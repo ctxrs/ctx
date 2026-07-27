@@ -7,36 +7,17 @@ use crate::{
     CaptureError, Result, GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
 };
 
-use super::{normalization, position::goose_message_locator, schema};
-
-pub(super) fn result_record(
-    conn: &Connection,
-    rowid: i64,
-) -> Result<Option<crate::complete_content::sqlite::SqliteResultRecord>> {
-    let Some(values) = message_values_at_rowid(conn, rowid)? else {
-        return Ok(None);
-    };
-    let (_, message) = schema::decode_goose_message_record(&values)?;
-    let raw_content =
-        serde_json::from_str::<serde_json::Value>(&message.content_json).map_err(|error| {
-            CaptureError::InvalidPayload(format!(
-                "Goose result content is no longer valid JSON: {error}"
-            ))
-        })?;
-    let content =
-        normalization::goose_normalized_result_content(&raw_content).ok_or_else(|| {
-            CaptureError::InvalidPayload("Goose row is no longer a supported result".to_owned())
-        })?;
-    Ok(Some(crate::complete_content::sqlite::SqliteResultRecord {
-        values,
-        native_record_id: normalization::goose_message_identity(&message),
-        content,
-    }))
-}
+use super::{
+    normalization::{
+        goose_event_payload_hash, normalize_goose_native_message, GooseNativeEventKind,
+    },
+    position::goose_message_locator,
+    schema::{self, GooseNativeSchema},
+    stream::{goose_native_message_identity_at, GooseRetainedContentClass, GooseRetainedMessage},
+};
 
 pub(super) fn load_schema(conn: &Connection) -> Result<()> {
-    schema::goose_session_columns(conn)?;
-    schema::goose_message_columns(conn)?;
+    GooseNativeSchema::probe(conn)?;
     Ok(())
 }
 
@@ -46,21 +27,48 @@ pub(super) fn load_message_values(conn: &Connection, rowid: i64) -> Result<Vec<N
     })
 }
 
-pub(super) fn complete_message(values: &[NativeSqliteValue]) -> Result<(String, String, String)> {
+pub(super) fn complete_message_with_normalized_hash(
+    conn: &Connection,
+    values: &[NativeSqliteValue],
+) -> Result<(String, String, String, String)> {
     let (parent_rowid, message) = schema::decode_goose_message_record(values)?;
     if parent_rowid.is_none() {
         return Err(CaptureError::InvalidPayload(
             "Goose message parent is missing".into(),
         ));
     }
-    let content: serde_json::Value = serde_json::from_str(&message.content_json)?;
-    let text = normalization::goose_complete_content_text(&content)
-        .unwrap_or_else(|| format!("Goose {} message", message.role));
-    let identity = message
-        .message_id
-        .clone()
-        .unwrap_or_else(|| format!("row-{}", message.id));
-    Ok((message.session_id, identity, text))
+    let schema = GooseNativeSchema::probe(conn)?;
+    let identity = goose_native_message_identity_at(conn, &schema, message.rowid, message.id)?;
+    let event = normalize_goose_native_message(GooseRetainedMessage {
+        sqlite_rowid: message.rowid,
+        native_order: message.id,
+        native_identity: identity.native_identity,
+        provider_message_identity: identity.provider_message_identity,
+        identity_degraded: identity.identity_degraded,
+        session_identity: message.session_id,
+        role: message.role,
+        retained_class: GooseRetainedContentClass::Message,
+        content_bytes: message.content_json.len() as u64,
+        content_json: message.content_json,
+        created_timestamp: message.created_timestamp,
+        timestamp: message.timestamp,
+        tokens_json: message.tokens,
+        metadata_json: message.metadata_json,
+    })?;
+    if event.kind != GooseNativeEventKind::Message {
+        return Err(CaptureError::InvalidPayload(
+            "Goose complete-content row is no longer a retained message".to_owned(),
+        ));
+    }
+    let text = super::normalization::goose_complete_content_text(&event.content)
+        .unwrap_or_else(|| event.searchable_text.clone());
+    let normalized_hash = goose_event_payload_hash(&event);
+    Ok((
+        event.session_identity,
+        event.provider_message_identity,
+        normalized_hash,
+        text,
+    ))
 }
 
 pub(super) fn attach_message_locator(

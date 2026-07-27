@@ -50,6 +50,8 @@ pub(crate) use nanoclaw_snapshot::set_before_source_set_revalidation as set_nano
 pub(crate) mod windows;
 
 const SQLITE_SNAPSHOT_MAX_COMPONENT_BYTES: u64 = 512 * 1024 * 1024;
+pub const COMPLETE_CONTENT_MAX_ADMITTED_SOURCES: usize = 8;
+pub const COMPLETE_CONTENT_MAX_SNAPSHOT_BYTES: u64 = nanoclaw_snapshot::SNAPSHOT_MAX_TOTAL_BYTES;
 
 /// Store-authorized route used only while admitting source access.
 ///
@@ -85,6 +87,32 @@ impl fmt::Debug for AuthorizedSourceRoute {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SourceAccessBroker;
 
+/// Opaque result of bounded route inspection. It owns the exact route that was
+/// measured, so admission cannot substitute a caller-supplied byte count or a
+/// different path after the aggregate gate accepts it.
+pub struct PreparedSourceAdmission {
+    route: AuthorizedSourceRoute,
+    reserved_snapshot_bytes: u64,
+    event_id: Uuid,
+}
+
+impl PreparedSourceAdmission {
+    pub const fn reserved_snapshot_bytes(&self) -> u64 {
+        self.reserved_snapshot_bytes
+    }
+}
+
+impl fmt::Debug for PreparedSourceAdmission {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreparedSourceAdmission")
+            .field("source_id", &self.route.source_id)
+            .field("family", &self.route.family)
+            .field("reserved_snapshot_bytes", &self.reserved_snapshot_bytes)
+            .finish_non_exhaustive()
+    }
+}
+
 impl SourceAccessBroker {
     pub const fn new() -> Self {
         Self
@@ -113,8 +141,195 @@ impl SourceAccessBroker {
                 event_id,
             ));
         }
-        admit_platform(route, locators, event_id)
+        admit_platform(route, locators, None, event_id)
     }
+
+    /// Returns the bytes that must be reserved before admitting this source.
+    ///
+    /// Ordinary SQLite sources report the exact currently named database and
+    /// sidecar bytes. Compound and structured sources reserve their complete
+    /// family bound because discovering their selected files is itself
+    /// admission work. Single-file JSONL retains a handle and reserves no
+    /// copied snapshot bytes.
+    pub fn prepare(
+        &self,
+        route: AuthorizedSourceRoute,
+        event_id: Uuid,
+    ) -> Result<PreparedSourceAdmission, CompleteContentError> {
+        if route.source_identity.as_deref().is_some_and(str::is_empty) {
+            return Err(CompleteContentError::new(
+                CompleteContentErrorKind::HydrationUnsupported,
+                event_id,
+            ));
+        }
+        let reserved_snapshot_bytes = snapshot_reservation_bytes_platform(&route, event_id)?;
+        Ok(PreparedSourceAdmission {
+            route,
+            reserved_snapshot_bytes,
+            event_id,
+        })
+    }
+
+    /// Admits a route only if it still has the reservation measured before the
+    /// caller accepted its aggregate source set.
+    pub fn admit_prepared_for_source_locators(
+        &self,
+        prepared: PreparedSourceAdmission,
+        locators: &[CompleteContentSourceLocator],
+    ) -> Result<BrokeredSourceAccess, CompleteContentError> {
+        admit_platform(
+            prepared.route,
+            locators,
+            Some(prepared.reserved_snapshot_bytes),
+            prepared.event_id,
+        )
+    }
+}
+
+#[cfg(any(unix, target_os = "windows"))]
+fn snapshot_reservation_bytes_platform(
+    route: &AuthorizedSourceRoute,
+    event_id: Uuid,
+) -> Result<u64, CompleteContentError> {
+    match route.family {
+        CompleteContentSourceFamily::Jsonl => Ok(0),
+        CompleteContentSourceFamily::Sqlite
+            if route.provider == CaptureProvider::NanoClaw
+                && route.source_format == NANOCLAW_SOURCE_FORMAT =>
+        {
+            Ok(nanoclaw_snapshot::SNAPSHOT_MAX_TOTAL_BYTES)
+        }
+        CompleteContentSourceFamily::Sqlite => {
+            let selected = selected_source_path(route, event_id)?;
+            sqlite_snapshot_reservation_bytes(route, &selected, event_id)
+        }
+        CompleteContentSourceFamily::Structured => {
+            u64::try_from(super::structured::verification::STRUCTURED_MAX_TOTAL_READ_BYTES).map_err(
+                |_| CompleteContentError::new(CompleteContentErrorKind::ContentTooLarge, event_id),
+            )
+        }
+        #[cfg(test)]
+        CompleteContentSourceFamily::Fixture => Ok(0),
+    }
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
+fn snapshot_reservation_bytes_platform(
+    _route: &AuthorizedSourceRoute,
+    event_id: Uuid,
+) -> Result<u64, CompleteContentError> {
+    Err(CompleteContentError::new(
+        CompleteContentErrorKind::HydrationUnsupported,
+        event_id,
+    ))
+}
+
+fn validate_fixed_snapshot_reservation(
+    reserved: Option<u64>,
+    expected: u64,
+    event_id: Uuid,
+) -> Result<(), CompleteContentError> {
+    if reserved.is_some_and(|reserved| reserved != expected) {
+        return Err(CompleteContentError::new(
+            CompleteContentErrorKind::SourceChanged,
+            event_id,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_observed_snapshot_reservation(
+    reserved: Option<u64>,
+    observed: u64,
+    event_id: Uuid,
+) -> Result<(), CompleteContentError> {
+    validate_fixed_snapshot_reservation(reserved, observed, event_id)
+}
+
+fn bounded_sqlite_component_bytes(
+    metadata: &fs::Metadata,
+    event_id: Uuid,
+) -> Result<u64, CompleteContentError> {
+    if !metadata.file_type().is_file() {
+        return Err(CompleteContentError::new(
+            CompleteContentErrorKind::SourceUnreadable,
+            event_id,
+        ));
+    }
+    if metadata.len() > SQLITE_SNAPSHOT_MAX_COMPONENT_BYTES {
+        return Err(CompleteContentError::new(
+            CompleteContentErrorKind::ContentTooLarge,
+            event_id,
+        ));
+    }
+    Ok(metadata.len())
+}
+
+#[cfg(unix)]
+fn sqlite_snapshot_reservation_bytes(
+    route: &AuthorizedSourceRoute,
+    selected_path: &Path,
+    event_id: Uuid,
+) -> Result<u64, CompleteContentError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let main = open_brokered_file(selected_path).map_err(|cause| map_io_error(event_id, cause))?;
+    let metadata = main
+        .metadata()
+        .map_err(|cause| map_io_error(event_id, cause))?;
+    if metadata.permissions().mode() & 0o444 == 0 {
+        return Err(CompleteContentError::new(
+            CompleteContentErrorKind::SourceUnreadable,
+            event_id,
+        ));
+    }
+    validate_source_snapshot(&route.source_snapshot, &metadata, event_id)?;
+    let mut bytes = bounded_sqlite_component_bytes(&metadata, event_id)?;
+    for suffix in ["-wal", "-shm", "-journal"] {
+        match open_brokered_file(&sqlite_sidecar_path(selected_path, suffix)) {
+            Ok(file) => {
+                let metadata = file
+                    .metadata()
+                    .map_err(|cause| map_io_error(event_id, cause))?;
+                bytes = bytes
+                    .checked_add(bounded_sqlite_component_bytes(&metadata, event_id)?)
+                    .ok_or_else(|| {
+                        CompleteContentError::new(
+                            CompleteContentErrorKind::ContentTooLarge,
+                            event_id,
+                        )
+                    })?;
+            }
+            Err(cause) if cause.kind() == io::ErrorKind::NotFound => {}
+            Err(cause) => return Err(map_io_error(event_id, cause)),
+        }
+    }
+    Ok(bytes)
+}
+
+#[cfg(target_os = "windows")]
+fn sqlite_snapshot_reservation_bytes(
+    route: &AuthorizedSourceRoute,
+    selected_path: &Path,
+    event_id: Uuid,
+) -> Result<u64, CompleteContentError> {
+    let main = windows::admit_regular_file(selected_path, route.source_root.as_deref(), event_id)?;
+    validate_source_snapshot(&route.source_snapshot, &main.metadata, event_id)?;
+    let mut bytes = bounded_sqlite_component_bytes(&main.metadata, event_id)?;
+    for suffix in ["-wal", "-shm", "-journal"] {
+        if let Some(file) = windows::admit_optional_regular_file(
+            &sqlite_sidecar_path(selected_path, suffix),
+            route.source_root.as_deref(),
+            event_id,
+        )? {
+            bytes = bytes
+                .checked_add(bounded_sqlite_component_bytes(&file.metadata, event_id)?)
+                .ok_or_else(|| {
+                    CompleteContentError::new(CompleteContentErrorKind::ContentTooLarge, event_id)
+                })?;
+        }
+    }
+    Ok(bytes)
 }
 
 /// Opaque capability shared by every request for one admitted source.
@@ -251,11 +466,13 @@ impl BrokeredNanoClawSource {
 fn admit_platform(
     route: AuthorizedSourceRoute,
     locators: &[CompleteContentSourceLocator],
+    reserved_snapshot_bytes: Option<u64>,
     event_id: Uuid,
 ) -> Result<BrokeredSourceAccess, CompleteContentError> {
     let source_id = route.source_id;
     let inner = match route.family {
         CompleteContentSourceFamily::Jsonl => {
+            validate_fixed_snapshot_reservation(reserved_snapshot_bytes, 0, event_id)?;
             let selected = selected_source_path(&route, event_id)?;
             BrokeredSource::Jsonl(jsonl::admit(route, selected, event_id)?)
         }
@@ -264,16 +481,37 @@ fn admit_platform(
             if route.provider == CaptureProvider::NanoClaw
                 && route.source_format == NANOCLAW_SOURCE_FORMAT
             {
+                validate_fixed_snapshot_reservation(
+                    reserved_snapshot_bytes,
+                    nanoclaw_snapshot::SNAPSHOT_MAX_TOTAL_BYTES,
+                    event_id,
+                )?;
                 BrokeredSource::NanoClaw(admit_nanoclaw(&route, &selected, locators, event_id)?)
             } else {
-                BrokeredSource::Sqlite(admit_sqlite(&route, &selected, event_id)?)
+                BrokeredSource::Sqlite(admit_sqlite(
+                    &route,
+                    &selected,
+                    reserved_snapshot_bytes,
+                    event_id,
+                )?)
             }
         }
-        CompleteContentSourceFamily::Structured => BrokeredSource::Structured(
-            super::structured::source_access::admit_structured_source(&route, event_id)?,
-        ),
+        CompleteContentSourceFamily::Structured => {
+            validate_fixed_snapshot_reservation(
+                reserved_snapshot_bytes,
+                u64::try_from(super::structured::verification::STRUCTURED_MAX_TOTAL_READ_BYTES)
+                    .unwrap_or(u64::MAX),
+                event_id,
+            )?;
+            BrokeredSource::Structured(super::structured::source_access::admit_structured_source(
+                &route, locators, event_id,
+            )?)
+        }
         #[cfg(test)]
-        CompleteContentSourceFamily::Fixture => BrokeredSource::Fixture,
+        CompleteContentSourceFamily::Fixture => {
+            validate_fixed_snapshot_reservation(reserved_snapshot_bytes, 0, event_id)?;
+            BrokeredSource::Fixture
+        }
     };
     Ok(BrokeredSourceAccess {
         source_id,
@@ -295,6 +533,7 @@ fn admit_nanoclaw(
 fn admit_platform(
     _route: AuthorizedSourceRoute,
     _locators: &[CompleteContentSourceLocator],
+    _reserved_snapshot_bytes: Option<u64>,
     event_id: Uuid,
 ) -> Result<BrokeredSourceAccess, CompleteContentError> {
     Err(CompleteContentError::new(
@@ -307,6 +546,7 @@ fn admit_platform(
 fn admit_sqlite(
     route: &AuthorizedSourceRoute,
     selected_path: &Path,
+    reserved_snapshot_bytes: Option<u64>,
     event_id: Uuid,
 ) -> Result<BrokeredSqliteSource, CompleteContentError> {
     use std::os::unix::fs::PermissionsExt;
@@ -326,13 +566,23 @@ fn admit_sqlite(
         CompleteContentError::new(CompleteContentErrorKind::SourceUnreadable, event_id)
     })?;
     let mut sidecars = Vec::new();
+    let mut snapshot_bytes = bounded_sqlite_component_bytes(&metadata, event_id)?;
     for suffix in ["-wal", "-shm", "-journal"] {
         let source_path = sqlite_sidecar_path(selected_path, suffix);
         match open_brokered_file(&source_path) {
             Ok(file) => {
-                let frozen = file
+                let metadata = file
                     .metadata()
-                    .and_then(|metadata| FrozenFile::from_metadata(&metadata))
+                    .map_err(|cause| map_io_error(event_id, cause))?;
+                snapshot_bytes = snapshot_bytes
+                    .checked_add(bounded_sqlite_component_bytes(&metadata, event_id)?)
+                    .ok_or_else(|| {
+                        CompleteContentError::new(
+                            CompleteContentErrorKind::ContentTooLarge,
+                            event_id,
+                        )
+                    })?;
+                let frozen = FrozenFile::from_metadata(&metadata)
                     .map_err(|cause| map_io_error(event_id, cause))?;
                 sidecars.push((suffix, source_path, file, frozen));
             }
@@ -340,14 +590,20 @@ fn admit_sqlite(
             Err(cause) => return Err(map_io_error(event_id, cause)),
         }
     }
+    validate_observed_snapshot_reservation(reserved_snapshot_bytes, snapshot_bytes, event_id)?;
     let dir = tempfile::Builder::new()
         .prefix("ctx-complete-content-sqlite-")
         .tempdir()
         .map_err(|cause| map_io_error(event_id, cause))?;
     let path = dir.path().join("source.sqlite");
-    copy_bounded_handle(&main, &path, event_id)?;
-    for (suffix, _, file, _) in &sidecars {
-        copy_bounded_handle(file, &sqlite_sidecar_path(&path, suffix), event_id)?;
+    copy_bounded_handle(&main, &path, main_frozen.length, event_id)?;
+    for (suffix, _, file, frozen) in &sidecars {
+        copy_bounded_handle(
+            file,
+            &sqlite_sidecar_path(&path, suffix),
+            frozen.length,
+            event_id,
+        )?;
     }
     if !revalidate_opened_file(selected_path, &main, &main_frozen) {
         return Err(CompleteContentError::new(
@@ -397,6 +653,7 @@ fn admit_sqlite(
 fn admit_sqlite(
     route: &AuthorizedSourceRoute,
     selected_path: &Path,
+    reserved_snapshot_bytes: Option<u64>,
     event_id: Uuid,
 ) -> Result<BrokeredSqliteSource, CompleteContentError> {
     let database =
@@ -412,18 +669,25 @@ fn admit_sqlite(
             event_id,
         )?);
     }
+    let mut snapshot_bytes = bounded_sqlite_component_bytes(&database.metadata, event_id)?;
+    for admitted in sidecars.iter().flatten() {
+        snapshot_bytes = snapshot_bytes
+            .checked_add(bounded_sqlite_component_bytes(
+                &admitted.metadata,
+                event_id,
+            )?)
+            .ok_or_else(|| {
+                CompleteContentError::new(CompleteContentErrorKind::ContentTooLarge, event_id)
+            })?;
+    }
+    validate_observed_snapshot_reservation(reserved_snapshot_bytes, snapshot_bytes, event_id)?;
 
     let dir = tempfile::Builder::new()
         .prefix("ctx-complete-content-sqlite-")
         .tempdir()
         .map_err(|cause| map_io_error(event_id, cause))?;
     let path = dir.path().join("source.sqlite");
-    windows::copy_bounded_handle(
-        &database,
-        &path,
-        SQLITE_SNAPSHOT_MAX_COMPONENT_BYTES,
-        event_id,
-    )?;
+    windows::copy_bounded_handle(&database, &path, database.metadata.len(), event_id)?;
     for ((suffix, admitted), _source_path) in ["-wal", "-shm", "-journal"]
         .into_iter()
         .zip(sidecars.iter())
@@ -434,7 +698,7 @@ fn admit_sqlite(
             windows::copy_bounded_handle(
                 admitted,
                 &destination,
-                SQLITE_SNAPSHOT_MAX_COMPONENT_BYTES,
+                admitted.metadata.len(),
                 event_id,
             )?;
         }
@@ -577,15 +841,21 @@ fn validate_source_snapshot(
 fn copy_bounded_handle(
     source: &File,
     destination: &Path,
+    expected_bytes: u64,
     event_id: Uuid,
 ) -> Result<(), CompleteContentError> {
     let metadata = source
         .metadata()
         .map_err(|cause| map_io_error(event_id, cause))?;
-    if !metadata.file_type().is_file() || metadata.len() > SQLITE_SNAPSHOT_MAX_COMPONENT_BYTES {
+    if !metadata.file_type().is_file()
+        || metadata.len() > SQLITE_SNAPSHOT_MAX_COMPONENT_BYTES
+        || metadata.len() != expected_bytes
+    {
         return Err(CompleteContentError::new(
             if metadata.len() > SQLITE_SNAPSHOT_MAX_COMPONENT_BYTES {
                 CompleteContentErrorKind::ContentTooLarge
+            } else if metadata.len() != expected_bytes {
+                CompleteContentErrorKind::SourceChanged
             } else {
                 CompleteContentErrorKind::SourceUnreadable
             },
@@ -594,14 +864,9 @@ fn copy_bounded_handle(
     }
     let mut output = File::create(destination).map_err(|cause| map_io_error(event_id, cause))?;
     let mut input = source;
-    let copied = io::copy(
-        &mut input
-            .by_ref()
-            .take(SQLITE_SNAPSHOT_MAX_COMPONENT_BYTES.saturating_add(1)),
-        &mut output,
-    )
-    .map_err(|cause| map_io_error(event_id, cause))?;
-    if copied != metadata.len() {
+    let copied = io::copy(&mut input.by_ref().take(expected_bytes), &mut output)
+        .map_err(|cause| map_io_error(event_id, cause))?;
+    if copied != expected_bytes {
         return Err(CompleteContentError::new(
             CompleteContentErrorKind::SourceChanged,
             event_id,

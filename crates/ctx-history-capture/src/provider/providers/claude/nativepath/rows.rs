@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
+use ctx_history_core::ContentRef;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::source::ClaudeSessionKey;
 
@@ -41,6 +43,7 @@ pub(crate) struct ClaudePhysicalLocator {
     pub(crate) byte_start: u64,
     pub(crate) byte_end_exclusive: u64,
     pub(crate) line_number: u64,
+    pub(crate) record_sha256: [u8; 32],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,6 +89,8 @@ pub(crate) struct ClaudeRetainedRow {
     pub(crate) occurred_at: Option<String>,
     pub(crate) body: Option<String>,
     pub(crate) body_sha256: Option<[u8; 32]>,
+    pub(crate) body_text_retention: Option<Value>,
+    pub(crate) complete_body_ref: Option<ContentRef>,
     pub(crate) tool_call: Option<ToolCallRequest>,
     pub(crate) sparse_output: Option<ClaudeSparseOutputDiagnostic>,
     pub(crate) locator: ClaudePhysicalLocator,

@@ -13,7 +13,6 @@ use ctx_pro_host_protocol::{
 
 use crate::pro::verified_executable::VerifiedHelperExecutable;
 
-pub(super) const GIT_EXECUTABLE_ENV: &str = "CTX_PRO_GIT_EXECUTABLE";
 const MAX_GIT_EXECUTABLE_PATH_BYTES: usize = 4 * 1024;
 
 pub(super) fn error_code(error: &anyhow::Error) -> String {
@@ -73,7 +72,7 @@ pub(crate) fn default_helper_path(data_root: &Path) -> PathBuf {
 }
 
 pub(super) fn helper_path(data_root: &Path) -> Result<PathBuf> {
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, test))]
     if let Some(value) = env::var_os("CTX_PRO_HELPER") {
         let path = PathBuf::from(value);
         if !path.is_absolute() {
@@ -86,7 +85,7 @@ pub(super) fn helper_path(data_root: &Path) -> Result<PathBuf> {
 }
 
 pub(super) fn helper_executable(data_root: &Path) -> Result<VerifiedHelperExecutable> {
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, test))]
     if let Some(value) = env::var_os("CTX_PRO_HELPER") {
         let path = PathBuf::from(value);
         if !path.is_absolute() {
@@ -145,7 +144,7 @@ fn git_executable_names() -> &'static [&'static str] {
     &["git"]
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, test))]
 fn regular_helper_path(path: PathBuf) -> Result<PathBuf> {
     let metadata = fs::symlink_metadata(&path)
         .with_context(|| format!("pro_not_installed: no Pro helper at {}", path.display()))?;

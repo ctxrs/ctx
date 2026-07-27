@@ -10,6 +10,12 @@ use sha2::{Digest, Sha256};
 
 use crate::{common::io::ensure_regular_provider_transcript_file, CaptureError, Result};
 
+#[cfg(test)]
+use std::{
+    path::PathBuf,
+    sync::{LazyLock, Mutex},
+};
+
 const TOKEN_DOMAIN: &[u8] = b"ctx-ordinary-file-observation-v2\0";
 const FULL_CONTENT_FINGERPRINT_MAX_BYTES: u64 = 64 * 1024;
 const SPARSE_SAMPLE_BYTES: u64 = 8 * 1024;
@@ -17,6 +23,50 @@ const SPARSE_SAMPLE_BYTES: u64 = 8 * 1024;
 #[cfg(test)]
 std::thread_local! {
     static CONTENT_SAMPLE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+static FORBIDDEN_CONTENT_OPENS: LazyLock<Mutex<BTreeSet<PathBuf>>> =
+    LazyLock::new(|| Mutex::new(BTreeSet::new()));
+
+#[cfg(test)]
+pub(crate) struct ForbiddenOrdinaryFileContentOpen {
+    path: PathBuf,
+}
+
+#[cfg(test)]
+impl Drop for ForbiddenOrdinaryFileContentOpen {
+    fn drop(&mut self) {
+        let mut paths = FORBIDDEN_CONTENT_OPENS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        paths.remove(&self.path);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn forbid_ordinary_file_content_open(path: &Path) -> ForbiddenOrdinaryFileContentOpen {
+    let path = path.to_path_buf();
+    let mut paths = FORBIDDEN_CONTENT_OPENS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    paths.insert(path.clone());
+    ForbiddenOrdinaryFileContentOpen { path }
+}
+
+#[cfg(test)]
+fn reject_forbidden_content_open(path: &Path) -> Result<()> {
+    let paths = FORBIDDEN_CONTENT_OPENS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if paths.contains(path) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "test forbids opening this provider transcript",
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// A bounded observation of an ordinary provider file.
@@ -60,6 +110,48 @@ impl OrdinaryFileObservation {
 
 pub fn observe_ordinary_file(path: impl AsRef<Path>) -> Result<OrdinaryFileObservation> {
     observe_ordinary_file_inner(path.as_ref(), || {})
+}
+
+/// Returns strong change identity without opening or reading file contents
+/// where the platform exposes that identity through ordinary metadata.
+///
+/// Callers must fall back to full source certification when this returns
+/// `None`. Unix metadata includes device, inode, and change time, so a
+/// same-size rewrite with restored mtime cannot pass this observation.
+pub(crate) fn observe_ordinary_file_strong_metadata(
+    path: &Path,
+) -> Result<Option<OrdinaryFileObservation>> {
+    #[cfg(unix)]
+    {
+        ensure_regular_provider_transcript_file(path)?;
+        let before = std::fs::symlink_metadata(path)?;
+        let platform_before = unix_platform_token(&before);
+        let after = std::fs::symlink_metadata(path)?;
+        let platform_after = unix_platform_token(&after);
+        if !after.file_type().is_file()
+            || after.len() != before.len()
+            || after.modified().ok() != before.modified().ok()
+            || platform_after != platform_before
+        {
+            return Err(file_changed_during_observation().into());
+        }
+        Ok(Some(OrdinaryFileObservation {
+            len: before.len(),
+            modified_at: before.modified().unwrap_or(UNIX_EPOCH),
+            token: combined_token(Some(platform_before), None),
+        }))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // Windows change time and file identity require a metadata handle, but
+        // the supported platform token still avoids every content read.
+        observe_ordinary_file(path).map(Some)
+    }
+    #[cfg(not(any(unix, target_os = "windows")))]
+    {
+        let _ = path;
+        Ok(None)
+    }
 }
 
 fn observe_ordinary_file_inner(
@@ -115,6 +207,8 @@ pub(crate) fn open_ordinary_file_without_following(path: &Path) -> Result<File> 
 
     const RESOLVE_NO_SYMLINKS: u64 = 0x04;
 
+    #[cfg(test)]
+    reject_forbidden_content_open(path)?;
     let c_path =
         CString::new(path.as_os_str().as_bytes()).map_err(|_| invalid_ordinary_file(path))?;
     let flags = u64::try_from(libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW)
@@ -153,6 +247,8 @@ pub(crate) fn open_ordinary_file_without_following(path: &Path) -> Result<File> 
 fn open_ordinary_file_portable_unix(path: &Path) -> Result<File> {
     use std::{fs::OpenOptions, os::unix::fs::OpenOptionsExt};
 
+    #[cfg(test)]
+    reject_forbidden_content_open(path)?;
     ensure_regular_provider_transcript_file(path)?;
     Ok(OpenOptions::new()
         .read(true)
@@ -164,6 +260,8 @@ fn open_ordinary_file_portable_unix(path: &Path) -> Result<File> {
 pub(crate) fn open_ordinary_file_without_following(path: &Path) -> Result<File> {
     use std::{fs::OpenOptions, os::unix::fs::OpenOptionsExt};
 
+    #[cfg(test)]
+    reject_forbidden_content_open(path)?;
     ensure_regular_provider_transcript_file(path)?;
     Ok(OpenOptions::new()
         .read(true)
@@ -177,6 +275,8 @@ pub(crate) fn open_ordinary_file_without_following(path: &Path) -> Result<File> 
 
     const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 
+    #[cfg(test)]
+    reject_forbidden_content_open(path)?;
     ensure_regular_provider_transcript_file(path)?;
     Ok(OpenOptions::new()
         .read(true)
@@ -186,6 +286,8 @@ pub(crate) fn open_ordinary_file_without_following(path: &Path) -> Result<File> 
 
 #[cfg(not(any(unix, target_os = "windows")))]
 pub(crate) fn open_ordinary_file_without_following(path: &Path) -> Result<File> {
+    #[cfg(test)]
+    reject_forbidden_content_open(path)?;
     ensure_regular_provider_transcript_file(path)?;
     let file = File::open(path)?;
     let current = std::fs::symlink_metadata(path)?;
@@ -204,6 +306,11 @@ fn invalid_ordinary_file(path: &Path) -> CaptureError {
 
 #[cfg(unix)]
 fn platform_token(_path: &Path, _file: &File, metadata: &Metadata) -> Result<Option<[u8; 32]>> {
+    Ok(Some(unix_platform_token(metadata)))
+}
+
+#[cfg(unix)]
+fn unix_platform_token(metadata: &Metadata) -> [u8; 32] {
     use std::os::unix::fs::MetadataExt;
 
     let mut hasher = Sha256::new();
@@ -213,7 +320,7 @@ fn platform_token(_path: &Path, _file: &File, metadata: &Metadata) -> Result<Opt
     hasher.update(metadata.ino().to_le_bytes());
     hasher.update(metadata.ctime().to_le_bytes());
     hasher.update(metadata.ctime_nsec().to_le_bytes());
-    Ok(Some(hasher.finalize().into()))
+    hasher.finalize().into()
 }
 
 #[cfg(target_os = "windows")]
@@ -387,6 +494,21 @@ mod tests {
 
         assert_eq!(observation.len(), 256 * 1024);
         assert_eq!(content_reads, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn strong_metadata_observation_matches_opened_authority_without_opening_content() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let path = temp.path().join("source.jsonl");
+        std::fs::write(&path, vec![b'x'; 256 * 1024]).unwrap();
+
+        let opened = observe_ordinary_file(&path).unwrap();
+        let metadata_only = observe_ordinary_file_strong_metadata(&path)
+            .unwrap()
+            .expect("Unix must expose strong metadata identity");
+
+        assert_eq!(metadata_only, opened);
     }
 
     #[cfg(any(unix, target_os = "windows"))]

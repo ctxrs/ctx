@@ -66,6 +66,8 @@ pub enum StoreError {
     },
     #[error("ctx index is busy: another source inventory is active")]
     SourceInventoryBusy,
+    #[error("catalog source contains at least {observed} sessions; maximum is {maximum}")]
+    CatalogSessionLimitExceeded { observed: usize, maximum: usize },
     #[error(
         "source import observation changed before it could be marked {operation}; retry the import: {provider}/{source_path}"
     )]
@@ -110,6 +112,8 @@ pub enum StoreError {
     BulkSearchGroupAdmissionOutstanding,
     #[error("a NativePath publication group is already active on this Store")]
     NativePathGroupAlreadyActive,
+    #[error("Store connection is quarantined after transaction rollback failed; reopen the Store")]
+    StoreConnectionQuarantined,
     #[error("a NativePath publication group requires an outermost autocommit boundary")]
     NativePathGroupRequiresAutocommit,
     #[error("NativePath publication group {limit} accounting is {actual}; maximum is {maximum}")]
@@ -134,6 +138,20 @@ pub enum StoreError {
     NativePathSourceGenerationConflict,
     #[error("NativePath legacy provider-hash migration was not exactly authorized")]
     InvalidNativePathLegacyProviderHashMigration,
+    #[error("NativePath event identity alias conflicts with canonical Store identity")]
+    NativePathEventIdentityAliasConflict,
+    #[error("cold Store construction is supported only on Linux")]
+    ColdStoreUnsupportedPlatform,
+    #[error("cold Store target must be absent: {0:?}")]
+    ColdStoreTargetIneligible(PathBuf),
+    #[error("cold Store target changed after admission: {0:?}")]
+    ColdStoreTargetChanged(PathBuf),
+    #[error("another cold Store builder owns the target: {0:?}")]
+    ColdStoreBuildBusy(PathBuf),
+    #[error("cold Store build is not in the required lifecycle phase")]
+    ColdStoreInvalidState,
+    #[error("cold Store validation failed: {0}")]
+    ColdStoreValidation(String),
     #[error(
         "session relationship update would change the canonical actor projection; dependent fanout is intentionally not performed"
     )]

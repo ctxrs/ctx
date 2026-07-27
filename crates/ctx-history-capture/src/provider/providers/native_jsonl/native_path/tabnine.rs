@@ -25,8 +25,8 @@ use crate::{
     stable_capture_uuid, CaptureError, ImportProfile, OutputAssociations, OutputNativeCoordinate,
     OutputObservationKind, OutputOutcomeMetadata, OutputSourceIdentity, OutputSourceLocator,
     ProOutputObservation, ProOutputProgress, ProOutputSink, ProOutputSinkError,
-    ProOutputSourceDisposition, ProviderImportSummary, ProviderImportWorkResult, Result,
-    TABNINE_CLI_SOURCE_FORMAT,
+    ProOutputSourceDisposition, ProviderImportFailure, ProviderImportSummary,
+    ProviderImportWorkResult, Result, TABNINE_CLI_SOURCE_FORMAT,
 };
 
 use super::{
@@ -61,18 +61,23 @@ pub(crate) fn import_tabnine_nativepath_tree(
     let sink = request.import_profile.sink().cloned();
 
     if request.import_profile.is_replay_only() {
-        replay_outputs_or_mark_behind(
+        mark_inventory_failures_behind(&live_inventory, sink.as_deref());
+        replay_tabnine_outputs(
             store,
             &request.machine_id,
             &live_inventory.paths,
             &configured_source_root,
             request.imported_at,
             sink.as_deref(),
-        );
-        return Ok(ProviderImportSummary::default());
+        )?;
+        return Ok(live_inventory.failure_summary());
     }
 
     if live_inventory.paths.is_empty() {
+        if !live_inventory.failures.is_empty() {
+            mark_inventory_failures_behind(&live_inventory, sink.as_deref());
+            return Ok(live_inventory.failure_summary());
+        }
         if known_routes.is_empty() {
             return Err(CaptureError::InvalidProviderTranscriptPath {
                 path: request.path.to_path_buf(),
@@ -87,6 +92,7 @@ pub(crate) fn import_tabnine_nativepath_tree(
             request.imported_at,
             &known_routes,
             &live_inventory.paths,
+            &live_inventory.failed_paths,
             if live_inventory.root_missing {
                 ProviderSourceRouteRetirementReason::RootMissing
             } else {
@@ -95,24 +101,39 @@ pub(crate) fn import_tabnine_nativepath_tree(
         );
     }
 
-    let mut summary = import_direct_native_jsonl_tree_core(
-        store,
-        NativePathJsonlTreeImport {
-            path: request.path,
-            machine_id: request.machine_id.clone(),
-            source_path: request.source_path,
-            source_root: request.source_root,
-            imported_at: request.imported_at,
-            history_record_id: request.history_record_id,
-            capture_work_limit: request.capture_work_limit,
-            inventory_observation_token: request.inventory_observation_token,
-            import_profile: ImportProfile::CoreOnly,
-        },
-        CaptureProvider::Tabnine,
-        TABNINE_CLI_SOURCE_FORMAT,
-    )?;
-    if summary.work_remaining {
-        return Ok(summary);
+    let mut summary = live_inventory.failure_summary();
+    for path in &live_inventory.paths {
+        match import_direct_native_jsonl_tree_core(
+            store,
+            NativePathJsonlTreeImport {
+                path,
+                machine_id: request.machine_id.clone(),
+                source_path: request.source_path.clone(),
+                // The shared tree driver normally derives this from its tree
+                // path. Preserve that one root while isolating child files so
+                // all sibling sessions retain the same source-scoped identity.
+                source_root: Some(configured_source_root.clone()),
+                imported_at: request.imported_at,
+                history_record_id: request.history_record_id,
+                capture_work_limit: request.capture_work_limit,
+                inventory_observation_token: request.inventory_observation_token.clone(),
+                import_profile: ImportProfile::CoreOnly,
+            },
+            CaptureProvider::Tabnine,
+            TABNINE_CLI_SOURCE_FORMAT,
+        ) {
+            Ok(source_summary) => summary.merge_from(source_summary),
+            Err(error)
+                if live_inventory.isolate_selected_file_errors
+                    && selected_file_source_error(&error) =>
+            {
+                summary.record_failure(tabnine_source_failure(path, &error));
+            }
+            Err(error) => return Err(error),
+        }
+        if summary.work_remaining {
+            return Ok(summary);
+        }
     }
     summary.merge_from(retire_missing_routes(
         store,
@@ -120,37 +141,75 @@ pub(crate) fn import_tabnine_nativepath_tree(
         request.imported_at,
         &known_routes,
         &live_inventory.paths,
+        &live_inventory.failed_paths,
         ProviderSourceRouteRetirementReason::SourceMissing,
     )?);
-    replay_outputs_or_mark_behind(
+    mark_inventory_failures_behind(&live_inventory, sink.as_deref());
+    replay_tabnine_outputs(
         store,
         &request.machine_id,
         &live_inventory.paths,
         &configured_source_root,
         request.imported_at,
         sink.as_deref(),
-    );
+    )?;
     Ok(summary)
 }
 
 struct TabnineInventory {
     paths: BTreeSet<PathBuf>,
+    failed_paths: BTreeSet<PathBuf>,
+    failures: Vec<ProviderImportFailure>,
     root_missing: bool,
+    isolate_selected_file_errors: bool,
+}
+
+impl TabnineInventory {
+    fn failure_summary(&self) -> ProviderImportSummary {
+        let mut summary = ProviderImportSummary::default();
+        for failure in &self.failures {
+            summary.record_failure(failure.clone());
+        }
+        summary
+    }
+}
+
+fn selected_file_source_error(error: &CaptureError) -> bool {
+    matches!(
+        error,
+        CaptureError::Io(_)
+            | CaptureError::InvalidProviderTranscriptPath { .. }
+            | CaptureError::SourceChangedDuringCapture
+            | CaptureError::InvalidJsonLine { .. }
+            | CaptureError::UnsupportedSchemaVersion(_)
+    )
+}
+
+fn tabnine_source_failure(path: &Path, error: &CaptureError) -> ProviderImportFailure {
+    ProviderImportFailure {
+        line: 0,
+        error: format!("{}: {error}", path.display()),
+    }
 }
 
 fn discover_live_transcripts(root: &Path) -> Result<TabnineInventory> {
-    match std::fs::symlink_metadata(root) {
-        Ok(_) => {}
+    let root_metadata = match std::fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(TabnineInventory {
                 paths: BTreeSet::new(),
+                failed_paths: BTreeSet::new(),
+                failures: Vec::new(),
                 root_missing: true,
+                isolate_selected_file_errors: false,
             });
         }
         Err(error) => return Err(error.into()),
-    }
+    };
     let mut paths = BTreeSet::new();
-    super::super::traversal::visit_jsonl_tree_files(
+    let mut failed_paths = BTreeSet::new();
+    let mut failures = Vec::new();
+    super::super::traversal::visit_jsonl_tree_files_isolating_selected(
         root,
         &|path| {
             super::super::dialect::native_jsonl_file_is_selected(CaptureProvider::Tabnine, path)
@@ -159,10 +218,18 @@ fn discover_live_transcripts(root: &Path) -> Result<TabnineInventory> {
             paths.insert(std::fs::canonicalize(path)?);
             Ok(())
         },
+        &mut |path, error| {
+            failed_paths.insert(path.to_path_buf());
+            failures.push(tabnine_source_failure(path, &error));
+            Ok(())
+        },
     )?;
     Ok(TabnineInventory {
         paths,
+        failed_paths,
+        failures,
         root_missing: false,
+        isolate_selected_file_errors: root_metadata.file_type().is_dir(),
     })
 }
 
@@ -254,11 +321,12 @@ fn retire_missing_routes(
     retired_at: DateTime<Utc>,
     known_routes: &[KnownTabnineRoute],
     live_paths: &BTreeSet<PathBuf>,
+    failed_paths: &BTreeSet<PathBuf>,
     reason: ProviderSourceRouteRetirementReason,
 ) -> Result<ProviderImportSummary> {
     let missing = known_routes
         .iter()
-        .filter(|route| !live_paths.contains(&route.path))
+        .filter(|route| !live_paths.contains(&route.path) && !failed_paths.contains(&route.path))
         .collect::<Vec<_>>();
     if missing.is_empty() {
         return Ok(ProviderImportSummary::default());
@@ -343,23 +411,14 @@ fn retire_route(
     Ok(changed)
 }
 
-fn replay_outputs_or_mark_behind(
-    store: &Store,
-    machine_id: &str,
-    paths: &BTreeSet<PathBuf>,
-    source_root: &Path,
-    imported_at: DateTime<Utc>,
-    sink: Option<&dyn ProOutputSink>,
-) {
+fn mark_inventory_failures_behind(inventory: &TabnineInventory, sink: Option<&dyn ProOutputSink>) {
     let Some(sink) = sink else {
         return;
     };
-    if let Err(error) =
-        replay_tabnine_outputs(store, machine_id, paths, source_root, imported_at, sink)
-    {
+    for failure in &inventory.failures {
         sink.mark_behind(ProOutputSinkError::new(
-            "tabnine_nativepath_output_replay",
-            error.to_string(),
+            "tabnine_nativepath_output_source",
+            failure.error.clone(),
         ));
     }
 }
@@ -370,40 +429,56 @@ fn replay_tabnine_outputs(
     paths: &BTreeSet<PathBuf>,
     source_root: &Path,
     imported_at: DateTime<Utc>,
+    sink: Option<&dyn ProOutputSink>,
+) -> Result<()> {
+    let Some(sink) = sink else {
+        return Ok(());
+    };
+    super::driver::replay_selected_output_sources(
+        paths,
+        sink,
+        "tabnine_nativepath_output_source",
+        |path| replay_tabnine_output_path(store, machine_id, path, source_root, imported_at, sink),
+    )
+}
+
+fn replay_tabnine_output_path(
+    store: &Store,
+    machine_id: &str,
+    path: &Path,
+    source_root: &Path,
+    imported_at: DateTime<Utc>,
     sink: &dyn ProOutputSink,
 ) -> Result<()> {
-    for path in paths {
-        let authority = committed_direct_jsonl_replay_authority(
-            store,
-            machine_id,
-            CaptureProvider::Tabnine,
-            TABNINE_CLI_SOURCE_FORMAT,
-            path,
-        )?;
-        let locator_identity = provider_path_identity(path)?;
-        let source = OutputSourceIdentity {
-            provider: CaptureProvider::Tabnine.as_str().to_owned(),
-            namespace_id: source_root.display().to_string(),
-            source_id: locator_identity.clone(),
-        };
-        let progress = match sink.observe_source(&source) {
-            Ok(progress) => progress,
-            Err(error) => {
-                sink.mark_behind(error);
-                continue;
-            }
-        };
-        replay_tabnine_source(
-            path,
-            imported_at,
-            sink,
-            source,
-            locator_identity,
-            progress,
-            &authority,
-        )?;
-    }
-    Ok(())
+    let authority = committed_direct_jsonl_replay_authority(
+        store,
+        machine_id,
+        CaptureProvider::Tabnine,
+        TABNINE_CLI_SOURCE_FORMAT,
+        path,
+    )?;
+    let locator_identity = provider_path_identity(path)?;
+    let source = OutputSourceIdentity {
+        provider: CaptureProvider::Tabnine.as_str().to_owned(),
+        namespace_id: source_root.display().to_string(),
+        source_id: locator_identity.clone(),
+    };
+    let progress = match sink.observe_source(&source) {
+        Ok(progress) => progress,
+        Err(error) => {
+            sink.mark_behind(error);
+            return Ok(());
+        }
+    };
+    replay_tabnine_source(
+        path,
+        imported_at,
+        sink,
+        source,
+        locator_identity,
+        progress,
+        &authority,
+    )
 }
 
 fn replay_tabnine_source(
@@ -598,7 +673,7 @@ fn output_observation(
         coordinate: OutputNativeCoordinate {
             unit_key: format!("{}:{}", output.raw_ordinal, output.sub_ordinal),
             native_sequence: output.raw_ordinal,
-            native_record_id: output.call_id.clone(),
+            native_record_id: output.native_record_id.clone(),
             source_record_ordinal: Some(output.raw_ordinal),
             source_record_subrecord_index: Some(output.sub_ordinal),
             byte_start: Some(output.byte_start),
@@ -677,413 +752,5 @@ fn retirement_publication_id(retirement: &ProviderSourceRouteRetirement) -> Stri
 }
 
 #[cfg(test)]
-mod tests {
-    use std::{
-        fs,
-        io::Write,
-        sync::{
-            atomic::{AtomicBool, AtomicUsize, Ordering},
-            Arc, Mutex,
-        },
-    };
-
-    use ctx_history_core::EventType;
-    use serde_json::{json, Value};
-
-    use super::*;
-    use crate::{
-        test_support_paths::tempdir, ProOutputMaterializationPage, ProOutputPageResult,
-        TabnineCliImportOptions,
-    };
-
-    const MACHINE: &str = "tabnine-nativepath-test-machine";
-    const SUCCESS_BODY: &str = "TABNINE_SUCCESS_BODY_MUST_NOT_ENTER_CORE";
-
-    #[test]
-    fn production_lifecycle_covers_all_source_changes_and_retires_disappearance() {
-        let temp = tempdir().unwrap();
-        let root = temp.path().join(".tabnine/agent");
-        let transcript = transcript_path(&root);
-        write_transcript(
-            &transcript,
-            &[
-                header("tabnine-life"),
-                message("fresh-user", "user", "fresh-user"),
-                message("fresh-assistant", "tabnine", "fresh-assistant"),
-                tool_call("fresh-call"),
-            ],
-        );
-        let store_path = temp.path().join("work.sqlite");
-        let mut store = Store::open(&store_path).unwrap();
-
-        let fresh = import(&root, &mut store, ImportProfile::CoreOnly);
-        assert_eq!(fresh.work_result(), ProviderImportWorkResult::Changed);
-        assert_eq!(fresh.imported_sessions, 1);
-        assert_eq!(fresh.imported_events, 4);
-        let session = store
-            .list_sessions()
-            .unwrap()
-            .into_iter()
-            .find(|session| session.provider == CaptureProvider::Tabnine)
-            .unwrap();
-        let original_events = store.events_for_session(session.id).unwrap();
-        assert_eq!(original_events.len(), 4);
-        assert!(original_events.iter().all(|event| !matches!(
-            event.event_type,
-            EventType::ToolOutput | EventType::CommandOutput
-        )));
-        let routed_event = original_events[0].id;
-        assert!(store
-            .authorized_source_route_for_event(routed_event)
-            .is_ok());
-
-        let previous = checkpoint(&store, &transcript);
-        assert_eq!(
-            classify(&transcript, &root, &previous),
-            DirectJsonlSourceChange::Unchanged
-        );
-        let noop = import(&root, &mut store, ImportProfile::CoreOnly);
-        assert_eq!(noop.work_result(), ProviderImportWorkResult::NoOp);
-
-        drop(store);
-        let mut store = Store::open(&store_path).unwrap();
-        let restart = import(&root, &mut store, ImportProfile::CoreOnly);
-        assert_eq!(restart.work_result(), ProviderImportWorkResult::NoOp);
-
-        let previous = checkpoint(&store, &transcript);
-        append_record(
-            &transcript,
-            &message("append", "tabnine", "append-assistant"),
-        );
-        assert_eq!(
-            classify(&transcript, &root, &previous),
-            DirectJsonlSourceChange::Append
-        );
-        let append = import(&root, &mut store, ImportProfile::CoreOnly);
-        assert_eq!(append.work_result(), ProviderImportWorkResult::Changed);
-        assert_eq!(append.imported_events, 1);
-
-        let previous = checkpoint(&store, &transcript);
-        write_transcript(
-            &transcript,
-            &[
-                header("tabnine-life"),
-                message("rewrite-user", "user", &"rewrite-user-content-".repeat(24)),
-                message(
-                    "rewrite-assistant",
-                    "tabnine",
-                    &"rewrite-assistant-content-".repeat(24),
-                ),
-            ],
-        );
-        assert_eq!(
-            classify(&transcript, &root, &previous),
-            DirectJsonlSourceChange::Rewrite
-        );
-        assert_eq!(
-            import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
-            ProviderImportWorkResult::Changed
-        );
-
-        let previous = checkpoint(&store, &transcript);
-        write_transcript(
-            &transcript,
-            &[header("tabnine-life"), message("short", "user", "short")],
-        );
-        assert_eq!(
-            classify(&transcript, &root, &previous),
-            DirectJsonlSourceChange::Truncation
-        );
-        assert_eq!(
-            import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
-            ProviderImportWorkResult::Changed
-        );
-
-        let previous = checkpoint(&store, &transcript);
-        let replacement = transcript.with_extension("replacement");
-        write_transcript(
-            &replacement,
-            &[
-                header("tabnine-life"),
-                message("replacement", "user", "replacement-generation"),
-            ],
-        );
-        fs::rename(&replacement, &transcript).unwrap();
-        assert_eq!(
-            classify(&transcript, &root, &previous),
-            DirectJsonlSourceChange::Replacement
-        );
-        assert_eq!(
-            import(&root, &mut store, ImportProfile::CoreOnly).work_result(),
-            ProviderImportWorkResult::Changed
-        );
-
-        fs::remove_dir_all(&root).unwrap();
-        let disappeared = import(&root, &mut store, ImportProfile::CoreOnly);
-        assert_eq!(disappeared.work_result(), ProviderImportWorkResult::Changed);
-        assert!(store
-            .authorized_source_route_for_event(routed_event)
-            .is_err());
-        let repeated = import(&root, &mut store, ImportProfile::CoreOnly);
-        assert_eq!(repeated.work_result(), ProviderImportWorkResult::NoOp);
-    }
-
-    #[test]
-    fn production_is_core_first_with_independent_pro_replay() {
-        let temp = tempdir().unwrap();
-        let root = temp.path().join(".tabnine/agent");
-        let transcript = transcript_path(&root);
-        write_transcript(
-            &transcript,
-            &[
-                header("tabnine-core-first"),
-                message("core-first", "user", "core-first"),
-                tool_call("call-with-output"),
-                tool_result("result-with-output", SUCCESS_BODY),
-            ],
-        );
-        let store_path = temp.path().join("core.sqlite");
-        let mut store = Store::open(&store_path).unwrap();
-        let sink = Arc::new(RecordingSink::new(store_path.clone()));
-
-        let fresh = import(&root, &mut store, ImportProfile::CoreAndPro(sink.clone()));
-        assert_eq!(fresh.work_result(), ProviderImportWorkResult::Changed);
-        assert!(sink.saw_core_before_page.load(Ordering::SeqCst));
-        assert!(sink.pages.load(Ordering::SeqCst) > 0);
-        assert_eq!(sink.outputs.load(Ordering::SeqCst), 1);
-        let core_events = store
-            .events_for_session(
-                store
-                    .list_sessions()
-                    .unwrap()
-                    .into_iter()
-                    .find(|session| session.provider == CaptureProvider::Tabnine)
-                    .unwrap()
-                    .id,
-            )
-            .unwrap();
-        assert!(core_events.iter().all(|event| !matches!(
-            event.event_type,
-            EventType::ToolOutput | EventType::CommandOutput
-        )));
-        assert!(!serde_json::to_string(&core_events)
-            .unwrap()
-            .contains(SUCCESS_BODY));
-        let pages_after_fresh = sink.pages.load(Ordering::SeqCst);
-
-        let noop = import(&root, &mut store, ImportProfile::CoreAndPro(sink.clone()));
-        assert_eq!(noop.work_result(), ProviderImportWorkResult::NoOp);
-        assert_eq!(sink.pages.load(Ordering::SeqCst), pages_after_fresh);
-
-        let pro_only_path = temp.path().join("pro-only.sqlite");
-        let mut pro_only_store = Store::open(&pro_only_path).unwrap();
-        let pro_only_sink = Arc::new(RecordingSink::new(pro_only_path));
-        let replay = import(
-            &root,
-            &mut pro_only_store,
-            ImportProfile::ProReplayOnly(pro_only_sink.clone()),
-        );
-        assert_eq!(replay.work_result(), ProviderImportWorkResult::NoOp);
-        assert!(pro_only_store.list_sessions().unwrap().is_empty());
-        assert!(!pro_only_sink.saw_core_before_page.load(Ordering::SeqCst));
-        assert_eq!(pro_only_sink.pages.load(Ordering::SeqCst), 0);
-        assert_eq!(pro_only_sink.outputs.load(Ordering::SeqCst), 0);
-    }
-
-    struct RecordingSink {
-        store_path: PathBuf,
-        progress: Mutex<Option<ProOutputProgress>>,
-        pages: AtomicUsize,
-        outputs: AtomicUsize,
-        saw_core_before_page: AtomicBool,
-    }
-
-    impl RecordingSink {
-        fn new(store_path: PathBuf) -> Self {
-            Self {
-                store_path,
-                progress: Mutex::new(None),
-                pages: AtomicUsize::new(0),
-                outputs: AtomicUsize::new(0),
-                saw_core_before_page: AtomicBool::new(false),
-            }
-        }
-    }
-
-    impl ProOutputSink for RecordingSink {
-        fn inventory_generation(&self) -> u64 {
-            1
-        }
-
-        fn materializer_revision(&self) -> &str {
-            "tabnine-nativepath-test-materializer-v1"
-        }
-
-        fn observe_source(
-            &self,
-            _source: &OutputSourceIdentity,
-        ) -> std::result::Result<Option<ProOutputProgress>, ProOutputSinkError> {
-            Ok(self.progress.lock().unwrap().clone())
-        }
-
-        fn materialize_page(
-            &self,
-            page: ProOutputMaterializationPage,
-        ) -> std::result::Result<ProOutputPageResult, ProOutputSinkError> {
-            let core = Store::open_read_only(&self.store_path)
-                .map_err(|error| ProOutputSinkError::new("test_store", error.to_string()))?;
-            if !core
-                .list_sessions()
-                .map_err(|error| ProOutputSinkError::new("test_sessions", error.to_string()))?
-                .is_empty()
-            {
-                self.saw_core_before_page.store(true, Ordering::SeqCst);
-            }
-            self.pages.fetch_add(1, Ordering::SeqCst);
-            self.outputs
-                .fetch_add(page.observations.len(), Ordering::SeqCst);
-            let committed_cursor = page.next_safe_cursor.clone();
-            *self.progress.lock().unwrap() = Some(ProOutputProgress {
-                source_epoch: page.source_epoch,
-                observed_revision: page.observed_revision.clone(),
-                cursor: Some(committed_cursor.clone()),
-                parser_revision: page.parser_revision.clone(),
-                materializer_revision: page.materializer_revision.clone(),
-                terminal: page.terminal,
-            });
-            Ok(ProOutputPageResult {
-                source_epoch: page.source_epoch,
-                committed_cursor,
-                accepted_outputs: u32::try_from(page.observations.len()).unwrap(),
-                materialized_facts: 0,
-                replayed: false,
-            })
-        }
-    }
-
-    fn import(
-        root: &Path,
-        store: &mut Store,
-        import_profile: ImportProfile,
-    ) -> ProviderImportSummary {
-        crate::import_tabnine_cli_history(
-            root,
-            store,
-            TabnineCliImportOptions {
-                machine_id: MACHINE.to_owned(),
-                source_path: Some(root.to_path_buf()),
-                imported_at: "2026-07-25T12:00:00Z".parse().unwrap(),
-                import_profile,
-                ..TabnineCliImportOptions::default()
-            },
-        )
-        .unwrap()
-    }
-
-    fn transcript_path(root: &Path) -> PathBuf {
-        root.join("tmp/project/chats/session-tabnine-life.jsonl")
-    }
-
-    fn header(session_id: &str) -> Value {
-        json!({
-            "sessionId": session_id,
-            "projectHash": "tabnine-nativepath-project",
-            "startTime": "2026-07-25T12:00:00Z",
-            "lastUpdated": "2026-07-25T12:00:59Z",
-            "kind": "main",
-            "directories": ["/workspace/tabnine"],
-        })
-    }
-
-    fn message(id: &str, kind: &str, content: &str) -> Value {
-        json!({
-            "id": id,
-            "timestamp": "2026-07-25T12:00:01Z",
-            "type": kind,
-            "content": content,
-            "model": "tabnine-agent",
-        })
-    }
-
-    fn tool_call(id: &str) -> Value {
-        json!({
-            "id": id,
-            "timestamp": "2026-07-25T12:00:02Z",
-            "type": "tabnine",
-            "toolCalls": [{
-                "id": "call-1",
-                "name": "read_file",
-                "args": {"file_path": "README.md"},
-            }],
-            "model": "tabnine-agent",
-        })
-    }
-
-    fn tool_result(id: &str, result: &str) -> Value {
-        json!({
-            "id": id,
-            "timestamp": "2026-07-25T12:00:03Z",
-            "type": "tabnine",
-            "toolCalls": [{
-                "id": "call-1",
-                "name": "read_file",
-                "result": result,
-            }],
-            "model": "tabnine-agent",
-        })
-    }
-
-    fn write_transcript(path: &Path, records: &[Value]) {
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let mut bytes = Vec::new();
-        for record in records {
-            serde_json::to_writer(&mut bytes, record).unwrap();
-            bytes.push(b'\n');
-        }
-        fs::write(path, bytes).unwrap();
-    }
-
-    fn append_record(path: &Path, record: &Value) {
-        let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
-        serde_json::to_writer(&mut file, record).unwrap();
-        file.write_all(b"\n").unwrap();
-    }
-
-    fn checkpoint(store: &Store, path: &Path) -> DirectJsonlCheckpoint {
-        let canonical = fs::canonicalize(path).unwrap();
-        let locator = provider_path_identity(&canonical).unwrap();
-        let stream = provider_source_cursor_stream_for_path(
-            CaptureProvider::Tabnine,
-            TABNINE_CLI_SOURCE_FORMAT,
-            &locator,
-        );
-        let cursor = store
-            .get_sync_cursor(None, MACHINE, &stream)
-            .unwrap()
-            .unwrap();
-        decode_direct_jsonl_native_cursor(
-            &cursor.cursor,
-            CaptureProvider::Tabnine,
-            TABNINE_CLI_SOURCE_FORMAT,
-        )
-        .unwrap()
-    }
-
-    fn classify(
-        path: &Path,
-        root: &Path,
-        previous: &DirectJsonlCheckpoint,
-    ) -> DirectJsonlSourceChange {
-        open_direct_jsonl_pages(
-            CaptureProvider::Tabnine,
-            TABNINE_CLI_SOURCE_FORMAT,
-            path,
-            Some(root.to_path_buf()),
-            "2026-07-25T12:01:00Z".parse().unwrap(),
-            false,
-            Some(previous),
-        )
-        .unwrap()
-        .source_change()
-    }
-}
+#[path = "tabnine_tests.rs"]
+mod tests;

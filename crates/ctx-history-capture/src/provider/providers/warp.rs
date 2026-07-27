@@ -7,7 +7,6 @@ use crate::{ProviderAdapterContext, ProviderImportOptions, ProviderImportSummary
 
 mod nativepath;
 mod production;
-mod proto;
 mod schema;
 mod wire;
 
@@ -15,38 +14,21 @@ pub(crate) struct WarpTaskContent {
     pub(crate) event_type: EventType,
     pub(crate) native_record_id: String,
     pub(crate) text: String,
+    pub(crate) normalized_payload_hash: Option<String>,
 }
 
-/// Pure provider-local reopening boundary shared by capture and SQLite
-/// resolution. It never treats Warp's synthetic tool labels as source-backed
-/// content.
-pub(crate) fn warp_task_content_at(
+pub(crate) fn warp_message_content_at(
     task_bytes: &[u8],
+    conversation_id: &str,
     fallback_task_id: &str,
     message_index: usize,
 ) -> Result<Option<WarpTaskContent>> {
-    let task = proto::warp_decode_task(task_bytes)?;
-    let task_id = if task.id.is_empty() {
-        fallback_task_id
-    } else {
-        &task.id
-    };
-    let Some(message) = task.messages.get(message_index) else {
-        return Ok(None);
-    };
-    let Some(text) = message.complete_text.clone() else {
-        return Ok(None);
-    };
-    let native_record_id = if message.id.is_empty() {
-        format!("{task_id}:{message_index}")
-    } else {
-        message.id.clone()
-    };
-    Ok(Some(WarpTaskContent {
-        event_type: message.event_type,
-        native_record_id,
-        text,
-    }))
+    nativepath::resolve_warp_task_message(
+        task_bytes,
+        conversation_id,
+        fallback_task_id,
+        message_index,
+    )
 }
 
 pub(crate) fn import_warp_nativepath(

@@ -14,6 +14,8 @@ const STAGING_COMMERCIAL_API_ORIGIN: &str =
     "https://ctx-local-pro-commercial-staging.fancy-sea-92df.workers.dev/";
 const PRODUCTION_COMMERCIAL_API_ORIGIN: Option<&str> = None;
 const CHANNEL_ENV: &str = "CTX_PRO_CHANNEL";
+const STAGING_REFERRALS_AVAILABLE: bool = false;
+const PRODUCTION_REFERRALS_AVAILABLE: bool = false;
 const STAGING_ENTITLEMENT_ISSUER: &str = "https://commercial.staging.ctx.rs";
 const STAGING_ENTITLEMENT_KEY_IDS: &[&str] = &["staging-2026-07-v1", "staging-2026-07-v2"];
 const PRODUCTION_ENTITLEMENT_ISSUER: Option<&str> = None;
@@ -45,16 +47,20 @@ pub(super) struct CommercialConfig {
 
 impl CommercialConfig {
     pub(super) fn production() -> Result<Self> {
-        let channel = match std::env::var(CHANNEL_ENV) {
-            Ok(value) if value == "staging" => ReleaseChannel::Staging,
-            Ok(value) if value == "stable" => ReleaseChannel::Stable,
-            Ok(_) => bail!("invalid_request: {CHANNEL_ENV} must be stable or staging"),
-            Err(std::env::VarError::NotPresent) => ReleaseChannel::Stable,
-            Err(std::env::VarError::NotUnicode(_)) => {
-                bail!("invalid_request: {CHANNEL_ENV} must be valid UTF-8")
-            }
-        };
-        Self::for_channel(channel)
+        Self::for_channel(selected_channel()?)
+    }
+
+    pub(super) fn ensure_referrals_available() -> Result<()> {
+        if !referrals_available_for_channel(selected_channel()?) {
+            bail!(
+                "referral_unavailable: ctx referrals are disabled until the reviewed commercial and payout rollout is qualified"
+            );
+        }
+        Ok(())
+    }
+
+    pub(super) fn referrals_available() -> bool {
+        Self::ensure_referrals_available().is_ok()
     }
 
     fn for_channel(channel: ReleaseChannel) -> Result<Self> {
@@ -108,6 +114,26 @@ impl CommercialConfig {
     }
 }
 
+fn referrals_available_for_channel(channel: ReleaseChannel) -> bool {
+    match channel {
+        ReleaseChannel::Stable => PRODUCTION_REFERRALS_AVAILABLE,
+        ReleaseChannel::Staging => STAGING_REFERRALS_AVAILABLE,
+    }
+}
+
+fn selected_channel() -> Result<ReleaseChannel> {
+    let channel = match std::env::var(CHANNEL_ENV) {
+        Ok(value) if value == "staging" => ReleaseChannel::Staging,
+        Ok(value) if value == "stable" => ReleaseChannel::Stable,
+        Ok(_) => bail!("invalid_request: {CHANNEL_ENV} must be stable or staging"),
+        Err(std::env::VarError::NotPresent) => ReleaseChannel::Stable,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            bail!("invalid_request: {CHANNEL_ENV} must be valid UTF-8")
+        }
+    };
+    Ok(channel)
+}
+
 fn parse_origin(value: &str, label: &str) -> Result<Url> {
     Url::parse(value).with_context(|| format!("invalid_request: {label} origin is invalid"))
 }
@@ -149,5 +175,16 @@ mod tests {
             .entitlement_trust
             .validate_identity("https://commercial.ctx.rs", "production-2026-07-v1")
             .is_err());
+    }
+
+    #[test]
+    fn referrals_are_reviewed_and_default_disabled_on_every_channel() {
+        assert!(!referrals_available_for_channel(ReleaseChannel::Staging));
+        assert!(!referrals_available_for_channel(ReleaseChannel::Stable));
+        assert!(!CommercialConfig::referrals_available());
+        assert!(CommercialConfig::ensure_referrals_available()
+            .unwrap_err()
+            .to_string()
+            .starts_with("referral_unavailable:"));
     }
 }

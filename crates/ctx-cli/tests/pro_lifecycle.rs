@@ -309,3 +309,105 @@ fn obsolete_and_manual_repository_lifecycle_flags_are_rejected() {
             .failure();
     }
 }
+
+#[test]
+fn default_disabled_referrals_fail_before_identity_auth_or_browser_side_effects() {
+    for arguments in [
+        vec!["referral", "create", "agent-smith", "--json"],
+        vec!["referral", "status", "--json"],
+        vec!["referral", "payout", "--json"],
+        vec!["pro", "--referral", "agent-smith", "--json"],
+    ] {
+        let parent = tempdir().unwrap();
+        let data_root = parent.path().join("missing-data-root");
+        let output = Command::cargo_bin("ctx")
+            .unwrap()
+            .env("CTX_PRO_CHANNEL", "staging")
+            .arg("--data-root")
+            .arg(&data_root)
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("referral_unavailable:"));
+        assert!(!stderr.contains("authentication_required:"));
+        assert!(!stderr.contains("Sign in to ctx Pro"));
+        assert!(!stderr.contains("http://"));
+        assert!(!stderr.contains("https://"));
+        assert!(
+            !data_root.join("pro").exists(),
+            "unavailable referrals must not initialize Pro credentials"
+        );
+    }
+}
+
+#[test]
+fn invalid_referral_codenames_are_rejected_without_echoing_the_secret() {
+    const INVALID_SECRET: &str = "Private_Referral_Code";
+    for arguments in [
+        vec!["pro", "--referral", INVALID_SECRET, "--json"],
+        vec!["referral", "create", INVALID_SECRET, "--json"],
+    ] {
+        let parent = tempdir().unwrap();
+        let data_root = parent.path().join("missing-data-root");
+        let output = Command::cargo_bin("ctx")
+            .unwrap()
+            .arg("--data-root")
+            .arg(&data_root)
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("invalid_request: referral codename must be"));
+        assert!(!stderr.contains(INVALID_SECRET));
+        assert!(!data_root.exists());
+    }
+}
+
+#[test]
+fn referral_input_is_rejected_when_any_explicit_pro_subcommand_follows() {
+    for arguments in [
+        vec!["pro", "--referral", "agent-smith", "setup", "--json"],
+        vec!["pro", "setup", "--referral", "agent-smith", "--json"],
+        vec!["pro", "--referral", "agent-smith", "manage", "--json"],
+        vec!["pro", "manage", "--referral", "agent-smith", "--json"],
+        vec![
+            "pro",
+            "--referral",
+            "agent-smith",
+            "uninstall",
+            "--keep-data",
+            "--json",
+        ],
+        vec![
+            "pro",
+            "uninstall",
+            "--referral",
+            "agent-smith",
+            "--keep-data",
+            "--json",
+        ],
+    ] {
+        let parent = tempdir().unwrap();
+        let data_root = parent.path().join("missing-data-root");
+        Command::cargo_bin("ctx")
+            .unwrap()
+            .arg("--data-root")
+            .arg(&data_root)
+            .args(&arguments)
+            .assert()
+            .failure()
+            .stderr(
+                predicate::str::contains("--referral is accepted only by bare `ctx pro`")
+                    .or(predicate::str::contains("unexpected argument '--referral'")),
+            );
+        assert!(
+            !data_root.exists(),
+            "invalid referral/subcommand combination mutated local state: {arguments:?}"
+        );
+    }
+}

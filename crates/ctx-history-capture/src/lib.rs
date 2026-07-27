@@ -1,4 +1,10 @@
 pub mod provider_sources;
+pub use common::io::{
+    inventory_provider_jsonl_paths, inventory_provider_regular_paths, provider_regular_file_len,
+    ProviderJsonlInventory, ProviderJsonlInventoryLimits, PROVIDER_JSONL_INVENTORY_MAX_DEPTH,
+    PROVIDER_JSONL_INVENTORY_MAX_DIRECTORIES, PROVIDER_JSONL_INVENTORY_MAX_ELIGIBLE_PATHS,
+    PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES, PROVIDER_JSONL_INVENTORY_MAX_PATH_BYTES,
+};
 pub use provider_sources::{
     discover_provider_sources, discover_provider_sources_for_provider,
     discover_provider_sources_for_provider_report,
@@ -41,7 +47,11 @@ pub(crate) const LINGMA_SQLITE_SOURCE_FORMAT: &str = "lingma_sqlite";
 pub(crate) const ANTIGRAVITY_CLI_SOURCE_FORMAT: &str = "antigravity_cli_transcript_jsonl_tree";
 pub(crate) const GEMINI_CLI_SOURCE_FORMAT: &str = "gemini_cli_chat_recording_jsonl";
 pub(crate) const TABNINE_CLI_SOURCE_FORMAT: &str = "tabnine_cli_chat_recording_jsonl";
-pub(crate) const CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT: &str = "cursor_agent_transcript_jsonl";
+pub(crate) const CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT: &str = "cursor_agent_transcript_jsonl_tree";
+/// v0.25 labeled each Cursor transcript leaf instead of its authoritative
+/// provider-owned tree. Read this only while migrating persisted routes.
+pub(crate) const LEGACY_CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT: &str =
+    "cursor_agent_transcript_jsonl";
 pub(crate) const WINDSURF_CASCADE_HOOK_TRANSCRIPT_SOURCE_FORMAT: &str =
     "windsurf_cascade_hook_transcript_jsonl";
 pub(crate) const QODER_SOURCE_FORMAT: &str = "qoder_transcript_jsonl";
@@ -72,11 +82,18 @@ pub use pro_output::{
 };
 
 mod error;
-pub use error::{CaptureError, Result};
+pub use error::{CaptureError, ProviderJsonlInventoryLimit, ProviderSourceFailureKind, Result};
 
 mod summaries;
+#[cfg(codex_nativepath_qualification)]
+#[doc(hidden)]
+pub use provider::codex::nativepath::{
+    qualify_codex_native_session_root, CodexNativePathQualificationEvidence,
+    QualificationInputIdentity, QualificationProducerCounters, QualificationStoreCounters,
+};
 pub use summaries::{
-    CatalogSummary, ProviderImportFailure, ProviderImportSummary, ProviderImportWorkResult,
+    CatalogSummary, ProviderImportFailure, ProviderImportSummary, ProviderImportTerminalOutcome,
+    ProviderImportWorkResult,
 };
 
 mod options;
@@ -130,9 +147,10 @@ pub use provider::api::{
     validate_custom_history_jsonl_v1, validate_custom_history_jsonl_v1_reader,
 };
 pub use provider::codex::{
-    catalog_codex_session_files, catalog_codex_session_tree, import_codex_history_jsonl,
-    import_codex_session_jsonl, import_codex_session_jsonl_tail, import_codex_session_paths,
-    import_codex_session_tree,
+    build_codex_cold_store, catalog_codex_session_files, catalog_codex_session_tree,
+    import_codex_history_jsonl, import_codex_session_jsonl, import_codex_session_jsonl_tail,
+    import_codex_session_paths, import_codex_session_tree, CodexColdPromptHistoryOptions,
+    CodexColdStoreOptions, CodexColdStoreOutcome,
 };
 pub use provider::custom_history_jsonl::{
     custom_history_jsonl_v1_cursor_stream, decode_custom_history_jsonl_v1_cursor,

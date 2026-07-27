@@ -1,8 +1,5 @@
 use super::*;
-use crate::complete_content::{
-    verified_content_route_matches, BrokeredSourceAccess, ResolvedResultContent,
-    ResultContentRequest,
-};
+use crate::complete_content::{verified_content_route_matches, BrokeredSourceAccess};
 
 pub(crate) const JUNIE_JSONL_RECORD_SET_LOCATOR_KIND: &str = "junie-jsonl-record-set-v1";
 const JUNIE_RECORD_SET_HEADER_BYTES: usize = 7;
@@ -235,16 +232,10 @@ fn replay_junie_record_set(
         JunieRecordSetTarget::AssistantMessage => Ok(
             crate::provider::providers::junie::junie_buffer_result_text(&buffer),
         ),
-        JunieRecordSetTarget::StepOutput(index) => {
-            crate::provider::providers::junie::junie_buffer_step_output(&buffer, index)
-                .map(str::to_owned)
-                .ok_or_else(|| {
-                    CompleteContentError::new(
-                        CompleteContentErrorKind::ContentVerificationFailed,
-                        event_id,
-                    )
-                })
-        }
+        JunieRecordSetTarget::StepOutput(_) => Err(CompleteContentError::new(
+            CompleteContentErrorKind::ContentVerificationFailed,
+            event_id,
+        )),
     }
 }
 
@@ -330,92 +321,6 @@ pub(super) fn resolve_messages(
     }
     first.source_access.revalidate_jsonl(first.event_id)?;
     Ok(messages)
-}
-
-pub(super) fn resolve_results(
-    requests: &[ResultContentRequest],
-) -> Vec<Result<ResolvedResultContent, CompleteContentError>> {
-    let group = resolve_result_group(requests);
-    match group {
-        Ok(results) => results,
-        Err(error) => requests
-            .iter()
-            .map(|request| Err(CompleteContentError::new(error.kind, request.event_id)))
-            .collect(),
-    }
-}
-
-fn resolve_result_group(
-    requests: &[ResultContentRequest],
-) -> Result<Vec<Result<ResolvedResultContent, CompleteContentError>>, CompleteContentError> {
-    let Some(first) = requests.first() else {
-        return Ok(Vec::new());
-    };
-    let mut prior = None;
-    let mut decoded = Vec::with_capacity(requests.len());
-    for request in requests {
-        let locator = DecodedJunieRecordSet::decode(&request.source_locator).ok_or_else(|| {
-            CompleteContentError::new(
-                CompleteContentErrorKind::HydrationUnsupported,
-                request.event_id,
-            )
-        })?;
-        let position = (
-            request.source_record_ordinal,
-            request.source_record_subrecord_index,
-        );
-        if request.provider != CaptureProvider::Junie
-            || request.source_format != JUNIE_SESSION_EVENTS_SOURCE_FORMAT
-            || request.source_access != first.source_access
-            || request.source_access.family() != CompleteContentSourceFamily::Jsonl
-            || !matches!(locator.target, JunieRecordSetTarget::StepOutput(_))
-            || request.expected_native_record_id
-                != decoded_native_record_id(&locator).unwrap_or_default()
-            || !verified_content_route_matches(
-                &request.content_profile,
-                request.provider,
-                &request.source_format,
-                request.source_family,
-                VerifiedContentRole::ResultBody,
-                request.source_locator.kind(),
-            )
-            || prior.is_some_and(|prior| prior >= position)
-        {
-            return Err(CompleteContentError::new(
-                CompleteContentErrorKind::ContentVerificationFailed,
-                request.event_id,
-            ));
-        }
-        prior = Some(position);
-        decoded.push(locator);
-    }
-    let mut results = Vec::with_capacity(requests.len());
-    for (request, locator) in requests.iter().zip(&decoded) {
-        let resolved = (|| {
-            let values = read_junie_record_set(
-                &request.source_access,
-                request.event_id,
-                locator,
-                &request.expected_record_digest,
-            )?;
-            let content = replay_junie_record_set(locator, &values, request.event_id)?;
-            if !request.expected_content_ref.verifies(content.as_bytes()) {
-                return Err(CompleteContentError::new(
-                    CompleteContentErrorKind::ContentVerificationFailed,
-                    request.event_id,
-                ));
-            }
-            Ok(ResolvedResultContent {
-                event_id: request.event_id,
-                content,
-                content_ref: request.expected_content_ref.clone(),
-                verification: SourceVerification::VERIFIED,
-            })
-        })();
-        results.push(resolved);
-    }
-    first.source_access.revalidate_jsonl(first.event_id)?;
-    Ok(results)
 }
 
 pub(super) fn decoded_native_record_id(decoded: &DecodedJunieRecordSet) -> Option<String> {

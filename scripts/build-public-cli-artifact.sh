@@ -102,13 +102,15 @@ inspector_roots=()
 freebsd_release_cargo_home=""
 cleanup_release_temps() {
   local root
-  for root in "${inspector_roots[@]}"; do
-    case "$root" in
-      "${TMPDIR:-/tmp}"/ctx-public-inspector.*)
-        [[ -d "$root" && ! -L "$root" ]] && rm -rf -- "$root"
-        ;;
-    esac
-  done
+  if (( ${#inspector_roots[@]} > 0 )); then
+    for root in "${inspector_roots[@]}"; do
+      case "$root" in
+        "${TMPDIR:-/tmp}"/ctx-public-inspector.*)
+          [[ -d "$root" && ! -L "$root" ]] && rm -rf -- "$root"
+          ;;
+      esac
+    done
+  fi
   case "${freebsd_release_cargo_home}" in
     "${TMPDIR:-/tmp}"/ctx-freebsd-release-cargo.*)
       [[ -d "${freebsd_release_cargo_home}" \

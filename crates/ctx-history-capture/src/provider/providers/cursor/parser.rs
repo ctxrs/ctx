@@ -3,13 +3,15 @@ use std::fmt;
 #[cfg(test)]
 use std::io;
 
-use ctx_history_core::{EventRole, EventType};
+use ctx_history_core::{ContentRef, EventRole, EventType};
 use serde::{
     de::{self, DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor},
     Deserialize, Serialize,
 };
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
-use crate::PROVIDER_MAX_TEXT_CHARS;
+use crate::provider::normalization::provider_policy_event_text;
 
 #[cfg(test)]
 use super::checkpoint::CursorCheckpoint;
@@ -70,6 +72,10 @@ pub(super) enum CursorSafePart {
         event_type: EventType,
         role: EventRole,
         text: String,
+        #[serde(skip)]
+        text_retention: Value,
+        #[serde(skip)]
+        complete_content_ref: Option<ContentRef>,
     },
     ToolUse {
         role: EventRole,
@@ -82,6 +88,14 @@ pub(super) enum CursorSafePart {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(super) struct CursorSanitizedRecord {
     pub(super) semantic_ordinal: u64,
+    #[serde(skip)]
+    pub(super) physical_ordinal: u64,
+    #[serde(skip)]
+    pub(super) byte_start: u64,
+    #[serde(skip)]
+    pub(super) byte_end_exclusive: u64,
+    #[serde(skip)]
+    pub(super) record_sha256: [u8; 32],
     pub(super) timestamp: Option<String>,
     pub(super) role: EventRole,
     pub(super) event: Option<String>,
@@ -112,11 +126,19 @@ pub(super) use stream::{
 fn decode_sanitized_record(
     bytes: &[u8],
     semantic_ordinal: u64,
+    physical_ordinal: u64,
+    byte_start: u64,
+    byte_end_exclusive: u64,
     classification: &CursorLineClassification,
 ) -> serde_json::Result<CursorSanitizedRecord> {
+    let record_sha256 = Sha256::digest(bytes).into();
     if classification.admission == CursorRecordAdmission::Excluded {
         return Ok(CursorSanitizedRecord {
             semantic_ordinal,
+            physical_ordinal,
+            byte_start,
+            byte_end_exclusive,
+            record_sha256,
             timestamp: classification.timestamp.clone(),
             role: EventRole::Unknown,
             event: classification.event.clone(),
@@ -147,6 +169,10 @@ fn decode_sanitized_record(
     }
     Ok(CursorSanitizedRecord {
         semantic_ordinal,
+        physical_ordinal,
+        byte_start,
+        byte_end_exclusive,
+        record_sha256,
         timestamp: classification.timestamp.clone(),
         role,
         event: classification.event.clone(),
@@ -380,22 +406,152 @@ impl<'de> Visitor<'de> for CursorTextBlockVisitor<'_> {
     where
         A: MapAccess<'de>,
     {
-        let mut text = None;
+        let event_type = cursor_text_event_type(self.classification);
+        let mut retained = None;
         while let Some(field) = map.next_key::<String>()? {
             if field == "text" {
-                text = Some(map.next_value_seed(BoundedStringSeed {
-                    max_chars: PROVIDER_MAX_TEXT_CHARS,
-                })?);
+                retained = Some(map.next_value_seed(CursorMessageTextSeed { event_type })?);
             } else {
                 map.next_value::<IgnoredAny>()?;
             }
         }
+        let retained = retained.unwrap_or_else(|| retained_cursor_message_text(event_type, ""));
         Ok(Some(CursorSafePart::Text {
-            event_type: cursor_text_event_type(self.classification),
+            event_type,
             role: cursor_role(self.classification.role.as_deref()),
-            text: text.unwrap_or_default(),
+            text: retained.text,
+            text_retention: retained.retention,
+            complete_content_ref: retained.complete_content_ref,
         }))
     }
+}
+
+struct CursorMessageTextSeed {
+    event_type: EventType,
+}
+
+impl<'de> DeserializeSeed<'de> for CursorMessageTextSeed {
+    type Value = CursorRetainedMessageText;
+
+    fn deserialize<D>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_string(CursorMessageTextVisitor {
+            event_type: self.event_type,
+        })
+    }
+}
+
+struct CursorMessageTextVisitor {
+    event_type: EventType,
+}
+
+impl Visitor<'_> for CursorMessageTextVisitor {
+    type Value = CursorRetainedMessageText;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a Cursor message string")
+    }
+
+    fn visit_borrowed_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(retained_cursor_message_text(self.event_type, value))
+    }
+
+    fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(retained_cursor_message_text(self.event_type, value))
+    }
+
+    fn visit_string<E>(self, value: String) -> std::result::Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(retained_cursor_message_text(self.event_type, &value))
+    }
+}
+
+struct CursorRetainedMessageText {
+    text: String,
+    retention: Value,
+    complete_content_ref: Option<ContentRef>,
+}
+
+fn retained_cursor_message_text(event_type: EventType, value: &str) -> CursorRetainedMessageText {
+    let retained = provider_policy_event_text(event_type, value, &json!({}));
+    let retention = retained.retention.as_json();
+    let complete_content_ref = (event_type == EventType::Message
+        && retention
+            .get("truncated")
+            .and_then(Value::as_bool)
+            .is_some_and(|truncated| truncated))
+    .then(|| ContentRef::from_bytes(value.as_bytes()))
+    .flatten();
+    CursorRetainedMessageText {
+        text: retained.text,
+        retention,
+        complete_content_ref,
+    }
+}
+
+pub(crate) fn cursor_complete_content_message_record(
+    value: &Value,
+    physical_ordinal: u64,
+    subrecord_index: u32,
+    indexed_text: &str,
+) -> Option<(String, String, String)> {
+    let encoded = serde_json::to_vec(value).ok()?;
+    let classification = classify_cursor_line(&encoded).ok()?;
+    if !matches!(
+        classification.admission,
+        CursorRecordAdmission::UserMessage | CursorRecordAdmission::AssistantMessage
+    ) {
+        return None;
+    }
+    let content = match classification.location {
+        CursorContentLocation::Message => value.get("message")?.get("content")?.as_array()?,
+        CursorContentLocation::TopLevel => value.get("content")?.as_array()?,
+        CursorContentLocation::None => return None,
+    };
+    let mut projected_ordinal = 0_u32;
+    for (kind, block) in classification.block_kinds.iter().zip(content) {
+        match kind {
+            CursorBlockKind::Excluded => continue,
+            CursorBlockKind::ToolUse => {
+                projected_ordinal = projected_ordinal.checked_add(1)?;
+            }
+            CursorBlockKind::Text => {
+                if projected_ordinal == subrecord_index {
+                    let complete_text = block.get("text").and_then(Value::as_str)?;
+                    let event_type = cursor_text_event_type(&classification);
+                    let role = cursor_role(classification.role.as_deref());
+                    let retained =
+                        provider_policy_event_text(event_type, complete_text, &json!({}));
+                    if retained.text != indexed_text {
+                        return None;
+                    }
+                    let body = super::projection::CursorEventBody::Text {
+                        text: retained.text,
+                    };
+                    let encoded =
+                        serde_json::to_vec(&("cursor-event-payload-v1", event_type, role, &body))
+                            .ok()?;
+                    return Some((
+                        complete_text.to_owned(),
+                        format!("cursor-line-v1:{physical_ordinal}:{subrecord_index}"),
+                        format!("{:x}", Sha256::digest(encoded)),
+                    ));
+                }
+                projected_ordinal = projected_ordinal.checked_add(1)?;
+            }
+        }
+    }
+    None
 }
 
 struct CursorToolUseBlockVisitor<'a> {

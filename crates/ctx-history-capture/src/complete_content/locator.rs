@@ -17,8 +17,8 @@ pub const COMPLETE_CONTENT_INDEXED_MESSAGE_LIMIT_CHARS: usize = crate::PROVIDER_
 pub const COMPLETE_CONTENT_MAX_LOCATOR_BYTES: usize = 4 * 1024;
 /// Bounded event-metadata envelope for all verified content addresses.
 pub const VERIFIED_CONTENT_LOCATORS_MAX_BYTES: usize = 8 * 1024;
-/// v0.26 supports at most one address for each of its two content roles.
-pub const VERIFIED_CONTENT_LOCATORS_MAX_ENTRIES: usize = 2;
+/// v0.26 supports one complete-message address per event.
+pub const VERIFIED_CONTENT_LOCATORS_MAX_ENTRIES: usize = 1;
 pub(super) const COMPLETE_CONTENT_MAX_LOCATOR_KIND_BYTES: usize = 256;
 const COMPLETE_CONTENT_MAX_NATIVE_RECORD_ID_BYTES: usize = 1024;
 pub(super) const VERIFIED_CONTENT_PROFILE_MAX_BYTES: usize = 128;
@@ -40,7 +40,6 @@ pub enum CompleteContentSourceFamily {
 #[serde(rename_all = "snake_case")]
 pub enum VerifiedContentRole {
     MessageBody,
-    ResultBody,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -286,16 +285,11 @@ impl VerifiedContentLocatorsV1 {
         serde_json::to_writer(&mut counter, value).ok()?;
         let collection = serde_json::from_value::<Self>(value.clone()).ok()?;
         if collection.version != 1
-            || collection.locators.is_empty()
-            || collection.locators.len() > VERIFIED_CONTENT_LOCATORS_MAX_ENTRIES
+            || collection.locators.len() != VERIFIED_CONTENT_LOCATORS_MAX_ENTRIES
             || collection
                 .locators
                 .iter()
                 .any(|locator| !locator.is_valid())
-            || collection
-                .locators
-                .windows(2)
-                .any(|pair| pair[0].content_role >= pair[1].content_role)
             || serde_json::to_vec(&collection).ok()?.len() > VERIFIED_CONTENT_LOCATORS_MAX_BYTES
         {
             return None;
@@ -311,25 +305,6 @@ impl VerifiedContentLocatorsV1 {
         self.locators
             .iter()
             .find(|locator| locator.content_role == role)
-    }
-
-    pub fn insert(&mut self, locator: VerifiedContentLocatorV1) -> bool {
-        if self.locator(locator.content_role).is_some()
-            || self.locators.len() >= VERIFIED_CONTENT_LOCATORS_MAX_ENTRIES
-        {
-            return false;
-        }
-        let role = locator.content_role;
-        self.locators.push(locator);
-        self.locators.sort_by_key(VerifiedContentLocatorV1::role);
-        if serde_json::to_vec(self)
-            .is_ok_and(|encoded| encoded.len() <= VERIFIED_CONTENT_LOCATORS_MAX_BYTES)
-        {
-            true
-        } else {
-            self.locators.retain(|locator| locator.content_role != role);
-            false
-        }
     }
 }
 
@@ -366,16 +341,10 @@ pub fn attach_verified_content_locator(
     locator: VerifiedContentLocatorV1,
 ) -> Option<()> {
     let object = metadata.as_object_mut()?;
-    let collection = match object.get(VERIFIED_CONTENT_LOCATORS_METADATA_KEY) {
-        Some(value) => {
-            let mut collection = VerifiedContentLocatorsV1::from_metadata_value(value)?;
-            if collection.locator(locator.role()).is_some() || !collection.insert(locator) {
-                return None;
-            }
-            collection
-        }
-        None => VerifiedContentLocatorsV1::singleton(locator)?,
-    };
+    if object.contains_key(VERIFIED_CONTENT_LOCATORS_METADATA_KEY) {
+        return None;
+    }
+    let collection = VerifiedContentLocatorsV1::singleton(locator)?;
     object.insert(
         VERIFIED_CONTENT_LOCATORS_METADATA_KEY.to_owned(),
         collection.to_metadata_value(),

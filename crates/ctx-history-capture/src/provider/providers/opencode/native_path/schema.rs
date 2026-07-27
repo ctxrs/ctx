@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use crate::{CaptureError, Result};
 
 use super::model::OpenCodeNativeSchemaFamily;
+use crate::provider::providers::opencode::OpenCodeSqliteDialect;
 
 const MAX_NATIVE_IDENTITY_BYTES: i64 = 4 * 1024;
 
@@ -29,12 +30,13 @@ struct ColumnCapability {
 }
 
 impl OpenCodeNativeSchema {
-    pub(super) fn probe(conn: &Connection) -> Result<Self> {
+    pub(super) fn probe(conn: &Connection, dialect: &OpenCodeSqliteDialect) -> Result<Self> {
         let tables = sqlite_tables(conn)?;
         if !tables.contains("session") {
-            return Err(CaptureError::InvalidPayload(
-                "OpenCode NativePath requires the session table".to_owned(),
-            ));
+            return Err(CaptureError::InvalidPayload(format!(
+                "{} NativePath requires the session table",
+                dialect.display_name
+            )));
         }
         let session = table_capabilities(conn, "session")?;
         require_identity_column(&session, "session", "id")?;
@@ -133,10 +135,10 @@ impl OpenCodeNativeSchema {
         } else if let Some((has_type, _)) = message {
             (OpenCodeNativeSchemaFamily::LegacyMessage, has_type)
         } else {
-            return Err(CaptureError::InvalidPayload(
-                "OpenCode NativePath found no explicitly supported message schema family"
-                    .to_owned(),
-            ));
+            return Err(CaptureError::InvalidPayload(format!(
+                "{} NativePath found no explicitly supported message schema family",
+                dialect.display_name
+            )));
         };
 
         validate_native_ordering_rows(conn, family)?;

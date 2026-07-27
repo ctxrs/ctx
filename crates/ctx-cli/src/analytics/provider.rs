@@ -80,6 +80,10 @@ impl ProviderRefreshContentEvidence {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(
+    dead_code,
+    reason = "the public telemetry vocabulary retains privacy-safe work kinds even when the current NativePath runtime cannot distinguish every kind"
+)]
 pub(crate) enum ProviderRefreshWorkKind {
     NoOp,
     Fresh,
@@ -145,6 +149,10 @@ impl ProviderCoreResult {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(
+    dead_code,
+    reason = "the public telemetry vocabulary retains Pro lifecycle outcomes used by released event consumers"
+)]
 pub(crate) enum ProviderProResult {
     NotRequested,
     Unavailable,
@@ -274,6 +282,24 @@ impl ProviderRefreshCountsV1 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProviderRefreshPerformanceV1 {
+    pub(crate) cpu_duration: DurationBucket,
+    pub(crate) observed_process_peak_rss: Option<BytesBucket>,
+}
+
+impl ProviderRefreshPerformanceV1 {
+    pub(crate) fn new(
+        cpu_duration: Duration,
+        observed_process_peak_rss_bytes: Option<u64>,
+    ) -> Self {
+        Self {
+            cpu_duration: duration_bucket(cpu_duration),
+            observed_process_peak_rss: observed_process_peak_rss_bytes.map(bytes_bucket),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ForegroundProviderRefreshV1 {
     pub(crate) provider: CaptureProvider,
     pub(crate) trigger: ProviderRefreshTrigger,
@@ -290,6 +316,7 @@ pub(crate) struct ForegroundProviderRefreshV1 {
     pub(crate) work_remaining: bool,
     pub(crate) retired_records: Option<CountBucket>,
     pub(crate) counts: ProviderRefreshCountsV1,
+    pub(crate) performance: Option<ProviderRefreshPerformanceV1>,
 }
 
 #[derive(Debug)]
@@ -311,6 +338,10 @@ impl ProviderRefreshCompletedV1 {
         }
     }
 
+    #[allow(
+        dead_code,
+        reason = "kept as the exact-duration constructor used by telemetry contract tests"
+    )]
     pub(crate) fn foreground(
         outcome: Outcome,
         duration: Duration,
@@ -367,6 +398,10 @@ mod tests {
                     work_remaining: true,
                     retired_records: Some(count_bucket(42)),
                     counts: ProviderRefreshCountsV1::new(2, 12, 3, 8, 1, 5, 1, 1, 2048),
+                    performance: Some(ProviderRefreshPerformanceV1::new(
+                        Duration::from_millis(800),
+                        Some(512 * 1024 * 1024),
+                    )),
                 },
             ));
         let occurred_at = chrono::DateTime::parse_from_rfc3339("2026-07-22T12:34:00Z")
@@ -403,6 +438,8 @@ mod tests {
                 "rejections_bucket": "1",
                 "failures_bucket": "1",
                 "bytes_bucket": "lt_100kb",
+                "cpu_duration_bucket": "lt_1s",
+                "observed_process_peak_rss_bucket": "100mb-1gb",
             })
         );
         let properties = serialized["properties"].as_object().unwrap();
@@ -422,7 +459,9 @@ mod tests {
             "error",
             "error_message",
             "duration_ms",
+            "peak_rss_bucket",
             "bytes",
+            "observed_process_peak_rss_bytes",
         ] {
             assert!(!properties.contains_key(forbidden));
         }

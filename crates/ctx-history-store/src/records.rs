@@ -107,14 +107,20 @@ impl Store {
                     record.updated_at.to_rfc3339(),
                 ],
             )?;
-            upsert_record_search_projection(&self.conn, record)
+            if !self.native_cold_load_active() {
+                upsert_record_search_projection(&self.conn, record)?;
+            }
+            Ok(())
         })
     }
 
     pub fn upsert_record(&self, record: &HistoryRecord) -> Result<()> {
         self.with_atomic_write(|| {
             self.upsert_record_row(record)?;
-            upsert_record_search_projection(&self.conn, record)
+            if !self.native_cold_load_active() {
+                upsert_record_search_projection(&self.conn, record)?;
+            }
+            Ok(())
         })
     }
 

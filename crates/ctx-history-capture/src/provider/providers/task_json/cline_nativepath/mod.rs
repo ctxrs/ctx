@@ -20,9 +20,10 @@ mod tests;
 
 pub(super) use normalize::{
     ClineArrayCheckpoint, ClineCatalogCompletion, ClineCatalogIndex, ClineCertifiedPage,
-    ClineEventComponent, ClineEventKind, ClineEventRole, ClineEventRow, ClineMetadataCheckpoint,
-    ClineNativeProfile, ClinePageFrontier, ClineSessionRow, ClineTaskCheckpoint, ClineTaskIdentity,
-    ClineTaskIdentityOrigin, ClineTransientOutputPayload,
+    ClineEventComponent, ClineEventKind, ClineEventRole, ClineEventRow, ClineFileSourceIdentity,
+    ClineMetadataCheckpoint, ClineNativeItemKey, ClineNativeProfile, ClinePageFrontier,
+    ClineSessionRow, ClineTaskCheckpoint, ClineTaskIdentity, ClineTaskIdentityOrigin,
+    ClineTransientOutputPayload,
 };
 #[cfg(test)]
 pub(super) use normalize::{

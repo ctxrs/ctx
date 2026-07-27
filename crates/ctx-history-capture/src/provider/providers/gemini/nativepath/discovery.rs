@@ -143,7 +143,7 @@ fn discover_gemini_transcripts_with_budget(
     }
     ensure_provider_path_parents_are_not_symlinks(root)?;
     let canonical_root = fs::canonicalize(root)?;
-    let layout_root = gemini_layout_root(&canonical_root);
+    let layout_root = gemini_layout_root(&canonical_root, &metadata);
     let mut paths = Vec::new();
     let scan_root = gemini_scan_root(&canonical_root, &metadata)?;
     if let Some(scan_root) = scan_root {
@@ -154,7 +154,9 @@ fn discover_gemini_transcripts_with_budget(
 
     let mut transcripts = Vec::with_capacity(paths.len());
     for path in paths {
-        let Some(layout) = gemini_transcript_layout(&layout_root, &path)? else {
+        let Some(layout) =
+            gemini_transcript_layout(&layout_root, &path, metadata.file_type().is_file())?
+        else {
             continue;
         };
         let relative_path = if metadata.file_type().is_file() {
@@ -182,7 +184,7 @@ fn discover_gemini_transcripts_with_budget(
 }
 
 fn gemini_scan_root(root: &Path, metadata: &Metadata) -> Result<Option<PathBuf>> {
-    if metadata.file_type().is_file() || root.file_name().is_none_or(|name| name != ".gemini") {
+    if metadata.file_type().is_file() {
         return Ok(Some(root.to_path_buf()));
     }
     let tmp = root.join("tmp");
@@ -194,8 +196,15 @@ fn gemini_scan_root(root: &Path, metadata: &Metadata) -> Result<Option<PathBuf>>
             })
         }
         Ok(metadata) if metadata.file_type().is_dir() => Ok(Some(tmp)),
-        Ok(_) => Ok(None),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Ok(_) if root.file_name().is_some_and(|name| name == ".gemini") => Ok(None),
+        Ok(_) => Ok(Some(root.to_path_buf())),
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                && root.file_name().is_some_and(|name| name == ".gemini") =>
+        {
+            Ok(None)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Some(root.to_path_buf())),
         Err(error) => Err(error.into()),
     }
 }
@@ -244,55 +253,91 @@ fn collect_candidates(
     Ok(())
 }
 
-fn gemini_layout_root(root: &Path) -> PathBuf {
-    root.ancestors()
+fn gemini_layout_root(root: &Path, metadata: &Metadata) -> PathBuf {
+    if let Some(layout_root) = root
+        .ancestors()
         .find(|ancestor| ancestor.file_name().is_some_and(|name| name == ".gemini"))
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| root.join(".gemini"))
+    {
+        return layout_root.to_path_buf();
+    }
+    for candidate in root.ancestors().skip(1) {
+        let Ok(relative) = root.strip_prefix(candidate) else {
+            continue;
+        };
+        let components = relative.components().collect::<Vec<_>>();
+        if matches!(
+            components.as_slice(),
+            [
+                Component::Normal(tmp),
+                Component::Normal(_project),
+                Component::Normal(chats),
+                ..
+            ] if *tmp == "tmp" && *chats == "chats"
+        ) {
+            return candidate.to_path_buf();
+        }
+    }
+    if metadata.file_type().is_file() {
+        root.parent().unwrap_or(root).to_path_buf()
+    } else {
+        root.to_path_buf()
+    }
 }
 
 fn gemini_transcript_layout(
     layout_root: &Path,
     path: &Path,
+    direct_file: bool,
 ) -> Result<Option<GeminiTranscriptLayout>> {
     if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
         return Ok(None);
     }
-    let Ok(relative_path) = path.strip_prefix(layout_root) else {
-        return Ok(None);
-    };
+    if let Ok(relative_path) = path.strip_prefix(layout_root) {
+        if let Some(layout) = gemini_relative_transcript_layout(path, relative_path)? {
+            return Ok(Some(layout));
+        }
+    }
+    if direct_file {
+        for ancestor in path.ancestors().skip(1) {
+            let Ok(relative_path) = path.strip_prefix(ancestor) else {
+                continue;
+            };
+            if let Some(layout) = gemini_relative_transcript_layout(path, relative_path)? {
+                return Ok(Some(layout));
+            }
+        }
+        return Ok(Some(GeminiTranscriptLayout::Primary));
+    }
+    Ok(None)
+}
+
+fn gemini_relative_transcript_layout(
+    path: &Path,
+    relative_path: &Path,
+) -> Result<Option<GeminiTranscriptLayout>> {
     let components: Vec<_> = relative_path.components().collect();
     match components.as_slice() {
-        [
-            Component::Normal(tmp),
-            Component::Normal(_project),
-            Component::Normal(chats),
-            Component::Normal(_file),
-        ] if *tmp == "tmp" && *chats == "chats" => {
+        [Component::Normal(tmp), Component::Normal(_project), Component::Normal(chats), Component::Normal(_file)]
+            if *tmp == "tmp" && *chats == "chats" =>
+        {
             Ok(Some(GeminiTranscriptLayout::Primary))
         }
-        [
-            Component::Normal(tmp),
-            Component::Normal(_project),
-            Component::Normal(chats),
-            Component::Normal(parent),
-            Component::Normal(_file),
-        ] if *tmp == "tmp" && *chats == "chats" => parent
-            .to_str()
-            .filter(|value| !value.trim().is_empty())
-            .map(|value| GeminiTranscriptLayout::Subagent {
-                parent_native_session_id_hint: value.to_owned(),
-            })
-            .map(Some)
-            .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
-                path: path.to_path_buf(),
-                reason: "Gemini subagent transcript parent identity must be nonempty UTF-8",
-            }),
-        _ => Err(CaptureError::InvalidProviderTranscriptPath {
-            path: path.to_path_buf(),
-            reason:
-                "Gemini JSONL transcripts must use .gemini/tmp/<project>/chats/<session>.jsonl or one subagent directory",
-        }),
+        [Component::Normal(tmp), Component::Normal(_project), Component::Normal(chats), Component::Normal(parent), Component::Normal(_file)]
+            if *tmp == "tmp" && *chats == "chats" =>
+        {
+            parent
+                .to_str()
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| GeminiTranscriptLayout::Subagent {
+                    parent_native_session_id_hint: value.to_owned(),
+                })
+                .map(Some)
+                .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
+                    path: path.to_path_buf(),
+                    reason: "Gemini subagent transcript parent identity must be nonempty UTF-8",
+                })
+        }
+        _ => Ok(None),
     }
 }
 

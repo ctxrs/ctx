@@ -135,22 +135,6 @@ pub(crate) fn junie_buffer_result_text(buffer: &JunieAssistantBuffer) -> String 
     final_text
 }
 
-pub(crate) fn junie_buffer_step_output(
-    buffer: &JunieAssistantBuffer,
-    step_order: u32,
-) -> Option<&str> {
-    let step_id = buffer
-        .step_ids_in_order
-        .get(usize::try_from(step_order).ok()?)?;
-    let step = buffer.steps.get(step_id)?;
-    if !step.changes.is_empty() {
-        return None;
-    }
-    step.details
-        .as_deref()
-        .filter(|details| !details.trim().is_empty())
-}
-
 pub(super) fn junie_step_output_projection(
     step: &JunieStepAgg,
 ) -> Option<JunieStepOutputProjection<'_>> {

@@ -435,7 +435,12 @@ fn native_junie_index_rejects_traversal_session_ids() {
     )
     .unwrap();
 
-    assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+    assert_eq!(summary.failed, 1, "{:?}", summary.failures);
+    assert_eq!(summary.failures.len(), 1);
+    assert_eq!(summary.failures[0].line, 1);
+    assert!(summary.failures[0]
+        .error
+        .contains("missing or unsafe sessionId"));
     assert_eq!(summary.imported_sessions, 1);
     assert!(store
         .capture_source_by_external_session(CaptureProvider::Junie, "../escape")
@@ -507,7 +512,7 @@ fn native_zed_fixture_imports_searches_and_reimports() {
     assert_eq!(tool_call.payload["provider_event_index"].as_u64(), Some(2));
     assert_eq!(
         tool_call.sync.metadata["nativepath_publication"].as_u64(),
-        Some(1)
+        Some(2)
     );
     assert!(tool_call.payload["cursor"].as_str().is_some());
     let rendered = serde_json::to_string(&parent_events).unwrap();
@@ -537,7 +542,7 @@ fn native_zed_fixture_imports_searches_and_reimports() {
     assert!(source.descriptor.source_identity.is_some());
     assert_eq!(
         source.sync.metadata["nativepath_publication"].as_u64(),
-        Some(1)
+        Some(2)
     );
 
     let second = import_zed_threads_sqlite(

@@ -7,16 +7,28 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use rusqlite::{functions::FunctionFlags, Connection, OpenFlags};
+use rusqlite::{
+    functions::FunctionFlags,
+    hooks::{AuthContext, Authorization},
+    Connection, OpenFlags,
+};
 use uuid::Uuid;
 
 use crate::object_store::{
     migrate_legacy_history_layout, restrict_private_dir, restrict_private_file, OBJECTS_DIR,
-    SPOOL_DIR,
 };
 use crate::{Result, Store, StoreError, SCHEMA_VERSION};
 
 pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_millis(30_000);
+
+fn deny_quarantined_connection(_: AuthContext<'_>) -> Authorization {
+    Authorization::Deny
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static TEST_FAIL_NEXT_ROLLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -40,24 +52,7 @@ impl Store {
             return Err(StoreError::UnsupportedSchemaVersion(user_version));
         }
         crate::schema::verify_final_schema_identity(&conn)?;
-        let store = Self {
-            path,
-            object_dir,
-            conn,
-            busy_timeout: BUSY_TIMEOUT,
-            event_search_bulk_depth: Default::default(),
-            event_search_bulk_epoch: Default::default(),
-            batch_depth: Default::default(),
-            import_batch_depth: Default::default(),
-            event_search_projection_capabilities: Default::default(),
-            projection_journal_active_in_batch: Default::default(),
-            projection_journal_group_collector: Default::default(),
-            native_path_group_token: Default::default(),
-            native_path_mutation_scope: Default::default(),
-            native_path_group_poisoned: Default::default(),
-            native_path_transaction_control_scope: Default::default(),
-            event_search_bulk_group_admission_outstanding: Default::default(),
-        };
+        let store = Self::from_connection(path, object_dir, conn, BUSY_TIMEOUT);
         store.initialize_event_search_projection_capabilities()?;
         Ok(store)
     }
@@ -77,30 +72,9 @@ impl Store {
             .unwrap_or_else(|| PathBuf::from(OBJECTS_DIR));
         fs::create_dir_all(&object_dir)?;
         restrict_private_dir(&object_dir)?;
-        if let Some(spool_dir) = path.parent().map(|parent| parent.join(SPOOL_DIR)) {
-            fs::create_dir_all(&spool_dir)?;
-            restrict_private_dir(&spool_dir)?;
-        }
         let conn = Connection::open(&path)?;
         restrict_private_file(&path)?;
-        let store = Self {
-            path,
-            object_dir,
-            conn,
-            busy_timeout,
-            event_search_bulk_depth: Default::default(),
-            event_search_bulk_epoch: Default::default(),
-            batch_depth: Default::default(),
-            import_batch_depth: Default::default(),
-            event_search_projection_capabilities: Default::default(),
-            projection_journal_active_in_batch: Default::default(),
-            projection_journal_group_collector: Default::default(),
-            native_path_group_token: Default::default(),
-            native_path_mutation_scope: Default::default(),
-            native_path_group_poisoned: Default::default(),
-            native_path_transaction_control_scope: Default::default(),
-            event_search_bulk_group_admission_outstanding: Default::default(),
-        };
+        let store = Self::from_connection(path, object_dir, conn, busy_timeout);
         store.migrate()?;
         restrict_existing_sqlite_auxiliary_files(&store.path)?;
         store.recover_event_search_bulk_mode()?;
@@ -110,6 +84,59 @@ impl Store {
         store.ensure_search_projection_initialized()?;
         store.initialize_event_search_projection_capabilities()?;
         Ok(store)
+    }
+
+    pub(crate) fn open_new_cold_stage(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        if fs::metadata(&path)?.len() != 0 {
+            return Err(StoreError::ColdStoreInvalidState);
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+            restrict_private_dir(parent)?;
+        }
+        let object_dir = path
+            .parent()
+            .map(|parent| parent.join(OBJECTS_DIR))
+            .unwrap_or_else(|| PathBuf::from(OBJECTS_DIR));
+        fs::create_dir_all(&object_dir)?;
+        restrict_private_dir(&object_dir)?;
+        let conn = Connection::open(&path)?;
+        restrict_private_file(&path)?;
+        let store = Self::from_connection(path, object_dir, conn, BUSY_TIMEOUT);
+        store.migrate()?;
+        restrict_existing_sqlite_auxiliary_files(&store.path)?;
+        store.recover_event_search_bulk_mode()?;
+        store.ensure_search_projection_initialized()?;
+        store.initialize_event_search_projection_capabilities()?;
+        Ok(store)
+    }
+
+    fn from_connection(
+        path: PathBuf,
+        object_dir: PathBuf,
+        conn: Connection,
+        busy_timeout: Duration,
+    ) -> Self {
+        Self {
+            path,
+            object_dir,
+            conn,
+            busy_timeout,
+            event_search_bulk_depth: Default::default(),
+            event_search_bulk_epoch: Default::default(),
+            batch_depth: Default::default(),
+            connection_quarantined: Default::default(),
+            event_search_projection_capabilities: Default::default(),
+            projection_journal_active_in_batch: Default::default(),
+            projection_journal_group_collector: Default::default(),
+            native_path_group_token: Default::default(),
+            native_cold_load_active: Default::default(),
+            native_path_mutation_scope: Default::default(),
+            native_path_group_poisoned: Default::default(),
+            native_path_transaction_control_scope: Default::default(),
+            event_search_bulk_group_admission_outstanding: Default::default(),
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -147,6 +174,7 @@ impl Store {
     }
 
     pub fn begin_immediate_batch(&self) -> Result<()> {
+        self.ensure_connection_usable()?;
         self.reject_unowned_native_path_transaction_control()?;
         let depth = self.batch_depth.get();
         if depth == 0 {
@@ -161,6 +189,7 @@ impl Store {
     }
 
     pub fn commit_batch(&self) -> Result<()> {
+        self.ensure_connection_usable()?;
         self.reject_unowned_native_path_transaction_control()?;
         let depth = self.batch_depth.get();
         if depth == 0 {
@@ -180,18 +209,28 @@ impl Store {
     }
 
     pub fn rollback_batch(&self) -> Result<()> {
+        self.ensure_connection_usable()?;
         self.reject_unowned_native_path_transaction_control()?;
         let depth = self.batch_depth.get();
         if depth == 0 {
             return Err(StoreError::Sql(rusqlite::Error::InvalidQuery));
         }
-        if depth == 1 {
-            self.conn.execute_batch("ROLLBACK")?;
+        #[cfg(test)]
+        if TEST_FAIL_NEXT_ROLLBACK.with(|fail| fail.replace(false)) {
+            self.quarantine_connection();
+            return Err(StoreError::StoreConnectionQuarantined);
+        }
+        let rollback = if depth == 1 {
+            self.conn.execute_batch("ROLLBACK")
         } else {
             self.conn.execute_batch(&format!(
                 "ROLLBACK TO SAVEPOINT ctx_store_batch_{depth};\n\
                  RELEASE SAVEPOINT ctx_store_batch_{depth};"
-            ))?;
+            ))
+        };
+        if rollback.is_err() {
+            self.quarantine_connection();
+            return Err(StoreError::StoreConnectionQuarantined);
         }
         self.batch_depth.set(depth - 1);
         // A savepoint may have activated or disabled the journal. Its cached
@@ -210,51 +249,17 @@ impl Store {
         Ok(())
     }
 
-    /// Begins an importer-owned atomic batch. Event and run mutations can rely on this owner to
-    /// roll back the complete batch instead of adding a savepoint around every row.
-    #[doc(hidden)]
-    pub fn begin_import_batch(&self) -> Result<()> {
-        self.begin_immediate_batch()?;
-        self.import_batch_depth
-            .set(self.import_batch_depth.get().saturating_add(1));
-        Ok(())
-    }
-
-    #[doc(hidden)]
-    pub fn commit_import_batch(&self) -> Result<()> {
-        let depth = self.import_batch_depth.get();
-        if depth == 0 {
-            return Err(StoreError::Sql(rusqlite::Error::InvalidQuery));
-        }
-        self.commit_batch()?;
-        self.import_batch_depth.set(depth - 1);
-        Ok(())
-    }
-
-    #[doc(hidden)]
-    pub fn rollback_import_batch(&self) -> Result<()> {
-        let depth = self.import_batch_depth.get();
-        if depth == 0 {
-            return Err(StoreError::Sql(rusqlite::Error::InvalidQuery));
-        }
-        self.rollback_batch()?;
-        self.import_batch_depth.set(depth - 1);
-        Ok(())
-    }
-
-    pub(crate) fn with_import_batch_write<T>(
-        &self,
-        operation: impl FnOnce() -> Result<T>,
-    ) -> Result<T> {
-        if self.import_batch_depth.get() > 0 {
-            debug_assert!(self.batch_depth.get() > 0);
-            operation()
-        } else {
-            self.with_atomic_write(operation)
-        }
-    }
-
     pub(crate) fn with_atomic_write<T>(&self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.ensure_connection_usable()?;
+        if self.native_cold_write_scope_active() {
+            return operation();
+        }
+        // Cold NativePath groups retain only statements prepared while their
+        // typed write scope is active. An out-of-route Store mutation must
+        // discard those statements before SQLite re-runs the authorizer.
+        if self.native_cold_load_active.get() && self.native_path_group_token.get().is_some() {
+            self.conn.flush_prepared_statement_cache();
+        }
         let owns_transaction = self.conn.is_autocommit();
         if owns_transaction {
             self.conn.execute_batch("BEGIN IMMEDIATE")?;
@@ -271,10 +276,17 @@ impl Store {
                     Ok(value)
                 }
                 Err(error) => {
-                    self.conn.execute_batch(
-                        "ROLLBACK TO SAVEPOINT ctx_atomic_canonical_mutation;
+                    if self
+                        .conn
+                        .execute_batch(
+                            "ROLLBACK TO SAVEPOINT ctx_atomic_canonical_mutation;
                          RELEASE SAVEPOINT ctx_atomic_canonical_mutation;",
-                    )?;
+                        )
+                        .is_err()
+                    {
+                        self.quarantine_connection();
+                        return Err(StoreError::StoreConnectionQuarantined);
+                    }
                     Err(error)
                 }
             };
@@ -282,18 +294,44 @@ impl Store {
         match result {
             Ok(value) => {
                 if let Err(error) = self.conn.execute_batch("COMMIT") {
-                    let _ = self.conn.execute_batch("ROLLBACK");
+                    if self.conn.execute_batch("ROLLBACK").is_err() {
+                        self.quarantine_connection();
+                        return Err(StoreError::StoreConnectionQuarantined);
+                    }
                     return Err(StoreError::Sql(error));
                 }
                 Ok(value)
             }
             Err(error) => {
-                if let Err(rollback_error) = self.conn.execute_batch("ROLLBACK") {
-                    return Err(StoreError::Sql(rollback_error));
+                if self.conn.execute_batch("ROLLBACK").is_err() {
+                    self.quarantine_connection();
+                    return Err(StoreError::StoreConnectionQuarantined);
                 }
                 Err(error)
             }
         }
+    }
+
+    pub(crate) fn ensure_connection_usable(&self) -> Result<()> {
+        if self.connection_quarantined.get() {
+            return Err(StoreError::StoreConnectionQuarantined);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn quarantine_connection(&self) {
+        self.connection_quarantined.set(true);
+        self.native_path_group_poisoned
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.native_path_mutation_scope
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.conn.flush_prepared_statement_cache();
+        self.conn.authorizer(Some(deny_quarantined_connection));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_rollback_for_test() {
+        TEST_FAIL_NEXT_ROLLBACK.with(|fail| fail.set(true));
     }
 
     pub fn checkpoint_wal_passive(&self) -> Result<()> {

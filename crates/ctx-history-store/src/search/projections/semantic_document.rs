@@ -191,7 +191,22 @@ fn semantic_lite_turn_cte_sql(anchor_tail: &str) -> String {
                    COALESCE(s.is_primary, rs.is_primary) AS session_is_primary,
                    COALESCE(event_source.cwd, session_source.cwd, run_source.cwd) AS cwd,
                    COALESCE(event_source.raw_source_path, session_source.raw_source_path, run_source.raw_source_path) AS raw_source_path,
-                   COALESCE(event_source.metadata_json, session_source.metadata_json, run_source.metadata_json) AS source_metadata_json,
+                   json_patch(
+                       COALESCE(event_source.metadata_json, session_source.metadata_json, run_source.metadata_json, '{{}}'),
+                       CASE
+                           WHEN COALESCE(
+                               json_extract(s.metadata_json, '$.source_metadata'),
+                               json_extract(rs.metadata_json, '$.source_metadata')
+                           ) IS NULL THEN '{{}}'
+                           ELSE json_object(
+                               'source_metadata',
+                               COALESCE(
+                                   json_extract(s.metadata_json, '$.source_metadata'),
+                                   json_extract(rs.metadata_json, '$.source_metadata')
+                               )
+                           )
+                       END
+                   ) AS source_metadata_json,
                    wr.title AS record_title,
                    wr.kind AS record_kind,
                    wr.workspace AS record_workspace,

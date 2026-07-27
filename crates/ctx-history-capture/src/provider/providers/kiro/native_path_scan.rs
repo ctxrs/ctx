@@ -154,9 +154,11 @@ impl<'source> KiroScanner<'source> {
         let locator = kiro_locator(candidate.phase, row.rowid)?;
         let mut events = Vec::new();
         let mut rejections = Vec::new();
-        let mut retained_bytes = KIRO_PAGE_BASE_BYTES
+        let initial_retained_bytes = KIRO_PAGE_BASE_BYTES
             .saturating_add(provider_session_id.len())
             .saturating_add(row.key.len());
+        let mut retained_bytes = initial_retained_bytes;
+        let mut logical_units = KIRO_PAGE_OVERHEAD_UNITS;
         let mut consumed = 0_usize;
         let mut next_event_ordinal = self.frontier.next_event_ordinal;
         for (history_index, entry) in history
@@ -166,8 +168,10 @@ impl<'source> KiroScanner<'source> {
             .skip(start)
             .take(KIRO_PAGE_HISTORY_ITEMS)
         {
-            self.hash_history_entry(history_index, entry);
             let mut prepared_entry_events = Vec::new();
+            let mut entry_rejection = None;
+            let mut entry_retained_bytes = 0_usize;
+            let mut entry_next_event_ordinal = next_event_ordinal;
             for mut native in kiro_history_entry_events(
                 &row,
                 &provider_session_id,
@@ -183,7 +187,7 @@ impl<'source> KiroScanner<'source> {
                     );
                     metadata.insert(
                         "source_record_subrecord_index".to_owned(),
-                        Value::from(next_event_ordinal),
+                        Value::from(entry_next_event_ordinal),
                     );
                 }
                 attach_kiro_complete_content(event, &locator, &values, &native.complete_text)?;
@@ -231,47 +235,70 @@ impl<'source> KiroScanner<'source> {
                 } else {
                     false
                 };
-                if touch_limit_exceeded
-                    || touches.len() > KIRO_PAGE_FILE_TOUCHES
-                    || events
-                        .iter()
-                        .map(|prepared: &KiroPreparedEvent| prepared.touches.len())
-                        .sum::<usize>()
-                        .saturating_add(touches.len())
-                        > KIRO_PAGE_FILE_TOUCHES
-                {
-                    rejections.push(KiroRejection {
-                        line: candidate.row_ordinal,
-                        reason: format!(
+                if touch_limit_exceeded {
+                    entry_rejection.get_or_insert_with(|| {
+                        format!(
                             "Kiro history entry {history_index} exceeds the NativePath file-touch bound"
-                        ),
+                        )
                     });
-                    touches.clear();
                 }
                 let event_bytes = estimated_event_bytes(event, &touches);
-                if retained_bytes.saturating_add(event_bytes) > KIRO_PAGE_MAX_BYTES {
-                    rejections.push(KiroRejection {
-                        line: candidate.row_ordinal,
-                        reason: format!(
-                            "Kiro history entry {history_index} event exceeds the NativePath page byte bound"
-                        ),
-                    });
-                } else {
-                    retained_bytes = retained_bytes.saturating_add(event_bytes);
-                    prepared_entry_events.push(KiroPreparedEvent {
-                        event: native.event,
-                        touches,
-                    });
-                }
-                next_event_ordinal =
-                    next_event_ordinal
-                        .checked_add(1)
-                        .ok_or(CaptureError::SystemInvariant(
-                            "Kiro event ordinal overflowed",
-                        ))?;
+                entry_retained_bytes = entry_retained_bytes.saturating_add(event_bytes);
+                prepared_entry_events.push(KiroPreparedEvent {
+                    event: native.event,
+                    touches,
+                });
+                entry_next_event_ordinal = entry_next_event_ordinal.checked_add(1).ok_or(
+                    CaptureError::SystemInvariant("Kiro event ordinal overflowed"),
+                )?;
             }
+
+            let mut entry_units = prepared_entry_events
+                .iter()
+                .fold(prepared_entry_events.len(), |units, prepared| {
+                    units.saturating_add(prepared.touches.len())
+                });
+            if entry_rejection.is_none()
+                && KIRO_PAGE_OVERHEAD_UNITS.saturating_add(entry_units) > KIRO_PAGE_MAX_UNITS
+            {
+                entry_rejection = Some(format!(
+                    "Kiro history entry {history_index} exceeds the NativePath 64-unit bound"
+                ));
+            }
+            if entry_rejection.is_none()
+                && initial_retained_bytes.saturating_add(entry_retained_bytes) > KIRO_PAGE_MAX_BYTES
+            {
+                entry_rejection = Some(format!(
+                    "Kiro history entry {history_index} exceeds the NativePath page byte bound"
+                ));
+            }
+            let mut entry_rejections = Vec::new();
+            if let Some(reason) = entry_rejection {
+                prepared_entry_events.clear();
+                entry_retained_bytes = 512_usize.saturating_add(reason.len());
+                entry_units = 1;
+                entry_rejections.push(KiroRejection {
+                    line: candidate.row_ordinal,
+                    reason,
+                });
+            }
+            if consumed != 0
+                && (logical_units.saturating_add(entry_units) > KIRO_PAGE_MAX_UNITS
+                    || retained_bytes.saturating_add(entry_retained_bytes) > KIRO_PAGE_MAX_BYTES)
+            {
+                break;
+            }
+
+            self.hash_history_entry(history_index, entry);
+            logical_units = logical_units.saturating_add(entry_units);
+            retained_bytes = retained_bytes.saturating_add(entry_retained_bytes);
             events.extend(prepared_entry_events);
+            rejections.extend(entry_rejections);
+            next_event_ordinal = entry_next_event_ordinal;
             consumed = consumed.saturating_add(1);
+            if logical_units == KIRO_PAGE_MAX_UNITS {
+                break;
+            }
         }
 
         let next_history_index = start.saturating_add(consumed);
@@ -295,12 +322,8 @@ impl<'source> KiroScanner<'source> {
             started_at,
             ended_at,
             history_len,
-            conversation_preview: provider_capped_json_value(
-                &kiro_core_value(&value),
-                PROVIDER_MAX_PREVIEW_CHARS,
-            ),
         };
-        Ok(Some(KiroCorePage {
+        let page = KiroCorePage {
             expected_frontier: expected,
             next_frontier: self.frontier.clone(),
             terminal,
@@ -308,7 +331,13 @@ impl<'source> KiroScanner<'source> {
             fact: Some(fact),
             events,
             rejections,
-        }))
+        };
+        if page.logical_units() > KIRO_PAGE_MAX_UNITS {
+            return Err(CaptureError::SystemInvariant(
+                "Kiro page exceeded the NativePath logical-unit bound",
+            ));
+        }
+        Ok(Some(page))
     }
 
     fn source_imported_at(&self) -> DateTime<Utc> {
@@ -684,6 +713,20 @@ pub(super) struct KiroCorePage {
 }
 
 impl KiroCorePage {
+    pub(super) fn accepted_content_records(&self) -> usize {
+        self.events
+            .iter()
+            .fold(self.events.len(), |records, event| {
+                records.saturating_add(event.touches.len())
+            })
+    }
+
+    pub(super) fn logical_units(&self) -> usize {
+        KIRO_PAGE_OVERHEAD_UNITS
+            .saturating_add(self.accepted_content_records())
+            .saturating_add(self.rejections.len())
+    }
+
     fn terminal_empty(expected_frontier: KiroFrontier, next_frontier: KiroFrontier) -> Self {
         Self {
             expected_frontier,
@@ -723,15 +766,9 @@ pub(super) struct KiroSessionFact {
     pub(super) started_at: DateTime<Utc>,
     pub(super) ended_at: DateTime<Utc>,
     pub(super) history_len: usize,
-    pub(super) conversation_preview: Value,
 }
 
 pub(super) struct KiroPreparedEvent {
     pub(super) event: KiroNativeEvent,
     pub(super) touches: Vec<KiroFileTouch>,
-}
-
-pub(super) struct KiroRejection {
-    pub(super) line: u64,
-    pub(super) reason: String,
 }

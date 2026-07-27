@@ -8,8 +8,8 @@ use thiserror::Error;
 
 use crate::CaptureError;
 
-pub(crate) const GEMINI_NATIVEPATH_PARSER_REVISION: u32 = 5;
-pub(crate) const GEMINI_NATIVEPATH_POLICY_REVISION: u32 = 3;
+pub(crate) const GEMINI_NATIVEPATH_PARSER_REVISION: u32 = 6;
+pub(crate) const GEMINI_NATIVEPATH_POLICY_REVISION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct GeminiFileObservation {
@@ -81,7 +81,6 @@ pub(crate) enum GeminiEventBody {
         outcome: String,
         exit_code: Option<i32>,
         duration_ms: Option<u64>,
-        output_preview: Option<String>,
     },
     StateNotice {
         summary: Option<String>,
@@ -101,12 +100,19 @@ pub(crate) struct GeminiToolCall {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct GeminiRetainedEvent {
     pub(crate) identity: GeminiEventIdentity,
+    /// Exact identity string emitted by the released positional v5/p3
+    /// publisher. Kept transiently so upgrades can recognize only that shape.
+    pub(crate) released_identity: String,
     pub(crate) native_order: GeminiNativeOrder,
     pub(crate) event_type: EventType,
     pub(crate) role: EventRole,
     pub(crate) occurred_at: Option<DateTime<Utc>>,
     pub(crate) body: GeminiEventBody,
     pub(crate) body_sha256: [u8; 32],
+    /// Exact hash emitted by the released positional publisher. It is used
+    /// only to migrate an already-committed v5/p3 event to the current
+    /// normalized-payload hash authority and is never published as content.
+    pub(crate) released_body_sha256: [u8; 32],
     pub(crate) preview: String,
     pub(crate) searchable_text: String,
     pub(crate) safe_file_touches: Vec<String>,

@@ -4,10 +4,9 @@ use ctx_history_core::ContentRef;
 use serde_json::{json, Value};
 
 use super::*;
-use crate::complete_content::jsonl::JsonlCompleteContentResolver;
 use crate::complete_content::{
     verified_content_profile_for_locator, AuthorizedSourceRoute, CompleteContentSourceLocator,
-    ResultContentResolverRegistry, SourceAccessBroker, SourceSnapshot,
+    SourceAccessBroker, SourceSnapshot,
 };
 use crate::test_support_paths::tempdir;
 
@@ -185,88 +184,4 @@ fn partial_message_fails_closed_after_snapshot_rewrite() {
         resolve_messages(&[request]).unwrap_err().kind,
         CompleteContentErrorKind::SourceChanged
     );
-}
-
-#[test]
-fn result_resolution_preserves_exact_boundaries_and_rejects_redaction() {
-    let temp = tempdir().unwrap();
-    let path = temp.path().join("chat.jsonl");
-    let value = json!({
-        "id": "tool-result",
-        "role": "assistant",
-        "parts": [
-            {"type": "dynamic-tool", "state": "output-available", "output": "first"},
-            {"type": "dynamic-tool", "state": "output-available", "output": {"second": 2}}
-        ],
-        "workspaceId": "mux-locator-test"
-    });
-    let content = mux_result_content(&value).unwrap();
-    assert_eq!(content, r#"["first",{"second":2}]"#);
-    let record = serde_json::to_vec(&value).unwrap();
-    let mut source = record.clone();
-    source.push(b'\n');
-    fs::write(&path, &source).unwrap();
-    let locator = CompleteContentSourceLocator::new(
-        MUX_LOCATOR_KIND,
-        MuxAddress::Chat(JsonlRange {
-            byte_start: 0,
-            byte_end_exclusive: source.len() as u64,
-        })
-        .encode()
-        .to_vec(),
-    )
-    .unwrap();
-    let event_id = uuid::Uuid::new_v4();
-    let source_access = SourceAccessBroker::new()
-        .admit(
-            AuthorizedSourceRoute {
-                source_id: uuid::Uuid::new_v4(),
-                provider: CaptureProvider::Mux,
-                source_format: MUX_SOURCE_FORMAT.to_owned(),
-                family: CompleteContentSourceFamily::Jsonl,
-                raw_source_path: path.clone(),
-                source_root: path.parent().map(std::path::Path::to_path_buf),
-                source_identity: Some("mux-test-source".to_owned()),
-                source_snapshot: SourceSnapshot::default(),
-            },
-            event_id,
-        )
-        .unwrap();
-    let request = ResultContentRequest {
-        event_id,
-        provider: CaptureProvider::Mux,
-        source_format: MUX_SOURCE_FORMAT.to_owned(),
-        source_access,
-        source_family: CompleteContentSourceFamily::Jsonl,
-        content_profile: verified_content_profile_for_locator(
-            CaptureProvider::Mux,
-            MUX_SOURCE_FORMAT,
-            CompleteContentSourceFamily::Jsonl,
-            VerifiedContentRole::ResultBody,
-            MUX_LOCATOR_KIND,
-        )
-        .unwrap()
-        .to_owned(),
-        source_locator: locator,
-        source_record_ordinal: 0,
-        source_record_subrecord_index: 0,
-        expected_native_record_id: "tool-result".to_owned(),
-        expected_record_digest: digest_bytes(&record),
-        expected_content_ref: ContentRef::from_bytes(content.as_bytes()).unwrap(),
-    };
-    let mut registry = ResultContentResolverRegistry::new();
-    registry.register(JsonlCompleteContentResolver::new());
-    assert_eq!(
-        registry.resolve(&[request])[0].as_ref().unwrap().content,
-        content
-    );
-
-    let redacted = json!({
-        "parts": [{
-            "type": "dynamic-tool",
-            "state": "output-redacted",
-            "output": "must-never-be-addressed"
-        }]
-    });
-    assert!(mux_result_content(&redacted).is_none());
 }

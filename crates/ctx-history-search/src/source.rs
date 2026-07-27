@@ -121,6 +121,7 @@ pub(crate) fn empty_hit(time: chrono::DateTime<Utc>) -> HitMetadata {
 
 pub(crate) fn session_hit(session: &Session, context: &RecordContext) -> HitMetadata {
     let mut hit = source_hit(session.capture_source_id, session.started_at, context);
+    apply_source_history_identity(&mut hit, session_history_identity(session));
     hit.provider = Some(session.provider);
     hit.provider_session_id = session.external_session_id.clone();
     hit.session_id = Some(session.id);
@@ -140,6 +141,7 @@ pub(crate) fn run_hit(run: &Run, context: &RecordContext) -> HitMetadata {
         .session_id
         .and_then(|id| context.sessions.iter().find(|session| session.id == id))
     {
+        apply_source_history_identity(&mut hit, session_history_identity(session));
         if hit.provider.is_none() {
             hit.provider = Some(session.provider);
         }
@@ -161,18 +163,19 @@ pub(crate) fn event_hit(event: &Event, context: &RecordContext) -> HitMetadata {
     hit.event_id = Some(event.id);
     hit.event_seq = Some(event.seq);
     hit.cursor = event_cursor(event).or(hit.cursor);
-    if hit.provider.is_none() {
-        if let Some(session) = event
-            .session_id
-            .and_then(|id| context.sessions.iter().find(|session| session.id == id))
-        {
+    if let Some(session) = event
+        .session_id
+        .and_then(|id| context.sessions.iter().find(|session| session.id == id))
+    {
+        apply_source_history_identity(&mut hit, session_history_identity(session));
+        if hit.provider.is_none() {
             hit.provider = Some(session.provider);
-            if hit.provider_session_id.is_none() {
-                hit.provider_session_id = session.external_session_id.clone();
-            }
-            hit.parent_session_id = session.parent_session_id;
-            hit.root_session_id = session.root_session_id;
         }
+        if hit.provider_session_id.is_none() {
+            hit.provider_session_id = session.external_session_id.clone();
+        }
+        hit.parent_session_id = session.parent_session_id;
+        hit.root_session_id = session.root_session_id;
     }
     hit
 }
@@ -195,6 +198,7 @@ pub(crate) fn file_hit(file: &FileTouched, context: &RecordContext) -> HitMetada
         .session_id
         .and_then(|id| context.sessions.iter().find(|session| session.id == id))
     {
+        apply_source_history_identity(&mut hit, session_history_identity(session));
         hit.provider = Some(session.provider);
         hit.provider_session_id = session.external_session_id.clone();
         hit.parent_session_id = session.parent_session_id;
@@ -274,7 +278,14 @@ pub(crate) struct SourceHistoryIdentity {
 pub(crate) fn source_history_identity(
     source: &ctx_history_core::CaptureSource,
 ) -> SourceHistoryIdentity {
-    let metadata = &source.sync.metadata;
+    metadata_history_identity(&source.sync.metadata)
+}
+
+pub(crate) fn session_history_identity(session: &Session) -> SourceHistoryIdentity {
+    metadata_history_identity(&session.sync.metadata)
+}
+
+fn metadata_history_identity(metadata: &serde_json::Value) -> SourceHistoryIdentity {
     let source_metadata = metadata
         .get("source_metadata")
         .and_then(serde_json::Value::as_object);
@@ -333,6 +344,16 @@ pub(crate) fn source_history_identity(
         source_id,
         source_format,
     }
+}
+
+fn apply_source_history_identity(hit: &mut HitMetadata, identity: SourceHistoryIdentity) {
+    hit.history_source = identity.history_source.or(hit.history_source.take());
+    hit.history_source_plugin = identity
+        .history_source_plugin
+        .or(hit.history_source_plugin.take());
+    hit.provider_key = identity.provider_key.or(hit.provider_key.take());
+    hit.source_id = identity.source_id.or(hit.source_id.take());
+    hit.source_format = identity.source_format.or(hit.source_format.take());
 }
 
 pub(crate) fn event_cursor(event: &Event) -> Option<String> {

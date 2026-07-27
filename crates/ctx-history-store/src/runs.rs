@@ -22,7 +22,7 @@ pub(crate) fn provider_output_run_is_retained_failure(run: &Run) -> bool {
 
 impl Store {
     pub fn upsert_run(&self, run: &Run) -> Result<()> {
-        self.with_import_batch_write(|| {
+        self.with_atomic_write(|| {
             if !provider_output_run_is_retained_failure(run) {
                 return Ok(());
             }
@@ -82,7 +82,7 @@ impl Store {
     }
 
     pub fn insert_run_if_absent(&self, run: &Run) -> Result<bool> {
-        self.with_import_batch_write(|| {
+        self.with_atomic_write(|| {
             if !provider_output_run_is_retained_failure(run) {
                 return Ok(false);
             }

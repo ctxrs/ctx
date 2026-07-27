@@ -5,14 +5,22 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use ctx_history_core::{EventRole, EventType};
+use ctx_history_core::{ContentRef, EventRole, EventType};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tempfile::TempPath;
+
+use crate::{
+    complete_content::CompleteContentBodyDigest,
+    provider::native_ingestion::{
+        NATIVE_INGESTION_PAGE_MAX_BYTES, NATIVE_INGESTION_PAGE_MAX_UNITS,
+    },
+};
 
 use super::ZedNativeResult;
 
-pub(crate) const ZED_NATIVE_PAGE_MAX_ROWS: usize = 4_096;
-pub(crate) const ZED_NATIVE_PAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const ZED_NATIVE_PAGE_MAX_UNITS: usize = NATIVE_INGESTION_PAGE_MAX_UNITS;
+pub(crate) const ZED_NATIVE_PAGE_MAX_BYTES: usize = NATIVE_INGESTION_PAGE_MAX_BYTES;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ZedNativeSourceSelection {
@@ -101,8 +109,17 @@ pub(crate) struct ZedNativeEvent {
     pub(super) call_ids: Vec<String>,
     pub(super) body: String,
     pub(super) content_hash: String,
+    pub(super) legacy_content_hash: String,
+    pub(super) payload: Value,
     pub(super) preview: String,
     pub(super) safe_file_touches: Vec<String>,
+    pub(super) complete_message: Option<ZedNativeCompleteMessageEvidence>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ZedNativeCompleteMessageEvidence {
+    pub(super) record_digest: CompleteContentBodyDigest,
+    pub(super) content_ref: ContentRef,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +151,17 @@ pub(crate) struct ZedNativePage {
 }
 
 impl ZedNativePage {
+    pub(super) fn publication_units(&self) -> usize {
+        self.sessions
+            .len()
+            .saturating_add(self.rejections.len())
+            .saturating_add(self.events.iter().fold(0_usize, |units, event| {
+                units
+                    .saturating_add(1)
+                    .saturating_add(event.safe_file_touches.len())
+            }))
+    }
+
     pub(super) fn row_count(&self) -> usize {
         self.sessions
             .len()

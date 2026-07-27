@@ -269,7 +269,7 @@ ctx import --provider cursor
 ctx import --provider zed
 ctx import --provider kiro-cli
 ctx import --provider copilot-cli
-ctx import --provider factory-ai-droid
+ctx import --provider factory-ai-droid --path /path/to/factory/sessions
 ctx import --provider qwen-code
 ctx import --provider kimi-code-cli
 ctx import --provider windsurf
@@ -321,6 +321,7 @@ Local Pro is a separately installed native helper and encrypted derived graph:
 
 ```bash
 ctx pro [--json]
+ctx pro --referral <codename> [--json]
 ctx pro setup [--json]
 ctx pro manage [--no-open] [--json]
 ctx pro uninstall [--delete-data|--keep-data] [--json]
@@ -351,10 +352,19 @@ uses that helper to produce bounded challenge-bound device evidence, obtains an
 installation-bound signed entitlement, and installs the same verified helper.
 The service uses the evidence only to prevent repeated trials. Raw platform
 identifiers never leave the helper; the signal is not hardware attestation.
+The ordinary anonymous trial remains 14 days. A first setup using exactly
+`ctx pro --referral <codename>` receives a 30-day trial when the service
+accepts the bounded ASCII codename. This is the sole attribution input: the
+codename is sent only with the first trial challenge, the resulting attribution
+is immutable, and only the service-issued opaque referral claim may be stored
+in the native key store after activation. An existing nonreferred trial cannot
+attach a code later. `ctx pro setup`, `manage`, `uninstall`, Core commands,
+websites, and cookies do not accept or change referral attribution.
 
-Paid conversion uses browser-based WorkOS sign-in and Stripe Checkout. Day One
-billing is monthly; conversion does not add a second trial. `manage --no-open` prints the hosted
-billing-portal URL instead of opening it. With `--json`, `manage` also reports
+Paid conversion uses browser-based WorkOS sign-in and Stripe Checkout. Pro is
+$20 USD per month; conversion does not add a second trial.
+`manage --no-open` prints the hosted billing-portal URL instead of opening it.
+With `--json`, `manage` also reports
 `access_state` plus any applicable
 `refresh_after_unix`, `access_deadline_unix`, and `grace_deadline_unix` values.
 The access state is one of `trial`, `active`, `canceling_paid`, `offline_grace`,
@@ -363,7 +373,7 @@ A locked commercial state may retain an applicable deadline for recovery
 diagnostics, but that deadline never grants access.
 
 On explicit `ctx status`, MCP `pro_status`, and `ctx pro manage` surfaces, a
-trial state may include a `$15/month` continuation action and a locked state may
+trial state may include a `$20/month` continuation action and a locked state may
 include an unpriced `pro_restore_access` action using `ctx pro manage`, with the
 local graph explicitly reported as preserved. Paid
 `active`, `canceling_paid`, and `offline_grace` states do not show a purchase
@@ -493,6 +503,85 @@ safely continue. Rebuild uses a state-token-checked reset before replay. Legacy
 derived graphs that predate the required immutable digests and epochs are reset
 instead of being treated as a valid resume point. Canonical `ctx` history is
 never deleted by this process.
+
+## Referrals
+
+The shipped referral surface is default-disabled on both staging and stable
+until commercial credential and isolated-payout qualification is complete.
+While disabled, every explicit referral command and `ctx pro --referral`
+returns `referral_unavailable` before identity, authentication, or browser
+side effects, and the one-time `ctx blame` referral CTA is not written or
+marked as shown.
+
+The referrer management surface is entirely in the CLI:
+
+```bash
+ctx referral create <codename> [--json]
+ctx referral status [--json]
+ctx referral payout [--no-open] [--country <CC>] [--entity-type <individual|company>] [--json]
+```
+
+`create` lets any WorkOS-verified person claim one stable codename, or returns
+that same claim when the request is replayed. A Pro trial or subscription is
+not required. A codename is 3–32 bytes of lowercase ASCII letters, digits, or
+hyphens and must start and end with a letter or digit. The client checks that
+syntax before sending it, while the hosted service remains authoritative.
+Human referral-command output leads with
+`Refer a developer. Earn $10/month toward your agent bill.` and may follow with
+`Up to $120 per friend.` Create and status also print the exact share command
+`ctx pro --referral <codename>`.
+
+The commission is $10 cash for each distinct qualifying $20 monthly Pro
+invoice, covering subscription invoices 1 through 12 for each direct referral.
+The maximum is $120 per direct referral. Invoice 1 and invoice 2 commissions
+accrue as pending; neither can become payable until invoice 2 has settled, the
+required 14-day hold has elapsed, authoritative reconciliation has completed,
+and the earnings pass manual review. Each invoice 3 through 12 commission has
+its own 14-day hold and authoritative reconciliation before manual review and
+payability.
+
+A refund or dispute voids an unpaid commission. If the corresponding
+commission was already paid, its reversal becomes referral debt, a negative
+adjustment against future earnings, and enters manual review; ctx does not
+initiate an external clawback. Earnings are cash commissions, not Pro credits.
+There is no creator-affiliate program, website or cookie attribution, annual
+plan qualification, or compatibility attribution path.
+
+`status` is the complete referrer summary. It reports the codename, exact share
+command, attributed and subscribed totals, earned, pending, manual-review,
+payable, processing, paid, and debt amounts, and payout state. `processing` is
+cash sent for payout but not yet settled. `paid` remains the historical cash
+actually settled and is never reduced by a later reversal; such a reversal
+increases debt instead. The aggregate accounting identity is
+`earned + debt = pending + manual review + payable + processing + paid`.
+Status is private to the authenticated referrer and aggregate only: it exposes
+no referred identity, invoice, or per-referral ledger. It does not add referral
+copy or status to ordinary `ctx status`, MCP, setup, search, or other Core
+flows.
+
+`payout` requests a one-use Stripe-hosted payout-onboarding URL when the account
+is eligible. Human mode opens that URL by default; `--no-open` prints it
+instead. If onboarding requests identity type, `--country <CC>` accepts a
+two-letter uppercase ISO country code and `--entity-type` accepts `individual`
+or `company`; ctx never collects bank or card data. These commands are explicit
+hosted-service operations. Human mode may start WorkOS AuthKit when no usable
+session is cached, and payout may open Stripe's hosted onboarding.
+
+Every referral command using `--json` is noninteractive and browser-free. It
+uses only a cached WorkOS session and returns the stable authentication-required
+failure when none is available; it never starts AuthKit or invokes a browser
+opener. JSON contains only the requested deterministic command data, with no
+unsolicited referral slogan or promotional message. `payout --json` returns
+the hosted URL without opening it.
+
+The sole automatic referral mention is human-only and shown once. After the
+first successful, nonempty, interactive `ctx blame` result, ctx may write
+`Refer a developer. Earn $10/month toward your agent bill.` followed by
+`Up to $120 per friend.` and `ctx referral create <codename>` to stderr, then
+record a nonsecret shown-once marker under the data root. It is suppressed for
+JSON and JSONL, MCP, noninteractive output, empty or failed results, install and
+setup, Core commands, and later blame results. Showing the copy makes no network
+request and is not reported remotely.
 
 ## Show And Locate
 
@@ -859,9 +948,13 @@ ctx show event <ctx-event-id> --format json
 ctx locate session <ctx-session-id> --format json
 ctx locate event <ctx-event-id> --format json
 ctx pro --json
+ctx pro --referral <codename> --json
 ctx pro setup --json
 ctx pro manage --no-open --json
 ctx pro uninstall (--delete-data|--keep-data) --json
+ctx referral create <codename> --json
+ctx referral status --json
+ctx referral payout [--no-open] [--country <CC>] [--entity-type <individual|company>] --json
 ctx blame file <path> --json
 ctx blame commit <sha> --json
 ctx blame pr <number-or-url> [--repository <logical-repository>] --json

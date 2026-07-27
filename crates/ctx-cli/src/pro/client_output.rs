@@ -175,6 +175,18 @@ impl ProOutputImport {
         &self.profile
     }
 
+    pub(crate) fn replay_only_profile(&self) -> ImportProfile {
+        let sink: Arc<dyn ProOutputSink> = self.sink.clone();
+        ImportProfile::ProReplayOnly(sink)
+    }
+
+    pub(crate) fn mark_output_replay_behind(&self, error: &anyhow::Error) {
+        self.sink.mark_behind(ProOutputSinkError::new(
+            "nativepath_output_replay",
+            error.to_string(),
+        ));
+    }
+
     /// Advances canonical Pro after one or more NativePath Core groups have
     /// committed. Failure marks only Pro behind; Core remains committed and a
     /// later import retries from the retained journal.

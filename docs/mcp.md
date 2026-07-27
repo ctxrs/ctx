@@ -74,11 +74,17 @@ Helper/graph readiness and subscription access are separate fields. Access is
 `trial`, `active`, `canceling_paid`, `offline_grace`, `locked`, or null when it
 cannot be determined.
 
-`pro_status` may include a `$15/month` continuation action during a trial and a
+`pro_status` may include a `$20/month` continuation action during a trial and a
 neutral, unpriced `pro_restore_access` action with `graph_preserved: true` when
 access is locked. It does not show a purchase action for paid active,
 `canceling_paid`, or `offline_grace` access and does not replace the existing
 `next_action`. Status never opens a browser.
+
+MCP has no referral tool, attribution input, commission status, or referral
+promotion. Referral attribution exists only through
+`ctx pro --referral <codename>`, and the private aggregate referrer status is
+available only through the explicit authenticated `ctx referral status`
+command.
 
 Local usage aggregation counts only recognized `tools/call` requests after the
 complete JSON-RPC response has serialized, written, and flushed. Initialize,

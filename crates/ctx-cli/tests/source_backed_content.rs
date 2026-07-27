@@ -8,6 +8,7 @@ use support::*;
 
 const BEGIN_SENTINEL: &str = "CTX_HYDRATION_BEGIN-";
 const END_SENTINEL: &str = "-CTX_HYDRATION_END";
+const PROVIDER_SESSION_ID: &str = "source-backed-regression-session";
 
 struct ImportedMessage {
     temp: TempDir,
@@ -28,7 +29,7 @@ fn import_truncated_codex_message() -> ImportedMessage {
             "timestamp": "2026-07-23T00:00:00Z",
             "type": "session_meta",
             "payload": {
-                "id": "source-backed-regression-session",
+                "id": PROVIDER_SESSION_ID,
                 "timestamp": "2026-07-23T00:00:00Z",
                 "cwd": "/workspace/project",
                 "originator": "codex-cli"
@@ -119,6 +120,22 @@ fn show_event(fixture: &ImportedMessage, content: &str) -> Value {
     ]))
 }
 
+fn show_session(fixture: &ImportedMessage, content: &str) -> Value {
+    json_output(ctx(&fixture.temp).args([
+        "show",
+        "session",
+        "--provider",
+        "codex",
+        "--provider-session",
+        PROVIDER_SESSION_ID,
+        "--mode",
+        "full",
+        "--content",
+        content,
+        "--json",
+    ]))
+}
+
 fn assert_complete_failure(fixture: &ImportedMessage, expected_error: &str) {
     let output = ctx(&fixture.temp)
         .args([
@@ -193,6 +210,28 @@ fn codex_message_locates_and_hydrates_verified_complete_content() {
 }
 
 #[test]
+fn codex_session_reopens_verified_complete_content() {
+    let fixture = import_truncated_codex_message();
+
+    let complete = show_session(&fixture, "complete");
+    assert_eq!(complete["content_policy"], "complete");
+    assert_eq!(complete["provider"], "codex");
+    assert_eq!(complete["provider_session_id"], PROVIDER_SESSION_ID);
+    let event = complete["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["ctx_event_id"] == fixture.event_id)
+        .unwrap();
+    assert_eq!(event["text"], fixture.complete_text);
+    assert_eq!(event["content"]["requested"], "complete");
+    assert_eq!(event["content"]["complete"], true);
+    assert_eq!(event["content"]["origin"], "provider_source");
+    assert_eq!(event["content"]["stored_truncated"], true);
+    assert_eq!(event["content"]["source_verified"], true);
+}
+
+#[test]
 fn modified_codex_source_fails_closed_without_partial_content() {
     let fixture = import_truncated_codex_message();
     let original = fs::read_to_string(&fixture.source).unwrap();
@@ -212,4 +251,158 @@ fn missing_codex_source_fails_closed_without_partial_content() {
     assert_eq!(location["source"]["exists"], false);
     assert_eq!(location["complete_content"]["available"], true);
     assert_complete_failure(&fixture, "source_missing");
+}
+
+fn proto_varint(mut value: u64) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        encoded.push(byte);
+        if value == 0 {
+            return encoded;
+        }
+    }
+}
+
+fn proto_field(number: u32, payload: &[u8]) -> Vec<u8> {
+    let mut encoded = proto_varint(u64::from(number) << 3 | 2);
+    encoded.extend(proto_varint(payload.len() as u64));
+    encoded.extend_from_slice(payload);
+    encoded
+}
+
+fn warp_message_task(body: &str) -> Vec<u8> {
+    let user = proto_field(1, body.as_bytes());
+    let mut message = proto_field(1, b"warp-source-backed-message");
+    message.extend(proto_field(2, &user));
+    message.extend(proto_field(11, b"warp-source-backed-task"));
+    let mut task = proto_field(1, b"warp-source-backed-task");
+    task.extend(proto_field(5, &message));
+    task
+}
+
+fn create_warp_source(path: &Path, body: &str) {
+    let connection = Connection::open(path).unwrap();
+    connection
+        .execute_batch(
+            "pragma user_version = 1;
+             create table agent_conversations (
+                 id integer primary key,
+                 conversation_id text not null unique,
+                 conversation_data text not null,
+                 last_modified_at text not null
+             );
+             create table agent_tasks (
+                 id integer primary key,
+                 conversation_id text not null,
+                 task_id text not null unique,
+                 task blob not null,
+                 last_modified_at text not null
+             );
+             create table ai_queries (
+                 id integer primary key,
+                 exchange_id text not null unique,
+                 conversation_id text not null,
+                 start_ts text not null,
+                 input text not null,
+                 working_directory text,
+                 output_status text not null,
+                 model_id text not null,
+                 planning_model_id text not null default '',
+                 coding_model_id text not null default ''
+             );",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "insert into agent_conversations
+             (conversation_id, conversation_data, last_modified_at)
+             values ('warp-source-backed-session',
+                     '{\"agent_name\":\"Warp\",\"run_id\":\"warp-source-backed-run\"}',
+                     '2026-07-26 12:00:00')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "insert into agent_tasks
+             (conversation_id, task_id, task, last_modified_at)
+             values ('warp-source-backed-session', 'warp-source-backed-task', ?1,
+                     '2026-07-26 12:00:01')",
+            params![warp_message_task(body)],
+        )
+        .unwrap();
+}
+
+fn import_truncated_warp_message() -> ImportedMessage {
+    let temp = tempdir();
+    let source = temp.path().join("warp-source-backed.sqlite");
+    let complete_text = format!("{BEGIN_SENTINEL}{}{END_SENTINEL}", "w".repeat(20_000));
+    create_warp_source(&source, &complete_text);
+    let report = json_output(
+        ctx(&temp)
+            .arg("import")
+            .args(["--provider", "warp", "--path"])
+            .arg(&source)
+            .args(["--no-daemon", "--json", "--progress", "none"]),
+    );
+    assert_eq!(report["totals"]["failed_sources"], 0, "{report:#}");
+    assert_eq!(report["totals"]["imported_events"], 1, "{report:#}");
+
+    let connection = Connection::open(temp.path().join("work.sqlite")).unwrap();
+    let (event_id, payload, metadata): (String, String, String) = connection
+        .query_row(
+            "select id, payload_json, metadata_json from events where event_type = 'message'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    let payload: Value = serde_json::from_str(&payload).unwrap();
+    let metadata: Value = serde_json::from_str(&metadata).unwrap();
+    assert_eq!(payload["provider"], "warp");
+    assert_eq!(payload["text_retention"]["mode"], "bounded");
+    assert_eq!(payload["text_retention"]["truncated"], true);
+    assert_eq!(
+        payload["text"].as_str().unwrap().chars().count(),
+        COMPLETE_CONTENT_INDEXED_MESSAGE_LIMIT_CHARS
+    );
+    let locators = VerifiedContentLocatorsV1::from_metadata_value(
+        &metadata[VERIFIED_CONTENT_LOCATORS_METADATA_KEY],
+    )
+    .unwrap();
+    assert_eq!(
+        locators
+            .locator(VerifiedContentRole::MessageBody)
+            .unwrap()
+            .kind(),
+        "warp-task-message-v1"
+    );
+    ImportedMessage {
+        temp,
+        source,
+        event_id,
+        complete_text,
+    }
+}
+
+#[test]
+fn warp_message_hydrates_complete_content_and_fails_closed_after_mutation() {
+    let fixture = import_truncated_warp_message();
+    let complete = show_event(&fixture, "complete");
+    assert_eq!(complete["event"]["text"], fixture.complete_text);
+    assert_eq!(complete["event"]["content"]["origin"], "provider_source");
+    assert_eq!(complete["event"]["content"]["source_verified"], true);
+
+    Connection::open(&fixture.source)
+        .unwrap()
+        .execute(
+            "update agent_tasks set task = ?1, last_modified_at = '2026-07-26 12:00:02'",
+            params![warp_message_task("mutated Warp body")],
+        )
+        .unwrap();
+    assert_complete_failure(&fixture, "content_verification_failed");
 }

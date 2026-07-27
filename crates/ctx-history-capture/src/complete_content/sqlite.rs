@@ -32,9 +32,8 @@ use super::{
     attach_verified_content_locator, verified_content_profile, verified_content_route_supported,
     CompleteContentBodyDigest, CompleteContentError, CompleteContentErrorKind,
     CompleteContentHashAuthority, CompleteContentResolver, CompleteContentSourceFamily,
-    CompleteMessage, CompleteMessageRequest, ResolvedResultContent, ResultContentRequest,
-    ResultContentResolver, SourceVerification, VerifiedContentLocatorV1, VerifiedContentRole,
-    COMPLETE_CONTENT_MAX_BODY_BYTES,
+    CompleteMessage, CompleteMessageRequest, SourceVerification, VerifiedContentLocatorV1,
+    VerifiedContentRole, COMPLETE_CONTENT_MAX_BODY_BYTES,
 };
 #[cfg(test)]
 use crate::{
@@ -62,27 +61,26 @@ mod no_tool_messages;
 #[cfg(test)]
 use no_tool_messages::LINGMA_LOCATOR_KIND;
 mod deepagents;
-mod warp_result;
 
 mod errors;
 mod locators;
 mod messages;
 mod query;
-mod results;
 
 use errors::*;
 use locators::*;
 use messages::*;
 use query::*;
-use results::*;
 
 pub(crate) use errors::map_bounded_sqlite_error_for_event;
-pub(crate) use locators::attach_sqlite_complete_content_locator;
+pub(crate) use locators::{
+    attach_sqlite_complete_content_locator, attach_sqlite_complete_content_locator_with_ref,
+    sqlite_logical_record_digest,
+};
 pub(crate) use query::{
     configure_complete_content_sqlite_connection, CompleteContentSqliteBoundError,
     CompleteContentSqliteQueryBudget,
 };
-pub(crate) use results::SqliteResultRecord;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SqliteCompleteContentResolver;
@@ -185,96 +183,6 @@ impl CompleteContentResolver for SqliteCompleteContentResolver {
             .collect::<Result<Vec<_>, _>>();
         conn.progress_handler(0, None::<fn() -> bool>);
         resolved
-    }
-}
-
-impl ResultContentResolver for SqliteCompleteContentResolver {
-    fn family(&self) -> CompleteContentSourceFamily {
-        CompleteContentSourceFamily::Sqlite
-    }
-
-    fn supports(&self, provider: CaptureProvider, source_format: &str) -> bool {
-        sqlite_result_profile(provider, source_format).is_some()
-    }
-
-    fn resolve_results(
-        &self,
-        requests: &[ResultContentRequest],
-    ) -> Vec<Result<ResolvedResultContent, CompleteContentError>> {
-        self.resolve_result_group(requests).unwrap_or_else(|error| {
-            requests
-                .iter()
-                .map(|request| Err(CompleteContentError::new(error.kind, request.event_id)))
-                .collect()
-        })
-    }
-}
-
-impl SqliteCompleteContentResolver {
-    fn resolve_result_group(
-        &self,
-        requests: &[ResultContentRequest],
-    ) -> Result<Vec<Result<ResolvedResultContent, CompleteContentError>>, CompleteContentError>
-    {
-        let Some(first) = requests.first() else {
-            return Ok(Vec::new());
-        };
-        if requests.len() > MAX_SQLITE_COMPLETE_REQUESTS {
-            return Err(result_error(
-                first,
-                CompleteContentErrorKind::ContentTooLarge,
-            ));
-        }
-        let mut previous = None;
-        for request in requests {
-            let coordinate = (
-                request.source_record_ordinal,
-                request.source_record_subrecord_index,
-            );
-            if request.provider != first.provider
-                || request.source_format != first.source_format
-                || request.source_access != first.source_access
-                || request.source_access.family() != CompleteContentSourceFamily::Sqlite
-                || request.source_family != CompleteContentSourceFamily::Sqlite
-                || !super::verified_content_route_matches(
-                    &request.content_profile,
-                    request.provider,
-                    &request.source_format,
-                    request.source_family,
-                    VerifiedContentRole::ResultBody,
-                    request.source_locator.kind(),
-                )
-                || previous.is_some_and(|previous| previous >= coordinate)
-                || decode_result_locator(request).is_err()
-            {
-                return Err(result_error(
-                    request,
-                    CompleteContentErrorKind::ContentVerificationFailed,
-                ));
-            }
-            previous = Some(coordinate);
-        }
-        if sqlite_result_profile(first.provider, &first.source_format).is_none() {
-            return Err(result_error(
-                first,
-                CompleteContentErrorKind::HydrationUnsupported,
-            ));
-        }
-
-        let shim = result_request_shim(first);
-        let conn = first.source_access.open_sqlite_snapshot(first.event_id)?;
-        configure_connection(&conn, &shim)?;
-        let deadline = Instant::now() + SQLITE_RESOLVE_TIMEOUT;
-        conn.progress_handler(
-            SQLITE_PROGRESS_INSTRUCTIONS,
-            Some(move || Instant::now() >= deadline),
-        );
-        let resolved = requests
-            .iter()
-            .map(|request| resolve_one_result(&conn, request))
-            .collect::<Vec<_>>();
-        conn.progress_handler(0, None::<fn() -> bool>);
-        Ok(resolved)
     }
 }
 

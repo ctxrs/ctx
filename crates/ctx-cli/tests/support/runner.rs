@@ -96,6 +96,10 @@ pub(crate) fn apply_hermetic_env(command: &mut Command, temp: &TempDir) {
 
 pub(crate) fn copied_ctx_binary(temp: &TempDir) -> PathBuf {
     let source = ctx_binary();
+    copied_binary(temp, &source)
+}
+
+pub(crate) fn copied_binary(temp: &TempDir, source: &Path) -> PathBuf {
     let target = temp.path().join(if cfg!(windows) {
         "ctx-test-copy.exe"
     } else {
@@ -103,7 +107,7 @@ pub(crate) fn copied_ctx_binary(temp: &TempDir) -> PathBuf {
     });
     // Close every write handle before the caller attempts to execute the copy.
     // Some Linux filesystems otherwise expose a brief ETXTBSY window here.
-    let mut source_file = fs::File::open(&source).unwrap();
+    let mut source_file = fs::File::open(source).unwrap();
     let mut target_file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)

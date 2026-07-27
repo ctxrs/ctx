@@ -4,7 +4,10 @@ use uuid::Uuid;
 
 use crate::model::{HitMetadata, RecordContext};
 use crate::query::{ProviderSessionFilter, Result, SearchFilters};
-use crate::source::{associated_session, source_history_identity, SourceHistoryIdentity};
+use crate::source::{
+    associated_session, associated_session_for_source, session_history_identity,
+    source_history_identity, SourceHistoryIdentity,
+};
 
 pub(crate) fn event_hit_matches_filters(
     hit: &EventSearchHit,
@@ -248,6 +251,24 @@ pub(crate) fn source_id_matches_history_source_filter(
     source_id
         .and_then(|id| context.sources.get(&id))
         .is_some_and(|source| source_matches_history_source_filter(source, filters))
+        || source_id.is_some_and(|id| {
+            context.sessions.iter().any(|session| {
+                session.capture_source_id == Some(id)
+                    && source_identity_matches_history_source_filter(
+                        &session_history_identity(session),
+                        filters,
+                    )
+            })
+        })
+        || source_id
+            .and_then(|id| associated_session_for_source(id, context))
+            .is_some_and(|session| {
+                session.capture_source_id.is_none()
+                    && source_identity_matches_history_source_filter(
+                        &session_history_identity(session),
+                        filters,
+                    )
+            })
 }
 
 pub(crate) fn has_history_source_filter(filters: &SearchFilters) -> bool {
@@ -428,6 +449,12 @@ pub(crate) fn record_matches_filters(
             .sources
             .values()
             .any(|source| source_matches_history_source_filter(source, filters))
+        && !context.sessions.iter().any(|session| {
+            source_identity_matches_history_source_filter(
+                &session_history_identity(session),
+                filters,
+            )
+        })
     {
         return false;
     }

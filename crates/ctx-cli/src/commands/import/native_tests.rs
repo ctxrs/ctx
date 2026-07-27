@@ -1,10 +1,18 @@
 use super::*;
+
+#[path = "native_tests/pro_activation.rs"]
+mod pro_activation;
+#[path = "native_tests/provider_roots.rs"]
+mod provider_roots;
 use crate::commands::import::inventory_import_sources;
+use crate::commands::import::report::{import_error_scope, ImportFailureScope};
 use crate::provider_sources::explicit_path_source;
 use ctx_history_capture::{
-    import_cline_task_json_history, ClineTaskJsonImportOptions, ImportProfile,
-    OutputSourceIdentity, ProOutputMaterializationPage, ProOutputPageResult, ProOutputProgress,
-    ProOutputSink, ProOutputSinkError,
+    build_codex_cold_store, import_cline_task_json_history, ClineTaskJsonImportOptions,
+    CodexColdStoreOptions, CodexColdStoreOutcome, ImportProfile, OutputSourceIdentity,
+    ProOutputMaterializationPage, ProOutputPageResult, ProOutputProgress, ProOutputSink,
+    ProOutputSinkError, ProviderAdapterContext, ProviderImportTerminalOutcome,
+    ProviderImportWorkResult,
 };
 use ctx_history_core::{
     new_id, CaptureProvider, Event, EventRole, EventType, Fidelity, SyncMetadata, SyncState,
@@ -12,9 +20,11 @@ use ctx_history_core::{
 };
 use ctx_history_store::{SourceImportFile, StoreError};
 use rusqlite::Connection;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::{
+    collections::HashMap,
     fs,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
@@ -31,23 +41,205 @@ fn tempdir() -> tempfile::TempDir {
         .unwrap()
 }
 
-fn assert_openhands_pinned_reader_allows_cli_cursor(manifested: bool) {
+#[test]
+fn import_record_is_a_noop_when_unchanged_but_refreshes_changed_metadata() {
     let temp = tempdir();
-    let source_root = temp.path().join("openhands-user");
-    let conversation = source_root.join("v1_conversations").join("cli-bulk-guard");
-    fs::create_dir_all(&conversation).unwrap();
-    fs::write(
-        conversation.join("0001-message.json"),
-        json!({
-            "id": "cli-bulk-guard-event",
-            "timestamp": "2026-07-18T12:00:00Z",
-            "source": "user",
-            "llm_message": {"role": "user", "content": "guard ownership"}
-        })
-        .to_string(),
-    )
+    let mut source =
+        explicit_path_source(CaptureProvider::OpenCode, temp.path().join("opencode.db"));
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    assert!(!ensure_import_record(&store, import_record_for_source(&source)).unwrap());
+    let original = store
+        .get_record(import_record_for_source(&source).id)
+        .unwrap();
+    assert!(ensure_import_record(&store, import_record_for_source(&source)).unwrap());
+    assert_eq!(
+        store.get_record(original.id).unwrap(),
+        original,
+        "an unchanged import record must preserve timestamps and searchable content"
+    );
+
+    source.source_format = "corrected-opencode-format";
+    let desired = import_record_for_source(&source);
+    assert!(ensure_import_record(&store, desired.clone()).unwrap());
+    let refreshed = store.get_record(original.id).unwrap();
+    assert_eq!(refreshed.body, desired.body);
+    assert_eq!(refreshed.created_at, original.created_at);
+}
+
+fn append_msgpack_string(bytes: &mut Vec<u8>, value: &str) {
+    let length = u8::try_from(value.len()).unwrap();
+    if length <= 31 {
+        bytes.push(0xa0 | length);
+    } else {
+        bytes.extend([0xd9, length]);
+    }
+    bytes.extend(value.as_bytes());
+}
+
+fn append_deepagents_message(
+    bytes: &mut Vec<u8>,
+    message_type: &str,
+    content: &str,
+    id: &str,
+    status: Option<&str>,
+) {
+    bytes.push(0x80 | if status.is_some() { 4 } else { 3 });
+    for (key, value) in [("type", message_type), ("content", content), ("id", id)] {
+        append_msgpack_string(bytes, key);
+        append_msgpack_string(bytes, value);
+    }
+    if let Some(status) = status {
+        append_msgpack_string(bytes, "status");
+        append_msgpack_string(bytes, status);
+    }
+}
+
+fn deepagents_manifest_source(temp: &tempfile::TempDir, include_output: bool) -> SourceInfo {
+    let source_path = temp.path().join("sessions.db");
+    let source_db = Connection::open(&source_path).unwrap();
+    source_db
+        .execute_batch(
+            "create table checkpoints (
+                thread_id text not null,
+                checkpoint_ns text not null default '',
+                checkpoint_id text not null,
+                parent_checkpoint_id text,
+                type text,
+                checkpoint blob,
+                metadata blob
+            );
+            create table writes (
+                thread_id text not null,
+                checkpoint_ns text not null default '',
+                checkpoint_id text not null,
+                task_id text not null,
+                idx integer not null,
+                channel text not null,
+                type text,
+                value blob
+            );",
+        )
+        .unwrap();
+    let metadata = serde_json::to_vec(&json!({
+        "updated_at": "2026-07-25T20:00:00Z",
+        "cwd": "/workspace/deepagents"
+    }))
     .unwrap();
-    let source = explicit_path_source(CaptureProvider::OpenHands, source_root);
+    source_db
+        .execute(
+            "insert into checkpoints
+             (thread_id, checkpoint_ns, checkpoint_id, checkpoint, metadata)
+             values ('thread-a', '', 'checkpoint-a', x'00', ?1)",
+            [metadata],
+        )
+        .unwrap();
+    let message_count: u8 = if include_output { 3 } else { 2 };
+    let mut messages = vec![0x90_u8 | message_count];
+    append_deepagents_message(
+        &mut messages,
+        "human",
+        "manifest accepted sibling",
+        "message-a",
+        None,
+    );
+    append_deepagents_message(
+        &mut messages,
+        "future_message",
+        "manifest rejected sibling",
+        "message-rejected",
+        None,
+    );
+    if include_output {
+        append_deepagents_message(
+            &mut messages,
+            "tool",
+            "manifest private successful output",
+            "message-tool",
+            Some("success"),
+        );
+    }
+    source_db
+        .execute(
+            "insert into writes
+             (thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, value)
+             values ('thread-a', '', 'checkpoint-a', 'task-a', 0, 'messages', 'msgpack', ?1)",
+            [messages],
+        )
+        .unwrap();
+    drop(source_db);
+    explicit_path_source(CaptureProvider::DeepAgents, source_path)
+}
+
+fn claude_message(session_id: &str, event_id: &str, content: &str) -> String {
+    json!({
+        "sessionId": session_id,
+        "timestamp": "2026-07-18T12:00:00Z",
+        "cwd": "/workspace/ctx",
+        "version": "test",
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [{"type": "text", "text": content}]
+        },
+        "uuid": event_id
+    })
+    .to_string()
+}
+
+fn factory_droid_transcript(session_id: &str, content: &str) -> String {
+    format!(
+        "{}\n{}\n",
+        json!({
+            "type": "session_start",
+            "id": session_id,
+            "timestamp": "2026-07-18T12:00:00Z",
+            "cwd": "/workspace/ctx",
+            "model": "factory/droid"
+        }),
+        json!({
+            "type": "message",
+            "id": format!("{session_id}-user"),
+            "timestamp": "2026-07-18T12:00:01Z",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": content}]
+            }
+        })
+    )
+}
+
+fn assert_pinned_reader_allows_cli_cursor(manifested: bool) {
+    let temp = tempdir();
+    let source = if manifested {
+        let source_root = temp.path().join("claude-projects");
+        fs::create_dir_all(&source_root).unwrap();
+        fs::write(
+            source_root.join("cli-bulk-guard.jsonl"),
+            format!(
+                "{}\n",
+                claude_message("cli-bulk-guard", "cli-bulk-guard-event", "guard ownership")
+            ),
+        )
+        .unwrap();
+        explicit_path_source(CaptureProvider::Claude, source_root)
+    } else {
+        let source_root = temp.path().join("openhands-user");
+        let conversation = source_root.join("v1_conversations").join("cli-bulk-guard");
+        fs::create_dir_all(&conversation).unwrap();
+        fs::write(
+            conversation.join("0001-message.json"),
+            json!({
+                "id": "cli-bulk-guard-event",
+                "timestamp": "2026-07-18T12:00:00Z",
+                "source": "user",
+                "llm_message": {"role": "user", "content": "guard ownership"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        explicit_path_source(CaptureProvider::OpenHands, source_root)
+    };
     let db_path = temp.path().join("work.sqlite");
     let mut store = Store::open_with_busy_timeout(&db_path, Duration::from_millis(10)).unwrap();
     let preinventory = if manifested {
@@ -62,9 +254,8 @@ fn assert_openhands_pinned_reader_allows_cli_cursor(manifested: bool) {
         .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
         .unwrap();
 
-    let imported =
-        import_one_source_inner(&mut store, &source, None, false, !manifested, &preinventory)
-            .expect("pinned readers do not block the bounded maintenance handoff");
+    let imported = import_one_source_inner(&mut store, &source, None, !manifested, &preinventory)
+        .expect("pinned readers do not block the bounded maintenance handoff");
     assert_eq!(imported.imported_events, 1);
     let cursor_count: i64 = reader
         .query_row("SELECT COUNT(*) FROM sync_cursors", [], |row| row.get(0))
@@ -88,9 +279,8 @@ fn assert_openhands_pinned_reader_allows_cli_cursor(manifested: bool) {
     assert_eq!(maintenance_pending, 1);
     reader.execute_batch("ROLLBACK").unwrap();
 
-    let retry =
-        import_one_source_inner(&mut store, &source, None, false, !manifested, &preinventory)
-            .expect("retry finishes pending maintenance and publishes the cursor");
+    let retry = import_one_source_inner(&mut store, &source, None, !manifested, &preinventory)
+        .expect("retry finishes pending maintenance and publishes the cursor");
     assert_eq!(retry.imported_events, 0);
     assert_eq!(retry.failed, 0);
     let cursor_count: i64 = reader
@@ -196,39 +386,120 @@ fn assert_inventory_race_winner_remains_pending(db_path: &Path, original: &Sourc
 
 #[test]
 fn direct_source_import_uses_nested_nativepath_maintenance_safely() {
-    assert_openhands_pinned_reader_allows_cli_cursor(false);
+    assert_pinned_reader_allows_cli_cursor(false);
 }
 
 #[test]
 fn manifested_source_import_uses_nested_nativepath_maintenance_safely() {
-    assert_openhands_pinned_reader_allows_cli_cursor(true);
+    assert_pinned_reader_allows_cli_cursor(true);
+}
+
+#[test]
+fn deepagents_terminal_core_cursor_completes_mixed_rejection_manifest() {
+    let temp = tempdir();
+    let source = deepagents_manifest_source(&temp, false);
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    inventory_source_import_files(&store, &source, false).unwrap();
+
+    let summary = import_one_source_for_search_refresh(
+        &mut store,
+        &source,
+        None,
+        &SourcePreinventory::SourceImportManifest,
+    )
+    .unwrap();
+
+    assert_eq!(summary.imported_events, 1);
+    assert_eq!(summary.failed, 1);
+    assert!(summary.has_accepted_content());
+    assert_eq!(
+        summary.terminal_outcome(),
+        ProviderImportTerminalOutcome::CoreCursorCommitted
+    );
+    assert!(store
+        .list_pending_source_import_files(source.provider, &source.path.display().to_string())
+        .unwrap()
+        .is_empty());
+
+    inventory_source_import_files(&store, &source, false).unwrap();
+    assert!(store
+        .list_pending_source_import_files(source.provider, &source.path.display().to_string())
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn late_raw_error_preserves_history_record_with_earlier_committed_content() {
+    let temp = tempdir();
+    let db_path = temp.path().join("work.sqlite");
+    let source = explicit_path_source(CaptureProvider::Codex, temp.path().join("sessions"));
+    let mut store = Store::open(&db_path).unwrap();
+    let record = import_record_for_source(&source);
+    store.upsert_record(&record).unwrap();
+    let event = Event {
+        id: new_id(),
+        seq: 1,
+        history_record_id: Some(record.id),
+        session_id: None,
+        run_id: None,
+        event_type: EventType::Message,
+        role: Some(EventRole::User),
+        occurred_at: utc_now(),
+        capture_source_id: None,
+        payload: json!({"text": "accepted before a later bounded-group failure"}),
+        payload_blob_id: None,
+        dedupe_key: None,
+        sync: SyncMetadata {
+            visibility: Visibility::LocalOnly,
+            fidelity: Fidelity::Imported,
+            sync_state: SyncState::LocalOnly,
+            sync_version: 0,
+            deleted_at: None,
+            metadata: json!({}),
+        },
+    };
+    store.upsert_event(&event).unwrap();
+
+    let mut run = NativeSourceRun::new(
+        &mut store,
+        &source,
+        None,
+        false,
+        &SourcePreinventory::None,
+        ctx_history_capture::CaptureWorkLimit::Drain,
+        None,
+        &ImportProfile::CoreOnly,
+    );
+    let error = run
+        .finish(
+            record.id,
+            false,
+            Err(anyhow::anyhow!("later bounded publication failed")),
+        )
+        .expect_err("the original import error must still be returned");
+    assert!(error
+        .to_string()
+        .contains("later bounded publication failed"));
+    assert!(history_record_exists(&store, record.id).unwrap());
+    assert!(store.get_event(event.id).is_ok());
 }
 
 #[test]
 fn manifested_source_import_collapses_file_groups_into_one_fts_handoff() {
     let temp = tempdir();
-    let source_root = temp.path().join("openhands-user");
-    let conversation = source_root
-        .join("v1_conversations")
-        .join("collapsed-bulk-guard");
-    fs::create_dir_all(&conversation).unwrap();
+    let source_root = temp.path().join("factory-droid-sessions");
+    fs::create_dir_all(&source_root).unwrap();
     for index in 0..7 {
         fs::write(
-            conversation.join(format!("{index:04}-message.json")),
-            json!({
-                "id": format!("collapsed-bulk-guard-event-{index}"),
-                "timestamp": "2026-07-18T12:00:00Z",
-                "source": "user",
-                "llm_message": {
-                    "role": "user",
-                    "content": format!("guard ownership {index}")
-                }
-            })
-            .to_string(),
+            source_root.join(format!("{index:04}-message.jsonl")),
+            factory_droid_transcript(
+                &format!("collapsed-bulk-guard-{index}"),
+                &format!("guard ownership {index}"),
+            ),
         )
         .unwrap();
     }
-    let source = explicit_path_source(CaptureProvider::OpenHands, source_root);
+    let source = explicit_path_source(CaptureProvider::FactoryAiDroid, source_root);
     let db_path = temp.path().join("work.sqlite");
     let mut store = Store::open(&db_path).unwrap();
     inventory_source_import_files(&store, &source, false).unwrap();
@@ -238,11 +509,10 @@ fn manifested_source_import_collapses_file_groups_into_one_fts_handoff() {
         &source,
         None,
         false,
-        false,
         &SourcePreinventory::SourceImportManifest,
     )
     .unwrap();
-    assert_eq!(imported.imported_events, 7);
+    assert_eq!(imported.imported_events, 14);
 
     let maintenance_groups: i64 = Connection::open(&db_path)
         .unwrap()
@@ -319,7 +589,6 @@ fn manifested_codex_groups_publish_before_the_manifest_page_finishes() {
             callback_observation.store(cursor_count > 0 && event_count > 0, Ordering::SeqCst);
         })),
         false,
-        false,
         &SourcePreinventory::SourceImportManifest,
     )
     .unwrap();
@@ -335,22 +604,18 @@ fn manifested_codex_groups_publish_before_the_manifest_page_finishes() {
 #[test]
 fn manifested_completion_surfaces_newer_inventory_observation() {
     let temp = tempdir();
-    let source_root = temp.path().join("openhands-user");
-    let conversation = source_root.join("v1_conversations").join("inventory-race");
-    fs::create_dir_all(&conversation).unwrap();
-    let source_path = conversation.join("0001-message.json");
+    let source_root = temp.path().join("claude-projects");
+    fs::create_dir_all(&source_root).unwrap();
+    let source_path = source_root.join("inventory-race.jsonl");
     fs::write(
         &source_path,
-        json!({
-            "id": "inventory-race-event",
-            "timestamp": "2026-07-18T12:00:00Z",
-            "source": "user",
-            "llm_message": {"role": "user", "content": "inventory race"}
-        })
-        .to_string(),
+        format!(
+            "{}\n",
+            claude_message("inventory-race", "inventory-race-event", "inventory race")
+        ),
     )
     .unwrap();
-    let source = explicit_path_source(CaptureProvider::OpenHands, source_root);
+    let source = explicit_path_source(CaptureProvider::Claude, source_root);
     let db_path = temp.path().join("work.sqlite");
     let mut store = Store::open(&db_path).unwrap();
     inventory_source_import_files(&store, &source, false).unwrap();
@@ -369,7 +634,7 @@ fn manifested_completion_surfaces_newer_inventory_observation() {
             BEGIN
                 UPDATE source_import_files
                 SET observed_at_ms = observed_at_ms + 1
-                WHERE provider = 'openhands'
+                WHERE provider = 'claude'
                   AND source_path != source_root;
             END;
             "#,
@@ -381,7 +646,6 @@ fn manifested_completion_surfaces_newer_inventory_observation() {
         &mut store,
         &source,
         None,
-        false,
         false,
         &SourcePreinventory::SourceImportManifest,
     )
@@ -491,7 +755,6 @@ fn indexed_inventory_race_cleans_replay_only_history_record_without_marking_winn
         &mut store,
         &source,
         None,
-        false,
         true,
         &SourcePreinventory::SourceRoot(original.clone()),
     )
@@ -528,7 +791,6 @@ fn failed_inventory_race_cleans_rejected_history_record_without_marking_winner()
         &mut store,
         &source,
         None,
-        false,
         true,
         &SourcePreinventory::SourceRoot(original.clone()),
     )
@@ -566,9 +828,10 @@ fn persist_indexed_root(
 struct RecordingProOutputSink {
     observations: AtomicUsize,
     pages: AtomicUsize,
+    output_records: AtomicUsize,
     fail_pages: bool,
     behind: AtomicBool,
-    progress: Mutex<Option<ProOutputProgress>>,
+    progress: Mutex<HashMap<OutputSourceIdentity, ProOutputProgress>>,
 }
 
 impl RecordingProOutputSink {
@@ -576,10 +839,15 @@ impl RecordingProOutputSink {
         Self {
             observations: AtomicUsize::new(0),
             pages: AtomicUsize::new(0),
+            output_records: AtomicUsize::new(0),
             fail_pages,
             behind: AtomicBool::new(false),
-            progress: Mutex::new(None),
+            progress: Mutex::new(HashMap::new()),
         }
+    }
+
+    fn progress(&self) -> HashMap<OutputSourceIdentity, ProOutputProgress> {
+        self.progress.lock().unwrap().clone()
     }
 }
 
@@ -594,13 +862,13 @@ impl ProOutputSink for RecordingProOutputSink {
 
     fn observe_source(
         &self,
-        _source: &OutputSourceIdentity,
+        source: &OutputSourceIdentity,
     ) -> std::result::Result<Option<ProOutputProgress>, ProOutputSinkError> {
         self.observations.fetch_add(1, Ordering::SeqCst);
         self.progress
             .lock()
             .map_err(|_| ProOutputSinkError::new("test_lock", "test progress lock poisoned"))
-            .map(|progress| progress.clone())
+            .map(|progress| progress.get(source).cloned())
     }
 
     fn materialize_page(
@@ -614,20 +882,24 @@ impl ProOutputSink for RecordingProOutputSink {
                 "simulated Pro output failure",
             ));
         }
+        self.output_records
+            .fetch_add(page.observations.len(), Ordering::SeqCst);
         let accepted_outputs = u32::try_from(page.observations.len()).unwrap();
         let committed_cursor = page.next_safe_cursor.clone();
-        *self
-            .progress
+        self.progress
             .lock()
-            .map_err(|_| ProOutputSinkError::new("test_lock", "test progress lock poisoned"))? =
-            Some(ProOutputProgress {
-                source_epoch: page.source_epoch,
-                observed_revision: page.observed_revision,
-                cursor: Some(committed_cursor.clone()),
-                parser_revision: page.parser_revision,
-                materializer_revision: page.materializer_revision,
-                terminal: page.terminal,
-            });
+            .map_err(|_| ProOutputSinkError::new("test_lock", "test progress lock poisoned"))?
+            .insert(
+                page.source,
+                ProOutputProgress {
+                    source_epoch: page.source_epoch,
+                    observed_revision: page.observed_revision,
+                    cursor: Some(committed_cursor.clone()),
+                    parser_revision: page.parser_revision,
+                    materializer_revision: page.materializer_revision,
+                    terminal: page.terminal,
+                },
+            );
         Ok(ProOutputPageResult {
             source_epoch: page.source_epoch,
             committed_cursor,
@@ -642,266 +914,19 @@ impl ProOutputSink for RecordingProOutputSink {
     }
 }
 
-#[test]
-fn unchanged_codex_catalog_session_replays_on_first_pro_activation_without_core_rewrite() {
-    let temp = tempdir();
-    let source_root = temp.path().join("codex-sessions");
-    fs::create_dir_all(&source_root).unwrap();
-    let session_path = source_root.join("session.jsonl");
-    let transcript = [
-        json!({
-            "timestamp": "2026-07-23T12:00:00Z",
-            "type": "session_meta",
-            "payload": {
-                "id": "019f92f1-0000-7000-8000-000000000001",
-                "timestamp": "2026-07-23T12:00:00Z",
-                "cwd": "/workspace/ctx",
-                "originator": "codex-cli"
-            }
-        }),
-        json!({
-            "timestamp": "2026-07-23T12:00:01Z",
-            "type": "response_item",
-            "payload": {
-                "type": "function_call",
-                "name": "exec_command",
-                "call_id": "catalog-call",
-                "arguments": "{\"cmd\":\"printf catalog\"}"
-            }
-        }),
-        json!({
-            "timestamp": "2026-07-23T12:00:02Z",
-            "type": "response_item",
-            "payload": {
-                "type": "function_call_output",
-                "call_id": "catalog-call",
-                "output": "unchanged catalog output"
-            }
-        }),
-    ]
-    .into_iter()
-    .map(|record| format!("{record}\n"))
-    .collect::<String>();
-    fs::write(&session_path, transcript).unwrap();
-
-    let source = explicit_path_source(CaptureProvider::Codex, source_root.clone());
-    let db_path = temp.path().join("work.sqlite");
-    let mut store = Store::open(&db_path).unwrap();
-    let first_inventory =
-        inventory_import_sources(&store, vec![source.clone()], false, false).unwrap();
-    assert_eq!(first_inventory.catalog.parsed_sessions, 1);
-    let first_plan = first_inventory.sources.into_iter().next().unwrap();
-    let first = import_one_source_for_search_refresh(
-        &mut store,
-        &first_plan.source,
-        None,
-        &first_plan.preinventory,
-    )
-    .unwrap();
-    assert_eq!(first.failed, 0);
-    assert!(first.imported_sessions > 0);
-    assert!(store
-        .list_pending_catalog_sessions(CaptureProvider::Codex, &source_root.display().to_string())
-        .unwrap()
-        .is_empty());
-
-    let second_inventory =
-        inventory_import_sources(&store, vec![source.clone()], true, true).unwrap();
-    assert_eq!(second_inventory.catalog.cached_sessions, 1);
-    assert_eq!(second_inventory.catalog.parsed_sessions, 0);
-    let available_catalog_rows: i64 = Connection::open(&db_path)
-        .unwrap()
+fn assert_single_root_schedule_row(db_path: &Path, source: &SourceInfo) {
+    let connection = Connection::open(db_path).unwrap();
+    let rows: i64 = connection
         .query_row(
-            "select count(*) from catalog_sessions where source_path = ?1 and is_stale = 0",
-            [session_path.display().to_string()],
+            "SELECT COUNT(*)
+             FROM source_import_files
+             WHERE provider = ?1 AND source_root = ?2 AND source_path = source_root
+               AND is_stale = 0",
+            rusqlite::params![source.provider.as_str(), source.path.display().to_string()],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(available_catalog_rows, 1);
-    let second_plan = second_inventory.sources.into_iter().next().unwrap();
-    let core_sessions_before: i64 = Connection::open(&db_path)
-        .unwrap()
-        .query_row("select count(*) from sessions", [], |row| row.get(0))
-        .unwrap();
-    let core_events_before: i64 = Connection::open(&db_path)
-        .unwrap()
-        .query_row("select count(*) from events", [], |row| row.get(0))
-        .unwrap();
-    let sink = Arc::new(RecordingProOutputSink::new(false));
-    let profile = ImportProfile::CoreAndPro(sink.clone());
-
-    let catch_up = import_one_source_for_search_refresh_with_profile(
-        &mut store,
-        &second_plan.source,
-        None,
-        &second_plan.preinventory,
-        &profile,
-    )
-    .unwrap();
-
-    assert_eq!(catch_up.failed, 0);
-    assert_eq!(
-        Connection::open(&db_path)
-            .unwrap()
-            .query_row("select count(*) from sessions", [], |row| row
-                .get::<_, i64>(0))
-            .unwrap(),
-        core_sessions_before
-    );
-    assert_eq!(
-        Connection::open(&db_path)
-            .unwrap()
-            .query_row("select count(*) from events", [], |row| row
-                .get::<_, i64>(0))
-            .unwrap(),
-        core_events_before
-    );
-    assert!(sink.observations.load(Ordering::SeqCst) > 0);
-    assert!(sink.pages.load(Ordering::SeqCst) > 0);
-    assert!(!sink.behind.load(Ordering::SeqCst));
-    assert!(store
-        .list_pending_catalog_sessions(CaptureProvider::Codex, &source_root.display().to_string())
-        .unwrap()
-        .is_empty());
-}
-
-fn imported_hermes_source() -> (tempfile::TempDir, SourceInfo, std::path::PathBuf) {
-    let temp = tempdir();
-    let source_path = temp.path().join("hermes.db");
-    let source_db = Connection::open(&source_path).unwrap();
-    source_db
-        .execute_batch(
-            "create table sessions (
-                 id text primary key,
-                 source text not null,
-                 started_at real not null
-             );
-             create table messages (
-                 id integer primary key,
-                 session_id text not null,
-                 role text not null,
-                 content text,
-                 tool_call_id text,
-                 timestamp real not null,
-                 finish_reason text
-             );
-             insert into sessions values ('session-id', 'acp', 1782259200.0);
-             insert into messages values (
-                 1, 'session-id', 'tool', 'complete output', 'call-id',
-                 1782259201.0, 'success'
-             );",
-        )
-        .unwrap();
-    drop(source_db);
-
-    let source = explicit_path_source(CaptureProvider::Hermes, source_path);
-    let db_path = temp.path().join("work.sqlite");
-    let mut store = Store::open(&db_path).unwrap();
-    let inventory = inventory_import_sources(&store, vec![source.clone()], false, false).unwrap();
-    let plan = inventory.sources.into_iter().next().unwrap();
-    let summary =
-        import_one_source_for_search_refresh(&mut store, &plan.source, None, &plan.preinventory)
-            .unwrap();
-    assert!(summary.imported_sessions > 0);
-    let cursor_count: i64 = Connection::open(&db_path)
-        .unwrap()
-        .query_row("select count(*) from sync_cursors", [], |row| row.get(0))
-        .unwrap();
-    assert!(cursor_count > 0);
-    (temp, source, db_path)
-}
-
-#[test]
-fn first_pro_activation_replays_an_unchanged_core_source_then_catch_up_is_a_noop() {
-    let (_temp, source, db_path) = imported_hermes_source();
-    let mut store = Store::open(&db_path).unwrap();
-    let inventory = inventory_import_sources(&store, vec![source.clone()], false, false).unwrap();
-    let plan = inventory.sources.into_iter().next().unwrap();
-    assert!(store
-        .list_pending_source_import_files(source.provider, &source.path.display().to_string())
-        .unwrap()
-        .is_empty());
-    let core_events_before: i64 = Connection::open(&db_path)
-        .unwrap()
-        .query_row("select count(*) from events", [], |row| row.get(0))
-        .unwrap();
-    let sink = Arc::new(RecordingProOutputSink::new(false));
-    let profile = ImportProfile::CoreAndPro(sink.clone());
-
-    let summary = import_one_source_for_search_refresh_with_profile(
-        &mut store,
-        &plan.source,
-        None,
-        &plan.preinventory,
-        &profile,
-    )
-    .unwrap();
-
-    let core_events_after: i64 = Connection::open(&db_path)
-        .unwrap()
-        .query_row("select count(*) from events", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(core_events_after, core_events_before);
-    assert_eq!(summary.failed, 0);
-    assert!(sink.observations.load(Ordering::SeqCst) > 0);
-    assert!(sink.pages.load(Ordering::SeqCst) > 0);
-    assert!(!sink.behind.load(Ordering::SeqCst));
-
-    let pages_after_activation = sink.pages.load(Ordering::SeqCst);
-    let second = import_one_source_for_search_refresh_with_profile(
-        &mut store,
-        &plan.source,
-        None,
-        &plan.preinventory,
-        &profile,
-    )
-    .unwrap();
-    assert_eq!(second.failed, 0);
-    assert_eq!(
-        sink.pages.load(Ordering::SeqCst),
-        pages_after_activation,
-        "an unchanged source at its terminal private cursor must not materialize another page"
-    );
-    assert_eq!(
-        Connection::open(&db_path)
-            .unwrap()
-            .query_row("select count(*) from events", [], |row| row
-                .get::<_, i64>(0))
-            .unwrap(),
-        core_events_before
-    );
-}
-
-#[test]
-fn pro_output_failure_does_not_fail_unchanged_core_import() {
-    let (_temp, source, db_path) = imported_hermes_source();
-    let mut store = Store::open(&db_path).unwrap();
-    let inventory = inventory_import_sources(&store, vec![source.clone()], false, false).unwrap();
-    let plan = inventory.sources.into_iter().next().unwrap();
-    let core_events_before: i64 = Connection::open(&db_path)
-        .unwrap()
-        .query_row("select count(*) from events", [], |row| row.get(0))
-        .unwrap();
-    let sink = Arc::new(RecordingProOutputSink::new(true));
-    let profile = ImportProfile::CoreAndPro(sink.clone());
-
-    let result = import_one_source_for_search_refresh_with_profile(
-        &mut store,
-        &plan.source,
-        None,
-        &plan.preinventory,
-        &profile,
-    );
-
-    assert!(result.is_ok(), "{result:?}");
-    let core_events_after: i64 = Connection::open(&db_path)
-        .unwrap()
-        .query_row("select count(*) from events", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(core_events_after, core_events_before);
-    assert!(sink.observations.load(Ordering::SeqCst) > 0);
-    assert!(sink.pages.load(Ordering::SeqCst) > 0);
-    assert!(sink.behind.load(Ordering::SeqCst));
+    assert_eq!(rows, 1, "outer inventory must schedule exactly one root");
 }
 
 #[test]
@@ -925,7 +950,7 @@ fn unchanged_root_source_skips_provider_normalization() {
 }
 
 #[test]
-fn background_refresh_publishes_one_group_and_restart_resumes_pending_manifest() {
+fn background_refresh_reenters_provider_owned_root_until_provider_work_is_complete() {
     let temp = tempdir();
     let source_path = temp.path().join("pi-session.jsonl");
     let mut lines = vec![json!({
@@ -954,13 +979,15 @@ fn background_refresh_publishes_one_group_and_restart_resumes_pending_manifest()
     let source = explicit_path_source(CaptureProvider::Pi, source_path.clone());
     let db_path = temp.path().join("work.sqlite");
     let mut store = Store::open(&db_path).unwrap();
-    inventory_source_import_files(&store, &source, false).unwrap();
+    let inventory =
+        inventory_import_sources(&store, vec![source.clone()], false, false, false).unwrap();
+    let plan = inventory.sources.into_iter().next().unwrap();
 
     let first = import_one_source_for_background_refresh(
         &mut store,
-        &source,
+        &plan.source,
         None,
-        &SourcePreinventory::SourceImportManifest,
+        &plan.preinventory,
     )
     .unwrap();
 
@@ -971,24 +998,21 @@ fn background_refresh_publishes_one_group_and_restart_resumes_pending_manifest()
         .unwrap()
         .get("work_remaining")
         .is_none());
-    assert_eq!(
-        store
-            .list_pending_source_import_files(source.provider, &source.path.display().to_string())
-            .unwrap()
-            .len(),
-        1,
-        "a partial captured source must not be marked indexed"
-    );
+    assert_single_root_schedule_row(&db_path, &source);
     drop(store);
 
     let mut imported_events = first.imported_events;
     loop {
         let mut restarted = Store::open(&db_path).unwrap();
+        let inventory =
+            inventory_import_sources(&restarted, vec![source.clone()], false, false, false)
+                .unwrap();
+        let plan = inventory.sources.into_iter().next().unwrap();
         let next = import_one_source_for_background_refresh(
             &mut restarted,
-            &source,
+            &plan.source,
             None,
-            &SourcePreinventory::SourceImportManifest,
+            &plan.preinventory,
         )
         .unwrap();
         imported_events = imported_events.saturating_add(next.imported_events);
@@ -997,19 +1021,10 @@ fn background_refresh_publishes_one_group_and_restart_resumes_pending_manifest()
                 next.imported_events > 0,
                 "each nonterminal bounded restart must advance the certified frontier: {next:?}"
             );
-            assert!(!restarted
-                .list_pending_source_import_files(
-                    source.provider,
-                    &source.path.display().to_string()
-                )
-                .unwrap()
-                .is_empty());
+            assert_single_root_schedule_row(&db_path, &source);
             continue;
         }
-        assert!(restarted
-            .list_pending_source_import_files(source.provider, &source.path.display().to_string())
-            .unwrap()
-            .is_empty());
+        assert_single_root_schedule_row(&db_path, &source);
         break;
     }
     assert_eq!(imported_events, 320);
@@ -1021,7 +1036,7 @@ fn background_refresh_publishes_one_group_and_restart_resumes_pending_manifest()
 }
 
 #[test]
-fn unchanged_root_source_still_repairs_event_search_backfill() {
+fn projection_backfill_blocks_refresh_and_import_before_provider_normalization() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
     let source_path = temp.path().join("state.db");
@@ -1058,22 +1073,39 @@ fn unchanged_root_source_still_repairs_event_search_backfill() {
     let mut store = Store::open(&db_path).unwrap();
     assert!(store.event_search_projection_needs_backfill().unwrap());
 
-    import_one_source_for_search_refresh(
+    let refresh_error = import_one_source_for_search_refresh(
         &mut store,
         &source,
         None,
-        &SourcePreinventory::SourceRoot(file),
+        &SourcePreinventory::SourceRoot(file.clone()),
     )
-    .unwrap();
+    .expect_err("search refresh must not rebuild an incomplete projection");
+    let serial_error = import_one_source_with_profile(
+        &mut store,
+        &source,
+        None,
+        false,
+        &SourcePreinventory::SourceRoot(file),
+        &ImportProfile::CoreOnly,
+    )
+    .expect_err("serial import must fail before provider normalization");
 
-    assert!(!store.event_search_projection_needs_backfill().unwrap());
-    assert_eq!(
-        store
-            .search_event_hits("unchanged root backfill oracle", 10)
-            .unwrap()
-            .len(),
-        1
-    );
+    for error in [&refresh_error, &serial_error] {
+        assert_eq!(import_error_scope(error), ImportFailureScope::System);
+        assert!(
+            error
+                .to_string()
+                .contains("search projection repair required before provider import"),
+            "unexpected repair error: {error:#}"
+        );
+    }
+    assert!(store.event_search_projection_needs_backfill().unwrap());
+    assert!(store.get_event(event.id).is_ok());
+    assert!(!history_record_exists(&store, import_record_for_source(&source).id).unwrap());
+    assert!(store
+        .search_event_hits("unchanged root backfill oracle", 10)
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -1124,7 +1156,6 @@ fn full_rescan_does_not_skip_unchanged_root_source() {
         &mut store,
         &source,
         None,
-        false,
         true,
         &SourcePreinventory::SourceRoot(file),
     );
@@ -1274,7 +1305,7 @@ fn source_root_inventory_rejects_non_utf8_identity_before_persistence() {
     let source = explicit_path_source(CaptureProvider::Hermes, source_root);
     let store = Store::open(temp.path().join("work.sqlite")).unwrap();
 
-    let inventory = inventory_import_sources(&store, vec![source], false, false).unwrap();
+    let inventory = inventory_import_sources(&store, vec![source], false, false, false).unwrap();
 
     assert_eq!(inventory.failures.len(), 1);
     assert!(inventory.failures[0]

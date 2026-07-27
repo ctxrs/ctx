@@ -60,6 +60,54 @@ impl ProviderEventHashAuthority {
 }
 
 impl Store {
+    pub(crate) fn bind_event_identity_alias(
+        &self,
+        alias_id: Uuid,
+        event_id: Uuid,
+        reason: &str,
+        created_at_ms: i64,
+    ) -> Result<()> {
+        if alias_id == event_id {
+            return Ok(());
+        }
+        let target_exists = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM events WHERE id = ?1",
+                params![event_id.to_string()],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        let alias_is_event = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM events WHERE id = ?1",
+                params![alias_id.to_string()],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        let existing = self.event_alias_target_id(alias_id)?;
+        if !target_exists || alias_is_event || existing.is_some_and(|existing| existing != event_id)
+        {
+            return Err(StoreError::NativePathEventIdentityAliasConflict);
+        }
+        if existing.is_none() {
+            self.conn.execute(
+                "INSERT INTO event_aliases (alias_id, event_id, reason, created_at_ms)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    alias_id.to_string(),
+                    event_id.to_string(),
+                    reason,
+                    created_at_ms
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn provider_event_dedupe_key(
         provider: CaptureProvider,
         external_session_id: &str,
@@ -102,7 +150,7 @@ impl Store {
     }
 
     pub fn upsert_event(&self, event: &Event) -> Result<Uuid> {
-        self.with_import_batch_write(|| {
+        self.with_atomic_write(|| {
             self.upsert_event_inner(event, &mut NativePathEventBindAccounting::default())
         })
     }
@@ -144,8 +192,12 @@ impl Store {
     ) -> Result<Uuid> {
         let event = durable_event(event)?;
         let event = event.as_ref();
-        let previous_searchable_count =
-            semantic_searchable_document_count_from_stored_event(&self.conn, event.id)?;
+        let cold_load = self.native_cold_write_scope_active();
+        let previous_searchable_count = if cold_load {
+            0
+        } else {
+            semantic_searchable_document_count_from_stored_event(&self.conn, event.id)?
+        };
 
         accounting.record_event_write(event)?;
         self.conn
@@ -194,19 +246,21 @@ impl Store {
                     optional_timestamp_ms(event.sync.deleted_at),
                     serde_json::to_string(&event.sync.metadata)?,
                 ])?;
-        upsert_event_search_projection_for_event(
-            &self.conn,
-            event.id,
-            event,
-            self.event_search_projection_capabilities()?,
-            accounting.search_bytes(),
-        )?;
-        adjust_semantic_searchable_item_stats(
-            &self.conn,
-            previous_searchable_count,
-            semantic_searchable_document_count_for_event(event),
-            accounting.search_bytes(),
-        )?;
+        if !cold_load {
+            upsert_event_search_projection_for_event(
+                &self.conn,
+                event.id,
+                event,
+                self.event_search_projection_capabilities()?,
+                accounting.search_bytes(),
+            )?;
+            adjust_semantic_searchable_item_stats(
+                &self.conn,
+                previous_searchable_count,
+                semantic_searchable_document_count_for_event(event),
+                accounting.search_bytes(),
+            )?;
+        }
         let id = if let Some(dedupe_key) = &event.dedupe_key {
             self.event_id_by_dedupe_key(dedupe_key)?
         } else {
@@ -228,7 +282,7 @@ impl Store {
         event: &Event,
         incoming_authority: ProviderEventHashAuthority,
     ) -> Result<bool> {
-        self.with_import_batch_write(|| {
+        self.with_atomic_write(|| {
             self.reconcile_provider_event_inner(
                 event,
                 incoming_authority,
@@ -244,7 +298,7 @@ impl Store {
         incoming_authority: ProviderEventHashAuthority,
     ) -> Result<(bool, usize)> {
         let mut accounting = NativePathEventBindAccounting::enabled();
-        let result = self.with_import_batch_write(|| {
+        let result = self.with_atomic_write(|| {
             self.reconcile_provider_event_inner(event, incoming_authority, None, &mut accounting)
         })?;
         Ok((result, accounting.bytes))
@@ -265,7 +319,7 @@ impl Store {
                 .to_owned(),
         );
         let mut accounting = NativePathEventBindAccounting::enabled();
-        let result = self.with_import_batch_write(|| {
+        let result = self.with_atomic_write(|| {
             self.reconcile_provider_event_inner(
                 &event,
                 ProviderEventHashAuthority::NormalizedPayloadFallback,
@@ -360,7 +414,7 @@ impl Store {
     }
 
     pub fn insert_event_if_absent(&self, event: &Event) -> Result<bool> {
-        self.with_import_batch_write(|| {
+        self.with_atomic_write(|| {
             self.insert_event_if_absent_inner(event, &mut NativePathEventBindAccounting::default())
         })
     }
@@ -386,6 +440,7 @@ impl Store {
     ) -> Result<bool> {
         let event = durable_event(event)?;
         let event = event.as_ref();
+        let cold_load = self.native_cold_write_scope_active();
         accounting.record_event_write(event)?;
         let changed = self
                 .conn
@@ -417,18 +472,20 @@ impl Store {
                     serde_json::to_string(&event.sync.metadata)?,
                 ])?;
         if changed > 0 {
-            insert_event_search_projection_for_event(
-                &self.conn,
-                event,
-                self.event_search_projection_capabilities()?,
-                accounting.search_bytes(),
-            )?;
-            adjust_semantic_searchable_item_stats(
-                &self.conn,
-                0,
-                semantic_searchable_document_count_for_event(event),
-                accounting.search_bytes(),
-            )?;
+            if !cold_load {
+                insert_event_search_projection_for_event(
+                    &self.conn,
+                    event,
+                    self.event_search_projection_capabilities()?,
+                    accounting.search_bytes(),
+                )?;
+                adjust_semantic_searchable_item_stats(
+                    &self.conn,
+                    0,
+                    semantic_searchable_document_count_for_event(event),
+                    accounting.search_bytes(),
+                )?;
+            }
             self.journal_event_mutated(event.id)?;
         }
         Ok(changed > 0)
@@ -885,333 +942,4 @@ pub(crate) fn event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event>
 }
 
 #[cfg(test)]
-mod tests {
-    use ctx_history_core::{new_id, utc_now, SyncMetadata};
-    use serde_json::{json, Value};
-    use tempfile::tempdir;
-
-    use super::*;
-
-    fn normalized_provider_event(
-        id: Uuid,
-        body: Value,
-        hash: &str,
-        authority: Option<ProviderEventHashAuthority>,
-    ) -> Event {
-        let mut sync = SyncMetadata::default();
-        if let Some(authority) = authority {
-            sync.metadata[PROVIDER_EVENT_HASH_AUTHORITY_KEY] = json!(authority.as_str());
-        }
-        Event {
-            id,
-            seq: 1,
-            history_record_id: None,
-            session_id: None,
-            run_id: None,
-            event_type: EventType::Message,
-            role: Some(EventRole::User),
-            occurred_at: utc_now(),
-            capture_source_id: None,
-            payload: json!({"body": body, "provider_event_hash": hash}),
-            payload_blob_id: None,
-            dedupe_key: Some(Store::provider_source_event_dedupe_key(
-                Uuid::nil(),
-                0,
-                hash,
-            )),
-            sync,
-        }
-    }
-
-    #[test]
-    fn reconcile_provider_event_inserts_then_replays_idempotently() {
-        let temp = tempdir().unwrap();
-        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
-        let body = json!({"text": "stable"});
-        let hash = compute_payload_hash(&body).unwrap();
-        let event = normalized_provider_event(
-            new_id(),
-            body,
-            &hash,
-            Some(ProviderEventHashAuthority::NormalizedPayloadFallback),
-        );
-
-        assert!(store
-            .reconcile_provider_event(
-                &event,
-                ProviderEventHashAuthority::NormalizedPayloadFallback,
-            )
-            .unwrap());
-        assert!(!store
-            .reconcile_provider_event(
-                &event,
-                ProviderEventHashAuthority::NormalizedPayloadFallback,
-            )
-            .unwrap());
-        assert_eq!(store.list_events().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn reconcile_provider_event_migrates_legacy_fallback_hash_in_place() {
-        let temp = tempdir().unwrap();
-        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
-        let id = new_id();
-        let legacy_body = json!({"text": "stable", "truncated": false});
-        let legacy_hash = compute_payload_hash(&legacy_body).unwrap();
-        let legacy = normalized_provider_event(id, legacy_body, &legacy_hash, None);
-        assert!(store.insert_event_if_absent(&legacy).unwrap());
-
-        let new_body = json!({"text": "stable", "text_retention": {"status": "full"}});
-        let new_hash = compute_payload_hash(&new_body).unwrap();
-        let replacement = normalized_provider_event(
-            id,
-            new_body.clone(),
-            &new_hash,
-            Some(ProviderEventHashAuthority::NormalizedPayloadFallback),
-        );
-        assert!(!store
-            .reconcile_provider_event(
-                &replacement,
-                ProviderEventHashAuthority::NormalizedPayloadFallback,
-            )
-            .unwrap());
-
-        let migrated = store.get_event(id).unwrap();
-        assert_eq!(migrated.payload["body"], new_body);
-        assert!(migrated.dedupe_key.as_deref().unwrap().ends_with(&new_hash));
-        assert_eq!(store.list_events().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn reconcile_provider_event_matching_fallback_hash_preserves_legacy_row() {
-        let temp = tempdir().unwrap();
-        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
-        let id = new_id();
-        let body = json!({"text": "stable"});
-        let hash = compute_payload_hash(&body).unwrap();
-        let legacy = normalized_provider_event(id, body.clone(), &hash, None);
-        assert!(store.insert_event_if_absent(&legacy).unwrap());
-        let mut replay = normalized_provider_event(
-            id,
-            body,
-            &hash,
-            Some(ProviderEventHashAuthority::NormalizedPayloadFallback),
-        );
-        replay.capture_source_id = Some(new_id());
-        replay.sync.metadata["new_adapter_metadata"] = json!(true);
-
-        assert!(!store
-            .reconcile_provider_event(
-                &replay,
-                ProviderEventHashAuthority::NormalizedPayloadFallback,
-            )
-            .unwrap());
-
-        let retained = store.get_event(id).unwrap();
-        assert_eq!(retained.capture_source_id, legacy.capture_source_id);
-        assert_eq!(retained.sync.metadata, legacy.sync.metadata);
-    }
-
-    #[test]
-    fn reconcile_provider_event_matching_provider_hash_preserves_payload() {
-        let temp = tempdir().unwrap();
-        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
-        let id = new_id();
-        let existing = normalized_provider_event(
-            id,
-            json!({"text": "immutable"}),
-            "provider-native-a",
-            Some(ProviderEventHashAuthority::ProviderSupplied),
-        );
-        assert!(store.insert_event_if_absent(&existing).unwrap());
-        let replay = normalized_provider_event(
-            id,
-            json!({"text": "rewritten"}),
-            "provider-native-a",
-            Some(ProviderEventHashAuthority::ProviderSupplied),
-        );
-
-        assert!(!store
-            .reconcile_provider_event(&replay, ProviderEventHashAuthority::ProviderSupplied)
-            .unwrap());
-
-        let retained = store.get_event(id).unwrap();
-        assert_eq!(retained.payload, existing.payload);
-        assert_eq!(retained.dedupe_key, existing.dedupe_key);
-    }
-
-    #[test]
-    fn reconcile_provider_event_rejects_provider_supplied_hash_conflict() {
-        let temp = tempdir().unwrap();
-        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
-        let id = new_id();
-        let existing = normalized_provider_event(
-            id,
-            json!({"text": "existing"}),
-            "provider-native-a",
-            Some(ProviderEventHashAuthority::ProviderSupplied),
-        );
-        assert!(store.insert_event_if_absent(&existing).unwrap());
-        let conflicting = normalized_provider_event(
-            id,
-            json!({"text": "conflicting"}),
-            "provider-native-b",
-            Some(ProviderEventHashAuthority::ProviderSupplied),
-        );
-
-        let error = store
-            .reconcile_provider_event(&conflicting, ProviderEventHashAuthority::ProviderSupplied)
-            .unwrap_err();
-        assert!(matches!(error, StoreError::ProviderEventConflict { .. }));
-        let retained = store.get_event(id).unwrap();
-        assert_eq!(retained.id, existing.id);
-        assert_eq!(retained.payload, existing.payload);
-        assert_eq!(retained.dedupe_key, existing.dedupe_key);
-    }
-
-    #[test]
-    fn native_path_exactly_migrates_released_provider_hash_in_place() {
-        let temp = tempdir().unwrap();
-        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
-        let id = new_id();
-        let legacy_hash = "released-positional-hash";
-        let existing = normalized_provider_event(
-            id,
-            json!({"text": "released"}),
-            legacy_hash,
-            Some(ProviderEventHashAuthority::ProviderSupplied),
-        );
-        assert!(store.insert_event_if_absent(&existing).unwrap());
-
-        let replacement_body = json!({"text": "rewritten"});
-        let replacement_hash = compute_payload_hash(&replacement_body).unwrap();
-        let replacement =
-            normalized_provider_event(new_id(), replacement_body.clone(), &replacement_hash, None);
-        let (inserted, _) = store
-            .reconcile_provider_event_migrating_exact_legacy_provider_hash_with_native_path_accounting(
-                &replacement,
-                legacy_hash,
-            )
-            .unwrap();
-        assert!(!inserted);
-
-        let migrated = store.get_event(id).unwrap();
-        assert_eq!(migrated.id, id);
-        assert_eq!(migrated.seq, existing.seq);
-        assert_eq!(migrated.payload["body"], replacement_body);
-        assert!(migrated
-            .dedupe_key
-            .as_deref()
-            .unwrap()
-            .ends_with(&replacement_hash));
-        assert_eq!(
-            migrated.sync.metadata[PROVIDER_EVENT_HASH_AUTHORITY_KEY],
-            json!(ProviderEventHashAuthority::NormalizedPayloadFallback.as_str())
-        );
-    }
-
-    #[test]
-    fn provider_reconciliation_elides_success_and_unknown_outputs_but_retains_failure() {
-        let temp = tempdir().unwrap();
-        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
-
-        let mut success = normalized_provider_event(
-            new_id(),
-            json!({
-                "result_outcome": "success",
-                "exit_code": 0,
-                "output_preview": "successful output"
-            }),
-            "success-output",
-            Some(ProviderEventHashAuthority::ProviderSupplied),
-        );
-        success.event_type = EventType::CommandOutput;
-        assert!(!store
-            .reconcile_provider_event(&success, ProviderEventHashAuthority::ProviderSupplied)
-            .unwrap());
-
-        let mut unknown = normalized_provider_event(
-            new_id(),
-            json!({"output_preview": "unknown output"}),
-            "unknown-output",
-            Some(ProviderEventHashAuthority::ProviderSupplied),
-        );
-        unknown.event_type = EventType::ToolOutput;
-        assert!(!store
-            .reconcile_provider_event(&unknown, ProviderEventHashAuthority::ProviderSupplied)
-            .unwrap());
-
-        let mut failure = normalized_provider_event(
-            new_id(),
-            json!({
-                "result_outcome": "failure",
-                "exit_code": 1,
-                "output_preview": "sparse failure oracle"
-            }),
-            "failure-output",
-            Some(ProviderEventHashAuthority::ProviderSupplied),
-        );
-        failure.event_type = EventType::CommandOutput;
-        assert!(store
-            .reconcile_provider_event(&failure, ProviderEventHashAuthority::ProviderSupplied)
-            .unwrap());
-
-        let events = store.list_events().unwrap();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].id, failure.id);
-        assert_eq!(
-            events[0].payload["body"]["output_preview"],
-            "sparse failure oracle"
-        );
-        assert!(store
-            .search_event_hits("sparse failure oracle", 10)
-            .unwrap()
-            .iter()
-            .any(|hit| hit.event_id == failure.id));
-    }
-
-    #[test]
-    fn cached_event_upsert_reprepares_after_schema_change() {
-        let temp = tempdir().unwrap();
-        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
-        let id = new_id();
-        let mut event = normalized_provider_event(
-            id,
-            json!({"text": "before"}),
-            "cached-upsert",
-            Some(ProviderEventHashAuthority::NormalizedPayloadFallback),
-        );
-        store
-            .write_event(&event, &mut NativePathEventBindAccounting::default())
-            .unwrap();
-
-        store
-            .conn
-            .execute_batch(
-                "CREATE TABLE event_upsert_audit (event_id TEXT NOT NULL);
-                 CREATE TRIGGER event_upsert_audit_trigger AFTER UPDATE ON events BEGIN
-                     INSERT INTO event_upsert_audit VALUES (NEW.id);
-                 END;",
-            )
-            .unwrap();
-        event.payload["body"] = json!({"text": "after"});
-        store
-            .write_event(&event, &mut NativePathEventBindAccounting::default())
-            .unwrap();
-
-        let audit_rows: u64 = store
-            .conn
-            .query_row("SELECT COUNT(*) FROM event_upsert_audit", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(
-            audit_rows, 1,
-            "schema change did not reprepare cached UPSERT"
-        );
-        assert_eq!(
-            store.get_event(id).unwrap().payload["body"]["text"],
-            "after"
-        );
-    }
-}
+mod tests;

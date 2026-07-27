@@ -841,14 +841,8 @@ fn event_search_indexes_policy_allowed_agent_content_only() {
         store.search_event_hits("toolnestoracle", 10).unwrap().len(),
         1
     );
-    assert_eq!(
-        store
-            .search_event_hits("failure-output-oracle", 10)
-            .unwrap()
-            .len(),
-        1
-    );
     for result_text in [
+        "failure-output-oracle",
         "failed-native-output-oracle",
         "failed-v2-native-output-oracle",
         "success-output-oracle",

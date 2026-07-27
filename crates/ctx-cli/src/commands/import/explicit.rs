@@ -27,7 +27,9 @@ use crate::commands::import::{
     CatalogTotals, ImportReport, ImportRunOptions, InventoryTotals, PlannedImportSource,
     SourceStats,
 };
-use crate::commands::import::{ProviderRefreshCollector, ProviderRefreshRuntimeFacts};
+use crate::commands::import::{
+    ProviderRefreshCollector, ProviderRefreshResourceObservation, ProviderRefreshRuntimeFacts,
+};
 use crate::progress::{format_bytes, format_count, plural, ProgressReporter};
 use crate::provider_args::ImportFormatArg;
 use crate::{
@@ -162,6 +164,7 @@ pub(crate) fn run_explicit_format_import(
     let record_existed = history_record_exists(&context.store, record_id)?;
     context.store.upsert_record(&record)?;
     progress.message("indexing", format!("importing {}", context.format.as_str()));
+    let provider_resources = ProviderRefreshResourceObservation::begin();
     let provider_started = Instant::now();
     let import_profile = context
         .pro_output
@@ -201,23 +204,30 @@ pub(crate) fn run_explicit_format_import(
                     provider_duration,
                     ImportFailureScope::System,
                     failure_type,
-                ),
+                )
+                .with_resource_observation(provider_resources),
             );
+            context.store.delete_orphan_record(record_id)?;
             return Err(error);
         }
         Err(error) => {
-            cleanup_rejected_history_record(&context.store, record_id, record_existed)?;
+            // Raw errors can follow accepted bounded commits. Strict cleanup
+            // remains below for an all-rejected successful summary.
+            context.store.delete_orphan_record(record_id)?;
             let failure_scope = import_error_scope(&error);
             let failure_type = import_failure_type(&error);
             return Ok(context.failure_report(
                 &path,
                 stats,
                 &error,
-                Some(ProviderRefreshRuntimeFacts::observed_failure(
-                    provider_duration,
-                    failure_scope,
-                    failure_type,
-                )),
+                Some(
+                    ProviderRefreshRuntimeFacts::observed_failure(
+                        provider_duration,
+                        failure_scope,
+                        failure_type,
+                    )
+                    .with_resource_observation(provider_resources),
+                ),
             ));
         }
     };
@@ -235,7 +245,8 @@ pub(crate) fn run_explicit_format_import(
                 provider_duration,
                 ImportFailureScope::Source,
                 ImportFailureType::RecordRejection,
-            ),
+            )
+            .with_resource_observation(provider_resources),
         );
     } else {
         totals.add(&summary, &stats);
@@ -245,12 +256,9 @@ pub(crate) fn run_explicit_format_import(
             ProviderRefreshSourceMode::ExplicitFormat,
             &summary,
             &stats,
-            ProviderRefreshRuntimeFacts::observed_success(provider_duration, &summary),
+            ProviderRefreshRuntimeFacts::observed_success(provider_duration, &summary)
+                .with_resource_observation(provider_resources),
         );
-    }
-    if totals.imported_sessions > 0 || totals.imported_events > 0 || totals.imported_edges > 0 {
-        progress.message("finalizing", "optimizing search index");
-        Store::open(&context.db_path)?.optimize_search_index()?;
     }
     progress.message("finalizing", "checkpointing search database");
     Store::open(&context.db_path)?

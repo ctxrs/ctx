@@ -1,0 +1,6 @@
+real 1.00
+user 0.50
+sys 0.25
+            16000000  maximum resident set size
+                   2  page reclaims
+                   0  block input operations

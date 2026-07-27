@@ -16,6 +16,7 @@ pub(crate) struct OpenCodeMessageRow {
     pub(crate) id: String,
     pub(crate) entry_type: String,
 }
+#[derive(Debug, Clone)]
 pub(crate) struct OpenCodeSqliteDialect {
     pub(crate) provider: CaptureProvider,
     pub(crate) display_name: &'static str,

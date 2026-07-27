@@ -1,7 +1,5 @@
 use serde_json::{Map, Value};
 
-use crate::ContentRef;
-
 const MAX_RESULT_IDENTIFIERS: usize = 32;
 const MAX_CALL_ID_BYTES: usize = 256;
 const MAX_TOOL_IDENTITY_BYTES: usize = 256;
@@ -68,13 +66,6 @@ pub fn compact_result_payload(payload: &Value) -> Value {
     {
         compact.insert("result_evidence".to_owned(), evidence);
     }
-    if let Some(content_ref) = first_result_field(payload, body, &["result_content_ref"])
-        .and_then(|value| serde_json::from_value::<ContentRef>(value.clone()).ok())
-        .and_then(|value| serde_json::to_value(value).ok())
-    {
-        compact.insert("result_content_ref".to_owned(), content_ref);
-    }
-
     Value::Object(compact)
 }
 
@@ -207,11 +198,7 @@ mod tests {
                 "result_evidence": [
                     {"kind": "call_id", "value": "call-1"},
                     {"kind": "git_oid", "value": "a".repeat(40)}
-                ],
-                "result_content_ref": {
-                    "sha256": "b".repeat(64),
-                    "byte_len": 1024
-                }
+                ]
             })
         );
     }

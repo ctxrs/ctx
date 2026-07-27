@@ -265,6 +265,18 @@ fn insert_provider_refresh_properties(
     );
     insert_optional_count(properties, "failures_bucket", Some(refresh.counts.failures));
     insert_optional_bytes(properties, "bytes_bucket", Some(refresh.counts.bytes));
+    if let Some(performance) = refresh.performance {
+        insert_optional_duration(
+            properties,
+            "cpu_duration_bucket",
+            Some(performance.cpu_duration),
+        );
+        insert_optional_bytes(
+            properties,
+            "observed_process_peak_rss_bucket",
+            performance.observed_process_peak_rss,
+        );
+    }
 }
 
 fn insert_client_operation_properties(

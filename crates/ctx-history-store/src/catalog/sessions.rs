@@ -5,7 +5,7 @@ use serde_json::Value;
 use crate::connection::{
     capped_i64, collect_rows, nonnegative_i64_to_u64, parse_json, parse_text_enum,
 };
-use crate::{Result, Store};
+use crate::{Result, Store, StoreError};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CatalogSession {
@@ -244,6 +244,38 @@ impl Store {
             catalog_session_from_row,
         )?;
         collect_rows(rows)
+    }
+
+    pub fn list_catalog_sessions_for_source_bounded(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        maximum: usize,
+    ) -> Result<Vec<CatalogSession>> {
+        let sentinel_limit = maximum.saturating_add(1);
+        let mut stmt = self.conn.prepare(
+            format!(
+                "{} WHERE provider = ?1 AND source_root = ?2 ORDER BY source_path LIMIT ?3",
+                catalog_session_select_sql("")
+            )
+            .as_str(),
+        )?;
+        let rows = stmt.query_map(
+            params![
+                provider.as_str(),
+                source_root,
+                capped_i64(sentinel_limit as u64)
+            ],
+            catalog_session_from_row,
+        )?;
+        let sessions = collect_rows(rows)?;
+        if sessions.len() > maximum {
+            return Err(StoreError::CatalogSessionLimitExceeded {
+                observed: sessions.len(),
+                maximum,
+            });
+        }
+        Ok(sessions)
     }
 
     pub fn catalog_source_stale_session_count(

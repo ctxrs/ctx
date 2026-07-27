@@ -347,6 +347,16 @@ fn native_provider_default_discovery_uses_importer_specific_file_predicates() {
     assert_source_status(
         temp.path(),
         CaptureProvider::Cursor,
+        ProviderSourceStatus::Empty,
+    );
+    std::fs::write(
+        cursor.join("project/agent-transcripts/session/session.jsonl"),
+        "{}\n",
+    )
+    .unwrap();
+    assert_source_status(
+        temp.path(),
+        CaptureProvider::Cursor,
         ProviderSourceStatus::Available,
     );
 
@@ -737,4 +747,57 @@ fn supported_explicit_shapes_and_missing_textual_paths_keep_pinned_mapping() {
     assert_eq!(source.path, missing_archive);
     assert_eq!(source.status, ProviderSourceStatus::Missing);
     assert_eq!(source.source_format, "mux_session_jsonl");
+}
+
+#[test]
+fn explicit_codex_files_use_bounded_schema_admission_not_filenames() {
+    let temp = tempdir();
+    let prompt_named_rollout = temp.path().join("rollout-renamed.jsonl");
+    std::fs::write(
+        &prompt_named_rollout,
+        r#"{"session_id":"prompt-session","ts":1782259200,"text":"prompt"}"#,
+    )
+    .unwrap();
+    let rollout_named_history = temp.path().join("history.jsonl");
+    std::fs::write(
+        &rollout_named_history,
+        r#"{"timestamp":"2026-06-24T10:00:00Z","type":"session_meta","payload":{"id":"rollout-session"}}"#,
+    )
+    .unwrap();
+
+    let prompt = provider_source_for_path(CaptureProvider::Codex, prompt_named_rollout);
+    assert_eq!(prompt.status, ProviderSourceStatus::Available);
+    assert_eq!(prompt.source_format, "codex_history_jsonl");
+
+    let rollout = provider_source_for_path(CaptureProvider::Codex, rollout_named_history);
+    assert_eq!(rollout.status, ProviderSourceStatus::Available);
+    assert_eq!(rollout.source_format, "codex_session_jsonl");
+}
+
+#[test]
+fn explicit_codex_admission_rejects_ambiguous_files_and_keeps_trees_typed() {
+    let temp = tempdir();
+    let ambiguous = temp.path().join("ambiguous.jsonl");
+    std::fs::write(
+        &ambiguous,
+        r#"{"session_id":"both","ts":1782259200,"text":"both","timestamp":"2026-06-24T10:00:00Z","type":"session_meta","payload":{}}"#,
+    )
+    .unwrap();
+    let ambiguous = provider_source_for_path(CaptureProvider::Codex, ambiguous);
+    assert_eq!(ambiguous.status, ProviderSourceStatus::Unsupported);
+    assert_eq!(ambiguous.source_format, "unsupported");
+    assert!(ambiguous
+        .unsupported_reason
+        .is_some_and(|reason| reason.contains("schema is ambiguous")));
+
+    let tree = temp.path().join("renamed-tree");
+    std::fs::create_dir_all(&tree).unwrap();
+    std::fs::write(
+        tree.join("session.jsonl"),
+        r#"{"timestamp":"2026-06-24T10:00:00Z","type":"session_meta","payload":{"id":"tree-session"}}"#,
+    )
+    .unwrap();
+    let tree = provider_source_for_path(CaptureProvider::Codex, tree);
+    assert_eq!(tree.status, ProviderSourceStatus::Available);
+    assert_eq!(tree.source_format, "codex_session_jsonl_tree");
 }

@@ -4,6 +4,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     common::time::parse_rfc3339_utc,
+    complete_content::sqlite::sqlite_logical_record_digest,
+    native_source::NativeSqliteValue,
     provider::sqlite::{
         ensure_sqlite_table_columns, optional_column_expr, sqlite_schema_fingerprint,
         sqlite_table_columns, sqlite_table_exists, SqliteLengthPreflightGuard,
@@ -54,7 +56,8 @@ impl ZedNativeSchema {
             &columns,
             "Zed NativePath threads table",
             &["id", "summary", "updated_at", "data_type", "data"],
-        )?;
+        )
+        .map_err(|error| ZedNativePathError::UnsupportedSchema(error.to_string()))?;
         require_native_thread_identity(connection)?;
         let user_version: i64 =
             connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -306,6 +309,7 @@ pub(super) fn scan_zed_native_snapshot(
                 .encoded_payload_bytes
                 .saturating_add(u64::try_from(row.data.len()).unwrap_or(u64::MAX));
             hash_hydrated_row(&mut source_hasher, &row);
+            let record_digest = zed_logical_record_digest(&row);
             let row_updated_at = match parse_zed_timestamp(&row.updated_at) {
                 Some(value) => value,
                 None => {
@@ -384,8 +388,12 @@ pub(super) fn scan_zed_native_snapshot(
                     })?;
                     counters.sessions_retained = counters.sessions_retained.saturating_add(1);
                     let output = decoded.emit_events(thread_ordinal, &mut |draft| {
-                        let event =
-                            super::dto::ZedNativeEvent::from_draft(row.rowid, &row.id, draft);
+                        let event = super::dto::ZedNativeEvent::from_draft(
+                            row.rowid,
+                            &row.id,
+                            draft,
+                            record_digest.clone(),
+                        )?;
                         counters.retained_events = counters.retained_events.saturating_add(1);
                         counters.retained_body_bytes = counters
                             .retained_body_bytes
@@ -435,6 +443,27 @@ pub(super) fn scan_zed_native_snapshot(
         pages_emitted,
         counters,
     })
+}
+
+fn zed_logical_record_digest(
+    row: &ZedHydratedRow,
+) -> crate::complete_content::CompleteContentBodyDigest {
+    sqlite_logical_record_digest(&[
+        NativeSqliteValue::Integer(row.rowid),
+        NativeSqliteValue::Text(row.id.clone()),
+        optional_native_text(row.parent_id.clone()),
+        optional_native_text(row.folder_paths.clone()),
+        optional_native_text(row.folder_paths_order.clone()),
+        NativeSqliteValue::Text(row.summary.clone()),
+        NativeSqliteValue::Text(row.updated_at.clone()),
+        NativeSqliteValue::Text(row.data_type.clone()),
+        NativeSqliteValue::Blob(row.data.clone()),
+        optional_native_text(row.created_at.clone()),
+    ])
+}
+
+fn optional_native_text(value: Option<String>) -> NativeSqliteValue {
+    value.map_or(NativeSqliteValue::Null, NativeSqliteValue::Text)
 }
 
 struct ZedCandidate {
@@ -581,18 +610,24 @@ impl ZedNativeOutputIndexWriter {
     fn new() -> ZedNativeResult<Self> {
         let file = tempfile::Builder::new()
             .prefix("ctx-zed-native-evidence-")
-            .tempfile()?;
+            .tempfile()
+            .map_err(|source| ZedNativePathError::SystemIo {
+                operation: "creating the Zed NativePath output evidence index",
+                source,
+            })?;
         let path = file.into_temp_path();
         let sqlite_path: &std::path::Path = path.as_ref();
-        let connection = Connection::open(sqlite_path)?;
-        connection.execute_batch(
-            "pragma journal_mode = off;
+        let connection = Connection::open(sqlite_path).map_err(output_index_sqlite)?;
+        connection
+            .execute_batch(
+                "pragma journal_mode = off;
              pragma synchronous = off;
              create table output_threads (
                  id text primary key collate binary
              ) without rowid;
              begin immediate;",
-        )?;
+            )
+            .map_err(output_index_sqlite)?;
         Ok(Self {
             connection,
             index: ZedNativeOutputIndex::new(path),
@@ -601,14 +636,24 @@ impl ZedNativeOutputIndexWriter {
 
     fn push(&mut self, id: &str) -> ZedNativeResult<()> {
         self.connection
-            .execute("insert into output_threads (id) values (?1)", [id])?;
+            .execute("insert into output_threads (id) values (?1)", [id])
+            .map_err(output_index_sqlite)?;
         Ok(())
     }
 
     fn finish(self) -> ZedNativeResult<ZedNativeOutputIndex> {
-        self.connection.execute_batch("commit")?;
+        self.connection
+            .execute_batch("commit")
+            .map_err(output_index_sqlite)?;
         drop(self.connection);
         Ok(self.index)
+    }
+}
+
+fn output_index_sqlite(source: rusqlite::Error) -> ZedNativePathError {
+    ZedNativePathError::SystemSqlite {
+        operation: "using the Zed NativePath output evidence index",
+        source,
     }
 }
 

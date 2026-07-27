@@ -5,21 +5,25 @@ use crate::common::io::{
 };
 use crate::Result;
 
-fn codebuddy_is_session_dir(path: &Path) -> bool {
-    codebuddy_is_regular_file(&path.join("index.json"))
-        && codebuddy_is_directory(&path.join("messages"))
+fn codebuddy_is_session_dir(path: &Path) -> Result<bool> {
+    Ok(codebuddy_is_regular_file(&path.join("index.json"))?
+        && codebuddy_is_directory(&path.join("messages"))?)
 }
 
-fn codebuddy_is_regular_file(path: &Path) -> bool {
-    fs::symlink_metadata(path)
-        .map(|metadata| metadata.file_type().is_file())
-        .unwrap_or(false)
+fn codebuddy_is_regular_file(path: &Path) -> Result<bool> {
+    codebuddy_path_type(path, |metadata| metadata.file_type().is_file())
 }
 
-fn codebuddy_is_directory(path: &Path) -> bool {
-    fs::symlink_metadata(path)
-        .map(|metadata| metadata.file_type().is_dir())
-        .unwrap_or(false)
+fn codebuddy_is_directory(path: &Path) -> Result<bool> {
+    codebuddy_path_type(path, |metadata| metadata.file_type().is_dir())
+}
+
+fn codebuddy_path_type(path: &Path, matches: impl FnOnce(&fs::Metadata) -> bool) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(matches(&metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub(super) fn visit_codebuddy_extension_sessions(
@@ -35,7 +39,7 @@ pub(super) fn visit_codebuddy_extension_sessions(
         let Some(parent) = root.parent() else {
             return Ok(0);
         };
-        if codebuddy_is_session_dir(parent) {
+        if codebuddy_is_session_dir(parent)? {
             visit(parent)?;
             return Ok(1);
         }
@@ -45,7 +49,7 @@ pub(super) fn visit_codebuddy_extension_sessions(
         return Ok(0);
     }
     ensure_provider_path_parents_are_not_symlinks(root)?;
-    if codebuddy_is_session_dir(root) {
+    if codebuddy_is_session_dir(root)? {
         visit(root)?;
         return Ok(1);
     }
@@ -69,14 +73,10 @@ fn visit_codebuddy_project_sessions(
     visit: &mut dyn FnMut(&Path) -> Result<()>,
 ) -> Result<usize> {
     let mut visited = 0_usize;
-    let Ok(entries) = fs::read_dir(project_dir) else {
-        return Ok(0);
-    };
-    for entry in entries.flatten() {
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        if file_type.is_dir() && codebuddy_is_session_dir(&entry.path()) {
+    let entries = fs::read_dir(project_dir)?.collect::<std::result::Result<Vec<_>, _>>()?;
+    for entry in entries {
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() && codebuddy_is_session_dir(&entry.path())? {
             visit(&entry.path())?;
             visited = visited.saturating_add(1);
         }
@@ -89,11 +89,9 @@ fn visit_codebuddy_history_root(
     visit: &mut dyn FnMut(&Path) -> Result<()>,
 ) -> Result<usize> {
     let mut visited = 0_usize;
-    let Ok(entries) = fs::read_dir(history_dir) else {
-        return Ok(0);
-    };
-    for entry in entries.flatten() {
-        if entry.file_type().is_ok_and(|file_type| file_type.is_dir()) {
+    let entries = fs::read_dir(history_dir)?.collect::<std::result::Result<Vec<_>, _>>()?;
+    for entry in entries {
+        if entry.file_type()?.is_dir() {
             visited =
                 visited.saturating_add(visit_codebuddy_project_sessions(&entry.path(), visit)?);
         }
@@ -111,18 +109,13 @@ fn visit_nested_codebuddy_history_roots(
         return Ok(0);
     }
     let mut visited = 0_usize;
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(_) => return Ok(0),
-    };
-    for entry in entries.flatten() {
+    let entries = fs::read_dir(dir)?.collect::<std::result::Result<Vec<_>, _>>()?;
+    for entry in entries {
         *inspected = inspected.saturating_add(1);
         if *inspected > 20_000 {
             break;
         }
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
+        let file_type = entry.file_type()?;
         if !file_type.is_dir() {
             continue;
         }

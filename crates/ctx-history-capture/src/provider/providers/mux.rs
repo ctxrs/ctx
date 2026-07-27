@@ -4,7 +4,7 @@ mod normalization;
 mod source;
 
 pub(crate) use native_path::import_mux_native_path;
-pub(crate) use normalization::{mux_event_id, mux_event_text, mux_event_type, mux_result_content};
+pub(crate) use normalization::{mux_event_id, mux_event_text, mux_event_type};
 
 const MUX_CAPTURE_REVISION: u32 = 2;
 const MUX_POLICY_REVISION: u32 = 5;

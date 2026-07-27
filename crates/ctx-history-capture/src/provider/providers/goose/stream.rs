@@ -6,6 +6,11 @@ use crate::{CaptureError, OutputOutcome, Result};
 use super::position::GooseNativeRowKeyset;
 use super::schema::{GooseNativeSchema, GooseSessionRow};
 
+mod identity;
+
+use identity::{goose_native_message_identity, goose_normalized_message_id_sql};
+pub(super) use identity::{goose_native_message_identity_at, goose_prepare_native_identity_index};
+
 pub(super) fn goose_retained_length_expr(expressions: &[String]) -> String {
     expressions
         .iter()
@@ -26,6 +31,7 @@ const GOOSE_NATIVE_PAGE_UNIT_OVERHEAD_BYTES: u64 = 1024;
 const GOOSE_NATIVE_MAX_MESSAGE_ID_BYTES: u64 = 1_024;
 const GOOSE_NATIVE_IDENTITY_TABLE: &str = "goose_native_message_identity_counts";
 const GOOSE_NATIVE_MESSAGE_METADATA_TABLE: &str = "goose_native_message_metadata";
+const GOOSE_NATIVE_ACCEPTED_SESSION_TABLE: &str = "goose_native_accepted_sessions";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct GooseNativePageLimits {
@@ -77,6 +83,7 @@ pub(super) struct GooseScannedSession {
     pub(super) sqlite_rowid: i64,
     pub(super) bounded_native_identity: Option<String>,
     pub(super) observed_bytes: u64,
+    pub(super) storage_class_supported: bool,
     pub(super) row: Option<GooseSessionRow>,
 }
 
@@ -157,6 +164,13 @@ pub(super) struct GooseScannedOutput {
     pub(super) timestamp: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct GooseNativeMessageIdentity {
+    pub(super) native_identity: String,
+    pub(super) provider_message_identity: String,
+    pub(super) identity_degraded: bool,
+}
+
 impl GooseScannedMessage {
     pub(super) fn into_retained(self) -> Result<GooseRetainedMessage> {
         if self.disposition != GooseMessageCellDisposition::Retained {
@@ -189,60 +203,6 @@ impl GooseScannedMessage {
     }
 }
 
-pub(super) fn goose_prepare_native_identity_index(
-    conn: &Connection,
-    schema: &GooseNativeSchema,
-) -> Result<()> {
-    conn.execute_batch(&format!(
-        "drop table if exists temp.{GOOSE_NATIVE_IDENTITY_TABLE};
-         drop table if exists temp.{GOOSE_NATIVE_MESSAGE_METADATA_TABLE};
-         create temp table {GOOSE_NATIVE_IDENTITY_TABLE} (
-             message_id text primary key,
-             uses integer not null
-         ) without rowid;
-         create temp table {GOOSE_NATIVE_MESSAGE_METADATA_TABLE} (
-             sqlite_rowid integer primary key,
-             native_message_id text,
-             message_id_uses integer not null,
-             message_ordinal integer not null
-         );"
-    ))?;
-    let message_id = schema.message_id_expression("m");
-    let normalized = format!(
-        "case when {message_id} is not null \
-              and octet_length(cast({message_id} as text)) <= {GOOSE_NATIVE_MAX_MESSAGE_ID_BYTES} \
-         then nullif(trim(cast({message_id} as text)), '') else null end"
-    );
-    conn.execute(
-        &format!(
-            "insert into temp.{GOOSE_NATIVE_IDENTITY_TABLE} (message_id, uses)
-             select {normalized}, count(*)
-             from messages m
-             where {normalized} is not null
-             group by {normalized}"
-        ),
-        [],
-    )?;
-    conn.execute(
-        &format!(
-            "insert into temp.{GOOSE_NATIVE_MESSAGE_METADATA_TABLE} (
-                 sqlite_rowid, native_message_id, message_id_uses, message_ordinal
-             )
-             select
-                 m.rowid,
-                 {normalized},
-                 coalesce(ids.uses, 0),
-                 row_number() over (order by m.rowid) - 1
-             from messages m
-             left join temp.{GOOSE_NATIVE_IDENTITY_TABLE} ids
-               on ids.message_id = {normalized}
-             order by m.rowid"
-        ),
-        [],
-    )?;
-    Ok(())
-}
-
 pub(super) fn goose_fetch_native_session_page(
     conn: &Connection,
     schema: &GooseNativeSchema,
@@ -253,6 +213,7 @@ pub(super) fn goose_fetch_native_session_page(
         .map_err(|_| CaptureError::InvalidPayload("Goose page row limit exceeds i64".to_owned()))?;
     let expressions = schema.session_hydration_expressions("s");
     let retained_bytes = goose_retained_length_expr(&expressions);
+    let storage_class_supported = schema.session_storage_class_predicate("s");
     let guarded_select = expressions
         .iter()
         .map(|expression| {
@@ -271,8 +232,11 @@ pub(super) fn goose_fetch_native_session_page(
              select
                  s.rowid as sqlite_rowid,
                  {retained_bytes} as retained_bytes,
+                 case when {storage_class_supported} then 1 else 0 end
+                     as storage_class_supported,
                  case
-                     when octet_length(cast(s.id as text)) <= 16384
+                     when typeof(s.id) = 'text'
+                          and octet_length(s.id) <= 16384
                      then cast(s.id as text)
                      else null
                  end as bounded_native_identity
@@ -283,7 +247,10 @@ pub(super) fn goose_fetch_native_session_page(
          ),
          classified as (
              select *,
-                 case when retained_bytes <= ?3 then 1 else 0 end as representable
+                 case
+                     when storage_class_supported = 1 and retained_bytes <= ?3 then 1
+                     else 0
+                 end as representable
              from candidates
          ),
          measured as (
@@ -305,6 +272,7 @@ pub(super) fn goose_fetch_native_session_page(
              selected.sqlite_rowid,
              selected.bounded_native_identity,
              selected.retained_bytes,
+             selected.storage_class_supported,
              selected.representable,
              {guarded_select}
          from selected
@@ -318,34 +286,36 @@ pub(super) fn goose_fetch_native_session_page(
             let raw_observed_bytes: i64 = row.get(2)?;
             let observed_bytes = u64::try_from(raw_observed_bytes)
                 .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(2, raw_observed_bytes))?;
-            let representable = row.get::<_, i64>(3)? != 0;
+            let storage_class_supported = row.get::<_, i64>(3)? != 0;
+            let representable = row.get::<_, i64>(4)? != 0;
             Ok(GooseScannedSession {
                 sqlite_rowid: row.get(0)?,
                 bounded_native_identity: row.get(1)?,
                 observed_bytes,
+                storage_class_supported,
                 row: if representable {
                     Some(GooseSessionRow {
-                        id: row.get(4)?,
-                        name: row.get(5)?,
-                        description: row.get(6)?,
-                        user_set_name: row.get::<_, i64>(7)? != 0,
-                        session_type: row.get(8)?,
-                        working_dir: row.get(9)?,
-                        created_at: row.get(10)?,
-                        updated_at: row.get(11)?,
-                        extension_data: row.get(12)?,
-                        total_tokens: row.get(13)?,
-                        input_tokens: row.get(14)?,
-                        output_tokens: row.get(15)?,
-                        accumulated_total_tokens: row.get(16)?,
-                        accumulated_input_tokens: row.get(17)?,
-                        accumulated_output_tokens: row.get(18)?,
-                        accumulated_cost: row.get(19)?,
-                        provider_name: row.get(20)?,
-                        model_config_json: row.get(21)?,
-                        goose_mode: row.get(22)?,
-                        archived_at: row.get(23)?,
-                        project_id: row.get(24)?,
+                        id: row.get(5)?,
+                        name: row.get(6)?,
+                        description: row.get(7)?,
+                        user_set_name: row.get::<_, i64>(8)? != 0,
+                        session_type: row.get(9)?,
+                        working_dir: row.get(10)?,
+                        created_at: row.get(11)?,
+                        updated_at: row.get(12)?,
+                        extension_data: row.get(13)?,
+                        total_tokens: row.get(14)?,
+                        input_tokens: row.get(15)?,
+                        output_tokens: row.get(16)?,
+                        accumulated_total_tokens: row.get(17)?,
+                        accumulated_input_tokens: row.get(18)?,
+                        accumulated_output_tokens: row.get(19)?,
+                        accumulated_cost: row.get(20)?,
+                        provider_name: row.get(21)?,
+                        model_config_json: row.get(22)?,
+                        goose_mode: row.get(23)?,
+                        archived_at: row.get(24)?,
+                        project_id: row.get(25)?,
                     })
                 } else {
                     None
@@ -376,11 +346,8 @@ pub(super) fn goose_fetch_native_message_page(
     let timestamp = schema.message_timestamp_expression("m");
     let tokens = schema.message_tokens_expression("m");
     let metadata = schema.message_metadata_expression("m");
-    let normalized_message_id = format!(
-        "case when {message_id} is not null \
-              and octet_length(cast({message_id} as text)) <= {GOOSE_NATIVE_MAX_MESSAGE_ID_BYTES} \
-         then nullif(trim(cast({message_id} as text)), '') else null end"
-    );
+    let normalized_message_id = goose_normalized_message_id_sql(&message_id);
+    let storage_class_supported = schema.message_storage_class_predicate("m");
     let keyset_operator = keyset.sql_operator();
     let content_disposition = goose_native_content_visitor_sql();
     let output_outcome = goose_native_output_outcome_sql();
@@ -391,22 +358,41 @@ pub(super) fn goose_fetch_native_message_page(
                  cast(m.id as integer) as native_order,
                  {normalized_message_id} as native_message_id,
                  coalesce(ids.uses, 0) as message_id_uses,
-                 cast(m.session_id as text) as session_identity,
-                 s.rowid as parent_rowid,
-                 cast(m.role as text) as role,
+                 coalesce(
+                     case when typeof(m.session_id) = 'text' then m.session_id end,
+                     ''
+                 ) as session_identity,
+                 accepted.sqlite_rowid as parent_rowid,
+                 coalesce(
+                     case when typeof(m.role) = 'text' then m.role end,
+                     ''
+                 ) as role,
                  m.content_json as content_json,
                  typeof(m.content_json) as content_storage_class,
                  coalesce(octet_length(m.content_json), 0) as content_bytes,
                  coalesce(octet_length({tokens}), 0)
                      + coalesce(octet_length({metadata}), 0) as auxiliary_bytes,
-                 {created_timestamp} as created_timestamp,
-                 {timestamp} as native_timestamp,
-                 {tokens} as tokens_json,
-                 {metadata} as metadata_json
+                 case
+                     when typeof({created_timestamp}) in ('null', 'integer')
+                     then {created_timestamp}
+                 end as created_timestamp,
+                 case
+                     when typeof({timestamp}) in ('null', 'text')
+                     then {timestamp}
+                 end as native_timestamp,
+                 case
+                     when typeof({tokens}) in ('null', 'integer', 'real')
+                     then {tokens}
+                 end as tokens_json,
+                 case
+                     when typeof({metadata}) in ('null', 'text')
+                     then {metadata}
+                 end as metadata_json,
+                 case when {storage_class_supported} then 1 else 0 end
+                     as storage_class_supported
              from messages m
-             left join sessions s
-               on cast(s.id as text) = cast(m.session_id as text)
-              and trim(cast(s.id as text)) != ''
+             left join temp.{GOOSE_NATIVE_ACCEPTED_SESSION_TABLE} accepted
+               on accepted.session_identity = m.session_id
              left join temp.{GOOSE_NATIVE_IDENTITY_TABLE} ids
                on ids.message_id = {normalized_message_id}
              where m.rowid {keyset_operator} ?1
@@ -473,30 +459,8 @@ pub(super) fn goose_fetch_native_message_page(
             let native_order: i64 = row.get(1)?;
             let native_message_id: Option<String> = row.get(2)?;
             let message_id_uses: i64 = row.get(3)?;
-            let identity_degraded = native_message_id.is_none() || message_id_uses != 1;
-            let provider_message_identity = if identity_degraded {
-                format!("row-{native_order}")
-            } else {
-                native_message_id
-                    .clone()
-                    .unwrap_or_else(|| format!("row-{native_order}"))
-            };
-            let native_identity = match (identity_degraded, native_message_id) {
-                (false, Some(native_message_id)) => {
-                    goose_tagged_native_message_identity(&native_message_id)
-                }
-                (true, _) => goose_tagged_fallback_message_identity(native_order),
-                (false, None) => {
-                    return Err(rusqlite::Error::FromSqlConversionFailure(
-                        2,
-                        rusqlite::types::Type::Null,
-                        std::io::Error::other(
-                            "unique Goose native message identity unexpectedly missing",
-                        )
-                        .into(),
-                    ));
-                }
-            };
+            let identity =
+                goose_native_message_identity(native_message_id, message_id_uses, native_order);
             let (disposition, retained_class, output_outcome) = match row.get::<_, i64>(6)? {
                 0 => (
                     GooseMessageCellDisposition::Retained,
@@ -558,9 +522,9 @@ pub(super) fn goose_fetch_native_message_page(
             Ok(GooseScannedMessage {
                 sqlite_rowid: row.get(0)?,
                 native_order,
-                native_identity,
-                provider_message_identity,
-                identity_degraded,
+                native_identity: identity.native_identity,
+                provider_message_identity: identity.provider_message_identity,
+                identity_degraded: identity.identity_degraded,
                 session_identity: row.get(4)?,
                 role: row.get(5)?,
                 disposition,
@@ -597,6 +561,7 @@ pub(super) fn goose_fetch_native_output_page(
     let timestamp = schema.message_timestamp_expression("m");
     let tokens = schema.message_tokens_expression("m");
     let metadata = schema.message_metadata_expression("m");
+    let storage_class_supported = schema.message_storage_class_predicate("m");
     let keyset_operator = keyset.sql_operator();
     let content_disposition = goose_native_content_visitor_sql();
     let output_outcome = goose_native_output_outcome_sql();
@@ -608,24 +573,45 @@ pub(super) fn goose_fetch_native_output_page(
                  native.native_message_id,
                  native.message_id_uses,
                  native.message_ordinal,
-                 cast(m.session_id as text) as session_identity,
-                 s.rowid as parent_rowid,
-                 cast(m.role as text) as role,
+                 coalesce(
+                     case when typeof(m.session_id) = 'text' then m.session_id end,
+                     ''
+                 ) as session_identity,
+                 accepted.sqlite_rowid as parent_rowid,
+                 coalesce(
+                     case when typeof(m.role) = 'text' then m.role end,
+                     ''
+                 ) as role,
                  m.content_json as content_json,
                  typeof(m.content_json) as content_storage_class,
                  coalesce(octet_length(m.content_json), 0) as content_bytes,
                  coalesce(octet_length({tokens}), 0)
                      + coalesce(octet_length({metadata}), 0)
-                     + coalesce(octet_length(cast(m.session_id as text)), 0)
-                     + coalesce(octet_length(cast(m.role as text)), 0) as auxiliary_bytes,
-                 {created_timestamp} as created_timestamp,
-                 {timestamp} as native_timestamp
+                     + coalesce(
+                         octet_length(
+                             case when typeof(m.session_id) = 'text' then m.session_id end
+                         ),
+                         0
+                     )
+                     + coalesce(
+                         octet_length(case when typeof(m.role) = 'text' then m.role end),
+                         0
+                     ) as auxiliary_bytes,
+                 case
+                     when typeof({created_timestamp}) in ('null', 'integer')
+                     then {created_timestamp}
+                 end as created_timestamp,
+                 case
+                     when typeof({timestamp}) in ('null', 'text')
+                     then {timestamp}
+                 end as native_timestamp,
+                 case when {storage_class_supported} then 1 else 0 end
+                     as storage_class_supported
              from messages m
              join temp.{GOOSE_NATIVE_MESSAGE_METADATA_TABLE} native
                on native.sqlite_rowid = m.rowid
-             left join sessions s
-               on cast(s.id as text) = cast(m.session_id as text)
-              and trim(cast(s.id as text)) != ''
+             left join temp.{GOOSE_NATIVE_ACCEPTED_SESSION_TABLE} accepted
+               on accepted.session_identity = m.session_id
              where m.rowid {keyset_operator} ?1
          ),
          structural as (
@@ -677,28 +663,8 @@ pub(super) fn goose_fetch_native_output_page(
             let native_order: i64 = row.get(1)?;
             let native_message_id: Option<String> = row.get(2)?;
             let message_id_uses: i64 = row.get(3)?;
-            let identity_degraded = native_message_id.is_none() || message_id_uses != 1;
-            let provider_message_identity = if identity_degraded {
-                format!("row-{native_order}")
-            } else {
-                native_message_id
-                    .clone()
-                    .unwrap_or_else(|| format!("row-{native_order}"))
-            };
-            let native_identity = if identity_degraded {
-                goose_tagged_fallback_message_identity(native_order)
-            } else if let Some(native_message_id) = native_message_id {
-                goose_tagged_native_message_identity(&native_message_id)
-            } else {
-                return Err(rusqlite::Error::FromSqlConversionFailure(
-                    2,
-                    rusqlite::types::Type::Null,
-                    std::io::Error::other(
-                        "unique Goose native message identity unexpectedly missing",
-                    )
-                    .into(),
-                ));
-            };
+            let identity =
+                goose_native_message_identity(native_message_id, message_id_uses, native_order);
             let raw_ordinal: i64 = row.get(4)?;
             let source_record_ordinal = u64::try_from(raw_ordinal)
                 .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(4, raw_ordinal))?;
@@ -722,9 +688,9 @@ pub(super) fn goose_fetch_native_output_page(
                 sqlite_rowid: row.get(0)?,
                 native_order,
                 source_record_ordinal,
-                native_identity,
-                provider_message_identity,
-                identity_degraded,
+                native_identity: identity.native_identity,
+                provider_message_identity: identity.provider_message_identity,
+                identity_degraded: identity.identity_degraded,
                 session_identity: row.get(5)?,
                 outcome,
                 content_json: row.get(7)?,
@@ -786,8 +752,13 @@ pub(super) fn goose_has_any_native_message(conn: &Connection) -> Result<bool> {
     .map_err(CaptureError::from)
 }
 
-pub(super) fn goose_has_native_output_after(conn: &Connection, rowid: i64) -> Result<bool> {
+pub(super) fn goose_has_native_output_after(
+    conn: &Connection,
+    schema: &GooseNativeSchema,
+    rowid: i64,
+) -> Result<bool> {
     let content_disposition = goose_native_content_visitor_sql();
+    let storage_class_supported = schema.message_storage_class_predicate("m");
     let tokens = "NULL";
     let metadata = "NULL";
     conn.query_row(
@@ -801,11 +772,12 @@ pub(super) fn goose_has_native_output_after(conn: &Connection, rowid: i64) -> Re
                          coalesce(octet_length(m.content_json), 0) as content_bytes,
                          coalesce(octet_length({tokens}), 0)
                              + coalesce(octet_length({metadata}), 0) as auxiliary_bytes,
-                         s.rowid as parent_rowid
+                         accepted.sqlite_rowid as parent_rowid,
+                         case when {storage_class_supported} then 1 else 0 end
+                             as storage_class_supported
                      from messages m
-                     left join sessions s
-                       on cast(s.id as text) = cast(m.session_id as text)
-                      and trim(cast(s.id as text)) != ''
+                     left join temp.{GOOSE_NATIVE_ACCEPTED_SESSION_TABLE} accepted
+                       on accepted.session_identity = m.session_id
                      where m.rowid > ?1
                  )
                  where {content_disposition} = 1
@@ -842,6 +814,7 @@ fn goose_native_content_visitor_sql() -> &'static str {
     // SQLite/serde semantics. Any direct toolResponse value dominates the
     // entire row; other duplicate type keys fail closed as a local rejection.
     "case
+         when storage_class_supported = 0 then 8
          when parent_rowid is null then 7
          when content_storage_class != 'text' then 8
          when json_valid(content_json) = 0 then 2

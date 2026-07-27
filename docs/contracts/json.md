@@ -816,7 +816,7 @@ The same base path-safe shape is returned by the MCP `pro_status` tool and
 embedded by `ctx doctor --json` under `pro`. MCP `pro_status` also adds
 `conversion_action` and `local_usage`; doctor does not.
 
-`conversion_action` is `pro_monthly_conversion` at `"$15/month"` for `trial`
+`conversion_action` is `pro_monthly_conversion` at `"$20/month"` for `trial`
 or an unpriced `pro_restore_access` for `locked`, both pointing to
 `ctx pro manage`. The restore action includes `graph_preserved: true` and
 `reason: "access_locked"`. It is null for paid `active`,
@@ -827,6 +827,11 @@ added to blame results or citations.
 `ctx pro --json` and its explicit synonym `ctx pro setup --json` both run the
 idempotent setup path, report operation `setup`, and return the
 `schema_version: 1`, `payload_type: "pro_setup"` contract.
+`ctx pro --referral <codename> --json` uses that same setup payload. It accepts
+the codename only for the first anonymous-trial challenge and does not echo the
+raw codename or opaque claim in JSON. The resulting attribution is immutable.
+An accepted referral produces a 30-day trial; setup without one remains the
+ordinary 14-day trial.
 `ctx pro manage --no-open --json` and
 `ctx pro uninstall (--delete-data|--keep-data) --json` return the `pro_manage`
 and `pro_uninstall` payload types respectively.
@@ -908,6 +913,94 @@ Stable codes include `pro_not_installed`, `commercial_unavailable`,
 `helper_crashed`, and `helper_timeout`.
 Native key-store failures use only `key_store_unavailable` and
 `key_store_locked`. Unshipped `credential_vault_*` spellings are not aliases.
+
+## Referrals
+
+```bash
+ctx referral create <codename> --json
+ctx referral status --json
+ctx referral payout [--country <CC>] [--entity-type <individual|company>] --json
+```
+
+All three commands return schema version 1. JSON referral commands use cached
+WorkOS authentication only. They never start device authorization or invoke a
+browser opener; a missing cached session fails with
+`authentication_required`. The payloads contain no human referral slogan or
+promotional message. Any verified person can create a codename; a Pro trial or
+subscription is not required.
+
+`ctx referral create <codename> --json` returns:
+
+- `schema_version`;
+- `payload_type: "referral_create"`;
+- `codename`;
+- `share_command`, exactly `ctx pro --referral <codename>`;
+- `disposition`, either `created` or `existing`.
+
+`ctx referral status --json` returns:
+
+- `schema_version`;
+- `payload_type: "referral_status"`;
+- `codename`;
+- `share_command`, exactly `ctx pro --referral <codename>`;
+- `attributed`;
+- `subscribed`;
+- `earned_cents`;
+- `pending_cents`;
+- `manual_review_cents`;
+- `payable_cents`;
+- `processing_cents`;
+- `paid_cents`;
+- `debt_cents`;
+- `currency: "usd"`;
+- `payout_state`.
+
+Counts and cent amounts are nonnegative integers. The requested status payload
+is the complete machine-readable referrer summary. It is private to the
+authenticated referrer and aggregate only: it contains no referred identity,
+invoice, or per-referral ledger, and no referral fields are added to ordinary
+status or MCP output. `payout_state` is one of
+`not_eligible`, `eligible`, `onboarding_pending`, `ready`, or `paused`.
+
+`manual_review_cents` is accrued cash awaiting an explicit review outcome.
+`processing_cents` is cash sent for payout but not yet settled. `paid_cents`
+is historical cash actually settled and never decreases after a reversal;
+post-paid reversals increase `debt_cents`. Every status payload satisfies:
+
+```text
+earned_cents + debt_cents
+  = pending_cents + manual_review_cents + payable_cents
+    + processing_cents + paid_cents
+```
+
+The amounts summarize a $10 cash commission for each distinct qualifying $20
+monthly Pro invoice, invoices 1 through 12, capped at $120 per direct referral.
+Invoice 1 and invoice 2 commissions remain pending until invoice 2 settles, the
+required 14-day hold elapses, authoritative reconciliation completes, and
+manual review makes them payable. Each invoice 3 through 12 commission has its
+own 14-day hold, reconciliation, and manual-review gate. A refund or dispute
+voids an unpaid commission. Reversal of a paid commission becomes debt, a
+negative adjustment against future earnings subject to manual review, never an
+external clawback.
+
+`ctx referral payout --json` returns:
+
+- `schema_version`;
+- `payload_type: "referral_payout"`;
+- `payout_state`;
+- `onboarding_url`, a one-use Stripe-hosted URL;
+- `expires_at_unix`;
+- `browser_opened: false`.
+
+`--no-open` is optional and redundant in JSON mode. `--country` accepts a
+two-letter uppercase ISO country code, and `--entity-type` accepts
+`individual` or `company` when the hosted onboarding request requires them.
+No payout command accepts bank or card details.
+
+Stable hosted referral failures include `authentication_required`,
+`referral_codename_conflict`, `referral_not_eligible`, `referral_not_found`,
+`referral_payout_unavailable`, and `referral_self_referral`. Malformed or
+out-of-bounds hosted results fail with `invalid_response`.
 
 ## Doctor
 

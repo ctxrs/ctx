@@ -19,8 +19,12 @@ pub use discovery::{
     discover_provider_sources_with_context, discover_provider_sources_with_projects,
     provider_source_for_path,
 };
-pub(crate) use ordinary_file::open_ordinary_file_without_following;
+#[cfg(test)]
+pub(crate) use ordinary_file::forbid_ordinary_file_content_open;
 pub use ordinary_file::{observe_ordinary_file, OrdinaryFileObservation};
+pub(crate) use ordinary_file::{
+    observe_ordinary_file_strong_metadata, open_ordinary_file_without_following,
+};
 pub use specs::{provider_source_spec, provider_source_specs};
 pub use types::{
     DiscoveryIssue, DiscoveryIssueKind, DiscoveryReport, ProviderCatalogSupport,

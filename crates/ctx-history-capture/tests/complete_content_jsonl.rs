@@ -573,11 +573,11 @@ fn import_persists_only_truncated_message_locators_and_the_resolver_consumes_the
         source_record_subrecord_index: event.sync.metadata["source_record_subrecord_index"]
             .as_u64()
             .unwrap() as u32,
-        expected_provider_event_hash: event.payload["provider_event_hash"]
+        expected_provider_event_hash: event.sync.metadata["provider_event_hash"]
             .as_str()
             .unwrap()
             .to_owned(),
-        expected_hash_authority: CompleteContentHashAuthority::ProviderSupplied,
+        expected_hash_authority: CompleteContentHashAuthority::NormalizedPayloadFallback,
         expected_native_record_id: Some(persisted.native_record_id().to_owned()),
         expected_record_digest: Some(persisted.record_sha256().clone()),
         expected_content_ref: Some(persisted.content_ref().clone()),
@@ -719,11 +719,11 @@ fn provider_root_move_preserves_import_identity_restart_and_complete_content() {
             ["source_record_subrecord_index"]
             .as_u64()
             .unwrap() as u32,
-        expected_provider_event_hash: moved_events[1].payload["provider_event_hash"]
+        expected_provider_event_hash: moved_events[1].sync.metadata["provider_event_hash"]
             .as_str()
             .unwrap()
             .to_owned(),
-        expected_hash_authority: CompleteContentHashAuthority::ProviderSupplied,
+        expected_hash_authority: CompleteContentHashAuthority::NormalizedPayloadFallback,
         expected_native_record_id: Some(persisted.native_record_id().to_owned()),
         expected_record_digest: Some(persisted.record_sha256().clone()),
         expected_content_ref: Some(persisted.content_ref().clone()),
@@ -848,35 +848,13 @@ fn persisted_request_for_provider(
             source.descriptor.source_identity.clone(),
             snapshot,
         );
-        let (source_record_ordinal, source_record_subrecord_index) =
-            if provider == CaptureProvider::CodeBuddy {
-                assert_eq!(
-                    event.sync.metadata.get("source_record_ordinal"),
-                    Some(&Value::Null),
-                    "CodeBuddy typed NativePath fixture must not claim a legacy source ordinal"
-                );
-                assert_eq!(
-                    event.sync.metadata.get("source_record_subrecord_index"),
-                    Some(&Value::Null),
-                    "CodeBuddy typed NativePath fixture must not claim a legacy subrecord index"
-                );
-                assert_eq!(
-                    event.sync.metadata["fixture_line"].as_u64(),
-                    Some(1),
-                    "CodeBuddy matrix fixture is exactly one JSONL record"
-                );
-                (0, 0)
-            } else {
-                (
-                    event.sync.metadata["source_record_ordinal"]
-                        .as_u64()
-                        .unwrap(),
-                    event.sync.metadata["source_record_subrecord_index"]
-                        .as_u64()
-                        .and_then(|value| u32::try_from(value).ok())
-                        .unwrap(),
-                )
-            };
+        let source_record_ordinal = event.sync.metadata["source_record_ordinal"]
+            .as_u64()
+            .unwrap();
+        let source_record_subrecord_index = event.sync.metadata["source_record_subrecord_index"]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap();
         return CompleteMessageRequest {
             event_id: event.id,
             provider,
@@ -896,11 +874,85 @@ fn persisted_request_for_provider(
             expected_native_record_id: Some(persisted.native_record_id().to_owned()),
             expected_record_digest: Some(persisted.record_sha256().clone()),
             expected_content_ref: Some(persisted.content_ref().clone()),
-            indexed_text: event.payload["body"]["text"].as_str().unwrap().to_owned(),
+            indexed_text: ["/body/text", "/body/body/text", "/text", "/body"]
+                .into_iter()
+                .find_map(|pointer| event.payload.pointer(pointer).and_then(Value::as_str))
+                .unwrap()
+                .to_owned(),
             indexed_limit_chars: INDEXED_LIMIT,
         };
     }
     panic!("missing persisted complete-content event for {provider:?}; observed {observed:?}")
+}
+
+#[test]
+fn kimi_exact_wire_input_hydrates_from_canonical_root_and_detects_auxiliary_mutation() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join(".kimi-code");
+    let session = root.join("sessions/work/session-1");
+    let agents = session.join("agents/main");
+    fs::create_dir_all(&agents).unwrap();
+    fs::write(
+        root.join("session_index.jsonl"),
+        format!(
+            "{}\n",
+            json!({"sessionId":"session-1","sessionDir":session})
+        ),
+    )
+    .unwrap();
+    let state = session.join("state.json");
+    fs::write(
+        &state,
+        json!({"title":"original","agents":{"main":{"type":"main"}}}).to_string(),
+    )
+    .unwrap();
+    let body = "Kimi exact input unicode 雪\n".repeat(900);
+    let wire = agents.join("wire.jsonl");
+    fs::write(
+        &wire,
+        format!(
+            "{}\n{}\n",
+            json!({"type":"metadata","created_at":1784731200000_i64}),
+            json!({"type":"turn.prompt","time":1784731200001_i64,"input":body})
+        ),
+    )
+    .unwrap();
+    let mut store = Store::open(temp.path().join("kimi-exact.sqlite")).unwrap();
+
+    import_kimi_code_cli_history(
+        &wire,
+        &mut store,
+        KimiCodeCliImportOptions {
+            source_path: Some(wire.clone()),
+            ..KimiCodeCliImportOptions::default()
+        },
+    )
+    .unwrap();
+    let source = store
+        .list_capture_sources()
+        .unwrap()
+        .into_iter()
+        .find(|source| source.descriptor.provider == CaptureProvider::KimiCodeCli)
+        .unwrap();
+    assert_eq!(
+        source.descriptor.source_root.as_deref(),
+        Some(fs::canonicalize(&root).unwrap().to_str().unwrap())
+    );
+    let request = persisted_request_for_provider(&store, CaptureProvider::KimiCodeCli);
+    let resolved = JsonlCompleteContentResolver::new()
+        .resolve(std::slice::from_ref(&request))
+        .unwrap();
+    assert_eq!(resolved[0].text, body);
+
+    fs::write(
+        state,
+        json!({"title":"mutated","agents":{"main":{"type":"main"}}}).to_string(),
+    )
+    .unwrap();
+    let error = JsonlCompleteContentResolver::new()
+        .resolve(&[request])
+        .unwrap_err();
+    assert_eq!(error.kind, CompleteContentErrorKind::SourceChanged);
 }
 
 #[test]
@@ -1140,9 +1192,9 @@ fn four_provider_capability_matrix_imports_persists_and_recovers_exact_content()
             provider_wire["checkpoint"]["policy_revision"] = json!(0);
         } else if stream.starts_with("provider:kimi_code_cli:") {
             assert_eq!(provider_wire["v"].as_u64(), Some(1));
-            assert_eq!(provider_wire["p"].as_u64(), Some(5));
-            assert_eq!(provider_wire["o"].as_u64(), Some(7));
-            provider_wire["o"] = json!(6);
+            assert_eq!(provider_wire["p"].as_u64(), Some(6));
+            assert_eq!(provider_wire["o"].as_u64(), Some(8));
+            provider_wire["o"] = json!(7);
         } else {
             panic!("unexpected four-provider cursor stream: {stream}");
         }

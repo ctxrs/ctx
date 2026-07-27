@@ -5,7 +5,7 @@ use ctx_history_core::{CaptureProvider, EventRole, EventType};
 use serde_json::{json, Value};
 
 use crate::provider::normalization::{
-    provider_block_text, provider_capped_json, provider_policy_body, provider_policy_event_text,
+    provider_capped_json, provider_policy_body, provider_policy_event_text,
     provider_result_identifier_evidence, provider_result_outcome_evidence, provider_string_field,
     provider_timestamp_from_fields,
 };
@@ -303,19 +303,17 @@ pub(crate) fn auggie_entry_time(entry: &Value, exchange: Option<&Value>) -> Opti
 }
 
 pub(crate) fn auggie_request_text(exchange: &Value) -> Option<String> {
-    provider_string_field(exchange, &["request_message", "requestMessage", "message"]).or_else(
-        || {
-            auggie_nodes_text(
-                exchange
-                    .get("request_nodes")
-                    .or_else(|| exchange.get("requestNodes")),
-            )
-        },
-    )
+    provider_string_field(exchange, &["request_message", "requestMessage"]).or_else(|| {
+        auggie_nodes_text(
+            exchange
+                .get("request_nodes")
+                .or_else(|| exchange.get("requestNodes")),
+        )
+    })
 }
 
 pub(crate) fn auggie_response_text(exchange: &Value) -> Option<String> {
-    provider_string_field(exchange, &["response_text", "responseText", "response"]).or_else(|| {
+    provider_string_field(exchange, &["response_text", "responseText"]).or_else(|| {
         auggie_nodes_text(
             exchange
                 .get("response_nodes")
@@ -335,14 +333,24 @@ pub(crate) fn auggie_nodes_text(value: Option<&Value>) -> Option<String> {
 }
 
 pub(crate) fn auggie_node_text(node: &Value) -> Option<String> {
-    if auggie_node_is_tool_metadata(node) {
+    let object = node.as_object()?;
+    match object.get("type") {
+        None if object.len() == 1 => {}
+        Some(kind) if object.len() == 2 && kind.as_u64() == Some(0) => {}
+        _ => return None,
+    }
+    let text_node = match (object.get("text_node"), object.get("textNode")) {
+        (Some(text_node), None) | (None, Some(text_node)) => text_node.as_object()?,
+        _ => return None,
+    };
+    if text_node.len() != 1 {
         return None;
     }
-    node.pointer("/text_node/content")
-        .or_else(|| node.pointer("/textNode/content"))
+    text_node
+        .get("content")
         .and_then(Value::as_str)
         .map(str::to_owned)
-        .or_else(|| provider_block_text(node))
+        .filter(|text| !text.trim().is_empty())
 }
 
 pub(crate) fn auggie_node_is_tool_metadata(node: &Value) -> bool {
@@ -361,15 +369,19 @@ pub(crate) fn auggie_node_is_tool_metadata(node: &Value) -> bool {
                     | "tool_result"
                     | "tool-result"
                     | "tool_use_result"
+                    | "tool-use-result"
+                    | "tool_output"
+                    | "tool-output"
                     | "function_call"
                     | "function_result"
+                    | "function_output"
             )
         });
     tool_kind
-        || node.get("tool_name").is_some()
-        || node.get("toolName").is_some()
         || node.get("tool_call").is_some()
         || node.get("toolCall").is_some()
+        || node.get("tool_result").is_some()
+        || node.get("toolResult").is_some()
 }
 
 #[cfg(test)]

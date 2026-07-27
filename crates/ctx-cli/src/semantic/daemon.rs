@@ -29,15 +29,18 @@ use super::{
     daemon_history::{history_retry_due, restore_daemon_history_runtime_state},
     daemon_retry::DaemonRetryBackoff,
     daemon_scheduler::{daemon_run_start_mode, run_daemon_once_with_activity},
+    daemon_status::{
+        daemon_jobs_failure_message, daemon_report_failure_message, print_daemon_status_human,
+    },
     daemon_worker::{
         semantic_worker_report_for_daemon, write_daemon_lifecycle_status_with_runtime,
     },
     health_search::semantic_env_flag,
     model_runtime::SharedSemanticRuntime,
     paths_status::{
-        daemon_report, daemon_report_with_disabled_status, daemon_semantic_job_path,
-        lower_semantic_worker_priority, read_daemon_job_status, read_daemon_status,
-        write_daemon_status, DaemonLock,
+        daemon_history_refresh_job_path, daemon_report, daemon_report_with_disabled_status,
+        daemon_semantic_job_path, lower_semantic_worker_priority, read_daemon_job_status,
+        read_daemon_status, write_daemon_status, DaemonLock,
     },
     query_service::{
         daemon_can_begin_idle_shutdown, observe_daemon_query_activity,
@@ -624,95 +627,6 @@ pub(super) fn run_daemon_enabled_update(
     Ok(())
 }
 
-pub(super) fn print_daemon_status_human(daemon: &Value) {
-    println!(
-        "daemon_enabled: {}",
-        daemon
-            .get("enabled")
-            .and_then(Value::as_bool)
-            .unwrap_or(true)
-    );
-    println!(
-        "daemon_status: {}",
-        daemon
-            .get("status")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-    );
-    println!(
-        "daemon_running: {}",
-        daemon
-            .get("running")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-    );
-    println!(
-        "daemon_config_reload_status: {}",
-        daemon
-            .get("config_reload")
-            .and_then(|reload| reload.get("status"))
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-    );
-    println!(
-        "semantic_runtime_active: {}",
-        daemon
-            .get("semantic_runtime_active")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-    );
-    if let Some(reason) = daemon.get("reason").and_then(Value::as_str) {
-        println!("daemon_reason: {reason}");
-    }
-    if daemon
-        .get("recoverable")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        println!("daemon_recoverable: true");
-    }
-    println!(
-        "history_refresh_status: {}",
-        daemon
-            .get("jobs")
-            .and_then(|jobs| jobs.get("history_refresh"))
-            .and_then(|job| job.get("status"))
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-    );
-    println!(
-        "semantic_index_status: {}",
-        daemon
-            .get("jobs")
-            .and_then(|jobs| jobs.get("semantic_index"))
-            .and_then(|job| job.get("status"))
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-    );
-    let embedding_runtime = daemon
-        .get("jobs")
-        .and_then(|jobs| jobs.get("semantic_index"))
-        .and_then(|job| job.get("embedding_runtime"));
-    if let Some(backend) = embedding_runtime
-        .and_then(|runtime| runtime.get("backend"))
-        .and_then(Value::as_str)
-    {
-        println!("semantic_embedding_backend: {backend}");
-    }
-    if let Some(compute_mode) = embedding_runtime
-        .and_then(|runtime| runtime.get("compute_mode"))
-        .and_then(Value::as_str)
-    {
-        println!("semantic_embedding_compute_mode: {compute_mode}");
-    }
-    if let Some(fallback) = embedding_runtime
-        .and_then(|runtime| runtime.get("acquisition_fallback"))
-        .and_then(Value::as_str)
-    {
-        println!("semantic_embedding_fallback: {fallback}");
-    }
-}
-
 pub(super) fn run_daemon(
     args: DaemonRunArgs,
     data_root: PathBuf,
@@ -752,10 +666,14 @@ pub(super) fn run_daemon(
             return Err(error);
         }
     };
+    let failure = daemon_report_failure_message(&report);
     if args.json {
         print_json(report)?;
     } else {
         print_daemon_status_human(&report);
+    }
+    if let Some(message) = failure {
+        return Err(anyhow!(message));
     }
     Ok(())
 }
@@ -1029,13 +947,19 @@ pub(super) fn run_daemon_inner(
                 )?,
             );
         }
+        let failure_message = failed.then(|| {
+            let history = read_daemon_job_status(&daemon_history_refresh_job_path(data_root));
+            let semantic = read_daemon_job_status(&daemon_semantic_job_path(data_root));
+            daemon_jobs_failure_message(history.as_ref(), semantic.as_ref())
+                .unwrap_or_else(|| "one or more daemon jobs failed".to_owned())
+        });
         write_daemon_lifecycle_status_with_runtime(
             data_root,
             &args,
             if failed { "failed" } else { "completed" },
             started_at_ms,
             Some(utc_now().timestamp_millis()),
-            failed.then_some("one or more daemon jobs failed".to_owned()),
+            failure_message,
             query_service.is_some(),
             &config_reload.to_json(),
         )?;

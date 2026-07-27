@@ -53,8 +53,8 @@ pub(super) fn import_direct_source(
     import_profile: &ImportProfile,
 ) -> Result<ProviderImportSummary> {
     match source.provider {
-        CaptureProvider::Codex => {
-            if input_path.is_dir() {
+        CaptureProvider::Codex => match source.source_format {
+            "codex_session_jsonl_tree" => {
                 let _ = (full_rescan, preinventory);
                 import_codex_session_tree(
                     input_path,
@@ -70,41 +70,38 @@ pub(super) fn import_direct_source(
                     },
                 )
                 .map_err(anyhow::Error::from)
-            } else if input_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name == "history.jsonl")
-            {
-                import_codex_history_jsonl(
-                    input_path,
-                    store,
-                    CodexHistoryImportOptions {
-                        source_path: Some(source.path.clone()),
-                        history_record_id: Some(record_id),
-                        capture_work_limit,
-                        inventory_observation_token: inventory_observation_token.clone(),
-                        import_profile: import_profile.clone(),
-                        ..CodexHistoryImportOptions::default()
-                    },
-                )
-                .map_err(anyhow::Error::from)
-            } else {
-                import_codex_session_jsonl(
-                    input_path,
-                    store,
-                    CodexSessionImportOptions {
-                        source_path: Some(source.path.clone()),
-                        history_record_id: Some(record_id),
-                        capture_work_limit,
-                        inventory_observation_token: inventory_observation_token.clone(),
-                        import_profile: import_profile.clone(),
-                        progress,
-                        ..CodexSessionImportOptions::default()
-                    },
-                )
-                .map_err(anyhow::Error::from)
             }
-        }
+            "codex_history_jsonl" => import_codex_history_jsonl(
+                input_path,
+                store,
+                CodexHistoryImportOptions {
+                    source_path: Some(source.path.clone()),
+                    history_record_id: Some(record_id),
+                    capture_work_limit,
+                    inventory_observation_token: inventory_observation_token.clone(),
+                    import_profile: import_profile.clone(),
+                    ..CodexHistoryImportOptions::default()
+                },
+            )
+            .map_err(anyhow::Error::from),
+            "codex_session_jsonl" => import_codex_session_jsonl(
+                input_path,
+                store,
+                CodexSessionImportOptions {
+                    source_path: Some(source.path.clone()),
+                    history_record_id: Some(record_id),
+                    capture_work_limit,
+                    inventory_observation_token: inventory_observation_token.clone(),
+                    import_profile: import_profile.clone(),
+                    progress,
+                    ..CodexSessionImportOptions::default()
+                },
+            )
+            .map_err(anyhow::Error::from),
+            source_format => Err(anyhow!(
+                "unsupported admitted Codex source format `{source_format}`"
+            )),
+        },
         CaptureProvider::Pi => import_pi_session_jsonl(
             input_path,
             store,

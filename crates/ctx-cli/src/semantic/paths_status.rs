@@ -685,11 +685,9 @@ pub(crate) fn semantic_worker_report_best_effort(data_root: &Path) -> SemanticWo
     semantic_worker_report_cached(data_root, None)
         .unwrap_or_else(|error| SemanticWorkerReport::unavailable(data_root, format!("{error:#}")))
 }
-
 pub(crate) fn daemon_report(data_root: &Path, semantic_report: &SemanticWorkerReport) -> Value {
     daemon_report_with_disabled_status(data_root, semantic_report, true)
 }
-
 pub(super) fn daemon_report_with_disabled_status(
     data_root: &Path,
     semantic_report: &SemanticWorkerReport,
@@ -707,10 +705,12 @@ pub(super) fn daemon_report_with_disabled_status(
     let lock_state = lock_pid.map(process_state);
     let running = pid_lock_file_reports_running(&lock_path, lock_state, status.as_str());
     let stale_lock = lock_path.exists() && pid_lock_file_is_orphaned(&lock_path);
+    let stale_lock_overrides_lifecycle =
+        stale_lock && !["completed", "failed"].contains(&status.as_str());
     let stale_running_status = !running && status == "running";
     if running {
         status = "running".to_owned();
-    } else if stale_lock || stale_running_status {
+    } else if stale_lock_overrides_lifecycle || stale_running_status {
         status = "stale_lock".to_owned();
     } else if !enabled && (disabled_overrides_lifecycle || status == "unknown") {
         status = "disabled".to_owned();
@@ -747,8 +747,8 @@ pub(super) fn daemon_report_with_disabled_status(
         "status": status,
         "enabled": enabled,
         "running": running,
-        "recoverable": stale_lock || stale_running_status,
-        "reason": if stale_lock {
+        "recoverable": stale_lock_overrides_lifecycle || stale_running_status,
+        "reason": if stale_lock_overrides_lifecycle {
             Some("daemon_lock_stale".to_owned())
         } else if stale_running_status {
             Some("daemon_status_stale".to_owned())

@@ -14,41 +14,18 @@ use crate::provider_sources::SourceInfo;
 
 use super::{ImportFailureScope, ImportFailureType, ImportTotals, SourceStats};
 
-#[derive(Debug)]
-pub(crate) struct ImportSourceOutcome {
-    pub(crate) index: usize,
-    pub(crate) source: SourceInfo,
-    pub(crate) stats: SourceStats,
-    pub(crate) summary: ProviderImportSummary,
-    pub(crate) runtime_facts: Option<ProviderRefreshRuntimeFacts>,
-}
+mod resources;
+pub(crate) use resources::ProviderRefreshResourceObservation;
+use resources::ProviderRefreshResourceReceipt;
 
 #[derive(Debug)]
 pub(crate) struct ImportSourceFailure {
-    pub(crate) index: usize,
     pub(crate) source: SourceInfo,
     pub(crate) stats: SourceStats,
     pub(crate) error: String,
-    pub(crate) failure_scope: ImportFailureScope,
     pub(crate) failure_type: ImportFailureType,
     pub(crate) rejected_summary: Option<ProviderImportSummary>,
-    pub(crate) system_error: Option<anyhow::Error>,
     pub(crate) runtime_facts: Option<ProviderRefreshRuntimeFacts>,
-}
-
-#[derive(Debug)]
-pub(crate) enum ImportSourceRun {
-    Imported(ImportSourceOutcome),
-    Failed(ImportSourceFailure),
-}
-
-impl ImportSourceRun {
-    pub(crate) fn index(&self) -> usize {
-        match self {
-            Self::Imported(outcome) => outcome.index,
-            Self::Failed(failure) => failure.index,
-        }
-    }
 }
 
 #[derive(Debug, Default)]
@@ -68,6 +45,7 @@ pub(crate) struct ProviderRefreshRuntimeFacts {
     retired_records: Option<u64>,
     failure_scope: ProviderRefreshFailureScope,
     failure_type: ProviderRefreshFailureType,
+    resources: Option<ProviderRefreshResourceReceipt>,
 }
 
 impl ProviderRefreshRuntimeFacts {
@@ -122,6 +100,7 @@ impl ProviderRefreshRuntimeFacts {
             retired_records,
             failure_scope: ProviderRefreshFailureScope::None,
             failure_type: ProviderRefreshFailureType::None,
+            resources: None,
         }
     }
 
@@ -145,7 +124,16 @@ impl ProviderRefreshRuntimeFacts {
             retired_records,
             failure_scope: map_failure_scope(failure_scope),
             failure_type: map_failure_type(failure_type),
+            resources: None,
         }
+    }
+
+    pub(crate) fn with_resource_observation(
+        mut self,
+        observation: ProviderRefreshResourceObservation,
+    ) -> Self {
+        self.resources = observation.finish();
+        self
     }
 }
 
@@ -168,35 +156,12 @@ struct ProviderRefreshAggregate {
     retired_records_complete: bool,
     failure_scope: Option<ProviderRefreshFailureScope>,
     failure_type: Option<ProviderRefreshFailureType>,
+    cpu_duration: Duration,
+    cpu_duration_observed: bool,
+    observed_process_peak_rss_bytes: Option<u64>,
 }
 
 impl ProviderRefreshCollector {
-    pub(crate) fn record_import_outcome(
-        &mut self,
-        trigger: ProviderRefreshTrigger,
-        source_mode: ProviderRefreshSourceMode,
-        outcome: &ImportSourceOutcome,
-    ) {
-        if let Some(facts) = outcome.runtime_facts {
-            self.record_success_with_facts(
-                outcome.source.provider,
-                trigger,
-                source_mode,
-                &outcome.summary,
-                &outcome.stats,
-                facts,
-            );
-        } else {
-            self.record_success(
-                outcome.source.provider,
-                trigger,
-                source_mode,
-                &outcome.summary,
-                &outcome.stats,
-            );
-        }
-    }
-
     pub(crate) fn record_import_failure(
         &mut self,
         trigger: ProviderRefreshTrigger,
@@ -235,47 +200,34 @@ impl ProviderRefreshCollector {
         }
     }
 
-    pub(crate) fn record_success(
+    pub(crate) fn record_combined_runtime(
         &mut self,
         provider: CaptureProvider,
         trigger: ProviderRefreshTrigger,
         source_mode: ProviderRefreshSourceMode,
-        summary: &ProviderImportSummary,
-        stats: &SourceStats,
+        duration: Duration,
+        resources: ProviderRefreshResourceObservation,
     ) {
         let aggregate = self.aggregate_mut(provider, trigger, source_mode);
-        aggregate.totals.add(summary, stats);
-        aggregate.work_result = aggregate.work_result.merge(summary.work_result());
-        aggregate.duration_complete = false;
-        aggregate.content_evidence =
-            merge_content_evidence(aggregate.content_evidence, content_evidence(summary));
-        aggregate.core_result = merge_core_result(
-            aggregate.core_result,
-            if summary.work_result() == ProviderImportWorkResult::NoOp {
-                ProviderCoreResult::NoOp
-            } else {
-                ProviderCoreResult::Complete
-            },
-        );
-        aggregate.canonical_pro_result =
-            merge_pro_result(aggregate.canonical_pro_result, ProviderProResult::Unknown);
-        aggregate.output_pro_result =
-            merge_pro_result(aggregate.output_pro_result, ProviderProResult::Unknown);
-        if summary.work_result() == ProviderImportWorkResult::NoOp {
-            aggregate.work_kind =
-                merge_work_kind(aggregate.work_kind, ProviderRefreshWorkKind::NoOp);
-        } else {
-            aggregate.work_kind_complete = false;
-            aggregate.retired_records_complete = false;
-        }
-        if summary.failed > 0 {
-            aggregate.failure_scope =
-                merge_failure_scope(aggregate.failure_scope, ProviderRefreshFailureScope::Record);
-            aggregate.failure_type = merge_failure_type(
-                aggregate.failure_type,
-                ProviderRefreshFailureType::RecordRejection,
-            );
-        }
+        aggregate.duration = aggregate.duration.saturating_add(duration);
+        aggregate.record_resources(resources.finish());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn recorded_duration(
+        &self,
+        provider: CaptureProvider,
+        trigger: ProviderRefreshTrigger,
+        source_mode: ProviderRefreshSourceMode,
+    ) -> Option<Duration> {
+        self.aggregates
+            .iter()
+            .find(|aggregate| {
+                aggregate.provider == provider
+                    && aggregate.trigger == trigger
+                    && aggregate.source_mode == source_mode
+            })
+            .map(|aggregate| aggregate.duration)
     }
 
     pub(crate) fn record_success_with_facts(
@@ -398,6 +350,11 @@ impl ProviderRefreshCollector {
         });
         let fallback_duration =
             (self.aggregates.len() == 1).then_some(single_provider_fallback_duration);
+        // ru_maxrss and PeakWorkingSetSize are process-lifetime high-water
+        // marks. They are useful as one command/import observation, but cannot
+        // truthfully be attributed to each event in a multi-aggregate batch.
+        let emit_observed_process_peak =
+            surface == crate::analytics::Surface::Cli && self.aggregates.len() == 1;
         self.aggregates
             .into_iter()
             .map(|aggregate| {
@@ -483,6 +440,14 @@ impl ProviderRefreshCollector {
                             count_u64(totals.failed_sources),
                             totals.source_bytes,
                         ),
+                        performance: aggregate.cpu_duration_observed.then(|| {
+                            crate::analytics::ProviderRefreshPerformanceV1::new(
+                                aggregate.cpu_duration,
+                                emit_observed_process_peak
+                                    .then_some(aggregate.observed_process_peak_rss_bytes)
+                                    .flatten(),
+                            )
+                        }),
                     },
                 );
                 event.surface = surface;
@@ -522,6 +487,9 @@ impl ProviderRefreshCollector {
             retired_records_complete: true,
             failure_scope: None,
             failure_type: None,
+            cpu_duration: Duration::ZERO,
+            cpu_duration_observed: false,
+            observed_process_peak_rss_bytes: None,
         });
         self.aggregates
             .last_mut()
@@ -548,6 +516,20 @@ impl ProviderRefreshAggregate {
         }
         self.failure_scope = merge_failure_scope(self.failure_scope, facts.failure_scope);
         self.failure_type = merge_failure_type(self.failure_type, facts.failure_type);
+        self.record_resources(facts.resources);
+    }
+
+    fn record_resources(&mut self, resources: Option<ProviderRefreshResourceReceipt>) {
+        let Some(resources) = resources else {
+            return;
+        };
+        self.cpu_duration = self.cpu_duration.saturating_add(resources.cpu_duration);
+        self.cpu_duration_observed = true;
+        self.observed_process_peak_rss_bytes = Some(
+            self.observed_process_peak_rss_bytes
+                .unwrap_or(0)
+                .max(resources.observed_process_peak_rss_bytes),
+        );
     }
 }
 
@@ -744,422 +726,4 @@ fn count_u64(value: usize) -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use crate::analytics::{BytesBucket, CountBucket};
-
-    use super::*;
-
-    fn foreground(event: &PublicEventV1) -> &ForegroundProviderRefreshV1 {
-        let PublicEventV1::ProviderRefreshCompleted(event) = event else {
-            panic!("expected a provider refresh event");
-        };
-        event.foreground.as_ref().unwrap()
-    }
-
-    #[test]
-    fn aggregates_many_source_and_record_results_once_per_provider() {
-        let mut collector = ProviderRefreshCollector::default();
-        let mut first = ProviderImportSummary::default();
-        first.imported_sessions = 1;
-        first.imported_events = 2;
-        first.skipped = 40;
-        let mut second = ProviderImportSummary::default();
-        second.imported_sessions = 2;
-        second.imported_events = 5;
-        second.imported_edges = 1;
-        second.work_remaining = true;
-        collector.record_success(
-            CaptureProvider::Codex,
-            ProviderRefreshTrigger::Setup,
-            ProviderRefreshSourceMode::Discovered,
-            &first,
-            &SourceStats {
-                files: 20,
-                bytes: 1024,
-                ..SourceStats::default()
-            },
-        );
-        collector.record_success(
-            CaptureProvider::Codex,
-            ProviderRefreshTrigger::Setup,
-            ProviderRefreshSourceMode::Discovered,
-            &second,
-            &SourceStats {
-                files: 30,
-                bytes: 2048,
-                ..SourceStats::default()
-            },
-        );
-
-        collector.refresh_duration = Duration::from_secs(1);
-        let events = collector.finish();
-
-        assert_eq!(
-            events.len(),
-            1,
-            "locations and records must not emit events"
-        );
-        let refresh = foreground(&events[0]);
-        assert_eq!(refresh.provider, CaptureProvider::Codex);
-        assert_eq!(refresh.change, ProviderRefreshChange::Changed);
-        assert_eq!(refresh.refresh_result, ProviderRefreshResult::Complete);
-        assert_eq!(refresh.core_result, ProviderCoreResult::Complete);
-        assert_eq!(
-            refresh.content_evidence,
-            ProviderRefreshContentEvidence::Accepted
-        );
-        assert_eq!(refresh.work_kind, None);
-        assert!(refresh.work_remaining);
-        assert_eq!(refresh.counts.sources, CountBucket::TwoToFive);
-        assert_eq!(
-            refresh.counts.source_files,
-            CountBucket::TwentyOneToOneHundred
-        );
-        assert_eq!(refresh.counts.sessions, CountBucket::TwoToFive);
-        assert_eq!(refresh.counts.events, CountBucket::SixToTwenty);
-        assert_eq!(refresh.counts.edges, CountBucket::One);
-        assert_eq!(refresh.counts.skips, CountBucket::TwentyOneToOneHundred);
-        assert_eq!(refresh.counts.bytes, BytesBucket::UnderOneHundredKb);
-    }
-
-    #[test]
-    fn distinguishes_no_op_from_changed_and_buckets_rejections_and_failures() {
-        let mut collector = ProviderRefreshCollector::default();
-        let mut no_op = ProviderImportSummary::default();
-        no_op.skipped = 3;
-        collector.record_success(
-            CaptureProvider::Codex,
-            ProviderRefreshTrigger::Search,
-            ProviderRefreshSourceMode::Discovered,
-            &no_op,
-            &SourceStats::default(),
-        );
-        let mut rejected = ProviderImportSummary::default();
-        rejected.failed = 7;
-        collector.record_failure(
-            CaptureProvider::Custom,
-            ProviderRefreshTrigger::Search,
-            ProviderRefreshSourceMode::HistorySourcePlugin,
-            &SourceStats {
-                bytes: 12_000,
-                ..SourceStats::default()
-            },
-            Some(&rejected),
-        );
-
-        let events = collector.finish();
-
-        assert_eq!(events.len(), 2);
-        let codex = foreground(&events[0]);
-        assert_eq!(codex.provider, CaptureProvider::Codex);
-        assert_eq!(codex.change, ProviderRefreshChange::NoOp);
-        assert_eq!(codex.work_kind, Some(ProviderRefreshWorkKind::NoOp));
-        assert_eq!(codex.refresh_result, ProviderRefreshResult::Complete);
-        assert_eq!(codex.core_result, ProviderCoreResult::NoOp);
-        assert_eq!(codex.counts.skips, CountBucket::TwoToFive);
-        let custom = foreground(&events[1]);
-        assert_eq!(custom.provider, CaptureProvider::Custom);
-        assert_eq!(custom.change, ProviderRefreshChange::NoOp);
-        assert_eq!(custom.counts.rejections, CountBucket::SixToTwenty);
-        assert_eq!(custom.counts.failures, CountBucket::One);
-        assert_eq!(custom.counts.bytes, BytesBucket::UnderOneHundredKb);
-        assert_eq!(custom.refresh_result, ProviderRefreshResult::Failure);
-        assert_eq!(custom.core_result, ProviderCoreResult::Unknown);
-        assert_eq!(custom.failure_scope, ProviderRefreshFailureScope::Source);
-        assert_eq!(
-            custom.failure_type,
-            ProviderRefreshFailureType::RecordRejection
-        );
-        let PublicEventV1::ProviderRefreshCompleted(custom_event) = &events[1] else {
-            unreachable!();
-        };
-        assert_eq!(custom_event.outcome, Outcome::Failure);
-        assert_eq!(custom_event.duration, DurationBucket::Unknown);
-    }
-
-    #[test]
-    fn exact_provider_durations_are_independent_in_multi_provider_batches() {
-        let mut collector = ProviderRefreshCollector::default();
-        let mut codex_summary = ProviderImportSummary::default();
-        codex_summary.imported_events = 1;
-        collector.record_success_with_facts(
-            CaptureProvider::Codex,
-            ProviderRefreshTrigger::Import,
-            ProviderRefreshSourceMode::Discovered,
-            &codex_summary,
-            &SourceStats::default(),
-            ProviderRefreshRuntimeFacts::success(
-                Duration::from_millis(40),
-                Some(ProviderRefreshWorkKind::Fresh),
-                ProviderCoreResult::Complete,
-                ProviderProResult::Complete,
-                ProviderProResult::NotRequested,
-                Some(0),
-            ),
-        );
-        let mut claude_summary = ProviderImportSummary::default();
-        claude_summary.imported_events = 1;
-        collector.record_success_with_facts(
-            CaptureProvider::Claude,
-            ProviderRefreshTrigger::Import,
-            ProviderRefreshSourceMode::Discovered,
-            &claude_summary,
-            &SourceStats::default(),
-            ProviderRefreshRuntimeFacts::success(
-                Duration::from_secs(7),
-                Some(ProviderRefreshWorkKind::Append),
-                ProviderCoreResult::Complete,
-                ProviderProResult::NoOp,
-                ProviderProResult::Complete,
-                Some(9),
-            ),
-        );
-
-        collector.refresh_duration = Duration::from_secs(90);
-        let events = collector.finish();
-        let event_for = |provider| {
-            events
-                .iter()
-                .find(|event| foreground(event).provider == provider)
-                .unwrap()
-        };
-        let PublicEventV1::ProviderRefreshCompleted(codex) = event_for(CaptureProvider::Codex)
-        else {
-            unreachable!();
-        };
-        let PublicEventV1::ProviderRefreshCompleted(claude) = event_for(CaptureProvider::Claude)
-        else {
-            unreachable!();
-        };
-
-        assert_eq!(codex.duration, DurationBucket::UnderOneHundredMs);
-        assert_eq!(claude.duration, DurationBucket::UnderThirtySeconds);
-        assert_ne!(codex.duration, duration_bucket(Duration::from_secs(90)));
-        assert_ne!(claude.duration, duration_bucket(Duration::from_secs(90)));
-        assert_eq!(
-            foreground(event_for(CaptureProvider::Codex)).work_kind,
-            Some(ProviderRefreshWorkKind::Fresh)
-        );
-        assert_eq!(
-            foreground(event_for(CaptureProvider::Claude)).retired_records,
-            Some(CountBucket::SixToTwenty)
-        );
-    }
-
-    #[test]
-    fn observed_fact_seam_keeps_unavailable_dimensions_unknown() {
-        let mut summary = ProviderImportSummary::default();
-        summary.imported_events = 1;
-        let success =
-            ProviderRefreshRuntimeFacts::observed_success(Duration::from_secs(3), &summary);
-        assert_eq!(success.duration, Duration::from_secs(3));
-        assert_eq!(success.work_kind, None);
-        assert_eq!(success.core_result, ProviderCoreResult::Complete);
-        assert_eq!(success.canonical_pro_result, ProviderProResult::Unknown);
-        assert_eq!(success.output_pro_result, ProviderProResult::Unknown);
-        assert_eq!(success.retired_records, None);
-
-        let failure = ProviderRefreshRuntimeFacts::observed_failure(
-            Duration::from_secs(4),
-            ImportFailureScope::System,
-            ImportFailureType::WorkerPanic,
-        );
-        assert_eq!(failure.work_kind, None);
-        assert_eq!(failure.core_result, ProviderCoreResult::Unknown);
-        assert_eq!(failure.failure_scope, ProviderRefreshFailureScope::System);
-        assert_eq!(
-            failure.failure_type,
-            ProviderRefreshFailureType::WorkerPanic
-        );
-    }
-
-    #[test]
-    fn detailed_facts_distinguish_partial_lane_and_failure_results() {
-        let mut collector = ProviderRefreshCollector::default();
-        let mut summary = ProviderImportSummary::default();
-        summary.imported_events = 3;
-        collector.record_success_with_facts(
-            CaptureProvider::Codex,
-            ProviderRefreshTrigger::Search,
-            ProviderRefreshSourceMode::Discovered,
-            &summary,
-            &SourceStats::default(),
-            ProviderRefreshRuntimeFacts::success(
-                Duration::from_secs(2),
-                Some(ProviderRefreshWorkKind::Append),
-                ProviderCoreResult::Complete,
-                ProviderProResult::Complete,
-                ProviderProResult::Complete,
-                Some(3),
-            ),
-        );
-        collector.record_failure_with_facts(
-            CaptureProvider::Codex,
-            ProviderRefreshTrigger::Search,
-            ProviderRefreshSourceMode::Discovered,
-            &SourceStats::default(),
-            None,
-            ProviderRefreshRuntimeFacts::failure(
-                Duration::from_secs(4),
-                Some(ProviderRefreshWorkKind::Replace),
-                ProviderCoreResult::Failure,
-                ProviderProResult::Failure,
-                ProviderProResult::Behind,
-                Some(2),
-                ImportFailureScope::System,
-                ImportFailureType::Store,
-            ),
-        );
-
-        let events = collector.finish();
-        let refresh = foreground(&events[0]);
-        let PublicEventV1::ProviderRefreshCompleted(event) = &events[0] else {
-            unreachable!();
-        };
-        assert_eq!(event.outcome, Outcome::Success);
-        assert_eq!(event.duration, DurationBucket::UnderThirtySeconds);
-        assert_eq!(refresh.refresh_result, ProviderRefreshResult::Partial);
-        assert_eq!(refresh.core_result, ProviderCoreResult::Partial);
-        assert_eq!(refresh.work_kind, Some(ProviderRefreshWorkKind::Mixed));
-        assert_eq!(refresh.canonical_pro_result, ProviderProResult::Partial);
-        assert_eq!(refresh.output_pro_result, ProviderProResult::Behind);
-        assert_eq!(refresh.failure_scope, ProviderRefreshFailureScope::System);
-        assert_eq!(refresh.failure_type, ProviderRefreshFailureType::Store);
-        assert_eq!(refresh.retired_records, Some(CountBucket::TwoToFive));
-    }
-
-    #[test]
-    fn pro_lag_makes_refresh_partial_without_falsifying_core_result() {
-        let mut collector = ProviderRefreshCollector::default();
-        let mut summary = ProviderImportSummary::default();
-        summary.imported_events = 1;
-        collector.record_success_with_facts(
-            CaptureProvider::Codex,
-            ProviderRefreshTrigger::Search,
-            ProviderRefreshSourceMode::Discovered,
-            &summary,
-            &SourceStats::default(),
-            ProviderRefreshRuntimeFacts::success(
-                Duration::from_secs(1),
-                None,
-                ProviderCoreResult::Complete,
-                ProviderProResult::Complete,
-                ProviderProResult::Behind,
-                None,
-            ),
-        );
-
-        let events = collector.finish();
-        let refresh = foreground(&events[0]);
-        let PublicEventV1::ProviderRefreshCompleted(event) = &events[0] else {
-            unreachable!();
-        };
-        assert_eq!(event.outcome, Outcome::Success);
-        assert_eq!(event.duration, DurationBucket::UnderFiveSeconds);
-        assert_eq!(refresh.refresh_result, ProviderRefreshResult::Partial);
-        assert_eq!(refresh.core_result, ProviderCoreResult::Complete);
-        assert_eq!(refresh.output_pro_result, ProviderProResult::Behind);
-        assert_eq!(refresh.work_kind, None);
-        assert_eq!(refresh.retired_records, None);
-    }
-
-    #[test]
-    fn every_capture_provider_emits_without_usage_suppression() {
-        let providers = [
-            CaptureProvider::Codex,
-            CaptureProvider::Claude,
-            CaptureProvider::Pi,
-            CaptureProvider::OpenCode,
-            CaptureProvider::Kilo,
-            CaptureProvider::KiroCli,
-            CaptureProvider::Antigravity,
-            CaptureProvider::Gemini,
-            CaptureProvider::Tabnine,
-            CaptureProvider::Cursor,
-            CaptureProvider::Windsurf,
-            CaptureProvider::Zed,
-            CaptureProvider::CopilotCli,
-            CaptureProvider::FactoryAiDroid,
-            CaptureProvider::QwenCode,
-            CaptureProvider::KimiCodeCli,
-            CaptureProvider::Auggie,
-            CaptureProvider::Junie,
-            CaptureProvider::Firebender,
-            CaptureProvider::ForgeCode,
-            CaptureProvider::DeepAgents,
-            CaptureProvider::MistralVibe,
-            CaptureProvider::Mux,
-            CaptureProvider::RovoDev,
-            CaptureProvider::OpenClaw,
-            CaptureProvider::Hermes,
-            CaptureProvider::NanoClaw,
-            CaptureProvider::AstrBot,
-            CaptureProvider::Shelley,
-            CaptureProvider::Continue,
-            CaptureProvider::OpenHands,
-            CaptureProvider::Cline,
-            CaptureProvider::RooCode,
-            CaptureProvider::Crush,
-            CaptureProvider::Goose,
-            CaptureProvider::Lingma,
-            CaptureProvider::Qoder,
-            CaptureProvider::Warp,
-            CaptureProvider::CodeBuddy,
-            CaptureProvider::Trae,
-            CaptureProvider::Shell,
-            CaptureProvider::Git,
-            CaptureProvider::Jj,
-            CaptureProvider::Gh,
-            CaptureProvider::Custom,
-            CaptureProvider::Unknown,
-            CaptureProvider::MiMoCode,
-        ];
-        let mut collector = ProviderRefreshCollector::default();
-        for provider in providers {
-            collector.record_success(
-                provider,
-                ProviderRefreshTrigger::Search,
-                ProviderRefreshSourceMode::Discovered,
-                &ProviderImportSummary::default(),
-                &SourceStats::default(),
-            );
-        }
-
-        let events = collector.finish();
-
-        assert_eq!(events.len(), providers.len());
-        for provider in providers {
-            assert!(events
-                .iter()
-                .any(|event| foreground(event).provider == provider));
-        }
-    }
-
-    #[test]
-    fn shared_collector_marks_daemon_owned_refreshes_with_daemon_trigger() {
-        let mut collector = ProviderRefreshCollector::default();
-        let mut summary = ProviderImportSummary::default();
-        summary.imported_sessions = 2;
-        collector.record_success(
-            CaptureProvider::Codex,
-            ProviderRefreshTrigger::Search,
-            ProviderRefreshSourceMode::Discovered,
-            &summary,
-            &SourceStats::default(),
-        );
-
-        let events = collector.finish_for_daemon(Duration::from_secs(1));
-        let PublicEventV1::ProviderRefreshCompleted(event) = &events[0] else {
-            panic!("expected provider refresh event");
-        };
-        assert_eq!(event.surface, crate::analytics::Surface::Daemon);
-        assert_eq!(
-            foreground(&events[0]).trigger,
-            ProviderRefreshTrigger::Daemon
-        );
-        assert_eq!(
-            foreground(&events[0]).counts.sessions,
-            CountBucket::TwoToFive
-        );
-    }
-}
+mod tests;

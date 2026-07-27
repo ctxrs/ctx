@@ -1,17 +1,23 @@
 use std::{
     fs,
+    io::{BufRead, BufReader},
     path::{Path, PathBuf},
 };
 
 use ctx_history_core::CaptureProvider;
+use serde_json::Value;
 
 use super::super::{
+    open_ordinary_file_without_following,
     probes::{default_location_import_probe, BoundedProbe},
     provider_source_spec,
     resolvers::unsupported_source,
     selectors, ProviderCatalogSupport, ProviderDefaultLocation, ProviderImportSupport,
     ProviderSource, ProviderSourceKind, ProviderSourceSpec, ProviderSourceStatus,
 };
+
+const CODEX_AMBIGUOUS_JSONL_REASON: &str =
+    "Codex JSONL schema is ambiguous; the bounded first-record probe requires either prompt-history fields (session_id, ts, text) or rollout fields (timestamp, type, payload)";
 
 pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> ProviderSource {
     let unknown_spec = ProviderSourceSpec {
@@ -30,6 +36,12 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
 
     let source_format = match provider {
         CaptureProvider::Codex if path.is_dir() => "codex_session_jsonl_tree",
+        CaptureProvider::Codex if exists => {
+            let Some(source_format) = codex_explicit_jsonl_source_format(&path) else {
+                return unsupported_source(spec, path, CODEX_AMBIGUOUS_JSONL_REASON);
+            };
+            source_format
+        }
         CaptureProvider::Codex => {
             if path.file_name().and_then(|name| name.to_str()) == Some("history.jsonl") {
                 "codex_history_jsonl"
@@ -118,6 +130,48 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
             ProviderSourceStatus::Missing
         },
         unsupported_reason: spec.unsupported_reason,
+    }
+}
+
+fn codex_explicit_jsonl_source_format(path: &Path) -> Option<&'static str> {
+    let file = open_ordinary_file_without_following(path).ok()?;
+    let mut reader = BufReader::new(file);
+    let mut record = Vec::new();
+    loop {
+        let available = reader.fill_buf().ok()?;
+        if available.is_empty() {
+            break;
+        }
+        let take = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |index| index.saturating_add(1));
+        if record.len().saturating_add(take) > crate::MAX_PROVIDER_JSONL_LINE_BYTES {
+            return None;
+        }
+        let terminated = available.get(take.saturating_sub(1)) == Some(&b'\n');
+        record.extend_from_slice(&available[..take]);
+        reader.consume(take);
+        if terminated {
+            break;
+        }
+    }
+    while matches!(record.last(), Some(b'\n') | Some(b'\r')) {
+        record.pop();
+    }
+
+    let value = serde_json::from_slice::<Value>(&record).ok()?;
+    let object = value.as_object()?;
+    let prompt_history = object.get("session_id").and_then(Value::as_str).is_some()
+        && object.get("ts").and_then(Value::as_i64).is_some()
+        && object.get("text").and_then(Value::as_str).is_some();
+    let rollout = object.get("timestamp").and_then(Value::as_str).is_some()
+        && object.get("type").and_then(Value::as_str).is_some()
+        && object.get("payload").and_then(Value::as_object).is_some();
+    match (prompt_history, rollout) {
+        (true, false) => Some("codex_history_jsonl"),
+        (false, true) => Some("codex_session_jsonl"),
+        _ => None,
     }
 }
 

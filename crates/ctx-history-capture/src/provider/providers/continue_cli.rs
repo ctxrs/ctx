@@ -65,47 +65,6 @@ pub(crate) fn continue_history_item_canonical_payload(item: &Value) -> (EventTyp
     )
 }
 
-pub(crate) fn continue_tool_result_body(state: &Value) -> Option<String> {
-    match state.get("output")? {
-        Value::Null => None,
-        Value::String(output) => Some(output.clone()),
-        output => serde_json::to_string(output).ok(),
-    }
-}
-
-pub(crate) fn continue_tool_result_native_id(
-    item: &Value,
-    history_item_index: u32,
-    state: &Value,
-    tool_state_index: u32,
-) -> String {
-    let item_id = item
-        .get("id")
-        .and_then(Value::as_str)
-        .filter(|value| valid_continue_native_id_part(value));
-    let tool_call_id = state
-        .get("toolCallId")
-        .or_else(|| state.pointer("/toolCall/id"))
-        .and_then(Value::as_str)
-        .filter(|value| valid_continue_native_id_part(value));
-    match (item_id, tool_call_id) {
-        (Some(item_id), Some(tool_call_id)) => {
-            format!("{item_id}:tool:{tool_call_id}:result")
-        }
-        (Some(item_id), None) => format!("{item_id}:tool-state:{tool_state_index}:result"),
-        (None, Some(tool_call_id)) => {
-            format!("history:{history_item_index}:tool:{tool_call_id}:result")
-        }
-        (None, None) => {
-            format!("history:{history_item_index}:tool-state:{tool_state_index}:result")
-        }
-    }
-}
-
-fn valid_continue_native_id_part(value: &str) -> bool {
-    !value.is_empty() && value.len() <= 384 && !value.chars().any(char::is_control)
-}
-
 pub(crate) fn continue_context_items_text(value: &Value) -> Option<String> {
     let items = value.as_array()?;
     let mut parts = Vec::new();

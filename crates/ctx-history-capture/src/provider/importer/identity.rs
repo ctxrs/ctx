@@ -237,6 +237,73 @@ pub(crate) fn provider_event_import_identity_with_exact_legacy_source(
     Ok(source_identity)
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn provider_native_event_import_identity_migrating_legacy_hash(
+    store: &Store,
+    provider: CaptureProvider,
+    provider_session_id: &str,
+    source_id: Uuid,
+    provider_event_index: u64,
+    provider_event_sequence_index: u64,
+    event_hash: &str,
+    legacy_provider_event_index: u64,
+    legacy_event_hash: &str,
+    allow_legacy_provider_identity: bool,
+) -> Result<ProviderEventImportIdentity> {
+    let current = provider_event_import_identity_with_exact_legacy_source(
+        store,
+        provider,
+        provider_session_id,
+        source_id,
+        provider_event_index,
+        provider_event_sequence_index,
+        event_hash,
+        None,
+        None,
+        allow_legacy_provider_identity,
+    )?;
+    if provider_event_by_id(store, current.id)?.is_some()
+        || provider_event_exists(store, &current.dedupe_key)?
+    {
+        return Ok(current);
+    }
+
+    let legacy_source = provider_source_event_import_identity(
+        source_id,
+        legacy_provider_event_index,
+        legacy_event_hash,
+    );
+    if provider_event_exists(store, &legacy_source.dedupe_key)? {
+        return Ok(legacy_source);
+    }
+    if let Some(existing) = provider_event_identity_by_alias(store, legacy_source.id)? {
+        return Ok(existing);
+    }
+    if let Some(existing) = provider_event_identity_by_id(store, legacy_source.id)? {
+        return Ok(existing);
+    }
+
+    if allow_legacy_provider_identity {
+        let legacy_global = provider_legacy_event_import_identity(
+            provider,
+            provider_session_id,
+            legacy_provider_event_index,
+            legacy_event_hash,
+        );
+        if provider_event_exists(store, &legacy_global.dedupe_key)? {
+            return Ok(legacy_global);
+        }
+        if let Some(existing) = provider_event_identity_by_alias(store, legacy_global.id)? {
+            return Ok(existing);
+        }
+        if let Some(existing) = provider_event_identity_by_id(store, legacy_global.id)? {
+            return Ok(existing);
+        }
+    }
+
+    Ok(current)
+}
+
 pub(crate) fn provider_source_event_import_identity(
     source_id: Uuid,
     provider_event_index: u64,
@@ -454,5 +521,51 @@ mod tests {
             .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn native_identity_migration_finds_exact_source_scoped_id_as_hash_row() {
+        let temp = tempdir().unwrap();
+        let store = Store::open(temp.path().join("store.sqlite")).unwrap();
+        let source_id = Uuid::parse_str("d104a95c-1240-41f5-8490-4ef97cd40885").unwrap();
+        let legacy_index = 7;
+        let legacy_hash = "released-native-id-as-hash";
+        let legacy = provider_source_event_import_identity(source_id, legacy_index, legacy_hash);
+        store
+            .upsert_event(&Event {
+                id: legacy.id,
+                seq: legacy.seq,
+                history_record_id: None,
+                session_id: None,
+                run_id: None,
+                event_type: EventType::Message,
+                role: Some(EventRole::User),
+                occurred_at: "2026-07-18T00:00:00Z".parse().unwrap(),
+                capture_source_id: None,
+                payload: json!({"text": "released payload"}),
+                payload_blob_id: None,
+                dedupe_key: Some(legacy.dedupe_key.clone()),
+                sync: provider_sync_metadata(
+                    Fidelity::Imported,
+                    json!({"provider_event_hash_authority": "provider_supplied"}),
+                ),
+            })
+            .unwrap();
+
+        let migrated = provider_native_event_import_identity_migrating_legacy_hash(
+            &store,
+            CaptureProvider::FactoryAiDroid,
+            "factory-session",
+            source_id,
+            0xfeed_cafe,
+            legacy_index,
+            "normalized-payload-hash",
+            legacy_index,
+            legacy_hash,
+            false,
+        )
+        .unwrap();
+        assert_eq!(migrated.id, legacy.id);
+        assert_eq!(migrated.dedupe_key, legacy.dedupe_key);
     }
 }

@@ -1,6 +1,9 @@
 //! Provider-specific message resolution from one admitted SQLite snapshot.
 
+use rusqlite::types::{Type, ValueRef};
+
 use super::*;
+use crate::provider::providers::lingma;
 
 pub(super) fn resolve_one(
     conn: &Connection,
@@ -8,9 +11,10 @@ pub(super) fn resolve_one(
 ) -> Result<CompleteMessage, CompleteContentError> {
     let resolved = match request.provider {
         CaptureProvider::Firebender => resolve_firebender(conn, request),
-        CaptureProvider::AstrBot | CaptureProvider::Lingma | CaptureProvider::Trae => {
+        CaptureProvider::AstrBot | CaptureProvider::Trae => {
             no_tool_messages::resolve(conn, request)
         }
+        CaptureProvider::Lingma => resolve_lingma(conn, request),
         CaptureProvider::KiroCli => resolve_kiro(conn, request),
         CaptureProvider::Zed => resolve_zed(conn, request),
         CaptureProvider::ForgeCode => resolve_forgecode(conn, request),
@@ -64,7 +68,7 @@ pub(super) fn resolve_nanoclaw_project(
                 CompleteContentErrorKind::ContentVerificationFailed,
             ));
         }
-        let resolved = resolved_from_event_fields(
+        let mut resolved = resolved_from_event_fields(
             record.event.provider_event_index,
             Some(record.event.provider_event_hash.as_str()),
             Some(record.event.cursor.as_str()),
@@ -72,6 +76,11 @@ pub(super) fn resolve_nanoclaw_project(
             record.text,
             &record.values,
         );
+        // NanoClaw's fallback hash covers the complete normalized provider body,
+        // including the tail deliberately omitted from Core. Reuse the hash
+        // reconstructed from the admitted source record; hashing the compact
+        // durable payload here would verify a different authority.
+        resolved.normalized_payload_hash = Some(record.event.provider_event_hash);
         verify_resolved(request, &resolved)?;
         messages.push(CompleteMessage::verified(
             request,
@@ -86,6 +95,71 @@ pub(super) fn resolve_nanoclaw_project(
         return Err(error(first, CompleteContentErrorKind::SourceChanged));
     }
     Ok(messages)
+}
+
+fn resolve_lingma(
+    conn: &Connection,
+    request: &CompleteMessageRequest,
+) -> Result<ResolvedSqliteMessage, CompleteContentError> {
+    const LINGMA_LOCATOR_KIND: &str = "lingma-chat-record-v1";
+    let locator = request
+        .source_locator
+        .as_ref()
+        .ok_or_else(|| error(request, CompleteContentErrorKind::HydrationUnsupported))?;
+    if locator.kind() != LINGMA_LOCATOR_KIND || locator.value().len() != 8 {
+        return Err(error(
+            request,
+            CompleteContentErrorKind::ContentVerificationFailed,
+        ));
+    }
+    let encoded = u64::from_be_bytes(
+        locator
+            .value()
+            .try_into()
+            .map_err(|_| error(request, CompleteContentErrorKind::ContentVerificationFailed))?,
+    );
+    let rowid = (encoded ^ (1_u64 << 63)) as i64;
+    let values = lingma::lingma_complete_values(conn, rowid)
+        .map_err(|cause| map_capture_error(request, cause))?
+        .ok_or_else(|| error(request, CompleteContentErrorKind::SourceRecordMissing))?;
+    let session_id = match values.get(1) {
+        Some(NativeSqliteValue::Text(value)) => value.as_str(),
+        _ => {
+            return Err(error(
+                request,
+                CompleteContentErrorKind::ContentVerificationFailed,
+            ));
+        }
+    };
+    if request.provider_session_id.as_deref() != Some(session_id) {
+        return Err(error(
+            request,
+            CompleteContentErrorKind::ContentVerificationFailed,
+        ));
+    }
+    let (event, text) = lingma::lingma_complete_user_message(&values)
+        .map_err(|cause| map_capture_error(request, cause))?;
+    if event.event_type != EventType::Message {
+        return Err(error(
+            request,
+            CompleteContentErrorKind::ContentVerificationFailed,
+        ));
+    }
+    let native_record_id = match request.expected_hash_authority {
+        CompleteContentHashAuthority::ProviderSupplied => {
+            event.released_provider_event_hash.clone()
+        }
+        CompleteContentHashAuthority::NormalizedPayloadFallback => {
+            event.provider_event_hash.clone()
+        }
+    };
+    Ok(ResolvedSqliteMessage {
+        text,
+        provider_event_hash: Some(event.released_provider_event_hash),
+        normalized_payload_hash: Some(event.provider_event_hash),
+        native_record_id,
+        record_digest: sqlite_logical_record_digest(&values),
+    })
 }
 
 pub(super) fn resolve_opencode(
@@ -105,16 +179,18 @@ pub(super) fn resolve_opencode(
                 map_capture_error(request, cause)
             }
         })?;
-    let (session_id, event_hash, text) = opencode::opencode_complete_message(&values, dialect)
-        .map_err(|cause| map_capture_error(request, cause))?;
+    let (session_id, native_record_id, text, normalized_payload_hash) =
+        opencode::opencode_complete_message_with_normalized_hash(&values, dialect)
+            .map_err(|cause| map_capture_error(request, cause))?;
     if request.provider_session_id.as_deref() != Some(session_id.as_str()) {
         return Err(error(
             request,
             CompleteContentErrorKind::ContentVerificationFailed,
         ));
     }
-    Ok(resolved_from_provider_hash_and_digest(
-        event_hash,
+    Ok(resolved_from_normalized_hash_and_digest(
+        native_record_id,
+        normalized_payload_hash,
         text,
         sqlite_logical_record_digest(&values[1..]),
     ))
@@ -175,15 +251,18 @@ pub(super) fn resolve_goose(
             map_capture_error(request, cause)
         }
     })?;
-    let (session_id, event_hash, text) = goose::goose_complete_message(&values)
-        .map_err(|cause| map_capture_error(request, cause))?;
+    let (session_id, native_record_id, normalized_payload_hash, text) =
+        goose::goose_complete_message_with_normalized_hash(conn, &values)
+            .map_err(|cause| map_capture_error(request, cause))?;
     if request.provider_session_id.as_deref() != Some(session_id.as_str()) {
         return Err(error(
             request,
             CompleteContentErrorKind::ContentVerificationFailed,
         ));
     }
-    Ok(resolved_from_provider_hash(event_hash, text, &values))
+    let mut resolved = resolved_from_provider_hash(native_record_id, text, &values);
+    resolved.normalized_payload_hash = Some(normalized_payload_hash);
+    Ok(resolved)
 }
 
 pub(super) fn validate_crush_schema(
@@ -208,15 +287,22 @@ pub(super) fn resolve_crush(
             map_capture_error(request, cause)
         }
     })?;
-    let (session_id, event_hash, text) = crush::crush_complete_message(&values)
-        .map_err(|cause| map_capture_error(request, cause))?;
+    let (session_id, native_record_id, normalized_payload_hash, text) =
+        crush::crush_complete_message(&values)
+            .map_err(|cause| map_capture_error(request, cause))?;
     if request.provider_session_id.as_deref() != Some(session_id.as_str()) {
         return Err(error(
             request,
             CompleteContentErrorKind::ContentVerificationFailed,
         ));
     }
-    Ok(resolved_from_provider_hash(event_hash, text, &values))
+    Ok(ResolvedSqliteMessage {
+        text,
+        provider_event_hash: Some(native_record_id.clone()),
+        normalized_payload_hash: Some(normalized_payload_hash),
+        native_record_id,
+        record_digest: sqlite_logical_record_digest(&values),
+    })
 }
 
 pub(super) fn resolve_forgecode(
@@ -289,7 +375,7 @@ pub(super) fn resolve_warp_message(
             CompleteContentErrorKind::ContentVerificationFailed,
         ));
     }
-    let content = warp::warp_task_content_at(task, task_id, message_index)
+    let content = warp::warp_message_content_at(task, conversation_id, task_id, message_index)
         .map_err(|cause| map_capture_error(request, cause))?
         .ok_or_else(|| error(request, CompleteContentErrorKind::SourceRecordMissing))?;
     if content.event_type != EventType::Message {
@@ -298,18 +384,20 @@ pub(super) fn resolve_warp_message(
             CompleteContentErrorKind::HydrationUnsupported,
         ));
     }
-    Ok(resolved_from_provider_hash(
-        content.native_record_id,
-        content.text,
-        &values,
-    ))
+    Ok(ResolvedSqliteMessage {
+        text: content.text,
+        provider_event_hash: None,
+        normalized_payload_hash: content.normalized_payload_hash,
+        native_record_id: content.native_record_id,
+        record_digest: sqlite_logical_record_digest(&values),
+    })
 }
 
 pub(super) struct ShelleyLoadedRecord {
-    message: shelley::ShelleyMessageRow,
     conversation: shelley::ShelleyConversationRow,
     digest_values: Vec<NativeSqliteValue>,
     complete_text: String,
+    native_record_id: String,
     provider_event_index: u64,
     provider_event_hash: String,
     cursor: String,
@@ -365,15 +453,16 @@ pub(super) fn load_shelley_record(
     }
     let complete_text = shelley::shelley_message_complete_text(&message)
         .unwrap_or_else(|| format!("Shelley {} message", message.entry_type));
+    let native_record_id = shelley::shelley_native_record_id(&message);
     let (provider_event_index, provider_event_hash, cursor, event_type, payload) =
         shelley::shelley_complete_event(&message, DateTime::<Utc>::UNIX_EPOCH);
     let digest_values =
         shelley::shelley_verified_record_values(&message, &conversation, parent_bearing);
     Ok(Some(ShelleyLoadedRecord {
-        message,
         conversation,
         digest_values,
         complete_text,
+        native_record_id,
         provider_event_index,
         provider_event_hash,
         cursor,
@@ -398,40 +487,16 @@ pub(super) fn resolve_shelley_message(
             CompleteContentErrorKind::ContentVerificationFailed,
         ));
     }
-    Ok(resolved_from_event_fields(
+    let mut resolved = resolved_from_event_fields(
         record.provider_event_index,
         Some(&record.provider_event_hash),
         Some(&record.cursor),
         &record.payload,
         record.complete_text,
         &record.digest_values,
-    ))
-}
-
-pub(super) fn shelley_result_record(
-    conn: &Connection,
-    parent_bearing: bool,
-    message_rowid: i64,
-    conversation_rowid: i64,
-) -> crate::Result<Option<SqliteResultRecord>> {
-    let Some(record) =
-        load_shelley_record(conn, parent_bearing, message_rowid, conversation_rowid)?
-    else {
-        return Ok(None);
-    };
-    if !matches!(
-        record.event_type,
-        EventType::ToolOutput | EventType::CommandOutput
-    ) {
-        return Err(CaptureError::InvalidPayload(
-            "Shelley compound content address no longer identifies a result".to_owned(),
-        ));
-    }
-    Ok(Some(SqliteResultRecord {
-        values: record.digest_values,
-        native_record_id: record.message.message_id,
-        content: record.complete_text,
-    }))
+    );
+    resolved.native_record_id = record.native_record_id;
+    Ok(resolved)
 }
 
 pub(super) struct ResolvedSqliteMessage {
@@ -534,32 +599,23 @@ pub(super) fn resolve_kiro(
     let (table, rowid) = decode_kiro_rowid(request)?;
     let values = if table == "conversations_v2" {
         conn.query_row(
-            "select rowid, cast(key as text), cast(conversation_id as text), cast(value as text), \
-                    cast(created_at as integer), cast(updated_at as integer) \
+            "select rowid, key, conversation_id, value, created_at, updated_at \
              from conversations_v2 where rowid = ?1",
             [rowid],
             |row| {
-                Ok(vec![
-                    NativeSqliteValue::Integer(row.get(0)?),
-                    NativeSqliteValue::Text(row.get(1)?),
-                    NativeSqliteValue::Text(row.get(2)?),
-                    NativeSqliteValue::Text(row.get(3)?),
-                    optional_integer(row.get(4)?),
-                    optional_integer(row.get(5)?),
-                ])
+                (0..6)
+                    .map(|index| raw_native_sqlite_value(row, index))
+                    .collect::<rusqlite::Result<Vec<NativeSqliteValue>>>()
             },
         )
     } else {
         conn.query_row(
-            "select rowid, cast(key as text), cast(value as text) \
-             from conversations where rowid = ?1",
+            "select rowid, key, value from conversations where rowid = ?1",
             [rowid],
             |row| {
-                Ok(vec![
-                    NativeSqliteValue::Integer(row.get(0)?),
-                    NativeSqliteValue::Text(row.get(1)?),
-                    NativeSqliteValue::Text(row.get(2)?),
-                ])
+                (0..3)
+                    .map(|index| raw_native_sqlite_value(row, index))
+                    .collect::<rusqlite::Result<Vec<NativeSqliteValue>>>()
             },
         )
     }
@@ -601,6 +657,25 @@ pub(super) fn resolve_kiro(
     ))
 }
 
+fn raw_native_sqlite_value(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+) -> rusqlite::Result<NativeSqliteValue> {
+    Ok(match row.get_ref(index)? {
+        ValueRef::Null => NativeSqliteValue::Null,
+        ValueRef::Integer(value) => NativeSqliteValue::Integer(value),
+        ValueRef::Real(value) => NativeSqliteValue::from_real(value),
+        ValueRef::Text(value) => NativeSqliteValue::Text(
+            std::str::from_utf8(value)
+                .map_err(|cause| {
+                    rusqlite::Error::FromSqlConversionFailure(index, Type::Text, Box::new(cause))
+                })?
+                .to_owned(),
+        ),
+        ValueRef::Blob(value) => NativeSqliteValue::Blob(value.to_vec()),
+    })
+}
+
 pub(super) fn resolve_zed(
     conn: &Connection,
     request: &CompleteMessageRequest,
@@ -614,25 +689,52 @@ pub(super) fn resolve_zed(
             CompleteContentErrorKind::ContentVerificationFailed,
         ));
     }
-    let decoded =
-        zed::decode_zed_thread_events(&row).map_err(|cause| map_capture_error(request, cause))?;
-    let event_index = usize::try_from(request.source_record_subrecord_index)
-        .map_err(|_| error(request, CompleteContentErrorKind::SourceRecordMissing))?;
-    let decoded_event = decoded
-        .event_at(&row.id, event_index)
-        .map_err(|cause| map_capture_error(request, cause))?
-        .ok_or_else(|| error(request, CompleteContentErrorKind::SourceRecordMissing))?;
-    if decoded_event.event.event_type != EventType::Message {
+    if request.expected_hash_authority == CompleteContentHashAuthority::ProviderSupplied
+        && request
+            .expected_provider_event_hash
+            .starts_with("zed-message:")
+    {
+        let decoded = zed::decode_zed_thread_events(&row)
+            .map_err(|cause| map_capture_error(request, cause))?;
+        let event_index = usize::try_from(request.source_record_subrecord_index)
+            .map_err(|_| error(request, CompleteContentErrorKind::SourceRecordMissing))?;
+        let decoded_event = decoded
+            .event_at(&row.id, event_index)
+            .map_err(|cause| map_capture_error(request, cause))?
+            .ok_or_else(|| error(request, CompleteContentErrorKind::SourceRecordMissing))?;
+        if decoded_event.event.event_type != EventType::Message {
+            return Err(error(
+                request,
+                CompleteContentErrorKind::HydrationUnsupported,
+            ));
+        }
+        return Ok(resolved_from_event_fields(
+            decoded_event.event.provider_event_index,
+            decoded_event.event.provider_event_hash.as_deref(),
+            decoded_event.event.cursor.as_deref(),
+            &decoded_event.event.payload,
+            decoded_event.complete_text,
+            &values,
+        ));
+    }
+    let decoded_event = zed::decode_zed_nativepath_complete_message(
+        &row,
+        u64::from(request.source_record_subrecord_index),
+        sqlite_logical_record_digest(&values),
+    )
+    .map_err(|cause| map_capture_error(request, cause))?
+    .ok_or_else(|| error(request, CompleteContentErrorKind::SourceRecordMissing))?;
+    if decoded_event.event_type != EventType::Message {
         return Err(error(
             request,
             CompleteContentErrorKind::HydrationUnsupported,
         ));
     }
     Ok(resolved_from_event_fields(
-        decoded_event.event.provider_event_index,
-        decoded_event.event.provider_event_hash.as_deref(),
-        decoded_event.event.cursor.as_deref(),
-        &decoded_event.event.payload,
+        decoded_event.provider_event_index,
+        Some(decoded_event.legacy_provider_event_hash.as_str()),
+        Some(decoded_event.cursor.as_str()),
+        &decoded_event.payload,
         decoded_event.complete_text,
         &values,
     ))
@@ -733,16 +835,17 @@ pub(super) fn resolved_from_provider_hash(
     }
 }
 
-pub(super) fn resolved_from_provider_hash_and_digest(
-    provider_event_hash: String,
+pub(super) fn resolved_from_normalized_hash_and_digest(
+    native_record_id: String,
+    normalized_payload_hash: String,
     text: String,
     record_digest: CompleteContentBodyDigest,
 ) -> ResolvedSqliteMessage {
     ResolvedSqliteMessage {
         text,
-        native_record_id: provider_event_hash.clone(),
-        provider_event_hash: Some(provider_event_hash),
-        normalized_payload_hash: None,
+        native_record_id,
+        provider_event_hash: None,
+        normalized_payload_hash: Some(normalized_payload_hash),
         record_digest,
     }
 }

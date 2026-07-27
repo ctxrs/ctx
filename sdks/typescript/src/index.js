@@ -94,13 +94,18 @@ export class LocalCliAdapter {
   async execute(args, options = {}) {
     const argv = this.#argv(args);
     const command = this.ctxPath;
+    const env = {
+      ...this.env,
+      ...options.env,
+      CTX_ANALYTICS_ENABLED: "false",
+    };
     if (this.runner) {
       return normalizeRunResult(
         await this.runner({
           command,
           args: argv,
           cwd: options.cwd ?? this.cwd,
-          env: { ...this.env, ...options.env },
+          env,
           timeoutMs: options.timeoutMs ?? this.timeoutMs,
         }),
         command,
@@ -109,7 +114,7 @@ export class LocalCliAdapter {
     }
     return spawnCommand(command, argv, {
       cwd: options.cwd ?? this.cwd,
-      env: { ...process.env, ...this.env, ...options.env },
+      env: { ...process.env, ...env },
       timeoutMs: options.timeoutMs ?? this.timeoutMs,
     });
   }

@@ -265,7 +265,7 @@ pub(super) fn remove_legacy(data_root: &Path) -> Result<()> {
 pub(super) fn write(journal: &InstallTransactionJournal) -> Result<()> {
     #[cfg(unix)]
     {
-        if cfg!(debug_assertions)
+        if crate::upgrade::test_harness_enabled()
             && journal.phase == JournalPhase::Committed
             && env_flag("CTX_UPGRADE_FAIL_COMMIT_JOURNAL_WRITE_FOR_TESTS")
         {

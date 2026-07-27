@@ -1,4 +1,8 @@
-use std::{path::PathBuf, time::Instant};
+use std::{
+    io::{self, IsTerminal as _},
+    path::PathBuf,
+    time::Instant,
+};
 
 use anyhow::{anyhow, Result};
 use clap::{Args, Subcommand};
@@ -162,6 +166,7 @@ pub(crate) fn run(
         .validate()
         .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
     local_usage.bind_blame_target(&target);
+    let interactive_human = !json && io::stdout().is_terminal() && io::stderr().is_terminal();
 
     let started = Instant::now();
     let target_kind = ProBlameTargetV1::from_protocol(&target);
@@ -170,9 +175,20 @@ pub(crate) fn run(
         let result = crate::pro::blame(&data_root, target, limit, cursor)
             .map_err(crate::pro::actionable_error)?;
         telemetry.complete(result.matches.len(), result.next.is_some());
-        emit_blame_result(&result, json, local_usage, print_blame_result)
+        emit_blame_result(&result, json, local_usage, print_blame_result)?;
+        let eligible = referral_cta_eligible(&result, json, interactive_human);
+        crate::pro::show_cta_once(&data_root, eligible, &mut io::stderr().lock());
+        Ok(())
     })();
     finish_blame_telemetry(&data_root, &mut telemetry, started, result)
+}
+
+fn referral_cta_eligible(
+    result: &ctx_pro_host_protocol::BlameResult,
+    json: bool,
+    interactive: bool,
+) -> bool {
+    interactive && !json && !result.matches.is_empty()
 }
 
 fn emit_blame_result(
@@ -315,6 +331,46 @@ mod tests {
             completed.result_metadata_for_test(),
             (crate::local_usage::ValueClass::NotApplicable, 0, 0)
         );
+    }
+
+    #[test]
+    fn referral_cta_requires_nonempty_interactive_human_success() {
+        let resource = |id: &str, kind| ResourceRef {
+            id: id.to_owned(),
+            kind,
+            display: id.to_owned(),
+        };
+        let commit = resource("commit:abc1234", ResourceKind::Commit);
+        let mut result = BlameResult {
+            target: ResolvedBlameTarget::Commit {
+                commit: commit.clone(),
+                repository: resource("repository:ctx", ResourceKind::Repository),
+            },
+            git_snapshot: None,
+            matches: vec![ctx_pro_host_protocol::BlameMatch::Commit(
+                CommitBlameMatch {
+                    fact_id: "fact:1".to_owned(),
+                    fact_type: CommitFactType::Produced,
+                    predicate: CommitPredicate::ProducedBy,
+                    subject: commit,
+                    object: None,
+                    fact_occurred_at_ms: None,
+                    confidence: FactConfidence::Explicit,
+                    state: FactState::Asserted,
+                    direct_actor: None,
+                    owning_root: None,
+                    evidence_numbers: Vec::new(),
+                },
+            )],
+            evidence: Vec::new(),
+            next: None,
+        };
+
+        assert!(referral_cta_eligible(&result, false, true));
+        assert!(!referral_cta_eligible(&result, true, true));
+        assert!(!referral_cta_eligible(&result, false, false));
+        result.matches.clear();
+        assert!(!referral_cta_eligible(&result, false, true));
     }
 
     #[test]

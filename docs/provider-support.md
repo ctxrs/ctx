@@ -64,6 +64,10 @@ support matrix is:
 | Cline | Supported | `cline_task_directory_json` |
 | Roo Code | Supported | `roo_task_directory_json` |
 
+Factory AI Droid has no automatic history location. Its imports always require
+an exact path, for example
+`ctx import --provider factory-ai-droid --path /path/to/factory/sessions`.
+
 `ctx sources --json` reports each known provider source with `import_support`
 and `importable` fields. A source is importable only when provider-specific
 transcript files exist and match the documented format. NanoClaw remains

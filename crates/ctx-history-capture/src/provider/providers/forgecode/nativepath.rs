@@ -18,6 +18,9 @@ mod output;
 mod publication;
 pub(super) mod source;
 
+#[cfg(test)]
+pub(in crate::provider::providers::forgecode) use publication::legacy_source_revision;
+
 use self::{
     output::ForgeCodeOutputReplay,
     publication::{
@@ -36,15 +39,9 @@ pub(super) fn import_forgecode_nativepath(
     context.source_path = Some(path.to_path_buf());
     let discovery = discover_forgecode_source(path)?;
     match discovery {
-        ForgeCodeDiscovery::Missing(path) => {
+        ForgeCodeDiscovery::Missing(missing) => {
             let bulk_guard = store.begin_event_search_bulk_mode()?;
-            let operation = retire_missing_source(
-                store,
-                &bulk_guard,
-                &context,
-                context.source_root_display().as_deref(),
-                &path,
-            );
+            let operation = retire_missing_source(store, &bulk_guard, &context, &missing);
             finish_bulk(store, &bulk_guard, operation)
         }
         ForgeCodeDiscovery::Live(source) => {

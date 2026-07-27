@@ -21,13 +21,26 @@ pub(super) fn visit_jsonl_tree_files(
     is_selected: &dyn Fn(&Path) -> bool,
     visit: &mut dyn FnMut(&Path) -> Result<()>,
 ) -> Result<usize> {
-    visit_jsonl_tree_files_at_depth(root, is_selected, visit, 0)
+    visit_jsonl_tree_files_at_depth(root, is_selected, visit, &mut |_path, error| Err(error), 0)
+}
+
+/// Visits a tree while containing admission/read failures for selected child
+/// files. Root and directory-enumeration failures remain fatal because no
+/// independent source boundary has been established for them.
+pub(super) fn visit_jsonl_tree_files_isolating_selected(
+    root: &Path,
+    is_selected: &dyn Fn(&Path) -> bool,
+    visit: &mut dyn FnMut(&Path) -> Result<()>,
+    selected_file_error: &mut dyn FnMut(&Path, CaptureError) -> Result<()>,
+) -> Result<usize> {
+    visit_jsonl_tree_files_at_depth(root, is_selected, visit, selected_file_error, 0)
 }
 
 fn visit_jsonl_tree_files_at_depth(
     root: &Path,
     is_selected: &dyn Fn(&Path) -> bool,
     visit: &mut dyn FnMut(&Path) -> Result<()>,
+    selected_file_error: &mut dyn FnMut(&Path, CaptureError) -> Result<()>,
     depth: usize,
 ) -> Result<usize> {
     if depth > NATIVE_JSONL_MAX_DIRECTORY_DEPTH {
@@ -60,18 +73,29 @@ fn visit_jsonl_tree_files_at_depth(
     let mut visited = 0_usize;
     visit_native_jsonl_directory_names(root, &mut |name| {
         let path = root.join(name);
-        let file_type = fs::symlink_metadata(&path)?.file_type();
+        let file_type = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata.file_type(),
+            Err(error) if is_selected(&path) => {
+                selected_file_error(&path, error.into())?;
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+        };
         if file_type.is_dir() {
             visited = visited.saturating_add(visit_jsonl_tree_files_at_depth(
                 &path,
                 is_selected,
                 visit,
+                selected_file_error,
                 depth.saturating_add(1),
             )?);
         } else if (file_type.is_file() || file_type.is_symlink()) && is_selected(&path) {
-            ensure_regular_provider_transcript_file(&path)?;
-            visit(&path)?;
-            visited = visited.saturating_add(1);
+            let outcome =
+                ensure_regular_provider_transcript_file(&path).and_then(|()| visit(&path));
+            match outcome {
+                Ok(()) => visited = visited.saturating_add(1),
+                Err(error) => selected_file_error(&path, error)?,
+            }
         }
         Ok(())
     })?;
@@ -362,4 +386,67 @@ pub(super) fn count_native_jsonl_traversal_work<T>(
     let output = operation();
     let stats = NATIVE_JSONL_TRAVERSAL_STATS.with(|stats| stats.replace(None).unwrap());
     (output, stats)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::symlink;
+
+    use super::*;
+
+    #[test]
+    fn selected_child_failure_is_isolated_from_healthy_siblings() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("tree");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("a-healthy.jsonl"), b"{}\n").unwrap();
+        symlink("a-healthy.jsonl", root.join("b-rejected.jsonl")).unwrap();
+
+        let mut visited = Vec::new();
+        let mut failures = Vec::new();
+        let count = visit_jsonl_tree_files_isolating_selected(
+            &root,
+            &|path| path.extension() == Some(OsStr::new("jsonl")),
+            &mut |path| {
+                visited.push(path.file_name().unwrap().to_owned());
+                Ok(())
+            },
+            &mut |path, _error| {
+                failures.push(path.file_name().unwrap().to_owned());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(count, 1);
+        assert_eq!(visited, [OsString::from("a-healthy.jsonl")]);
+        assert_eq!(failures, [OsString::from("b-rejected.jsonl")]);
+    }
+
+    #[test]
+    fn root_failure_is_never_downgraded_to_a_selected_file_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target");
+        fs::create_dir_all(&target).unwrap();
+        let root = directory.path().join("root.jsonl");
+        symlink(&target, &root).unwrap();
+        let mut isolated = 0;
+
+        let error = visit_jsonl_tree_files_isolating_selected(
+            &root,
+            &|_| true,
+            &mut |_| Ok(()),
+            &mut |_path, _error| {
+                isolated += 1;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CaptureError::InvalidProviderTranscriptPath { .. }
+        ));
+        assert_eq!(isolated, 0);
+    }
 }

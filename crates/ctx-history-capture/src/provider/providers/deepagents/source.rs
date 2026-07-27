@@ -1,6 +1,6 @@
 //! Frozen SQLite observation, schema admission, and bounded keyset reads.
 
-use std::path::Path;
+use std::{collections::BTreeSet, path::Path};
 
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension};
@@ -492,18 +492,18 @@ pub(super) fn deepagents_checkpoint_time(
 
 pub(super) fn deepagents_validate_schema(conn: &Connection, path: &Path) -> Result<()> {
     if !sqlite_table_exists(conn, "checkpoints")? {
-        return Err(CaptureError::InvalidProviderTranscriptPath {
-            path: path.to_path_buf(),
-            reason: "Deep Agents sessions.db is missing required checkpoints table",
-        });
+        return Err(CaptureError::UnsupportedSchema(format!(
+            "Deep Agents sessions.db at {} is missing required checkpoints table",
+            path.display()
+        )));
     }
     if !sqlite_table_exists(conn, "writes")? {
-        return Err(CaptureError::InvalidProviderTranscriptPath {
-            path: path.to_path_buf(),
-            reason: "Deep Agents sessions.db is missing required writes table",
-        });
+        return Err(CaptureError::UnsupportedSchema(format!(
+            "Deep Agents sessions.db at {} is missing required writes table",
+            path.display()
+        )));
     }
-    ensure_sqlite_table_columns(
+    deepagents_require_columns(
         &sqlite_table_columns(conn, "checkpoints")?,
         "Deep Agents checkpoints table",
         &[
@@ -514,7 +514,7 @@ pub(super) fn deepagents_validate_schema(conn: &Connection, path: &Path) -> Resu
             "metadata",
         ],
     )?;
-    ensure_sqlite_table_columns(
+    deepagents_require_columns(
         &sqlite_table_columns(conn, "writes")?,
         "Deep Agents writes table",
         &[
@@ -529,6 +529,17 @@ pub(super) fn deepagents_validate_schema(conn: &Connection, path: &Path) -> Resu
         ],
     )?;
     Ok(())
+}
+
+fn deepagents_require_columns(
+    columns: &BTreeSet<String>,
+    label: &str,
+    required: &[&str],
+) -> Result<()> {
+    ensure_sqlite_table_columns(columns, label, required).map_err(|error| match error {
+        CaptureError::InvalidPayload(reason) => CaptureError::UnsupportedSchema(reason),
+        error => error,
+    })
 }
 
 pub(super) fn deepagents_metadata_json(blob: Option<&[u8]>) -> Value {

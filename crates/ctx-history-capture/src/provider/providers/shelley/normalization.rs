@@ -15,15 +15,16 @@ use crate::provider::normalization::{
     provider_result_outcome_evidence,
 };
 use crate::{
-    CaptureError, OutputAssociations, OutputNativeCoordinate, OutputObservationKind, OutputOutcome,
-    OutputOutcomeMetadata, OutputSourceLocator, ProOutputObservation, ProviderAdapterContext,
-    Result, PROVIDER_MAX_PREVIEW_CHARS, SHELLEY_SQLITE_SOURCE_FORMAT,
+    compute_payload_hash, CaptureError, OutputAssociations, OutputNativeCoordinate,
+    OutputObservationKind, OutputOutcome, OutputOutcomeMetadata, OutputSourceLocator,
+    ProOutputObservation, ProviderAdapterContext, Result, PROVIDER_MAX_PREVIEW_CHARS,
+    SHELLEY_SQLITE_SOURCE_FORMAT,
 };
 
 use super::relationships::{
     shelley_event_index, shelley_event_role, shelley_event_type, shelley_message_body,
-    shelley_message_complete_text, shelley_message_text, shelley_verified_record_values,
-    ShelleyConversationRow, ShelleyMessageRow,
+    shelley_message_complete_text, shelley_message_text, shelley_native_record_id,
+    shelley_verified_record_values, ShelleyConversationRow, ShelleyMessageRow,
 };
 
 pub(super) fn shelley_core_event(
@@ -68,6 +69,7 @@ pub(super) fn shelley_core_event(
             &complete_text,
         )?;
     }
+    event.provider_event_hash = compute_payload_hash(&event.payload)?;
     Ok(Some(event))
 }
 
@@ -116,6 +118,7 @@ pub(super) fn shelley_output_observation(
     message: &ShelleyMessageRow,
     conversation: &ShelleyConversationRow,
     parent_bearing: bool,
+    provider_event_index: u64,
     context: &ProviderAdapterContext,
     classification: &ShelleyOutputClassification,
 ) -> Result<ProOutputObservation> {
@@ -132,8 +135,8 @@ pub(super) fn shelley_output_observation(
                 "shelley:{}:message:{}:output",
                 message.conversation_id, message.message_id
             ),
-            native_sequence: shelley_event_index(message),
-            native_record_id: Some(message.message_id.clone()),
+            native_sequence: provider_event_index,
+            native_record_id: Some(shelley_native_record_id(message)),
             source_record_ordinal: None,
             source_record_subrecord_index: None,
             byte_start: None,
@@ -374,7 +377,7 @@ pub(crate) fn shelley_complete_event(
     let event = shelley_native_event(message, occurred_at);
     (
         event.provider_event_index,
-        event.provider_event_hash,
+        event.legacy_provider_event_hash,
         event.cursor,
         event.event_type,
         event.payload,
@@ -385,6 +388,8 @@ pub(crate) fn shelley_complete_event(
 pub(super) struct ShelleyCoreEvent {
     pub(super) provider_event_index: u64,
     pub(super) provider_event_hash: String,
+    pub(super) legacy_provider_event_hash: String,
+    pub(super) native_record_id: String,
     pub(super) cursor: String,
     pub(super) event_type: EventType,
     pub(super) role: Option<EventRole>,
@@ -408,7 +413,9 @@ fn shelley_native_event(
     let result_outcome = provider_result_outcome_evidence(event_type, &body);
     ShelleyCoreEvent {
         provider_event_index: shelley_event_index(message),
-        provider_event_hash: message.message_id.clone(),
+        provider_event_hash: String::new(),
+        legacy_provider_event_hash: message.message_id.clone(),
+        native_record_id: shelley_native_record_id(message),
         cursor: format!(
             "conversation:{}:sequence:{}:message:{}",
             message.conversation_id, message.sequence_id, message.message_id
@@ -482,7 +489,7 @@ fn attach_shelley_core_content_locator(
         CompleteContentSourceFamily::Sqlite,
         "shelley-compound-message-row-v1",
         &coordinate,
-        event.provider_event_hash.clone(),
+        event.native_record_id.clone(),
         shelley_logical_record_digest(&values)?,
     )
     .ok_or(CaptureError::SystemInvariant(

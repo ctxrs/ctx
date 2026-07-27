@@ -290,7 +290,7 @@ pub(super) fn write_state_phase_locked(
     phase: &str,
 ) -> Result<bool> {
     if phase == "applying"
-        && cfg!(debug_assertions)
+        && crate::upgrade::test_harness_enabled()
         && super::env_flag("CTX_UPGRADE_FAIL_APPLYING_STATE_WRITE_FOR_TESTS")
     {
         return Err(anyhow!("injected applying-state write failure"));
@@ -312,7 +312,9 @@ pub(super) fn write_state_checked_locked(
     status: &str,
     interval: Duration,
 ) -> Result<bool> {
-    if cfg!(debug_assertions) && super::env_flag("CTX_UPGRADE_FAIL_STATE_WRITE_FOR_TESTS") {
+    if crate::upgrade::test_harness_enabled()
+        && super::env_flag("CTX_UPGRADE_FAIL_STATE_WRITE_FOR_TESTS")
+    {
         return Err(anyhow!("injected upgrade state write failure"));
     }
     let mut state = read_state_object(&lock.install_path);
@@ -644,7 +646,7 @@ impl UpgradeLock {
 }
 
 fn pause_after_recovery_discovery_for_test() -> Result<()> {
-    if !cfg!(debug_assertions) {
+    if !crate::upgrade::test_harness_enabled() {
         return Ok(());
     }
     let Some(path) = std::env::var_os("CTX_UPGRADE_PAUSE_AFTER_RECOVERY_DISCOVERY_FOR_TESTS")
@@ -667,7 +669,7 @@ fn pause_after_recovery_discovery_for_test() -> Result<()> {
 }
 
 fn pause_after_stale_recovery_rejection_for_test() -> Result<()> {
-    if !cfg!(debug_assertions) {
+    if !crate::upgrade::test_harness_enabled() {
         return Ok(());
     }
     let Some(path) = std::env::var_os("CTX_UPGRADE_PAUSE_AFTER_STALE_RECOVERY_FOR_TESTS") else {
