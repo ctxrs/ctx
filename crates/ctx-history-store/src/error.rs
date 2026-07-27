@@ -142,10 +142,21 @@ pub enum StoreError {
     NativePathEventIdentityAliasConflict,
     #[error("cold Store construction is supported only on Linux")]
     ColdStoreUnsupportedPlatform,
-    #[error("cold Store target must be absent: {0:?}")]
+    #[error("cold Store target must be an absent or regular path: {0:?}")]
     ColdStoreTargetIneligible(PathBuf),
+    #[error(
+        "a Store generation publication appears stuck: it still holds {0:?} after the open \
+         timeout. The publishing process may be stopped, frozen, or blocked on storage; \
+         inspect the holder of that lock, then retry."
+    )]
+    StorePublicationLeaseUnavailable(PathBuf),
     #[error("cold Store target changed after admission: {0:?}")]
     ColdStoreTargetChanged(PathBuf),
+    #[error(
+        "cold Store publication failed and the retired generation could not be restored; \
+         it is retained at {path:?} and must be recovered before it is removed: {cause}"
+    )]
+    ColdStoreRetiredGenerationRetained { path: PathBuf, cause: String },
     #[error("another cold Store builder owns the target: {0:?}")]
     ColdStoreBuildBusy(PathBuf),
     #[error("cold Store build is not in the required lifecycle phase")]

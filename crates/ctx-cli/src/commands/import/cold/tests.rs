@@ -152,8 +152,10 @@ fn all_inventory_cold_seed_consumes_only_codex_and_preserves_combined_authority(
     );
 }
 
+/// The state `ctx setup` and every content-free import leave behind still
+/// reaches the cold Store: eligibility follows the projection, not the file.
 #[test]
-fn existing_target_never_uses_the_cold_seed() {
+fn existing_empty_target_uses_the_cold_seed() {
     let temp = tempdir().unwrap();
     let sessions = temp.path().join("sessions");
     fs::create_dir_all(&sessions).unwrap();
@@ -175,10 +177,55 @@ fn existing_target_never_uses_the_cold_seed() {
         ProviderRefreshTrigger::Setup,
         &options(),
     )
+    .unwrap()
+    .expect("an existing empty target should cold-seed Codex");
+
+    assert_eq!(seed.report.totals.imported_sessions, 1);
+    let store = ctx_history_store::Store::open_read_only(&db_path).unwrap();
+    assert_eq!(store.list_sessions().unwrap().len(), 1);
+}
+
+/// A destination that already owns provider content stays on the ordinary
+/// incremental writer and keeps every canonical row it had.
+#[test]
+fn existing_populated_target_never_uses_the_cold_seed() {
+    let temp = tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(
+        sessions.join("session.jsonl"),
+        codex_session("019f5a54-67de-7422-9841-e9872df75f48"),
+    )
+    .unwrap();
+    let requests = vec![explicit_path_source(CaptureProvider::Codex, sessions)];
+    let db_path = temp.path().join("ctx.db");
+    let mut refreshes = ProviderRefreshCollector::default();
+    try_codex_cold_cli_import(
+        &all_args(),
+        &requests,
+        &db_path,
+        &mut refreshes,
+        ProviderRefreshTrigger::Setup,
+        &options(),
+    )
+    .unwrap()
+    .expect("the first import should cold-seed Codex");
+
+    let mut second_refreshes = ProviderRefreshCollector::default();
+    let seed = try_codex_cold_cli_import(
+        &all_args(),
+        &requests,
+        &db_path,
+        &mut second_refreshes,
+        ProviderRefreshTrigger::Import,
+        &options(),
+    )
     .unwrap();
 
     assert!(seed.is_none());
-    assert_eq!(requests.len(), 1);
+    let store = ctx_history_store::Store::open_read_only(&db_path).unwrap();
+    assert_eq!(store.list_sessions().unwrap().len(), 1);
+    assert_eq!(store.list_capture_sources().unwrap().len(), 1);
 }
 
 #[test]

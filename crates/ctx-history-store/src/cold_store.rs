@@ -1,5 +1,4 @@
 use std::{
-    ffi::OsString,
     fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -8,7 +7,6 @@ use std::{
 use fs2::FileExt;
 use rusqlite::{Connection, OptionalExtension};
 use same_file::Handle;
-use uuid::Uuid;
 
 use crate::{
     schema, search::projections::SearchProjectionCounts, JournalCheckpoint, Result, Store,
@@ -18,14 +16,26 @@ use crate::{
 mod preflight;
 #[cfg(test)]
 mod preflight_tests;
+mod publish;
+mod target;
 
-use preflight::{
-    cold_target_state, create_absent_hard_link_with, prove_adjacent_hard_link_with,
-    ColdTargetState, HardLinkOutcome,
+use preflight::{cold_target_state, prove_adjacent_hard_link_with, ColdTargetState};
+use publish::{
+    adjacent_retired_path, adjacent_stage_path, append_suffix, cleanup_orphaned_stage_files,
+    fsync_directory, install_same_filesystem, link_absent, link_count, remove_database_sidecars,
+    remove_path_if_same, remove_stage_sidecars, restore_retired_target,
+};
+#[cfg(test)]
+use target::set_publication_lease_wait;
+use target::{
+    acquire_publication_lease, admit_empty_generation, publication_lease_wait,
+    revalidate_empty_generation,
 };
 
 const COLD_LOCK_SUFFIX: &str = ".ctx-native-cold.lock";
 const COLD_STAGE_MARKER: &str = ".ctx-native-cold-";
+const COLD_RETIRED_TAIL: &str = ".retired.sqlite";
+const DATABASE_SIDECARS: [&str; 3] = ["-wal", "-shm", "-journal"];
 const FTS_TABLES: [&str; 5] = [
     "ctx_history_search",
     "event_search",
@@ -71,15 +81,19 @@ pub struct ColdStoreBuildReceipt {
 
 /// Adjacent builder for a final-format Store generation.
 ///
-/// Existing destinations always remain on the ordinary incremental writer.
-/// The stage is populated through the current NativePath Store APIs, validated,
-/// synced, and installed with an absent-target-only hard-link publication.
+/// Eligibility is a property of the projection being written, not of whether
+/// the destination file happens to exist: an absent target and an existing but
+/// wholly empty generation both build here, and every destination that already
+/// owns content stays on the ordinary incremental writer. The stage is
+/// populated through the current NativePath Store APIs, validated, synced, and
+/// published with an absent-target-only hard link.
 #[doc(hidden)]
 pub struct ColdStoreBuild {
     target_path: PathBuf,
     parent_path: PathBuf,
     stage_path: PathBuf,
     stage_identity: Option<Handle>,
+    admission: TargetAdmission,
     _lock_file: File,
     store: Option<Store>,
     schema_signature: String,
@@ -88,6 +102,54 @@ pub struct ColdStoreBuild {
     measured_core_load: Option<Duration>,
     projection_journal_build: Duration,
     installed: bool,
+}
+
+/// The destination state this build was admitted against.
+///
+/// Publication re-proves the admitted state immediately before it installs, and
+/// fails closed on any mismatch.
+enum TargetAdmission {
+    Absent,
+    EmptyGeneration {
+        identity: Handle,
+        records_digest: [u8; 32],
+    },
+}
+
+// Test-only injection point inside the window the publication lease protects:
+// after the emptiness proof, before the destination name is touched.
+#[cfg(test)]
+std::thread_local! {
+    static TEST_POST_PROOF_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_post_proof_hook(hook: Box<dyn FnOnce()>) {
+    TEST_POST_PROOF_HOOK.with(|slot| *slot.borrow_mut() = Some(hook));
+}
+
+#[cfg(test)]
+fn run_post_proof_hook() {
+    let hook = TEST_POST_PROOF_HOOK.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+/// Surfaces a retained retired generation ahead of the failure that caused it.
+///
+/// A publication that could neither install nor roll back leaves a real
+/// database on disk that nothing else will claim; naming it is more urgent than
+/// the underlying error, which is preserved in the message.
+fn retained_generation_error(retained: Option<PathBuf>, cause: StoreError) -> StoreError {
+    match retained {
+        Some(path) => StoreError::ColdStoreRetiredGenerationRetained {
+            path,
+            cause: cause.to_string(),
+        },
+        None => cause,
+    }
 }
 
 impl ColdStoreBuild {
@@ -114,10 +176,10 @@ impl ColdStoreBuild {
         fs::create_dir_all(requested_parent)?;
         let parent_path = fs::canonicalize(requested_parent)?;
         let target_path = parent_path.join(file_name);
-        match cold_target_state(&target_path)? {
-            ColdTargetState::ExistingRegular => return Ok(None),
-            ColdTargetState::Absent => {}
-        }
+        // Reject non-regular destinations before taking the lock. Absent and
+        // existing regular targets both stay admissible until the emptiness
+        // proof below runs under the exclusive cold lock.
+        cold_target_state(&target_path)?;
 
         let lock_path = append_suffix(&target_path, COLD_LOCK_SUFFIX);
         let lock_file = OpenOptions::new()
@@ -134,14 +196,26 @@ impl ColdStoreBuild {
             }
             return Err(error.into());
         }
+        if !restore_retired_target(&parent_path, file_name, &target_path)? {
+            return Ok(None);
+        }
         cleanup_orphaned_stage_files(&parent_path, file_name)?;
         if !prove_adjacent_hard_link_with(&target_path, hard_link)? {
             return Ok(None);
         }
-        match cold_target_state(&target_path)? {
-            ColdTargetState::ExistingRegular => return Ok(None),
-            ColdTargetState::Absent => {}
-        }
+        let (admission, carried_records) = match cold_target_state(&target_path)? {
+            ColdTargetState::Absent => (TargetAdmission::Absent, Vec::new()),
+            ColdTargetState::ExistingRegular => match admit_empty_generation(&target_path)? {
+                None => return Ok(None),
+                Some(admitted) => (
+                    TargetAdmission::EmptyGeneration {
+                        identity: admitted.identity,
+                        records_digest: admitted.records_digest,
+                    },
+                    admitted.records,
+                ),
+            },
+        };
 
         let stage_path = adjacent_stage_path(&target_path);
         let stage_file = OpenOptions::new()
@@ -174,12 +248,19 @@ impl ColdStoreBuild {
                  PRAGMA foreign_keys=ON;",
             )?;
             store.begin_native_cold_load()?;
+            // Control records the retired generation owned move into the new
+            // one before any provider content, so publication never drops a
+            // row the destination already held. The search projection is
+            // rebuilt from canonical rows at the end of the load.
+            for record in &carried_records {
+                store.upsert_record(record)?;
+            }
             Ok((store, schema_signature))
         })();
         let (store, schema_signature) = match initialized {
             Ok(value) => value,
             Err(error) => {
-                remove_stage_if_same(&stage_path, &stage_identity);
+                remove_path_if_same(&stage_path, &stage_identity);
                 remove_stage_sidecars(&stage_path);
                 return Err(error);
             }
@@ -190,6 +271,7 @@ impl ColdStoreBuild {
             parent_path,
             stage_path,
             stage_identity: Some(stage_identity),
+            admission,
             _lock_file: lock_file,
             store: Some(store),
             schema_signature,
@@ -315,16 +397,30 @@ impl ColdStoreBuild {
         let database_bytes = database.metadata()?.len();
         drop(database);
         fsync_directory(&self.parent_path)?;
+        // Everything from the emptiness proof through the install runs under one
+        // continuous exclusive publication lease. Every writable `Store::open`
+        // takes the same lease shared for the lifetime of the Store, so no
+        // writable Store — and therefore no commit — can exist in this window.
+        let lease = acquire_publication_lease(&self.target_path, publication_lease_wait())?;
         self.revalidate_target()?;
         self.revalidate_stage_link_count(1)?;
-        install_same_filesystem(&self.stage_path, &self.target_path)?;
+        #[cfg(test)]
+        run_post_proof_hook();
+        let retired_path = self.install()?;
         if let Err(error) = self
             .revalidate_installed_link()
             .and_then(|()| fsync_directory(&self.parent_path))
         {
             self.rollback_uninstalled_target();
-            return Err(error);
+            let retained = self.restore_retired_generation(retired_path.as_deref());
+            drop(lease);
+            return Err(retained_generation_error(retained, error));
         }
+        if let Some(retired_path) = retired_path {
+            let _ = fs::remove_file(retired_path);
+            let _ = fsync_directory(&self.parent_path);
+        }
+        drop(lease);
         self.installed = true;
         self.stage_identity.take();
         let _ = fs::remove_file(&self.stage_path);
@@ -349,11 +445,125 @@ impl ColdStoreBuild {
         })
     }
 
+    /// Re-proves the admitted destination state immediately before publication.
+    ///
+    /// The caller holds the exclusive publication lease across this proof and
+    /// the install that follows, and every writable `Store::open` takes that
+    /// same lease shared for the lifetime of the Store. No writable Store can
+    /// therefore exist between the proof and the install, which is what makes
+    /// the proof hold through publication rather than only at the instant it
+    /// runs.
+    ///
+    /// An absent target must still be absent. An empty generation must still be
+    /// the exact admitted object, must still be empty, and its carried rows must
+    /// still digest identically, contents included.
     fn revalidate_target(&self) -> Result<()> {
-        match fs::symlink_metadata(&self.target_path) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            _ => Err(StoreError::ColdStoreTargetChanged(self.target_path.clone())),
+        match &self.admission {
+            TargetAdmission::Absent => match fs::symlink_metadata(&self.target_path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                _ => Err(StoreError::ColdStoreTargetChanged(self.target_path.clone())),
+            },
+            TargetAdmission::EmptyGeneration {
+                identity,
+                records_digest,
+            } => {
+                self.revalidate_target_identity(identity)?;
+                revalidate_empty_generation(&self.target_path, records_digest)?;
+                self.revalidate_target_identity(identity)
+            }
         }
+    }
+
+    fn revalidate_target_identity(&self, identity: &Handle) -> Result<()> {
+        let changed = || StoreError::ColdStoreTargetChanged(self.target_path.clone());
+        let metadata = fs::symlink_metadata(&self.target_path).map_err(|_| changed())?;
+        if !metadata.file_type().is_file()
+            || Handle::from_path(&self.target_path)
+                .map(|current| current != *identity)
+                .unwrap_or(true)
+        {
+            return Err(changed());
+        }
+        Ok(())
+    }
+
+    /// Publishes the stage under the target name.
+    ///
+    /// Both admissions end in the same absent-target-only hard link, which is
+    /// the anti-clobber primitive: it fails closed the instant any other object
+    /// owns the destination name. An admitted empty generation is first linked
+    /// aside so the name can be made absent without ever losing the original
+    /// object, and is restored if publication does not succeed.
+    fn install(&self) -> Result<Option<PathBuf>> {
+        let TargetAdmission::EmptyGeneration { identity, .. } = &self.admission else {
+            install_same_filesystem(&self.stage_path, &self.target_path)?;
+            return Ok(None);
+        };
+        // The name is minted under the exclusive cold lock with a fresh nonce,
+        // so nothing else can own it and every failure below can drop it.
+        let retired_path = adjacent_retired_path(&self.target_path);
+        match self.retire_and_publish(identity, &retired_path) {
+            Ok(()) => Ok(Some(retired_path)),
+            Err(error) => {
+                let retained = self.restore_retired_generation(Some(&retired_path));
+                Err(retained_generation_error(retained, error))
+            }
+        }
+    }
+
+    /// Retires the admitted generation, then publishes the stage in its place.
+    ///
+    /// The backup link is made durable *before* the only other name for the
+    /// object is removed, so no crash can leave the parent directory without a
+    /// name for the admitted generation. Each subsequent directory mutation is
+    /// synced before the next one, so every reachable crash state is one this
+    /// builder's recovery can resolve.
+    fn retire_and_publish(&self, identity: &Handle, retired_path: &Path) -> Result<()> {
+        let changed = || StoreError::ColdStoreTargetChanged(self.target_path.clone());
+        link_absent(&self.target_path, retired_path)?;
+        if Handle::from_path(retired_path)
+            .map(|current| current != *identity)
+            .unwrap_or(true)
+            || link_count(retired_path)?.is_some_and(|actual| actual != 2)
+        {
+            return Err(changed());
+        }
+        // The backup name must be durable before the original name is removed.
+        fsync_directory(&self.parent_path)?;
+        remove_path_if_same(&self.target_path, identity);
+        if fs::symlink_metadata(&self.target_path).is_ok() {
+            return Err(changed());
+        }
+        remove_database_sidecars(&self.target_path);
+        fsync_directory(&self.parent_path)?;
+        install_same_filesystem(&self.stage_path, &self.target_path)?;
+        fsync_directory(&self.parent_path)
+    }
+
+    /// Puts an admitted generation back under the target name after a failed
+    /// publication.
+    ///
+    /// The restore is itself absent-target-only, so a concurrent winner is never
+    /// overwritten by the rollback. When the restore cannot succeed — which is
+    /// exactly the designed case where another object took the destination name
+    /// — the retired copy is **kept**, and its path is returned so the failure
+    /// names it. The next lock owner resolves it rather than deleting it.
+    #[must_use]
+    fn restore_retired_generation(&self, retired_path: Option<&Path>) -> Option<PathBuf> {
+        let retired_path = retired_path?;
+        if !matches!(self.admission, TargetAdmission::EmptyGeneration { .. })
+            || fs::symlink_metadata(retired_path).is_err()
+        {
+            return None;
+        }
+        if link_absent(retired_path, &self.target_path).is_err() {
+            let _ = fsync_directory(&self.parent_path);
+            return Some(retired_path.to_path_buf());
+        }
+        let _ = fsync_directory(&self.parent_path);
+        let _ = fs::remove_file(retired_path);
+        let _ = fsync_directory(&self.parent_path);
+        None
     }
 
     fn revalidate_stage(&self) -> Result<()> {
@@ -414,7 +624,7 @@ impl Drop for ColdStoreBuild {
         self.store.take();
         if !self.installed {
             if let Some(identity) = self.stage_identity.as_ref() {
-                remove_stage_if_same(&self.stage_path, identity);
+                remove_path_if_same(&self.stage_path, identity);
             }
             remove_stage_sidecars(&self.stage_path);
         }
@@ -615,320 +825,5 @@ fn quoted_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
-fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
-    let mut value: OsString = path.as_os_str().to_owned();
-    value.push(suffix);
-    PathBuf::from(value)
-}
-
-fn adjacent_stage_path(target: &Path) -> PathBuf {
-    loop {
-        let candidate = append_suffix(
-            target,
-            &format!("{COLD_STAGE_MARKER}{}.sqlite", Uuid::new_v4()),
-        );
-        if !candidate.exists() {
-            return candidate;
-        }
-    }
-}
-
-fn stage_sidecars(path: &Path) -> Vec<PathBuf> {
-    let mut paths = ["-wal", "-shm", "-journal"]
-        .into_iter()
-        .map(|suffix| append_suffix(path, suffix))
-        .collect::<Vec<_>>();
-    for suffix in [
-        ".event-search-bulk.lock.sqlite",
-        ".source-inventory.lock.sqlite",
-        ".migration.lock.sqlite",
-    ] {
-        let lock = append_suffix(path, suffix);
-        paths.push(lock.clone());
-        for sidecar in ["-wal", "-shm", "-journal"] {
-            paths.push(append_suffix(&lock, sidecar));
-        }
-    }
-    paths
-}
-
-fn remove_stage_sidecars(path: &Path) {
-    for sidecar in stage_sidecars(path) {
-        let _ = fs::remove_file(sidecar);
-    }
-}
-
-fn remove_stage_if_same(path: &Path, identity: &Handle) {
-    let matches = fs::symlink_metadata(path)
-        .map(|metadata| metadata.file_type().is_file())
-        .unwrap_or(false)
-        && Handle::from_path(path)
-            .map(|current| current == *identity)
-            .unwrap_or(false);
-    if matches {
-        let _ = fs::remove_file(path);
-    }
-}
-
-#[cfg(unix)]
-fn fsync_directory(path: &Path) -> Result<()> {
-    File::open(path)?.sync_all()?;
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-fn fsync_directory(path: &Path) -> Result<()> {
-    use std::os::windows::fs::OpenOptionsExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    };
-
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(path)?
-        .sync_all()?;
-    Ok(())
-}
-
-fn install_same_filesystem(stage: &Path, target: &Path) -> Result<()> {
-    match create_absent_hard_link_with(stage, target, |source, target| {
-        fs::hard_link(source, target)
-    })? {
-        HardLinkOutcome::Linked => Ok(()),
-        HardLinkOutcome::Unsupported => Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "adjacent absent-target hard-link publication is unsupported",
-        )
-        .into()),
-    }
-}
-
-fn cleanup_orphaned_stage_files(parent: &Path, target_name: &std::ffi::OsStr) -> Result<()> {
-    for entry in fs::read_dir(parent)? {
-        let entry = entry?;
-        if !is_exact_orphaned_stage_name(target_name, &entry.file_name()) {
-            continue;
-        }
-        let metadata = fs::symlink_metadata(entry.path())?;
-        if metadata.file_type().is_file() {
-            fs::remove_file(entry.path())?;
-        }
-    }
-    Ok(())
-}
-
-fn is_exact_orphaned_stage_name(
-    target_name: &std::ffi::OsStr,
-    entry_name: &std::ffi::OsStr,
-) -> bool {
-    const SUFFIXES: [&[u8]; 16] = [
-        b".sqlite",
-        b".sqlite-wal",
-        b".sqlite-shm",
-        b".sqlite-journal",
-        b".sqlite.event-search-bulk.lock.sqlite",
-        b".sqlite.event-search-bulk.lock.sqlite-wal",
-        b".sqlite.event-search-bulk.lock.sqlite-shm",
-        b".sqlite.event-search-bulk.lock.sqlite-journal",
-        b".sqlite.source-inventory.lock.sqlite",
-        b".sqlite.source-inventory.lock.sqlite-wal",
-        b".sqlite.source-inventory.lock.sqlite-shm",
-        b".sqlite.source-inventory.lock.sqlite-journal",
-        b".sqlite.migration.lock.sqlite",
-        b".sqlite.migration.lock.sqlite-wal",
-        b".sqlite.migration.lock.sqlite-shm",
-        b".sqlite.migration.lock.sqlite-journal",
-    ];
-    let name = entry_name.as_encoded_bytes();
-    let target = target_name.as_encoded_bytes();
-    let Some(rest) = name
-        .strip_prefix(target)
-        .and_then(|rest| rest.strip_prefix(COLD_STAGE_MARKER.as_bytes()))
-    else {
-        return false;
-    };
-    let Some((uuid, suffix)) = rest.split_at_checked(36) else {
-        return false;
-    };
-    std::str::from_utf8(uuid)
-        .ok()
-        .and_then(|value| Uuid::parse_str(value).ok())
-        .is_some()
-        && SUFFIXES.contains(&suffix)
-}
-
-#[cfg(unix)]
-fn link_count(path: &Path) -> Result<Option<u64>> {
-    use std::os::unix::fs::MetadataExt;
-    Ok(Some(fs::metadata(path)?.nlink()))
-}
-
-#[cfg(target_os = "windows")]
-fn link_count(_path: &Path) -> Result<Option<u64>> {
-    // Stable file-ID equality on both names proves that CreateHardLinkW
-    // published the exact staged object. Rust 1.88 does not expose the link
-    // count needed for the additional Unix invariant.
-    Ok(None)
-}
-
 #[cfg(test)]
-mod tests {
-    use chrono::{TimeZone, Utc};
-    use ctx_history_core::HistoryRecord;
-    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
-
-    use super::*;
-
-    #[test]
-    fn target_created_before_no_replace_install_preserves_target_and_stage() {
-        let temp = tempfile::tempdir().unwrap();
-        let stage = temp.path().join("stage.sqlite");
-        let target = temp.path().join("work.sqlite");
-        fs::write(&stage, b"stage").unwrap();
-        fs::write(&target, b"winner").unwrap();
-
-        assert!(matches!(
-            install_same_filesystem(&stage, &target),
-            Err(StoreError::ColdStoreTargetChanged(path)) if path == target
-        ));
-        assert_eq!(fs::read(&target).unwrap(), b"winner");
-        assert_eq!(fs::read(&stage).unwrap(), b"stage");
-    }
-
-    #[test]
-    fn no_replace_install_publishes_the_exact_stage_object() {
-        let temp = tempfile::tempdir().unwrap();
-        let stage = temp.path().join("stage.sqlite");
-        let target = temp.path().join("work.sqlite");
-        fs::write(&stage, b"stage").unwrap();
-        let stage_identity = Handle::from_path(&stage).unwrap();
-
-        install_same_filesystem(&stage, &target).unwrap();
-
-        assert_eq!(Handle::from_path(&target).unwrap(), stage_identity);
-        assert_eq!(fs::read(&target).unwrap(), b"stage");
-        assert_eq!(fs::read(&stage).unwrap(), b"stage");
-    }
-
-    #[test]
-    fn cold_stage_open_does_not_migrate_parent_legacy_store() {
-        let temp = tempfile::tempdir().unwrap();
-        let legacy = temp.path().join("work-record").join("work.sqlite");
-        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-        fs::write(&legacy, b"legacy-store-canary").unwrap();
-        let target = temp.path().join("work.sqlite");
-
-        let builder = ColdStoreBuild::begin(&target).unwrap().unwrap();
-
-        assert!(!target.exists());
-        assert_eq!(fs::read(&legacy).unwrap(), b"legacy-store-canary");
-        drop(builder);
-        assert_eq!(fs::read(&legacy).unwrap(), b"legacy-store-canary");
-    }
-
-    #[test]
-    fn cold_load_retains_every_canonical_explicit_index() {
-        let temp = tempfile::tempdir().unwrap();
-        let target = temp.path().join("work.sqlite");
-        let builder = ColdStoreBuild::begin(&target).unwrap().unwrap();
-        let temp_store = builder
-            .store()
-            .unwrap()
-            .conn
-            .query_row("PRAGMA temp_store", [], |row| row.get::<_, i64>(0))
-            .unwrap();
-        assert_eq!(temp_store, 1, "cold scratch storage must be disk-backed");
-        let during_load = query_count(
-            &builder.store().unwrap().conn,
-            "SELECT COUNT(*) FROM sqlite_master
-             WHERE type = 'index' AND sql IS NOT NULL",
-        )
-        .unwrap();
-        assert!(during_load > 0);
-
-        let receipt = builder.finish().unwrap();
-
-        assert_eq!(receipt.deferred_index_count, 0);
-        let reopened = Store::open_read_only(target).unwrap();
-        let installed = query_count(
-            &reopened.conn,
-            "SELECT COUNT(*) FROM sqlite_master
-             WHERE type = 'index' AND sql IS NOT NULL",
-        )
-        .unwrap();
-        assert_eq!(installed, during_load);
-    }
-
-    #[test]
-    fn cold_lock_owner_removes_only_exact_orphan_stage_names() {
-        let temp = tempfile::tempdir().unwrap();
-        let target_name = std::ffi::OsStr::new("work.sqlite");
-        let uuid = "9ff4ee19-a3bf-4b8b-81ce-0b768335cfac";
-        let stage = temp
-            .path()
-            .join(format!("work.sqlite{COLD_STAGE_MARKER}{uuid}.sqlite"));
-        let sidecar = append_suffix(&stage, "-wal");
-        let impostor = temp.path().join(format!(
-            "work.sqlite{COLD_STAGE_MARKER}{uuid}.sqlite.backup"
-        ));
-        fs::write(&stage, b"orphan").unwrap();
-        fs::write(&sidecar, b"orphan-sidecar").unwrap();
-        fs::write(&impostor, b"keep").unwrap();
-
-        cleanup_orphaned_stage_files(temp.path(), target_name).unwrap();
-
-        assert!(!stage.exists());
-        assert!(!sidecar.exists());
-        assert_eq!(fs::read(impostor).unwrap(), b"keep");
-    }
-
-    #[test]
-    fn cold_search_validation_is_read_only_and_detects_projection_count_drift() {
-        let temp = tempfile::tempdir().unwrap();
-        let store = Store::open(temp.path().join("stage.sqlite")).unwrap();
-        store
-            .upsert_record(&HistoryRecord {
-                id: Uuid::new_v4(),
-                title: "cold validation".to_owned(),
-                body: "検索投影の完全な入力".to_owned(),
-                tags: vec!["cold".to_owned()],
-                kind: "task".to_owned(),
-                workspace: Some("/workspace".to_owned()),
-                created_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
-                updated_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
-            })
-            .unwrap();
-        let expected = store.rebuild_search_projection_with_counts().unwrap();
-        assert_eq!(expected.history_search, 1);
-        assert_eq!(expected.history_scriptgram, 1);
-
-        store
-            .conn
-            .authorizer(Some(|context: AuthContext<'_>| match context.action {
-                AuthAction::Insert { .. }
-                | AuthAction::Update { .. }
-                | AuthAction::Delete { .. } => Authorization::Deny,
-                _ => Authorization::Allow,
-            }));
-        let started = Instant::now();
-        validate_search_projection(&store, expected).unwrap();
-        let elapsed = started.elapsed();
-        store
-            .conn
-            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
-        eprintln!("bounded cold search validation: {elapsed:?}");
-
-        store
-            .conn
-            .execute("DELETE FROM ctx_history_search", [])
-            .unwrap();
-        assert!(matches!(
-            validate_search_projection(&store, expected),
-            Err(StoreError::ColdStoreValidation(message))
-                if message == "rebuilt search authority does not match canonical rows"
-        ));
-    }
-}
+mod tests;

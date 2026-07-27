@@ -109,6 +109,12 @@ pub struct Store {
     object_dir: PathBuf,
     conn: Connection,
     busy_timeout: Duration,
+    /// Shared publication lease, released when this Store is dropped.
+    ///
+    /// A cold rebuild holds the same lease exclusively across its emptiness
+    /// proof and its install, so no writable Store — and therefore no commit —
+    /// can exist while a generation is being replaced.
+    publication_lease: Option<std::fs::File>,
     event_search_bulk_depth: Arc<AtomicUsize>,
     // Even values are inactive; each acquired root owns the following odd
     // epoch. Nested guards and one-use admissions are valid only in that epoch.
