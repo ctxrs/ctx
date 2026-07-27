@@ -14,7 +14,7 @@ use zeroize::Zeroize as _;
 
 use super::{
     anonymous_trial,
-    artifact_delivery::{fetch_latest, CommercialArtifactAuth},
+    artifact_delivery::{fetch_latest, ArtifactDeliveryConfig},
     authorization::InstallationChallengeSigner,
     commercial_api::{
         checkout_retry_after, is_retryable_checkout_failure, validate_https_url, CheckoutResult,
@@ -484,12 +484,11 @@ impl CommercialLifecycleService {
             self.store_entitlement(entitlement, &public_key)?;
             let artifact = fetch_latest(
                 data_root,
-                CommercialArtifactAuth {
-                    api_base_url: self.api.origin(),
-                    authorization: &format!("Bearer {access_token}"),
+                installed_version,
+                ArtifactDeliveryConfig {
+                    release_origin: self.api.origin(),
                     release_trust: self.config.release_trust,
                 },
-                installed_version,
             )?;
             Ok(ProSetupPlan {
                 artifact: Some(artifact),
