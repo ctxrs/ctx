@@ -295,7 +295,12 @@ fn platform_credential_vault_subprocess_helper() -> anyhow::Result<()> {
     let record_id = ids(CredentialVaultNamespace::Production)
         .get(CredentialRecordKind::InstallationSigningKey)
         .to_owned();
-    let secret = PlatformBackend::production(&data_root).load_or_store(&record_id, &[0x47; 32])?;
+    let backend = PlatformBackend::production(&data_root);
+    let secret = match backend.load(&record_id) {
+        Ok(secret) => secret,
+        Err(CredentialVaultError::NotFound) => backend.load_or_store(&record_id, &[0x47; 32])?,
+        Err(error) => return Err(error.into()),
+    };
     let mut output = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -491,7 +496,7 @@ fn locked_denied_and_corrupt_adapter_fail_without_fallback() {
 }
 
 #[test]
-fn pristine_unselected_load_and_delete_create_no_root_local_files() {
+fn pristine_unselected_unavailable_vault_is_not_found_without_creating_local_files() {
     let root = test_root();
     let adapter = FakeAdapter::new(AdapterMode::Unavailable);
     let backend = LinuxBackend::new(root.path(), adapter.clone());
@@ -501,14 +506,14 @@ fn pristine_unselected_load_and_delete_create_no_root_local_files() {
 
     assert!(matches!(
         backend.load(&record_id),
-        Err(CredentialVaultError::Unavailable { .. })
+        Err(CredentialVaultError::NotFound)
     ));
     assert!(matches!(
         backend.delete(&record_id),
-        Err(CredentialVaultError::Unavailable { .. })
+        Err(CredentialVaultError::NotFound)
     ));
     assert_eq!(fs::read_dir(root.path().join("pro")).unwrap().count(), 0);
-    assert_eq!(adapter.counts(), (0, 0));
+    assert_eq!(adapter.counts(), (2, 0));
 }
 
 #[test]
@@ -520,7 +525,7 @@ fn file_vault_rejects_symlinks_hardlinks_bad_modes_and_corruption() -> anyhow::R
         .to_owned();
     assert!(matches!(
         backend.load(&record_id),
-        Err(CredentialVaultError::Unavailable { .. })
+        Err(CredentialVaultError::NotFound)
     ));
     backend.load_or_store(&record_id, b"initial-secret")?;
     backend.delete(&record_id)?;

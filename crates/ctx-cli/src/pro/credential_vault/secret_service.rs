@@ -156,7 +156,10 @@ fn persistent_default_collection<'a>(
         Ok(_) | Err(SecretServiceError::NoResult) => {}
         Err(error) => return Err(map_secret_service_error(error)),
     }
-    if collection.is_locked().map_err(map_secret_service_error)? {
+    if collection
+        .is_locked()
+        .map_err(map_persistent_collection_object_error)?
+    {
         return Err(CredentialVaultError::Locked);
     }
     Ok(collection)
@@ -193,10 +196,30 @@ fn map_persistent_collection_error(error: SecretServiceError) -> CredentialVault
     }
 }
 
+#[cfg(target_os = "linux")]
+fn map_persistent_collection_object_error(error: SecretServiceError) -> CredentialVaultError {
+    if matches!(
+        &error,
+        SecretServiceError::ZbusFdo(
+            zbus::fdo::Error::UnknownMethod(_) | zbus::fdo::Error::UnknownObject(_)
+        )
+    ) {
+        drop(error);
+        persistent_collection_unavailable()
+    } else {
+        map_secret_service_error(error)
+    }
+}
+
+#[cfg(target_os = "freebsd")]
+fn map_persistent_collection_object_error(error: SecretServiceError) -> CredentialVaultError {
+    map_secret_service_error(error)
+}
+
 const fn persistent_collection_unavailable() -> CredentialVaultError {
     #[cfg(target_os = "linux")]
     {
-        CredentialVaultError::Backend
+        unavailable()
     }
     #[cfg(target_os = "freebsd")]
     {
@@ -518,7 +541,8 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn library_unavailable_and_missing_persistent_collection_fail_closed() {
+    fn library_unavailable_fails_closed_but_missing_persistent_collection_allows_initial_fallback()
+    {
         assert_eq!(
             map_secret_service_error(SecretServiceError::Unavailable),
             CredentialVaultError::Backend
@@ -529,7 +553,7 @@ mod tests {
         );
         assert_eq!(
             map_persistent_collection_error(SecretServiceError::NoResult),
-            CredentialVaultError::Backend
+            unavailable()
         );
         assert_eq!(
             map_secret_service_error(SecretServiceError::Locked),
@@ -538,6 +562,26 @@ mod tests {
         assert_eq!(
             map_secret_service_error(SecretServiceError::Prompt),
             CredentialVaultError::Locked
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn missing_persistent_collection_object_allows_initial_fallback_but_denial_does_not() {
+        for error in [
+            zbus::fdo::Error::UnknownMethod("collection does not exist".to_owned()),
+            zbus::fdo::Error::UnknownObject("collection does not exist".to_owned()),
+        ] {
+            assert_eq!(
+                map_persistent_collection_object_error(SecretServiceError::ZbusFdo(error)),
+                unavailable()
+            );
+        }
+        assert_eq!(
+            map_persistent_collection_object_error(SecretServiceError::ZbusFdo(
+                zbus::fdo::Error::AccessDenied("collection access denied".to_owned())
+            )),
+            CredentialVaultError::Backend
         );
     }
 
