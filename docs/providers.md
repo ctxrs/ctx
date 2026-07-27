@@ -12,7 +12,7 @@ Use `ctx sources` for the truth on the current machine:
 
 ```bash
 ctx sources
-ctx sources --json
+ctx sources --format json
 ctx sources --all
 ```
 
@@ -24,7 +24,7 @@ codex, claude, cursor, pi, opencode, github-copilot, copilot-cli, antigravity, g
 
 Aliases are accepted for common naming differences, for example `claude-code`, `gemini-cli`, `github-copilot`, `droid`, `augment`, `qoder-cn`, `trae-cn`, and `roo-code`.
 
-Custom history is separate: `ctx import --format ctx-history-jsonl-v1 --path <file>` reads an explicit JSONL interchange file from any exporter, and history-source plugins can stream the same format from local adapter commands.
+Custom history is separate: `ctx import --input-format ctx-history-jsonl-v1 --path <file>` reads an explicit JSONL interchange file from any exporter, and history-source plugins can stream the same format from local adapter commands.
 
 ## Location Selection
 

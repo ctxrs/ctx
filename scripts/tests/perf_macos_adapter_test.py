@@ -120,7 +120,7 @@ class PerfMacosParserTests(unittest.TestCase):
 
     def test_receipt_json_is_canonical_and_units_are_explicit(self) -> None:
         parsed = ADAPTER.parse_time_l(self.fixture("success.time.txt"))
-        receipt = ADAPTER.success_record(["/tmp/ctx", "status", "--json"], parsed, 0)
+        receipt = ADAPTER.success_record(["/tmp/ctx", "status", "--format=json"], parsed, 0)
         first = ADAPTER.canonical_json(receipt)
         second = ADAPTER.canonical_json(receipt)
         self.assertEqual(first, second)

@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 
 use crate::{
     analytics::{count_bucket, text_length_bucket, DocTopicId, DocsOperation, DocsTelemetry},
+    output::JsonOutputFormat,
     Cli,
 };
 
@@ -29,8 +30,8 @@ pub enum DocsCommand {
 
 #[derive(Debug, Args)]
 pub struct DocsListArgs {
-    #[arg(long)]
-    pub json: bool,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    pub format: JsonOutputFormat,
 }
 
 #[derive(Debug, Args)]
@@ -38,8 +39,8 @@ pub struct DocsSearchArgs {
     pub query: String,
     #[arg(long, default_value_t = 10)]
     pub limit: usize,
-    #[arg(long)]
-    pub json: bool,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    pub format: JsonOutputFormat,
 }
 
 #[derive(Debug, Args)]
@@ -47,8 +48,6 @@ pub struct DocsShowArgs {
     pub id: String,
     #[arg(long, value_enum, default_value_t = DocsFormat::Markdown)]
     pub format: DocsFormat,
-    #[arg(long)]
-    pub json: bool,
     #[arg(long)]
     pub out: Option<PathBuf>,
 }
@@ -71,9 +70,9 @@ pub struct DocsManArgs {
 impl DocsArgs {
     pub fn json_output(&self) -> bool {
         match &self.command {
-            Some(DocsCommand::List(args)) => args.json,
-            Some(DocsCommand::Search(args)) => args.json,
-            Some(DocsCommand::Show(args)) => args.json || args.format == DocsFormat::Json,
+            Some(DocsCommand::List(args)) => args.format.is_json(),
+            Some(DocsCommand::Search(args)) => args.format.is_json(),
+            Some(DocsCommand::Show(args)) => args.format == DocsFormat::Json,
             Some(DocsCommand::Man(_)) | None => false,
         }
     }
@@ -304,11 +303,11 @@ pub fn run(args: DocsArgs, telemetry: &mut DocsTelemetry) -> Result<()> {
     match args.command {
         Some(DocsCommand::List(args)) => {
             telemetry.operation = Some(DocsOperation::List);
-            list_docs(args.json, telemetry)
+            list_docs(args.format.is_json(), telemetry)
         }
         Some(DocsCommand::Search(args)) => {
             telemetry.operation = Some(DocsOperation::Search);
-            search_docs(&args.query, args.limit, args.json, telemetry)
+            search_docs(&args.query, args.limit, args.format.is_json(), telemetry)
         }
         Some(DocsCommand::Show(args)) => {
             telemetry.operation = Some(DocsOperation::Show);
@@ -487,7 +486,7 @@ fn show_doc(args: DocsShowArgs, telemetry: &mut DocsTelemetry) -> Result<()> {
     telemetry.topic = DocTopicId::from_known_id(topic.id);
     telemetry.result_count = Some(count_bucket(1));
     telemetry.zero_result = Some(false);
-    let body = if args.json || args.format == DocsFormat::Json {
+    let body = if args.format == DocsFormat::Json {
         serde_json::to_string_pretty(&topic_json_with_body(topic))?
     } else {
         match args.format {

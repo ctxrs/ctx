@@ -26,7 +26,7 @@ fn release_binary_ignores_untrusted_helper_override() {
             "--data-root",
             root.path().to_str().unwrap(),
             "status",
-            "--json",
+            "--format=json",
         ])
         .output()
         .unwrap();
@@ -74,7 +74,7 @@ fn release_binary_rejects_an_unsigned_helper_at_the_canonical_path() {
             "--data-root",
             root.path().to_str().unwrap(),
             "status",
-            "--json",
+            "--format=json",
         ])
         .output()
         .unwrap();

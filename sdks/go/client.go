@@ -111,14 +111,14 @@ type LocateEventOptions struct {
 
 func (c *Client) Status(ctx context.Context) (*StatusResponse, error) {
 	var out StatusResponse
-	if err := c.do(ctx, Operation{Name: "status", Args: []string{"status", "--json"}}, &out); err != nil {
+	if err := c.do(ctx, Operation{Name: "status", Args: []string{"status", "--format=json"}}, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
 func (c *Client) Init(ctx context.Context, opts InitOptions) (*InitResponse, error) {
-	args := []string{"setup", "--json", "--progress", "none"}
+	args := []string{"setup", "--format=json", "--progress", "none"}
 	if opts.CatalogOnly {
 		args = append(args, "--catalog-only")
 	}
@@ -131,14 +131,14 @@ func (c *Client) Init(ctx context.Context, opts InitOptions) (*InitResponse, err
 
 func (c *Client) Sources(ctx context.Context) (*SourcesResponse, error) {
 	var out SourcesResponse
-	if err := c.do(ctx, Operation{Name: "sources", Args: []string{"sources", "--json"}}, &out); err != nil {
+	if err := c.do(ctx, Operation{Name: "sources", Args: []string{"sources", "--format=json"}}, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
 func (c *Client) Import(ctx context.Context, opts ImportOptions) (*ImportResponse, error) {
-	args := []string{"import", "--json", "--progress", "none"}
+	args := []string{"import", "--format=json", "--progress", "none"}
 	args = appendImportOptions(args, opts)
 	var out ImportResponse
 	if err := c.do(ctx, Operation{Name: "import", Args: args}, &out); err != nil {
@@ -149,7 +149,7 @@ func (c *Client) Import(ctx context.Context, opts ImportOptions) (*ImportRespons
 
 // Sync is an alias for Import in agent-history-v1. ctx writes and refreshes the local index.
 func (c *Client) Sync(ctx context.Context, opts ImportOptions) (*ImportResponse, error) {
-	args := []string{"import", "--json", "--progress", "none"}
+	args := []string{"import", "--format=json", "--progress", "none"}
 	args = appendImportOptions(args, opts)
 	var out ImportResponse
 	if err := c.do(ctx, Operation{Name: "sync", Args: args}, &out); err != nil {
@@ -166,7 +166,7 @@ func (c *Client) Search(ctx context.Context, opts SearchOptions) (*SearchRespons
 	if opts.Query != "" {
 		args = append(args, opts.Query)
 	}
-	args = append(args, "--json")
+	args = append(args, "--format=json")
 	if opts.Limit > 0 {
 		args = append(args, "--limit", strconv.Itoa(opts.Limit))
 	}

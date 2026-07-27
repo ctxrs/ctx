@@ -420,7 +420,7 @@ class SemanticWorkerBenchTest(unittest.TestCase):
                 "private query text",
                 "--term",
                 "private term",
-                "--json",
+                "--format=json",
             ]
         )
         serialized = json.dumps(redacted)
@@ -439,7 +439,7 @@ class SemanticWorkerBenchTest(unittest.TestCase):
                 "/home/private/bin/ctx",
                 "--data-root=/Users/private/.ctx",
                 "status",
-                "--json",
+                "--format=json",
             ]
         )
         serialized = json.dumps(redacted)
@@ -451,7 +451,7 @@ class SemanticWorkerBenchTest(unittest.TestCase):
     def test_command_summary_summarizes_stderr_without_text(self):
         summary = worker_bench.command_summary(
             {
-                "argv": ["ctx", "status", "--json"],
+                "argv": ["ctx", "status", "--format=json"],
                 "returncode": 1,
                 "wall_ms": 12.5,
                 "stderr_summary": worker_bench.private_text_summary(

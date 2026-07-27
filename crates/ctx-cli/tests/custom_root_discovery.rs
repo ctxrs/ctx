@@ -26,7 +26,7 @@ fn sources_json_keeps_the_v1_top_level_and_source_fields() {
         "sources",
         "--provider",
         "codex",
-        "--json",
+        "--format=json",
     ]));
 
     assert_eq!(packet["schema_version"], 1);
@@ -58,8 +58,12 @@ fn sources_json_keeps_the_v1_top_level_and_source_fields() {
         ])
     );
 
-    let no_path_report =
-        json_output(ctx(&temp).args(["sources", "--provider", "factory-ai-droid", "--json"]));
+    let no_path_report = json_output(ctx(&temp).args([
+        "sources",
+        "--provider",
+        "factory-ai-droid",
+        "--format=json",
+    ]));
     assert_eq!(object_keys(&no_path_report), object_keys(&packet));
     assert!(no_path_report["sources"].as_array().unwrap().is_empty());
     assert_eq!(no_path_report["issues_truncated"], false);
@@ -88,7 +92,7 @@ fn provider_filtered_human_sources_and_import_errors_are_actionable() {
         "import",
         "--provider",
         "opencode",
-        "--json",
+        "--format=json",
     ]));
     assert!(stderr.contains("no disk history is selected"), "{stderr}");
     assert!(
@@ -114,7 +118,7 @@ fn provider_filtered_human_sources_and_import_errors_are_actionable() {
     let stderr = failure_stderr(
         ctx(&unreconstructible)
             .env("CLAUDE_CONFIG_DIR", "relative-provider-root")
-            .args(["import", "--provider", "claude", "--json"]),
+            .args(["import", "--provider", "claude", "--format=json"]),
     );
     assert!(
         stderr.contains("automatic history location cannot be safely reconstructed"),
@@ -141,7 +145,7 @@ fn provider_filtered_human_sources_and_import_errors_are_actionable() {
         "import",
         "--provider",
         "factory-ai-droid",
-        "--json",
+        "--format=json",
     ]));
     assert!(
         stderr.contains("no official automatic history location is established"),
@@ -182,7 +186,7 @@ fn unsupported_discovery_is_human_only_and_provider_filtered_import_does_not_dis
         "sources",
         "--provider",
         "mux",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(json["schema_version"], 1);
     assert_eq!(
@@ -211,7 +215,7 @@ fn unsupported_discovery_is_human_only_and_provider_filtered_import_does_not_dis
         "import",
         "--provider",
         "mux",
-        "--json",
+        "--format=json",
     ]));
     assert!(
         stderr.contains("detected unsupported history at"),
@@ -245,7 +249,7 @@ fn explicit_manual_paths_still_import_and_current_unsupported_shapes_stop_at_adm
         "--no-daemon",
         "--progress",
         "none",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(imported["totals"]["failed_sources"], 0);
     assert_eq!(imported["totals"]["imported_sources"], 1);
@@ -256,7 +260,7 @@ fn explicit_manual_paths_still_import_and_current_unsupported_shapes_stop_at_adm
         "factory-ai-droid",
         "--refresh",
         "off",
-        "--json",
+        "--format=json",
     ]));
     assert_search_provider_oracle(&search, "factory_ai_droid", query, 1, "message");
 
@@ -318,16 +322,16 @@ fn unsupported_reports_do_not_enter_setup_import_all_search_refresh_or_status() 
         "--wait",
         "--progress",
         "none",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(setup["import"]["totals"]["imported_sources"], 0);
     assert_eq!(setup["import"]["totals"]["failed_sources"], 0);
 
-    let baseline_status = json_output(ctx(&temp).args(["status", "--json"]));
+    let baseline_status = json_output(ctx(&temp).args(["status", "--format=json"]));
     let discovery_status = json_output(
         ctx(&temp)
             .env("MUX_ROOT", &mux_root)
-            .args(["status", "--json"]),
+            .args(["status", "--format=json"]),
     );
     assert_eq!(
         object_keys(&discovery_status),
@@ -370,7 +374,7 @@ fn unsupported_reports_do_not_enter_setup_import_all_search_refresh_or_status() 
         "mux",
         "--refresh",
         "background",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(search["freshness"]["status"], "no_sources");
     assert_eq!(search["freshness"]["source_count"], 0);

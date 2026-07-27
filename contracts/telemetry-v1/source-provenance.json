@@ -5,7 +5,7 @@
   "provenance_kind": "content_addressed_candidate",
   "scope": "selected_typed_telemetry_contract_inventory",
   "files": {
-    "crates/ctx-cli/src/analytics/operation.rs": "cfc919cffa0f1ea0543b7f94d38b03e82f2d84a82f5c94cd77d27683dde74aec",
+    "crates/ctx-cli/src/analytics/operation.rs": "9532976e13e7d66003ca4e41744e688eeaff2421ab3810ab5eb96465dc7fba25",
     "crates/ctx-cli/src/analytics/daemon.rs": "5a7337e9b144fcbdc8ed4f5f96b72ec517c447d56e0eb20a27e99eb91959fd72",
     "crates/ctx-cli/src/analytics/mcp.rs": "951eb98a057dee7ff67f0746e878752cfa174a57bee74e8a2f5da5d5ac8d8070",
     "crates/ctx-cli/src/analytics/runtime.rs": "b2ab7fb8655d1eafc34e997472f2fdb0a4afa33029a8b92b47f9f752e4d951a6",
@@ -14,7 +14,7 @@
     "crates/ctx-cli/src/analytics/provider.rs": "827522c5ac4c3c77ee7e7282e01dd05d8863568db488cf58847bf543caab69ea",
     "crates/ctx-cli/src/analytics/product.rs": "90c84843faf1550d417da4e7e77134c6a2fc9d6425018b6b0c458be74e358387",
     "crates/ctx-cli/src/analytics/sender.rs": "b15313d68e94e19ea166cffbe31f718877a0b3c544621a35f71d4d713b5f5def",
-    "crates/ctx-cli/src/upgrade/command.rs": "dac7e09b0072eebaa09f2f3edd7d6099e9a1ca363168ccd6c57d6a1d4c09c850",
+    "crates/ctx-cli/src/upgrade/command.rs": "0b91291c968dfc5137e4100f9071048a5cb5d67884ba86e71a1cabdcfb90c1a0",
     "crates/ctx-cli/src/upgrade/command/daemon.rs": "548cc098fb7d95f80c839728e56bec7555665a1e9e5d13da082678fa3e7fe31e",
     "crates/ctx-cli/src/upgrade/state.rs": "451c3511656fe99e35d52ebfc7e890ede9a152c8b841013b6bbd537f124ec397"
   }

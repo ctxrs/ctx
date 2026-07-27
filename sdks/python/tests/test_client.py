@@ -61,7 +61,7 @@ class LocalCliAdapterTests(unittest.TestCase):
 
     def test_local_cli_forces_analytics_off_after_ambient_and_user_env(self) -> None:
         completed = subprocess.CompletedProcess(
-            ["ctx", "status", "--json"],
+            ["ctx", "status", "--format=json"],
             0,
             stdout=b'{"initialized":true,"local_only":true}',
             stderr=b"",
@@ -149,7 +149,7 @@ class LocalCliAdapterTests(unittest.TestCase):
             adapter.calls[1],
             [
                 "search",
-                "--json",
+                "--format=json",
                 "semantic override",
                 "--backend",
                 "hybrid",

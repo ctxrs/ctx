@@ -15,7 +15,7 @@ fn upgrade_analytics_reports_manual_dry_run_outcome() {
 
     let mut command = ctx(&temp);
     command
-        .args(["upgrade", "--dry-run", "--json"])
+        .args(["upgrade", "--dry-run", "--format=json"])
         .env("CTX_DATA_ROOT", &data_root)
         .env("HOME", &home)
         .env("XDG_STATE_HOME", &state)

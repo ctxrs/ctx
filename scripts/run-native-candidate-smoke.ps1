@@ -225,14 +225,14 @@ try {
 
     [void](Invoke-Ctx @("setup", "--catalog-only", "--no-daemon", "--progress", "none"))
     $import = Invoke-Ctx @(
-        "import", "--format", "ctx-history-jsonl-v1", "--path", $Fixture,
-        "--no-daemon", "--json", "--progress", "none"
+        "import", "--input-format", "ctx-history-jsonl-v1", "--path", $Fixture,
+        "--no-daemon", "--format=json", "--progress", "none"
     )
     if ($import -notmatch '"imported_events"\s*:\s*[1-9][0-9]*') {
         Fail "fixture import did not import events"
     }
 
-    $search = Invoke-Ctx @("search", "parser test", "--backend", "lexical", "--refresh", "off", "--json")
+    $search = Invoke-Ctx @("search", "parser test", "--backend", "lexical", "--refresh", "off", "--format=json")
     if ($search -notmatch '"requested_mode"\s*:\s*"lexical"' -or
         $search -notmatch '"effective_mode"\s*:\s*"lexical"' -or
         $search -notmatch [regex]::Escape("Add a parser test.")) {
@@ -242,7 +242,7 @@ try {
     $env:CTX_SEARCH_SEMANTIC = $null
     $env:CTX_DAEMON_ENABLED = $null
     try {
-        $status = Invoke-Ctx @("status", "--json")
+        $status = Invoke-Ctx @("status", "--format=json")
     } finally {
         $env:CTX_SEARCH_SEMANTIC = "0"
         $env:CTX_DAEMON_ENABLED = "false"
@@ -268,7 +268,7 @@ try {
         # NativeCommandError when the global preference is Stop, so capture it
         # under Continue and validate the exit status and message ourselves.
         $ErrorActionPreference = "Continue"
-        $capabilityResult = Invoke-CtxRaw @("search", "parser test", "--backend", "semantic", "--refresh", "off", "--json")
+        $capabilityResult = Invoke-CtxRaw @("search", "parser test", "--backend", "semantic", "--refresh", "off", "--format=json")
         $capabilityOutput = $capabilityResult.Text
         $capabilityExit = $capabilityResult.ExitCode
     } finally {

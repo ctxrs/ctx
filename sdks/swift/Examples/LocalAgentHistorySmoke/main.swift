@@ -92,11 +92,11 @@ private final class FakeSmokeRunner: CommandRunner, @unchecked Sendable {
     func run(_ request: CommandRequest) throws -> CommandResult {
         let arguments = request.arguments.filter { $0 != "--data-root" && $0 != "/tmp/ctx-swift-local-agent-history-smoke" }
         switch Array(arguments.prefix(2)) {
-        case ["status", "--json"]:
+        case ["status", "--format=json"]:
             return CommandResult(stdout: #"{"initialized":true,"local_only":true,"data_root":"/tmp/ctx-swift-local-agent-history-smoke","indexed_items":3,"indexed_sources":1,"cataloged_sessions":1,"pending_catalog_sessions":0,"failed_catalog_sessions":0,"stale_catalog_sessions":0}"#)
-        case ["setup", "--json"]:
+        case ["setup", "--format=json"]:
             return CommandResult(stdout: #"{"schema_version":1,"data_root":"/tmp/ctx-swift-local-agent-history-smoke","mode":"catalog_only","indexed_items":3,"network_required":false}"#)
-        case ["import", "--json"]:
+        case ["import", "--format=json"]:
             return CommandResult(stdout: #"{"resume":true,"totals":{"imported_sources":1,"imported_sessions":1,"imported_events":1},"sources":[{"provider":"codex","path":"/tmp/ctx-sdk-fixture/session.jsonl","status":"imported","imported_sessions":1,"imported_events":1}]}"#)
         case ["search", "local agent history"]:
             return CommandResult(stdout: #"{"query":"local agent history","filters":{"provider":"codex"},"freshness":{"mode":"off","status":"skipped","source_count":0,"totals":{"imported_events":0}},"generated_at":"2026-07-01T12:00:00Z","results":[{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","provider_session_id":"codex-fixture-session","event_seq":1,"title":"Fixture session","snippet":"local agent history search result","rank":0.98,"result_type":"event","result_scope":"event","provider":"codex","timestamp":"2026-07-01T12:00:00Z","cwd":"/workspace/ctx","source_path":"/tmp/ctx-sdk-fixture/session.jsonl","source_exists":true,"cursor":"line:2","why_matched":["text"],"citations":[{"target_type":"event","ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","label":"codex event","provider":"codex","source_path":"/tmp/ctx-sdk-fixture/session.jsonl","source_exists":true,"cursor":"line:2"}],"suggested_next_commands":["ctx show event 11111111-1111-4111-8111-111111111111 --window 10","ctx locate event 11111111-1111-4111-8111-111111111111","ctx search 'local agent history' --session 22222222-2222-4222-8222-222222222222","ctx show session 22222222-2222-4222-8222-222222222222","ctx locate session 22222222-2222-4222-8222-222222222222"],"visibility":"local_only"}],"pagination":{"limit":1},"truncation":{"truncated":false}}"#)

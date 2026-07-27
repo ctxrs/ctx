@@ -351,7 +351,7 @@ def run_search(
         args.refresh,
         "--limit",
         str(args.limit),
-        "--json",
+        "--format=json",
         *args.search_arg,
         *case.search_args,
     ]

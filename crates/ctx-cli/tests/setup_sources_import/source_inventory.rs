@@ -5,12 +5,13 @@ fn setup_skips_empty_codex_session_tree() {
     let temp = tempdir();
     fs::create_dir_all(temp.path().join(".codex").join("sessions")).unwrap();
 
-    let setup = json_output(ctx(&temp).args(["setup", "--wait", "--json", "--progress", "none"]));
+    let setup =
+        json_output(ctx(&temp).args(["setup", "--wait", "--format=json", "--progress", "none"]));
     assert_eq!(setup["catalog"]["cataloged_sessions"], 0);
     assert_eq!(setup["catalog"]["source_files"], 0);
     assert_eq!(setup["import"]["totals"]["imported_sources"], 0);
 
-    let sources = json_output(ctx(&temp).args(["sources", "--json"]));
+    let sources = json_output(ctx(&temp).args(["sources", "--format=json"]));
     let codex_sessions = sources["sources"]
         .as_array()
         .unwrap()
@@ -27,7 +28,7 @@ fn setup_skips_empty_codex_session_tree() {
 fn sources_default_hides_unsupported_missing_locations() {
     let temp = tempdir();
 
-    let sources = json_output(ctx(&temp).args(["sources", "--json"]));
+    let sources = json_output(ctx(&temp).args(["sources", "--format=json"]));
     assert_eq!(sources["scope"], "default");
     assert!(sources["hidden_missing_sources"].as_u64().unwrap() > 0);
     let visible = sources["sources"].as_array().unwrap();
@@ -53,7 +54,7 @@ fn sources_default_hides_unsupported_missing_locations() {
     assert!(text.contains("missing provider locations hidden"));
     assert!(text.contains("ctx sources --all"));
 
-    let all_sources = json_output(ctx(&temp).args(["sources", "--json", "--all"]));
+    let all_sources = json_output(ctx(&temp).args(["sources", "--format=json", "--all"]));
     assert_eq!(all_sources["scope"], "all");
     assert_eq!(all_sources["hidden_missing_sources"], 0);
     let all = all_sources["sources"].as_array().unwrap();
@@ -65,7 +66,12 @@ fn sources_provider_filter_rejects_unsupported_providers() {
     let temp = tempdir();
 
     ctx(&temp)
-        .args(["sources", "--provider", "not-a-real-provider", "--json"])
+        .args([
+            "sources",
+            "--provider",
+            "not-a-real-provider",
+            "--format=json",
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("unknown provider"));
@@ -78,7 +84,7 @@ fn sources_json_reports_typed_discovery_issues_additively() {
     let sources = json_output(
         ctx(&temp)
             .env("CLAUDE_CONFIG_DIR", "relative-account")
-            .args(["sources", "--provider", "claude", "--json"]),
+            .args(["sources", "--provider", "claude", "--format=json"]),
     );
 
     assert_eq!(sources["schema_version"], 1);
@@ -115,7 +121,7 @@ fn sources_lists_supported_personal_agent_provider_defaults() {
     install_default_junie_fixture(&temp, "junie-sources-oracle");
     install_default_warp_fixture(&temp);
 
-    let sources = json_output(ctx(&temp).args(["sources", "--json"]));
+    let sources = json_output(ctx(&temp).args(["sources", "--format=json"]));
     for (provider, source_format, import_support, native_import) in [
         ("hermes", "hermes_state_sqlite", "native", true),
         ("kilo", "kilo_sqlite", "native", true),
@@ -165,7 +171,7 @@ fn sources_uses_exact_cwd_and_ignores_shelley_db_env_override() {
         ctx(&temp)
             .current_dir(temp.path())
             .env("SHELLEY_DB", &ignored_env_db)
-            .args(["sources", "--json"]),
+            .args(["sources", "--format=json"]),
     );
     let source = sources["sources"]
         .as_array()
@@ -195,7 +201,7 @@ fn sources_falls_back_to_userprofile_when_home_unset() {
         ctx(&temp)
             .env_remove("HOME")
             .env("USERPROFILE", temp.path())
-            .args(["sources", "--json"]),
+            .args(["sources", "--format=json"]),
     );
     let codex = sources["sources"]
         .as_array()
@@ -221,7 +227,7 @@ fn sources_discovers_forgecode_env_and_legacy_db() {
     let sources = json_output(
         ctx(&temp)
             .env("FORGE_CONFIG", &env_root)
-            .args(["sources", "--json"]),
+            .args(["sources", "--format=json"]),
     );
     let source = sources["sources"]
         .as_array()
@@ -243,7 +249,7 @@ fn sources_discovers_forgecode_env_and_legacy_db() {
     let legacy_db = legacy_root.join(".forge.db");
     fs::copy(legacy_fixture, &legacy_db).unwrap();
 
-    let sources = json_output(ctx(&legacy_temp).args(["sources", "--json"]));
+    let sources = json_output(ctx(&legacy_temp).args(["sources", "--format=json"]));
     let source = sources["sources"]
         .as_array()
         .unwrap()
@@ -263,7 +269,7 @@ fn explicit_native_sources_are_listed_but_not_auto_imported() {
 
     let mut sources_command = ctx(&temp);
     sources_command.current_dir(&project);
-    let sources = json_output(sources_command.args(["sources", "--json"]));
+    let sources = json_output(sources_command.args(["sources", "--format=json"]));
     let nanoclaw = sources["sources"]
         .as_array()
         .unwrap()
@@ -285,7 +291,7 @@ fn explicit_native_sources_are_listed_but_not_auto_imported() {
         "nanoclaw",
         "--refresh",
         "background",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(search["freshness"]["mode"], "background");
     assert_eq!(search["freshness"]["status"], "no_sources");
@@ -298,12 +304,12 @@ fn explicit_native_sources_are_listed_but_not_auto_imported() {
         "nanoclaw",
         "--path",
         project.to_str().unwrap(),
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(imported["totals"]["rejected_records"], 0);
     assert_eq!(imported["totals"]["imported_sources"], 1);
 
     let search_after_import =
-        json_output(ctx(&temp).args(["search", query, "--provider", "nanoclaw", "--json"]));
+        json_output(ctx(&temp).args(["search", query, "--provider", "nanoclaw", "--format=json"]));
     assert_search_provider_oracle(&search_after_import, "nanoclaw", query, 1, "message");
 }

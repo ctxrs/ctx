@@ -131,7 +131,7 @@ fn default_selection_includes_universal_and_detected_agent_specific_dirs() {
             agent: Vec::new(),
             all_agents: false,
             project: false,
-            json: true,
+            format: crate::output::JsonOutputFormat::Json,
             force: false,
         },
         &context,
@@ -238,7 +238,7 @@ fn analytics_values_are_closed_and_path_free() {
         agent: vec![SkillAgentArg::Codex, SkillAgentArg::ClaudeCode],
         all_agents: false,
         project: true,
-        json: true,
+        format: crate::output::JsonOutputFormat::Json,
         force: false,
     };
     let mut telemetry = IntegrationTelemetry::default();

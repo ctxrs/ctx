@@ -102,7 +102,7 @@ main() {
     HOME="${home}" \
     CTX_DATA_ROOT="${data_root}" \
     CTX_ANALYTICS_ENABLED=false \
-    run "${ctx_bin}" integrations install mcp --agent claude-code --json > "${install_json}"
+    run "${ctx_bin}" integrations install mcp --agent claude-code --format json > "${install_json}"
   require_contains "${install_json}" '"agent":"claude-code"'
   require_contains "${install_json}" '"status":"current"'
   require_contains "${claude_config_json}" '"mcpServers"'

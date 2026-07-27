@@ -68,7 +68,7 @@ Factory AI Droid has no automatic history location. Its imports always require
 an exact path, for example
 `ctx import --provider factory-ai-droid --path /path/to/factory/sessions`.
 
-`ctx sources --json` reports each known provider source with `import_support`
+`ctx sources --format json` reports each known provider source with `import_support`
 and `importable` fields. A source is importable only when provider-specific
 transcript files exist and match the documented format. NanoClaw remains
 explicit-import only; it is not included in `ctx import --all` or pre-search

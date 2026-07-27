@@ -31,7 +31,7 @@ pub(crate) fn autostart_daemon_and_wait(
 ) -> Result<DaemonHandoff> {
     let request = request_daemon_autostart(data_root, config, trigger).map_err(|error| {
         anyhow!(
-            "ctx daemon did not start: {error:#}. Run `ctx daemon status --json`, then `ctx daemon run` for details"
+            "ctx daemon did not start: {error:#}. Run `ctx daemon status --format json`, then `ctx daemon run` for details"
         )
     })?;
     let (mut child, pending_restart_request) = match request {
@@ -83,7 +83,7 @@ pub(crate) fn autostart_daemon_and_wait(
     )
     .map_err(|error| {
         anyhow!(
-            "ctx daemon did not become ready: {error}. Run `ctx daemon status --json`, then `ctx daemon run` for details"
+            "ctx daemon did not become ready: {error}. Run `ctx daemon status --format json`, then `ctx daemon run` for details"
         )
     })
 }
@@ -288,7 +288,7 @@ pub(super) fn daemon_autostart_command(
         .arg(DaemonStartModeArg::Auto.as_str())
         .arg("--trigger-command")
         .arg(trigger.as_str())
-        .arg("--json")
+        .arg("--format=json")
         .env(DAEMON_BACKGROUND_CHILD_ENV, "1")
         .stdin(Stdio::null())
         .stdout(Stdio::null())

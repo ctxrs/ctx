@@ -28,7 +28,7 @@ setup unless you pass an explicit skill option.
 
 ```bash
 ctx setup
-ctx status --json
+ctx status --format json
 ```
 
 `ctx setup` creates local storage, discovers supported provider history,
@@ -44,7 +44,7 @@ ctx --data-root /tmp/ctx-first-10 setup
 
 ```bash
 ctx sources
-ctx sources --json
+ctx sources --format json
 ```
 
 Expect rows for supported local import providers such as Codex, Pi,
@@ -117,7 +117,7 @@ ctx locate event <ctx-event-id>
 ```
 
 Use citations from `ctx search` or `ctx show` when the retrieved material
-affects an answer or implementation. Add `--json` only when a script or `jq`
+affects an answer or implementation. Add `--format json` only when a script or `jq`
 needs exact fields.
 
 ## 6. Local Help And Upgrade Status
@@ -137,7 +137,7 @@ for signed self-upgrades, and shadowed by another `ctx` binary on `PATH`.
 - No sources listed: this machine may not have supported local provider
   history. Use `ctx import --provider <provider> --path <path>` only for a
   known supported native provider format.
-- Import fails on a file: rerun with `--json` and inspect the per-source
+- Import fails on a file: rerun with `--format json` and inspect the per-source
   `failed` count.
 - Search returns no results: confirm `ctx status` shows indexed items, then
   widen the query or remove filters.

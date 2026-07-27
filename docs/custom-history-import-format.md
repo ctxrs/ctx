@@ -8,7 +8,7 @@ from tools without a built-in local-history adapter.
 The same JSONL schema can be imported from an explicit local file path:
 
 ```bash
-ctx import --format ctx-history-jsonl-v1 --path ./history.jsonl
+ctx import --input-format ctx-history-jsonl-v1 --path ./history.jsonl
 ```
 
 or from a local history-source plugin command:

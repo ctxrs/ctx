@@ -77,7 +77,7 @@ func TestSearchBuildsAgentHistoryV1Operation(t *testing.T) {
 	}
 
 	want := []string{
-		"search", "panic", "--json", "--limit", "5",
+		"search", "panic", "--format=json", "--limit", "5",
 		"--term", "sqlite", "--term", "retry",
 		"--backend", "hybrid",
 		"--semantic-weight", "0.35",
@@ -234,7 +234,7 @@ func TestLocalCLIAdapterCommandFailureIsStructured(t *testing.T) {
 		},
 	}
 
-	_, err := adapter.Do(context.Background(), Operation{Name: "import", Args: []string{"import", "--json"}})
+	_, err := adapter.Do(context.Background(), Operation{Name: "import", Args: []string{"import", "--format=json"}})
 	var sdkErr *Error
 	if !errors.As(err, &sdkErr) {
 		t.Fatalf("expected structured error, got %T %v", err, err)
@@ -248,7 +248,7 @@ func TestLocalCLIAdapterClassifiesContextTimeout(t *testing.T) {
 	adapter := NewLocalCLIAdapter(WithCLIPath("ctx"))
 	adapter.runner = fakeRunner{result: commandResult{Err: context.DeadlineExceeded, ExitCode: -1}}
 
-	_, err := adapter.Do(context.Background(), Operation{Name: "status", Args: []string{"status", "--json"}})
+	_, err := adapter.Do(context.Background(), Operation{Name: "status", Args: []string{"status", "--format=json"}})
 	if !IsErrorKind(err, ErrorKindTimeout) {
 		t.Fatalf("expected timeout error, got %v", err)
 	}
@@ -259,7 +259,7 @@ func TestLocalCLIAdapterAddsDataRootEnvironment(t *testing.T) {
 	adapter := NewLocalCLIAdapter(WithCLIPath("ctx"), WithDataRoot("/tmp/ctx-data"))
 	adapter.runner = runner
 
-	_, err := adapter.Do(context.Background(), Operation{Name: "status", Args: []string{"status", "--json"}})
+	_, err := adapter.Do(context.Background(), Operation{Name: "status", Args: []string{"status", "--format=json"}})
 	if err != nil {
 		t.Fatalf("Do returned error: %v", err)
 	}
@@ -277,7 +277,7 @@ func TestLocalCLIAdapterForcesAnalyticsOffAfterAmbientAndUserEnvironment(t *test
 	)
 	adapter.runner = runner
 
-	_, err := adapter.Do(context.Background(), Operation{Name: "status", Args: []string{"status", "--json"}})
+	_, err := adapter.Do(context.Background(), Operation{Name: "status", Args: []string{"status", "--format=json"}})
 	if err != nil {
 		t.Fatalf("Do returned error: %v", err)
 	}

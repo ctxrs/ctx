@@ -18,7 +18,7 @@ use crate::{
     config::{self, AppConfig, CONFIG_FILE},
     output::print_json,
     DaemonArgs, DaemonCommand, DaemonRunArgs, DaemonStartModeArg, DaemonTriggerCommandArg,
-    JsonArgs,
+    FormatArgs,
 };
 
 use super::{
@@ -584,11 +584,11 @@ fn daemon_iteration_events(
     }
 }
 
-pub(super) fn run_daemon_status(args: JsonArgs, data_root: PathBuf) -> Result<()> {
+pub(super) fn run_daemon_status(args: FormatArgs, data_root: PathBuf) -> Result<()> {
     let semantic_report = semantic_worker_report_for_daemon(&data_root);
     let daemon = daemon_report(&data_root, &semantic_report);
     let pro = crate::pro::lifecycle_status_json(&data_root);
-    if args.json {
+    if args.format.is_json() {
         print_json(json!({
             "schema_version": 1,
             "daemon": daemon,
@@ -608,12 +608,12 @@ pub(super) fn run_daemon_status(args: JsonArgs, data_root: PathBuf) -> Result<()
 }
 
 pub(super) fn run_daemon_enabled_update(
-    args: JsonArgs,
+    args: FormatArgs,
     data_root: PathBuf,
     enabled: bool,
 ) -> Result<()> {
     config::set_daemon_enabled(&data_root, enabled)?;
-    if args.json {
+    if args.format.is_json() {
         print_json(json!({
             "schema_version": 1,
             "daemon_enabled": enabled,
@@ -667,7 +667,7 @@ pub(super) fn run_daemon(
         }
     };
     let failure = daemon_report_failure_message(&report);
-    if args.json {
+    if args.format.is_json() {
         print_json(report)?;
     } else {
         print_daemon_status_human(&report);

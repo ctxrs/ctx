@@ -31,7 +31,7 @@ fn qwen_kimi_mistral_mux_and_qoder_default_sources_import_search_and_reimport() 
         &temp.path().join(".qoder").join("projects"),
     );
 
-    let sources = json_output(ctx(&temp).args(["sources", "--json"]));
+    let sources = json_output(ctx(&temp).args(["sources", "--format=json"]));
     for (provider, source_format) in [
         ("qwen_code", "qwen_code_chat_jsonl_tree"),
         ("kimi_code_cli", "kimi_code_cli_wire_jsonl_tree"),
@@ -74,7 +74,7 @@ fn qwen_kimi_mistral_mux_and_qoder_default_sources_import_search_and_reimport() 
             "import",
             "--provider",
             cli_provider,
-            "--json",
+            "--format=json",
             "--progress",
             "none",
         ]));
@@ -103,7 +103,7 @@ fn qwen_kimi_mistral_mux_and_qoder_default_sources_import_search_and_reimport() 
             cli_provider,
             "--refresh",
             "off",
-            "--json",
+            "--format=json",
         ]));
         assert_search_provider_oracle(&search, stored_provider, query, 1, "message");
 
@@ -111,7 +111,7 @@ fn qwen_kimi_mistral_mux_and_qoder_default_sources_import_search_and_reimport() 
             "import",
             "--provider",
             cli_provider,
-            "--json",
+            "--format=json",
             "--progress",
             "none",
         ]));
@@ -132,7 +132,7 @@ fn mimocode_default_and_env_sources_import_search_and_reimport() {
         .join("mimocode.db");
     install_default_mimocode_fixture(&temp, default_query);
 
-    let sources = json_output(ctx(&temp).args(["sources", "--json", "--all"]));
+    let sources = json_output(ctx(&temp).args(["sources", "--format=json", "--all"]));
     let source = source_by_path(&sources, "mimocode", &default_db);
     assert_eq!(source["status"], "available");
     assert_eq!(source["source_format"], "mimocode_sqlite");
@@ -147,7 +147,7 @@ fn mimocode_default_and_env_sources_import_search_and_reimport() {
         "mimo-code",
         "--refresh",
         "wait",
-        "--json",
+        "--format=json",
     ]));
     let freshness_mode = search["freshness"]["mode"].as_str().unwrap();
     assert_eq!(
@@ -175,7 +175,7 @@ fn mimocode_default_and_env_sources_import_search_and_reimport() {
         "import",
         "--provider",
         "mimo_code",
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -186,11 +186,11 @@ fn mimocode_default_and_env_sources_import_search_and_reimport() {
     let mimocode_home = temp.path().join("mimocode-home");
     let home_db = mimocode_home.join("data").join("mimocode.db");
     write_mimocode_sqlite_fixture(&home_db, home_query, "mimocode-home");
-    let home_sources = json_output(
-        ctx(&temp)
-            .env("MIMOCODE_HOME", &mimocode_home)
-            .args(["sources", "--json", "--all"]),
-    );
+    let home_sources = json_output(ctx(&temp).env("MIMOCODE_HOME", &mimocode_home).args([
+        "sources",
+        "--format=json",
+        "--all",
+    ]));
     assert_eq!(
         source_by_path(&home_sources, "mimocode", &home_db)["status"],
         "available"
@@ -203,7 +203,7 @@ fn mimocode_default_and_env_sources_import_search_and_reimport() {
         "import",
         "--provider",
         "mimocode",
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -216,7 +216,7 @@ fn mimocode_default_and_env_sources_import_search_and_reimport() {
         "mimocode",
         "--refresh",
         "off",
-        "--json",
+        "--format=json",
     ]));
     assert_search_provider_oracle(&home_search, "mimocode", home_query, 1, "message");
 
@@ -227,7 +227,7 @@ fn mimocode_default_and_env_sources_import_search_and_reimport() {
         "import",
         "--provider",
         "mimocode",
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -241,11 +241,11 @@ fn mimocode_default_and_env_sources_import_search_and_reimport() {
     let xdg_data = temp.path().join("xdg-data");
     let channel_db = xdg_data.join("mimocode").join("mimocode-nightly.db");
     write_mimocode_sqlite_fixture(&channel_db, "mimocode-channel-oracle", "mimocode-channel");
-    let channel_sources = json_output(
-        ctx(&temp)
-            .env("XDG_DATA_HOME", &xdg_data)
-            .args(["sources", "--json", "--all"]),
-    );
+    let channel_sources = json_output(ctx(&temp).env("XDG_DATA_HOME", &xdg_data).args([
+        "sources",
+        "--format=json",
+        "--all",
+    ]));
     assert!(
         !has_provider_source_path(&channel_sources, "mimocode", &channel_db),
         "unregistered channel databases must not be discovered: {channel_sources:#}"
@@ -266,7 +266,7 @@ fn mimocode_default_and_env_sources_import_search_and_reimport() {
         ctx(&temp)
             .env("XDG_DATA_HOME", &xdg_data)
             .env("MIMOCODE_DB", "relative.db")
-            .args(["sources", "--json", "--all"]),
+            .args(["sources", "--format=json", "--all"]),
     );
     assert_eq!(
         source_by_path(&relative_sources, "mimocode", &relative_db)["status"],
@@ -284,7 +284,7 @@ fn windsurf_default_discovery_is_native_and_search_refresh_imports() {
     let query = "windsurf-native-default-discovery-oracle";
     install_default_windsurf_fixture(&temp, query);
 
-    let sources = json_output(ctx(&temp).args(["sources", "--json"]));
+    let sources = json_output(ctx(&temp).args(["sources", "--format=json"]));
     let windsurf = sources["sources"]
         .as_array()
         .unwrap()
@@ -311,7 +311,7 @@ fn windsurf_default_discovery_is_native_and_search_refresh_imports() {
         "windsurf",
         "--refresh",
         "wait",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(search["freshness"]["mode"], "wait");
     assert_eq!(search["freshness"]["status"], "completed");
@@ -325,7 +325,7 @@ fn windsurf_default_discovery_is_native_and_search_refresh_imports() {
         "import",
         "--provider",
         "windsurf",
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -338,7 +338,8 @@ fn unknown_native_providers_are_rejected_by_public_cli() {
     let temp = tempdir();
 
     for provider in ["not-a-real-provider", "unsupported-provider-placeholder"] {
-        let stderr = failure_stderr(ctx(&temp).args(["import", "--provider", provider, "--json"]));
+        let stderr =
+            failure_stderr(ctx(&temp).args(["import", "--provider", provider, "--format=json"]));
         assert!(stderr.contains("unknown provider"), "{provider}: {stderr}");
     }
 }
@@ -526,7 +527,7 @@ fn native_provider_cli_flow_imports_supported_provider_paths() {
             cli_provider,
             "--path",
             &path,
-            "--json",
+            "--format=json",
         ]));
         assert_eq!(first["schema_version"], 2);
         assert_eq!(first["sources"][0]["provider"], stored_provider);
@@ -542,7 +543,7 @@ fn native_provider_cli_flow_imports_supported_provider_paths() {
             cli_provider,
             "--refresh",
             "off",
-            "--json",
+            "--format=json",
         ]));
         assert_search_provider_oracle(&search, stored_provider, &query, 1, "message");
     }
@@ -594,7 +595,7 @@ fn authorized_missing_explicit_paths_retire_routes_and_restart_as_noops() {
             cli_provider,
             "--path",
             path_text,
-            "--json",
+            "--format=json",
             "--progress",
             "none",
         ]));
@@ -615,7 +616,7 @@ fn authorized_missing_explicit_paths_retire_routes_and_restart_as_noops() {
             cli_provider,
             "--path",
             path_text,
-            "--json",
+            "--format=json",
             "--progress",
             "none",
         ]));
@@ -640,7 +641,7 @@ fn authorized_missing_explicit_paths_retire_routes_and_restart_as_noops() {
             cli_provider,
             "--path",
             path_text,
-            "--json",
+            "--format=json",
             "--progress",
             "none",
         ]));
@@ -672,7 +673,7 @@ fn missing_explicit_path_authority_is_provider_scoped_and_cold_paths_fail_closed
             provider,
             "--path",
             missing.to_str().unwrap(),
-            "--json",
+            "--format=json",
             "--progress",
             "none",
         ]));
@@ -698,7 +699,7 @@ fn missing_explicit_path_authority_is_provider_scoped_and_cold_paths_fail_closed
         "lingma",
         "--path",
         lingma_text,
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -710,7 +711,7 @@ fn missing_explicit_path_authority_is_provider_scoped_and_cold_paths_fail_closed
         "shelley",
         "--path",
         lingma_text,
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -729,7 +730,7 @@ fn missing_explicit_path_authority_is_provider_scoped_and_cold_paths_fail_closed
         "lingma",
         "--path",
         lingma_text,
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -754,7 +755,7 @@ fn forgecode_custom_filenames_receive_zero_stat_missing_path_plans() {
             "forgecode",
             "--path",
             custom_text,
-            "--json",
+            "--format=json",
             "--progress",
             "none",
         ]));
@@ -768,7 +769,7 @@ fn forgecode_custom_filenames_receive_zero_stat_missing_path_plans() {
                 "forgecode",
                 "--path",
                 custom_text,
-                "--json",
+                "--format=json",
                 "--progress",
                 "none",
             ])
@@ -856,7 +857,7 @@ fn native_provider_cli_policy_excludes_success_tool_outputs_from_search_and_payl
             provider,
             "--path",
             path,
-            "--json",
+            "--format=json",
             "--progress",
             "none",
         ]));
@@ -869,7 +870,7 @@ fn native_provider_cli_policy_excludes_success_tool_outputs_from_search_and_payl
             provider,
             "--refresh",
             "off",
-            "--json",
+            "--format=json",
         ]));
         assert_search_provider_oracle(&search, provider, query, 1, "message");
     }
@@ -886,7 +887,7 @@ fn native_provider_cli_policy_excludes_success_tool_outputs_from_search_and_payl
             provider,
             "--refresh",
             "off",
-            "--json",
+            "--format=json",
         ]));
         assert!(
             search["results"].as_array().unwrap().is_empty(),
@@ -969,7 +970,7 @@ fn personal_agent_provider_imports_are_idempotent_and_incremental() {
             cli_provider,
             "--path",
             &path,
-            "--json",
+            "--format=json",
         ]));
         assert_eq!(first["totals"]["rejected_records"], 0);
         assert!(first["totals"]["imported_events"].as_u64().unwrap() >= 1);
@@ -980,7 +981,7 @@ fn personal_agent_provider_imports_are_idempotent_and_incremental() {
             cli_provider,
             "--path",
             &path,
-            "--json",
+            "--format=json",
         ]));
         assert_eq!(second["totals"]["rejected_records"], 0);
         assert_eq!(second["totals"]["imported_events"], 0);
@@ -992,7 +993,7 @@ fn personal_agent_provider_imports_are_idempotent_and_incremental() {
             cli_provider,
             "--path",
             &path,
-            "--json",
+            "--format=json",
         ]));
         assert_eq!(third["totals"]["rejected_records"], 0);
         assert!(third["totals"]["imported_events"].as_u64().unwrap() >= 1);
@@ -1002,7 +1003,7 @@ fn personal_agent_provider_imports_are_idempotent_and_incremental() {
             &incremental_query,
             "--provider",
             cli_provider,
-            "--json",
+            "--format=json",
         ]));
         assert_search_provider_oracle(&search, stored_provider, &incremental_query, 1, "message");
     }
@@ -1038,13 +1039,13 @@ fn openclaw_import_accepts_explicit_session_jsonl_file() {
         "openclaw",
         "--path",
         path.to_str().unwrap(),
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(imported["totals"]["rejected_records"], 0);
     assert_eq!(imported["totals"]["imported_sources"], 1);
 
     let search =
-        json_output(ctx(&temp).args(["search", query, "--provider", "openclaw", "--json"]));
+        json_output(ctx(&temp).args(["search", query, "--provider", "openclaw", "--format=json"]));
     assert_search_provider_oracle(&search, "openclaw", query, 1, "message");
 }
 
@@ -1070,13 +1071,13 @@ fn nanoclaw_import_tolerates_partial_auxiliary_tables() {
         "nanoclaw",
         "--path",
         &path,
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(imported["totals"]["rejected_records"], 0);
     assert_eq!(imported["totals"]["imported_sources"], 1);
 
     let search =
-        json_output(ctx(&temp).args(["search", query, "--provider", "nanoclaw", "--json"]));
+        json_output(ctx(&temp).args(["search", query, "--provider", "nanoclaw", "--format=json"]));
     assert_search_provider_oracle(&search, "nanoclaw", query, 1, "message");
 }
 
@@ -1098,7 +1099,7 @@ fn personal_agent_sqlite_imports_report_corrupt_databases() {
                 provider,
                 "--path",
                 db_path.to_str().unwrap(),
-                "--json",
+                "--format=json",
             ])
             .assert()
             .failure()
@@ -1120,7 +1121,7 @@ fn personal_agent_sqlite_imports_report_corrupt_databases() {
             "nanoclaw",
             "--path",
             root.to_str().unwrap(),
-            "--json",
+            "--format=json",
         ])
         .assert()
         .failure()
@@ -1165,7 +1166,7 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
             "import",
             "--provider",
             cli_provider,
-            "--json",
+            "--format=json",
         ]));
 
         assert!(stderr.contains(expected_blocker), "{stderr}");
@@ -1192,8 +1193,14 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
     let temp = tempdir();
     let cline = provider_history_fixture("cline/data");
 
-    let imported =
-        json_output(ctx(&temp).args(["import", "--provider", "cline", "--path", &cline, "--json"]));
+    let imported = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "cline",
+        "--path",
+        &cline,
+        "--format=json",
+    ]));
     assert_eq!(imported["schema_version"], 2);
     assert_eq!(imported["sources"][0]["provider"], "cline");
     assert_eq!(
@@ -1204,14 +1211,25 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
     assert_eq!(imported["totals"]["imported_events"], 4);
     assert_eq!(imported["totals"]["rejected_records"], 0);
 
-    let second =
-        json_output(ctx(&temp).args(["import", "--provider", "cline", "--path", &cline, "--json"]));
+    let second = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "cline",
+        "--path",
+        &cline,
+        "--format=json",
+    ]));
     assert_eq!(second["totals"]["imported_sessions"], 0);
     assert_eq!(second["totals"]["imported_events"], 0);
     assert_eq!(second["totals"]["skipped_events"], 0);
 
-    let search =
-        json_output(ctx(&temp).args(["search", "parser note", "--provider", "cline", "--json"]));
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "parser note",
+        "--provider",
+        "cline",
+        "--format=json",
+    ]));
     assert_search_provider_oracle(&search, "cline", "parser note", 1, "message");
 
     let roo = provider_history_fixture("roo/storage");
@@ -1221,7 +1239,7 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
         "roo-code",
         "--path",
         &roo,
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(imported["schema_version"], 2);
     assert_eq!(imported["sources"][0]["provider"], "roo_code");
@@ -1238,7 +1256,7 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
         "fallback claude_messages",
         "--provider",
         "roo",
-        "--json",
+        "--format=json",
     ]));
     assert_search_provider_oracle(
         &search,
@@ -1260,7 +1278,7 @@ fn antigravity_cli_imports_native_transcript_tree() {
         "antigravity",
         "--path",
         &fixture,
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(imported["schema_version"], 2);
     assert_eq!(imported["sources"][0]["provider"], "antigravity");
@@ -1298,7 +1316,7 @@ fn antigravity_cli_imports_native_transcript_tree() {
         "write_to_file",
         "--provider",
         "antigravity",
-        "--json",
+        "--format=json",
     ]));
     assert_search_provider_oracle(&search, "antigravity", "write_to_file", 1, "tool_call");
 }
@@ -1330,7 +1348,7 @@ fn antigravity_cli_inventory_prefers_full_transcript_over_live_partial() {
         "antigravity",
         "--path",
         brain.to_str().unwrap(),
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(
         imported["totals"]["source_files"],
@@ -1352,7 +1370,7 @@ fn codex_cli_reports_rejected_records_and_imports_valid_content() {
         "codex",
         "--path",
         &fixture,
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(imported["schema_version"], 2);
     assert_eq!(imported["totals"]["imported_sessions"], 1);
@@ -1360,7 +1378,7 @@ fn codex_cli_reports_rejected_records_and_imports_valid_content() {
     assert_eq!(imported["totals"]["rejected_records"], 1);
     assert_eq!(imported["sources"][0]["rejected_records"], 1);
 
-    let search = json_output(ctx(&temp).args(["search", "after malformed", "--json"]));
+    let search = json_output(ctx(&temp).args(["search", "after malformed", "--format=json"]));
     assert!(!search["results"].as_array().unwrap().is_empty());
 }
 
@@ -1369,8 +1387,14 @@ fn pi_cli_reports_malformed_and_schema_rejections() {
     let temp = tempdir();
     let fixture = provider_history_fixture("pi-malformed-mixed.jsonl");
 
-    let imported =
-        json_output(ctx(&temp).args(["import", "--provider", "pi", "--path", &fixture, "--json"]));
+    let imported = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "pi",
+        "--path",
+        &fixture,
+        "--format=json",
+    ]));
     assert_eq!(imported["schema_version"], 2);
     assert_eq!(imported["totals"]["imported_sessions"], 1);
     assert_eq!(imported["totals"]["imported_events"], 2);
@@ -1385,7 +1409,8 @@ fn pi_cli_reports_malformed_and_schema_rejections() {
     );
 
     let query = "after malformed line";
-    let search = json_output(ctx(&temp).args(["search", query, "--provider", "pi", "--json"]));
+    let search =
+        json_output(ctx(&temp).args(["search", query, "--provider", "pi", "--format=json"]));
     assert_search_provider_oracle(&search, "pi", query, 1, "message");
 }
 
@@ -1403,7 +1428,7 @@ fn import_all_isolates_rejected_records_and_imports_other_sources() {
     install_default_pi_fixture(&temp, pi_query);
 
     let imported =
-        json_output(ctx(&temp).args(["import", "--all", "--json", "--progress", "none"]));
+        json_output(ctx(&temp).args(["import", "--all", "--format=json", "--progress", "none"]));
     assert_eq!(imported["totals"]["failed_sources"], 0, "{imported:#}");
     assert!(imported["sources"]
         .as_array()
@@ -1425,7 +1450,7 @@ fn import_all_isolates_rejected_records_and_imports_other_sources() {
         "pi",
         "--refresh",
         "off",
-        "--json",
+        "--format=json",
     ]));
     assert_search_provider_oracle(&pi_search, "pi", pi_query, 1, "message");
     let codex_search = json_output(ctx(&temp).args([
@@ -1435,7 +1460,7 @@ fn import_all_isolates_rejected_records_and_imports_other_sources() {
         "codex",
         "--refresh",
         "off",
-        "--json",
+        "--format=json",
     ]));
     assert!(!codex_search["results"].as_array().unwrap().is_empty());
 }

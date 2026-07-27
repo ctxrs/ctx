@@ -26,20 +26,20 @@ as `search`, `show`, `sources`, and `docs` are not suppressed.
 ctx setup
 ctx setup --catalog-only
 ctx setup --no-daemon
-ctx setup --json
-ctx setup --progress json --json
+ctx setup --format json
+ctx setup --progress json --format json
 ctx status
-ctx status --json
+ctx status --format json
 ctx status --usage detail
 ctx status --usage enable
 ctx status --usage disable
 ctx status --usage reset
 ctx doctor
-ctx doctor --json
+ctx doctor --format json
 ctx daemon status
-ctx daemon status --json
+ctx daemon status --format json
 ctx daemon run
-ctx daemon run --once --json
+ctx daemon run --once --format json
 ctx daemon disable
 ctx daemon enable
 ```
@@ -74,7 +74,7 @@ ctx daemon enable
   network path or network-delivery identity, and remains independent of remote
   reporting controls.
 - `status --quiet` performs the same local checks but prints nothing on
-  success. Use `status --json` when scripts need the actual state.
+  success. Use `status --format json` when scripts need the actual state.
 - `doctor` opens local storage and reports validation findings, including
   semantic sidecar/worker and daemon lock/status problems when present.
 - `daemon status` reports the same ctx-owned daemon coordinator state without
@@ -119,7 +119,7 @@ ctx integrations install skills --all-agents
 ctx integrations install skills --project
 ctx integrations install skills --force
 ctx integrations status skills
-ctx integrations status skills --agent codex --json
+ctx integrations status skills --agent codex --format json
 ```
 
 `integrations install skills` installs or refreshes ctx's bundled
@@ -147,10 +147,10 @@ ctx integrations install mcp
 ctx integrations install mcp --agent codex
 ctx integrations install mcp --agent mimocode
 ctx integrations install mcp --provider cursor --project
-ctx integrations install mcp --all-agents --json
+ctx integrations install mcp --all-agents --format json
 ctx integrations install mcp --agent cursor --force
 ctx integrations status mcp
-ctx integrations status mcp --agent codex --json
+ctx integrations status mcp --agent codex --format json
 ctx integrations install slash-commands
 ctx integrations install slash-commands --agent opencode
 ctx integrations install slash-commands --agent mimocode
@@ -159,7 +159,7 @@ ctx integrations install slash-commands --agent qwen-code
 ctx integrations install slash-commands --agent windsurf
 ctx integrations install slash-commands --all-agents
 ctx integrations install slash-commands --force
-ctx integrations install slash-commands --json
+ctx integrations install slash-commands --format json
 ```
 
 `integrations install mcp` adds a local MCP server named `ctx` to supported
@@ -203,7 +203,7 @@ and manual snippets.
 
 ```bash
 ctx sources
-ctx sources --json
+ctx sources --format json
 ```
 
 `sources` lists bounded provider history locations selected for this machine.
@@ -278,14 +278,14 @@ ctx import --provider codebuddy
 ctx import --provider trae
 ctx import --provider codex --path ~/.codex/sessions
 ctx import --provider pi --path ~/.pi/agent/sessions
-ctx import --format ctx-history-jsonl-v1 --path ./history.jsonl
+ctx import --input-format ctx-history-jsonl-v1 --path ./history.jsonl
 ctx import --history-source example-agent/default
 ctx import --history-source-manifest ./ctx-history-plugin.json
 ctx import --history-source example-agent/default --reset-cursor
 ctx import --resume
 ctx import --no-daemon
-ctx import --json
-ctx import --progress json --json
+ctx import --format json
+ctx import --progress json --format json
 ```
 
 `import` explicitly indexes provider history into the local SQLite store. The
@@ -320,11 +320,11 @@ maintenance; machine-readable import does not start or nudge the daemon.
 Local Pro is a separately installed native helper and encrypted derived graph:
 
 ```bash
-ctx pro [--json]
-ctx pro --referral <codename> [--json]
-ctx pro setup [--json]
-ctx pro manage [--no-open] [--json]
-ctx pro uninstall [--delete-data|--keep-data] [--json]
+ctx pro [--format json]
+ctx pro --referral <codename> [--format json]
+ctx pro setup [--format json]
+ctx pro manage [--no-open] [--format json]
+ctx pro uninstall [--delete-data|--keep-data] [--format json]
 ```
 
 Bare `ctx pro` starts or resumes the anonymous trial when needed, activates access, transactionally
@@ -364,7 +364,7 @@ websites, and cookies do not accept or change referral attribution.
 Paid conversion uses browser-based WorkOS sign-in and Stripe Checkout. Pro is
 $20 USD per month; conversion does not add a second trial.
 `manage --no-open` prints the hosted billing-portal URL instead of opening it.
-With `--json`, `manage` also reports
+With `--format json`, `manage` also reports
 `access_state` plus any applicable
 `refresh_after_unix`, `access_deadline_unix`, and `grace_deadline_unix` values.
 The access state is one of `trial`, `active`, `canceling_paid`, `offline_grace`,
@@ -434,9 +434,9 @@ flow rather than copying `ctx-pro.db` alone.
 The public Pro query surface is:
 
 ```bash
-ctx blame file <path> [--lines <start[:end]>] [--repository <logical-repository>] [--limit N] [--cursor <cursor>] [--json]
-ctx blame commit <sha> [--repository <logical-repository>] [--limit N] [--cursor <cursor>] [--json]
-ctx blame pr <positive-number-or-canonical-url> [--repository <logical-repository>] [--limit N] [--cursor <cursor>] [--json]
+ctx blame file <path> [--lines <start[:end]>] [--repository <logical-repository>] [--limit N] [--cursor <cursor>] [--format json]
+ctx blame commit <sha> [--repository <logical-repository>] [--limit N] [--cursor <cursor>] [--format json]
+ctx blame pr <positive-number-or-canonical-url> [--repository <logical-repository>] [--limit N] [--cursor <cursor>] [--format json]
 ```
 
 There are no Pro `show`, `locate`, `timeline`, `facts`, or `related`
@@ -516,9 +516,9 @@ marked as shown.
 The referrer management surface is entirely in the CLI:
 
 ```bash
-ctx referral create <codename> [--json]
-ctx referral status [--json]
-ctx referral payout [--no-open] [--country <CC>] [--entity-type <individual|company>] [--json]
+ctx referral create <codename> [--format json]
+ctx referral status [--format json]
+ctx referral payout [--no-open] [--country <CC>] [--entity-type <individual|company>] [--format json]
 ```
 
 `create` lets any WorkOS-verified person claim one stable codename, or returns
@@ -567,11 +567,11 @@ or `company`; ctx never collects bank or card data. These commands are explicit
 hosted-service operations. Human mode may start WorkOS AuthKit when no usable
 session is cached, and payout may open Stripe's hosted onboarding.
 
-Every referral command using `--json` is noninteractive and browser-free. It
+Every referral command using `--format json` is noninteractive and browser-free. It
 uses only a cached WorkOS session and returns the stable authentication-required
 failure when none is available; it never starts AuthKit or invokes a browser
 opener. JSON contains only the requested deterministic command data, with no
-unsolicited referral slogan or promotional message. `payout --json` returns
+unsolicited referral slogan or promotional message. `payout --format json` returns
 the hosted URL without opening it.
 
 The sole automatic referral mention is human-only and shown once. After the
@@ -805,7 +805,7 @@ include transcript payloads, paths, and source metadata.
 Formats:
 
 - default `table` output is compact and intended for humans and agents;
-- `--format json` or `--json` returns a structured result with `columns`,
+- `--format json` returns a structured result with `columns`,
   array rows, limits, truncation flags, and `read_only: true`;
 - `--format csv` prints a CSV header unless `--no-header` is set;
 - `--format raw` requires exactly one selected column and prints one value per
@@ -822,9 +822,9 @@ can fail before result truncation. `--timeout` accepts values such as `250ms`,
 ```bash
 ctx docs
 ctx docs list
-ctx docs list --json
+ctx docs list --format json
 ctx docs search "upgrade"
-ctx docs search "file path" --limit 5 --json
+ctx docs search "file path" --limit 5 --format json
 ctx docs show cli-reference
 ctx docs show search --format text
 ctx docs show json-contracts --format json
@@ -881,9 +881,9 @@ MCP configs.
 
 ```bash
 ctx upgrade status
-ctx upgrade status --json
+ctx upgrade status --format json
 ctx upgrade check
-ctx upgrade check --json
+ctx upgrade check --format json
 ctx upgrade --dry-run
 ctx upgrade
 ctx upgrade disable
@@ -896,7 +896,7 @@ binary, such as `~/.local/bin/ctx.install.json`, recording the managed install
 path, platform, version, channel, binary SHA-256, metadata URL, and artifact
 URL. Source builds, `cargo install`, package-manager installs, copied binaries,
 and mismatched sidecars are treated as unmanaged and will not self-upgrade.
-`ctx upgrade status --json` also reports the current executable and every
+`ctx upgrade status --format json` also reports the current executable and every
 executable `ctx` candidate found on `PATH`, with warnings when another binary
 shadows the managed install or multiple `ctx` binaries are present. Diagnostics
 identify candidates without executing a shadowing binary.
@@ -921,10 +921,10 @@ and `applied: false` until replacement completes.
 ## Progress Output
 
 `setup` and `import` accept `--progress auto|plain|json|none`. `auto` writes
-plain progress only to an interactive stderr and stays quiet for `--json` or
+plain progress only to an interactive stderr and stays quiet for `--format json` or
 non-interactive stderr. `--progress json` writes newline-delimited progress
 objects to stderr. It does not change stdout, so command result JSON remains a
-single object when `--json` is also present.
+single object when `--format json` is also present.
 
 Progress JSON is a best-effort operation stream. Each object has
 `type: "ctx_progress"` plus `operation`, `phase`, `message`,
@@ -939,36 +939,39 @@ extraction. It is private unless a user explicitly reviews it.
 Structured output is available for:
 
 ```text
-ctx setup --json
-ctx status --json
-ctx sources --json
-ctx import --json
+ctx setup --format json
+ctx status --format json
+ctx index status --format json
+ctx index watch --format jsonl
+ctx index wait --format json
+ctx sources --format json
+ctx import --format json
 ctx show session <ctx-session-id> --format json
 ctx show event <ctx-event-id> --format json
 ctx locate session <ctx-session-id> --format json
 ctx locate event <ctx-event-id> --format json
-ctx pro --json
-ctx pro --referral <codename> --json
-ctx pro setup --json
-ctx pro manage --no-open --json
-ctx pro uninstall (--delete-data|--keep-data) --json
-ctx referral create <codename> --json
-ctx referral status --json
-ctx referral payout [--no-open] [--country <CC>] [--entity-type <individual|company>] --json
-ctx blame file <path> --json
-ctx blame commit <sha> --json
-ctx blame pr <number-or-url> [--repository <logical-repository>] --json
-ctx search <query>|--term <term>|--file <path> --json
-ctx sql "SELECT COUNT(*) FROM ctx_sessions" --json
-ctx docs list --json
-ctx docs search <query> --json
+ctx pro --format json
+ctx pro --referral <codename> --format json
+ctx pro setup --format json
+ctx pro manage --no-open --format json
+ctx pro uninstall (--delete-data|--keep-data) --format json
+ctx referral create <codename> --format json
+ctx referral status --format json
+ctx referral payout [--no-open] [--country <CC>] [--entity-type <individual|company>] --format json
+ctx blame file <path> --format json
+ctx blame commit <sha> --format json
+ctx blame pr <number-or-url> [--repository <logical-repository>] --format json
+ctx search <query>|--term <term>|--file <path> --format json
+ctx sql "SELECT COUNT(*) FROM ctx_sessions" --format json
+ctx docs list --format json
+ctx docs search <query> --format json
 ctx docs show <topic> --format json
-ctx integrations install mcp --json
-ctx integrations status mcp --json
-ctx upgrade --json
-ctx upgrade check --json
-ctx upgrade status --json
-ctx doctor --json
+ctx integrations install mcp --format json
+ctx integrations status mcp --format json
+ctx upgrade --format json
+ctx upgrade check --format json
+ctx upgrade status --format json
+ctx doctor --format json
 ```
 
 See [contracts/json.md](contracts/json.md) for the current field-level contract

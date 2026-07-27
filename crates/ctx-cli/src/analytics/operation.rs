@@ -195,12 +195,12 @@ impl ClientOperationDraft {
             CommandRoot::Locate(args) => match &args.target {
                 LocateTarget::Session(args) => ClientOperationV1::Locate(LocateTelemetry {
                     target_kind: TargetKind::Session,
-                    output_format: RenderFormat::from_locate_format(args.format),
+                    output_format: RenderFormat::from_json_output_format(args.format),
                     provider_lookup: args.provider.is_some() || args.provider_session.is_some(),
                 }),
                 LocateTarget::Event(args) => ClientOperationV1::Locate(LocateTelemetry {
                     target_kind: TargetKind::Event,
-                    output_format: RenderFormat::from_locate_format(args.format),
+                    output_format: RenderFormat::from_json_output_format(args.format),
                     provider_lookup: false,
                 }),
             },

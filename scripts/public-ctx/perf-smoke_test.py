@@ -29,7 +29,7 @@ REPO_ROOT = SCRIPT.parents[2]
 # This is the embedded Python body from base 8f5cf123. Update it only alongside
 # an intentional harness behavior or artifact-schema change.
 FROZEN_PYTHON_SOURCE_SHA256 = (
-    "70aafda14c48d6d8b1d2eccae6ad193f90e87e822b53fff03da0b0257d214689"
+    "d97ffb5ebe8181153cfb8cb0ec2a836c4f6ce3976a3f09fe33967a9a8c3c4391"
 )
 PHASES = (
     "initial_import",

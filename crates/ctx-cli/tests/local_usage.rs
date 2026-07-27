@@ -13,7 +13,7 @@ fn enabled(command: &mut assert_cmd::Command) -> &mut assert_cmd::Command {
 #[test]
 fn default_on_usage_is_independent_of_analytics_and_reports_stable_json() {
     let temp = tempdir();
-    enabled(ctx(&temp).args(["doctor", "--progress", "none"]))
+    enabled(ctx(&temp).args(["doctor"]))
         .env("CTX_ANALYTICS_ENABLED", "false")
         .assert()
         .success();
@@ -21,9 +21,12 @@ fn default_on_usage_is_independent_of_analytics_and_reports_stable_json() {
     assert!(temp.path().join("usage.sqlite").exists());
     assert!(!temp.path().join("install.json").exists());
 
-    let report = json_output(enabled(
-        ctx(&temp).args(["status", "--usage", "detail", "--json"]),
-    ));
+    let report = json_output(enabled(ctx(&temp).args([
+        "status",
+        "--usage",
+        "detail",
+        "--format=json",
+    ])));
     let usage = &report["local_usage"];
     assert_eq!(usage["schema_version"], 1);
     assert_eq!(usage["enabled"], true);
@@ -85,7 +88,7 @@ fn local_usage_report_is_content_free_and_absent_from_status_analytics() {
     )
     .unwrap();
 
-    enabled(ctx(&temp).args(["doctor", "--progress", "none"]))
+    enabled(ctx(&temp).args(["doctor"]))
         .env("CTX_DATA_ROOT", &data_root)
         .env("HOME", &home)
         .env("XDG_STATE_HOME", &state)
@@ -96,7 +99,7 @@ fn local_usage_report_is_content_free_and_absent_from_status_analytics() {
 
     let output = enabled(
         ctx(&temp)
-            .args(["status", "--usage", "detail", "--json"])
+            .args(["status", "--usage", "detail", "--format=json"])
             .env("CTX_DATA_ROOT", &data_root)
             .env("HOME", &home)
             .env("XDG_STATE_HOME", &state)
@@ -186,7 +189,7 @@ fn local_usage_report_is_content_free_and_absent_from_status_analytics() {
 fn disable_enable_and_reset_are_explicit_and_do_not_record_the_control() {
     let temp = tempdir();
 
-    let disabled = json_output(ctx(&temp).args(["status", "--usage", "disable", "--json"]));
+    let disabled = json_output(ctx(&temp).args(["status", "--usage", "disable", "--format=json"]));
     assert_eq!(disabled["local_usage_action"]["effective_enabled"], false);
     assert_eq!(disabled["local_usage_action"]["persisted_enabled"], false);
     assert_eq!(
@@ -194,12 +197,11 @@ fn disable_enable_and_reset_are_explicit_and_do_not_record_the_control() {
         "disabled"
     );
     assert!(disabled.get("local_usage").is_none());
-    enabled(ctx(&temp).args(["doctor", "--progress", "none"]))
-        .assert()
-        .success();
+    enabled(ctx(&temp).args(["doctor"])).assert().success();
     assert!(!temp.path().join("usage.sqlite").exists());
 
-    let enabled_report = json_output(ctx(&temp).args(["status", "--usage", "enable", "--json"]));
+    let enabled_report =
+        json_output(ctx(&temp).args(["status", "--usage", "enable", "--format=json"]));
     assert_eq!(
         enabled_report["local_usage_action"]["effective_enabled"], false,
         "the inherited hard-disable must remain effective for this process"
@@ -210,19 +212,20 @@ fn disable_enable_and_reset_are_explicit_and_do_not_record_the_control() {
     );
     enabled(
         ctx(&temp)
-            .args(["status", "--usage", "enable", "--json"])
+            .args(["status", "--usage", "enable", "--format=json"])
             .env_remove("CTX_LOCAL_USAGE_ENABLED"),
     )
     .assert()
     .success();
     assert!(!temp.path().join("usage.sqlite").exists());
 
-    enabled(ctx(&temp).args(["doctor", "--progress", "none"]))
-        .assert()
-        .success();
-    let reset = json_output(enabled(
-        ctx(&temp).args(["status", "--usage", "reset", "--json"]),
-    ));
+    enabled(ctx(&temp).args(["doctor"])).assert().success();
+    let reset = json_output(enabled(ctx(&temp).args([
+        "status",
+        "--usage",
+        "reset",
+        "--format=json",
+    ])));
     assert_eq!(reset["local_usage_action"]["store_state"], "cleared");
     assert!(reset.get("local_usage").is_none());
 
@@ -241,17 +244,18 @@ fn disable_enable_and_reset_are_explicit_and_do_not_record_the_control() {
 fn usage_reports_are_literal_read_only_and_never_create_or_increment_the_store() {
     let temp = tempdir();
     for mode in ["summary", "detail"] {
-        let report = json_output(enabled(
-            ctx(&temp).args(["status", "--usage", mode, "--json"]),
-        ));
+        let report = json_output(enabled(ctx(&temp).args([
+            "status",
+            "--usage",
+            mode,
+            "--format=json",
+        ])));
         assert_eq!(report["read_only"], true);
         assert_eq!(report["local_usage"]["state"], "empty");
         assert!(!temp.path().join("usage.sqlite").exists());
     }
 
-    enabled(ctx(&temp).args(["doctor", "--progress", "none"]))
-        .assert()
-        .success();
+    enabled(ctx(&temp).args(["doctor"])).assert().success();
     let usage_path = temp.path().join("usage.sqlite");
     let before_bytes = fs::read(&usage_path).unwrap();
     let before_modified = fs::metadata(&usage_path).unwrap().modified().unwrap();
@@ -259,13 +263,19 @@ fn usage_reports_are_literal_read_only_and_never_create_or_increment_the_store()
     let shm_path = temp.path().join("usage.sqlite-shm");
     let before_auxiliaries = (wal_path.exists(), shm_path.exists());
     for _ in 0..3 {
-        json_output(enabled(
-            ctx(&temp).args(["status", "--usage", "detail", "--json"]),
-        ));
+        json_output(enabled(ctx(&temp).args([
+            "status",
+            "--usage",
+            "detail",
+            "--format=json",
+        ])));
     }
-    let report = json_output(enabled(
-        ctx(&temp).args(["status", "--usage", "summary", "--json"]),
-    ));
+    let report = json_output(enabled(ctx(&temp).args([
+        "status",
+        "--usage",
+        "summary",
+        "--format=json",
+    ])));
     assert_eq!(report["local_usage"]["summary"]["calls"], 1);
     assert_eq!(fs::read(&usage_path).unwrap(), before_bytes);
     assert_eq!(
@@ -283,9 +293,12 @@ fn usage_reports_are_literal_read_only_and_never_create_or_increment_the_store()
 fn usage_actions_ignore_core_status_damage_and_fail_with_stable_json_for_owned_inputs() {
     let temp = tempdir();
     fs::write(temp.path().join("work.sqlite"), b"malformed core").unwrap();
-    let enabled_action = json_output(enabled(
-        ctx(&temp).args(["status", "--usage", "enable", "--json"]),
-    ));
+    let enabled_action = json_output(enabled(ctx(&temp).args([
+        "status",
+        "--usage",
+        "enable",
+        "--format=json",
+    ])));
     assert_eq!(enabled_action["local_usage_action"]["ok"], true);
     assert_eq!(
         enabled_action["local_usage_action"]["effective_enabled"],
@@ -297,7 +310,7 @@ fn usage_actions_ignore_core_status_damage_and_fail_with_stable_json_for_owned_i
         "[local_usage]\nenabled = invalid\nSECRET_PATH=/tmp/private\n",
     )
     .unwrap();
-    let output = enabled(ctx(&temp).args(["status", "--usage", "disable", "--json"]))
+    let output = enabled(ctx(&temp).args(["status", "--usage", "disable", "--format=json"]))
         .env("CTX_ANALYTICS_ENABLED", "true")
         .env("CTX_ANALYTICS_DEBUG", "1")
         .assert()
@@ -315,7 +328,7 @@ fn usage_actions_ignore_core_status_damage_and_fail_with_stable_json_for_owned_i
     assert!(!temp.path().join("install.json").exists());
 
     fs::write(temp.path().join("usage.sqlite"), b"SECRET_STORE_PATH").unwrap();
-    let output = enabled(ctx(&temp).args(["status", "--usage", "reset", "--json"]))
+    let output = enabled(ctx(&temp).args(["status", "--usage", "reset", "--format=json"]))
         .assert()
         .failure()
         .get_output()
@@ -332,9 +345,7 @@ fn usage_actions_ignore_core_status_damage_and_fail_with_stable_json_for_owned_i
 #[test]
 fn reset_rejects_constraint_bypassed_rows_without_deleting_them() {
     let temp = tempdir();
-    enabled(ctx(&temp).args(["doctor", "--progress", "none"]))
-        .assert()
-        .success();
+    enabled(ctx(&temp).args(["doctor"])).assert().success();
     let path = temp.path().join("usage.sqlite");
     let conn = Connection::open(&path).unwrap();
     conn.pragma_update(None, "ignore_check_constraints", true)
@@ -344,7 +355,7 @@ fn reset_rejects_constraint_bypassed_rows_without_deleting_them() {
     drop(conn);
     let before = fs::read(&path).unwrap();
 
-    let output = enabled(ctx(&temp).args(["status", "--usage", "reset", "--json"]))
+    let output = enabled(ctx(&temp).args(["status", "--usage", "reset", "--format=json"]))
         .assert()
         .failure()
         .get_output()
@@ -374,7 +385,7 @@ fn malformed_status_config_has_one_content_free_parseable_json_error() {
     )
     .unwrap();
 
-    let output = enabled(ctx(&temp).args(["status", "--json"]))
+    let output = enabled(ctx(&temp).args(["status", "--format=json"]))
         .assert()
         .failure()
         .get_output()
@@ -414,7 +425,7 @@ fn malformed_config_daemon_status_resolves_local_usage_fail_closed() {
         let temp = tempdir();
         fs::write(temp.path().join("config.toml"), config).unwrap();
         let mut command = ctx(&temp);
-        command.args(["daemon", "status", "--json"]);
+        command.args(["daemon", "status", "--format=json"]);
         enabled(&mut command);
         if let Some(value) = environment {
             command.env("CTX_LOCAL_USAGE_ENABLED", value);
@@ -470,9 +481,12 @@ fn malformed_global_config_does_not_block_mcp_or_enable_local_or_remote_state() 
 #[test]
 fn reset_reports_missing_without_creating_a_store() {
     let temp = tempdir();
-    let reset = json_output(enabled(
-        ctx(&temp).args(["status", "--usage", "reset", "--json"]),
-    ));
+    let reset = json_output(enabled(ctx(&temp).args([
+        "status",
+        "--usage",
+        "reset",
+        "--format=json",
+    ])));
     assert_eq!(reset["local_usage_action"]["store_state"], "missing");
     assert!(!temp.path().join("usage.sqlite").exists());
 }
@@ -498,9 +512,7 @@ fn human_usage_actions_report_effective_override_and_cleared_vs_missing() {
         .success()
         .stdout(predicates::str::contains("local_usage_store: missing"));
 
-    enabled(ctx(&temp).args(["doctor", "--progress", "none"]))
-        .assert()
-        .success();
+    enabled(ctx(&temp).args(["doctor"])).assert().success();
     enabled(ctx(&temp).args(["status", "--usage", "reset"]))
         .assert()
         .success()
@@ -510,10 +522,7 @@ fn human_usage_actions_report_effective_override_and_cleared_vs_missing() {
 #[test]
 fn environment_disable_creates_no_sidecar() {
     let temp = tempdir();
-    ctx(&temp)
-        .args(["doctor", "--progress", "none"])
-        .assert()
-        .success();
+    ctx(&temp).args(["doctor"]).assert().success();
     assert!(!temp.path().join("usage.sqlite").exists());
 }
 
@@ -524,9 +533,12 @@ fn foreground_failure_is_recorded_once_as_not_applicable() {
         .assert()
         .failure();
 
-    let report = json_output(enabled(
-        ctx(&temp).args(["status", "--usage", "detail", "--json"]),
-    ));
+    let report = json_output(enabled(ctx(&temp).args([
+        "status",
+        "--usage",
+        "detail",
+        "--format=json",
+    ])));
     let usage = &report["local_usage"];
     assert_eq!(usage["summary"]["calls"], 1);
     assert_eq!(usage["summary"]["successful_calls"], 0);
@@ -539,9 +551,7 @@ fn foreground_failure_is_recorded_once_as_not_applicable() {
 #[test]
 fn human_report_uses_utc_classification_and_conservative_attribution_wording() {
     let temp = tempdir();
-    enabled(ctx(&temp).args(["doctor", "--progress", "none"]))
-        .assert()
-        .success();
+    enabled(ctx(&temp).args(["doctor"])).assert().success();
     let conn = Connection::open(temp.path().join("usage.sqlite")).unwrap();
     conn.execute_batch(
         r#"
@@ -611,9 +621,7 @@ fn human_report_uses_utc_classification_and_conservative_attribution_wording() {
 #[test]
 fn detailed_usage_operations_are_complete_deterministic_and_at_most_eighty_columns() {
     let temp = tempdir();
-    enabled(ctx(&temp).args(["doctor", "--progress", "none"]))
-        .assert()
-        .success();
+    enabled(ctx(&temp).args(["doctor"])).assert().success();
     let long_version = "v".repeat(64);
     let calls = i64::MAX;
     let connection = Connection::open(temp.path().join("usage.sqlite")).unwrap();
@@ -669,7 +677,7 @@ fn ordinary_record_failure_is_silent_and_does_not_change_command_success() {
     let temp = tempdir();
     fs::create_dir(temp.path().join("usage.sqlite")).unwrap();
 
-    let output = enabled(ctx(&temp).args(["doctor", "--progress", "none"]))
+    let output = enabled(ctx(&temp).args(["doctor"]))
         .assert()
         .success()
         .get_output()
@@ -741,7 +749,7 @@ fn mcp_counts_only_recognized_flushed_tool_responses() {
 
     let report = json_output(
         ctx(&temp)
-            .args(["status", "--usage", "detail", "--json"])
+            .args(["status", "--usage", "detail", "--format=json"])
             .env("CTX_LOCAL_USAGE_ENABLED", "true"),
     );
     let usage = &report["local_usage"];
@@ -839,7 +847,7 @@ fn malformed_store_is_an_explicit_content_free_report_error() {
     )
     .unwrap();
 
-    let report = json_output(enabled(ctx(&temp).args(["status", "--json"])));
+    let report = json_output(enabled(ctx(&temp).args(["status", "--format=json"])));
     let encoded = serde_json::to_string(&report["local_usage"]).unwrap();
     assert_eq!(report["local_usage"]["state"], "error");
     assert_eq!(

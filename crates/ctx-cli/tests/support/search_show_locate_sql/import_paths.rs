@@ -23,7 +23,7 @@ fn pi_cli_imports_directory_tree_path() {
         "pi",
         "--path",
         path.to_str().unwrap(),
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(imported["totals"]["imported_sessions"], 2);
     assert_eq!(imported["totals"]["imported_events"], 2);
@@ -33,7 +33,7 @@ fn pi_cli_imports_directory_tree_path() {
         "pi directory beta oracle",
         "--provider",
         "pi",
-        "--json",
+        "--format=json",
     ]));
     assert_search_provider_oracle(&search, "pi", "pi directory beta oracle", 1, "message");
     assert!(search["results"][0]["snippet"]
@@ -57,7 +57,7 @@ fn pi_cli_discovers_env_session_dir_for_sources_and_search_refresh() {
     let sources = json_output(
         ctx(&temp)
             .env("PI_CODING_AGENT_SESSION_DIR", &path)
-            .args(["sources", "--json"]),
+            .args(["sources", "--format=json"]),
     );
     let source = sources["sources"]
         .as_array()
@@ -80,7 +80,7 @@ fn pi_cli_discovers_env_session_dir_for_sources_and_search_refresh() {
         "pi",
         "--refresh",
         "wait",
-        "--json",
+        "--format=json",
     ]));
     assert_search_provider_oracle(&search, "pi", "pi env refresh oracle", 1, "message");
 }
@@ -132,7 +132,13 @@ fn import_rejects_nonexistent_explicit_format_path() {
     let path = path.to_str().unwrap();
 
     ctx(&temp)
-        .args(["import", "--format", "ctx-history-jsonl-v1", "--path", path])
+        .args([
+            "import",
+            "--input-format",
+            "ctx-history-jsonl-v1",
+            "--path",
+            path,
+        ])
         .assert()
         .failure()
         .stderr(
@@ -230,13 +236,13 @@ fn codex_cli_marks_deleted_raw_source_citations_unavailable() {
         "codex",
         "--path",
         &copied_text,
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(imported["totals"]["imported_events"], 7);
 
     fs::remove_dir_all(&copied).unwrap();
 
-    let search = json_output(ctx(&temp).args(["search", "onboarding", "--json"]));
+    let search = json_output(ctx(&temp).args(["search", "onboarding", "--format=json"]));
     assert!(search["results"]
         .as_array()
         .unwrap()

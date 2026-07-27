@@ -13,7 +13,7 @@ fn antigravity_cli_import_skips_malformed_file_among_valid_files() {
         "antigravity",
         "--path",
         brain.to_str().unwrap(),
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -28,7 +28,7 @@ fn antigravity_cli_import_skips_malformed_file_among_valid_files() {
         .iter()
         .any(|failure| failure["error"].as_str().unwrap().contains("agy-bad")));
 
-    let status = json_output(ctx(&temp).args(["status", "--json"]));
+    let status = json_output(ctx(&temp).args(["status", "--format=json"]));
     assert_eq!(status["source_import_files"], 1, "{status:#}");
     assert_eq!(status["indexed_source_import_files"], 1, "{status:#}");
     assert_eq!(status["failed_source_import_files"], 0, "{status:#}");
@@ -39,7 +39,7 @@ fn antigravity_cli_import_skips_malformed_file_among_valid_files() {
         "write_to_file",
         "--provider",
         "antigravity",
-        "--json",
+        "--format=json",
     ]));
     assert_search_provider_oracle(&search, "antigravity", "write_to_file", 1, "tool_call");
 }
@@ -56,7 +56,7 @@ fn mixed_source_replay_remains_completed_with_rejections() {
         "antigravity",
         "--path",
         path,
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -69,7 +69,7 @@ fn mixed_source_replay_remains_completed_with_rejections() {
         "--path",
         path,
         "--resume",
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -115,7 +115,7 @@ fn firebender_replay_preserves_mixed_and_all_invalid_outcomes() {
             "firebender",
             "--path",
             &mixed_project,
-            "--json",
+            "--format=json",
             "--progress",
             "none",
         ]);
@@ -160,7 +160,7 @@ fn firebender_replay_preserves_mixed_and_all_invalid_outcomes() {
             "firebender",
             "--path",
             &invalid_project,
-            "--json",
+            "--format=json",
             "--progress",
             "none",
         ]);
@@ -226,7 +226,7 @@ fn codex_mixed_session_replay_remains_completed_with_rejections() {
             "codex",
             "--path",
             path,
-            "--json",
+            "--format=json",
             "--progress",
             "none",
         ]);
@@ -254,7 +254,7 @@ fn codex_mixed_session_replay_remains_completed_with_rejections() {
         "codex",
         "--refresh",
         "off",
-        "--json",
+        "--format=json",
     ]));
     assert_search_provider_oracle(&search, "codex", "codex mixed replay oracle", 1, "message");
 }
@@ -275,14 +275,14 @@ fn corrected_manifested_file_retries_rejected_row_idempotently() {
         "claude",
         "--path",
         path,
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
     assert_eq!(first["outcome"], "completed_with_rejections", "{first:#}");
     assert_eq!(first["totals"]["imported_events"], 1, "{first:#}");
     assert_eq!(first["totals"]["rejected_records"], 1, "{first:#}");
-    let status = json_output(ctx(&temp).args(["status", "--json"]));
+    let status = json_output(ctx(&temp).args(["status", "--format=json"]));
     assert_eq!(status["failed_source_import_files"], 1, "{status:#}");
     assert_eq!(status["pending_source_import_files"], 1, "{status:#}");
 
@@ -294,7 +294,7 @@ fn corrected_manifested_file_retries_rejected_row_idempotently() {
         "claude",
         "--path",
         path,
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -310,7 +310,7 @@ fn corrected_manifested_file_retries_rejected_row_idempotently() {
         "claude",
         "--refresh",
         "off",
-        "--json",
+        "--format=json",
     ]));
     assert_search_provider_oracle(
         &search,
@@ -336,7 +336,7 @@ fn all_invalid_source_reports_failure_json_and_exits_nonzero() {
             "antigravity",
             "--path",
             brain.to_str().unwrap(),
-            "--json",
+            "--format=json",
             "--progress",
             "none",
         ])
@@ -387,7 +387,7 @@ fn complete_oversize_only_codex_session_replays_failure_without_import_scaffoldi
             "codex",
             "--path",
             session.to_str().unwrap(),
-            "--json",
+            "--format=json",
             "--progress",
             "none",
         ]);
@@ -427,7 +427,7 @@ fn missing_explicit_format_source_reports_failure_json() {
             "ctx-history-jsonl-v1",
             "--path",
             missing.to_str().unwrap(),
-            "--json",
+            "--format=json",
             "--progress",
             "none",
         ])
@@ -461,7 +461,7 @@ fn failed_warp_report(temp: &TempDir, path: &Path) -> Value {
             "--path",
             path.to_str().unwrap(),
             "--no-daemon",
-            "--json",
+            "--format=json",
             "--progress",
             "none",
         ])
@@ -505,7 +505,8 @@ fn symlinked_default_source_is_not_admitted_beside_a_valid_source() {
     write_codex_inventory_oracle(&temp);
     write_symlinked_claude_inventory_source(&temp);
 
-    let report = json_output(ctx(&temp).args(["import", "--all", "--json", "--progress", "none"]));
+    let report =
+        json_output(ctx(&temp).args(["import", "--all", "--format=json", "--progress", "none"]));
 
     assert_eq!(report["outcome"], "success", "{report:#}");
     assert_eq!(report["totals"]["imported_sources"], 1, "{report:#}");
@@ -525,13 +526,14 @@ fn symlinked_default_source_is_rejected_before_inventory() {
     write_symlinked_claude_inventory_source(&temp);
 
     let error =
-        failure_stderr(ctx(&temp).args(["import", "--all", "--json", "--progress", "none"]));
+        failure_stderr(ctx(&temp).args(["import", "--all", "--format=json", "--progress", "none"]));
     assert!(
         error.contains("no importable provider history sources found"),
         "{error}"
     );
 
-    let sources = json_output(ctx(&temp).args(["sources", "--provider", "claude", "--json"]));
+    let sources =
+        json_output(ctx(&temp).args(["sources", "--provider", "claude", "--format=json"]));
     assert_eq!(sources["sources"], json!([]), "{sources:#}");
 }
 
@@ -552,7 +554,7 @@ fn mixed_import_analytics_reports_only_coarse_rejection_outcome() {
             "antigravity",
             "--path",
             brain.to_str().unwrap(),
-            "--json",
+            "--format=json",
             "--progress",
             "none",
         ])

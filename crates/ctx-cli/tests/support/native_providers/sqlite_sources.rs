@@ -10,7 +10,7 @@ fn warp_cli_imports_explicit_sqlite() {
         "warp",
         "--path",
         &fixture,
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -28,7 +28,7 @@ fn warp_cli_imports_explicit_sqlite() {
         "warp",
         "--refresh",
         "off",
-        "--json",
+        "--format=json",
     ]));
     assert_search_provider_oracle(&search, "warp", "Warp sqlite oracle answer", 1, "message");
 
@@ -38,7 +38,7 @@ fn warp_cli_imports_explicit_sqlite() {
         "warp",
         "--path",
         &fixture,
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -52,7 +52,7 @@ fn warp_native_default_discovery_auto_imports_for_search() {
     let temp = tempdir();
     install_default_warp_fixture(&temp);
 
-    let sources = json_output(ctx(&temp).args(["sources", "--json"]));
+    let sources = json_output(ctx(&temp).args(["sources", "--format=json"]));
     let source = sources["sources"]
         .as_array()
         .unwrap()
@@ -72,7 +72,7 @@ fn warp_native_default_discovery_auto_imports_for_search() {
         "warp",
         "--refresh",
         "wait",
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(search["freshness"]["mode"], "wait");
     assert_eq!(search["freshness"]["status"], "completed");
@@ -89,7 +89,7 @@ fn warp_native_default_discovery_is_included_in_import_all() {
     install_default_warp_fixture(&temp);
 
     let imported =
-        json_output(ctx(&temp).args(["import", "--all", "--json", "--progress", "none"]));
+        json_output(ctx(&temp).args(["import", "--all", "--format=json", "--progress", "none"]));
     assert!(imported["sources"]
         .as_array()
         .unwrap()
@@ -108,7 +108,7 @@ fn warp_native_default_discovery_is_included_in_import_all() {
         "warp",
         "--refresh",
         "off",
-        "--json",
+        "--format=json",
     ]));
     assert_search_provider_oracle(&search, "warp", "Warp sqlite oracle answer", 1, "message");
 }
@@ -119,7 +119,7 @@ fn lingma_cli_default_source_imports_home_local_db() {
     let query = "lingma-default-import-oracle";
     install_default_lingma_fixture(&temp, query);
 
-    let sources = json_output(ctx(&temp).args(["sources", "--json"]));
+    let sources = json_output(ctx(&temp).args(["sources", "--format=json"]));
     let source = sources["sources"]
         .as_array()
         .unwrap()
@@ -130,21 +130,23 @@ fn lingma_cli_default_source_imports_home_local_db() {
     assert_eq!(source["status"], "available");
     assert_eq!(source["importable"], true);
 
-    let imported = json_output(ctx(&temp).args(["import", "--provider", "lingma", "--json"]));
+    let imported =
+        json_output(ctx(&temp).args(["import", "--provider", "lingma", "--format=json"]));
     assert_eq!(imported["sources"][0]["provider"], "lingma");
     assert_eq!(imported["sources"][0]["source_format"], "lingma_sqlite");
     assert_eq!(imported["totals"]["rejected_records"], 0);
     assert_eq!(imported["totals"]["imported_sessions"], 1);
     assert_eq!(imported["totals"]["imported_events"], 2);
 
-    let search = json_output(ctx(&temp).args(["search", query, "--provider", "lingma", "--json"]));
+    let search =
+        json_output(ctx(&temp).args(["search", query, "--provider", "lingma", "--format=json"]));
     assert_search_provider_oracle(&search, "lingma", query, 1, "message");
 
     let alias_search =
-        json_output(ctx(&temp).args(["search", query, "--provider", "qoder-cn", "--json"]));
+        json_output(ctx(&temp).args(["search", query, "--provider", "qoder-cn", "--format=json"]));
     assert_search_provider_oracle(&alias_search, "lingma", query, 1, "message");
 
-    let second = json_output(ctx(&temp).args(["import", "--provider", "lingma", "--json"]));
+    let second = json_output(ctx(&temp).args(["import", "--provider", "lingma", "--format=json"]));
     assert_eq!(second["totals"]["rejected_records"], 0);
     assert_eq!(second["totals"]["imported_events"], 0);
 }
@@ -160,7 +162,7 @@ fn tabnine_cli_imports_explicit_agent_home_searches_and_reimports() {
         "tabnine",
         "--path",
         &fixture,
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -181,7 +183,7 @@ fn tabnine_cli_imports_explicit_agent_home_searches_and_reimports() {
         "tabnine",
         "--refresh",
         "off",
-        "--json",
+        "--format=json",
     ]));
     assert_search_provider_oracle(
         &search,
@@ -197,7 +199,7 @@ fn tabnine_cli_imports_explicit_agent_home_searches_and_reimports() {
         "tabnine",
         "--path",
         &fixture,
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -217,7 +219,7 @@ fn deepagents_cli_sources_import_search_and_reimport_with_aliases() {
     )
     .unwrap();
 
-    let sources = json_output(ctx(&temp).args(["sources", "--json"]));
+    let sources = json_output(ctx(&temp).args(["sources", "--format=json"]));
     let source = sources["sources"]
         .as_array()
         .unwrap()
@@ -233,7 +235,7 @@ fn deepagents_cli_sources_import_search_and_reimport_with_aliases() {
         "import",
         "--provider",
         "deep-agents",
-        "--json",
+        "--format=json",
         "--progress",
         "none",
     ]));
@@ -253,7 +255,7 @@ fn deepagents_cli_sources_import_search_and_reimport_with_aliases() {
         "dcode",
         "--refresh",
         "off",
-        "--json",
+        "--format=json",
     ]));
     assert_search_provider_oracle(
         &search,
@@ -269,7 +271,7 @@ fn deepagents_cli_sources_import_search_and_reimport_with_aliases() {
         "deepagents",
         "--path",
         default_db.to_str().unwrap(),
-        "--json",
+        "--format=json",
     ]));
     assert_eq!(second["totals"]["rejected_records"], 0);
     assert_eq!(second["totals"]["imported_events"], 0);
@@ -341,7 +343,7 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
             cli_provider,
             "--path",
             &fixture,
-            "--json",
+            "--format=json",
             "--progress",
             "none",
         ]));
@@ -390,13 +392,14 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
             cli_provider,
             "--refresh",
             "off",
-            "--json",
+            "--format=json",
         ]));
         assert_search_provider_oracle(&search, stored_provider, query, 1, "message");
 
         let result = &search["results"].as_array().unwrap()[0];
         let ctx_event_id = result["ctx_event_id"].as_str().unwrap();
-        let located = json_output(ctx(&temp).args(["locate", "event", ctx_event_id, "--json"]));
+        let located =
+            json_output(ctx(&temp).args(["locate", "event", ctx_event_id, "--format=json"]));
         assert_eq!(located["provider"], stored_provider);
         assert_eq!(located["source"]["source_format"], source_format);
         assert!(located["source"]["path"]
@@ -409,7 +412,7 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
             cli_provider,
             "--path",
             &fixture,
-            "--json",
+            "--format=json",
             "--progress",
             "none",
         ]));

@@ -38,7 +38,7 @@ ctx search "this current task" --include-current-session
 ctx search "mail provider throttled bulk mailbox setup" --backend hybrid
 ctx search "pricing decisions from the launch review" --backend semantic
 ctx status
-ctx status --json
+ctx status --format json
 ```
 
 A result can include:
@@ -255,8 +255,8 @@ only retrieves indexed local evidence; it does not synthesize conclusions.
 
 ## Machine Output
 
-Use default text output for agent reading. Use `ctx search <query> --json` or a
-term/file search with `--json` for scripts, `jq`, or exact field extraction.
+Use default text output for agent reading. Use `ctx search <query> --format json` or a
+term/file search with `--format json` for scripts, `jq`, or exact field extraction.
 JSON results include the same result metadata and citations as the human output,
 plus a top-level `freshness` object describing the pre-search text refresh mode
 and outcome and a top-level `retrieval` object describing the requested/effective

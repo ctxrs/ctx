@@ -13,6 +13,7 @@ use crate::{
         send_pro_operation, Outcome, ProBlameTargetV1, ProBlameTelemetryV1, ProFailureBucketV1,
         ProHostOperationV1, ProSurfaceV1,
     },
+    output::JsonOutputFormat,
     pro::{print_blame_result, DEFAULT_BLAME_LIMIT},
 };
 
@@ -25,9 +26,9 @@ pub(crate) struct BlameArgs {
 impl BlameArgs {
     pub(crate) const fn json_output(&self) -> bool {
         match &self.target {
-            BlameTargetArgs::File(args) => args.json,
-            BlameTargetArgs::Commit(args) => args.json,
-            BlameTargetArgs::PullRequest(args) => args.json,
+            BlameTargetArgs::File(args) => args.format.is_json(),
+            BlameTargetArgs::Commit(args) => args.format.is_json(),
+            BlameTargetArgs::PullRequest(args) => args.format.is_json(),
         }
     }
 }
@@ -71,8 +72,8 @@ pub(crate) struct FileBlameArgs {
     pub(crate) limit: u32,
     #[arg(long, help = "Opaque continuation cursor from a previous blame page")]
     pub(crate) cursor: Option<String>,
-    #[arg(long, help = "Print the typed BlameResult as JSON")]
-    pub(crate) json: bool,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    pub(crate) format: JsonOutputFormat,
 }
 
 #[derive(Debug, Args)]
@@ -97,8 +98,8 @@ pub(crate) struct CommitBlameArgs {
     pub(crate) limit: u32,
     #[arg(long, help = "Opaque continuation cursor from a previous blame page")]
     pub(crate) cursor: Option<String>,
-    #[arg(long, help = "Print the typed BlameResult as JSON")]
-    pub(crate) json: bool,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    pub(crate) format: JsonOutputFormat,
 }
 
 #[derive(Debug, Args)]
@@ -123,8 +124,8 @@ pub(crate) struct PullRequestBlameArgs {
     pub(crate) limit: u32,
     #[arg(long, help = "Opaque continuation cursor from a previous blame page")]
     pub(crate) cursor: Option<String>,
-    #[arg(long, help = "Print the typed BlameResult as JSON")]
-    pub(crate) json: bool,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    pub(crate) format: JsonOutputFormat,
 }
 
 pub(crate) fn run(
@@ -141,7 +142,7 @@ pub(crate) fn run(
             },
             args.limit,
             args.cursor,
-            args.json,
+            args.format.is_json(),
         ),
         BlameTargetArgs::Commit(args) => (
             BlameTarget::Commit {
@@ -150,7 +151,7 @@ pub(crate) fn run(
             },
             args.limit,
             args.cursor,
-            args.json,
+            args.format.is_json(),
         ),
         BlameTargetArgs::PullRequest(args) => (
             BlameTarget::PullRequest {
@@ -159,7 +160,7 @@ pub(crate) fn run(
             },
             args.limit,
             args.cursor,
-            args.json,
+            args.format.is_json(),
         ),
     };
     target

@@ -38,7 +38,7 @@ mod parser_prop_tests;
 
 pub(crate) use cli::{
     Cli, DaemonArgs, DaemonCommand, DaemonRunArgs, DaemonStartModeArg, DaemonTriggerCommandArg,
-    DoctorArgs, ImportArgs, JsonArgs, LocateArgs, LocateTarget, SearchArgs, SearchBackendArg,
+    DoctorArgs, FormatArgs, ImportArgs, LocateArgs, LocateTarget, SearchArgs, SearchBackendArg,
     SetupArgs, ShowArgs, ShowTarget, SourcesArgs, SqlArgs, StatusArgs, UsageStatusMode,
     MAX_EVENT_WINDOW, MAX_SEARCH_LIMIT,
 };

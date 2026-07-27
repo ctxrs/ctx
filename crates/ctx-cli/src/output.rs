@@ -11,9 +11,15 @@ pub(crate) enum OutputFormat {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub(crate) enum LocateFormat {
+pub(crate) enum JsonOutputFormat {
     Text,
     Json,
+}
+
+impl JsonOutputFormat {
+    pub(crate) const fn is_json(self) -> bool {
+        matches!(self, Self::Json)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -58,16 +64,4 @@ pub(crate) fn prune_null_json(value: &mut Value) {
 pub(crate) fn print_json(value: Value) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
-}
-
-pub(crate) fn effective_format(format: OutputFormat, json: bool) -> OutputFormat {
-    if json {
-        OutputFormat::Json
-    } else {
-        format
-    }
-}
-
-pub(crate) fn locate_json_output(format: LocateFormat, json: bool) -> bool {
-    json || format == LocateFormat::Json
 }

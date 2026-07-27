@@ -92,8 +92,8 @@ fn foreground_analytics_eligibility_is_closed_and_remote_safe() {
             "/tmp/history.jsonl",
             "--no-daemon",
         ],
-        vec!["ctx", "status", "--json"],
-        vec!["ctx", "index", "status", "--json"],
+        vec!["ctx", "status", "--format=json"],
+        vec!["ctx", "index", "status", "--format=json"],
         vec!["ctx", "sql", "select 1"],
         vec!["ctx", "doctor"],
         vec!["ctx", "show", "event", "deadbeef"],
@@ -107,10 +107,10 @@ fn foreground_analytics_eligibility_is_closed_and_remote_safe() {
     }
 
     for args in [
-        vec!["ctx", "daemon", "disable", "--json"],
+        vec!["ctx", "daemon", "disable", "--format=json"],
         vec!["ctx", "mcp", "serve"],
-        vec!["ctx", "pro", "--json"],
-        vec!["ctx", "referral", "status", "--json"],
+        vec!["ctx", "pro", "--format=json"],
+        vec!["ctx", "referral", "status", "--format=json"],
         vec!["ctx", "blame", "commit", "deadbeef"],
     ] {
         let cli = Cli::try_parse_from(args).unwrap();
@@ -123,7 +123,8 @@ fn foreground_analytics_eligibility_is_closed_and_remote_safe() {
 
 #[test]
 fn bare_pro_accepts_referral_and_json_as_independent_output_and_attribution_flags() {
-    let cli = Cli::try_parse_from(["ctx", "pro", "--referral", "agent-smith", "--json"]).unwrap();
+    let cli =
+        Cli::try_parse_from(["ctx", "pro", "--referral", "agent-smith", "--format=json"]).unwrap();
     let crate::cli::CommandRoot::Pro(args) = cli.command else {
         panic!("expected Pro command");
     };
@@ -133,12 +134,12 @@ fn bare_pro_accepts_referral_and_json_as_independent_output_and_attribution_flag
 #[test]
 fn deprecated_control_warnings_are_limited_to_foreground_text_commands() {
     for args in [
-        vec!["ctx", "status", "--json"],
+        vec!["ctx", "status", "--format=json"],
         vec!["ctx", "mcp", "serve"],
         vec!["ctx", "daemon", "status"],
         vec!["ctx", "setup", "--progress", "json"],
         vec!["ctx", "import", "--progress", "json"],
-        vec!["ctx", "doctor", "--progress", "json"],
+        vec!["ctx", "doctor", "--format=json"],
     ] {
         let cli = Cli::try_parse_from(args).unwrap();
         assert!(!crate::dispatch::command_deprecation_warning_eligible(
@@ -149,7 +150,7 @@ fn deprecated_control_warnings_are_limited_to_foreground_text_commands() {
     for args in [
         vec!["ctx", "status"],
         vec!["ctx", "setup", "--progress", "plain"],
-        vec!["ctx", "doctor", "--progress", "none"],
+        vec!["ctx", "doctor"],
     ] {
         let cli = Cli::try_parse_from(args).unwrap();
         assert!(crate::dispatch::command_deprecation_warning_eligible(

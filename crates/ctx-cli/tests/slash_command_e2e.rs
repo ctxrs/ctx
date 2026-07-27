@@ -58,7 +58,7 @@ fn slash_command_e2e_detected_global_harnesses_discover_and_invoke() {
         "integrations",
         "install",
         "slash-commands",
-        "--json",
+        "--format=json",
     ]));
 
     assert_eq!(output["integration"], "slash-commands");
@@ -105,7 +105,7 @@ fn slash_command_e2e_mimocode_honors_config_dir_env() {
         "slash-commands",
         "--agent",
         "mimocode",
-        "--json",
+        "--format=json",
     ]));
 
     let mimocode = MiMoCodeHarness::global_config_dir(&config_dir);
@@ -128,7 +128,7 @@ fn slash_command_e2e_mimocode_default_detection_honors_config_dir_env() {
         "integrations",
         "install",
         "slash-commands",
-        "--json",
+        "--format=json",
     ]));
 
     assert_eq!(output_agents(&output), vec!["mimocode"]);
@@ -150,7 +150,7 @@ fn slash_command_e2e_mimocode_rejects_relative_home_override() {
                 "slash-commands",
                 "--agent",
                 "mimocode",
-                "--json",
+                "--format=json",
             ]),
     );
 
@@ -179,7 +179,7 @@ fn slash_command_e2e_project_harnesses_discover_and_invoke() {
         "--agent",
         "windsurf",
         "--project",
-        "--json",
+        "--format=json",
     ]);
     let output = json_output(&mut command);
 
@@ -233,7 +233,7 @@ fn slash_command_e2e_skill_only_agents_do_not_write_legacy_command_surfaces() {
             "slash-commands",
             "--agent",
             agent,
-            "--json",
+            "--format=json",
         ]));
         assert_eq!(output["results"][0]["agent"], agent);
         assert_eq!(output["results"][0]["status"], "skill_only");
@@ -256,7 +256,7 @@ fn slash_command_e2e_manual_only_agents_are_accepted_without_writing_files() {
             "slash-commands",
             "--agent",
             agent,
-            "--json",
+            "--format=json",
         ]));
         let result = result_for_agent(&output, agent);
         assert_eq!(result["status"], "manual_only");
@@ -286,7 +286,7 @@ fn slash_command_e2e_all_agents_json_covers_the_complete_accepted_matrix() {
         "install",
         "slash-commands",
         "--all-agents",
-        "--json",
+        "--format=json",
     ]));
 
     assert_eq!(output["integration"], "slash-commands");
@@ -316,7 +316,7 @@ fn slash_command_e2e_project_all_agents_json_covers_the_complete_accepted_matrix
         "slash-commands",
         "--all-agents",
         "--project",
-        "--json",
+        "--format=json",
     ]));
 
     assert_eq!(output["integration"], "slash-commands");

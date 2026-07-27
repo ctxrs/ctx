@@ -28,7 +28,7 @@ case " $* " in
     printf '%s\n' 'semantic-only search will not initialize or download intfloat/multilingual-e5-small during search' >&2
     exit 1
     ;;
-  *" status --json "*)
+  *" status --format json "*)
     test -z "${CTX_SEARCH_SEMANTIC:-}"
     if test -n "${CTX_PRO_HELPER:-}"; then
       test "${CTX_ANALYTICS_ENABLED:-}" = false

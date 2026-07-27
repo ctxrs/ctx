@@ -179,14 +179,14 @@ mod unix {
     fn run_supported_setup(temp: &tempfile::TempDir, binary: &Path) -> Value {
         let mut command = ctx_from_binary(temp, binary);
         command
-            .args(["setup", "--json", "--progress", "none"])
+            .args(["setup", "--format=json", "--progress", "none"])
             .env_remove("CTX_DAEMON_AUTOSTART_OFF");
         json_output(&mut command)
     }
 
     fn daemon_status(temp: &tempfile::TempDir, binary: &Path) -> Value {
         let mut command = ctx_from_binary(temp, binary);
-        command.args(["daemon", "status", "--json"]);
+        command.args(["daemon", "status", "--format=json"]);
         json_output(&mut command)["daemon"].clone()
     }
 
