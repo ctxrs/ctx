@@ -240,28 +240,26 @@ struct CustomOutputFrontier {
 }
 
 struct SessionUnit {
-    line: usize,
     session: Session,
 }
 
 struct EventUnit {
-    line: usize,
     event: Event,
     run: Option<Run>,
     authority: ProviderEventHashAuthority,
 }
 
 struct FileTouchUnit {
-    line: usize,
     file: FileTouched,
 }
 
 struct EdgeUnit {
-    line: usize,
     actor: CanonicalActor,
     edge: SessionEdge,
 }
 
+// Canonical entity shapes differ substantially and are consumed as one ordered stream.
+#[allow(clippy::large_enum_variant)]
 enum CoreUnit {
     Session(SessionUnit),
     Event(EventUnit),
@@ -879,6 +877,7 @@ fn import_parsed(
         (_, Err(error)) => return Err(error),
         (Err(error), Ok(())) => return Err(error),
     }
+    drop(bulk_guard);
 
     if cursor.phase == CustomCursorPhase::Complete {
         if options.capture_work_limit == CaptureWorkLimit::OneSafeGroup
@@ -1603,7 +1602,6 @@ fn build_canonical_history(
             event.id,
         );
         event_units.push(CoreUnit::Event(EventUnit {
-            line: *line,
             event,
             run,
             authority,
@@ -1611,7 +1609,7 @@ fn build_canonical_history(
     }
 
     let mut touch_units = Vec::new();
-    for (line, record) in &parsed.file_touches {
+    for (_, record) in &parsed.file_touches {
         let source = &parsed.sources[&record.source_id].1;
         let Some(session) = sessions.get(&(record.source_id.clone(), record.session_id.clone()))
         else {
@@ -1660,7 +1658,7 @@ fn build_canonical_history(
             event_id,
             touch_id,
         );
-        touch_units.push(CoreUnit::FileTouch(FileTouchUnit { line: *line, file }));
+        touch_units.push(CoreUnit::FileTouch(FileTouchUnit { file }));
     }
 
     let mut edge_units = BTreeMap::<Uuid, EdgeUnit>::new();
@@ -1708,13 +1706,12 @@ fn build_canonical_history(
         edge_units.insert(
             edge.id,
             EdgeUnit {
-                line: parsed.sessions[&(source_id.clone(), source_session_id(session)?)].0,
                 actor: canonical_actor(parent),
                 edge,
             },
         );
     }
-    for (line, record) in &parsed.edges {
+    for (_, record) in &parsed.edges {
         let source = &parsed.sources[&record.source_id].1;
         let (Some(from), Some(to)) = (
             sessions.get(&(record.source_id.clone(), record.from_session_id.clone())),
@@ -1789,7 +1786,6 @@ fn build_canonical_history(
         edge_units.insert(
             edge_id,
             EdgeUnit {
-                line: *line,
                 actor: canonical_actor(from),
                 edge,
             },
@@ -2309,7 +2305,7 @@ fn canonical_session_unit(
             }),
         ),
     };
-    SessionUnit { line, session }
+    SessionUnit { session }
 }
 
 fn ordered_sessions(

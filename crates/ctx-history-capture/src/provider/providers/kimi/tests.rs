@@ -9,8 +9,9 @@ use std::{
     },
 };
 
-use ctx_history_core::{CaptureProvider, EventType, RunStatus};
+use ctx_history_core::{CaptureProvider, EventType, HistoryRecord, RunStatus};
 use serde_json::{json, Value};
+use uuid::Uuid;
 
 use crate::{
     test_support_paths::tempdir, CaptureError, CaptureWorkLimit, ImportProfile,
@@ -277,6 +278,47 @@ fn nativepath_lifecycle_handles_restart_append_mutations_and_disappearance() {
 }
 
 #[test]
+fn nativepath_links_import_record_for_small_corpus_search() {
+    let (temp, root, _wire) = kimi_wire_fixture();
+    let mut store =
+        ctx_history_store::Store::open(temp.path().join("small-corpus.sqlite")).unwrap();
+    let mut record = HistoryRecord::new(
+        "Kimi provider import",
+        "Provider import anchor without transcript terms",
+        vec!["agent-history".to_owned()],
+        "agent_history",
+        Some("/workspace/kimi".to_owned()),
+    );
+    record.id = Uuid::parse_str("018f45d0-0000-7000-8000-00000000c001").unwrap();
+    store.insert_record(&record).unwrap();
+    let mut import_options = options(ImportProfile::CoreOnly);
+    import_options.history_record_id = Some(record.id);
+
+    let summary =
+        import_kimi_nativepath_tree(&root, &mut store, context(&root), import_options).unwrap();
+    assert_eq!(summary.imported_events, 2);
+
+    let sessions = store.list_sessions().unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].history_record_id, Some(record.id));
+    let events = store.events_for_session(sessions[0].id).unwrap();
+    assert_eq!(events.len(), 2);
+    assert!(events
+        .iter()
+        .all(|event| event.history_record_id == Some(record.id)));
+    let runs = store.runs_for_session(sessions[0].id).unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].history_record_id, Some(record.id));
+
+    let hits = store.search_records("fresh", 10).unwrap();
+    assert_eq!(
+        hits.iter().map(|hit| hit.id).collect::<Vec<_>>(),
+        [record.id],
+        "the two-event corpus must remain searchable through its import record"
+    );
+}
+
+#[test]
 fn core_commits_before_independent_pro_and_omits_success_bodies() {
     let (temp, root, _wire) = kimi_wire_fixture();
     let store_path = temp.path().join("core-pro.sqlite");
@@ -342,6 +384,11 @@ fn pro_failure_never_rolls_back_core_and_later_activation_replays() {
     )
     .unwrap();
     assert_eq!(summary.imported_events, 2);
+    assert_eq!(summary.failed, 1);
+    assert_eq!(
+        summary.failures[0].error,
+        "Kimi Pro output is behind committed Core"
+    );
     assert!(!store.list_sessions().unwrap().is_empty());
     assert!(failing.behind.load(Ordering::SeqCst) > 0);
 
@@ -354,6 +401,7 @@ fn pro_failure_never_rolls_back_core_and_later_activation_replays() {
     )
     .unwrap();
     assert_eq!(replay_summary.work_result(), ProviderImportWorkResult::NoOp);
+    assert_eq!(replay_summary.failed, 0);
     assert_eq!(replay.outputs.load(Ordering::SeqCst), 2);
 }
 
@@ -432,7 +480,7 @@ fn released_cursor_is_migration_only_and_upgrades_without_duplicates() {
     let certified =
         crate::provider::importer::CertifiedProviderCursor::decode(committed.provider_cursor())
             .unwrap();
-    assert_eq!(certified.parser_revision(), 5);
+    assert_eq!(certified.parser_revision(), 6);
     assert_eq!(store.export_archive().unwrap().events.len(), 2);
 }
 

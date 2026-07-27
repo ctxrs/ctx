@@ -135,10 +135,7 @@ pub(super) fn import_warp_nativepath(
         previous.as_ref(),
     )?;
 
-    let prepared = match prepare_warp_nativepath_lifecycle(
-        path,
-        previous.as_ref().map(std::slice::from_ref).unwrap_or(&[]),
-    ) {
+    let prepared = match prepare_warp_nativepath_lifecycle(path, previous.as_slice()) {
         WarpNativePreparationOutcome::Ready(prepared) => prepared,
         WarpNativePreparationOutcome::ExactNoOp {
             persisted_state, ..
@@ -192,10 +189,6 @@ pub(super) fn import_warp_nativepath(
             replacement_prior_source_identity = Some(route.canonical_source_identity.clone());
         }
     }
-    let replacement_prior_source_id = replacement_prior_source_identity
-        .as_deref()
-        .map(warp_source_id);
-
     let context = publication_context(
         &prepared.inputs,
         &adapter,
@@ -203,7 +196,6 @@ pub(super) fn import_warp_nativepath(
         cursor_stream,
         options.history_record_id,
         options.inventory_observation_token.as_deref(),
-        replacement_prior_source_id,
         replacement_prior_source_identity,
     )?;
     let preparation_inputs = prepared.inputs.clone();
@@ -295,7 +287,6 @@ fn publication_context(
     cursor_stream: String,
     history_record_id: Option<Uuid>,
     inventory_observation_token: Option<&str>,
-    replacement_prior_source_id: Option<Uuid>,
     replacement_prior_source_identity: Option<String>,
 ) -> Result<WarpPublicationContext> {
     let proposed_source_identity =
@@ -327,7 +318,9 @@ fn publication_context(
         cursor_stream,
         proposed_source_identity,
         source_revision,
-        replacement_prior_source_id,
+        replacement_prior_source_id: replacement_prior_source_identity
+            .as_deref()
+            .map(warp_source_id),
         replacement_prior_source_identity,
     })
 }

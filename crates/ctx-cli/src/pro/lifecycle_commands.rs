@@ -130,6 +130,14 @@ impl ProArgs {
             None | Some(ProCommand::Setup(_)) => ProLifecycleOperationV1::Setup,
         }
     }
+
+    pub(crate) fn local_usage_operation(&self) -> &'static str {
+        match &self.command {
+            Some(ProCommand::Manage(_)) => "pro_manage",
+            Some(ProCommand::Uninstall(_)) => "pro_uninstall",
+            None | Some(ProCommand::Setup(_)) => "pro_setup",
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -433,6 +441,24 @@ fn run_manage(
     json_output: bool,
     telemetry: &mut ProLifecycleTelemetryV1,
 ) -> Result<()> {
+    run_manage_with_opener(
+        data_root,
+        service,
+        no_open,
+        json_output,
+        telemetry,
+        &open_browser,
+    )
+}
+
+fn run_manage_with_opener(
+    data_root: &Path,
+    service: &mut dyn ProLifecycleService,
+    no_open: bool,
+    json_output: bool,
+    telemetry: &mut ProLifecycleTelemetryV1,
+    opener: &dyn Fn(&str) -> Result<()>,
+) -> Result<()> {
     let plan = with_pro_initialization(data_root, || service.manage(data_root))?;
     validate_portal_url(&plan.portal_url)?;
     validate_access_status(
@@ -442,8 +468,23 @@ fn run_manage(
         plan.grace_deadline_unix,
     )?;
     telemetry.access_state = ProAccessStateV1::from_safe_name(&plan.access_state);
-    let browser_opened = !no_open && open_browser(&plan.portal_url).is_ok();
-    let value = manage_payload(&plan, browser_opened);
+    let browser_opened = !json_output && !no_open && opener(&plan.portal_url).is_ok();
+    let mut value = manage_payload(&plan, browser_opened);
+    let usage_report = crate::config::AppConfig::load(data_root)
+        .map(|config| crate::local_usage::read_report(data_root, config.local_usage.enabled, false))
+        .unwrap_or_else(|_| crate::local_usage::UsageReport::config_error());
+    let conversion_action =
+        crate::local_usage::pro_conversion_action(Some(plan.access_state.as_str()));
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "local_usage".to_owned(),
+            serde_json::to_value(&usage_report)?,
+        );
+        object.insert(
+            "conversion_action".to_owned(),
+            conversion_action.clone().unwrap_or(serde_json::Value::Null),
+        );
+    }
     if json_output {
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
@@ -453,6 +494,21 @@ fn run_manage(
         );
         if !no_open && !browser_opened {
             println!("A browser could not be opened; use the URL above.");
+        }
+        crate::local_usage::render_human_summary(&usage_report, false);
+        if let Some(action) = conversion_action {
+            if action["kind"] == "pro_restore_access" {
+                println!(
+                    "Restore ctx Pro access; the local graph is preserved: {}",
+                    action["command"].as_str().unwrap_or("ctx pro manage")
+                );
+            } else {
+                println!(
+                    "Continue with ctx Pro for {}: {}",
+                    action["price"].as_str().unwrap_or("$15/month"),
+                    action["command"].as_str().unwrap_or("ctx pro manage")
+                );
+            }
         }
     }
     Ok(())
@@ -853,6 +909,8 @@ fn delete_one_file(path: &Path) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
 
     #[derive(Default)]
@@ -1091,21 +1149,15 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let installation_id = crate::identity::installation_id(root.path()).unwrap();
         let layout = ProFilesystemLayout::new(root.path());
-        fs::create_dir(&layout.pro_root()).unwrap();
+        fs::create_dir(layout.pro_root()).unwrap();
         ctx_history_core::platform_security::restrict_private_directory(&layout.pro_root())
             .unwrap();
         let phase = layout.pro_root().join(".ctx-pro.graph-key-cleanup.json");
-        fs::write(
-            &phase,
-            serde_json::to_vec(&json!({
-                "schema_version": 1,
-                "installation_id": installation_id,
-                "thumbprints": [],
-            }))
-            .unwrap(),
+        crate::pro::local_deletion::write_empty_graph_key_cleanup_phase_for_test(
+            root.path(),
+            &installation_id,
         )
         .unwrap();
-        restrict_private_file(&phase).unwrap();
 
         let mut operation_called = false;
         let error = with_pro_initialization(root.path(), || -> Result<()> {
@@ -1127,7 +1179,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         crate::identity::installation_id(root.path()).unwrap();
         let layout = ProFilesystemLayout::new(root.path());
-        fs::create_dir(&layout.pro_root()).unwrap();
+        fs::create_dir(layout.pro_root()).unwrap();
         ctx_history_core::platform_security::restrict_private_directory(&layout.pro_root())
             .unwrap();
         fs::create_dir(layout.bin_dir()).unwrap();
@@ -1299,6 +1351,53 @@ mod tests {
         validate_access_status("offline_grace", None, Some(200), Some(300)).unwrap();
         validate_access_status("locked", None, None, None).unwrap();
         assert!(validate_access_status("none", None, None, None).is_err());
+    }
+
+    #[test]
+    fn manage_json_never_invokes_the_browser_opener() {
+        struct ManageService;
+
+        impl ProLifecycleService for ManageService {
+            fn release_trust(&self) -> Result<ReleaseTrust> {
+                bail!("unused")
+            }
+
+            fn setup(
+                &mut self,
+                _data_root: &Path,
+                _installed_version: Option<&str>,
+            ) -> Result<ProSetupPlan> {
+                bail!("unused")
+            }
+
+            fn manage(&mut self, _data_root: &Path) -> Result<ProManagePlan> {
+                Ok(ProManagePlan {
+                    portal_url: "https://billing.example.test/session".to_owned(),
+                    access_state: "active".to_owned(),
+                    refresh_after_unix: Some(100),
+                    access_deadline_unix: Some(200),
+                    grace_deadline_unix: None,
+                })
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let calls = Cell::new(0);
+        let opener = |_: &str| {
+            calls.set(calls.get() + 1);
+            Ok(())
+        };
+        let mut telemetry = ProLifecycleTelemetryV1::new(ProLifecycleOperationV1::Manage);
+        run_manage_with_opener(
+            root.path(),
+            &mut ManageService,
+            false,
+            true,
+            &mut telemetry,
+            &opener,
+        )
+        .unwrap();
+        assert_eq!(calls.get(), 0);
     }
 
     #[test]

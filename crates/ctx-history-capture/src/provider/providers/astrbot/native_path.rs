@@ -175,6 +175,9 @@ impl AstrBotStoreCursor {
 }
 
 #[derive(Debug)]
+// Cursor decoding keeps released and current wire shapes explicit; boxing
+// would add allocation to this short-lived control-flow value.
+#[allow(clippy::large_enum_variant)]
 enum PriorCursor {
     None,
     Native {
@@ -986,7 +989,7 @@ impl<'a> AstrBotReader<'a> {
                     });
                     let include_session = item_index == 0;
                     let unit =
-                        (include_session || event.is_some()).then(|| CoreUnit { session, event });
+                        (include_session || event.is_some()).then_some(CoreUnit { session, event });
                     let unit_bytes = unit.as_ref().map_or(64, estimated_unit_bytes);
                     let output_estimate =
                         output.as_ref().map_or(0, |output| output.estimated_bytes);

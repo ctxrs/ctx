@@ -153,7 +153,7 @@ pub(super) enum NanoClawNativeUnit {
         source: NanoClawMessageSource,
         message_rowid: i64,
         session: NanoClawSessionRow,
-        message: NanoClawMessageRow,
+        message: Box<NanoClawMessageRow>,
         #[serde(skip)]
         locator: NativeLocator,
     },
@@ -512,7 +512,7 @@ impl<'connection, 'snapshot> NanoClawNativeScanner<'connection, 'snapshot> {
                 source: candidate.source,
                 message_rowid: candidate.rowid,
                 session: active.row.clone(),
-                message,
+                message: Box::new(message),
                 locator: nanoclaw_message_locator(active.rowid, candidate.source, candidate.rowid)?,
             },
             next_frontier,

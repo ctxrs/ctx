@@ -328,7 +328,12 @@ pub(crate) fn import_firebender_nativepath(
         return Ok(summary);
     }
     if let Some(sink) = import_options.import_profile.sink() {
-        replay_output(&conn, &snapshot, &authority, sink.as_ref());
+        if replay_output(&conn, &snapshot, &authority, sink.as_ref())? {
+            summary.record_failure(ProviderImportFailure {
+                line: 0,
+                error: "Firebender Pro output is behind committed Core".to_owned(),
+            });
+        }
     }
     Ok(summary)
 }
@@ -1370,13 +1375,8 @@ fn replay_output(
     snapshot: &ProviderSqliteSourceSnapshot,
     authority: &FirebenderSourceAuthority,
     sink: &dyn ProOutputSink,
-) {
-    if let Err(error) = replay_output_inner(conn, snapshot, authority, sink) {
-        sink.mark_behind(ProOutputSinkError::new(
-            "firebender_output_replay",
-            error.to_string(),
-        ));
-    }
+) -> Result<bool> {
+    replay_output_inner(conn, snapshot, authority, sink)
 }
 
 fn replay_output_inner(
@@ -1384,20 +1384,34 @@ fn replay_output_inner(
     snapshot: &ProviderSqliteSourceSnapshot,
     authority: &FirebenderSourceAuthority,
     sink: &dyn ProOutputSink,
-) -> Result<()> {
+) -> Result<bool> {
     let source = OutputSourceIdentity {
         provider: CaptureProvider::Firebender.as_str().to_owned(),
         namespace_id: authority.canonical_source_identity.clone(),
         source_id: authority.route_identity.clone(),
     };
-    let progress = sink.observe_source(&source).map_err(|error| {
-        CaptureError::InvalidPayload(format!(
-            "Firebender output sink observation failed: {error}"
-        ))
-    })?;
-    let mut state = output_state(progress, authority, sink)?;
+    let progress = match sink.observe_source(&source) {
+        Ok(progress) => progress,
+        Err(_) => {
+            sink.mark_behind(ProOutputSinkError::new(
+                "firebender_output_progress",
+                "Firebender Pro output progress is unavailable",
+            ));
+            return Ok(true);
+        }
+    };
+    let mut state = match output_state(progress, authority, sink) {
+        Ok(state) => state,
+        Err(_) => {
+            sink.mark_behind(ProOutputSinkError::new(
+                "firebender_output_progress",
+                "Firebender Pro output progress is invalid",
+            ));
+            return Ok(true);
+        }
+    };
     if state.complete {
-        return Ok(());
+        return Ok(false);
     }
     loop {
         if !snapshot.revalidate(&authority.database_path)? {
@@ -1407,45 +1421,58 @@ fn replay_output_inner(
         if !snapshot.revalidate(&authority.database_path)? {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
-        let observations = output_observations(&page)?;
-        let expected = safe_frontier(&page.expected)?;
-        let next = safe_frontier(&page.next)?;
-        let output = NativeProOutputPage {
-            inventory_generation: sink.inventory_generation(),
-            source: source.clone(),
-            source_epoch: state.source_epoch,
-            observed_revision: authority.source_revision.clone(),
-            parser_revision: FIREBENDER_OUTPUT_PARSER_REVISION.to_owned(),
-            materializer_revision: sink.materializer_revision().to_owned(),
-            disposition: state.disposition,
-            expected_prior_source_epoch: state.expected_source_epoch,
-            expected_prior_frontier: state.expected_sink_frontier.clone(),
-            observations,
+        let output_page = (|| {
+            let observations = output_observations(&page)?;
+            let expected = safe_frontier(&page.expected)?;
+            let next = safe_frontier(&page.next)?;
+            let output = NativeProOutputPage {
+                inventory_generation: sink.inventory_generation(),
+                source: source.clone(),
+                source_epoch: state.source_epoch,
+                observed_revision: authority.source_revision.clone(),
+                parser_revision: FIREBENDER_OUTPUT_PARSER_REVISION.to_owned(),
+                materializer_revision: sink.materializer_revision().to_owned(),
+                disposition: state.disposition,
+                expected_prior_source_epoch: state.expected_source_epoch,
+                expected_prior_frontier: state.expected_sink_frontier.clone(),
+                observations,
+            };
+            let replay = NativeProReplayPage::new_with_source_identity(
+                NativeSourceIdentity::new(
+                    CaptureProvider::Firebender.as_str(),
+                    authority.route_identity.clone(),
+                ),
+                expected,
+                next.clone(),
+                page.next.terminal,
+                NativePageAccounting {
+                    logical_units: output.observations.len(),
+                    conservative_serialized_bytes: NATIVE_PATH_MAX_RETAINED_PAGE_BYTES,
+                },
+                output,
+            )
+            .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+            Ok::<_, CaptureError>((replay, next))
+        })();
+        let (replay, next) = match output_page {
+            Ok(page) => page,
+            Err(_) => {
+                sink.mark_behind(ProOutputSinkError::new(
+                    "firebender_output_page",
+                    "Firebender Pro output page is invalid",
+                ));
+                return Ok(true);
+            }
         };
-        let replay = NativeProReplayPage::new_with_source_identity(
-            NativeSourceIdentity::new(
-                CaptureProvider::Firebender.as_str(),
-                authority.route_identity.clone(),
-            ),
-            expected,
-            next.clone(),
-            page.next.terminal,
-            NativePageAccounting {
-                logical_units: output.observations.len(),
-                conservative_serialized_bytes: NATIVE_PATH_MAX_RETAINED_PAGE_BYTES,
-            },
-            output,
-        )
-        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
-        process_pro_replay_only(replay, sink).map_err(|failure| {
-            CaptureError::InvalidPayload(format!("{:?}", failure.output_error))
-        })?;
+        if process_pro_replay_only(replay, sink).is_err() {
+            return Ok(true);
+        }
         state.frontier = page.next;
         state.expected_source_epoch = Some(state.source_epoch);
         state.expected_sink_frontier = Some(next);
         state.disposition = ProOutputSourceDisposition::AppendOrResume;
         if state.frontier.terminal {
-            return Ok(());
+            return Ok(false);
         }
     }
 }
@@ -1801,7 +1828,75 @@ fn hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex,
+    };
+
     use super::*;
+
+    #[derive(Default)]
+    struct RecordingOutputSink {
+        fail_once: AtomicBool,
+        behind: AtomicUsize,
+        progress: Mutex<Option<crate::ProOutputProgress>>,
+        contents: Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl crate::ProOutputSink for RecordingOutputSink {
+        fn inventory_generation(&self) -> u64 {
+            1
+        }
+
+        fn materializer_revision(&self) -> &str {
+            "firebender-nativepath-test-materializer-v1"
+        }
+
+        fn observe_source(
+            &self,
+            _source: &crate::OutputSourceIdentity,
+        ) -> std::result::Result<Option<crate::ProOutputProgress>, crate::ProOutputSinkError>
+        {
+            Ok(self.progress.lock().unwrap().clone())
+        }
+
+        fn materialize_page(
+            &self,
+            page: crate::ProOutputMaterializationPage,
+        ) -> std::result::Result<crate::ProOutputPageResult, crate::ProOutputSinkError> {
+            if self.fail_once.swap(false, Ordering::SeqCst) {
+                return Err(crate::ProOutputSinkError::new(
+                    "firebender_test_failure",
+                    "retry the output page",
+                ));
+            }
+            self.contents.lock().unwrap().extend(
+                page.observations
+                    .iter()
+                    .map(|observation| observation.content.clone()),
+            );
+            let committed_cursor = page.next_safe_cursor.clone();
+            *self.progress.lock().unwrap() = Some(crate::ProOutputProgress {
+                source_epoch: page.source_epoch,
+                observed_revision: page.observed_revision.clone(),
+                cursor: Some(committed_cursor.clone()),
+                parser_revision: page.parser_revision.clone(),
+                materializer_revision: page.materializer_revision.clone(),
+                terminal: page.terminal,
+            });
+            Ok(crate::ProOutputPageResult {
+                source_epoch: page.source_epoch,
+                committed_cursor,
+                accepted_outputs: u32::try_from(page.observations.len()).unwrap(),
+                materialized_facts: 0,
+                replayed: false,
+            })
+        }
+
+        fn mark_behind(&self, _error: crate::ProOutputSinkError) {
+            self.behind.fetch_add(1, Ordering::SeqCst);
+        }
+    }
 
     #[test]
     fn native_cursor_round_trips() {
@@ -1857,5 +1952,102 @@ mod tests {
         assert!(evidence.failure);
         assert_eq!(evidence.exit_code, Some(9));
         assert!(!event.payload.to_string().contains("SECRET_OUTPUT"));
+    }
+
+    #[test]
+    fn output_failure_keeps_core_success_and_later_replay_catches_up() {
+        const SECRET: &str = "firebender-private-output";
+
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let root = temp.path().join("project");
+        let database = root
+            .join(".idea")
+            .join("firebender")
+            .join("chat_history.db");
+        fs::create_dir_all(database.parent().unwrap()).unwrap();
+        let conn = Connection::open(&database).unwrap();
+        conn.execute_batch(
+            "create table chat_sessions (
+                id text not null,
+                name text not null,
+                created_at integer not null,
+                updated_at integer not null,
+                messages_json text not null,
+                metadata_json text not null
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "insert into chat_sessions
+             (id, name, created_at, updated_at, messages_json, metadata_json)
+             values (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                "firebender-session",
+                "test",
+                1_785_000_000_i64,
+                1_785_000_001_i64,
+                json!([
+                    {"role": "user", "content": "core message"},
+                    {
+                        "role": "tool",
+                        "tool_call_id": "call-1",
+                        "status": "success",
+                        "content": SECRET
+                    }
+                ])
+                .to_string(),
+                "{}",
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut store = Store::open(temp.path().join("ctx.sqlite")).unwrap();
+        let sink = Arc::new(RecordingOutputSink::default());
+        sink.fail_once.store(true, Ordering::SeqCst);
+        let context = ProviderAdapterContext {
+            machine_id: "firebender-nativepath-test".to_owned(),
+            source_path: Some(root.clone()),
+            source_root: Some(root.clone()),
+            imported_at: "2026-07-25T12:00:00Z".parse().unwrap(),
+        };
+        let summary = import_firebender_nativepath(
+            &root,
+            &mut store,
+            context.clone(),
+            ProviderImportOptions {
+                import_profile: crate::ImportProfile::CoreAndPro(sink.clone()),
+                ..ProviderImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.imported_events, 1);
+        assert_eq!(summary.failed, 1);
+        assert_eq!(
+            summary.failures[0].error,
+            "Firebender Pro output is behind committed Core"
+        );
+        assert!(sink.behind.load(Ordering::SeqCst) > 0);
+        assert!(!serde_json::to_string(&store.export_archive().unwrap())
+            .unwrap()
+            .contains(SECRET));
+
+        let replay = import_firebender_nativepath(
+            &root,
+            &mut store,
+            context,
+            ProviderImportOptions {
+                import_profile: crate::ImportProfile::ProReplayOnly(sink.clone()),
+                ..ProviderImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(replay.imported_events, 0);
+        assert_eq!(replay.failed, 0);
+        assert_eq!(
+            sink.contents.lock().unwrap().as_slice(),
+            [SECRET.as_bytes()]
+        );
     }
 }

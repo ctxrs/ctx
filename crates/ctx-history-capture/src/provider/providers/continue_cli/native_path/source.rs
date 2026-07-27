@@ -814,7 +814,9 @@ fn observe_inventory(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+// Recursive inventory traversal carries one shared bounded-state bundle; the
+// root and current path remain separate to make containment checks explicit.
+#[allow(clippy::only_used_in_recursion, clippy::too_many_arguments)]
 fn visit_inventory(
     root: &Path,
     path: &Path,

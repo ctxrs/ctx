@@ -11,7 +11,7 @@ pub(crate) use self::schema::mistral_vibe_result_content;
 pub(crate) use native_path::import_mistral_vibe_nativepath;
 
 pub(super) const MISTRAL_VIBE_CAPTURE_REVISION: u32 = 4;
-pub(super) const MISTRAL_VIBE_POLICY_REVISION: u32 = 7;
+pub(super) const MISTRAL_VIBE_POLICY_REVISION: u32 = 8;
 const MISTRAL_VIBE_MAX_ID_BYTES: usize = 4 * 1024;
 pub(crate) const MISTRAL_VIBE_RESULT_CONTENT_PROFILE: &str = "mistral-vibe.result-body.v1";
 

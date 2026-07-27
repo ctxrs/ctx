@@ -611,17 +611,30 @@ mod tests {
         json!({"path": path, "sha256": sha256, "size": size})
     }
 
-    fn asset(
-        role: &str,
-        backend: &str,
-        version: &str,
-        platform: &str,
-        artifact: &str,
-        archive_format: &str,
-        archive_path_prefix: &str,
+    struct AssetFixture<'a> {
+        role: &'a str,
+        backend: &'a str,
+        version: &'a str,
+        platform: &'a str,
+        artifact: &'a str,
+        archive_format: &'a str,
+        archive_path_prefix: &'a str,
         files: Vec<Value>,
-        archive_sha256: &str,
-    ) -> Value {
+        archive_sha256: &'a str,
+    }
+
+    fn asset(fixture: AssetFixture<'_>) -> Value {
+        let AssetFixture {
+            role,
+            backend,
+            version,
+            platform,
+            artifact,
+            archive_format,
+            archive_path_prefix,
+            files,
+            archive_sha256,
+        } = fixture;
         let expanded = files
             .iter()
             .map(|value| value["size"].as_u64().unwrap())
@@ -708,31 +721,31 @@ mod tests {
         let mut assets = serde_json::Map::new();
         assets.insert(
             "onnx_model".to_owned(),
-            asset(
-                "model",
-                "onnx",
-                "1.0.0",
-                "any",
-                CPU_MODEL_ARTIFACT,
-                "tar.xz",
-                "ctx-multilingual-e5-small-onnx-fp32-1.0.0",
-                model_files(false),
-                &hash('a'),
-            ),
+            asset(AssetFixture {
+                role: "model",
+                backend: "onnx",
+                version: "1.0.0",
+                platform: "any",
+                artifact: CPU_MODEL_ARTIFACT,
+                archive_format: "tar.xz",
+                archive_path_prefix: "ctx-multilingual-e5-small-onnx-fp32-1.0.0",
+                files: model_files(false),
+                archive_sha256: &hash('a'),
+            }),
         );
         assets.insert(
             "onnx_model_o4_fp16".to_owned(),
-            asset(
-                "model",
-                "onnx",
-                "1.0.0",
-                "any",
-                ACCELERATOR_MODEL_ARTIFACT,
-                "tar.xz",
-                "ctx-multilingual-e5-small-onnx-o4-fp16-1.0.0",
-                model_files(true),
-                &hash('a'),
-            ),
+            asset(AssetFixture {
+                role: "model",
+                backend: "onnx",
+                version: "1.0.0",
+                platform: "any",
+                artifact: ACCELERATOR_MODEL_ARTIFACT,
+                archive_format: "tar.xz",
+                archive_path_prefix: "ctx-multilingual-e5-small-onnx-o4-fp16-1.0.0",
+                files: model_files(true),
+                archive_sha256: &hash('a'),
+            }),
         );
         for (id, platform, artifact) in [
             ("linux_x64_cpu", "linux-x64", "ctx-ort-linux-x64.tar.zst"),
@@ -755,67 +768,67 @@ mod tests {
         ] {
             assets.insert(
                 id.to_owned(),
-                asset(
-                    "cpu-runtime",
-                    "ort-cpu",
-                    "1.27.0",
+                asset(AssetFixture {
+                    role: "cpu-runtime",
+                    backend: "ort-cpu",
+                    version: "1.27.0",
                     platform,
                     artifact,
-                    "tar.zst",
-                    "",
-                    vec![file("lib/libonnxruntime.so", 1, &hash('d'))],
-                    &hash('a'),
-                ),
+                    archive_format: "tar.zst",
+                    archive_path_prefix: "",
+                    files: vec![file("lib/libonnxruntime.so", 1, &hash('d'))],
+                    archive_sha256: &hash('a'),
+                }),
             );
         }
         assets.insert(
             "windows_x64_windows_ml".to_owned(),
-            asset(
-                "cpu-runtime",
-                "windows-ml",
-                "2.1.74",
-                "windows-x64",
-                WINDOWS_ML_ARTIFACT,
-                "zip",
-                "",
-                WINDOWS_ML_FILES
+            asset(AssetFixture {
+                role: "cpu-runtime",
+                backend: "windows-ml",
+                version: "2.1.74",
+                platform: "windows-x64",
+                artifact: WINDOWS_ML_ARTIFACT,
+                archive_format: "zip",
+                archive_path_prefix: "",
+                files: WINDOWS_ML_FILES
                     .iter()
                     .map(|path| file(path, 1, &hash('d')))
                     .collect(),
-                &hash('a'),
-            ),
+                archive_sha256: &hash('a'),
+            }),
         );
         assets.insert(
             "linux_x64_cuda".to_owned(),
-            asset(
-                "accelerator",
-                "ort-cuda",
-                "1.27.0",
-                "linux-x64-cuda12",
-                "ctx-onnxruntime-linux-x64-cuda12.tar.zst",
-                "tar.zst",
-                "",
-                vec![file("lib/libonnxruntime.so", 1, &hash('d'))],
-                &hash('a'),
-            ),
+            asset(AssetFixture {
+                role: "accelerator",
+                backend: "ort-cuda",
+                version: "1.27.0",
+                platform: "linux-x64-cuda12",
+                artifact: "ctx-onnxruntime-linux-x64-cuda12.tar.zst",
+                archive_format: "tar.zst",
+                archive_path_prefix: "",
+                files: vec![file("lib/libonnxruntime.so", 1, &hash('d'))],
+                archive_sha256: &hash('a'),
+            }),
         );
         assets.insert(
             "apple_coreml".to_owned(),
-            asset(
-                "accelerator",
-                "coreml",
-                "1.0.0",
-                "macos-arm64",
-                "ctx-multilingual-e5-small-coreml-fp16-1.0.0.tar.xz",
-                "tar.xz",
-                "ctx-multilingual-e5-small-coreml-fp16-1.0.0",
-                vec![file(
+            asset(AssetFixture {
+                role: "accelerator",
+                backend: "coreml",
+                version: "1.0.0",
+                platform: "macos-arm64",
+                artifact: "ctx-multilingual-e5-small-coreml-fp16-1.0.0.tar.xz",
+                archive_format: "tar.xz",
+                archive_path_prefix: "ctx-multilingual-e5-small-coreml-fp16-1.0.0",
+                files: vec![file(
                     "manifest.json",
                     1,
                     "576c68756563333fdf442e6859f2392ca0065b09a2cb5d73983e30de75df1ad6",
                 )],
-                "94c6fac5c4250079401d383adf1b10270fe5d370f2091dbad17bf4823222321e",
-            ),
+                archive_sha256: "94c6fac5c4250079401d383adf1b10270fe5d370f2091dbad17bf4823222321e",
+            }),
         );
 
         let mut metadata = BTreeMap::from([

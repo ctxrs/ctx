@@ -531,7 +531,6 @@ fn released_cursor_and_positional_hash_migrate_exactly_in_place() {
             timestamps: timestamps(DateTime::<Utc>::UNIX_EPOCH),
         })
         .unwrap();
-    drop(scanner);
     drop(source);
 
     import(

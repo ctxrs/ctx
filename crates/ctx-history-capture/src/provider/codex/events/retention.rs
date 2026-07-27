@@ -324,6 +324,7 @@ impl CodexExitCodeParser {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn codex_exit_code(text: &str) -> Option<i32> {
     let mut parser = CodexExitCodeParser::default();
     parser.feed_bytes(text.as_bytes());
@@ -434,6 +435,7 @@ impl CodexWallTimeParser {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn codex_wall_time_ms(text: &str) -> Option<i64> {
     let mut parser = CodexWallTimeParser::default();
     parser.feed_bytes(text.as_bytes());

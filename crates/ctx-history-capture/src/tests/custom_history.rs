@@ -828,8 +828,8 @@ fn codex_history_jsonl_reports_oversized_line_and_imports_remaining_records() {
     assert!(summary.failures[0]
         .error
         .contains("provider record exceeds the"));
-    assert_eq!(summary.skipped, 1);
-    assert_eq!(summary.skipped_sessions, 1);
+    assert_eq!(summary.skipped, 0);
+    assert_eq!(summary.skipped_sessions, 0);
     assert_eq!(summary.skipped_events, 0);
     assert_eq!(summary.imported_sessions, 1);
     assert_eq!(summary.imported_events, 2);

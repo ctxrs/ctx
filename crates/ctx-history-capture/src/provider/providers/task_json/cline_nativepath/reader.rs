@@ -32,6 +32,9 @@ use super::{
     ClineNativePathError,
 };
 
+#[cfg(test)]
+type BeforeExposureHook = Box<dyn FnMut(&Path, ClineComponent)>;
+
 pub(crate) struct ClineNativeReader {
     discovery: ClineDiscovery,
     dialect: TaskJsonNativeDialect,
@@ -46,13 +49,17 @@ pub(crate) struct ClineNativeReader {
     stats: ClinePublicationStats,
     catalog_finished: bool,
     #[cfg(test)]
-    before_exposure: Option<Box<dyn FnMut(&Path, ClineComponent)>>,
+    before_exposure: Option<BeforeExposureHook>,
 }
 
 struct ActiveTask {
     task: Box<ClineLiveTaskObservation>,
     metadata: ClineMetadataCheckpoint,
     metadata_content_authority: Option<ClinePinnedContentAuthority>,
+    deferred_metadata_page: Option<ClineCertifiedPage>,
+    discard_deferred_metadata_on_failure: bool,
+    component_failed: bool,
+    component_page_certified: bool,
     identity_changed: bool,
     api_history: Option<ClineArrayCheckpoint>,
     ui_messages: Option<ClineArrayCheckpoint>,
@@ -256,6 +263,7 @@ impl ClineNativeReader {
             inventory_complete: self.discovery.root_authority().is_complete(),
             inventory_revalidated,
             root_index,
+            component_outcomes: self.outcomes.clone().into_boxed_slice(),
             live_checkpoints: self.live_checkpoints.clone().into_boxed_slice(),
             missing_task_paths: missing_task_paths.into_boxed_slice(),
         })
@@ -293,17 +301,22 @@ impl ClineNativeReader {
             .filter_map(event_component)
             .collect::<Vec<_>>()
             .into_boxed_slice();
+        let needs_session = metadata.page.is_none();
         self.active_task = Some(ActiveTask {
             task: Box::new(task),
             metadata: metadata.checkpoint,
             metadata_content_authority: metadata.content_authority,
+            deferred_metadata_page: metadata.page,
+            discard_deferred_metadata_on_failure: previous.is_none(),
+            component_failed: false,
+            component_page_certified: false,
             identity_changed,
             api_history,
             ui_messages,
             fallback_history,
             event_components,
             next_component: 0,
-            needs_session: !metadata.page_emitted,
+            needs_session,
         });
         Ok(())
     }
@@ -316,6 +329,42 @@ impl ClineNativeReader {
                 message: "Cline active task disappeared".to_owned(),
             })?;
         if task.next_component >= task.event_components.len() {
+            if task.component_failed
+                && !task.component_page_certified
+                && task.discard_deferred_metadata_on_failure
+            {
+                task.deferred_metadata_page = None;
+                return Ok(None);
+            }
+            let has_retained_rows = [
+                task.api_history.as_ref(),
+                task.ui_messages.as_ref(),
+                task.fallback_history.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|checkpoint| checkpoint.retained_rows != 0);
+            if !has_retained_rows && task.discard_deferred_metadata_on_failure {
+                task.deferred_metadata_page = None;
+            }
+            if let Some(page) = task.deferred_metadata_page.take() {
+                if let Some(failure) = Self::certify_metadata_boundary(
+                    &task.metadata,
+                    &mut task.metadata_content_authority,
+                )? {
+                    self.outcomes.push(component_failure_outcome(failure));
+                    if let Some(previous) =
+                        self.previous_by_path.get(&task.task.canonical_task_path)
+                    {
+                        self.live_checkpoints.push(previous.clone());
+                    }
+                    return Ok(None);
+                }
+                self.stats.pages_certified = self.stats.pages_certified.saturating_add(1);
+                self.stats.max_pages_buffered = self.stats.max_pages_buffered.max(1);
+                self.active_task = Some(task);
+                return Ok(Some(page));
+            }
             self.live_checkpoints.push(ClineTaskCheckpoint {
                 identity: task.metadata.session.identity.clone(),
                 canonical_task_path: task.task.canonical_task_path.clone(),
@@ -342,6 +391,7 @@ impl ClineNativeReader {
             if let Some(failure) = component_authority_failure(&observation, false)?
                 .or(directory_authority_failure(&task.task, &observation)?)
             {
+                task.component_failed = true;
                 self.outcomes.push(component_failure_outcome(failure));
             } else {
                 self.outcomes.push(ClineComponentReadOutcome {
@@ -357,6 +407,7 @@ impl ClineNativeReader {
         }
         match &observation.state {
             ClineObservedFileState::Unavailable(message) => {
+                task.component_failed = true;
                 self.outcomes
                     .push(component_failure_outcome(ClineComponentFailure {
                         component: observation.component,
@@ -373,6 +424,7 @@ impl ClineNativeReader {
                 if let Some(failure) = component_authority_failure(&observation, false)?
                     .or(directory_authority_failure(&task.task, &observation)?)
                 {
+                    task.component_failed = true;
                     self.outcomes.push(component_failure_outcome(failure));
                     self.active_task = Some(task);
                     return Ok(None);
@@ -396,6 +448,7 @@ impl ClineNativeReader {
                 let deletion_authority_failure = metadata_failure
                     .or_else(|| deletion_metadata_authority_refusal(&task.metadata, &observation));
                 if let Some(failure) = deletion_authority_failure {
+                    task.component_failed = true;
                     self.outcomes.push(ClineComponentReadOutcome {
                         component: observation.component,
                         path: observation.path.clone(),
@@ -423,12 +476,13 @@ impl ClineNativeReader {
                 });
                 self.stats.pages_certified = self.stats.pages_certified.saturating_add(1);
                 self.active_task = Some(task);
-                Ok(Some(page))
+                Ok(Some(self.expose_component_page_after_metadata(page)?))
             }
             ClineObservedFileState::Present(_) => {
                 let scanner = match ClineArrayScanner::open(&observation, &mut self.stats) {
                     Ok(scanner) => scanner,
                     Err(ClineLocalReadError::Local(failure)) => {
+                        task.component_failed = true;
                         self.outcomes.push(component_failure_outcome(failure));
                         self.active_task = Some(task);
                         return Ok(None);
@@ -545,7 +599,7 @@ impl ClineNativeReader {
                 active.pages = active.pages.saturating_add(1);
                 self.finish_array_success(&active, checkpoint, transition);
                 self.stats.pages_certified = self.stats.pages_certified.saturating_add(1);
-                Ok(Some(page))
+                Ok(Some(self.expose_component_page_after_metadata(page)?))
             }
             ClineArrayScanStep::Item(scanned) => {
                 let terminal = scanned.terminal;
@@ -652,9 +706,35 @@ impl ClineNativeReader {
                 } else {
                     self.active_array = Some(active);
                 }
-                Ok(Some(page))
+                Ok(Some(self.expose_component_page_after_metadata(page)?))
             }
         }
+    }
+
+    fn expose_component_page_after_metadata(
+        &mut self,
+        page: ClineCertifiedPage,
+    ) -> Result<ClineCertifiedPage, ClineNativePathError> {
+        let deferred_metadata = self.active_task.as_mut().and_then(|task| {
+            task.component_page_certified = true;
+            if page.core.events.is_empty() {
+                None
+            } else {
+                task.deferred_metadata_page.take()
+            }
+        });
+        let Some(metadata) = deferred_metadata else {
+            return Ok(page);
+        };
+        if self.pending_page.is_some() {
+            return Err(ClineNativePathError::Invariant {
+                message: "Cline reader attempted to buffer more than one certified page".to_owned(),
+            });
+        }
+        self.pending_page = Some(page);
+        self.stats.pages_certified = self.stats.pages_certified.saturating_add(1);
+        self.stats.max_pages_buffered = self.stats.max_pages_buffered.max(1);
+        Ok(metadata)
     }
 
     fn certify_array_boundary(
@@ -740,6 +820,9 @@ impl ClineNativeReader {
     }
 
     fn finish_array_failure(&mut self, active: &ActiveArray, failure: ClineComponentFailure) {
+        if let Some(task) = self.active_task.as_mut() {
+            task.component_failed = true;
+        }
         self.outcomes.push(ClineComponentReadOutcome {
             component: active.component.source_component(),
             path: active.source.canonical_path.clone(),
@@ -783,7 +866,7 @@ impl ClineNativeReader {
             });
             return Ok(MetadataResolution::Ready(Box::new(MetadataReady {
                 checkpoint: prior.clone(),
-                page_emitted: false,
+                page: None,
                 content_authority: match prior.content_sha256 {
                     Some(content_sha256) => {
                         match pin_component_content(observation, content_sha256) {
@@ -815,7 +898,7 @@ impl ClineNativeReader {
                 }
                 return Ok(MetadataResolution::Ready(Box::new(MetadataReady {
                     checkpoint: fallback_metadata(task, observation.clone()),
-                    page_emitted: false,
+                    page: None,
                     content_authority: None,
                 })));
             }
@@ -840,7 +923,6 @@ impl ClineNativeReader {
                     ClineComponentTransition::Cold
                 };
                 let page = self.build_metadata_page(checkpoint.clone(), prior, transition)?;
-                self.certify_page(page)?;
                 self.outcomes.push(ClineComponentReadOutcome {
                     component: observation.component,
                     path: observation.path.clone(),
@@ -850,7 +932,7 @@ impl ClineNativeReader {
                 });
                 return Ok(MetadataResolution::Ready(Box::new(MetadataReady {
                     checkpoint,
-                    page_emitted: true,
+                    page: Some(page),
                     content_authority: None,
                 })));
             }
@@ -900,7 +982,6 @@ impl ClineNativeReader {
             Some(_) => ClineComponentTransition::Rewrite,
         };
         let page = self.build_metadata_page(checkpoint.clone(), prior, transition)?;
-        self.certify_page(page)?;
         self.outcomes.push(ClineComponentReadOutcome {
             component: observation.component,
             path: observation.path.clone(),
@@ -910,7 +991,7 @@ impl ClineNativeReader {
         });
         Ok(MetadataResolution::Ready(Box::new(MetadataReady {
             checkpoint,
-            page_emitted: true,
+            page: Some(page),
             content_authority,
         })))
     }
@@ -1196,18 +1277,6 @@ impl ClineNativeReader {
         })
     }
 
-    fn certify_page(&mut self, page: ClineCertifiedPage) -> Result<(), ClineNativePathError> {
-        if self.pending_page.is_some() {
-            return Err(ClineNativePathError::Invariant {
-                message: "Cline reader attempted to buffer more than one certified page".to_owned(),
-            });
-        }
-        self.stats.pages_certified = self.stats.pages_certified.saturating_add(1);
-        self.pending_page = Some(page);
-        self.stats.max_pages_buffered = self.stats.max_pages_buffered.max(1);
-        Ok(())
-    }
-
     fn run_before_exposure(&mut self, path: &Path, component: ClineComponent) {
         #[cfg(test)]
         if let Some(hook) = self.before_exposure.as_mut() {
@@ -1225,7 +1294,7 @@ enum MetadataResolution {
 
 struct MetadataReady {
     checkpoint: ClineMetadataCheckpoint,
-    page_emitted: bool,
+    page: Option<ClineCertifiedPage>,
     content_authority: Option<ClinePinnedContentAuthority>,
 }
 

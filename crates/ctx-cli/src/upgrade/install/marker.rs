@@ -7,7 +7,9 @@ use anyhow::{anyhow, Context, Result};
 use ctx_history_core::utc_now;
 use serde_json::{json, Value};
 
-use crate::install_marker::{active_install_attribution_from_value, ActiveInstallAttribution};
+use crate::install_marker::{
+    active_install_attribution_from_value, is_staging_dogfood_marker, ActiveInstallAttribution,
+};
 
 use super::super::state::atomic_write_json;
 use super::super::{platform_key, sha256_hex, UpgradePlan};
@@ -30,6 +32,7 @@ pub(in crate::upgrade) struct InstallMarker {
     pub(in crate::upgrade) channel: String,
     pub(in crate::upgrade) version: String,
     pub(in crate::upgrade) sha256: String,
+    pub(in crate::upgrade) staging_dogfood: bool,
 }
 
 /// A plan-time snapshot rechecked under the executable lock immediately before
@@ -123,6 +126,7 @@ fn read_install_marker_at(path: &Path) -> Result<Option<InstallMarker>> {
         channel: string_field(&value, "channel")?,
         version: string_field(&value, "version")?,
         sha256: string_field(&value, "sha256")?,
+        staging_dogfood: is_staging_dogfood_marker(&value),
     }))
 }
 
@@ -164,6 +168,7 @@ fn fallback_install_marker(
         platform: platform.to_owned(),
         channel: channel.to_owned(),
         version: current_version.to_owned(),
+        staging_dogfood: false,
     })
 }
 

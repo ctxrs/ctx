@@ -7,23 +7,22 @@ use crate::provider::providers::shelley::{
 use crate::tests::native_sqlite::shelley_fixtures::write_shelley_adversarial_db;
 use crate::tests::support::fixtures::sqlite::write_shelley_smoke_db;
 use crate::tests::support::paths::tempdir;
-use crate::tests::support::provider_state::{
-    assert_provider_policy_cursor_restored, delete_event_and_downgrade_provider_policy_cursor,
-    only_provider_cursor_stream, stored_provider_session_id,
-};
+use crate::tests::support::provider_state::stored_provider_session_id;
 use crate::{
-    import_shelley_sqlite, ShelleySqliteImportOptions, PROVIDER_MAX_TEXT_CHARS,
-    SHELLEY_SQLITE_SOURCE_FORMAT,
+    import_shelley_sqlite, native_source::NativePosition, ShelleySqliteImportOptions,
+    PROVIDER_MAX_TEXT_CHARS, SHELLEY_SQLITE_SOURCE_FORMAT,
 };
 use chrono::{DateTime, Utc};
-use ctx_history_core::{CaptureProvider, EventType};
-use ctx_history_store::Store;
+use ctx_history_core::{CaptureProvider, EntityTimestamps, EventType, SyncCursor};
+use ctx_history_store::{decode_native_path_committed_cursor, Store};
 use serde_json::json;
 use std::collections::BTreeSet;
 use std::fs;
+use uuid::Uuid;
 
 use crate::provider::importer::{
-    provider_path_identity, provider_source_cursor_stream_for_path, CertifiedProviderCursor,
+    provider_path_identity, provider_source_cursor_stream_for_path, BoundedParserCheckpoint,
+    CertifiedProviderCursor,
 };
 
 #[test]
@@ -117,9 +116,17 @@ fn native_shelley_imports_sessions_messages_metadata_and_citations() {
         )
         .unwrap()
         .unwrap();
-    assert!(CertifiedProviderCursor::decode_if_certified(&cursor.cursor)
-        .unwrap()
-        .is_some());
+    let committed = decode_native_path_committed_cursor(&cursor.cursor).unwrap();
+    let authority: serde_json::Value = serde_json::from_str(committed.provider_cursor()).unwrap();
+    assert_eq!(authority["version"].as_u64(), Some(1));
+    assert_eq!(authority["provider"].as_str(), Some("shelley"));
+    assert_eq!(
+        authority["path_identity"].as_str(),
+        Some(cursor_path.as_str())
+    );
+    assert_eq!(authority["phase"].as_str(), Some("complete"));
+    assert_eq!(authority["terminal"].as_bool(), Some(true));
+    assert_eq!(authority["route_retired"].as_bool(), Some(false));
 }
 
 #[test]
@@ -156,49 +163,78 @@ fn native_shelley_reimport_is_idempotent() {
 }
 
 #[test]
-fn native_shelley_policy_upgrade_repairs_once_then_is_terminal_noop() {
+fn native_shelley_released_cursor_migrates_once_then_is_terminal_noop() {
     let temp = tempdir();
     let database = temp.path().join("work.sqlite");
     let fixture = write_shelley_smoke_db(&temp);
-    let machine_id = "shelley-policy-upgrade-machine";
+    let machine_id = "shelley-released-cursor-machine";
+    let imported_at = "2026-06-24T12:20:00Z".parse().unwrap();
     let options = ShelleySqliteImportOptions {
         machine_id: machine_id.to_owned(),
         source_path: Some(fixture.clone()),
-        imported_at: "2026-06-24T12:20:00Z".parse().unwrap(),
+        imported_at,
         ..ShelleySqliteImportOptions::default()
     };
     let mut store = Store::open(&database).unwrap();
-
-    let first = import_shelley_sqlite(&fixture, &mut store, options.clone()).unwrap();
-    assert_eq!(first.failed, 0, "{first:?}");
-    assert_eq!(first.imported_events, 3);
-    let session_id = stored_provider_session_id(&store, CaptureProvider::Shelley, "shelley-root");
-    let retained_event = store
-        .events_for_session(session_id)
-        .unwrap()
-        .into_iter()
-        .find(|event| event.event_type == EventType::ToolCall)
-        .expect("Shelley retained event exists before simulated legacy upgrade");
-    let stream = only_provider_cursor_stream(&database, machine_id);
-    let policy_revision = delete_event_and_downgrade_provider_policy_cursor(
-        &database,
-        &store,
-        machine_id,
-        &stream,
-        retained_event.id,
+    let canonical_path = fs::canonicalize(&fixture).unwrap();
+    let path_identity = provider_path_identity(&canonical_path).unwrap();
+    let stream = provider_source_cursor_stream_for_path(
+        CaptureProvider::Shelley,
+        SHELLEY_SQLITE_SOURCE_FORMAT,
+        &path_identity,
     );
+    let released = CertifiedProviderCursor::new(
+        "released-shelley-source",
+        9,
+        5,
+        NativePosition::new("shelley-native-message-keyset-v9", vec![0]).unwrap(),
+        BoundedParserCheckpoint::from_serializable(&()).unwrap(),
+    )
+    .unwrap()
+    .encode()
+    .unwrap();
+    store
+        .upsert_sync_cursor(&SyncCursor {
+            id: Uuid::new_v4(),
+            team_id: None,
+            device_id: machine_id.to_owned(),
+            stream: stream.clone(),
+            cursor: released,
+            last_synced_at: Some(imported_at),
+            timestamps: EntityTimestamps {
+                created_at: imported_at,
+                updated_at: imported_at,
+            },
+        })
+        .unwrap();
 
-    let repaired = import_shelley_sqlite(&fixture, &mut store, options.clone()).unwrap();
-    assert_eq!(repaired.failed, 0, "{repaired:?}");
-    assert_eq!(repaired.imported_events, 1);
+    let migrated = import_shelley_sqlite(&fixture, &mut store, options.clone()).unwrap();
+    assert_eq!(migrated.failed, 0, "{migrated:?}");
+    assert_eq!(migrated.imported_events, 3);
+    let session_id = stored_provider_session_id(&store, CaptureProvider::Shelley, "shelley-root");
     assert_eq!(store.events_for_session(session_id).unwrap().len(), 2);
-    assert_provider_policy_cursor_restored(&store, machine_id, &stream, policy_revision);
+    let migrated_cursor = store
+        .get_sync_cursor(None, machine_id, &stream)
+        .unwrap()
+        .expect("Shelley NativePath cursor exists after migration");
+    let committed = decode_native_path_committed_cursor(&migrated_cursor.cursor).unwrap();
+    let authority: serde_json::Value = serde_json::from_str(committed.provider_cursor()).unwrap();
+    assert_eq!(authority["provider"].as_str(), Some("shelley"));
+    assert_eq!(authority["terminal"].as_bool(), Some(true));
 
     let terminal = import_shelley_sqlite(&fixture, &mut store, options).unwrap();
     assert_eq!(terminal.failed, 0, "{terminal:?}");
     assert_eq!(terminal.imported_events, 0);
     assert_eq!(terminal.skipped_events, 0);
     assert_eq!(store.events_for_session(session_id).unwrap().len(), 2);
+    assert_eq!(
+        store
+            .get_sync_cursor(None, machine_id, &stream)
+            .unwrap()
+            .unwrap()
+            .cursor,
+        migrated_cursor.cursor
+    );
 }
 
 #[test]

@@ -403,10 +403,11 @@ fn no_separate_result_cohort_has_explicit_message_routes_without_result_routes()
         CaptureProvider::AstrBot,
         CaptureProvider::Lingma,
         CaptureProvider::Trae,
+        CaptureProvider::Qoder,
     ]
     .into_iter()
     .collect::<HashSet<_>>();
-    assert_eq!(expected.len(), 9);
+    assert_eq!(expected.len(), 10);
 
     let matrix: serde_json::Value = serde_json::from_str(include_str!(
         "../../../../docs/provider-support-matrix.json"
@@ -479,13 +480,26 @@ fn no_separate_result_cohort_has_explicit_message_routes_without_result_routes()
         .collect::<HashSet<_>>()
         .into_iter()
         .filter(|provider| {
-            VERIFIED_CONTENT_ROUTES.iter().all(|route| {
-                route.provider != *provider
-                    || route.role != VerifiedContentRole::ResultBody
-                    || route.platform_dispositions.iter().all(|disposition| {
-                        disposition.status == VerifiedContentRouteStatus::NotNeeded
-                    })
-            })
+            let message_routes = VERIFIED_CONTENT_ROUTES
+                .iter()
+                .filter(|route| {
+                    route.provider == *provider && route.role == VerifiedContentRole::MessageBody
+                })
+                .collect::<Vec<_>>();
+            !message_routes.is_empty()
+                && message_routes.iter().all(|route| {
+                    !route.contracts.is_empty()
+                        && route.platform_dispositions.iter().all(|disposition| {
+                            disposition.status == VerifiedContentRouteStatus::Supported
+                        })
+                })
+                && VERIFIED_CONTENT_ROUTES.iter().all(|route| {
+                    route.provider != *provider
+                        || route.role != VerifiedContentRole::ResultBody
+                        || route.platform_dispositions.iter().all(|disposition| {
+                            disposition.status == VerifiedContentRouteStatus::NotNeeded
+                        })
+                })
         })
         .collect::<HashSet<_>>();
     assert_eq!(actual, expected);

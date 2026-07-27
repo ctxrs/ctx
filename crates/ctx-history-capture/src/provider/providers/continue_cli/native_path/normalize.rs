@@ -1,5 +1,9 @@
+use std::collections::BTreeSet;
+
 use chrono::{DateTime, Utc};
+use ctx_history_core::{Confidence, FileChangeKind};
 use serde::Serialize;
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::{ProOutputObservation, MAX_PROVIDER_JSONL_LINE_BYTES, PROVIDER_MAX_PREVIEW_CHARS};
@@ -16,7 +20,7 @@ use super::{
     },
 };
 
-const EVENT_HASH_DOMAIN: &[u8] = b"ctx-continue-nativepath-event-v2\0";
+const EVENT_HASH_DOMAIN: &[u8] = b"ctx-continue-nativepath-event-v3\0";
 const SESSION_METADATA_HASH_DOMAIN: &[u8] = b"ctx-continue-nativepath-session-metadata-v2\0";
 
 pub(crate) const CONTINUE_NATIVE_MAX_RETAINED_ITEM_BYTES: usize = MAX_PROVIDER_JSONL_LINE_BYTES;
@@ -24,6 +28,10 @@ pub(crate) const CONTINUE_NATIVE_MAX_RETAINED_ITEM_BYTES: usize = MAX_PROVIDER_J
 // Reserve four units for the page's source/session/route/cursor mechanics so
 // the family consumer can publish a page without exceeding either bound.
 pub(crate) const CONTINUE_NATIVE_MAX_PAGE_ROWS: usize = 60;
+// One event reconciliation and all of its file-touch upserts share the same
+// Store transaction. Keep the event itself inside the provider page bound.
+pub(crate) const CONTINUE_NATIVE_MAX_FILE_TOUCHES_PER_EVENT: usize =
+    CONTINUE_NATIVE_MAX_PAGE_ROWS - 1;
 pub(crate) const CONTINUE_NATIVE_MAX_PAGE_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const CONTINUE_NATIVE_MAX_OUTPUT_PAGE_BYTES: usize = 4 * 1024 * 1024;
 pub(crate) const CONTINUE_NATIVE_MAX_OUTPUT_PAGE_UNITS: usize = 64;
@@ -73,6 +81,15 @@ pub(crate) struct ContinueCallRelationship {
     pub(crate) status: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ContinueFileTouch {
+    pub(crate) path: String,
+    pub(crate) old_path: Option<String>,
+    pub(crate) change_kind: Option<FileChangeKind>,
+    pub(crate) confidence: Confidence,
+    pub(crate) metadata: Value,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ContinueSourceCompleteness {
     Complete,
@@ -113,6 +130,7 @@ pub(crate) struct ContinueEventRow {
     pub(crate) search_text: String,
     pub(crate) preview: String,
     pub(crate) calls: Box<[ContinueCallRelationship]>,
+    pub(crate) file_touches: Box<[ContinueFileTouch]>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -401,6 +419,7 @@ struct SanitizedToolCall<'a> {
 
 pub(super) enum NormalizeEventError {
     RetainedItemTooLarge { observed: usize },
+    FileTouchLimitExceeded,
     Serialization(String),
 }
 
@@ -436,7 +455,8 @@ pub(super) fn normalize_event(
         .chars()
         .take(PROVIDER_MAX_PREVIEW_CHARS)
         .collect::<String>();
-    let content_hash = sha256_hex(EVENT_HASH_DOMAIN, &body_bytes);
+    let file_touches = event_file_touches(item)?;
+    let content_hash = event_content_hash(&body_bytes, &file_touches)?;
     let body_json = String::from_utf8(body_bytes).map_err(|error| {
         NormalizeEventError::Serialization(format!(
             "sanitized Continue event is not UTF-8: {error}"
@@ -478,13 +498,18 @@ pub(super) fn normalize_event(
         search_text,
         preview,
         calls: event_call_relationships(item),
+        file_touches,
     })
 }
 
 impl ContinueEventRow {
+    pub(super) fn logical_units(&self) -> usize {
+        1_usize.saturating_add(self.file_touches.len())
+    }
+
     pub(super) fn estimated_bytes(&self) -> usize {
         const FIXED_EVENT_BYTES: usize = 512;
-        self.calls.iter().fold(
+        let event_bytes = self.calls.iter().fold(
             FIXED_EVENT_BYTES
                 .saturating_add(self.identity.session.0.len())
                 .saturating_add(option_string_bytes(&self.native_item_id))
@@ -500,8 +525,97 @@ impl ContinueEventRow {
                     .saturating_add(option_string_bytes(&call.tool_name))
                     .saturating_add(option_string_bytes(&call.status))
             },
-        )
+        );
+        self.file_touches.iter().fold(event_bytes, |bytes, touch| {
+            bytes
+                .saturating_add(128)
+                .saturating_add(touch.path.len())
+                .saturating_add(option_string_bytes(&touch.old_path))
+                .saturating_add(touch.metadata.to_string().len())
+        })
     }
+}
+
+fn event_file_touches(
+    item: &RawContinueHistoryItem,
+) -> Result<Box<[ContinueFileTouch]>, NormalizeEventError> {
+    let candidates = item
+        .message
+        .iter()
+        .flat_map(|message| message.calls.iter())
+        .flat_map(|call| call.file_touches.iter())
+        .chain(
+            item.tool_call_states
+                .iter()
+                .filter_map(|state| state.tool_call.as_ref())
+                .flat_map(|call| call.file_touches.iter()),
+        );
+    let mut seen = BTreeSet::new();
+    let mut touches = Vec::new();
+    for touch in candidates {
+        let key = (
+            touch.path.clone(),
+            touch.old_path.clone(),
+            touch.change_kind.map(|kind| kind.as_str().to_owned()),
+        );
+        if !seen.insert(key) {
+            continue;
+        }
+        if touches.len() == CONTINUE_NATIVE_MAX_FILE_TOUCHES_PER_EVENT {
+            return Err(NormalizeEventError::FileTouchLimitExceeded);
+        }
+        touches.push(touch.clone());
+    }
+    Ok(touches.into_boxed_slice())
+}
+
+fn event_content_hash(
+    body_bytes: &[u8],
+    file_touches: &[ContinueFileTouch],
+) -> Result<String, NormalizeEventError> {
+    let mut hasher = Sha256::new();
+    hasher.update(EVENT_HASH_DOMAIN);
+    hash_bytes(&mut hasher, body_bytes);
+    hasher.update(
+        u64::try_from(file_touches.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    for touch in file_touches {
+        hash_bytes(&mut hasher, touch.path.as_bytes());
+        hash_optional_bytes(&mut hasher, touch.old_path.as_deref().map(str::as_bytes));
+        hash_optional_bytes(
+            &mut hasher,
+            touch.change_kind.map(|kind| kind.as_str().as_bytes()),
+        );
+        hash_bytes(&mut hasher, touch.confidence.as_str().as_bytes());
+        let metadata = serde_json::to_vec(&touch.metadata).map_err(|error| {
+            NormalizeEventError::Serialization(format!(
+                "failed to serialize normalized Continue file-touch metadata: {error}"
+            ))
+        })?;
+        hash_bytes(&mut hasher, &metadata);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+fn hash_optional_bytes(hasher: &mut Sha256, bytes: Option<&[u8]>) {
+    match bytes {
+        Some(bytes) => {
+            hasher.update([1]);
+            hash_bytes(hasher, bytes);
+        }
+        None => hasher.update([0]),
+    }
+}
+
+fn hash_bytes(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_be_bytes());
+    hasher.update(bytes);
 }
 
 fn sanitized_message(message: &RawContinueMessage) -> SanitizedMessage<'_> {

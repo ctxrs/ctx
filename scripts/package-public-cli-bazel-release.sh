@@ -277,17 +277,10 @@ expected_identity="$(
   || die "declared Bazel artifact identity does not match source, Cargo.lock, and target graph"
 artifact_sha_before="$(sha256_file "${artifact}")"
 
-version="$(python3 - "${repo_root}/crates/ctx-cli/Cargo.toml" <<'PY'
-import sys
-import tomllib
-
-with open(sys.argv[1], "rb") as source:
-    value = tomllib.load(source)
-version = value.get("package", {}).get("version")
-if not isinstance(version, str) or not version:
-    raise SystemExit("ctx package version is unavailable")
-print(version)
-PY
+version="$(
+  python3 -B "${repo_root}/scripts/release/public-cli-bazel-build-info.py" \
+    cargo-version \
+    --cargo-toml "${repo_root}/crates/ctx-cli/Cargo.toml"
 )" || die "could not determine the ctx package version"
 
 if [[ "${output_dir}" != /* ]]; then
@@ -486,6 +479,24 @@ python3 -I "${repo_root}/scripts/check-public-cli-build-info.py" \
   --platform "${CTX_PUBLIC_TARGET_PLATFORM}" \
   --source-commit "${source_commit}" \
   --cargo-lock "${workspace_cargo_lock}" >/dev/null
+if [[ "${CTX_PUBLIC_TARGET_OS}" == "linux" ]]; then
+  python3 -I "${repo_root}/scripts/release/public-cli-bazel-build-info.py" verify \
+    --artifact "${staged}" \
+    --bazel-version-file "${repo_root}/.bazelversion" \
+    --build-info "${staged_build_info}" \
+    --builder-recipe \
+      "${repo_root}/scripts/release/linux-bazel-release.Dockerfile" \
+    --cargo-lock "${workspace_cargo_lock}" \
+    --cargo-toml "${repo_root}/crates/ctx-cli/Cargo.toml" \
+    --matrix "${target_matrix}" \
+    --module-file "${repo_root}/MODULE.bazel" \
+    --module-lock "${repo_root}/MODULE.bazel.lock" \
+    --platform "${CTX_PUBLIC_TARGET_PLATFORM}" \
+    --rustc "${rustc}" \
+    --source-commit "${source_commit}" \
+    --source-repo "${source_repo}" \
+    --version "${version}" >/dev/null
+fi
 
 staged_sbom="${staged}.cdx.json"
 python3 -I "${repo_root}/scripts/release-sbom.py" generate \

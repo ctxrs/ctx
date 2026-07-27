@@ -394,6 +394,80 @@ fn decode_cursor(
     migrate_released_cursor(&encoded, path, observation)
 }
 
+fn committed_replay_authority(store: &Store, machine_id: &str, path: &Path) -> Result<Checkpoint> {
+    let observation = OpenClawSessionObservation::read(path)?;
+    let canonical_path = observation.canonical_path.clone();
+    let locator_identity = provider_path_identity(&canonical_path)?;
+    let stream = provider_source_cursor_stream_for_path(
+        CaptureProvider::OpenClaw,
+        OPENCLAW_SOURCE_FORMAT,
+        &locator_identity,
+    );
+    let stored = store
+        .get_sync_cursor(None, machine_id, &stream)?
+        .ok_or_else(|| {
+            CaptureError::InvalidPayload(
+                "OpenClaw output replay requires committed terminal NativePath Core".to_owned(),
+            )
+        })?;
+    let committed = decode_native_path_committed_cursor(&stored.cursor).map_err(|_| {
+        CaptureError::InvalidPayload(
+            "OpenClaw output replay requires a Store-committed NativePath Core cursor".to_owned(),
+        )
+    })?;
+    let wire: CursorWire = serde_json::from_str(committed.provider_cursor()).map_err(|_| {
+        CaptureError::InvalidPayload(
+            "OpenClaw output replay requires committed OpenClaw Core authority".to_owned(),
+        )
+    })?;
+    if wire.version != CURSOR_VERSION
+        || wire.kind != "openclaw-nativepath-jsonl"
+        || !wire.checkpoint.supported()
+        || !wire.checkpoint.terminal
+        || wire.checkpoint.source_path != canonical_path
+        || !wire
+            .checkpoint
+            .source_observation
+            .matches_live(&observation)?
+        || wire.checkpoint.complete_prefix_end != observation.transcript.length
+    {
+        return Err(CaptureError::InvalidPayload(
+            "OpenClaw output replay source does not exactly match committed terminal Core authority"
+                .to_owned(),
+        ));
+    }
+    let live_prefix_sha256 = prefix_sha256(path, wire.checkpoint.complete_prefix_end)?;
+    let revalidated = OpenClawSessionObservation::read(path)?;
+    if live_prefix_sha256 != wire.checkpoint.complete_prefix_sha256
+        || !wire
+            .checkpoint
+            .source_observation
+            .matches_live(&revalidated)?
+    {
+        return Err(CaptureError::InvalidPayload(
+            "OpenClaw output replay content does not match committed terminal Core authority"
+                .to_owned(),
+        ));
+    }
+    Ok(wire.checkpoint)
+}
+
+fn replay_checkpoint_is_covered_by(authority: &Checkpoint, candidate: &Checkpoint) -> bool {
+    authority.version == candidate.version
+        && authority.parser_revision == candidate.parser_revision
+        && authority.policy_revision == candidate.policy_revision
+        && authority.source_path == candidate.source_path
+        && authority.source_observation == candidate.source_observation
+        && authority.complete_prefix_end >= candidate.complete_prefix_end
+        && authority.next_raw_ordinal >= candidate.next_raw_ordinal
+        && authority.accepted_events >= candidate.accepted_events
+        && authority.accepted_file_touches >= candidate.accepted_file_touches
+        && authority.rejected_records >= candidate.rejected_records
+        && (authority.complete_prefix_end != candidate.complete_prefix_end
+            || authority.complete_prefix_sha256 == candidate.complete_prefix_sha256)
+        && (!candidate.terminal || authority.terminal)
+}
+
 fn migrate_released_cursor(
     encoded: &str,
     path: &Path,
@@ -730,10 +804,11 @@ impl PageReader {
             ))?;
         if value.get("type").and_then(Value::as_str) == Some("session") {
             self.update_header(&value, byte_start, byte_end_exclusive, bytes);
-            let mut projected = ProjectedLine::default();
-            projected.logical_units = 1;
-            projected.serialized_bytes = session_wire_bytes(&self.session);
-            return Ok(projected);
+            return Ok(ProjectedLine {
+                logical_units: 1,
+                serialized_bytes: session_wire_bytes(&self.session),
+                ..ProjectedLine::default()
+            });
         }
 
         let occurred_at =
@@ -1287,6 +1362,8 @@ pub(crate) fn import_openclaw_nativepath_tree(
 
     if options.import_profile.is_replay_only() {
         replay_outputs_or_mark_behind(
+            store,
+            &context.machine_id,
             &inventory.paths,
             &source_root,
             context.imported_at,
@@ -1332,6 +1409,8 @@ pub(crate) fn import_openclaw_nativepath_tree(
         ProviderSourceRouteRetirementReason::SourceMissing,
     )?);
     replay_outputs_or_mark_behind(
+        store,
+        &context.machine_id,
         &inventory.paths,
         &source_root,
         context.imported_at,
@@ -2005,6 +2084,9 @@ fn publish_group(
     Ok(summary)
 }
 
+// These route and revision values remain explicit because each is recorded
+// independently in the provider source descriptor or synchronization metadata.
+#[allow(clippy::too_many_arguments)]
 fn capture_source(
     context: &PublicationContext<'_>,
     session: &SessionFact,
@@ -2769,6 +2851,8 @@ fn retirement_publication_id(retirement: &ProviderSourceRouteRetirement) -> Stri
 }
 
 fn replay_outputs_or_mark_behind(
+    store: &Store,
+    machine_id: &str,
     paths: &BTreeSet<PathBuf>,
     source_root: &Path,
     imported_at: DateTime<Utc>,
@@ -2777,7 +2861,7 @@ fn replay_outputs_or_mark_behind(
     let Some(sink) = sink else {
         return;
     };
-    if let Err(error) = replay_outputs(paths, source_root, imported_at, sink) {
+    if let Err(error) = replay_outputs(store, machine_id, paths, source_root, imported_at, sink) {
         sink.mark_behind(ProOutputSinkError::new(
             "openclaw_nativepath_output_replay",
             error.to_string(),
@@ -2786,12 +2870,15 @@ fn replay_outputs_or_mark_behind(
 }
 
 fn replay_outputs(
+    store: &Store,
+    machine_id: &str,
     paths: &BTreeSet<PathBuf>,
     source_root: &Path,
     imported_at: DateTime<Utc>,
     sink: &dyn ProOutputSink,
 ) -> Result<()> {
     for path in paths {
+        let authority = committed_replay_authority(store, machine_id, path)?;
         let locator_identity = provider_path_identity(path)?;
         let source = OutputSourceIdentity {
             provider: CaptureProvider::OpenClaw.as_str().to_owned(),
@@ -2805,7 +2892,15 @@ fn replay_outputs(
                 continue;
             }
         };
-        replay_source(path, imported_at, sink, source, locator_identity, progress)?;
+        replay_source(
+            path,
+            imported_at,
+            sink,
+            source,
+            locator_identity,
+            progress,
+            &authority,
+        )?;
     }
     Ok(())
 }
@@ -2818,6 +2913,7 @@ fn replay_source(
     output_source: OutputSourceIdentity,
     locator_identity: String,
     progress: Option<ProOutputProgress>,
+    authority: &Checkpoint,
 ) -> Result<()> {
     let progress_cursor = progress
         .as_ref()
@@ -2832,6 +2928,12 @@ fn replay_source(
     });
     let previous = can_resume.then_some(progress_cursor.as_ref()).flatten();
     let mut reader = open_pages(path, imported_at, true, None, false, previous)?;
+    if !authority
+        .source_observation
+        .matches_live(&reader.observation)?
+    {
+        return Err(CaptureError::SourceChangedDuringCapture);
+    }
     let source_change = reader.source_change;
     let observed_revision = reader.source_revision.clone();
     let mut output_state = OutputState::new(
@@ -2843,6 +2945,11 @@ fn replay_source(
     )?;
 
     while let Some(page) = reader.next_page()? {
+        if !replay_checkpoint_is_covered_by(authority, &page.next_checkpoint) {
+            return Err(CaptureError::InvalidPayload(
+                "OpenClaw output replay advanced beyond committed Core authority".to_owned(),
+            ));
+        }
         let expected_frontier = safe_frontier(&page.expected_checkpoint)?;
         let next_safe_frontier = safe_frontier(&page.next_checkpoint)?;
         let observations = page
@@ -2876,11 +2983,24 @@ fn replay_source(
         )
         .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
         if process_pro_replay_only(replay, sink).is_err() {
-            break;
+            return Ok(());
         }
         output_state.expected_source_epoch = Some(output_state.source_epoch);
         output_state.expected_sink_frontier = Some(next_safe_frontier);
         output_state.disposition = ProOutputSourceDisposition::AppendOrResume;
+    }
+    let outcome = reader
+        .outcome
+        .as_ref()
+        .ok_or(CaptureError::SystemInvariant(
+            "OpenClaw output replay reader completed without an outcome",
+        ))?;
+    if !outcome.checkpoint.terminal
+        || !replay_checkpoint_is_covered_by(authority, &outcome.checkpoint)
+    {
+        return Err(CaptureError::InvalidPayload(
+            "OpenClaw output replay outcome exceeded committed Core authority".to_owned(),
+        ));
     }
     Ok(())
 }

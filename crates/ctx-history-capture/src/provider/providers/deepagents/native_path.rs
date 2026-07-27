@@ -326,9 +326,9 @@ pub(super) fn import_deepagents_sqlite_nativepath(
     let generation = if same_generation {
         prior.as_ref().map_or(0, |cursor| cursor.generation)
     } else {
-        prior.as_ref().map_or(0, |cursor| {
-            cursor.generation.checked_add(1).unwrap_or(u64::MAX)
-        })
+        prior
+            .as_ref()
+            .map_or(0, |cursor| cursor.generation.saturating_add(1))
     };
     if generation == u64::MAX
         && prior
@@ -358,10 +358,13 @@ pub(super) fn import_deepagents_sqlite_nativepath(
 
     if options.import_profile.is_replay_only() {
         require_complete_matching_core(store, &authority, &context)?;
+        let mut summary = ProviderImportSummary::default();
         if let Some(sink) = options.import_profile.sink() {
-            replay_outputs(&conn, &snapshot, &authority, &context, sink.as_ref());
+            if replay_outputs(&conn, &snapshot, &authority, &context, sink.as_ref())? {
+                record_output_behind(&mut summary);
+            }
         }
-        return Ok(ProviderImportSummary::default());
+        return Ok(summary);
     }
 
     let cursor = prior
@@ -391,7 +394,9 @@ pub(super) fn import_deepagents_sqlite_nativepath(
         summary.failed = usize::try_from(cursor.rejected_records).unwrap_or(usize::MAX);
         summary.set_work_result(ProviderImportWorkResult::NoOp);
         if let Some(sink) = options.import_profile.sink() {
-            replay_outputs(&conn, &snapshot, &authority, &context, sink.as_ref());
+            if replay_outputs(&conn, &snapshot, &authority, &context, sink.as_ref())? {
+                record_output_behind(&mut summary);
+            }
         }
         return Ok(summary);
     }
@@ -407,7 +412,9 @@ pub(super) fn import_deepagents_sqlite_nativepath(
     )?;
     if !summary.work_remaining {
         if let Some(sink) = options.import_profile.sink() {
-            replay_outputs(&conn, &snapshot, &authority, &context, sink.as_ref());
+            if replay_outputs(&conn, &snapshot, &authority, &context, sink.as_ref())? {
+                record_output_behind(&mut summary);
+            }
         }
     }
     if summary.work_result.is_none() {
@@ -1264,7 +1271,7 @@ fn predict_retirement_page(
         })
         .collect::<Vec<_>>();
     let done = remaining.len() <= limit;
-    let next_after = remaining.into_iter().take(limit).last();
+    let next_after = remaining.into_iter().take(limit).next_back();
     Ok(PredictedRetirementPage { next_after, done })
 }
 
@@ -2114,13 +2121,8 @@ fn replay_outputs(
     authority: &DeepAgentsSourceAuthority,
     context: &ProviderAdapterContext,
     sink: &dyn ProOutputSink,
-) {
-    if let Err(error) = replay_outputs_inner(conn, snapshot, authority, context, sink) {
-        sink.mark_behind(ProOutputSinkError::new(
-            "deepagents_output_replay",
-            error.to_string(),
-        ));
-    }
+) -> Result<bool> {
+    replay_outputs_inner(conn, snapshot, authority, context, sink)
 }
 
 fn replay_outputs_inner(
@@ -2129,20 +2131,34 @@ fn replay_outputs_inner(
     authority: &DeepAgentsSourceAuthority,
     context: &ProviderAdapterContext,
     sink: &dyn ProOutputSink,
-) -> Result<()> {
+) -> Result<bool> {
     let source = OutputSourceIdentity {
         provider: CaptureProvider::DeepAgents.as_str().to_owned(),
         namespace_id: authority.canonical_source_identity.clone(),
         source_id: authority.route_identity.clone(),
     };
-    let progress = sink.observe_source(&source).map_err(|error| {
-        CaptureError::InvalidPayload(format!(
-            "Deep Agents output sink observation failed: {error}"
-        ))
-    })?;
-    let mut state = output_state(progress, authority, sink)?;
+    let progress = match sink.observe_source(&source) {
+        Ok(progress) => progress,
+        Err(_) => {
+            sink.mark_behind(ProOutputSinkError::new(
+                "deepagents_output_progress",
+                "Deep Agents Pro output progress is unavailable",
+            ));
+            return Ok(true);
+        }
+    };
+    let mut state = match output_state(progress, authority, sink) {
+        Ok(state) => state,
+        Err(_) => {
+            sink.mark_behind(ProOutputSinkError::new(
+                "deepagents_output_progress",
+                "Deep Agents Pro output progress is invalid",
+            ));
+            return Ok(true);
+        }
+    };
     if state.complete {
-        return Ok(());
+        return Ok(false);
     }
     loop {
         if !snapshot.revalidate(&authority.database_path)? {
@@ -2153,47 +2169,67 @@ fn replay_outputs_inner(
         if !snapshot.revalidate(&authority.database_path)? {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
-        let observations = output_observations(&page)?;
-        let expected = output_safe_frontier(&page.expected)?;
-        let next = output_safe_frontier(&page.next)?;
-        let output = NativeProOutputPage {
-            inventory_generation: sink.inventory_generation(),
-            source: source.clone(),
-            source_epoch: state.source_epoch,
-            observed_revision: authority.source_revision.clone(),
-            parser_revision: DEEPAGENTS_OUTPUT_PARSER_REVISION.to_owned(),
-            materializer_revision: sink.materializer_revision().to_owned(),
-            disposition: state.disposition,
-            expected_prior_source_epoch: state.expected_source_epoch,
-            expected_prior_frontier: state.expected_sink_frontier.clone(),
-            observations,
+        let output_page = (|| {
+            let observations = output_observations(&page)?;
+            let expected = output_safe_frontier(&page.expected)?;
+            let next = output_safe_frontier(&page.next)?;
+            let output = NativeProOutputPage {
+                inventory_generation: sink.inventory_generation(),
+                source: source.clone(),
+                source_epoch: state.source_epoch,
+                observed_revision: authority.source_revision.clone(),
+                parser_revision: DEEPAGENTS_OUTPUT_PARSER_REVISION.to_owned(),
+                materializer_revision: sink.materializer_revision().to_owned(),
+                disposition: state.disposition,
+                expected_prior_source_epoch: state.expected_source_epoch,
+                expected_prior_frontier: state.expected_sink_frontier.clone(),
+                observations,
+            };
+            let replay = NativeProReplayPage::new_with_source_identity(
+                NativeSourceIdentity::new(
+                    CaptureProvider::DeepAgents.as_str(),
+                    authority.route_identity.clone(),
+                ),
+                expected,
+                next.clone(),
+                page.next.terminal,
+                NativePageAccounting {
+                    logical_units: output.observations.len().max(1),
+                    conservative_serialized_bytes: page.retained_bytes,
+                },
+                output,
+            )
+            .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+            Ok::<_, CaptureError>((replay, next))
+        })();
+        let (replay, next) = match output_page {
+            Ok(page) => page,
+            Err(_) => {
+                sink.mark_behind(ProOutputSinkError::new(
+                    "deepagents_output_page",
+                    "Deep Agents Pro output page is invalid",
+                ));
+                return Ok(true);
+            }
         };
-        let replay = NativeProReplayPage::new_with_source_identity(
-            NativeSourceIdentity::new(
-                CaptureProvider::DeepAgents.as_str(),
-                authority.route_identity.clone(),
-            ),
-            expected,
-            next.clone(),
-            page.next.terminal,
-            NativePageAccounting {
-                logical_units: output.observations.len().max(1),
-                conservative_serialized_bytes: page.retained_bytes,
-            },
-            output,
-        )
-        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
-        process_pro_replay_only(replay, sink).map_err(|failure| {
-            CaptureError::InvalidPayload(format!("{:?}", failure.output_error))
-        })?;
+        if process_pro_replay_only(replay, sink).is_err() {
+            return Ok(true);
+        }
         state.frontier = page.next;
         state.expected_source_epoch = Some(state.source_epoch);
         state.expected_sink_frontier = Some(next);
         state.disposition = ProOutputSourceDisposition::AppendOrResume;
         if state.frontier.terminal {
-            return Ok(());
+            return Ok(false);
         }
     }
+}
+
+fn record_output_behind(summary: &mut ProviderImportSummary) {
+    summary.record_failure(ProviderImportFailure {
+        line: 0,
+        error: "Deep Agents Pro output is behind committed Core".to_owned(),
+    });
 }
 
 struct DeepAgentsOutputState {

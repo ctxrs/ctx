@@ -572,13 +572,19 @@ mod tests {
     };
 
     use serde_json::{json, Map};
-    use tempfile::tempdir;
+    use tempfile::TempDir;
 
     use super::*;
     use crate::analytics::{
         pro_operation_event, OperationPayloadV1, ProHostOperationV1, ProStatusTelemetryV1,
         ProSurfaceV1, RuntimeObservationKindV1,
     };
+
+    fn private_tempdir() -> TempDir {
+        let root = tempfile::tempdir().unwrap();
+        ctx_history_core::platform_security::restrict_private_directory(root.path()).unwrap();
+        root
+    }
 
     fn test_event() -> PublicEventV1 {
         operation_event(
@@ -609,6 +615,18 @@ mod tests {
         fn flush(&mut self) -> std::io::Result<()> {
             self.trace.lock().unwrap().push("response_flush");
             Ok(())
+        }
+    }
+
+    struct FailingFlushWriter;
+
+    impl Write for FailingFlushWriter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::other("test flush failure"))
         }
     }
 
@@ -742,8 +760,8 @@ mod tests {
     }
 
     #[test]
-    fn response_flush_precedes_mcp_and_pro_submissions() {
-        let temp = tempdir().unwrap();
+    fn response_flush_precedes_one_local_blame_increment_and_remote_submissions() {
+        let temp = private_tempdir();
         fs::write(
             temp.path().join("config.toml"),
             "analytics.enabled = true\n",
@@ -774,13 +792,21 @@ mod tests {
             "jsonrpc": "2.0",
             "id": 1,
             "method": "tools/call",
-            "params": {"name": "pro_status", "arguments": {}}
+            "params": {
+                "name": "blame",
+                "arguments": {
+                    "target": {"kind": "commit", "oid": "abc1234"}
+                }
+            }
         });
         let mut stdin = Cursor::new(format!("{request}\n").into_bytes());
         let mut stdout = TraceWriter {
             trace: Arc::clone(&trace),
         };
         let mut initialized = true;
+        let mut usage_recorder =
+            crate::local_usage::McpUsageRecorder::start(temp.path().to_path_buf());
+        usage_recorder.set_test_trace(Arc::clone(&trace));
 
         let result = super::super::serve_stdio_loop(
             temp.path(),
@@ -788,6 +814,7 @@ mod tests {
             &mut stdout,
             &mut initialized,
             &mut telemetry,
+            &mut usage_recorder,
         );
         assert!(result.is_ok());
         telemetry.stop(McpStopReasonV1::Eof, Outcome::Success, Duration::ZERO);
@@ -795,13 +822,135 @@ mod tests {
         let trace = trace.lock().unwrap();
         let position = |label| trace.iter().position(|entry| *entry == label).unwrap();
         assert!(position("response_write") < position("response_flush"));
+        assert!(position("response_flush") < position("local_usage"));
+        assert!(position("local_usage") < position("submit_mcp"));
+        assert!(position("local_usage") < position("submit_pro"));
         assert!(position("response_flush") < position("submit_mcp"));
         assert!(position("response_flush") < position("submit_pro"));
+        assert_eq!(
+            trace
+                .iter()
+                .filter(|entry| **entry == "local_usage")
+                .count(),
+            1
+        );
+        drop(trace);
+
+        let report = crate::local_usage::read_report(temp.path(), true, true);
+        let summary = report.summary.unwrap();
+        assert_eq!(summary.calls, 1);
+        assert_eq!(summary.pro_blame.requests, 1);
+        let detail = &report.details.unwrap().by_operation[0];
+        assert_eq!(detail.surface, "mcp");
+        assert_eq!(detail.operation, "blame");
+        assert_eq!(detail.calls, 1);
+    }
+
+    #[test]
+    fn failed_response_flush_does_not_record_local_usage() {
+        let temp = private_tempdir();
+        fs::write(
+            temp.path().join("config.toml"),
+            "analytics.enabled = false\n",
+        )
+        .unwrap();
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "status", "arguments": {}}
+        });
+        let mut stdin = Cursor::new(format!("{request}\n").into_bytes());
+        let mut stdout = FailingFlushWriter;
+        let mut initialized = true;
+        let mut telemetry = McpTelemetry::start(temp.path().to_path_buf());
+        let mut usage_recorder =
+            crate::local_usage::McpUsageRecorder::start(temp.path().to_path_buf());
+
+        let failure = super::super::serve_stdio_loop(
+            temp.path(),
+            &mut stdin,
+            &mut stdout,
+            &mut initialized,
+            &mut telemetry,
+            &mut usage_recorder,
+        )
+        .unwrap_err();
+        assert_eq!(failure.reason, McpStopReasonV1::StdoutFlushError);
+        assert!(!temp.path().join("usage.sqlite").exists());
+    }
+
+    #[test]
+    fn local_usage_descriptor_is_created_only_after_protocol_and_dispatch_validation() {
+        let temp = private_tempdir();
+        let excluded = [
+            json!([]),
+            json!({"jsonrpc": "1.0", "id": 1, "method": "tools/call", "params": {"name": "status"}}),
+            json!({"jsonrpc": "2.0", "id": true, "method": "tools/call", "params": {"name": "status"}}),
+            json!({"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "status"}}),
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "unknown"}}),
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {}}),
+        ];
+        for message in excluded {
+            let mut initialized = true;
+            let (_, invocation) =
+                super::super::handle_message(message.clone(), temp.path(), &mut initialized);
+            assert!(invocation.is_none(), "{message}");
+        }
+
+        let pre_init = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "status", "arguments": {}}
+        });
+        let (_, invocation) = super::super::handle_message(pre_init, temp.path(), &mut false);
+        assert!(invocation.is_none());
+
+        let recognized_argument_error = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "search", "arguments": {"unknown": "content"}}
+        });
+        let (_, invocation) =
+            super::super::handle_message(recognized_argument_error, temp.path(), &mut true);
+        assert!(invocation.is_some());
+
+        let invalid_target = json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "blame",
+                "arguments": {"target": {"kind": "commit", "oid": ""}}
+            }
+        });
+        let (_, invocation) = super::super::handle_message(invalid_target, temp.path(), &mut true);
+        assert_eq!(
+            invocation.unwrap().target_type_for_test(),
+            crate::local_usage::TargetType::NotApplicable
+        );
+
+        let valid_target = json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "blame",
+                "arguments": {"target": {"kind": "commit", "oid": "abc1234"}}
+            }
+        });
+        let (_, invocation) = super::super::handle_message(valid_target, temp.path(), &mut true);
+        assert_eq!(
+            invocation.unwrap().target_type_for_test(),
+            crate::local_usage::TargetType::Commit
+        );
     }
 
     #[test]
     fn disabled_start_creates_no_sender_thread_and_stays_noop() {
-        let temp = tempdir().unwrap();
+        let temp = private_tempdir();
         let config_path = temp.path().join("config.toml");
         fs::write(&config_path, "analytics.enabled = false\n").unwrap();
         let mut telemetry = McpTelemetry::start(temp.path().to_path_buf());
@@ -815,7 +964,7 @@ mod tests {
 
     #[test]
     fn enabled_start_honors_later_dynamic_opt_out() {
-        let temp = tempdir().unwrap();
+        let temp = private_tempdir();
         let config_path = temp.path().join("config.toml");
         fs::write(&config_path, "analytics.enabled = true\n").unwrap();
         let calls = Arc::new(AtomicU64::new(0));
@@ -842,7 +991,7 @@ mod tests {
 
     #[test]
     fn mixed_mcp_and_pro_queue_pressure_is_bounded_and_counted() {
-        let temp = tempdir().unwrap();
+        let temp = private_tempdir();
         let gate = Arc::new((Mutex::new((false, false)), Condvar::new()));
         let dispatch_gate = Arc::clone(&gate);
         let sender = AsyncMcpSender::start_with(
@@ -896,7 +1045,7 @@ mod tests {
 
     #[test]
     fn dispatch_failure_is_best_effort() {
-        let temp = tempdir().unwrap();
+        let temp = private_tempdir();
         let calls = Arc::new(AtomicU64::new(0));
         let observed = Arc::clone(&calls);
         let mut sender = AsyncMcpSender::start_with(

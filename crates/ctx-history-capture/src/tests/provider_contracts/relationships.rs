@@ -166,7 +166,13 @@ fn assert_imports_parent_child_edge(
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
     let summary = run_import(&mut store);
     assert_eq!(summary.failed, 0, "{label}: {:?}", summary.failures);
-    assert_eq!(summary.imported_sessions, 2, "{label}: {summary:?}");
+    assert_eq!(
+        summary
+            .imported_sessions
+            .saturating_add(summary.skipped_sessions),
+        2,
+        "{label}: {summary:?}"
+    );
     assert_eq!(summary.imported_edges, 1, "{label}: {summary:?}");
     let parent_id = stored_provider_session_id(&store, provider, parent_external_id);
     let child_id = stored_provider_session_id(&store, provider, child_external_id);

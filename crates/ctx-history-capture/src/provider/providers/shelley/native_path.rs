@@ -149,6 +149,8 @@ struct ShelleyNativeCursor {
 }
 
 impl ShelleyNativeCursor {
+    // Keep every persisted authority field explicit at this serialization boundary.
+    #[allow(clippy::too_many_arguments)]
     fn fresh(
         database_path: PathBuf,
         path_identity: String,
@@ -884,6 +886,8 @@ fn next_message_unit(
     )))
 }
 
+// This is constructed for every message; boxing the accepted row would add hot-path allocation.
+#[allow(clippy::large_enum_variant)]
 enum ParentConversation {
     Accepted {
         conversation: ShelleyConversationRow,
@@ -1830,6 +1834,8 @@ fn provider_sync_cursor(
     }
 }
 
+// The decoded native cursor is short-lived migration state and remains inline for direct validation.
+#[allow(clippy::large_enum_variant)]
 enum DecodedCursor {
     Native(ShelleyNativeCursor),
     Legacy,

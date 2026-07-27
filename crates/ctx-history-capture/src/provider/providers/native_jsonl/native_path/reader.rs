@@ -364,7 +364,7 @@ impl DirectJsonlPageReader {
                     byte_start,
                     byte_end_exclusive,
                     reason: format!(
-                        "{}:{} appeared before an importable native session header",
+                        "{}:{}: record appeared before an importable native JSONL session header",
                         self.path.display(),
                         ordinal.saturating_add(1)
                     ),
@@ -489,11 +489,7 @@ impl DirectJsonlPageReader {
         };
         let mut projected = ProjectedLine::default();
         for subrecord in subrecords {
-            let sub_ordinal = u32::try_from(subrecord.subrecord_index).map_err(|_| {
-                CaptureError::InvalidPayload(
-                    "direct JSONL result subrecord index exceeds u32".to_owned(),
-                )
-            })?;
+            let sub_ordinal = subrecord.subrecord_index;
             if matches!(
                 subrecord.outcome.outcome,
                 OutputOutcome::Failure | OutputOutcome::Timeout

@@ -1,0 +1,385 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+usage() {
+  cat >&2 <<'USAGE'
+Usage: build-linux-x64-bazel-dogfood.sh --staging-dogfood --source-commit SHA --version VERSION --output-dir PATH
+
+Builds and packages one staging-only Linux x64 Core dogfood candidate through
+//:ctx_release_linux_x64 --config=release. This command does not sign, upload,
+publish, deploy, or update a release channel.
+USAGE
+}
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+source_commit=""
+version=""
+output_dir=""
+staging_dogfood=0
+while (( $# > 0 )); do
+  case "$1" in
+    --staging-dogfood)
+      staging_dogfood=$((staging_dogfood + 1))
+      ;;
+    --source-commit)
+      shift
+      source_commit="${1:-}"
+      ;;
+    --version)
+      shift
+      version="${1:-}"
+      ;;
+    --output-dir)
+      shift
+      output_dir="${1:-}"
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      printf 'error: unknown argument: %s\n' "$1" >&2
+      usage
+      exit 64
+      ;;
+  esac
+  shift
+done
+
+[[ "${staging_dogfood}" == "1" ]] || {
+  echo "error: --staging-dogfood must be supplied exactly once" >&2
+  exit 64
+}
+[[ "${source_commit}" =~ ^[0-9a-f]{40}$ \
+  && ! "${source_commit}" =~ ^0{40}$ ]] || {
+  echo "error: --source-commit must be a nonzero lowercase 40-hex commit" >&2
+  exit 64
+}
+[[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]] || {
+  echo "error: --version must be an explicit semantic version" >&2
+  exit 64
+}
+[[ -n "${output_dir}" ]] || {
+  echo "error: --output-dir is required" >&2
+  exit 64
+}
+[[ "$(uname -s)" == "Linux" ]] \
+  || die "Linux x64 Bazel dogfood construction requires Linux"
+case "$(uname -m)" in
+  x86_64|amd64) ;;
+  *) die "Linux x64 Bazel dogfood construction requires a native x86_64 host" ;;
+esac
+for command in docker flock git python3 sha256sum; do
+  command -v "${command}" >/dev/null 2>&1 \
+    || die "required builder command is unavailable: ${command}"
+done
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+cd "${repo_root}"
+[[ "$(git rev-parse --verify HEAD^{commit})" == "${source_commit}" ]] \
+  || die "source commit does not match the builder checkout"
+[[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]] \
+  || die "Linux x64 Bazel dogfood construction requires a clean checkout"
+
+source_version="$(
+  python3 -I scripts/release/public-cli-bazel-build-info.py cargo-version \
+    --cargo-toml "${repo_root}/crates/ctx-cli/Cargo.toml"
+)" || die "could not determine the ctx package version"
+[[ "${source_version}" == "${version}" ]] \
+  || die "requested version ${version} does not match source version ${source_version}"
+
+target_values="$(
+  python3 scripts/public-cli-release-targets.py \
+    --matrix contracts/release-targets-v1.json shell linux-x64
+)" || exit $?
+eval "${target_values}"
+[[ "${CTX_PUBLIC_TARGET_OS}:${CTX_PUBLIC_TARGET_ARCH}:${CTX_PUBLIC_TARGET_TRIPLE}" \
+  == "linux:x86_64:x86_64-unknown-linux-gnu" ]] \
+  || die "release-target matrix does not select the owned Linux x64 graph"
+
+if [[ "${output_dir}" != /* ]]; then
+  output_dir="${repo_root}/${output_dir}"
+fi
+output_dir="$(
+  python3 - "${output_dir}" <<'PY'
+import os
+import sys
+
+print(os.path.abspath(sys.argv[1]))
+PY
+)"
+case "${output_dir}/" in
+  "${repo_root}/"*)
+    die "dogfood output must be outside the source checkout"
+    ;;
+esac
+[[ ! -L "${output_dir}" ]] || die "dogfood output directory is a symlink"
+mkdir -p "${output_dir}"
+[[ -d "${output_dir}" && -w "${output_dir}" ]] \
+  || die "dogfood output directory is not writable"
+
+bazel_version="$(tr -d '[:space:]' <.bazelversion)"
+linux_build_json="$(
+  python3 - contracts/release-targets-v1.json <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    matrix = json.load(source)
+matches = [target for target in matrix["targets"] if target.get("id") == "linux-x64"]
+if len(matches) != 1 or not isinstance(matches[0].get("linux_build"), dict):
+    raise SystemExit("Linux x64 build contract is unavailable")
+print(json.dumps(matches[0]["linux_build"], separators=(",", ":")))
+PY
+)" || die "could not load the Linux x64 build contract"
+readarray -t linux_build_values < <(
+  python3 - "${linux_build_json}" <<'PY'
+import json
+import sys
+
+value = json.loads(sys.argv[1])
+for key in (
+    "builder_image",
+    "ubuntu_snapshot",
+    "glibc_max",
+    "rust_toolchain",
+    "rust_commit",
+):
+    item = value.get(key)
+    if not isinstance(item, str) or not item:
+        raise SystemExit(f"Linux build contract lacks {key}")
+    print(item)
+PY
+)
+[[ "${#linux_build_values[@]}" == "5" ]] \
+  || die "Linux x64 build contract is incomplete"
+base_image="${linux_build_values[0]}"
+ubuntu_snapshot="${linux_build_values[1]}"
+glibc_max="${linux_build_values[2]}"
+rust_toolchain="${linux_build_values[3]}"
+rust_commit="${linux_build_values[4]}"
+expected_base_digest="${base_image##*@}"
+
+docker_platform="linux/amd64"
+builder_image="ctx-public-cli-bazel:linux-x64-builder-bazel-${bazel_version}"
+runtime_image="ctx-public-cli-bazel:linux-x64-runtime-ubuntu-22.04"
+inspector_image="ctx-public-cli-bazel:linux-x64-inspector-ubuntu-22.04"
+builder_recipe="scripts/release/linux-bazel-release.Dockerfile"
+
+docker pull --platform "${docker_platform}" "${base_image}" >/dev/null
+actual_base_digest="$(
+  docker image inspect "${base_image}" \
+    --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+    | sed -n 's/^.*@\(sha256:[0-9a-f]\{64\}\)$/\1/p' \
+    | sort -u
+)"
+[[ "${actual_base_digest}" == "${expected_base_digest}" ]] || {
+  printf 'error: resolved Ubuntu base mismatch: expected %s, got %s\n' \
+    "${expected_base_digest}" "${actual_base_digest:-missing}" >&2
+  exit 1
+}
+
+docker build \
+  --platform "${docker_platform}" \
+  --target builder \
+  --provenance=false \
+  --build-arg "UBUNTU_IMAGE=${base_image}" \
+  --build-arg "UBUNTU_SNAPSHOT=${ubuntu_snapshot}" \
+  --build-arg "GLIBC_BASELINE=${glibc_max}" \
+  --build-arg "BAZEL_VERSION=${bazel_version}" \
+  --build-arg "RUST_TOOLCHAIN=${rust_toolchain}" \
+  --build-arg "RUST_COMMIT=${rust_commit}" \
+  -t "${builder_image}" \
+  -f "${builder_recipe}" \
+  scripts/release
+docker build \
+  --platform "${docker_platform}" \
+  --target runtime \
+  --provenance=false \
+  --build-arg "UBUNTU_IMAGE=${base_image}" \
+  --build-arg "UBUNTU_SNAPSHOT=${ubuntu_snapshot}" \
+  -t "${runtime_image}" \
+  -f "${builder_recipe}" \
+  scripts/release
+docker build \
+  --platform "${docker_platform}" \
+  --target inspector \
+  --provenance=false \
+  --build-arg "UBUNTU_IMAGE=${base_image}" \
+  --build-arg "UBUNTU_SNAPSHOT=${ubuntu_snapshot}" \
+  -t "${inspector_image}" \
+  -f "${builder_recipe}" \
+  scripts/release
+
+builder_image_id="$(docker image inspect "${builder_image}" --format '{{.Id}}')"
+runtime_image_id="$(docker image inspect "${runtime_image}" --format '{{.Id}}')"
+inspector_image_id="$(docker image inspect "${inspector_image}" --format '{{.Id}}')"
+for value in "${builder_image_id}" "${runtime_image_id}" "${inspector_image_id}"; do
+  [[ "${value}" =~ ^sha256:[0-9a-f]{64}$ ]] \
+    || die "release image did not resolve to an immutable image ID"
+done
+
+lock_file="/tmp/ctx-public-linux-x64-bazel-dogfood.lock"
+exec 9>"${lock_file}"
+flock -x 9
+task_root="$(mktemp -d "/tmp/ctx-public-linux-x64-bazel-dogfood.XXXXXX")"
+cleanup() {
+  if [[ "${task_root:-}" == "/tmp/ctx-public-linux-x64-bazel-dogfood."* \
+    && -d "${task_root}" && ! -L "${task_root}" ]]; then
+    chmod -R u+w -- "${task_root}" 2>/dev/null || true
+    rm -rf -- "${task_root}"
+  fi
+}
+trap cleanup EXIT
+install -d -m 0700 \
+  "${task_root}/release-input" \
+  "${task_root}/cache"
+
+docker_run_args=(
+  --rm
+  --platform "${docker_platform}"
+  --user "$(id -u):$(id -g)"
+  --cap-drop ALL
+  --security-opt no-new-privileges
+  --read-only
+  --tmpfs /tmp:rw,nosuid,nodev,exec
+  -e HOME=/tmp/home
+  -e USER=ctx-builder
+  -e LOGNAME=ctx-builder
+  -e TMPDIR=/tmp
+  -e CTX_BAZEL_BIN=/opt/ctx/bin/bazel
+  -e CTX_BAZEL_CACHE_ROOT=/build/cache
+  -v "${repo_root}:${repo_root}:ro"
+  -v "${task_root}:/build:rw"
+  -w "${repo_root}"
+)
+git_common_dir="$(git rev-parse --path-format=absolute --git-common-dir)"
+case "${git_common_dir}/" in
+  "${repo_root}/"*) ;;
+  *) docker_run_args+=(-v "${git_common_dir}:${git_common_dir}:ro") ;;
+esac
+
+docker run "${docker_run_args[@]}" \
+  "${builder_image_id}" \
+  bash -ceu '
+    install -d -m 0700 "$HOME"
+    scripts/bazelw fetch \
+      //:ctx_release_linux_x64 \
+      --config=release \
+      --lockfile_mode=error \
+      --symlink_prefix=/build/bazel-links/
+  '
+
+docker run "${docker_run_args[@]}" \
+  --network none \
+  "${builder_image_id}" \
+  bash -ceu '
+    install -d -m 0700 "$HOME"
+    wrapper=scripts/bazelw
+    "$wrapper" build \
+      //:ctx_release_linux_x64 \
+      --config=release \
+      --lockfile_mode=error \
+      --symlink_prefix=/build/bazel-links/
+    bazel_bin="$(
+      "$wrapper" info bazel-bin \
+        --config=release \
+        --lockfile_mode=error \
+        --symlink_prefix=/build/bazel-links/
+    )"
+    route_runfiles="$bazel_bin/ctx_release_linux_x64.runfiles"
+    artifact_runfile="$(
+      find "$route_runfiles" \
+        -path "*/ctx_release_routes/linux-x64/artifact" \
+        -print
+    )"
+    rustc_runfile="$(
+      find "$route_runfiles" \
+        -path "*/ctx_release_routes/linux-x64/rustc" \
+        -print
+    )"
+    test -n "$artifact_runfile"
+    test "$(printf "%s\n" "$artifact_runfile" | wc -l)" -eq 1
+    test -n "$rustc_runfile"
+    test "$(printf "%s\n" "$rustc_runfile" | wc -l)" -eq 1
+    test -f "$artifact_runfile" -a -x "$artifact_runfile"
+    test -f "$rustc_runfile" -a -x "$rustc_runfile"
+    install -m 0755 "$artifact_runfile" /build/release-input/ctx
+    "$rustc_runfile" --version > /build/release-input/rustc.version
+  '
+
+artifact="${task_root}/release-input/ctx"
+rust_version="$(tr -d '\r\n' <"${task_root}/release-input/rustc.version")"
+artifact_sha256="$(sha256sum "${artifact}" | awk '{print $1}')"
+printf '%s\n' "${artifact_sha256}" >"${artifact}.sha256"
+"${artifact}" --version >"${artifact}.version"
+grep -Fx "ctx ${version}" "${artifact}.version" >/dev/null \
+  || die "Bazel artifact does not report the requested version"
+
+# The build-info producer deliberately runs its pinned container gates as the
+# unprivileged nobody user. Expose only this public candidate, its required
+# sidecars, and their containing release-input directory.
+chmod 0555 "${artifact}"
+chmod 0444 "${artifact}.sha256" "${artifact}.version"
+chmod 0755 "${task_root}/release-input"
+
+build_info="${task_root}/release-input/ctx.build-info.json"
+python3 -I scripts/release/public-cli-bazel-build-info.py create \
+  --artifact "${artifact}" \
+  --bazel-version-file .bazelversion \
+  --builder-image-id "${builder_image_id}" \
+  --builder-recipe "${builder_recipe}" \
+  --cargo-lock Cargo.lock \
+  --cargo-toml crates/ctx-cli/Cargo.toml \
+  --docker "$(command -v docker)" \
+  --inspector-image-id "${inspector_image_id}" \
+  --matrix contracts/release-targets-v1.json \
+  --module-file MODULE.bazel \
+  --module-lock MODULE.bazel.lock \
+  --output "${build_info}" \
+  --platform linux-x64 \
+  --runtime-image-id "${runtime_image_id}" \
+  --rust-version "${rust_version}" \
+  --source-commit "${source_commit}" \
+  --source-repo "${repo_root}" \
+  --version "${version}"
+
+docker run "${docker_run_args[@]}" \
+  --network none \
+  -v "${output_dir}:/release-output:rw" \
+  "${builder_image_id}" \
+  bash -ceu '
+    install -d -m 0700 "$HOME"
+    route=/build/bazel-links/bin/ctx_release_linux_x64
+    test -x "$route"
+    test -d "$route.runfiles"
+    BUILD_WORKSPACE_DIRECTORY="$PWD" \
+    RUNFILES_DIR="$route.runfiles" \
+    TEST_WORKSPACE=_main \
+    "$route" \
+      --build-info /build/release-input/ctx.build-info.json \
+      --output-dir /release-output
+  '
+
+[[ "$(git rev-parse --verify HEAD^{commit})" == "${source_commit}" ]] \
+  || die "source commit changed during Linux x64 Bazel dogfood construction"
+[[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]] \
+  || die "source checkout changed during Linux x64 Bazel dogfood construction"
+for leaf in ctx ctx.sha256 ctx.version ctx.build-info.json ctx.cdx.json; do
+  [[ -s "${output_dir}/${leaf}" ]] \
+    || die "packaged dogfood output is missing: ${output_dir}/${leaf}"
+done
+
+trap - EXIT
+cleanup
+printf 'staging-only Linux x64 Core Bazel dogfood candidate: %s\n' \
+  "${output_dir}/ctx"
+printf 'source commit: %s\n' "${source_commit}"
+printf 'version: %s\n' "${version}"
+
+exit 0

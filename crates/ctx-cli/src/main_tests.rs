@@ -91,8 +91,8 @@ fn foreground_analytics_eligibility_is_closed_and_remote_safe() {
         vec!["ctx", "index", "status", "--json"],
         vec!["ctx", "sql", "select 1"],
         vec!["ctx", "doctor"],
-        vec!["ctx", "show", "commit", "deadbeef"],
-        vec!["ctx", "locate", "repo", "ctxrs/ctx"],
+        vec!["ctx", "show", "event", "deadbeef"],
+        vec!["ctx", "locate", "event", "deadbeef"],
     ] {
         let cli = Cli::try_parse_from(args).unwrap();
         assert!(
@@ -105,7 +105,7 @@ fn foreground_analytics_eligibility_is_closed_and_remote_safe() {
         vec!["ctx", "daemon", "disable", "--json"],
         vec!["ctx", "mcp", "serve"],
         vec!["ctx", "pro", "--json"],
-        vec!["ctx", "blame", "src/main.rs"],
+        vec!["ctx", "blame", "commit", "deadbeef"],
     ] {
         let cli = Cli::try_parse_from(args).unwrap();
         assert!(

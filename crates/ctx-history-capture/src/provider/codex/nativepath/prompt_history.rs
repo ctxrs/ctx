@@ -305,6 +305,8 @@ impl PromptHistoryCursor {
     }
 }
 
+// The native cursor is intentionally inline so cursor ownership remains explicit.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 enum StoredCursor {
     None,
@@ -771,6 +773,8 @@ fn prepare_page(
     })
 }
 
+// The publication boundary keeps cursor, source, page, and summary authorities explicit.
+#[allow(clippy::too_many_arguments)]
 fn publish_core_page(
     store: &Store,
     guard: &ctx_history_store::EventSearchBulkGuard,

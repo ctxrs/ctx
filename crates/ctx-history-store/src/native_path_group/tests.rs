@@ -1616,6 +1616,50 @@ fn only_one_bulk_group_admission_can_be_outstanding() {
 }
 
 #[test]
+fn nested_bulk_guard_can_publish_while_outer_root_is_live() {
+    let (_temp, store) = open_store();
+    let outer = store.begin_event_search_bulk_mode().unwrap();
+    let nested = store.begin_event_search_bulk_mode().unwrap();
+    let mut group = begin_group(&store, &nested);
+    group
+        .upsert_capture_source(&source(Uuid::from_u128(690)))
+        .unwrap();
+    publish_and_commit(group).unwrap();
+
+    store.finish_event_search_bulk_mode(&nested).unwrap();
+    drop(nested);
+    store.finish_event_search_bulk_mode(&outer).unwrap();
+}
+
+#[test]
+fn nested_bulk_guard_and_admission_expire_with_their_root_epoch() {
+    let (_temp, store) = open_store();
+    let outer = store.begin_event_search_bulk_mode().unwrap();
+    let nested = store.begin_event_search_bulk_mode().unwrap();
+    let stale_admission = store.admit_event_search_bulk_group(&nested).unwrap();
+
+    drop(outer);
+    assert!(matches!(
+        store.admit_event_search_bulk_group(&nested),
+        Err(StoreError::InvalidBulkSearchGuard)
+    ));
+    drop(nested);
+
+    let replacement = store.begin_event_search_bulk_mode().unwrap();
+    assert!(matches!(
+        store.begin_native_path_publication_group(stale_admission, accounting()),
+        Err(StoreError::InvalidBulkSearchGroupAdmission)
+    ));
+    let admission = store.admit_event_search_bulk_group(&replacement).unwrap();
+    store
+        .begin_native_path_publication_group(admission, accounting())
+        .unwrap()
+        .rollback()
+        .unwrap();
+    store.finish_event_search_bulk_mode(&replacement).unwrap();
+}
+
+#[test]
 fn relationship_edge_is_journal_neutral_only_when_actor_is_exactly_unchanged() {
     let (_temp, store) = open_store();
     let parent = session(Uuid::from_u128(700), None);

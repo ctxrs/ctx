@@ -43,6 +43,7 @@ mod support;
 use super::authorization::{
     AuthorizationProvider, EntitlementSchedule, StoredAuthorizationProvider,
 };
+use super::credential_vault::CredentialVaultNamespace;
 use super::verified_executable::VerifiedHelperExecutable;
 pub(crate) use support::default_helper_path;
 use support::{git_executable, helper_executable};
@@ -122,16 +123,11 @@ fn blame_once(
         .validate()
         .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
     let capabilities = required_blame_capabilities(&request.target);
-    let requested_limit = request.limit as usize;
+    let request_context = request.clone();
     let mut client = ProClient::connect(data_root, &capabilities)?;
     match client.exchange(HostMessage::Blame(request), BLAME_TIMEOUT)? {
         HelperMessage::Blame(result) => {
-            if result.matches.len() > requested_limit {
-                bail!("invalid_response: helper returned more blame matches than requested");
-            }
-            result
-                .validate()
-                .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
+            validate_blame_response(&request_context, &result)?;
             Ok(result)
         }
         HelperMessage::Error(error) => Err(protocol_error(error)),
@@ -139,7 +135,20 @@ fn blame_once(
     }
 }
 
-pub(super) fn delete_graph_key(data_root: &Path, installation_key_thumbprint: &str) -> Result<()> {
+fn validate_blame_response(
+    request: &ctx_pro_host_protocol::BlameRequest,
+    result: &BlameResult,
+) -> Result<()> {
+    result
+        .validate_for_request(request)
+        .map_err(|error| anyhow!("invalid_response: {}", error.message))
+}
+
+pub(super) fn delete_graph_key(
+    data_root: &Path,
+    namespace: CredentialVaultNamespace,
+    installation_key_thumbprint: &str,
+) -> Result<()> {
     if decode_base64url(installation_key_thumbprint)
         .as_deref()
         .map(<[u8]>::len)
@@ -150,8 +159,12 @@ pub(super) fn delete_graph_key(data_root: &Path, installation_key_thumbprint: &s
     let required = BTreeSet::from([Capability::GraphKeyDeletion]);
     let mut client = ProClient::connect(data_root, &required)?;
     delete_graph_key_with_client(&mut client, installation_key_thumbprint, |challenge| {
-        StoredAuthorizationProvider::load_for_status(data_root)?
-            .authorization_for_challenge(challenge)
+        StoredAuthorizationProvider::load_for_graph_key_deletion(
+            data_root,
+            namespace,
+            installation_key_thumbprint,
+        )?
+        .authorization_for_challenge(challenge)
     })
 }
 

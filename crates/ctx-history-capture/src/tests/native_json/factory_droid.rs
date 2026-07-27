@@ -46,7 +46,7 @@ fn native_factory_ai_droid_supports_new_session_format() {
     assert_event_type_count(&events, EventType::Message, 1);
     assert_event_type_count(&events, EventType::ToolCall, 1);
     assert_event_type_count(&events, EventType::ToolOutput, 0);
-    assert_events_have_provider_citations(&events);
+    assert_events_have_provider_citations(&store, &events);
 
     let rendered = serde_json::to_string(&events).unwrap();
     assert!(rendered.contains("droid new format prompt"));
@@ -92,7 +92,7 @@ fn native_factory_ai_droid_supports_legacy_session_format() {
     assert_event_type_count(&events, EventType::Message, 1);
     assert_event_type_count(&events, EventType::ToolCall, 1);
     assert_event_type_count(&events, EventType::ToolOutput, 0);
-    assert_events_have_provider_citations(&events);
+    assert_events_have_provider_citations(&store, &events);
 
     let rendered = serde_json::to_string(&events).unwrap();
     assert!(rendered.contains("droid legacy prompt"));

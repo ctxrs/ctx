@@ -179,6 +179,124 @@ fn citation() -> EvidenceCitation {
     }
 }
 
+fn resource(kind: ResourceKind, id: &str, display: &str) -> ResourceRef {
+    ResourceRef {
+        id: id.to_owned(),
+        kind,
+        display: display.to_owned(),
+    }
+}
+
+fn blame_request(target: BlameTarget) -> BlameRequest {
+    BlameRequest {
+        target,
+        limit: 10,
+        cursor: None,
+        expected_snapshot: QuerySnapshotExpectation {
+            checkpoint: full_request(Vec::new()).frozen_through,
+            projection_pending: false,
+        },
+    }
+}
+
+fn cited_commit_blame_result() -> BlameResult {
+    let commit = resource(
+        ResourceKind::Commit,
+        "commit:1",
+        "0123456789abcdef0123456789abcdef01234567",
+    );
+    BlameResult {
+        target: ResolvedBlameTarget::Commit {
+            commit: commit.clone(),
+            repository: resource(ResourceKind::Repository, "repository:1", "ctxrs/ctx"),
+        },
+        git_snapshot: None,
+        matches: vec![BlameMatch::Commit(CommitBlameMatch {
+            fact_id: "fact:1".to_owned(),
+            fact_type: CommitFactType::Referenced,
+            predicate: CommitPredicate::ReferencedBy,
+            subject: commit,
+            object: Some(resource(ResourceKind::Session, "session:1", "session-1")),
+            fact_occurred_at_ms: None,
+            confidence: FactConfidence::Explicit,
+            state: FactState::Asserted,
+            direct_actor: None,
+            owning_root: None,
+            evidence_numbers: vec![1],
+        })],
+        evidence: vec![NumberedEvidence {
+            number: 1,
+            citation: citation(),
+        }],
+        next: None,
+    }
+}
+
+fn cited_file_blame_result(requested_lines: Option<LineRange>, lines: LineRange) -> BlameResult {
+    BlameResult {
+        target: ResolvedBlameTarget::File {
+            path: "src/lib.rs".to_owned(),
+            repository: resource(ResourceKind::Repository, "repository:1", "ctxrs/ctx"),
+            requested_lines,
+        },
+        git_snapshot: Some(GitSnapshot {
+            head_oid: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            worktree_status: WorktreeStatus::Clean,
+        }),
+        matches: vec![BlameMatch::File(FileBlameMatch {
+            id: "file-match:1".to_owned(),
+            lines,
+            commit: resource(
+                ResourceKind::Commit,
+                "commit:1",
+                "0123456789abcdef0123456789abcdef01234567",
+            ),
+            line_evidence_numbers: vec![1],
+            production: Vec::new(),
+        })],
+        evidence: vec![NumberedEvidence {
+            number: 1,
+            citation: citation(),
+        }],
+        next: None,
+    }
+}
+
+fn cited_pull_request_blame_result() -> BlameResult {
+    let pull_request = resource(
+        ResourceKind::PullRequest,
+        "pull_request:1",
+        "https://github.com/ctxrs/ctx/pull/42",
+    );
+    BlameResult {
+        target: ResolvedBlameTarget::PullRequest {
+            selector: "42".to_owned(),
+            pull_request: pull_request.clone(),
+            repository: resource(ResourceKind::Repository, "repository:1", "ctxrs/ctx"),
+        },
+        git_snapshot: None,
+        matches: vec![BlameMatch::PullRequest(PullRequestBlameMatch {
+            pull_request,
+            relationship: PullRequestBlameRelationship::Activity(PullRequestActivity {
+                fact_id: "pr-fact:1".to_owned(),
+                action: PullRequestAction::Referenced,
+                session: resource(ResourceKind::Session, "session:1", "session-1"),
+                direct_actor: None,
+                owning_root: None,
+                fact_occurred_at_ms: None,
+                confidence: FactConfidence::Explicit,
+                state: FactState::Asserted,
+                evidence_numbers: vec![1],
+            }),
+        })],
+        evidence: vec![NumberedEvidence {
+            number: 1,
+            citation: citation(),
+        }],
+        next: None,
+    }
+}
+
 #[test]
 fn exact_v1_frame_round_trips_and_rejects_other_versions() {
     let request = hello(0);
@@ -493,47 +611,7 @@ fn pull_request_selectors_are_positive_numbers_or_canonical_urls() {
 
 #[test]
 fn typed_blame_results_require_complete_deduplicated_evidence() {
-    let result = BlameResult {
-        target: ResolvedBlameTarget::Commit {
-            commit: ResourceRef {
-                id: "commit:1".to_owned(),
-                kind: ResourceKind::Commit,
-                display: "0123456789ab".to_owned(),
-            },
-            repository: ResourceRef {
-                id: "repository:1".to_owned(),
-                kind: ResourceKind::Repository,
-                display: "ctxrs/ctx".to_owned(),
-            },
-        },
-        git_snapshot: None,
-        matches: vec![BlameMatch::Commit(CommitBlameMatch {
-            fact_id: "fact:1".to_owned(),
-            fact_type: CommitFactType::Referenced,
-            predicate: CommitPredicate::ReferencedBy,
-            subject: ResourceRef {
-                id: "commit:1".to_owned(),
-                kind: ResourceKind::Commit,
-                display: "0123456789ab".to_owned(),
-            },
-            object: Some(ResourceRef {
-                id: "session:1".to_owned(),
-                kind: ResourceKind::Session,
-                display: "session-1".to_owned(),
-            }),
-            fact_occurred_at_ms: None,
-            confidence: FactConfidence::Explicit,
-            state: FactState::Asserted,
-            direct_actor: None,
-            owning_root: None,
-            evidence_numbers: vec![1],
-        })],
-        evidence: vec![NumberedEvidence {
-            number: 1,
-            citation: citation(),
-        }],
-        next: None,
-    };
+    let result = cited_commit_blame_result();
     result.validate().unwrap();
 
     let mut unreferenced = result.clone();
@@ -550,6 +628,183 @@ fn typed_blame_results_require_complete_deduplicated_evidence() {
     assert_eq!(
         duplicate_number.validate().unwrap_err().class,
         ErrorClass::Corrupt
+    );
+}
+
+#[test]
+fn typed_blame_results_bind_matches_to_the_request_context() {
+    let commit_request = blame_request(BlameTarget::Commit {
+        oid: "0123456789abcdef".to_owned(),
+        repository: Some("ctxrs/ctx".to_owned()),
+    });
+    let commit_result = cited_commit_blame_result();
+    commit_result.validate_for_request(&commit_request).unwrap();
+
+    let mut wrong_resolved_commit = commit_result.clone();
+    let ResolvedBlameTarget::Commit { commit, .. } = &mut wrong_resolved_commit.target else {
+        unreachable!();
+    };
+    commit.display = "89abcdef0123456789abcdef0123456789abcdef".to_owned();
+    assert_eq!(
+        wrong_resolved_commit
+            .validate_for_request(&commit_request)
+            .unwrap_err()
+            .class,
+        ErrorClass::Corrupt
+    );
+
+    let mut wrong_commit_repository = commit_result.clone();
+    let ResolvedBlameTarget::Commit { repository, .. } = &mut wrong_commit_repository.target else {
+        unreachable!();
+    };
+    repository.display = "ctxrs/other".to_owned();
+    assert_eq!(
+        wrong_commit_repository
+            .validate_for_request(&commit_request)
+            .unwrap_err()
+            .class,
+        ErrorClass::Corrupt
+    );
+
+    let mut unrelated_commit = commit_result.clone();
+    let BlameMatch::Commit(commit_match) = &mut unrelated_commit.matches[0] else {
+        unreachable!();
+    };
+    commit_match.subject = resource(
+        ResourceKind::Commit,
+        "commit:other",
+        "0123456789abcdef0123456789abcdef01234567",
+    );
+    assert_eq!(
+        unrelated_commit
+            .validate_for_request(&commit_request)
+            .unwrap_err()
+            .class,
+        ErrorClass::Corrupt
+    );
+
+    let mut target_as_object = unrelated_commit;
+    let ResolvedBlameTarget::Commit {
+        commit: resolved_commit,
+        ..
+    } = &target_as_object.target
+    else {
+        unreachable!();
+    };
+    let mut object_identity = resolved_commit.clone();
+    object_identity.display = "same exact commit, alternate display".to_owned();
+    let BlameMatch::Commit(commit_match) = &mut target_as_object.matches[0] else {
+        unreachable!();
+    };
+    commit_match.object = Some(object_identity);
+    target_as_object
+        .validate_for_request(&commit_request)
+        .unwrap();
+
+    let mut explicit_absence = commit_result;
+    explicit_absence.matches.clear();
+    explicit_absence.evidence.clear();
+    explicit_absence
+        .validate_for_request(&commit_request)
+        .unwrap();
+
+    let file_request = blame_request(BlameTarget::File {
+        path: "src/lib.rs".to_owned(),
+        repository: Some("ctxrs/ctx".to_owned()),
+        lines: Some(LineRange { start: 42, end: 60 }),
+    });
+    let file_result = cited_file_blame_result(
+        Some(LineRange { start: 42, end: 60 }),
+        LineRange { start: 45, end: 50 },
+    );
+    file_result.validate_for_request(&file_request).unwrap();
+    let mut wrong_file_path = file_result.clone();
+    let ResolvedBlameTarget::File { path, .. } = &mut wrong_file_path.target else {
+        unreachable!();
+    };
+    *path = "src/other.rs".to_owned();
+    assert_eq!(
+        wrong_file_path
+            .validate_for_request(&file_request)
+            .unwrap_err()
+            .class,
+        ErrorClass::Corrupt
+    );
+    assert_eq!(
+        cited_file_blame_result(
+            Some(LineRange { start: 42, end: 60 }),
+            LineRange { start: 41, end: 50 },
+        )
+        .validate_for_request(&file_request)
+        .unwrap_err()
+        .class,
+        ErrorClass::Corrupt
+    );
+    assert_eq!(
+        cited_file_blame_result(None, LineRange { start: 45, end: 50 })
+            .validate_for_request(&file_request)
+            .unwrap_err()
+            .class,
+        ErrorClass::Corrupt
+    );
+
+    let pull_request_request = blame_request(BlameTarget::PullRequest {
+        selector: "42".to_owned(),
+        repository: Some("ctxrs/ctx".to_owned()),
+    });
+    let pull_request_result = cited_pull_request_blame_result();
+    pull_request_result
+        .validate_for_request(&pull_request_request)
+        .unwrap();
+    let mut wrong_resolved_pull_request = pull_request_result.clone();
+    let ResolvedBlameTarget::PullRequest { selector, .. } = &mut wrong_resolved_pull_request.target
+    else {
+        unreachable!();
+    };
+    *selector = "43".to_owned();
+    assert_eq!(
+        wrong_resolved_pull_request
+            .validate_for_request(&pull_request_request)
+            .unwrap_err()
+            .class,
+        ErrorClass::Corrupt
+    );
+    let mut unrelated_pull_request = pull_request_result;
+    let BlameMatch::PullRequest(pull_request_match) = &mut unrelated_pull_request.matches[0] else {
+        unreachable!();
+    };
+    pull_request_match.pull_request.id = "pull_request:other".to_owned();
+    assert_eq!(
+        unrelated_pull_request
+            .validate_for_request(&pull_request_request)
+            .unwrap_err()
+            .class,
+        ErrorClass::Corrupt
+    );
+
+    assert_eq!(
+        cited_commit_blame_result()
+            .validate_for_request(&file_request)
+            .unwrap_err()
+            .class,
+        ErrorClass::Corrupt
+    );
+}
+
+#[test]
+fn typed_blame_results_obey_the_request_limit() {
+    let request = blame_request(BlameTarget::Commit {
+        oid: "0123456789abcdef".to_owned(),
+        repository: Some("ctxrs/ctx".to_owned()),
+    });
+    let mut request = request;
+    request.limit = 1;
+
+    let mut result = cited_commit_blame_result();
+    result.matches.push(result.matches[0].clone());
+    assert_eq!(
+        result.validate_for_request(&request).unwrap_err().class,
+        ErrorClass::Bounds
     );
 }
 

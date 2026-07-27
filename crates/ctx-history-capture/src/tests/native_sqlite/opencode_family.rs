@@ -99,20 +99,34 @@ fn native_kilo_imports_opencode_derived_sqlite_fixture_idempotently() {
         events[0].sync.metadata["source_format"].as_str(),
         Some(KILO_SQLITE_SOURCE_FORMAT)
     );
-    let first_seq = events[0].payload["body"]["session_message_seq"]
-        .as_i64()
-        .expect("Kilo synthesized sequence");
-    let second_seq = events[1].payload["body"]["session_message_seq"]
-        .as_i64()
-        .expect("Kilo synthesized sequence");
-    assert!(first_seq > 0);
-    assert!(second_seq > 0);
-    assert_ne!(first_seq, second_seq);
+    let first_ids = [events[0].id, events[1].id];
+    let first_indexes = [
+        events[0].sync.metadata["provider_event_index"]
+            .as_u64()
+            .expect("Kilo NativePath event index"),
+        events[1].sync.metadata["provider_event_index"]
+            .as_u64()
+            .expect("Kilo NativePath event index"),
+    ];
+    let first_cursors = [
+        events[0].sync.metadata["cursor"]
+            .as_str()
+            .expect("Kilo NativePath event cursor")
+            .to_owned(),
+        events[1].sync.metadata["cursor"]
+            .as_str()
+            .expect("Kilo NativePath event cursor")
+            .to_owned(),
+    ];
+    assert_ne!(first_ids[0], first_ids[1]);
+    assert_ne!(first_indexes[0], first_indexes[1]);
+    assert_ne!(first_cursors[0], first_cursors[1]);
 
     let second = import_kilo_sqlite(
         &fixture,
         &mut store,
         KiloSqliteImportOptions {
+            machine_id: "test-machine".into(),
             source_path: Some(fixture.clone()),
             ..KiloSqliteImportOptions::default()
         },
@@ -122,7 +136,16 @@ fn native_kilo_imports_opencode_derived_sqlite_fixture_idempotently() {
     assert_eq!(second.imported_sessions, 0);
     assert_eq!(second.imported_events, 0);
     assert_eq!(second.skipped_sessions, 1);
-    assert_eq!(second.skipped_events, 2);
+    assert_eq!(second.skipped_events, 0);
+    let reimported = store.events_for_session(session_id).unwrap();
+    assert_eq!([reimported[0].id, reimported[1].id], first_ids);
+    assert_eq!(
+        [
+            reimported[0].sync.metadata["cursor"].as_str().unwrap(),
+            reimported[1].sync.metadata["cursor"].as_str().unwrap(),
+        ],
+        [first_cursors[0].as_str(), first_cursors[1].as_str()]
+    );
 }
 #[cfg(unix)]
 #[test]
@@ -152,11 +175,13 @@ fn native_opencode_synthesizes_stable_session_message_identity_when_seq_is_missi
     let temp = tempdir();
     let fixture = write_opencode_session_message_without_seq_db(&temp);
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let machine_id = "opencode-no-seq-machine";
 
     let summary = import_opencode_sqlite(
         &fixture,
         &mut store,
         OpenCodeSqliteImportOptions {
+            machine_id: machine_id.to_owned(),
             ..OpenCodeSqliteImportOptions::default()
         },
     )
@@ -170,16 +195,50 @@ fn native_opencode_synthesizes_stable_session_message_identity_when_seq_is_missi
         stored_provider_session_id(&store, CaptureProvider::OpenCode, "opencode-no-seq");
     let events = store.events_for_session(session_id).unwrap();
     assert_eq!(events.len(), 2);
-    let first_seq = events[0].payload["body"]["session_message_seq"]
-        .as_i64()
-        .expect("OpenCode synthesized sequence");
-    let second_seq = events[1].payload["body"]["session_message_seq"]
-        .as_i64()
-        .expect("OpenCode synthesized sequence");
-    assert!(first_seq > 0);
-    assert!(second_seq > 0);
-    assert_ne!(first_seq, second_seq);
+    let first_indexes = [
+        events[0].sync.metadata["provider_event_index"]
+            .as_u64()
+            .expect("OpenCode NativePath event index"),
+        events[1].sync.metadata["provider_event_index"]
+            .as_u64()
+            .expect("OpenCode NativePath event index"),
+    ];
+    let first_cursors = [
+        events[0].sync.metadata["cursor"]
+            .as_str()
+            .expect("OpenCode NativePath event cursor")
+            .to_owned(),
+        events[1].sync.metadata["cursor"]
+            .as_str()
+            .expect("OpenCode NativePath event cursor")
+            .to_owned(),
+    ];
+    assert_ne!(first_indexes[0], first_indexes[1]);
+    assert_ne!(first_cursors[0], first_cursors[1]);
     assert_ne!(events[0].id, events[1].id);
+    let first_ids = [events[0].id, events[1].id];
+
+    let second = import_opencode_sqlite(
+        &fixture,
+        &mut store,
+        OpenCodeSqliteImportOptions {
+            machine_id: machine_id.to_owned(),
+            ..OpenCodeSqliteImportOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(second.failed, 0, "{second:?}");
+    assert_eq!(second.imported_sessions, 0);
+    assert_eq!(second.imported_events, 0);
+    let reimported = store.events_for_session(session_id).unwrap();
+    assert_eq!([reimported[0].id, reimported[1].id], first_ids);
+    assert_eq!(
+        [
+            reimported[0].sync.metadata["cursor"].as_str().unwrap(),
+            reimported[1].sync.metadata["cursor"].as_str().unwrap(),
+        ],
+        [first_cursors[0].as_str(), first_cursors[1].as_str()]
+    );
 }
 
 #[test]
@@ -195,32 +254,17 @@ fn native_opencode_rejects_negative_session_message_seq() {
     drop(conn);
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
 
-    let summary = import_opencode_sqlite(
-        &fixture,
-        &mut store,
-        OpenCodeSqliteImportOptions {
-            ..OpenCodeSqliteImportOptions::default()
-        },
-    )
-    .unwrap();
+    let error =
+        import_opencode_sqlite(&fixture, &mut store, OpenCodeSqliteImportOptions::default())
+            .unwrap_err();
 
-    assert_eq!(summary.failed, 1);
-    assert!(summary.failures[0]
-        .error
-        .contains("OpenCode session_message seq must be nonnegative"));
-    assert_eq!(summary.imported_events, 2);
-    let events = store
-        .list_sessions()
-        .unwrap()
-        .into_iter()
-        .flat_map(|session| store.events_for_session(session.id).unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(events.len(), summary.imported_events);
-    assert!(events.iter().all(|event| {
-        event.payload["body"]["session_message_seq"]
-            .as_i64()
-            .is_some_and(|seq| seq >= 0)
-    }));
+    assert!(
+        error.to_string().contains(
+            "OpenCode NativePath session_message contains a non-integer native ordering value"
+        ),
+        "{error}"
+    );
+    assert!(store.list_sessions().unwrap().is_empty());
 }
 
 #[test]
@@ -292,7 +336,12 @@ fn native_opencode_rejects_oversized_sqlite_text_value_and_imports_other_rows() 
     .expect("oversized rows should be rejected without aborting the whole import");
 
     assert_eq!(summary.failed, 1, "unexpected summary: {summary:?}");
-    assert!(summary.failures[0].error.contains("exceeds the"));
+    assert!(
+        summary.failures[0]
+            .error
+            .starts_with("oversized_retained_content:"),
+        "{summary:?}"
+    );
     assert_eq!(summary.skipped, 0, "unexpected summary: {summary:?}");
     assert_eq!(summary.skipped_events, 0, "unexpected summary: {summary:?}");
     assert_eq!(
@@ -328,10 +377,15 @@ fn native_opencode_reports_all_oversized_sqlite_text_values_without_scaffolding(
     .expect("oversized rows should be rejected without aborting the import");
 
     assert_eq!(summary.failed, 1, "unexpected summary: {summary:?}");
-    assert!(summary.failures[0].error.contains("exceeds the"));
+    assert!(
+        summary.failures[0]
+            .error
+            .starts_with("oversized_retained_content:"),
+        "{summary:?}"
+    );
     assert_eq!(summary.skipped, 0, "unexpected summary: {summary:?}");
     assert_eq!(summary.skipped_events, 0, "unexpected summary: {summary:?}");
-    assert_eq!(summary.imported_sessions, 0);
+    assert_eq!(summary.imported_sessions, 2);
     assert_eq!(summary.imported_events, 0);
 }
 
@@ -353,7 +407,12 @@ fn native_opencode_rejects_oversized_legacy_message_value_without_scaffolding() 
     .expect("oversized legacy message rows should be rejected without aborting the import");
 
     assert_eq!(summary.failed, 1, "{summary:?}");
-    assert!(summary.failures[0].error.contains("exceeds the"));
+    assert!(
+        summary.failures[0]
+            .error
+            .starts_with("oversized_retained_content:"),
+        "{summary:?}"
+    );
     assert_eq!(summary.skipped, 0, "{summary:?}");
     assert_eq!(summary.skipped_events, 0, "{summary:?}");
     assert_eq!(summary.imported_events, 0, "{summary:?}");
@@ -381,7 +440,7 @@ fn native_opencode_imports_message_part_text_and_metadata() {
 
     assert_eq!(summary.failed, 0, "{:?}", summary.failures);
     assert_eq!(summary.imported_sessions, 1);
-    assert_eq!(summary.imported_events, 1);
+    assert_eq!(summary.imported_events, 2);
     assert_message_part_import(
         &store,
         CaptureProvider::OpenCode,
@@ -413,7 +472,7 @@ fn native_kilo_imports_message_part_text_and_metadata() {
 
     assert_eq!(summary.failed, 0, "{:?}", summary.failures);
     assert_eq!(summary.imported_sessions, 1);
-    assert_eq!(summary.imported_events, 1);
+    assert_eq!(summary.imported_events, 2);
     assert_message_part_import(
         &store,
         CaptureProvider::Kilo,
@@ -446,7 +505,7 @@ fn native_mimocode_imports_message_part_text_and_metadata_idempotently() {
 
     assert_eq!(first.failed, 0, "{:?}", first.failures);
     assert_eq!(first.imported_sessions, 1);
-    assert_eq!(first.imported_events, 1);
+    assert_eq!(first.imported_events, 2);
     assert_message_part_import(
         &store,
         CaptureProvider::MiMoCode,
@@ -467,7 +526,7 @@ fn native_mimocode_imports_message_part_text_and_metadata_idempotently() {
     assert_eq!(second.failed, 0, "{:?}", second.failures);
     assert_eq!(second.imported_sessions, 0);
     assert_eq!(second.imported_events, 0);
-    assert_eq!(second.skipped_sessions, 0);
+    assert_eq!(second.skipped_sessions, 1);
     assert_eq!(second.skipped_events, 0);
 }
 
@@ -494,9 +553,10 @@ fn native_opencode_message_part_invalid_json_reports_failure() {
             .unwrap();
 
     assert_eq!(summary.failed, 1);
-    assert!(summary.failures[0]
-        .error
-        .contains("invalid JSON in message part part-text"));
+    assert!(
+        summary.failures[0].error.starts_with("malformed_json:"),
+        "{summary:?}"
+    );
 }
 
 fn assert_message_part_import(
@@ -508,7 +568,7 @@ fn assert_message_part_import(
 ) {
     let session_id = stored_provider_session_id(store, provider, provider_session_id);
     let events = store.events_for_session(session_id).unwrap();
-    assert_eq!(events.len(), 1);
+    assert_eq!(events.len(), 2);
     assert!(!events
         .iter()
         .any(|event| event.event_type == EventType::ToolOutput));
@@ -517,36 +577,42 @@ fn assert_message_part_import(
         .find(|event| event.event_type == EventType::Message)
         .expect("message part event imported");
     assert_eq!(event.event_type, EventType::Message);
-    assert_eq!(event.payload["body"]["text"].as_str(), Some(oracle_text));
+    assert_eq!(event.payload["text"].as_str(), Some(oracle_text));
+    assert_eq!(event.payload["message_id"].as_str(), Some("part-message"));
     assert_eq!(
-        event.payload["body"]["message_id"].as_str(),
-        Some("part-message")
+        event.sync.metadata["native_record_id"].as_str(),
+        Some("part-message:part-text")
     );
-    assert_eq!(event.payload["body"]["part_id"].as_str(), Some("part-text"));
     assert_eq!(
         event.sync.metadata["source_format"].as_str(),
         Some(source_format)
     );
-    let rendered = serde_json::to_string(event).unwrap();
-    assert!(rendered.contains("message:part-message:part:part-text"));
-    assert!(!rendered.contains("session_message:"));
+    let text_rendered = serde_json::to_string(event).unwrap();
+    assert!(text_rendered.contains("message:part-message:part:part-text"));
+    assert!(!text_rendered.contains("session_message:"));
+
+    let patch = events
+        .iter()
+        .find(|event| event.sync.metadata["native_record_id"] == "part-message:part-patch")
+        .expect("input-side patch part imported");
+    let patch_rendered = serde_json::to_string(patch).unwrap();
+    assert!(patch_rendered.contains("src/opencode_part.txt"));
+    assert!(patch_rendered.contains("src/opencode_part_from_files.txt"));
+    assert!(patch_rendered.contains("contained_patch_or_diff"));
+    assert!(!patch_rendered.contains("*** Begin Patch"));
+    assert!(!patch_rendered.contains("raw-opencode-patch-needle"));
+
+    let rendered = serde_json::to_string(&events).unwrap();
     assert!(!rendered.contains("part-tool"));
     assert!(!rendered.contains("write_file"));
     assert!(!rendered.contains("outputPath"));
-    assert!(!rendered.contains("part-patch"));
-    assert!(!rendered.contains("opencode_part_from_files"));
-    assert!(!rendered.contains("*** Begin Patch"));
-    assert!(!rendered.contains("raw-opencode-patch-needle"));
+    assert!(!rendered.contains("src/tool_arg_should_not_touch.txt"));
 
     assert!(store
         .search_event_hits(oracle_text, 10)
         .unwrap()
         .iter()
         .any(|hit| hit.provider == Some(provider)));
-    assert!(store
-        .search_event_hits("Begin Patch", 10)
-        .unwrap()
-        .is_empty());
     assert!(store
         .search_event_hits("raw-opencode-patch-needle", 10)
         .unwrap()
@@ -561,18 +627,10 @@ fn assert_message_part_import(
         .is_empty());
 
     let archive = store.export_archive().unwrap();
-    assert!(archive
-        .files_touched
-        .iter()
-        .any(|file| file.path == "src/opencode_part.txt"));
-    assert!(archive
-        .files_touched
-        .iter()
-        .any(|file| file.path == "src/opencode_part_from_files.txt"));
-    assert!(!archive
-        .files_touched
-        .iter()
-        .any(|file| file.path == "src/tool_arg_should_not_touch.txt"));
+    assert!(
+        archive.files_touched.is_empty(),
+        "retained input-side tool metadata must not synthesize durable file touches"
+    );
 }
 
 #[test]
@@ -592,7 +650,10 @@ fn native_opencode_reports_malformed_and_corrupt_db() {
     )
     .unwrap();
     assert_eq!(summary.failed, 1);
-    assert!(summary.failures[0].error.contains("invalid JSON"));
+    assert!(
+        summary.failures[0].error.starts_with("malformed_json:"),
+        "{summary:?}"
+    );
 
     let err = import_opencode_sqlite(&corrupt, &mut store, OpenCodeSqliteImportOptions::default())
         .unwrap_err();
@@ -664,26 +725,25 @@ fn native_opencode_keeps_metadata_only_session_message_authoritative() {
     )
     .unwrap();
 
-    assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+    assert_eq!(summary.failed, 1, "{summary:?}");
+    assert!(
+        summary.failures[0]
+            .error
+            .starts_with("unknown_record_type:"),
+        "{summary:?}"
+    );
     assert_eq!(summary.imported_sessions, 1);
-    assert_eq!(summary.imported_events, 1);
+    assert_eq!(summary.imported_events, 0);
     let session_id = store
         .session_by_external_session(CaptureProvider::OpenCode, "strict-root")
         .unwrap()
         .unwrap()
         .id;
-    let events = store.events_for_session(session_id).unwrap();
-    assert_eq!(events.len(), 1);
-    assert!(events[0].payload.to_string().contains("metadata-only"));
-    assert!(!events[0]
-        .payload
-        .to_string()
-        .contains("legacy fallback prompt"));
-    let session = store.get_session(session_id).unwrap();
-    assert_eq!(
-        session.sync.metadata["metadata"]["legacy_projection"]["selected_message_table"].as_str(),
-        Some("session_message")
-    );
+    assert!(store.events_for_session(session_id).unwrap().is_empty());
+    assert!(store
+        .search_event_hits("legacy fallback prompt", 10)
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -702,10 +762,18 @@ fn native_opencode_rejects_malformed_authoritative_rows_without_legacy_fallback(
     .unwrap();
 
     assert_eq!(summary.failed, 1, "{:?}", summary.failures);
-    assert!(summary.failures[0].error.contains("invalid JSON"));
-    assert_eq!(summary.imported_sessions, 0);
+    assert!(
+        summary.failures[0].error.starts_with("malformed_json:"),
+        "{summary:?}"
+    );
+    assert_eq!(summary.imported_sessions, 1);
     assert_eq!(summary.imported_events, 0);
-    assert!(store.list_sessions().unwrap().is_empty());
+    let session_id = stored_provider_session_id(&store, CaptureProvider::OpenCode, "strict-root");
+    assert!(store.events_for_session(session_id).unwrap().is_empty());
+    assert!(store
+        .search_event_hits("legacy fallback prompt", 10)
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -714,22 +782,21 @@ fn native_opencode_rejects_malformed_metadata_authoritative_rows_without_legacy_
     let fixture = write_opencode_session_message_metadata_bad_seq_with_legacy_message_db(&temp);
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
 
-    let summary = import_opencode_sqlite(
-        &fixture,
-        &mut store,
-        OpenCodeSqliteImportOptions {
-            ..OpenCodeSqliteImportOptions::default()
-        },
-    )
-    .unwrap();
+    let error =
+        import_opencode_sqlite(&fixture, &mut store, OpenCodeSqliteImportOptions::default())
+            .unwrap_err();
 
-    assert_eq!(summary.failed, 1, "{summary:?}");
-    assert!(summary.failures[0]
-        .error
-        .contains("OpenCode session_message seq must be nonnegative"));
-    assert_eq!(summary.imported_sessions, 0);
-    assert_eq!(summary.imported_events, 0);
+    assert!(
+        error.to_string().contains(
+            "OpenCode NativePath session_message contains a non-integer native ordering value"
+        ),
+        "{error}"
+    );
     assert!(store.list_sessions().unwrap().is_empty());
+    assert!(store
+        .search_event_hits("legacy fallback prompt", 10)
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -747,7 +814,7 @@ fn native_opencode_imports_tool_only_sqlite_rows() {
     )
     .unwrap();
 
-    assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+    assert_eq!(summary.failed, 0, "{summary:?}");
     assert_eq!(summary.imported_sessions, 1);
     assert_eq!(summary.imported_events, 1);
     let session_id = stored_provider_session_id(&store, CaptureProvider::OpenCode, "strict-root");
@@ -771,26 +838,25 @@ fn native_opencode_keeps_metadata_only_session_entry_authoritative() {
     )
     .unwrap();
 
-    assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+    assert_eq!(summary.failed, 1, "{summary:?}");
+    assert!(
+        summary.failures[0]
+            .error
+            .starts_with("unknown_record_type:"),
+        "{summary:?}"
+    );
     assert_eq!(summary.imported_sessions, 1);
-    assert_eq!(summary.imported_events, 1);
+    assert_eq!(summary.imported_events, 0);
     let session_id = store
         .session_by_external_session(CaptureProvider::OpenCode, "strict-root")
         .unwrap()
         .unwrap()
         .id;
-    let events = store.events_for_session(session_id).unwrap();
-    assert_eq!(events.len(), 1);
-    assert!(events[0].payload.to_string().contains("metadata-only"));
-    assert!(!events[0]
-        .payload
-        .to_string()
-        .contains("legacy fallback prompt"));
-    let session = store.get_session(session_id).unwrap();
-    assert_eq!(
-        session.sync.metadata["metadata"]["legacy_projection"]["selected_message_table"].as_str(),
-        Some("session_entry")
-    );
+    assert!(store.events_for_session(session_id).unwrap().is_empty());
+    assert!(store
+        .search_event_hits("legacy fallback prompt", 10)
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -808,11 +874,17 @@ fn native_kilo_imports_metadata_only_sqlite_rows() {
     )
     .unwrap();
 
-    assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+    assert_eq!(summary.failed, 1, "{summary:?}");
+    assert!(
+        summary.failures[0]
+            .error
+            .starts_with("unknown_record_type:"),
+        "{summary:?}"
+    );
     assert_eq!(summary.imported_sessions, 1);
-    assert_eq!(summary.imported_events, 1);
+    assert_eq!(summary.imported_events, 0);
     let session_id = stored_provider_session_id(&store, CaptureProvider::Kilo, "strict-root");
-    assert_eq!(store.events_for_session(session_id).unwrap().len(), 1);
+    assert!(store.events_for_session(session_id).unwrap().is_empty());
 }
 
 #[test]
@@ -848,7 +920,9 @@ fn native_opencode_rejects_changed_message_schema_before_querying() {
     let err = import_opencode_sqlite(&fixture, &mut store, OpenCodeSqliteImportOptions::default())
         .unwrap_err();
 
-    assert!(err
-        .to_string()
-        .contains("OpenCode SQLite message table missing required column(s): data"));
+    assert!(
+        err.to_string()
+            .contains("OpenCode NativePath message is missing required column data"),
+        "{err}"
+    );
 }

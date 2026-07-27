@@ -2,7 +2,10 @@ use std::{
     collections::HashMap,
     fs,
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use chrono::{DateTime, Utc};
@@ -179,13 +182,23 @@ fn output_failure_does_not_stop_later_core_pages() {
     );
     let store_path = directory.path().join("ctx.sqlite");
     let mut store = Store::open(&store_path).unwrap();
-    let mut options = ProviderImportOptions::default();
-    options.import_profile = ImportProfile::CoreAndPro(Arc::new(FailingSink));
+    let failing = Arc::new(FailingSink::default());
+    let options = ProviderImportOptions {
+        import_profile: ImportProfile::CoreAndPro(failing.clone()),
+        ..Default::default()
+    };
 
-    let result =
-        import_forgecode_nativepath(&source_path, &mut store, context(&source_path), options);
+    let summary =
+        import_forgecode_nativepath(&source_path, &mut store, context(&source_path), options)
+            .unwrap();
 
-    assert!(result.is_err());
+    assert_eq!(summary.imported_events, 20);
+    assert_eq!(summary.failed, 1);
+    assert_eq!(
+        summary.failures[0].error,
+        "ForgeCode Pro output is behind committed Core"
+    );
+    assert!(failing.behind.load(Ordering::SeqCst) > 0);
     assert_eq!(event_count(&store), 20);
     assert!(store
         .list_sessions()
@@ -193,6 +206,25 @@ fn output_failure_does_not_stop_later_core_pages() {
         .into_iter()
         .flat_map(|session| store.events_for_session(session.id).unwrap())
         .all(|event| !event.payload.to_string().contains(SUCCESS_SENTINEL)));
+
+    let replay = Arc::new(RecordingSink::default());
+    let replay_options = ProviderImportOptions {
+        import_profile: ImportProfile::ProReplayOnly(replay.clone()),
+        ..Default::default()
+    };
+    let replay_summary = import_forgecode_nativepath(
+        &source_path,
+        &mut store,
+        context(&source_path),
+        replay_options,
+    )
+    .unwrap();
+    assert_eq!(replay_summary.failed, 0);
+    assert_eq!(
+        replay.contents.lock().unwrap().as_slice(),
+        [SUCCESS_SENTINEL.as_bytes()]
+    );
+    assert_eq!(event_count(&store), 20);
 }
 
 #[test]
@@ -210,8 +242,10 @@ fn pro_can_activate_after_core_and_replay_success_body() {
     assert_eq!(event_count(&store), 1);
 
     let sink = Arc::new(RecordingSink::default());
-    let mut options = ProviderImportOptions::default();
-    options.import_profile = ImportProfile::ProReplayOnly(sink.clone());
+    let options = ProviderImportOptions {
+        import_profile: ImportProfile::ProReplayOnly(sink.clone()),
+        ..Default::default()
+    };
     let replay =
         import_forgecode_nativepath(&source_path, &mut store, context(&source_path), options)
             .unwrap();
@@ -258,7 +292,10 @@ fn missing_root_resolves_to_the_canonical_database_locator() {
     }
 }
 
-struct FailingSink;
+#[derive(Default)]
+struct FailingSink {
+    behind: AtomicUsize,
+}
 
 impl ProOutputSink for FailingSink {
     fn inventory_generation(&self) -> u64 {
@@ -281,6 +318,10 @@ impl ProOutputSink for FailingSink {
         _page: ProOutputMaterializationPage,
     ) -> std::result::Result<ProOutputPageResult, ProOutputSinkError> {
         Err(ProOutputSinkError::new("test_failure", "expected"))
+    }
+
+    fn mark_behind(&self, _error: ProOutputSinkError) {
+        self.behind.fetch_add(1, Ordering::SeqCst);
     }
 }
 

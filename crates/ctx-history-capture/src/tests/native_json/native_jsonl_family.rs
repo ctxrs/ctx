@@ -10,15 +10,13 @@ use crate::tests::support::provider_state::stored_provider_session_id;
 use crate::{
     import_claude_projects_jsonl_tree, import_continue_cli_sessions, import_pi_session_jsonl,
     provider_source_for_path, ClaudeProjectsImportOptions, ContinueCliImportOptions,
-    PiSessionImportOptions, ProviderImportSupport, ProviderSourceStatus, PROVIDER_MAX_TEXT_CHARS,
+    PiSessionImportOptions, ProviderImportSupport, ProviderSourceStatus,
 };
 use chrono::{DateTime, Utc};
 use ctx_history_core::{AgentType, CaptureProvider, Confidence, EventType};
 use ctx_history_store::Store;
 use serde_json::json;
 use std::fs;
-
-use crate::PROVIDER_MAX_PREVIEW_CHARS;
 
 #[test]
 fn continue_cli_empty_history_imports_metadata_only_session() {
@@ -132,16 +130,6 @@ fn continue_cli_tool_call_redacts_raw_outputs_and_reimports_file_touches() {
         .iter()
         .find(|event| event.event_type == EventType::ToolCall)
         .expect("tool call metadata event imported");
-    assert_eq!(
-        tool.payload["body"]["text_retention"],
-        json!({
-            "mode": "bounded",
-            "limit_chars": PROVIDER_MAX_PREVIEW_CHARS,
-            "truncated": false,
-            "omission_policy": "none",
-            "omission_applied": false,
-        })
-    );
     let rendered_tool = serde_json::to_string(tool).unwrap();
     assert!(rendered_tool.contains("apply_patch"));
     assert!(!rendered_tool.contains(raw_output));
@@ -184,7 +172,7 @@ fn continue_cli_tool_call_redacts_raw_outputs_and_reimports_file_touches() {
     assert_eq!(second.imported_sessions, 0);
     assert_eq!(second.imported_events, 0);
     assert_eq!(second.skipped_sessions, 1);
-    assert_eq!(second.skipped_events, 3);
+    assert_eq!(second.skipped_events, 2);
 }
 
 #[test]
@@ -221,7 +209,7 @@ fn native_pi_fixture_imports_event_types_searches_and_reimports() {
     assert_event_type_count(&events, EventType::ToolOutput, 0);
     assert_event_type_count(&events, EventType::CommandOutput, 0);
     assert_event_type_count(&events, EventType::Summary, 1);
-    assert_events_have_provider_citations(&events);
+    assert_events_have_provider_citations(&store, &events);
 
     assert_search_hits_provider(
         &store,
@@ -351,7 +339,7 @@ fn native_claude_manifested_files_import_parent_and_subagent() {
     assert_eq!(replay.imported_sessions, 0);
     assert_eq!(replay.imported_events, 0);
     assert_eq!(replay.skipped_sessions, 1);
-    assert_eq!(replay.skipped_events, 2);
+    assert_eq!(replay.skipped_events, 0);
 
     {
         use std::io::Write;
@@ -456,17 +444,17 @@ fn native_claude_manifested_file_crosses_a_batch_boundary_and_replays() {
     assert_eq!(replay.imported_sessions, 0);
     assert_eq!(replay.imported_events, 0);
     assert_eq!(replay.skipped_sessions, 1);
-    assert_eq!(replay.skipped_events, 65);
+    assert_eq!(replay.skipped_events, 0);
 }
 
 #[test]
-fn native_claude_reports_text_limit_and_truncation_independently() {
+fn native_claude_retains_core_text_in_its_provider_native_shape() {
     let temp = tempdir();
     let root = temp.path().join("claude/projects/-workspace");
     fs::create_dir_all(&root).unwrap();
     let text = "x".repeat(20_000);
     fs::write(
-        root.join("bounded-text.jsonl"),
+        root.join("claude-bounded-text.jsonl"),
         jsonl_line(json!({
             "sessionId": "claude-bounded-text",
             "timestamp": "2026-07-04T14:00:00Z",
@@ -480,7 +468,7 @@ fn native_claude_reports_text_limit_and_truncation_independently() {
     .unwrap();
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
 
-    let path = root.join("bounded-text.jsonl");
+    let path = root.join("claude-bounded-text.jsonl");
     let summary = import_claude_projects_jsonl_tree(
         &path,
         &mut store,
@@ -497,27 +485,13 @@ fn native_claude_reports_text_limit_and_truncation_independently() {
         stored_provider_session_id(&store, CaptureProvider::Claude, "claude-bounded-text");
     let events = store.events_for_session(session_id).unwrap();
     assert_eq!(events.len(), 1);
-    let payload = &events[0].payload["body"];
-    assert_eq!(
-        payload["text"].as_str().unwrap().chars().count(),
-        PROVIDER_MAX_TEXT_CHARS
-    );
-    assert_eq!(
-        payload["text_retention"],
-        json!({
-            "mode": "bounded",
-            "limit_chars": PROVIDER_MAX_TEXT_CHARS,
-            "truncated": true,
-            "omission_policy": "none",
-            "omission_applied": false,
-        })
-    );
-    assert!(payload.get("content_retention").is_none());
-    assert!(payload.get("truncated").is_none());
+    let payload = &events[0].payload;
+    assert_eq!(payload["body"].as_str().unwrap().chars().count(), 20_000);
+    assert!(payload["body_sha256"].as_str().is_some());
 }
 
 #[test]
-fn native_claude_empty_manifested_jsonl_is_a_noop() {
+fn native_claude_empty_manifested_jsonl_imports_metadata_only_session() {
     let temp = tempdir();
     let root = temp.path().join("claude/projects/-workspace");
     fs::create_dir_all(&root).unwrap();
@@ -535,7 +509,10 @@ fn native_claude_empty_manifested_jsonl_is_a_noop() {
     .unwrap();
 
     assert_eq!(summary.failed, 0, "{:?}", summary.failures);
-    assert!(store.list_sessions().unwrap().is_empty());
+    assert_eq!(summary.imported_sessions, 1);
+    assert_eq!(summary.imported_events, 0);
+    let session_id = stored_provider_session_id(&store, CaptureProvider::Claude, "empty");
+    assert!(store.events_for_session(session_id).unwrap().is_empty());
 }
 
 #[test]
@@ -543,7 +520,7 @@ fn native_claude_manifested_file_advances_past_oversized_jsonl_record() {
     let temp = tempdir();
     let root = temp.path().join("claude/projects/-workspace");
     fs::create_dir_all(&root).unwrap();
-    let path = root.join("oversized-claude.jsonl");
+    let path = root.join("claude-oversized.jsonl");
     let mut bytes = Vec::new();
     bytes.extend_from_slice(
         jsonl_line(json!({

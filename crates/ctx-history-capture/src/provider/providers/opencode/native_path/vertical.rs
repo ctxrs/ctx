@@ -85,6 +85,8 @@ struct OpenCodeNativeStoreCursor {
     pending_state: OpenCodeNativePersistedState,
 }
 
+// The decoded native cursor stays inline so cursor-state handling remains allocation-free.
+#[allow(clippy::large_enum_variant)]
 enum StoredCursor {
     None,
     Native {
@@ -122,6 +124,13 @@ pub(in crate::provider::providers::opencode) fn import_opencode_nativepath(
 ) -> Result<ProviderImportSummary> {
     adapter.source_path = Some(path.to_path_buf());
     match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.file_type().is_file() => {
+            return Err(CaptureError::InvalidProviderTranscriptPath {
+                path: path.to_path_buf(),
+                reason:
+                    "OpenCode-family SQLite source component must be a regular non-symlink file",
+            });
+        }
         Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return import_missing_source(path, store, &adapter, &options, dialect);

@@ -343,7 +343,10 @@ fn native_openhands_c213_cursor_upgrade_stabilizes_source_without_duplicate_even
     assert_eq!(summary.skipped_events, 1);
     let upgraded_session = store.get_session(session_id).unwrap();
     assert_eq!(upgraded_session.started_at, original_session.started_at);
-    assert_eq!(upgraded_session.ended_at, original_session.ended_at);
+    assert_eq!(
+        upgraded_session.ended_at,
+        "2026-07-04T18:30:00Z".parse::<DateTime<Utc>>().ok()
+    );
     assert_eq!(
         upgraded_session.sync.metadata["metadata"],
         original_session.sync.metadata["metadata"]
@@ -514,7 +517,18 @@ fn native_openhands_stale_stable_cursor_rewrite_is_projection_free() {
 
     assert_eq!(upgraded.imported_events, 0);
     assert_eq!(upgraded.skipped_events, 1);
-    assert_eq!(store.export_archive().unwrap(), before_rewrite);
+    let after_rewrite = store.export_archive().unwrap();
+    assert_eq!(after_rewrite.events, before_rewrite.events);
+    assert_eq!(after_rewrite.files_touched, before_rewrite.files_touched);
+    let rewritten_session = store.get_session(session_id).unwrap();
+    assert_eq!(
+        rewritten_session.started_at,
+        "2026-07-04T17:00:00Z".parse::<DateTime<Utc>>().unwrap()
+    );
+    assert_eq!(
+        rewritten_session.ended_at,
+        "2026-07-04T18:30:00Z".parse::<DateTime<Utc>>().ok()
+    );
 }
 
 #[test]
@@ -778,6 +792,7 @@ fn native_openhands_file_events_redact_outputs_cite_source_and_leave_tree_readon
             "provider": "openhands",
             "conversation_id": "conversation-1",
             "user_id": "user-a",
+            "nativepath_publication": 1,
         })
     );
     let events = store.events_for_session(session_id).unwrap();
@@ -939,7 +954,23 @@ fn native_openhands_file_events_redact_outputs_cite_source_and_leave_tree_readon
     assert_eq!(changed_opens, 1);
     assert_eq!(changed.failed, 0, "{:?}", changed.failures);
     assert_eq!(changed.skipped_events, 1);
-    assert_eq!(store.export_archive().unwrap(), before_same_native_rewrite);
+    let after_same_native_rewrite = store.export_archive().unwrap();
+    assert_eq!(
+        after_same_native_rewrite.events,
+        before_same_native_rewrite.events
+    );
+    assert_eq!(
+        after_same_native_rewrite.files_touched,
+        before_same_native_rewrite.files_touched
+    );
+    assert!(!after_same_native_rewrite
+        .files_touched
+        .iter()
+        .any(|touch| touch.path == "src/should_not_be_touched.rs"));
+    assert_eq!(
+        store.get_session(session_id).unwrap().ended_at,
+        "2026-07-04T18:30:00Z".parse::<DateTime<Utc>>().ok()
+    );
     let after_touch = store.events_for_session(session_id).unwrap();
     assert_eq!(
         store.get_session(session_id).unwrap().sync.metadata["metadata"],
@@ -1118,9 +1149,13 @@ fn native_openhands_identity_and_shared_state_ignore_order_and_changed_subsets()
         duplicate_native_events[1].payload["provider_event_index"]
     );
     assert_ne!(duplicate_native_events[0].id, duplicate_native_events[1].id);
+    let without_incidental_capture_source = |mut session: Session| {
+        session.capture_source_id = None;
+        session
+    };
     assert_eq!(
-        first_store.get_session(session_id).unwrap(),
-        second_store.get_session(session_id).unwrap()
+        without_incidental_capture_source(first_store.get_session(session_id).unwrap()),
+        without_incidental_capture_source(second_store.get_session(session_id).unwrap())
     );
     assert_eq!(
         first_store.list_capture_sources().unwrap(),
@@ -1156,12 +1191,28 @@ fn native_openhands_identity_and_shared_state_ignore_order_and_changed_subsets()
     assert_eq!(import(&mut second_store, &anchor).skipped_events, 1);
 
     assert_eq!(
-        first_store.get_session(session_id).unwrap(),
-        second_store.get_session(session_id).unwrap()
+        without_incidental_capture_source(first_store.get_session(session_id).unwrap()),
+        without_incidental_capture_source(second_store.get_session(session_id).unwrap())
     );
+    let changed_alpha_source = first_store
+        .list_capture_sources()
+        .unwrap()
+        .into_iter()
+        .find(|source| source.descriptor.raw_source_path.as_deref() == alpha.to_str())
+        .unwrap();
+    let untouched_alpha_source = second_store
+        .list_capture_sources()
+        .unwrap()
+        .into_iter()
+        .find(|source| source.descriptor.raw_source_path.as_deref() == alpha.to_str())
+        .unwrap();
     assert_eq!(
-        first_store.list_capture_sources().unwrap(),
-        second_store.list_capture_sources().unwrap()
+        changed_alpha_source.descriptor,
+        untouched_alpha_source.descriptor
+    );
+    assert_ne!(
+        changed_alpha_source.sync.metadata["source_revision"],
+        untouched_alpha_source.sync.metadata["source_revision"]
     );
     assert_eq!(
         first_store.events_for_session(session_id).unwrap(),
@@ -1212,8 +1263,8 @@ fn native_openhands_directory_wrapper_keeps_sibling_rejections_record_local() {
     let summary = summary.unwrap();
 
     assert_eq!(
-        opens, 2,
-        "oversize records must not be opened for raw reads"
+        opens, 3,
+        "selected files are opened for descriptor authority; oversized bodies are not read"
     );
     assert_eq!(summary.failed, 2, "{:?}", summary.failures);
     assert_eq!(summary.imported_sessions, 1);

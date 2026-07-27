@@ -79,6 +79,7 @@ const EVENT_BASE_BYTES: usize = 1024;
 const OUTPUT_BASE_BYTES: usize = 1024;
 const MAX_TOUCHES_PER_RECORD: usize = PAGE_MAX_UNITS - 4;
 const CURSOR_KIND: &str = "mistral-vibe-nativepath";
+const LOCATOR_REPAIR_PREVIOUS_POLICY_REVISION: u32 = 7;
 const OUTPUT_PARSER_REVISION: &str = "mistral-vibe-nativepath-output-v1";
 const PREFIX_HASH_DOMAIN: &[u8] = b"ctx-mistral-vibe-nativepath-prefix-v1\0";
 const PUBLICATION_DOMAIN: &[u8] = b"ctx-mistral-vibe-nativepath-publication-v1\0";
@@ -354,10 +355,10 @@ impl Checkpoint {
         }
     }
 
-    fn supported(&self) -> bool {
+    fn supported_at_policy(&self, policy_revision: u32) -> bool {
         self.version == CURSOR_VERSION
             && self.capture_revision == MISTRAL_VIBE_CAPTURE_REVISION
-            && self.policy_revision == MISTRAL_VIBE_POLICY_REVISION
+            && self.policy_revision == policy_revision
             && self.provider == CaptureProvider::MistralVibe.as_str()
             && self.source_format == MISTRAL_VIBE_SOURCE_FORMAT
     }
@@ -695,6 +696,7 @@ fn open_source(
 ) -> Result<OpenedSource> {
     let mut generation = 0_u64;
     let mut prior = None;
+    let mut locator_policy_upgrade = false;
     let mut lifecycle = SourceLifecycle::Fresh;
     let mut force_publication = stored.is_none();
     if let Some(stored) = stored {
@@ -704,7 +706,30 @@ fn open_source(
                 prior = Some(checkpoint);
             }
             None => {
-                if let Some(migrated) = migrate_released_cursor(
+                let previous_policy = decode_native_checkpoint_at_policy(
+                    &stored.cursor,
+                    LOCATOR_REPAIR_PREVIOUS_POLICY_REVISION,
+                )?;
+                if let Some(previous_policy) = previous_policy {
+                    force_publication = true;
+                    if previous_policy.machine_id == machine_id
+                        && previous_policy.canonical_source_identity == canonical_source_identity
+                        && previous_policy.session.provider_session_id
+                            == session.provider_session_id
+                    {
+                        generation = previous_policy.generation;
+                        prior = Some(previous_policy);
+                        locator_policy_upgrade = true;
+                        lifecycle = SourceLifecycle::Migrated;
+                    } else {
+                        generation = previous_policy.generation.checked_add(1).ok_or(
+                            CaptureError::SystemInvariant(
+                                "Mistral Vibe source generation overflowed",
+                            ),
+                        )?;
+                        lifecycle = SourceLifecycle::Replace;
+                    }
+                } else if let Some(migrated) = migrate_released_cursor(
                     &stored.cursor,
                     &source,
                     &observation,
@@ -759,22 +784,39 @@ fn open_source(
                 previous.complete_prefix_end,
                 initial_prefix_hasher(),
             )?;
-            checkpoint = previous;
-            let fully_consumed = checkpoint.complete_prefix_end == observation.messages.length;
-            let unchanged = fully_consumed
-                && checkpoint.terminal
-                && checkpoint.metadata_stamp == observation.metadata
-                && checkpoint.messages_stamp == observation.messages
-                && checkpoint.metadata_sha256 == observation.metadata_sha256
-                && checkpoint.source_revision == source_revision
-                && checkpoint.generation_identity == observation.generation_identity()
-                && checkpoint.canonical_source_identity == canonical_source_identity
-                && checkpoint.session == session;
-            lifecycle = if unchanged && !force_publication && !migration_required {
-                SourceLifecycle::NoOp
+            if locator_policy_upgrade {
+                // Policy 8 changes only the persisted exact locator wire. Replay the
+                // validated policy-7 prefix under the same logical source generation.
+                hasher = initial_prefix_hasher();
+                checkpoint = Checkpoint::fresh(
+                    &observation,
+                    machine_id,
+                    source_revision.clone(),
+                    canonical_source_identity.clone(),
+                    session.clone(),
+                    previous.generation,
+                );
+                lifecycle = SourceLifecycle::Migrated;
             } else {
-                SourceLifecycle::Append
-            };
+                checkpoint = previous;
+                let fully_consumed = checkpoint.complete_prefix_end == observation.messages.length;
+                let unchanged = fully_consumed
+                    && checkpoint.terminal
+                    && checkpoint.metadata_stamp == observation.metadata
+                    && checkpoint.messages_stamp == observation.messages
+                    && checkpoint.metadata_sha256 == observation.metadata_sha256
+                    && checkpoint.source_revision == source_revision
+                    && checkpoint.generation_identity == observation.generation_identity()
+                    && checkpoint.canonical_source_identity == canonical_source_identity
+                    && checkpoint.session == session;
+                lifecycle = if unchanged && !force_publication && !migration_required {
+                    SourceLifecycle::NoOp
+                } else if migration_required {
+                    SourceLifecycle::Migrated
+                } else {
+                    SourceLifecycle::Append
+                };
+            }
         } else {
             force_publication = true;
             lifecycle = if observation.messages.length < previous.complete_prefix_end {
@@ -1307,9 +1349,11 @@ fn publish_core_page(
         NativePathCursorSetClassification::AllNextSameGroup { .. }
     ) {
         group.commit()?;
-        let mut summary = ProviderImportSummary::default();
-        summary.skipped_events = page.events.len();
-        summary.skipped = page.events.len();
+        let mut summary = ProviderImportSummary {
+            skipped_events: page.events.len(),
+            skipped: page.events.len(),
+            ..ProviderImportSummary::default()
+        };
         summary.set_work_result(ProviderImportWorkResult::NoOp);
         return Ok(summary);
     }
@@ -2491,7 +2535,8 @@ fn proposed_source_identity(
 }
 
 pub(super) fn source_cursor_stream(path: &Path) -> Result<String> {
-    let identity = provider_path_identity(path)?;
+    let canonical_path = fs::canonicalize(path)?;
+    let identity = provider_path_identity(&canonical_path)?;
     Ok(provider_source_cursor_stream_for_path(
         CaptureProvider::MistralVibe,
         MISTRAL_VIBE_SOURCE_FORMAT,
@@ -2533,13 +2578,23 @@ fn encode_checkpoint(checkpoint: &Checkpoint) -> Result<String> {
 }
 
 fn decode_native_checkpoint(encoded_store_cursor: &str) -> Result<Option<Checkpoint>> {
+    decode_native_checkpoint_at_policy(encoded_store_cursor, MISTRAL_VIBE_POLICY_REVISION)
+}
+
+fn decode_native_checkpoint_at_policy(
+    encoded_store_cursor: &str,
+    policy_revision: u32,
+) -> Result<Option<Checkpoint>> {
     let encoded = decode_native_path_committed_cursor(encoded_store_cursor)
         .map(|cursor| cursor.provider_cursor().to_owned())
         .unwrap_or_else(|_| encoded_store_cursor.to_owned());
     let Ok(wire) = serde_json::from_str::<CursorWire>(&encoded) else {
         return Ok(None);
     };
-    if wire.version != CURSOR_VERSION || wire.kind != CURSOR_KIND || !wire.checkpoint.supported() {
+    if wire.version != CURSOR_VERSION
+        || wire.kind != CURSOR_KIND
+        || !wire.checkpoint.supported_at_policy(policy_revision)
+    {
         return Ok(None);
     }
     Ok(Some(wire.checkpoint))
@@ -2681,6 +2736,9 @@ fn retirement_publication_id(retirement: &ProviderSourceRouteRetirement) -> Stri
     format!("mistral-vibe-retirement-v1:{:x}", digest.finalize())
 }
 
+// Each argument is an independently encoded locator component; keeping them
+// explicit makes the exact-content identity inputs visible at both call sites.
+#[allow(clippy::too_many_arguments)]
 fn attach_exact_locator(
     metadata: &mut Value,
     role: VerifiedContentRole,
@@ -2727,6 +2785,7 @@ fn attach_exact_locator(
 fn domain_digest(domain: &[u8], value: &str) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(domain);
+    digest.update((value.len() as u64).to_be_bytes());
     digest.update(value.as_bytes());
     digest.finalize().into()
 }
@@ -2848,6 +2907,33 @@ fn read_bounded_line(
         }
         if start.saturating_add(total) == frozen_length {
             return Ok(Line::IncompleteTail);
+        }
+    }
+}
+
+#[cfg(test)]
+mod exact_locator_digest_tests {
+    use super::*;
+
+    #[test]
+    fn exact_locator_digest_uses_canonical_length_prefixed_wire() {
+        for (domain, value, expected) in [
+            (
+                EXACT_SOURCE_REVISION_DIGEST_DOMAIN,
+                "mistral-vibe-session-v1:fixture",
+                "25d78662f03d40916f48f7eb91ed1e151f203726f28e43154d5b83cd806c65ac",
+            ),
+            (
+                EXACT_PATH_IDENTITY_DIGEST_DOMAIN,
+                "unix:64513:42",
+                "a36901bd6245237a6da04a9afa70ed8f5ffa18bece96493cfa9f8d3d9f31327e",
+            ),
+        ] {
+            let actual = domain_digest(domain, value)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            assert_eq!(actual, expected);
         }
     }
 }

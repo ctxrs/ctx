@@ -245,8 +245,10 @@ fn production_supports_late_pro_replay_and_pro_failure_never_blocks_core() {
     assert_eq!(store.events_for_session(session.id).unwrap().len(), 1);
 
     let late_sink = Arc::new(TestOutputSink::default());
-    let mut replay_options = ProviderImportOptions::default();
-    replay_options.import_profile = ImportProfile::ProReplayOnly(late_sink.clone());
+    let replay_options = ProviderImportOptions {
+        import_profile: ImportProfile::ProReplayOnly(late_sink.clone()),
+        ..ProviderImportOptions::default()
+    };
     let replay = import_goose_nativepath(
         &source_path,
         &mut store,
@@ -272,8 +274,10 @@ fn production_supports_late_pro_replay_and_pro_failure_never_blocks_core() {
         fail: true,
         ..TestOutputSink::default()
     });
-    let mut combined_options = ProviderImportOptions::default();
-    combined_options.import_profile = ImportProfile::CoreAndPro(failing_sink.clone());
+    let combined_options = ProviderImportOptions {
+        import_profile: ImportProfile::CoreAndPro(failing_sink.clone()),
+        ..ProviderImportOptions::default()
+    };
     let combined = import_goose_nativepath(
         &source_path,
         &mut store,

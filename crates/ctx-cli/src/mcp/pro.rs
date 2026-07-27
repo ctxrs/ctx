@@ -16,7 +16,37 @@ pub(super) const MCP_BLAME_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 
 pub(super) fn tool_pro_status(data_root: &Path) -> McpHandled<Result<Value>> {
     let started = Instant::now();
-    let value = crate::pro::lifecycle_status_json(data_root);
+    let mut value = crate::pro::lifecycle_status_json(data_root);
+    if let Some(object) = value.as_object_mut() {
+        let access_state = object
+            .get("access_state")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        let usage = crate::config::AppConfig::load(data_root)
+            .map(|config| {
+                crate::local_usage::read_report(data_root, config.local_usage.enabled, false)
+            })
+            .unwrap_or_else(|_| crate::local_usage::UsageReport::config_error());
+        object.insert(
+            "local_usage".to_owned(),
+            serde_json::to_value(usage).unwrap_or_else(|_| {
+                json!({
+                    "schema_version": 1,
+                    "enabled": false,
+                    "state": "error",
+                    "error": {
+                        "code": "usage_report_serialization",
+                        "message": "local usage report could not be serialized",
+                    }
+                })
+            }),
+        );
+        object.insert(
+            "conversion_action".to_owned(),
+            crate::local_usage::pro_conversion_action(access_state.as_deref())
+                .unwrap_or(Value::Null),
+        );
+    }
     let error_code = value.get("error_code").and_then(Value::as_str);
     let mut telemetry = ProStatusTelemetryV1::new(ProSurfaceV1::Mcp);
     telemetry.access_state = value
@@ -43,9 +73,12 @@ pub(super) fn tool_pro_status(data_root: &Path) -> McpHandled<Result<Value>> {
     McpHandled::with_pro_event(Ok(value), event)
 }
 
-pub(super) fn tool_pro_blame(arguments: &Value, data_root: &Path) -> McpHandled<Result<Value>> {
+pub(super) fn tool_pro_blame(
+    arguments: &Value,
+    data_root: &Path,
+    parsed_target: Result<BlameTarget>,
+) -> McpHandled<Result<Value>> {
     let started = Instant::now();
-    let parsed_target = required_blame_target(arguments);
     let target_kind = parsed_target
         .as_ref()
         .ok()
@@ -106,7 +139,7 @@ fn finish_mcp_blame_telemetry(
     McpHandled::with_pro_event(result, event)
 }
 
-fn required_blame_target(arguments: &Value) -> Result<BlameTarget> {
+pub(super) fn required_blame_target(arguments: &Value) -> Result<BlameTarget> {
     let target = arguments
         .get("target")
         .and_then(Value::as_object)
@@ -312,6 +345,37 @@ fn repository_schema() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn private_tempdir() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        ctx_history_core::platform_security::restrict_private_directory(root.path()).unwrap();
+        root
+    }
+
+    #[test]
+    fn pro_status_usage_config_error_is_content_free() {
+        let root = private_tempdir();
+        let marker = "SECRET_PATH_TOKEN_7f98";
+        std::fs::write(
+            root.path().join("config.toml"),
+            format!("invalid config /tmp/{marker}/bearer-secret\n"),
+        )
+        .unwrap();
+
+        let response = tool_pro_status(root.path()).value.unwrap();
+        let encoded = serde_json::to_string(&response).unwrap();
+        assert!(!encoded.contains(marker));
+        assert!(!encoded.contains("bearer-secret"));
+        assert_eq!(response["local_usage"]["state"], "error");
+        assert_eq!(
+            response["local_usage"]["error"]["code"],
+            "local_usage_config_unavailable"
+        );
+        assert_eq!(
+            response["local_usage"]["error"]["message"],
+            "local usage configuration could not be read"
+        );
+    }
 
     #[test]
     fn blame_schema_discloses_local_writes_and_is_agent_sized() {

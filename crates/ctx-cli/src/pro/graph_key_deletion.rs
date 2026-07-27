@@ -9,7 +9,7 @@ use anyhow::Result;
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 use sha2::{Digest as _, Sha256};
 
-use super::credential_vault::CredentialVaultError;
+use super::credential_vault::{CredentialVaultError, CredentialVaultNamespace};
 
 #[cfg(target_os = "macos")]
 #[path = "graph_key_deletion/macos.rs"]
@@ -29,8 +29,12 @@ const GRAPH_RECORD_DOMAIN: &[u8] = b"graph-key";
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 const GRAPH_RECORD_PREFIX: &str = "nvr1-g-";
 
-pub(super) fn delete_selected(data_root: &Path, installation_key_thumbprint: &str) -> Result<()> {
-    super::client::delete_graph_key(data_root, installation_key_thumbprint)
+pub(super) fn delete_selected(
+    data_root: &Path,
+    namespace: CredentialVaultNamespace,
+    installation_key_thumbprint: &str,
+) -> Result<()> {
+    super::client::delete_graph_key(data_root, namespace, installation_key_thumbprint)
 }
 
 pub(super) fn delete(graph_id: &str) -> Result<(), CredentialVaultError> {

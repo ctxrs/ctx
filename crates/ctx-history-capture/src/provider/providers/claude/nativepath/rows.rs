@@ -100,6 +100,7 @@ impl ClaudeRetainedRow {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub(crate) struct ClaudeRowPage {
     pub(crate) rows: Vec<ClaudeRetainedRow>,
     pub(crate) estimated_bytes: usize,
