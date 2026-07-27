@@ -1,0 +1,572 @@
+use super::*;
+
+#[test]
+fn deadline_partial_batch_keeps_only_fully_embedded_events() {
+    let first = Uuid::new_v4();
+    let split = Uuid::new_v4();
+    let last = Uuid::new_v4();
+    let pending = vec![
+        test_chunk_at(first, 1, "first", 0, 1),
+        test_chunk_at(split, 2, "split", 0, 3),
+        test_chunk_at(split, 2, "split", 1, 3),
+        test_chunk_at(split, 2, "split", 2, 3),
+        test_chunk_at(last, 3, "last", 0, 1),
+    ];
+
+    assert_eq!(semantic_complete_embedding_prefix(&pending, 0), 0);
+    assert_eq!(semantic_complete_embedding_prefix(&pending, 1), 1);
+    assert_eq!(semantic_complete_embedding_prefix(&pending, 2), 1);
+    assert_eq!(semantic_complete_embedding_prefix(&pending, 3), 1);
+    assert_eq!(semantic_complete_embedding_prefix(&pending, 4), 4);
+    assert_eq!(semantic_complete_embedding_prefix(&pending, 5), 5);
+    assert_eq!(semantic_complete_embedding_prefix(&pending, 99), 5);
+
+    let considered = vec![first, split, last];
+    assert_eq!(
+        semantic_contiguous_consumed_event_ids(&considered, &[first, last]),
+        vec![first]
+    );
+    assert_eq!(
+        semantic_contiguous_consumed_event_ids(&considered, &[first, split, last]),
+        considered
+    );
+
+    let cursors = vec![(first, (30, 3)), (split, (10, 2)), (last, (20, 1))];
+    assert_eq!(
+        semantic_consumed_page_anchor_cursor(&cursors, &[first, last]),
+        None,
+        "a bounded activity-order prefix cannot advance past any unfinished page member"
+    );
+    assert_eq!(
+        semantic_consumed_page_anchor_cursor(&cursors, &[first, split, last]),
+        Some((10, 2)),
+        "a fully consumed activity-ordered page advances at its oldest anchor"
+    );
+}
+
+#[test]
+fn semantic_backfill_cursor_waits_for_a_full_reordered_activity_page() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_late_activity_searchable_store(temp.path(), SEMANTIC_DIRTY_QUEUE_RECENT_LIMIT + 1)?;
+    let store = Store::open(database_path(temp.path().to_path_buf()))?;
+    let first = store.recent_event_embedding_documents(None, SEMANTIC_DIRTY_QUEUE_RECENT_LIMIT)?;
+    assert_eq!(first.len(), SEMANTIC_DIRTY_QUEUE_RECENT_LIMIT);
+    let page_cursors = first
+        .iter()
+        .map(|doc| (doc.event_id, (doc.anchor_occurred_at_ms, doc.seq)))
+        .collect::<Vec<_>>();
+    let bounded_prefix = first
+        .iter()
+        .take(SEMANTIC_DIRTY_QUEUE_RECENT_LIMIT / 2)
+        .map(|doc| doc.event_id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        semantic_consumed_page_anchor_cursor(&page_cursors, &bounded_prefix),
+        None,
+        "a bounded prefix must leave the persisted frontier unchanged"
+    );
+
+    let fully_consumed = first.iter().map(|doc| doc.event_id).collect::<Vec<_>>();
+    let boundary = semantic_consumed_page_anchor_cursor(&page_cursors, &fully_consumed)
+        .expect("a full page has an anchor boundary");
+    let second = store
+        .recent_event_embedding_documents(Some(boundary), SEMANTIC_DIRTY_QUEUE_RECENT_LIMIT)?;
+    assert_eq!(second.len(), 1);
+    assert!(!first.iter().any(|doc| doc.event_id == second[0].event_id));
+    Ok(())
+}
+
+#[test]
+fn e5_embedding_text_uses_query_and_passage_prefixes_once() {
+    assert_eq!(
+        semantic_e5_query_text_value("find a daemon failure"),
+        "query: find a daemon failure"
+    );
+    assert_eq!(
+        semantic_e5_query_text_value("  query: find a daemon failure"),
+        "query: find a daemon failure"
+    );
+    assert_eq!(
+        semantic_e5_passage_text("daemon failed to restart"),
+        "passage: daemon failed to restart"
+    );
+    assert_eq!(
+        semantic_e5_passage_text("  passage: daemon failed to restart"),
+        "passage: daemon failed to restart"
+    );
+}
+
+#[cfg(ctx_semantic_fastembed)]
+#[test]
+fn fixed_shape_settings_are_strict() {
+    assert_eq!(semantic_fixed_shape_from_values(None, None).unwrap(), None);
+    assert_eq!(
+        semantic_fixed_shape_from_values(Some("16"), Some("512")).unwrap(),
+        Some((16, 512))
+    );
+    for values in [
+        (Some("16"), None),
+        (None, Some("512")),
+        (Some("0"), Some("512")),
+        (Some("wat"), Some("512")),
+        (Some("16"), Some("-1")),
+    ] {
+        assert!(semantic_fixed_shape_from_values(values.0, values.1).is_err());
+    }
+}
+
+#[cfg(ctx_semantic_fastembed)]
+#[test]
+fn fixed_batch_padding_preserves_complete_batches() -> Result<()> {
+    let make = |count| {
+        (0..count)
+            .map(|index| format!("passage: {index}"))
+            .collect::<Vec<_>>()
+    };
+    assert!(pad_texts_to_exact_batch(make(0), 4)?.is_empty());
+    assert_eq!(pad_texts_to_exact_batch(make(4), 4)?.len(), 4);
+    let padded = pad_texts_to_exact_batch(make(5), 4)?;
+    assert_eq!(padded.len(), 8);
+    assert_eq!(&padded[..5], make(5));
+    assert!(padded[5..]
+        .iter()
+        .all(|text| text == SEMANTIC_PASSAGE_PREFIX));
+    assert!(pad_texts_to_exact_batch(make(1), 0).is_err());
+    Ok(())
+}
+
+#[test]
+fn semantic_worker_report_preserves_embed_policy_from_status() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_semantic_worker_status(
+        temp.path(),
+        &json!({
+            "schema_version": 1,
+            "status": "budget_exhausted",
+            "model_key": semantic_model_key(),
+            "pid": 1234,
+            "searchable_items": 10,
+            "embedded_items": 2,
+            "embedded_chunks": 4,
+            "dirty_items": 1,
+            "embed_policy": {
+                "source": "fixture",
+                "threads": 7,
+                "batch_size": 96,
+                "memory_budget_bytes": 123,
+            },
+        }),
+    )?;
+
+    let report = semantic_worker_report_best_effort(temp.path()).to_json();
+    assert_eq!(report["embed_policy"]["source"], "fixture");
+    assert_eq!(report["embed_policy"]["threads"], 7);
+    assert_eq!(report["coverage"]["embedded_chunks"], 4);
+    Ok(())
+}
+
+#[test]
+fn semantic_worker_report_ignores_status_from_old_model_key() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_semantic_worker_status(
+        temp.path(),
+        &json!({
+            "schema_version": 1,
+            "status": "ready",
+            "model_key": "fastembed:old-model-key",
+            "pid": 999,
+            "last_error": "old failure",
+            "searchable_items": 10,
+            "embedded_items": 10,
+            "embedded_chunks": 20,
+            "dirty_items": 0,
+            "embed_policy": {
+                "source": "old-fixture"
+            },
+        }),
+    )?;
+
+    let report = semantic_worker_report_best_effort(temp.path()).to_json();
+    assert_eq!(report["status"], "unknown");
+    assert_eq!(report["pid"], Value::Null);
+    assert_eq!(report["last_error"], Value::Null);
+    assert_ne!(report["embed_policy"]["source"], "old-fixture");
+    assert_eq!(report["coverage"]["searchable_items"], 0);
+    assert_eq!(report["coverage"]["searchable_items_known"], false);
+    assert_eq!(report["coverage"]["embedded_items"], 0);
+    Ok(())
+}
+
+#[test]
+fn semantic_incremental_slice_requires_previous_ready_status() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let stats = SemanticSidecarStats {
+        embedded_items: 10,
+        embedded_chunks: 20,
+    };
+    assert!(!semantic_worker_status_was_ready_for_stats(
+        temp.path(),
+        stats
+    ));
+
+    write_semantic_worker_status(
+        temp.path(),
+        &json!({
+            "schema_version": 1,
+            "status": "completed",
+            "model_key": semantic_model_key(),
+            "searchable_items": 11,
+            "embedded_items": 10,
+            "embedded_chunks": 20,
+            "dirty_items": 0,
+        }),
+    )?;
+    assert!(!semantic_worker_status_was_ready_for_stats(
+        temp.path(),
+        stats
+    ));
+
+    write_semantic_worker_status(
+        temp.path(),
+        &json!({
+            "schema_version": 1,
+            "status": "ready",
+            "model_key": semantic_model_key(),
+            "searchable_items": 10,
+            "embedded_items": 10,
+            "embedded_chunks": 20,
+            "dirty_items": 0,
+        }),
+    )?;
+    assert!(semantic_worker_status_was_ready_for_stats(
+        temp.path(),
+        stats
+    ));
+    Ok(())
+}
+
+#[test]
+fn ready_index_requests_daemon_model_load_with_or_without_cache() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut report = SemanticWorkerReport::unavailable(temp.path(), "test");
+    report.status = "ready".to_owned();
+    report.searchable_items = 10;
+    report.searchable_items_known = true;
+    report.embedded_items = 10;
+    report.queued_items_estimate = 0;
+    report.model_cache_available = false;
+    report.embedding_runtime = Some(json!({
+        "backend": "cpu",
+        "compute_class": "cpu",
+    }));
+
+    assert!(semantic_daemon_model_load_needed(&report, false));
+    assert!(!semantic_daemon_model_load_needed(&report, true));
+    report.model_cache_available = true;
+    assert!(semantic_daemon_model_load_needed(&report, false));
+    let status = daemon_semantic_job_report(temp.path(), &report, true);
+    assert_eq!(status["embedding_runtime"]["backend"], "cpu");
+    assert_eq!(status["embedding_runtime"]["compute_class"], "cpu");
+    Ok(())
+}
+
+#[test]
+fn daemon_status_reports_retryable_memory_deferral() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_semantic_enabled_config(temp.path())?;
+    let mut report = SemanticWorkerReport::unavailable(temp.path(), "test");
+    report.status = "model_load_deferred".to_owned();
+    report.searchable_items = 10;
+    report.searchable_items_known = true;
+    report.queued_items_estimate = 10;
+    write_daemon_job_status(
+        &daemon_semantic_job_path(temp.path()),
+        &compact_json(json!({
+            "schema_version": 1,
+            "model_key": semantic_model_key(),
+            "status": "skipped",
+            "reason": "memory_pressure",
+            "retryable": true,
+            "available_memory_bytes": 1_610_612_736_u64,
+            "required_available_memory_bytes": 2_147_483_648_u64,
+        })),
+    )?;
+
+    let value = daemon_semantic_job_report(temp.path(), &report, true);
+    assert_eq!(value["status"], "skipped");
+    assert_eq!(value["reason"], "memory_pressure");
+    assert_eq!(value["worker_status"], "model_load_deferred");
+    assert_eq!(value["retryable"], true);
+    assert_eq!(value["available_memory_bytes"], 1_610_612_736_u64);
+    assert_eq!(value["required_available_memory_bytes"], 2_147_483_648_u64);
+    Ok(())
+}
+
+#[test]
+fn daemon_semantic_status_ignores_job_from_old_model_key() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_semantic_enabled_config(temp.path())?;
+    write_daemon_job_status(
+        &daemon_semantic_job_path(temp.path()),
+        &json!({
+            "schema_version": 1,
+            "status": "ready",
+            "model_key": "fastembed:old-model-key",
+            "last_run_at_ms": 1234,
+            "indexed_chunks": 99,
+        }),
+    )?;
+
+    let daemon = daemon_report(
+        temp.path(),
+        &semantic_worker_report_best_effort(temp.path()),
+    );
+    let semantic = &daemon["jobs"]["semantic_index"];
+    assert_eq!(semantic["status"], "unknown");
+    assert_eq!(semantic["reason"], "searchable_items_unknown");
+    assert_eq!(semantic["last_run_status"], Value::Null);
+    assert_eq!(semantic["indexed_chunks"], Value::Null);
+    Ok(())
+}
+
+#[test]
+fn hybrid_semantic_readiness_requires_complete_coverage() {
+    assert!(semantic_hybrid_coverage_ready(0, 0, 0));
+    assert!(semantic_hybrid_coverage_ready(10, 10, 0));
+    assert!(semantic_hybrid_coverage_ready(11, 10, 0));
+
+    assert!(!semantic_hybrid_coverage_ready(0, 10, 0));
+    assert!(!semantic_hybrid_coverage_ready(1_000, 100_000, 0));
+    assert!(!semantic_hybrid_coverage_ready(99_999, 100_000, 0));
+    assert!(!semantic_hybrid_coverage_ready(10, 10, 1));
+}
+
+#[test]
+fn daemon_recent_queue_marks_user_anchor_dirty_when_assistant_changes() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let data_root = temp.path();
+    let store = Store::open(database_path(data_root.to_path_buf()))?;
+    let session_id = Uuid::new_v4();
+    insert_test_session(&store, session_id)?;
+    let user = test_session_message(1, session_id, EventRole::User, "semantic anchor prompt");
+    let assistant = test_session_message(
+        2,
+        session_id,
+        EventRole::Assistant,
+        "original assistant answer",
+    );
+    store.upsert_event(&user)?;
+    store.upsert_event(&assistant)?;
+    store.refresh_event_embedding_document_count_cache()?;
+    let docs = store.event_embedding_documents_by_ids(&[user.id])?;
+    let doc = docs.first().expect("user lite-turn document");
+    let source_text = semantic_source_text(&doc.text);
+    let source_hash = semantic_document_hash(doc, &source_text);
+
+    let vector_path = semantic_vector_path(data_root);
+    let mut vector_store = SemanticVectorStore::open(&vector_path)?;
+    vector_store.upsert_chunk_embeddings(&[(
+        test_chunk(user.id, user.seq, &source_hash),
+        test_embedding(1.0, 0.0),
+    )])?;
+    assert_eq!(vector_store.dirty_event_count()?, 0);
+    drop(vector_store);
+
+    let mut updated_assistant = assistant.clone();
+    updated_assistant.payload = json!({ "text": "updated assistant answer" });
+    updated_assistant.occurred_at = utc_now();
+    store.upsert_event(&updated_assistant)?;
+
+    assert_eq!(
+        queue_recent_semantic_work(data_root, &store, "test_recent")?,
+        1
+    );
+    let vector_store = SemanticVectorStore::open(&vector_path)?;
+    assert_eq!(vector_store.queued_dirty_event_ids(10)?, vec![user.id]);
+    Ok(())
+}
+
+#[test]
+fn daemon_restart_reconciles_commit_that_missed_semantic_handoff() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let data_root = temp.path();
+    let store = Store::open(database_path(data_root.to_path_buf()))?;
+    let session_id = Uuid::new_v4();
+    insert_test_session(&store, session_id)?;
+    let user = test_session_message(1, session_id, EventRole::User, "restart anchor prompt");
+    let assistant = test_session_message(
+        2,
+        session_id,
+        EventRole::Assistant,
+        "answer committed before crash",
+    );
+    store.upsert_event(&user)?;
+    store.upsert_event(&assistant)?;
+    let docs = store.event_embedding_documents_by_ids(&[user.id])?;
+    let doc = docs.first().expect("user lite-turn document");
+    let source_text = semantic_source_text(&doc.text);
+    let source_hash = semantic_document_hash(doc, &source_text);
+    let vector_path = semantic_vector_path(data_root);
+    let mut vector_store = SemanticVectorStore::open(&vector_path)?;
+    vector_store.upsert_chunk_embeddings(&[(
+        test_chunk(user.id, user.seq, &source_hash),
+        test_embedding(1.0, 0.0),
+    )])?;
+    drop(vector_store);
+
+    let mut updated_assistant = assistant;
+    updated_assistant.payload = json!({ "text": "committed update with no dirty handoff" });
+    store.upsert_event(&updated_assistant)?;
+    drop(store);
+
+    let restarted_store = Store::open(database_path(data_root.to_path_buf()))?;
+    reconcile_committed_semantic_work(data_root, &restarted_store)?;
+    let vector_store = SemanticVectorStore::open(&vector_path)?;
+    assert_eq!(vector_store.queued_dirty_event_ids(10)?, vec![user.id]);
+    Ok(())
+}
+
+#[test]
+fn daemon_restart_finds_old_store_event_beyond_reordered_activity_page() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let docs =
+        write_late_activity_searchable_store(temp.path(), SEMANTIC_DIRTY_QUEUE_RECENT_LIMIT + 1)?;
+    let missing = docs
+        .last()
+        .expect("fixture must contain an event beyond the recent reconciliation page")
+        .event_id;
+    let mut embedded = Vec::with_capacity(docs.len().saturating_sub(1));
+    for doc in docs.iter().filter(|doc| doc.event_id != missing) {
+        let source_text = semantic_source_text(&doc.text);
+        let source_hash = semantic_document_hash(doc, &source_text);
+        embedded.push((
+            test_chunk(doc.event_id, doc.seq, &source_hash),
+            test_embedding(1.0, 0.0),
+        ));
+    }
+    let vector_path = semantic_vector_path(temp.path());
+    let mut vector_store = SemanticVectorStore::open(&vector_path)?;
+    vector_store.upsert_chunk_embeddings(&embedded)?;
+    drop(vector_store);
+
+    let store = Store::open(database_path(temp.path().to_path_buf()))?;
+    reconcile_committed_semantic_work(temp.path(), &store)?;
+    let vector_store = SemanticVectorStore::open(&vector_path)?;
+    assert!(vector_store.queued_dirty_event_ids(10)?.is_empty());
+    drop(vector_store);
+    drop(store);
+
+    let restarted_store = Store::open(database_path(temp.path().to_path_buf()))?;
+    reconcile_committed_semantic_work(temp.path(), &restarted_store)?;
+    let vector_store = SemanticVectorStore::open(&vector_path)?;
+    assert_eq!(vector_store.queued_dirty_event_ids(10)?, vec![missing]);
+    Ok(())
+}
+
+#[test]
+fn daemon_scheduler_round_robins_sources_and_backoff_is_capped() {
+    let mut cursor = 0;
+    assert_eq!(daemon_take_next_source_index(&mut cursor, 3), Some(0));
+    assert_eq!(daemon_take_next_source_index(&mut cursor, 3), Some(1));
+    assert_eq!(daemon_take_next_source_index(&mut cursor, 3), Some(2));
+    assert_eq!(daemon_take_next_source_index(&mut cursor, 3), Some(0));
+    assert_eq!(daemon_take_next_source_index(&mut cursor, 0), None);
+
+    let mut backoff = DaemonRetryBackoff::default();
+    let mut last = StdDuration::ZERO;
+    for _ in 0..40 {
+        let delay = backoff.record_failure();
+        assert!(delay >= last);
+        assert!(delay <= DaemonRetryBackoff::MAX_DELAY);
+        last = delay;
+    }
+    assert_eq!(last, DaemonRetryBackoff::MAX_DELAY);
+    assert!(!backoff.ready());
+    assert!(backoff.retry_after_ms().is_some_and(|delay| delay > 0));
+    let persisted = json!({
+        "consecutive_failures": backoff.consecutive_failures,
+        "retry_not_before_at_ms": backoff.retry_not_before_at_ms,
+    });
+    let mut restarted = DaemonRetryBackoff::default();
+    restarted.restore(Some(&persisted));
+    assert!(!restarted.ready(), "restart must preserve watcher backoff");
+    backoff.reset();
+    assert!(backoff.ready());
+}
+
+#[test]
+fn foreground_query_preempts_daemon_background_jobs() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_semantic_enabled_config(temp.path())?;
+    let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let _hooks = install_test_daemon_jobs(
+        calls.clone(),
+        Some(daemon_history_completed_test_job()),
+        Some(daemon_semantic_indexed_test_job(temp.path())),
+    );
+    let activity = Arc::new(DaemonQueryActivity::new());
+    let _request = activity
+        .begin_request()
+        .expect("test foreground query should be accepted");
+    let mut runtime = DaemonRuntime::default();
+
+    let iteration = run_daemon_once_with_activity(
+        &test_daemon_run_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        true,
+        Some(activity.as_ref()),
+    )?;
+
+    assert!(!iteration.did_work);
+    assert!(!iteration.failed);
+    assert!(calls.borrow().is_empty());
+    let daemon = daemon_report(temp.path(), &semantic_worker_report_for_daemon(temp.path()));
+    assert_eq!(
+        daemon["jobs"]["history_refresh"]["reason"],
+        "foreground_query"
+    );
+    assert_eq!(
+        daemon["jobs"]["semantic_index"]["last_run_reason"],
+        "foreground_query"
+    );
+    Ok(())
+}
+
+#[test]
+fn semantic_only_search_does_not_reject_a_running_worker() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_test_semantic_cache(&temp.path().join("semantic-model-cache"))?;
+    let docs = write_searchable_store(temp.path(), 1)?;
+    let doc = docs.first().expect("searchable fixture doc");
+    let source_text = semantic_source_text(&doc.text);
+    let source_hash = semantic_document_hash(doc, &source_text);
+    let mut vector_store = SemanticVectorStore::open(&semantic_vector_path(temp.path()))?;
+    vector_store.upsert_chunk_embeddings(&[(
+        test_chunk(doc.event_id, doc.seq, &source_hash),
+        test_embedding(1.0, 0.0),
+    )])?;
+    drop(vector_store);
+
+    let _lock = SemanticWorkerLock::acquire(temp.path())?
+        .expect("test should acquire semantic worker lock");
+    let store = Store::open(database_path(temp.path().to_path_buf()))?;
+    let err = search_packet_with_backend(
+        &store,
+        temp.path(),
+        "semantic daemon scheduling fixture",
+        &[],
+        &ctx_history_search::PacketOptions::default(),
+        SearchBackendArg::Semantic,
+        true,
+        1.0,
+        RefreshArg::Off,
+        false,
+    )
+    .expect_err("fixture has no daemon query service");
+    let message = format!("{err:#}");
+    assert!(message.contains("daemon semantic query service is not available"));
+    assert!(!message.contains("semantic worker is currently indexing"));
+    Ok(())
+}

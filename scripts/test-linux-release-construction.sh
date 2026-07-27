@@ -114,12 +114,20 @@ if python3 scripts/write-public-cli-build-info.py \
   exit 1
 fi
 
-test "$(scripts/public-cli-runtime-authority.sh macos-x64 Darwin arm64 passed arm64 0)" = non_authoritative
-test "$(scripts/public-cli-runtime-authority.sh macos-x64 Darwin x86_64 passed x86_64 0)" = authoritative
-test "$(scripts/public-cli-runtime-authority.sh macos-x64 Darwin x86_64 passed arm64 1)" = non_authoritative
-test "$(scripts/public-cli-runtime-authority.sh macos-x64 Darwin x86_64 passed unknown unknown)" = non_authoritative
-test "$(scripts/public-cli-runtime-authority.sh linux-x64 Linux x86_64 passed x86_64 0)" = authoritative
-test "$(scripts/public-cli-runtime-authority.sh linux-x64 Darwin arm64 passed arm64 0)" = non_authoritative
+test "$(scripts/public-cli-runtime-authority.sh macos-x64 Darwin arm64 passed arm64 0 apple none absent 1)" = non_authoritative
+test "$(scripts/public-cli-runtime-authority.sh macos-x64 Darwin x86_64 passed x86_64 0 apple none absent 1)" = authoritative
+test "$(scripts/public-cli-runtime-authority.sh macos-x64 Darwin x86_64 passed arm64 1 apple rosetta-2 absent 1)" = non_authoritative
+test "$(scripts/public-cli-runtime-authority.sh macos-x64 Darwin x86_64 passed x86_64 0 apple qemu-kvm present 1)" = non_authoritative
+test "$(scripts/public-cli-runtime-authority.sh macos-x64 Darwin x86_64 passed x86_64 0 generic none absent 1)" = non_authoritative
+test "$(scripts/public-cli-runtime-authority.sh macos-x64 Darwin x86_64 passed unknown unknown unknown unknown unknown 0)" = non_authoritative
+test "$(scripts/public-cli-runtime-authority.sh macos-arm64 Darwin arm64 passed arm64 0 apple none absent 1)" = authoritative
+test "$(scripts/public-cli-runtime-authority.sh linux-aarch64 Linux aarch64 passed aarch64 0 generic none present 1)" = authoritative
+test "$(scripts/public-cli-runtime-authority.sh linux-aarch64 Linux aarch64 passed aarch64 0 generic qemu-user present 1)" = non_authoritative
+test "$(scripts/public-cli-runtime-authority.sh linux-x64 Linux x86_64 passed x86_64 0 generic none absent 1)" = authoritative
+test "$(scripts/public-cli-runtime-authority.sh windows-x64 Windows_NT AMD64 passed X64 0 generic none present 1)" = authoritative
+test "$(scripts/public-cli-runtime-authority.sh freebsd-x64 FreeBSD amd64 passed amd64 0 generic none present 1)" = authoritative
+test "$(CTX_HARDWARE_IDENTITY=apple CTX_EXECUTION_EMULATION=none scripts/public-cli-runtime-authority.sh macos-x64 Darwin x86_64 passed x86_64 0 generic qemu-kvm present 1)" = non_authoritative
+test "$(scripts/public-cli-runtime-authority.sh linux-x64 Darwin arm64 passed arm64 0 apple none absent 1)" = non_authoritative
 test "$(scripts/public-cli-runtime-authority.sh windows-x64 Windows_NT AMD64 not_run)" = not_run
 if scripts/public-cli-runtime-authority.sh macos-x64 Darwin arm64 invalid >/dev/null 2>&1; then
   echo "invalid runtime status unexpectedly produced authority" >&2
@@ -131,6 +139,7 @@ cat > "${tmp_dir}/native-sysctl" <<'EOF'
 case "${2:-}" in
   sysctl.proc_translated) exit 1 ;;
   hw.optional.arm64) printf '0\n' ;;
+  kern.hv_vmm_present) printf '0\n' ;;
   *) exit 2 ;;
 esac
 EOF
@@ -138,6 +147,7 @@ cat > "${tmp_dir}/rosetta-sysctl" <<'EOF'
 #!/usr/bin/env bash
 case "${2:-}" in
   sysctl.proc_translated|hw.optional.arm64) printf '1\n' ;;
+  kern.hv_vmm_present) printf '0\n' ;;
   *) exit 2 ;;
 esac
 EOF
@@ -146,6 +156,7 @@ cat > "${tmp_dir}/inconsistent-sysctl" <<'EOF'
 case "${2:-}" in
   sysctl.proc_translated) printf '0\n' ;;
   hw.optional.arm64) printf '1\n' ;;
+  kern.hv_vmm_present) printf '0\n' ;;
   *) exit 2 ;;
 esac
 EOF
@@ -153,26 +164,85 @@ cat > "${tmp_dir}/blank-sysctl" <<'EOF'
 #!/usr/bin/env bash
 exit 1
 EOF
+cat > "${tmp_dir}/fixture-ioreg" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *IOPlatformExpertDevice*) printf '"manufacturer" = <"Apple Inc.">\n' ;;
+  *) printf 'Apple internal display\n' ;;
+esac
+EOF
+cat > "${tmp_dir}/fixture-kvm-ioreg" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *IOPlatformExpertDevice*) printf '"manufacturer" = <"Apple Inc.">\n' ;;
+  *) printf 'QEMU display\nvirtio-net-pci\n' ;;
+esac
+EOF
+cat > "${tmp_dir}/fixture-system-profiler" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  SPHardwareDataType) printf 'Model Name: Mac Pro\n' ;;
+  SPDisplaysDataType) printf 'AMD Radeon Pro\n' ;;
+  *) exit 2 ;;
+esac
+EOF
+cat > "${tmp_dir}/fixture-powershell" <<'EOF'
+#!/usr/bin/env bash
+printf '1\n'
+EOF
 chmod +x \
   "${tmp_dir}/native-sysctl" \
   "${tmp_dir}/rosetta-sysctl" \
   "${tmp_dir}/inconsistent-sysctl" \
-  "${tmp_dir}/blank-sysctl"
+  "${tmp_dir}/blank-sysctl" \
+  "${tmp_dir}/fixture-ioreg" \
+  "${tmp_dir}/fixture-kvm-ioreg" \
+  "${tmp_dir}/fixture-system-profiler" \
+  "${tmp_dir}/fixture-powershell"
 test "$(scripts/public-cli-host-runtime-evidence.sh \
-  --host-system Darwin --host-arch x86_64 --sysctl "${tmp_dir}/native-sysctl")" = \
-  $'Darwin\tx86_64\tx86_64\t0\tsysctl'
+  --host-system Darwin --host-arch x86_64 --sysctl "${tmp_dir}/native-sysctl" \
+  --ioreg "${tmp_dir}/fixture-ioreg" --system-profiler "${tmp_dir}/fixture-system-profiler")" = \
+  $'Darwin\tx86_64\tx86_64\t0\tsysctl\tapple\tnone\tabsent\t1'
 test "$(scripts/public-cli-host-runtime-evidence.sh \
-  --host-system Darwin --host-arch x86_64 --sysctl "${tmp_dir}/rosetta-sysctl")" = \
-  $'Darwin\tx86_64\tarm64\t1\tsysctl'
+  --host-system Darwin --host-arch x86_64 --sysctl "${tmp_dir}/rosetta-sysctl" \
+  --ioreg "${tmp_dir}/fixture-ioreg" --system-profiler "${tmp_dir}/fixture-system-profiler")" = \
+  $'Darwin\tx86_64\tarm64\t1\tsysctl\tapple\trosetta-2\tabsent\t1'
 test "$(scripts/public-cli-host-runtime-evidence.sh \
-  --host-system Darwin --host-arch x86_64 --sysctl "${tmp_dir}/missing-sysctl")" = \
-  $'Darwin\tx86_64\tunknown\tunknown\tsysctl'
+  --host-system Darwin --host-arch x86_64 --sysctl "${tmp_dir}/missing-sysctl" \
+  --ioreg "${tmp_dir}/fixture-ioreg" --system-profiler "${tmp_dir}/fixture-system-profiler")" = \
+  $'Darwin\tx86_64\tunknown\tunknown\tsysctl\tapple\tnone\tunknown\t0'
 test "$(scripts/public-cli-host-runtime-evidence.sh \
-  --host-system Darwin --host-arch x86_64 --sysctl "${tmp_dir}/blank-sysctl")" = \
-  $'Darwin\tx86_64\tx86_64\t0\tsysctl'
+  --host-system Darwin --host-arch x86_64 --sysctl "${tmp_dir}/blank-sysctl" \
+  --ioreg "${tmp_dir}/fixture-ioreg" --system-profiler "${tmp_dir}/fixture-system-profiler")" = \
+  $'Darwin\tx86_64\tx86_64\t0\tsysctl\tapple\tnone\tunknown\t0'
 test "$(scripts/public-cli-host-runtime-evidence.sh \
-  --host-system Darwin --host-arch x86_64 --sysctl "${tmp_dir}/inconsistent-sysctl")" = \
-  $'Darwin\tx86_64\tarm64\tunknown\tsysctl'
+  --host-system Darwin --host-arch x86_64 --sysctl "${tmp_dir}/inconsistent-sysctl" \
+  --ioreg "${tmp_dir}/fixture-ioreg" --system-profiler "${tmp_dir}/fixture-system-profiler")" = \
+  $'Darwin\tx86_64\tarm64\tunknown\tsysctl\tapple\tnone\tabsent\t0'
+test "$(scripts/public-cli-host-runtime-evidence.sh \
+  --host-system Darwin --host-arch x86_64 --sysctl "${tmp_dir}/native-sysctl" \
+  --ioreg "${tmp_dir}/fixture-kvm-ioreg" --system-profiler "${tmp_dir}/fixture-system-profiler")" = \
+  $'Darwin\tx86_64\tx86_64\t0\tsysctl\tapple\tqemu-kvm\tabsent\t1'
+test "$(scripts/public-cli-host-runtime-evidence.sh \
+  --host-system MINGW64_NT-10.0 --host-arch x86_64 \
+  --powershell "${tmp_dir}/fixture-powershell")" = \
+  $'Windows_NT\tAMD64\tX64\t0\tuname\tgeneric\tnone\tpresent\t1'
+
+printf 'processor : 0\nFeatures : fp asimd aes sha2\n' > "${tmp_dir}/arm-cpuinfo"
+printf '/usr/bin/ctx-pro\n' > "${tmp_dir}/arm-maps"
+printf 'Amazon EC2 Graviton3\n' > "${tmp_dir}/arm-platform"
+test "$(scripts/public-cli-host-runtime-evidence.sh \
+  --host-system Linux --host-arch aarch64 \
+  --cpuinfo "${tmp_dir}/arm-cpuinfo" --process-maps "${tmp_dir}/arm-maps" \
+  --platform-facts "${tmp_dir}/arm-platform")" = \
+  $'Linux\taarch64\taarch64\t0\tuname\tgeneric\tnone\tabsent\t1'
+printf '/usr/bin/qemu-aarch64-static\n' > "${tmp_dir}/arm-maps"
+printf 'QEMU Virtual Machine\nlinux,dummy-virt\n' > "${tmp_dir}/arm-platform"
+test "$(scripts/public-cli-host-runtime-evidence.sh \
+  --host-system Linux --host-arch aarch64 \
+  --cpuinfo "${tmp_dir}/arm-cpuinfo" --process-maps "${tmp_dir}/arm-maps" \
+  --platform-facts "${tmp_dir}/arm-platform")" = \
+  $'Linux\taarch64\taarch64\t0\tuname\tgeneric\tqemu-user\tpresent\t1'
 
 partial_runtime_matrix="${tmp_dir}/partial-runtime-matrix"
 mkdir -p "${partial_runtime_matrix}"
@@ -411,9 +481,11 @@ grep -Fq \
 
 multiline_cross_output='cross 0.2.5
 rustup 1.28.2
-cargo 1.88.0'
+cargo 1.97.1'
 test "$(printf '%s\n' "${multiline_cross_output}" | sed -n '1p')" = 'cross 0.2.5'
 test "$(printf '%s\n' 'cross 0.2.4' 'rustup 1.28.2' | sed -n '1p')" != 'cross 0.2.5'
+bash scripts/tests/public-cli-freebsd-build-strategy-test.sh
+python3 scripts/tests/onnxruntime-sidecar-tools-test.py
 
 mkdir -p "${tmp_dir}/dirty-path"
 cat > "${tmp_dir}/dirty-path/git" <<'EOF'
@@ -439,10 +511,64 @@ fi
 grep -Fq 'public release construction requires a clean checkout' "${tmp_dir}/dirty.err"
 test ! -e "${dirty_out}/ctx.exe.build-info.json"
 
+inspector_parent="${tmp_dir}/mode-0700-parent"
+inspector_source="${inspector_parent}/source"
+inspector_artifacts="${inspector_source}/target/public-cli-artifacts"
+mkdir -p \
+  "${inspector_source}/scripts" \
+  "${inspector_source}/tests/fixtures/custom-history-jsonl" \
+  "${inspector_artifacts}"
+chmod 0700 "${inspector_parent}" "${inspector_source}"
+for source in check-public-cli-artifact.sh check-release-binary-compat.sh run-native-candidate-smoke.sh; do
+  printf '#!/bin/sh\nexit 0\n' >"${inspector_source}/scripts/${source}"
+done
+printf '{}\n' >"${inspector_source}/tests/fixtures/custom-history-jsonl/basic.jsonl"
+printf 'candidate\n' >"${inspector_artifacts}/ctx"
+printf '%064d\n' 0 >"${inspector_artifacts}/ctx.sha256"
+printf 'ctx 0.26.0\n' >"${inspector_artifacts}/ctx.version"
+inspector_output="${tmp_dir}/inspector-output"
+mkdir "${inspector_output}"
+scripts/stage-public-cli-inspector-inputs.sh \
+  "${inspector_source}" "${inspector_artifacts}" ctx "${inspector_output}" >/dev/null
+test -x "${inspector_output}/artifacts/ctx"
+test "$(stat -c '%a' "${inspector_output}")" = 755
+test "$(stat -c '%a' "${inspector_output}/tests/fixtures/custom-history-jsonl/basic.jsonl")" = 444
+
+mv "${inspector_artifacts}/ctx" "${inspector_artifacts}/real-ctx"
+ln -s real-ctx "${inspector_artifacts}/ctx"
+mkdir "${tmp_dir}/inspector-symlink-output"
+if scripts/stage-public-cli-inspector-inputs.sh \
+  "${inspector_source}" "${inspector_artifacts}" ctx "${tmp_dir}/inspector-symlink-output" \
+  >"${tmp_dir}/inspector-symlink.out" 2>"${tmp_dir}/inspector-symlink.err"; then
+  echo "inspector staging accepted a symlink artifact" >&2
+  exit 1
+fi
+grep -Fq 'non-symlink' "${tmp_dir}/inspector-symlink.err"
+rm "${inspector_artifacts}/ctx"
+mv "${inspector_artifacts}/real-ctx" "${inspector_artifacts}/ctx"
+
+mkdir -p "${tmp_dir}/outside-artifacts" "${tmp_dir}/inspector-escape-output"
+if scripts/stage-public-cli-inspector-inputs.sh \
+  "${inspector_source}" "${tmp_dir}/outside-artifacts" ctx "${tmp_dir}/inspector-escape-output" \
+  >"${tmp_dir}/inspector-escape.out" 2>"${tmp_dir}/inspector-escape.err"; then
+  echo "inspector staging accepted an artifact root escape" >&2
+  exit 1
+fi
+grep -Fq 'escapes the source snapshot' "${tmp_dir}/inspector-escape.err"
+
+ln -s "${tmp_dir}/outside-artifacts" "${tmp_dir}/inspector-output-link"
+if scripts/stage-public-cli-inspector-inputs.sh \
+  "${inspector_source}" "${inspector_artifacts}" ctx "${tmp_dir}/inspector-output-link" \
+  >"${tmp_dir}/inspector-output-link.out" 2>"${tmp_dir}/inspector-output-link.err"; then
+  echo "inspector staging accepted a symlink output root" >&2
+  exit 1
+fi
+grep -Fq 'empty non-symlink' "${tmp_dir}/inspector-output-link.err"
+
 grep -F '20260701T000000Z' scripts/docker/linux-release.Dockerfile >/dev/null
 grep -F 'ubuntu:22.04@sha256:' scripts/docker/linux-release.Dockerfile >/dev/null
 grep -F 'RUSTUP_VERSION="1.28.2"' scripts/docker/linux-release.Dockerfile >/dev/null
-grep -F 'RUST_TOOLCHAIN_VERSION="1.88.0"' scripts/build-public-cli-artifact.sh >/dev/null
+grep -F 'RUST_TOOLCHAIN_VERSION="1.97.1"' scripts/build-public-cli-artifact.sh >/dev/null
 grep -A5 -F '[profile.release]' Cargo.toml | grep -F 'strip = "symbols"' >/dev/null
 grep -F 'rustup target add --toolchain "${RUST_TOOLCHAIN_VERSION}"' scripts/build-public-cli-artifact.sh >/dev/null
 grep -F 'cargo "+${RUST_TOOLCHAIN_VERSION}"' scripts/build-public-cli-artifact.sh >/dev/null
@@ -452,6 +578,8 @@ grep -F 'source commit changed during public release construction' scripts/build
 grep -F 'linux-*' scripts/build-public-cli-artifact.sh >/dev/null
 grep -F -- '--network none' scripts/build-public-cli-artifact.sh >/dev/null
 grep -F 'scripts/run-native-candidate-smoke.sh' scripts/build-public-cli-artifact.sh >/dev/null
+grep -F 'CTX_PRO_HELPER="${untrusted_helper}"' scripts/run-native-candidate-smoke.sh >/dev/null
+grep -F 'pro_helper_override_ignored' scripts/run-native-candidate-smoke.sh >/dev/null
 grep -F 'LINUX_X64_QEMU_CPU_PROFILE="qemu64"' scripts/build-public-cli-artifact.sh >/dev/null
 grep -F 'CTX_TEST_ONLY_ALLOW_EMULATED_LINUX_BUILD' scripts/build-public-cli-artifact.sh >/dev/null
 grep -F 'flock -n' scripts/build-public-cli-artifact.sh >/dev/null
@@ -459,8 +587,8 @@ grep -F 'local_runtime_authority' scripts/write-public-cli-build-info.py >/dev/n
 grep -F 'required ONNX Runtime sidecar missing' scripts/stage-github-release-assets.sh >/dev/null
 grep -F 'ctx-onnxruntime-freebsd-x64.tar.gz' scripts/check-github-release-assets.sh >/dev/null
 grep -F 'ctx-onnxruntime-macos-x64.tar.gz' scripts/check-github-release-assets.sh >/dev/null
-test "$(sed -n '/^stage_macos_x64_source_build()/,/^stage_freebsd_source_build()/p' \
-  scripts/build-onnxruntime-sidecar.sh | grep -Fc -- '--skip_tests --skip_submodule_sync')" = 1
+test "$(grep -Fc -- '--skip_tests --skip_submodule_sync' \
+  scripts/onnxruntime-sidecar/build_macos_x64.sh)" = 1
 grep -F -- '--expected-builder-base "${LINUX_RELEASE_UBUNTU_DIGEST}"' scripts/build-public-cli-artifact.sh >/dev/null
 grep -F -- '--actual-builder-base "${actual_base_digest}"' scripts/build-public-cli-artifact.sh >/dev/null
 grep -F -- '--runtime-image-id "${runtime_image_id}"' scripts/build-public-cli-artifact.sh >/dev/null
@@ -468,9 +596,19 @@ grep -F -- '--inspector-image-id "${inspector_image_id}"' scripts/build-public-c
 grep -F -- '--inspector-image-id "${artifact_inspector_image_id}"' scripts/build-public-cli-artifact.sh >/dev/null
 grep -F 'build-info.json' scripts/build-public-cli-artifact.sh >/dev/null
 grep -F -- '--locked --offline' scripts/build-linux-release-offline.sh >/dev/null
+grep -F 'python3 scripts/check-linux-release-network-isolation.py' scripts/build-linux-release-offline.sh >/dev/null
+python3 scripts/tests/check-linux-release-network-isolation-test.py \
+  scripts/check-linux-release-network-isolation.py \
+  scripts/tests/fixtures/linux-release-network-isolation.json
 grep -F "cross --version | sed -n '1p'" scripts/build-public-cli-artifact.sh >/dev/null
+grep -F 'native-freebsd)' scripts/build-public-cli-artifact.sh >/dev/null
+grep -F 'release_cargo build -p ctx --release --target "${target}" --locked' \
+  scripts/build-public-cli-artifact.sh >/dev/null
+grep -F 'linux-cross)' scripts/build-public-cli-artifact.sh >/dev/null
+grep -F 'RUSTUP_TOOLCHAIN="${RUST_TOOLCHAIN_VERSION}"' scripts/build-public-cli-artifact.sh >/dev/null
 grep -F "cargo-zigbuild --version | sed -n '1p'" scripts/build-public-cli-artifact.sh >/dev/null
 grep -F 'run_host_artifact_check' scripts/build-public-cli-artifact.sh >/dev/null
+grep -F 'stage-public-cli-inspector-inputs.sh' scripts/build-public-cli-artifact.sh >/dev/null
 grep -F -- '--target runtime' scripts/build-public-cli-artifact.sh >/dev/null
 grep -F -- '--target inspector' scripts/build-public-cli-artifact.sh >/dev/null
 grep -F 'org.ctx.release.role="runtime"' scripts/docker/linux-release.Dockerfile >/dev/null
@@ -486,7 +624,7 @@ grep -F '@CommandArgs' scripts/smoke-daemon-semantic-release.ps1 >/dev/null
 grep -F 'scripts/test-windows-semantic-smoke-contract.ps1' .buildkite/pipeline.yml >/dev/null
 grep -F 'scripts/test-windows-runtime-upgrade-extractor.ps1' .buildkite/pipeline.yml >/dev/null
 grep -F 'scripts/tests/run-native-candidate-smoke-test.ps1' .buildkite/pipeline.yml >/dev/null
-grep -F '//crates/ctx-cli:unit_tests' .buildkite/pipeline.yml >/dev/null
+grep -F 'scripts/buildkite-public-ci.sh --mode=ci' .buildkite/pipeline.yml >/dev/null
 grep -F 'apt-get is required to provision cabextract' .buildkite/pipeline.yml >/dev/null
 grep -F 'sudo is required to provision cabextract' .buildkite/pipeline.yml >/dev/null
 test -f scripts/test-windows-semantic-smoke-contract.ps1

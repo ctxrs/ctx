@@ -19,6 +19,7 @@ mod fixtures;
 mod history_plugins;
 mod mcp;
 mod native_fixtures;
+mod pro;
 mod runner;
 mod upgrade;
 
@@ -28,5 +29,6 @@ pub(crate) use fixtures::*;
 pub(crate) use history_plugins::*;
 pub(crate) use mcp::*;
 pub(crate) use native_fixtures::*;
+pub(crate) use pro::*;
 pub(crate) use runner::*;
 pub(crate) use upgrade::*;

@@ -1,0 +1,19 @@
+{
+  "event_id": "4ebaa2b7-1a06-461c-bab2-532f3369539b",
+  "event_name": "runtime_observation",
+  "event_version": 1,
+  "occurred_at": "2026-07-22T12:34:00Z",
+  "surface": "daemon",
+  "operation": "liveness",
+  "outcome": "success",
+  "duration_bucket": "gte_30s",
+  "properties": {
+    "start_mode": "auto",
+    "supervisor": "cli_autostart",
+    "trigger_command": "search",
+    "history_freshness": "current",
+    "semantic_backlog_bucket": "0",
+    "semantic_coverage": "complete",
+    "retry_backoff": "none"
+  }
+}

@@ -1,14 +1,13 @@
 use ctx_history_core::CaptureProvider;
 use rusqlite::Connection;
 
+use super::super::probes::{has_trae_state_vscdb_chat_history, BoundedProbe};
 use super::super::{
-    discover_provider_sources, discover_provider_sources_for_provider, provider_source_spec,
-    ProviderImportSupport, ProviderSourceStatus,
-};
-use super::super::{
-    discovery::discover_pi_custom_session_sources_with_project_settings,
-    probes::{has_trae_state_vscdb_chat_history, BoundedProbe},
-    specs::TRAE_STATE_VSCDB_SOURCE_FORMAT,
+    discover_provider_sources, discover_provider_sources_for_provider,
+    discover_provider_sources_for_provider_report,
+    discover_provider_sources_for_provider_with_context,
+    discover_provider_sources_for_provider_with_projects, DiscoveryContext, DiscoveryIssueKind,
+    DiscoveryPlatform, DiscoveryPlatformDirs, ProviderImportSupport, ProviderSourceStatus,
 };
 use super::support::{
     shared_provider_history_fixture, tempdir, write_junie_discovery_session,
@@ -40,7 +39,7 @@ fn continue_discovery_uses_global_dir_env_sessions_subdir() {
 }
 
 #[test]
-fn kilo_discovery_uses_xdg_kilo_db_env_override_and_channel_dbs() {
+fn kilo_discovery_selects_one_active_database() {
     let _lock = ENV_LOCK.lock().unwrap();
     let temp = tempdir();
     let _kilo_db = EnvGuard::remove("KILO_DB");
@@ -60,7 +59,7 @@ fn kilo_discovery_uses_xdg_kilo_db_env_override_and_channel_dbs() {
             .iter()
             .map(|source| source.path.clone())
             .collect::<Vec<_>>(),
-        vec![data_dir.join("kilo.db"), data_dir.join("kilo-dev.db")]
+        vec![data_dir.join("kilo.db")]
     );
     assert!(sources
         .iter()
@@ -99,7 +98,7 @@ fn kilo_discovery_uses_xdg_kilo_db_env_override_and_channel_dbs() {
 }
 
 #[test]
-fn qwen_discovery_uses_runtime_and_home_env_overrides() {
+fn qwen_runtime_override_suppresses_home_root() {
     let _lock = ENV_LOCK.lock().unwrap();
     let temp = tempdir();
     let runtime = temp.path().join("qwen-runtime");
@@ -109,15 +108,12 @@ fn qwen_discovery_uses_runtime_and_home_env_overrides() {
     let _runtime = EnvGuard::set("QWEN_RUNTIME_DIR", runtime.as_os_str());
     let _home = EnvGuard::set("QWEN_HOME", qwen_home.as_os_str());
 
-    let sources = discover_provider_sources(temp.path());
-    for path in [runtime.join("projects"), qwen_home.join("projects")] {
-        let source = sources
-            .iter()
-            .find(|source| source.provider == CaptureProvider::QwenCode && source.path == path)
-            .unwrap_or_else(|| panic!("missing Qwen Code source for {path:?}: {sources:#?}"));
-        assert_eq!(source.status, ProviderSourceStatus::Available);
-        assert_eq!(source.import_support, ProviderImportSupport::Native);
-    }
+    let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::QwenCode);
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].path, runtime.join("projects"));
+    assert_eq!(sources[0].status, ProviderSourceStatus::Available);
+    assert_eq!(sources[0].import_support, ProviderImportSupport::Native);
+    assert_ne!(sources[0].path, qwen_home.join("projects"));
 }
 
 #[test]
@@ -128,66 +124,37 @@ fn kimi_discovery_uses_home_env_override() {
     write_kimi_discovery_wire(&kimi_home);
     let _home = EnvGuard::set("KIMI_CODE_HOME", kimi_home.as_os_str());
 
-    let sources = discover_provider_sources(temp.path());
+    let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::KimiCodeCli);
     let source = sources
         .iter()
         .find(|source| source.provider == CaptureProvider::KimiCodeCli && source.path == kimi_home)
         .unwrap_or_else(|| panic!("missing Kimi Code CLI source in {sources:#?}"));
     assert_eq!(source.status, ProviderSourceStatus::Available);
-    let crush = temp.path().join(".local/share/crush");
-    std::fs::create_dir_all(&crush).unwrap();
-    std::fs::write(crush.join("crush.db"), b"sqlite fixture marker").unwrap();
-    let crush_source = discover_provider_sources(temp.path())
-        .into_iter()
-        .find(|source| source.provider == CaptureProvider::Crush)
-        .unwrap();
-    assert_eq!(crush_source.status, ProviderSourceStatus::Available);
-    assert_eq!(crush_source.source_format, "crush_sqlite");
-
-    let goose = temp.path().join(".local/share/goose/sessions");
-    std::fs::create_dir_all(&goose).unwrap();
-    std::fs::write(goose.join("sessions.db"), b"sqlite fixture marker").unwrap();
-    let goose_source = discover_provider_sources(temp.path())
-        .into_iter()
-        .find(|source| source.provider == CaptureProvider::Goose)
-        .unwrap();
-    assert_eq!(goose_source.status, ProviderSourceStatus::Available);
-    assert_eq!(goose_source.source_format, "goose_sessions_sqlite");
 }
 
 #[test]
-fn codebuddy_discovery_uses_localappdata_override() {
+fn codebuddy_discovery_uses_cli_config_override() {
     let _lock = ENV_LOCK.lock().unwrap();
     let temp = tempdir();
-    let local_app_data = temp.path().join("local-app-data");
-    let codebuddy = local_app_data.join("CodeBuddyExtension");
-    let session = codebuddy
-        .join("CodeBuddyIDE/default/history/11112222333344445555666677778888/session-alpha");
-    std::fs::create_dir_all(session.join("messages")).unwrap();
-    std::fs::write(
-        session.join("index.json"),
-        r#"{"messages":[{"id":"msg-1","role":"user"}]}"#,
-    )
-    .unwrap();
-    std::fs::write(
-        session.join("messages/msg-1.json"),
-        r#"{"message":"hello"}"#,
-    )
-    .unwrap();
-    let _local_app_data = EnvGuard::set("LOCALAPPDATA", local_app_data.as_os_str());
+    let codebuddy = temp.path().join("codebuddy-cli");
+    let project = codebuddy.join("projects/workspace");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("session.jsonl"), "{}\n").unwrap();
+    let _config = EnvGuard::set("CODEBUDDY_CONFIG_DIR", codebuddy.as_os_str());
 
     let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::CodeBuddy);
+    assert_eq!(sources.len(), 1);
     let source = sources
         .iter()
         .find(|source| source.provider == CaptureProvider::CodeBuddy && source.path == codebuddy)
-        .unwrap_or_else(|| panic!("missing CodeBuddy LOCALAPPDATA source in {sources:#?}"));
+        .unwrap_or_else(|| panic!("missing CodeBuddy CLI source in {sources:#?}"));
 
     assert_eq!(source.status, ProviderSourceStatus::Available);
     assert_eq!(source.import_support, ProviderImportSupport::Native);
 }
 
 #[test]
-fn firebender_discovery_uses_current_project_chat_history_db() {
+fn firebender_project_db_requires_explicit_path() {
     let _lock = ENV_LOCK.lock().unwrap();
     let temp = tempdir();
     let project = temp.path().join("project");
@@ -208,18 +175,17 @@ fn firebender_discovery_uses_current_project_chat_history_db() {
         .unwrap();
     let _cwd = CwdGuard::set(&nested);
 
-    let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Firebender);
-    let source = sources
-        .iter()
-        .find(|source| source.provider == CaptureProvider::Firebender && source.path == db)
-        .unwrap_or_else(|| panic!("missing Firebender cwd source in {sources:#?}"));
-
-    assert_eq!(source.status, ProviderSourceStatus::Available);
-    assert_eq!(source.source_format, "firebender_chat_history_sqlite");
-    assert_eq!(source.import_support, ProviderImportSupport::Native);
+    let report =
+        discover_provider_sources_for_provider_report(temp.path(), CaptureProvider::Firebender);
+    assert!(report.sources.is_empty());
+    assert_eq!(report.issues.len(), 1);
+    assert_eq!(
+        report.issues[0].kind,
+        DiscoveryIssueKind::InsufficientOfficialEvidence
+    );
 }
 #[test]
-fn junie_discovery_uses_default_sessions_and_env_overrides() {
+fn junie_home_replaces_default_and_retired_sessions_override() {
     let _lock = ENV_LOCK.lock().unwrap();
     let temp = tempdir();
     let _sessions_dir = EnvGuard::remove("JUNIE_SESSIONS_DIR");
@@ -255,15 +221,12 @@ fn junie_discovery_uses_default_sessions_and_env_overrides() {
     let _junie_home = EnvGuard::set("JUNIE_HOME", junie_home.as_os_str());
 
     let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Junie);
-    for path in [&env_sessions, &home_sessions] {
-        let source = sources
-            .iter()
-            .find(|source| source.path == *path)
-            .unwrap_or_else(|| panic!("missing Junie source {path:?} in {sources:#?}"));
-        assert_eq!(source.status, ProviderSourceStatus::Available);
-        assert_eq!(source.source_format, "junie_session_events_jsonl_tree");
-        assert_eq!(source.import_support, ProviderImportSupport::Native);
-    }
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].path, home_sessions);
+    assert_ne!(sources[0].path, env_sessions);
+    assert_eq!(sources[0].status, ProviderSourceStatus::Available);
+    assert_eq!(sources[0].source_format, "junie_session_events_jsonl_tree");
+    assert_eq!(sources[0].import_support, ProviderImportSupport::Native);
 }
 
 #[test]
@@ -295,9 +258,10 @@ fn mistral_vibe_discovery_uses_default_and_home_env_sessions() {
     write_mistral_vibe_discovery_session(&custom_sessions);
     let _home = EnvGuard::set("VIBE_HOME", custom_home.as_os_str());
     let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::MistralVibe);
-    assert!(sources.iter().any(|source| {
-        source.path == custom_sessions && source.status == ProviderSourceStatus::Available
-    }));
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].path, custom_sessions);
+    assert_eq!(sources[0].status, ProviderSourceStatus::Available);
+    assert_ne!(sources[0].path, default_sessions);
 }
 
 #[test]
@@ -328,13 +292,14 @@ fn mux_discovery_uses_default_and_mux_root_sessions() {
     write_mux_discovery_session(&custom_sessions);
     let _home = EnvGuard::set("MUX_ROOT", custom_home.as_os_str());
     let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Mux);
-    assert!(sources.iter().any(|source| {
-        source.path == custom_sessions && source.status == ProviderSourceStatus::Available
-    }));
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].path, custom_sessions);
+    assert_eq!(sources[0].status, ProviderSourceStatus::Available);
+    assert_ne!(sources[0].path, default_sessions);
 }
 
 #[test]
-fn deepagents_discovery_uses_default_sessions_db() {
+fn deepagents_discovery_does_not_open_the_selected_database() {
     let temp = tempdir();
     let db = temp.path().join(".deepagents/.state/sessions.db");
     std::fs::create_dir_all(db.parent().unwrap()).unwrap();
@@ -352,7 +317,8 @@ fn deepagents_discovery_uses_default_sessions_db() {
             .into_iter()
             .find(|source| source.path == db)
             .unwrap();
-    assert_eq!(unreadable_source.status, ProviderSourceStatus::Unknown);
+    assert_eq!(unreadable_source.status, ProviderSourceStatus::Available);
+    assert_eq!(unreadable_source.unsupported_reason, None);
 
     std::fs::copy(
         shared_provider_history_fixture("deepagents/v1/sessions.db"),
@@ -372,8 +338,10 @@ fn deepagents_discovery_uses_default_sessions_db() {
 fn crush_discovery_uses_global_config_data_directory() {
     let _lock = ENV_LOCK.lock().unwrap();
     let temp = tempdir();
-    let config = temp.path().join("crush.json");
+    let config_dir = temp.path().join("crush-config");
+    let config = config_dir.join("crush.json");
     let data_dir = temp.path().join("custom-crush-data");
+    std::fs::create_dir_all(&config_dir).unwrap();
     std::fs::create_dir_all(&data_dir).unwrap();
     std::fs::write(data_dir.join("crush.db"), b"sqlite fixture marker").unwrap();
     std::fs::write(
@@ -384,10 +352,11 @@ fn crush_discovery_uses_global_config_data_directory() {
         ),
     )
     .unwrap();
-    let _config = EnvGuard::set("CRUSH_GLOBAL_CONFIG", &config);
+    let _config = EnvGuard::set("CRUSH_GLOBAL_CONFIG", &config_dir);
     let _data = EnvGuard::remove("CRUSH_GLOBAL_DATA");
 
     let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Crush);
+    assert_eq!(sources.len(), 1);
     let source = sources
         .iter()
         .find(|source| source.path == data_dir.join("crush.db"))
@@ -415,10 +384,8 @@ fn goose_discovery_uses_path_root_data_sessions_db() {
     assert_eq!(source.source_format, "goose_sessions_sqlite");
 }
 
-#[cfg(unix)]
 #[test]
-fn warp_discovery_uses_documented_state_and_localappdata_paths() {
-    let _lock = ENV_LOCK.lock().unwrap();
+fn warp_linux_state_root_does_not_union_windows_localappdata() {
     let temp = tempdir();
     let xdg_state = temp.path().join("xdg-state");
     let local_app_data = temp.path().join("local-app-data");
@@ -428,24 +395,29 @@ fn warp_discovery_uses_documented_state_and_localappdata_paths() {
     std::fs::create_dir_all(windows_db.parent().unwrap()).unwrap();
     std::fs::write(&linux_db, b"sqlite fixture marker").unwrap();
     std::fs::write(&windows_db, b"sqlite fixture marker").unwrap();
-    let _xdg_state = EnvGuard::set("XDG_STATE_HOME", xdg_state.as_os_str());
-    let _local_app_data = EnvGuard::set("LOCALAPPDATA", local_app_data.as_os_str());
+    let context = DiscoveryContext::new(
+        temp.path(),
+        temp.path(),
+        DiscoveryPlatform::Linux,
+        DiscoveryPlatformDirs::default(),
+    )
+    .with_env("XDG_STATE_HOME", xdg_state.as_os_str())
+    .with_env("LOCALAPPDATA", local_app_data.as_os_str());
 
-    let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Warp);
-    for path in [&linux_db, &windows_db] {
-        let source = sources
-            .iter()
-            .find(|source| source.path == *path)
-            .unwrap_or_else(|| panic!("missing Warp source {path:?} in {sources:#?}"));
-        assert_eq!(source.status, ProviderSourceStatus::Available);
-        assert_eq!(source.source_format, "warp_sqlite");
-        assert_eq!(source.import_support, ProviderImportSupport::Native);
-        assert!(source.import_support.is_auto_importable());
-    }
+    let sources =
+        discover_provider_sources_for_provider_with_context(&context, CaptureProvider::Warp)
+            .sources;
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].path, linux_db);
+    assert_ne!(sources[0].path, windows_db);
+    assert_eq!(sources[0].status, ProviderSourceStatus::Available);
+    assert_eq!(sources[0].source_format, "warp_sqlite");
+    assert_eq!(sources[0].import_support, ProviderImportSupport::Native);
+    assert!(sources[0].import_support.is_auto_importable());
 }
 
 #[test]
-fn lingma_discovery_uses_waylog_default_local_db_paths() {
+fn lingma_discovery_uses_current_vscode_root_only() {
     let temp = tempdir();
     let stable = temp
         .path()
@@ -457,19 +429,16 @@ fn lingma_discovery_uses_waylog_default_local_db_paths() {
     write_lingma_discovery_db(&insiders);
 
     let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Lingma);
-    for path in [&stable, &insiders] {
-        let source = sources
-            .iter()
-            .find(|source| source.path == *path)
-            .unwrap_or_else(|| panic!("missing Lingma source {path:?} in {sources:#?}"));
-        assert_eq!(source.status, ProviderSourceStatus::Available);
-        assert_eq!(source.source_format, "lingma_sqlite");
-        assert_eq!(source.import_support, ProviderImportSupport::Native);
-    }
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].path, stable);
+    assert_ne!(sources[0].path, insiders);
+    assert_eq!(sources[0].status, ProviderSourceStatus::Available);
+    assert_eq!(sources[0].source_format, "lingma_sqlite");
+    assert_eq!(sources[0].import_support, ProviderImportSupport::Native);
 }
 
 #[test]
-fn trae_discovery_uses_workspace_storage_roots_as_native_sources() {
+fn trae_workspace_storage_compatibility_paths_are_not_automatic() {
     let _lock = ENV_LOCK.lock().unwrap();
     let temp = tempdir();
     let appdata = temp.path().join("appdata");
@@ -478,19 +447,14 @@ fn trae_discovery_uses_workspace_storage_roots_as_native_sources() {
     let standard_mac_root = temp
         .path()
         .join("Library/Application Support/Trae/User/workspaceStorage");
-    let mac_root = temp
-        .path()
-        .join("Library/Application Support/Trae CN/User/workspaceStorage");
     let standard_appdata_root = appdata.join("Trae/User/workspaceStorage");
-    let appdata_root = appdata.join("Trae CN/User/workspaceStorage");
-    for root in [
-        &standard_mac_root,
-        &mac_root,
-        &standard_appdata_root,
-        &appdata_root,
-    ] {
+    for root in [&standard_mac_root, &standard_appdata_root] {
         write_trae_discovery_db(&root.join("workspace-hash/state.vscdb"));
     }
+    assert_eq!(
+        has_trae_state_vscdb_chat_history(&standard_mac_root, 10_000),
+        BoundedProbe::Found
+    );
 
     let empty_root = temp
         .path()
@@ -502,22 +466,7 @@ fn trae_discovery_uses_workspace_storage_roots_as_native_sources() {
     );
 
     let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Trae);
-    for path in [
-        &standard_mac_root,
-        &mac_root,
-        &standard_appdata_root,
-        &appdata_root,
-    ] {
-        let source = sources
-            .iter()
-            .find(|source| source.provider == CaptureProvider::Trae && source.path == *path)
-            .unwrap_or_else(|| panic!("missing Trae source {path:?} in {sources:#?}"));
-        assert_eq!(source.status, ProviderSourceStatus::Available);
-        assert_eq!(source.source_format, TRAE_STATE_VSCDB_SOURCE_FORMAT);
-        assert_eq!(source.import_support, ProviderImportSupport::Native);
-        assert!(source.import_support.is_auto_importable());
-        assert!(source.unsupported_reason.is_none());
-    }
+    assert!(sources.is_empty());
 }
 
 #[test]
@@ -540,7 +489,7 @@ fn pi_discovery_uses_env_session_dir() {
 }
 
 #[test]
-fn pi_discovery_uses_global_and_project_settings_session_dirs() {
+fn pi_project_setting_replaces_global_setting_when_persistently_trusted() {
     let _lock = ENV_LOCK.lock().unwrap();
     let temp = tempdir();
     let project = tempdir();
@@ -552,35 +501,69 @@ fn pi_discovery_uses_global_and_project_settings_session_dirs() {
     std::fs::create_dir_all(temp.path().join(".pi/agent")).unwrap();
     std::fs::write(
         temp.path().join(".pi/agent/settings.json"),
-        r#"{"sessionDir":"~/global-pi-sessions"}"#,
+        r#"{"sessionDir":"~/global-pi-sessions","defaultProjectTrust":"ask"}"#,
     )
     .unwrap();
 
     let project_sessions = project.path().join(".pi/custom-sessions");
+    std::fs::create_dir_all(project.path().join(".git")).unwrap();
     write_pi_discovery_session(&project_sessions);
     std::fs::write(
         project.path().join(".pi/settings.json"),
-        r#"{"sessionDir":"custom-sessions"}"#,
+        r#"{"sessionDir":".pi/custom-sessions"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join(".pi/agent/trust.json"),
+        format!(
+            "{{{}:true}}",
+            serde_json::to_string(project.path().to_str().unwrap()).unwrap()
+        ),
     )
     .unwrap();
 
-    let spec = provider_source_spec(CaptureProvider::Pi).unwrap();
-    let project_settings_dirs = [
-        project.path().join("subdir/.pi"),
-        project.path().join(".pi"),
-    ];
-    let sources = discover_pi_custom_session_sources_with_project_settings(
+    let context = DiscoveryContext::new(
         temp.path(),
-        spec,
-        &project_settings_dirs,
+        project.path(),
+        DiscoveryPlatform::Linux,
+        DiscoveryPlatformDirs::default(),
     );
-    for path in [&global, &project_sessions] {
-        let source = sources
-            .iter()
-            .find(|source| source.provider == CaptureProvider::Pi && source.path == *path)
-            .unwrap();
-        assert_eq!(source.status, ProviderSourceStatus::Available);
+    let report = discover_provider_sources_for_provider_with_context(&context, CaptureProvider::Pi);
+    assert_eq!(report.sources.len(), 1);
+    assert_eq!(report.sources[0].path, project_sessions);
+    assert_ne!(report.sources[0].path, global);
+    assert_eq!(report.sources[0].status, ProviderSourceStatus::Available);
+}
+
+#[test]
+fn project_discovery_fans_out_only_across_supplied_activity_locators() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home = tempdir();
+    let root = tempdir();
+
+    let projects = [root.path().join("one"), root.path().join("two")];
+    let mut databases = Vec::new();
+    for project in &projects {
+        std::fs::create_dir_all(project).unwrap();
+        let database = project.join("shelley.db");
+        Connection::open(&database).unwrap();
+        databases.push(database);
     }
+    let unrelated = root.path().join("unrelated");
+    std::fs::create_dir_all(&unrelated).unwrap();
+    Connection::open(unrelated.join("shelley.db")).unwrap();
+
+    let sources = discover_provider_sources_for_provider_with_projects(
+        home.path(),
+        CaptureProvider::Shelley,
+        &projects,
+    );
+    for database in databases {
+        assert!(sources.iter().any(|source| source.path == database));
+    }
+    assert!(sources
+        .iter()
+        .all(|source| !source.path.starts_with(&unrelated)));
 }
 
 #[test]
@@ -606,7 +589,6 @@ fn cline_discovery_uses_env_data_dirs() {
 
 #[test]
 fn roo_discovery_uses_custom_storage_setting() {
-    let _lock = ENV_LOCK.lock().unwrap();
     let temp = tempdir();
     let custom = temp.path().join("roo-custom-storage");
     write_task_json_discovery_task(&custom, "roo-custom-task", "history_item.json");
@@ -614,19 +596,96 @@ fn roo_discovery_uses_custom_storage_setting() {
     std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
     std::fs::write(
         &settings,
-        r#"{"roo-cline.customStoragePath":"~/roo-custom-storage"}"#,
+        format!(
+            r#"{{"roo-cline.customStoragePath":{}}}"#,
+            serde_json::to_string(custom.to_str().unwrap()).unwrap()
+        ),
     )
     .unwrap();
-    let _roo_code = EnvGuard::remove("ROO_CODE_DATA_DIR");
-    let _roo = EnvGuard::remove("ROO_DATA_DIR");
-    let _roo_cline = EnvGuard::remove("ROO_CLINE_DATA_DIR");
+    let context = DiscoveryContext::new(
+        temp.path(),
+        temp.path(),
+        DiscoveryPlatform::Linux,
+        DiscoveryPlatformDirs {
+            config: Some(temp.path().join(".config")),
+            ..DiscoveryPlatformDirs::default()
+        },
+    );
 
-    let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::RooCode);
-    let source = sources
+    let report =
+        discover_provider_sources_for_provider_with_context(&context, CaptureProvider::RooCode);
+    let source = report
+        .sources
         .iter()
         .find(|source| source.provider == CaptureProvider::RooCode && source.path == custom)
         .unwrap();
 
     assert_eq!(source.status, ProviderSourceStatus::Available);
     assert_eq!(source.import_support, ProviderImportSupport::Native);
+}
+
+#[test]
+fn injected_context_isolates_resolvers_from_process_env_and_cwd() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let temp = tempdir();
+    let process_mux = temp.path().join("process-mux");
+    write_mux_discovery_session(&process_mux.join("sessions"));
+    let _mux = EnvGuard::set("MUX_ROOT", &process_mux);
+
+    let injected_cwd = temp.path().join("injected-cwd");
+    std::fs::create_dir_all(&injected_cwd).unwrap();
+    let context = DiscoveryContext::new(
+        temp.path(),
+        &injected_cwd,
+        DiscoveryPlatform::Linux,
+        DiscoveryPlatformDirs::default(),
+    );
+    let report =
+        discover_provider_sources_for_provider_with_context(&context, CaptureProvider::Mux);
+    assert!(!report
+        .sources
+        .iter()
+        .any(|source| source.path == process_mux.join("sessions")));
+
+    let report = discover_provider_sources_for_provider_with_context(
+        &context.with_env("MUX_ROOT", &process_mux),
+        CaptureProvider::Mux,
+    );
+    assert!(report
+        .sources
+        .iter()
+        .any(|source| source.path == process_mux.join("sessions")));
+}
+
+#[test]
+fn canonical_alias_dedupe_keeps_first_operational_spelling_only_for_existing_paths() {
+    let temp = tempdir();
+    let default_sessions = temp.path().join(".mux/sessions");
+    write_mux_discovery_session(&default_sessions);
+    let alias_root = temp.path().join(".mux/../.mux");
+    let context = DiscoveryContext::new(
+        temp.path(),
+        temp.path(),
+        DiscoveryPlatform::Linux,
+        DiscoveryPlatformDirs::default(),
+    )
+    .with_env("MUX_ROOT", &alias_root);
+    let report =
+        discover_provider_sources_for_provider_with_context(&context, CaptureProvider::Mux);
+    assert_eq!(report.sources.len(), 1);
+    assert_eq!(report.sources[0].path, alias_root.join("sessions"));
+
+    let missing_home = temp.path().join("missing-home");
+    let missing_alias = missing_home.join(".mux/../.mux/sessions");
+    let missing_context = DiscoveryContext::new(
+        &missing_home,
+        temp.path(),
+        DiscoveryPlatform::Linux,
+        DiscoveryPlatformDirs::default(),
+    )
+    .with_env("MUX_ROOT", missing_home.join(".mux/../.mux"));
+    let report =
+        discover_provider_sources_for_provider_with_context(&missing_context, CaptureProvider::Mux);
+    assert_eq!(report.sources.len(), 1);
+    assert_eq!(report.sources[0].path, missing_alias);
 }

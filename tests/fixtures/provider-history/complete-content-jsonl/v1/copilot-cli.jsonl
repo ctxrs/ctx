@@ -1,0 +1,2 @@
+{"type":"session.start","id":"copilot-meta","data":{"sessionId":"complete-copilot","startTime":"2026-07-21T12:00:00Z","context":{"cwd":"/workspace/fixture"}}}
+{"type":"user.message","id":"copilot-message","timestamp":"2026-07-21T12:00:01Z","data":{"content":"Copilot snowman ☃\nquoted \"body\" and escaped \\\\ path"}}

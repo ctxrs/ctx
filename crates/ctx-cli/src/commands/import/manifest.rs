@@ -1,38 +1,269 @@
-use std::collections::BTreeMap;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    time::UNIX_EPOCH,
+};
 
-use super::*;
-use crate::commands::import::catalog::system_time_ms;
+use anyhow::{anyhow, Context, Result};
+
+use ctx_history_core::{utc_now, CaptureProvider};
+use ctx_history_store::{
+    SourceImportFile, SourceImportInventoryControl as InventoryControl, Store,
+};
+
+use crate::commands::import::{provider_path_text, system_time_ms, SourceStats};
+use crate::provider_sources::SourceInfo;
+
+mod observation;
+mod store_pages;
+mod walk;
+
+use store_pages::{InventoryPageStore, SOURCE_IMPORT_STORE_PAGE_SIZE};
+use walk::{pace_inventory_page, SourceImportDirectoryWalk};
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SourceImportInventory {
+    pub(crate) files: usize,
+    pub(crate) bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum InventoryPhase {
+    Discovering,
+    Reconciling(ReconciliationStage),
+    Complete,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ReconciliationStage {
+    Preference,
+    Missing,
+}
+
+fn inventory_control_from_source(
+    source: &SourceInfo,
+    metadata: &fs::Metadata,
+    observed_at_ms: i64,
+) -> Result<InventoryControl> {
+    Ok(InventoryControl::new(
+        source.provider,
+        source.source_format,
+        provider_path_text(&source.path)?,
+        metadata.len(),
+        system_time_ms(metadata.modified().unwrap_or(UNIX_EPOCH)),
+        observed_at_ms,
+    ))
+}
+
+struct InventoryRun<'a> {
+    pages: InventoryPageStore<'a>,
+    source: &'a SourceInfo,
+    force_reindex: bool,
+    observed_at_ms: i64,
+}
+
+impl<'a> InventoryRun<'a> {
+    fn new(store: &'a Store, source: &'a SourceInfo, force_reindex: bool) -> Result<Self> {
+        let source_root = provider_path_text(&source.path)?;
+        let observed_at_ms = store.next_source_import_observed_at_ms(
+            source.provider,
+            source_root,
+            utc_now().timestamp_millis(),
+        )?;
+        Ok(Self {
+            pages: InventoryPageStore::new(store),
+            source,
+            force_reindex,
+            observed_at_ms,
+        })
+    }
+
+    fn run(self, root_metadata: fs::Metadata) -> Result<SourceImportInventory> {
+        if root_metadata.file_type().is_file() {
+            return self.run_single_file();
+        }
+        if !root_metadata.file_type().is_dir() {
+            return Ok(SourceImportInventory::default());
+        }
+        self.run_directory(root_metadata)
+    }
+
+    fn run_directory(self, root_metadata: fs::Metadata) -> Result<SourceImportInventory> {
+        let control =
+            inventory_control_from_source(self.source, &root_metadata, self.observed_at_ms)?;
+        self.pages.persist_control(
+            &control,
+            InventoryPhase::Discovering,
+            None,
+            SourceImportInventory::default(),
+        )?;
+        let discovered = self.discover(SourceImportDirectoryWalk::new(&self.source.path)?)?;
+        self.pages.persist_control(
+            &control,
+            InventoryPhase::Reconciling(ReconciliationStage::Preference),
+            None,
+            discovered,
+        )?;
+        self.reconcile_shadowed(&control, discovered)?;
+        self.pages.persist_control(
+            &control,
+            InventoryPhase::Reconciling(ReconciliationStage::Missing),
+            None,
+            discovered,
+        )?;
+        let stale_keyset = self.reconcile_missing(&control, discovered)?;
+        self.finish_directory(&control, stale_keyset)
+    }
+
+    fn finish_directory(
+        &self,
+        control: &InventoryControl,
+        stale_keyset: Option<String>,
+    ) -> Result<SourceImportInventory> {
+        let (files, bytes) = self
+            .pages
+            .source_stats(self.source.provider, control.source_root())?;
+        let inventory = SourceImportInventory { files, bytes };
+        self.pages.persist_control(
+            control,
+            InventoryPhase::Complete,
+            stale_keyset.as_deref(),
+            inventory,
+        )?;
+        Ok(inventory)
+    }
+
+    fn run_single_file(&self) -> Result<SourceImportInventory> {
+        let source_root = provider_path_text(&self.source.path)?.to_owned();
+        let mut inventory = SourceImportInventory::default();
+        if source_import_file_matches(self.source, &self.source.path) {
+            let metadata = fs::metadata(&self.source.path).with_context(|| {
+                format!("stat import source file {}", self.source.path.display())
+            })?;
+            let file = observation::source_import_file(
+                self.source,
+                &self.source.path,
+                &metadata,
+                self.observed_at_ms,
+            )?;
+            self.pages
+                .persist_data_page(std::slice::from_ref(&file), self.force_reindex)?;
+            inventory.files = 1;
+            inventory.bytes = metadata.len();
+        }
+        let mut after_source_path = None;
+        while let Some(next) = self.pages.reconcile_single_file_missing_page(
+            self.source.provider,
+            &source_root,
+            self.observed_at_ms,
+            after_source_path.as_deref(),
+        )? {
+            after_source_path = Some(next);
+        }
+        Ok(inventory)
+    }
+
+    fn discover<I>(&self, paths: I) -> Result<SourceImportInventory>
+    where
+        I: IntoIterator<Item = Result<PathBuf>>,
+    {
+        let mut inventory = SourceImportInventory::default();
+        let mut page = Vec::with_capacity(SOURCE_IMPORT_STORE_PAGE_SIZE);
+        for path in paths {
+            let path = path?;
+            if !source_import_file_matches(self.source, &path) {
+                continue;
+            }
+            let metadata = fs::metadata(&path)
+                .with_context(|| format!("stat import source file {}", path.display()))?;
+            inventory.files += 1;
+            inventory.bytes = inventory.bytes.saturating_add(metadata.len());
+            page.push(observation::source_import_file(
+                self.source,
+                &path,
+                &metadata,
+                self.observed_at_ms,
+            )?);
+            if page.len() == SOURCE_IMPORT_STORE_PAGE_SIZE {
+                self.pages.persist_data_page(&page, self.force_reindex)?;
+                page.clear();
+            }
+        }
+        self.pages.persist_data_page(&page, self.force_reindex)?;
+        Ok(inventory)
+    }
+
+    fn reconcile_shadowed(
+        &self,
+        control: &InventoryControl,
+        inventory: SourceImportInventory,
+    ) -> Result<()> {
+        let mut after_source_path = None;
+        loop {
+            let next = self.pages.reconcile_shadowed_page(
+                control,
+                inventory,
+                after_source_path.as_deref(),
+            )?;
+            let Some(next) = next else {
+                return Ok(());
+            };
+            after_source_path = Some(next);
+            pace_inventory_page();
+        }
+    }
+
+    fn reconcile_missing(
+        &self,
+        control: &InventoryControl,
+        inventory: SourceImportInventory,
+    ) -> Result<Option<String>> {
+        let mut after_source_path = None;
+        loop {
+            let next = self.pages.reconcile_missing_page(
+                control,
+                inventory,
+                after_source_path.as_deref(),
+            )?;
+            let Some(next) = next else {
+                return Ok(after_source_path);
+            };
+            after_source_path = Some(next);
+            pace_inventory_page();
+        }
+    }
+}
+
+pub(crate) fn inventory_source_import_files(
+    store: &Store,
+    source: &SourceInfo,
+    force_reindex: bool,
+) -> Result<SourceImportInventory> {
+    let root_metadata = fs::symlink_metadata(&source.path)
+        .with_context(|| format!("stat import source {}", source.path.display()))?;
+    if root_metadata.file_type().is_symlink() {
+        return Err(anyhow!(
+            "symlinked provider transcript roots are rejected: {}",
+            source.path.display()
+        ));
+    }
+    InventoryRun::new(store, source, force_reindex)?.run(root_metadata)
+}
+
+pub(crate) fn bounded_source_root_stats(path: &Path) -> Result<SourceStats> {
+    walk::bounded_source_root_stats(path)
+}
+
+pub(crate) fn persist_source_import_page(store: &Store, files: &[SourceImportFile]) -> Result<()> {
+    InventoryPageStore::new(store).persist_data_page(files, false)
+}
 
 pub(crate) fn persist_source_import_files(
     store: &Store,
     source: &SourceInfo,
     files: &[SourceImportFile],
 ) -> Result<()> {
-    let source_root = source.path.display().to_string();
-    let current_paths = files
-        .iter()
-        .map(|file| file.source_path.clone())
-        .collect::<Vec<_>>();
-    let observed_at_ms = utc_now().timestamp_millis();
-    store.begin_immediate_batch()?;
-    let persist = (|| -> Result<()> {
-        store.upsert_source_import_files(files)?;
-        store.mark_source_import_missing_paths_stale(
-            source.provider,
-            &source_root,
-            &current_paths,
-            observed_at_ms,
-        )?;
-        Ok(())
-    })();
-    match persist {
-        Ok(()) => store.commit_batch()?,
-        Err(err) => {
-            let _ = store.rollback_batch();
-            return Err(err);
-        }
-    }
-    Ok(())
+    InventoryPageStore::new(store).persist_files_and_mark_missing(source, files)
 }
 
 pub(crate) fn source_uses_import_file_manifest(source: &SourceInfo) -> bool {
@@ -40,7 +271,6 @@ pub(crate) fn source_uses_import_file_manifest(source: &SourceInfo) -> bool {
         source.source_format,
         "codex_session_jsonl_tree"
             | "openclaw_session_jsonl_tree"
-            | "openhands_file_events"
             | "hermes_state_sqlite"
             | "nanoclaw_project"
             | "astrbot_data_v4_sqlite"
@@ -50,125 +280,6 @@ pub(crate) fn source_uses_import_file_manifest(source: &SourceInfo) -> bool {
             | "firebender_chat_history_sqlite"
             | "codebuddy_history_json"
     )
-}
-
-pub(crate) fn collect_source_import_files(source: &SourceInfo) -> Result<Vec<SourceImportFile>> {
-    let paths = collect_source_import_paths(source)?;
-    let source_root = source.path.display().to_string();
-    let observed_at_ms = utc_now().timestamp_millis();
-    let mut files = Vec::with_capacity(paths.len());
-    for path in paths {
-        let metadata = fs::metadata(&path)
-            .with_context(|| format!("stat import source file {}", path.display()))?;
-        files.push(SourceImportFile {
-            provider: source.provider,
-            source_format: source.source_format.to_owned(),
-            source_root: source_root.clone(),
-            source_path: path.display().to_string(),
-            file_size_bytes: metadata.len(),
-            file_modified_at_ms: system_time_ms(metadata.modified().unwrap_or(UNIX_EPOCH)),
-            observed_at_ms,
-            metadata: json!({}),
-        });
-    }
-    Ok(files)
-}
-
-pub(crate) fn collect_source_import_paths(source: &SourceInfo) -> Result<Vec<PathBuf>> {
-    let metadata = fs::symlink_metadata(&source.path)
-        .with_context(|| format!("stat import source {}", source.path.display()))?;
-    if metadata.file_type().is_symlink() {
-        return Err(anyhow!(
-            "symlinked provider transcript roots are rejected: {}",
-            source.path.display()
-        ));
-    }
-    if metadata.file_type().is_file() {
-        return Ok(if source_import_file_matches(source, &source.path) {
-            vec![source.path.clone()]
-        } else {
-            Vec::new()
-        });
-    }
-    if !metadata.file_type().is_dir() {
-        return Ok(Vec::new());
-    }
-
-    let mut paths = Vec::new();
-    let mut stack = vec![source.path.clone()];
-    while let Some(dir) = stack.pop() {
-        for entry in fs::read_dir(&dir)
-            .with_context(|| format!("read import source directory {}", dir.display()))?
-        {
-            let entry = entry
-                .with_context(|| format!("read import source entry under {}", dir.display()))?;
-            let path = entry.path();
-            let file_type = entry
-                .file_type()
-                .with_context(|| format!("stat import source entry {}", path.display()))?;
-            if file_type.is_dir() {
-                stack.push(path);
-            } else if file_type.is_file() && source_import_file_matches(source, &path) {
-                paths.push(path);
-            }
-        }
-    }
-    paths = preferred_source_import_paths(source, paths);
-    paths.sort();
-    Ok(paths)
-}
-
-fn preferred_source_import_paths(source: &SourceInfo, paths: Vec<PathBuf>) -> Vec<PathBuf> {
-    match source.provider {
-        CaptureProvider::Antigravity => antigravity_preferred_import_paths(paths),
-        _ => paths,
-    }
-}
-
-fn antigravity_preferred_import_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
-    let mut by_session: BTreeMap<String, PathBuf> = BTreeMap::new();
-    for path in paths {
-        let session = antigravity_session_key_from_path(&path);
-        let prefer_new =
-            path.file_name().and_then(|name| name.to_str()) == Some("transcript_full.jsonl");
-        let replace = by_session
-            .get(&session)
-            .map(|current| {
-                prefer_new
-                    && current.file_name().and_then(|name| name.to_str())
-                        != Some("transcript_full.jsonl")
-            })
-            .unwrap_or(true);
-        if replace {
-            by_session.insert(session, path);
-        }
-    }
-    by_session.into_values().collect()
-}
-
-fn antigravity_session_key_from_path(path: &Path) -> String {
-    let components = path
-        .components()
-        .filter_map(|component| component.as_os_str().to_str().map(str::to_owned))
-        .collect::<Vec<_>>();
-    components
-        .windows(2)
-        .find_map(|window| {
-            (window[0] == "brain" && !window[1].trim().is_empty()).then(|| window[1].clone())
-        })
-        .or_else(|| {
-            components.windows(2).find_map(|window| {
-                (window[1] == ".system_generated" && !window[0].trim().is_empty())
-                    .then(|| window[0].clone())
-            })
-        })
-        .or_else(|| {
-            path.file_stem()
-                .and_then(|stem| stem.to_str())
-                .filter(|stem| !stem.trim().is_empty())
-                .map(str::to_owned)
-        })
-        .unwrap_or_else(|| path.display().to_string())
 }
 
 pub(crate) fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
@@ -276,11 +387,17 @@ pub(crate) fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bo
             path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
                 && path.starts_with(&source.path)
         }
+        CaptureProvider::OpenHands => {
+            path.extension().and_then(|ext| ext.to_str()) == Some("json")
+                && path.starts_with(&source.path)
+                && path
+                    .components()
+                    .any(|component| component.as_os_str() == "v1_conversations")
+        }
         CaptureProvider::Hermes
         | CaptureProvider::NanoClaw
         | CaptureProvider::AstrBot
         | CaptureProvider::Shelley
-        | CaptureProvider::OpenHands
         | CaptureProvider::Cline
         | CaptureProvider::RooCode
         | CaptureProvider::Shell
@@ -291,3 +408,7 @@ pub(crate) fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bo
         | CaptureProvider::Unknown => false,
     }
 }
+
+#[cfg(test)]
+#[path = "manifest/lifecycle_tests.rs"]
+mod lifecycle_tests;

@@ -1,12 +1,23 @@
 use ctx_history_core::{
-    CaptureProvider, EventType, ProviderEventEnvelope, Run, RunStatus, RunType,
+    compact_result_payload, CaptureProvider, EventType, ProviderEventEnvelope, Run, RunStatus,
+    RunType,
 };
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use crate::provider::tool_input;
 use crate::{CaptureError, Result};
 
 use super::ids::{provider_run_uuid, provider_source_run_uuid, provider_sync_metadata, timestamps};
+
+/// Removes provider result bodies and previews before the canonical Store write.
+/// Typed correlation/outcome/content identity survive; source bytes do not.
+pub(crate) fn compact_provider_result_payload(event_type: EventType, payload: &Value) -> Value {
+    if !matches!(event_type, EventType::ToolOutput | EventType::CommandOutput) {
+        return payload.clone();
+    }
+    compact_result_payload(payload)
+}
 
 pub(crate) struct ProviderCommandRunInput<'a> {
     pub(crate) provider: CaptureProvider,
@@ -37,11 +48,20 @@ pub(crate) fn provider_command_run_from_event(
     if event.event_type != EventType::CommandOutput {
         return Ok(None);
     }
+    let arguments_preview = payload.get("arguments_preview");
     let command_preview = payload
         .get("command")
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
-        .map(str::to_owned);
+        .map(str::to_owned)
+        .or_else(|| arguments_preview.and_then(tool_input::command));
+    let cwd = payload
+        .get("workdir")
+        .or_else(|| payload.get("cwd"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+        .or_else(|| arguments_preview.and_then(tool_input::working_directory));
     let call_id = payload.get("call_id").and_then(Value::as_str);
     let key = call_id.unwrap_or(event_hash);
     let started_at = provider_event_started_at(event, payload)?;
@@ -60,7 +80,7 @@ pub(crate) fn provider_command_run_from_event(
             .get("exit_code")
             .and_then(Value::as_i64)
             .and_then(|value| i32::try_from(value).ok()),
-        cwd: None,
+        cwd,
         command_preview,
         input_blob_id: None,
         output_blob_id: None,
@@ -141,5 +161,40 @@ pub(crate) fn provider_command_run_status(payload: &Value) -> RunStatus {
         Some(0) => RunStatus::Succeeded,
         Some(_) => RunStatus::Failed,
         None => RunStatus::Partial,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn sqlite_boundary_drops_malformed_and_oversized_result_fields() {
+        let malformed = json!({
+            "tool": "x".repeat(257),
+            "call_id": "x".repeat(257),
+            "exit_code": i64::from(i32::MAX) + 1,
+            "duration_ms": "42",
+            "timed_out": 0,
+            "output_bytes": -1,
+            "result_outcome": ["success"],
+            "result_evidence": (0..33)
+                .map(|index| json!({"kind": "call_id", "value": format!("call-{index}")}))
+                .collect::<Vec<_>>(),
+            "result_content_ref": {"sha256": "not-a-digest", "byte_len": 1},
+            "text": "raw result body",
+            "output_preview": "raw result preview"
+        });
+
+        assert_eq!(
+            compact_provider_result_payload(EventType::CommandOutput, &malformed),
+            json!({})
+        );
+        assert_eq!(
+            compact_provider_result_payload(EventType::Message, &malformed),
+            malformed
+        );
     }
 }

@@ -5,8 +5,8 @@ search.
 
 ## Decision
 
-ctx should make local daemon-owned indexing and hybrid semantic search the
-default path.
+ctx makes local daemon-owned indexing the default path. Semantic search remains
+an explicit opt-in; when enabled, hybrid retrieval becomes the default.
 
 Indexing is background infrastructure. Search is an interactive read path.
 When the daemon is enabled, `ctx search` should not perform inline history
@@ -18,9 +18,9 @@ The public retrieval modes are:
 
 | Mode | Meaning |
 | --- | --- |
-| `hybrid` | Default. Query lexical and semantic indexes together, then fuse/rerank candidates. |
+| `hybrid` | Default when semantic search is enabled. Query lexical and semantic indexes together, then fuse/rerank candidates. |
 | `semantic` | Semantic vector retrieval only. Useful for conceptual recall and debugging. |
-| `lexical` | SQLite FTS/path/token retrieval only. Useful for exact strings, ids, paths, flags, and symbols. |
+| `lexical` | Default while semantic search is disabled. SQLite FTS/path/token retrieval only. Useful for exact strings, ids, paths, flags, and symbols. |
 
 There is no public `auto` retrieval mode. `auto` made lexical and semantic feel
 like fallback tiers. The desired model is not "try lexical, then maybe rescue
@@ -182,7 +182,9 @@ The foreground `index` command owns:
    mapping or replacing the current `RefreshArg::Auto|Off|Strict` behavior.
 
 3. Make search read-only under daemon ownership:
-   when daemon is enabled or running, skip inline `refresh_before_search`,
+   when daemon is enabled or running and a local index exists, skip inline
+   `refresh_before_search`; allow one bounded foreground bootstrap when the
+   index is absent,
    serve the existing index, and signal/autostart daemon work when allowed.
 
 4. Make setup foreground-light:

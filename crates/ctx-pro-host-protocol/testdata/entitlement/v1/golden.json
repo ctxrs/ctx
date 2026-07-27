@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "grant": {
+    "schema_version": 1,
+    "issuer": "https://commercial.staging.ctx.rs",
+    "key_id": "fixture-v1",
+    "grant_id": "019f85ff-0000-7000-8000-000000000001",
+    "subject": "user_01",
+    "account_id": "account_01",
+    "product": "ctx-local-pro",
+    "access_kind": "trial",
+    "installation_key_thumbprint": "8rMOzdr4Ej9lhHtWMyoVIKbN6P4_viojVlsA-0maNxA",
+    "issued_at_unix": 1800000000,
+    "not_before_unix": 1799999700,
+    "refresh_after_unix": 1800345600,
+    "access_deadline_unix": 1801209600,
+    "grace_deadline_unix": 1801814400,
+    "expires_at_unix": 1800604800,
+    "minimum_helper_protocol": 1,
+    "revocation_epoch": 0,
+    "capabilities": ["graph_read", "graph_write", "export", "migrate", "update"]
+  },
+  "issuer_public_key_base64url": "7UkoxijRwsbq6QM4kFmVYSlZJzpcY_k2NsFGFKyHN9E",
+  "installation_public_key_base64url": "6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw",
+  "challenge_base64url": "CwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCws",
+  "canonical_grant_hex": "6374782d70726f2d656e7469746c656d656e742d6772616e742d76310000010000002168747470733a2f2f636f6d6d65726369616c2e73746167696e672e6374782e72730000000a666978747572652d76310000002430313966383566662d303030302d373030302d383030302d30303030303030303030303100000007757365725f30310000000a6163636f756e745f30310000000d6374782d6c6f63616c2d70726f00000005747269616c0000002b38724d4f7a647234456a396c684874574d796f56494b624e3650345f76696f6a566c73412d306d614e7841000000006b49d200000000006b49d0d4000000006b4f1800000000006b5c4700000000006b658180000000006b530c800001000000000000000000050000000a67726170685f726561640000000b67726170685f7772697465000000066578706f7274000000076d69677261746500000006757064617465",
+  "grant_signature_base64url": "yBnUPH_4oNm7Egqus6pRxLXq-79UgdJu0Eis0plAXRxBuXUjQZ8fVUkqT6WQkxl8ypRn4BY-njsmi2h8LoAICg",
+  "installation_proof_signature_base64url": "zE6kSpXmZ5OEKklF_BvHLkjj2DudbrE9r8gv8GzVJqGYvwLc17e92JDTZOZQnVCwhTTuTjmRsBuyVS0r57JnBw"
+}

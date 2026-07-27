@@ -1,0 +1,5 @@
+{"timestamp":"2026-07-21T12:00:00Z","type":"session_meta","payload":{"id":"codex-result-digest-reuse","timestamp":"2026-07-21T12:00:00Z","cwd":"/workspace/ctx","originator":"codex-cli","source":"cli"}}
+{"timestamp":"2026-07-21T12:00:01Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-plain-string","output":"plain output body\nwith unicode λ"}}
+{"timestamp":"2026-07-21T12:00:02Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-structured-array","output":[{"type":"input_text","text":"first structured block"},{"type":"output_text","text":"second structured block"}]}}
+{"timestamp":"2026-07-21T12:00:03Z","type":"response_item","payload":{"type":"tool_search_output","call_id":"call-fallback-object","output":{"zeta":7,"alpha":{"ok":true},"items":[3,2,1]}}}
+{"timestamp":"2026-07-21T12:00:04Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-malformed-array","output":[{"type":"input_text","text":17},{"unexpected":true},null]}}

@@ -18,7 +18,8 @@ ctx show event <ctx-event-id> --window 5
 ```
 
 Normal `ctx search` uses `--refresh background`, which serves existing indexes
-while daemon maintenance refreshes history and semantic coverage when enabled.
+while default-on daemon maintenance refreshes history. Semantic coverage remains
+disabled unless explicitly enabled.
 Rerun the same search with `--refresh off` when the task requires a strictly
 read-only query over the existing index.
 

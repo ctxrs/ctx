@@ -2,14 +2,14 @@ use std::{fs, path::Path};
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    new_id, Artifact, ArtifactKind, EntityTimestamps, Fidelity, SessionHistoryArchive,
-    SyncMetadata, SyncState, Visibility,
+    new_id, Artifact, ArtifactKind, ContentRef, EntityTimestamps, Event, EventRole, EventType,
+    Fidelity, SessionHistoryArchive, SyncMetadata, SyncState, Visibility,
 };
 use uuid::Uuid;
 
 use crate::archive::{validate_archive_artifact_record_blob, validate_archive_version};
 use crate::object_store::{object_relative_path, sha256_hex};
-use crate::StoreError;
+use crate::{Store, StoreError};
 
 fn tempdir() -> tempfile::TempDir {
     let root = std::env::var_os("TEST_TMPDIR")
@@ -42,6 +42,31 @@ fn artifact(id: Uuid, blob_hash: String, byte_size: u64) -> Artifact {
             updated_at: fixed_time(),
         },
         source_id: None,
+        sync: SyncMetadata {
+            visibility: Visibility::LocalOnly,
+            fidelity: Fidelity::Imported,
+            sync_state: SyncState::LocalOnly,
+            sync_version: 0,
+            deleted_at: None,
+            metadata: serde_json::json!({}),
+        },
+    }
+}
+
+fn event(seq: u64, event_type: EventType, payload: serde_json::Value) -> Event {
+    Event {
+        id: new_id(),
+        seq,
+        history_record_id: None,
+        session_id: None,
+        run_id: None,
+        event_type,
+        role: Some(EventRole::Tool),
+        occurred_at: fixed_time(),
+        capture_source_id: None,
+        payload,
+        payload_blob_id: None,
+        dedupe_key: None,
         sync: SyncMetadata {
             visibility: Visibility::LocalOnly,
             fidelity: Fidelity::Imported,
@@ -157,5 +182,154 @@ fn archive_version_validation_rejects_future_version() {
     assert!(matches!(
         error,
         StoreError::UnsupportedArchiveVersion(version) if version == 3
+    ));
+}
+
+#[test]
+fn every_event_write_boundary_keeps_result_bodies_source_backed() {
+    let temp = tempdir();
+    let mut store = Store::open(temp.path().join("ctx.db")).unwrap();
+    let direct_canary = "DIRECT-RESULT-BODY-CANARY-79ef";
+    let archive_canary = "ARCHIVE-RESULT-BODY-CANARY-cab4";
+    let message_canary = "NON-RESULT-BODY-MUST-SURVIVE-3e11";
+    let direct_content_ref = ContentRef::from_bytes(direct_canary.as_bytes()).unwrap();
+    let direct = event(
+        1,
+        EventType::CommandOutput,
+        serde_json::json!({
+            "tool": "exec_command",
+            "call_id": "call-direct",
+            "exit_code": 0,
+            "result_outcome": "success",
+            "result_content_ref": direct_content_ref,
+            "output": direct_canary,
+            "output_preview": direct_canary,
+        }),
+    );
+    store.upsert_event(&direct).unwrap();
+
+    let archived = event(
+        2,
+        EventType::ToolOutput,
+        serde_json::json!({
+            "provider": "codex",
+            "provider_session_id": "archive-session",
+            "provider_event_index": 2,
+            "provider_event_hash": "archive-event-hash",
+            "body": {
+                "tool": "shell",
+                "call_id": "call-archive",
+                "exit_code": 1,
+                "result_outcome": "failure",
+                "output": archive_canary,
+                "output_preview": archive_canary,
+            }
+        }),
+    );
+    let message = event(
+        3,
+        EventType::Message,
+        serde_json::json!({"text": message_canary}),
+    );
+    let archive = SessionHistoryArchive {
+        schema_version: 2,
+        version: 2,
+        events: vec![archived.clone(), message.clone()],
+        ..SessionHistoryArchive::default()
+    };
+    // This is the same Store transaction used by nested spool archives.
+    store.import_archive(&archive, false).unwrap();
+
+    assert_eq!(
+        store.get_event(direct.id).unwrap().payload,
+        serde_json::json!({
+            "tool": "exec_command",
+            "call_id": "call-direct",
+            "exit_code": 0,
+            "result_outcome": "success",
+            "result_content_ref": direct_content_ref,
+        })
+    );
+    assert_eq!(
+        store.get_event(archived.id).unwrap().payload,
+        serde_json::json!({
+            "provider": "codex",
+            "provider_session_id": "archive-session",
+            "provider_event_index": 2,
+            "provider_event_hash": "archive-event-hash",
+            "body": {
+                "tool": "shell",
+                "call_id": "call-archive",
+                "exit_code": 1,
+                "result_outcome": "failure",
+            }
+        })
+    );
+    assert_eq!(
+        store.get_event(message.id).unwrap().payload,
+        message.payload
+    );
+    assert!(store
+        .search_event_hits(direct_canary, 10)
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .search_event_hits(archive_canary, 10)
+        .unwrap()
+        .is_empty());
+
+    let exported = serde_json::to_string(&store.export_archive().unwrap()).unwrap();
+    assert!(!exported.contains(direct_canary));
+    assert!(!exported.contains(archive_canary));
+    assert!(exported.contains(message_canary));
+}
+
+#[test]
+fn result_payload_blobs_are_rejected_at_direct_and_archive_boundaries() {
+    let temp = tempdir();
+    let mut store = Store::open(temp.path().join("ctx.db")).unwrap();
+    let mut direct = event(
+        1,
+        EventType::CommandOutput,
+        serde_json::json!({"output": "blob-backed result"}),
+    );
+    direct.payload_blob_id = Some(new_id());
+    assert!(matches!(
+        store.upsert_event(&direct).unwrap_err(),
+        StoreError::ResultPayloadBlobUnsupported { id } if id == direct.id
+    ));
+
+    let mut archived = event(
+        2,
+        EventType::ToolOutput,
+        serde_json::json!({"output": "archived blob-backed result"}),
+    );
+    archived.payload_blob_id = Some(new_id());
+    let archive = SessionHistoryArchive {
+        schema_version: 2,
+        version: 2,
+        events: vec![archived.clone()],
+        ..SessionHistoryArchive::default()
+    };
+    assert!(matches!(
+        store.import_archive(&archive, false).unwrap_err(),
+        StoreError::ResultPayloadBlobUnsupported { id } if id == archived.id
+    ));
+    assert!(matches!(
+        store.get_event(archived.id),
+        Err(StoreError::NotFound(_))
+    ));
+
+    let mut replay = event(
+        3,
+        EventType::CommandOutput,
+        serde_json::json!({"output": "first valid result"}),
+    );
+    replay.dedupe_key = Some("result-replay".to_owned());
+    store.upsert_event(&replay).unwrap();
+    replay.payload_blob_id = Some(new_id());
+    assert!(matches!(
+        store.upsert_event(&replay).unwrap_err(),
+        StoreError::ResultPayloadBlobUnsupported { id } if id == replay.id
     ));
 }

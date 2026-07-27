@@ -772,7 +772,9 @@ pub(crate) fn write_native_shelley_fixture(temp: &TempDir, query: &str) -> Strin
             llm_api_url text,
             model_name text,
             forked_from_message_id text
-        );",
+        );
+        create index idx_messages_conversation_sequence
+            on messages(conversation_id collate binary asc, sequence_id asc);",
     )
     .unwrap();
     conn.execute(

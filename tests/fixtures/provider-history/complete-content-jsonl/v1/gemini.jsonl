@@ -1,0 +1,2 @@
+{"sessionId":"complete-gemini","startTime":"2026-07-21T12:00:00Z","directories":["/workspace/fixture"]}
+{"id":"gemini-message","timestamp":"2026-07-21T12:00:01Z","type":"user","content":"Gemini snowman ☃\nquoted \"body\" and escaped \\\\ path"}

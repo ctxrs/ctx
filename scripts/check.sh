@@ -4,46 +4,11 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
 
-# shellcheck source=scripts/ci-common.sh
-source "${repo_root}/scripts/ci-common.sh"
-
-bazel_bin=""
-
-init_bazel() {
-  if [[ -n "${bazel_bin}" ]]; then
-    return 0
-  fi
-
-  ctx_init_tool_env_defaults
-  ctx_init_resource_env
-  ctx_print_resource_env
-
-  bazel_bin="$(ctx_find_bazel)" || {
-    printf 'bazel or bazelisk is required; set CTX_BOOTSTRAP_BAZELISK=1 to allow bootstrap\n' >&2
-    exit 127
-  }
-}
-
 run_bazel() {
-  init_bazel
-  local -a bazel_args
-
-  bazel_args=("$@")
-  case "${1:-}" in
-    build|coverage|test)
-      bazel_args=(
-        "$@"
-        "--jobs=${BAZEL_JOBS}"
-        "--local_resources=cpu=${BAZEL_LOCAL_CPU_RESOURCES}"
-        "--local_resources=memory=${BAZEL_LOCAL_RAM_RESOURCES}"
-      )
-      ;;
-  esac
-
-  printf '==> %s' "${bazel_bin}"
-  printf ' %q' "${bazel_args[@]}"
+  printf '==> scripts/bazelw'
+  printf ' %q' "$@"
   printf '\n'
-  "${bazel_bin}" "${bazel_args[@]}"
+  scripts/bazelw "$@"
 }
 
 usage() {
@@ -53,78 +18,46 @@ usage: scripts/check.sh [--mode MODE]
        scripts/check.sh -- BAZEL_ARGS...
 
 Modes:
-  fast       formatting, docs, static package surface, and CLI contracts
-  presubmit  fast plus clippy, workspace tests, fresh-home, and provider smoke
-  smoke      fast plus fresh-home and provider smoke
-  ci         presubmit plus release/content gates used by Buildkite
+  fast       format, policy, SDK, and native Rust smoke tests
+  presubmit  fast plus the complete native Rust test graph
+  smoke      fast plus fresh-home and provider fixture flows
+  ci         presubmit plus native clippy and release/content gates
+
+Cargo is not invoked by these modes; Bazel is the build and test authority.
 USAGE
 }
 
-list_modes() {
-  printf '%s\n' fast presubmit smoke ci
-}
-
 mode="ci"
-
 while (( "$#" > 0 )); do
   case "$1" in
-    --mode=*)
-      mode="${1#--mode=}"
-      shift
-      ;;
+    --mode=*) mode="${1#--mode=}"; shift ;;
     --mode)
       shift
-      if (( "$#" == 0 )); then
-        printf 'missing value for --mode\n' >&2
-        usage >&2
-        exit 2
-      fi
+      (( "$#" > 0 )) || { printf 'missing value for --mode\n' >&2; exit 2; }
       mode="$1"
       shift
       ;;
-    --list-modes)
-      list_modes
-      exit 0
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
+    --list-modes) printf '%s\n' fast presubmit smoke ci; exit 0 ;;
+    -h|--help) usage; exit 0 ;;
     --)
       shift
-      if (( "$#" == 0 )); then
-        printf 'missing Bazel arguments after --\n' >&2
-        usage >&2
-        exit 2
-      fi
+      (( "$#" > 0 )) || { printf 'missing Bazel arguments after --\n' >&2; exit 2; }
       run_bazel "$@"
       exit $?
       ;;
-    *)
-      run_bazel "$@"
-      exit $?
-      ;;
+    *) run_bazel "$@"; exit $? ;;
   esac
 done
 
 run_bazel query //...
 
 case "${mode}" in
-  fast)
-    run_bazel test //:fast --config=ci
-    ;;
-  presubmit)
-    run_bazel test //:presubmit --config=ci
-    ;;
+  fast) run_bazel test //:fast --config=ci ;;
+  presubmit) run_bazel test //:presubmit --config=ci ;;
+  smoke) run_bazel test //:smoke --config=ci ;;
   ci)
+    run_bazel build //... --config=ci --config=lint
     run_bazel test //:ci --config=ci
     ;;
-  smoke)
-    run_bazel test //:smoke --config=ci
-    ;;
-  *)
-    printf 'unknown check mode: %s\n' "${mode}" >&2
-    usage >&2
-    exit 2
-    ;;
+  *) printf 'unknown check mode: %s\n' "${mode}" >&2; usage >&2; exit 2 ;;
 esac

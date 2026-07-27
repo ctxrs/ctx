@@ -31,6 +31,31 @@ fn search_refreshes_discovered_codex_sessions_before_query() {
 }
 
 #[test]
+fn default_search_bootstraps_and_autostarts_daemon_with_semantic_disabled() {
+    let temp = tempdir();
+    let fixture = PathBuf::from(provider_history_fixture("codex-sessions"));
+    let discovered = temp.path().join(".codex").join("sessions");
+    copy_dir_all(&fixture, &discovered);
+    let missing_exe = temp.path().join("missing-ctx-binary");
+
+    let search = json_output(
+        ctx(&temp)
+            .args(["search", "onboarding", "--provider", "codex", "--json"])
+            .env("CTX_DAEMON_AUTOSTART_EXE", &missing_exe)
+            .env_remove("CTX_DAEMON_AUTOSTART_OFF"),
+    );
+    assert_search_provider_oracle(&search, "codex", "onboarding", 1, "message");
+    assert_eq!(search["freshness"]["status"], "completed");
+    assert_eq!(search["retrieval"]["requested_mode"], "lexical");
+
+    let status = json_output(ctx(&temp).args(["status", "--json"]));
+    assert_eq!(status["daemon"]["status"], "failed");
+    assert_eq!(status["daemon"]["trigger_command"], "search");
+    assert_eq!(status["semantic"]["status"], "disabled");
+    assert_eq!(status["semantic"]["reason"], "semantic_disabled");
+}
+
+#[test]
 fn search_refresh_wait_skips_malformed_jsonl_rows() {
     let temp = tempdir();
     write_malformed_claude_session(&temp);
@@ -449,6 +474,114 @@ sys.exit(23)
 }
 
 #[test]
+fn search_refresh_wait_drains_plugin_failures_and_imports_later_good_source() {
+    let temp = tempdir();
+    let first_bad_script = r#"#!/usr/bin/env python3
+import sys
+print("first plugin exploded", file=sys.stderr)
+sys.exit(23)
+"#;
+    let second_bad_script = r#"#!/usr/bin/env python3
+import sys
+print("second plugin exploded", file=sys.stderr)
+sys.exit(24)
+"#;
+    let first_bad = write_raw_history_source_plugin_with_options(
+        &temp,
+        "badplugin",
+        first_bad_script,
+        true,
+        Some("auto"),
+    );
+    let second_bad = write_raw_history_source_plugin_with_options(
+        &temp,
+        "brokenplugin",
+        second_bad_script,
+        true,
+        Some("auto"),
+    );
+    let good = write_history_source_plugin_with_refresh(&temp, "hermes", true, Some("auto"), None);
+    let plugin_root = temp.path().join("history-plugins");
+
+    let stderr = failure_stderr(
+        ctx(&temp)
+            .env("CTX_HISTORY_PLUGIN_PATH", &plugin_root)
+            .args([
+                "search",
+                "hermes plugin initial marker",
+                "--provider",
+                "custom",
+                "--refresh",
+                "wait",
+                "--json",
+            ]),
+    );
+
+    assert!(
+        stderr.contains("2 search refresh source failure(s)"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("badplugin/default failed"), "{stderr}");
+    assert!(stderr.contains("brokenplugin/default failed"), "{stderr}");
+    assert!(stderr.contains("first plugin exploded"), "{stderr}");
+    assert!(stderr.contains("second plugin exploded"), "{stderr}");
+    assert!(first_bad.manifest_dir.exists());
+    assert!(second_bad.manifest_dir.exists());
+    assert!(good.run_marker.exists());
+
+    let indexed = json_output(ctx(&temp).args([
+        "search",
+        "hermes plugin initial marker",
+        "--provider",
+        "custom",
+        "--refresh",
+        "off",
+        "--json",
+    ]));
+    assert!(
+        !indexed["results"].as_array().unwrap().is_empty(),
+        "later good plugin source was not committed before wait returned: {indexed:#}"
+    );
+}
+
+#[test]
+fn search_refresh_wait_drains_native_failure_and_imports_later_good_source() {
+    let temp = tempdir();
+    let sessions = temp
+        .path()
+        .join(".codex")
+        .join("sessions")
+        .join("2026/07/12");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(sessions.join("rollout-empty-session.jsonl"), "").unwrap();
+    let query = "pi-later-good-refresh-oracle";
+    install_default_pi_fixture(&temp, query);
+
+    let stderr = failure_stderr(ctx(&temp).args(["search", query, "--refresh", "wait", "--json"]));
+
+    assert!(
+        stderr.contains("1 search refresh source failure(s)"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("import codex source"), "{stderr}");
+    assert!(
+        stderr.contains("contained no real message content"),
+        "{stderr}"
+    );
+
+    let indexed = json_output(ctx(&temp).args([
+        "search",
+        query,
+        "--provider",
+        "pi",
+        "--refresh",
+        "off",
+        "--json",
+    ]));
+    assert_search_provider_oracle(&indexed, "pi", query, 1, "message");
+}
+
+#[test]
 fn search_refresh_auto_failure_without_prior_store_fails_instead_of_serving_empty_index() {
     let temp = tempdir();
     ctx(&temp).args(["daemon", "disable"]).assert().success();
@@ -574,6 +707,7 @@ fn search_refresh_wait_times_out_when_plugin_helper_keeps_stdout_open() {
 import json
 import os
 import subprocess
+import sys
 
 observed = "2026-07-01T12:00:00Z"
 source_id = os.environ["CTX_HISTORY_SOURCE_ID"]
@@ -588,7 +722,20 @@ records = [
 ]
 for record in records:
     print(json.dumps(record, separators=(",", ":")), flush=True)
-subprocess.Popen(["sh", "-c", "sleep 5"])
+watchdog = r"""
+import os
+import time
+
+root = os.environ["CTX_DATA_ROOT"]
+release = os.path.join(root, "hanging-plugin-release")
+deadline = os.path.join(root, "hanging-plugin-deadline")
+expires = time.monotonic() + 15
+while time.monotonic() < expires and not os.path.exists(release):
+    time.sleep(0.05)
+if not os.path.exists(release):
+    open(deadline, "w").close()
+"""
+subprocess.Popen([sys.executable, "-c", watchdog])
 "#;
     let plugin = write_raw_history_source_plugin_with_options_and_timeout(
         &temp,
@@ -599,7 +746,6 @@ subprocess.Popen(["sh", "-c", "sleep 5"])
         1,
     );
 
-    let started = Instant::now();
     let stderr = failure_stderr(
         ctx(&temp)
             .env("CTX_HISTORY_PLUGIN_PATH", &plugin.manifest_dir)
@@ -613,9 +759,11 @@ subprocess.Popen(["sh", "-c", "sleep 5"])
                 "--json",
             ]),
     );
+    let exceeded_watchdog = temp.path().join("hanging-plugin-deadline").exists();
+    fs::write(temp.path().join("hanging-plugin-release"), b"release").unwrap();
     assert!(
-        started.elapsed() < Duration::from_secs(3),
-        "plugin timeout did not bound pipe draining: {stderr}"
+        !exceeded_watchdog,
+        "plugin waited for the inherited pipe until the independent 15s watchdog: {stderr}"
     );
     assert!(
         stderr.contains("history source plugin hanging/default timed out after 1s"),
@@ -825,11 +973,9 @@ fn search_refresh_auto_imports_discovered_top_provider_sources() {
         ),
         ("pi", "pi", install_default_pi_fixture),
         ("cursor", "cursor", install_default_cursor_fixture),
-        ("openclaw", "openclaw", install_default_openclaw_fixture),
         ("hermes", "hermes", install_default_hermes_fixture),
         ("kilo", "kilo", install_default_kilo_fixture),
         ("astrbot", "astrbot", install_default_astrbot_fixture),
-        ("shelley", "shelley", install_default_shelley_fixture),
         ("continue", "continue", install_default_continue_fixture),
         ("openhands", "openhands", install_default_openhands_fixture),
         ("rovodev", "rovodev", install_default_rovodev_fixture),

@@ -26,6 +26,33 @@ skip() {
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/ctx-sdk-package-dry-run.XXXXXX")"
 trap 'rm -rf "$tmp_dir"' EXIT
 
+resolve_input() {
+  local input="$1"
+  if [[ "$input" = /* ]]; then
+    printf '%s\n' "$input"
+  else
+    printf '%s/%s\n' "$repo_root" "$input"
+  fi
+}
+
+if [[ -z "${CTX_SDK_CARGO:-}" \
+  || -z "${CTX_SDK_RUSTC:-}" \
+  || -z "${CTX_SDK_CARGO_VENDOR_MANIFEST:-}" ]]; then
+  if [[ -z "${TEST_SRCDIR:-}" ]]; then
+    exec scripts/bazelw test //:sdk_package_dry_run \
+      --config=ci --test_output=all --nocache_test_results
+  fi
+  printf 'Bazel SDK package dry-run requires declared Cargo, rustc, and vendor inputs\n' >&2
+  exit 1
+fi
+cargo_bin="$(resolve_input "${CTX_SDK_CARGO:-}")"
+rustc_bin="$(resolve_input "${CTX_SDK_RUSTC:-}")"
+vendor_manifest="$(resolve_input "${CTX_SDK_CARGO_VENDOR_MANIFEST:-}")"
+if [[ ! -x "$cargo_bin" || ! -x "$rustc_bin" || ! -f "$vendor_manifest" ]]; then
+  printf 'Bazel SDK package dry-run requires declared Cargo, rustc, and vendor inputs\n' >&2
+  exit 1
+fi
+
 run bash scripts/check-sdk-no-publish.sh
 
 if [[ -n "${TEST_SRCDIR:-}" ]]; then
@@ -47,13 +74,34 @@ else
   skip "Python package dry-run (python3 unavailable)"
 fi
 
-if command -v cargo >/dev/null 2>&1; then
-  run cargo package --locked --no-verify --allow-dirty -p ctx-protocol --target-dir "$tmp_dir/cargo-target"
-  run cargo check --locked -p ctx-sdk
-  skip "Rust ctx-sdk cargo package dry-run (depends on unpublished in-repo ctx-protocol)"
-else
-  skip "Rust cargo package dry-run (cargo unavailable)"
-fi
+run python3 scripts/prepare-sdk-cargo-workspace.py \
+  Cargo.toml \
+  Cargo.lock \
+  crates/ctx-protocol \
+  crates/ctx-sdk \
+  "$vendor_manifest" \
+  "$tmp_dir/cargo-workspace"
+mkdir -p "$tmp_dir/home" "$tmp_dir/cargo-home" "$tmp_dir/rustup-home"
+cargo_env=(
+  env
+  "HOME=$tmp_dir/home"
+  "CARGO_HOME=$tmp_dir/cargo-home"
+  "RUSTUP_HOME=$tmp_dir/rustup-home"
+  "CARGO_NET_OFFLINE=true"
+  "RUSTC=$rustc_bin"
+  "PATH=/usr/bin:/bin"
+)
+run "${cargo_env[@]}" "$cargo_bin" --version
+run "${cargo_env[@]}" "$rustc_bin" --version
+run_in_dir "$tmp_dir/cargo-workspace" \
+  "${cargo_env[@]}" "$cargo_bin" generate-lockfile --offline
+run_in_dir "$tmp_dir/cargo-workspace" \
+  "${cargo_env[@]}" "$cargo_bin" package --locked --offline --no-verify --allow-dirty \
+  -p ctx-protocol --target-dir "$tmp_dir/cargo-target"
+run_in_dir "$tmp_dir/cargo-workspace" \
+  "${cargo_env[@]}" "$cargo_bin" check --locked --offline -p ctx-sdk \
+  --target-dir "$tmp_dir/cargo-target"
+skip "Rust ctx-sdk cargo package dry-run (depends on unpublished in-repo ctx-protocol)"
 
 if command -v go >/dev/null 2>&1; then
   run_in_dir sdks/go go list ./...

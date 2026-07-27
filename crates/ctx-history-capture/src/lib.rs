@@ -1,17 +1,21 @@
 pub mod provider_sources;
 pub use provider_sources::{
-    discover_provider_sources, discover_provider_sources_for_provider, provider_source_for_path,
-    provider_source_spec, provider_source_specs, ProviderCatalogSupport, ProviderDefaultLocation,
+    discover_provider_sources, discover_provider_sources_for_provider,
+    discover_provider_sources_for_provider_report,
+    discover_provider_sources_for_provider_with_context,
+    discover_provider_sources_for_provider_with_projects, discover_provider_sources_report,
+    discover_provider_sources_with_context, discover_provider_sources_with_projects,
+    observe_ordinary_file, provider_source_for_path, provider_source_spec, provider_source_specs,
+    DiscoveryContext, DiscoveryIssue, DiscoveryIssueKind, DiscoveryPlatform, DiscoveryPlatformDirs,
+    DiscoveryReport, OrdinaryFileObservation, ProviderCatalogSupport, ProviderDefaultLocation,
     ProviderImportSupport, ProviderSource, ProviderSourceKind, ProviderSourceSpec,
-    ProviderSourceStatus,
+    ProviderSourceStatus, DISCOVERY_ENV_ALLOWLIST,
 };
 
 pub const CAPTURE_SCHEMA_VERSION: u32 = 1;
 pub(crate) const MAX_PROVIDER_JSONL_LINE_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const MAX_PROVIDER_SQLITE_VALUE_BYTES: usize = MAX_PROVIDER_JSONL_LINE_BYTES;
 pub(crate) const MAX_OPENCLAW_SESSION_INDEX_BYTES: usize = 1024 * 1024;
-pub(crate) const MAX_OPENCLAW_SESSION_INDEX_PATHS: usize = 256;
-pub(crate) const MAX_OPENCLAW_SESSION_INDEX_VISITED_PATHS: usize = 4096;
 pub(crate) const CODEX_SESSION_SOURCE_FORMAT: &str = "codex_session_jsonl";
 pub(crate) const CLAUDE_PROJECTS_SOURCE_FORMAT: &str = "claude_projects_jsonl_tree";
 pub(crate) const CLINE_TASK_JSON_SOURCE_FORMAT: &str = "cline_task_directory_json";
@@ -54,6 +58,10 @@ pub(crate) const MISTRAL_VIBE_SOURCE_FORMAT: &str = "mistral_vibe_session_jsonl"
 pub(crate) const MUX_SOURCE_FORMAT: &str = "mux_session_jsonl";
 pub(crate) const PROVIDER_MAX_TEXT_CHARS: usize = 16_000;
 pub(crate) const PROVIDER_MAX_PREVIEW_CHARS: usize = 4_000;
+
+pub mod complete_content;
+
+pub(crate) mod captured_batch;
 
 mod error;
 pub use error::{CaptureError, Result};
@@ -100,21 +108,10 @@ mod test_support_paths;
 
 pub(crate) mod provider;
 pub use provider::adapter::{
-    AntigravityCliJsonlAdapter, AstrBotSqliteAdapter, AuggieSessionJsonAdapter,
-    ClaudeProjectsJsonlAdapter, ClineTaskJsonAdapter, CodeBuddyHistoryJsonAdapter,
-    CodexHistoryJsonlAdapter, CodexSessionJsonlAdapter, ContinueCliSessionsAdapter,
-    CopilotCliSessionEventsAdapter, CrushSqliteAdapter, CursorAgentTranscriptJsonlAdapter,
-    DeepAgentsSqliteAdapter, FactoryAiDroidJsonlAdapter, FirebenderSqliteAdapter,
-    ForgeCodeSqliteAdapter, GeminiCliJsonlAdapter, GooseSessionsSqliteAdapter, HermesSqliteAdapter,
-    JunieSessionEventsAdapter, KiloSqliteAdapter, KimiCodeCliWireJsonlAdapter, KiroSqliteAdapter,
-    LingmaSqliteAdapter, MiMoCodeSqliteAdapter, MistralVibeJsonlAdapter, MuxJsonlAdapter,
-    NanoClawProjectAdapter, NormalizedProviderImportOptions, OpenClawJsonlAdapter,
-    OpenCodeSqliteAdapter, OpenHandsFileEventsAdapter, PiSessionJsonlAdapter,
-    ProviderAdapterContext, ProviderCaptureAdapter, ProviderEventDto, ProviderFileTouchedEnvelope,
+    CaptureWorkLimit, NormalizedProviderImportOptions, ProviderAdapterContext,
+    ProviderCaptureAdapter, ProviderEventDto, ProviderFileTouchedEnvelope,
     ProviderFixtureJsonlAdapter, ProviderFixtureLine, ProviderNormalizationResult,
-    ProviderSessionDto, QoderJsonlAdapter, QwenCodeJsonlAdapter, RooTaskJsonAdapter,
-    RovoDevSessionJsonAdapter, ShelleySqliteAdapter, TabnineCliJsonlAdapter,
-    WindsurfCascadeHookTranscriptJsonlAdapter, ZedThreadsSqliteAdapter,
+    ProviderSessionDto,
 };
 pub use provider::api::{
     import_antigravity_cli_history, import_astrbot_sqlite, import_auggie_history,

@@ -1,0 +1,1 @@
+{"uuid":"qwen-message","sessionId":"complete-qwen","timestamp":"2026-07-21T12:00:00Z","type":"user","cwd":"/workspace/fixture","message":{"role":"user","content":[{"type":"text","text":"Qwen snowman ☃\nquoted \"body\" and escaped \\\\ path"}]}}

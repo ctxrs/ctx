@@ -3,29 +3,33 @@ use std::path::PathBuf;
 use anyhow::Result;
 use serde_json::json;
 
-use ctx_history_capture::ProviderSourceStatus;
+use ctx_history_capture::{DiscoveryIssue, DiscoveryIssueKind, ProviderSourceStatus};
 use ctx_history_core::CaptureProvider;
 
-use crate::analytics::AnalyticsProperties;
+use crate::analytics::{count_bucket, SourcesTelemetry};
 use crate::history_source_plugins::discover_history_source_plugins_with_diagnostics;
 use crate::output::print_json;
 use crate::provider_args::ProviderArg;
 use crate::provider_sources::{
-    discovered_sources, discovered_sources_for_provider, plugin_manifest_failures_json,
-    plugin_sources_json, sources_json, SourceInfo,
+    discovered_sources, discovered_sources_for_provider_report, manual_path_guidance,
+    plugin_manifest_failures_json, plugin_sources_json, provider_cli_name, sources_json,
+    SourceInfo,
 };
-use crate::{analytics, SourcesArgs, DEFAULT_VISIBLE_SOURCE_PROVIDERS};
+use crate::{SourcesArgs, DEFAULT_VISIBLE_SOURCE_PROVIDERS};
 
 pub(crate) fn run_sources(
     args: SourcesArgs,
     data_root: PathBuf,
-    analytics_properties: &mut AnalyticsProperties,
+    telemetry: &mut SourcesTelemetry,
 ) -> Result<()> {
     let provider_filter = args.provider.map(ProviderArg::capture_provider);
-    let sources = match provider_filter {
-        Some(CaptureProvider::Custom) => Vec::new(),
-        Some(provider) => discovered_sources_for_provider(provider),
-        None => discovered_sources(),
+    let (sources, issues) = match provider_filter {
+        Some(CaptureProvider::Custom) => (Vec::new(), Vec::new()),
+        Some(provider) => {
+            let report = discovered_sources_for_provider_report(provider);
+            (report.sources, report.issues)
+        }
+        None => (discovered_sources(), Vec::new()),
     };
     let plugin_discovery = discover_history_source_plugins_with_diagnostics(&data_root, &[])?;
     let (plugin_sources, plugin_failures) = if matches!(provider_filter, Some(provider) if provider != CaptureProvider::Custom)
@@ -43,24 +47,14 @@ pub(crate) fn run_sources(
                 && source.status == ProviderSourceStatus::Available
         })
         .count();
-    analytics::insert_count_bucket(
-        analytics_properties,
-        "providers_detected_bucket",
+    telemetry.providers_detected = Some(count_bucket(
         sources
             .len()
             .saturating_add(plugin_sources.len())
             .saturating_add(plugin_failures.len()) as u64,
-    );
-    analytics::insert_count_bucket(
-        analytics_properties,
-        "providers_existing_bucket",
-        existing as u64,
-    );
-    analytics::insert_count_bucket(
-        analytics_properties,
-        "providers_importable_bucket",
-        importable as u64,
-    );
+    ));
+    telemetry.providers_existing = Some(count_bucket(existing as u64));
+    telemetry.providers_importable = Some(count_bucket(importable as u64));
     let show_all_sources = args.all || args.show_missing || provider_filter.is_some();
     let visible_sources = sources
         .iter()
@@ -87,6 +81,18 @@ pub(crate) fn run_sources(
                 source.status.as_str(),
                 source.source_format
             );
+            if source.status == ProviderSourceStatus::Unsupported {
+                if let Some(reason) = source.unsupported_reason {
+                    println!("  {reason}");
+                }
+                println!(
+                    "  current ctx cannot import this path; for supported history, use `{}`",
+                    manual_path_guidance(source.provider)
+                );
+            }
+        }
+        for issue in issues {
+            print_discovery_issue(&issue);
         }
         for failure in plugin_failures {
             println!(
@@ -111,6 +117,30 @@ pub(crate) fn run_sources(
     Ok(())
 }
 
+fn print_discovery_issue(issue: &DiscoveryIssue) {
+    let provider = source_provider_cli_name(issue.provider);
+    match issue.kind {
+        DiscoveryIssueKind::NoDiskHistory => {
+            println!("{provider}: no disk history is selected: {}", issue.reason);
+            println!(
+                "  select a disk-backed history location, then use `{}`",
+                manual_path_guidance(issue.provider)
+            );
+        }
+        DiscoveryIssueKind::SelectorUnreconstructible => {
+            println!(
+                "{provider}: the automatic history location cannot be safely reconstructed: {}",
+                issue.reason
+            );
+            println!("  use `{}`", manual_path_guidance(issue.provider));
+        }
+        DiscoveryIssueKind::InsufficientOfficialEvidence => {
+            println!("{provider}: no official automatic history location is established");
+            println!("  use `{}`", manual_path_guidance(issue.provider));
+        }
+    }
+}
+
 pub(crate) fn source_visible_by_default(source: &SourceInfo) -> bool {
     source.exists
         || source.status != ProviderSourceStatus::Missing
@@ -118,7 +148,5 @@ pub(crate) fn source_visible_by_default(source: &SourceInfo) -> bool {
 }
 
 pub(crate) fn source_provider_cli_name(provider: CaptureProvider) -> &'static str {
-    ProviderArg::parse_name(provider.as_str())
-        .map(ProviderArg::cli_name)
-        .unwrap_or_else(|| provider.as_str())
+    provider_cli_name(provider)
 }

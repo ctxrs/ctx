@@ -1,0 +1,316 @@
+use super::*;
+
+#[test]
+fn hybrid_search_with_semantic_disabled_uses_lexical_without_sidecar() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_searchable_store(temp.path(), 1)?;
+    let vector_path = semantic_vector_path(temp.path());
+    let store = Store::open(database_path(temp.path().to_path_buf()))?;
+
+    let (packet, retrieval) = search_packet_with_backend(
+        &store,
+        temp.path(),
+        "semantic daemon scheduling fixture",
+        &[],
+        &ctx_history_search::PacketOptions::default(),
+        SearchBackendArg::Hybrid,
+        false,
+        0.35,
+        RefreshArg::Off,
+        false,
+    )?;
+
+    assert_eq!(retrieval.effective_mode(), SearchBackendArg::Lexical);
+    assert_eq!(
+        retrieval.to_json()["semantic_fallback_code"],
+        "semantic_disabled"
+    );
+    assert_eq!(packet.query, "semantic daemon scheduling fixture");
+    assert!(!vector_path.exists());
+    Ok(())
+}
+
+#[cfg(ctx_semantic_fastembed)]
+#[test]
+fn hybrid_search_reports_missing_daemon_query_service() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_test_semantic_cache(&temp.path().join("semantic-model-cache"))?;
+    let docs = write_searchable_store(temp.path(), 1)?;
+    let doc = docs.first().expect("searchable fixture doc");
+    let source_text = semantic_source_text(&doc.text);
+    let source_hash = semantic_document_hash(doc, &source_text);
+    let mut vector_store = SemanticVectorStore::open(&semantic_vector_path(temp.path()))?;
+    vector_store.upsert_chunk_embeddings(&[(
+        test_chunk(doc.event_id, doc.seq, &source_hash),
+        test_embedding(1.0, 0.0),
+    )])?;
+    drop(vector_store);
+
+    let store = Store::open(database_path(temp.path().to_path_buf()))?;
+    let (packet, retrieval) = search_packet_with_backend(
+        &store,
+        temp.path(),
+        "semantic daemon scheduling fixture",
+        &[],
+        &ctx_history_search::PacketOptions::default(),
+        SearchBackendArg::Hybrid,
+        true,
+        0.35,
+        RefreshArg::Off,
+        false,
+    )?;
+
+    assert_eq!(retrieval.effective_mode(), SearchBackendArg::Lexical);
+    assert_eq!(
+        retrieval.to_json()["semantic_fallback_code"],
+        "daemon_query_service_unavailable"
+    );
+    assert_eq!(packet.query, "semantic daemon scheduling fixture");
+
+    let err = search_packet_with_backend(
+        &store,
+        temp.path(),
+        "semantic daemon scheduling fixture",
+        &[],
+        &ctx_history_search::PacketOptions::default(),
+        SearchBackendArg::Semantic,
+        true,
+        1.0,
+        RefreshArg::Off,
+        false,
+    )
+    .expect_err("semantic-only search should require the daemon query service");
+    assert!(format!("{err:#}").contains("daemon semantic query service is not available"));
+    Ok(())
+}
+
+#[cfg(ctx_semantic_fastembed)]
+#[test]
+fn semantic_cache_discovery_prefers_explicit_env_roots() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let data_root = temp.path().join("data");
+    let explicit = temp.path().join("explicit");
+    let fallback = temp.path().join("fallback");
+    write_test_semantic_cache(&fallback)?;
+
+    let env = SemanticCacheEnv {
+        semantic_cache_dir: Some(explicit.clone()),
+        hf_home: Some(temp.path().join("bad-hf-home")),
+        current_dir: Some(temp.path().to_path_buf()),
+        home: Some(temp.path().to_path_buf()),
+        xdg_cache_home: Some(fallback.clone()),
+        ..SemanticCacheEnv::default()
+    };
+
+    assert_eq!(
+        semantic_worker_cache_dir_from_env(&data_root, &env),
+        explicit
+    );
+    Ok(())
+}
+
+#[cfg(ctx_semantic_fastembed)]
+#[test]
+fn daemon_allows_history_refresh_after_one_semantic_bootstrap_pass() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_semantic_enabled_config(temp.path())?;
+    write_test_semantic_cache(&temp.path().join("semantic-model-cache"))?;
+    write_searchable_store(temp.path(), SEMANTIC_DIRTY_QUEUE_RECENT_LIMIT + 1)?;
+    let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let _hooks = install_test_daemon_jobs(
+        calls.clone(),
+        Some(daemon_history_completed_test_job()),
+        Some(daemon_semantic_indexed_test_job(temp.path())),
+    );
+    let mut runtime = DaemonRuntime::default();
+
+    let first = run_daemon_once(
+        &test_daemon_run_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        true,
+    )?;
+    let second = run_daemon_once(
+        &test_daemon_run_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        true,
+    )?;
+
+    assert!(first.did_work);
+    assert!(second.did_work);
+    assert!(!first.failed);
+    assert!(!second.failed);
+    assert_eq!(
+        *calls.borrow(),
+        vec!["semantic_index", "history_refresh", "semantic_index"]
+    );
+    let daemon = daemon_report(temp.path(), &semantic_worker_report_for_daemon(temp.path()));
+    assert_eq!(daemon["jobs"]["history_refresh"]["status"], "completed");
+    assert_ne!(
+        daemon["jobs"]["history_refresh"]["reason"],
+        "semantic_bootstrap_in_progress"
+    );
+    Ok(())
+}
+
+#[cfg(ctx_semantic_fastembed)]
+#[test]
+fn semantic_cache_discovery_finds_repo_local_fastembed_cache() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let data_root = temp.path().join("data");
+    let repo_cache = temp.path().join(".fastembed_cache");
+    write_test_semantic_cache(&repo_cache)?;
+
+    let env = SemanticCacheEnv {
+        current_dir: Some(temp.path().to_path_buf()),
+        home: Some(temp.path().join("home")),
+        ..SemanticCacheEnv::default()
+    };
+
+    assert_eq!(
+        semantic_worker_cache_dir_from_env(&data_root, &env),
+        repo_cache
+    );
+    Ok(())
+}
+
+#[cfg(ctx_semantic_fastembed)]
+#[test]
+fn semantic_cache_discovery_finds_common_home_cache() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let data_root = temp.path().join("data");
+    let home = temp.path().join("home");
+    let home_cache = home.join(".cache").join("huggingface").join("hub");
+    write_test_semantic_cache(&home_cache)?;
+
+    let env = SemanticCacheEnv {
+        current_dir: Some(temp.path().join("repo")),
+        home: Some(home),
+        ..SemanticCacheEnv::default()
+    };
+
+    assert_eq!(
+        semantic_worker_cache_dir_from_env(&data_root, &env),
+        home_cache
+    );
+    Ok(())
+}
+
+#[cfg(ctx_semantic_fastembed)]
+#[test]
+fn daemon_history_refresh_runs_when_semantic_has_no_backlog() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_semantic_enabled_config(temp.path())?;
+    write_test_semantic_cache(&temp.path().join("semantic-model-cache"))?;
+    let docs = write_searchable_store(temp.path(), 1)?;
+    let doc = docs.first().expect("searchable fixture doc");
+    let source_text = semantic_source_text(&doc.text);
+    let source_hash = semantic_document_hash(doc, &source_text);
+    let mut vector_store = SemanticVectorStore::open(&semantic_vector_path(temp.path()))?;
+    vector_store.upsert_chunk_embeddings(&[(
+        test_chunk(doc.event_id, doc.seq, &source_hash),
+        test_embedding(1.0, 0.0),
+    )])?;
+    drop(vector_store);
+
+    let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let _hooks = install_test_daemon_jobs(
+        calls.clone(),
+        Some(daemon_history_completed_test_job()),
+        Some(daemon_semantic_indexed_test_job(temp.path())),
+    );
+
+    let mut runtime = DaemonRuntime::default();
+    let iteration = run_daemon_once(
+        &test_daemon_run_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        true,
+    )?;
+
+    assert!(iteration.did_work);
+    assert!(!iteration.failed);
+    assert_eq!(*calls.borrow(), vec!["history_refresh", "semantic_index"]);
+    let daemon = daemon_report(temp.path(), &semantic_worker_report_for_daemon(temp.path()));
+    assert_eq!(daemon["jobs"]["history_refresh"]["status"], "completed");
+    assert_ne!(
+        daemon["jobs"]["history_refresh"]["reason"],
+        "semantic_bootstrap_in_progress"
+    );
+    Ok(())
+}
+
+#[test]
+fn daemon_skips_semantic_job_when_semantic_is_disabled() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_searchable_store(temp.path(), 2)?;
+    let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let _hooks = install_test_daemon_jobs(
+        calls.clone(),
+        Some(daemon_history_completed_test_job()),
+        Some(daemon_semantic_indexed_test_job(temp.path())),
+    );
+
+    let mut runtime = DaemonRuntime::default();
+    let iteration = run_daemon_once(
+        &test_daemon_run_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        false,
+    )?;
+
+    assert!(!iteration.failed);
+    assert_eq!(*calls.borrow(), vec!["history_refresh"]);
+    let daemon = daemon_report(temp.path(), &semantic_worker_report_for_daemon(temp.path()));
+    assert_eq!(daemon["jobs"]["semantic_index"]["status"], "disabled");
+    assert_eq!(
+        daemon["jobs"]["semantic_index"]["reason"],
+        "semantic_disabled"
+    );
+    assert!(!semantic_vector_path(temp.path()).exists());
+    Ok(())
+}
+
+#[test]
+fn daemon_history_refresh_runs_when_store_is_not_ready() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_semantic_enabled_config(temp.path())?;
+    let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let _hooks = install_test_daemon_jobs(
+        calls.clone(),
+        Some(daemon_history_completed_test_job()),
+        None,
+    );
+
+    let mut runtime = DaemonRuntime::default();
+    let iteration = run_daemon_once(
+        &test_daemon_run_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        true,
+    )?;
+
+    assert!(!iteration.failed);
+    assert_eq!(calls.borrow().first(), Some(&"history_refresh"));
+    let daemon = daemon_report(temp.path(), &semantic_worker_report_for_daemon(temp.path()));
+    assert_eq!(daemon["jobs"]["history_refresh"]["status"], "completed");
+    assert_ne!(
+        daemon["jobs"]["history_refresh"]["reason"],
+        "semantic_bootstrap_in_progress"
+    );
+    assert_eq!(
+        daemon["jobs"]["semantic_index"]["last_run_status"],
+        "skipped"
+    );
+    assert_eq!(
+        daemon["jobs"]["semantic_index"]["last_run_reason"],
+        "store_missing"
+    );
+    Ok(())
+}

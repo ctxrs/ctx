@@ -6,12 +6,9 @@ use std::{
 #[cfg(target_os = "linux")]
 use std::io::Read;
 
+use crate::identity;
 use anyhow::{Context, Result};
-use serde_json::Value;
 
-use crate::{analytics::AnalyticsProperties, identity};
-
-const SNAPSHOT_SCHEMA: u64 = 1;
 const CLAIM_FILE: &str = "execution-capabilities-v1.claim";
 const REPORTED_FILE: &str = "execution-capabilities-v1.reported";
 #[cfg(target_os = "linux")]
@@ -21,31 +18,12 @@ const GIB: u64 = 1024 * 1024 * 1024;
 pub(crate) struct PendingSnapshot {
     claim_path: PathBuf,
     reported_path: PathBuf,
-    snapshot: Snapshot,
+    snapshot: CapabilitySnapshotV1,
 }
 
 impl PendingSnapshot {
-    pub(crate) fn insert_properties(&self, properties: &mut AnalyticsProperties) {
-        properties.insert(
-            "capability_snapshot_schema".to_owned(),
-            Value::Number(SNAPSHOT_SCHEMA.into()),
-        );
-        properties.insert(
-            "available_parallelism_bucket".to_owned(),
-            Value::String(self.snapshot.available_parallelism_bucket.to_owned()),
-        );
-        properties.insert(
-            "host_memory_bucket".to_owned(),
-            Value::String(self.snapshot.host_memory_bucket.to_owned()),
-        );
-        properties.insert(
-            "cpu_vector_tier".to_owned(),
-            Value::String(self.snapshot.cpu_vector_tier.to_owned()),
-        );
-        properties.insert(
-            "acceleration_candidate".to_owned(),
-            Value::String(self.snapshot.acceleration_candidate.to_owned()),
-        );
+    pub(crate) fn snapshot(&self) -> &CapabilitySnapshotV1 {
+        &self.snapshot
     }
 
     pub(crate) fn mark_reported(self) -> Result<()> {
@@ -82,11 +60,23 @@ pub(crate) fn pending(data_root: &Path) -> Result<Option<PendingSnapshot>> {
             return Err(err).with_context(|| format!("claim {}", claim_path.display()));
         }
     }
+    if discard_claim_if_reported(&claim_path, &reported_path)? {
+        return Ok(None);
+    }
     Ok(Some(PendingSnapshot {
         claim_path,
         reported_path,
-        snapshot: Snapshot::collect(),
+        snapshot: CapabilitySnapshotV1::collect(),
     }))
+}
+
+fn discard_claim_if_reported(claim_path: &Path, reported_path: &Path) -> Result<bool> {
+    if !path_entry_exists(reported_path)? {
+        return Ok(false);
+    }
+    fs::remove_file(claim_path)
+        .with_context(|| format!("discard superseded claim {}", claim_path.display()))?;
+    Ok(true)
 }
 
 fn path_entry_exists(path: &Path) -> io::Result<bool> {
@@ -97,57 +87,153 @@ fn path_entry_exists(path: &Path) -> io::Result<bool> {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct Snapshot {
-    available_parallelism_bucket: &'static str,
-    host_memory_bucket: &'static str,
-    cpu_vector_tier: &'static str,
-    acceleration_candidate: &'static str,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ParallelismBucketV1 {
+    Unknown,
+    One,
+    Two,
+    ThreeToFour,
+    FiveToEight,
+    NineToSixteen,
+    SeventeenToThirtyTwo,
+    ThirtyThreeToSixtyFour,
+    OverSixtyFour,
 }
 
-impl Snapshot {
-    fn collect() -> Self {
-        Self {
-            available_parallelism_bucket: std::thread::available_parallelism()
-                .ok()
-                .map(|value| parallelism_bucket(value.get()))
-                .unwrap_or("unknown"),
-            host_memory_bucket: host_memory_bytes().map(memory_bucket).unwrap_or("unknown"),
-            cpu_vector_tier: cpu_vector_tier(),
-            acceleration_candidate: acceleration_candidate(),
+impl ParallelismBucketV1 {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::One => "1",
+            Self::Two => "2",
+            Self::ThreeToFour => "3-4",
+            Self::FiveToEight => "5-8",
+            Self::NineToSixteen => "9-16",
+            Self::SeventeenToThirtyTwo => "17-32",
+            Self::ThirtyThreeToSixtyFour => "33-64",
+            Self::OverSixtyFour => "65+",
         }
     }
 }
 
-fn parallelism_bucket(parallelism: usize) -> &'static str {
-    match parallelism {
-        0 => "unknown",
-        1 => "1",
-        2 => "2",
-        3..=4 => "3-4",
-        5..=8 => "5-8",
-        9..=16 => "9-16",
-        17..=32 => "17-32",
-        33..=64 => "33-64",
-        _ => "65+",
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MemoryBucketV1 {
+    Unknown,
+    UnderFourGb,
+    FourToEightGb,
+    EightToSixteenGb,
+    SixteenToThirtyTwoGb,
+    ThirtyTwoToSixtyFourGb,
+    OverSixtyFourGb,
+}
+
+impl MemoryBucketV1 {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::UnderFourGb => "lt_4gb",
+            Self::FourToEightGb => "4-8gb",
+            Self::EightToSixteenGb => "8-16gb",
+            Self::SixteenToThirtyTwoGb => "16-32gb",
+            Self::ThirtyTwoToSixtyFourGb => "32-64gb",
+            Self::OverSixtyFourGb => "64gb+",
+        }
     }
 }
 
-fn memory_bucket(bytes: u64) -> &'static str {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CpuVectorTierV1 {
+    Avx512,
+    Avx2,
+    X86Baseline,
+    ArmNeon,
+    Other,
+}
+
+impl CpuVectorTierV1 {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Avx512 => "avx512",
+            Self::Avx2 => "avx2",
+            Self::X86Baseline => "x86_baseline",
+            Self::ArmNeon => "arm_neon",
+            Self::Other => "other",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AccelerationCandidateV1 {
+    AppleAne,
+    NvidiaCuda,
+    NotDetected,
+    Unknown,
+}
+
+impl AccelerationCandidateV1 {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::AppleAne => "apple_ane",
+            Self::NvidiaCuda => "nvidia_cuda",
+            Self::NotDetected => "not_detected",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct CapabilitySnapshotV1 {
+    pub(crate) available_parallelism: ParallelismBucketV1,
+    pub(crate) host_memory: MemoryBucketV1,
+    pub(crate) cpu_vector: CpuVectorTierV1,
+    pub(crate) acceleration: AccelerationCandidateV1,
+}
+
+impl CapabilitySnapshotV1 {
+    fn collect() -> Self {
+        Self {
+            available_parallelism: std::thread::available_parallelism()
+                .ok()
+                .map(|value| parallelism_bucket(value.get()))
+                .unwrap_or(ParallelismBucketV1::Unknown),
+            host_memory: host_memory_bytes()
+                .map(memory_bucket)
+                .unwrap_or(MemoryBucketV1::Unknown),
+            cpu_vector: cpu_vector_tier(),
+            acceleration: acceleration_candidate(),
+        }
+    }
+}
+
+fn parallelism_bucket(parallelism: usize) -> ParallelismBucketV1 {
+    match parallelism {
+        0 => ParallelismBucketV1::Unknown,
+        1 => ParallelismBucketV1::One,
+        2 => ParallelismBucketV1::Two,
+        3..=4 => ParallelismBucketV1::ThreeToFour,
+        5..=8 => ParallelismBucketV1::FiveToEight,
+        9..=16 => ParallelismBucketV1::NineToSixteen,
+        17..=32 => ParallelismBucketV1::SeventeenToThirtyTwo,
+        33..=64 => ParallelismBucketV1::ThirtyThreeToSixtyFour,
+        _ => ParallelismBucketV1::OverSixtyFour,
+    }
+}
+
+fn memory_bucket(bytes: u64) -> MemoryBucketV1 {
     if bytes == 0 {
-        "unknown"
+        MemoryBucketV1::Unknown
     } else if bytes < 4 * GIB {
-        "lt_4gb"
+        MemoryBucketV1::UnderFourGb
     } else if bytes < 8 * GIB {
-        "4-8gb"
+        MemoryBucketV1::FourToEightGb
     } else if bytes < 16 * GIB {
-        "8-16gb"
+        MemoryBucketV1::EightToSixteenGb
     } else if bytes < 32 * GIB {
-        "16-32gb"
+        MemoryBucketV1::SixteenToThirtyTwoGb
     } else if bytes < 64 * GIB {
-        "32-64gb"
+        MemoryBucketV1::ThirtyTwoToSixtyFourGb
     } else {
-        "64gb+"
+        MemoryBucketV1::OverSixtyFourGb
     }
 }
 
@@ -239,31 +325,31 @@ fn host_memory_bytes() -> Option<u64> {
 }
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-fn cpu_vector_tier() -> &'static str {
+fn cpu_vector_tier() -> CpuVectorTierV1 {
     if std::arch::is_x86_feature_detected!("avx512f") {
-        "avx512"
+        CpuVectorTierV1::Avx512
     } else if std::arch::is_x86_feature_detected!("avx2") {
-        "avx2"
+        CpuVectorTierV1::Avx2
     } else {
-        "x86_baseline"
+        CpuVectorTierV1::X86Baseline
     }
 }
 
 #[cfg(target_arch = "aarch64")]
-fn cpu_vector_tier() -> &'static str {
+fn cpu_vector_tier() -> CpuVectorTierV1 {
     if std::arch::is_aarch64_feature_detected!("neon") {
-        "arm_neon"
+        CpuVectorTierV1::ArmNeon
     } else {
-        "other"
+        CpuVectorTierV1::Other
     }
 }
 
 #[cfg(target_arch = "arm")]
-fn cpu_vector_tier() -> &'static str {
+fn cpu_vector_tier() -> CpuVectorTierV1 {
     if std::arch::is_arm_feature_detected!("neon") {
-        "arm_neon"
+        CpuVectorTierV1::ArmNeon
     } else {
-        "other"
+        CpuVectorTierV1::Other
     }
 }
 
@@ -273,29 +359,29 @@ fn cpu_vector_tier() -> &'static str {
     target_arch = "aarch64",
     target_arch = "arm"
 )))]
-fn cpu_vector_tier() -> &'static str {
-    "other"
+fn cpu_vector_tier() -> CpuVectorTierV1 {
+    CpuVectorTierV1::Other
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn acceleration_candidate() -> &'static str {
-    "apple_ane"
+fn acceleration_candidate() -> AccelerationCandidateV1 {
+    AccelerationCandidateV1::AppleAne
 }
 
 #[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
-fn acceleration_candidate() -> &'static str {
-    "not_detected"
+fn acceleration_candidate() -> AccelerationCandidateV1 {
+    AccelerationCandidateV1::NotDetected
 }
 
 #[cfg(target_os = "linux")]
-fn acceleration_candidate() -> &'static str {
+fn acceleration_candidate() -> AccelerationCandidateV1 {
     match linux_nvidia_driver_has_device() {
-        Ok(true) => "nvidia_cuda",
+        Ok(true) => AccelerationCandidateV1::NvidiaCuda,
         Ok(false) => match linux_drm_has_nvidia_device() {
-            Ok(true) | Err(_) => "unknown",
-            Ok(false) => "not_detected",
+            Ok(true) | Err(_) => AccelerationCandidateV1::Unknown,
+            Ok(false) => AccelerationCandidateV1::NotDetected,
         },
-        Err(_) => "unknown",
+        Err(_) => AccelerationCandidateV1::Unknown,
     }
 }
 
@@ -333,15 +419,17 @@ fn linux_drm_has_nvidia_device() -> io::Result<bool> {
 }
 
 #[cfg(target_os = "windows")]
-fn acceleration_candidate() -> &'static str {
+fn acceleration_candidate() -> AccelerationCandidateV1 {
     match windows_system_directory() {
         Some(path) => match fs::symlink_metadata(path.join("nvcuda.dll")) {
-            Ok(metadata) if metadata.is_file() => "nvidia_cuda",
-            Ok(_) => "unknown",
-            Err(err) if err.kind() == io::ErrorKind::NotFound => "not_detected",
-            Err(_) => "unknown",
+            Ok(metadata) if metadata.is_file() => AccelerationCandidateV1::NvidiaCuda,
+            Ok(_) => AccelerationCandidateV1::Unknown,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                AccelerationCandidateV1::NotDetected
+            }
+            Err(_) => AccelerationCandidateV1::Unknown,
         },
-        None => "unknown",
+        None => AccelerationCandidateV1::Unknown,
     }
 }
 
@@ -363,8 +451,8 @@ fn windows_system_directory() -> Option<PathBuf> {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
-fn acceleration_candidate() -> &'static str {
-    "unknown"
+fn acceleration_candidate() -> AccelerationCandidateV1 {
+    AccelerationCandidateV1::Unknown
 }
 
 #[cfg(target_os = "linux")]
@@ -388,26 +476,26 @@ mod tests {
 
     #[test]
     fn parallelism_buckets_are_coarse_and_exhaustive() {
-        assert_eq!(parallelism_bucket(0), "unknown");
-        assert_eq!(parallelism_bucket(1), "1");
-        assert_eq!(parallelism_bucket(2), "2");
-        assert_eq!(parallelism_bucket(4), "3-4");
-        assert_eq!(parallelism_bucket(8), "5-8");
-        assert_eq!(parallelism_bucket(16), "9-16");
-        assert_eq!(parallelism_bucket(32), "17-32");
-        assert_eq!(parallelism_bucket(64), "33-64");
-        assert_eq!(parallelism_bucket(65), "65+");
+        assert_eq!(parallelism_bucket(0).as_str(), "unknown");
+        assert_eq!(parallelism_bucket(1).as_str(), "1");
+        assert_eq!(parallelism_bucket(2).as_str(), "2");
+        assert_eq!(parallelism_bucket(4).as_str(), "3-4");
+        assert_eq!(parallelism_bucket(8).as_str(), "5-8");
+        assert_eq!(parallelism_bucket(16).as_str(), "9-16");
+        assert_eq!(parallelism_bucket(32).as_str(), "17-32");
+        assert_eq!(parallelism_bucket(64).as_str(), "33-64");
+        assert_eq!(parallelism_bucket(65).as_str(), "65+");
     }
 
     #[test]
     fn memory_buckets_do_not_expose_byte_counts() {
-        assert_eq!(memory_bucket(0), "unknown");
-        assert_eq!(memory_bucket(4 * GIB - 1), "lt_4gb");
-        assert_eq!(memory_bucket(4 * GIB), "4-8gb");
-        assert_eq!(memory_bucket(8 * GIB), "8-16gb");
-        assert_eq!(memory_bucket(16 * GIB), "16-32gb");
-        assert_eq!(memory_bucket(32 * GIB), "32-64gb");
-        assert_eq!(memory_bucket(64 * GIB), "64gb+");
+        assert_eq!(memory_bucket(0).as_str(), "unknown");
+        assert_eq!(memory_bucket(4 * GIB - 1).as_str(), "lt_4gb");
+        assert_eq!(memory_bucket(4 * GIB).as_str(), "4-8gb");
+        assert_eq!(memory_bucket(8 * GIB).as_str(), "8-16gb");
+        assert_eq!(memory_bucket(16 * GIB).as_str(), "16-32gb");
+        assert_eq!(memory_bucket(32 * GIB).as_str(), "32-64gb");
+        assert_eq!(memory_bucket(64 * GIB).as_str(), "64gb+");
     }
 
     #[test]
@@ -420,10 +508,29 @@ mod tests {
     }
 
     #[test]
+    fn newly_created_claim_is_discarded_after_reported_marker_wins_handoff() {
+        let temp = tempfile::tempdir().unwrap();
+        let claim_path = temp.path().join(CLAIM_FILE);
+        let reported_path = temp.path().join(REPORTED_FILE);
+
+        assert!(!path_entry_exists(&reported_path).unwrap());
+        fs::write(&claim_path, b"schema_version=1\n").unwrap();
+        fs::write(&reported_path, b"schema_version=1\n").unwrap();
+
+        assert!(discard_claim_if_reported(&claim_path, &reported_path).unwrap());
+        assert!(!path_entry_exists(&claim_path).unwrap());
+        assert!(path_entry_exists(&reported_path).unwrap());
+    }
+
+    #[test]
     fn cpu_vector_tier_is_an_allowlisted_scalar() {
         assert!(matches!(
             cpu_vector_tier(),
-            "avx512" | "avx2" | "x86_baseline" | "arm_neon" | "other"
+            CpuVectorTierV1::Avx512
+                | CpuVectorTierV1::Avx2
+                | CpuVectorTierV1::X86Baseline
+                | CpuVectorTierV1::ArmNeon
+                | CpuVectorTierV1::Other
         ));
     }
 }

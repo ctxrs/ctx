@@ -5,9 +5,10 @@ pub(crate) mod codex;
 pub(crate) mod custom_history_jsonl;
 pub(crate) mod file_touches;
 pub(crate) mod importer;
-pub(crate) mod native;
+pub(crate) mod normalization;
 pub(crate) mod providers;
 pub(crate) mod sqlite;
+pub(crate) mod tool_input;
 
 pub(crate) fn provider_safe_path_segment(value: &str) -> bool {
     use std::path::{Component, Path};

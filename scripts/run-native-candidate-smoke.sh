@@ -96,8 +96,8 @@ clean_env() {
     XDG_DATA_HOME="${root}/xdg-data" \
     XDG_STATE_HOME="${state_root}" \
     CTX_DATA_ROOT="${data_root}" \
-    CTX_ANALYTICS_OFF=1 \
-    CTX_UPGRADE_OFF=1 \
+    CTX_ANALYTICS_ENABLED=false \
+    CTX_UPGRADE_AUTO=off \
     CTX_DAEMON_AUTOSTART_OFF=1 \
     CTX_SEMANTIC_CACHE_DIR="${root}/semantic-cache" \
     HF_HOME="${root}/huggingface" \
@@ -108,7 +108,7 @@ clean_env() {
 
 ctx() {
   clean_env \
-    CTX_DISABLE_DAEMON=1 \
+    CTX_DAEMON_ENABLED=false \
     CTX_SEARCH_SEMANTIC=0 \
     "${binary}" "$@"
 }
@@ -142,6 +142,34 @@ run_bounded() {
     return 124
   fi
   return "${bounded_status}"
+}
+
+pro_status_reports_absent_local_runtime() {
+  status_file="$1"
+  status_compact="$(tr '\r\n' '  ' < "${status_file}")"
+
+  for expected in \
+    '"schema_version"[[:space:]]*:[[:space:]]*2' \
+    '"payload_type"[[:space:]]*:[[:space:]]*"pro_status"' \
+    '"state"[[:space:]]*:[[:space:]]*"not_setup"' \
+    '"installed"[[:space:]]*:[[:space:]]*false' \
+    '"ready"[[:space:]]*:[[:space:]]*false' \
+    '"materialized"[[:space:]]*:[[:space:]]*false' \
+    '"helper_version"[[:space:]]*:[[:space:]]*null' \
+    '"protocol_version"[[:space:]]*:[[:space:]]*1' \
+    '"capabilities"[[:space:]]*:[[:space:]]*\[[[:space:]]*\]' \
+    '"command"[[:space:]]*:[[:space:]]*"ctx pro"' \
+    '"reason"[[:space:]]*:[[:space:]]*"helper_missing"'
+  do
+    if ! printf '%s\n' "${status_compact}" | grep -Eq "${expected}"; then
+      return 1
+    fi
+  done
+
+  # The public status shape is path-safe. Commercial access/error fields are
+  # intentionally independent of whether the signed helper and graph exist.
+  ! printf '%s\n' "${status_compact}" \
+    | grep -Eq '"helper_path"[[:space:]]*:'
 }
 
 process_ids_for_binary() {
@@ -211,6 +239,42 @@ grep -Eq '"read_only"[[:space:]]*:[[:space:]]*true' "${root}/status.json" || {
   exit 1
 }
 
+# A distributable ctx must select only the signed helper pair installed below
+# its data root. Prove that an ambient developer override cannot execute an
+# arbitrary helper in the exact candidate artifact.
+untrusted_helper="${root}/untrusted-ctx-pro"
+override_marker="${root}/untrusted-helper-executed"
+cat > "${untrusted_helper}" <<EOF
+#!/bin/sh
+: > "${override_marker}"
+exit 99
+EOF
+chmod 0700 "${untrusted_helper}"
+run_bounded "${root}/pro-status.json" "${root}/pro-status.err" \
+  clean_env CTX_PRO_HELPER="${untrusted_helper}" \
+  "${binary}" status --json || {
+  cat "${root}/pro-status.err" >&2
+  printf 'candidate Pro status query failed while testing helper selection\n' >&2
+  exit 1
+}
+if [ -e "${override_marker}" ]; then
+  printf 'candidate executed CTX_PRO_HELPER in a distributable build\n' >&2
+  exit 1
+fi
+if ! pro_status_reports_absent_local_runtime "${root}/pro-status.json"; then
+  printf 'candidate Pro status did not report an absent helper and graph\n' >&2
+  exit 1
+fi
+if [ -e "${data_root}/ctx-pro.db" ]; then
+  printf 'candidate Pro status created a graph while reporting no local runtime\n' >&2
+  exit 1
+fi
+if grep -Fq "${untrusted_helper}" "${root}/pro-status.json" \
+  || grep -Fq "${untrusted_helper}" "${root}/pro-status.err"; then
+  printf 'candidate exposed the rejected Pro helper override path\n' >&2
+  exit 1
+fi
+
 # Semantic search is supported but opt-in on every public release target. Prove
 # that the default remains disabled, then that an explicit offline request with
 # no provisioned model fails closed without fallback, state, or download.
@@ -257,7 +321,7 @@ if [ -e "${data_root}/daemon/daemon.lock" ]; then
   exit 1
 fi
 
-printf '%s\n' '{"schema_version":1,"kind":"ctx-native-candidate-smoke","status":"passed","steps":{"version":"passed","setup":"passed","import":"passed","search":"passed","read_only":"passed","semantic_offline_fail_closed":"passed"}}' \
+printf '%s\n' '{"schema_version":1,"kind":"ctx-native-candidate-smoke","status":"passed","steps":{"version":"passed","setup":"passed","import":"passed","search":"passed","read_only":"passed","pro_helper_override_ignored":"passed","semantic_offline_fail_closed":"passed"}}' \
   > "${result_tmp}"
 mv "${result_tmp}" "${result_path}"
 printf 'native candidate smoke passed: %s %s\n' "$(uname -s)" "$(uname -m)"

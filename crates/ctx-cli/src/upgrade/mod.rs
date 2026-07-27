@@ -5,6 +5,7 @@ mod path;
 mod state;
 
 pub use command::{maybe_spawn_auto_upgrade, run, UpgradeArgs};
+pub(crate) use install::is_valid_install_attempt_id;
 
 use std::env;
 

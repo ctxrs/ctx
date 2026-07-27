@@ -4,8 +4,9 @@ use anyhow::Result;
 use serde_json::{json, Value};
 
 use ctx_history_capture::{
-    discover_provider_sources, discover_provider_sources_for_provider, provider_source_for_path,
-    ProviderImportSupport, ProviderSource, ProviderSourceStatus,
+    discover_provider_sources_for_provider_report, discover_provider_sources_report,
+    provider_source_for_path, DiscoveryReport, ProviderImportSupport, ProviderSource,
+    ProviderSourceStatus,
 };
 use ctx_history_core::CaptureProvider;
 
@@ -14,7 +15,7 @@ use crate::history_source_plugins::{
     HistorySourcePluginRefresh, HistorySourcePluginSource,
 };
 use crate::identity;
-use crate::provider_args::cli_supported_provider;
+use crate::provider_args::{cli_supported_provider, ProviderArg};
 
 pub(crate) type SourceInfo = ProviderSource;
 pub(crate) fn discovered_plugin_sources_json(data_root: &Path) -> Result<Vec<Value>> {
@@ -24,20 +25,24 @@ pub(crate) fn discovered_plugin_sources_json(data_root: &Path) -> Result<Vec<Val
     Ok(values)
 }
 pub(crate) fn discovered_sources() -> Vec<SourceInfo> {
+    discovered_sources_report().sources
+}
+
+pub(crate) fn discovered_sources_report() -> DiscoveryReport {
     home_dir()
         .as_deref()
-        .map(discover_provider_sources)
-        .map(filter_cli_supported_sources)
+        .map(discover_provider_sources_report)
+        .map(filter_cli_supported_report)
         .unwrap_or_default()
 }
 
-pub(crate) fn discovered_sources_for_provider(provider: CaptureProvider) -> Vec<SourceInfo> {
+pub(crate) fn discovered_sources_for_provider_report(provider: CaptureProvider) -> DiscoveryReport {
     if !cli_supported_provider(provider) {
-        return Vec::new();
+        return DiscoveryReport::default();
     }
     home_dir()
         .as_deref()
-        .map(|home| discover_provider_sources_for_provider(home, provider))
+        .map(|home| discover_provider_sources_for_provider_report(home, provider))
         .unwrap_or_default()
 }
 
@@ -46,6 +51,27 @@ pub(crate) fn filter_cli_supported_sources(sources: Vec<SourceInfo>) -> Vec<Sour
         .into_iter()
         .filter(|source| cli_supported_provider(source.provider))
         .collect()
+}
+
+pub(crate) fn filter_cli_supported_report(mut report: DiscoveryReport) -> DiscoveryReport {
+    report.sources = filter_cli_supported_sources(report.sources);
+    report
+        .issues
+        .retain(|issue| cli_supported_provider(issue.provider));
+    report
+}
+
+pub(crate) fn provider_cli_name(provider: CaptureProvider) -> &'static str {
+    ProviderArg::parse_name(provider.as_str())
+        .map(ProviderArg::cli_name)
+        .unwrap_or_else(|| provider.as_str())
+}
+
+pub(crate) fn manual_path_guidance(provider: CaptureProvider) -> String {
+    format!(
+        "ctx import --provider {} --path <path>",
+        provider_cli_name(provider)
+    )
 }
 
 pub(crate) fn explicit_path_source(provider: CaptureProvider, path: PathBuf) -> SourceInfo {

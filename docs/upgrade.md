@@ -22,17 +22,16 @@ sidecars are treated as unmanaged and will not self-upgrade.
 `ctx upgrade status --json` also lists every `ctx` binary found on `PATH` and
 warns when another binary shadows the managed install.
 
-Official installer-managed installs default to background auto-upgrade after
-successful normal commands when signed release metadata explicitly allows
-auto-upgrade. Background checks never run for `--json` commands, MCP,
+Official installer-managed installs can opt in to background auto-upgrade with
+`ctx upgrade enable`; signed release metadata must also explicitly allow it.
+Background checks never run for `--json` commands, MCP,
 `ctx status`, `ctx docs`, `ctx sql`, `ctx upgrade`, CI, unmanaged installs, or
 process-level opt-outs. They write state and logs under the ctx data root and do
 not write to stdout or stderr.
 
-Use `CTX_UPGRADE_OFF=1` or `CTX_DISABLE_AUTO_UPGRADE=1` for process-level
-opt-out, or `ctx upgrade disable` to write `upgrade.auto = "off"` in
-`config.toml`. Use `ctx upgrade enable` to restore managed background
-auto-upgrade for installer-managed binaries.
+Use `CTX_UPGRADE_AUTO=off` for a process-level opt-out, or `ctx upgrade
+disable` to write `upgrade.auto = "off"` in
+`config.toml`.
 
 Manual `ctx upgrade` verifies signed release metadata, explicit self-upgrade
 policy, artifact SHA-256, the current managed install marker, and the staged

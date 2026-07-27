@@ -95,7 +95,7 @@ main() {
   PATH="$(dirname "${ctx_bin}"):${PATH}" \
     HOME="${home}" \
     CTX_DATA_ROOT="${data_root}" \
-    CTX_ANALYTICS_OFF=1 \
+    CTX_ANALYTICS_ENABLED=false \
     run "${ctx_bin}" integrations install mcp --agent gemini-cli --json > "${install_json}"
   require_contains "${install_json}" '"agent":"gemini-cli"'
   require_contains "${install_json}" '"status":"current"'
@@ -118,7 +118,7 @@ main() {
     PATH="$(dirname "${ctx_bin}"):${PATH}" \
       HOME="${home}" \
       CTX_DATA_ROOT="${data_root}" \
-      CTX_ANALYTICS_OFF=1 \
+      CTX_ANALYTICS_ENABLED=false \
       GEMINI_API_KEY="sk-ctx-real-harness-fixture" \
       GOOGLE_GEMINI_BASE_URL="http://127.0.0.1:${port}" \
       GEMINI_CLI_TRUST_WORKSPACE=true \

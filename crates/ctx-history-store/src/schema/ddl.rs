@@ -160,6 +160,32 @@ CREATE TABLE IF NOT EXISTS capture_sources (
     metadata_json TEXT NOT NULL DEFAULT '{}'
 );
 
+-- Local-only alias ledger for provider-owned history sources.  Paths remain
+-- locators; canonical source identity survives a proven move while each
+-- locator retains its own operational cursor namespace.
+CREATE TABLE IF NOT EXISTS provider_source_locators (
+    provider TEXT NOT NULL,
+    source_format TEXT NOT NULL,
+    machine_id TEXT NOT NULL,
+    locator_identity TEXT NOT NULL,
+    cursor_stream TEXT NOT NULL,
+    canonical_source_identity TEXT NOT NULL,
+    alias_group_identity TEXT NOT NULL,
+    raw_source_path TEXT,
+    source_revision TEXT NOT NULL,
+    is_current INTEGER NOT NULL CHECK (is_current IN (0, 1)),
+    is_relocation_alias INTEGER NOT NULL CHECK (is_relocation_alias IN (0, 1)),
+    observed_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (provider, source_format, machine_id, locator_identity)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_source_locators_current
+ON provider_source_locators(provider, source_format, machine_id, alias_group_identity)
+WHERE is_current = 1;
+
+CREATE INDEX IF NOT EXISTS idx_provider_source_locators_revision
+ON provider_source_locators(provider, source_format, machine_id, source_revision, is_current);
+
 CREATE TABLE IF NOT EXISTS catalog_sessions (
     source_path TEXT PRIMARY KEY NOT NULL,
 
@@ -585,6 +611,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
     source_id TEXT REFERENCES capture_sources(id),
     metadata_json TEXT NOT NULL DEFAULT '{}'
 );
+
 "#;
 
 pub(crate) fn ensure_columns(conn: &Connection, table: &str, columns: &[ColumnSpec]) -> Result<()> {

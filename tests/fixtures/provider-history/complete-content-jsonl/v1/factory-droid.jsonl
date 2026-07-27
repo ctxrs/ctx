@@ -1,0 +1,2 @@
+{"type":"session_start","sessionId":"complete-droid","timestamp":"2026-07-21T12:00:00Z","cwd":"/workspace/fixture"}
+{"type":"message","id":"droid-message","timestamp":"2026-07-21T12:00:01Z","role":"user","content":"Droid snowman ☃\nquoted \"body\" and escaped \\\\ path"}

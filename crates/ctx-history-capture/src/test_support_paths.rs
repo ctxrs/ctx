@@ -1,7 +1,14 @@
 use std::{
-    fs,
+    fs, io,
     path::{Path, PathBuf},
 };
+
+pub(crate) fn tempdir() -> io::Result<tempfile::TempDir> {
+    let temp_root = fs::canonicalize(std::env::temp_dir())?;
+    tempfile::Builder::new()
+        .prefix("ctx-history-capture-")
+        .tempdir_in(temp_root)
+}
 
 pub(crate) fn capture_manifest_dir() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

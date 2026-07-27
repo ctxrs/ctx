@@ -130,7 +130,7 @@ PY
     HOME="${home}" \
     XDG_CONFIG_HOME="${xdg_config_home}" \
     CTX_DATA_ROOT="${data_root}" \
-    CTX_ANALYTICS_OFF=1 \
+    CTX_ANALYTICS_ENABLED=false \
     run "${ctx_bin}" integrations install mcp --agent opencode --json > "${install_json}"
   require_contains "${install_json}" '"agent":"opencode"'
   require_contains "${install_json}" '"status":"current"'
@@ -164,7 +164,7 @@ PY
     HOME="${home}" \
     XDG_CONFIG_HOME="${xdg_config_home}" \
     CTX_DATA_ROOT="${data_root}" \
-    CTX_ANALYTICS_OFF=1 \
+    CTX_ANALYTICS_ENABLED=false \
     run "${opencode_bin}" run \
       'Discover ctx MCP tools, call ctx status, then report success.' \
       --model "mock/${MODEL}" \

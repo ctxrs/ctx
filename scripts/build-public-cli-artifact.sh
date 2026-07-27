@@ -14,7 +14,7 @@ LINUX_RELEASE_UBUNTU_DIGEST="sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c
 LINUX_RELEASE_UBUNTU_SNAPSHOT="20260701T000000Z"
 LINUX_X64_QEMU_CPU_PROFILE="qemu64"
 MACOS_DEPLOYMENT_TARGET="13.0"
-RUST_TOOLCHAIN_VERSION="1.88.0"
+RUST_TOOLCHAIN_VERSION="1.97.1"
 
 usage() {
   cat >&2 <<'USAGE'
@@ -68,18 +68,91 @@ case "${platform}" in
     ;;
 esac
 
-root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "${root_dir}"
 
+freebsd_build_strategy=""
+if [[ "${platform}" == "freebsd-x64" ]]; then
+  freebsd_build_strategy="$(sh scripts/public-cli-freebsd-build-strategy.sh \
+    "$(uname -s)" "$(uname -m)")"
+fi
+
+inspector_roots=()
+cleanup_inspector_roots() {
+  local root
+  if (( ${#inspector_roots[@]} == 0 )); then
+    return 0
+  fi
+  for root in "${inspector_roots[@]}"; do
+    case "$root" in
+      "${TMPDIR:-/tmp}"/ctx-public-inspector.*)
+        [[ -d "$root" && ! -L "$root" ]] && rm -rf -- "$root"
+        ;;
+    esac
+  done
+}
+trap cleanup_inspector_roots EXIT
+
+stage_inspector_root() {
+  local artifact_dir="$1"
+  local root
+  root="$(mktemp -d "${TMPDIR:-/tmp}/ctx-public-inspector.XXXXXX")"
+  scripts/stage-public-cli-inspector-inputs.sh \
+    "$root_dir" "$artifact_dir" "$binary_name" "$root" >/dev/null
+  inspector_roots+=("$root")
+  staged_inspector_root="$root"
+}
+
 release_cargo() {
-  cargo "+${RUST_TOOLCHAIN_VERSION}" "$@"
+  if [[ "${freebsd_build_strategy}" == "native-freebsd" ]]; then
+    cargo "$@"
+  else
+    cargo "+${RUST_TOOLCHAIN_VERSION}" "$@"
+  fi
+}
+
+release_rustc_version() {
+  if [[ "${freebsd_build_strategy}" == "native-freebsd" ]]; then
+    rustc --version
+  else
+    rustc "+${RUST_TOOLCHAIN_VERSION}" --version
+  fi
 }
 
 ensure_release_rust() {
+  if [[ "${freebsd_build_strategy}" == "native-freebsd" ]]; then
+    for required_tool in cargo rustc; do
+      command -v "${required_tool}" >/dev/null 2>&1 || {
+        printf 'error: native FreeBSD release construction requires %s\n' \
+          "${required_tool}" >&2
+        exit 127
+      }
+    done
+    local native_rust native_cargo target_libdir
+    native_rust="$(rustc --version)"
+    native_cargo="$(cargo --version)"
+    [[ "${native_rust}" == "rustc ${RUST_TOOLCHAIN_VERSION} "* ]] || {
+      printf 'error: expected native rustc %s, got %s\n' \
+        "${RUST_TOOLCHAIN_VERSION}" "${native_rust}" >&2
+      exit 1
+    }
+    [[ "${native_cargo}" == "cargo ${RUST_TOOLCHAIN_VERSION} "* ]] || {
+      printf 'error: expected native cargo %s, got %s\n' \
+        "${RUST_TOOLCHAIN_VERSION}" "${native_cargo}" >&2
+      exit 1
+    }
+    target_libdir="$(rustc --print target-libdir --target "${target}")"
+    [[ -d "${target_libdir}" ]] || {
+      printf 'error: native rustc does not provide target %s\n' "${target}" >&2
+      exit 1
+    }
+    return
+  fi
+
   rustup toolchain install "${RUST_TOOLCHAIN_VERSION}" --profile minimal
   rustup target add --toolchain "${RUST_TOOLCHAIN_VERSION}" "${target}" >/dev/null
   local actual
-  actual="$(rustc "+${RUST_TOOLCHAIN_VERSION}" --version)"
+  actual="$(release_rustc_version)"
   [[ "${actual}" == "rustc ${RUST_TOOLCHAIN_VERSION} "* ]] || {
     printf 'error: expected rustc %s, got %s\n' "${RUST_TOOLCHAIN_VERSION}" "${actual}" >&2
     exit 1
@@ -215,6 +288,9 @@ run_host_artifact_check() {
     echo "error: pinned cross-target validation image labels are invalid" >&2
     exit 1
   }
+  local inspector_root
+  stage_inspector_root "${root_dir}/${out_dir}"
+  inspector_root="$staged_inspector_root"
   docker run --rm --platform linux/amd64 \
     --network none \
     --user 65534:65534 \
@@ -223,11 +299,10 @@ run_host_artifact_check() {
     --read-only \
     --tmpfs /tmp:rw,nosuid,nodev \
     -e "CTX_PUBLIC_CLI_EXPECTED_VERSION=${version}" \
-    -v "${root_dir}:/work:ro" \
-    -v "${root_dir}/${out_dir}:/artifacts:ro" \
+    -v "${inspector_root}:/work:ro" \
     -w /work \
     "${artifact_inspector_image_id}" \
-    bash scripts/check-public-cli-artifact.sh "${platform}" /artifacts
+    bash scripts/check-public-cli-artifact.sh "${platform}" /work/artifacts
 }
 
 run_linux_container_build() {
@@ -419,6 +494,9 @@ run_linux_container_build() {
     echo "error: required native candidate smoke helper is missing" >&2
     exit 1
   fi
+  local inspector_root
+  stage_inspector_root "${root_dir}/${out_dir}"
+  inspector_root="$staged_inspector_root"
   docker run --rm --platform "${docker_platform}" \
     --network none \
     --user 65534:65534 \
@@ -427,11 +505,10 @@ run_linux_container_build() {
     --read-only \
     --tmpfs /tmp:rw,nosuid,nodev \
     -e "CTX_PUBLIC_CLI_EXPECTED_VERSION=${version}" \
-    -v "${root_dir}:/work:ro" \
-    -v "${root_dir}/${out_dir}:/artifacts:ro" \
+    -v "${inspector_root}:/work:ro" \
     -w /work \
     "${inspector_image_id}" \
-    bash scripts/check-public-cli-artifact.sh "${platform}" /artifacts
+    bash scripts/check-public-cli-artifact.sh "${platform}" /work/artifacts
   docker run --rm --platform "${docker_platform}" \
     --network none \
     --user 65534:65534 \
@@ -440,14 +517,13 @@ run_linux_container_build() {
     --read-only \
     --tmpfs /tmp:rw,nosuid,nodev \
     -e HOME=/tmp/home \
-    -v "${root_dir}:/work:ro" \
-    -v "${staged_host}:/candidate/ctx:ro" \
+    -v "${inspector_root}:/work:ro" \
     -w /work \
     "${runtime_image_id}" \
     bash -euo pipefail -c \
       'timeout --signal=KILL 120s bash scripts/run-native-candidate-smoke.sh "$1" "$2" "$3" /tmp/native-smoke.json && grep -Fq '"'"'"status":"passed"'"'"' /tmp/native-smoke.json' \
       -- \
-      /candidate/ctx \
+      "/work/artifacts/${binary_name}" \
       /work/tests/fixtures/custom-history-jsonl/basic.jsonl \
       "${version}"
 
@@ -462,17 +538,16 @@ run_linux_container_build() {
       --read-only \
       --tmpfs /tmp:rw,exec,nosuid,nodev \
       -e HOME=/tmp/home \
-      -v "${root_dir}:/work:ro" \
-      -v "${staged_host}:/candidate/ctx:ro" \
+      -v "${inspector_root}:/work:ro" \
       -w /work \
       "${inspector_image_id}" \
       bash -euo pipefail -c \
-        'printf '\''#!/usr/bin/env bash\nexec qemu-x86_64 -cpu %q /candidate/ctx "$@"\n'\'' "$1" > /tmp/qemu-ctx
+        'printf '\''#!/usr/bin/env bash\nexec qemu-x86_64 -cpu %q %q "$@"\n'\'' "$1" "$3" > /tmp/qemu-ctx
          chmod 0755 /tmp/qemu-ctx
          timeout --signal=KILL 180s bash scripts/run-native-candidate-smoke.sh \
            /tmp/qemu-ctx /work/tests/fixtures/custom-history-jsonl/basic.jsonl "$2" /tmp/qemu-smoke.json
          grep -Fq '\''"status":"passed"'\'' /tmp/qemu-smoke.json' \
-        -- "${qemu_cpu_profile}" "${version}"
+        -- "${qemu_cpu_profile}" "${version}" "/work/artifacts/${binary_name}"
     qemu_version="$(docker run --rm --platform "${docker_platform}" "${inspector_image_id}" \
       qemu-x86_64 --version | sed -n '1p')"
   fi
@@ -590,19 +665,32 @@ elif [[ "${platform}" == macos-* && "$(uname -s)" != "Darwin" ]]; then
   ensure_darwin_cross_tools
   release_cargo zigbuild -p ctx --release --target "${build_target}" --locked
 elif [[ "${platform}" == "freebsd-x64" ]]; then
-  if ! command -v cross >/dev/null 2>&1 \
-    || [[ "$(cross --version | sed -n '1p')" != "cross ${CROSS_VERSION}" ]]; then
-    release_cargo install cross --version "${CROSS_VERSION}" --locked --force
-  fi
-  [[ "$(cross --version | sed -n '1p')" == "cross ${CROSS_VERSION}" ]] || {
-    echo "error: cross ${CROSS_VERSION} is required" >&2
-    exit 1
-  }
-  if [[ -z "${CARGO_TARGET_DIR:-}" ]]; then
-    export CARGO_TARGET_DIR="target/public-cli-cross/${platform}"
-    build_target_dir="${CARGO_TARGET_DIR}"
-  fi
-  RUSTUP_TOOLCHAIN="${RUST_TOOLCHAIN_VERSION}" cross build -p ctx --release --target "${target}" --locked
+  case "${freebsd_build_strategy}" in
+    native-freebsd)
+      release_cargo build -p ctx --release --target "${target}" --locked
+      ;;
+    linux-cross)
+      if ! command -v cross >/dev/null 2>&1 \
+        || [[ "$(cross --version | sed -n '1p')" != "cross ${CROSS_VERSION}" ]]; then
+        release_cargo install cross --version "${CROSS_VERSION}" --locked --force
+      fi
+      [[ "$(cross --version | sed -n '1p')" == "cross ${CROSS_VERSION}" ]] || {
+        echo "error: cross ${CROSS_VERSION} is required" >&2
+        exit 1
+      }
+      if [[ -z "${CARGO_TARGET_DIR:-}" ]]; then
+        export CARGO_TARGET_DIR="target/public-cli-cross/${platform}"
+        build_target_dir="${CARGO_TARGET_DIR}"
+      fi
+      RUSTUP_TOOLCHAIN="${RUST_TOOLCHAIN_VERSION}" \
+        cross build -p ctx --release --target "${target}" --locked
+      ;;
+    *)
+      printf 'error: unsupported FreeBSD build strategy: %s\n' \
+        "${freebsd_build_strategy:-missing}" >&2
+      exit 1
+      ;;
+  esac
 else
   release_cargo build -p ctx --release --target "${build_target}" --locked
 fi
@@ -675,6 +763,14 @@ case "${platform}" in
       printf 'not run on this host: %s\n' "${platform}" > "${staged}.version"
     fi
     ;;
+  freebsd-x64)
+    if [[ "${freebsd_build_strategy}" == "native-freebsd" ]]; then
+      "${staged}" --version | tee "${staged}.version"
+      grep -Fx "ctx ${version}" "${staged}.version" >/dev/null
+    else
+      printf 'not run on this host: %s\n' "${platform}" > "${staged}.version"
+    fi
+    ;;
   *)
     printf 'not run on this host: %s\n' "${platform}" > "${staged}.version"
     ;;
@@ -697,7 +793,8 @@ if [[ "${platform}" != linux-* ]]; then
   if [[ "$(tr -d '\r' < "${staged}.version" | tail -n 1)" == "ctx ${version}" ]]; then
     local_runtime_status=passed
   fi
-  if [[ "${local_runtime_status}" == passed && "${platform}" == macos-* ]]; then
+  if [[ "${local_runtime_status}" == passed \
+    && ( "${platform}" == macos-* || "${platform}" == "freebsd-x64" ) ]]; then
     native_smoke_result="$(mktemp "${TMPDIR:-/tmp}/ctx-native-smoke.XXXXXX")"
     rm -f "${native_smoke_result}"
     scripts/run-native-candidate-smoke.sh \
@@ -708,10 +805,12 @@ if [[ "${platform}" != linux-* ]]; then
   fi
   IFS=$'\t' read -r \
     host_system host_arch host_native_arch process_translated _native_arch_probe \
+    hardware_identity emulation hypervisor evidence_complete \
     < <(scripts/public-cli-host-runtime-evidence.sh)
   local_runtime_authority="$(scripts/public-cli-runtime-authority.sh \
     "${platform}" "${host_system}" "${host_arch}" "${local_runtime_status}" \
-    "${host_native_arch}" "${process_translated}")"
+    "${host_native_arch}" "${process_translated}" "${hardware_identity}" \
+    "${emulation}" "${hypervisor}" "${evidence_complete}")"
   python3 scripts/write-public-cli-build-info.py \
     --output "${staged}.build-info.json" \
     --artifact "${staged}" \
@@ -720,7 +819,7 @@ if [[ "${platform}" != linux-* ]]; then
     --target "${target}" \
     --source-commit "${source_commit}" \
     --source-clean "${source_clean}" \
-    --rust-version "$(rustc "+${RUST_TOOLCHAIN_VERSION}" --version)" \
+    --rust-version "$(release_rustc_version)" \
     --inspector-image-id "${artifact_inspector_image_id}" \
     --static-status passed \
     --local-runtime-status "${local_runtime_status}" \

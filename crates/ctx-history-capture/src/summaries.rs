@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+pub(crate) const MAX_RETAINED_PROVIDER_FAILURES: usize = 64;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpoolCounts {
     pub pending: usize,
@@ -38,6 +40,8 @@ pub struct ProviderImportSummary {
     pub skipped_edges: usize,
     #[serde(skip)]
     pub(crate) accepted_content_records: usize,
+    #[serde(skip)]
+    pub work_remaining: bool,
     pub failures: Vec<ProviderImportFailure>,
 }
 
@@ -75,7 +79,17 @@ impl ProviderImportSummary {
         self.imported_edges += other.imported_edges;
         self.skipped_edges += other.skipped_edges;
         self.accepted_content_records += other.accepted_content_records;
-        self.failures.extend(other.failures);
+        self.work_remaining |= other.work_remaining;
+        let remaining = MAX_RETAINED_PROVIDER_FAILURES.saturating_sub(self.failures.len());
+        self.failures
+            .extend(other.failures.into_iter().take(remaining));
+    }
+
+    pub(crate) fn record_failure(&mut self, failure: ProviderImportFailure) {
+        self.failed = self.failed.saturating_add(1);
+        if self.failures.len() < MAX_RETAINED_PROVIDER_FAILURES {
+            self.failures.push(failure);
+        }
     }
 
     pub(crate) fn merge(&mut self, other: ProviderImportSummary) {

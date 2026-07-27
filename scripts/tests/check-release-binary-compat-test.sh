@@ -6,6 +6,24 @@ checker="${repo_root}/scripts/check-release-binary-compat.sh"
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/ctx-binary-compat-test.XXXXXX")"
 trap 'rm -rf "${tmp}"' EXIT
 
+rust_strip_setting='build:release --@rules_rust//rust/settings:extra_rustc_flag=-Cstrip=symbols'
+if [[ "$(grep -Fxc "${rust_strip_setting}" "${repo_root}/.bazelrc")" != 1 ]]; then
+  printf 'Bazel release configuration must contain exactly: %s\n' \
+    "${rust_strip_setting}" >&2
+  exit 1
+fi
+macos_deployment_setting='build:release --action_env=MACOSX_DEPLOYMENT_TARGET=13.0'
+if [[ "$(grep -Fxc "${macos_deployment_setting}" "${repo_root}/.bazelrc")" != 1 ]]; then
+  printf 'Bazel release configuration must contain exactly: %s\n' \
+    "${macos_deployment_setting}" >&2
+  exit 1
+fi
+macos_x64_triple='        "x86_64-apple-darwin",'
+if [[ "$(grep -Fxc "${macos_x64_triple}" "${repo_root}/MODULE.bazel")" != 1 ]]; then
+  printf 'crate-universe macOS x64 target is missing or duplicated\n' >&2
+  exit 1
+fi
+
 cat > "${tmp}/llvm-readobj" <<'EOF'
 #!/bin/sh
 case " $* " in *' --sections '*) ;; *) exit 64 ;; esac
@@ -157,14 +175,17 @@ Load command 7
      name /System/Library/Frameworks/Metal.framework/Versions/A/Metal (offset 24)
 Load command 8
       cmd LC_LOAD_DYLIB
-     name /usr/lib/libSystem.B.dylib (offset 24)
+     name /System/Library/Frameworks/Security.framework/Versions/A/Security (offset 24)
 Load command 9
       cmd LC_LOAD_DYLIB
-     name /usr/lib/libc++.1.dylib (offset 24)
+     name /usr/lib/libSystem.B.dylib (offset 24)
 Load command 10
       cmd LC_LOAD_DYLIB
-     name /usr/lib/libiconv.2.dylib (offset 24)
+     name /usr/lib/libc++.1.dylib (offset 24)
 Load command 11
+      cmd LC_LOAD_DYLIB
+     name /usr/lib/libiconv.2.dylib (offset 24)
+Load command 12
       cmd LC_LOAD_DYLIB
      name /usr/lib/libobjc.A.dylib (offset 24)
 EOF
@@ -243,8 +264,8 @@ EOF
 
 expect_pass linux_x64 run_check linux-x64 "${linux_x64}"
 expect_pass linux_arm64 run_check linux-aarch64 "${linux_arm64}"
-expect_pass mac_arm64 run_check macos-arm64 "${mac_arm_readobj}" "${mac_objdump}"
-expect_pass mac_x64 run_check macos-x64 "${mac_x64_readobj}" "${mac_objdump}"
+expect_pass mac_arm64_security_framework run_check macos-arm64 "${mac_arm_readobj}" "${mac_objdump}"
+expect_pass mac_x64_security_framework run_check macos-x64 "${mac_x64_readobj}" "${mac_objdump}"
 expect_pass windows run_check windows-x64 "${windows}"
 expect_pass freebsd run_check freebsd-x64 "${freebsd}"
 expect_fail malformed run_check linux-x64 "${tmp}/empty"
@@ -292,9 +313,37 @@ mutate_and_fail linux_debug_section linux-x64 "${linux_x64}" 's/Name: .dynsym/Na
 bad_mac_dylib="${tmp}/bad-mac-dylib.txt"
 sed 's#/System/Library/Frameworks/CoreML.framework/Versions/A/CoreML#/opt/local/libCoreML.dylib#' "${mac_objdump}" > "${bad_mac_dylib}"
 expect_fail mac_dylib run_check macos-arm64 "${mac_arm_readobj}" "${bad_mac_dylib}"
+bad_mac_framework="${tmp}/bad-mac-framework.txt"
+sed 's#/System/Library/Frameworks/Security.framework/Versions/A/Security#/System/Library/Frameworks/Contacts.framework/Versions/A/Contacts#' \
+  "${mac_objdump}" > "${bad_mac_framework}"
+expect_fail mac_arbitrary_framework run_check macos-arm64 "${mac_arm_readobj}" "${bad_mac_framework}"
+expect_fail mac_x64_arbitrary_framework run_check macos-x64 "${mac_x64_readobj}" "${bad_mac_framework}"
+bad_mac_framework_path="${tmp}/bad-mac-framework-path.txt"
+sed 's#/System/Library/Frameworks/Security.framework/Versions/A/Security#/opt/ctx/Security.framework/Versions/A/Security#' \
+  "${mac_objdump}" > "${bad_mac_framework_path}"
+expect_fail mac_arbitrary_framework_path run_check macos-arm64 "${mac_arm_readobj}" "${bad_mac_framework_path}"
+expect_fail mac_x64_arbitrary_framework_path run_check macos-x64 "${mac_x64_readobj}" "${bad_mac_framework_path}"
+missing_mac_security="${tmp}/missing-mac-security.txt"
+sed '/Security.framework\/Versions\/A\/Security/d' "${mac_objdump}" > "${missing_mac_security}"
+expect_fail mac_missing_security_framework run_check macos-arm64 "${mac_arm_readobj}" "${missing_mac_security}"
+expect_fail mac_x64_missing_security_framework run_check macos-x64 "${mac_x64_readobj}" "${missing_mac_security}"
+injected_mac_dylib="${tmp}/injected-mac-dylib.txt"
+sed '/name \/usr\/lib\/libobjc.A.dylib/a\
+Load command 13\
+      cmd LC_LOAD_DYLIB\
+     name /usr/local/lib/libctx-injected.dylib (offset 24)' \
+  "${mac_objdump}" > "${injected_mac_dylib}"
+expect_fail mac_injected_dylib run_check macos-arm64 "${mac_arm_readobj}" "${injected_mac_dylib}"
+expect_fail mac_x64_injected_dylib run_check macos-x64 "${mac_x64_readobj}" "${injected_mac_dylib}"
 bad_mac_version="${tmp}/bad-mac-version.txt"
 sed 's/minos 13.0/minos 14.0/' "${mac_objdump}" > "${bad_mac_version}"
 expect_fail mac_version run_check macos-arm64 "${mac_arm_readobj}" "${bad_mac_version}"
+host_sdk_mac_version="${tmp}/host-sdk-mac-version.txt"
+sed 's/minos 13.0/minos 26.2/' "${mac_objdump}" > "${host_sdk_mac_version}"
+expect_fail mac_arm_host_sdk_minos run_check macos-arm64 \
+  "${mac_arm_readobj}" "${host_sdk_mac_version}"
+expect_fail mac_x64_host_sdk_minos run_check macos-x64 \
+  "${mac_x64_readobj}" "${host_sdk_mac_version}"
 bad_mac_rpath="${tmp}/bad-mac-rpath.txt"
 sed 's/cmd LC_BUILD_VERSION/cmd LC_RPATH\nLoad command 1\n      cmd LC_BUILD_VERSION/' "${mac_objdump}" > "${bad_mac_rpath}"
 expect_fail mac_rpath run_check macos-arm64 "${mac_arm_readobj}" "${bad_mac_rpath}"
@@ -306,7 +355,15 @@ sed 's/FileType: Executable/FileType: Dylib/' "${mac_arm_readobj}" > "${bad_mac_
 expect_fail mac_type run_check macos-arm64 "${bad_mac_type}" "${mac_objdump}"
 bad_mac_local_symbol="${tmp}/bad-mac-local-symbol.txt"
 sed '/^[[:space:]]*Extern$/d' "${mac_arm_readobj}" > "${bad_mac_local_symbol}"
-expect_fail mac_local_symbol run_check macos-arm64 "${bad_mac_local_symbol}" "${mac_objdump}"
+expect_fail mac_arm_unstripped_local_symbol run_check macos-arm64 "${bad_mac_local_symbol}" "${mac_objdump}"
+bad_mac_x64_local_symbol="${tmp}/bad-mac-x64-local-symbol.txt"
+sed '/^Symbols \[$/a\
+  Symbol {\
+    Name: core::ptr::drop_in_place::h0123456789abcdef (1)\
+    Type: Section (0xE)\
+  }' "${mac_x64_readobj}" > "${bad_mac_x64_local_symbol}"
+expect_fail mac_x64_unstripped_local_symbol run_check macos-x64 \
+  "${bad_mac_x64_local_symbol}" "${mac_objdump}"
 bad_mac_truncated_symbol="${tmp}/bad-mac-truncated-symbol.txt"
 sed '/^  }$/d' "${mac_arm_readobj}" > "${bad_mac_truncated_symbol}"
 expect_fail mac_truncated_symbol run_check macos-arm64 "${bad_mac_truncated_symbol}" "${mac_objdump}"

@@ -46,8 +46,8 @@ PUBLIC_DOCS_WITH_SELF_CONTAINED_CLAIMS = (
 )
 PUBLIC_PRIVATE_BOUNDARY_SCAN_PATHS = PUBLIC_DOCS_WITH_SELF_CONTAINED_CLAIMS + (
     REPO_ROOT / "crates/ctx-history-search/src/tests/perf.rs",
-    REPO_ROOT / "crates/ctx-history-capture/src/tests/codex.rs",
 )
+CODEX_PUBLIC_CLAIM_TEST_SUITE = REPO_ROOT / "crates/ctx-history-capture/src/tests/codex"
 FORBIDDEN_PUBLIC_CLAIM_RE = re.compile(
     r"ctx-" + r"private|private\s+conformance|conformance\s+evidence|"
     r"proof\s+packet|fixture-backed|source-backed|schema\s+confidence|Full\s+GA",
@@ -148,8 +148,20 @@ def scan_public_text(value: Any, field: str) -> None:
             scan_public_text(item, f"{field}.{key}")
 
 
+def codex_public_claim_scan_paths(
+    suite_path: Path = CODEX_PUBLIC_CLAIM_TEST_SUITE,
+) -> tuple[Path, ...]:
+    if not suite_path.is_dir():
+        fail(f"public claim test suite does not exist: {suite_path}")
+    scan_paths = tuple(sorted(suite_path.glob("*.rs")))
+    if not scan_paths:
+        fail(f"public claim test suite contains no Rust sources: {suite_path}")
+    return scan_paths
+
+
 def validate_public_claim_docs() -> None:
-    for doc_path in PUBLIC_PRIVATE_BOUNDARY_SCAN_PATHS:
+    scan_paths = PUBLIC_PRIVATE_BOUNDARY_SCAN_PATHS + codex_public_claim_scan_paths()
+    for doc_path in scan_paths:
         if not doc_path.exists():
             fail(f"public claim doc does not exist: {doc_path.relative_to(REPO_ROOT)}")
         text = doc_path.read_text(encoding="utf-8")
@@ -248,6 +260,12 @@ def validate_provider(provider: Any, index: int, seen_ids: set[str]) -> None:
         fail(f"providers[{provider_id}].implemented_paths must not be empty")
     for path_index, implemented_path in enumerate(implemented_paths):
         validate_implemented_path(implemented_path, provider_id, path_index)
+
+    require_string_list(
+        provider.get("history_locations"),
+        f"providers[{provider_id}].history_locations",
+        allow_empty=True,
+    )
 
     imports_existing_history = provider.get("imports_existing_history")
     if not isinstance(imports_existing_history, bool):

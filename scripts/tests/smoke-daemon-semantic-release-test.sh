@@ -39,8 +39,8 @@ done
 [[ -n "${data_root}" && -n "${command}" ]]
 [[ "${CTX_INTERNAL_SEMANTIC_BACKEND:-}" == "coreml" ]]
 [[ "${CTX_SEMANTIC_COREML_NATIVE_COMPUTE:-}" == "all" ]]
-[[ "${CTX_DAEMON_ENABLED:-}" == "1" ]]
-[[ "${CTX_SEARCH_SEMANTIC:-}" == "1" ]]
+[[ "${CTX_DAEMON_ENABLED:-}" == "true" ]]
+[[ "${CTX_SEARCH_SEMANTIC:-}" == "true" ]]
 [[ "${CTX_SEMANTIC_CACHE_DIR:-}" == "${data_root}/semantic-cache" ]]
 
 case "${command}" in

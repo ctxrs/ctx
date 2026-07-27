@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 smoke="${repo_root}/scripts/run-native-candidate-smoke.sh"
+pro_status_fixtures="${repo_root}/scripts/tests/fixtures/native-candidate-pro-status"
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/ctx-native-smoke-test.XXXXXX")"
 trap 'rm -rf "${tmp}"' EXIT
 
@@ -11,8 +12,8 @@ cat > "${fake}" <<'EOF'
 #!/bin/sh
 set -eu
 
-test "${CTX_ANALYTICS_OFF:-}" = 1
-test "${CTX_UPGRADE_OFF:-}" = 1
+test "${CTX_ANALYTICS_ENABLED:-}" = false
+test "${CTX_UPGRADE_AUTO:-}" = off
 test "${CTX_DAEMON_AUTOSTART_OFF:-}" = 1
 test -n "${CTX_DATA_ROOT:-}"
 test -n "${HOME:-}"
@@ -29,10 +30,10 @@ case " $* " in
     ;;
   *" status --json "*)
     test -z "${CTX_SEARCH_SEMANTIC:-}"
-    test -z "${CTX_DISABLE_DAEMON:-}"
+    test -z "${CTX_DAEMON_ENABLED:-}"
     ;;
   *)
-    test "${CTX_DISABLE_DAEMON:-}" = 1
+    test "${CTX_DAEMON_ENABLED:-}" = false
     test "${CTX_SEARCH_SEMANTIC:-}" = 0
     ;;
 esac
@@ -52,7 +53,13 @@ case "${1:-}" in
     printf '%s\n' '{"retrieval":{"requested_mode":"lexical","effective_mode":"lexical"},"results":[{"text":"Add a parser test."}]}'
     ;;
   status)
-    printf '%s\n' '{"read_only":true,"semantic":{"config_source":"default","enabled":false,"reason":"semantic_disabled","embed_policy":{"source":"dynamic_quiet"}}}'
+    if test -n "${CTX_PRO_HELPER:-}"; then
+      printf '%s' '{"read_only":true,"pro":'
+      cat "${0}.pro-status.json"
+      printf '%s\n' '}'
+    else
+      printf '%s\n' '{"read_only":true,"semantic":{"config_source":"default","enabled":false,"reason":"semantic_disabled","embed_policy":{"source":"dynamic_quiet"}}}'
+    fi
     ;;
   *)
     printf 'unexpected fake ctx arguments: %s\n' "$*" >&2
@@ -63,14 +70,17 @@ EOF
 chmod +x "${fake}"
 printf '%s\n' '{"record_type":"manifest","schema_version":"ctx-history-jsonl-v1"}' > "${tmp}/fixture.jsonl"
 
-result="${tmp}/result.json"
-"${smoke}" "${fake}" "${tmp}/fixture.jsonl" 0.25.0 "${result}" >/dev/null
-expected='{"schema_version":1,"kind":"ctx-native-candidate-smoke","status":"passed","steps":{"version":"passed","setup":"passed","import":"passed","search":"passed","read_only":"passed","semantic_offline_fail_closed":"passed"}}'
-[[ "$(tr -d '\r\n' < "${result}")" == "${expected}" ]] || {
-  printf 'candidate smoke result schema changed\n' >&2
-  cat "${result}" >&2
-  exit 1
-}
+expected='{"schema_version":1,"kind":"ctx-native-candidate-smoke","status":"passed","steps":{"version":"passed","setup":"passed","import":"passed","search":"passed","read_only":"passed","pro_helper_override_ignored":"passed","semantic_offline_fail_closed":"passed"}}'
+for access_case in absent-helper-trial absent-helper-locked absent-helper-unavailable; do
+  cp "${pro_status_fixtures}/${access_case}.json" "${fake}.pro-status.json"
+  result="${tmp}/result-${access_case}.json"
+  "${smoke}" "${fake}" "${tmp}/fixture.jsonl" 0.25.0 "${result}" >/dev/null
+  [[ "$(tr -d '\r\n' < "${result}")" == "${expected}" ]] || {
+    printf 'candidate smoke result schema changed for %s\n' "${access_case}" >&2
+    cat "${result}" >&2
+    exit 1
+  }
+done
 
 failed_result="${tmp}/failed-result.json"
 cp "${fake}" "${tmp}/ctx-bad-version"

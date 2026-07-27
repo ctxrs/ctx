@@ -1,7 +1,7 @@
 use assert_cmd::Command;
 use serde_json::Value;
 use std::{
-    fs,
+    fs, io,
     path::{Path, PathBuf},
 };
 use tempfile::{Builder, TempDir};
@@ -16,9 +16,18 @@ pub(crate) fn tempdir() -> TempDir {
 }
 
 pub(crate) fn ctx(temp: &TempDir) -> Command {
-    let mut command = Command::cargo_bin("ctx").unwrap();
+    let mut command = Command::new(ctx_binary());
     apply_hermetic_env(&mut command, temp);
     command
+}
+
+fn ctx_binary() -> PathBuf {
+    let program = PathBuf::from(Command::cargo_bin("ctx").unwrap().get_program());
+    if program.is_absolute() {
+        program
+    } else {
+        std::env::current_dir().unwrap().join(program)
+    }
 }
 
 pub(crate) fn ctx_from_binary(temp: &TempDir, binary: &Path) -> Command {
@@ -30,7 +39,22 @@ pub(crate) fn ctx_from_binary(temp: &TempDir, binary: &Path) -> Command {
 pub(crate) fn apply_hermetic_env(command: &mut Command, temp: &TempDir) {
     command.env("CTX_DATA_ROOT", temp.path());
     command.env("HOME", temp.path());
-    command.env("CTX_ANALYTICS_OFF", "1");
+    command.env("CTX_ANALYTICS_ENABLED", "false");
+    for name in [
+        "CTX_ANALYTICS_OFF",
+        "CTX_DISABLE_ANALYTICS",
+        "CTX_INSTALL_DIAGNOSTICS_OFF",
+        "CTX_DAEMON_OFF",
+        "CTX_DISABLE_DAEMON",
+        "CTX_UPGRADE_OFF",
+        "CTX_DISABLE_AUTO_UPGRADE",
+    ] {
+        command.env_remove(name);
+    }
+    command.env_remove("CTX_DAEMON_ENABLED");
+    // Keep ordinary integration tests process-local now that daemon maintenance
+    // defaults on. Dedicated lifecycle tests remove this override explicitly.
+    command.env("CTX_DAEMON_AUTOSTART_OFF", "1");
     command.env_remove("CTX_QUIET");
     // Tests set CI explicitly when they need CI-only behavior.
     command.env_remove("CI");
@@ -61,13 +85,24 @@ pub(crate) fn apply_hermetic_env(command: &mut Command, temp: &TempDir) {
 }
 
 pub(crate) fn copied_ctx_binary(temp: &TempDir) -> PathBuf {
-    let source = PathBuf::from(Command::cargo_bin("ctx").unwrap().get_program().to_owned());
+    let source = ctx_binary();
     let target = temp.path().join(if cfg!(windows) {
         "ctx-test-copy.exe"
     } else {
         "ctx-test-copy"
     });
-    fs::copy(&source, &target).unwrap();
+    // Close every write handle before the caller attempts to execute the copy.
+    // Some Linux filesystems otherwise expose a brief ETXTBSY window here.
+    let mut source_file = fs::File::open(&source).unwrap();
+    let mut target_file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target)
+        .unwrap();
+    io::copy(&mut source_file, &mut target_file).unwrap();
+    target_file.sync_all().unwrap();
+    drop(target_file);
+    drop(source_file);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

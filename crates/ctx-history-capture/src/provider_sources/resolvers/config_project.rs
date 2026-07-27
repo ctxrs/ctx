@@ -1,0 +1,287 @@
+use std::{
+    ffi::OsStr,
+    fs,
+    io::ErrorKind,
+    path::{Component, Path, PathBuf},
+};
+
+use ctx_history_core::CaptureProvider;
+use serde_json::Value;
+
+use crate::common::io::ensure_provider_path_parents_are_not_symlinks;
+
+use super::{
+    super::{
+        context::{DiscoveryContext, DiscoveryPlatform},
+        selectors::{
+            SelectorDocument, SelectorFormat, SelectorReadError, SelectorReader,
+            MAX_PROJECT_ANCESTORS,
+        },
+        types::{DiscoveryIssueKind, DiscoveryReport, ProviderSourceKind, ProviderSourceSpec},
+    },
+    dedupe_report, issue, path_presence, push_source_candidate, source_from_parts, PathPresence,
+};
+
+mod crush;
+mod pi;
+mod qwen;
+mod roo;
+mod rovo;
+mod vibe;
+
+const PI_FORMAT: &str = "pi_session_jsonl";
+const CRUSH_FORMAT: &str = "crush_sqlite";
+const QWEN_FORMAT: &str = "qwen_code_chat_jsonl_tree";
+const VIBE_FORMAT: &str = "mistral_vibe_session_jsonl_tree";
+const ROVO_FORMAT: &str = "rovodev_session_json_tree";
+const ROO_FORMAT: &str = "roo_task_directory_json";
+
+const MANUAL_SELECTOR_REASON: &str =
+    "the provider selected a history root that cannot be reconstructed safely; use an exact --path";
+const UNSAFE_SELECTOR_REASON: &str =
+    "the selected history root crosses a link, network, or consent boundary; use an exact --path";
+const INVALID_SELECTOR_REASON: &str =
+    "a winning provider selector is malformed or unreadable; the stale default is suppressed";
+const PROJECT_TRUST_REASON: &str =
+    "project history configuration is not covered by persisted provider trust; use an exact --path";
+const SELECTOR_LIMIT_REASON: &str =
+    "provider selector discovery exceeded a fixed local bound; use an exact --path";
+
+pub(super) fn resolve(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> DiscoveryReport {
+    let report = match spec.provider {
+        CaptureProvider::Pi => pi::resolve(context, spec),
+        CaptureProvider::Crush => crush::resolve(context, spec),
+        CaptureProvider::QwenCode => qwen::resolve(context, spec),
+        CaptureProvider::MistralVibe => vibe::resolve(context, spec),
+        CaptureProvider::RovoDev => rovo::resolve(context, spec),
+        CaptureProvider::RooCode => roo::resolve(context, spec),
+        _ => DiscoveryReport::default(),
+    };
+    dedupe_report(report)
+}
+
+fn add_source(
+    report: &mut DiscoveryReport,
+    spec: &ProviderSourceSpec,
+    path: PathBuf,
+    format: &'static str,
+) {
+    if !path_is_safe_for_automatic_read(&path) {
+        report.issues.push(issue(
+            spec.provider,
+            None,
+            DiscoveryIssueKind::SelectorUnreconstructible,
+            UNSAFE_SELECTOR_REASON,
+        ));
+        return;
+    }
+    if !push_source_candidate(
+        &mut report.sources,
+        source_from_parts(spec, path, format, ProviderSourceKind::NativeHistory),
+    ) {
+        report.issues.push(issue(
+            spec.provider,
+            None,
+            DiscoveryIssueKind::SelectorUnreconstructible,
+            SELECTOR_LIMIT_REASON,
+        ));
+    }
+}
+
+fn add_manual_issue(report: &mut DiscoveryReport, provider: CaptureProvider, reason: &'static str) {
+    report.issues.push(issue(
+        provider,
+        None,
+        DiscoveryIssueKind::SelectorUnreconstructible,
+        reason,
+    ));
+}
+
+fn path_is_safe_for_automatic_read(path: &Path) -> bool {
+    if ensure_provider_path_parents_are_not_symlinks(path).is_err() {
+        return false;
+    }
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => !metadata.file_type().is_symlink(),
+        Err(error) => error.kind() == ErrorKind::NotFound,
+    }
+}
+
+fn supported_desktop_platform(context: &DiscoveryContext) -> bool {
+    !matches!(context.platform(), DiscoveryPlatform::OtherUnix)
+}
+
+#[derive(Debug)]
+enum OptionalDocument {
+    Missing,
+    Empty,
+    Present(SelectorDocument),
+}
+
+fn read_optional(
+    reader: &mut SelectorReader,
+    path: &Path,
+    format: SelectorFormat,
+) -> Result<OptionalDocument, SelectorReadError> {
+    match path_presence(path) {
+        PathPresence::Missing => Ok(OptionalDocument::Missing),
+        PathPresence::Unknown(_) => Err(SelectorReadError::Unavailable),
+        PathPresence::Present => {
+            let metadata =
+                fs::symlink_metadata(path).map_err(|_| SelectorReadError::Unavailable)?;
+            if !(metadata.file_type().is_file() && metadata.len() == 0) {
+                return reader.read(path, format).map(OptionalDocument::Present);
+            }
+            if ensure_provider_path_parents_are_not_symlinks(path).is_err() {
+                Err(SelectorReadError::Unavailable)
+            } else {
+                Ok(OptionalDocument::Empty)
+            }
+        }
+    }
+}
+
+fn structured(document: &SelectorDocument) -> Option<&Value> {
+    match document {
+        SelectorDocument::Structured(value) => Some(value),
+        SelectorDocument::Xml(_) => None,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StringSetting {
+    Missing,
+    Reset,
+    Value(String),
+    Invalid,
+}
+
+fn string_setting(value: &Value, path: &[&str]) -> StringSetting {
+    let mut selected = value;
+    for component in path {
+        let Some(next) = selected.as_object().and_then(|map| map.get(*component)) else {
+            return StringSetting::Missing;
+        };
+        selected = next;
+    }
+    match selected {
+        Value::Null => StringSetting::Reset,
+        Value::String(value) if value.is_empty() => StringSetting::Reset,
+        Value::String(value) => StringSetting::Value(value.clone()),
+        _ => StringSetting::Invalid,
+    }
+}
+
+fn bool_setting(value: &Value, path: &[&str]) -> Result<Option<bool>, ()> {
+    let mut selected = value;
+    for component in path {
+        let Some(next) = selected.as_object().and_then(|map| map.get(*component)) else {
+            return Ok(None);
+        };
+        selected = next;
+    }
+    selected.as_bool().map(Some).ok_or(())
+}
+
+fn resolve_expand_user(
+    raw: &str,
+    home: &Path,
+    relative_base: Option<&Path>,
+    windows_tilde: bool,
+) -> Result<PathBuf, ()> {
+    let path = if raw == "~" {
+        home.to_path_buf()
+    } else if let Some(rest) = raw.strip_prefix("~/") {
+        home.join(rest)
+    } else if windows_tilde {
+        if let Some(rest) = raw.strip_prefix("~\\") {
+            home.join(rest.replace('\\', "/"))
+        } else {
+            PathBuf::from(raw)
+        }
+    } else {
+        PathBuf::from(raw)
+    };
+    if path.is_absolute() {
+        Ok(lexical_normalize(&path))
+    } else {
+        relative_base
+            .map(|base| lexical_normalize(&base.join(path)))
+            .ok_or(())
+    }
+}
+
+fn resolve_os_path(raw: &OsStr, relative_base: Option<&Path>) -> Result<PathBuf, ()> {
+    let path = PathBuf::from(raw);
+    if path.is_absolute() {
+        Ok(lexical_normalize(&path))
+    } else {
+        relative_base
+            .map(|base| lexical_normalize(&base.join(path)))
+            .ok_or(())
+    }
+}
+
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut output = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !output.pop() {
+                    output.push(component.as_os_str());
+                }
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                output.push(component.as_os_str());
+            }
+        }
+    }
+    output
+}
+
+fn local_absolute_path(path: &Path) -> bool {
+    path.is_absolute() && !is_network_path(path)
+}
+
+fn is_network_path(path: &Path) -> bool {
+    let text = path.as_os_str().to_string_lossy();
+    text.starts_with("//") || text.starts_with("\\\\")
+}
+
+fn is_within(path: &Path, root: &Path) -> bool {
+    lexical_normalize(path).starts_with(lexical_normalize(root))
+}
+
+fn canonical_comparison_path(path: &Path) -> PathBuf {
+    if path_is_safe_for_automatic_read(path) {
+        fs::canonicalize(path).unwrap_or_else(|_| lexical_normalize(path))
+    } else {
+        lexical_normalize(path)
+    }
+}
+
+fn git_bounded_ancestors(cwd: &Path) -> Vec<PathBuf> {
+    let mut walked = Vec::new();
+    for candidate in cwd.ancestors().take(MAX_PROJECT_ANCESTORS) {
+        walked.push(candidate.to_path_buf());
+        let marker = candidate.join(".git");
+        match path_presence(&marker) {
+            PathPresence::Missing => {}
+            PathPresence::Present => {
+                if fs::symlink_metadata(&marker)
+                    .is_ok_and(|metadata| !metadata.file_type().is_symlink())
+                {
+                    return walked;
+                }
+                return vec![cwd.to_path_buf()];
+            }
+            PathPresence::Unknown(_) => return vec![cwd.to_path_buf()],
+        }
+    }
+    vec![cwd.to_path_buf()]
+}
+
+#[cfg(test)]
+#[path = "config_project_tests.rs"]
+mod tests;

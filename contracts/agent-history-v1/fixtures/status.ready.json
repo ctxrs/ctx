@@ -41,11 +41,6 @@
         "semanticIndex": {
           "enabled": true,
           "status": "ready"
-        },
-        "cloudSync": {
-          "enabled": false,
-          "status": "disabled",
-          "networkAllowed": false
         }
       }
     }

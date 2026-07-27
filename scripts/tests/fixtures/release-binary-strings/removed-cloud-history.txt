@@ -1,0 +1,16 @@
+ctx_cloud_client::uploader::CloudUploader
+ctx-captured-batch
+CloudPublicationSink
+PublicationWindowInput
+CTX_CLOUD_TOKEN
+CTX_CLOUD_CREDENTIAL_FD
+v1/sources/resolve
+v1/uploads/reservations
+v1/uploads/upload_123/finalize
+v1/imports/import_123/seal
+local_revision_publication_windows
+spool_batches_ready
+cloud_sync_status
+ctx-dashboard
+dashboard_url
+work_record_core::PublishedTo

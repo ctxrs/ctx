@@ -229,7 +229,8 @@ fn fresh_home_search_mvp_flow() {
     assert_eq!(setup_json["network_required"], false);
     assert_eq!(setup_json["repo_writes"], false);
     assert_eq!(setup_json["mode"], "ready");
-    assert_eq!(setup_json["import"]["ran"], true);
+    assert_eq!(setup_json["import"]["ran"], false);
+    assert_eq!(setup_json["import"]["reason"], "no_sources");
     assert_eq!(setup_json["background_indexing"]["enabled"], false);
 
     let sources = json_output(ctx(&temp).args(["sources", "--json"]));
@@ -540,14 +541,14 @@ fn fresh_home_search_mvp_flow() {
     assert!(status["indexed_items"].as_u64().unwrap() > 0);
     assert_eq!(status["semantic"]["status"], "disabled");
     assert_eq!(status["semantic"]["reason"], "semantic_disabled");
-    assert_eq!(status["daemon"]["enabled"], false);
+    assert_eq!(status["daemon"]["enabled"], true);
     assert!(status["daemon"]["jobs"]["semantic_index"]["status"].is_string());
 
     let doctor = json_output(ctx(&temp).args(["doctor", "--json"]));
     assert_eq!(doctor["schema_version"], 1);
     assert_eq!(doctor["ok"], true);
     assert_eq!(doctor["progress"], "auto");
-    assert_eq!(doctor["daemon"]["enabled"], false);
+    assert_eq!(doctor["daemon"]["enabled"], true);
     assert!(doctor["daemon"]["jobs"]["semantic_index"]["status"].is_string());
 
     let doctor_progress = ctx(&temp)
@@ -697,7 +698,7 @@ fn doctor_reports_missing_store_without_creating_it() {
 
     assert_eq!(doctor["schema_version"], 1);
     assert_eq!(doctor["ok"], false);
-    assert_eq!(doctor["daemon"]["enabled"], false);
+    assert_eq!(doctor["daemon"]["enabled"], true);
     assert!(doctor["daemon"]["jobs"]["semantic_index"]["status"].is_string());
     assert!(doctor["findings"]
         .as_array()
@@ -732,7 +733,7 @@ fn codex_cli_resume_is_idempotent_rescan_and_filters_subagents() {
     assert_eq!(first["resume"], false);
     assert_eq!(first["resume_mode"], "normal_scan");
     assert_eq!(first["totals"]["imported_sessions"], 2);
-    assert_eq!(first["totals"]["imported_events"], 7);
+    assert_eq!(first["totals"]["imported_events"], 8);
     assert_eq!(first["totals"]["imported_edges"], 1);
 
     let primary_default = json_output(ctx(&temp).args(["search", "subagent", "--json"]));
@@ -836,7 +837,7 @@ fn codex_cli_default_import_uses_catalog_state_for_incremental_catch_up() {
     assert_eq!(first["resume"], false);
     assert_eq!(first["resume_mode"], "normal_scan");
     assert_eq!(first["totals"]["imported_sessions"], 2);
-    assert_eq!(first["totals"]["imported_events"], 7);
+    assert_eq!(first["totals"]["imported_events"], 8);
     assert_eq!(first["totals"]["rejected_records"], 0);
 
     let status = json_output(ctx(&temp).args(["status", "--json"]));
@@ -877,7 +878,7 @@ fn codex_cli_provider_oracle_covers_retrieval_and_claimed_fidelity() {
         "--json",
     ]));
     assert_eq!(basic["totals"]["imported_sessions"], 2);
-    assert_eq!(basic["totals"]["imported_events"], 7);
+    assert_eq!(basic["totals"]["imported_events"], 8);
     assert_eq!(basic["totals"]["imported_edges"], 1);
 
     let rich = json_output(ctx(&temp).args([
@@ -889,7 +890,7 @@ fn codex_cli_provider_oracle_covers_retrieval_and_claimed_fidelity() {
         "--json",
     ]));
     assert_eq!(rich["totals"]["imported_sessions"], 1);
-    assert_eq!(rich["totals"]["imported_events"], 5);
+    assert_eq!(rich["totals"]["imported_events"], 7);
 
     let query = "setup flow";
     let search = json_output(ctx(&temp).args(["search", query, "--provider", "codex", "--json"]));
@@ -908,7 +909,7 @@ fn codex_cli_provider_oracle_covers_retrieval_and_claimed_fidelity() {
             &conn,
             "SELECT COUNT(*) FROM events e JOIN sessions s ON e.session_id = s.id WHERE s.provider = 'codex' AND e.fidelity = 'imported'"
         ),
-        12
+        15
     );
     assert_eq!(
         sqlite_count(
@@ -936,14 +937,14 @@ fn codex_cli_provider_oracle_covers_retrieval_and_claimed_fidelity() {
             &conn,
             "SELECT COUNT(*) FROM events e JOIN sessions s ON e.session_id = s.id WHERE s.provider = 'codex' AND e.event_type = 'tool_output'"
         ),
-        0
+        1
     );
     assert_eq!(
         sqlite_count(
             &conn,
             "SELECT COUNT(*) FROM events e JOIN sessions s ON e.session_id = s.id WHERE s.provider = 'codex' AND e.event_type = 'command_output'"
         ),
-        0
+        2
     );
     assert_eq!(
         sqlite_count(
@@ -1268,7 +1269,7 @@ fn pi_cli_imports_directory_tree_path() {
         "pi",
         "--json",
     ]));
-    assert_search_provider_oracle(&search, "pi", "pi directory beta oracle", 2, "message");
+    assert_search_provider_oracle(&search, "pi", "pi directory beta oracle", 1, "message");
     assert!(search["results"][0]["snippet"]
         .as_str()
         .unwrap()
@@ -1463,7 +1464,7 @@ fn codex_cli_marks_deleted_raw_source_citations_unavailable() {
         &copied_text,
         "--json",
     ]));
-    assert_eq!(imported["totals"]["imported_events"], 7);
+    assert_eq!(imported["totals"]["imported_events"], 8);
 
     fs::remove_dir_all(&copied).unwrap();
 

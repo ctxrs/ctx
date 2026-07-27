@@ -11,15 +11,16 @@ use crate::search::analyzer::{
     lexical_query_terms, scriptgram_match_clauses, scriptgram_match_query,
 };
 use crate::search::projections::{
-    event_scriptgram_table_ready, fts_match_clauses, fts_match_query,
-    record_scriptgram_table_ready, upsert_record_search_projection,
+    delete_record_search_projection, event_scriptgram_table_ready, fts_match_clauses,
+    fts_match_query, record_scriptgram_table_ready, upsert_record_search_projection,
 };
 use crate::sync::sync_metadata_from_row;
 use crate::{Result, Store, StoreError};
 
 impl Store {
     pub fn upsert_history_record_link(&self, link: &HistoryRecordLink) -> Result<Uuid> {
-        self.conn.execute(
+        self.with_atomic_write(|| {
+            self.conn.execute(
                 r#"
                 INSERT INTO history_record_links
                 (id, history_record_id, target_type, target_id, link_type, confidence, source_id, created_at_ms, updated_at_ms, visibility, fidelity, sync_state, sync_version, deleted_at_ms, metadata_json)
@@ -53,7 +54,7 @@ impl Store {
                     serde_json::to_string(&link.sync.metadata)?,
                 ],
             )?;
-        self.conn
+            let id = self.conn
                 .query_row(
                     "SELECT id FROM history_record_links WHERE history_record_id = ?1 AND target_type = ?2 AND target_id = ?3 AND link_type = ?4",
                     params![
@@ -64,7 +65,10 @@ impl Store {
                     ],
                     |row| parse_uuid(row.get::<_, String>(0)?),
                 )
-                .map_err(StoreError::from)
+                .map_err(StoreError::from)?;
+            self.journal_history_link_mutated(link.target_type.as_str(), link.target_id)?;
+            Ok(id)
+        })
     }
 
     pub(crate) fn list_history_record_links(&self) -> Result<Vec<HistoryRecordLink>> {
@@ -78,8 +82,9 @@ impl Store {
     pub fn insert_record(&self, record: &HistoryRecord) -> Result<()> {
         let created_at_ms = timestamp_ms(record.created_at);
         let updated_at_ms = timestamp_ms(record.updated_at);
-        self.conn.execute(
-            r#"
+        self.with_atomic_write(|| {
+            self.conn.execute(
+                r#"
                 INSERT INTO history_records
                 (
                     id, title, summary, status, started_at_ms, last_activity_at_ms,
@@ -88,34 +93,36 @@ impl Store {
                 )
                 VALUES (?1, ?2, ?3, 'open', ?4, ?5, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
                 "#,
-            params![
-                record.id.to_string(),
-                record.title,
-                record.body,
-                created_at_ms,
-                updated_at_ms,
-                record.body,
-                serde_json::to_string(&record.tags)?,
-                record.kind,
-                record.workspace,
-                record.created_at.to_rfc3339(),
-                record.updated_at.to_rfc3339(),
-            ],
-        )?;
-        upsert_record_search_projection(&self.conn, record)?;
-        Ok(())
+                params![
+                    record.id.to_string(),
+                    record.title,
+                    record.body,
+                    created_at_ms,
+                    updated_at_ms,
+                    record.body,
+                    serde_json::to_string(&record.tags)?,
+                    record.kind,
+                    record.workspace,
+                    record.created_at.to_rfc3339(),
+                    record.updated_at.to_rfc3339(),
+                ],
+            )?;
+            upsert_record_search_projection(&self.conn, record)
+        })
     }
 
     pub fn upsert_record(&self, record: &HistoryRecord) -> Result<()> {
-        self.upsert_record_row(record)?;
-        upsert_record_search_projection(&self.conn, record)?;
-        Ok(())
+        self.with_atomic_write(|| {
+            self.upsert_record_row(record)?;
+            upsert_record_search_projection(&self.conn, record)
+        })
     }
 
     pub fn delete_orphan_record(&self, record_id: Uuid) -> Result<bool> {
-        let record_id = record_id.to_string();
-        let deleted = self.conn.execute(
-            r#"
+        self.with_atomic_write(|| {
+            let record_id_text = record_id.to_string();
+            let deleted = self.conn.execute(
+                r#"
             DELETE FROM history_records
             WHERE id = ?1
               AND NOT EXISTS (SELECT 1 FROM sessions WHERE history_record_id = ?1)
@@ -127,36 +134,26 @@ impl Store {
               AND NOT EXISTS (SELECT 1 FROM history_record_tags WHERE history_record_id = ?1)
               AND NOT EXISTS (SELECT 1 FROM record_edges WHERE from_record_id = ?1 OR to_record_id = ?1)
             "#,
-            params![&record_id],
-        )?;
-        if deleted > 0 && table_exists(&self.conn, "ctx_history_search")? {
-            self.conn.execute(
-                "DELETE FROM ctx_history_search WHERE record_id = ?1",
-                params![&record_id],
+                params![record_id_text],
             )?;
-        }
-        Ok(deleted > 0)
+            if deleted > 0 {
+                delete_record_search_projection(&self.conn, record_id)?;
+            }
+            Ok(deleted > 0)
+        })
     }
 
     pub fn upsert_records(&self, records: &[HistoryRecord]) -> Result<()> {
         if records.is_empty() {
             return Ok(());
         }
-        self.begin_immediate_batch()?;
-        for record in records {
-            if let Err(err) = self.upsert_record_row(record) {
-                let _ = self.rollback_batch();
-                return Err(err);
+        self.with_atomic_write(|| {
+            for record in records {
+                self.upsert_record_row(record)?;
+                upsert_record_search_projection(&self.conn, record)?;
             }
-        }
-        if let Err(err) = self.commit_batch() {
-            let _ = self.rollback_batch();
-            return Err(err);
-        }
-        for record in records {
-            upsert_record_search_projection(&self.conn, record)?;
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     fn upsert_record_row(&self, record: &HistoryRecord) -> Result<()> {

@@ -113,10 +113,10 @@ $isolation = [ordered]@{
     TEMP = $tmpRoot
     TMP = $tmpRoot
     CTX_DATA_ROOT = $dataRoot
-    CTX_ANALYTICS_OFF = "1"
-    CTX_UPGRADE_OFF = "1"
+    CTX_ANALYTICS_ENABLED = "false"
+    CTX_UPGRADE_AUTO = "off"
     CTX_DAEMON_AUTOSTART_OFF = "1"
-    CTX_DISABLE_DAEMON = "1"
+    CTX_DAEMON_ENABLED = "false"
     CTX_SEARCH_SEMANTIC = "0"
     CTX_SEMANTIC_CACHE_DIR = (Join-Path $root "semantic-cache")
     HF_HOME = (Join-Path $root "huggingface")
@@ -240,12 +240,12 @@ try {
     }
 
     $env:CTX_SEARCH_SEMANTIC = $null
-    $env:CTX_DISABLE_DAEMON = $null
+    $env:CTX_DAEMON_ENABLED = $null
     try {
         $status = Invoke-Ctx @("status", "--json")
     } finally {
         $env:CTX_SEARCH_SEMANTIC = "0"
-        $env:CTX_DISABLE_DAEMON = "1"
+        $env:CTX_DAEMON_ENABLED = "false"
     }
     if ($status -notmatch '"read_only"\s*:\s*true') {
         Fail "read-only status command returned an unexpected payload"
@@ -261,8 +261,7 @@ try {
     # Semantic search is supported but opt-in. Without a provisioned model, an
     # explicit offline request must fail before fallback, state, or network.
     $env:CTX_SEARCH_SEMANTIC = "1"
-    $env:CTX_DAEMON_ENABLED = "1"
-    $env:CTX_DISABLE_DAEMON = "0"
+    $env:CTX_DAEMON_ENABLED = "true"
     $savedErrorActionPreference = $ErrorActionPreference
     try {
         # This command must fail. Windows PowerShell promotes native stderr to
@@ -276,8 +275,7 @@ try {
         $ErrorActionPreference = $savedErrorActionPreference
     }
     $env:CTX_SEARCH_SEMANTIC = "0"
-    $env:CTX_DAEMON_ENABLED = "0"
-    $env:CTX_DISABLE_DAEMON = "1"
+    $env:CTX_DAEMON_ENABLED = "false"
     $capabilityText = $capabilityOutput -join [Environment]::NewLine
     if ($capabilityExit -eq 0) {
         Fail "semantic-only search unexpectedly succeeded"

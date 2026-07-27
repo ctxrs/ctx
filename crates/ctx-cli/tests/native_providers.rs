@@ -73,7 +73,7 @@ fn qwen_kimi_mistral_mux_and_qoder_default_sources_import_search_and_reimport() 
             "--progress",
             "none",
         ]));
-        assert_eq!(first["totals"]["rejected_records"], 0);
+        assert_eq!(first["totals"]["rejected_records"], 0, "{first:#}");
         assert_eq!(first["totals"]["imported_sources"], 1);
         assert!(
             first["totals"]["imported_events"].as_u64().unwrap() >= minimum_events,
@@ -111,7 +111,7 @@ fn qwen_kimi_mistral_mux_and_qoder_default_sources_import_search_and_reimport() 
 }
 
 #[test]
-fn mimocode_default_env_and_channel_sources_import_search_and_reimport() {
+fn mimocode_default_and_env_sources_import_search_and_reimport() {
     let temp = tempdir();
     let default_query = "mimocode-default-discovery-oracle";
     let default_db = temp
@@ -233,19 +233,14 @@ fn mimocode_default_env_and_channel_sources_import_search_and_reimport() {
             .env("XDG_DATA_HOME", &xdg_data)
             .args(["sources", "--json", "--all"]),
     );
-    assert_eq!(
-        source_by_path(&channel_sources, "mimocode", &channel_db)["status"],
-        "available"
-    );
-    let disabled_channel_sources = json_output(
-        ctx(&temp)
-            .env("XDG_DATA_HOME", &xdg_data)
-            .env("MIMOCODE_DISABLE_CHANNEL_DB", "1")
-            .args(["sources", "--json", "--all"]),
-    );
     assert!(
-        !has_provider_source_path(&disabled_channel_sources, "mimocode", &channel_db),
-        "MIMOCODE_DISABLE_CHANNEL_DB should suppress channel DB discovery"
+        !has_provider_source_path(&channel_sources, "mimocode", &channel_db),
+        "unregistered channel databases must not be discovered: {channel_sources:#}"
+    );
+    let selected_xdg_db = xdg_data.join("mimocode").join("mimocode.db");
+    assert_eq!(
+        source_by_path(&channel_sources, "mimocode", &selected_xdg_db)["status"],
+        "missing"
     );
 
     let relative_db = xdg_data.join("mimocode").join("relative.db");
@@ -523,7 +518,7 @@ fn native_provider_cli_flow_imports_supported_provider_paths() {
         assert_eq!(first["schema_version"], 2);
         assert_eq!(first["sources"][0]["provider"], stored_provider);
         assert_eq!(first["sources"][0]["source_format"], expected_format);
-        assert_eq!(first["totals"]["rejected_records"], 0);
+        assert_eq!(first["totals"]["rejected_records"], 0, "{first:#}");
         assert!(first["totals"]["imported_sessions"].as_u64().unwrap() >= 1);
         assert!(first["totals"]["imported_events"].as_u64().unwrap() >= 1);
 
@@ -655,20 +650,17 @@ fn native_provider_cli_policy_excludes_success_tool_outputs_from_search_and_payl
 }
 
 #[test]
-fn trae_cli_imports_explicit_workspace_storage_with_default_discovery() {
+fn trae_cli_imports_explicit_workspace_storage_without_default_discovery() {
     let temp = tempdir();
     let empty_sources = json_output(ctx(&temp).args(["sources", "--json", "--all"]));
-    let trae_source = empty_sources["sources"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|source| source["provider"] == "trae")
-        .unwrap_or_else(|| panic!("missing Trae default source: {empty_sources:#}"));
-    assert_eq!(trae_source["status"], "missing");
-    assert_eq!(trae_source["source_format"], "trae_state_vscdb");
-    assert_eq!(trae_source["import_support"], "native");
-    assert_eq!(trae_source["native_import"], true);
-    assert_eq!(trae_source["importable"], false);
+    assert!(
+        empty_sources["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|source| source["provider"] != "trae"),
+        "Trae workspace storage is explicit-path-only: {empty_sources:#}"
+    );
 
     let fixture = provider_history_fixture("trae/User/workspaceStorage");
     let imported = json_output(ctx(&temp).args([
@@ -723,34 +715,25 @@ fn trae_cli_imports_explicit_workspace_storage_with_default_discovery() {
 }
 
 #[test]
-fn trae_cn_native_default_discovery_search_refresh_imports_input_history() {
+fn trae_cn_workspace_storage_requires_explicit_path_for_search_refresh() {
     let temp = tempdir();
-    let query = "trae-cn-default-discovery-oracle";
+    let query = "trae-cn-explicit-discovery-oracle";
     install_default_trae_cn_fixture(&temp, query);
+    let workspace_storage = temp
+        .path()
+        .join("Library/Application Support/Trae CN/User/workspaceStorage");
 
     let sources = json_output(ctx(&temp).args(["sources", "--json"]));
-    let source = sources["sources"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|source| {
-            source["provider"] == "trae"
-                && source["status"] == "available"
-                && source["path"]
-                    .as_str()
-                    .is_some_and(|path| path.ends_with("Trae CN/User/workspaceStorage"))
-        })
-        .unwrap_or_else(|| panic!("missing Trae CN source in {sources:#}"));
-    assert_eq!(source["status"], "available");
-    assert_eq!(source["source_format"], "trae_state_vscdb");
-    assert_eq!(source["import_support"], "native");
-    assert_eq!(source["native_import"], true);
-    assert!(source["path"]
-        .as_str()
-        .unwrap()
-        .ends_with("Trae CN/User/workspaceStorage"));
+    assert!(
+        sources["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|source| source["provider"] != "trae"),
+        "Trae CN workspace storage must not be auto-discovered: {sources:#}"
+    );
 
-    let search = json_output(ctx(&temp).args([
+    let stderr = failure_stderr(ctx(&temp).args([
         "search",
         query,
         "--provider",
@@ -759,89 +742,18 @@ fn trae_cn_native_default_discovery_search_refresh_imports_input_history() {
         "wait",
         "--json",
     ]));
-    assert_eq!(search["freshness"]["mode"], "wait");
-    assert_eq!(search["freshness"]["status"], "completed");
-    assert_eq!(search["freshness"]["source_count"], 1);
-    assert_eq!(search["freshness"]["totals"]["rejected_records"], 0);
-    assert_eq!(search["freshness"]["totals"]["imported_sessions"], 1);
-    assert_eq!(search["freshness"]["totals"]["imported_events"], 2);
-    assert_search_provider_oracle_with_scope(
-        &search,
-        "trae",
-        query,
-        1,
-        "message",
-        "session_result",
-        "session",
-    );
-}
+    assert!(stderr.contains("found no supported discovered native provider"));
 
-#[test]
-fn trae_native_default_discovery_search_refresh_imports_standard_workspace_storage() {
-    let temp = tempdir();
-    let query = "trae-standard-default-discovery-oracle";
-    install_default_trae_fixture(&temp, query);
-
-    let sources = json_output(ctx(&temp).args(["sources", "--json"]));
-    let source = sources["sources"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|source| {
-            source["provider"] == "trae"
-                && source["status"] == "available"
-                && source["path"]
-                    .as_str()
-                    .is_some_and(|path| path.ends_with("Trae/User/workspaceStorage"))
-        })
-        .unwrap_or_else(|| panic!("missing standard Trae source in {sources:#}"));
-    assert_eq!(source["source_format"], "trae_state_vscdb");
-    assert_eq!(source["import_support"], "native");
-    assert_eq!(source["native_import"], true);
-
-    let search = json_output(ctx(&temp).args([
-        "search",
-        query,
+    let imported = json_output(ctx(&temp).args([
+        "import",
         "--provider",
-        "trae",
-        "--refresh",
-        "wait",
+        "trae-cn",
+        "--path",
+        workspace_storage.to_str().unwrap(),
         "--json",
+        "--progress",
+        "none",
     ]));
-    assert_eq!(search["freshness"]["mode"], "wait");
-    assert_eq!(search["freshness"]["status"], "completed");
-    assert_eq!(search["freshness"]["source_count"], 1);
-    assert_eq!(search["freshness"]["totals"]["rejected_records"], 0);
-    assert_eq!(search["freshness"]["totals"]["imported_sessions"], 1);
-    assert_eq!(search["freshness"]["totals"]["imported_events"], 2);
-    assert_search_provider_oracle_with_scope(
-        &search,
-        "trae",
-        query,
-        1,
-        "message",
-        "session_result",
-        "session",
-    );
-}
-
-#[test]
-fn trae_cn_native_default_discovery_is_included_in_import_all() {
-    let temp = tempdir();
-    let query = "trae-cn-import-all-oracle";
-    install_default_trae_cn_fixture(&temp, query);
-
-    let imported =
-        json_output(ctx(&temp).args(["import", "--all", "--json", "--progress", "none"]));
-    assert!(imported["sources"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|source| {
-            source["provider"] == "trae"
-                && source["source_format"] == "trae_state_vscdb"
-                && source["import_support"] == "native"
-        }));
     assert_eq!(imported["totals"]["rejected_records"], 0);
     assert_eq!(imported["totals"]["imported_sessions"], 1);
     assert_eq!(imported["totals"]["imported_events"], 2);
@@ -864,6 +776,77 @@ fn trae_cn_native_default_discovery_is_included_in_import_all() {
         "session_result",
         "session",
     );
+}
+
+#[test]
+fn trae_workspace_storage_requires_explicit_path_for_search_refresh() {
+    let temp = tempdir();
+    let query = "trae-standard-explicit-discovery-oracle";
+    install_default_trae_fixture(&temp, query);
+    let workspace_storage = temp
+        .path()
+        .join("Library/Application Support/Trae/User/workspaceStorage");
+
+    let sources = json_output(ctx(&temp).args(["sources", "--json"]));
+    assert!(
+        sources["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|source| source["provider"] != "trae"),
+        "Trae workspace storage must not be auto-discovered: {sources:#}"
+    );
+
+    let imported = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "trae",
+        "--path",
+        workspace_storage.to_str().unwrap(),
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(imported["totals"]["rejected_records"], 0);
+    assert_eq!(imported["totals"]["imported_sessions"], 1);
+    assert_eq!(imported["totals"]["imported_events"], 2);
+
+    let search = json_output(ctx(&temp).args([
+        "search",
+        query,
+        "--provider",
+        "trae",
+        "--refresh",
+        "off",
+        "--json",
+    ]));
+    assert_search_provider_oracle_with_scope(
+        &search,
+        "trae",
+        query,
+        1,
+        "message",
+        "session_result",
+        "session",
+    );
+}
+
+#[test]
+fn trae_cn_workspace_storage_is_excluded_from_import_all() {
+    let temp = tempdir();
+    let query = "trae-cn-import-all-oracle";
+    install_default_trae_cn_fixture(&temp, query);
+
+    let stderr =
+        failure_stderr(ctx(&temp).args(["import", "--all", "--json", "--progress", "none"]));
+    assert!(stderr.contains("no importable provider history sources found"));
+
+    let sources = json_output(ctx(&temp).args(["sources", "--json", "--all"]));
+    assert!(sources["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|source| source["provider"] != "trae"));
 }
 
 #[test]
@@ -1200,8 +1183,8 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
             "crush_sqlite",
             "crush/v1/crush.db",
             "crush oracle",
-            1,
-            3,
+            2,
+            4,
         ),
         (
             "goose",
@@ -1250,6 +1233,37 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
         assert_eq!(imported["totals"]["rejected_records"], 0);
         assert_eq!(imported["totals"]["imported_sessions"], sessions);
         assert_eq!(imported["totals"]["imported_events"], events);
+        if stored_provider == "crush" {
+            let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
+            assert_eq!(
+                sqlite_count(
+                    &conn,
+                    "SELECT COUNT(*) FROM ctx_sessions \
+                     WHERE provider = 'crush' AND provider_session_id = 'crush-child'",
+                ),
+                1,
+                "CapturedBatch must preserve the structurally valid child without conversation messages"
+            );
+            assert_eq!(
+                sqlite_count(
+                    &conn,
+                    "SELECT COUNT(*) FROM ctx_events \
+                     WHERE provider = 'crush' AND provider_session_id = 'crush-child' \
+                     AND event_type = 'command_output'",
+                ),
+                1,
+                "the child-only shell command output must remain attached to the Crush child"
+            );
+            assert_eq!(
+                sqlite_count(
+                    &conn,
+                    "SELECT COUNT(*) FROM ctx_events \
+                     WHERE provider = 'crush' AND provider_session_id = 'crush-root'",
+                ),
+                3,
+                "the fourth Crush event must not duplicate a root message"
+            );
+        }
 
         let search = json_output(ctx(&temp).args([
             "search",
@@ -1524,14 +1538,23 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
         ("roo", "no importable roo_code history found"),
     ] {
         let temp = tempdir();
-        let stderr =
-            failure_stderr(ctx(&temp).args(["import", "--provider", cli_provider, "--json"]));
+        let stderr = failure_stderr(ctx(&temp).current_dir(temp.path()).args([
+            "import",
+            "--provider",
+            cli_provider,
+            "--json",
+        ]));
 
         assert!(stderr.contains(expected_blocker), "{stderr}");
         assert!(stderr.contains("use `ctx sources`"), "{stderr}");
-        if cli_provider == "nanoclaw" {
+        if matches!(cli_provider, "nanoclaw" | "openclaw" | "lingma") {
             assert!(
                 stderr.contains("no default paths are registered for this provider"),
+                "{stderr}"
+            );
+        } else if cli_provider == "factory-ai-droid" {
+            assert!(
+                stderr.contains("no official automatic history location is established"),
                 "{stderr}"
             );
         } else {
@@ -1622,9 +1645,30 @@ fn antigravity_cli_imports_native_transcript_tree() {
         imported["sources"][0]["source_format"],
         "antigravity_cli_transcript_jsonl_tree"
     );
-    assert_eq!(imported["totals"]["imported_sessions"], 3);
-    assert_eq!(imported["totals"]["imported_events"], 9);
-    assert_eq!(imported["totals"]["rejected_records"], 2);
+    assert_eq!(imported["totals"]["imported_sessions"], 4);
+    assert_eq!(imported["totals"]["imported_events"], 11);
+    assert_eq!(imported["totals"]["rejected_records"], 1);
+
+    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
+    assert_eq!(
+        sqlite_count(
+            &conn,
+            "SELECT COUNT(*) FROM ctx_sessions \
+             WHERE provider = 'antigravity' AND provider_session_id = 'agy-future'",
+        ),
+        1,
+        "the future-shape transcript must retain its notice-only session"
+    );
+    assert_eq!(
+        sqlite_count(
+            &conn,
+            "SELECT COUNT(*) FROM ctx_events \
+             WHERE provider = 'antigravity' AND provider_session_id = 'agy-future' \
+             AND event_type = 'notice'",
+        ),
+        2,
+        "both future-shape records must survive as notices"
+    );
 
     let search = json_output(ctx(&temp).args([
         "search",

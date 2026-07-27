@@ -1,8 +1,36 @@
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    time::{Duration as StdDuration, Instant},
+};
+
+use anyhow::{anyhow, Result};
+use ctx_history_store::{EventEmbeddingDocument, Store};
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
+
+use super::{
+    model_contract::{SEMANTIC_DIMENSIONS, SEMANTIC_PASSAGE_PREFIX, SEMANTIC_QUERY_PREFIX},
+    model_runtime::SharedSemanticRuntime,
+    reports::SemanticRetrievalDiagnostics,
+    runtime_limits::{
+        SEMANTIC_CHUNK_OVERLAP_CHARS, SEMANTIC_CHUNK_TARGET_CHARS,
+        SEMANTIC_DEADLINE_CHUNKS_PER_SECOND, SEMANTIC_DEADLINE_MIN_CHUNK_BATCH,
+        SEMANTIC_DIRTY_QUEUE_RECENT_LIMIT, SEMANTIC_FULL_SCAN_MAX_CHUNKS,
+        SEMANTIC_FULL_SCAN_MAX_VECTOR_BYTES, SEMANTIC_MODEL_INIT_MIN_REMAINING_SECS,
+        SEMANTIC_SOURCE_MAX_CHARS, SEMANTIC_VECTOR_OVERFETCH,
+    },
+    vector_store::{
+        SemanticChunkDocument, SemanticHitSearch, SemanticIndexOutcome, SemanticVectorHit,
+        SemanticVectorStore,
+    },
+};
+
 #[allow(clippy::too_many_arguments)]
-fn backfill_semantic_embeddings(
+pub(super) fn backfill_semantic_embeddings(
     store: &Store,
     vector_store: &mut SemanticVectorStore,
-    embedder: &Arc<Mutex<Option<SemanticEmbedder>>>,
+    runtime: &SharedSemanticRuntime,
     model_init_ms: &mut Option<u64>,
     cache_dir: &Path,
     query_text: Option<&str>,
@@ -31,7 +59,7 @@ fn backfill_semantic_embeddings(
         scanned = scanned.saturating_add(docs.len());
         let outcome = index_semantic_documents(
             vector_store,
-            embedder,
+            runtime,
             model_init_ms,
             cache_dir,
             &mut existing_hashes,
@@ -64,7 +92,7 @@ fn backfill_semantic_embeddings(
                 scanned = scanned.saturating_add(docs.len());
                 let outcome = index_semantic_documents(
                     vector_store,
-                    embedder,
+                    runtime,
                     model_init_ms,
                     cache_dir,
                     &mut existing_hashes,
@@ -86,12 +114,10 @@ fn backfill_semantic_embeddings(
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             break;
         }
-        let embedder_batch_size = lock_shared_semantic_embedder(embedder)?
-            .as_ref()
-            .map(|embedder| embedder.batch_size);
-        if embedder_batch_size.is_some_and(|batch_size| {
-            max_to_index.saturating_sub(indexed) < batch_size
-        }) {
+        let embedder_batch_size = runtime.loaded_batch_size()?;
+        if embedder_batch_size
+            .is_some_and(|batch_size| max_to_index.saturating_sub(indexed) < batch_size)
+        {
             break;
         }
         let docs = store.recent_event_embedding_documents(before, 512)?;
@@ -101,15 +127,15 @@ fn backfill_semantic_embeddings(
             }
             break;
         }
-        let doc_cursors = docs
+        let page_cursors = docs
             .iter()
-            .map(|doc| (doc.event_id, (doc.occurred_at_ms, doc.seq)))
+            .map(|doc| (doc.event_id, (doc.anchor_occurred_at_ms, doc.seq)))
             .collect::<Vec<_>>();
         extend_existing_hashes_for_docs(vector_store, &mut existing_hashes, &docs)?;
         scanned = scanned.saturating_add(docs.len());
         let outcome = index_semantic_documents(
             vector_store,
-            embedder,
+            runtime,
             model_init_ms,
             cache_dir,
             &mut existing_hashes,
@@ -119,17 +145,19 @@ fn backfill_semantic_embeddings(
         )?;
         let added = outcome.indexed_chunks;
         indexed = indexed.saturating_add(added);
-        let consumed_cursor = semantic_contiguous_consumed_cursor(
-            &doc_cursors,
-            &outcome.consumed_event_ids,
-        );
+        let consumed_cursor =
+            semantic_consumed_page_anchor_cursor(&page_cursors, &outcome.consumed_event_ids);
         if !json_output {
             eprintln!("semantic index: embedded {indexed} chunks (scanned {scanned} events)");
         }
         if !continue_past_indexed_pages {
             break;
         }
-        if consumed_cursor.is_none() && added == 0 {
+        // Store pages are selected by user-anchor time and then reordered by
+        // turn activity, so an activity-order prefix is not a safe pagination
+        // prefix. Keep the durable frontier unchanged until every anchor in
+        // this page has either been embedded or proven unchanged.
+        if consumed_cursor.is_none() {
             break;
         }
         if !recent_probe_done {
@@ -147,19 +175,21 @@ fn backfill_semantic_embeddings(
     Ok(indexed)
 }
 
-fn semantic_contiguous_consumed_cursor(
-    doc_cursors: &[(Uuid, (i64, u64))],
+pub(super) fn semantic_consumed_page_anchor_cursor(
+    page_cursors: &[(Uuid, (i64, u64))],
     consumed_event_ids: &[Uuid],
 ) -> Option<(i64, u64)> {
     let consumed = consumed_event_ids.iter().copied().collect::<HashSet<_>>();
-    doc_cursors
+    if page_cursors
         .iter()
-        .take_while(|(event_id, _)| consumed.contains(event_id))
-        .last()
-        .map(|(_, cursor)| *cursor)
+        .any(|(event_id, _)| !consumed.contains(event_id))
+    {
+        return None;
+    }
+    page_cursors.iter().map(|(_, cursor)| *cursor).min()
 }
 
-fn extend_existing_hashes_for_docs(
+pub(super) fn extend_existing_hashes_for_docs(
     vector_store: &SemanticVectorStore,
     existing_hashes: &mut HashMap<Uuid, String>,
     docs: &[EventEmbeddingDocument],
@@ -177,9 +207,9 @@ fn extend_existing_hashes_for_docs(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn index_semantic_documents(
+pub(super) fn index_semantic_documents(
     vector_store: &mut SemanticVectorStore,
-    embedder: &Arc<Mutex<Option<SemanticEmbedder>>>,
+    runtime: &SharedSemanticRuntime,
     model_init_ms: &mut Option<u64>,
     cache_dir: &Path,
     existing_hashes: &mut HashMap<Uuid, String>,
@@ -228,40 +258,27 @@ fn index_semantic_documents(
         .iter()
         .map(|doc| doc.text.clone())
         .collect::<Vec<_>>();
-    {
-        let mut guard = lock_shared_semantic_embedder(embedder)?;
-        if guard.is_none() {
-            if !semantic_deadline_has_model_init_budget(deadline) {
-                return Ok(SemanticIndexOutcome {
-                    indexed_chunks: 0,
-                    consumed_event_ids: semantic_contiguous_consumed_event_ids(
-                        &considered_event_ids,
-                        &unchanged_event_ids,
-                    ),
-                });
-            }
-            let model_init_started = Instant::now();
-            *guard = Some(new_semantic_embedder(cache_dir)?);
-            *model_init_ms = Some(model_init_started.elapsed().as_millis() as u64);
+    if !runtime.is_loaded() {
+        if !semantic_deadline_has_model_init_budget(deadline) {
+            return Ok(SemanticIndexOutcome {
+                indexed_chunks: 0,
+                consumed_event_ids: semantic_contiguous_consumed_event_ids(
+                    &considered_event_ids,
+                    &unchanged_event_ids,
+                ),
+            });
+        }
+        if let Some(elapsed_ms) = runtime.ensure_loaded_from_cache(cache_dir)? {
+            *model_init_ms = Some(elapsed_ms);
         }
     }
-    let batch_size = {
-        let guard = lock_shared_semantic_embedder(embedder)?;
-        let embedder = guard
-            .as_ref()
-            .ok_or_else(|| anyhow!("semantic embedder was not initialized"))?;
-        embedder
-            .batch_size
-            .min(embedder.quiet_policy().batch_size)
-            .max(1)
-    };
+    let batch_size = runtime.active_batch_size()?;
     let mut embeddings = Vec::with_capacity(texts.len());
     for batch in texts.chunks(batch_size) {
         if semantic_deadline_reached(deadline) {
             break;
         }
-        let (batch_embeddings, _) =
-            embed_documents_with_shared_runtime(embedder, cache_dir, batch.to_vec(), deadline)?;
+        let (batch_embeddings, _) = runtime.embed_documents(cache_dir, batch.to_vec(), deadline)?;
         embeddings.extend(batch_embeddings);
     }
     let complete_prefix = semantic_complete_embedding_prefix(&pending, embeddings.len());
@@ -287,7 +304,7 @@ fn index_semantic_documents(
     })
 }
 
-fn semantic_contiguous_consumed_event_ids(
+pub(super) fn semantic_contiguous_consumed_event_ids(
     considered_event_ids: &[Uuid],
     completed_event_ids: &[Uuid],
 ) -> Vec<Uuid> {
@@ -299,11 +316,11 @@ fn semantic_contiguous_consumed_event_ids(
         .collect()
 }
 
-fn semantic_deadline_reached(deadline: Option<Instant>) -> bool {
+pub(super) fn semantic_deadline_reached(deadline: Option<Instant>) -> bool {
     deadline.is_some_and(|deadline| Instant::now() >= deadline)
 }
 
-fn semantic_complete_embedding_prefix(
+pub(super) fn semantic_complete_embedding_prefix(
     pending: &[SemanticChunkDocument],
     embedded_len: usize,
 ) -> usize {
@@ -322,7 +339,7 @@ fn semantic_complete_embedding_prefix(
         .unwrap_or(0)
 }
 
-fn semantic_deadline_chunk_limit(limit: usize, deadline: Option<Instant>) -> usize {
+pub(super) fn semantic_deadline_chunk_limit(limit: usize, deadline: Option<Instant>) -> usize {
     let Some(deadline) = deadline else {
         return limit;
     };
@@ -339,7 +356,7 @@ fn semantic_deadline_chunk_limit(limit: usize, deadline: Option<Instant>) -> usi
     limit.min(deadline_limit)
 }
 
-fn semantic_deadline_has_model_init_budget(deadline: Option<Instant>) -> bool {
+pub(super) fn semantic_deadline_has_model_init_budget(deadline: Option<Instant>) -> bool {
     let Some(deadline) = deadline else {
         return true;
     };
@@ -350,11 +367,11 @@ fn semantic_deadline_has_model_init_budget(deadline: Option<Instant>) -> bool {
         })
 }
 
-fn semantic_source_text(text: &str) -> String {
+pub(super) fn semantic_source_text(text: &str) -> String {
     text.chars().take(SEMANTIC_SOURCE_MAX_CHARS).collect()
 }
 
-fn semantic_rust_full_scan_chunk_limit() -> usize {
+pub(super) fn semantic_rust_full_scan_chunk_limit() -> usize {
     let bytes_per_vector = SEMANTIC_DIMENSIONS.saturating_mul(std::mem::size_of::<f32>());
     let byte_limited_chunks = SEMANTIC_FULL_SCAN_MAX_VECTOR_BYTES
         .checked_div(bytes_per_vector)
@@ -362,7 +379,9 @@ fn semantic_rust_full_scan_chunk_limit() -> usize {
     SEMANTIC_FULL_SCAN_MAX_CHUNKS.min(byte_limited_chunks)
 }
 
-fn semantic_full_corpus_vector_scan_ready(vector_store: &SemanticVectorStore) -> Result<bool> {
+pub(super) fn semantic_full_corpus_vector_scan_ready(
+    vector_store: &SemanticVectorStore,
+) -> Result<bool> {
     if vector_store.sqlite_vec0_search_ready().unwrap_or(false) {
         return Ok(true);
     }
@@ -370,7 +389,7 @@ fn semantic_full_corpus_vector_scan_ready(vector_store: &SemanticVectorStore) ->
     Ok(stats.embedded_chunks <= semantic_rust_full_scan_chunk_limit())
 }
 
-fn semantic_chunks_for_document(
+pub(super) fn semantic_chunks_for_document(
     doc: &EventEmbeddingDocument,
     source_text: &str,
     source_text_hash: &str,
@@ -398,15 +417,15 @@ fn semantic_chunks_for_document(
         .collect()
 }
 
-fn semantic_document_hash(doc: &EventEmbeddingDocument, source_text: &str) -> String {
+pub(super) fn semantic_document_hash(doc: &EventEmbeddingDocument, source_text: &str) -> String {
     semantic_text_hash(&semantic_embedded_document_text(doc, source_text))
 }
 
-fn semantic_embedded_document_text(doc: &EventEmbeddingDocument, body: &str) -> String {
+pub(super) fn semantic_embedded_document_text(doc: &EventEmbeddingDocument, body: &str) -> String {
     semantic_embedded_chunk_text(doc, body)
 }
 
-fn semantic_embedded_chunk_text(doc: &EventEmbeddingDocument, body: &str) -> String {
+pub(super) fn semantic_embedded_chunk_text(doc: &EventEmbeddingDocument, body: &str) -> String {
     let header = semantic_document_header(doc);
     let text = if header.is_empty() {
         body.to_owned()
@@ -416,7 +435,7 @@ fn semantic_embedded_chunk_text(doc: &EventEmbeddingDocument, body: &str) -> Str
     semantic_e5_passage_text(&text)
 }
 
-fn semantic_e5_prefixed_text(prefix: &str, text: &str) -> String {
+pub(super) fn semantic_e5_prefixed_text(prefix: &str, text: &str) -> String {
     let text = text.trim_start();
     if text.starts_with(prefix) {
         text.to_owned()
@@ -425,15 +444,15 @@ fn semantic_e5_prefixed_text(prefix: &str, text: &str) -> String {
     }
 }
 
-fn semantic_e5_passage_text(text: &str) -> String {
+pub(super) fn semantic_e5_passage_text(text: &str) -> String {
     semantic_e5_prefixed_text(SEMANTIC_PASSAGE_PREFIX, text)
 }
 
-fn semantic_e5_query_text_value(text: &str) -> String {
+pub(super) fn semantic_e5_query_text_value(text: &str) -> String {
     semantic_e5_prefixed_text(SEMANTIC_QUERY_PREFIX, text)
 }
 
-fn semantic_document_header(doc: &EventEmbeddingDocument) -> String {
+pub(super) fn semantic_document_header(doc: &EventEmbeddingDocument) -> String {
     let mut lines = vec![
         "semantic_document: v2".to_owned(),
         format!("event_type: {}", doc.event_type.as_str()),
@@ -489,7 +508,7 @@ fn semantic_document_header(doc: &EventEmbeddingDocument) -> String {
     lines.join("\n")
 }
 
-fn semantic_header_value(value: &str, max_chars: usize) -> String {
+pub(super) fn semantic_header_value(value: &str, max_chars: usize) -> String {
     let sanitized = value.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut output = sanitized.chars().take(max_chars).collect::<String>();
     if sanitized.chars().count() > max_chars {
@@ -498,11 +517,11 @@ fn semantic_header_value(value: &str, max_chars: usize) -> String {
     output
 }
 
-fn path_basename(path: &str) -> Option<&str> {
+pub(super) fn path_basename(path: &str) -> Option<&str> {
     Path::new(path).file_name().and_then(|value| value.to_str())
 }
 
-fn semantic_text_chunks(text: &str) -> Vec<(usize, usize, String)> {
+pub(super) fn semantic_text_chunks(text: &str) -> Vec<(usize, usize, String)> {
     let chars = text.chars().collect::<Vec<_>>();
     if chars.is_empty() {
         return Vec::new();
@@ -541,13 +560,13 @@ fn semantic_text_chunks(text: &str) -> Vec<(usize, usize, String)> {
     chunks
 }
 
-fn semantic_text_hash(text: &str) -> String {
+pub(super) fn semantic_text_hash(text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());
     format!("{:x}", hasher.finalize())
 }
 
-fn semantic_tokens(text: &str) -> Vec<String> {
+pub(super) fn semantic_tokens(text: &str) -> Vec<String> {
     text.split(|ch: char| !ch.is_alphanumeric())
         .filter_map(|token| {
             let token = token.trim().to_lowercase();
@@ -560,7 +579,7 @@ fn semantic_tokens(text: &str) -> Vec<String> {
         .collect()
 }
 
-fn semantic_backfill_terms(text: &str) -> Vec<String> {
+pub(super) fn semantic_backfill_terms(text: &str) -> Vec<String> {
     let mut terms = Vec::<String>::new();
     for token in semantic_tokens(text) {
         push_unique_term(&mut terms, &token);
@@ -602,13 +621,13 @@ fn semantic_backfill_terms(text: &str) -> Vec<String> {
     terms
 }
 
-fn push_unique_term(terms: &mut Vec<String>, term: &str) {
+pub(super) fn push_unique_term(terms: &mut Vec<String>, term: &str) {
     if term.len() >= 3 && !terms.iter().any(|existing| existing == term) {
         terms.push(term.to_owned());
     }
 }
 
-fn stem_semantic_token(token: &str) -> String {
+pub(super) fn stem_semantic_token(token: &str) -> String {
     for suffix in ["ing", "ed", "es", "s"] {
         if token.len() > suffix.len() + 3 && token.ends_with(suffix) {
             return token[..token.len() - suffix.len()].to_owned();
@@ -617,7 +636,7 @@ fn stem_semantic_token(token: &str) -> String {
     token.to_owned()
 }
 
-fn canonical_semantic_token(token: &str) -> Option<&'static str> {
+pub(super) fn canonical_semantic_token(token: &str) -> Option<&'static str> {
     match token {
         "mail" | "email" | "inbox" | "mailbox" | "mx" | "spf" | "dmarc" | "smtp" | "zoho" => {
             Some("email")
@@ -638,7 +657,7 @@ fn canonical_semantic_token(token: &str) -> Option<&'static str> {
     }
 }
 
-fn serialize_f32_blob(values: &[f32]) -> Vec<u8> {
+pub(super) fn serialize_f32_blob(values: &[f32]) -> Vec<u8> {
     let mut blob = Vec::with_capacity(values.len() * 4);
     for value in values {
         blob.extend_from_slice(&value.to_le_bytes());
@@ -646,7 +665,7 @@ fn serialize_f32_blob(values: &[f32]) -> Vec<u8> {
     blob
 }
 
-fn dot_product_f32_blob(left: &[f32], right_blob: &[u8]) -> Result<Option<f32>> {
+pub(super) fn dot_product_f32_blob(left: &[f32], right_blob: &[u8]) -> Result<Option<f32>> {
     if !right_blob.len().is_multiple_of(4) {
         return Err(anyhow!(
             "invalid semantic vector blob length {}",
@@ -663,7 +682,7 @@ fn dot_product_f32_blob(left: &[f32], right_blob: &[u8]) -> Result<Option<f32>> 
     Ok(Some(sum))
 }
 
-fn compare_semantic_hits_desc(
+pub(super) fn compare_semantic_hits_desc(
     left: &SemanticVectorHit,
     right: &SemanticVectorHit,
 ) -> std::cmp::Ordering {
@@ -673,7 +692,7 @@ fn compare_semantic_hits_desc(
         .unwrap_or(std::cmp::Ordering::Equal)
 }
 
-fn semantic_hits_for_query(
+pub(super) fn semantic_hits_for_query(
     store: &Store,
     vector_store: &SemanticVectorStore,
     query_embedding: &[f32],
@@ -755,7 +774,7 @@ fn semantic_hits_for_query(
     Ok(SemanticHitSearch { hits, diagnostics })
 }
 
-fn current_semantic_source_hashes(
+pub(super) fn current_semantic_source_hashes(
     store: &Store,
     vector_hits: &[SemanticVectorHit],
 ) -> Result<HashMap<Uuid, String>> {

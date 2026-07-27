@@ -1,4 +1,4 @@
-use ctx_history_core::{CaptureProvider, Event, EventRole, EventType};
+use ctx_history_core::{compute_payload_hash, CaptureProvider, Event, EventRole, EventType};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use uuid::Uuid;
 
@@ -6,6 +6,7 @@ use crate::connection::{
     collect_rows, ms_to_time, nonnegative_i64_to_u64, optional_timestamp_ms, optional_uuid_string,
     parse_json, parse_optional_uuid, parse_text_enum, parse_uuid, timestamp_ms,
 };
+use crate::result_storage::durable_event;
 use crate::search::projections::{
     adjust_semantic_searchable_item_stats, insert_event_search_projection_for_event,
     semantic_searchable_document_count_for_event,
@@ -13,6 +14,23 @@ use crate::search::projections::{
 };
 use crate::sync::sync_metadata_from_row;
 use crate::{Result, Store, StoreError};
+
+const PROVIDER_EVENT_HASH_AUTHORITY_KEY: &str = "provider_event_hash_authority";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderEventHashAuthority {
+    ProviderSupplied,
+    NormalizedPayloadFallback,
+}
+
+impl ProviderEventHashAuthority {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ProviderSupplied => "provider_supplied",
+            Self::NormalizedPayloadFallback => "normalized_payload_fallback",
+        }
+    }
+}
 
 impl Store {
     pub fn provider_event_dedupe_key(
@@ -38,8 +56,32 @@ impl Store {
         format!("provider-source:{source_id}:{provider_index}:{payload_hash}")
     }
 
+    pub fn provider_event_dedupe_key_with_payload_hash(
+        dedupe_key: &str,
+        payload_hash: &str,
+    ) -> Option<String> {
+        let parsed = parse_provider_event_dedupe_key(dedupe_key)?;
+        Some(if let Some(source_id) = parsed.source_id {
+            format!(
+                "provider-source:{source_id}:{}:{payload_hash}",
+                parsed.provider_index
+            )
+        } else {
+            format!(
+                "provider:{}:{}:{}:{payload_hash}",
+                parsed.provider, parsed.external_session_id, parsed.provider_index
+            )
+        })
+    }
+
     pub fn upsert_event(&self, event: &Event) -> Result<Uuid> {
-        let event_id = if let Some(dedupe_key) = &event.dedupe_key {
+        self.with_import_batch_write(|| self.upsert_event_inner(event))
+    }
+
+    fn upsert_event_inner(&self, event: &Event) -> Result<Uuid> {
+        let event = durable_event(event)?;
+        let event = event.as_ref();
+        if let Some(dedupe_key) = &event.dedupe_key {
             reject_provider_event_hash_conflict(&self.conn, dedupe_key)?;
             if let Some(existing_id) = self
                 .conn
@@ -52,14 +94,18 @@ impl Store {
             {
                 return Ok(existing_id);
             }
-            event.id
-        } else {
-            event.id
-        };
-        let previous_searchable_count =
-            semantic_searchable_document_count_from_stored_event(&self.conn, event_id)?;
+        }
+        self.write_event(event)
+    }
 
-        self.conn.execute(
+    fn write_event(&self, event: &Event) -> Result<Uuid> {
+        let event = durable_event(event)?;
+        let event = event.as_ref();
+        let previous_searchable_count =
+            semantic_searchable_document_count_from_stored_event(&self.conn, event.id)?;
+
+        self.conn
+            .prepare_cached(
                 r#"
                 INSERT INTO events
                 (id, seq, history_record_id, session_id, run_id, event_type, role, occurred_at_ms, capture_source_id, payload_json, payload_blob_id, dedupe_key, visibility, fidelity, sync_state, sync_version, deleted_at_ms, metadata_json)
@@ -83,8 +129,9 @@ impl Store {
                     deleted_at_ms = excluded.deleted_at_ms,
                     metadata_json = excluded.metadata_json
                 "#,
-                params![
-                    event_id.to_string(),
+            )?
+            .execute(params![
+                    event.id.to_string(),
                     event.seq as i64,
                     optional_uuid_string(event.history_record_id),
                     optional_uuid_string(event.session_id),
@@ -102,21 +149,116 @@ impl Store {
                     event.sync.sync_version as i64,
                     optional_timestamp_ms(event.sync.deleted_at),
                     serde_json::to_string(&event.sync.metadata)?,
-                ],
-            )?;
-        upsert_event_search_projection_for_event(&self.conn, event_id, event)?;
+                ])?;
+        upsert_event_search_projection_for_event(
+            &self.conn,
+            event.id,
+            event,
+            self.event_search_projection_capabilities()?,
+        )?;
         adjust_semantic_searchable_item_stats(
             &self.conn,
             previous_searchable_count,
             semantic_searchable_document_count_for_event(event),
         )?;
-        if let Some(dedupe_key) = &event.dedupe_key {
-            return self.event_id_by_dedupe_key(dedupe_key);
+        let id = if let Some(dedupe_key) = &event.dedupe_key {
+            self.event_id_by_dedupe_key(dedupe_key)?
+        } else {
+            event.id
+        };
+        self.journal_event_mutated(id)?;
+        Ok(id)
+    }
+
+    /// Reconciles an event produced by the provider normalization pipeline.
+    ///
+    /// Provider-supplied hashes are authoritative and differing values always conflict. Fallback
+    /// hashes describe ctx's normalized payload rather than provider identity, so normalization
+    /// changes may replace the existing event in place when the stored row is also known to use a
+    /// fallback hash. Rows written before hash authority was recorded are recognized only when the
+    /// stored hash exactly matches the stored normalized body.
+    pub fn reconcile_provider_event(
+        &self,
+        event: &Event,
+        incoming_authority: ProviderEventHashAuthority,
+    ) -> Result<bool> {
+        self.with_import_batch_write(|| {
+            self.reconcile_provider_event_inner(event, incoming_authority)
+        })
+    }
+
+    fn reconcile_provider_event_inner(
+        &self,
+        event: &Event,
+        incoming_authority: ProviderEventHashAuthority,
+    ) -> Result<bool> {
+        let Some(incoming_key) = event.dedupe_key.as_deref() else {
+            return self.insert_event_if_absent(event);
+        };
+        let Some(incoming) = parse_provider_event_dedupe_key(incoming_key) else {
+            return self.insert_event_if_absent(event);
+        };
+        if self.insert_event_if_absent_without_conflict_check(event)? {
+            return Ok(true);
         }
-        Ok(event_id)
+        let Some(existing) = provider_event_with_same_identity(&self.conn, &incoming)? else {
+            return Ok(false);
+        };
+        let existing_key = existing
+            .dedupe_key
+            .as_deref()
+            .and_then(parse_provider_event_dedupe_key)
+            .ok_or_else(|| StoreError::ProviderEventConflict {
+                provider: incoming.provider.clone(),
+                external_session_id: incoming.external_session_id.clone(),
+                provider_index: incoming.provider_index,
+                existing_hash: "invalid-provider-event-dedupe-key".to_owned(),
+                new_hash: incoming.payload_hash.clone(),
+            })?;
+        let existing_authority = stored_provider_event_hash_authority(&existing, &existing_key)?;
+        let hashes_match = existing_key.payload_hash == incoming.payload_hash;
+
+        if !hashes_match
+            && (incoming_authority == ProviderEventHashAuthority::ProviderSupplied
+                || existing_authority == ProviderEventHashAuthority::ProviderSupplied)
+        {
+            return Err(provider_event_conflict(
+                &incoming,
+                &existing_key.payload_hash,
+            ));
+        }
+
+        // A matching identity hash is a strict replay: legacy payload, source,
+        // and metadata remain immutable. Fallback normalization migrations
+        // below are permitted only when their normalized payload hash changes.
+        if hashes_match {
+            return Ok(false);
+        }
+
+        let mut replacement = event.clone();
+        replacement.id = existing.id;
+        replacement.seq = existing.seq;
+        self.write_event(&replacement)?;
+        Ok(false)
     }
 
     pub fn insert_event_if_absent(&self, event: &Event) -> Result<bool> {
+        self.with_import_batch_write(|| self.insert_event_if_absent_inner(event))
+    }
+
+    fn insert_event_if_absent_inner(&self, event: &Event) -> Result<bool> {
+        let inserted = self.insert_event_if_absent_without_conflict_check(event)?;
+        if !inserted {
+            if let Some(dedupe_key) = &event.dedupe_key {
+                reject_provider_event_hash_conflict(&self.conn, dedupe_key)?;
+            }
+        }
+        Ok(inserted)
+    }
+
+    fn insert_event_if_absent_without_conflict_check(&self, event: &Event) -> Result<bool> {
+        let event = durable_event(event)?;
+        let event = event.as_ref();
         let changed = self
                 .conn
                 .prepare_cached(
@@ -146,18 +288,18 @@ impl Store {
                     optional_timestamp_ms(event.sync.deleted_at),
                     serde_json::to_string(&event.sync.metadata)?,
                 ])?;
-        if changed == 0 {
-            if let Some(dedupe_key) = &event.dedupe_key {
-                reject_provider_event_hash_conflict(&self.conn, dedupe_key)?;
-            }
-        }
         if changed > 0 {
-            insert_event_search_projection_for_event(&self.conn, event)?;
+            insert_event_search_projection_for_event(
+                &self.conn,
+                event,
+                self.event_search_projection_capabilities()?,
+            )?;
             adjust_semantic_searchable_item_stats(
                 &self.conn,
                 0,
                 semantic_searchable_document_count_for_event(event),
             )?;
+            self.journal_event_mutated(event.id)?;
         }
         Ok(changed > 0)
     }
@@ -246,6 +388,31 @@ impl Store {
             event_from_row,
         )?;
         collect_rows(rows)
+    }
+
+    pub fn event_for_session_by_type_and_payload_string(
+        &self,
+        session_id: Uuid,
+        event_type: EventType,
+        payload_path: &str,
+        expected: &str,
+    ) -> Result<Option<Event>> {
+        self.conn
+            .query_row(
+                event_select_sql(
+                    "WHERE session_id = ?1 AND event_type = ?2 AND json_extract(payload_json, ?3) = ?4 ORDER BY seq DESC LIMIT 1",
+                )
+                .as_str(),
+                params![
+                    session_id.to_string(),
+                    event_type.as_str(),
+                    payload_path,
+                    expected
+                ],
+                event_from_row,
+            )
+            .optional()
+            .map_err(StoreError::from)
     }
 
     pub fn events_for_session_window(
@@ -360,6 +527,63 @@ impl Store {
             |row| row.get::<_, i64>(0),
         )?;
         Ok(exists != 0)
+    }
+}
+
+fn provider_event_with_same_identity(
+    conn: &Connection,
+    incoming: &ParsedProviderEventDedupeKey,
+) -> Result<Option<Event>> {
+    let prefix = provider_event_dedupe_key_prefix(incoming);
+    let upper_bound = provider_event_dedupe_key_upper_bound(&prefix);
+    conn.query_row(
+        event_select_sql("WHERE dedupe_key >= ?1 AND dedupe_key < ?2 ORDER BY dedupe_key LIMIT 1")
+            .as_str(),
+        params![prefix, upper_bound],
+        event_from_row,
+    )
+    .optional()
+    .map_err(StoreError::from)
+}
+
+fn stored_provider_event_hash_authority(
+    event: &Event,
+    parsed_key: &ParsedProviderEventDedupeKey,
+) -> Result<ProviderEventHashAuthority> {
+    match event
+        .sync
+        .metadata
+        .get(PROVIDER_EVENT_HASH_AUTHORITY_KEY)
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("provider_supplied") => return Ok(ProviderEventHashAuthority::ProviderSupplied),
+        Some("normalized_payload_fallback") => {
+            return Ok(ProviderEventHashAuthority::NormalizedPayloadFallback)
+        }
+        Some(_) => return Ok(ProviderEventHashAuthority::ProviderSupplied),
+        None => {}
+    }
+
+    let Some(body) = event.payload.get("body") else {
+        return Ok(ProviderEventHashAuthority::ProviderSupplied);
+    };
+    if compute_payload_hash(body)? == parsed_key.payload_hash {
+        Ok(ProviderEventHashAuthority::NormalizedPayloadFallback)
+    } else {
+        Ok(ProviderEventHashAuthority::ProviderSupplied)
+    }
+}
+
+fn provider_event_conflict(
+    incoming: &ParsedProviderEventDedupeKey,
+    existing_hash: &str,
+) -> StoreError {
+    StoreError::ProviderEventConflict {
+        provider: incoming.provider.clone(),
+        external_session_id: incoming.external_session_id.clone(),
+        provider_index: incoming.provider_index,
+        existing_hash: existing_hash.to_owned(),
+        new_hash: incoming.payload_hash.clone(),
     }
 }
 
@@ -528,4 +752,231 @@ pub(crate) fn event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event>
         dedupe_key: row.get(11)?,
         sync: sync_metadata_from_row(row, 12, 13, 14, 15, 16, 17)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use ctx_history_core::{new_id, utc_now, SyncMetadata};
+    use serde_json::{json, Value};
+    use tempfile::tempdir;
+
+    use super::*;
+
+    fn normalized_provider_event(
+        id: Uuid,
+        body: Value,
+        hash: &str,
+        authority: Option<ProviderEventHashAuthority>,
+    ) -> Event {
+        let mut sync = SyncMetadata::default();
+        if let Some(authority) = authority {
+            sync.metadata[PROVIDER_EVENT_HASH_AUTHORITY_KEY] = json!(authority.as_str());
+        }
+        Event {
+            id,
+            seq: 1,
+            history_record_id: None,
+            session_id: None,
+            run_id: None,
+            event_type: EventType::Message,
+            role: Some(EventRole::User),
+            occurred_at: utc_now(),
+            capture_source_id: None,
+            payload: json!({"body": body, "provider_event_hash": hash}),
+            payload_blob_id: None,
+            dedupe_key: Some(Store::provider_source_event_dedupe_key(
+                Uuid::nil(),
+                0,
+                hash,
+            )),
+            sync,
+        }
+    }
+
+    #[test]
+    fn reconcile_provider_event_inserts_then_replays_idempotently() {
+        let temp = tempdir().unwrap();
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let body = json!({"text": "stable"});
+        let hash = compute_payload_hash(&body).unwrap();
+        let event = normalized_provider_event(
+            new_id(),
+            body,
+            &hash,
+            Some(ProviderEventHashAuthority::NormalizedPayloadFallback),
+        );
+
+        assert!(store
+            .reconcile_provider_event(
+                &event,
+                ProviderEventHashAuthority::NormalizedPayloadFallback,
+            )
+            .unwrap());
+        assert!(!store
+            .reconcile_provider_event(
+                &event,
+                ProviderEventHashAuthority::NormalizedPayloadFallback,
+            )
+            .unwrap());
+        assert_eq!(store.list_events().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn reconcile_provider_event_migrates_legacy_fallback_hash_in_place() {
+        let temp = tempdir().unwrap();
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let id = new_id();
+        let legacy_body = json!({"text": "stable", "truncated": false});
+        let legacy_hash = compute_payload_hash(&legacy_body).unwrap();
+        let legacy = normalized_provider_event(id, legacy_body, &legacy_hash, None);
+        assert!(store.insert_event_if_absent(&legacy).unwrap());
+
+        let new_body = json!({"text": "stable", "text_retention": {"status": "full"}});
+        let new_hash = compute_payload_hash(&new_body).unwrap();
+        let replacement = normalized_provider_event(
+            id,
+            new_body.clone(),
+            &new_hash,
+            Some(ProviderEventHashAuthority::NormalizedPayloadFallback),
+        );
+        assert!(!store
+            .reconcile_provider_event(
+                &replacement,
+                ProviderEventHashAuthority::NormalizedPayloadFallback,
+            )
+            .unwrap());
+
+        let migrated = store.get_event(id).unwrap();
+        assert_eq!(migrated.payload["body"], new_body);
+        assert!(migrated.dedupe_key.as_deref().unwrap().ends_with(&new_hash));
+        assert_eq!(store.list_events().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn reconcile_provider_event_matching_fallback_hash_preserves_legacy_row() {
+        let temp = tempdir().unwrap();
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let id = new_id();
+        let body = json!({"text": "stable"});
+        let hash = compute_payload_hash(&body).unwrap();
+        let legacy = normalized_provider_event(id, body.clone(), &hash, None);
+        assert!(store.insert_event_if_absent(&legacy).unwrap());
+        let mut replay = normalized_provider_event(
+            id,
+            body,
+            &hash,
+            Some(ProviderEventHashAuthority::NormalizedPayloadFallback),
+        );
+        replay.capture_source_id = Some(new_id());
+        replay.sync.metadata["new_adapter_metadata"] = json!(true);
+
+        assert!(!store
+            .reconcile_provider_event(
+                &replay,
+                ProviderEventHashAuthority::NormalizedPayloadFallback,
+            )
+            .unwrap());
+
+        let retained = store.get_event(id).unwrap();
+        assert_eq!(retained.capture_source_id, legacy.capture_source_id);
+        assert_eq!(retained.sync.metadata, legacy.sync.metadata);
+    }
+
+    #[test]
+    fn reconcile_provider_event_matching_provider_hash_preserves_payload() {
+        let temp = tempdir().unwrap();
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let id = new_id();
+        let existing = normalized_provider_event(
+            id,
+            json!({"text": "immutable"}),
+            "provider-native-a",
+            Some(ProviderEventHashAuthority::ProviderSupplied),
+        );
+        assert!(store.insert_event_if_absent(&existing).unwrap());
+        let replay = normalized_provider_event(
+            id,
+            json!({"text": "rewritten"}),
+            "provider-native-a",
+            Some(ProviderEventHashAuthority::ProviderSupplied),
+        );
+
+        assert!(!store
+            .reconcile_provider_event(&replay, ProviderEventHashAuthority::ProviderSupplied)
+            .unwrap());
+
+        let retained = store.get_event(id).unwrap();
+        assert_eq!(retained.payload, existing.payload);
+        assert_eq!(retained.dedupe_key, existing.dedupe_key);
+    }
+
+    #[test]
+    fn reconcile_provider_event_rejects_provider_supplied_hash_conflict() {
+        let temp = tempdir().unwrap();
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let id = new_id();
+        let existing = normalized_provider_event(
+            id,
+            json!({"text": "existing"}),
+            "provider-native-a",
+            Some(ProviderEventHashAuthority::ProviderSupplied),
+        );
+        assert!(store.insert_event_if_absent(&existing).unwrap());
+        let conflicting = normalized_provider_event(
+            id,
+            json!({"text": "conflicting"}),
+            "provider-native-b",
+            Some(ProviderEventHashAuthority::ProviderSupplied),
+        );
+
+        let error = store
+            .reconcile_provider_event(&conflicting, ProviderEventHashAuthority::ProviderSupplied)
+            .unwrap_err();
+        assert!(matches!(error, StoreError::ProviderEventConflict { .. }));
+        let retained = store.get_event(id).unwrap();
+        assert_eq!(retained.id, existing.id);
+        assert_eq!(retained.payload, existing.payload);
+        assert_eq!(retained.dedupe_key, existing.dedupe_key);
+    }
+
+    #[test]
+    fn cached_event_upsert_reprepares_after_schema_change() {
+        let temp = tempdir().unwrap();
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let id = new_id();
+        let mut event = normalized_provider_event(
+            id,
+            json!({"text": "before"}),
+            "cached-upsert",
+            Some(ProviderEventHashAuthority::NormalizedPayloadFallback),
+        );
+        store.write_event(&event).unwrap();
+
+        store
+            .conn
+            .execute_batch(
+                "CREATE TABLE event_upsert_audit (event_id TEXT NOT NULL);
+                 CREATE TRIGGER event_upsert_audit_trigger AFTER UPDATE ON events BEGIN
+                     INSERT INTO event_upsert_audit VALUES (NEW.id);
+                 END;",
+            )
+            .unwrap();
+        event.payload["body"] = json!({"text": "after"});
+        store.write_event(&event).unwrap();
+
+        let audit_rows: u64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM event_upsert_audit", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            audit_rows, 1,
+            "schema change did not reprepare cached UPSERT"
+        );
+        assert_eq!(
+            store.get_event(id).unwrap().payload["body"]["text"],
+            "after"
+        );
+    }
 }

@@ -1,0 +1,103 @@
+{
+  "mode": "full_baseline",
+  "canonical_schema_version": 47,
+  "canonical_schema_identity": "ctx-store-schema-47-final-v3",
+  "projection_contract_version": 1,
+  "contract_fingerprint": "f9c77c0df491f276dd3d8c2cdb7f6c95daf8ebb9a216b2ca9a158ff0be1024c9",
+  "prior_checkpoint": {
+    "position": { "generation": 1, "sequence": 0 },
+    "contract_fingerprint": "f9c77c0df491f276dd3d8c2cdb7f6c95daf8ebb9a216b2ca9a158ff0be1024c9",
+    "cumulative_digest": "885fb2b9762ea293e260f3a725308cf8d3580f677045bb9c1dbf361fe6c35a27"
+  },
+  "frozen_through": {
+    "position": { "generation": 1, "sequence": 1 },
+    "contract_fingerprint": "f9c77c0df491f276dd3d8c2cdb7f6c95daf8ebb9a216b2ca9a158ff0be1024c9",
+    "cumulative_digest": "d485bc99bd5b5a519606e77a1c8cdff09a6dd387e41bb7fc3df7987b8617d87e"
+  },
+  "authorized_repository_roots": ["/fixture/repository"],
+  "records": [
+    {
+      "generation": 1,
+      "sequence": 1,
+      "projection_contract_version": 1,
+      "entity_kind": "event",
+      "stable_entity_id": "00000000-0000-0000-0000-000000000001",
+      "entity_revision": 1,
+      "operation": "upsert",
+      "canonical_payload": {
+        "actor": {
+          "agent_type": "primary",
+          "direct_session_id": "00000000-0000-0000-0000-000000000003",
+          "external_agent_id": "agent-1",
+          "external_session_id": "provider-session-1",
+          "is_primary": true,
+          "parent_session_id": null,
+          "role_hint": "primary",
+          "root_session_id": "00000000-0000-0000-0000-000000000003"
+        },
+        "citation": {
+          "byte_range": null,
+          "event_id": "00000000-0000-0000-0000-000000000001",
+          "event_seq": 1,
+          "fixture_line": 1,
+          "observation_id": "00000000-0000-0000-0000-000000000001",
+          "observation_kind": "event",
+          "observation_seq": 0,
+          "source_path": "/fixture/provider/session.jsonl",
+          "source_record_ordinal": 0,
+          "source_record_subrecord_index": null,
+          "source_sha256": null
+        },
+        "event_id": "00000000-0000-0000-0000-000000000001",
+        "event_seq": 1,
+        "event_type": "tool_call",
+        "file_touch": null,
+        "history_record_id": null,
+        "metadata": { "fixture_line": 1 },
+        "observation_id": "00000000-0000-0000-0000-000000000001",
+        "observation_kind": "event",
+        "observation_seq": 0,
+        "occurred_at_ms": 1784678400000,
+        "payload": { "body": "journal parity" },
+        "result": { "content_ref": null, "identifiers": [], "outcome": "unknown" },
+        "role": "assistant",
+        "run": null,
+        "semantic_digest": "9378dc329c60599d562455ef5454f8be62aee3021718ffd7338c384fb5d91293",
+        "source": {
+          "cwd": null,
+          "format": "codex_session_jsonl_tree",
+          "id": "00000000-0000-0000-0000-000000000002",
+          "identity": "fixture-source",
+          "imported_observation": null,
+          "path": "/fixture/provider/session.jsonl",
+          "permitted_bytes": null,
+          "provider": "codex",
+          "root": null
+        },
+        "typed_event": null,
+        "vcs_change": null
+      },
+      "payload_sha256": "c9b274c17f081f5c30c9a37feb86f08b1246eb321307f2bd38ae52c9f662890e",
+      "evidence": [
+        {
+          "event_id": "00000000-0000-0000-0000-000000000001",
+          "source_id": "00000000-0000-0000-0000-000000000002",
+          "source_path": "/fixture/provider/session.jsonl",
+          "source_record_ordinal": 0,
+          "source_record_subrecord_index": null,
+          "byte_start": null,
+          "byte_end_exclusive": null
+        }
+      ],
+      "provenance": {
+        "entity_kind": "event",
+        "stable_entity_id": "00000000-0000-0000-0000-000000000001",
+        "capture_source_id": "00000000-0000-0000-0000-000000000002",
+        "provider": "codex",
+        "provider_external_id": "provider-session-1"
+      },
+      "cumulative_digest": "d485bc99bd5b5a519606e77a1c8cdff09a6dd387e41bb7fc3df7987b8617d87e"
+    }
+  ],
+  "result_contents": []
+}

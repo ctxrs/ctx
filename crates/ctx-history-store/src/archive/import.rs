@@ -11,7 +11,10 @@ use uuid::Uuid;
 use super::validate_archive_artifact_record_blobs;
 use crate::connection::{optional_timestamp_ms, optional_uuid_string, parse_uuid, timestamp_ms};
 use crate::object_store::BlobWriteGuard;
+use crate::result_storage::durable_event;
 use crate::{Result, StoreError};
+
+use super::ImportedArchiveCanonicalIds;
 
 pub(super) fn upsert_capture_source_tx(
     tx: &Transaction<'_>,
@@ -69,12 +72,13 @@ pub(super) fn import_rich_archive_entities_tx(
     blob_dir: &Path,
     archive: &SessionHistoryArchive,
     _blob_guard: &mut BlobWriteGuard,
-) -> Result<()> {
+) -> Result<ImportedArchiveCanonicalIds> {
     if archive.schema_version < 2 && archive.version < 2 {
-        return Ok(());
+        return Ok(ImportedArchiveCanonicalIds::default());
     }
 
     validate_archive_artifact_record_blobs(blob_dir, archive)?;
+    let mut canonical_ids = ImportedArchiveCanonicalIds::default();
 
     for source in &archive.capture_sources {
         upsert_imported_capture_source_tx(tx, source)?;
@@ -92,10 +96,12 @@ pub(super) fn import_rich_archive_entities_tx(
         upsert_run_tx(tx, run)?;
     }
     for event in &archive.events {
-        upsert_event_tx(tx, event)?;
+        canonical_ids.event_ids.insert(upsert_event_tx(tx, event)?);
     }
     for change in &archive.vcs_changes {
-        upsert_vcs_change_tx(tx, change)?;
+        canonical_ids
+            .vcs_change_ids
+            .insert(upsert_vcs_change_tx(tx, change)?);
     }
     for summary in &archive.summaries {
         upsert_summary_tx(tx, summary)?;
@@ -106,7 +112,7 @@ pub(super) fn import_rich_archive_entities_tx(
     for link in &archive.history_record_links {
         upsert_history_record_link_tx(tx, link)?;
     }
-    Ok(())
+    Ok(canonical_ids)
 }
 
 fn upsert_imported_capture_source_tx(tx: &Transaction<'_>, source: &CaptureSource) -> Result<()> {
@@ -271,6 +277,8 @@ fn upsert_run_tx(tx: &Transaction<'_>, run: &Run) -> Result<()> {
 }
 
 fn upsert_event_tx(tx: &Transaction<'_>, event: &Event) -> Result<Uuid> {
+    let event = durable_event(event)?;
+    let event = event.as_ref();
     let event_id = if let Some(dedupe_key) = &event.dedupe_key {
         if let Some(existing) = tx
             .query_row(
