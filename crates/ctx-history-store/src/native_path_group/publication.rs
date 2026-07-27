@@ -132,20 +132,6 @@ impl NativePathPublicationGroup<'_> {
             Ok(value) => value,
             Err(error) => return self.poison_with(error),
         };
-        if let Err(error) = validate_limit(
-            "actual journal records",
-            records,
-            NATIVE_PATH_MAX_JOURNAL_RECORDS,
-        ) {
-            return self.poison_with(error);
-        }
-        if let Err(error) = validate_limit(
-            "uncompressed journal encoding bytes",
-            bytes,
-            NATIVE_PATH_MAX_JOURNAL_BYTES,
-        ) {
-            return self.poison_with(error);
-        }
         self.journal_records = records;
         self.journal_uncompressed_bytes = bytes;
         self.checkpoint = checkpoint;
