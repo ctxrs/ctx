@@ -323,27 +323,76 @@ fn rejection_source_label_is_path_free_escaped_and_bounded() {
     assert!(label.ends_with("..."));
 }
 
+/// Every table the current schema has that a released v0.25 store does not.
+///
+/// Taken by diffing `schema/ddl.rs` against a real v0.25 database: a released
+/// store has no NativePath locators, routes, source generations or identity
+/// aliases, so v47 creates them empty and the first 0.26 import has nothing to
+/// resolve against.
+const RELEASED_STORE_ABSENT_TABLES: [&str; 6] = [
+    "capture_source_provider_routes",
+    "event_aliases",
+    "native_path_source_generation_entities",
+    "native_path_source_generations",
+    "provider_source_locators",
+    "session_aliases",
+];
+
 /// Rewrites an already imported store into the shape a released v0.25 store
 /// has after it migrates to the current schema.
 ///
-/// A released store has no projection journal at all, no NativePath
-/// publication cursors, and capture-source identities that predate the current
-/// canonical identity. Its session rows also predate the current canonical
-/// actor columns, so the upgrading import rewrites the actor that every event
-/// observation cites.
+/// Beyond the absent tables above, a released store has no projection journal,
+/// no NativePath publication cursors, a bare-UUID `source_identity` that
+/// predates the canonical `codex-nativepath:` identity, and session rows using
+/// the released `role_hint` vocabulary.
 fn released_store_shape(store: Store, database: &Path) {
     // v0.25 had no projection journal, so it also had no writer fence.
     store.disable_projection_journal().unwrap();
     drop(store);
     let conn = rusqlite::Connection::open(database).unwrap();
+    conn.execute("PRAGMA foreign_keys = OFF", []).unwrap();
+    for table in RELEASED_STORE_ABSENT_TABLES {
+        conn.execute(&format!("DELETE FROM {table}"), []).unwrap();
+    }
     conn.execute("DELETE FROM sync_cursors", []).unwrap();
     conn.execute(
         "UPDATE capture_sources SET source_identity = '46b1b4bc-66b2-773d-89ef-30b895fef4a2'",
         [],
     )
     .unwrap();
-    conn.execute("UPDATE sessions SET role_hint = NULL", [])
-        .unwrap();
+    conn.execute(
+        "UPDATE sessions SET role_hint = CASE WHEN is_primary = 1 THEN 'primary' ELSE 'subagent' END",
+        [],
+    )
+    .unwrap();
+}
+
+/// The released-store shape plus the property that a different release also
+/// derived different row identities.
+///
+/// Without this the current build re-derives the very ids already present and
+/// silently reconciles with them, so a synthetic upgrade looks clean when the
+/// field upgrade is not. Re-keying is what exposes the identity divergence:
+/// the build then mints its own source and leaves the released one behind.
+fn released_store_shape_with_divergent_identities(store: Store, database: &Path) {
+    released_store_shape(store, database);
+    let conn = rusqlite::Connection::open(database).unwrap();
+    conn.execute("PRAGMA foreign_keys = OFF", []).unwrap();
+    conn.execute_batch(
+        "UPDATE events SET capture_source_id = 'ffffffff-' || substr(capture_source_id, 10)
+             WHERE capture_source_id IS NOT NULL;
+         UPDATE sessions SET capture_source_id = 'ffffffff-' || substr(capture_source_id, 10)
+             WHERE capture_source_id IS NOT NULL;
+         UPDATE runs SET source_id = 'ffffffff-' || substr(source_id, 10)
+             WHERE source_id IS NOT NULL;
+         UPDATE files_touched SET source_id = 'ffffffff-' || substr(source_id, 10)
+             WHERE source_id IS NOT NULL;
+         UPDATE capture_sources SET id = 'ffffffff-' || substr(id, 10);
+         UPDATE files_touched SET event_id = 'eeeeeeee-' || substr(event_id, 10)
+             WHERE event_id IS NOT NULL;
+         UPDATE events SET id = 'eeeeeeee-' || substr(id, 10);",
+    )
+    .unwrap();
 }
 
 #[test]
@@ -484,9 +533,11 @@ fn canonical_counts(database: &Path) -> (i64, i64, i64, i64) {
 /// "at least as many" reported success.
 #[test]
 #[ignore = "fails until upgrades rebuild and replace a pre-0.26 provider projection \
-            instead of publishing alongside it: v0.26 derives capture-source identities \
-            that do not match released rows, so it mints new sources and new event \
-            identities and the released rows are never retired. Reconciliation was \
+            instead of publishing alongside it. This build derives capture-source and \
+            event identities that released rows do not carry, so it mints its own and \
+            never retires theirs: here the upgraded store holds two capture sources \
+            where a fresh install holds one, and on the 1.087 GB Codex corpus it holds \
+            284,923 events against a fresh install's 142,950. Reconciliation was \
             rejected by the product owner; the re-derive branch owns the fix and this \
             test is its acceptance gate. Do not weaken it to a floor."]
 fn released_store_upgrade_matches_a_fresh_install_canonical_set() {
@@ -551,7 +602,7 @@ fn released_store_upgrade_matches_a_fresh_install_canonical_set() {
     let mut released = Store::open(&database).unwrap();
     import_codex_native_session_root(&source_root, &mut released, options(&source_root))
         .expect("released import");
-    released_store_shape(released, &database);
+    released_store_shape_with_divergent_identities(released, &database);
     let mut store = Store::open(&database).unwrap();
     import_codex_native_session_root(&source_root, &mut store, options(&source_root))
         .expect("upgrade import");
