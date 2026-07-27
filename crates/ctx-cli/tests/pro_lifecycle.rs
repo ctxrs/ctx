@@ -48,7 +48,7 @@ fn ctx_status_has_one_actionable_pro_machine_contract() {
 }
 
 #[test]
-fn commercial_channel_selection_is_exact_and_stable_fails_closed() {
+fn commercial_channel_selection_rejects_every_non_registry_value() {
     let root = tempdir().unwrap();
     for arguments in [
         vec!["pro", "--format=json"],
@@ -67,23 +67,6 @@ fn commercial_channel_selection_is_exact_and_stable_fails_closed() {
                     "CTX_PRO_CHANNEL must be stable or staging",
                 ));
         }
-    }
-
-    for arguments in [
-        vec!["pro", "--format=json"],
-        vec!["pro", "setup", "--format=json"],
-    ] {
-        Command::cargo_bin("ctx")
-            .unwrap()
-            .env_remove("CTX_PRO_CHANNEL")
-            .arg("--data-root")
-            .arg(root.path())
-            .args(arguments)
-            .assert()
-            .failure()
-            .stderr(predicate::str::contains(
-                "ctx Pro stable channel is not configured",
-            ));
     }
 }
 
@@ -323,35 +306,42 @@ fn obsolete_and_manual_repository_lifecycle_flags_are_rejected() {
 }
 
 #[test]
-fn default_disabled_referrals_fail_before_identity_auth_or_browser_side_effects() {
-    for arguments in [
-        vec!["referral", "create", "agent-smith", "--format=json"],
-        vec!["referral", "status", "--format=json"],
-        vec!["referral", "payout", "--format=json"],
-        vec!["pro", "--referral", "agent-smith", "--format=json"],
-    ] {
-        let parent = tempdir().unwrap();
-        let data_root = parent.path().join("missing-data-root");
-        let output = Command::cargo_bin("ctx")
-            .unwrap()
-            .env("CTX_PRO_CHANNEL", "staging")
-            .arg("--data-root")
-            .arg(&data_root)
-            .args(arguments)
-            .output()
-            .unwrap();
-        assert!(!output.status.success());
-        assert!(output.stdout.is_empty());
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("referral_unavailable:"));
-        assert!(!stderr.contains("authentication_required:"));
-        assert!(!stderr.contains("Sign in to ctx Pro"));
-        assert!(!stderr.contains("http://"));
-        assert!(!stderr.contains("https://"));
-        assert!(
-            !data_root.join("pro").exists(),
-            "unavailable referrals must not initialize Pro credentials"
-        );
+fn referral_commands_are_available_on_both_channels_before_cached_authentication() {
+    for channel in ["stable", "staging"] {
+        for arguments in [
+            vec!["referral", "create", "agent-smith", "--format=json"],
+            vec!["referral", "status", "--format=json"],
+            vec!["referral", "payout", "--format=json"],
+        ] {
+            let parent = tempdir().unwrap();
+            let data_root = parent.path().join("missing-data-root");
+            let output = Command::cargo_bin("ctx")
+                .unwrap()
+                .env("CTX_PRO_CHANNEL", channel)
+                .arg("--data-root")
+                .arg(&data_root)
+                .args(arguments)
+                .output()
+                .unwrap();
+            assert!(!output.status.success());
+            assert!(output.stdout.is_empty());
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains("authentication_required:"),
+                "{channel}: {stderr}"
+            );
+            assert!(
+                !stderr.contains("referral_unavailable:"),
+                "{channel}: {stderr}"
+            );
+            assert!(!stderr.contains("Sign in to ctx Pro"));
+            assert!(!stderr.contains("http://"));
+            assert!(!stderr.contains("https://"));
+            assert!(
+                !data_root.join("pro").exists(),
+                "noninteractive referrals must not initialize Pro credentials"
+            );
+        }
     }
 }
 

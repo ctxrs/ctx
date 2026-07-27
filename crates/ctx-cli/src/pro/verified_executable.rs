@@ -30,7 +30,7 @@ pub(super) struct VerifiedHelperExecutable {
 }
 
 impl VerifiedHelperExecutable {
-    #[cfg(any(debug_assertions, test))]
+    #[cfg(any(test, ctx_pro_test_helper))]
     pub(super) fn open_developer(path: &Path) -> Result<Self> {
         let metadata = fs::symlink_metadata(path)
             .context("pro_not_installed: inspect developer Pro helper")?;
@@ -43,6 +43,32 @@ impl VerifiedHelperExecutable {
             let marker = helper
                 .try_clone()
                 .context("pro_not_installed: clone developer Pro helper handle")?;
+            Ok(Self {
+                path: path.to_path_buf(),
+                _directories: Vec::new(),
+                helper,
+                marker,
+            })
+        }
+        #[cfg(not(windows))]
+        Ok(Self {
+            path: path.to_path_buf(),
+        })
+    }
+
+    #[cfg(ctx_pro_qualification)]
+    pub(super) fn open_qualification(path: &Path) -> Result<Self> {
+        let metadata = fs::symlink_metadata(path)
+            .context("pro_not_installed: inspect qualification Pro helper")?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            bail!("pro_not_installed: qualification Pro helper is not a regular file");
+        }
+        #[cfg(windows)]
+        {
+            let helper = open_locked_file(path)?;
+            let marker = helper
+                .try_clone()
+                .context("pro_not_installed: clone qualification Pro helper handle")?;
             Ok(Self {
                 path: path.to_path_buf(),
                 _directories: Vec::new(),

@@ -16,18 +16,30 @@ use sha2::{Digest, Sha256};
 use url::Url;
 use uuid::Uuid;
 
+use super::commercial_api::CommercialApiConfig;
 use super::lifecycle::lifecycle_manifest::{
     parse_release_version, platform_target, verified_manifest_for_trust, ProManifest, ReleaseTrust,
     MAX_ARTIFACT_BYTES, MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES,
 };
 use super::lifecycle::ProInstallArgs;
+#[cfg(any(test, ctx_pro_qualification))]
+use super::qualification_helper::QualificationHelperBundle;
 
 const RELEASE_ACCEPT: &str = "application/json, application/problem+json";
 const MAX_RELEASE_RESPONSE_BYTES: u64 = 96 * 1024;
 
-pub(crate) struct ArtifactDeliveryConfig<'a> {
-    pub(crate) release_origin: &'a str,
-    pub(crate) release_trust: ReleaseTrust,
+pub(super) struct ArtifactDeliveryConfig<'a> {
+    release_api: &'a CommercialApiConfig,
+    release_trust: ReleaseTrust,
+}
+
+impl<'a> ArtifactDeliveryConfig<'a> {
+    pub(super) fn new(release_api: &'a CommercialApiConfig, release_trust: ReleaseTrust) -> Self {
+        Self {
+            release_api,
+            release_trust,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -36,6 +48,24 @@ pub(crate) struct VerifiedArtifactBundle {
     pub(crate) artifact: PathBuf,
     pub(crate) manifest: PathBuf,
     pub(crate) signature: PathBuf,
+}
+
+#[derive(Debug)]
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) enum SetupArtifactBundle {
+    Release(VerifiedArtifactBundle),
+    #[cfg(any(test, ctx_pro_qualification))]
+    Qualification(QualificationHelperBundle),
+}
+
+impl SetupArtifactBundle {
+    pub(crate) fn verified_helper_path(&self) -> Result<&Path> {
+        match self {
+            Self::Release(bundle) => Ok(&bundle.artifact),
+            #[cfg(any(test, ctx_pro_qualification))]
+            Self::Qualification(bundle) => bundle.verified_path(),
+        }
+    }
 }
 
 impl Drop for VerifiedArtifactBundle {
@@ -91,7 +121,7 @@ enum ReleaseReadFailure {
     },
 }
 
-pub(crate) fn fetch_latest(
+pub(super) fn fetch_latest(
     data_root: &Path,
     installed_version: Option<&str>,
     config: ArtifactDeliveryConfig<'_>,
@@ -104,18 +134,21 @@ pub(crate) fn fetch_latest(
         .build();
     let target = platform_target();
     let manifest_url = manifest_url(
-        config.release_origin,
+        config.release_api.origin().as_str(),
         config.release_trust.channel.wire_name(),
         &target,
     )?;
-    let envelope_bytes = get_manifest_bounded(&agent, &manifest_url)?;
+    let envelope_bytes = get_manifest_bounded(&agent, &manifest_url, config.release_api)?;
     let envelope: ApiSuccess<ManifestEnvelope> = serde_json::from_slice(&envelope_bytes)
         .context("invalid_response: parse artifact manifest response")?;
     validate_success_envelope(&envelope)?;
     let (manifest, manifest_bytes, signature_bytes) =
         verify_envelope(envelope.data, config.release_trust)?;
     reject_release_rollback(installed_version, &manifest.version)?;
-    let artifact_url = artifact_url(config.release_origin, &manifest.artifact_object)?;
+    let artifact_url = artifact_url(
+        config.release_api.origin().as_str(),
+        &manifest.artifact_object,
+    )?;
 
     let stage_dir = create_stage_directory(data_root)?;
     match download_and_stage(
@@ -125,6 +158,7 @@ pub(crate) fn fetch_latest(
         &manifest,
         &manifest_bytes,
         &signature_bytes,
+        config.release_api,
     ) {
         Ok(bundle) => Ok(bundle),
         Err(error) => {
@@ -132,6 +166,21 @@ pub(crate) fn fetch_latest(
             Err(error)
         }
     }
+}
+
+pub(super) fn acquire_latest(
+    data_root: &Path,
+    installed_version: Option<&str>,
+    config: ArtifactDeliveryConfig<'_>,
+) -> Result<SetupArtifactBundle> {
+    #[cfg(ctx_pro_qualification)]
+    if let Some(bundle) =
+        QualificationHelperBundle::from_process_environment(config.release_trust.channel)?
+    {
+        return Ok(SetupArtifactBundle::Qualification(bundle));
+    }
+
+    fetch_latest(data_root, installed_version, config).map(SetupArtifactBundle::Release)
 }
 
 fn reject_release_rollback(installed_version: Option<&str>, release_version: &str) -> Result<()> {
@@ -205,8 +254,14 @@ fn artifact_url(base: &str, artifact_object: &str) -> Result<Url> {
     Ok(url)
 }
 
-fn get_manifest_bounded(agent: &ureq::Agent, url: &Url) -> Result<Vec<u8>> {
-    let response = agent.get(url.as_str()).set("accept", RELEASE_ACCEPT).call();
+fn get_manifest_bounded(
+    agent: &ureq::Agent,
+    url: &Url,
+    api: &CommercialApiConfig,
+) -> Result<Vec<u8>> {
+    let request = api
+        .apply_transport_credentials(agent.get(url.as_str()).set("accept", RELEASE_ACCEPT), url)?;
+    let response = request.call();
     let response =
         response.map_err(|error| anonymous_release_read_error(error, "manifest read"))?;
     let response = require_success_status(response, "manifest read")?;
@@ -335,9 +390,11 @@ fn download_and_stage(
     manifest: &ProManifest,
     manifest_bytes: &[u8],
     signature_bytes: &[u8],
+    api: &CommercialApiConfig,
 ) -> Result<VerifiedArtifactBundle> {
-    let response = agent
-        .get(artifact_url.as_str())
+    let request =
+        api.apply_transport_credentials(agent.get(artifact_url.as_str()), artifact_url)?;
+    let response = request
         .call()
         .map_err(|error| anonymous_release_read_error(error, "artifact read"))?;
     let response = require_success_status(response, "artifact read")?;
@@ -737,13 +794,21 @@ mod tests {
             .build();
 
         assert_eq!(
-            get_manifest_bounded(&agent, &manifest_url).unwrap(),
+            get_manifest_bounded(
+                &agent,
+                &manifest_url,
+                &CommercialApiConfig::new(Url::parse(&format!("{origin}/")).unwrap(), None)
+                    .unwrap(),
+            )
+            .unwrap(),
             br#"{"manifest":"transport-only"}"#
         );
 
         let root = tempfile::tempdir().unwrap();
         let stage = create_stage_directory(root.path()).unwrap();
         let manifest = transport_test_manifest(artifact_object, artifact);
+        let api =
+            CommercialApiConfig::new(Url::parse(&format!("{origin}/")).unwrap(), None).unwrap();
         let bundle = download_and_stage(
             &agent,
             &stage,
@@ -751,11 +816,12 @@ mod tests {
             &manifest,
             b"{}",
             b"signature",
+            &api,
         )
         .unwrap();
         assert_eq!(fs::read(&bundle.artifact).unwrap(), artifact);
 
-        let error = get_manifest_bounded(&agent, &manifest_url).unwrap_err();
+        let error = get_manifest_bounded(&agent, &manifest_url, &api).unwrap_err();
         assert_eq!(
             error.to_string(),
             "invalid_response: anonymous release manifest read returned HTTP 302"

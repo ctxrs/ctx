@@ -3,7 +3,8 @@ use std::{
     sync::{Arc, Barrier},
 };
 
-use super::{show_cta_once, show_cta_once_when_available, REFERRAL_CTA, REFERRAL_CTA_MARKER};
+use super::{cta_marker, show_cta_once_for_channel, REFERRAL_CTA};
+use crate::pro::lifecycle::lifecycle_manifest::ReleaseChannel;
 
 #[test]
 fn cta_marker_is_private_atomic_and_shown_once() {
@@ -11,16 +12,16 @@ fn cta_marker_is_private_atomic_and_shown_once() {
     ctx_history_core::platform_security::restrict_private_directory(root.path()).unwrap();
     let mut first = Vec::new();
     let mut second = Vec::new();
-    assert!(show_cta_once_when_available(
+    assert!(show_cta_once_for_channel(
         root.path(),
         true,
-        true,
+        ReleaseChannel::Stable,
         &mut first
     ));
-    assert!(!show_cta_once_when_available(
+    assert!(!show_cta_once_for_channel(
         root.path(),
         true,
-        true,
+        ReleaseChannel::Stable,
         &mut second
     ));
     assert_eq!(
@@ -28,7 +29,7 @@ fn cta_marker_is_private_atomic_and_shown_once() {
         format!("\n{REFERRAL_CTA}\n")
     );
     assert!(second.is_empty());
-    let marker = root.path().join(REFERRAL_CTA_MARKER);
+    let marker = cta_marker(root.path(), ReleaseChannel::Stable);
     assert_eq!(fs::read(&marker).unwrap(), b"shown\n");
     ctx_history_core::platform_security::verify_private_file(&marker).unwrap();
     assert!(fs::read_dir(root.path()).unwrap().all(|entry| !entry
@@ -58,19 +59,19 @@ fn cta_output_failure_rolls_back_the_marker_for_a_later_retry() {
     let root = tempfile::tempdir().unwrap();
     ctx_history_core::platform_security::restrict_private_directory(root.path()).unwrap();
 
-    assert!(!show_cta_once_when_available(
+    assert!(!show_cta_once_for_channel(
         root.path(),
         true,
-        true,
+        ReleaseChannel::Stable,
         &mut FailingWriter
     ));
-    assert!(!root.path().join(REFERRAL_CTA_MARKER).exists());
+    assert!(!cta_marker(root.path(), ReleaseChannel::Stable).exists());
 
     let mut retry = Vec::new();
-    assert!(show_cta_once_when_available(
+    assert!(show_cta_once_for_channel(
         root.path(),
         true,
-        true,
+        ReleaseChannel::Stable,
         &mut retry
     ));
     assert_eq!(
@@ -93,7 +94,8 @@ fn concurrent_cta_attempts_publish_exactly_once() {
         workers.push(std::thread::spawn(move || {
             let mut output = Vec::new();
             barrier.wait();
-            let shown = show_cta_once_when_available(root.path(), true, true, &mut output);
+            let shown =
+                show_cta_once_for_channel(root.path(), true, ReleaseChannel::Stable, &mut output);
             (shown, output)
         }));
     }
@@ -120,22 +122,39 @@ fn ineligible_cta_does_not_write_or_create_state() {
     let root = tempfile::tempdir().unwrap();
     ctx_history_core::platform_security::restrict_private_directory(root.path()).unwrap();
     let mut output = Vec::new();
-    assert!(!show_cta_once_when_available(
+    assert!(!show_cta_once_for_channel(
         root.path(),
         false,
-        true,
+        ReleaseChannel::Stable,
         &mut output
     ));
     assert!(output.is_empty());
-    assert!(!root.path().join(REFERRAL_CTA_MARKER).exists());
+    assert!(!cta_marker(root.path(), ReleaseChannel::Stable).exists());
 }
 
 #[test]
-fn disabled_cta_does_not_write_or_consume_the_marker() {
+fn cta_marker_is_namespaced_by_commercial_channel() {
     let root = tempfile::tempdir().unwrap();
     ctx_history_core::platform_security::restrict_private_directory(root.path()).unwrap();
-    let mut output = Vec::new();
-    assert!(!show_cta_once(root.path(), true, &mut output));
-    assert!(output.is_empty());
-    assert!(!root.path().join(REFERRAL_CTA_MARKER).exists());
+    let mut stable = Vec::new();
+    let mut staging = Vec::new();
+    assert!(show_cta_once_for_channel(
+        root.path(),
+        true,
+        ReleaseChannel::Stable,
+        &mut stable
+    ));
+    assert!(show_cta_once_for_channel(
+        root.path(),
+        true,
+        ReleaseChannel::Staging,
+        &mut staging
+    ));
+    assert_eq!(stable, staging);
+    assert!(cta_marker(root.path(), ReleaseChannel::Stable).is_file());
+    assert!(cta_marker(root.path(), ReleaseChannel::Staging).is_file());
+    assert_ne!(
+        cta_marker(root.path(), ReleaseChannel::Stable),
+        cta_marker(root.path(), ReleaseChannel::Staging)
+    );
 }

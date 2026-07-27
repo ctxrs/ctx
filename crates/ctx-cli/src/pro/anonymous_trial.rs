@@ -11,7 +11,7 @@ use ctx_pro_host_protocol::base64url;
 use zeroize::Zeroizing;
 
 use super::{
-    artifact_delivery::{fetch_latest, ArtifactDeliveryConfig},
+    artifact_delivery::{acquire_latest, ArtifactDeliveryConfig},
     authorization::InstallationChallengeSigner,
     commercial_api::TrialChallengeRequest,
     commercial_lifecycle::{vault_error, CommercialLifecycleService},
@@ -107,13 +107,10 @@ pub(super) fn setup(
             std::mem::take(&mut refresh.trial_access_token),
             std::mem::take(&mut refresh.referral_claim_token),
         )?;
-        let artifact = fetch_latest(
+        let artifact = acquire_latest(
             data_root,
             installed_version,
-            ArtifactDeliveryConfig {
-                release_origin: service.api.origin(),
-                release_trust: service.config.release_trust,
-            },
+            ArtifactDeliveryConfig::new(service.api.config(), service.config.release_trust),
         )?;
         service.store_anonymous_state(
             refresh.entitlement.clone(),
@@ -139,17 +136,14 @@ pub(super) fn setup(
         referral_codename,
     })?;
     let activation_token = Zeroizing::new(std::mem::take(&mut challenge.trial_activation_token));
-    let artifact = fetch_latest(
+    let artifact = acquire_latest(
         data_root,
         installed_version,
-        ArtifactDeliveryConfig {
-            release_origin: service.api.origin(),
-            release_trust: service.config.release_trust,
-        },
+        ArtifactDeliveryConfig::new(service.api.config(), service.config.release_trust),
     )?;
     let evidence = collect_device_evidence(
         data_root,
-        &artifact.artifact,
+        artifact.verified_helper_path()?,
         &challenge.challenge_base64url,
         &encoded_public_key,
     )?;
