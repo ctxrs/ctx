@@ -57,12 +57,23 @@ impl ProClient {
         // staged setup smoke, status, journal, and deletion operations.
         let query_only = required.len() == 1 && required.contains(&Capability::Query);
         let git_executable = (!query_only).then(git_executable).transpose()?;
-        let mut command = helper_command::new(path, data_root, git_executable.as_deref())?;
+        let prepared_execution = execution_guard
+            .as_ref()
+            .map(VerifiedHelperExecutable::prepare_execution)
+            .transpose()?;
+        let program = prepared_execution
+            .as_ref()
+            .map(|execution| execution.program())
+            .unwrap_or(path);
+        let mut command = helper_command::new(program, data_root, git_executable.as_deref())?;
         command
             .arg("serve-stdio")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if let Some(execution) = &prepared_execution {
+            execution.configure_command(&mut command);
+        }
         #[cfg(target_os = "linux")]
         {
             let expected_parent = unsafe { libc::getpid() };
@@ -81,12 +92,10 @@ impl ProClient {
         }
         #[cfg(unix)]
         command.process_group(0);
-        if let Some(executable) = execution_guard.as_ref() {
-            executable.verify_execution_identity()?;
-        }
         let mut child = command
             .spawn()
             .with_context(|| format!("helper_crashed: start Pro helper {}", path.display()))?;
+        drop(prepared_execution);
         let stdin = child
             .stdin
             .take()

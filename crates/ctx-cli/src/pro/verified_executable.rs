@@ -17,6 +17,28 @@ use ctx_history_core::platform_security::{
 };
 use ctx_pro_host_protocol::ProFilesystemLayout;
 
+pub(super) struct PreparedHelperExecution {
+    program: PathBuf,
+    #[cfg(all(unix, ctx_pro_qualification))]
+    _qualification_descriptor:
+        Option<crate::pro::qualification_helper::QualificationDescriptorExecution>,
+}
+
+impl PreparedHelperExecution {
+    pub(super) fn program(&self) -> &Path {
+        &self.program
+    }
+
+    pub(super) fn configure_command(&self, command: &mut std::process::Command) {
+        #[cfg(all(unix, ctx_pro_qualification))]
+        if let Some(descriptor) = &self._qualification_descriptor {
+            descriptor.configure_command(command);
+        }
+        #[cfg(not(all(unix, ctx_pro_qualification)))]
+        let _ = command;
+    }
+}
+
 /// Holds the exact installed helper and its controlled directory chain for the
 /// complete helper process lifetime.
 pub(super) struct VerifiedHelperExecutable {
@@ -151,6 +173,24 @@ impl VerifiedHelperExecutable {
 
     pub(super) fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub(super) fn prepare_execution(&self) -> Result<PreparedHelperExecution> {
+        #[cfg(all(unix, ctx_pro_qualification))]
+        if let Some(bundle) = &self.qualification_bundle {
+            let descriptor = bundle.prepare_descriptor_execution()?;
+            return Ok(PreparedHelperExecution {
+                program: descriptor.program().to_path_buf(),
+                _qualification_descriptor: Some(descriptor),
+            });
+        }
+
+        self.verify_execution_identity()?;
+        Ok(PreparedHelperExecution {
+            program: self.path.clone(),
+            #[cfg(all(unix, ctx_pro_qualification))]
+            _qualification_descriptor: None,
+        })
     }
 
     /// Reopens the execution pathname immediately before spawn and confirms it
