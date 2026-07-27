@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use super::IndexWatchOutput;
+use super::{index_terminal_error, IndexSelection, IndexWatchOutput};
 
 fn watch_status(
     lexical_done: usize,
@@ -94,4 +94,53 @@ fn interactive_watch_clears_a_disappearing_warning() {
         rendered.ends_with("\r\u{1b}[2K\n\r\u{1b}[2K\n\r\u{1b}[2K\n\u{1b}[3A"),
         "the stale warning rows must be erased: {rendered:?}"
     );
+}
+
+#[test]
+fn watch_treats_a_stopped_failed_daemon_as_terminal() {
+    let mut status = watch_status(4, 12, false);
+    status["daemon"]["status"] = json!("failed");
+
+    assert_eq!(
+        index_terminal_error(&status, IndexSelection::default_for(&status)).as_deref(),
+        Some(
+            "background indexing stopped before the index was ready; run `ctx doctor` for details"
+        )
+    );
+}
+
+#[test]
+fn watch_treats_failed_inventory_as_terminal_even_without_pending_units() {
+    let mut status = watch_status(12, 12, false);
+    status["lexical"]["status"] = json!("failed");
+    status["lexical"]["failed_inventory_units"] = json!(1);
+    status["daemon"]["status"] = json!("failed");
+
+    assert_eq!(
+        index_terminal_error(&status, IndexSelection::default_for(&status)).as_deref(),
+        Some("one or more history files could not be indexed; run `ctx doctor` for details")
+    );
+}
+
+#[test]
+fn watch_does_not_treat_record_rejections_as_terminal_or_user_facing() {
+    let mut status = watch_status(4, 12, true);
+    status["daemon"]["jobs"]["history_refresh"] = json!({
+        "status": "completed",
+        "totals": {
+            "sources_completed_with_rejections": 1,
+            "rejected_records": 108,
+            "failed_sources": 0,
+        },
+    });
+    assert!(
+        index_terminal_error(&status, IndexSelection::default_for(&status)).is_none(),
+        "{status:#}"
+    );
+
+    let mut output = IndexWatchOutput::for_test(Vec::new(), false, 80);
+    output.print_human(&status).unwrap();
+    let rendered = String::from_utf8(output.writer).unwrap();
+    assert!(!rendered.contains("rejected"), "{rendered}");
+    assert!(!rendered.contains("malformed"), "{rendered}");
 }

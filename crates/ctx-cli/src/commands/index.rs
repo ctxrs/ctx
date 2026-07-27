@@ -372,6 +372,7 @@ fn index_status_snapshot(data_root: &Path) -> Result<Value> {
         indexed_items,
         inventory_units,
         pending_inventory_units,
+        failed_inventory_units,
     );
     Ok(compact_json(json!({
         "schema_version": 1,
@@ -403,9 +404,12 @@ fn lexical_index_status(
     indexed_items: usize,
     inventory_units: usize,
     pending_inventory_units: usize,
+    failed_inventory_units: usize,
 ) -> &'static str {
     if !initialized {
         "missing"
+    } else if failed_inventory_units > 0 {
+        "failed"
     } else if pending_inventory_units > 0 && indexed_items > 0 {
         "partial"
     } else if pending_inventory_units > 0 {
@@ -524,6 +528,15 @@ fn index_terminal_error(status: &Value, selection: IndexSelection) -> Option<Str
     if selection.lexical && string_at(status, &["lexical", "status"], "unknown") == "missing" {
         return Some("ctx index does not exist yet; run `ctx setup` first".to_owned());
     }
+    if selection.lexical
+        && string_at(status, &["lexical", "status"], "unknown") == "failed"
+        && !bool_at(status, &["daemon", "running"])
+    {
+        return Some(
+            "one or more history files could not be indexed; run `ctx doctor` for details"
+                .to_owned(),
+        );
+    }
     if selection.semantic {
         let semantic_status = semantic_job_status(status);
         let reason = string_at(status, &["daemon", "jobs", "semantic_index", "reason"], "");
@@ -539,6 +552,15 @@ fn index_terminal_error(status: &Value, selection: IndexSelection) -> Option<Str
         ) {
             return Some(format!("semantic indexing is {semantic_status}"));
         }
+    }
+    if !index_ready(status, selection)
+        && string_at(status, &["daemon", "status"], "unknown") == "failed"
+        && !bool_at(status, &["daemon", "running"])
+    {
+        return Some(
+            "background indexing stopped before the index was ready; run `ctx doctor` for details"
+                .to_owned(),
+        );
     }
     None
 }

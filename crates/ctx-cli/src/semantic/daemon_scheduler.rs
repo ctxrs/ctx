@@ -340,11 +340,12 @@ pub(super) fn daemon_job_failed(value: &Value) -> bool {
 
 pub(super) fn daemon_history_job_failed(value: &Value) -> bool {
     daemon_job_failed(value)
-        || value.get("totals").is_some_and(|totals| {
-            ["failed_sources", "rejected_records"]
-                .into_iter()
-                .any(|key| totals.get(key).and_then(Value::as_u64).unwrap_or(0) > 0)
-        })
+        || value
+            .get("totals")
+            .and_then(|totals| totals.get("failed_sources"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            > 0
 }
 
 pub(super) fn write_daemon_job_status_unless_deadline_skip(

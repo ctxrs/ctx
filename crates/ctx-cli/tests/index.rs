@@ -64,6 +64,182 @@ fn index_status_and_watch_are_read_only_for_missing_store() {
 }
 
 #[test]
+fn index_watch_exits_when_background_indexing_has_terminally_failed() {
+    let temp = tempdir();
+    let sessions = temp
+        .path()
+        .join(".codex")
+        .join("sessions")
+        .join("2026/06/24");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::copy(
+        provider_history_fixture("codex-malformed-session.jsonl"),
+        sessions.join("rollout-pending.jsonl"),
+    )
+    .unwrap();
+    ctx(&temp)
+        .args([
+            "setup",
+            "--catalog-only",
+            "--no-daemon",
+            "--progress",
+            "none",
+        ])
+        .assert()
+        .success();
+    let pending = json_output(ctx(&temp).args(["index", "status", "--json"]));
+    assert!(
+        pending["lexical"]["pending_inventory_units"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0,
+        "{pending:#}"
+    );
+
+    let daemon_root = temp.path().join("daemon");
+    fs::create_dir_all(&daemon_root).unwrap();
+    fs::write(
+        daemon_root.join("status.json"),
+        json!({
+            "schema_version": 1,
+            "status": "failed",
+            "pid": 0,
+            "finished_at_ms": 1,
+            "last_error": "synthetic terminal failure",
+            "semantic_runtime_active": false,
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let output = ctx(&temp)
+        .timeout(Duration::from_secs(3))
+        .args(["index", "watch", "--json", "--interval-seconds", "1"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let snapshots = String::from_utf8(output.stdout).unwrap();
+    let snapshots = snapshots.lines().collect::<Vec<_>>();
+    assert_eq!(snapshots.len(), 1, "{snapshots:#?}");
+    let status: Value = serde_json::from_str(snapshots[0]).unwrap();
+    assert_eq!(status["lexical"]["status"], "pending", "{status:#}");
+    assert_eq!(status["daemon"]["status"], "failed", "{status:#}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains(
+            "background indexing stopped before the index was ready; run `ctx doctor` for details"
+        ),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn index_watch_and_wait_fail_when_inventory_has_terminal_failures() {
+    let temp = tempdir();
+    let sessions = temp
+        .path()
+        .join(".codex")
+        .join("sessions")
+        .join("2026/06/24");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::copy(
+        provider_history_fixture("codex-malformed-session.jsonl"),
+        sessions.join("rollout-failed.jsonl"),
+    )
+    .unwrap();
+    ctx(&temp)
+        .args([
+            "setup",
+            "--catalog-only",
+            "--no-daemon",
+            "--progress",
+            "none",
+        ])
+        .assert()
+        .success();
+    let connection = Connection::open(temp.path().join("work.sqlite")).unwrap();
+    connection
+        .execute(
+            "UPDATE catalog_sessions
+             SET indexed_status = 'failed',
+                 indexed_error = 'synthetic terminal source failure',
+                 indexed_at_ms = 1",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    let daemon_root = temp.path().join("daemon");
+    fs::create_dir_all(&daemon_root).unwrap();
+    fs::write(
+        daemon_root.join("status.json"),
+        json!({
+            "schema_version": 1,
+            "status": "failed",
+            "pid": 0,
+            "finished_at_ms": 1,
+            "last_error": "synthetic terminal source failure",
+            "semantic_runtime_active": false,
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let status = json_output(ctx(&temp).args(["index", "status", "--json"]));
+    assert_eq!(status["lexical"]["status"], "failed", "{status:#}");
+    assert_eq!(
+        status["lexical"]["pending_inventory_units"], 1,
+        "{status:#}"
+    );
+    assert_eq!(status["lexical"]["failed_inventory_units"], 1, "{status:#}");
+
+    let watch = ctx(&temp)
+        .timeout(Duration::from_secs(3))
+        .args(["index", "watch", "--json", "--interval-seconds", "1"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let watch_stderr = String::from_utf8(watch.stderr).unwrap();
+    assert!(
+        watch_stderr.contains(
+            "one or more history files could not be indexed; run `ctx doctor` for details"
+        ),
+        "{watch_stderr}"
+    );
+
+    let wait = ctx(&temp)
+        .args([
+            "index",
+            "wait",
+            "--lexical",
+            "--json",
+            "--timeout-seconds",
+            "1",
+            "--interval-seconds",
+            "1",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let wait_stdout: Value = serde_json::from_slice(&wait.stdout).unwrap();
+    let wait_stderr = String::from_utf8(wait.stderr).unwrap();
+    assert_eq!(wait_stdout["status"], "blocked", "{wait_stdout:#}");
+    assert_eq!(
+        wait_stdout["index"]["lexical"]["status"], "failed",
+        "{wait_stdout:#}"
+    );
+    assert!(
+        wait_stderr.contains(
+            "one or more history files could not be indexed; run `ctx doctor` for details"
+        ),
+        "{wait_stderr}"
+    );
+}
+
+#[test]
 fn index_status_reports_stale_daemon_lock_as_recoverable() {
     let temp = tempdir();
     let daemon = temp.path().join("daemon");
