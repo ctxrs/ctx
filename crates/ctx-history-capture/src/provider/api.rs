@@ -2,16 +2,11 @@ use std::{io::BufRead, path::Path};
 
 use ctx_history_store::Store;
 
-use crate::provider::adapter::{ProviderCaptureAdapter, ProviderFixtureJsonlAdapter};
 use crate::provider::custom_history_jsonl::{
-    import_custom_history_edges, import_custom_history_source_cursors,
-    normalize_custom_history_jsonl_v1, normalize_custom_history_jsonl_v1_reader,
+    import_custom_history_nativepath, import_custom_history_nativepath_reader,
+    validate_custom_history_nativepath, validate_custom_history_nativepath_reader,
 };
-use crate::provider::importer::import_normalized_provider_captures;
-use crate::{
-    CustomHistoryJsonlV1ImportOptions, NormalizedProviderImportOptions, ProviderAdapterContext,
-    ProviderFixtureImportOptions, ProviderImportSummary, Result,
-};
+use crate::{CustomHistoryJsonlV1ImportOptions, ProviderImportSummary, Result};
 
 mod json_sources;
 mod native_streams;
@@ -38,86 +33,12 @@ pub use sqlite_sources::{
     import_openhands_file_events, import_shelley_sqlite,
 };
 
-pub fn import_provider_fixture_jsonl(
-    path: impl AsRef<Path>,
-    store: &mut Store,
-    options: ProviderFixtureImportOptions,
-) -> Result<ProviderImportSummary> {
-    let path = path.as_ref();
-    let source_path = options
-        .source_path
-        .clone()
-        .unwrap_or_else(|| path.to_path_buf());
-    let normalization = ProviderFixtureJsonlAdapter {
-        expected_provider: options.expected_provider,
-        source_format: options.source_format.clone(),
-        fidelity: options.fidelity,
-    }
-    .normalize_path(
-        path,
-        &ProviderAdapterContext {
-            machine_id: options.machine_id,
-            source_path: Some(source_path),
-            source_root: None,
-            imported_at: options.imported_at,
-        },
-    )?;
-
-    import_normalized_provider_captures(
-        store,
-        normalization,
-        NormalizedProviderImportOptions {
-            history_record_id: options.history_record_id,
-            persist_cursors: true,
-            wrap_transaction: true,
-            fast_event_inserts: true,
-            capture_work_limit: crate::CaptureWorkLimit::Drain,
-            inventory_observation_token: None,
-        },
-    )
-}
-
 pub fn import_custom_history_jsonl_v1(
     path: impl AsRef<Path>,
     store: &mut Store,
     options: CustomHistoryJsonlV1ImportOptions,
 ) -> Result<ProviderImportSummary> {
-    let path = path.as_ref();
-    let source_path = options
-        .source_path
-        .clone()
-        .unwrap_or_else(|| path.to_path_buf());
-    let normalization = normalize_custom_history_jsonl_v1(
-        path,
-        &ProviderAdapterContext {
-            machine_id: options.machine_id,
-            source_path: Some(source_path),
-            source_root: None,
-            imported_at: options.imported_at,
-        },
-    )?;
-    let mut summary = import_normalized_provider_captures(
-        store,
-        normalization.provider,
-        NormalizedProviderImportOptions {
-            history_record_id: options.history_record_id,
-            persist_cursors: true,
-            wrap_transaction: true,
-            fast_event_inserts: true,
-            capture_work_limit: crate::CaptureWorkLimit::Drain,
-            inventory_observation_token: options.inventory_observation_token.clone(),
-        },
-    )?;
-    import_custom_history_edges(
-        store,
-        &normalization.edges,
-        options.history_record_id,
-        &mut summary,
-    )?;
-    if summary.failed == 0 {
-        import_custom_history_source_cursors(store, &normalization.source_cursors)?;
-    }
-    Ok(summary)
+    import_custom_history_nativepath(path.as_ref(), store, options)
 }
 
 pub fn import_custom_history_jsonl_v1_reader(
@@ -125,56 +46,15 @@ pub fn import_custom_history_jsonl_v1_reader(
     store: &mut Store,
     options: CustomHistoryJsonlV1ImportOptions,
 ) -> Result<ProviderImportSummary> {
-    let normalization = normalize_custom_history_jsonl_v1_reader(
-        reader,
-        &ProviderAdapterContext {
-            machine_id: options.machine_id,
-            source_path: options.source_path,
-            source_root: None,
-            imported_at: options.imported_at,
-        },
-    )?;
-    let mut summary = import_normalized_provider_captures(
-        store,
-        normalization.provider,
-        NormalizedProviderImportOptions {
-            history_record_id: options.history_record_id,
-            persist_cursors: true,
-            wrap_transaction: true,
-            fast_event_inserts: true,
-            capture_work_limit: crate::CaptureWorkLimit::Drain,
-            inventory_observation_token: options.inventory_observation_token.clone(),
-        },
-    )?;
-    import_custom_history_edges(
-        store,
-        &normalization.edges,
-        options.history_record_id,
-        &mut summary,
-    )?;
-    if summary.failed == 0 {
-        import_custom_history_source_cursors(store, &normalization.source_cursors)?;
-    }
-    Ok(summary)
+    import_custom_history_nativepath_reader(reader, store, options)
 }
 
 pub fn validate_custom_history_jsonl_v1(path: impl AsRef<Path>) -> Result<ProviderImportSummary> {
-    let path = path.as_ref();
-    let normalization = normalize_custom_history_jsonl_v1(
-        path,
-        &ProviderAdapterContext {
-            source_path: Some(path.to_path_buf()),
-            source_root: None,
-            ..ProviderAdapterContext::default()
-        },
-    )?;
-    Ok(normalization.provider.summary)
+    validate_custom_history_nativepath(path.as_ref())
 }
 
 pub fn validate_custom_history_jsonl_v1_reader(
     reader: impl BufRead,
 ) -> Result<ProviderImportSummary> {
-    let normalization =
-        normalize_custom_history_jsonl_v1_reader(reader, &ProviderAdapterContext::default())?;
-    Ok(normalization.provider.summary)
+    validate_custom_history_nativepath_reader(reader)
 }

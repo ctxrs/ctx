@@ -1,253 +1,37 @@
+use std::collections::BTreeSet;
+
 use chrono::{DateTime, NaiveDateTime, Utc};
-use ctx_history_core::{
-    AgentType, CaptureProvider, EventType, Fidelity, ProviderCaptureEnvelope,
-    ProviderEventEnvelope, ProviderSourceTrust,
-};
+use ctx_history_core::FileChangeKind;
 use serde_json::{json, Value};
 
 use crate::common::time::parse_rfc3339_utc;
+use crate::provider::file_touches::{
+    inferred_file_change_kind, normalize_file_path, MAX_PROVIDER_FILE_TOUCHES_PER_EVENT,
+};
 use crate::provider::normalization::{
-    native_event, native_provider_capture, provider_json_text, provider_line_from_index,
-    provider_normalized_result_value, provider_role, provider_timestamp_seconds,
-    provider_value_text, text_id_index, NativeEventDraft, NativeSessionDraft,
+    provider_json_text, provider_local_preview, provider_normalized_result_value,
+    provider_timestamp_seconds, provider_value_text,
 };
 use crate::{
-    ProviderAdapterContext, ProviderNormalizationResult, GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
+    OutputOutcome, OutputOutcomeMetadata, Result, PROVIDER_MAX_PREVIEW_CHARS,
     PROVIDER_MAX_TEXT_CHARS,
 };
 
 use super::schema::{GooseMessageRow, GooseSessionRow};
+use super::stream::{GooseRetainedContentClass, GooseRetainedMessage};
 
-pub(super) fn goose_message_normalization(
-    message: GooseMessageRow,
-    session: Option<&GooseSessionRow>,
-    raw_source_path: &str,
-    user_version: i64,
-    schema_version: Option<i64>,
-    schema_fingerprint: &str,
-    context: &ProviderAdapterContext,
-) -> std::result::Result<GooseMessageProjection, GooseMessageRejection> {
-    let provider_event_index = goose_event_index(&message);
-    let line = provider_line_from_index(provider_event_index);
-    let Some(session) = session else {
-        return Err(GooseMessageRejection {
-            line,
-            reason: format!(
-                "Goose message {} references missing session {}",
-                goose_message_identity(&message),
-                message.session_id
-            ),
-        });
-    };
-    let content: Value = match serde_json::from_str(&message.content_json) {
-        Ok(content) => content,
-        Err(err) => {
-            return Err(GooseMessageRejection {
-                line,
-                reason: format!(
-                    "invalid JSON in Goose message {} content_json: {err}",
-                    goose_message_identity(&message)
-                ),
-            });
-        }
-    };
-    let metadata = message
-        .metadata_json
-        .as_deref()
-        .map(provider_json_text)
-        .unwrap_or(Value::Null);
-    let started_at = goose_timestamp(session.created_at.as_deref(), context.imported_at);
-    let occurred_at = goose_message_timestamp(&message, started_at);
-    let ended_at = session
-        .updated_at
-        .as_deref()
-        .map(|timestamp| goose_timestamp(Some(timestamp), occurred_at));
-    let event_type = goose_event_type(&message.role, &content);
-    let complete_text = goose_complete_content_text(&content)
-        .unwrap_or_else(|| format!("Goose {} message", message.role));
-    let text =
-        goose_content_text(&content).unwrap_or_else(|| format!("Goose {} message", message.role));
-    let event = native_event(NativeEventDraft {
-        provider: CaptureProvider::Goose,
-        source_format: GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
-        provider_session_id: message.session_id.clone(),
-        provider_event_index,
-        provider_event_hash: Some(goose_message_identity(&message)),
-        cursor: format!(
-            "session:{}:message:{}:rowid:{}",
-            message.session_id,
-            goose_message_identity(&message),
-            message.rowid
-        ),
-        event_type,
-        role: Some(provider_role(Some(&message.role))),
-        occurred_at,
-        text,
-        body: json!({
-            "message_id": message.message_id,
-            "row_id": message.id,
-            "role": message.role,
-            "content": content,
-            "metadata": metadata,
-            "tokens": message.tokens.as_deref().map(provider_json_text),
-            "created_timestamp": message.created_timestamp,
-            "timestamp": message.timestamp,
-        }),
-        metadata: json!({
-            "source": "goose_messages",
-            "source_format": GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
-            "message_id": message.message_id,
-            "row_id": message.id,
-            "session_id": message.session_id,
-            "rowid": message.rowid,
-        }),
-    });
-    let capture = goose_capture(
-        session,
-        GooseCaptureContext {
-            started_at,
-            ended_at,
-            raw_source_path,
-            user_version,
-            schema_version,
-            schema_fingerprint,
-            event: Some(event.clone()),
-        },
-        context,
-    );
-    Ok(GooseMessageProjection {
-        line,
-        provider_session_id: session.id.clone(),
-        event,
-        raw_content: content,
-        capture,
-        complete_text,
-    })
+pub(super) struct GooseOutputProjection {
+    pub(super) call_id: Option<String>,
+    pub(super) outcome: OutputOutcomeMetadata,
 }
 
-pub(super) struct GooseMessageProjection {
-    pub(super) line: usize,
-    pub(super) provider_session_id: String,
-    pub(super) event: ProviderEventEnvelope,
-    pub(super) raw_content: Value,
-    pub(super) capture: ProviderCaptureEnvelope,
-    pub(super) complete_text: String,
-}
-
-pub(super) struct GooseMessageRejection {
-    pub(super) line: usize,
-    pub(super) reason: String,
-}
-
-pub(super) fn goose_session_normalization(
-    session: &GooseSessionRow,
-    raw_source_path: &str,
-    user_version: i64,
-    schema_version: Option<i64>,
-    schema_fingerprint: &str,
-    context: &ProviderAdapterContext,
-) -> ProviderNormalizationResult {
-    let started_at = goose_timestamp(session.created_at.as_deref(), context.imported_at);
-    let ended_at = session
-        .updated_at
-        .as_deref()
-        .map(|timestamp| goose_timestamp(Some(timestamp), started_at));
-    ProviderNormalizationResult {
-        captures: vec![(
-            0,
-            goose_capture(
-                session,
-                GooseCaptureContext {
-                    started_at,
-                    ended_at,
-                    raw_source_path,
-                    user_version,
-                    schema_version,
-                    schema_fingerprint,
-                    event: None,
-                },
-                context,
-            ),
-        )],
-        ..ProviderNormalizationResult::default()
+fn goose_output_outcome_label(outcome: OutputOutcome) -> &'static str {
+    match outcome {
+        OutputOutcome::Success => "success",
+        OutputOutcome::Failure => "failure",
+        OutputOutcome::Timeout => "timeout",
+        OutputOutcome::Unknown => "unknown",
     }
-}
-
-struct GooseCaptureContext<'a> {
-    started_at: DateTime<Utc>,
-    ended_at: Option<DateTime<Utc>>,
-    raw_source_path: &'a str,
-    user_version: i64,
-    schema_version: Option<i64>,
-    schema_fingerprint: &'a str,
-    event: Option<ProviderEventEnvelope>,
-}
-
-fn goose_capture(
-    session: &GooseSessionRow,
-    draft: GooseCaptureContext<'_>,
-    context: &ProviderAdapterContext,
-) -> ProviderCaptureEnvelope {
-    native_provider_capture(
-        NativeSessionDraft {
-            provider: CaptureProvider::Goose,
-            source_format: GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
-            provider_session_id: session.id.clone(),
-            parent_provider_session_id: None,
-            root_provider_session_id: None,
-            external_agent_id: session.provider_name.clone(),
-            agent_type: AgentType::Primary,
-            role_hint: session
-                .session_type
-                .clone()
-                .or_else(|| Some("primary".to_owned())),
-            is_primary: true,
-            started_at: draft.started_at,
-            ended_at: draft.ended_at,
-            cwd: session.working_dir.clone(),
-            fidelity: Fidelity::Imported,
-            raw_source_path: draft.raw_source_path.to_owned(),
-            trust: ProviderSourceTrust::ProviderNative,
-            source_metadata: json!({
-                "adapter": GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
-                "sqlite_user_version": draft.user_version,
-                "goose_schema_version": draft.schema_version,
-                "schema_fingerprint": draft.schema_fingerprint,
-                "source_path": draft.raw_source_path,
-            }),
-            session_metadata: json!({
-                "source_format": GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
-                "session_id": session.id,
-                "name": session.name,
-                "description": session.description,
-                "user_set_name": session.user_set_name,
-                "session_type": session.session_type,
-                "extension_data": session.extension_data.as_deref().map(provider_json_text),
-                "provider_name": session.provider_name,
-                "model_config": session.model_config_json.as_deref().map(provider_json_text),
-                "goose_mode": session.goose_mode,
-                "archived_at": session.archived_at,
-                "project_id": session.project_id,
-                "tokens": {
-                    "total": session.total_tokens,
-                    "input": session.input_tokens,
-                    "output": session.output_tokens,
-                    "accumulated_total": session.accumulated_total_tokens,
-                    "accumulated_input": session.accumulated_input_tokens,
-                    "accumulated_output": session.accumulated_output_tokens,
-                },
-                "accumulated_cost": session.accumulated_cost,
-            }),
-        },
-        context,
-        draft.event,
-    )
-}
-
-fn goose_event_index(message: &GooseMessageRow) -> u64 {
-    let base = message.created_timestamp.unwrap_or(message.rowid).max(0) as u64;
-    base.saturating_mul(4_096)
-        .saturating_add(text_id_index(&goose_message_identity(message), 0) % 4_096)
 }
 
 pub(super) fn goose_message_identity(message: &GooseMessageRow) -> String {
@@ -255,13 +39,6 @@ pub(super) fn goose_message_identity(message: &GooseMessageRow) -> String {
         .message_id
         .clone()
         .unwrap_or_else(|| format!("row-{}", message.id))
-}
-
-fn goose_message_timestamp(message: &GooseMessageRow, fallback: DateTime<Utc>) -> DateTime<Utc> {
-    if let Some(timestamp) = message.created_timestamp {
-        return provider_timestamp_seconds(Some(timestamp as f64), fallback);
-    }
-    goose_timestamp(message.timestamp.as_deref(), fallback)
 }
 
 pub(super) fn goose_timestamp(raw: Option<&str>, fallback: DateTime<Utc>) -> DateTime<Utc> {
@@ -282,38 +59,6 @@ pub(super) fn goose_timestamp(raw: Option<&str>, fallback: DateTime<Utc>) -> Dat
         .unwrap_or(fallback)
 }
 
-fn goose_event_type(role: &str, content: &Value) -> EventType {
-    if goose_content_has_type(content, "toolResponse") {
-        EventType::ToolOutput
-    } else if goose_content_has_type(content, "toolRequest")
-        || goose_content_has_type(content, "frontendToolRequest")
-    {
-        EventType::ToolCall
-    } else if matches!(role, "user" | "assistant" | "system") {
-        EventType::Message
-    } else {
-        EventType::Notice
-    }
-}
-
-fn goose_content_has_type(content: &Value, expected: &str) -> bool {
-    match content {
-        Value::Array(items) => items
-            .iter()
-            .any(|item| goose_content_has_type(item, expected)),
-        Value::Object(object) => {
-            object
-                .get("type")
-                .and_then(Value::as_str)
-                .is_some_and(|kind| kind == expected)
-                || object
-                    .values()
-                    .any(|value| goose_content_has_type(value, expected))
-        }
-        _ => false,
-    }
-}
-
 fn goose_content_text(content: &Value) -> Option<String> {
     let mut parts = Vec::new();
     goose_collect_text(content, &mut parts);
@@ -324,10 +69,13 @@ fn goose_content_text(content: &Value) -> Option<String> {
 /// order. Only direct `toolResponse` blocks and their documented result fields
 /// are accepted; arbitrary object descendants are not searched. The caller
 /// owns any byte bound.
-#[allow(dead_code)] // Activated by SQLite result-locator attachment.
 pub(crate) fn goose_normalized_result_content(content: &Value) -> Option<String> {
     let mut parts = Vec::new();
-    goose_collect_result_content(content, &mut parts);
+    goose_visit_tool_responses(content, &mut |object| {
+        if let Some(value) = goose_tool_response_value(object) {
+            parts.push(provider_normalized_result_value(value));
+        }
+    });
     (!parts.is_empty()).then(|| parts.join("\n"))
 }
 
@@ -357,22 +105,161 @@ fn goose_collect_complete_text(value: &Value, parts: &mut Vec<String>) {
     }
 }
 
-fn goose_collect_result_content(value: &Value, parts: &mut Vec<String>) {
+fn goose_visit_tool_responses(
+    value: &Value,
+    visitor: &mut impl FnMut(&serde_json::Map<String, Value>),
+) {
     match value {
         Value::Array(items) => {
             for item in items {
-                goose_collect_result_content(item, parts);
+                goose_visit_tool_responses(item, visitor);
             }
         }
         Value::Object(object)
             if object.get("type").and_then(Value::as_str) == Some("toolResponse") =>
         {
-            if let Some(value) = goose_tool_response_value(object) {
-                parts.push(provider_normalized_result_value(value));
+            visitor(object);
+        }
+        _ => {}
+    }
+}
+
+pub(super) fn goose_output_projection(content: &Value) -> GooseOutputProjection {
+    let mut aggregate = GooseOutcomeAggregate::default();
+    goose_visit_tool_responses(content, &mut |object| {
+        if aggregate.call_id.is_none() {
+            aggregate.call_id = goose_tool_response_string(
+                object,
+                &["toolCallId", "tool_call_id", "call_id", "id"],
+            )
+            .or_else(|| {
+                object
+                    .get("toolCall")
+                    .and_then(|value| value.get("id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            });
+        }
+        goose_collect_outcome(object, &mut aggregate);
+        if let Some(result) = goose_tool_response_value(object) {
+            goose_collect_outcome_value(result, &mut aggregate);
+        }
+    });
+    GooseOutputProjection {
+        call_id: aggregate.call_id,
+        outcome: OutputOutcomeMetadata {
+            outcome: if aggregate.timeout {
+                OutputOutcome::Timeout
+            } else if aggregate.failure {
+                OutputOutcome::Failure
+            } else if aggregate.success {
+                OutputOutcome::Success
+            } else {
+                OutputOutcome::Unknown
+            },
+            exit_code: aggregate.exit_code,
+            duration_ms: aggregate.duration_ms,
+        },
+    }
+}
+
+#[derive(Default)]
+struct GooseOutcomeAggregate {
+    timeout: bool,
+    failure: bool,
+    success: bool,
+    exit_code: Option<i32>,
+    duration_ms: Option<u64>,
+    call_id: Option<String>,
+}
+
+fn goose_collect_outcome(
+    object: &serde_json::Map<String, Value>,
+    aggregate: &mut GooseOutcomeAggregate,
+) {
+    aggregate.timeout |= ["timed_out", "timedOut", "timeout"]
+        .iter()
+        .any(|key| object.get(*key).and_then(Value::as_bool).unwrap_or(false));
+    if let Some(success) = object.get("success").and_then(Value::as_bool) {
+        aggregate.success |= success;
+        aggregate.failure |= !success;
+    }
+    aggregate.failure |= object
+        .get("isError")
+        .or_else(|| object.get("is_error"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if let Some(code) = object
+        .get("exit_code")
+        .or_else(|| object.get("exitCode"))
+        .and_then(Value::as_i64)
+    {
+        aggregate.exit_code = i32::try_from(code).ok();
+        aggregate.success |= code == 0;
+        aggregate.failure |= code != 0;
+    }
+    if aggregate.duration_ms.is_none() {
+        aggregate.duration_ms = ["duration_ms", "durationMs"]
+            .iter()
+            .find_map(|key| object.get(*key).and_then(Value::as_u64));
+    }
+    for key in ["status", "state", "outcome"] {
+        if let Some(status) = object.get(key).and_then(Value::as_str) {
+            let status = status.trim().to_ascii_lowercase();
+            aggregate.timeout |= matches!(status.as_str(), "timeout" | "timed_out" | "timedout");
+            aggregate.failure |= matches!(
+                status.as_str(),
+                "failed" | "failure" | "error" | "errored" | "cancelled" | "canceled"
+            );
+            aggregate.success |= matches!(
+                status.as_str(),
+                "success" | "succeeded" | "complete" | "completed" | "ok" | "passed"
+            );
+        }
+    }
+    aggregate.failure |= object.get("error").is_some_and(goose_error_is_nonempty);
+}
+
+fn goose_collect_outcome_value(value: &Value, aggregate: &mut GooseOutcomeAggregate) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                goose_collect_outcome_value(item, aggregate);
+            }
+        }
+        Value::Object(object) => {
+            goose_collect_outcome(object, aggregate);
+            for value in object.values() {
+                goose_collect_outcome_value(value, aggregate);
             }
         }
         _ => {}
     }
+}
+
+fn goose_error_is_nonempty(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::String(value) => !value.trim().is_empty(),
+        Value::Number(value) => value.as_i64().is_some_and(|value| value != 0),
+        Value::Array(values) => !values.is_empty(),
+        Value::Object(values) => !values.is_empty(),
+    }
+}
+
+fn goose_tool_response_string(
+    object: &serde_json::Map<String, Value>,
+    keys: &[&str],
+) -> Option<String> {
+    keys.iter().find_map(|key| {
+        object
+            .get(*key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    })
 }
 
 fn goose_collect_text(value: &Value, parts: &mut Vec<String>) {
@@ -458,4 +345,449 @@ fn goose_tool_response_value(object: &serde_json::Map<String, Value>) -> Option<
     ["toolResult", "content", "result"]
         .iter()
         .find_map(|key| object.get(*key))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum GooseNativeEventKind {
+    Message,
+    ToolCall,
+    ToolOutput,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct GooseNativeFileTouch {
+    pub(super) ordinal: u32,
+    pub(super) path: String,
+    pub(super) old_path: Option<String>,
+    pub(super) change_kind: FileChangeKind,
+    pub(super) evidence: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct GooseNativeSession {
+    pub(super) sqlite_rowid: i64,
+    pub(super) native_identity: String,
+    pub(super) row: GooseSessionRow,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct GooseNativeEvent {
+    pub(super) sqlite_rowid: i64,
+    pub(super) native_order: i64,
+    pub(super) native_identity: String,
+    pub(super) provider_message_identity: String,
+    pub(super) identity_degraded: bool,
+    pub(super) session_identity: String,
+    pub(super) kind: GooseNativeEventKind,
+    pub(super) role: String,
+    pub(super) content: Value,
+    pub(super) searchable_text: String,
+    pub(super) created_timestamp: Option<i64>,
+    pub(super) timestamp: Option<String>,
+    pub(super) tokens_json: Option<String>,
+    pub(super) metadata_json: Option<String>,
+    pub(super) retained_content_bytes: u64,
+    pub(super) file_touches: Vec<GooseNativeFileTouch>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct GooseNativeExcludedOutput {
+    pub(super) sqlite_rowid: i64,
+    pub(super) native_order: i64,
+    pub(super) native_identity: String,
+    pub(super) identity_degraded: bool,
+    pub(super) session_identity: String,
+    pub(super) role: String,
+    pub(super) content_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum GooseNativeRejectionKind {
+    EmptySessionIdentity,
+    OversizedSession,
+    MissingSession,
+    MalformedJson,
+    UnsupportedJsonRoot,
+    NonObjectBlock,
+    UnknownBlockType,
+    DuplicateBlockType,
+    OversizedRetainedContent,
+    UnsupportedStorageClass,
+    RetainedParseMismatch,
+}
+
+impl GooseNativeRejectionKind {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::EmptySessionIdentity => "empty_session_identity",
+            Self::OversizedSession => "oversized_session",
+            Self::MissingSession => "missing_session",
+            Self::MalformedJson => "malformed_json",
+            Self::UnsupportedJsonRoot => "unsupported_json_root",
+            Self::NonObjectBlock => "non_object_block",
+            Self::UnknownBlockType => "unknown_block_type",
+            Self::DuplicateBlockType => "duplicate_block_type",
+            Self::OversizedRetainedContent => "oversized_retained_content",
+            Self::UnsupportedStorageClass => "unsupported_storage_class",
+            Self::RetainedParseMismatch => "retained_parse_mismatch",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct GooseNativeRejection {
+    pub(super) sqlite_rowid: i64,
+    pub(super) native_order: Option<i64>,
+    pub(super) native_identity: String,
+    pub(super) session_identity: Option<String>,
+    pub(super) kind: GooseNativeRejectionKind,
+    pub(super) reason: String,
+}
+
+pub(super) fn normalize_goose_native_message(
+    message: GooseRetainedMessage,
+) -> Result<GooseNativeEvent> {
+    let content: Value = serde_json::from_str(&message.content_json).map_err(|error| {
+        crate::CaptureError::InvalidPayload(format!(
+            "Goose retained message {} changed classification while parsing: {error}",
+            message.native_identity
+        ))
+    })?;
+    content.as_array().ok_or_else(|| {
+        crate::CaptureError::InvalidPayload(format!(
+            "Goose retained message {} is no longer an array",
+            message.native_identity
+        ))
+    })?;
+    let kind = match message.retained_class {
+        GooseRetainedContentClass::Message => GooseNativeEventKind::Message,
+        GooseRetainedContentClass::ToolCall => GooseNativeEventKind::ToolCall,
+    };
+    let searchable_text =
+        goose_content_text(&content).unwrap_or_else(|| format!("Goose {} message", message.role));
+    let file_touches = if kind == GooseNativeEventKind::ToolCall {
+        goose_native_file_touches(&content)?
+    } else {
+        Vec::new()
+    };
+    Ok(GooseNativeEvent {
+        sqlite_rowid: message.sqlite_rowid,
+        native_order: message.native_order,
+        native_identity: message.native_identity,
+        provider_message_identity: message.provider_message_identity,
+        identity_degraded: message.identity_degraded,
+        session_identity: message.session_identity,
+        kind,
+        role: message.role,
+        content,
+        searchable_text,
+        created_timestamp: message.created_timestamp,
+        timestamp: message.timestamp,
+        tokens_json: message.tokens_json,
+        metadata_json: message.metadata_json,
+        retained_content_bytes: message.content_bytes,
+        file_touches,
+    })
+}
+
+pub(super) fn normalize_goose_native_output_diagnostic(
+    message: &super::stream::GooseScannedMessage,
+) -> Result<GooseNativeEvent> {
+    let outcome = message.output_outcome.ok_or_else(|| {
+        crate::CaptureError::SystemInvariant(
+            "Goose output diagnostic omitted its SQL-classified outcome",
+        )
+    })?;
+    if !matches!(outcome, OutputOutcome::Failure | OutputOutcome::Timeout) {
+        return Err(crate::CaptureError::SystemInvariant(
+            "Goose attempted to retain a successful or unknown output in Core",
+        ));
+    }
+    let (diagnostic, call_id, exit_code, duration_ms) =
+        if let Some(raw_content) = message.content_json.as_deref() {
+            let content: Value = serde_json::from_str(raw_content).map_err(|error| {
+                crate::CaptureError::InvalidPayload(format!(
+                    "Goose SQL-classified output {} changed while building its diagnostic: {error}",
+                    message.native_identity
+                ))
+            })?;
+            let projection = goose_output_projection(&content);
+            (
+                goose_normalized_result_content(&content)
+                    .unwrap_or_else(|| "Goose tool response failed".to_owned()),
+                projection.call_id,
+                projection.outcome.exit_code,
+                projection.outcome.duration_ms,
+            )
+        } else {
+            ("Goose tool response failed".to_owned(), None, None, None)
+        };
+    let preview = provider_local_preview(&diagnostic, PROVIDER_MAX_PREVIEW_CHARS).0;
+    let body = json!({
+        "message_id": message.provider_message_identity,
+        "row_id": message.native_order,
+        "role": message.role,
+        "output_preview": preview,
+        "result_outcome": goose_output_outcome_label(outcome),
+        "exit_code": exit_code,
+        "duration_ms": duration_ms,
+        "timed_out": outcome == OutputOutcome::Timeout,
+        "call_id": call_id,
+        "output_retention": "bounded_diagnostic",
+        "metadata": message.metadata_json.as_deref().map(provider_json_text),
+        "tokens": message.tokens_json.as_deref().map(provider_json_text),
+        "created_timestamp": message.created_timestamp,
+        "timestamp": message.timestamp,
+    });
+    let retained_content_bytes = u64::try_from(body.to_string().len()).map_err(|_| {
+        crate::CaptureError::SystemInvariant("Goose diagnostic body length exceeds u64")
+    })?;
+    Ok(GooseNativeEvent {
+        sqlite_rowid: message.sqlite_rowid,
+        native_order: message.native_order,
+        native_identity: message.native_identity.clone(),
+        provider_message_identity: message.provider_message_identity.clone(),
+        identity_degraded: message.identity_degraded,
+        session_identity: message.session_identity.clone(),
+        kind: GooseNativeEventKind::ToolOutput,
+        role: message.role.clone(),
+        content: body,
+        searchable_text: preview,
+        created_timestamp: message.created_timestamp,
+        timestamp: message.timestamp.clone(),
+        tokens_json: None,
+        metadata_json: None,
+        retained_content_bytes,
+        file_touches: Vec::new(),
+    })
+}
+
+fn goose_native_file_touches(content: &Value) -> Result<Vec<GooseNativeFileTouch>> {
+    let mut touches = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut found_patch = false;
+    goose_visit_patch_values(content, &mut |path, old_path, change_kind, evidence| {
+        found_patch = true;
+        goose_push_native_touch(
+            &mut touches,
+            &mut seen,
+            path,
+            old_path,
+            change_kind,
+            evidence,
+        )
+    })?;
+    if !found_patch {
+        goose_visit_structured_touches(
+            content,
+            None,
+            &mut |path, old_path, change_kind, evidence| {
+                goose_push_native_touch(
+                    &mut touches,
+                    &mut seen,
+                    path,
+                    old_path,
+                    change_kind,
+                    evidence,
+                )
+            },
+        )?;
+    }
+    Ok(touches)
+}
+
+fn goose_push_native_touch(
+    touches: &mut Vec<GooseNativeFileTouch>,
+    seen: &mut BTreeSet<(String, Option<String>, String)>,
+    path: String,
+    old_path: Option<String>,
+    change_kind: FileChangeKind,
+    evidence: &'static str,
+) -> Result<()> {
+    let key = (path.clone(), old_path.clone(), format!("{change_kind:?}"));
+    if !seen.insert(key) {
+        return Ok(());
+    }
+    if touches.len() == MAX_PROVIDER_FILE_TOUCHES_PER_EVENT {
+        return Err(crate::CaptureError::InvalidPayload(
+            "Goose retained event exceeds the safe file-touch limit".to_owned(),
+        ));
+    }
+    touches.push(GooseNativeFileTouch {
+        ordinal: u32::try_from(touches.len()).map_err(|_| {
+            crate::CaptureError::SystemInvariant("Goose file-touch ordinal exceeds u32")
+        })?,
+        path,
+        old_path,
+        change_kind,
+        evidence,
+    });
+    Ok(())
+}
+
+fn goose_visit_patch_values<E>(
+    value: &Value,
+    visit: &mut impl FnMut(
+        String,
+        Option<String>,
+        FileChangeKind,
+        &'static str,
+    ) -> std::result::Result<(), E>,
+) -> std::result::Result<(), E> {
+    match value {
+        Value::String(text) if text.contains("*** Begin Patch") => {
+            goose_visit_patch_text(text, visit)?;
+        }
+        Value::Array(values) => {
+            for value in values {
+                goose_visit_patch_values(value, visit)?;
+            }
+        }
+        Value::Object(object) => {
+            for value in object.values() {
+                goose_visit_patch_values(value, visit)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn goose_visit_patch_text<E>(
+    patch: &str,
+    visit: &mut impl FnMut(
+        String,
+        Option<String>,
+        FileChangeKind,
+        &'static str,
+    ) -> std::result::Result<(), E>,
+) -> std::result::Result<(), E> {
+    let mut pending_update = None;
+    for line in patch.lines() {
+        if let Some(path) = line.strip_prefix("*** Add File: ") {
+            goose_visit_pending_update(&mut pending_update, visit)?;
+            if let Some(path) = normalize_file_path(path) {
+                visit(path, None, FileChangeKind::Created, "apply_patch_add")?;
+            }
+        } else if let Some(path) = line.strip_prefix("*** Update File: ") {
+            goose_visit_pending_update(&mut pending_update, visit)?;
+            pending_update = normalize_file_path(path);
+        } else if let Some(path) = line.strip_prefix("*** Delete File: ") {
+            goose_visit_pending_update(&mut pending_update, visit)?;
+            if let Some(path) = normalize_file_path(path) {
+                visit(path, None, FileChangeKind::Deleted, "apply_patch_delete")?;
+            }
+        } else if let Some(path) = line.strip_prefix("*** Move to: ") {
+            let old_path = pending_update.take();
+            if let Some(path) = normalize_file_path(path) {
+                visit(path, old_path, FileChangeKind::Renamed, "apply_patch_move")?;
+            }
+        }
+    }
+    goose_visit_pending_update(&mut pending_update, visit)
+}
+
+fn goose_visit_pending_update<E>(
+    pending_update: &mut Option<String>,
+    visit: &mut impl FnMut(
+        String,
+        Option<String>,
+        FileChangeKind,
+        &'static str,
+    ) -> std::result::Result<(), E>,
+) -> std::result::Result<(), E> {
+    if let Some(path) = pending_update.take() {
+        visit(path, None, FileChangeKind::Modified, "apply_patch_update")?;
+    }
+    Ok(())
+}
+
+fn goose_visit_structured_touches<E>(
+    value: &Value,
+    inherited_kind: Option<FileChangeKind>,
+    visit: &mut impl FnMut(
+        String,
+        Option<String>,
+        FileChangeKind,
+        &'static str,
+    ) -> std::result::Result<(), E>,
+) -> std::result::Result<(), E> {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                goose_visit_structured_touches(value, inherited_kind, visit)?;
+            }
+        }
+        Value::Object(object) => {
+            let object_kind = {
+                let inferred = inferred_file_change_kind(object);
+                (inferred != FileChangeKind::Unknown)
+                    .then_some(inferred)
+                    .or(inherited_kind)
+                    .unwrap_or(FileChangeKind::Unknown)
+            };
+            let old_path = object.iter().find_map(|(key, value)| {
+                goose_is_old_path_key(key)
+                    .then(|| value.as_str())
+                    .flatten()
+                    .and_then(normalize_file_path)
+            });
+            for (key, value) in object {
+                if !goose_is_path_key(key) {
+                    continue;
+                }
+                let Some(raw_path) = value.as_str() else {
+                    continue;
+                };
+                if goose_normalized_key(key) == "uri" && !raw_path.trim().starts_with("file://") {
+                    continue;
+                }
+                if let Some(path) = normalize_file_path(raw_path) {
+                    visit(
+                        path,
+                        old_path.clone(),
+                        object_kind,
+                        "structured_provider_payload",
+                    )?;
+                }
+            }
+            for value in object.values() {
+                goose_visit_structured_touches(value, Some(object_kind), visit)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn goose_is_path_key(key: &str) -> bool {
+    matches!(
+        goose_normalized_key(key).as_str(),
+        "path"
+            | "file"
+            | "filepath"
+            | "filename"
+            | "targetfile"
+            | "targetpath"
+            | "relativepath"
+            | "absolutepath"
+            | "uri"
+            | "destinationfile"
+            | "destinationpath"
+    )
+}
+
+fn goose_is_old_path_key(key: &str) -> bool {
+    matches!(
+        goose_normalized_key(key).as_str(),
+        "oldpath" | "frompath" | "sourcepath" | "originalpath" | "previouspath"
+    )
+}
+
+fn goose_normalized_key(key: &str) -> String {
+    key.bytes()
+        .filter(u8::is_ascii_alphanumeric)
+        .map(|byte| char::from(byte.to_ascii_lowercase()))
+        .take(256)
+        .collect()
 }

@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 
-use super::super::{SERVER_ARGS, SERVER_COMMAND, SERVER_NAME};
-use super::ConfigStatus;
+use super::super::SERVER_NAME;
+use super::{server_command, ConfigStatus};
 
 pub(super) fn status_continue(body: &str) -> Result<ConfigStatus> {
     let doc: serde_yaml::Value = serde_yaml::from_str(body).context("parse YAML config")?;
@@ -123,6 +123,7 @@ fn continue_server_index(servers: &[serde_yaml::Value]) -> Option<usize> {
 }
 
 fn continue_server_value() -> serde_yaml::Value {
+    let command = server_command();
     let mut mapping = serde_yaml::Mapping::new();
     mapping.insert(
         serde_yaml::Value::String("name".to_owned()),
@@ -134,12 +135,13 @@ fn continue_server_value() -> serde_yaml::Value {
     );
     mapping.insert(
         serde_yaml::Value::String("command".to_owned()),
-        serde_yaml::Value::String(SERVER_COMMAND.to_owned()),
+        serde_yaml::Value::String(command.executable().to_owned()),
     );
     mapping.insert(
         serde_yaml::Value::String("args".to_owned()),
         serde_yaml::Value::Sequence(
-            SERVER_ARGS
+            command
+                .args()
                 .iter()
                 .map(|arg| serde_yaml::Value::String((*arg).to_owned()))
                 .collect(),
@@ -149,19 +151,21 @@ fn continue_server_value() -> serde_yaml::Value {
 }
 
 fn continue_server_is_current(value: &serde_yaml::Value) -> bool {
+    let expected = server_command();
     let Some(mapping) = value.as_mapping() else {
         return false;
     };
-    let command = mapping
+    let configured_command = mapping
         .get(serde_yaml::Value::String("command".to_owned()))
         .and_then(serde_yaml::Value::as_str);
     let args = mapping
         .get(serde_yaml::Value::String("args".to_owned()))
         .and_then(serde_yaml::Value::as_sequence);
-    command == Some(SERVER_COMMAND) && args_are_current(args)
+    configured_command == Some(expected.executable()) && args_are_current(args)
 }
 
 fn goose_server_value() -> serde_yaml::Value {
+    let command = server_command();
     let mut mapping = serde_yaml::Mapping::new();
     mapping.insert(
         serde_yaml::Value::String("enabled".to_owned()),
@@ -181,12 +185,13 @@ fn goose_server_value() -> serde_yaml::Value {
     );
     mapping.insert(
         serde_yaml::Value::String("cmd".to_owned()),
-        serde_yaml::Value::String(SERVER_COMMAND.to_owned()),
+        serde_yaml::Value::String(command.executable().to_owned()),
     );
     mapping.insert(
         serde_yaml::Value::String("args".to_owned()),
         serde_yaml::Value::Sequence(
-            SERVER_ARGS
+            command
+                .args()
                 .iter()
                 .map(|arg| serde_yaml::Value::String((*arg).to_owned()))
                 .collect(),
@@ -200,6 +205,7 @@ fn goose_server_value() -> serde_yaml::Value {
 }
 
 fn goose_server_is_current(value: &serde_yaml::Value) -> bool {
+    let expected = server_command();
     let Some(mapping) = value.as_mapping() else {
         return false;
     };
@@ -214,14 +220,15 @@ fn goose_server_is_current(value: &serde_yaml::Value) -> bool {
     let args = mapping
         .get(serde_yaml::Value::String("args".to_owned()))
         .and_then(serde_yaml::Value::as_sequence);
-    cmd == Some(SERVER_COMMAND) && args_are_current(args)
+    cmd == Some(expected.executable()) && args_are_current(args)
 }
 
 fn args_are_current(args: Option<&Vec<serde_yaml::Value>>) -> bool {
+    let expected = server_command();
     args.is_some_and(|args| {
         args.iter()
             .filter_map(serde_yaml::Value::as_str)
-            .eq(SERVER_ARGS.iter().copied())
+            .eq(expected.args().iter().copied())
     })
 }
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.metadata
 import json
 import os
@@ -128,8 +129,19 @@ def main() -> None:
 
     try:
         _write_archive(args.output_dir, args.archive, args.bundle_version)
+        _write_release_asset_record(args.output_dir, args.archive, args.bundle_version)
+        digest = hashlib.sha256()
+        with args.archive.open("rb") as stream:
+            while block := stream.read(1024 * 1024):
+                digest.update(block)
+        args.archive.with_suffix(args.archive.suffix + ".sha256").write_text(
+            f"{digest.hexdigest()}  {args.archive.name}\n", encoding="ascii"
+        )
     except BaseException:
         shutil.rmtree(args.output_dir, ignore_errors=True)
+        args.archive.unlink(missing_ok=True)
+        args.archive.with_suffix(args.archive.suffix + ".asset.json").unlink(missing_ok=True)
+        args.archive.with_suffix(args.archive.suffix + ".sha256").unlink(missing_ok=True)
         raise
     print(f"bundle={args.output_dir}")
     print(f"archive={args.archive}")
@@ -345,6 +357,45 @@ def _add_tar_entry(output: tarfile.TarFile, source: Path, archive_name: str) -> 
             output.addfile(info, stream)
     else:
         raise BundleError(f"refusing to archive unsupported entry: {source}")
+
+
+def _write_release_asset_record(bundle: Path, archive: Path, version: str) -> None:
+    release_tool = SCRIPT_ROOT.parent / "semantic-release-assets.py"
+    output = archive.with_suffix(archive.suffix + ".asset.json")
+    files = sorted(
+        [
+            MANIFEST_NAME,
+            *(record["path"] for record in file_records(bundle)),
+        ]
+    )
+    command = [
+        sys.executable,
+        str(release_tool),
+        "record",
+        "--asset-id",
+        "apple_coreml",
+        "--role",
+        "accelerator",
+        "--backend",
+        "coreml",
+        "--version",
+        version,
+        "--platform",
+        "macos-arm64",
+        "--archive-format",
+        "tar.xz",
+        "--archive-path-prefix",
+        f"ctx-multilingual-e5-small-coreml-fp16-{version}",
+        "--archive",
+        str(archive),
+        "--root",
+        str(bundle),
+        "--output",
+        str(output),
+    ]
+    for relative in files:
+        command.extend(("--file", relative))
+    subprocess.run(command, check=True)
 
 
 if __name__ == "__main__":

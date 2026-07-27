@@ -3,6 +3,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
 use crate::connection::collect_rows;
+use crate::native_path_group::BoundEncoding;
 use crate::records::{record_from_row, record_select_sql};
 use crate::schema::ddl::{table_exists, table_has_column};
 use crate::search::analyzer::scriptgram_index_text;
@@ -435,8 +436,22 @@ fn ensure_search_projection_stats_table(conn: &Connection) -> Result<()> {
 }
 
 pub(crate) fn refresh_semantic_searchable_item_stats(conn: &Connection) -> Result<usize> {
+    refresh_semantic_searchable_item_stats_accounted(conn, None)
+}
+
+fn refresh_semantic_searchable_item_stats_accounted(
+    conn: &Connection,
+    accounting: Option<&mut usize>,
+) -> Result<usize> {
     ensure_search_projection_stats_table(conn)?;
     let count = semantic_searchable_item_count_exact(conn)?;
+    if let Some(accounting) = accounting {
+        let mut values = BoundEncoding::mutation();
+        values.text(SEMANTIC_SEARCHABLE_ITEMS_STAT_KEY);
+        values.integer();
+        values.integer();
+        *accounting = accounting.saturating_add(values.finish());
+    }
     conn.execute(
         r#"
         INSERT INTO search_projection_stats (key, value, updated_at_ms)
@@ -458,17 +473,25 @@ pub(crate) fn adjust_semantic_searchable_item_stats(
     conn: &Connection,
     previous_count: usize,
     current_count: usize,
+    accounting: Option<&mut usize>,
 ) -> Result<()> {
     if previous_count == current_count {
         return Ok(());
     }
     if !table_exists(conn, "search_projection_stats")? {
-        return refresh_semantic_searchable_item_stats(conn).map(|_| ());
+        return refresh_semantic_searchable_item_stats_accounted(conn, accounting).map(|_| ());
     }
     if cached_semantic_searchable_item_count(conn)?.is_none() {
-        return refresh_semantic_searchable_item_stats(conn).map(|_| ());
+        return refresh_semantic_searchable_item_stats_accounted(conn, accounting).map(|_| ());
     }
     let delta = current_count as i64 - previous_count as i64;
+    if let Some(accounting) = accounting {
+        let mut values = BoundEncoding::mutation();
+        values.text(SEMANTIC_SEARCHABLE_ITEMS_STAT_KEY);
+        values.integer();
+        values.integer();
+        *accounting = accounting.saturating_add(values.finish());
+    }
     conn.execute(
         r#"
         UPDATE search_projection_stats
@@ -620,8 +643,9 @@ pub(crate) fn insert_event_search_projection_for_event(
     conn: &Connection,
     event: &Event,
     capabilities: EventSearchProjectionCapabilities,
+    accounting: Option<&mut usize>,
 ) -> Result<()> {
-    insert_event_search_projection_for_event_id(conn, event.id, event, capabilities)
+    insert_event_search_projection_for_event_id(conn, event.id, event, capabilities, accounting)
 }
 
 pub(crate) fn upsert_event_search_projection_for_event(
@@ -629,6 +653,7 @@ pub(crate) fn upsert_event_search_projection_for_event(
     event_id: Uuid,
     event: &Event,
     capabilities: EventSearchProjectionCapabilities,
+    mut accounting: Option<&mut usize>,
 ) -> Result<()> {
     let EventSearchProjectionCapabilities {
         event_search: has_event_search,
@@ -640,24 +665,27 @@ pub(crate) fn upsert_event_search_projection_for_event(
     }
     let event_id_text = event_id.to_string();
     if has_event_search {
+        account_single_text_bind(accounting.as_deref_mut(), &event_id_text);
         conn.execute(
             "DELETE FROM event_search WHERE event_id = ?1",
             params![&event_id_text],
         )?;
     }
     if has_event_scriptgram {
+        account_single_text_bind(accounting.as_deref_mut(), &event_id_text);
         conn.execute(
             "DELETE FROM event_search_scriptgram WHERE event_id = ?1",
             params![&event_id_text],
         )?;
     }
     if has_event_lookup {
+        account_single_text_bind(accounting.as_deref_mut(), &event_id_text);
         conn.execute(
             "DELETE FROM event_search_lookup WHERE event_id = ?1",
             params![&event_id_text],
         )?;
     }
-    insert_event_search_projection_for_event_id(conn, event_id, event, capabilities)
+    insert_event_search_projection_for_event_id(conn, event_id, event, capabilities, accounting)
 }
 
 pub(crate) fn insert_event_search_projection_for_event_id(
@@ -665,6 +693,7 @@ pub(crate) fn insert_event_search_projection_for_event_id(
     event_id: Uuid,
     event: &Event,
     capabilities: EventSearchProjectionCapabilities,
+    mut accounting: Option<&mut usize>,
 ) -> Result<()> {
     let EventSearchProjectionCapabilities {
         event_search: has_event_search,
@@ -680,6 +709,13 @@ pub(crate) fn insert_event_search_projection_for_event_id(
     let role = projection.role.map(|role| role.as_str());
     let rank_bucket = projection.event_type.as_str();
     if has_event_search {
+        account_event_projection_binds(
+            accounting.as_deref_mut(),
+            &projection,
+            role,
+            &projection.preview,
+            rank_bucket,
+        );
         conn.prepare_cached(
             r#"
             INSERT INTO event_search
@@ -699,6 +735,13 @@ pub(crate) fn insert_event_search_projection_for_event_id(
     if has_event_scriptgram {
         let token_text = scriptgram_index_text(&projection.preview);
         if !token_text.is_empty() {
+            account_event_projection_binds(
+                accounting.as_deref_mut(),
+                &projection,
+                role,
+                &token_text,
+                rank_bucket,
+            );
             conn.prepare_cached(
                 r#"
                 INSERT INTO event_search_scriptgram
@@ -717,6 +760,13 @@ pub(crate) fn insert_event_search_projection_for_event_id(
         }
     }
     if has_event_lookup && semantic_lookup_event_parts(projection.event_type, role) {
+        account_event_projection_binds(
+            accounting,
+            &projection,
+            role,
+            &projection.preview,
+            rank_bucket,
+        );
         conn.prepare_cached(
             r#"
             INSERT INTO event_search_lookup
@@ -734,6 +784,35 @@ pub(crate) fn insert_event_search_projection_for_event_id(
         ])?;
     }
     Ok(())
+}
+
+fn account_single_text_bind(accounting: Option<&mut usize>, value: &str) {
+    let Some(accounting) = accounting else {
+        return;
+    };
+    let mut values = BoundEncoding::mutation();
+    values.text(value);
+    *accounting = accounting.saturating_add(values.finish());
+}
+
+fn account_event_projection_binds(
+    accounting: Option<&mut usize>,
+    projection: &PreparedEventProjection,
+    role: Option<&str>,
+    indexed_text: &str,
+    rank_bucket: &str,
+) {
+    let Some(accounting) = accounting else {
+        return;
+    };
+    let mut values = BoundEncoding::mutation();
+    values.text(&projection.event_id);
+    values.optional_text(projection.history_record_id.as_deref());
+    values.optional_text(projection.session_id.as_deref());
+    values.optional_text(role);
+    values.text(indexed_text);
+    values.text(rank_bucket);
+    *accounting = accounting.saturating_add(values.finish());
 }
 
 pub(crate) fn detect_event_search_projection_capabilities(

@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::entitlement::{base64url, decode_base64url, AUTHORIZATION_CHALLENGE_BYTES};
 use crate::error::{ErrorClass, ProtocolError};
@@ -11,22 +11,29 @@ use crate::message::{
     Capability, GraphState, HelloRequest, HelloResult, HelperEnvelope, HelperMessage, HostEnvelope,
     HostMessage, StatusResult,
 };
-use crate::query::QueryRequest;
-use crate::{QueryResult, PROTOCOL_FINGERPRINT, PROTOCOL_VERSION};
+use crate::query::{BlameRequest, BlameTarget, ResolvedBlameTarget};
+use crate::{
+    BeginOutputInventoryRequest, BlameResult, FinishOutputInventoryRequest, GitSnapshot,
+    ObserveOutputSourceRequest, OutputInventoryBegan, OutputInventoryFinished,
+    OutputPageMaterialized, OutputProgressRequest, OutputProgressResult, OutputSourceAvailability,
+    OutputSourceDisposition, OutputSourceIdentity, OutputSourceObserved, OutputSourceProgress,
+    ProOutputMaterializationPage, ResourceKind, ResourceRef, WorktreeStatus, PROTOCOL_FINGERPRINT,
+    PROTOCOL_VERSION,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FakeQueryFailure {
+pub enum FakeBlameFailure {
     SourceUnavailable,
     RepositoryUnavailable,
     StaleSnapshot,
 }
 
-impl FakeQueryFailure {
+impl FakeBlameFailure {
     const fn class(self) -> ErrorClass {
         match self {
             Self::SourceUnavailable => ErrorClass::MissingSource,
             Self::RepositoryUnavailable => ErrorClass::MissingRepository,
-            Self::StaleSnapshot => ErrorClass::StaleFact,
+            Self::StaleSnapshot => ErrorClass::StaleSnapshot,
         }
     }
 
@@ -34,7 +41,7 @@ impl FakeQueryFailure {
         match self {
             Self::SourceUnavailable => "canonical source is unavailable",
             Self::RepositoryUnavailable => "repository is unavailable",
-            Self::StaleSnapshot => "query snapshot is stale",
+            Self::StaleSnapshot => "blame snapshot is stale",
         }
     }
 }
@@ -49,7 +56,12 @@ pub struct FakeHelper {
     negotiated_capabilities: BTreeSet<Capability>,
     checkpoint: Option<JournalCheckpoint>,
     accepted_requests: HashMap<(u64, u64, u64), Vec<u8>>,
-    query_failure: Option<FakeQueryFailure>,
+    active_output_inventory: Option<u64>,
+    completed_output_inventory: u64,
+    output_observations: BTreeMap<OutputSourceIdentity, OutputSourceAvailability>,
+    output_progress: BTreeMap<OutputSourceIdentity, OutputSourceProgress>,
+    accepted_output_pages: BTreeMap<(OutputSourceIdentity, u64, String), Vec<u8>>,
+    blame_failure: Option<FakeBlameFailure>,
     graph_key_deletion_challenge: Option<([u8; GRAPH_KEY_DELETION_CHALLENGE_BYTES], String)>,
     graph_key_present: bool,
 }
@@ -70,20 +82,27 @@ impl FakeHelper {
                 Capability::GraphKeyDeletion,
                 Capability::Status,
                 Capability::JournalSync,
+                Capability::OutputMaterialization,
                 Capability::Query,
+                Capability::GitRead,
             ]),
             negotiated_capabilities: BTreeSet::new(),
             checkpoint: None,
             accepted_requests: HashMap::new(),
-            query_failure: None,
+            active_output_inventory: None,
+            completed_output_inventory: 0,
+            output_observations: BTreeMap::new(),
+            output_progress: BTreeMap::new(),
+            accepted_output_pages: BTreeMap::new(),
+            blame_failure: None,
             graph_key_deletion_challenge: None,
             graph_key_present: true,
         }
     }
 
     #[must_use]
-    pub const fn with_query_failure(mut self, failure: FakeQueryFailure) -> Self {
-        self.query_failure = Some(failure);
+    pub const fn with_blame_failure(mut self, failure: FakeBlameFailure) -> Self {
+        self.blame_failure = Some(failure);
         self
     }
 
@@ -131,8 +150,33 @@ impl FakeHelper {
             HostMessage::SyncJournal(request) if self.selected(Capability::JournalSync) => {
                 self.handle_journal_sync(request)
             }
-            HostMessage::Query(query) if self.selected(Capability::Query) => {
-                self.handle_query(query)
+            HostMessage::BeginOutputInventory(request)
+                if self.selected(Capability::OutputMaterialization) =>
+            {
+                self.handle_begin_output_inventory(request)
+            }
+            HostMessage::ObserveOutputSource(request)
+                if self.selected(Capability::OutputMaterialization) =>
+            {
+                self.handle_observe_output_source(request)
+            }
+            HostMessage::MaterializeOutputPage(page)
+                if self.selected(Capability::OutputMaterialization) =>
+            {
+                self.handle_materialize_output_page(page)
+            }
+            HostMessage::FinishOutputInventory(request)
+                if self.selected(Capability::OutputMaterialization) =>
+            {
+                self.handle_finish_output_inventory(request)
+            }
+            HostMessage::GetOutputProgress(request)
+                if self.selected(Capability::OutputMaterialization) =>
+            {
+                self.handle_output_progress(request)
+            }
+            HostMessage::Blame(request) if self.selected(Capability::Query) => {
+                self.handle_blame(request)
             }
             _ if !self.negotiated => HelperMessage::Error(ProtocolError::new(
                 ErrorClass::ProtocolMismatch,
@@ -254,9 +298,7 @@ impl FakeHelper {
             request.prior_checkpoint.position.sequence,
             committed.position.sequence,
         );
-        let mut durable_request = request.clone();
-        durable_request.result_contents.clear();
-        let encoded = match serde_json::to_vec(&durable_request) {
+        let encoded = match serde_json::to_vec(&request) {
             Ok(encoded) => encoded,
             Err(_) => {
                 return HelperMessage::Error(ProtocolError::new(
@@ -300,24 +342,273 @@ impl FakeHelper {
         })
     }
 
-    fn handle_query(&self, query: QueryRequest) -> HelperMessage {
-        if let Err(error) = query.validate() {
+    fn handle_begin_output_inventory(
+        &mut self,
+        request: BeginOutputInventoryRequest,
+    ) -> HelperMessage {
+        if let Err(error) = request.validate() {
             return HelperMessage::Error(error);
         }
-        if self.checkpoint.as_ref() != Some(&query.expected_snapshot.checkpoint) {
+        if self
+            .active_output_inventory
+            .is_some_and(|active| active != request.generation)
+            || request.generation < self.completed_output_inventory
+        {
             return HelperMessage::Error(ProtocolError::new(
-                ErrorClass::StaleFact,
-                "query checkpoint does not match durable graph state",
+                ErrorClass::Sequence,
+                "output inventory generation is not the active generation",
             ));
         }
-        if let Some(failure) = self.query_failure {
+        if self.active_output_inventory != Some(request.generation) {
+            self.output_observations.clear();
+        }
+        self.active_output_inventory = Some(request.generation);
+        HelperMessage::OutputInventoryBegan(OutputInventoryBegan {
+            generation: request.generation,
+            materializer_revision: "fake-materializer-v1".to_owned(),
+        })
+    }
+
+    fn handle_observe_output_source(
+        &mut self,
+        request: ObserveOutputSourceRequest,
+    ) -> HelperMessage {
+        if let Err(error) = request.validate() {
+            return HelperMessage::Error(error);
+        }
+        if self.active_output_inventory != Some(request.generation) {
+            return HelperMessage::Error(ProtocolError::new(
+                ErrorClass::Sequence,
+                "output source observation is outside its active inventory",
+            ));
+        }
+        self.output_observations
+            .insert(request.source.clone(), request.availability);
+        HelperMessage::OutputSourceObserved(OutputSourceObserved {
+            generation: request.generation,
+            source: request.source,
+            availability: request.availability,
+        })
+    }
+
+    fn handle_materialize_output_page(
+        &mut self,
+        page: ProOutputMaterializationPage,
+    ) -> HelperMessage {
+        if let Err(error) = page.validate() {
+            return HelperMessage::Error(error);
+        }
+        if self.active_output_inventory != Some(page.inventory_generation) {
+            return HelperMessage::Error(ProtocolError::new(
+                ErrorClass::Sequence,
+                "output page is outside its active inventory",
+            ));
+        }
+        let encoded = match serde_json::to_vec(&page) {
+            Ok(encoded) => encoded,
+            Err(_) => {
+                return HelperMessage::Error(ProtocolError::new(
+                    ErrorClass::Internal,
+                    "output page could not be encoded",
+                ));
+            }
+        };
+        let page_key = (
+            page.source.clone(),
+            page.source_epoch,
+            format!(
+                "{}:{}",
+                page.next_safe_cursor.version, page.next_safe_cursor.payload_base64
+            ),
+        );
+        if let Some(previous) = self.accepted_output_pages.get(&page_key) {
+            if previous != &encoded {
+                return HelperMessage::Error(ProtocolError::new(
+                    ErrorClass::Corrupt,
+                    "output cursor was reused with different page contents",
+                ));
+            }
+            return HelperMessage::OutputPageMaterialized(output_page_result(&page, true));
+        }
+        let prior_matches = match (&page.disposition, self.output_progress.get(&page.source)) {
+            (OutputSourceDisposition::NewSource, None) => true,
+            (OutputSourceDisposition::AppendOrResume, Some(progress)) => {
+                page.expected_prior_source_epoch == Some(progress.source_epoch)
+                    && page.expected_prior_cursor == progress.cursor
+            }
+            (OutputSourceDisposition::Rewrite, Some(progress)) => {
+                page.expected_prior_source_epoch == Some(progress.source_epoch)
+                    && page.expected_prior_cursor == progress.cursor
+                    && page.source_epoch > progress.source_epoch
+            }
+            _ => false,
+        };
+        if !prior_matches {
+            return HelperMessage::Error(ProtocolError::new(
+                ErrorClass::Sequence,
+                "output page compare-and-swap does not match private source progress",
+            ));
+        }
+        let availability = self
+            .output_observations
+            .get(&page.source)
+            .copied()
+            .unwrap_or(OutputSourceAvailability::Available);
+        self.output_progress.insert(
+            page.source.clone(),
+            OutputSourceProgress {
+                source: page.source.clone(),
+                source_epoch: page.source_epoch,
+                observed_revision: page.observed_revision.clone(),
+                cursor: Some(page.next_safe_cursor.clone()),
+                parser_revision: page.parser_revision.clone(),
+                materializer_revision: page.materializer_revision.clone(),
+                terminal: page.terminal,
+                availability,
+                last_seen_inventory: Some(page.inventory_generation),
+            },
+        );
+        self.accepted_output_pages.insert(page_key, encoded);
+        HelperMessage::OutputPageMaterialized(output_page_result(&page, false))
+    }
+
+    fn handle_finish_output_inventory(
+        &mut self,
+        request: FinishOutputInventoryRequest,
+    ) -> HelperMessage {
+        if let Err(error) = request.validate() {
+            return HelperMessage::Error(error);
+        }
+        if self.active_output_inventory != Some(request.generation) {
+            return HelperMessage::Error(ProtocolError::new(
+                ErrorClass::Sequence,
+                "output inventory finish does not match its active generation",
+            ));
+        }
+        let observed_sources = self.output_observations.len() as u32;
+        let unavailable_sources = self
+            .output_observations
+            .values()
+            .filter(|availability| **availability != OutputSourceAvailability::Available)
+            .count() as u32;
+        self.active_output_inventory = None;
+        self.completed_output_inventory = request.generation;
+        HelperMessage::OutputInventoryFinished(OutputInventoryFinished {
+            generation: request.generation,
+            observed_sources,
+            unavailable_sources,
+        })
+    }
+
+    fn handle_output_progress(&self, request: OutputProgressRequest) -> HelperMessage {
+        if let Err(error) = request.validate() {
+            return HelperMessage::Error(error);
+        }
+        HelperMessage::OutputProgress(OutputProgressResult {
+            inventory_generation: self
+                .active_output_inventory
+                .unwrap_or(self.completed_output_inventory),
+            inventory_complete: self.active_output_inventory.is_none(),
+            sources: request
+                .sources
+                .iter()
+                .filter_map(|source| self.output_progress.get(source).cloned())
+                .collect(),
+        })
+    }
+
+    fn handle_blame(&self, request: BlameRequest) -> HelperMessage {
+        if let Err(error) = request.validate() {
+            return HelperMessage::Error(error);
+        }
+        if self.checkpoint.as_ref() != Some(&request.expected_snapshot.checkpoint) {
+            return HelperMessage::Error(ProtocolError::new(
+                ErrorClass::StaleFact,
+                "blame checkpoint does not match durable graph state",
+            ));
+        }
+        if let Some(failure) = self.blame_failure {
             return HelperMessage::Error(ProtocolError::new(failure.class(), failure.message()));
         }
-        HelperMessage::Query(QueryResult {
-            records: Vec::new(),
-            next_cursor: None,
-            truncated: false,
-            stale: false,
+        let repository = |selector: Option<String>| ResourceRef {
+            id: selector
+                .clone()
+                .unwrap_or_else(|| "repository:fixture".to_owned()),
+            kind: ResourceKind::Repository,
+            display: selector.unwrap_or_else(|| "fixture/repository".to_owned()),
+        };
+        let (target, git_snapshot) = match request.target {
+            BlameTarget::File {
+                path,
+                repository: selector,
+                lines,
+            } => (
+                ResolvedBlameTarget::File {
+                    path,
+                    repository: repository(selector),
+                    requested_lines: lines,
+                },
+                Some(GitSnapshot {
+                    head_oid: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                    worktree_status: WorktreeStatus::Clean,
+                }),
+            ),
+            BlameTarget::Commit {
+                oid,
+                repository: selector,
+            } => (
+                ResolvedBlameTarget::Commit {
+                    commit: ResourceRef {
+                        id: format!("commit:{oid}"),
+                        kind: ResourceKind::Commit,
+                        display: oid,
+                    },
+                    repository: repository(selector),
+                },
+                None,
+            ),
+            BlameTarget::PullRequest {
+                selector: pull_request,
+                repository: selector,
+            } => (
+                ResolvedBlameTarget::PullRequest {
+                    selector: pull_request.clone(),
+                    pull_request: ResourceRef {
+                        id: format!("pull_request:{pull_request}"),
+                        kind: ResourceKind::PullRequest,
+                        display: pull_request,
+                    },
+                    repository: repository(selector),
+                },
+                None,
+            ),
+        };
+        HelperMessage::Blame(BlameResult {
+            target,
+            git_snapshot,
+            matches: Vec::new(),
+            evidence: Vec::new(),
+            next: None,
         })
+    }
+}
+
+fn output_page_result(
+    page: &ProOutputMaterializationPage,
+    replayed: bool,
+) -> OutputPageMaterialized {
+    OutputPageMaterialized {
+        inventory_generation: page.inventory_generation,
+        source: page.source.clone(),
+        source_epoch: page.source_epoch,
+        committed_cursor: page.next_safe_cursor.clone(),
+        accepted_outputs: if replayed {
+            0
+        } else {
+            page.observations.len() as u32
+        },
+        materialized_facts: 0,
+        materialized_evidence: 0,
+        replayed,
     }
 }

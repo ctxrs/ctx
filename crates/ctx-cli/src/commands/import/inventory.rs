@@ -62,6 +62,7 @@ pub(crate) fn inventory_import_sources(
                     failure_type: import_failure_type(&error),
                     rejected_summary: None,
                     system_error: None,
+                    runtime_facts: None,
                 });
                 continue;
             }

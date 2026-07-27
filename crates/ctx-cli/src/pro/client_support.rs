@@ -7,8 +7,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use ctx_history_core::database_path;
 use ctx_history_store::Store;
 use ctx_pro_host_protocol::{
-    JournalCheckpoint, JournalPosition, ProFilesystemLayout, QueryKind, QueryRequest,
-    QuerySnapshotExpectation, ResourceSelector, PROTOCOL_FINGERPRINT,
+    BlameRequest, BlameTarget, JournalCheckpoint, JournalPosition, ProFilesystemLayout,
+    QuerySnapshotExpectation, PROTOCOL_FINGERPRINT,
 };
 
 use crate::pro::verified_executable::VerifiedHelperExecutable;
@@ -25,13 +25,12 @@ pub(super) fn error_code(error: &anyhow::Error) -> String {
         .to_owned()
 }
 
-pub(super) fn current_query_request(
+pub(super) fn current_blame_request(
     data_root: &Path,
-    kind: QueryKind,
-    target: ResourceSelector,
+    target: BlameTarget,
     limit: u32,
     cursor: Option<String>,
-) -> Result<QueryRequest> {
+) -> Result<BlameRequest> {
     let db_path = database_path(data_root.to_path_buf());
     if !db_path.exists() {
         bail!(
@@ -51,8 +50,7 @@ pub(super) fn current_query_request(
     if snapshot.frozen_through.contract_fingerprint != PROTOCOL_FINGERPRINT {
         bail!("protocol_mismatch: canonical projection journal uses a different contract");
     }
-    Ok(QueryRequest {
-        kind,
+    Ok(BlameRequest {
         target,
         limit,
         cursor,

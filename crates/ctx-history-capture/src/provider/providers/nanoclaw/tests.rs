@@ -5,61 +5,18 @@ use std::{
 
 use chrono::{TimeZone, Utc};
 use ctx_history_core::CaptureProvider;
-use ctx_history_store::Store;
+use ctx_history_store::{decode_native_path_committed_cursor, Store};
 use rusqlite::Connection;
 use tempfile::TempDir;
 
 use super::*;
-use crate::captured_batch::sqlite_logical_rows::SqliteLogicalRowBatchProducer;
-use crate::captured_batch::{
-    CapturedBatch, CapturedRecordPayload, NativePosition, SourceObservation,
-    CAPTURE_BATCH_MAX_OVERSIZE_RECORD_BYTES, CAPTURE_BATCH_MAX_RECORDS,
+use crate::provider::importer::{provider_path_identity, provider_source_cursor_stream_for_path};
+use crate::{
+    CaptureWorkLimit, ImportProfile, ProviderImportOptions, ProviderImportWorkResult,
+    NANOCLAW_SOURCE_FORMAT,
 };
-use crate::provider::custom_history_jsonl::push_provider_import_failure;
-use crate::provider::importer::{
-    CapturedBatchProjector, ProviderProjectionOutput, ProviderProjectionResult,
-};
-use crate::provider::sqlite::open_provider_sqlite_readonly;
-use crate::provider::sqlite::{sqlite_schema_fingerprint, with_sqlite_read_snapshot};
-use crate::{NormalizedProviderImportOptions, ProviderNormalizationResult};
 
-use super::project::NanoClawProjectSnapshot;
-use super::source::NanoClawRowFetcher;
-
-#[path = "tests/import.rs"]
-mod import;
-#[path = "tests/position.rs"]
-mod position;
-#[path = "tests/project.rs"]
-mod project;
-#[path = "tests/projection.rs"]
-mod projection;
-#[path = "tests/source.rs"]
-mod source;
-
-pub(super) struct CollectingOutput {
-    pub(super) normalization: ProviderNormalizationResult,
-}
-
-impl ProviderProjectionOutput for CollectingOutput {
-    fn emit_normalization(
-        &mut self,
-        normalization: ProviderNormalizationResult,
-    ) -> ProviderProjectionResult<()> {
-        self.normalization.summary.merge(normalization.summary);
-        self.normalization.captures.extend(normalization.captures);
-        self.normalization
-            .files_touched
-            .extend(normalization.files_touched);
-        Ok(())
-    }
-
-    fn reject_record(&mut self, line_number: usize, reason: String) {
-        push_provider_import_failure(&mut self.normalization.summary, line_number, reason);
-    }
-}
-
-pub(super) fn context(root: &Path) -> ProviderAdapterContext {
+fn context(root: &Path) -> ProviderAdapterContext {
     ProviderAdapterContext {
         machine_id: "machine-nanoclaw-test".to_owned(),
         source_path: Some(root.to_path_buf()),
@@ -71,7 +28,15 @@ pub(super) fn context(root: &Path) -> ProviderAdapterContext {
     }
 }
 
-pub(super) fn create_project(temp: &TempDir, name: &str, sessions: usize) -> PathBuf {
+fn import_options(work_limit: CaptureWorkLimit) -> ProviderImportOptions {
+    ProviderImportOptions {
+        capture_work_limit: work_limit,
+        import_profile: ImportProfile::CoreOnly,
+        ..ProviderImportOptions::default()
+    }
+}
+
+fn create_project(temp: &TempDir, name: &str, sessions: usize) -> PathBuf {
     let root = temp.path().join(name);
     let data = root.join("data");
     fs::create_dir_all(data.join("v2-sessions")).unwrap();
@@ -118,7 +83,7 @@ pub(super) fn create_project(temp: &TempDir, name: &str, sessions: usize) -> Pat
     root
 }
 
-pub(super) fn create_message_stores(root: &Path, session_id: &str) -> (PathBuf, PathBuf) {
+fn create_message_stores(root: &Path, session_id: &str) -> (PathBuf, PathBuf) {
     let session_dir = root
         .join("data")
         .join("v2-sessions")
@@ -150,7 +115,7 @@ pub(super) fn create_message_stores(root: &Path, session_id: &str) -> (PathBuf, 
     (inbound_path, outbound_path)
 }
 
-pub(super) fn insert_inbound(path: &Path, id: &str, seq: i64, timestamp: i64, content: &str) {
+fn insert_inbound(path: &Path, id: &str, seq: i64, timestamp: i64, content: &str) {
     Connection::open(path)
         .unwrap()
         .execute(
@@ -163,7 +128,7 @@ pub(super) fn insert_inbound(path: &Path, id: &str, seq: i64, timestamp: i64, co
         .unwrap();
 }
 
-pub(super) fn insert_outbound(path: &Path, id: &str, seq: i64, timestamp: i64, content: &str) {
+fn insert_outbound(path: &Path, id: &str, seq: i64, timestamp: i64, content: &str) {
     Connection::open(path)
         .unwrap()
         .execute(
@@ -175,43 +140,166 @@ pub(super) fn insert_outbound(path: &Path, id: &str, seq: i64, timestamp: i64, c
         .unwrap();
 }
 
-pub(super) fn capture_batches(root: &Path, start: NativePosition) -> Vec<CapturedBatch> {
-    let central_path = root.join("data").join("v2.db");
-    let snapshot = NanoClawProjectSnapshot::read(root, &central_path).unwrap();
-    let conn = open_provider_sqlite_readonly(&central_path).unwrap();
-    let user_version: i64 = conn
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .unwrap();
-    let schema_fingerprint = sqlite_schema_fingerprint(&conn).unwrap();
-    let source = SourceObservation::new(
+fn cursor_stream(root: &Path) -> String {
+    let canonical_root = fs::canonicalize(root).unwrap();
+    let identity = provider_path_identity(&canonical_root).unwrap();
+    provider_source_cursor_stream_for_path(
         CaptureProvider::NanoClaw,
         NANOCLAW_SOURCE_FORMAT,
-        "nanoclaw-project:test",
-        snapshot.source_revision(user_version, &schema_fingerprint),
-        "provider:nanoclaw:test",
-        NANOCLAW_CAPTURE_REVISION,
-        NANOCLAW_POLICY_REVISION,
-        None,
+        &identity,
     )
-    .unwrap();
-    let mut fetcher = NanoClawRowFetcher::new(&conn, &snapshot).unwrap();
-    let mut producer =
-        SqliteLogicalRowBatchProducer::new(source, start, move |position| fetcher.fetch(position));
-    let mut batches = Vec::new();
-    while let Some(batch) = with_sqlite_read_snapshot(&conn, || {
-        producer.next_batch().map_err(nanoclaw_sqlite_batch_error)
-    })
-    .unwrap()
-    {
-        batches.push(batch);
-    }
-    batches
 }
 
-pub(super) fn record_kinds(batches: &[CapturedBatch]) -> Vec<&str> {
-    batches
+fn nanoclaw_event_count(store: &Store) -> usize {
+    let archive = store.export_archive().unwrap();
+    let source_ids = archive
+        .capture_sources
         .iter()
-        .flat_map(|batch| batch.records())
-        .map(|record| record.record_kind().as_str())
-        .collect()
+        .filter(|source| source.descriptor.provider == CaptureProvider::NanoClaw)
+        .map(|source| source.id)
+        .collect::<std::collections::BTreeSet<_>>();
+    archive
+        .events
+        .iter()
+        .filter(|event| {
+            event
+                .capture_source_id
+                .is_some_and(|source_id| source_ids.contains(&source_id))
+        })
+        .count()
+}
+
+#[test]
+fn nativepath_import_is_cursor_committed_and_idempotent() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = create_project(&temp, "native", 1);
+    let (inbound, outbound) = create_message_stores(&root, "session-0000");
+    insert_inbound(&inbound, "in-1", 1, 1_000, "native-inbound-marker");
+    insert_outbound(&outbound, "out-1", 2, 2_000, "native-outbound-marker");
+    let stream = cursor_stream(&root);
+    let mut store = Store::open(temp.path().join("store.sqlite")).unwrap();
+
+    let first = import_nanoclaw_nativepath(
+        &root,
+        &mut store,
+        context(&root),
+        import_options(CaptureWorkLimit::Drain),
+    )
+    .unwrap();
+    assert_eq!(first.failed, 0, "{:?}", first.failures);
+    assert_eq!(nanoclaw_event_count(&store), 2);
+    let stored = store
+        .get_sync_cursor(None, "machine-nanoclaw-test", &stream)
+        .unwrap()
+        .unwrap();
+    let committed = decode_native_path_committed_cursor(&stored.cursor).unwrap();
+    assert!(committed
+        .provider_cursor()
+        .starts_with("nanoclaw-nativepath-v1:"));
+    assert!(committed.journal_checkpoint().is_some());
+
+    let replay = import_nanoclaw_nativepath(
+        &root,
+        &mut store,
+        context(&root),
+        import_options(CaptureWorkLimit::Drain),
+    )
+    .unwrap();
+    assert_eq!(replay.work_result(), ProviderImportWorkResult::NoOp);
+    assert_eq!(nanoclaw_event_count(&store), 2);
+}
+
+#[test]
+fn nativepath_append_resumes_and_one_group_is_bounded() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = create_project(&temp, "append", 1);
+    let (inbound, _) = create_message_stores(&root, "session-0000");
+    for index in 0..150 {
+        insert_inbound(
+            &inbound,
+            &format!("in-{index:03}"),
+            index,
+            1_000 + index,
+            &format!("bounded-marker-{index:03}"),
+        );
+    }
+    let mut store = Store::open(temp.path().join("bounded.sqlite")).unwrap();
+    let first = import_nanoclaw_nativepath(
+        &root,
+        &mut store,
+        context(&root),
+        import_options(CaptureWorkLimit::OneSafeGroup),
+    )
+    .unwrap();
+    assert!(first.work_remaining);
+    assert!(nanoclaw_event_count(&store) < 150);
+
+    let drained = import_nanoclaw_nativepath(
+        &root,
+        &mut store,
+        context(&root),
+        import_options(CaptureWorkLimit::Drain),
+    )
+    .unwrap();
+    assert!(!drained.work_remaining);
+    assert_eq!(nanoclaw_event_count(&store), 150);
+
+    insert_inbound(&inbound, "in-tail", 151, 2_000, "append-tail-marker");
+    let appended = import_nanoclaw_nativepath(
+        &root,
+        &mut store,
+        context(&root),
+        import_options(CaptureWorkLimit::Drain),
+    )
+    .unwrap();
+    assert_eq!(appended.failed, 0, "{:?}", appended.failures);
+    assert_eq!(nanoclaw_event_count(&store), 151);
+}
+
+#[test]
+fn nativepath_source_disappearance_retires_exact_route() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = create_project(&temp, "retire", 1);
+    let (inbound, _) = create_message_stores(&root, "session-0000");
+    insert_inbound(&inbound, "in-1", 1, 1_000, "retirement-marker");
+    let mut store = Store::open(temp.path().join("retire.sqlite")).unwrap();
+    import_nanoclaw_nativepath(
+        &root,
+        &mut store,
+        context(&root),
+        import_options(CaptureWorkLimit::Drain),
+    )
+    .unwrap();
+    let held = temp.path().join("retire-held");
+    fs::rename(&root, &held).unwrap();
+
+    let retired = import_nanoclaw_nativepath(
+        &root,
+        &mut store,
+        context(&root),
+        import_options(CaptureWorkLimit::Drain),
+    )
+    .unwrap();
+    assert_eq!(retired.work_result(), ProviderImportWorkResult::Changed);
+    assert_eq!(nanoclaw_event_count(&store), 1);
+
+    let repeated = import_nanoclaw_nativepath(
+        &root,
+        &mut store,
+        context(&root),
+        import_options(CaptureWorkLimit::Drain),
+    )
+    .unwrap();
+    assert_eq!(repeated.work_result(), ProviderImportWorkResult::NoOp);
+
+    fs::rename(&held, &root).unwrap();
+    let reactivated = import_nanoclaw_nativepath(
+        &root,
+        &mut store,
+        context(&root),
+        import_options(CaptureWorkLimit::Drain),
+    )
+    .unwrap();
+    assert_eq!(reactivated.work_result(), ProviderImportWorkResult::Changed);
+    assert_eq!(nanoclaw_event_count(&store), 1);
 }

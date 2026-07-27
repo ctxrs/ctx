@@ -343,7 +343,6 @@ pub(crate) struct SourcesTelemetry {
 pub(crate) enum TargetKind {
     Session,
     Event,
-    Resource,
 }
 
 impl TargetKind {
@@ -351,30 +350,6 @@ impl TargetKind {
         match self {
             Self::Session => "session",
             Self::Event => "event",
-            Self::Resource => "resource",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ResourceKind {
-    Commit,
-    PullRequest,
-    Issue,
-    File,
-    Branch,
-    Repository,
-}
-
-impl ResourceKind {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Commit => "commit",
-            Self::PullRequest => "pull_request",
-            Self::Issue => "issue",
-            Self::File => "file",
-            Self::Branch => "branch",
-            Self::Repository => "repository",
         }
     }
 }
@@ -454,7 +429,6 @@ impl TranscriptModeKind {
 #[derive(Debug)]
 pub(crate) struct ShowTelemetry {
     pub(crate) target_kind: TargetKind,
-    pub(crate) resource_kind: Option<ResourceKind>,
     pub(crate) transcript_mode: Option<TranscriptModeKind>,
     pub(crate) output_format: RenderFormat,
     pub(crate) writes_out_file: bool,
@@ -466,7 +440,6 @@ pub(crate) struct ShowTelemetry {
 #[derive(Debug)]
 pub(crate) struct LocateTelemetry {
     pub(crate) target_kind: TargetKind,
-    pub(crate) resource_kind: Option<ResourceKind>,
     pub(crate) output_format: RenderFormat,
     pub(crate) provider_lookup: bool,
 }

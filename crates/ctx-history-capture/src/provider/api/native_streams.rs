@@ -1,29 +1,27 @@
 use std::path::Path;
 
-use ctx_history_core::CaptureProvider;
 use ctx_history_store::Store;
 
-use crate::provider::providers::kimi::import_kimi_wire_jsonl_tree_batched;
-use crate::provider::providers::lingma::import_lingma_sqlite_batched;
-use crate::provider::providers::mistral_vibe::import_mistral_vibe_sessions_batched;
-use crate::provider::providers::mux::import_mux_sessions_batched;
+use crate::provider::providers::kimi::import_kimi_nativepath_tree;
+use crate::provider::providers::lingma::import_lingma_nativepath;
+use crate::provider::providers::mistral_vibe::import_mistral_vibe_nativepath;
+use crate::provider::providers::mux::import_mux_native_path;
 use crate::provider::providers::native_jsonl::{
-    import_bounded_native_jsonl_tree, NativeJsonlTreeImport,
+    import_antigravity_nativepath_tree, import_copilot_nativepath_tree,
+    import_cursor_nativepath_tree, import_factory_ai_droid_nativepath_tree,
+    import_gemini_nativepath_tree, import_qoder_nativepath_tree, import_qwen_code_nativepath_tree,
+    import_tabnine_nativepath_tree, import_windsurf_nativepath_tree, NativePathJsonlTreeImport,
 };
-use crate::provider::providers::rovodev::import_rovodev_sessions_batched;
-use crate::provider::providers::warp::import_warp_sqlite_batched;
-use crate::provider::providers::zed::import_zed_threads_sqlite_batched;
+use crate::provider::providers::rovodev::import_rovodev_native_path;
+use crate::provider::providers::warp::import_warp_nativepath;
+use crate::provider::providers::zed::import_zed_nativepath;
 use crate::{
     AntigravityCliImportOptions, CopilotCliImportOptions, CursorNativeImportOptions,
     FactoryAiDroidImportOptions, GeminiCliImportOptions, KimiCodeCliImportOptions,
-    LingmaSqliteImportOptions, MistralVibeImportOptions, MuxImportOptions,
-    NormalizedProviderImportOptions, ProviderAdapterContext, ProviderImportSummary,
-    QoderImportOptions, QwenCodeImportOptions, Result, RovoDevImportOptions,
-    TabnineCliImportOptions, WarpSqliteImportOptions, WindsurfCascadeHookImportOptions,
-    ZedThreadsSqliteImportOptions, ANTIGRAVITY_CLI_SOURCE_FORMAT, COPILOT_CLI_SOURCE_FORMAT,
-    CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT, FACTORY_DROID_SOURCE_FORMAT, GEMINI_CLI_SOURCE_FORMAT,
-    QODER_SOURCE_FORMAT, QWEN_CODE_SOURCE_FORMAT, TABNINE_CLI_SOURCE_FORMAT,
-    WINDSURF_CASCADE_HOOK_TRANSCRIPT_SOURCE_FORMAT,
+    LingmaSqliteImportOptions, MistralVibeImportOptions, MuxImportOptions, ProviderAdapterContext,
+    ProviderImportOptions, ProviderImportSummary, QoderImportOptions, QwenCodeImportOptions,
+    Result, RovoDevImportOptions, TabnineCliImportOptions, WarpSqliteImportOptions,
+    WindsurfCascadeHookImportOptions, ZedThreadsSqliteImportOptions,
 };
 
 pub fn import_antigravity_cli_history(
@@ -31,9 +29,9 @@ pub fn import_antigravity_cli_history(
     store: &mut Store,
     options: AntigravityCliImportOptions,
 ) -> Result<ProviderImportSummary> {
-    import_bounded_native_jsonl_tree(
+    import_antigravity_nativepath_tree(
         store,
-        NativeJsonlTreeImport {
+        NativePathJsonlTreeImport {
             path: path.as_ref(),
             machine_id: options.machine_id,
             source_path: options.source_path,
@@ -42,9 +40,8 @@ pub fn import_antigravity_cli_history(
             history_record_id: options.history_record_id,
             capture_work_limit: options.capture_work_limit,
             inventory_observation_token: options.inventory_observation_token,
+            import_profile: options.import_profile,
         },
-        CaptureProvider::Antigravity,
-        ANTIGRAVITY_CLI_SOURCE_FORMAT,
     )
 }
 
@@ -53,9 +50,9 @@ pub fn import_gemini_cli_history(
     store: &mut Store,
     options: GeminiCliImportOptions,
 ) -> Result<ProviderImportSummary> {
-    import_bounded_native_jsonl_tree(
+    import_gemini_nativepath_tree(
         store,
-        NativeJsonlTreeImport {
+        NativePathJsonlTreeImport {
             path: path.as_ref(),
             machine_id: options.machine_id,
             source_path: options.source_path,
@@ -64,9 +61,8 @@ pub fn import_gemini_cli_history(
             history_record_id: options.history_record_id,
             capture_work_limit: options.capture_work_limit,
             inventory_observation_token: options.inventory_observation_token,
+            import_profile: options.import_profile,
         },
-        CaptureProvider::Gemini,
-        GEMINI_CLI_SOURCE_FORMAT,
     )
 }
 
@@ -75,9 +71,9 @@ pub fn import_tabnine_cli_history(
     store: &mut Store,
     options: TabnineCliImportOptions,
 ) -> Result<ProviderImportSummary> {
-    import_bounded_native_jsonl_tree(
+    import_tabnine_nativepath_tree(
         store,
-        NativeJsonlTreeImport {
+        NativePathJsonlTreeImport {
             path: path.as_ref(),
             machine_id: options.machine_id,
             source_path: options.source_path,
@@ -86,9 +82,8 @@ pub fn import_tabnine_cli_history(
             history_record_id: options.history_record_id,
             capture_work_limit: options.capture_work_limit,
             inventory_observation_token: options.inventory_observation_token,
+            import_profile: options.import_profile,
         },
-        CaptureProvider::Tabnine,
-        TABNINE_CLI_SOURCE_FORMAT,
     )
 }
 
@@ -97,9 +92,9 @@ pub fn import_cursor_native_history(
     store: &mut Store,
     options: CursorNativeImportOptions,
 ) -> Result<ProviderImportSummary> {
-    import_bounded_native_jsonl_tree(
+    import_cursor_nativepath_tree(
         store,
-        NativeJsonlTreeImport {
+        NativePathJsonlTreeImport {
             path: path.as_ref(),
             machine_id: options.machine_id,
             source_path: options.source_path,
@@ -108,9 +103,8 @@ pub fn import_cursor_native_history(
             history_record_id: options.history_record_id,
             capture_work_limit: options.capture_work_limit,
             inventory_observation_token: options.inventory_observation_token,
+            import_profile: options.import_profile,
         },
-        CaptureProvider::Cursor,
-        CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
     )
 }
 
@@ -119,9 +113,9 @@ pub fn import_windsurf_cascade_hook_transcripts(
     store: &mut Store,
     options: WindsurfCascadeHookImportOptions,
 ) -> Result<ProviderImportSummary> {
-    import_bounded_native_jsonl_tree(
+    import_windsurf_nativepath_tree(
         store,
-        NativeJsonlTreeImport {
+        NativePathJsonlTreeImport {
             path: path.as_ref(),
             machine_id: options.machine_id,
             source_path: options.source_path,
@@ -130,9 +124,8 @@ pub fn import_windsurf_cascade_hook_transcripts(
             history_record_id: options.history_record_id,
             capture_work_limit: options.capture_work_limit,
             inventory_observation_token: options.inventory_observation_token,
+            import_profile: options.import_profile,
         },
-        CaptureProvider::Windsurf,
-        WINDSURF_CASCADE_HOOK_TRANSCRIPT_SOURCE_FORMAT,
     )
 }
 
@@ -146,7 +139,7 @@ pub fn import_warp_sqlite(
         .source_path
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
-    import_warp_sqlite_batched(
+    import_warp_nativepath(
         path,
         store,
         ProviderAdapterContext {
@@ -155,13 +148,11 @@ pub fn import_warp_sqlite(
             source_root: None,
             imported_at: options.imported_at,
         },
-        NormalizedProviderImportOptions {
+        ProviderImportOptions {
             history_record_id: options.history_record_id,
-            persist_cursors: true,
-            wrap_transaction: true,
-            fast_event_inserts: false,
             capture_work_limit: options.capture_work_limit,
             inventory_observation_token: options.inventory_observation_token.clone(),
+            import_profile: options.import_profile.clone(),
         },
     )
 }
@@ -171,9 +162,9 @@ pub fn import_qoder_history(
     store: &mut Store,
     options: QoderImportOptions,
 ) -> Result<ProviderImportSummary> {
-    import_bounded_native_jsonl_tree(
+    import_qoder_nativepath_tree(
         store,
-        NativeJsonlTreeImport {
+        NativePathJsonlTreeImport {
             path: path.as_ref(),
             machine_id: options.machine_id,
             source_path: options.source_path,
@@ -182,9 +173,8 @@ pub fn import_qoder_history(
             history_record_id: options.history_record_id,
             capture_work_limit: options.capture_work_limit,
             inventory_observation_token: options.inventory_observation_token,
+            import_profile: options.import_profile,
         },
-        CaptureProvider::Qoder,
-        QODER_SOURCE_FORMAT,
     )
 }
 
@@ -198,7 +188,7 @@ pub fn import_zed_threads_sqlite(
         .source_path
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
-    import_zed_threads_sqlite_batched(
+    import_zed_nativepath(
         path,
         store,
         ProviderAdapterContext {
@@ -207,13 +197,11 @@ pub fn import_zed_threads_sqlite(
             source_root: None,
             imported_at: options.imported_at,
         },
-        NormalizedProviderImportOptions {
+        ProviderImportOptions {
             history_record_id: options.history_record_id,
-            persist_cursors: true,
-            wrap_transaction: true,
-            fast_event_inserts: true,
             capture_work_limit: options.capture_work_limit,
             inventory_observation_token: options.inventory_observation_token.clone(),
+            import_profile: options.import_profile.clone(),
         },
     )
 }
@@ -228,7 +216,7 @@ pub fn import_lingma_sqlite(
         .source_path
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
-    import_lingma_sqlite_batched(
+    import_lingma_nativepath(
         path,
         store,
         ProviderAdapterContext {
@@ -237,13 +225,11 @@ pub fn import_lingma_sqlite(
             source_root: None,
             imported_at: options.imported_at,
         },
-        NormalizedProviderImportOptions {
+        ProviderImportOptions {
             history_record_id: options.history_record_id,
-            persist_cursors: true,
-            wrap_transaction: true,
-            fast_event_inserts: true,
             capture_work_limit: options.capture_work_limit,
             inventory_observation_token: options.inventory_observation_token.clone(),
+            import_profile: options.import_profile.clone(),
         },
     )
 }
@@ -253,9 +239,9 @@ pub fn import_factory_ai_droid_sessions(
     store: &mut Store,
     options: FactoryAiDroidImportOptions,
 ) -> Result<ProviderImportSummary> {
-    import_bounded_native_jsonl_tree(
+    import_factory_ai_droid_nativepath_tree(
         store,
-        NativeJsonlTreeImport {
+        NativePathJsonlTreeImport {
             path: path.as_ref(),
             machine_id: options.machine_id,
             source_path: options.source_path,
@@ -264,9 +250,8 @@ pub fn import_factory_ai_droid_sessions(
             history_record_id: options.history_record_id,
             capture_work_limit: options.capture_work_limit,
             inventory_observation_token: options.inventory_observation_token,
+            import_profile: options.import_profile,
         },
-        CaptureProvider::FactoryAiDroid,
-        FACTORY_DROID_SOURCE_FORMAT,
     )
 }
 
@@ -275,9 +260,9 @@ pub fn import_copilot_cli_session_events(
     store: &mut Store,
     options: CopilotCliImportOptions,
 ) -> Result<ProviderImportSummary> {
-    import_bounded_native_jsonl_tree(
+    import_copilot_nativepath_tree(
         store,
-        NativeJsonlTreeImport {
+        NativePathJsonlTreeImport {
             path: path.as_ref(),
             machine_id: options.machine_id,
             source_path: options.source_path,
@@ -286,9 +271,8 @@ pub fn import_copilot_cli_session_events(
             history_record_id: options.history_record_id,
             capture_work_limit: options.capture_work_limit,
             inventory_observation_token: options.inventory_observation_token,
+            import_profile: options.import_profile,
         },
-        CaptureProvider::CopilotCli,
-        COPILOT_CLI_SOURCE_FORMAT,
     )
 }
 
@@ -297,9 +281,9 @@ pub fn import_qwen_code_history(
     store: &mut Store,
     options: QwenCodeImportOptions,
 ) -> Result<ProviderImportSummary> {
-    import_bounded_native_jsonl_tree(
+    import_qwen_code_nativepath_tree(
         store,
-        NativeJsonlTreeImport {
+        NativePathJsonlTreeImport {
             path: path.as_ref(),
             machine_id: options.machine_id,
             source_path: options.source_path,
@@ -308,9 +292,8 @@ pub fn import_qwen_code_history(
             history_record_id: options.history_record_id,
             capture_work_limit: options.capture_work_limit,
             inventory_observation_token: options.inventory_observation_token,
+            import_profile: options.import_profile,
         },
-        CaptureProvider::QwenCode,
-        QWEN_CODE_SOURCE_FORMAT,
     )
 }
 
@@ -324,7 +307,7 @@ pub fn import_kimi_code_cli_history(
         .source_path
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
-    import_kimi_wire_jsonl_tree_batched(
+    import_kimi_nativepath_tree(
         path,
         store,
         ProviderAdapterContext {
@@ -333,13 +316,11 @@ pub fn import_kimi_code_cli_history(
             source_root: None,
             imported_at: options.imported_at,
         },
-        NormalizedProviderImportOptions {
+        ProviderImportOptions {
             history_record_id: options.history_record_id,
-            persist_cursors: true,
-            wrap_transaction: true,
-            fast_event_inserts: true,
             capture_work_limit: options.capture_work_limit,
             inventory_observation_token: options.inventory_observation_token.clone(),
+            import_profile: options.import_profile.clone(),
         },
     )
 }
@@ -354,7 +335,7 @@ pub fn import_rovodev_history(
         .source_path
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
-    import_rovodev_sessions_batched(
+    import_rovodev_native_path(
         path,
         store,
         ProviderAdapterContext {
@@ -363,13 +344,11 @@ pub fn import_rovodev_history(
             source_root: None,
             imported_at: options.imported_at,
         },
-        NormalizedProviderImportOptions {
+        ProviderImportOptions {
             history_record_id: options.history_record_id,
-            persist_cursors: true,
-            wrap_transaction: true,
-            fast_event_inserts: true,
             capture_work_limit: options.capture_work_limit,
             inventory_observation_token: options.inventory_observation_token.clone(),
+            import_profile: options.import_profile.clone(),
         },
     )
 }
@@ -384,7 +363,7 @@ pub fn import_mistral_vibe_history(
         .source_path
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
-    import_mistral_vibe_sessions_batched(
+    import_mistral_vibe_nativepath(
         path,
         store,
         ProviderAdapterContext {
@@ -393,13 +372,11 @@ pub fn import_mistral_vibe_history(
             source_root: None,
             imported_at: options.imported_at,
         },
-        NormalizedProviderImportOptions {
+        ProviderImportOptions {
             history_record_id: options.history_record_id,
-            persist_cursors: true,
-            wrap_transaction: true,
-            fast_event_inserts: true,
             capture_work_limit: options.capture_work_limit,
             inventory_observation_token: options.inventory_observation_token.clone(),
+            import_profile: options.import_profile.clone(),
         },
     )
 }
@@ -414,7 +391,7 @@ pub fn import_mux_history(
         .source_path
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
-    import_mux_sessions_batched(
+    import_mux_native_path(
         path,
         store,
         ProviderAdapterContext {
@@ -423,13 +400,11 @@ pub fn import_mux_history(
             source_root: None,
             imported_at: options.imported_at,
         },
-        NormalizedProviderImportOptions {
+        ProviderImportOptions {
             history_record_id: options.history_record_id,
-            persist_cursors: true,
-            wrap_transaction: true,
-            fast_event_inserts: true,
             capture_work_limit: options.capture_work_limit,
             inventory_observation_token: options.inventory_observation_token.clone(),
+            import_profile: options.import_profile.clone(),
         },
     )
 }

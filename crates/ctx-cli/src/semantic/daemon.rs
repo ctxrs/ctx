@@ -22,10 +22,16 @@ use crate::{
 };
 
 use super::{
+    daemon_autostart::{
+        current_process_owns_daemon_upgrade_handoff, daemon_upgrade_handoff_blocks_current_process,
+        resume_completed_installation_daemons, InstallationDaemonLease,
+    },
     daemon_history::{history_retry_due, restore_daemon_history_runtime_state},
     daemon_retry::DaemonRetryBackoff,
     daemon_scheduler::{daemon_run_start_mode, run_daemon_once_with_activity},
-    daemon_worker::{semantic_worker_report_for_daemon, write_daemon_lifecycle_status},
+    daemon_worker::{
+        semantic_worker_report_for_daemon, write_daemon_lifecycle_status_with_runtime,
+    },
     health_search::semantic_env_flag,
     model_runtime::SharedSemanticRuntime,
     paths_status::{
@@ -35,7 +41,7 @@ use super::{
     },
     query_service::{
         daemon_can_begin_idle_shutdown, observe_daemon_query_activity,
-        semantic_query_service_supported, start_daemon_query_service,
+        semantic_query_service_supported, start_daemon_query_service, DaemonQueryService,
     },
     runtime_limits::{
         DAEMON_BACKGROUND_CHILD_ENV, DAEMON_IDLE_EXIT_SECONDS_DEFAULT,
@@ -307,13 +313,140 @@ fn reload_daemon_analytics_config(data_root: &Path) -> Option<AppConfig> {
 #[derive(Default)]
 pub(super) struct DaemonRuntime {
     pub(super) semantic_runtime: SharedSemanticRuntime,
+    pub(super) semantic_reconciliation_sweep:
+        super::daemon_worker::SemanticReconciliationSweepState,
     pub(super) semantic_bootstrap_passes_since_refresh: usize,
     pub(super) history_source_cursor: usize,
     pub(super) history_followup_passes_remaining: usize,
     pub(super) history_retry_drain_passes_remaining: usize,
     pub(super) history_retry: DaemonRetryBackoff,
     pub(super) semantic_retry: DaemonRetryBackoff,
+    pub(super) semantic_blocked_job: Option<Value>,
     pub(super) config: AppConfig,
+}
+
+#[derive(Debug, Clone)]
+struct DaemonConfigReloadState {
+    status: &'static str,
+    last_attempt_at_ms: i64,
+    last_applied_at_ms: Option<i64>,
+    requested_daemon_enabled: bool,
+    requested_semantic_enabled: bool,
+    applied_daemon_enabled: Option<bool>,
+    applied_semantic_enabled: Option<bool>,
+    last_error: Option<String>,
+}
+
+impl DaemonConfigReloadState {
+    fn pending(config: &AppConfig) -> Self {
+        Self {
+            status: "pending",
+            last_attempt_at_ms: utc_now().timestamp_millis(),
+            last_applied_at_ms: None,
+            requested_daemon_enabled: config.daemon.enabled,
+            requested_semantic_enabled: config.semantic_search_enabled(),
+            applied_daemon_enabled: None,
+            applied_semantic_enabled: None,
+            last_error: None,
+        }
+    }
+
+    fn begin_attempt(&mut self, config: &AppConfig) {
+        self.last_attempt_at_ms = utc_now().timestamp_millis();
+        self.requested_daemon_enabled = config.daemon.enabled;
+        self.requested_semantic_enabled = config.semantic_search_enabled();
+        self.last_error = None;
+    }
+
+    fn applied(&mut self) {
+        self.status = "applied";
+        self.last_applied_at_ms = Some(self.last_attempt_at_ms);
+        self.applied_daemon_enabled = Some(self.requested_daemon_enabled);
+        self.applied_semantic_enabled = Some(self.requested_semantic_enabled);
+        self.last_error = None;
+    }
+
+    fn load_failed(&mut self, error: anyhow::Error) {
+        self.status = "failed";
+        self.last_attempt_at_ms = utc_now().timestamp_millis();
+        self.last_error = Some(format!("{error:#}"));
+    }
+
+    fn activation_failed(&mut self, error: anyhow::Error) {
+        self.status = "activation_failed";
+        self.applied_daemon_enabled = Some(self.requested_daemon_enabled);
+        self.last_error = Some(format!("{error:#}"));
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "status": self.status,
+            "last_attempt_at_ms": self.last_attempt_at_ms,
+            "last_applied_at_ms": self.last_applied_at_ms,
+            "requested": {
+                "daemon_enabled": self.requested_daemon_enabled,
+                "semantic_enabled": self.requested_semantic_enabled,
+            },
+            "applied": {
+                "daemon_enabled": self.applied_daemon_enabled,
+                "semantic_enabled": self.applied_semantic_enabled,
+            },
+            "last_error": self.last_error,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DaemonConfigReloadOutcome {
+    Continue,
+    StopDisabled,
+}
+
+fn reload_daemon_runtime_config(
+    data_root: &Path,
+    args: &DaemonRunArgs,
+    runtime: &mut DaemonRuntime,
+    query_service: &mut Option<DaemonQueryService>,
+    reload: &mut DaemonConfigReloadState,
+) -> DaemonConfigReloadOutcome {
+    let config = match AppConfig::load(data_root) {
+        Ok(config) => config,
+        Err(error) => {
+            reload.load_failed(error);
+            return DaemonConfigReloadOutcome::Continue;
+        }
+    };
+    reload.begin_attempt(&config);
+    runtime.config = config;
+
+    if !runtime.config.daemon.enabled && !args.force {
+        drop(query_service.take());
+        let _ = runtime.semantic_runtime.release_if_idle();
+        reload.applied();
+        return DaemonConfigReloadOutcome::StopDisabled;
+    }
+
+    let semantic_runtime_requested =
+        runtime.config.semantic_search_enabled() && semantic_query_service_supported();
+    if semantic_runtime_requested && query_service.is_none() {
+        match start_daemon_query_service(data_root, runtime.semantic_runtime.clone()) {
+            Ok(service) => {
+                *query_service = Some(service);
+                // The query service thread keeps normal interactive priority.
+                lower_semantic_worker_priority();
+            }
+            Err(error) => {
+                reload.activation_failed(error);
+                return DaemonConfigReloadOutcome::Continue;
+            }
+        }
+    } else if !semantic_runtime_requested && query_service.is_some() {
+        drop(query_service.take());
+        let _ = runtime.semantic_runtime.release_if_idle();
+    }
+
+    reload.applied();
+    DaemonConfigReloadOutcome::Continue
 }
 
 #[cfg(all(test, ctx_sqlite_vec))]
@@ -513,6 +646,21 @@ pub(super) fn print_daemon_status_human(daemon: &Value) {
             .and_then(Value::as_bool)
             .unwrap_or(false)
     );
+    println!(
+        "daemon_config_reload_status: {}",
+        daemon
+            .get("config_reload")
+            .and_then(|reload| reload.get("status"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+    );
+    println!(
+        "semantic_runtime_active: {}",
+        daemon
+            .get("semantic_runtime_active")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    );
     if let Some(reason) = daemon.get("reason").and_then(Value::as_str) {
         println!("daemon_reason: {reason}");
     }
@@ -577,15 +725,12 @@ pub(super) fn run_daemon(
             "daemon autostart metadata flags are internal; run `ctx daemon run` without --start-mode or --trigger-command"
         ));
     }
-    let semantic_enabled = config.semantic_search_enabled() && semantic_query_service_supported();
-    if semantic_enabled {
-        lower_semantic_worker_priority();
-    }
-    let report = match run_daemon_inner(args.clone(), &data_root, config, semantic_enabled) {
+    let report = match run_daemon_inner(args.clone(), &data_root, config) {
         Ok(report) => report,
         Err(error) => {
             let message = format!("{error:#}");
             let now = utc_now().timestamp_millis();
+            let previous_status = read_daemon_status(&data_root);
             let _ = write_daemon_status(
                 &data_root,
                 &json!({
@@ -597,6 +742,11 @@ pub(super) fn run_daemon(
                     "start_mode": daemon_run_start_mode(&args).as_str(),
                     "trigger_command": args.trigger_command.map(DaemonTriggerCommandArg::as_str),
                     "last_error": message,
+                    "semantic_runtime_active": false,
+                    "config_reload": previous_status
+                        .as_ref()
+                        .and_then(|value| value.get("config_reload"))
+                        .cloned(),
                 }),
             );
             return Err(error);
@@ -614,17 +764,32 @@ pub(super) fn run_daemon_inner(
     args: DaemonRunArgs,
     data_root: &Path,
     config: &AppConfig,
-    semantic_enabled: bool,
 ) -> Result<Value> {
     if !config.daemon.enabled && !args.force {
         let semantic_report = semantic_worker_report_for_daemon(data_root);
         return Ok(daemon_report(data_root, &semantic_report));
     }
-    let Some(_lock) = DaemonLock::acquire(data_root)? else {
+    if installation_upgrade_blocks_current_process(data_root) {
+        let semantic_report = semantic_worker_report_for_daemon(data_root);
+        return Ok(daemon_report(data_root, &semantic_report));
+    }
+    if daemon_upgrade_handoff_blocks_current_process(data_root) {
+        let semantic_report = semantic_worker_report_for_daemon(data_root);
+        return Ok(daemon_report(data_root, &semantic_report));
+    }
+    let Some(lock) = DaemonLock::acquire(data_root)? else {
         let semantic_report = semantic_worker_report_for_daemon(data_root);
         return Ok(daemon_report(data_root, &semantic_report));
     };
-
+    // Close the check/acquire race with an upgrader that fenced daemon starts
+    // after the first observation but before this process acquired ownership.
+    if daemon_upgrade_handoff_blocks_current_process(data_root)
+        || installation_upgrade_blocks_current_process(data_root)
+    {
+        drop(lock);
+        let semantic_report = semantic_worker_report_for_daemon(data_root);
+        return Ok(daemon_report(data_root, &semantic_report));
+    }
     let run_once = args.once;
     let run_started = Instant::now();
     let started_at_ms = utc_now().timestamp_millis();
@@ -640,25 +805,86 @@ pub(super) fn run_daemon_inner(
         args.loop_interval_seconds
             .unwrap_or(DAEMON_LOOP_INTERVAL_SECONDS_DEFAULT),
     );
+    let upgrade_restart_trigger = args
+        .trigger_command
+        .unwrap_or(DaemonTriggerCommandArg::Search);
+    let Some(installation_daemon_lease) = InstallationDaemonLease::acquire(
+        data_root,
+        upgrade_restart_trigger,
+        idle_exit.as_secs(),
+        loop_interval.as_secs(),
+        current_process_owns_daemon_upgrade_handoff(data_root),
+    )?
+    else {
+        drop(lock);
+        let semantic_report = semantic_worker_report_for_daemon(data_root);
+        return Ok(daemon_report(data_root, &semantic_report));
+    };
+    let mut prepared_auto_upgrade = None;
+    let mut auto_upgrade_handoff = None;
     let active_result = (|| -> Result<bool> {
         let mut failed = false;
-        write_daemon_lifecycle_status(data_root, &args, "running", started_at_ms, None, None)?;
-
         let mut runtime = DaemonRuntime {
             config: config.clone(),
             ..DaemonRuntime::default()
         };
+        let mut config_reload = DaemonConfigReloadState::pending(config);
+        let mut query_service = None;
+        write_daemon_lifecycle_status_with_runtime(
+            data_root,
+            &args,
+            "running",
+            started_at_ms,
+            None,
+            None,
+            false,
+            &config_reload.to_json(),
+        )?;
         restore_daemon_history_runtime_state(&mut runtime, data_root);
         let semantic_status = read_daemon_job_status(&daemon_semantic_job_path(data_root));
         runtime.semantic_retry.restore(semantic_status.as_ref());
-        let query_service = if semantic_enabled {
-            Some(start_daemon_query_service(
-                data_root,
-                runtime.semantic_runtime.clone(),
-            )?)
-        } else {
-            None
-        };
+        let stop_disabled = reload_daemon_runtime_config(
+            data_root,
+            &args,
+            &mut runtime,
+            &mut query_service,
+            &mut config_reload,
+        ) == DaemonConfigReloadOutcome::StopDisabled;
+        if config_reload.status == "activation_failed" {
+            return Err(anyhow!(
+                "activate semantic daemon runtime: {}",
+                config_reload
+                    .last_error
+                    .as_deref()
+                    .unwrap_or("query service activation failed")
+            ));
+        }
+        #[cfg(test)]
+        fail_daemon_before_ready_for_test(data_root)?;
+        resume_completed_installation_daemons(data_root)?;
+        write_daemon_lifecycle_status_with_runtime(
+            data_root,
+            &args,
+            "running",
+            started_at_ms,
+            None,
+            None,
+            query_service.is_some(),
+            &config_reload.to_json(),
+        )?;
+        // The daemon is ready only after every fallible lifecycle and runtime
+        // initialization step has succeeded. Publish that status before
+        // acknowledging any durable restart request so every parent observes
+        // the same authoritative readiness condition.
+        super::daemon_autostart::acknowledge_daemon_restart_requests(data_root);
+        // This is the sole automatic scheduler authority. The first tick is
+        // after readiness; later ticks only revisit installation-scoped
+        // cadence/backoff or reconcile a completed helper.
+        if daemon_should_schedule_auto_upgrade(runtime.config.daemon.enabled, args.once) {
+            prepared_auto_upgrade =
+                crate::upgrade::prepare_daemon_auto_upgrade(data_root, &runtime.config)
+                    .unwrap_or(None);
+        }
         if let Some(telemetry) = telemetry.as_ref() {
             let events = telemetry.ready_events(recovered_previous_run, Instant::now());
             send_daemon_events(data_root, &events);
@@ -666,6 +892,55 @@ pub(super) fn run_daemon_inner(
         let mut idle_since: Option<Instant> = None;
         let mut observed_query_generation = 0;
         loop {
+            if stop_disabled {
+                break;
+            }
+            if reload_daemon_runtime_config(
+                data_root,
+                &args,
+                &mut runtime,
+                &mut query_service,
+                &mut config_reload,
+            ) == DaemonConfigReloadOutcome::StopDisabled
+            {
+                write_daemon_lifecycle_status_with_runtime(
+                    data_root,
+                    &args,
+                    "running",
+                    started_at_ms,
+                    None,
+                    None,
+                    false,
+                    &config_reload.to_json(),
+                )?;
+                break;
+            }
+            write_daemon_lifecycle_status_with_runtime(
+                data_root,
+                &args,
+                "running",
+                started_at_ms,
+                None,
+                None,
+                query_service.is_some(),
+                &config_reload.to_json(),
+            )?;
+            if prepared_auto_upgrade.is_none()
+                && daemon_should_schedule_auto_upgrade(runtime.config.daemon.enabled, args.once)
+            {
+                prepared_auto_upgrade =
+                    crate::upgrade::prepare_daemon_auto_upgrade(data_root, &runtime.config)
+                        .unwrap_or(None);
+            }
+            if prepared_auto_upgrade.is_none() {
+                resume_completed_installation_daemons(data_root)?;
+            }
+            if prepared_auto_upgrade.is_some()
+                || daemon_upgrade_handoff_blocks_current_process(data_root)
+                || installation_upgrade_blocks_current_process(data_root)
+            {
+                break;
+            }
             observe_daemon_query_activity(
                 query_service
                     .as_ref()
@@ -702,7 +977,7 @@ pub(super) fn run_daemon_inner(
                 data_root,
                 &mut runtime,
                 None,
-                semantic_enabled,
+                query_service.is_some(),
                 query_service
                     .as_ref()
                     .map(|service| service.activity.as_ref()),
@@ -711,7 +986,16 @@ pub(super) fn run_daemon_inner(
             let iteration_events =
                 daemon_iteration_events(telemetry.as_mut(), &mut iteration, cycle_duration);
             send_daemon_events(data_root, &iteration_events);
-            write_daemon_lifecycle_status(data_root, &args, "running", started_at_ms, None, None)?;
+            write_daemon_lifecycle_status_with_runtime(
+                data_root,
+                &args,
+                "running",
+                started_at_ms,
+                None,
+                None,
+                query_service.is_some(),
+                &config_reload.to_json(),
+            )?;
             failed |= iteration.failed;
             if run_once {
                 break;
@@ -728,16 +1012,32 @@ pub(super) fn run_daemon_inner(
             } else if idle_since.is_none() {
                 idle_since = Some(Instant::now());
             }
-            std::thread::sleep(loop_interval);
+            if daemon_wait_interrupted_by_upgrade(data_root, loop_interval) {
+                break;
+            }
         }
 
-        write_daemon_lifecycle_status(
+        if let Some(attempt_id) = prepared_auto_upgrade
+            .as_ref()
+            .and_then(crate::upgrade::PreparedDaemonUpgrade::attempt_id)
+        {
+            auto_upgrade_handoff = Some(
+                super::daemon_autostart::begin_current_daemon_upgrade_handoff(
+                    data_root,
+                    attempt_id,
+                    upgrade_restart_trigger,
+                )?,
+            );
+        }
+        write_daemon_lifecycle_status_with_runtime(
             data_root,
             &args,
             if failed { "failed" } else { "completed" },
             started_at_ms,
             Some(utc_now().timestamp_millis()),
             failed.then_some("one or more daemon jobs failed".to_owned()),
+            query_service.is_some(),
+            &config_reload.to_json(),
         )?;
         // Keep daemon ownership until the query service has removed its endpoint
         // and joined its listener thread. Otherwise a replacement can publish a
@@ -749,7 +1049,8 @@ pub(super) fn run_daemon_inner(
     let failed = match active_result {
         Ok(failed) => failed,
         Err(error) => {
-            drop(_lock);
+            drop(installation_daemon_lease);
+            drop(lock);
             if let Some(telemetry) = telemetry.as_mut() {
                 let events = telemetry.fatal_events(Instant::now());
                 send_daemon_events(data_root, &events);
@@ -757,10 +1058,34 @@ pub(super) fn run_daemon_inner(
             return Err(error);
         }
     };
-    drop(_lock);
+    let upgrade_attempt_id = prepared_auto_upgrade
+        .as_ref()
+        .and_then(crate::upgrade::PreparedDaemonUpgrade::attempt_id)
+        .map(str::to_owned)
+        .or(crate::upgrade::active_installation_upgrade_attempt_id()?);
+    if let Some(attempt_id) = upgrade_attempt_id.as_deref() {
+        installation_daemon_lease.acknowledge(attempt_id)?;
+    } else {
+        drop(installation_daemon_lease);
+    }
+    drop(lock);
+    if let Some(handoff) = auto_upgrade_handoff.as_ref() {
+        handoff.wait_for_installation_quiescence()?;
+    }
     if let Some(telemetry) = telemetry.as_mut() {
         let events = telemetry.stopped_events(failed, Instant::now());
         send_daemon_events(data_root, &events);
+    }
+    if let Some(prepared) = prepared_auto_upgrade {
+        crate::upgrade::finish_daemon_auto_upgrade(
+            prepared,
+            (
+                upgrade_restart_trigger.as_str(),
+                idle_exit.as_secs(),
+                loop_interval.as_secs(),
+            ),
+            auto_upgrade_handoff,
+        )?;
     }
     let semantic_report = semantic_worker_report_for_daemon(data_root);
     Ok(daemon_report_with_disabled_status(
@@ -770,103 +1095,44 @@ pub(super) fn run_daemon_inner(
     ))
 }
 
+fn daemon_should_schedule_auto_upgrade(daemon_enabled: bool, run_once: bool) -> bool {
+    daemon_enabled && !run_once
+}
+
 #[cfg(test)]
-mod telemetry_tests {
-    use std::fs;
-
-    use super::*;
-    use crate::analytics::{ProviderRefreshCompletedV1, Surface};
-
-    fn manual_run() -> DaemonRunFactsV1 {
-        DaemonRunFactsV1::new(DaemonStartModeV1::Manual, DaemonSupervisorV1::User, None)
+fn fail_daemon_before_ready_for_test(data_root: &Path) -> Result<()> {
+    if data_root
+        .join(".fail-daemon-before-ready-for-test")
+        .exists()
+    {
+        return Err(anyhow!("injected daemon failure before readiness"));
     }
+    Ok(())
+}
 
-    fn runtime_names(events: &[PublicEventV1]) -> Vec<&'static str> {
-        events
-            .iter()
-            .filter_map(|event| match event {
-                PublicEventV1::RuntimeObservation(event) => Some(event.kind.name()),
-                _ => None,
-            })
-            .collect()
-    }
-
-    #[test]
-    fn liveness_is_jittered_daily_and_never_a_loop_heartbeat() {
-        assert_eq!(daemon_liveness_interval(0), DAEMON_LIVENESS_MIN_INTERVAL);
-        assert!(
-            daemon_liveness_interval(u64::MAX)
-                < DAEMON_LIVENESS_MIN_INTERVAL + DAEMON_LIVENESS_JITTER_WINDOW
-        );
-        let started = Instant::now();
-        let mut telemetry = DaemonTelemetry::new(manual_run(), started, 0);
-        assert!(telemetry
-            .liveness_events(started + StdDuration::from_secs(5))
-            .is_empty());
-        let due = started + DAEMON_LIVENESS_MIN_INTERVAL;
-        assert_eq!(runtime_names(&telemetry.liveness_events(due)), ["liveness"]);
-        assert!(telemetry.liveness_events(due).is_empty());
-    }
-
-    #[test]
-    fn idle_cycles_emit_first_then_flush_a_coalesced_transition() {
-        let started = Instant::now();
-        let mut telemetry = DaemonTelemetry::new(manual_run(), started, 0);
-        let mut first = DaemonIteration::new(false, false, DaemonCycleStateV1::unknown());
-        assert_eq!(
-            runtime_names(&telemetry.observe_cycle(&mut first, StdDuration::from_millis(10))),
-            ["cycle"]
-        );
-        for _ in 0..6 {
-            let mut idle = DaemonIteration::new(false, false, DaemonCycleStateV1::unknown());
-            assert!(telemetry
-                .observe_cycle(&mut idle, StdDuration::from_millis(10))
-                .is_empty());
+fn daemon_wait_interrupted_by_upgrade(data_root: &Path, duration: StdDuration) -> bool {
+    const POLL_INTERVAL: StdDuration = StdDuration::from_millis(100);
+    let deadline = Instant::now() + duration;
+    loop {
+        if daemon_upgrade_handoff_blocks_current_process(data_root) {
+            return true;
         }
-        assert_eq!(
-            runtime_names(&telemetry.stopped_events(false, started + StdDuration::from_secs(1))),
-            ["cycle", "stopped"]
-        );
-    }
-
-    #[test]
-    fn run_once_has_no_runtime_event_but_preserves_provider_handoff() {
-        let provider = PublicEventV1::ProviderRefreshCompleted(ProviderRefreshCompletedV1::new(
-            Surface::Daemon,
-            Outcome::Success,
-            StdDuration::from_secs(1),
-        ));
-        let mut iteration = DaemonIteration::new(true, false, DaemonCycleStateV1::unknown())
-            .with_provider_refresh_events(vec![provider]);
-        let events = daemon_iteration_events(None, &mut iteration, StdDuration::from_secs(1));
-        assert_eq!(events.len(), 1);
-        assert!(matches!(
-            events[0],
-            PublicEventV1::ProviderRefreshCompleted(_)
-        ));
-        assert!(iteration.provider_refresh_events.is_empty());
-    }
-
-    #[test]
-    fn telemetry_policy_is_reloaded_and_failures_fail_closed() {
-        let root = tempfile::tempdir().unwrap();
-        let config_path = root.path().join(CONFIG_FILE);
-
-        fs::write(&config_path, "analytics.enabled = true\n").unwrap();
-        assert!(reload_daemon_analytics_config(root.path()).is_some());
-
-        fs::write(&config_path, "analytics.enabled = false\n").unwrap();
-        assert!(reload_daemon_analytics_config(root.path()).is_none());
-
-        fs::write(&config_path, "not valid config\n").unwrap();
-        assert!(reload_daemon_analytics_config(root.path()).is_none());
-
-        let event = runtime_event(
-            DaemonRuntimeObservationV1::ready(manual_run()),
-            Outcome::Success,
-            StdDuration::ZERO,
-        );
-        send_daemon_events(root.path(), &[event]);
-        assert!(!crate::identity::install_path(root.path()).exists());
+        let now = Instant::now();
+        if installation_upgrade_blocks_current_process(data_root) {
+            return true;
+        }
+        if now >= deadline {
+            return false;
+        }
+        std::thread::sleep(deadline.saturating_duration_since(now).min(POLL_INTERVAL));
     }
 }
+
+fn installation_upgrade_blocks_current_process(data_root: &Path) -> bool {
+    !super::daemon_autostart::current_process_owns_daemon_upgrade_handoff(data_root)
+        && crate::upgrade::installation_upgrade_is_active().unwrap_or(false)
+}
+
+#[cfg(test)]
+#[path = "daemon/tests.rs"]
+mod telemetry_tests;

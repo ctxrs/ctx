@@ -1,19 +1,20 @@
 use std::collections::BTreeSet;
 
 use rusqlite::{Connection, OptionalExtension};
+use serde::Serialize;
 
-use crate::captured_batch::{CapturedSqliteValue, CAPTURE_BATCH_MAX_OVERSIZE_RECORD_BYTES};
+use crate::native_source::NativeSqliteValue;
 use crate::provider::sqlite::{
     ensure_sqlite_table_columns, sqlite_table_columns, sqlite_table_exists,
 };
 use crate::{CaptureError, Result};
 
-use super::position::{NanoClawKeyset, NanoClawMessageSource};
+use super::position::{NanoClawFrontier, NanoClawMessageSource};
 
 const NANOCLAW_SQLITE_VALUE_OVERHEAD_BYTES: u64 = 64 * 32;
-const NANOCLAW_MESSAGE_CAPTURED_VALUE_COUNT: usize = 14;
+pub(super) const NANOCLAW_NATIVE_MAX_RECORD_BYTES: u64 = 1024 * 1024;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(super) struct NanoClawSessionRow {
     pub(super) id: String,
     pub(super) agent_group_id: String,
@@ -32,7 +33,7 @@ pub(super) struct NanoClawSessionRow {
     pub(super) messaging_name: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(super) struct NanoClawMessageRow {
     pub(super) source: &'static str,
     pub(super) id: String,
@@ -248,70 +249,43 @@ pub(super) fn nanoclaw_session_candidate_by_rowid(
     .map_err(CaptureError::from)
 }
 
-pub(super) fn nanoclaw_hydrate_session(
+pub(super) fn nanoclaw_hydrate_native_session(
     conn: &Connection,
     columns: &BTreeSet<String>,
     rowid: i64,
-) -> Result<(NanoClawSessionRow, Vec<CapturedSqliteValue>)> {
+) -> Result<NanoClawSessionRow> {
     let projection = nanoclaw_session_projection(conn, columns)?.join(", ");
-    let values = conn.query_row(
+    conn.query_row(
         &format!("select {projection} from sessions s where s.rowid = ?1"),
         [rowid],
-        nanoclaw_session_values_from_row,
-    )?;
-    let row = decode_nanoclaw_session(&values)?;
-    Ok((row, values))
-}
-
-fn nanoclaw_session_values_from_row(
-    row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<Vec<CapturedSqliteValue>> {
-    Ok(vec![
-        CapturedSqliteValue::Text(row.get(0)?),
-        CapturedSqliteValue::Text(row.get(1)?),
-        nanoclaw_row_optional_text(row, 2)?,
-        nanoclaw_row_optional_text(row, 3)?,
-        nanoclaw_row_optional_text(row, 4)?,
-        nanoclaw_row_optional_text(row, 5)?,
-        nanoclaw_row_optional_text(row, 6)?,
-        nanoclaw_row_optional_i64(row, 7)?,
-        nanoclaw_row_optional_i64(row, 8)?,
-        nanoclaw_row_optional_text(row, 9)?,
-        nanoclaw_row_optional_text(row, 10)?,
-        nanoclaw_row_optional_text(row, 11)?,
-        nanoclaw_row_optional_text(row, 12)?,
-        nanoclaw_row_optional_text(row, 13)?,
-        nanoclaw_row_optional_text(row, 14)?,
-    ])
-}
-
-pub(super) fn nanoclaw_session_captured_values(
-    row: &NanoClawSessionRow,
-) -> Vec<CapturedSqliteValue> {
-    vec![
-        CapturedSqliteValue::Text(row.id.clone()),
-        CapturedSqliteValue::Text(row.agent_group_id.clone()),
-        nanoclaw_optional_text_value(row.messaging_group_id.clone()),
-        nanoclaw_optional_text_value(row.thread_id.clone()),
-        nanoclaw_optional_text_value(row.agent_provider.clone()),
-        nanoclaw_optional_text_value(row.status.clone()),
-        nanoclaw_optional_text_value(row.container_status.clone()),
-        nanoclaw_optional_i64_value(row.last_active),
-        nanoclaw_optional_i64_value(row.created_at),
-        nanoclaw_optional_text_value(row.agent_group_name.clone()),
-        nanoclaw_optional_text_value(row.agent_group_folder.clone()),
-        nanoclaw_optional_text_value(row.messaging_channel_type.clone()),
-        nanoclaw_optional_text_value(row.messaging_platform_id.clone()),
-        nanoclaw_optional_text_value(row.messaging_instance.clone()),
-        nanoclaw_optional_text_value(row.messaging_name.clone()),
-    ]
+        |row| {
+            Ok(NanoClawSessionRow {
+                id: row.get(0)?,
+                agent_group_id: row.get(1)?,
+                messaging_group_id: row.get(2)?,
+                thread_id: row.get(3)?,
+                agent_provider: row.get(4)?,
+                status: row.get(5)?,
+                container_status: row.get(6)?,
+                last_active: row.get(7)?,
+                created_at: row.get(8)?,
+                agent_group_name: row.get(9)?,
+                agent_group_folder: row.get(10)?,
+                messaging_channel_type: row.get(11)?,
+                messaging_platform_id: row.get(12)?,
+                messaging_instance: row.get(13)?,
+                messaging_name: row.get(14)?,
+            })
+        },
+    )
+    .map_err(CaptureError::from)
 }
 
 pub(super) fn nanoclaw_message_after(
     conn: &Connection,
     columns: &BTreeSet<String>,
     source: NanoClawMessageSource,
-    keyset: NanoClawKeyset,
+    keyset: NanoClawFrontier,
 ) -> Result<NanoClawMessageAfter> {
     let timestamp = nanoclaw_message_timestamp_expr(columns, "m");
     let seq = nanoclaw_qualified_optional(columns, "m", "seq", "NULL");
@@ -462,178 +436,68 @@ fn nanoclaw_message_timestamp_expr(columns: &BTreeSet<String>, alias: &str) -> S
     nanoclaw_qualified_timestamp(columns, alias, "timestamp")
 }
 
-pub(super) fn nanoclaw_hydrate_message(
+pub(super) fn nanoclaw_hydrate_native_message(
     conn: &Connection,
     columns: &BTreeSet<String>,
     source: NanoClawMessageSource,
     rowid: i64,
-) -> Result<Vec<CapturedSqliteValue>> {
+) -> Result<NanoClawMessageRow> {
     let projection = nanoclaw_message_projection(source, columns).join(", ");
-    let mut values = conn.query_row(
+    conn.query_row(
         &format!(
             "select {projection} from {} m where m.rowid = ?1",
             source.table()
         ),
         [rowid],
-        nanoclaw_message_values_from_row,
-    )?;
-    values.insert(0, CapturedSqliteValue::Text(source.label().to_owned()));
-    Ok(values)
+        |row| {
+            Ok(NanoClawMessageRow {
+                source: source.label(),
+                id: row.get(0)?,
+                seq: row.get(1)?,
+                kind: row.get(2)?,
+                timestamp: row.get(3)?,
+                status: row.get(4)?,
+                in_reply_to: row.get(5)?,
+                platform_id: row.get(6)?,
+                channel_type: row.get(7)?,
+                thread_id: row.get(8)?,
+                content: row.get(9)?,
+                trigger: row.get(10)?,
+                source_session_id: row.get(11)?,
+                on_wake: row.get(12)?,
+            })
+        },
+    )
+    .map_err(CaptureError::from)
 }
 
-fn nanoclaw_message_values_from_row(
-    row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<Vec<CapturedSqliteValue>> {
-    Ok(vec![
-        CapturedSqliteValue::Text(row.get(0)?),
-        nanoclaw_row_optional_i64(row, 1)?,
-        nanoclaw_row_optional_text(row, 2)?,
-        nanoclaw_row_optional_i64(row, 3)?,
-        nanoclaw_row_optional_text(row, 4)?,
-        nanoclaw_row_optional_text(row, 5)?,
-        nanoclaw_row_optional_text(row, 6)?,
-        nanoclaw_row_optional_text(row, 7)?,
-        nanoclaw_row_optional_text(row, 8)?,
-        nanoclaw_row_optional_text(row, 9)?,
-        nanoclaw_row_optional_text(row, 10)?,
-        nanoclaw_row_optional_text(row, 11)?,
-        nanoclaw_row_optional_i64(row, 12)?,
-    ])
+pub(super) fn nanoclaw_message_digest_values(
+    message: &NanoClawMessageRow,
+) -> Vec<NativeSqliteValue> {
+    vec![
+        NativeSqliteValue::Text(message.source.to_owned()),
+        NativeSqliteValue::Text(message.id.clone()),
+        nanoclaw_optional_i64_value(message.seq),
+        nanoclaw_optional_text_value(message.kind.clone()),
+        nanoclaw_optional_i64_value(message.timestamp),
+        nanoclaw_optional_text_value(message.status.clone()),
+        nanoclaw_optional_text_value(message.in_reply_to.clone()),
+        nanoclaw_optional_text_value(message.platform_id.clone()),
+        nanoclaw_optional_text_value(message.channel_type.clone()),
+        nanoclaw_optional_text_value(message.thread_id.clone()),
+        nanoclaw_optional_text_value(message.content.clone()),
+        nanoclaw_optional_text_value(message.trigger.clone()),
+        nanoclaw_optional_text_value(message.source_session_id.clone()),
+        nanoclaw_optional_i64_value(message.on_wake),
+    ]
 }
 
-pub(super) fn decode_nanoclaw_message_record(
-    values: &[CapturedSqliteValue],
-) -> Result<(NanoClawMessageRow, NanoClawSessionRow)> {
-    if values.len() != NANOCLAW_MESSAGE_CAPTURED_VALUE_COUNT + 15 {
-        return Err(CaptureError::SystemInvariant(
-            "NanoClaw message logical row has an invalid value shape",
-        ));
-    }
-    let source = nanoclaw_required_text(&values[0])?;
-    let source = match source.as_str() {
-        "inbound" => "inbound",
-        "outbound" => "outbound",
-        _ => {
-            return Err(CaptureError::SystemInvariant(
-                "NanoClaw message logical row has an invalid source",
-            ));
-        }
-    };
-    let message = NanoClawMessageRow {
-        source,
-        id: nanoclaw_required_text(&values[1])?,
-        seq: nanoclaw_optional_i64(&values[2])?,
-        kind: nanoclaw_optional_text(&values[3])?,
-        timestamp: nanoclaw_optional_i64(&values[4])?,
-        status: nanoclaw_optional_text(&values[5])?,
-        in_reply_to: nanoclaw_optional_text(&values[6])?,
-        platform_id: nanoclaw_optional_text(&values[7])?,
-        channel_type: nanoclaw_optional_text(&values[8])?,
-        thread_id: nanoclaw_optional_text(&values[9])?,
-        content: nanoclaw_optional_text(&values[10])?,
-        trigger: nanoclaw_optional_text(&values[11])?,
-        source_session_id: nanoclaw_optional_text(&values[12])?,
-        on_wake: nanoclaw_optional_i64(&values[13])?,
-    };
-    Ok((
-        message,
-        decode_nanoclaw_session(&values[NANOCLAW_MESSAGE_CAPTURED_VALUE_COUNT..])?,
-    ))
+fn nanoclaw_optional_text_value(value: Option<String>) -> NativeSqliteValue {
+    value.map_or(NativeSqliteValue::Null, NativeSqliteValue::Text)
 }
 
-pub(super) fn nanoclaw_message_values_for_content_digest(
-    values: &[CapturedSqliteValue],
-) -> Result<&[CapturedSqliteValue]> {
-    if values.len() != NANOCLAW_MESSAGE_CAPTURED_VALUE_COUNT + 15 {
-        return Err(CaptureError::SystemInvariant(
-            "NanoClaw message logical row has an invalid value shape",
-        ));
-    }
-    Ok(&values[..NANOCLAW_MESSAGE_CAPTURED_VALUE_COUNT])
-}
-
-pub(super) fn decode_nanoclaw_session(
-    values: &[CapturedSqliteValue],
-) -> Result<NanoClawSessionRow> {
-    if values.len() != 15 {
-        return Err(CaptureError::SystemInvariant(
-            "NanoClaw session logical row has an invalid value shape",
-        ));
-    }
-    Ok(NanoClawSessionRow {
-        id: nanoclaw_required_text(&values[0])?,
-        agent_group_id: nanoclaw_required_text(&values[1])?,
-        messaging_group_id: nanoclaw_optional_text(&values[2])?,
-        thread_id: nanoclaw_optional_text(&values[3])?,
-        agent_provider: nanoclaw_optional_text(&values[4])?,
-        status: nanoclaw_optional_text(&values[5])?,
-        container_status: nanoclaw_optional_text(&values[6])?,
-        last_active: nanoclaw_optional_i64(&values[7])?,
-        created_at: nanoclaw_optional_i64(&values[8])?,
-        agent_group_name: nanoclaw_optional_text(&values[9])?,
-        agent_group_folder: nanoclaw_optional_text(&values[10])?,
-        messaging_channel_type: nanoclaw_optional_text(&values[11])?,
-        messaging_platform_id: nanoclaw_optional_text(&values[12])?,
-        messaging_instance: nanoclaw_optional_text(&values[13])?,
-        messaging_name: nanoclaw_optional_text(&values[14])?,
-    })
-}
-
-fn nanoclaw_row_optional_text(
-    row: &rusqlite::Row<'_>,
-    index: usize,
-) -> rusqlite::Result<CapturedSqliteValue> {
-    Ok(match row.get::<_, Option<String>>(index)? {
-        Some(value) => CapturedSqliteValue::Text(value),
-        None => CapturedSqliteValue::Null,
-    })
-}
-
-fn nanoclaw_row_optional_i64(
-    row: &rusqlite::Row<'_>,
-    index: usize,
-) -> rusqlite::Result<CapturedSqliteValue> {
-    Ok(match row.get::<_, Option<i64>>(index)? {
-        Some(value) => CapturedSqliteValue::Integer(value),
-        None => CapturedSqliteValue::Null,
-    })
-}
-
-fn nanoclaw_optional_text_value(value: Option<String>) -> CapturedSqliteValue {
-    value.map_or(CapturedSqliteValue::Null, CapturedSqliteValue::Text)
-}
-
-fn nanoclaw_optional_i64_value(value: Option<i64>) -> CapturedSqliteValue {
-    value.map_or(CapturedSqliteValue::Null, CapturedSqliteValue::Integer)
-}
-
-fn nanoclaw_required_text(value: &CapturedSqliteValue) -> Result<String> {
-    match value {
-        CapturedSqliteValue::Text(value) => Ok(value.clone()),
-        _ => Err(CaptureError::SystemInvariant(
-            "NanoClaw logical row has an invalid required text value",
-        )),
-    }
-}
-
-fn nanoclaw_optional_text(value: &CapturedSqliteValue) -> Result<Option<String>> {
-    match value {
-        CapturedSqliteValue::Null => Ok(None),
-        CapturedSqliteValue::Text(value) => Ok(Some(value.clone())),
-        _ => Err(CaptureError::SystemInvariant(
-            "NanoClaw logical row has an invalid optional text value",
-        )),
-    }
-}
-
-fn nanoclaw_optional_i64(value: &CapturedSqliteValue) -> Result<Option<i64>> {
-    match value {
-        CapturedSqliteValue::Null => Ok(None),
-        CapturedSqliteValue::Integer(value) => Ok(Some(*value)),
-        _ => Err(CaptureError::SystemInvariant(
-            "NanoClaw logical row has an invalid optional integer value",
-        )),
-    }
+fn nanoclaw_optional_i64_value(value: Option<i64>) -> NativeSqliteValue {
+    value.map_or(NativeSqliteValue::Null, NativeSqliteValue::Integer)
 }
 
 pub(super) fn nanoclaw_observed_bytes(retained_bytes: i64) -> Result<u64> {
@@ -647,9 +511,4 @@ pub(super) fn nanoclaw_observed_bytes(retained_bytes: i64) -> Result<u64> {
         .ok_or(CaptureError::SystemInvariant(
             "NanoClaw SQLite retained byte count overflowed",
         ))
-}
-
-pub(super) fn nanoclaw_oversize_limit() -> Result<u64> {
-    u64::try_from(CAPTURE_BATCH_MAX_OVERSIZE_RECORD_BYTES)
-        .map_err(|_| CaptureError::SystemInvariant("NanoClaw byte limit exceeds u64"))
 }

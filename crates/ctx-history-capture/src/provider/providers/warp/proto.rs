@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use ctx_history_core::{EventRole, EventType};
 
+use super::wire::{warp_tool_name, warp_tool_result_name};
 use crate::{CaptureError, Result};
 
 #[derive(Debug, Clone, Default)]
@@ -26,6 +27,28 @@ pub(super) struct WarpMessageProto {
     /// deliberately excluded even when they remain useful as indexed event
     /// descriptions.
     pub(super) complete_text: Option<String>,
+    pub(super) tool_result: Option<WarpToolResultProto>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WarpToolResultOutcome {
+    Success,
+    Failure,
+    Unknown,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct WarpToolResultProto {
+    pub(super) call_id: Option<String>,
+    pub(super) tool_name: &'static str,
+    pub(super) outcome: WarpToolResultOutcome,
+    payload: Vec<u8>,
+}
+
+impl WarpToolResultProto {
+    pub(super) fn complete_text(&self) -> Result<Option<String>> {
+        warp_decode_tool_result_text(&self.payload)
+    }
 }
 
 impl Default for WarpMessageProto {
@@ -40,11 +63,21 @@ impl Default for WarpMessageProto {
             event_type: EventType::Notice,
             text: String::new(),
             complete_text: None,
+            tool_result: None,
         }
     }
 }
 
 pub(super) fn warp_decode_task(data: &[u8]) -> Result<WarpTaskProto> {
+    // Message-body reopening never needs tool-output bytes. NativePath owns
+    // output replay through its independent Pro fanout.
+    warp_decode_task_with_result_text(data, false)
+}
+
+fn warp_decode_task_with_result_text(
+    data: &[u8],
+    decode_result_text: bool,
+) -> Result<WarpTaskProto> {
     let mut task = WarpTaskProto::default();
     let mut pos = 0;
     while pos < data.len() {
@@ -53,9 +86,10 @@ pub(super) fn warp_decode_task(data: &[u8]) -> Result<WarpTaskProto> {
             (1, 2) => task.id = proto_string(data, &mut pos)?,
             (2, 2) => task.description = proto_string(data, &mut pos)?,
             (3, 2) => task.parent_task_id = warp_decode_dependencies(proto_len(data, &mut pos)?)?,
-            (5, 2) => task
-                .messages
-                .push(warp_decode_message(proto_len(data, &mut pos)?)?),
+            (5, 2) => task.messages.push(warp_decode_message_with_result_text(
+                proto_len(data, &mut pos)?,
+                decode_result_text,
+            )?),
             (6, 2) => task.summary = proto_string(data, &mut pos)?,
             _ => proto_skip(data, &mut pos, wire)?,
         }
@@ -81,7 +115,15 @@ pub(super) fn warp_decode_dependencies(data: &[u8]) -> Result<Option<String>> {
     Ok(parent)
 }
 
+#[cfg(test)]
 pub(super) fn warp_decode_message(data: &[u8]) -> Result<WarpMessageProto> {
+    warp_decode_message_with_result_text(data, true)
+}
+
+fn warp_decode_message_with_result_text(
+    data: &[u8],
+    decode_result_text: bool,
+) -> Result<WarpMessageProto> {
     let mut message = WarpMessageProto::default();
     let mut pos = 0;
     while pos < data.len() {
@@ -117,15 +159,20 @@ pub(super) fn warp_decode_message(data: &[u8]) -> Result<WarpMessageProto> {
             }
             (5, 2) => {
                 let result = proto_len(data, &mut pos)?;
-                let tool_name = warp_tool_result_name(warp_tool_result_field(result)?.unwrap_or(0));
+                let tool_result = warp_decode_tool_result(result)?;
                 message.kind = "tool_call_result";
                 message.role = Some(EventRole::Tool);
                 message.event_type = EventType::ToolOutput;
-                message.complete_text = warp_decode_tool_result_text(result)?;
+                message.complete_text = if decode_result_text {
+                    tool_result.complete_text()?
+                } else {
+                    None
+                };
                 message.text = message
                     .complete_text
                     .clone()
-                    .unwrap_or_else(|| format!("tool result: {tool_name}"));
+                    .unwrap_or_else(|| format!("tool result: {}", tool_result.tool_name));
+                message.tool_result = Some(tool_result);
             }
             (9, 2) => {
                 message.kind = "system_query";
@@ -166,6 +213,65 @@ pub(super) fn warp_decode_message(data: &[u8]) -> Result<WarpMessageProto> {
         }
     }
     Ok(message)
+}
+
+fn warp_decode_tool_result(data: &[u8]) -> Result<WarpToolResultProto> {
+    let mut pos = 0;
+    let mut call_id = None;
+    let mut variant = None;
+    while pos < data.len() {
+        let (field, wire) = proto_key(data, &mut pos)?;
+        match (field, wire) {
+            (1, 2) => {
+                call_id = nonempty(Some(proto_string(data, &mut pos)?))?;
+            }
+            (11, _) => proto_skip(data, &mut pos, wire)?,
+            (field, 2) if variant.is_none() => {
+                let payload = proto_len(data, &mut pos)?;
+                variant = Some((field, warp_tool_result_outcome(field, payload)?));
+            }
+            _ => proto_skip(data, &mut pos, wire)?,
+        }
+    }
+    let (field, outcome) = variant.unwrap_or((0, WarpToolResultOutcome::Unknown));
+    Ok(WarpToolResultProto {
+        call_id,
+        tool_name: warp_tool_result_name(field),
+        outcome,
+        payload: data.to_vec(),
+    })
+}
+
+fn warp_tool_result_outcome(field: u32, payload: &[u8]) -> Result<WarpToolResultOutcome> {
+    let arm = proto_first_len_field(payload)?;
+    let outcome = match (field, arm) {
+        // RunShellCommandResult: finished is success and permission denied is failure.
+        (2, Some(5)) => WarpToolResultOutcome::Success,
+        (2, Some(6)) => WarpToolResultOutcome::Failure,
+        // ServerResult.serialized_result and SubagentResult.payload are success-only text.
+        (4 | 23, Some(1)) => WarpToolResultOutcome::Success,
+        // Success/error oneofs.
+        (
+            3 | 5 | 6 | 9 | 10 | 15 | 16 | 19 | 24 | 25 | 26 | 28 | 30 | 32 | 34 | 36 | 38 | 41
+            | 42,
+            Some(1),
+        ) => WarpToolResultOutcome::Success,
+        (
+            3 | 5 | 6 | 9 | 10 | 15 | 16 | 19 | 24 | 25 | 26 | 28 | 30 | 32 | 34 | 36 | 38 | 41
+            | 42,
+            Some(2),
+        ) => WarpToolResultOutcome::Failure,
+        // InsertReviewCommentsResult and RequestComputerUseResult have a third error arm.
+        (29 | 31, Some(1)) => WarpToolResultOutcome::Success,
+        (29 | 31, Some(2 | 3)) => WarpToolResultOutcome::Failure,
+        // Shell wrapper snapshots are nonterminal; their finished arms are success.
+        (17 | 35, Some(2)) | (27, Some(3)) => WarpToolResultOutcome::Success,
+        // RunAgentsResult: launched, denied, failure.
+        (39, Some(1)) => WarpToolResultOutcome::Success,
+        (39, Some(2 | 3)) => WarpToolResultOutcome::Failure,
+        _ => WarpToolResultOutcome::Unknown,
+    };
+    Ok(outcome)
 }
 
 /// Extracts one exact textual result body from Warp's typed protobuf result.
@@ -429,18 +535,6 @@ pub(super) fn proto_first_len_field(data: &[u8]) -> Result<Option<u32>> {
     Ok(None)
 }
 
-fn warp_tool_result_field(data: &[u8]) -> Result<Option<u32>> {
-    let mut pos = 0;
-    while pos < data.len() {
-        let (field, wire) = proto_key(data, &mut pos)?;
-        if wire == 2 && !matches!(field, 1 | 11) {
-            return Ok(Some(field));
-        }
-        proto_skip(data, &mut pos, wire)?;
-    }
-    Ok(None)
-}
-
 pub(super) fn proto_key(data: &[u8], pos: &mut usize) -> Result<(u32, u8)> {
     let key = proto_varint(data, pos)?;
     Ok(((key >> 3) as u32, (key & 0x07) as u8))
@@ -520,80 +614,6 @@ pub(super) fn proto_skip(data: &[u8], pos: &mut usize, wire: u8) -> Result<()> {
         ));
     }
     Ok(())
-}
-
-pub(super) fn warp_tool_name(field: u32) -> &'static str {
-    match field {
-        2 => "run_shell_command",
-        3 => "search_codebase",
-        5 => "read_files",
-        6 => "apply_file_diffs",
-        7 => "suggest_plan",
-        8 => "suggest_create_plan",
-        9 => "grep",
-        11 => "read_mcp_resource",
-        12 => "call_mcp_tool",
-        13 => "write_to_long_running_shell_command",
-        14 => "suggest_new_conversation",
-        15 => "file_glob",
-        17 => "open_code_review",
-        18 => "init_project",
-        19 => "subagent",
-        20 => "read_documents",
-        21 => "edit_documents",
-        22 => "create_documents",
-        23 => "read_shell_command_output",
-        24 => "use_computer",
-        26 => "read_skill",
-        28 => "fetch_conversation",
-        29 => "start_agent",
-        30 => "send_message_to_agent",
-        31 => "transfer_shell_command_control_to_user",
-        _ => "unknown",
-    }
-}
-
-pub(super) fn warp_tool_result_name(field: u32) -> &'static str {
-    match field {
-        2 => "run_shell_command",
-        3 => "search_codebase",
-        4 => "server",
-        5 => "read_files",
-        6 => "apply_file_diffs",
-        7 => "suggest_plan",
-        8 => "suggest_create_plan",
-        9 => "grep",
-        10 => "file_glob",
-        14 => "cancel",
-        15 => "read_mcp_resource",
-        16 => "call_mcp_tool",
-        17 => "write_to_long_running_shell_command",
-        18 => "suggest_new_conversation",
-        19 => "file_glob_v2",
-        20 => "suggest_prompt",
-        21 => "open_code_review",
-        22 => "init_project",
-        23 => "subagent",
-        24 => "read_documents",
-        25 => "edit_documents",
-        26 => "create_documents",
-        27 => "read_shell_command_output",
-        28 => "use_computer",
-        29 => "insert_review_comments",
-        30 => "read_skill",
-        31 => "request_computer_use",
-        32 => "fetch_conversation",
-        33 => "start_agent",
-        34 => "send_message_to_agent",
-        35 => "transfer_shell_command_control_to_user",
-        36 => "ask_user_question",
-        38 => "upload_file_artifact",
-        39 => "run_agents",
-        40 => "wait_for_events",
-        41 => "start_recording",
-        42 => "stop_recording",
-        _ => "unknown",
-    }
 }
 
 #[cfg(test)]

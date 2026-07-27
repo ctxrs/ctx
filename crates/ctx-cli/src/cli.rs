@@ -55,9 +55,9 @@ pub(crate) enum CommandRoot {
     Sources(SourcesArgs),
     #[command(about = "Index provider history into local search")]
     Import(ImportArgs),
-    #[command(about = "Show an indexed session, event, or Pro resource")]
+    #[command(about = "Show an indexed session or event")]
     Show(ShowArgs),
-    #[command(about = "Locate evidence for an indexed session, event, or Pro resource")]
+    #[command(about = "Locate evidence for an indexed session or event")]
     Locate(LocateArgs),
     #[command(about = "Search indexed agent history")]
     Search(SearchArgs),
@@ -66,12 +66,8 @@ pub(crate) enum CommandRoot {
         long_about = "Set up, resume, repair, manage, or remove local ctx Pro. Bare `ctx pro` runs the idempotent setup path; `ctx pro setup` is an explicit synonym. `ctx status` does not mutate canonical history or graph data; entitlement authorization may advance nonsecret anti-clock-rollback metadata."
     )]
     Pro(pro::ProArgs),
-    #[command(about = "Show agent-aware provenance for a file or line")]
-    Blame(commands::work_graph::BlameArgs),
-    #[command(about = "Show an ordered work-graph history for a resource")]
-    Timeline(commands::work_graph::WorkGraphArgs),
-    #[command(about = "Show stable cited facts for a resource")]
-    Facts(commands::work_graph::WorkGraphArgs),
+    #[command(about = "Show cited agent provenance for committed code or a pull request")]
+    Blame(commands::blame::BlameArgs),
     #[command(about = "Run read-only SQL against the local ctx index")]
     Sql(SqlArgs),
     #[command(about = "Read embedded ctx documentation")]
@@ -96,6 +92,11 @@ pub(crate) struct SetupArgs {
         help = "Prepare local history inventory without importing searchable history"
     )]
     pub(crate) catalog_only: bool,
+    #[arg(
+        long,
+        help = "Enable local semantic search in config (requires daemon maintenance)"
+    )]
+    pub(crate) semantic: bool,
     #[arg(long, help = "Do not start daemon maintenance after setup")]
     pub(crate) no_daemon: bool,
     #[arg(long, help = "Wait for foreground lexical indexing before returning")]
@@ -193,26 +194,6 @@ pub(crate) enum ShowTarget {
     Session(ShowSessionArgs),
     #[command(about = "Show one event or a surrounding event window")]
     Event(ShowEventArgs),
-    #[command(about = "Show Pro provenance for a commit")]
-    Commit(commands::work_graph::ResourceValueArgs),
-    #[command(
-        name = "pr",
-        alias = "pull-request",
-        about = "Show Pro provenance for a pull request"
-    )]
-    PullRequest(commands::work_graph::ResourceValueArgs),
-    #[command(about = "Show Pro provenance for an issue")]
-    Issue(commands::work_graph::ResourceValueArgs),
-    #[command(about = "Show Pro provenance for a file")]
-    File(commands::work_graph::FileResourceValueArgs),
-    #[command(about = "Show Pro provenance for a branch")]
-    Branch(commands::work_graph::ResourceValueArgs),
-    #[command(
-        name = "repo",
-        alias = "repository",
-        about = "Show Pro provenance for a repository"
-    )]
-    Repository(commands::work_graph::ResourceValueArgs),
 }
 
 #[derive(Debug, Args)]
@@ -227,26 +208,6 @@ pub(crate) enum LocateTarget {
     Session(LocateSessionArgs),
     #[command(about = "Locate provider/source metadata for an event")]
     Event(LocateEventArgs),
-    #[command(about = "Locate Pro evidence for a commit")]
-    Commit(commands::work_graph::ResourceValueArgs),
-    #[command(
-        name = "pr",
-        alias = "pull-request",
-        about = "Locate Pro evidence for a pull request"
-    )]
-    PullRequest(commands::work_graph::ResourceValueArgs),
-    #[command(about = "Locate Pro evidence for an issue")]
-    Issue(commands::work_graph::ResourceValueArgs),
-    #[command(about = "Locate Pro evidence for a file")]
-    File(commands::work_graph::FileResourceValueArgs),
-    #[command(about = "Locate Pro evidence for a branch")]
-    Branch(commands::work_graph::ResourceValueArgs),
-    #[command(
-        name = "repo",
-        alias = "repository",
-        about = "Locate Pro evidence for a repository"
-    )]
-    Repository(commands::work_graph::ResourceValueArgs),
 }
 
 #[derive(Debug, Args)]

@@ -1,4 +1,3 @@
-use crate::provider::codex::session::codex_session_file_conversation_scan;
 use crate::tests::support::fixtures::jsonl::{jsonl_line, oversized_jsonl_line};
 use crate::tests::support::paths::tempdir;
 use crate::tests::support::provider_state::stored_provider_session_id;
@@ -192,7 +191,6 @@ fn codex_session_jsonl_reports_only_oversized_events_without_fake_session() {
         &mut slow_store,
         CodexSessionImportOptions {
             imported_at: "2026-07-03T12:31:00Z".parse().unwrap(),
-            fast_event_inserts: false,
             capture_work_limit: crate::CaptureWorkLimit::Drain,
             inventory_observation_token: None,
             ..CodexSessionImportOptions::default()
@@ -350,12 +348,6 @@ fn codex_session_probe_reports_oversized_line_before_first_real_message() {
     );
     fs::write(&path, bytes).unwrap();
 
-    assert!(
-        codex_session_file_conversation_scan(&path)
-            .unwrap()
-            .has_real_conversation
-    );
-
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
     let summary = import_codex_session_jsonl(
         &path,
@@ -423,7 +415,6 @@ fn codex_session_jsonl_keeps_valid_header_when_event_timestamp_is_malformed() {
         &mut store,
         CodexSessionImportOptions {
             imported_at: "2026-07-03T12:30:00Z".parse().unwrap(),
-            fast_event_inserts: false,
             capture_work_limit: crate::CaptureWorkLimit::Drain,
             inventory_observation_token: None,
             ..CodexSessionImportOptions::default()
@@ -481,7 +472,6 @@ fn codex_session_jsonl_accepts_tool_only_session() {
         &mut store,
         CodexSessionImportOptions {
             imported_at: "2026-07-03T12:30:00Z".parse().unwrap(),
-            fast_event_inserts: false,
             capture_work_limit: crate::CaptureWorkLimit::Drain,
             inventory_observation_token: None,
             ..CodexSessionImportOptions::default()

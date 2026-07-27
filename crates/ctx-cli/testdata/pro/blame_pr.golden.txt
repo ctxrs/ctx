@@ -1,0 +1,29 @@
+PR          ctxrs/ctx#42
+repository  ctxrs/ctx
+
+Code produced
+  contains_commit  commit deadbeef
+    membership evidence  [1]
+    produced by
+    session       producer
+    confidence    explicit
+    state         asserted
+    evidence      [2]
+    possible producer
+    session       possible
+    confidence    ambiguous
+    state         ambiguous
+    evidence      [3]
+
+PR activity
+  reviewed   session reviewer  [4]
+    confidence explicit  state asserted
+
+Evidence
+  [1] ctx show event 00000000-0000-0000-0000-000000000001
+  [2] ctx show event 00000000-0000-0000-0000-000000000002
+  [3] ctx show event 00000000-0000-0000-0000-000000000003
+  [4] ctx show event 00000000-0000-0000-0000-000000000004
+
+2 matches shown; more matches are available.
+continue  ctx blame pr https://gitlab.example.com/ctxrs/ctx/-/merge_requests/42 --repository ctxrs/ctx --cursor next-page

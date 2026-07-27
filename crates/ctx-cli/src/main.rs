@@ -22,6 +22,7 @@ mod pro;
 mod progress;
 mod provider_args;
 mod provider_sources;
+mod release_build_identity;
 mod search_filters;
 mod search_render;
 mod semantic;
@@ -43,9 +44,7 @@ pub(crate) use commands::search::{RefreshArg, SearchRefreshReport};
 pub(crate) use commands::sql::raw_sql_result_json;
 pub(crate) use output::{compact_json, OutputFormat};
 pub(crate) use provider_args::{cli_supported_provider, parse_provider_arg, ProviderArg};
-pub(crate) use provider_sources::{
-    discovered_plugin_sources_json, discovered_sources, sources_json,
-};
+pub(crate) use provider_sources::{discovered_plugin_sources_json, sources_json};
 pub(crate) use search_filters::{
     search_filters, search_has_intent, SearchFilterInput, SearchIntentInput,
     SourceIdentityFilterArgs,
@@ -70,6 +69,9 @@ const DEFAULT_VISIBLE_SOURCE_PROVIDERS: &[CaptureProvider] = &[
 ];
 
 fn main() -> ExitCode {
+    if release_build_identity::print_if_requested() {
+        return ExitCode::SUCCESS;
+    }
     dispatch::run()
 }
 

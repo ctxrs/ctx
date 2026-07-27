@@ -1,8 +1,13 @@
+use chrono::{DateTime, Utc};
+use ctx_history_core::{Event, EventRole, EventType, SyncMetadata};
 use rusqlite::params;
+use serde_json::json;
+use uuid::Uuid;
 
 use super::fixtures::tempdir;
+use crate::events::ProviderEventHashAuthority;
 use crate::raw_sql::{RawSqlOptions, RawSqlValue};
-use crate::Store;
+use crate::{Store, FINAL_SCHEMA_IDENTITY, SCHEMA_VERSION};
 
 #[test]
 fn raw_sql_query_reads_stable_views() {
@@ -27,6 +32,114 @@ fn raw_sql_query_reads_stable_views() {
     assert_eq!(result.columns[0].name, "session_count");
     assert_eq!(result.returned_rows, 1);
     assert_eq!(result.rows[0][0], RawSqlValue::Integer(0));
+}
+
+#[test]
+fn v47_stable_events_expose_sparse_failure_without_transitional_result_schema() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let now: DateTime<Utc> = "2026-07-23T00:00:00Z".parse().unwrap();
+    let output = |id, seq, event_type, hash, body| Event {
+        id,
+        seq,
+        history_record_id: None,
+        session_id: None,
+        run_id: None,
+        event_type,
+        role: Some(EventRole::Tool),
+        occurred_at: now,
+        capture_source_id: None,
+        payload: json!({"body": body}),
+        payload_blob_id: None,
+        dedupe_key: Some(Store::provider_source_event_dedupe_key(
+            Uuid::nil(),
+            seq,
+            hash,
+        )),
+        sync: SyncMetadata::default(),
+    };
+    let success = output(
+        Uuid::new_v4(),
+        1,
+        EventType::ToolOutput,
+        "success-output",
+        json!({
+            "result_outcome": "success",
+            "output_preview": "successful output must be absent"
+        }),
+    );
+    let failure = output(
+        Uuid::new_v4(),
+        2,
+        EventType::CommandOutput,
+        "failure-output",
+        json!({
+            "result_outcome": "failure",
+            "exit_code": 1,
+            "output_preview": "retained sparse failure"
+        }),
+    );
+
+    assert!(!store
+        .reconcile_provider_event(&success, ProviderEventHashAuthority::ProviderSupplied)
+        .unwrap());
+    assert!(store
+        .reconcile_provider_event(&failure, ProviderEventHashAuthority::ProviderSupplied)
+        .unwrap());
+
+    let (version, identity): (i64, String) = store
+        .conn
+        .query_row(
+            "SELECT (SELECT user_version FROM pragma_user_version),
+                    schema_identity
+             FROM ctx_store_schema_identity WHERE singleton = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(version, SCHEMA_VERSION);
+    assert_eq!(identity, FINAL_SCHEMA_IDENTITY);
+    assert_eq!(
+        store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema
+                 WHERE name = 'result_observations'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+
+    let rows = store
+        .raw_sql_query(
+            "SELECT ctx_event_id, event_type, payload_json FROM ctx_events",
+            RawSqlOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(rows.returned_rows, 1);
+    assert_eq!(
+        rows.rows[0][0],
+        RawSqlValue::Text {
+            value: failure.id.to_string(),
+            bytes: 36,
+            truncated: false,
+        }
+    );
+    assert_eq!(
+        rows.rows[0][1],
+        RawSqlValue::Text {
+            value: "command_output".to_owned(),
+            bytes: "command_output".len(),
+            truncated: false,
+        }
+    );
+    let RawSqlValue::Text { value, .. } = &rows.rows[0][2] else {
+        panic!("failure payload is not text");
+    };
+    assert!(value.contains("retained sparse failure"));
+    assert!(!value.contains("successful output must be absent"));
 }
 
 #[test]

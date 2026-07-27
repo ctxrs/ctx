@@ -38,19 +38,6 @@ pub(super) fn reject_import_conflicts(
     Ok(())
 }
 
-pub(super) fn reject_capture_source_import_conflict(
-    tx: &Transaction<'_>,
-    source_id: Uuid,
-) -> Result<()> {
-    if row_exists(tx, "capture_sources", source_id)? {
-        return Err(StoreError::ImportConflict {
-            kind: "capture_source",
-            id: source_id,
-        });
-    }
-    Ok(())
-}
-
 pub(super) fn reject_import_invariant_conflicts(
     tx: &Transaction<'_>,
     archive: &SessionHistoryArchive,

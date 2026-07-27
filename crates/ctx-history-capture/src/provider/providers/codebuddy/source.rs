@@ -69,6 +69,13 @@ impl CodeBuddyFrozenFile {
         format!("codebuddy-{shape}-v1:fnv1a64:{:016x}", revision.finish())
     }
 
+    pub(super) fn identity_token(&self) -> String {
+        match (self.device, self.inode) {
+            (Some(device), Some(inode)) => format!("unix:{device}:{inode}"),
+            _ => "metadata-only".to_owned(),
+        }
+    }
+
     pub(super) fn revalidate(&self, path: &Path) -> Result<bool> {
         match Self::read(path) {
             Ok(current) => Ok(current == *self),

@@ -174,6 +174,7 @@ pub(super) fn run_daemon_history_refresh_job(
         true,
         &mut provider_refreshes,
         config,
+        *next_source_cursor == 0,
     );
     let provider_refresh_events = provider_refreshes.finish_for_daemon(refresh_started.elapsed());
     let mut job = match refresh_result {
@@ -299,6 +300,42 @@ pub(super) fn search_refresh_source_fingerprint(
         .collect::<Vec<_>>();
     items.sort();
     semantic_text_hash(&items.join("\n"))
+}
+
+#[cfg(test)]
+mod canonical_pro_progression_tests {
+    use ctx_history_capture::ProviderImportSummary;
+
+    use crate::commands::{
+        import::CanonicalProSourceProgression, search::progress_search_refresh_canonical_pro,
+    };
+
+    #[derive(Default)]
+    struct TestCanonicalProProgression {
+        frontier_checks: usize,
+    }
+
+    impl CanonicalProSourceProgression for TestCanonicalProProgression {
+        fn progress_to_committed_core_frontier(&mut self) {
+            self.frontier_checks += 1;
+        }
+    }
+
+    #[test]
+    fn daemon_refresh_shared_path_progresses_changed_or_failed_core_attempts() {
+        let mut changed = ProviderImportSummary::default();
+        changed.imported = 1;
+        let no_op = ProviderImportSummary::default();
+        let mut progression = TestCanonicalProProgression::default();
+
+        // `run_daemon_history_refresh_job` delegates to the search refresh path
+        // above, so this is the exact post-Core gate used by daemon refreshes.
+        progress_search_refresh_canonical_pro(Some(&mut progression), Some(&changed));
+        progress_search_refresh_canonical_pro(Some(&mut progression), Some(&no_op));
+        progress_search_refresh_canonical_pro(Some(&mut progression), None);
+
+        assert_eq!(progression.frontier_checks, 2);
+    }
 }
 use std::{path::Path, time::Instant};
 

@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, path::Path};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 use crate::provider::sqlite::{
     ensure_sqlite_table_columns, optional_text_column_expr, optional_timestamp_millis_expr,
@@ -9,6 +9,7 @@ use crate::provider::sqlite::{
 };
 use crate::{CaptureError, Result};
 
+use super::model::{ConversationRow, LegacyOrderKey, PlatformMessageRow};
 use super::{ASTRBOT_CAPTURE_REVISION, ASTRBOT_POLICY_REVISION};
 
 pub(super) fn astrbot_source_snapshot(path: &Path) -> Result<ProviderSqliteSourceSnapshot> {
@@ -33,12 +34,27 @@ pub(super) fn astrbot_source_revision(
 pub(super) struct AstrBotSql {
     pub(super) conversation_candidate_initial: String,
     pub(super) conversation_candidate_after: String,
-    pub(super) conversation_order_at: String,
     pub(super) conversation_hydration: String,
     pub(super) platform_message_candidate_initial: Option<String>,
     pub(super) platform_message_candidate_after: Option<String>,
-    pub(super) platform_message_order_at: Option<String>,
     pub(super) platform_message_hydration: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct RowCandidate {
+    pub(super) physical_rowid: i64,
+    pub(super) retained_bytes: i64,
+    pub(super) legacy_order: LegacyOrderKey,
+}
+
+impl RowCandidate {
+    pub(super) fn observed_bytes(self) -> Result<u64> {
+        u64::try_from(self.retained_bytes).map_err(|_| {
+            CaptureError::InvalidPayload(
+                "AstrBot retained SQLite byte count must be nonnegative".to_owned(),
+            )
+        })
+    }
 }
 
 impl AstrBotSql {
@@ -74,10 +90,6 @@ impl AstrBotSql {
              from projected p where p.physical_rowid > ?1 \
              order by p.physical_rowid limit 1"
         );
-        let conversation_order_at = format!(
-            "{conversation_cte} select physical_rowid, created_at, row_id \
-             from projected where physical_rowid = ?1"
-        );
         let conversation_hydration = format!(
             "{conversation_cte} select row_id, inner_conversation_id, conversation_id, \
              platform_id, user_id, content, title, persona_id, token_usage, created_at, \
@@ -86,7 +98,6 @@ impl AstrBotSql {
         let (
             platform_message_candidate_initial,
             platform_message_candidate_after,
-            platform_message_order_at,
             platform_message_hydration,
         ) = if sqlite_table_exists(conn, "platform_message_history")? {
             let columns = sqlite_table_columns(conn, "platform_message_history")?;
@@ -119,27 +130,21 @@ impl AstrBotSql {
                          where p.physical_rowid > ?1 order by p.physical_rowid limit 1"
                 )),
                 Some(format!(
-                    "{cte} select physical_rowid, created_at, id \
-                         from projected where physical_rowid = ?1"
-                )),
-                Some(format!(
                     "{cte} select id, platform_id, user_id, sender_id, sender_name, \
                          content, llm_checkpoint_id, created_at from projected \
                          where physical_rowid = ?1"
                 )),
             )
         } else {
-            (None, None, None, None)
+            (None, None, None)
         };
 
         Ok(Self {
             conversation_candidate_initial,
             conversation_candidate_after,
-            conversation_order_at,
             conversation_hydration,
             platform_message_candidate_initial,
             platform_message_candidate_after,
-            platform_message_order_at,
             platform_message_hydration,
         })
     }
@@ -221,4 +226,76 @@ pub(super) fn with_astrbot_length_preflight<T>(
     // counts, so lift the limit only around metadata preflight and restore it before hydration.
     let _guard = SqliteLengthPreflightGuard::new(conn);
     query().map_err(CaptureError::from)
+}
+
+pub(super) fn fetch_candidate(
+    conn: &Connection,
+    initial_sql: &str,
+    after_sql: &str,
+    after_rowid: Option<i64>,
+) -> Result<Option<RowCandidate>> {
+    let map_row = |row: &rusqlite::Row<'_>| {
+        let physical_rowid = row.get(0)?;
+        let timestamp = row.get::<_, Option<i64>>(2)?;
+        Ok(RowCandidate {
+            physical_rowid,
+            retained_bytes: row.get(1)?,
+            legacy_order: LegacyOrderKey {
+                timestamp_is_present: timestamp.is_some(),
+                timestamp: timestamp.unwrap_or(0),
+                logical_id: row.get(3)?,
+                physical_rowid,
+            },
+        })
+    };
+    with_astrbot_length_preflight(conn, || {
+        match after_rowid {
+            Some(rowid) => conn.query_row(after_sql, [rowid], map_row),
+            None => conn.query_row(initial_sql, [], map_row),
+        }
+        .optional()
+    })
+}
+
+pub(super) fn hydrate_conversation(
+    conn: &Connection,
+    sql: &str,
+    physical_rowid: i64,
+) -> Result<ConversationRow> {
+    conn.query_row(sql, [physical_rowid], |row| {
+        Ok(ConversationRow {
+            row_id: row.get(0)?,
+            inner_conversation_id: row.get(1)?,
+            conversation_id: row.get(2)?,
+            platform_id: row.get(3)?,
+            user_id: row.get(4)?,
+            content: row.get(5)?,
+            title: row.get(6)?,
+            persona_id: row.get(7)?,
+            token_usage: row.get(8)?,
+            created_at: row.get(9)?,
+            updated_at: row.get(10)?,
+        })
+    })
+    .map_err(CaptureError::from)
+}
+
+pub(super) fn hydrate_platform_message(
+    conn: &Connection,
+    sql: &str,
+    physical_rowid: i64,
+) -> Result<PlatformMessageRow> {
+    conn.query_row(sql, [physical_rowid], |row| {
+        Ok(PlatformMessageRow {
+            id: row.get(0)?,
+            platform_id: row.get(1)?,
+            user_id: row.get(2)?,
+            sender_id: row.get(3)?,
+            sender_name: row.get(4)?,
+            content: row.get(5)?,
+            llm_checkpoint_id: row.get(6)?,
+            created_at: row.get(7)?,
+        })
+    })
+    .map_err(CaptureError::from)
 }

@@ -3,24 +3,32 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{DateTime, Utc};
-use ctx_history_core::{CaptureProvider, EventRole, EventType, ProviderEventEnvelope};
+use ctx_history_core::{CaptureProvider, ContentRef, EventRole, EventType};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::{
-    captured_batch::CapturedRecord,
-    complete_content::jsonl::ExactJsonlSourceBinding,
+    complete_content::{
+        attach_verified_content_locator, verified_content_profile, CompleteContentBodyDigest,
+        CompleteContentSourceFamily, VerifiedContentLocatorV1, VerifiedContentRole,
+        COMPLETE_CONTENT_MAX_BODY_BYTES,
+    },
     provider::normalization::{
         provider_capped_json, provider_explicit_result_value_text, provider_role,
         provider_value_text,
     },
-    Result, OPENCLAW_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS,
+    CaptureError, Result, OPENCLAW_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS,
+    PROVIDER_MAX_TEXT_CHARS,
 };
 
 use super::{
-    normalization, openclaw_index_revision, openclaw_session_index_for_file,
-    OpenClawFrozenFileMetadata, OpenClawSessionObservation,
+    openclaw_index_revision, openclaw_session_index_for_file, OpenClawFrozenFileMetadata,
+    OpenClawSessionObservation,
 };
+
+const EXACT_JSONL_LOCATOR_KIND: &str = "jsonl-exact-range-v1";
+const SOURCE_REVISION_DIGEST_DOMAIN: &[u8] = b"ctx-complete-content-source-revision-v1\0";
+const PATH_IDENTITY_DIGEST_DOMAIN: &[u8] = b"ctx-complete-content-path-identity-v1\0";
 
 pub(crate) fn source_from_admitted(
     path: &Path,
@@ -53,48 +61,147 @@ pub(crate) fn source_from_admitted(
     Ok((observation.source_revision(), path_identity))
 }
 
-pub(super) fn event_with_locators(
-    provider_session_id: &str,
-    event_index: u64,
-    line_number: usize,
+#[allow(clippy::too_many_arguments)]
+pub(super) fn attach_native_path_locators(
+    event_type: EventType,
+    payload: &mut Value,
+    metadata: &mut Value,
     row: &Value,
-    occurred_at: DateTime<Utc>,
-    record: &CapturedRecord,
-    binding: &ExactJsonlSourceBinding,
-) -> Result<ProviderEventEnvelope> {
-    let mut event = normalization::event(
-        provider_session_id,
-        event_index,
-        line_number,
-        row,
-        occurred_at,
-    );
-    crate::complete_content::jsonl::attach_exact_jsonl_complete_content_locator(
-        &mut event,
-        CaptureProvider::OpenClaw,
-        OPENCLAW_SOURCE_FORMAT,
-        row,
-        record,
-        line_number,
-        binding,
-    )?;
-    if let Some((content, native_record_id)) = crate::complete_content::jsonl::result_content_and_id(
-        CaptureProvider::OpenClaw,
-        OPENCLAW_SOURCE_FORMAT,
-        row,
-        line_number,
-    ) {
-        crate::complete_content::jsonl::attach_exact_jsonl_result_content_locator(
-            &mut event,
-            CaptureProvider::OpenClaw,
-            OPENCLAW_SOURCE_FORMAT,
-            &content,
-            &native_record_id,
-            record,
-            binding,
-        )?;
+    line_number: usize,
+    record_bytes: &[u8],
+    byte_start: u64,
+    byte_end_exclusive: u64,
+    source_revision: &str,
+    path_identity: &str,
+    result_body: Option<&str>,
+) -> Result<()> {
+    if byte_start >= byte_end_exclusive {
+        return Err(CaptureError::SystemInvariant(
+            "OpenClaw NativePath locator range is empty",
+        ));
     }
-    Ok(event)
+    if event_type == EventType::Message {
+        if let Some((text, native_record_id)) = message_record(row, line_number) {
+            if text.chars().count() > PROVIDER_MAX_TEXT_CHARS
+                && text.len() <= COMPLETE_CONTENT_MAX_BODY_BYTES
+            {
+                attach_locator(
+                    metadata,
+                    VerifiedContentRole::MessageBody,
+                    &text,
+                    &native_record_id,
+                    record_bytes,
+                    byte_start,
+                    byte_end_exclusive,
+                    source_revision,
+                    path_identity,
+                )?;
+            }
+        }
+    }
+    if matches!(event_type, EventType::ToolOutput | EventType::CommandOutput) {
+        if let Some(content) =
+            result_body.filter(|content| content.len() <= COMPLETE_CONTENT_MAX_BODY_BYTES)
+        {
+            let native_record_id = row
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("line-{line_number}"));
+            if attach_locator(
+                metadata,
+                VerifiedContentRole::ResultBody,
+                content,
+                &native_record_id,
+                record_bytes,
+                byte_start,
+                byte_end_exclusive,
+                source_revision,
+                path_identity,
+            )? {
+                let content_ref = ContentRef::from_bytes(content.as_bytes()).ok_or(
+                    CaptureError::SystemInvariant(
+                        "OpenClaw result ContentRef exceeded the complete-content limit",
+                    ),
+                )?;
+                payload["result_content_ref"] = serde_json::to_value(content_ref)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn attach_locator(
+    metadata: &mut Value,
+    role: VerifiedContentRole,
+    content: &str,
+    native_record_id: &str,
+    record_bytes: &[u8],
+    byte_start: u64,
+    byte_end_exclusive: u64,
+    source_revision: &str,
+    path_identity: &str,
+) -> Result<bool> {
+    let Some(profile) = verified_content_profile(
+        CaptureProvider::OpenClaw,
+        OPENCLAW_SOURCE_FORMAT,
+        CompleteContentSourceFamily::Jsonl,
+        role,
+    ) else {
+        return Ok(false);
+    };
+    let Some(content_ref) = ContentRef::from_bytes(content.as_bytes()) else {
+        return Ok(false);
+    };
+    let locator_value = exact_locator_value(
+        byte_start,
+        byte_end_exclusive,
+        source_revision,
+        path_identity,
+    );
+    let Some(locator) = VerifiedContentLocatorV1::new(
+        role,
+        profile,
+        content_ref,
+        CompleteContentSourceFamily::Jsonl,
+        EXACT_JSONL_LOCATOR_KIND,
+        &locator_value,
+        native_record_id,
+        CompleteContentBodyDigest::from_bytes(record_bytes),
+    ) else {
+        return Ok(false);
+    };
+    attach_verified_content_locator(metadata, locator).ok_or(CaptureError::SystemInvariant(
+        "OpenClaw NativePath verified-content locator is malformed",
+    ))?;
+    Ok(true)
+}
+
+fn exact_locator_value(
+    byte_start: u64,
+    byte_end_exclusive: u64,
+    source_revision: &str,
+    path_identity: &str,
+) -> [u8; 80] {
+    let mut value = [0_u8; 80];
+    value[..8].copy_from_slice(&byte_start.to_be_bytes());
+    value[8..16].copy_from_slice(&byte_end_exclusive.to_be_bytes());
+    value[16..48].copy_from_slice(&domain_digest(
+        SOURCE_REVISION_DIGEST_DOMAIN,
+        source_revision,
+    ));
+    value[48..80].copy_from_slice(&domain_digest(PATH_IDENTITY_DIGEST_DOMAIN, path_identity));
+    value
+}
+
+fn domain_digest(domain: &[u8], value: &str) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(domain);
+    digest.update((value.len() as u64).to_be_bytes());
+    digest.update(value.as_bytes());
+    digest.finalize().into()
 }
 
 pub(crate) fn message_record(value: &Value, line_number: usize) -> Option<(String, String)> {
@@ -130,7 +237,7 @@ pub(crate) fn message_record(value: &Value, line_number: usize) -> Option<(Strin
     })
 }
 
-/// Extracts explicit output from an OpenClaw legacy JSONL tool message.
+/// Extracts explicit output from an OpenClaw native JSONL tool message.
 pub(crate) fn result_content(row: &Value) -> Option<String> {
     if row.get("type").and_then(Value::as_str).unwrap_or("message") != "message" {
         return None;

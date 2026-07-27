@@ -2,12 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{
-    AgentType, ArtifactKind, CaptureProvider, EventRole, EventType, Fidelity, SessionStatus,
-};
+use crate::{ArtifactKind, CaptureProvider, Fidelity};
 
-pub const PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION: u32 = 2;
-pub const PROVIDER_CAPTURE_ENVELOPE_MIN_SUPPORTED_SCHEMA_VERSION: u32 = 1;
 pub const PROVIDER_SUPPORT_MATRIX_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -245,94 +241,6 @@ pub struct ProviderArtifactDescriptor {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ProviderSourceEnvelope {
-    pub source_format: String,
-    pub machine_id: String,
-    pub observed_at: DateTime<Utc>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub raw_source_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_root: Option<String>,
-    #[serde(default)]
-    pub trust: ProviderSourceTrust,
-    #[serde(default)]
-    pub fidelity: Fidelity,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<ProviderCursorRange>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub idempotency_key: Option<String>,
-    #[serde(default = "super::default_metadata")]
-    pub metadata: Value,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ProviderSessionEnvelope {
-    pub provider_session_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_provider_session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub root_provider_session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub external_agent_id: Option<String>,
-    #[serde(default)]
-    pub agent_type: AgentType,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub role_hint: Option<String>,
-    #[serde(default)]
-    pub is_primary: bool,
-    #[serde(default)]
-    pub status: SessionStatus,
-    pub started_at: DateTime<Utc>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ended_at: Option<DateTime<Utc>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    #[serde(default)]
-    pub fidelity: Fidelity,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub idempotency_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifacts: Vec<ProviderArtifactDescriptor>,
-    #[serde(default = "super::default_metadata")]
-    pub metadata: Value,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ProviderEventEnvelope {
-    pub provider_event_index: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_event_hash: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<String>,
-    #[serde(default)]
-    pub event_type: EventType,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub role: Option<EventRole>,
-    pub occurred_at: DateTime<Utc>,
-    #[serde(default)]
-    pub fidelity: Fidelity,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub idempotency_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifacts: Vec<ProviderArtifactDescriptor>,
-    #[serde(default = "super::default_metadata")]
-    pub payload: Value,
-    #[serde(default = "super::default_metadata")]
-    pub metadata: Value,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ProviderCaptureEnvelope {
-    #[serde(default = "provider_capture_envelope_min_supported_schema_version")]
-    pub schema_version: u32,
-    pub provider: CaptureProvider,
-    pub source: ProviderSourceEnvelope,
-    pub session: ProviderSessionEnvelope,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub event: Option<ProviderEventEnvelope>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderSupportPath {
     pub kind: ProviderPathKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -384,14 +292,6 @@ pub struct ProviderSupportMatrixDocument {
     pub providers: Vec<ProviderSupportEntry>,
 }
 
-pub const fn provider_capture_envelope_schema_version() -> u32 {
-    PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION
-}
-
-const fn provider_capture_envelope_min_supported_schema_version() -> u32 {
-    PROVIDER_CAPTURE_ENVELOPE_MIN_SUPPORTED_SCHEMA_VERSION
-}
-
 pub const fn provider_support_matrix_schema_version() -> u32 {
     PROVIDER_SUPPORT_MATRIX_SCHEMA_VERSION
 }
@@ -400,10 +300,7 @@ pub const fn provider_support_matrix_schema_version() -> u32 {
 mod tests {
     use std::{collections::BTreeSet, fs, path::PathBuf};
 
-    use super::{
-        ProviderCaptureEnvelope, ProviderId, ProviderSupportMatrixDocument, ProviderSupportStatus,
-        PROVIDER_CAPTURE_ENVELOPE_MIN_SUPPORTED_SCHEMA_VERSION,
-    };
+    use super::{ProviderId, ProviderSupportMatrixDocument, ProviderSupportStatus};
 
     fn workspace_file(path: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -517,74 +414,5 @@ mod tests {
           }]
         }"#;
         assert!(serde_json::from_str::<ProviderSupportMatrixDocument>(legacy_status).is_err());
-    }
-
-    #[test]
-    fn provider_capture_envelope_round_trips_cursor_fields() {
-        let sample = r#"{
-          "schema_version": 1,
-          "provider": "codex",
-          "source": {
-            "source_format": "normalized_provider_fixture_jsonl",
-            "machine_id": "machine-1",
-            "observed_at": "2026-06-23T12:00:00Z",
-            "trust": "fixture",
-            "fidelity": "imported",
-            "cursor": {
-              "after": {
-                "stream": "provider:codex:fixture",
-                "cursor": "line:2",
-                "observed_at": "2026-06-23T12:00:01Z"
-              }
-            },
-            "metadata": {"source": "fixture"}
-          },
-          "session": {
-            "provider_session_id": "codex-session-1",
-            "agent_type": "primary",
-            "status": "imported",
-            "started_at": "2026-06-23T12:00:00Z",
-            "fidelity": "imported",
-            "metadata": {"model": "gpt-5-codex"}
-          },
-          "event": {
-            "provider_event_index": 1,
-            "cursor": "line:2",
-            "event_type": "message",
-            "role": "assistant",
-            "occurred_at": "2026-06-23T12:00:01Z",
-            "fidelity": "imported",
-            "payload": {"text": "provider preview"},
-            "metadata": {"token_usage": 42}
-          }
-        }"#;
-
-        let parsed: ProviderCaptureEnvelope =
-            serde_json::from_str(sample).expect("envelope should parse");
-        assert_eq!(parsed.schema_version, 1);
-        let legacy_without_version = sample.replacen(r#""schema_version": 1,"#, "", 1);
-        let parsed_legacy: ProviderCaptureEnvelope = serde_json::from_str(&legacy_without_version)
-            .expect("legacy envelope without a schema version should parse as v1");
-        assert_eq!(
-            parsed_legacy.schema_version,
-            PROVIDER_CAPTURE_ENVELOPE_MIN_SUPPORTED_SCHEMA_VERSION
-        );
-        assert_eq!(
-            parsed
-                .source
-                .cursor
-                .as_ref()
-                .and_then(|cursor| cursor.after.as_ref())
-                .map(|checkpoint| checkpoint.cursor.as_str()),
-            Some("line:2")
-        );
-        assert_eq!(
-            parsed
-                .event
-                .as_ref()
-                .and_then(|event| event.payload.get("text"))
-                .and_then(serde_json::Value::as_str),
-            Some("provider preview")
-        );
     }
 }

@@ -157,15 +157,5 @@ fn semantic_partial_role_indexes_preserve_run_and_session_recall_and_order() {
     assert!(!first_run_turn.text.contains("deleted assistant"));
     assert!(!first_run_turn.text.contains("non-message row"));
 
-    let matching = store
-        .event_embedding_documents_matching_terms(&["final answer".to_owned()], 10)
-        .unwrap();
-    assert_eq!(
-        matching
-            .iter()
-            .map(|document| document.event_id)
-            .collect::<Vec<_>>(),
-        vec![run_first_user.id]
-    );
     assert_eq!(store.count_event_embedding_documents_exact().unwrap(), 3);
 }

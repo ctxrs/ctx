@@ -16,6 +16,46 @@ pub(super) fn is_complete_content_tool_call(message: &Value) -> bool {
             == Some("complete")
 }
 
+pub(super) fn is_blame_tool_call(message: &Value) -> bool {
+    message.get("method").and_then(Value::as_str) == Some("tools/call")
+        && message.pointer("/params/name").and_then(Value::as_str) == Some("blame")
+}
+
+pub(super) fn bound_blame_mcp_response(
+    response: Value,
+    response_id: Value,
+    output_limit_bytes: usize,
+) -> Value {
+    if serialized_json_line_bytes(&response).is_ok_and(|bytes| bytes <= output_limit_bytes) {
+        return response;
+    }
+
+    let message = "blame response exceeds the MCP output limit; lower `limit` or use the CLI with `ctx blame ... --json`";
+    let result = json!({
+        "isError": true,
+        "content": [{
+            "type": "text",
+            "text": message,
+        }],
+        "structuredContent": {
+            "error": message,
+            "error_code": "invalid_response",
+            "retryable": true,
+        },
+    });
+    let bounded = success_response(response_id, result);
+    if serialized_json_line_bytes(&bounded).is_ok_and(|bytes| bytes <= output_limit_bytes) {
+        bounded
+    } else {
+        error_response(
+            Value::Null,
+            -32603,
+            "Blame response too large",
+            Some(json!({ "error": "invalid_response" })),
+        )
+    }
+}
+
 pub(super) fn bound_complete_content_mcp_response(
     response: Value,
     response_id: Value,

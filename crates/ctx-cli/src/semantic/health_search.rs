@@ -147,31 +147,18 @@ pub(super) fn private_open_existing_lock_file(path: &Path) -> std::io::Result<fs
     fs::OpenOptions::new().read(true).write(true).open(path)
 }
 
-#[cfg(unix)]
 pub(super) fn secure_private_dir_permissions(path: &Path) -> Result<()> {
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+    restrict_private_directory(path)
         .with_context(|| format!("secure private directory {}", path.display()))?;
     Ok(())
 }
 
-#[cfg(not(unix))]
-pub(super) fn secure_private_dir_permissions(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
-#[cfg(unix)]
 pub(super) fn secure_private_file_permissions(path: &Path) -> Result<()> {
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+    restrict_private_file(path)
         .with_context(|| format!("secure private file {}", path.display()))?;
     Ok(())
 }
 
-#[cfg(not(unix))]
-pub(super) fn secure_private_file_permissions(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
-#[cfg(unix)]
 pub(super) fn secure_semantic_vector_permissions(path: &Path) -> Result<()> {
     for candidate in [
         path.to_path_buf(),
@@ -179,66 +166,11 @@ pub(super) fn secure_semantic_vector_permissions(path: &Path) -> Result<()> {
         PathBuf::from(format!("{}-shm", path.display())),
     ] {
         if candidate.exists() {
-            fs::set_permissions(&candidate, fs::Permissions::from_mode(0o600))
+            restrict_private_file(&candidate)
                 .with_context(|| format!("secure semantic vector file {}", candidate.display()))?;
         }
     }
     Ok(())
-}
-
-#[cfg(not(unix))]
-pub(super) fn secure_semantic_vector_permissions(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
-pub(super) fn sqlite_column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
-    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
-    let mut rows = stmt.query([])?;
-    while let Some(row) = rows.next()? {
-        let name: String = row.get(1)?;
-        if name == column {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-pub(super) fn sqlite_table_has_columns(
-    conn: &Connection,
-    table: &str,
-    columns: &[&str],
-) -> Result<bool> {
-    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
-    let mut rows = stmt.query([])?;
-    let mut existing = std::collections::HashSet::new();
-    while let Some(row) = rows.next()? {
-        existing.insert(row.get::<_, String>(1)?);
-    }
-    Ok(columns.iter().all(|column| existing.contains(*column)))
-}
-
-pub(super) fn sqlite_table_exists(conn: &Connection, table: &str) -> Result<bool> {
-    let exists = conn
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
-            params![table],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some();
-    Ok(exists)
-}
-
-pub(super) fn sqlite_table_sql(conn: &Connection, table: &str) -> Result<Option<String>> {
-    let sql = conn
-        .query_row(
-            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
-            params![table],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .optional()?
-        .flatten();
-    Ok(sql)
 }
 
 pub(super) fn semantic_query_text(query: &str, terms: &[String]) -> String {
@@ -312,7 +244,6 @@ pub(super) fn semantic_hits_for_text_query(
     vector_store: &SemanticVectorStore,
     semantic_text: &str,
     limit: usize,
-    event_filter: Option<&[Uuid]>,
 ) -> Result<(
     Vec<ctx_history_search::SemanticEventHit>,
     SemanticRetrievalDiagnostics,
@@ -320,7 +251,7 @@ pub(super) fn semantic_hits_for_text_query(
     let (query_embedding, query_embed_ms) = daemon_query_embedding(data_root, semantic_text)?
         .ok_or_else(|| anyhow!("daemon semantic query service is not available"))?;
     let semantic_hit_search =
-        semantic_hits_for_query(store, vector_store, &query_embedding, limit, event_filter)?;
+        semantic_hits_for_query(store, vector_store, &query_embedding, limit)?;
     let mut diagnostics = semantic_hit_search.diagnostics;
     diagnostics.query_embed_ms = Some(query_embed_ms);
     Ok((semantic_hit_search.hits, diagnostics))
@@ -498,7 +429,7 @@ pub(super) fn semantic_embed_policy_from_env_and_resources(
     policy
 }
 
-pub(super) fn semantic_worker_cache_dir(data_root: &Path) -> PathBuf {
+pub(crate) fn semantic_worker_cache_dir(data_root: &Path) -> PathBuf {
     let env = SemanticCacheEnv::current();
     semantic_worker_cache_dir_from_env(data_root, &env)
 }
@@ -588,7 +519,13 @@ pub(super) fn semantic_worker_default_cache_candidates(
 
 pub(super) fn semantic_model_cache_available(cache_dir: &Path) -> bool {
     semantic_model_cache_snapshot_dir(cache_dir).is_some()
+        || semantic_accelerator_model_cache_available(cache_dir)
         || semantic_coreml_model_cache_available(cache_dir)
+}
+
+pub(super) fn semantic_accelerator_model_cache_available(cache_dir: &Path) -> bool {
+    semantic_ort_model_cache_snapshot_dir(cache_dir, SemanticOrtModelVariant::AcceleratorO4Fp16)
+        .is_some()
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -603,6 +540,7 @@ pub(super) fn semantic_coreml_model_cache_available(_cache_dir: &Path) -> bool {
 
 pub(super) fn semantic_model_acquisition_status_json(cache_dir: &Path) -> Value {
     let cpu_available = semantic_model_cache_snapshot_dir(cache_dir).is_some();
+    let accelerator_available = semantic_accelerator_model_cache_available(cache_dir);
     #[cfg(any(target_os = "macos", test))]
     let coreml = coreml_acquisition_status_json(cache_dir);
     #[cfg(not(any(target_os = "macos", test)))]
@@ -615,6 +553,12 @@ pub(super) fn semantic_model_acquisition_status_json(cache_dir: &Path) -> Value 
         "network_scope": "daemon_only",
         "cpu": {
             "cache_status": if cpu_available { "present" } else { "missing" },
+            "verification": "sha256_on_load",
+            "source_revision": SEMANTIC_MODEL_REVISION,
+        },
+        "accelerator": {
+            "cache_status": if accelerator_available { "present" } else { "missing" },
+            "model_variant": SemanticOrtModelVariant::AcceleratorO4Fp16.as_str(),
             "verification": "sha256_on_load",
             "source_revision": SEMANTIC_MODEL_REVISION,
         },
@@ -638,6 +582,13 @@ pub(super) fn semantic_model_acquisition_integrity_error(error: &anyhow::Error) 
 }
 
 pub(super) fn semantic_model_cache_snapshot_dir(cache_dir: &Path) -> Option<PathBuf> {
+    semantic_ort_model_cache_snapshot_dir(cache_dir, SemanticOrtModelVariant::CpuFp32)
+}
+
+fn semantic_ort_model_cache_snapshot_dir(
+    cache_dir: &Path,
+    variant: SemanticOrtModelVariant,
+) -> Option<PathBuf> {
     if !semantic_embedding_supported() {
         return None;
     }
@@ -645,19 +596,22 @@ pub(super) fn semantic_model_cache_snapshot_dir(cache_dir: &Path) -> Option<Path
         return None;
     }
     for model_root in cache_paths::semantic_model_cache_roots(cache_dir) {
-        if let Some(snapshot) = semantic_model_snapshot_from_root(&model_root) {
+        if let Some(snapshot) = semantic_ort_model_snapshot_from_root(&model_root, variant) {
             return Some(snapshot);
         }
     }
     None
 }
 
-pub(super) fn semantic_model_snapshot_from_root(model_root: &Path) -> Option<PathBuf> {
+fn semantic_ort_model_snapshot_from_root(
+    model_root: &Path,
+    variant: SemanticOrtModelVariant,
+) -> Option<PathBuf> {
     let snapshot = model_root.join("snapshots").join(SEMANTIC_MODEL_REVISION);
     if !snapshot.is_dir() {
         return None;
     }
-    if SEMANTIC_REQUIRED_MODEL_FILES.iter().all(|file| {
+    if variant.required_files().all(|file| {
         fs::metadata(snapshot.join(file.path))
             .map(|metadata| metadata.is_file() && metadata.len() == file.size)
             .unwrap_or(false)
@@ -691,22 +645,20 @@ use std::{
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-use anyhow::{anyhow, Context, Result};
-use ctx_history_store::Store;
-use rusqlite::{params, Connection, OptionalExtension};
-use serde_json::{json, Value};
-use uuid::Uuid;
+use std::os::unix::fs::OpenOptionsExt;
 
 use crate::compact_json;
+use anyhow::{anyhow, Context, Result};
+use ctx_history_core::platform_security::{restrict_private_directory, restrict_private_file};
+use ctx_history_store::Store;
+use serde_json::{json, Value};
 
 use super::{
     cache_paths,
     indexing::semantic_hits_for_query,
     model_contract::{
-        semantic_model_key, SemanticCpuModelIntegrityError, SEMANTIC_DIMENSIONS,
-        SEMANTIC_MODEL_REVISION, SEMANTIC_REQUIRED_MODEL_FILES,
+        semantic_model_key, SemanticCpuModelIntegrityError, SemanticOrtModelVariant,
+        SEMANTIC_DIMENSIONS, SEMANTIC_MODEL_REVISION,
     },
     model_runtime::SemanticEmbedder,
     paths_status::{

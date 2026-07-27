@@ -1,10 +1,10 @@
 use crate::tests::support::assertions::{
-    assert_event_type_count, assert_event_with_role, assert_events_have_provider_citations,
+    assert_event_type_count, assert_events_have_provider_citations,
 };
 use crate::tests::support::paths::tempdir;
 use crate::tests::support::provider_state::stored_provider_session_id;
 use crate::{import_factory_ai_droid_sessions, FactoryAiDroidImportOptions};
-use ctx_history_core::{CaptureProvider, EventRole, EventType};
+use ctx_history_core::{CaptureProvider, EventType};
 use ctx_history_store::Store;
 use std::fs;
 
@@ -37,16 +37,15 @@ fn native_factory_ai_droid_supports_new_session_format() {
 
     assert_eq!(summary.failed, 0, "{:?}", summary.failures);
     assert_eq!(summary.imported_sessions, 1);
-    assert_eq!(summary.imported_events, 4);
+    assert_eq!(summary.imported_events, 3);
 
     let session_id =
         stored_provider_session_id(&store, CaptureProvider::FactoryAiDroid, "droid-new");
     let events = store.events_for_session(session_id).unwrap();
-    assert_eq!(events.len(), 4);
+    assert_eq!(events.len(), 3);
     assert_event_type_count(&events, EventType::Message, 1);
     assert_event_type_count(&events, EventType::ToolCall, 1);
-    assert_event_type_count(&events, EventType::ToolOutput, 1);
-    assert_event_with_role(&events, EventType::ToolOutput, EventRole::Tool);
+    assert_event_type_count(&events, EventType::ToolOutput, 0);
     assert_events_have_provider_citations(&events);
 
     let rendered = serde_json::to_string(&events).unwrap();
@@ -84,16 +83,15 @@ fn native_factory_ai_droid_supports_legacy_session_format() {
 
     assert_eq!(summary.failed, 0, "{:?}", summary.failures);
     assert_eq!(summary.imported_sessions, 1);
-    assert_eq!(summary.imported_events, 4);
+    assert_eq!(summary.imported_events, 3);
 
     let session_id =
         stored_provider_session_id(&store, CaptureProvider::FactoryAiDroid, "droid-legacy");
     let events = store.events_for_session(session_id).unwrap();
-    assert_eq!(events.len(), 4);
+    assert_eq!(events.len(), 3);
     assert_event_type_count(&events, EventType::Message, 1);
     assert_event_type_count(&events, EventType::ToolCall, 1);
-    assert_event_type_count(&events, EventType::ToolOutput, 1);
-    assert_event_with_role(&events, EventType::ToolOutput, EventRole::Tool);
+    assert_event_type_count(&events, EventType::ToolOutput, 0);
     assert_events_have_provider_citations(&events);
 
     let rendered = serde_json::to_string(&events).unwrap();

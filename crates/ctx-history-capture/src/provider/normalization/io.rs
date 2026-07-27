@@ -3,10 +3,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde_json::Value;
-
-use crate::common::io::{ensure_regular_provider_transcript_file, read_text_file_limited};
-use crate::{CaptureError, Result, MAX_PROVIDER_JSONL_LINE_BYTES};
+use crate::common::io::ensure_regular_provider_transcript_file;
+use crate::{CaptureError, Result};
 
 pub(crate) fn provider_optional_regular_file(path: &Path) -> Result<Option<PathBuf>> {
     match fs::symlink_metadata(path) {
@@ -27,15 +25,4 @@ pub(crate) fn provider_optional_regular_file(path: &Path) -> Result<Option<PathB
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(err.into()),
     }
-}
-
-pub(crate) fn read_provider_json_file(path: &Path, label: &str) -> Result<Value> {
-    let raw = read_text_file_limited(path, MAX_PROVIDER_JSONL_LINE_BYTES, label)?;
-    let value: Value = serde_json::from_str(&raw)?;
-    if !value.is_object() {
-        return Err(CaptureError::InvalidPayload(format!(
-            "{label} must contain a JSON object"
-        )));
-    }
-    Ok(value)
 }

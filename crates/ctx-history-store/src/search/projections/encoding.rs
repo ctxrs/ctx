@@ -1,5 +1,7 @@
 use ctx_history_core::{EventRole, EventType, RedactionState};
 
+use crate::result_storage::retained_failure_preview;
+
 pub(super) fn event_search_preview_from_payload(
     event_type: EventType,
     role: Option<EventRole>,
@@ -20,7 +22,7 @@ pub(super) fn event_search_preview_from_payload(
         EventType::ToolCall | EventType::CommandStarted | EventType::CommandFinished => {
             event_tool_call_preview(payload)
         }
-        EventType::ToolOutput | EventType::CommandOutput => None,
+        EventType::ToolOutput | EventType::CommandOutput => retained_failure_preview(payload),
         _ => None,
     }
     .unwrap_or_default();

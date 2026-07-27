@@ -1,7 +1,40 @@
 mod support;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use support::*;
+
+#[cfg(unix)]
+fn scheduler_state_path(binary: &Path) -> PathBuf {
+    binary.with_file_name(".ctx.upgrade-state.json")
+}
+
+#[cfg(unix)]
+fn installation_lock_path(binary: &Path) -> PathBuf {
+    binary.with_file_name(".ctx.install.lock")
+}
+
+#[cfg(unix)]
+fn ctx_with_umask(temp: &TempDir, mask: &str) -> Command {
+    let program = ctx(temp).get_program().to_owned();
+    let mut command = Command::new("/bin/sh");
+    command
+        .args(["-c", &format!("umask {mask}; exec \"$0\" \"$@\"")])
+        .arg(program);
+    apply_hermetic_env(&mut command, temp);
+    command
+}
+
+#[cfg(unix)]
+fn assert_mode(path: &Path, expected: u32) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    assert_eq!(
+        fs::metadata(path).unwrap().permissions().mode() & 0o777,
+        expected,
+        "unexpected mode for {}",
+        path.display()
+    );
+}
 
 #[test]
 fn windows_runtime_extractor_keeps_external_source_contract() {
@@ -30,6 +63,88 @@ fn windows_runtime_extractor_keeps_external_source_contract() {
 
 #[cfg(unix)]
 #[test]
+fn upgrade_enable_and_disable_persist_private_config_with_analytics_disabled() {
+    for (command_name, expected_mode) in [("enable", "apply"), ("disable", "off")] {
+        let temp = tempdir();
+        let first = temp.path().join(format!("{command_name}-state"));
+        let second = first.join("nested");
+        let data_root = second.join("ctx");
+
+        ctx_with_umask(&temp, "022")
+            .args(["upgrade", command_name])
+            .env("CTX_DATA_ROOT", &data_root)
+            .env("CTX_ANALYTICS_ENABLED", "false")
+            .assert()
+            .success();
+
+        assert_mode(&first, 0o700);
+        assert_mode(&second, 0o700);
+        assert_mode(&data_root, 0o700);
+        let config = data_root.join("config.toml");
+        assert_mode(&config, 0o600);
+        assert_eq!(
+            fs::read_to_string(config).unwrap(),
+            format!("[upgrade]\nauto = \"{expected_mode}\"\n")
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn upgrade_enable_and_disable_reject_insecure_config_without_repair() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    for command_name in ["enable", "disable"] {
+        let temp = tempdir();
+        let data_root = temp.path().join(format!("{command_name}-state"));
+        let config = data_root.join("config.toml");
+        let original = b"[search]\nsemantic = true\n";
+        fs::create_dir(&data_root).unwrap();
+        fs::set_permissions(&data_root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(&config, original).unwrap();
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o666)).unwrap();
+
+        let stderr = failure_stderr(
+            ctx(&temp)
+                .args(["upgrade", command_name])
+                .env("CTX_DATA_ROOT", &data_root)
+                .env("CTX_ANALYTICS_ENABLED", "false"),
+        );
+
+        assert!(
+            stderr.contains("private state path is not owner-only"),
+            "{command_name}: {stderr}"
+        );
+        assert_eq!(fs::read(&config).unwrap(), original, "{command_name}");
+        assert_mode(&config, 0o666);
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn upgrade_enable_creates_protected_nested_root_and_config_on_windows() {
+    use ctx_history_core::platform_security::{verify_private_directory, verify_private_file};
+
+    let temp = tempdir();
+    let first = temp.path().join("upgrade-state");
+    let nested = first.join("nested");
+    let data_root = nested.join("ctx");
+
+    ctx(&temp)
+        .args(["upgrade", "enable"])
+        .env("CTX_DATA_ROOT", &data_root)
+        .env("CTX_ANALYTICS_ENABLED", "false")
+        .assert()
+        .success();
+
+    verify_private_directory(&first).unwrap();
+    verify_private_directory(&nested).unwrap();
+    verify_private_directory(&data_root).unwrap();
+    verify_private_file(&data_root.join("config.toml")).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
 fn upgrade_status_check_and_apply_support_managed_installs() {
     let temp = tempdir();
     let release = fake_release(&temp, "9.9.9");
@@ -49,6 +164,15 @@ fn upgrade_status_check_and_apply_support_managed_installs() {
     assert_eq!(check["status"], "available");
     assert_eq!(check["latest_version"], "9.9.9");
     assert_eq!(check["managed"], true);
+    let checked_state: Value =
+        serde_json::from_slice(&fs::read(scheduler_state_path(&release.target)).unwrap()).unwrap();
+    assert!(checked_state["checked_at"].as_str().is_some());
+    assert!(checked_state["last_checked_unix_s"].as_u64().is_some());
+    assert_eq!(checked_state["metadata_url"], file_url(&release.metadata));
+    assert_eq!(
+        checked_state["artifact_url"],
+        file_url(&release.metadata.parent().unwrap().join("ctx"))
+    );
 
     let dry_run = json_output(fake_release_env(
         ctx(&temp).args(["upgrade", "--dry-run", "--json"]),
@@ -390,7 +514,6 @@ fn runtime_restore_failure_reports_primary_error_and_retains_backup() {
 fn interrupted_publications_recover_before_the_next_upgrade_action() {
     for (injection, point) in [
         ("CTX_UPGRADE_ABORT_AFTER_BACKUP_FOR_TESTS", "runtime"),
-        ("CTX_UPGRADE_ABORT_AFTER_BACKUP_FOR_TESTS", "binary"),
         ("CTX_UPGRADE_ABORT_AFTER_BACKUP_FOR_TESTS", "marker"),
         ("CTX_UPGRADE_ABORT_AFTER_PUBLISH_FOR_TESTS", "runtime"),
         ("CTX_UPGRADE_ABORT_AFTER_PUBLISH_FOR_TESTS", "binary"),
@@ -410,20 +533,34 @@ fn interrupted_publications_recover_before_the_next_upgrade_action() {
                 .env(injection, point),
         );
         assert!(
-            temp.path()
-                .join("upgrade-install-transaction.json")
+            release
+                .target
+                .with_file_name(".ctx.upgrade-install-transaction.json")
                 .is_file(),
             "{injection}={point} did not retain a recovery journal"
         );
 
-        let stderr = failure_stderr(
-            fake_release_env(ctx(&temp).args(["upgrade", "--json"]), &release)
-                .env("CTX_UPGRADE_STOP_AFTER_RECOVERY_FOR_TESTS", "1"),
-        );
-        assert!(
-            stderr.contains("stopped after interrupted install recovery"),
-            "{injection}={point}: {stderr}"
-        );
+        let output = fake_release_env(ctx(&temp).args(["upgrade", "--json"]), &release)
+            .env("CTX_UPGRADE_STOP_AFTER_RECOVERY_FOR_TESTS", "1")
+            .output()
+            .unwrap();
+        let restored_running_executable = point == "marker"
+            || (injection == "CTX_UPGRADE_ABORT_AFTER_PUBLISH_FOR_TESTS" && point == "binary");
+        if restored_running_executable {
+            assert!(output.status.success(), "{injection}={point}: {output:?}");
+            assert_eq!(
+                output.stdout,
+                format!("ctx {}\n", env!("CARGO_PKG_VERSION")).as_bytes(),
+                "{injection}={point}"
+            );
+        } else {
+            assert!(!output.status.success(), "{injection}={point}: {output:?}");
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            assert!(
+                stderr.contains("stopped after interrupted install recovery"),
+                "{injection}={point}: {stderr}"
+            );
+        }
         assert_eq!(
             fs::read(&release.target).unwrap(),
             cli_before,
@@ -440,9 +577,9 @@ fn interrupted_publications_recover_before_the_next_upgrade_action() {
             "{injection}={point} did not restore the runtime"
         );
         assert!(
-            !temp
-                .path()
-                .join("upgrade-install-transaction.json")
+            !release
+                .target
+                .with_file_name(".ctx.upgrade-install-transaction.json")
                 .exists(),
             "{injection}={point} left the recovery journal behind"
         );
@@ -457,25 +594,7 @@ fn interrupted_publications_recover_before_the_next_upgrade_action() {
 
 #[cfg(unix)]
 #[test]
-fn interrupted_publication_journal_bytes_keep_the_v1_contract() {
-    #[derive(serde::Serialize)]
-    struct ExpectedJournal<'a> {
-        schema_version: u32,
-        transaction_id: &'a str,
-        phase: &'static str,
-        install_path: &'a Path,
-        paths: Vec<ExpectedJournalPath<'a>>,
-    }
-
-    #[derive(serde::Serialize)]
-    struct ExpectedJournalPath<'a> {
-        label: &'static str,
-        staged: &'a Path,
-        target: &'a Path,
-        backup: &'a Path,
-        kind: &'static str,
-    }
-
+fn interrupted_publication_journal_exposes_minimal_v2_transaction_contract() {
     let temp = tempdir();
     let release = fake_release(&temp, "9.9.9");
     let runtime = add_fake_release_runtime(&temp, &release);
@@ -486,69 +605,41 @@ fn interrupted_publication_journal_bytes_keep_the_v1_contract() {
             .env("CTX_UPGRADE_ABORT_AFTER_BACKUP_FOR_TESTS", "runtime"),
     );
 
-    let journal_path = temp.path().join("upgrade-install-transaction.json");
-    let actual = fs::read(&journal_path).unwrap();
-    let journal: Value = serde_json::from_slice(&actual).unwrap();
-    let transaction_id = journal["transaction_id"].as_str().unwrap();
-
-    let runtime_name = runtime.target.file_name().unwrap().to_string_lossy();
-    let runtime_staged = runtime
+    let journal_path = release
         .target
-        .with_file_name(format!(".{runtime_name}.ctx-upgrade-{transaction_id}.new"));
-    let runtime_backup = runtime.target.with_file_name(format!(
-        ".{runtime_name}.ctx-upgrade-{transaction_id}.runtime.previous"
-    ));
-    let binary_name = release.target.file_name().unwrap().to_string_lossy();
-    let binary_staged = release
-        .target
-        .parent()
-        .unwrap()
-        .join(format!(".ctx-upgrade-{transaction_id}.new"));
-    let binary_backup = release.target.with_file_name(format!(
-        ".{binary_name}.ctx-upgrade-{transaction_id}.binary.previous"
-    ));
-    let marker_target = install_marker_path(&release.target);
-    let marker_name = marker_target.file_name().unwrap().to_string_lossy();
-    let marker_staged = release
-        .target
-        .parent()
-        .unwrap()
-        .join(format!(".ctx-upgrade-{transaction_id}.install.json.new"));
-    let marker_backup = marker_target.with_file_name(format!(
-        ".{marker_name}.ctx-upgrade-{transaction_id}.marker.previous"
-    ));
-    let expected = ExpectedJournal {
-        schema_version: 1,
-        transaction_id,
-        phase: "publishing",
-        install_path: &release.target,
-        paths: vec![
-            ExpectedJournalPath {
-                label: "ONNX Runtime sidecar",
-                staged: &runtime_staged,
-                target: &runtime.target,
-                backup: &runtime_backup,
-                kind: "directory",
-            },
-            ExpectedJournalPath {
-                label: "ctx binary",
-                staged: &binary_staged,
-                target: &release.target,
-                backup: &binary_backup,
-                kind: "file",
-            },
-            ExpectedJournalPath {
-                label: "ctx install marker",
-                staged: &marker_staged,
-                target: &marker_target,
-                backup: &marker_backup,
-                kind: "file",
-            },
-        ],
-    };
-    let mut expected_bytes = serde_json::to_vec_pretty(&expected).unwrap();
-    expected_bytes.push(b'\n');
-    assert_eq!(actual, expected_bytes);
+        .with_file_name(".ctx.upgrade-install-transaction.json");
+    let journal: Value = serde_json::from_slice(&fs::read(&journal_path).unwrap()).unwrap();
+    assert_eq!(journal["schema_version"], 2);
+    assert!(journal["attempt_id"].as_str().is_some());
+    assert!(journal.get("attempt_generation").is_none());
+    assert_eq!(journal["data_root"], temp.path().display().to_string());
+    assert!(journal.get("ownership_token").is_none());
+    assert!(journal.get("scheduler").is_none());
+    assert!(journal.get("telemetry").is_none());
+    assert_eq!(journal["phase"], "publishing");
+    assert_eq!(
+        journal["install_path"],
+        release.target.display().to_string()
+    );
+    let paths = journal["paths"].as_array().unwrap();
+    assert_eq!(paths.len(), 3);
+    for (path, label, kind) in [
+        (&paths[0], "ONNX Runtime sidecar", "directory"),
+        (&paths[1], "ctx binary", "file"),
+        (&paths[2], "ctx install marker", "file"),
+    ] {
+        assert_eq!(path["label"], label);
+        assert_eq!(path["kind"], kind);
+        assert!(path["target_preexisted"].as_bool().is_some());
+        assert!(path["state"].as_str().is_some());
+        for identity in ["staged_identity", "original_target_identity"] {
+            if let Some(identity) = path.get(identity) {
+                assert!(identity["device"].is_u64());
+                assert!(identity["inode"].is_u64());
+                assert!(identity["length"].is_u64());
+            }
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -560,10 +651,12 @@ fn forged_recovery_journal_fails_closed_without_touching_paths() {
     let sentinel = temp.path().join("must-survive");
     fs::write(&sentinel, "safe\n").unwrap();
     fs::write(
-        temp.path().join("upgrade-install-transaction.json"),
+        release.target.with_file_name(".ctx.upgrade-install-transaction.json"),
         serde_json::to_vec(&json!({
-            "schema_version": 1,
-            "transaction_id": "forged",
+            "schema_version": 2,
+            "attempt_id": "forged",
+            "data_root": temp.path(),
+            "runtime_root": temp.path().join("runtime"),
             "phase": "publishing",
             "install_path": sentinel,
             "paths": [
@@ -572,14 +665,18 @@ fn forged_recovery_journal_fails_closed_without_touching_paths() {
                     "staged": sentinel.parent().unwrap().join(".ctx-upgrade-forged.new"),
                     "target": sentinel,
                     "backup": sentinel.parent().unwrap().join(".must-survive.ctx-upgrade-forged.binary.previous"),
-                    "kind": "file"
+                    "kind": "file",
+                    "target_preexisted": true,
+                    "state": "published"
                 },
                 {
                     "label": "ctx install marker",
                     "staged": sentinel.parent().unwrap().join(".ctx-upgrade-forged.install.json.new"),
                     "target": sentinel.parent().unwrap().join("must-survive.install.json"),
                     "backup": sentinel.parent().unwrap().join(".must-survive.install.json.ctx-upgrade-forged.marker.previous"),
-                    "kind": "file"
+                    "kind": "file",
+                    "target_preexisted": false,
+                    "state": "staged"
                 }
             ]
         }))
@@ -593,7 +690,8 @@ fn forged_recovery_journal_fails_closed_without_touching_paths() {
     ));
 
     assert!(
-        stderr.contains("expected current managed install"),
+        stderr.contains("install transaction runtime root")
+            || stderr.contains("expected current managed install"),
         "{stderr}"
     );
     assert_eq!(fs::read_to_string(&sentinel).unwrap(), "safe\n");
@@ -687,9 +785,9 @@ fn committed_journal_write_failure_rolls_back_immediately() {
         fs::read_to_string(runtime.target.join("old-runtime")).unwrap(),
         "old\n"
     );
-    assert!(!temp
-        .path()
-        .join("upgrade-install-transaction.json")
+    assert!(!release
+        .target
+        .with_file_name(".ctx.upgrade-install-transaction.json")
         .exists());
 }
 
@@ -716,6 +814,8 @@ fn runtime_installs_at_semantic_discovery_roots() {
     let release = fake_release(&custom_data, "9.9.9");
     let _runtime = add_fake_release_runtime(&custom_data, &release);
     let data_root = custom_data.path().join("custom-data-root");
+    fs::create_dir(&data_root).unwrap();
+    ctx_history_core::platform_security::restrict_private_directory(&data_root).unwrap();
     let applied = json_output(
         fake_release_env(ctx(&custom_data).args(["upgrade", "--json"]), &release)
             .env("CTX_DATA_ROOT", &data_root),
@@ -737,6 +837,8 @@ fn runtime_install_honors_cli_selected_data_root() {
     let release = fake_release(&temp, "9.9.9");
     let _runtime = add_fake_release_runtime(&temp, &release);
     let selected_root = temp.path().join("selected-data-root");
+    fs::create_dir(&selected_root).unwrap();
+    ctx_history_core::platform_security::restrict_private_directory(&selected_root).unwrap();
     let unrelated_home = temp.path().join("unrelated-home");
     fs::create_dir(&unrelated_home).unwrap();
     let mut command = ctx(&temp);
@@ -761,6 +863,114 @@ fn runtime_install_honors_cli_selected_data_root() {
         .join("VERSION_NUMBER")
         .is_file());
     assert!(!unrelated_home.join(".ctx/runtime").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn v025_legacy_runtime_recovery_requires_and_honors_the_original_custom_root() {
+    let temp = tempdir();
+    let release = fake_release(&temp, "9.9.9");
+    let custom_runtime = temp.path().join("legacy-custom-runtime");
+    let platform = test_platform_key().replace('_', "-");
+    let runtime_target = custom_runtime
+        .join("onnxruntime")
+        .join("1.27.0")
+        .join(&platform);
+    fs::create_dir_all(&runtime_target).unwrap();
+    fs::write(runtime_target.join("VERSION_NUMBER"), b"1.27.0\n").unwrap();
+    let transaction_id = "legacy-runtime";
+    let binary_name = release.target.file_name().unwrap().to_str().unwrap();
+    let marker_path = install_marker_path(&release.target);
+    let marker_name = marker_path.file_name().unwrap().to_str().unwrap();
+    let runtime_name = runtime_target.file_name().unwrap().to_str().unwrap();
+    let journal = json!({
+        "schema_version": 1,
+        "transaction_id": transaction_id,
+        "phase": "committed",
+        "install_path": release.target,
+        "paths": [
+            {
+                "label": "ONNX Runtime sidecar",
+                "staged": runtime_target.with_file_name(format!(".{runtime_name}.ctx-upgrade-{transaction_id}.new")),
+                "target": runtime_target,
+                "backup": runtime_target.with_file_name(format!(".{runtime_name}.ctx-upgrade-{transaction_id}.runtime.previous")),
+                "kind": "directory"
+            },
+            {
+                "label": "ctx binary",
+                "staged": release.target.with_file_name(format!(".ctx-upgrade-{transaction_id}.new")),
+                "target": release.target,
+                "backup": release.target.with_file_name(format!(".{binary_name}.ctx-upgrade-{transaction_id}.binary.previous")),
+                "kind": "file"
+            },
+            {
+                "label": "ctx install marker",
+                "staged": marker_path.with_file_name(format!(".ctx-upgrade-{transaction_id}.install.json.new")),
+                "target": marker_path,
+                "backup": marker_path.with_file_name(format!(".{marker_name}.ctx-upgrade-{transaction_id}.marker.previous")),
+                "kind": "file"
+            }
+        ]
+    });
+    let legacy_journal = temp.path().join("upgrade-install-transaction.json");
+    fs::write(
+        &legacy_journal,
+        serde_json::to_vec_pretty(&journal).unwrap(),
+    )
+    .unwrap();
+
+    let missing_root = fake_release_env(ctx(&temp).args(["upgrade", "check", "--json"]), &release)
+        .output()
+        .unwrap();
+    assert!(!missing_root.status.success(), "{missing_root:?}");
+    assert!(String::from_utf8_lossy(&missing_root.stderr).contains("invalid runtime paths"));
+    assert!(legacy_journal.exists());
+
+    let recovered = fake_release_env(ctx(&temp).args(["upgrade", "check", "--json"]), &release)
+        .env("CTX_RUNTIME_DIR", &custom_runtime)
+        .output()
+        .unwrap();
+    assert!(recovered.status.success(), "{recovered:?}");
+    assert!(!legacy_journal.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn cross_root_recovery_uses_one_installation_state_and_the_validated_origin_root() {
+    let owner = tempdir();
+    let release = fake_release(&owner, "9.9.9");
+    let _runtime = add_fake_release_runtime(&owner, &release);
+    let origin_root = tempdir();
+    let discovering_root = tempdir();
+
+    let interrupted = fake_release_env(ctx(&origin_root).args(["upgrade", "--json"]), &release)
+        .env("CTX_UPGRADE_ABORT_AFTER_BACKUP_FOR_TESTS", "binary")
+        .output()
+        .unwrap();
+    assert!(!interrupted.status.success(), "{interrupted:?}");
+    assert!(release
+        .target
+        .with_file_name(".ctx.upgrade-install-transaction.json")
+        .exists());
+    let state_path = scheduler_state_path(&release.target);
+    assert!(state_path.exists());
+
+    let discovered = fake_release_env(
+        ctx(&discovering_root).args(["upgrade", "check", "--json"]),
+        &release,
+    )
+    .output()
+    .unwrap();
+    assert!(discovered.status.success(), "{discovered:?}");
+    assert!(!release
+        .target
+        .with_file_name(".ctx.upgrade-install-transaction.json")
+        .exists());
+    let state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    assert_eq!(state["attempt_source"], "upgrade_check");
+    assert_eq!(state["status"], "available");
+    assert!(!origin_root.path().join("upgrade-state.json").exists());
+    assert!(!discovering_root.path().join("upgrade-state.json").exists());
 }
 
 #[cfg(unix)]
@@ -878,7 +1088,7 @@ fn upgrade_status_text_output_shows_error_details() {
         "error": "download artifact: connection refused",
     });
     fs::write(
-        temp.path().join("upgrade-state.json"),
+        scheduler_state_path(&release.target),
         serde_json::to_vec_pretty(&state).unwrap(),
     )
     .unwrap();
@@ -903,6 +1113,47 @@ fn upgrade_status_text_output_shows_error_details() {
 
 #[cfg(unix)]
 #[test]
+fn upgrade_status_bridges_v025_data_root_state_read_only() {
+    let temp = tempdir();
+    let release = fake_release(&temp, "9.9.9");
+    let legacy_path = temp.path().join("upgrade-state.json");
+    let legacy = serde_json::to_vec_pretty(&json!({
+        "schema_version": 1,
+        "status": "available",
+        "checked_at": "2026-07-10T12:00:00Z",
+        "last_checked_unix_s": 1778500000_u64,
+        "current_version": "0.25.0",
+        "latest_version": "9.9.9",
+        "update_available": true,
+        "channel": "stable",
+        "platform": test_platform_key().replace('_', "-"),
+        "metadata_url": file_url(&release.metadata),
+        "artifact_url": file_url(&release.metadata.parent().unwrap().join("ctx")),
+        "install_path": release.target,
+        "managed": true,
+    }))
+    .unwrap();
+    fs::write(&legacy_path, &legacy).unwrap();
+
+    let status = json_output(fake_release_env(
+        ctx(&temp).args(["upgrade", "status", "--json"]),
+        &release,
+    ));
+
+    assert_eq!(status["state"]["schema_version"], 1);
+    assert_eq!(status["state"]["checked_at"], "2026-07-10T12:00:00Z");
+    assert_eq!(status["state"]["last_checked_unix_s"], 1778500000_u64);
+    assert_eq!(status["state"]["metadata_url"], file_url(&release.metadata));
+    assert_eq!(
+        status["state"]["artifact_url"],
+        file_url(&release.metadata.parent().unwrap().join("ctx"))
+    );
+    assert_eq!(fs::read(&legacy_path).unwrap(), legacy);
+    assert!(!scheduler_state_path(&release.target).exists());
+}
+
+#[cfg(unix)]
+#[test]
 fn upgrade_status_reconciles_completed_scheduled_replacement() {
     let temp = tempdir();
     let release = fake_release(&temp, "9.9.9");
@@ -918,8 +1169,9 @@ fn upgrade_status_reconciles_completed_scheduled_replacement() {
     )
     .unwrap();
     fs::write(
-        temp.path().join("upgrade-state.json"),
+        scheduler_state_path(&release.target),
         serde_json::to_vec_pretty(&json!({
+            "schema_version": 1,
             "status": "scheduled",
             "current_version": env!("CARGO_PKG_VERSION"),
             "latest_version": "9.9.9",
@@ -1017,26 +1269,12 @@ fn upgrade_commands_do_not_execute_hanging_shadow_path_ctx() {
 
 #[cfg(unix)]
 #[test]
-fn upgrade_recovers_stale_lock_for_dead_pid() {
+fn persistent_installation_lock_ignores_text_when_no_os_owner_exists() {
     let temp = tempdir();
     let release = fake_release(&temp, "9.9.9");
     let _runtime = add_fake_release_runtime(&temp, &release);
-    let mut child = std::process::Command::new("sh")
-        .arg("-c")
-        .arg("exit 0")
-        .spawn()
-        .unwrap();
-    let stale_pid = child.id();
-    child.wait().unwrap();
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    fs::write(
-        temp.path().join("upgrade.lock"),
-        format!("{stale_pid} {}\n", now.saturating_sub(60)),
-    )
-    .unwrap();
+    let lock_path = installation_lock_path(&release.target);
+    fs::write(&lock_path, "stale pid-looking text\n").unwrap();
 
     let dry_run = json_output(fake_release_env(
         ctx(&temp).args(["upgrade", "--dry-run", "--json"]),
@@ -1044,39 +1282,50 @@ fn upgrade_recovers_stale_lock_for_dead_pid() {
     ));
 
     assert_eq!(dry_run["status"], "dry_run");
-    assert!(!temp.path().join("upgrade.lock").exists());
+    assert!(lock_path.exists());
 }
 
 #[cfg(unix)]
 #[test]
-fn upgrade_lock_still_rejects_active_pid() {
+fn upgrade_lock_rejects_a_live_os_lock_owner() {
     let temp = tempdir();
     let release = fake_release(&temp, "9.9.9");
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    fs::write(
-        temp.path().join("upgrade.lock"),
-        format!("{} {now}\n", std::process::id()),
-    )
-    .unwrap();
+    let lock_path = installation_lock_path(&release.target);
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&lock_path)
+        .unwrap();
+    assert_eq!(
+        unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&lock), libc::LOCK_EX) },
+        0
+    );
 
     let stderr = failure_stderr(fake_release_env(
         ctx(&temp).args(["upgrade", "--dry-run"]),
         &release,
     ));
 
-    assert!(stderr.contains("ctx upgrade lock is held"), "{stderr}");
-    assert!(temp.path().join("upgrade.lock").exists());
+    assert!(
+        stderr.contains("ctx installation upgrade lock is held"),
+        "{stderr}"
+    );
+    assert!(lock_path.exists());
+    assert_eq!(
+        unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&lock), libc::LOCK_UN) },
+        0
+    );
 }
 
 #[cfg(unix)]
 #[test]
 fn upgrade_rejects_unmanaged_install_before_network() {
     let temp = tempdir();
+    let binary = managed_candidate(&temp, "ia_removed_unmanaged_marker");
+    fs::remove_file(install_marker_path(&binary)).unwrap();
     let stderr = failure_stderr(
-        ctx(&temp)
+        ctx_from_binary(&temp, &binary)
             .args(["upgrade", "--dry-run"])
             .env(
                 "CTX_RELEASE_METADATA_URL",
@@ -1124,7 +1373,7 @@ fn upgrade_verifies_signed_metadata_and_fails_closed() {
     let stderr = failure_stderr(
         ctx(&wrong_key)
             .args(["upgrade", "check"])
-            .env("CTX_UPGRADE_TARGET", &release.target)
+            .env("CTX_UPGRADE_TEST_TARGET", &release.target)
             .env("CTX_RELEASE_METADATA_URL", file_url(&release.metadata))
             .env(
                 "CTX_RELEASE_METADATA_SIGNATURE_URL",
@@ -1165,7 +1414,7 @@ fn upgrade_verifies_signed_metadata_and_fails_closed() {
     let check = json_output(
         ctx(&default_signature_path)
             .args(["upgrade", "check", "--json"])
-            .env("CTX_UPGRADE_TARGET", &release.target)
+            .env("CTX_UPGRADE_TEST_TARGET", &release.target)
             .env("CTX_RELEASE_METADATA_URL", file_url(&release.metadata))
             .env(
                 "CTX_RELEASE_METADATA_PUBLIC_KEY_PEM",
@@ -1275,141 +1524,4 @@ fn upgrade_rejects_unsafe_metadata_and_bad_artifacts() {
         &release,
     ));
     assert!(stderr.contains("artifact checksum mismatch"), "{stderr}");
-}
-
-#[cfg(unix)]
-#[test]
-fn status_json_does_not_spawn_background_upgrade() {
-    let temp = tempdir();
-    let release = fake_release(&temp, "9.9.9");
-
-    let status = json_output(fake_release_env(
-        ctx(&temp).args(["status", "--json"]),
-        &release,
-    ));
-    assert_eq!(status["schema_version"], 1);
-    assert_eq!(
-        fs::read_to_string(&release.target).unwrap(),
-        format!("#!/bin/sh\nprintf 'ctx {}\\n'\n", env!("CARGO_PKG_VERSION"))
-    );
-    assert!(
-        !temp.path().join("upgrade-state.json").exists(),
-        "JSON status must not start a background upgrade"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn eligible_json_command_spawns_background_upgrade_without_polluting_output() {
-    let temp = tempdir();
-    let release = fake_release(&temp, "9.9.9");
-    let binary = copied_ctx_binary(&temp);
-    let before = fs::read(&binary).unwrap();
-    let current_sha = sha256_hex(&before);
-    fs::write(
-        install_marker_path(&binary),
-        serde_json::to_vec_pretty(&json!({
-            "schema_version": 1,
-            "manager": "ctx-hosted-installer",
-            "install_attempt_id": "ia_test_doctor_json_background",
-            "install_path": binary.display().to_string(),
-            "platform": test_platform_key().replace('_', "-"),
-            "channel": "stable",
-            "version": env!("CARGO_PKG_VERSION"),
-            "sha256": current_sha,
-            "metadata_url": null,
-            "artifact_url": null,
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-
-    let mut command = ctx_from_binary(&temp, &binary);
-    let output = command
-        .args(["doctor", "--json"])
-        .env("CTX_UPGRADE_AUTO", "apply")
-        .env("CTX_RELEASE_METADATA_URL", file_url(&release.metadata))
-        .env(
-            "CTX_RELEASE_METADATA_SIGNATURE_URL",
-            file_url(&release.signature),
-        )
-        .env(
-            "CTX_RELEASE_METADATA_PUBLIC_KEY_PEM",
-            TEST_RELEASE_PUBLIC_KEY_PEM,
-        )
-        .assert()
-        .success()
-        .get_output()
-        .clone();
-    let doctor: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(doctor["schema_version"], 1);
-    assert_eq!(
-        output.stderr, b"",
-        "background upgrade must not write to JSON command stderr"
-    );
-
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while Instant::now() < deadline {
-        if fs::read_to_string(&binary).unwrap_or_default() == "#!/bin/sh\nprintf 'ctx 9.9.9\\n'\n" {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    panic!(
-        "eligible JSON command did not apply background upgrade; state: {:?}",
-        fs::read_to_string(temp.path().join("upgrade-state.json")).ok()
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn status_command_does_not_spawn_background_upgrade_even_for_managed_installs() {
-    let temp = tempdir();
-    let release = fake_release(&temp, "9.9.9");
-    let binary = copied_ctx_binary(&temp);
-    let before = fs::read(&binary).unwrap();
-    let current_sha = sha256_hex(&before);
-    fs::write(
-        install_marker_path(&binary),
-        serde_json::to_vec_pretty(&json!({
-            "schema_version": 1,
-            "manager": "ctx-hosted-installer",
-            "install_attempt_id": "ia_test_status_no_background",
-            "install_path": binary.display().to_string(),
-            "platform": test_platform_key().replace('_', "-"),
-            "channel": "stable",
-            "version": env!("CARGO_PKG_VERSION"),
-            "sha256": current_sha,
-            "metadata_url": null,
-            "artifact_url": null,
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-
-    ctx_from_binary(&temp, &binary)
-        .arg("status")
-        .env("CTX_RELEASE_METADATA_URL", file_url(&release.metadata))
-        .env(
-            "CTX_RELEASE_METADATA_SIGNATURE_URL",
-            file_url(&release.signature),
-        )
-        .env(
-            "CTX_RELEASE_METADATA_PUBLIC_KEY_PEM",
-            TEST_RELEASE_PUBLIC_KEY_PEM,
-        )
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("read_only: true"));
-
-    std::thread::sleep(Duration::from_millis(1_000));
-    assert_eq!(
-        fs::read(&binary).unwrap(),
-        before,
-        "status must not spawn a background upgrade that replaces the binary"
-    );
-    assert!(
-        !temp.path().join("upgrade-state.json").exists(),
-        "status must not write background upgrade state"
-    );
 }

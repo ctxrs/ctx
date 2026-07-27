@@ -1,12 +1,10 @@
 use super::{parse_event_window_limit, Cli};
 use crate::cli::parse_search_limit;
-use crate::commands::import::{catalog_import_checkpoint_matches, sha256_file_prefix_hex};
 use crate::commands::sql::parse_sql_timeout;
 use crate::search_filters::parse_since_filter;
 use crate::transcript::{normalize_uuid_prefix, shell_quote_arg};
 use clap::{error::ErrorKind, Command, CommandFactory, Parser};
-use std::{fs, io::Write, panic};
-use tempfile::tempdir;
+use std::panic;
 
 #[test]
 fn shell_quote_arg_uses_single_quotes_for_shell_metacharacters() {
@@ -126,7 +124,6 @@ fn deprecated_control_warnings_are_limited_to_foreground_text_commands() {
         vec!["ctx", "setup", "--progress", "json"],
         vec!["ctx", "import", "--progress", "json"],
         vec!["ctx", "doctor", "--progress", "json"],
-        vec!["ctx", "upgrade", "--background"],
     ] {
         let cli = Cli::try_parse_from(args).unwrap();
         assert!(!crate::dispatch::command_deprecation_warning_eligible(
@@ -182,20 +179,4 @@ fn complete_cli_grammar_renders_and_parses_help_recursively() {
             "missing usage for {path:?}:\n{help}"
         );
     }
-}
-
-#[test]
-fn catalog_import_checkpoint_requires_matching_hash() {
-    let temp = tempdir().unwrap();
-    let path = temp.path().join("session.jsonl");
-    {
-        let mut file = fs::File::create(&path).unwrap();
-        writeln!(file, "prefix").unwrap();
-    }
-    let prefix_hash = sha256_file_prefix_hex(&path, 7).unwrap();
-    assert!(catalog_import_checkpoint_matches(&path, 7, Some(&prefix_hash)).unwrap());
-    assert!(catalog_import_checkpoint_matches(&path, 7, None).unwrap());
-
-    fs::write(&path, "mutated\n").unwrap();
-    assert!(!catalog_import_checkpoint_matches(&path, 7, Some(&prefix_hash)).unwrap());
 }

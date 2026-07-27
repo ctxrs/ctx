@@ -1,12 +1,17 @@
-use std::{env, fs, path::Path};
-
-#[cfg(unix)]
-use std::collections::BTreeSet;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    env, fs,
+    io::{Read, Write as _},
+    path::Path,
+};
 
 use anyhow::{anyhow, Context, Result};
+use ctx_history_core::platform_security::{restrict_private_directory, restrict_private_file};
 #[cfg(unix)]
 use flate2::read::GzDecoder;
+use sha2::{Digest, Sha256};
 
+use super::super::metadata::{SemanticAssetMetadata, SemanticFileMetadata};
 #[cfg(unix)]
 use super::durability::sync_directory;
 
@@ -203,4 +208,535 @@ fn runtime_expanded_size_limit() -> u64 {
         }
     }
     MAX_RUNTIME_EXPANDED_BYTES
+}
+
+pub(super) fn extract_semantic_archive(
+    archive_path: &Path,
+    destination: &Path,
+    asset: &SemanticAssetMetadata,
+) -> Result<()> {
+    match asset.archive_format.as_str() {
+        "tar.zst" | "tar.xz" => extract_semantic_tar(archive_path, destination, asset),
+        "zip" => extract_semantic_zip(archive_path, destination, asset),
+        format => Err(anyhow!(
+            "unsupported signed Semantic archive format {format:?}"
+        )),
+    }
+}
+
+fn extract_semantic_tar(
+    archive_path: &Path,
+    destination: &Path,
+    asset: &SemanticAssetMetadata,
+) -> Result<()> {
+    let archive_file = fs::File::open(archive_path)
+        .with_context(|| format!("open Semantic archive {}", archive_path.display()))?;
+    let decoder: Box<dyn Read> = match asset.archive_format.as_str() {
+        "tar.zst" => Box::new(
+            zstd::stream::read::Decoder::new(archive_file).context("open Semantic zstd archive")?,
+        ),
+        "tar.xz" => Box::new(xz2::read::XzDecoder::new(archive_file)),
+        _ => return Err(anyhow!("Semantic tar archive has the wrong format")),
+    };
+    let mut archive = tar::Archive::new(decoder);
+    let expected = expected_archive_files(asset);
+    let expected_directories = expected_archive_directories(expected.keys());
+    let mut seen_entries = BTreeSet::new();
+    let mut seen_files = BTreeSet::new();
+    let mut total_size = 0_u64;
+
+    for entry in archive.entries().context("read signed Semantic archive")? {
+        let mut entry = entry.context("read signed Semantic archive entry")?;
+        let raw = std::str::from_utf8(entry.path_bytes().as_ref())
+            .context("Semantic archive path is not UTF-8")?
+            .to_owned();
+        let is_directory_name = raw.ends_with('/');
+        let name = raw.strip_suffix('/').unwrap_or(&raw);
+        validate_archive_path(name)?;
+        if !seen_entries.insert(name.to_ascii_lowercase()) {
+            return Err(anyhow!(
+                "duplicate or case-colliding Semantic archive entry: {raw}"
+            ));
+        }
+        let mode = entry
+            .header()
+            .mode()
+            .context("read Semantic archive entry mode")?;
+        if mode & 0o7000 != 0 {
+            return Err(anyhow!(
+                "unsafe permission bits on Semantic archive entry: {raw}"
+            ));
+        }
+        let entry_type = entry.header().entry_type();
+        if entry_type.is_dir() {
+            if !expected_directories.contains(name) {
+                return Err(anyhow!("unexpected Semantic archive directory: {raw}"));
+            }
+            continue;
+        }
+        if is_directory_name || !entry_type.is_file() {
+            return Err(anyhow!(
+                "Semantic archive entry is not a regular file: {raw}"
+            ));
+        }
+        let expected_file = expected
+            .get(name)
+            .ok_or_else(|| anyhow!("unexpected Semantic archive file: {raw}"))?;
+        if entry.size() != expected_file.size {
+            return Err(anyhow!(
+                "Semantic archive file {raw} size {} does not match signed size {}",
+                entry.size(),
+                expected_file.size
+            ));
+        }
+        total_size = total_size
+            .checked_add(entry.size())
+            .ok_or_else(|| anyhow!("Semantic archive expanded size overflow"))?;
+        if total_size > asset.max_expanded_bytes {
+            return Err(anyhow!(
+                "Semantic archive expands beyond its signed safety limit"
+            ));
+        }
+        write_verified_entry(&mut entry, destination, expected_file)?;
+        seen_files.insert(name.to_owned());
+    }
+    let expected_files = expected.keys().cloned().collect::<BTreeSet<_>>();
+    if seen_files != expected_files {
+        return Err(anyhow!(
+            "Semantic archive file set does not exactly match signed metadata"
+        ));
+    }
+    #[cfg(unix)]
+    sync_tree(destination)?;
+    Ok(())
+}
+
+fn expected_archive_files(
+    asset: &SemanticAssetMetadata,
+) -> BTreeMap<String, &SemanticFileMetadata> {
+    asset
+        .files
+        .iter()
+        .map(|file| {
+            let path = if asset.archive_path_prefix.is_empty() {
+                file.path.clone()
+            } else {
+                format!("{}/{}", asset.archive_path_prefix, file.path)
+            };
+            (path, file)
+        })
+        .collect()
+}
+
+fn expected_archive_directories<'a>(files: impl Iterator<Item = &'a String>) -> BTreeSet<String> {
+    let mut directories = BTreeSet::new();
+    for file in files {
+        let mut path = file.as_str();
+        while let Some((parent, _)) = path.rsplit_once('/') {
+            directories.insert(parent.to_owned());
+            path = parent;
+        }
+    }
+    directories
+}
+
+fn validate_archive_path(path: &str) -> Result<()> {
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.contains('\\')
+        || path.contains("//")
+        || path
+            .split('/')
+            .any(|component| component.is_empty() || component == "." || component == "..")
+    {
+        return Err(anyhow!(
+            "unsafe or non-canonical Semantic archive path: {path:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn write_verified_entry(
+    input: &mut dyn Read,
+    destination: &Path,
+    expected: &SemanticFileMetadata,
+) -> Result<()> {
+    let target = destination.join(&expected.path);
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create Semantic directory {}", parent.display()))?;
+        restrict_private_directory(parent)
+            .with_context(|| format!("protect Semantic directory {}", parent.display()))?;
+    }
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target)
+        .with_context(|| format!("create Semantic file {}", target.display()))?;
+    let mut hasher = Sha256::new();
+    let mut total = 0_u64;
+    let mut buffer = [0_u8; 128 * 1024];
+    loop {
+        let count = input
+            .read(&mut buffer)
+            .with_context(|| format!("read Semantic file {}", expected.path))?;
+        if count == 0 {
+            break;
+        }
+        total = total
+            .checked_add(count as u64)
+            .ok_or_else(|| anyhow!("Semantic file size overflow"))?;
+        if total > expected.size {
+            return Err(anyhow!(
+                "Semantic file {} exceeds signed size",
+                expected.path
+            ));
+        }
+        hasher.update(&buffer[..count]);
+        output.write_all(&buffer[..count])?;
+    }
+    if total != expected.size {
+        return Err(anyhow!(
+            "Semantic file {} size {total} does not match signed size {}",
+            expected.path,
+            expected.size
+        ));
+    }
+    if format!("{:x}", hasher.finalize()) != expected.sha256 {
+        return Err(anyhow!("Semantic file {} checksum mismatch", expected.path));
+    }
+    restrict_private_file(&target)
+        .with_context(|| format!("protect Semantic file {}", target.display()))?;
+    output.flush()?;
+    output.sync_all()?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_tree(root: &Path) -> Result<()> {
+    let mut directories = vec![root.to_path_buf()];
+    let mut index = 0;
+    while index < directories.len() {
+        let directory = directories[index].clone();
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                directories.push(entry.path());
+            }
+        }
+        index += 1;
+    }
+    for directory in directories.into_iter().rev() {
+        sync_directory(&directory)?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn extract_semantic_zip(
+    archive_path: &Path,
+    destination: &Path,
+    asset: &SemanticAssetMetadata,
+) -> Result<()> {
+    let contract_path = archive_path.with_extension("extract.json");
+    let script_path = archive_path.with_extension("extract.ps1");
+    let contract = serde_json::json!({
+        "prefix": asset.archive_path_prefix,
+        "max_expanded_bytes": asset.max_expanded_bytes,
+        "files": asset.files,
+    });
+    fs::write(&contract_path, serde_json::to_vec(&contract)?)
+        .with_context(|| format!("write extraction contract {}", contract_path.display()))?;
+    fs::write(&script_path, WINDOWS_SEMANTIC_ZIP_EXTRACT_SCRIPT)
+        .with_context(|| format!("write extraction helper {}", script_path.display()))?;
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+        .arg(&script_path)
+        .arg("-ArchivePath")
+        .arg(archive_path)
+        .arg("-Destination")
+        .arg(destination)
+        .arg("-ContractPath")
+        .arg(&contract_path)
+        .output()
+        .context("run signed Semantic zip extraction helper");
+    let _ = fs::remove_file(&script_path);
+    let _ = fs::remove_file(&contract_path);
+    let output = output?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "extract signed Semantic zip: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    protect_extracted_windows_tree(destination)
+}
+
+#[cfg(not(windows))]
+fn extract_semantic_zip(
+    _archive_path: &Path,
+    _destination: &Path,
+    _asset: &SemanticAssetMetadata,
+) -> Result<()> {
+    Err(anyhow!(
+        "zip Semantic archives are supported only on Windows"
+    ))
+}
+
+#[cfg(windows)]
+fn protect_extracted_windows_tree(root: &Path) -> Result<()> {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        restrict_private_directory(&directory)
+            .with_context(|| format!("protect Semantic directory {}", directory.display()))?;
+        for entry in fs::read_dir(&directory)
+            .with_context(|| format!("read Semantic directory {}", directory.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() {
+                return Err(anyhow!(
+                    "Semantic installation contains a link: {}",
+                    path.display()
+                ));
+            }
+            if metadata.is_dir() {
+                pending.push(path);
+            } else if metadata.is_file() {
+                restrict_private_file(&path)
+                    .with_context(|| format!("protect Semantic file {}", path.display()))?;
+            } else {
+                return Err(anyhow!(
+                    "Semantic installation contains a special file: {}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(windows, test))]
+const WINDOWS_SEMANTIC_ZIP_EXTRACT_SCRIPT: &str = r#"
+param(
+  [string]$ArchivePath,
+  [string]$Destination,
+  [string]$ContractPath
+)
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$contract = Get-Content -LiteralPath $ContractPath -Raw | ConvertFrom-Json
+$expectedArchive = @{}
+$directories = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+foreach ($file in $contract.files) {
+  $archiveName = if ([string]::IsNullOrEmpty($contract.prefix)) {
+    [string]$file.path
+  } else {
+    "$($contract.prefix)/$($file.path)"
+  }
+  $expectedArchive[$archiveName] = $file
+  $cursor = $archiveName
+  while ($cursor.Contains('/')) {
+    $cursor = $cursor.Substring(0, $cursor.LastIndexOf('/'))
+    [void]$directories.Add($cursor)
+  }
+}
+$seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$seenFiles = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+[long]$total = 0
+$archive = [System.IO.Compression.ZipFile]::OpenRead($ArchivePath)
+try {
+  foreach ($entry in $archive.Entries) {
+    $raw = $entry.FullName
+    if (
+      [string]::IsNullOrEmpty($raw) -or
+      $raw.Contains('\') -or
+      $raw.StartsWith('/', [System.StringComparison]::Ordinal) -or
+      $raw -match '^[A-Za-z]:' -or
+      $raw.Contains('//')
+    ) { throw "unsafe Semantic zip entry path: '$raw'" }
+    $isDirectory = $raw.EndsWith('/', [System.StringComparison]::Ordinal)
+    $name = if ($isDirectory) { $raw.Substring(0, $raw.Length - 1) } else { $raw }
+    if (@($name.Split('/') | Where-Object { $_ -eq '' -or $_ -eq '.' -or $_ -eq '..' }).Count -ne 0) {
+      throw "unsafe Semantic zip entry path: '$raw'"
+    }
+    if (-not $seen.Add($name)) { throw "duplicate or case-colliding Semantic zip entry: '$raw'" }
+    $unixMode = ($entry.ExternalAttributes -shr 16) -band 0xFFFF
+    $fileType = $unixMode -band 0xF000
+    if (($unixMode -band 0x0E00) -ne 0) { throw "unsafe permission bits on Semantic zip entry: '$raw'" }
+    if ($isDirectory) {
+      if (-not $directories.Contains($name) -or ($fileType -ne 0 -and $fileType -ne 0x4000)) {
+        throw "unexpected Semantic zip directory: '$raw'"
+      }
+      continue
+    }
+    if (($fileType -ne 0 -and $fileType -ne 0x8000) -or -not $expectedArchive.ContainsKey($name)) {
+      throw "unexpected or non-regular Semantic zip file: '$raw'"
+    }
+    $record = $expectedArchive[$name]
+    if ([long]$entry.Length -ne [long]$record.size) { throw "Semantic zip file size mismatch: '$raw'" }
+    $target = Join-Path $Destination ([string]$record.path).Replace('/', '\')
+    $parent = Split-Path -Parent $target
+    New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    $source = $entry.Open()
+    try {
+      $output = [System.IO.File]::Open($target, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+      $sha = [System.Security.Cryptography.SHA256]::Create()
+      try {
+        $buffer = New-Object byte[] 131072
+        [long]$written = 0
+        while (($count = $source.Read($buffer, 0, $buffer.Length)) -gt 0) {
+          [long]$fileRemaining = [long]$record.size - $written
+          [long]$totalRemaining = [long]$contract.max_expanded_bytes - $total
+          if ([long]$count -gt $fileRemaining) { throw "Semantic zip file exceeds signed size: '$raw'" }
+          if ([long]$count -gt $totalRemaining) { throw 'Semantic zip exceeds signed expanded-size limit' }
+          $output.Write($buffer, 0, $count)
+          [void]$sha.TransformBlock($buffer, 0, $count, $null, 0)
+          $written += [long]$count
+          $total += [long]$count
+        }
+        [void]$sha.TransformFinalBlock([byte[]]::new(0), 0, 0)
+        $actual = ([BitConverter]::ToString($sha.Hash)).Replace('-', '').ToLowerInvariant()
+        if ($written -ne [long]$record.size -or $actual -cne [string]$record.sha256) {
+          throw "Semantic zip file verification failed: '$raw'"
+        }
+        $output.Flush($true)
+      } finally {
+        $sha.Dispose()
+        $output.Dispose()
+      }
+    } finally {
+      $source.Dispose()
+    }
+    [void]$seenFiles.Add($name)
+  }
+  if ($seenFiles.Count -ne $expectedArchive.Count) {
+    throw 'Semantic zip file set does not exactly match signed metadata'
+  }
+} finally {
+  $archive.Dispose()
+}
+"#;
+
+#[cfg(test)]
+mod semantic_zip_script_tests {
+    use super::WINDOWS_SEMANTIC_ZIP_EXTRACT_SCRIPT;
+
+    #[test]
+    fn streamed_zip_bytes_are_bounded_before_each_write() {
+        let read_loop = WINDOWS_SEMANTIC_ZIP_EXTRACT_SCRIPT
+            .split_once("while (($count = $source.Read($buffer, 0, $buffer.Length)) -gt 0) {")
+            .unwrap()
+            .1
+            .split_once("[void]$sha.TransformFinalBlock")
+            .unwrap()
+            .0;
+        let file_guard = read_loop
+            .find("if ([long]$count -gt $fileRemaining)")
+            .unwrap();
+        let total_guard = read_loop
+            .find("if ([long]$count -gt $totalRemaining)")
+            .unwrap();
+        let write = read_loop.find("$output.Write($buffer, 0, $count)").unwrap();
+        assert!(file_guard < write);
+        assert!(total_guard < write);
+        assert!(!WINDOWS_SEMANTIC_ZIP_EXTRACT_SCRIPT.contains("$total += [long]$entry.Length"));
+    }
+}
+
+#[cfg(test)]
+mod semantic_tar_tests {
+    use std::io::Cursor;
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn sha256(bytes: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(bytes))
+    }
+
+    fn asset(bytes: &[u8], max_expanded_bytes: u64) -> SemanticAssetMetadata {
+        SemanticAssetMetadata {
+            role: "model".to_owned(),
+            backend: "onnx".to_owned(),
+            version: "1.0.0".to_owned(),
+            platform: "any".to_owned(),
+            artifact: "model.tar.xz".to_owned(),
+            archive_format: "tar.xz".to_owned(),
+            archive_path_prefix: "model".to_owned(),
+            archive_sha256: "0".repeat(64),
+            max_expanded_bytes,
+            max_files: 1,
+            files: vec![SemanticFileMetadata {
+                path: "onnx/model.onnx".to_owned(),
+                size: bytes.len() as u64,
+                sha256: sha256(bytes),
+            }],
+        }
+    }
+
+    fn write_archive(temp: &TempDir, bytes: &[u8]) -> std::path::PathBuf {
+        let path = temp.path().join("model.tar.xz");
+        let file = fs::File::create(&path).unwrap();
+        let encoder = xz2::write::XzEncoder::new(file, 6);
+        let mut archive = tar::Builder::new(encoder);
+        let mut header = tar::Header::new_ustar();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        archive
+            .append_data(&mut header, "model/onnx/model.onnx", Cursor::new(bytes))
+            .unwrap();
+        let encoder = archive.into_inner().unwrap();
+        encoder.finish().unwrap();
+        path
+    }
+
+    #[test]
+    fn semantic_tar_extracts_only_the_exact_signed_file() {
+        let temp = TempDir::new().unwrap();
+        let bytes = b"signed-model";
+        let archive = write_archive(&temp, bytes);
+        let destination = temp.path().join("output");
+        fs::create_dir(&destination).unwrap();
+
+        extract_semantic_archive(&archive, &destination, &asset(bytes, bytes.len() as u64))
+            .unwrap();
+
+        assert_eq!(
+            fs::read(destination.join("onnx/model.onnx")).unwrap(),
+            bytes
+        );
+    }
+
+    #[test]
+    fn semantic_tar_rejects_hash_mismatch() {
+        let temp = TempDir::new().unwrap();
+        let bytes = b"signed-model";
+        let archive = write_archive(&temp, bytes);
+        let destination = temp.path().join("output");
+        fs::create_dir(&destination).unwrap();
+        let mut metadata = asset(bytes, bytes.len() as u64);
+        metadata.files[0].sha256 = "f".repeat(64);
+
+        let error = extract_semantic_archive(&archive, &destination, &metadata).unwrap_err();
+
+        assert!(error.to_string().contains("checksum mismatch"));
+    }
+
+    #[test]
+    fn semantic_tar_checks_expanded_limit_before_creating_the_file() {
+        let temp = TempDir::new().unwrap();
+        let bytes = b"signed-model";
+        let archive = write_archive(&temp, bytes);
+        let destination = temp.path().join("output");
+        fs::create_dir(&destination).unwrap();
+
+        let error = extract_semantic_archive(&archive, &destination, &asset(bytes, 1)).unwrap_err();
+
+        assert!(error.to_string().contains("signed safety limit"));
+        assert!(!destination.join("onnx/model.onnx").exists());
+    }
 }

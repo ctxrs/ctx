@@ -22,7 +22,7 @@ use super::{
     CompleteContentSourceLocator, SourceSnapshot,
 };
 use crate::{
-    captured_batch::NativeLocator,
+    native_source::NativeLocator,
     provider::{
         providers::nanoclaw,
         sqlite::{open_provider_sqlite_readonly, ReadOnlySqliteConnection},

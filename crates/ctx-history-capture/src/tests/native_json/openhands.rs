@@ -1,20 +1,21 @@
 use crate::provider::importer::{
-    import_normalized_provider_captures, provider_scoped_source_uuid, provider_source_event_uuid,
+    provider_file_touch_import_id, provider_scoped_source_identity_key,
+    provider_scoped_source_uuid, provider_source_event_import_identity, provider_source_event_uuid,
+    provider_source_root_identity, provider_source_session_uuid, provider_sync_metadata,
+    timestamps,
 };
 use crate::tests::support::paths::tempdir;
 use crate::tests::support::provider_state::stored_provider_session_id;
 use crate::tests::support::source_snapshot::provider_source_snapshot;
 use crate::{
-    import_openhands_file_events, provider_source_for_path, NormalizedProviderImportOptions,
-    OpenHandsImportOptions, ProviderFileTouchedEnvelope, ProviderNormalizationResult,
+    import_openhands_file_events, provider_source_for_path, OpenHandsImportOptions,
     ProviderSourceStatus, MAX_PROVIDER_JSONL_LINE_BYTES,
 };
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    AgentType, CaptureProvider, Confidence, EventRole, EventType, Fidelity, FileChangeKind,
-    ProviderCaptureEnvelope, ProviderEventEnvelope, ProviderSessionEnvelope,
-    ProviderSourceEnvelope, ProviderSourceTrust, SessionStatus,
-    PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION,
+    AgentType, CaptureProvider, CaptureSource, CaptureSourceDescriptor, CaptureSourceKind,
+    Confidence, Event, EventRole, EventType, Fidelity, FileChangeKind, FileTouched, Session,
+    SessionStatus,
 };
 use ctx_history_store::Store;
 use serde_json::json;
@@ -41,119 +42,224 @@ fn import_origin_main_openhands_event(
     let canonical_event_path = fs::canonicalize(event_path).unwrap();
     let conversation_dir = canonical_event_path.parent().unwrap().display().to_string();
     let source_root = fs::canonicalize(root).unwrap().display().to_string();
+    let source_format = "openhands_file_events";
     let legacy_source_id = provider_scoped_source_uuid(
         CaptureProvider::OpenHands,
         provider_session_id,
-        "openhands_file_events",
+        source_format,
         Some(&conversation_dir),
     );
-    let files_touched = file_touch_path
-        .map(|path| {
-            vec![(
-                1,
-                ProviderFileTouchedEnvelope {
-                    provider: CaptureProvider::OpenHands,
-                    provider_session_id: provider_session_id.to_owned(),
-                    provider_touch_index: 0,
-                    provider_event_index: Some(provider_event_index),
-                    raw_source_path: Some(conversation_dir.clone()),
-                    source_root: Some(source_root.clone()),
-                    path: path.to_owned(),
-                    change_kind: Some(FileChangeKind::Modified),
-                    old_path: None,
-                    line_count_delta: Some(1),
-                    confidence: Confidence::Explicit,
-                    occurred_at,
-                    source_format: "openhands_file_events".to_owned(),
-                    metadata: json!({"origin_main_fixture": true}),
-                },
-            )]
+    let source_identity =
+        provider_source_root_identity(CaptureProvider::OpenHands, source_format, &source_root);
+    let source_identity_key = provider_scoped_source_identity_key(
+        CaptureProvider::OpenHands,
+        provider_session_id,
+        source_format,
+        Some(&conversation_dir),
+    );
+    let source_idempotency_key =
+        format!("provider-source:openhands:{source_format}:{provider_session_id}");
+    let session_idempotency_key = format!("provider-session:openhands:{provider_session_id}");
+    let session_metadata = json!({
+        "source_format": source_format,
+        "provider": "openhands",
+        "conversation_id": provider_session_id,
+    });
+    let source_metadata = json!({
+        "adapter": source_format,
+        "storage": "filesystem_event_service",
+        "conversation_dir": conversation_dir,
+    });
+    let legacy_session_id = provider_source_session_uuid(&source_identity, provider_session_id);
+    let cursor = format!("{}:{provider_event_hash}", canonical_event_path.display());
+
+    // Seed the exact Store rows emitted by the released 0.26 importer.
+    store
+        .upsert_capture_source(&CaptureSource {
+            id: legacy_source_id,
+            descriptor: CaptureSourceDescriptor {
+                kind: CaptureSourceKind::ProviderImport,
+                provider: CaptureProvider::OpenHands,
+                machine_id: "test-machine".to_owned(),
+                process_id: None,
+                cwd: None,
+                raw_source_path: Some(conversation_dir.clone()),
+                source_format: Some(source_format.to_owned()),
+                source_root: Some(source_root.clone()),
+                source_identity: Some(source_identity.clone()),
+                external_session_id: Some(provider_session_id.to_owned()),
+            },
+            started_at: occurred_at,
+            ended_at: Some(occurred_at),
+            sync: provider_sync_metadata(
+                Fidelity::Imported,
+                json!({
+                    "provider_session_id": provider_session_id,
+                    "source_format": source_format,
+                    "source_trust": "fixture",
+                    "cursor": null,
+                    "fixture_line": 1,
+                    "imported_at": occurred_at,
+                    "source_idempotency_key": source_idempotency_key,
+                    "source_identity": source_identity,
+                    "source_root": source_root,
+                    "source_identity_key": source_identity_key,
+                    "source_metadata": source_metadata,
+                    "session_metadata": session_metadata,
+                }),
+            ),
         })
-        .unwrap_or_default();
-    let capture = ProviderCaptureEnvelope {
-        schema_version: PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION,
-        provider: CaptureProvider::OpenHands,
-        source: ProviderSourceEnvelope {
-            source_format: "openhands_file_events".to_owned(),
-            machine_id: "test-machine".to_owned(),
-            observed_at: occurred_at,
-            raw_source_path: Some(conversation_dir.clone()),
-            source_root: Some(source_root),
-            // This helper seeds legacy Store state through the direct
-            // normalized fixture path. Fixture trust keeps its original
-            // tool-call event available for the exact OpenHands upgrade path.
-            trust: ProviderSourceTrust::Fixture,
-            fidelity: Fidelity::Imported,
-            cursor: None,
-            idempotency_key: Some(format!(
-                "provider-source:openhands:openhands_file_events:{provider_session_id}"
-            )),
-            metadata: json!({
-                "adapter": "openhands_file_events",
-                "storage": "filesystem_event_service",
-                "conversation_dir": conversation_dir,
-            }),
-        },
-        session: ProviderSessionEnvelope {
-            provider_session_id: provider_session_id.to_owned(),
-            parent_provider_session_id: None,
-            root_provider_session_id: None,
+        .unwrap();
+    store
+        .upsert_session(&Session {
+            id: legacy_session_id,
+            history_record_id: None,
+            parent_session_id: None,
+            root_session_id: None,
+            capture_source_id: Some(legacy_source_id),
+            provider: CaptureProvider::OpenHands,
+            external_session_id: Some(provider_session_id.to_owned()),
             external_agent_id: None,
             agent_type: AgentType::Primary,
             role_hint: Some("primary".to_owned()),
             is_primary: true,
             status: SessionStatus::Imported,
+            transcript_blob_id: None,
             started_at: occurred_at,
             ended_at: Some(occurred_at),
-            cwd: None,
-            fidelity: Fidelity::Imported,
-            idempotency_key: Some(format!("provider-session:openhands:{provider_session_id}")),
-            artifacts: Vec::new(),
-            metadata: json!({
-                "source_format": "openhands_file_events",
-                "provider": "openhands",
-                "conversation_id": provider_session_id,
-            }),
-        },
-        event: Some(ProviderEventEnvelope {
-            provider_event_index,
-            provider_event_hash: Some(provider_event_hash.to_owned()),
-            cursor: Some(format!(
-                "{}:{provider_event_hash}",
-                canonical_event_path.display()
-            )),
-            event_type: if file_touch_path.is_some() {
-                EventType::ToolCall
-            } else {
-                EventType::Message
-            },
-            role: Some(if file_touch_path.is_some() {
-                EventRole::Assistant
-            } else {
-                EventRole::User
-            }),
-            occurred_at,
-            fidelity: Fidelity::Imported,
-            idempotency_key: Some(format!(
-                "provider-event:openhands:{provider_session_id}:{provider_event_index}"
-            )),
-            artifacts: Vec::new(),
-            payload: json!({"text": payload_text, "origin_main_fixture": true}),
-            metadata: json!({"event_path": canonical_event_path.display().to_string()}),
-        }),
+            timestamps: timestamps(occurred_at),
+            sync: provider_sync_metadata(
+                Fidelity::Imported,
+                json!({
+                    "provider_session_id": provider_session_id,
+                    "parent_provider_session_id": null,
+                    "root_provider_session_id": null,
+                    "source_format": source_format,
+                    "source_trust": "fixture",
+                    "fixture_line": 1,
+                    "imported_at": occurred_at,
+                    "session_idempotency_key": session_idempotency_key,
+                    "artifacts": [],
+                    "metadata": session_metadata,
+                }),
+            ),
+        })
+        .unwrap();
+
+    let event_identity = provider_source_event_import_identity(
+        legacy_source_id,
+        provider_event_index,
+        provider_event_hash,
+    );
+    let legacy_event_id = event_identity.id;
+    let event_type = if file_touch_path.is_some() {
+        EventType::ToolCall
+    } else {
+        EventType::Message
     };
-    let summary = import_normalized_provider_captures(
-        store,
-        ProviderNormalizationResult {
-            captures: vec![(1, capture)],
-            files_touched,
-            ..ProviderNormalizationResult::default()
-        },
-        NormalizedProviderImportOptions::default(),
-    )
-    .unwrap();
-    assert_eq!(summary.imported_events, 1);
-    provider_source_event_uuid(legacy_source_id, provider_event_index)
+    let role = if file_touch_path.is_some() {
+        EventRole::Assistant
+    } else {
+        EventRole::User
+    };
+    let event_idempotency_key =
+        format!("provider-event:openhands:{provider_session_id}:{provider_event_index}");
+    assert_eq!(
+        store
+            .upsert_event(&Event {
+                id: legacy_event_id,
+                seq: event_identity.seq,
+                history_record_id: None,
+                session_id: Some(legacy_session_id),
+                run_id: None,
+                event_type,
+                role: Some(role),
+                occurred_at,
+                capture_source_id: Some(legacy_source_id),
+                payload: json!({
+                    "provider": "openhands",
+                    "provider_session_id": provider_session_id,
+                    "provider_event_index": provider_event_index,
+                    "provider_event_hash": provider_event_hash,
+                    "cursor": cursor,
+                    "artifacts": [],
+                    "body": {
+                        "text": payload_text,
+                        "origin_main_fixture": true,
+                    },
+                }),
+                payload_blob_id: None,
+                dedupe_key: Some(event_identity.dedupe_key),
+                sync: provider_sync_metadata(
+                    Fidelity::Imported,
+                    json!({
+                        "provider_session_id": provider_session_id,
+                        "provider_event_index": provider_event_index,
+                        "provider_event_hash": provider_event_hash,
+                        "provider_event_hash_authority": "provider_supplied",
+                        "cursor": cursor,
+                        "source_format": source_format,
+                        "source_trust": "fixture",
+                        "fixture_line": 1,
+                        "imported_at": occurred_at,
+                        "event_idempotency_key": event_idempotency_key,
+                        "source_record_ordinal": null,
+                        "source_record_subrecord_index": null,
+                        "metadata": {
+                            "event_path": canonical_event_path.display().to_string(),
+                        },
+                    }),
+                ),
+            })
+            .unwrap(),
+        legacy_event_id
+    );
+
+    if let Some(path) = file_touch_path {
+        let touch_id = provider_file_touch_import_id(
+            store,
+            CaptureProvider::OpenHands,
+            provider_session_id,
+            legacy_source_id,
+            Some(provider_event_index),
+            0,
+            false,
+        )
+        .unwrap();
+        store
+            .upsert_file_touched(&FileTouched {
+                id: touch_id,
+                history_record_id: None,
+                run_id: None,
+                event_id: Some(legacy_event_id),
+                vcs_workspace_id: None,
+                path: path.to_owned(),
+                change_kind: Some(FileChangeKind::Modified),
+                old_path: None,
+                line_count_delta: Some(1),
+                confidence: Confidence::Explicit,
+                timestamps: timestamps(occurred_at),
+                source_id: Some(legacy_source_id),
+                sync: provider_sync_metadata(
+                    Fidelity::Imported,
+                    json!({
+                        "provider": "openhands",
+                        "provider_session_id": provider_session_id,
+                        "provider_touch_index": 0,
+                        "provider_event_index": provider_event_index,
+                        "raw_source_path": conversation_dir,
+                        "source_id": legacy_source_id,
+                        "source_format": source_format,
+                        "source_root": source_root,
+                        "metadata": {"origin_main_fixture": true},
+                        "session_id": legacy_session_id,
+                    }),
+                ),
+            })
+            .unwrap();
+    }
+
+    legacy_event_id
 }
 
 #[test]
@@ -648,7 +754,7 @@ fn native_openhands_file_events_redact_outputs_cite_source_and_leave_tree_readon
     assert_eq!(first_opens, 3);
     assert_eq!(first.failed, 0, "{:?}", first.failures);
     assert_eq!(first.imported_sessions, 1);
-    assert_eq!(first.imported_events, 3);
+    assert_eq!(first.imported_events, 2);
     let session_id =
         stored_provider_session_id(&store, CaptureProvider::OpenHands, "conversation-1");
     let session = store.get_session(session_id).unwrap();
@@ -675,20 +781,20 @@ fn native_openhands_file_events_redact_outputs_cite_source_and_leave_tree_readon
         })
     );
     let events = store.events_for_session(session_id).unwrap();
-    assert_eq!(events.len(), 3);
+    assert_eq!(events.len(), 2);
     assert_eq!(
         events
             .iter()
             .map(|event| event.id)
             .collect::<BTreeSet<_>>()
             .len(),
-        3
+        2
     );
     let imported_event_indices = events
         .iter()
         .map(|event| event.payload["provider_event_index"].as_u64().unwrap())
         .collect::<BTreeSet<_>>();
-    assert_eq!(imported_event_indices.len(), 3);
+    assert_eq!(imported_event_indices.len(), 2);
     let action = events
         .iter()
         .find(|event| event.event_type == EventType::ToolCall)
@@ -697,16 +803,10 @@ fn native_openhands_file_events_redact_outputs_cite_source_and_leave_tree_readon
     assert!(rendered_action.contains("src/openhands_policy.py"));
     assert!(!rendered_action.contains(raw_old));
     assert!(!rendered_action.contains(raw_new));
-    let output = events
+    assert!(events
         .iter()
-        .find(|event| event.event_type == EventType::CommandOutput)
-        .expect("successful command output metadata imported");
-    assert!(output.payload["body"].get("text").is_none());
-    assert!(output.payload["body"].get("text_retention").is_none());
-    assert!(output.payload["body"].get("exit_code").is_none());
-    assert_eq!(output.payload["body"]["result_outcome"], "success");
-    let rendered_output = serde_json::to_string(output).unwrap();
-    assert!(!rendered_output.contains(raw_output));
+        .all(|event| event.event_type != EventType::CommandOutput));
+    assert!(!serde_json::to_string(&events).unwrap().contains(raw_output));
     assert!(store
         .search_event_hits("openhands file event oracle prompt", 10)
         .unwrap()
@@ -884,7 +984,7 @@ fn native_openhands_file_events_redact_outputs_cite_source_and_leave_tree_readon
     assert_eq!(added.imported_events, 1);
     assert_eq!(store.list_sessions().unwrap().len(), 1);
     let after_add = store.events_for_session(session_id).unwrap();
-    assert_eq!(after_add.len(), 4);
+    assert_eq!(after_add.len(), 3);
     assert_eq!(
         store
             .list_capture_sources()

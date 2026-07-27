@@ -1,21 +1,18 @@
 //! Exact message reopening for providers whose source exposes no separate result events.
 
-use ctx_history_core::{CaptureProvider, ContentRef, EventType, ProviderEventEnvelope};
+use ctx_history_core::{CaptureProvider, EventType};
 use rusqlite::Connection;
-use serde_json::Value;
 
 use crate::{
-    captured_batch::{CapturedSqliteValue, NativeLocator},
     compute_payload_hash,
+    native_source::NativeSqliteValue,
     provider::providers::{astrbot, lingma, trae},
-    CaptureError,
 };
 
 use super::{
-    attach_verified_content_locator, error, map_capture_error, native_record_id,
-    resolved_from_values, verified_content_profile, CompleteContentBodyDigest,
-    CompleteContentError, CompleteContentErrorKind, CompleteContentSourceFamily,
-    CompleteMessageRequest, ResolvedSqliteMessage, VerifiedContentLocatorV1, VerifiedContentRole,
+    error, map_capture_error, native_record_id, resolved_from_event_fields,
+    CompleteContentBodyDigest, CompleteContentError, CompleteContentErrorKind,
+    CompleteMessageRequest, ResolvedSqliteMessage,
 };
 
 const ASTRBOT_LOCATOR_KIND: &str = "astrbot-conversation-message-v1";
@@ -59,17 +56,25 @@ fn resolve_astrbot(
     let values = astrbot::astrbot_complete_conversation_values(conn, rowid)
         .map_err(|cause| map_capture_error(request, cause))?
         .ok_or_else(|| error(request, CompleteContentErrorKind::SourceRecordMissing))?;
-    let (event, text, provider_session_id) =
-        astrbot::astrbot_complete_conversation_message(&values, item_index)
-            .map_err(|cause| map_capture_error(request, cause))?
-            .ok_or_else(|| error(request, CompleteContentErrorKind::SourceRecordMissing))?;
-    if request.provider_session_id.as_deref() != Some(provider_session_id.as_str()) {
+    let message = astrbot::astrbot_complete_conversation_message(&values, item_index)
+        .map_err(|cause| map_capture_error(request, cause))?
+        .ok_or_else(|| error(request, CompleteContentErrorKind::SourceRecordMissing))?;
+    if request.provider_session_id.as_deref() != Some(message.provider_session_id.as_str())
+        || message.event_type != EventType::Message
+    {
         return Err(error(
             request,
             CompleteContentErrorKind::ContentVerificationFailed,
         ));
     }
-    Ok(resolved_from_values(event, text, &values))
+    Ok(resolved_from_event_fields(
+        message.provider_event_index,
+        message.provider_event_hash.as_deref(),
+        Some(&message.cursor),
+        &message.payload,
+        message.text,
+        &values,
+    ))
 }
 
 fn resolve_lingma(
@@ -81,7 +86,7 @@ fn resolve_lingma(
         .map_err(|cause| map_capture_error(request, cause))?
         .ok_or_else(|| error(request, CompleteContentErrorKind::SourceRecordMissing))?;
     let session_id = match values.get(1) {
-        Some(CapturedSqliteValue::Text(value)) => value.as_str(),
+        Some(NativeSqliteValue::Text(value)) => value.as_str(),
         _ => {
             return Err(error(
                 request,
@@ -97,7 +102,20 @@ fn resolve_lingma(
     }
     let (event, text) = lingma::lingma_complete_user_message(&values)
         .map_err(|cause| map_capture_error(request, cause))?;
-    Ok(resolved_from_values(event, text, &values))
+    if event.event_type != EventType::Message {
+        return Err(error(
+            request,
+            CompleteContentErrorKind::ContentVerificationFailed,
+        ));
+    }
+    Ok(resolved_from_event_fields(
+        event.provider_event_index,
+        Some(&event.provider_event_hash),
+        Some(&event.cursor),
+        &event.payload,
+        text,
+        &values,
+    ))
 }
 
 fn resolve_trae(
@@ -121,10 +139,20 @@ fn resolve_trae(
     )
     .map_err(|cause| map_capture_error(request, cause))?
     .ok_or_else(|| error(request, CompleteContentErrorKind::SourceRecordMissing))?;
-    let native_record_id = native_record_id(&event);
+    if event.event_type != EventType::Message {
+        return Err(error(
+            request,
+            CompleteContentErrorKind::ContentVerificationFailed,
+        ));
+    }
+    let native_record_id = native_record_id(
+        event.provider_event_index,
+        Some(&event.provider_event_hash),
+        Some(&event.cursor),
+    );
     Ok(ResolvedSqliteMessage {
         text,
-        provider_event_hash: event.provider_event_hash.clone(),
+        provider_event_hash: Some(event.provider_event_hash),
         normalized_payload_hash: compute_payload_hash(&event.payload).ok(),
         native_record_id,
         record_digest: CompleteContentBodyDigest::from_bytes(&bytes),
@@ -195,52 +223,4 @@ fn decode_astrbot_coordinate(
             .map_err(|_| error(request, CompleteContentErrorKind::ContentVerificationFailed))?,
     );
     Ok(((ordered ^ (1_u64 << 63)) as i64, item))
-}
-
-pub(crate) fn attach_sqlite_native_content_locator(
-    event: &mut ProviderEventEnvelope,
-    provider: CaptureProvider,
-    source_format: &str,
-    locator: &NativeLocator,
-    record_digest: &CompleteContentBodyDigest,
-    complete_text: &str,
-) -> crate::Result<()> {
-    if event.event_type != EventType::Message
-        || event
-            .payload
-            .pointer("/text_retention/truncated")
-            .and_then(Value::as_bool)
-            != Some(true)
-    {
-        return Ok(());
-    }
-    let content_ref = ContentRef::from_bytes(complete_text.as_bytes()).ok_or(
-        CaptureError::SystemInvariant("SQLite content length exceeds ContentRef bounds"),
-    )?;
-    let profile = verified_content_profile(
-        provider,
-        source_format,
-        CompleteContentSourceFamily::Sqlite,
-        VerifiedContentRole::MessageBody,
-    )
-    .ok_or(CaptureError::SystemInvariant(
-        "supported SQLite message route must have a verified-content profile",
-    ))?;
-    let persisted = VerifiedContentLocatorV1::new(
-        VerifiedContentRole::MessageBody,
-        profile,
-        content_ref,
-        CompleteContentSourceFamily::Sqlite,
-        locator.kind(),
-        locator.value(),
-        native_record_id(event),
-        record_digest.clone(),
-    )
-    .ok_or(CaptureError::SystemInvariant(
-        "SQLite complete-content locator exceeds the bounded canonical schema",
-    ))?;
-    attach_verified_content_locator(&mut event.metadata, persisted).ok_or(
-        CaptureError::SystemInvariant("verified-content locator collection is malformed"),
-    )?;
-    Ok(())
 }

@@ -5,17 +5,14 @@ mod tests;
 
 use std::{collections::BTreeSet, fs, path::Path};
 
-use chrono::{DateTime, Utc};
-use ctx_history_core::{Artifact, CaptureSourceDescriptor, Fidelity, SessionHistoryArchive};
+use ctx_history_core::{Artifact, SessionHistoryArchive};
 use uuid::Uuid;
 
 use crate::archive::conflicts::{
-    reject_archive_event_internal_conflicts, reject_capture_source_import_conflict,
-    reject_import_conflicts, reject_import_invariant_conflicts,
+    reject_archive_event_internal_conflicts, reject_import_conflicts,
+    reject_import_invariant_conflicts,
 };
-use crate::archive::import::{
-    import_rich_archive_entities_tx, upsert_capture_source_tx, upsert_record_tx,
-};
+use crate::archive::import::{import_rich_archive_entities_tx, upsert_record_tx};
 use crate::object_store::{
     ensure_regular_blob_file, object_relative_path, sha256_hex, BlobWriteGuard, LEGACY_BLOBS_DIR,
 };
@@ -82,53 +79,6 @@ impl Store {
         let canonical_ids =
             import_rich_archive_entities_tx(&tx, &blob_dir, archive, &mut blob_guard)?;
         crate::projection_journal::journal_archive_mutations(&tx, archive, &canonical_ids, None)?;
-        crate::projection_journal::journal_archive_dependencies(&tx, journal_dependencies)?;
-        crate::search::projections::rebuild_search_projection(&tx)?;
-        let search_capabilities =
-            crate::search::projections::detect_event_search_projection_capabilities(&tx)?;
-        tx.commit()?;
-        self.cache_event_search_projection_capabilities(search_capabilities);
-        blob_guard.commit();
-        Ok(())
-    }
-
-    pub fn import_archive_from_capture_source(
-        &mut self,
-        archive: &SessionHistoryArchive,
-        source_id: Uuid,
-        source: &CaptureSourceDescriptor,
-        occurred_at: DateTime<Utc>,
-        fidelity: Fidelity,
-        overwrite: bool,
-    ) -> Result<()> {
-        let mut archive = archive.clone();
-        strip_local_verified_content_locators(&mut archive.events);
-        let archive = &archive;
-        validate_archive_version(archive)?;
-        reject_archive_event_internal_conflicts(archive)?;
-        let blob_dir = self.object_dir.clone();
-        self.invalidate_event_search_projection_capabilities();
-        let tx = self.conn.transaction()?;
-        reject_import_invariant_conflicts(&tx, archive)?;
-        if !overwrite {
-            reject_capture_source_import_conflict(&tx, source_id)?;
-            reject_import_conflicts(&tx, archive)?;
-        }
-        let journal_dependencies =
-            crate::projection_journal::capture_archive_journal_dependencies(&tx, archive)?;
-        let mut blob_guard = BlobWriteGuard::default();
-        upsert_capture_source_tx(&tx, source_id, source, occurred_at, fidelity)?;
-        for record in &archive.records {
-            upsert_record_tx(&tx, record, Some(source_id))?;
-        }
-        let canonical_ids =
-            import_rich_archive_entities_tx(&tx, &blob_dir, archive, &mut blob_guard)?;
-        crate::projection_journal::journal_archive_mutations(
-            &tx,
-            archive,
-            &canonical_ids,
-            Some(source_id),
-        )?;
         crate::projection_journal::journal_archive_dependencies(&tx, journal_dependencies)?;
         crate::search::projections::rebuild_search_projection(&tx)?;
         let search_capabilities =

@@ -11,6 +11,8 @@ pub enum ErrorClass {
     MissingSource,
     MissingRepository,
     StaleFact,
+    LineOutOfRange,
+    StaleSnapshot,
     Ambiguous,
     Corrupt,
     InvalidRequest,

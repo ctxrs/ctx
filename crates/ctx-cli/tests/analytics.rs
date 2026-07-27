@@ -3,38 +3,6 @@ mod support;
 use support::*;
 
 #[test]
-fn eligible_json_command_analytics_reports_default_off_auto_upgrade_status() {
-    let temp = tempdir();
-    let events_path = temp.path().join("analytics.jsonl");
-    let home = temp.path().join("home");
-    let state = temp.path().join("state");
-    let data_root = temp.path().join("data");
-    fs::create_dir_all(&home).unwrap();
-
-    ctx(&temp)
-        .args(["doctor", "--json"])
-        .env("CTX_DATA_ROOT", &data_root)
-        .env("HOME", &home)
-        .env("XDG_STATE_HOME", &state)
-        .env("LOCALAPPDATA", &state)
-        .env_remove("CTX_ANALYTICS_ENABLED")
-        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
-        .assert()
-        .success();
-
-    let event = read_analytics_events(&events_path).remove(0);
-    assert_operation_event(&event, "doctor", "success");
-    let properties = analytics_event_properties(&event);
-    assert_eq!(properties["output"], "json");
-    assert_eq!(properties["auto_upgrade_probe"], true);
-    assert_eq!(properties["auto_upgrade_due"], false);
-    assert_eq!(properties["auto_upgrade_spawned"], false);
-    assert_eq!(properties["auto_upgrade_spawn_status"], "auto_disabled");
-    assert_eq!(properties["auto_upgrade_channel"], "stable");
-    assert_analytics_properties_are_allowlisted(properties);
-}
-
-#[test]
 fn capability_snapshot_is_sent_once_after_successful_delivery() {
     let temp = tempdir();
     let events_path = temp.path().join("analytics.jsonl");
@@ -701,6 +669,7 @@ fn search_analytics_reports_when_search_creates_empty_store() {
     let properties = analytics_event_properties(&events[0]);
     assert_eq!(properties["search_refresh_mode"], "background");
     assert_eq!(properties["search_refresh_status"], "no_sources");
+    assert_eq!(properties["search_refresh_source_count_bucket"], "0");
     assert_eq!(properties["had_existing_store_before_search"], false);
     assert_eq!(properties["indexed_content_before_search_known"], true);
     assert_eq!(properties["had_indexed_content_before_search"], false);
@@ -766,48 +735,6 @@ fn search_analytics_reports_existing_indexed_content() {
 
 #[cfg(unix)]
 #[test]
-fn upgrade_analytics_reports_manual_dry_run_outcome() {
-    let temp = tempdir();
-    let release = fake_release(&temp, "9.9.9");
-    let data_root = temp.path().join("ctx-data");
-    let home = temp.path().join("home");
-    let state = temp.path().join("state");
-    let events_path = temp.path().join("analytics.jsonl");
-    fs::create_dir_all(&home).unwrap();
-
-    let mut command = ctx(&temp);
-    command
-        .args(["upgrade", "--dry-run", "--json"])
-        .env("CTX_DATA_ROOT", &data_root)
-        .env("HOME", &home)
-        .env("XDG_STATE_HOME", &state)
-        .env("LOCALAPPDATA", &state)
-        .env_remove("CTX_ANALYTICS_ENABLED")
-        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
-        .env("CTX_UPGRADE_AUTO", "off");
-    fake_release_env(&mut command, &release).assert().success();
-
-    let events = read_analytics_events(&events_path);
-    assert_eq!(events.len(), 1);
-    assert_operation_event(&events[0], "upgrade", "success");
-    let properties = analytics_event_properties(&events[0]);
-    assert_eq!(properties["upgrade_mode"], "manual");
-    assert_eq!(properties["upgrade_operation"], "apply");
-    assert_eq!(properties["upgrade_status"], "dry_run");
-    assert_eq!(properties["dry_run"], true);
-    assert_eq!(properties["update_available"], true);
-    assert_eq!(properties["upgrade_applied"], false);
-    assert_eq!(properties["upgrade_scheduled"], false);
-    assert_eq!(properties["managed_install"], true);
-    assert_eq!(properties["upgrade_channel"], "stable");
-    assert_eq!(properties["self_upgrade_allowed"], true);
-    assert_eq!(properties["auto_upgrade_allowed"], true);
-    assert!(properties.get("upgrade_warning_count_bucket").is_some());
-    assert_analytics_properties_are_allowlisted(properties);
-}
-
-#[cfg(unix)]
-#[test]
 fn upgrade_analytics_reports_manual_apply_success() {
     let temp = tempdir();
     let release = fake_release(&temp, "9.9.9");
@@ -829,6 +756,13 @@ fn upgrade_analytics_reports_manual_apply_success() {
         .env("CTX_UPGRADE_AUTO", "off");
     fake_release_env(&mut command, &release).assert().success();
 
+    let mode = {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        fs::metadata(&data_root).unwrap().permissions().mode() & 0o777
+    };
+    assert_eq!(mode, 0o700);
+
     let events = read_analytics_events(&events_path);
     assert_eq!(events.len(), 1);
     assert_operation_event(&events[0], "upgrade", "success");
@@ -837,12 +771,97 @@ fn upgrade_analytics_reports_manual_apply_success() {
     assert_eq!(properties["upgrade_operation"], "apply");
     assert_eq!(properties["upgrade_status"], "applied");
     assert_eq!(properties["dry_run"], false);
-    assert_eq!(properties["update_available"], true);
+    assert_eq!(properties["update_available"], false);
+    assert_eq!(properties["update_was_available"], true);
     assert_eq!(properties["upgrade_applied"], true);
     assert_eq!(properties["upgrade_scheduled"], false);
     assert_eq!(properties["managed_install"], true);
     assert_eq!(properties["upgrade_channel"], "stable");
     assert_analytics_properties_are_allowlisted(properties);
+}
+
+#[cfg(unix)]
+#[test]
+fn upgrade_check_rejects_preexisting_insecure_data_root_without_repair() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temp = tempdir();
+    let release = fake_release(&temp, "9.9.9");
+    let data_root = temp.path().join("ctx-data");
+    let home = temp.path().join("home");
+    let state = temp.path().join("state");
+    let events_path = temp.path().join("analytics.jsonl");
+    fs::create_dir_all(&data_root).unwrap();
+    fs::set_permissions(&data_root, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::create_dir_all(&home).unwrap();
+
+    let mut command = ctx(&temp);
+    command
+        .args(["upgrade", "check", "--json"])
+        .env("CTX_DATA_ROOT", &data_root)
+        .env("HOME", &home)
+        .env("XDG_STATE_HOME", &state)
+        .env("LOCALAPPDATA", &state)
+        .env_remove("CTX_ANALYTICS_ENABLED")
+        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
+        .env("CTX_UPGRADE_AUTO", "off");
+    let stderr = failure_stderr(fake_release_env(&mut command, &release));
+
+    assert!(
+        stderr.contains("private state path is not owner-only"),
+        "{stderr}"
+    );
+    assert_eq!(
+        fs::metadata(&data_root).unwrap().permissions().mode() & 0o777,
+        0o755,
+        "upgrade check must reject, not repair, an insecure existing root"
+    );
+
+    assert!(
+        !events_path.exists(),
+        "analytics identity creation must not repair a rejected data root"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn upgrade_status_rejects_preexisting_insecure_data_root_without_analytics_repair() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temp = tempdir();
+    let data_root = temp.path().join("ctx-data");
+    let home = temp.path().join("home");
+    let state = temp.path().join("state");
+    let events_path = temp.path().join("analytics.jsonl");
+    fs::create_dir_all(&data_root).unwrap();
+    fs::set_permissions(&data_root, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::create_dir_all(&home).unwrap();
+
+    let stderr = failure_stderr(
+        ctx(&temp)
+            .args(["upgrade", "status", "--json"])
+            .env("CTX_DATA_ROOT", &data_root)
+            .env("HOME", &home)
+            .env("XDG_STATE_HOME", &state)
+            .env("LOCALAPPDATA", &state)
+            .env_remove("CTX_ANALYTICS_ENABLED")
+            .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
+            .env("CTX_UPGRADE_AUTO", "off"),
+    );
+
+    assert!(
+        stderr.contains("private state path is not owner-only"),
+        "{stderr}"
+    );
+    assert_eq!(
+        fs::metadata(&data_root).unwrap().permissions().mode() & 0o777,
+        0o755,
+        "upgrade status must reject, not repair, an insecure existing root"
+    );
+    assert!(
+        !events_path.exists(),
+        "rejected status analytics must not create identities or emit an event"
+    );
 }
 
 #[cfg(unix)]
@@ -890,179 +909,6 @@ fn upgrade_analytics_reports_manual_failure_kind() {
     assert_eq!(properties["upgrade_operation"], "apply");
     assert_eq!(properties["upgrade_status"], "failed");
     assert_eq!(properties["upgrade_failure_kind"], "artifact_verify");
-    assert_eq!(properties["upgrade_applied"], false);
-    assert_eq!(properties["upgrade_scheduled"], false);
-    assert_analytics_properties_are_allowlisted(properties);
-}
-
-#[cfg(unix)]
-#[test]
-fn upgrade_analytics_reports_background_auto_upgrade_outcome() {
-    let temp = tempdir();
-    let release = fake_release(&temp, "9.9.9");
-    let data_root = temp.path().join("ctx-data");
-    let home = temp.path().join("home");
-    let state = temp.path().join("state");
-    let events_path = temp.path().join("analytics.jsonl");
-    fs::create_dir_all(&home).unwrap();
-
-    let mut command = ctx(&temp);
-    command
-        .args(["upgrade", "--background"])
-        .env("CTX_DATA_ROOT", &data_root)
-        .env("HOME", &home)
-        .env("XDG_STATE_HOME", &state)
-        .env("LOCALAPPDATA", &state)
-        .env_remove("CTX_ANALYTICS_ENABLED")
-        .env("CTX_UPGRADE_AUTO", "apply")
-        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path));
-    fake_release_env(&mut command, &release).assert().success();
-
-    let events = read_analytics_events(&events_path);
-    assert_eq!(events.len(), 1);
-    assert_operation_event(&events[0], "upgrade", "success");
-    let properties = analytics_event_properties(&events[0]);
-    assert_eq!(properties["upgrade_mode"], "auto");
-    assert_eq!(properties["upgrade_operation"], "apply");
-    assert_eq!(properties["upgrade_status"], "applied");
-    assert_eq!(properties["update_available"], true);
-    assert_eq!(properties["upgrade_applied"], true);
-    assert_eq!(properties["upgrade_scheduled"], false);
-    assert_eq!(properties["managed_install"], true);
-    assert_eq!(properties["upgrade_channel"], "stable");
-    assert_analytics_properties_are_allowlisted(properties);
-}
-
-#[cfg(unix)]
-#[test]
-fn upgrade_analytics_reports_background_failure_kind() {
-    let temp = tempdir();
-    let release = fake_release(&temp, "9.9.9");
-    let data_root = temp.path().join("ctx-data");
-    let home = temp.path().join("home");
-    let state = temp.path().join("state");
-    fs::create_dir_all(&home).unwrap();
-    rewrite_fake_release_metadata(&release, |metadata| {
-        metadata.replace(
-            &format!(
-                "CTX_RELEASE_SHA256_{}={}\n",
-                test_platform_key(),
-                release.artifact_sha
-            ),
-            &format!(
-                "CTX_RELEASE_SHA256_{}={}\n",
-                test_platform_key(),
-                "f".repeat(64)
-            ),
-        )
-    });
-    let events_path = temp.path().join("analytics.jsonl");
-
-    let mut command = ctx(&temp);
-    command
-        .args(["upgrade", "--background"])
-        .env("CTX_DATA_ROOT", &data_root)
-        .env("HOME", &home)
-        .env("XDG_STATE_HOME", &state)
-        .env("LOCALAPPDATA", &state)
-        .env_remove("CTX_ANALYTICS_ENABLED")
-        .env("CTX_UPGRADE_AUTO", "apply")
-        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path));
-    fake_release_env(&mut command, &release).assert().failure();
-
-    let events = read_analytics_events(&events_path);
-    assert_eq!(events.len(), 1);
-    assert_operation_event(&events[0], "upgrade", "failure");
-    let properties = analytics_event_properties(&events[0]);
-    assert_eq!(properties["upgrade_mode"], "auto");
-    assert_eq!(properties["upgrade_operation"], "apply");
-    assert_eq!(properties["upgrade_status"], "failed");
-    assert_eq!(properties["upgrade_failure_kind"], "artifact_verify");
-    assert_eq!(properties["upgrade_applied"], false);
-    assert_eq!(properties["upgrade_scheduled"], false);
-    assert_analytics_properties_are_allowlisted(properties);
-}
-
-#[cfg(unix)]
-#[test]
-fn upgrade_analytics_reports_background_locked_skip_and_backs_off() {
-    let temp = tempdir();
-    let release = fake_release(&temp, "9.9.9");
-    let data_root = temp.path().join("ctx-data");
-    let home = temp.path().join("home");
-    let state = temp.path().join("state");
-    let events_path = temp.path().join("analytics.jsonl");
-    fs::create_dir_all(&home).unwrap();
-    fs::create_dir_all(&data_root).unwrap();
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    fs::write(
-        data_root.join("upgrade.lock"),
-        format!("{} {now}\n", std::process::id()),
-    )
-    .unwrap();
-
-    let mut command = ctx(&temp);
-    command
-        .args(["upgrade", "--background"])
-        .env("CTX_DATA_ROOT", &data_root)
-        .env("HOME", &home)
-        .env("XDG_STATE_HOME", &state)
-        .env("LOCALAPPDATA", &state)
-        .env_remove("CTX_ANALYTICS_ENABLED")
-        .env("CTX_UPGRADE_AUTO", "apply")
-        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path));
-    fake_release_env(&mut command, &release).assert().success();
-
-    let events = read_analytics_events(&events_path);
-    assert_eq!(events.len(), 1);
-    assert_operation_event(&events[0], "upgrade", "success");
-    let properties = analytics_event_properties(&events[0]);
-    assert_eq!(properties["upgrade_mode"], "auto");
-    assert_eq!(properties["upgrade_operation"], "apply");
-    assert_eq!(properties["upgrade_status"], "locked");
-    assert_eq!(properties["upgrade_applied"], false);
-    assert_eq!(properties["upgrade_scheduled"], false);
-    assert_analytics_properties_are_allowlisted(properties);
-
-    let state_json: Value =
-        serde_json::from_slice(&fs::read(data_root.join("upgrade-state.json")).unwrap()).unwrap();
-    assert_eq!(state_json["status"], "locked");
-    assert!(state_json["last_checked_unix_s"].as_u64().is_some());
-}
-
-#[cfg(unix)]
-#[test]
-fn upgrade_analytics_reports_background_skipped_in_ci() {
-    let temp = tempdir();
-    let data_root = temp.path().join("ctx-data");
-    let home = temp.path().join("home");
-    let state = temp.path().join("state");
-    let events_path = temp.path().join("analytics.jsonl");
-    fs::create_dir_all(&home).unwrap();
-
-    ctx(&temp)
-        .args(["upgrade", "--background"])
-        .env("CTX_DATA_ROOT", &data_root)
-        .env("HOME", &home)
-        .env("XDG_STATE_HOME", &state)
-        .env("LOCALAPPDATA", &state)
-        .env("CI", "1")
-        .env_remove("CTX_ANALYTICS_ENABLED")
-        .env("CTX_UPGRADE_AUTO", "apply")
-        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
-        .assert()
-        .success();
-
-    let events = read_analytics_events(&events_path);
-    assert_eq!(events.len(), 1);
-    assert_operation_event(&events[0], "upgrade", "success");
-    let properties = analytics_event_properties(&events[0]);
-    assert_eq!(properties["upgrade_mode"], "auto");
-    assert_eq!(properties["upgrade_operation"], "apply");
-    assert_eq!(properties["upgrade_status"], "skipped");
     assert_eq!(properties["upgrade_applied"], false);
     assert_eq!(properties["upgrade_scheduled"], false);
     assert_analytics_properties_are_allowlisted(properties);
@@ -1318,9 +1164,38 @@ fn foreground_provider_refreshes_batch_once_and_report_changed_then_no_op() {
         assert_eq!(refresh["trigger"], "import");
         assert_eq!(refresh["source_mode"], "explicit_path");
         assert_eq!(refresh["change"], expected_change);
+        assert_eq!(
+            refresh["content_evidence"],
+            if expected_change == "no_op" {
+                "none"
+            } else {
+                "accepted"
+            }
+        );
+        assert_eq!(refresh["refresh_result"], "complete");
+        assert_eq!(
+            refresh["core_result"],
+            if expected_change == "no_op" {
+                "no_op"
+            } else {
+                "complete"
+            }
+        );
+        assert_eq!(refresh["canonical_pro_result"], "unknown");
+        assert_eq!(refresh["output_pro_result"], "unknown");
+        assert_eq!(refresh["failure_scope"], "none");
+        assert_eq!(refresh["failure_type"], "none");
+        if expected_change == "no_op" {
+            assert_eq!(refresh["work_kind"], "no_op");
+            assert_eq!(refresh["retired_records_bucket"], "0");
+        } else {
+            assert!(refresh.get("work_kind").is_none());
+            assert!(refresh.get("retired_records_bucket").is_none());
+        }
         assert_eq!(refresh["work_remaining"], false);
         for bucket in [
             "sources_bucket",
+            "source_files_bucket",
             "sessions_bucket",
             "events_bucket",
             "edges_bucket",
@@ -1340,7 +1215,13 @@ fn foreground_provider_refreshes_batch_once_and_report_changed_then_no_op() {
             "provider_key",
             "source_format",
             "ingestion_mode",
+            "ingestion_engine",
             "rewrite_reason",
+            "locator",
+            "cursor",
+            "error",
+            "error_message",
+            "duration_ms",
         ] {
             assert!(
                 !refresh.contains_key(forbidden),

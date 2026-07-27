@@ -83,6 +83,7 @@ shipped.
 
 - Core setup/import/search are local filesystem operations.
 - Official installer-managed binaries can use signed release metadata for an
-  explicit `ctx upgrade` command and, after opt-in, managed background checks.
+  explicit `ctx upgrade` command and daemon-owned automatic checks while the
+  daemon and automatic upgrades are enabled.
 - Unmanaged installs do not self-upgrade.
 - No provider beyond the support matrix should be described as supported.

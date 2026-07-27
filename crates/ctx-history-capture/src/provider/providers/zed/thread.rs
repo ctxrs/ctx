@@ -3,25 +3,20 @@ use std::{borrow::Cow, io::Read};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-use crate::captured_batch::CapturedSqliteValue;
 use crate::common::time::parse_rfc3339_utc;
+use crate::native_source::NativeSqliteValue;
 use crate::{CaptureError, Result, MAX_PROVIDER_SQLITE_VALUE_BYTES};
 
 pub(crate) struct ZedThreadRow {
     pub(crate) rowid: i64,
     pub(crate) id: String,
-    pub(crate) parent_id: Option<String>,
-    pub(crate) folder_paths: Option<String>,
-    pub(crate) folder_paths_order: Option<String>,
-    pub(crate) summary: String,
     pub(crate) updated_at: String,
     pub(crate) data_type: String,
     pub(crate) data: Vec<u8>,
-    pub(crate) created_at: Option<String>,
 }
 
-pub(super) fn decode_zed_thread(values: &[CapturedSqliteValue]) -> Result<ZedThreadRow> {
-    let [CapturedSqliteValue::Integer(rowid), CapturedSqliteValue::Text(id), parent_id, folder_paths, folder_paths_order, CapturedSqliteValue::Text(summary), CapturedSqliteValue::Text(updated_at), CapturedSqliteValue::Text(data_type), CapturedSqliteValue::Blob(data), created_at] =
+pub(super) fn decode_zed_thread(values: &[NativeSqliteValue]) -> Result<ZedThreadRow> {
+    let [NativeSqliteValue::Integer(rowid), NativeSqliteValue::Text(id), _, _, _, NativeSqliteValue::Text(_), NativeSqliteValue::Text(updated_at), NativeSqliteValue::Text(data_type), NativeSqliteValue::Blob(data), _] =
         values
     else {
         return Err(CaptureError::SystemInvariant(
@@ -31,31 +26,14 @@ pub(super) fn decode_zed_thread(values: &[CapturedSqliteValue]) -> Result<ZedThr
     Ok(ZedThreadRow {
         rowid: *rowid,
         id: id.clone(),
-        parent_id: zed_optional_text_value(parent_id)?,
-        folder_paths: zed_optional_text_value(folder_paths)?,
-        folder_paths_order: zed_optional_text_value(folder_paths_order)?,
-        summary: summary.clone(),
         updated_at: updated_at.clone(),
         data_type: data_type.clone(),
         data: data.clone(),
-        created_at: zed_optional_text_value(created_at)?,
     })
 }
 
-pub(crate) fn decode_zed_thread_for_complete(
-    values: &[CapturedSqliteValue],
-) -> Result<ZedThreadRow> {
+pub(crate) fn decode_zed_thread_for_complete(values: &[NativeSqliteValue]) -> Result<ZedThreadRow> {
     decode_zed_thread(values)
-}
-
-fn zed_optional_text_value(value: &CapturedSqliteValue) -> Result<Option<String>> {
-    match value {
-        CapturedSqliteValue::Null => Ok(None),
-        CapturedSqliteValue::Text(value) => Ok(Some(value.clone())),
-        _ => Err(CaptureError::SystemInvariant(
-            "Zed logical row has an invalid optional text value",
-        )),
-    }
 }
 
 pub(super) fn zed_decode_thread_json(row: &ZedThreadRow) -> Result<Value> {

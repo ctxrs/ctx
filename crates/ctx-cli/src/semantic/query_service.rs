@@ -3,15 +3,6 @@ use std::{
     time::{Duration as StdDuration, Instant},
 };
 
-#[cfg(ctx_sqlite_vec)]
-use std::{
-    os::raw::c_char,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Once,
-    },
-};
-
 use anyhow::{anyhow, Result};
 use ctx_history_store::Store;
 use serde_json::{json, Value};
@@ -31,20 +22,21 @@ use super::{
     reports::{semantic_status_from_worker, SemanticRetrievalReport, SemanticWorkerReport},
     runtime_limits::{SEMANTIC_SEARCH_CANDIDATES, SEMANTIC_SOFT_FILTER_SEARCH_CANDIDATES},
     vector_store::SemanticVectorStore,
+    vector_store_schema::SEMANTIC_SQLITE_VEC0_MAX_K,
 };
 
 mod transport;
-#[cfg(not(test))]
-pub(in crate::semantic) use transport::daemon_query_request;
 #[cfg(test)]
 pub(in crate::semantic) use transport::*;
+#[cfg(not(test))]
+pub(in crate::semantic) use transport::{daemon_query_request, DaemonQueryServiceUnavailable};
 mod server;
 #[cfg(test)]
 pub(in crate::semantic) use server::*;
 #[cfg(not(test))]
 pub(in crate::semantic) use server::{
     daemon_can_begin_idle_shutdown, observe_daemon_query_activity, start_daemon_query_service,
-    DaemonQueryActivity,
+    DaemonQueryActivity, DaemonQueryService,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -356,16 +348,37 @@ pub(super) fn semantic_or_hybrid_search_packet(
                 return lexical_search_packet();
             }
 
-            if !daemon_query_service_available(data_root) {
-                let message = "daemon semantic query service is not available; run `ctx daemon run` or use the default background refresh mode to start it";
+            let query_service = daemon_query_service_ping(data_root).and_then(|available| {
+                if available {
+                    Ok(())
+                } else {
+                    Err(DaemonQueryServiceUnavailable.into())
+                }
+            });
+            if let Err(error) = query_service {
+                let unavailable = error
+                    .downcast_ref::<DaemonQueryServiceUnavailable>()
+                    .is_some();
+                let message = if unavailable {
+                    DaemonQueryServiceUnavailable.to_string()
+                } else {
+                    format!("daemon semantic query service check failed: {error:#}")
+                };
                 if effective_backend == SearchBackendArg::Semantic {
-                    return Err(anyhow!("{message}"));
+                    return Err(error.context("semantic search failed"));
                 }
                 retrieval.effective_mode = SearchBackendArg::Lexical;
                 retrieval.semantic_weight = 0.0;
                 retrieval.embedding_model = None;
                 retrieval.semantic_status = "unavailable";
-                retrieval.set_semantic_fallback("daemon_query_service_unavailable", message);
+                retrieval.set_semantic_fallback(
+                    if unavailable {
+                        "daemon_query_service_unavailable"
+                    } else {
+                        "semantic_retrieval_failed"
+                    },
+                    message,
+                );
                 warn_if(
                     emit_warnings,
                     "warning: daemon semantic query service is not available; falling back to lexical search",
@@ -373,18 +386,13 @@ pub(super) fn semantic_or_hybrid_search_packet(
                 return lexical_search_packet();
             }
 
-            let semantic_candidate_limit = if semantic_filters_need_overfetch(&options.filters) {
-                SEMANTIC_SOFT_FILTER_SEARCH_CANDIDATES.max(options.limit.saturating_mul(100))
-            } else {
-                SEMANTIC_SEARCH_CANDIDATES.max(options.limit.saturating_mul(8))
-            };
+            let candidate_limit = semantic_candidate_limit(options);
             match semantic_hits_for_text_query(
                 data_root,
                 store,
                 &vector_store,
                 semantic_text,
-                semantic_candidate_limit,
-                None,
+                candidate_limit,
             ) {
                 Ok((semantic_hits, diagnostics)) => {
                     retrieval.diagnostics = Some(diagnostics);
@@ -399,21 +407,26 @@ pub(super) fn semantic_or_hybrid_search_packet(
                     .map_err(Into::into)
                 }
                 Err(error) => {
-                    let error_message = format!("{error:#}");
+                    let unavailable = error
+                        .downcast_ref::<DaemonQueryServiceUnavailable>()
+                        .is_some();
+                    let error_message = if unavailable {
+                        DaemonQueryServiceUnavailable.to_string()
+                    } else {
+                        format!("{error:#}")
+                    };
                     if effective_backend == SearchBackendArg::Semantic {
-                        return Err(anyhow!("semantic search failed: {error_message}"));
+                        return Err(error.context("semantic search failed"));
                     }
                     retrieval.effective_mode = SearchBackendArg::Lexical;
                     retrieval.semantic_weight = 0.0;
                     retrieval.embedding_model = None;
                     retrieval.semantic_status = "unavailable";
                     retrieval.diagnostics = None;
-                    if error_message.contains("daemon query")
-                        || error_message.contains("daemon semantic query service")
-                    {
+                    if unavailable {
                         retrieval.set_semantic_fallback(
                             "daemon_query_service_unavailable",
-                            format!("daemon semantic query service failed: {error_message}"),
+                            error_message,
                         );
                     } else {
                         retrieval.set_semantic_fallback(
@@ -474,39 +487,19 @@ pub(super) fn semantic_or_hybrid_search_packet(
     }
 }
 
+pub(super) fn semantic_candidate_limit(options: &ctx_history_search::PacketOptions) -> usize {
+    let overfetch = if semantic_filters_need_overfetch(&options.filters) {
+        SEMANTIC_SOFT_FILTER_SEARCH_CANDIDATES.max(options.limit.saturating_mul(100))
+    } else {
+        SEMANTIC_SEARCH_CANDIDATES.max(options.limit.saturating_mul(8))
+    };
+    overfetch.min(SEMANTIC_SQLITE_VEC0_MAX_K)
+}
+
 pub(super) fn warn_if(enabled: bool, message: &str) {
     if enabled {
         eprintln!("{message}");
     }
-}
-
-#[cfg(ctx_sqlite_vec)]
-pub(super) fn register_sqlite_vec_auto_extension() -> bool {
-    static REGISTER: Once = Once::new();
-    static AVAILABLE: AtomicBool = AtomicBool::new(false);
-
-    REGISTER.call_once(|| {
-        let rc = unsafe {
-            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
-                *const (),
-                unsafe extern "C" fn(
-                    *mut rusqlite::ffi::sqlite3,
-                    *mut *mut c_char,
-                    *const rusqlite::ffi::sqlite3_api_routines,
-                ) -> i32,
-            >(
-                sqlite_vec::sqlite3_vec_init as *const ()
-            )))
-        };
-        AVAILABLE.store(rc == rusqlite::ffi::SQLITE_OK, Ordering::Relaxed);
-    });
-
-    AVAILABLE.load(Ordering::Relaxed)
-}
-
-#[cfg(not(ctx_sqlite_vec))]
-pub(super) fn register_sqlite_vec_auto_extension() -> bool {
-    false
 }
 
 pub(crate) fn semantic_query_service_supported() -> bool {
@@ -514,6 +507,10 @@ pub(crate) fn semantic_query_service_supported() -> bool {
 }
 
 pub(crate) fn daemon_query_service_available(data_root: &Path) -> bool {
+    daemon_query_service_ping(data_root).unwrap_or(false)
+}
+
+fn daemon_query_service_ping(data_root: &Path) -> Result<bool> {
     let response = daemon_query_request(
         data_root,
         compact_json(json!({
@@ -522,12 +519,11 @@ pub(crate) fn daemon_query_service_available(data_root: &Path) -> bool {
         })),
         StdDuration::from_secs(1),
         1024,
-    );
-    response
-        .ok()
-        .flatten()
+    )?;
+    Ok(response
+        .as_ref()
         .and_then(|value| value.get("ok").and_then(Value::as_bool))
-        == Some(true)
+        == Some(true))
 }
 
 pub(crate) fn wait_for_daemon_query_service(data_root: &Path, timeout: StdDuration) -> bool {

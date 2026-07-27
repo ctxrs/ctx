@@ -16,6 +16,8 @@ macos_execution_script="scripts/verify-macos-signed-cli.sh"
 macos_evidence_script="scripts/macos-release-signing-evidence.py"
 macos_precommand_script="scripts/buildkite/macos_agent_pre_command.sh"
 macos_ca_file="scripts/apple-developer-id-g2-ca.pem"
+semantic_handoff_script="scripts/stage-semantic-release-handoff.sh"
+semantic_append_script="scripts/append-semantic-release-metadata.sh"
 test -f "${pipeline}"
 test -f "${public_ci_script}"
 test -f "${artifact_script}"
@@ -31,6 +33,8 @@ test -f "${macos_execution_script}"
 test -f "${macos_evidence_script}"
 test -f "${macos_precommand_script}"
 test -f "${macos_ca_file}"
+test -f "${semantic_handoff_script}"
+test -f "${semantic_append_script}"
 
 if [[ -e ".github/workflows/public-ci.yml" ]]; then
   printf 'public GitHub Actions CI workflow should be migrated to Buildkite\n' >&2
@@ -43,7 +47,7 @@ if command -v ruby >/dev/null 2>&1; then
     data = YAML.load_file(ARGV.fetch(0))
     abort "pipeline must have steps" unless data.is_a?(Hash) && data["steps"].is_a?(Array)
     steps = data["steps"]
-    abort "pipeline should include public smoke and gated artifact/native smoke matrices" unless steps.length == 10
+    abort "pipeline should include public smoke and bounded release matrices" unless steps.length == 16
     smoke = steps.fetch(0)
     abort "pipeline step must be a mapping" unless smoke.is_a?(Hash)
     abort "pipeline public smoke step must be keyed" unless smoke.key?("key")
@@ -63,6 +67,12 @@ if command -v ruby >/dev/null 2>&1; then
       public-cli-macos-x64
       public-cli-macos-x64-native-smoke
       public-cli-windows-x64-native-smoke
+      semantic-model-archives
+      semantic-coreml-archive
+      semantic-runtime-linux-cuda12
+      semantic-runtime-windows-ml
+      semantic-runtime-macos-x64
+      semantic-release-handoff
     ]
     actual_keys = steps.filter_map { |step| step["key"] if step.is_a?(Hash) }
     required_keys.each { |key| abort "missing gated artifact step #{key}" unless actual_keys.include?(key) }
@@ -100,6 +110,18 @@ if command -v ruby >/dev/null 2>&1; then
       abort "#{key} must upload the CLI cryptographic attestation" unless Array(step["artifact_paths"]).include?(attestation)
       execution = "target/public-cli-artifacts/ctx-#{key.delete_prefix("public-cli-")}.execution.txt"
       abort "#{key} must upload signed CLI execution evidence" unless Array(step["artifact_paths"]).include?(execution)
+    end
+    {
+      "public-cli-windows-x64" => ["windows-x64", "windows", "ctx-public-cli-windows-native"],
+      "public-cli-freebsd-x64" => ["freebsd-x64", "freebsd", "ctx-public-cli-freebsd-native"],
+    }.each do |key, values|
+      queue, os, concurrency_group = values
+      step = steps.find { |candidate| candidate.is_a?(Hash) && candidate["key"] == key }
+      abort "missing native artifact step #{key}" unless step
+      abort "#{key} must use queue #{queue}" unless step.dig("agents", "queue") == queue
+      abort "#{key} must require #{os}" unless step.dig("agents", "os") == os
+      abort "#{key} must require x86_64" unless step.dig("agents", "arch") == "x86_64"
+      abort "#{key} must serialize native construction" unless step["concurrency"] == 1 && step["concurrency_group"] == concurrency_group
     end
     macos_arm64 = steps.find { |candidate| candidate.is_a?(Hash) && candidate["key"] == "public-cli-macos-arm64" }
     abort "macos-arm64 smoke must require authoritative evidence" unless macos_arm64["command"].to_s.include?("runtime_authority=authoritative")
@@ -170,6 +192,27 @@ if command -v ruby >/dev/null 2>&1; then
     rust_toolchain = data.dig("env", "CTX_RUST_TOOLCHAIN").to_s
     abort "windows-x64 native lane must use the pinned Rust toolchain without POSIX expansion" unless !rust_toolchain.empty? && windows_native_command.include?("rustup toolchain install #{rust_toolchain} ") && windows_native_command.include?("rustup run #{rust_toolchain} cargo check")
     abort "windows-x64 native lane must run the PowerShell 5 candidate contract" unless windows_native_command.include?("scripts/tests/run-native-candidate-smoke-test.ps1")
+    abort "legacy Windows native lane must explicitly select ONNX Runtime" unless windows_native_command.include?("-RuntimeMode onnxruntime")
+    abort "legacy Windows native lane must retain its ORT archive" unless windows_native_command.include?("-RuntimeArchive target/public-cli-artifacts/ctx-onnxruntime-windows-x64.zip")
+    legacy_windows_proof = "target/public-cli-artifacts/ctx-windows-x64.native-runtime-proof.txt"
+    abort "legacy Windows native lane must retain the default/with-semantic proof name" unless windows_native_command.include?("-ProofOutput #{legacy_windows_proof}") && Array(windows_native["artifact_paths"]).include?(legacy_windows_proof)
+
+    windows_ml = steps.find { |candidate| candidate.is_a?(Hash) && candidate["key"] == "semantic-runtime-windows-ml" }
+    abort "missing Windows ML runtime producer" unless windows_ml
+    abort "unsigned Windows ML runtime production must not depend on the CLI candidate" unless windows_ml["depends_on"].nil?
+    windows_ml_command = windows_ml["command"].to_s
+    windows_ml_paths = Array(windows_ml["artifact_paths"])
+    windows_ml_proof = "target/public-cli-artifacts/ctx-windows-x64.windowsml-native-runtime-proof.txt"
+    abort "Windows ML lane must build the exact native candidate archive" unless windows_ml_command.include?("scripts/build-onnxruntime-sidecar.sh windows-x64-windowsml")
+    abort "Windows ML lane must run the PowerShell smoke contract" unless windows_ml_command.include?("scripts/test-windows-semantic-smoke-contract.ps1")
+    abort "unsigned Windows ML runtime lane must not claim a production proof" if windows_ml_command.include?("scripts/smoke-daemon-semantic-release.ps1") || windows_ml_command.include?(windows_ml_proof) || windows_ml_paths.include?(windows_ml_proof)
+    legacy_command_producers = steps.select { |step| step.is_a?(Hash) && step["command"].to_s.include?(legacy_windows_proof) }
+    abort "#{legacy_windows_proof} must have exactly one command producer" unless legacy_command_producers == [windows_native]
+    legacy_artifact_uploaders = steps.select { |step| step.is_a?(Hash) && Array(step["artifact_paths"]).include?(legacy_windows_proof) }
+    abort "#{legacy_windows_proof} must have exactly one artifact uploader" unless legacy_artifact_uploaders == [windows_native]
+    windows_ml_command_producers = steps.select { |step| step.is_a?(Hash) && step["command"].to_s.include?(windows_ml_proof) }
+    windows_ml_artifact_uploaders = steps.select { |step| step.is_a?(Hash) && Array(step["artifact_paths"]).include?(windows_ml_proof) }
+    abort "Windows ML native proof must be produced only after private signed provisioning" unless windows_ml_command_producers.empty? && windows_ml_artifact_uploaders.empty?
     runtime_builds = {
       "public-cli-linux-x64" => "linux-x64",
       "public-cli-linux-aarch64" => "linux-aarch64",
@@ -190,6 +233,63 @@ if command -v ruby >/dev/null 2>&1; then
     abort "linux-aarch64 must build on linux-arm64" unless linux_aarch64.dig("agents", "queue") == "linux-arm64"
     abort "linux-aarch64 must run on linux" unless linux_aarch64.dig("agents", "os") == "linux"
     abort "linux-aarch64 must run on arm64" unless linux_aarch64.dig("agents", "arch") == "arm64"
+    legacy_windows = steps.find { |candidate| candidate.is_a?(Hash) && candidate["key"] == "public-cli-windows-x64" }
+    legacy_windows_command = legacy_windows["command"].to_s
+    abort "legacy windows-x64 invocation changed" unless legacy_windows_command.include?("bash scripts/build-onnxruntime-sidecar.sh windows-x64")
+    legacy_windows_paths = Array(legacy_windows["artifact_paths"])
+    abort "legacy windows-x64 archive must remain staged" unless legacy_windows_paths.include?("target/public-cli-artifacts/ctx-onnxruntime-windows-x64.zip")
+    semantic_assets = %w[
+      ctx-multilingual-e5-small-onnx-fp32-1.0.0.tar.xz
+      ctx-multilingual-e5-small-onnx-o4-fp16-1.0.0.tar.xz
+      ctx-multilingual-e5-small-coreml-fp16-1.0.0.tar.xz
+      ctx-onnxruntime-linux-x64.tar.zst
+      ctx-onnxruntime-linux-aarch64.tar.zst
+      ctx-onnxruntime-macos-arm64.tar.zst
+      ctx-onnxruntime-macos-x64.tar.zst
+      ctx-windowsml-windows-x64.zip
+      ctx-onnxruntime-freebsd-x64.tar.zst
+      ctx-onnxruntime-linux-x64-cuda12.tar.zst
+    ]
+    semantic_producer_keys = %w[
+      semantic-model-archives
+      semantic-coreml-archive
+      semantic-runtime-linux-cuda12
+      semantic-runtime-windows-ml
+      semantic-runtime-macos-x64
+    ]
+    semantic_producer_keys.each do |key|
+      step = steps.find { |candidate| candidate.is_a?(Hash) && candidate["key"] == key }
+      condition = step["if"].to_s
+      abort "#{key} must use the standard artifact gate" unless condition.include?("CTX_PUBLIC_CLI_ARTIFACT_MATRIX")
+      abort "#{key} must be restricted to trusted main" unless condition.include?(%q{build.branch == "main"}) && condition.include?("build.pull_request.id == null")
+    end
+    all_artifact_paths = steps.flat_map { |step| step.is_a?(Hash) ? Array(step["artifact_paths"]).map(&:to_s) : [] }
+    semantic_assets.each do |artifact|
+      path = "target/public-cli-artifacts/#{artifact}"
+      abort "Semantic producer does not retain #{artifact}" unless all_artifact_paths.include?(path)
+      abort "Semantic producer does not retain #{artifact}.asset.json" unless all_artifact_paths.include?("#{path}.asset.json")
+      abort "Semantic producer does not retain #{artifact}.sha256" unless all_artifact_paths.include?("#{path}.sha256")
+    end
+    gather = steps.find { |candidate| candidate.is_a?(Hash) && candidate["key"] == "semantic-release-handoff" }
+    expected_dependencies = %w[
+      public-cli-linux-x64
+      public-cli-linux-aarch64
+      public-cli-freebsd-x64
+      public-cli-macos-arm64
+      semantic-model-archives
+      semantic-coreml-archive
+      semantic-runtime-linux-cuda12
+      semantic-runtime-windows-ml
+      semantic-runtime-macos-x64
+    ]
+    abort "Semantic gather has the wrong bounded producer set" unless Array(gather["depends_on"]) == expected_dependencies
+    gather_command = gather["command"].to_s
+    semantic_assets.each do |artifact|
+      stem = artifact.sub(/\.(tar\.xz|tar\.zst|zip)\z/, "")
+      abort "Semantic gather does not download #{artifact}" unless gather_command.include?(stem)
+    end
+    abort "Semantic gather must construct and stage the unsigned handoff" unless gather_command.include?("scripts/stage-semantic-release-handoff.sh")
+    abort "public Semantic gather must not sign release metadata" if gather_command.match?(/sign|private/i)
   ' "${pipeline}"
 else
   top_level_steps="$(
@@ -200,7 +300,7 @@ else
       END { print count + 0 }
     ' "${pipeline}"
   )"
-  if [[ "${top_level_steps}" != "10" ]]; then
+  if [[ "${top_level_steps}" != "16" ]]; then
     printf 'pipeline should include public smoke and gated artifact/native smoke matrices\n' >&2
     exit 1
   fi
@@ -217,8 +317,6 @@ for required in \
   'CTX_GO_VERSION: "1.22.12"' \
   'BUILDKITE_JOB_ID' \
   'CTX_PUBLIC_CI_TOOL_ROOT' \
-  'DPkg::Lock::Timeout=300' \
-  'apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends' \
   'default-jdk-headless' \
   'install_go' \
   'go${CTX_GO_VERSION}.linux-${go_arch}.tar.gz' \
@@ -237,6 +335,10 @@ for required in \
   'scripts/build-public-cli-artifact.sh freebsd-x64' \
   'scripts/build-public-cli-artifact.sh macos-arm64' \
   'scripts/build-public-cli-artifact.sh macos-x64' \
+  'scripts/build-onnxruntime-sidecar.sh windows-x64-windowsml' \
+  'scripts/build-onnxruntime-sidecar.sh linux-x64-cuda12' \
+  'scripts/stage-semantic-release-handoff.sh' \
+  'target/semantic-release-handoff/*' \
   'CTX_MACOS_RELEASE_SIGNING=required' \
   'CTX_MACOS_SIGNING_SECRET_SOURCE=infisical' \
   'scripts/run-macos-release-signing.sh --attest-runtime-archive' \
@@ -274,7 +376,8 @@ for required in \
   'check_symbol_ceiling GLIBC 2.35' \
   '.build-info.json' \
   'scripts/docker/linux-release.Dockerfile' \
-  'CTX_PUBLIC_CLI_IN_CONTAINER=1' \
+  'scripts/build-linux-release-offline.sh "${platform}" "${target}"' \
+  'scripts/check-linux-release-environment.sh' \
   'MACOS_DEPLOYMENT_TARGET="13.0"' \
   'CARGO_ZIGBUILD_VERSION' \
   'ZIG_LINUX_X64_SHA256' \
@@ -294,7 +397,9 @@ for required in \
     "${macos_archive_attester_script}" \
     "${macos_execution_script}" \
     "${macos_evidence_script}" \
-    "${macos_precommand_script}"; do
+    "${macos_precommand_script}" \
+    "${semantic_handoff_script}" \
+    "${semantic_append_script}"; do
     if grep -F -q -- "${required}" "${checked_file}"; then
       found=1
       break
@@ -309,10 +414,14 @@ done
 python3 - \
   "${artifact_script}" \
   "scripts/build-onnxruntime-sidecar.sh" \
-  "scripts/stage-github-release-assets.sh" <<'PY'
+  "scripts/stage-github-release-assets.sh" \
+  "${semantic_handoff_script}" \
+  "${semantic_append_script}" <<'PY'
 import sys
 
-cli, runtime, staging = [open(path, encoding="utf-8").read() for path in sys.argv[1:]]
+cli, runtime, staging, handoff, append = [
+    open(path, encoding="utf-8").read() for path in sys.argv[1:]
+]
 
 
 def require_order(label, source, *needles):
@@ -366,6 +475,42 @@ require_order(
     '"${platform}" cli "${artifact_dir%/}/ctx-${platform}"',
     'scripts/run-macos-release-signing.sh --attest-runtime-archive',
 )
+semantic_artifacts = (
+    "ctx-multilingual-e5-small-onnx-fp32-1.0.0.tar.xz",
+    "ctx-multilingual-e5-small-onnx-o4-fp16-1.0.0.tar.xz",
+    "ctx-multilingual-e5-small-coreml-fp16-1.0.0.tar.xz",
+    "ctx-onnxruntime-linux-x64.tar.zst",
+    "ctx-onnxruntime-linux-aarch64.tar.zst",
+    "ctx-onnxruntime-macos-arm64.tar.zst",
+    "ctx-onnxruntime-macos-x64.tar.zst",
+    "ctx-windowsml-windows-x64.zip",
+    "ctx-onnxruntime-freebsd-x64.tar.zst",
+    "ctx-onnxruntime-linux-x64-cuda12.tar.zst",
+)
+for artifact in semantic_artifacts:
+    if artifact not in handoff or artifact not in staging:
+        raise SystemExit(f"Semantic handoff/publication contract is missing {artifact}")
+if "construct-semantic-release-catalog.sh" not in handoff:
+    raise SystemExit("Semantic handoff must construct the six public metadata fields")
+if "--with-semantic" not in staging:
+    raise SystemExit("release staging must have an explicit additive Semantic mode")
+for platform in (
+    "linux-x64",
+    "linux-aarch64",
+    "macos-arm64",
+    "macos-x64",
+    "windows-x64",
+    "freebsd-x64",
+):
+    if f"stage_runtime_asset {platform}" not in staging:
+        raise SystemExit(f"legacy six-runtime staging lost {platform}")
+if "append-semantic-release-metadata.sh" in staging:
+    raise SystemExit("public asset staging must not assume private signing authority")
+if "CTX_RELEASE_SEMANTIC_AUTHORITY_universal_ort_cpu" not in append:
+    raise SystemExit("metadata append handoff must require all six Semantic fields")
+for source, label in ((handoff, "handoff"), (append, "metadata append")):
+    if "PRIVATE_KEY" in source or "SIGNING_KEY" in source:
+        raise SystemExit(f"public Semantic {label} must not access signing material")
 PY
 
 if grep -Fq 'spctl ' "${macos_sign_script}" \

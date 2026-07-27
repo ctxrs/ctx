@@ -1,5 +1,6 @@
 use std::{collections::BTreeSet, io::Cursor};
 
+use base64::Engine as _;
 use proptest::prelude::*;
 use serde_json::json;
 
@@ -21,10 +22,44 @@ fn hello(sequence: u64) -> HostEnvelope {
             BTreeSet::from([
                 Capability::Status,
                 Capability::JournalSync,
+                Capability::OutputMaterialization,
                 Capability::Query,
             ]),
         )),
     )
+}
+
+fn output_source() -> OutputSourceIdentity {
+    OutputSourceIdentity {
+        provider: "codex".to_owned(),
+        namespace_id: "codex-session-jsonl".to_owned(),
+        source_id: "fixture/session.jsonl".to_owned(),
+    }
+}
+
+fn output_cursor(value: &str) -> OutputNativeCursor {
+    OutputNativeCursor {
+        version: 1,
+        payload_base64: base64::engine::general_purpose::STANDARD.encode(value),
+    }
+}
+
+fn empty_output_page() -> ProOutputMaterializationPage {
+    ProOutputMaterializationPage {
+        contract_version: OUTPUT_MATERIALIZATION_CONTRACT_VERSION,
+        inventory_generation: 1,
+        source: output_source(),
+        source_epoch: 0,
+        observed_revision: "revision-1".to_owned(),
+        parser_revision: "parser-1".to_owned(),
+        materializer_revision: "materializer-1".to_owned(),
+        disposition: OutputSourceDisposition::NewSource,
+        expected_prior_source_epoch: None,
+        expected_prior_cursor: None,
+        next_safe_cursor: output_cursor("cursor-1"),
+        terminal: true,
+        observations: Vec::new(),
+    }
 }
 
 fn provenance(kind: JournalEntityKind, id: Uuid) -> JournalProvenanceIdentity {
@@ -120,7 +155,6 @@ fn full_request(records: Vec<JournalRecord>) -> JournalSyncRequest {
         frozen_through: frozen,
         authorized_repository_roots: Vec::new(),
         records,
-        result_contents: Vec::new(),
     }
 }
 
@@ -141,6 +175,7 @@ fn citation() -> EvidenceCitation {
             end_exclusive: 10,
         }),
         source_sha256: Some("b".repeat(64)),
+        provider_output: None,
     }
 }
 
@@ -244,169 +279,6 @@ fn journal_rejects_gaps_payload_mutation_and_tombstone_payloads() {
     assert_eq!(request.validate().unwrap_err().class, ErrorClass::Corrupt);
 }
 
-fn request_with_result_content(content: &str) -> JournalSyncRequest {
-    let generation = 10;
-    let initial = initial_journal_digest(generation);
-    let content_ref = ContentRef::from_bytes(content.as_bytes()).unwrap();
-    let mut record = record(generation, 1, 1, JournalOperation::Upsert, &initial);
-    record.canonical_payload = Some(json!({
-        "result": {
-            "outcome": "success",
-            "identifiers": [],
-            "content_ref": content_ref
-        }
-    }));
-    record.payload_sha256 =
-        sha256_hex(&canonical_payload_bytes(record.canonical_payload.as_ref().unwrap()).unwrap());
-    record.cumulative_digest = journal_record_digest(&initial, &record).unwrap();
-    let sidecar = ResultContentSidecar {
-        journal_sequence: record.sequence,
-        stable_entity_id: record.stable_entity_id,
-        content_ref,
-        content: content.to_owned(),
-    };
-    let mut request = full_request(vec![record]);
-    request.result_contents.push(sidecar);
-    request
-}
-
-#[test]
-fn transient_result_content_is_exact_bounded_and_not_in_the_journal_digest() {
-    let request = request_with_result_content("complete normalized output");
-    request.validate().unwrap();
-    let sidecar = &request.result_contents[0];
-    let record = &request.records[0];
-    assert!(sidecar.content_ref.verifies(sidecar.content.as_bytes()));
-    assert_eq!(
-        journal_record_digest(&request.prior_checkpoint.cumulative_digest, record).unwrap(),
-        record.cumulative_digest
-    );
-
-    let mut changed = request.clone();
-    changed.result_contents[0].content.push('!');
-    assert_eq!(changed.validate().unwrap_err().class, ErrorClass::Corrupt);
-
-    let mut bad_binding = request.clone();
-    bad_binding.result_contents[0].stable_entity_id = Uuid::from_u128(999);
-    assert_eq!(
-        bad_binding.validate().unwrap_err().class,
-        ErrorClass::InvalidRequest
-    );
-
-    let mut bad_reference = request.clone();
-    bad_reference.result_contents[0].content_ref = ContentRef::from_bytes(b"other").unwrap();
-    bad_reference.result_contents[0].content = "other".to_owned();
-    assert_eq!(
-        bad_reference.validate().unwrap_err().class,
-        ErrorClass::Corrupt
-    );
-
-    let mut duplicate = request;
-    duplicate
-        .result_contents
-        .push(duplicate.result_contents[0].clone());
-    assert_eq!(
-        duplicate.validate().unwrap_err().class,
-        ErrorClass::InvalidRequest
-    );
-}
-
-#[test]
-fn transient_result_content_is_redacted_from_debug_output() {
-    let secret = "PRIVATE_TRANSIENT_RESULT_DEBUG_CANARY";
-    let request = request_with_result_content(secret);
-
-    for debug_output in [
-        format!("{:?}", request.result_contents[0]),
-        format!("{request:?}"),
-    ] {
-        assert!(!debug_output.contains(secret));
-        assert!(debug_output.contains("<redacted>"));
-    }
-}
-
-#[test]
-fn transient_result_content_allows_distinct_revisions_of_one_event() {
-    let generation = 10;
-    let content = "same complete output";
-    let content_ref = ContentRef::from_bytes(content.as_bytes()).unwrap();
-    let mut initial_request = request_with_result_content(content);
-    let first = initial_request.records.remove(0);
-    let mut second = record(
-        generation,
-        2,
-        2,
-        JournalOperation::Upsert,
-        &first.cumulative_digest,
-    );
-    second.stable_entity_id = first.stable_entity_id;
-    second.provenance.stable_entity_id = first.stable_entity_id;
-    second.evidence[0].event_id = first.stable_entity_id;
-    second.canonical_payload = first.canonical_payload.clone();
-    second.payload_sha256 = first.payload_sha256.clone();
-    second.cumulative_digest = journal_record_digest(&first.cumulative_digest, &second).unwrap();
-
-    let mut request = full_request(vec![first.clone(), second.clone()]);
-    request.result_contents = vec![
-        ResultContentSidecar {
-            journal_sequence: first.sequence,
-            stable_entity_id: first.stable_entity_id,
-            content_ref: content_ref.clone(),
-            content: content.to_owned(),
-        },
-        ResultContentSidecar {
-            journal_sequence: second.sequence,
-            stable_entity_id: second.stable_entity_id,
-            content_ref,
-            content: content.to_owned(),
-        },
-    ];
-    request.validate().unwrap();
-}
-
-#[test]
-fn transient_result_content_rejects_partial_or_overbound_text() {
-    let full = "x".repeat(MAX_RESULT_CONTENT_BYTES_PER_ITEM + 1);
-    let request = request_with_result_content(&full);
-    assert_eq!(request.validate().unwrap_err().class, ErrorClass::Bounds);
-
-    let mut partial = request_with_result_content("full output");
-    partial.result_contents[0].content = "full".to_owned();
-    assert_eq!(partial.validate().unwrap_err().class, ErrorClass::Corrupt);
-
-    let generation = 12;
-    let content = "x".repeat(MAX_RESULT_CONTENT_BYTES_PER_ITEM);
-    let content_ref = ContentRef::from_bytes(content.as_bytes()).unwrap();
-    let mut prior = initial_journal_digest(generation);
-    let mut records = Vec::new();
-    let mut sidecars = Vec::new();
-    for sequence in 1..=5 {
-        let mut record = record(generation, sequence, 1, JournalOperation::Upsert, &prior);
-        record.canonical_payload = Some(json!({
-            "result": {
-                "outcome": "success",
-                "identifiers": [],
-                "content_ref": content_ref.clone()
-            }
-        }));
-        record.payload_sha256 = sha256_hex(
-            &canonical_payload_bytes(record.canonical_payload.as_ref().unwrap()).unwrap(),
-        );
-        record.cumulative_digest = journal_record_digest(&prior, &record).unwrap();
-        prior.clone_from(&record.cumulative_digest);
-        sidecars.push(ResultContentSidecar {
-            journal_sequence: sequence,
-            stable_entity_id: record.stable_entity_id,
-            content_ref: content_ref.clone(),
-            content: content.clone(),
-        });
-        records.push(record);
-    }
-    let mut over_total = full_request(records);
-    over_total.result_contents = sidecars;
-    assert_eq!(over_total.validate().unwrap_err().class, ErrorClass::Bounds);
-}
-
 #[test]
 fn fake_journal_ack_is_idempotent_and_queries_require_exact_checkpoint() {
     let generation = 9;
@@ -443,13 +315,10 @@ fn fake_journal_ack_is_idempotent_and_queries_require_exact_checkpoint() {
         })
     ));
 
-    let query = QueryRequest {
-        kind: QueryKind::Facts,
-        target: ResourceSelector {
-            kind: ResourceKind::Commit,
-            value: "0123456789abcdef".to_owned(),
+    let query = BlameRequest {
+        target: BlameTarget::Commit {
+            oid: "0123456789abcdef".to_owned(),
             repository: Some("ctxrs/ctx".to_owned()),
-            line: None,
         },
         limit: 10,
         cursor: None,
@@ -459,37 +328,229 @@ fn fake_journal_ack_is_idempotent_and_queries_require_exact_checkpoint() {
         },
     };
     assert!(matches!(
-        fake.handle(host(3, HostMessage::Query(query))).message,
-        HelperMessage::Query(_)
+        fake.handle(host(3, HostMessage::Blame(query))).message,
+        HelperMessage::Blame(_)
     ));
 }
 
 #[test]
-fn resource_selector_line_is_scoped_to_files() {
-    let file = ResourceSelector {
-        kind: ResourceKind::File,
-        value: "src/lib.rs".to_owned(),
+fn fake_output_sink_coordinates_inventory_progress_and_page_cas() {
+    let mut fake = FakeHelper::default();
+    assert!(matches!(
+        fake.handle(hello(0)).message,
+        HelperMessage::Hello(_)
+    ));
+    let began = fake.handle(host(
+        1,
+        HostMessage::BeginOutputInventory(BeginOutputInventoryRequest { generation: 1 }),
+    ));
+    assert!(matches!(
+        began.message,
+        HelperMessage::OutputInventoryBegan(OutputInventoryBegan { generation: 1, .. })
+    ));
+    let observed = fake.handle(host(
+        2,
+        HostMessage::ObserveOutputSource(ObserveOutputSourceRequest {
+            generation: 1,
+            source: output_source(),
+            availability: OutputSourceAvailability::Available,
+        }),
+    ));
+    assert!(matches!(
+        observed.message,
+        HelperMessage::OutputSourceObserved(_)
+    ));
+
+    let page = empty_output_page();
+    let first = fake.handle(host(3, HostMessage::MaterializeOutputPage(page.clone())));
+    assert!(matches!(
+        first.message,
+        HelperMessage::OutputPageMaterialized(OutputPageMaterialized {
+            accepted_outputs: 0,
+            replayed: false,
+            ..
+        })
+    ));
+    let replay = fake.handle(host(4, HostMessage::MaterializeOutputPage(page)));
+    assert!(matches!(
+        replay.message,
+        HelperMessage::OutputPageMaterialized(OutputPageMaterialized {
+            accepted_outputs: 0,
+            replayed: true,
+            ..
+        })
+    ));
+    let progress = fake.handle(host(
+        5,
+        HostMessage::GetOutputProgress(OutputProgressRequest {
+            sources: vec![output_source()],
+        }),
+    ));
+    assert!(matches!(
+        progress.message,
+        HelperMessage::OutputProgress(OutputProgressResult {
+            ref sources,
+            inventory_complete: false,
+            ..
+        }) if sources.len() == 1 && sources[0].cursor == Some(output_cursor("cursor-1"))
+    ));
+    let finished = fake.handle(host(
+        6,
+        HostMessage::FinishOutputInventory(FinishOutputInventoryRequest { generation: 1 }),
+    ));
+    assert!(matches!(
+        finished.message,
+        HelperMessage::OutputInventoryFinished(OutputInventoryFinished {
+            generation: 1,
+            observed_sources: 1,
+            unavailable_sources: 0,
+        })
+    ));
+}
+
+#[test]
+fn blame_target_file_ranges_are_positive_and_inclusive() {
+    let file = BlameTarget::File {
+        path: "src/lib.rs".to_owned(),
         repository: Some("forge:github.com/ctxrs/ctx".to_owned()),
-        line: Some(42),
+        lines: Some(LineRange { start: 42, end: 60 }),
     };
     file.validate().unwrap();
 
-    for kind in [
-        ResourceKind::Commit,
-        ResourceKind::PullRequest,
-        ResourceKind::Issue,
-        ResourceKind::Session,
-        ResourceKind::Run,
+    for lines in [
+        LineRange { start: 0, end: 1 },
+        LineRange { start: 2, end: 1 },
     ] {
-        let mut invalid = file.clone();
-        invalid.kind = kind;
-        let error = invalid.validate().unwrap_err();
-        assert_eq!(error.class, ErrorClass::InvalidRequest);
+        let invalid = BlameTarget::File {
+            path: "src/lib.rs".to_owned(),
+            repository: None,
+            lines: Some(lines),
+        };
         assert_eq!(
-            error.message,
-            "resource selector line is valid only for file targets"
+            invalid.validate().unwrap_err().class,
+            ErrorClass::InvalidRequest
         );
     }
+}
+
+#[test]
+fn pull_request_selectors_are_positive_numbers_or_canonical_urls() {
+    for selector in [
+        "1",
+        "42",
+        "https://github.com/ctxrs/ctx/pull/42",
+        "https://gitlab.com/ctxrs/ctx/-/merge_requests/42",
+        "https://gitlab.corp.example/groups/ctxrs/ctx/-/merge_requests/42",
+        "https://codeberg.org/ctxrs/ctx/pulls/42",
+    ] {
+        let target = BlameTarget::PullRequest {
+            selector: selector.to_owned(),
+            repository: (!selector.starts_with("https://")).then(|| "ctxrs/ctx".to_owned()),
+        };
+        target.validate().unwrap_or_else(|error| {
+            panic!("{selector} should be valid: {}", error.message);
+        });
+    }
+    for selector in [
+        "",
+        "0",
+        "-1",
+        "+1",
+        "01",
+        "1.0",
+        "#42",
+        "https://github.com/ctxrs/ctx/pull/0",
+        "https://github.com/ctxrs/ctx/pulls/42",
+        "https://github.com/ctxrs/ctx/-/merge_requests/42",
+        "https://gitlab.com/ctxrs/ctx/merge_requests/42",
+        "https://gitlab.com/ctxrs/ctx/-/merge_requests/-1",
+        "https://gitlab.com/ctxrs/ctx/-/merge_requests/42?token=x",
+        "https://GitLab.corp.example/ctxrs/ctx/-/merge_requests/42",
+        "https://bitbucket.org/ctxrs/ctx/-/merge_requests/42",
+        "https://example.com/arbitrary/42",
+    ] {
+        let target = BlameTarget::PullRequest {
+            selector: selector.to_owned(),
+            repository: Some("ctxrs/ctx".to_owned()),
+        };
+        assert!(
+            target.validate().is_err(),
+            "{selector} should be rejected as a PR selector"
+        );
+    }
+
+    let number_without_repository = BlameTarget::PullRequest {
+        selector: "42".to_owned(),
+        repository: None,
+    };
+    let error = number_without_repository.validate().unwrap_err();
+    assert_eq!(error.class, ErrorClass::InvalidRequest);
+    assert_eq!(
+        error.message,
+        "pull request number requires a repository selector"
+    );
+}
+
+#[test]
+fn typed_blame_results_require_complete_deduplicated_evidence() {
+    let result = BlameResult {
+        target: ResolvedBlameTarget::Commit {
+            commit: ResourceRef {
+                id: "commit:1".to_owned(),
+                kind: ResourceKind::Commit,
+                display: "0123456789ab".to_owned(),
+            },
+            repository: ResourceRef {
+                id: "repository:1".to_owned(),
+                kind: ResourceKind::Repository,
+                display: "ctxrs/ctx".to_owned(),
+            },
+        },
+        git_snapshot: None,
+        matches: vec![BlameMatch::Commit(CommitBlameMatch {
+            fact_id: "fact:1".to_owned(),
+            fact_type: CommitFactType::Referenced,
+            predicate: CommitPredicate::ReferencedBy,
+            subject: ResourceRef {
+                id: "commit:1".to_owned(),
+                kind: ResourceKind::Commit,
+                display: "0123456789ab".to_owned(),
+            },
+            object: Some(ResourceRef {
+                id: "session:1".to_owned(),
+                kind: ResourceKind::Session,
+                display: "session-1".to_owned(),
+            }),
+            fact_occurred_at_ms: None,
+            confidence: FactConfidence::Explicit,
+            state: FactState::Asserted,
+            direct_actor: None,
+            owning_root: None,
+            evidence_numbers: vec![1],
+        })],
+        evidence: vec![NumberedEvidence {
+            number: 1,
+            citation: citation(),
+        }],
+        next: None,
+    };
+    result.validate().unwrap();
+
+    let mut unreferenced = result.clone();
+    unreferenced.matches.clear();
+    assert_eq!(
+        unreferenced.validate().unwrap_err().class,
+        ErrorClass::Corrupt
+    );
+
+    let mut duplicate_number = result;
+    duplicate_number
+        .evidence
+        .push(duplicate_number.evidence[0].clone());
+    assert_eq!(
+        duplicate_number.validate().unwrap_err().class,
+        ErrorClass::Corrupt
+    );
 }
 
 #[test]
@@ -503,32 +564,6 @@ fn resource_kind_inventory_round_trips_and_rejects_unknown_values() {
     }
     assert_eq!(ResourceKind::from_wire_name("deployment"), None);
     assert!(serde_json::from_str::<ResourceKind>(r#""deployment""#).is_err());
-}
-
-#[test]
-fn typed_query_records_require_resolvable_citations_and_bounds() {
-    let resource = ResourceRef {
-        id: "commit:1".to_owned(),
-        kind: ResourceKind::Commit,
-        display: "0123456789ab".to_owned(),
-    };
-    let fact = FactRecord {
-        id: "fact:1".to_owned(),
-        fact_type: "commit.produced".to_owned(),
-        subject: resource.clone(),
-        predicate: "produced".to_owned(),
-        object: FactValue::Boolean(true),
-        confidence: FactConfidence::Explicit,
-        state: FactState::Asserted,
-        detector_version: "v1".to_owned(),
-        owning_root_session_id: None,
-        direct_actor_session_id: None,
-        citations: vec![citation()],
-    };
-    fact.validate().unwrap();
-    let mut uncited = fact;
-    uncited.citations.clear();
-    assert_eq!(uncited.validate().unwrap_err().class, ErrorClass::Corrupt);
 }
 
 #[test]

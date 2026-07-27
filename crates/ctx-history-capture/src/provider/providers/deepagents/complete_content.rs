@@ -1,16 +1,17 @@
 //! Provider-owned verified-content coordinates and pure SQLite snapshot recovery.
 
 use chrono::{DateTime, Utc};
-use ctx_history_core::ProviderEventEnvelope;
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 
 use crate::complete_content::{CompleteContentBodyDigest, COMPLETE_CONTENT_MAX_LOCATOR_BYTES};
 use crate::{CaptureError, Result};
 
-use super::ledger::deepagents_message_identity;
 use super::message::{deepagents_messages_from_blob, DeepAgentsMessage};
-use super::projector::{deepagents_event, DeepAgentsEventDraft};
+use super::native_path::{
+    deepagents_message_identity, deepagents_native_event, DeepAgentsNativeEvent,
+    DeepAgentsParsedMessage,
+};
 use super::source::DeepAgentsWriteKey;
 
 pub(crate) const DEEPAGENTS_CONTENT_LOCATOR_KIND: &str = "deepagents-write-message-v1";
@@ -139,7 +140,7 @@ fn update_digest_string(digest: &mut Sha256, value: &str) {
 #[derive(Debug)]
 pub(crate) struct DeepAgentsResolvedContent {
     pub(crate) text: String,
-    pub(crate) event: ProviderEventEnvelope,
+    pub(crate) event: DeepAgentsNativeEvent,
     pub(crate) record_digest: CompleteContentBodyDigest,
 }
 
@@ -224,7 +225,7 @@ pub(crate) fn resolve_deepagents_content(
         task_id: address.task_id.clone(),
         idx: address.write_idx,
     };
-    let event = resolved_event(address, message);
+    let event = resolved_event(address, message, &key);
     Ok(Some(DeepAgentsResolvedContent {
         text,
         event,
@@ -235,7 +236,8 @@ pub(crate) fn resolve_deepagents_content(
 fn resolved_event(
     address: &DeepAgentsContentAddress,
     message: DeepAgentsMessage,
-) -> ProviderEventEnvelope {
+    key: &DeepAgentsWriteKey,
+) -> DeepAgentsNativeEvent {
     let cursor = format!(
         "thread:{}:checkpoint:{}:task:{}:write:{}:message:{}",
         address.thread_id,
@@ -248,24 +250,24 @@ fn resolved_event(
         .message_id
         .as_deref()
         .map(|message_id| deepagents_message_identity(&address.thread_id, message_id));
-    deepagents_event(&DeepAgentsEventDraft {
-        thread_id: address.thread_id.clone(),
-        provider_event_index: identity
-            .as_ref()
-            .map_or(0, |identity| identity.provider_index),
-        cursor: cursor.clone(),
-        occurred_at: DateTime::<Utc>::UNIX_EPOCH,
-        message,
-        checkpoint_id: address.checkpoint_id.clone(),
-        task_id: address.task_id.clone(),
-        write_idx: address.write_idx,
-        message_offset: address.message_offset as usize,
-        provider_event_identity_index: identity.as_ref().map(|identity| identity.provider_index),
-        provider_event_hash: identity
-            .map(|identity| identity.payload_hash)
-            .unwrap_or(cursor),
-        record_digest: None,
-    })
+    let provider_event_hash = identity
+        .as_ref()
+        .map(|identity| identity.payload_hash.as_str())
+        .unwrap_or(&cursor);
+    deepagents_native_event(
+        key,
+        &DeepAgentsParsedMessage {
+            offset: address.message_offset as usize,
+            provider_event_index: identity
+                .as_ref()
+                .map_or(0, |identity| identity.provider_index),
+            message,
+        },
+        DateTime::<Utc>::UNIX_EPOCH,
+        provider_event_hash,
+        identity.as_ref().map(|identity| identity.provider_index),
+        None,
+    )
 }
 
 #[cfg(test)]

@@ -1,5 +1,0 @@
-{"provider":"codex","session":{"provider_session_id":"captured-batch-malformed-mixed","agent_type":"primary","is_primary":true,"status":"imported","started_at":"2026-07-17T12:10:00Z"},"event":{"provider_event_index":0,"event_type":"message","role":"user","occurred_at":"2026-07-17T12:10:01Z","payload":{"text":"valid before malformed records"}}}
-{"provider":"codex","session":
-{"provider":"codex","session":{"provider_session_id":"captured-batch-malformed-mixed","agent_type":"primary","is_primary":true,"status":"imported","started_at":"2026-07-17T12:10:00Z"},"event":{"provider_event_index":1,"event_type":"message","role":"assistant","occurred_at":"2026-07-17T12:10:02Z","payload":{"text":"valid between malformed records"}}}
-{"provider":"codex","session":{"provider_session_id":"missing-required-fields"}}
-{"provider":"codex","session":{"provider_session_id":"captured-batch-malformed-mixed","agent_type":"primary","is_primary":true,"status":"imported","started_at":"2026-07-17T12:10:00Z"},"event":{"provider_event_index":2,"event_type":"message","role":"assistant","occurred_at":"2026-07-17T12:10:03Z","payload":{"text":"valid after malformed records"}}}

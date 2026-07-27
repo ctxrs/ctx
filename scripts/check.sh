@@ -5,15 +5,22 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
 
 run_bazel() {
+  local command_name="$1"
+  shift
+  local command=("${command_name}")
+  if (( force_rerun )) && [[ "${command_name}" == "test" || "${command_name}" == "coverage" ]]; then
+    command+=(--cache_test_results=no)
+  fi
+  command+=("$@")
   printf '==> scripts/bazelw'
-  printf ' %q' "$@"
+  printf ' %q' "${command[@]}"
   printf '\n'
-  scripts/bazelw "$@"
+  scripts/bazelw "${command[@]}"
 }
 
 usage() {
   cat <<'USAGE'
-usage: scripts/check.sh [--mode MODE]
+usage: scripts/check.sh [--mode MODE] [--force-rerun]
        scripts/check.sh --list-modes
        scripts/check.sh -- BAZEL_ARGS...
 
@@ -24,10 +31,12 @@ Modes:
   ci         presubmit plus native clippy and release/content gates
 
 Cargo is not invoked by these modes; Bazel is the build and test authority.
+--force-rerun disables test-result reuse without deleting compilation caches.
 USAGE
 }
 
 mode="ci"
+force_rerun=0
 while (( "$#" > 0 )); do
   case "$1" in
     --mode=*) mode="${1#--mode=}"; shift ;;
@@ -37,6 +46,7 @@ while (( "$#" > 0 )); do
       mode="$1"
       shift
       ;;
+    --force-rerun) force_rerun=1; shift ;;
     --list-modes) printf '%s\n' fast presubmit smoke ci; exit 0 ;;
     -h|--help) usage; exit 0 ;;
     --)

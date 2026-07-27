@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use anyhow::Result;
 use serde_json::json;
 
-use ctx_history_capture::{DiscoveryIssue, DiscoveryIssueKind, ProviderSourceStatus};
+use ctx_history_capture::{
+    DiscoveryIssue, DiscoveryIssueKind, DiscoveryReport, ProviderSourceStatus,
+};
 use ctx_history_core::CaptureProvider;
 
 use crate::analytics::{count_bucket, SourcesTelemetry};
@@ -11,9 +13,9 @@ use crate::history_source_plugins::discover_history_source_plugins_with_diagnost
 use crate::output::print_json;
 use crate::provider_args::ProviderArg;
 use crate::provider_sources::{
-    discovered_sources, discovered_sources_for_provider_report, manual_path_guidance,
-    plugin_manifest_failures_json, plugin_sources_json, provider_cli_name, sources_json,
-    SourceInfo,
+    discovered_sources_for_provider_report, discovered_sources_report,
+    discovery_report_issues_json, manual_path_guidance, plugin_manifest_failures_json,
+    plugin_sources_json, provider_cli_name, sources_json, SourceInfo,
 };
 use crate::{SourcesArgs, DEFAULT_VISIBLE_SOURCE_PROVIDERS};
 
@@ -23,14 +25,12 @@ pub(crate) fn run_sources(
     telemetry: &mut SourcesTelemetry,
 ) -> Result<()> {
     let provider_filter = args.provider.map(ProviderArg::capture_provider);
-    let (sources, issues) = match provider_filter {
-        Some(CaptureProvider::Custom) => (Vec::new(), Vec::new()),
-        Some(provider) => {
-            let report = discovered_sources_for_provider_report(provider);
-            (report.sources, report.issues)
-        }
-        None => (discovered_sources(), Vec::new()),
+    let discovery_report = match provider_filter {
+        Some(CaptureProvider::Custom) => DiscoveryReport::default(),
+        Some(provider) => discovered_sources_for_provider_report(provider),
+        None => discovered_sources_report(),
     };
+    let sources = &discovery_report.sources;
     let plugin_discovery = discover_history_source_plugins_with_diagnostics(&data_root, &[])?;
     let (plugin_sources, plugin_failures) = if matches!(provider_filter, Some(provider) if provider != CaptureProvider::Custom)
     {
@@ -66,11 +66,14 @@ pub(crate) fn run_sources(
         let mut source_values = sources_json(&visible_sources);
         source_values.extend(plugin_sources_json(&plugin_sources));
         source_values.extend(plugin_manifest_failures_json(&plugin_failures));
+        let (issues, issues_truncated) = discovery_report_issues_json(&discovery_report);
         print_json(json!({
             "schema_version": 1,
             "scope": if show_all_sources { "all" } else { "default" },
             "hidden_missing_sources": hidden_missing_sources,
             "sources": source_values,
+            "issues": issues,
+            "issues_truncated": issues_truncated,
         }))?;
     } else {
         for source in visible_sources {
@@ -91,8 +94,8 @@ pub(crate) fn run_sources(
                 );
             }
         }
-        for issue in issues {
-            print_discovery_issue(&issue);
+        for issue in &discovery_report.issues {
+            print_discovery_issue(issue);
         }
         for failure in plugin_failures {
             println!(

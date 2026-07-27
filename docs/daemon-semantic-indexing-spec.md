@@ -88,9 +88,18 @@ The exact words can change, but the output must communicate:
 - how to watch/wait in the foreground
 - search can run before indexing completes
 
-`ctx setup --json` should not autostart the daemon and should report the same
-counts/status as structured fields. `ctx setup --no-daemon` initializes local
-state without starting background work.
+`ctx setup --json` should report the same counts/status as structured fields
+without starting or nudging the daemon. `ctx setup --no-daemon` initializes
+local state without starting background work.
+
+The long-lived daemon reloads effective daemon and semantic configuration
+between maintenance cycles. A later supported semantic opt-in plus repeat setup
+must activate daemon-owned query service and indexing in the existing process;
+config-file mutation alone is not activation. Status reports current requested
+configuration, last daemon-applied configuration, reload failure, and observed
+semantic runtime ownership separately. A failed reload retains the last
+known-good runtime, and a failed semantic activation must never report the
+semantic job as enabled.
 
 ## Foreground Progress Commands
 
@@ -133,6 +142,7 @@ The daemon owns:
 - lexical projection refresh
 - semantic document projection
 - semantic embedding
+- opted-in model acquisition, pinned-hash verification, and repair
 - deletion/dirty queue cleanup
 - status/job JSON for foreground observers
 
@@ -148,8 +158,10 @@ The setup command owns:
 
 - creating the data root/config/store
 - source discovery/inventory
-- daemon autostart unless disabled or JSON output
+- daemon autostart unless explicitly disabled or the setup mode is catalog-only
 - printing initial background indexing estimates and status commands
+- queueing model acquisition for the daemon without downloading in the setup
+  process
 
 The foreground `index` command owns:
 
@@ -163,6 +175,9 @@ The foreground `index` command owns:
 - No public `auto` retrieval mode.
 - No lexical-then-semantic fallback as the default strategy.
 - No foreground semantic embedding from `ctx search`.
+- No model download from foreground setup, import, search, status, doctor, MCP,
+  or index-observer commands. Only the opted-in daemon may acquire or repair the
+  pinned model, and unverified bytes must fail closed before cache publication.
 - No duplicate inline refresh when daemon is enabled and running.
 - No LLM-generated semantic documents.
 - Prefer one persisted semantic-document projection over reconstructing the

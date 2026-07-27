@@ -262,51 +262,19 @@ pub(crate) struct UpgradeTelemetry {
     pub(crate) mode: UpgradeMode,
     pub(crate) operation: UpgradeOperation,
     pub(crate) dry_run: bool,
+    pub(crate) suppress_event: bool,
     pub(crate) status: Option<UpgradeStatus>,
     pub(crate) applied: Option<bool>,
     pub(crate) scheduled: Option<bool>,
     pub(crate) update_available: Option<bool>,
+    pub(crate) update_was_available: Option<bool>,
+    pub(crate) upgrade_attempt_id: Option<String>,
     pub(crate) managed_install: Option<bool>,
     pub(crate) self_upgrade_allowed: Option<bool>,
     pub(crate) auto_upgrade_allowed: Option<bool>,
     pub(crate) warning_count: Option<CountBucket>,
     pub(crate) channel: Option<UpgradeChannel>,
     pub(crate) failure_kind: Option<UpgradeFailureKind>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AutoUpgradeSpawnStatus {
-    AutoDisabled,
-    Ci,
-    BackgroundChild,
-    NotDue,
-    MarkerInvalid,
-    CurrentExeError,
-    Spawned,
-    SpawnFailed,
-}
-
-impl AutoUpgradeSpawnStatus {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::AutoDisabled => "auto_disabled",
-            Self::Ci => "ci",
-            Self::BackgroundChild => "background_child",
-            Self::NotDue => "not_due",
-            Self::MarkerInvalid => "marker_invalid",
-            Self::CurrentExeError => "current_exe_error",
-            Self::Spawned => "spawned",
-            Self::SpawnFailed => "spawn_failed",
-        }
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct AutoUpgradeTelemetry {
-    pub(crate) due: bool,
-    pub(crate) spawned: bool,
-    pub(crate) status: AutoUpgradeSpawnStatus,
-    pub(crate) channel: UpgradeChannel,
 }
 
 #[derive(Debug, Default)]

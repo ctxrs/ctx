@@ -5,7 +5,13 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 
 use crate::config::AppConfig;
 
-use super::{env_flag, sha256_hex};
+use super::{env_flag, version::parse_semver};
+
+mod semantic;
+pub(in crate::upgrade) use semantic::{
+    SelectedSemanticAsset, SelectedSemanticProvisioning, SemanticAccelerator,
+    SemanticAssetMetadata, SemanticFileMetadata,
+};
 
 const DEFAULT_METADATA_PUBLIC_KEY_PEM: &str = r#"-----BEGIN RSA PUBLIC KEY-----
 MIIBigKCAYEAyBPNIx3H/NwWlN9CPHY5kOEe9kQEshOJEMpv3Atq086H1FWqliTm
@@ -48,6 +54,7 @@ pub(super) struct ReleaseMetadata {
     pub(super) auto_upgrade_allowed: bool,
     pub(super) store_schema_version: Option<String>,
     pub(super) onnxruntime: Option<OnnxRuntimeMetadata>,
+    pub(super) semantic: Option<semantic::SemanticReleaseMetadata>,
 }
 
 pub(super) fn metadata_url(config: &AppConfig, channel: &str) -> String {
@@ -73,6 +80,7 @@ pub(super) fn parse_release_metadata(
     bytes: &[u8],
     platform: &str,
     expected_channel: &str,
+    semantic_enabled: bool,
 ) -> Result<ReleaseMetadata> {
     let text = std::str::from_utf8(bytes).context("release metadata is not UTF-8")?;
     let metadata = parse_metadata_map(text)?;
@@ -90,6 +98,9 @@ pub(super) fn parse_release_metadata(
     }
     let version = value("CTX_RELEASE_VERSION")
         .ok_or_else(|| anyhow!("metadata missing CTX_RELEASE_VERSION"))?;
+    parse_semver(&version).with_context(|| {
+        format!("metadata CTX_RELEASE_VERSION {version:?} must be valid SemVer")
+    })?;
     let base_url = value("CTX_RELEASE_BASE_URL")
         .ok_or_else(|| anyhow!("metadata missing CTX_RELEASE_BASE_URL"))?;
     let platform_key = platform.replace('-', "_");
@@ -127,6 +138,14 @@ pub(super) fn parse_release_metadata(
     } else {
         None
     };
+    // Semantic metadata has no effect while the feature remains opt-in. When
+    // enabled, the signed canonical catalog is validated before any contained
+    // URL suffix, archive hash, or file hash can become acquisition authority.
+    let semantic = if semantic_enabled {
+        semantic::parse_semantic_metadata(&metadata)?
+    } else {
+        None
+    };
     Ok(ReleaseMetadata {
         version,
         base_url,
@@ -138,6 +157,7 @@ pub(super) fn parse_release_metadata(
         auto_upgrade_allowed: metadata_bool(&metadata, "CTX_RELEASE_AUTO_UPGRADE_ALLOWED", false)?,
         store_schema_version: value("CTX_RELEASE_STORE_SCHEMA_VERSION"),
         onnxruntime,
+        semantic,
     })
 }
 
@@ -225,7 +245,7 @@ pub(super) fn validate_artifact_url(base_url: &str, artifact: &str) -> Result<()
     validate_artifact_name(artifact)
 }
 
-fn validate_artifact_name(artifact: &str) -> Result<()> {
+pub(super) fn validate_artifact_name(artifact: &str) -> Result<()> {
     if artifact.is_empty()
         || artifact.contains('/')
         || artifact.contains('\\')
@@ -256,7 +276,7 @@ fn validate_onnxruntime_version(version: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_sha256(value: &str) -> Result<()> {
+pub(super) fn validate_sha256(value: &str) -> Result<()> {
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(anyhow!("checksum is not a SHA-256 hex digest"));
     }
@@ -266,12 +286,70 @@ fn validate_sha256(value: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn verify_artifact_sha(bytes: &[u8], expected: &str) -> Result<()> {
-    let actual = sha256_hex(bytes);
-    if !actual.eq_ignore_ascii_case(expected) {
-        return Err(anyhow!(
-            "artifact checksum mismatch: expected {expected}, got {actual}"
-        ));
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn minimal_release_metadata(version: &str) -> Vec<u8> {
+        format!(
+            "\
+CTX_RELEASE_SCHEMA_VERSION=1
+CTX_RELEASE_CHANNEL=stable
+CTX_RELEASE_VERSION={version}
+CTX_RELEASE_BASE_URL=https://cli.ctx.rs/storage/v1/object/public/releases/artifacts/test
+CTX_RELEASE_ARTIFACT_linux_x64=ctx-linux-x64
+CTX_RELEASE_SHA256_linux_x64={}
+",
+            "1".repeat(64)
+        )
+        .into_bytes()
     }
-    Ok(())
+
+    #[test]
+    fn release_metadata_requires_an_exact_semver_version() {
+        for version in [
+            "v1.2.3",
+            "1.2",
+            "01.2.3",
+            "1.2.3-01",
+            "1.2.3+",
+            "release-1.2.3",
+            "1.2.3 ",
+        ] {
+            let error = parse_release_metadata(
+                &minimal_release_metadata(version),
+                "linux-x64",
+                "stable",
+                false,
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("CTX_RELEASE_VERSION")
+                    && error.to_string().contains("valid SemVer"),
+                "{version:?}: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn release_metadata_accepts_prerelease_and_build_semver() {
+        let metadata = parse_release_metadata(
+            &minimal_release_metadata("1.2.3-rc.1+linux.7"),
+            "linux-x64",
+            "stable",
+            false,
+        )
+        .unwrap();
+        assert_eq!(metadata.version, "1.2.3-rc.1+linux.7");
+    }
+
+    #[test]
+    fn disabled_semantic_search_does_not_parse_catalog_fields() {
+        let mut bytes = minimal_release_metadata("1.2.3");
+        bytes.extend_from_slice(b"CTX_RELEASE_SEMANTIC_ASSETS=not-trusted-or-parsed\n");
+
+        let metadata = parse_release_metadata(&bytes, "linux-x64", "stable", false).unwrap();
+
+        assert!(metadata.semantic.is_none());
+    }
 }

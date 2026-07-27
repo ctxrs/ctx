@@ -1,10 +1,9 @@
 use ctx_history_core::{
-    Artifact, CaptureSource, CaptureSourceDescriptor, Event, Fidelity, FileTouched, HistoryRecord,
-    HistoryRecordLink, Run, Session, SessionHistoryArchive, Summary, VcsChange, VcsWorkspace,
+    Artifact, CaptureSource, Event, FileTouched, HistoryRecord, HistoryRecordLink, Run, Session,
+    SessionHistoryArchive, Summary, VcsChange, VcsWorkspace,
 };
 use std::path::Path;
 
-use chrono::{DateTime, Utc};
 use rusqlite::{params, OptionalExtension, Transaction};
 use uuid::Uuid;
 
@@ -15,57 +14,6 @@ use crate::result_storage::durable_event;
 use crate::{Result, StoreError};
 
 use super::ImportedArchiveCanonicalIds;
-
-pub(super) fn upsert_capture_source_tx(
-    tx: &Transaction<'_>,
-    source_id: Uuid,
-    source: &CaptureSourceDescriptor,
-    occurred_at: DateTime<Utc>,
-    fidelity: Fidelity,
-) -> Result<()> {
-    let occurred_at_ms = timestamp_ms(occurred_at);
-    tx.execute(
-        r#"
-        INSERT INTO capture_sources
-        (
-            id, kind, provider, machine_id, process_id, cwd, raw_source_path,
-            source_format, source_root, source_identity, external_session_id,
-            started_at_ms, ended_at_ms, fidelity,
-            visibility, sync_state, sync_version, metadata_json
-        )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL, ?13, 'local_only', 'local_only', 0, '{}')
-        ON CONFLICT(id) DO UPDATE SET
-            kind = excluded.kind,
-            provider = excluded.provider,
-            machine_id = excluded.machine_id,
-            process_id = excluded.process_id,
-            cwd = excluded.cwd,
-            raw_source_path = excluded.raw_source_path,
-            source_format = excluded.source_format,
-            source_root = excluded.source_root,
-            source_identity = excluded.source_identity,
-            external_session_id = excluded.external_session_id,
-            started_at_ms = excluded.started_at_ms,
-            fidelity = excluded.fidelity
-        "#,
-        params![
-            source_id.to_string(),
-            source.kind.as_str(),
-            source.provider.as_str(),
-            source.machine_id.as_str(),
-            source.process_id.map(i64::from),
-            source.cwd.as_deref(),
-            source.raw_source_path.as_deref(),
-            source.source_format.as_deref(),
-            source.source_root.as_deref(),
-            source.source_identity.as_deref(),
-            source.external_session_id.as_deref(),
-            occurred_at_ms,
-            fidelity.as_str(),
-        ],
-    )?;
-    Ok(())
-}
 
 pub(super) fn import_rich_archive_entities_tx(
     tx: &Transaction<'_>,

@@ -1,6 +1,14 @@
 load("@rules_python//python:defs.bzl", "py_test")
 load("@rules_rust//rust:defs.bzl", "rustfmt_test")
-load("//tools/bazel:gates.bzl", "non_rust_gate", "real_harness_gate")
+load("//tools/bazel:gates.bzl", "loc_check_inputs", "non_rust_gate", "real_harness_gate")
+load(
+    "//tools/bazel:release_routes.bzl",
+    "public_cli_release_route",
+)
+load(
+    "//tools/bazel:release_inventory.bzl",
+    "configured_dependency_inventory",
+)
 
 filegroup(
     name = "cloud_removed_build_inputs",
@@ -23,6 +31,8 @@ java_binary(
     runtime_deps = ["@ctx_bazel_diff//jar"],
     tags = ["manual", "tool"],
 )
+
+loc_check_inputs(name = "loc_check_inputs")
 
 # These inputs belong to repository-policy, packaging, documentation, and real
 # harness actions. Rust compilation and Rust tests are deliberately absent:
@@ -60,6 +70,24 @@ CARGO_WORKSPACE_PACKAGE_DATA = [
     "//crates/ctx-pro-host-protocol:cargo_package_data",
     "//crates/ctx-protocol:cargo_package_data",
     "//crates/ctx-sdk:cargo_package_data",
+]
+
+LOC_CHECK_DATA = [
+    ":loc_check_inputs",
+    "Cargo.toml",
+    "scripts/check-loc-exceptions.tsv",
+    "//crates/ctx-cli:loc_check_inputs",
+    "//crates/ctx-history-capture:loc_check_inputs",
+    "//crates/ctx-history-core:loc_check_inputs",
+    "//crates/ctx-history-search:loc_check_inputs",
+    "//crates/ctx-history-store:loc_check_inputs",
+    "//crates/ctx-pro-host-protocol:loc_check_inputs",
+    "//crates/ctx-protocol:loc_check_inputs",
+    "//crates/ctx-sdk:loc_check_inputs",
+    "//tools/bazel:loc_check_inputs",
+    "//tools/bazel/mingw:loc_check_inputs",
+    "//tools/bazel/patches:loc_check_inputs",
+    "//tools/bazel/platforms:loc_check_inputs",
 ]
 
 # Keep the direct-checkout and Bazel package audits on the exact same source
@@ -115,9 +143,22 @@ filegroup(
 filegroup(
     name = "release_contracts",
     srcs = [
+        "contracts/public-control-surface-v1.json",
         "contracts/release-targets-v1.json",
         "contracts/release-version-v1.json",
     ],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "release_cargo_lock",
+    srcs = ["Cargo.lock"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "release_target_matrix",
+    srcs = ["contracts/release-targets-v1.json"],
     visibility = ["//visibility:public"],
 )
 
@@ -137,11 +178,13 @@ RUST_FORMAT_TARGETS = [
     "//crates/ctx-cli:analytics_identity_tests",
     "//crates/ctx-cli:analytics_tests",
     "//crates/ctx-cli:analytics_policy_tests",
+    "//crates/ctx-cli:auto_upgrade_acceptance_tests",
     "//crates/ctx-cli:cli_public_help_docs_tests",
     "//crates/ctx-cli:cloud_removed_tests",
     "//crates/ctx-cli:custom_root_discovery_tests",
     "//crates/ctx-cli:explicit_path_revision_upgrade_tests",
     "//crates/ctx-cli:history_source_plugins_tests",
+    "//crates/ctx-cli:import_change_reporting_tests",
     "//crates/ctx-cli:index_tests",
     "//crates/ctx-cli:integrations_mcp_tests",
     "//crates/ctx-cli:integrations_tests",
@@ -162,9 +205,11 @@ RUST_FORMAT_TARGETS = [
     "//crates/ctx-cli:setup_sources_import_tests",
     "//crates/ctx-cli:skill_tests",
     "//crates/ctx-cli:slash_command_e2e_tests",
+    "//crates/ctx-cli:source_backed_content_tests",
     "//crates/ctx-cli:unit_tests",
     "//crates/ctx-cli:upgrade_tests",
-    "//crates/ctx-history-capture:captured_batch_characterization_tests",
+    "//crates/ctx-cli:upgrade_analytics_tests",
+    "//crates/ctx-history-capture:codex_tail_nativepath_tests",
     "//crates/ctx-history-capture:complete_content_jsonl_tests",
     "//crates/ctx-history-capture:complete_content_sqlite_tests",
     "//crates/ctx-history-capture:cursor_native_tests",
@@ -227,6 +272,43 @@ py_test(
 )
 
 py_test(
+    name = "freebsd_ort_exit_contract",
+    srcs = ["//tools/bazel:check_freebsd_ort_exit_contract.py"],
+    main = "//tools/bazel:check_freebsd_ort_exit_contract.py",
+    args = [
+        "$(rootpath MODULE.bazel)",
+        "$(rootpath Cargo.toml)",
+        "$(rootpath //tools/bazel/patches:ort-freebsd-release-env-order.patch)",
+        "$(rootpath scripts/build-public-cli-artifact.sh)",
+        "$(rootpath scripts/prepare-freebsd-ort-release-source.sh)",
+    ],
+    data = [
+        "Cargo.toml",
+        "MODULE.bazel",
+        "scripts/build-public-cli-artifact.sh",
+        "scripts/prepare-freebsd-ort-release-source.sh",
+        "//tools/bazel/patches:ort-freebsd-release-env-order.patch",
+    ],
+)
+
+py_test(
+    name = "freebsd_ort_exit_contract_mutation_tests",
+    srcs = [
+        "//tools/bazel:check_freebsd_ort_exit_contract.py",
+        "//tools/bazel:check_freebsd_ort_exit_contract_test.py",
+    ],
+    data = [
+        "Cargo.toml",
+        "MODULE.bazel",
+        "scripts/build-public-cli-artifact.sh",
+        "scripts/prepare-freebsd-ort-release-source.sh",
+        "//tools/bazel/patches:ort-freebsd-release-env-order.patch",
+    ],
+    imports = ["tools/bazel"],
+    main = "//tools/bazel:check_freebsd_ort_exit_contract_test.py",
+)
+
+py_test(
     name = "bazel_affected_mutation_tests",
     srcs = [
         "//tools/bazel:select_affected_tests.py",
@@ -234,6 +316,65 @@ py_test(
     ],
     imports = ["tools/bazel"],
     main = "//tools/bazel:select_affected_tests_test.py",
+)
+
+sh_test(
+    name = "bazel_wrapper_tests",
+    srcs = ["scripts/tests/bazelw-test.sh"],
+    data = [
+        ".bazelversion",
+        "scripts/bazelw",
+        "scripts/ci-common.sh",
+        "scripts/tests/fixtures/fake-bazel.sh",
+    ],
+)
+
+sh_test(
+    name = "bazel_affected_script_tests",
+    srcs = ["scripts/tests/bazel-affected-test.sh"],
+    data = [
+        ".bazelversion",
+        "scripts/bazel-affected.sh",
+        "scripts/bazelw",
+        "scripts/ci-common.sh",
+        "scripts/tests/fixtures/fake-bazel.sh",
+        "//tools/bazel:select_affected_tests.py",
+    ],
+)
+
+sh_test(
+    name = "cargo_diagnostic_tests",
+    srcs = ["scripts/tests/cargo-diagnostic-bazel-test.sh"],
+    data = [
+        "scripts/cargo-diagnostic.sh",
+        "scripts/tests/cargo-diagnostic-test.sh",
+        "scripts/tests/fixtures/fake-cargo.sh",
+    ],
+)
+
+sh_test(
+    name = "check_force_rerun_tests",
+    srcs = ["scripts/tests/check-force-rerun-test.sh"],
+    data = [
+        "scripts/check.sh",
+        "scripts/tests/fixtures/fake-bazel.sh",
+    ],
+)
+
+sh_test(
+    name = "stage_github_release_assets_tests",
+    srcs = ["scripts/tests/stage-github-release-assets-test.sh"],
+    data = [
+        "contracts/release-targets-v1.json",
+        "scripts/apple-developer-id-g2-ca.pem",
+        "scripts/build-onnxruntime-sidecar.sh",
+        "scripts/check-macos-release-signing.sh",
+        "scripts/check-public-cli-build-info.py",
+        "scripts/macos-release-signing-evidence.py",
+        "scripts/stage-github-release-assets.sh",
+        "scripts/verify-macos-release-attestation.sh",
+    ],
+    tags = ["release-gate"],
 )
 
 py_test(
@@ -252,6 +393,147 @@ py_test(
     ],
     main = "scripts/tests/check-release-target-matrix-test.py",
     data = [":release_contracts"],
+    tags = ["release-gate"],
+)
+
+py_test(
+    name = "release_sbom_tests",
+    srcs = [
+        "scripts/release-sbom.py",
+        "scripts/tests/release-sbom-test.py",
+    ],
+    main = "scripts/tests/release-sbom-test.py",
+    tags = ["release-gate"],
+)
+
+sh_binary(
+    name = "ctx_release_packager",
+    srcs = ["scripts/package-public-cli-bazel-release.sh"],
+    data = [
+        "Cargo.lock",
+        "MODULE.bazel",
+        "MODULE.bazel.lock",
+        "contracts/public-control-surface-v1.json",
+        "contracts/release-targets-v1.json",
+        "scripts/apple-developer-id-g2-ca.pem",
+        "scripts/check-macos-release-signing.sh",
+        "scripts/check-macos-signing-trusted-ref.sh",
+        "scripts/check-public-cli-artifact.sh",
+        "scripts/check-public-cli-build-info.py",
+        "scripts/check-release-binary-compat.sh",
+        "scripts/check-release-target-matrix.py",
+        "scripts/install-public-cli-candidate.py",
+        "scripts/macos-release-signing-evidence.py",
+        "scripts/public-cli-host-runtime-evidence.sh",
+        "scripts/public-cli-release-targets.py",
+        "scripts/public-cli-runtime-authority.sh",
+        "scripts/release-sbom.py",
+        "scripts/run-macos-release-signing.sh",
+        "scripts/run-native-candidate-smoke.ps1",
+        "scripts/run-native-candidate-smoke.sh",
+        "scripts/sign-notarize-macos-release-artifact.sh",
+        "scripts/verify-macos-release-attestation.sh",
+        "scripts/verify-macos-signed-cli.sh",
+        "scripts/write-public-cli-build-info.py",
+        "tests/fixtures/custom-history-jsonl/basic.jsonl",
+        "//crates/ctx-cli:Cargo.toml",
+    ],
+    tags = [
+        "manual",
+        "release-gate",
+        "release-tool",
+    ],
+)
+
+configured_dependency_inventory(
+    name = "ctx_release_dependency_inventory",
+    target = "//crates/ctx-cli:ctx",
+)
+
+public_cli_release_route(
+    name = "ctx_release_linux_x64",
+    artifact = "//crates/ctx-cli:ctx",
+    packager = ":ctx_release_packager",
+    rustc = "//tools/bazel:pinned_rustc",
+    sbom_inventory = ":ctx_release_dependency_inventory",
+    target_id = "linux-x64",
+)
+
+public_cli_release_route(
+    name = "ctx_release_linux_arm64",
+    artifact = "//crates/ctx-cli:ctx",
+    packager = ":ctx_release_packager",
+    rustc = "//tools/bazel:pinned_rustc",
+    sbom_inventory = ":ctx_release_dependency_inventory",
+    target_id = "linux-arm64",
+)
+
+public_cli_release_route(
+    name = "ctx_release_macos_arm64",
+    artifact = "//crates/ctx-cli:ctx",
+    packager = ":ctx_release_packager",
+    rustc = "//tools/bazel:pinned_rustc",
+    sbom_inventory = ":ctx_release_dependency_inventory",
+    target_id = "macos-arm64",
+)
+
+public_cli_release_route(
+    name = "ctx_release_macos_x64",
+    artifact = "//crates/ctx-cli:ctx",
+    packager = ":ctx_release_packager",
+    rustc = "//tools/bazel:pinned_rustc",
+    sbom_inventory = ":ctx_release_dependency_inventory",
+    target_id = "macos-x64",
+)
+
+public_cli_release_route(
+    name = "ctx_release_windows_x64",
+    artifact = "//crates/ctx-cli:ctx",
+    packager = ":ctx_release_packager",
+    rustc = "//tools/bazel:pinned_rustc",
+    sbom_inventory = ":ctx_release_dependency_inventory",
+    target_id = "windows-x64",
+)
+
+public_cli_release_route(
+    name = "ctx_release_freebsd_x64",
+    artifact = "//crates/ctx-cli:ctx",
+    packager = ":ctx_release_packager",
+    rustc = "//tools/bazel:pinned_rustc",
+    sbom_inventory = ":ctx_release_dependency_inventory",
+    target_id = "freebsd-x64",
+)
+
+py_test(
+    name = "public_cli_release_targets_tests",
+    srcs = [
+        "scripts/check-release-target-matrix.py",
+        "scripts/public-cli-release-targets.py",
+        "scripts/tests/public-cli-release-targets-test.py",
+    ],
+    main = "scripts/tests/public-cli-release-targets-test.py",
+    data = [":release_contracts"],
+    tags = ["release-gate"],
+)
+
+sh_test(
+    name = "public_cli_bazel_release_contract",
+    srcs = ["scripts/tests/package-public-cli-bazel-release-test.sh"],
+    data = [
+        "Cargo.lock",
+        "MODULE.bazel",
+        "MODULE.bazel.lock",
+        "contracts/release-targets-v1.json",
+        "scripts/check-public-cli-build-info.py",
+        "scripts/check-release-target-matrix.py",
+        "scripts/install-public-cli-candidate.py",
+        "scripts/package-public-cli-bazel-release.sh",
+        "scripts/public-cli-release-targets.py",
+        "scripts/release-sbom.py",
+        "scripts/write-public-cli-build-info.py",
+        "tests/fixtures/custom-history-jsonl/basic.jsonl",
+        "//crates/ctx-cli:Cargo.toml",
+    ],
     tags = ["release-gate"],
 )
 
@@ -296,7 +578,11 @@ sh_test(
     data = ["scripts/build-public-cli-artifact.sh"],
     tags = ["release-gate"],
 )
-non_rust_gate(name = "loc_check", mode = "loc_check", data = NON_RUST_GATE_DATA)
+non_rust_gate(
+    name = "loc_check",
+    mode = "loc_check",
+    data = LOC_CHECK_DATA,
+)
 non_rust_gate(
     name = "public_control_surface_check",
     mode = "public_control_surface_check",
@@ -406,17 +692,21 @@ test_suite(name = "show_complete_content_tests", tests = [
 
 NATIVE_RUST_TESTS = [
     ":native_ctx_binary_smoke",
+    "//crates/ctx-cli:analytics_identity_tests",
     "//crates/ctx-cli:analytics_tests",
     "//crates/ctx-cli:analytics_policy_tests",
+    "//crates/ctx-cli:auto_upgrade_acceptance_tests",
     "//crates/ctx-cli:cli_public_help_docs_tests",
     "//crates/ctx-cli:cloud_removed_tests",
     "//crates/ctx-cli:custom_root_discovery_tests",
     "//crates/ctx-cli:explicit_path_revision_upgrade_tests",
     "//crates/ctx-cli:history_source_plugins_tests",
+    "//crates/ctx-cli:import_change_reporting_tests",
     "//crates/ctx-cli:index_tests",
     "//crates/ctx-cli:integrations_mcp_tests",
     "//crates/ctx-cli:integrations_tests",
     "//crates/ctx-cli:mcp_integration_e2e_tests",
+    "//crates/ctx-cli:mcp_telemetry_tests",
     "//crates/ctx-cli:mcp_tests",
     "//crates/ctx-cli:native_provider_real_shapes_tests",
     "//crates/ctx-cli:native_provider_rejections_tests",
@@ -432,9 +722,11 @@ NATIVE_RUST_TESTS = [
     "//crates/ctx-cli:setup_sources_import_tests",
     "//crates/ctx-cli:skill_tests",
     "//crates/ctx-cli:slash_command_e2e_tests",
+    "//crates/ctx-cli:source_backed_content_tests",
     "//crates/ctx-cli:unit_tests",
     "//crates/ctx-cli:upgrade_tests",
-    "//crates/ctx-history-capture:captured_batch_characterization_tests",
+    "//crates/ctx-cli:upgrade_analytics_tests",
+    "//crates/ctx-history-capture:codex_tail_nativepath_tests",
     "//crates/ctx-history-capture:complete_content_jsonl_tests",
     "//crates/ctx-history-capture:complete_content_sqlite_tests",
     "//crates/ctx-history-capture:cursor_native_tests",
@@ -482,9 +774,15 @@ test_suite(
     tests = [
         ":buildkite_pipeline_check",
         ":bazel_affected_mutation_tests",
+        ":bazel_affected_script_tests",
+        ":bazel_wrapper_tests",
+        ":cargo_diagnostic_tests",
+        ":check_force_rerun_tests",
         ":cli_build_cfg_parity_check",
         ":cli_contract_tests",
         ":docs_check",
+        ":freebsd_ort_exit_contract",
+        ":freebsd_ort_exit_contract_mutation_tests",
         ":installer_path_smoke",
         ":linux_release_construction_tests",
         ":loc_check",
@@ -493,7 +791,10 @@ test_suite(
         ":native_rust_smoke",
         ":package_audit_fast",
         ":public_control_surface_check",
+        ":public_cli_bazel_release_contract",
         ":public_cli_artifact_cleanup_tests",
+        ":public_cli_release_targets_tests",
+        "//tools/bazel:release_route_analysis_tests",
         ":release_binary_compat_tests",
         ":release_binary_string_audit_tests",
         ":release_source_surface_audit_tests",
@@ -502,6 +803,7 @@ test_suite(
         ":rust_target_inventory_check",
         ":rust_toolchain_pin_check",
         ":rust_toolchain_pin_mutation_tests",
+        ":stage_github_release_assets_tests",
         ":rustfmt_check",
         ":sdk_contract_checks",
         ":source_diff_check",

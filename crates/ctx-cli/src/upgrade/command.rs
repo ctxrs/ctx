@@ -1,42 +1,59 @@
 use std::{
-    env, fs,
+    env,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    time::{Duration, Instant},
 };
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, Subcommand};
-use ctx_history_core::utc_now;
+use ctx_history_core::platform_security::{create_private_directory_all, verify_private_directory};
 use serde_json::{json, Value};
 
 use crate::{
     analytics::{
-        count_bucket, AutoUpgradeSpawnStatus, AutoUpgradeTelemetry, UpgradeChannel,
-        UpgradeFailureKind, UpgradeStatus, UpgradeTelemetry,
+        self, count_bucket, OperationCompletedV1, Outcome, PublicEventV1, UpgradeChannel,
+        UpgradeFailureKind, UpgradeMode, UpgradeOperation, UpgradeStatus, UpgradeTelemetry,
     },
     config::AppConfig,
     net,
+    semantic::{semantic_native_accelerator_target, SemanticNativeAcceleratorTarget},
 };
 
+use super::download::DownloadedArtifact;
 use super::install::{
-    apply_artifact, current_install_path, install_marker_for_plan,
-    read_verified_install_marker_for_current_exe, recover_interrupted_install, ApplyResult,
+    apply_artifact, capture_install_snapshot, current_install_path, pending_recovery,
+    recover_interrupted_install, reexec_recovered_executable, remove_terminal_recovery,
+    semantic_install_required, ApplyResult, InstallRecovery, PendingRecovery, TerminalRecovery,
+    RECOVERY_REEXEC_ENV,
 };
 use super::metadata::{
     metadata_signature_url, metadata_url, parse_release_metadata, validate_artifact_url,
-    verify_artifact_sha, verify_metadata_signature,
+    verify_metadata_signature, SemanticAccelerator,
 };
-use super::path::{path_diagnostics, PathDiagnostics};
+use super::path::path_diagnostics;
 use super::state::{
-    append_upgrade_log, atomic_write_json, now_unix_s, read_json_file, set_auto_mode,
-    should_check_now, write_state_checked, write_state_error, UpgradeLock, STATE_FILE,
+    begin_manual_attempt_locked, begin_recovery_attempt_locked, claim_daemon_auto_upgrade,
+    reconcile_replacement_terminal_locked, set_auto_mode, write_state_checked_locked,
+    write_state_error_locked, write_state_phase_locked, AutoUpgradeClaim, UpgradeAttempt,
+    UpgradeLock,
 };
-use super::{env_flag, platform_key, version_gt, UpgradePlan};
+use super::{env_flag, is_valid_upgrade_attempt_id, platform_key, version_gt, UpgradePlan};
+
+mod daemon;
+pub(crate) use daemon::{
+    finish_daemon_auto_upgrade, prepare_daemon_auto_upgrade, PreparedDaemonUpgrade,
+};
+mod status;
+use status::render_status;
 
 const RELEASE_METADATA_MAX_BYTES: usize = 1024 * 1024;
 const RELEASE_METADATA_SIGNATURE_MAX_BYTES: usize = 64 * 1024;
 const RELEASE_ARTIFACT_MAX_BYTES: usize = 128 * 1024 * 1024;
 const RELEASE_ONNXRUNTIME_ARTIFACT_MAX_BYTES: usize = 1024 * 1024 * 1024;
+const SEMANTIC_MODEL_ARCHIVE_MAX_BYTES: u64 = 768 * 1024 * 1024;
+const SEMANTIC_CPU_ARCHIVE_MAX_BYTES: u64 = 256 * 1024 * 1024;
+const SEMANTIC_ACCELERATOR_ARCHIVE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const RELEASE_ARTIFACT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
 #[derive(Debug, Args)]
 pub struct UpgradeArgs {
@@ -49,7 +66,13 @@ pub struct UpgradeArgs {
     #[arg(long)]
     pub json: bool,
     #[arg(long, hide = true)]
-    pub background: bool,
+    pub replacement_helper: bool,
+    #[arg(long, hide = true)]
+    pub install_path: Option<PathBuf>,
+    #[arg(long, hide = true)]
+    pub attempt_id: Option<String>,
+    #[arg(long, hide = true)]
+    pub parent_pid: Option<u32>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -58,9 +81,9 @@ pub enum UpgradeCommand {
     Check(UpgradeCheckArgs),
     #[command(about = "Show local upgrade state")]
     Status(UpgradeStatusArgs),
-    #[command(about = "Enable managed background auto-upgrades")]
+    #[command(about = "Enable daemon-owned automatic upgrades")]
     Enable,
-    #[command(about = "Disable background auto-upgrades")]
+    #[command(about = "Disable daemon-owned automatic upgrades")]
     Disable,
 }
 
@@ -89,11 +112,7 @@ impl UpgradeArgs {
                 &self.command,
                 Some(UpgradeCommand::Status(args)) if args.json
             )
-            || self.background
-    }
-
-    pub fn background(&self) -> bool {
-        self.background
+            || self.replacement_helper
     }
 
     pub fn operation(&self) -> &'static str {
@@ -116,6 +135,7 @@ struct UpgradeOutcome {
     applied: bool,
     dry_run: bool,
     warnings: Vec<String>,
+    attempt_id: Option<String>,
 }
 
 impl UpgradeOutcome {
@@ -127,9 +147,16 @@ impl UpgradeOutcome {
             "ok": true,
             "status": self.status,
             "message": self.message,
-            "current_version": plan.map(|plan| plan.current_version.as_str()),
+            "current_version": plan.map(|plan| if self.applied {
+                plan.latest_version.as_str()
+            } else {
+                plan.current_version.as_str()
+            }),
             "latest_version": plan.map(|plan| plan.latest_version.as_str()),
-            "update_available": plan.map(|plan| plan.update_available).unwrap_or(false),
+            "update_available": plan
+                .map(|plan| !self.applied && plan.update_available)
+                .unwrap_or(false),
+            "update_was_available": plan.map(|plan| plan.update_available).unwrap_or(false),
             "channel": plan.map(|plan| plan.channel.as_str()),
             "platform": plan.map(|plan| plan.platform.as_str()),
             "metadata_url": plan.map(|plan| plan.metadata_url.as_str()),
@@ -140,6 +167,7 @@ impl UpgradeOutcome {
             "applied": self.applied,
             "dry_run": self.dry_run,
             "warnings": self.warnings,
+            "upgrade_attempt_id": self.attempt_id,
         })
     }
 }
@@ -150,8 +178,33 @@ pub fn run(
     config: AppConfig,
     telemetry: &mut UpgradeTelemetry,
 ) -> Result<()> {
-    if args.background {
-        return run_background_apply(&data_root, &config, telemetry);
+    #[cfg(windows)]
+    if args.replacement_helper {
+        let install_path = args
+            .install_path
+            .as_deref()
+            .ok_or_else(|| anyhow!("replacement helper missing --install-path"))?;
+        let attempt_id = args
+            .attempt_id
+            .as_deref()
+            .ok_or_else(|| anyhow!("replacement helper missing --attempt-id"))?;
+        telemetry.suppress_event = true;
+        let outcome = super::install::run_replacement_helper(
+            install_path,
+            attempt_id,
+            args.parent_pid.unwrap_or(0),
+        )?;
+        match outcome {
+            super::install::HelperOutcome::Applied { .. } => return Ok(()),
+            super::install::HelperOutcome::Failed { error, .. } => return Err(anyhow!(error)),
+        }
+    }
+    if let Err(error) = prepare_upgrade_data_root(&data_root) {
+        // Analytics identity creation writes beneath the data root and would
+        // otherwise repair an insecure pre-existing root after any upgrade
+        // operation, including the read-only status command, rejected it.
+        telemetry.suppress_event = true;
+        return Err(error);
     }
     let result = (|| -> Result<()> {
         match &args.command {
@@ -163,7 +216,7 @@ pub fn run(
             }
             Some(UpgradeCommand::Status(status)) => {
                 insert_upgrade_simple_analytics(telemetry, UpgradeStatus::StatusChecked);
-                render_status(&data_root, status.json || args.json)
+                render_status(&data_root, &config, status.json || args.json)
             }
             Some(UpgradeCommand::Enable) => {
                 insert_upgrade_simple_analytics(telemetry, UpgradeStatus::AutoEnabled);
@@ -174,13 +227,8 @@ pub fn run(
                 set_auto_mode(&data_root, "off")
             }
             None => {
-                let outcome = apply_upgrade(
-                    &data_root,
-                    &config,
-                    args.channel.as_deref(),
-                    args.dry_run,
-                    false,
-                )?;
+                let outcome =
+                    apply_upgrade(&data_root, &config, args.channel.as_deref(), args.dry_run)?;
                 insert_upgrade_outcome_analytics(telemetry, &outcome);
                 render_outcome(&outcome, args.json)
             }
@@ -192,103 +240,27 @@ pub fn run(
     result
 }
 
-pub fn maybe_spawn_auto_upgrade(data_root: &Path, config: &AppConfig) -> AutoUpgradeTelemetry {
-    let channel = UpgradeChannel::from_config(&config.upgrade.channel);
-    if !auto_mode_is_apply(config) {
-        return auto_upgrade_telemetry(channel, AutoUpgradeSpawnStatus::AutoDisabled, false, false);
-    }
-    if env_flag("CI") {
-        return auto_upgrade_telemetry(channel, AutoUpgradeSpawnStatus::Ci, false, false);
-    }
-    if env_flag("CTX_UPGRADE_BACKGROUND_CHILD") {
-        return auto_upgrade_telemetry(
-            channel,
-            AutoUpgradeSpawnStatus::BackgroundChild,
-            false,
-            false,
-        );
-    }
-    if !should_check_now(data_root, config.upgrade.interval) {
-        return auto_upgrade_telemetry(channel, AutoUpgradeSpawnStatus::NotDue, false, false);
-    }
-    if read_verified_install_marker_for_current_exe().is_err() {
-        return auto_upgrade_telemetry(channel, AutoUpgradeSpawnStatus::MarkerInvalid, true, false);
-    }
-    let Ok(current_exe) = current_install_path() else {
-        return auto_upgrade_telemetry(
-            channel,
-            AutoUpgradeSpawnStatus::CurrentExeError,
-            true,
-            false,
-        );
-    };
-    let mut command = Command::new(current_exe);
-    command.arg("--data-root").arg(data_root);
-    let spawn_result = command
-        .args(["upgrade", "--background"])
-        .env("CTX_UPGRADE_BACKGROUND_CHILD", "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-    if spawn_result.is_ok() {
-        auto_upgrade_telemetry(channel, AutoUpgradeSpawnStatus::Spawned, true, true)
-    } else {
-        auto_upgrade_telemetry(channel, AutoUpgradeSpawnStatus::SpawnFailed, true, false)
-    }
-}
-
-fn auto_upgrade_telemetry(
-    channel: UpgradeChannel,
-    status: AutoUpgradeSpawnStatus,
-    due: bool,
-    spawned: bool,
-) -> AutoUpgradeTelemetry {
-    AutoUpgradeTelemetry {
-        due,
-        spawned,
-        status,
-        channel,
-    }
-}
-
-fn run_background_apply(
-    data_root: &Path,
-    config: &AppConfig,
-    telemetry: &mut UpgradeTelemetry,
-) -> Result<()> {
-    if !auto_mode_is_apply(config) || env_flag("CI") {
-        insert_upgrade_simple_analytics(telemetry, UpgradeStatus::Skipped);
-        return Ok(());
-    }
-    match apply_upgrade(data_root, config, None, false, true) {
-        Ok(outcome) => {
-            insert_upgrade_outcome_analytics(telemetry, &outcome);
-            append_upgrade_log(data_root, &outcome.message);
-            Ok(())
-        }
-        Err(error) => {
-            let message = format!("{error:#}");
-            let _ = write_state_error(data_root, &message);
-            append_upgrade_log(data_root, &format!("background upgrade failed: {message}"));
-            insert_upgrade_error_analytics(telemetry, &error);
-            Err(error)
-        }
-    }
-}
-
 fn insert_upgrade_outcome_analytics(telemetry: &mut UpgradeTelemetry, outcome: &UpgradeOutcome) {
     telemetry.status = Some(UpgradeStatus::from_safe_summary(outcome.status));
     telemetry.applied = Some(outcome.applied);
     telemetry.scheduled = Some(outcome.status == "scheduled");
     telemetry.update_available = Some(false);
+    telemetry.update_was_available = Some(false);
+    telemetry.upgrade_attempt_id = outcome.attempt_id.clone();
     telemetry.managed_install = Some(false);
     telemetry.self_upgrade_allowed = Some(false);
     telemetry.auto_upgrade_allowed = Some(false);
     telemetry.warning_count = Some(count_bucket(outcome.warnings.len() as u64));
     if let Some(plan) = &outcome.plan {
         telemetry.channel = Some(UpgradeChannel::from_config(&plan.channel));
-        telemetry.update_available = Some(plan.update_available);
+        // The plan retains pre-apply availability for update_was_available analytics.
+        // A completed apply is no longer pending an update.
+        telemetry.update_available = Some(if outcome.applied {
+            false
+        } else {
+            plan.update_available
+        });
+        telemetry.update_was_available = Some(plan.update_available);
         telemetry.managed_install = Some(plan.managed);
         telemetry.self_upgrade_allowed = Some(plan.metadata.self_upgrade_allowed);
         telemetry.auto_upgrade_allowed = Some(plan.metadata.auto_upgrade_allowed);
@@ -335,8 +307,42 @@ fn upgrade_failure_kind(error: &anyhow::Error) -> UpgradeFailureKind {
     }
 }
 
-fn auto_mode_is_apply(config: &AppConfig) -> bool {
-    config.upgrade.auto.eq_ignore_ascii_case("apply")
+fn prepare_upgrade_data_root(data_root: &Path) -> Result<()> {
+    create_private_directory_all(data_root)
+        .with_context(|| format!("create private upgrade data root {}", data_root.display()))?;
+    verify_private_directory(data_root)
+        .with_context(|| format!("verify private upgrade data root {}", data_root.display()))
+}
+
+fn semantic_accelerator(platform: &str) -> Result<Option<SemanticAccelerator>> {
+    let accelerator = semantic_native_accelerator_target().map(|accelerator| match accelerator {
+        SemanticNativeAcceleratorTarget::CoreMl => SemanticAccelerator::CoreMl,
+        SemanticNativeAcceleratorTarget::WindowsMl => SemanticAccelerator::WindowsMl,
+        SemanticNativeAcceleratorTarget::Cuda => SemanticAccelerator::OrtCuda,
+    });
+    if !matches!(
+        (platform, accelerator),
+        ("macos-arm64", Some(SemanticAccelerator::CoreMl))
+            | ("windows-x64", Some(SemanticAccelerator::WindowsMl))
+            | ("linux-x64", Some(SemanticAccelerator::OrtCuda))
+            | (_, None)
+    ) {
+        return Err(anyhow!(
+            "detected Semantic accelerator is incompatible with {platform}"
+        ));
+    }
+    Ok(accelerator)
+}
+
+fn semantic_archive_download_limit(asset: &super::metadata::SemanticAssetMetadata) -> Result<u64> {
+    match asset.role.as_str() {
+        "model" => Ok(SEMANTIC_MODEL_ARCHIVE_MAX_BYTES),
+        "cpu-runtime" => Ok(SEMANTIC_CPU_ARCHIVE_MAX_BYTES),
+        "accelerator" => Ok(SEMANTIC_ACCELERATOR_ARCHIVE_MAX_BYTES),
+        role => Err(anyhow!(
+            "signed Semantic provisioning contains unsupported role {role}"
+        )),
+    }
 }
 
 fn check_upgrade(
@@ -345,13 +351,107 @@ fn check_upgrade(
     channel_override: Option<&str>,
     command: &'static str,
 ) -> Result<UpgradeOutcome> {
-    let plan = build_upgrade_plan(config, channel_override, false)?;
-    write_state_checked(data_root, &plan, "checked")?;
+    if let Some(recovery) = pending_recovery(data_root)? {
+        if let Some(terminal) = recovery.terminal.as_ref() {
+            let lock = UpgradeLock::acquire_terminal_recovery(&recovery)?;
+            let (applied, detail) = match terminal {
+                TerminalRecovery::Applied { warning } => (true, warning.as_deref()),
+                TerminalRecovery::Failed { error } => (false, Some(error.as_str())),
+            };
+            reconcile_replacement_terminal_locked(
+                &lock,
+                &recovery.attempt_id,
+                applied,
+                detail,
+                config.upgrade.interval,
+            )?;
+            remove_terminal_recovery(&recovery, lock.installation())?;
+        } else {
+            #[cfg(windows)]
+            return Err(anyhow!(
+                "interrupted Windows installation requires `ctx upgrade` so daemon handoff and replacement recovery remain coordinated"
+            ));
+            #[cfg(not(windows))]
+            {
+                let recovery_lock = UpgradeLock::acquire_recovery(&recovery)?;
+                begin_recovery_attempt_locked(
+                    &recovery_lock,
+                    &recovery.attempt_id,
+                    "manual_recovery",
+                )?;
+                let handoff = crate::semantic::begin_daemon_upgrade_handoff(
+                    &recovery.data_root,
+                    &recovery.attempt_id,
+                )?;
+                match recover_interrupted_install(&recovery, recovery_lock.installation())? {
+                    InstallRecovery::None => {
+                        return Err(anyhow!(
+                            "interrupted ctx installation recovery disappeared while owned"
+                        ));
+                    }
+                    InstallRecovery::Recovered { committed } => {
+                        reconcile_replacement_terminal_locked(
+                            &recovery_lock,
+                            &recovery.attempt_id,
+                            committed,
+                            (!committed).then_some("interrupted ctx installation was rolled back"),
+                            config.upgrade.interval,
+                        )?;
+                        drop(recovery_lock);
+                        handoff.resume_with(&current_install_path()?)?;
+                    }
+                    InstallRecovery::Scheduled { .. } => {
+                        return Err(anyhow!("interrupted install recovery is still active"));
+                    }
+                    InstallRecovery::ReexecRequired(path) => {
+                        reconcile_replacement_terminal_locked(
+                            &recovery_lock,
+                            &recovery.attempt_id,
+                            false,
+                            Some("interrupted ctx installation was rolled back"),
+                            config.upgrade.interval,
+                        )?;
+                        drop(recovery_lock);
+                        if recovery.legacy_v025() {
+                            let _ = handoff.resume_legacy_reexec_with(&path)?;
+                        } else {
+                            handoff.prepare_reexec()?;
+                        }
+                        reexec_recovered_executable(&path, &recovery.attempt_id)?;
+                        unreachable!("successful recovery re-exec does not return");
+                    }
+                }
+            }
+        }
+    }
+    let lock = UpgradeLock::acquire(data_root)?;
+    let attempt = begin_manual_attempt_locked(data_root, &lock, command)?;
+    let plan = match build_upgrade_plan(&lock, config, channel_override, false) {
+        Ok(plan) => plan,
+        Err(error) => {
+            let _ = write_state_error_locked(
+                data_root,
+                &lock,
+                &attempt,
+                "failed",
+                &format!("{error:#}"),
+            );
+            return Err(error);
+        }
+    };
     let status = if plan.update_available {
         "available"
     } else {
         "up_to_date"
     };
+    write_state_checked_locked(
+        data_root,
+        &lock,
+        &attempt,
+        &plan,
+        status,
+        config.upgrade.interval,
+    )?;
     let message = if plan.update_available {
         format!(
             "ctx {} is available (current {}, channel {}).",
@@ -369,6 +469,7 @@ fn check_upgrade(
         applied: false,
         dry_run: false,
         warnings,
+        attempt_id: Some(attempt.id().to_owned()),
     })
 }
 
@@ -377,189 +478,411 @@ fn apply_upgrade(
     config: &AppConfig,
     channel_override: Option<&str>,
     dry_run: bool,
-    background: bool,
 ) -> Result<UpgradeOutcome> {
-    fs::create_dir_all(data_root)?;
-    #[allow(unused_mut)]
-    let mut upgrade_lock = match UpgradeLock::acquire(data_root) {
-        Ok(lock) => lock,
-        Err(error) if background => {
-            append_upgrade_log(data_root, &format!("background upgrade skipped: {error}"));
-            let _ = write_background_skip_state(data_root, "locked");
+    if let Some(recovery) = pending_recovery(data_root)? {
+        if let Some(terminal) = recovery.terminal.as_ref() {
+            let lock = UpgradeLock::acquire_terminal_recovery(&recovery)?;
+            let (applied, detail) = match terminal {
+                TerminalRecovery::Applied { warning } => (true, warning.as_deref()),
+                TerminalRecovery::Failed { error } => (false, Some(error.as_str())),
+            };
+            reconcile_replacement_terminal_locked(
+                &lock,
+                &recovery.attempt_id,
+                applied,
+                detail,
+                config.upgrade.interval,
+            )?;
+            remove_terminal_recovery(&recovery, lock.installation())?;
+            drop(lock);
+        } else {
+            let recovery_attempt_id = recovery.attempt_id.clone();
+            let origin_root = recovery.data_root.clone();
+            let recovery_lock = UpgradeLock::acquire_recovery(&recovery)?;
+            begin_recovery_attempt_locked(&recovery_lock, &recovery_attempt_id, "manual_recovery")?;
+            let daemon_handoff =
+                crate::semantic::begin_daemon_upgrade_handoff(&origin_root, &recovery_attempt_id)?;
+            match recover_interrupted_install(&recovery, recovery_lock.installation())? {
+                InstallRecovery::None => {
+                    return Err(anyhow!(
+                        "interrupted ctx installation recovery disappeared while owned"
+                    ));
+                }
+                InstallRecovery::Recovered { committed } => {
+                    reconcile_replacement_terminal_locked(
+                        &recovery_lock,
+                        &recovery_attempt_id,
+                        committed,
+                        (!committed).then_some("interrupted ctx installation was rolled back"),
+                        config.upgrade.interval,
+                    )?;
+                    drop(recovery_lock);
+                    if let Err(error) = daemon_handoff.resume_with(&current_install_path()?) {
+                        if !committed {
+                            return Err(error);
+                        }
+                        let warning = format!(
+                        "ctx upgrade was already committed, but daemon restart remains pending: {error:#}"
+                    );
+                        return Ok(UpgradeOutcome {
+                        command: "upgrade",
+                        status: "applied",
+                        message:
+                            "recovered a committed ctx installation; daemon restart remains pending"
+                                .to_owned(),
+                        plan: None,
+                        applied: true,
+                        dry_run: false,
+                        warnings: vec![warning],
+                        attempt_id: Some(recovery_attempt_id),
+                    });
+                    }
+                    if cfg!(debug_assertions)
+                        && env_flag("CTX_UPGRADE_STOP_AFTER_RECOVERY_FOR_TESTS")
+                    {
+                        return Err(anyhow!("stopped after interrupted install recovery"));
+                    }
+                }
+                InstallRecovery::Scheduled {
+                    attempt_id,
+                    helper_pid,
+                } => {
+                    daemon_handoff.transfer_to_replacement_helper(helper_pid)?;
+                    drop(recovery_lock);
+                    return Ok(UpgradeOutcome {
+                    command: "upgrade",
+                    status: "scheduled",
+                    message: format!(
+                        "rescheduled interrupted ctx replacement attempt {attempt_id}; it will finish after this process exits"
+                    ),
+                    plan: None,
+                    applied: false,
+                    dry_run: false,
+                    warnings: Vec::new(),
+                    attempt_id: Some(attempt_id),
+                });
+                }
+                InstallRecovery::ReexecRequired(path) => {
+                    reconcile_replacement_terminal_locked(
+                        &recovery_lock,
+                        &recovery_attempt_id,
+                        false,
+                        Some("interrupted ctx installation was rolled back"),
+                        config.upgrade.interval,
+                    )?;
+                    drop(recovery_lock);
+                    if recovery.legacy_v025() {
+                        // v0.25 cannot consume the v0.26 deferred-restart request
+                        // contract. Restart and prove daemon readiness while this
+                        // process still understands the request, then re-exec.
+                        if let Some(warning) = daemon_handoff.resume_legacy_reexec_with(&path)? {
+                            eprintln!("warning: {warning}");
+                        }
+                    } else {
+                        daemon_handoff.prepare_reexec()?;
+                    }
+                    reexec_recovered_executable(&path, &recovery_attempt_id)?;
+                    unreachable!("successful recovery re-exec does not return");
+                }
+            }
+        }
+    }
+    if env::var(RECOVERY_REEXEC_ENV)
+        .ok()
+        .is_some_and(|attempt_id| is_valid_upgrade_attempt_id(&attempt_id))
+    {
+        env::remove_var(RECOVERY_REEXEC_ENV);
+    }
+    let upgrade_lock = UpgradeLock::acquire(data_root)?;
+    let attempt = begin_manual_attempt_locked(data_root, &upgrade_lock, "manual_apply")?;
+    let result = (|| -> Result<UpgradeOutcome> {
+        let plan = build_upgrade_plan(&upgrade_lock, config, channel_override, true)?;
+        let semantic_repair_required = semantic_install_required(&plan, data_root)?;
+        if !plan.update_available && !semantic_repair_required {
+            write_state_checked_locked(
+                data_root,
+                &upgrade_lock,
+                &attempt,
+                &plan,
+                "up_to_date",
+                config.upgrade.interval,
+            )?;
+            let warnings = plan.warnings.clone();
             return Ok(UpgradeOutcome {
                 command: "upgrade",
-                status: "locked",
-                message: "another ctx upgrade is already running".to_owned(),
-                plan: None,
+                status: "up_to_date",
+                message: format!("ctx {} is already installed.", plan.current_version),
+                plan: Some(plan),
                 applied: false,
                 dry_run,
-                warnings: vec!["another ctx upgrade is already running".to_owned()],
+                warnings,
+                attempt_id: Some(attempt.id().to_owned()),
             });
         }
-        Err(error) => return Err(error),
-    };
-    if recover_interrupted_install(data_root)? {
-        append_upgrade_log(data_root, "recovered interrupted install transaction");
-        if cfg!(debug_assertions) && env_flag("CTX_UPGRADE_STOP_AFTER_RECOVERY_FOR_TESTS") {
-            return Err(anyhow!("stopped after interrupted install recovery"));
+        if plan.update_available && !plan.metadata.self_upgrade_allowed {
+            return Err(anyhow!(
+                "release {} does not allow self-upgrade",
+                plan.latest_version
+            ));
         }
-    }
-    let plan = build_upgrade_plan(config, channel_override, true)?;
-    if !plan.update_available {
-        write_state_checked(data_root, &plan, "up_to_date")?;
-        let warnings = plan.warnings.clone();
-        return Ok(UpgradeOutcome {
-            command: "upgrade",
-            status: "up_to_date",
-            message: format!("ctx {} is already installed.", plan.current_version),
-            plan: Some(plan),
-            applied: false,
-            dry_run,
-            warnings,
-        });
-    }
-    if !plan.metadata.self_upgrade_allowed {
-        return Err(anyhow!(
-            "release {} does not allow self-upgrade",
-            plan.latest_version
-        ));
-    }
-    if plan.metadata.onnxruntime.is_none() {
-        return Err(anyhow!(
-            "release {} is newer than this ctx build but has no complete ONNX Runtime sidecar metadata; refusing a downgrade-compatible legacy update",
-            plan.latest_version
-        ));
-    }
-    if background && !plan.metadata.auto_upgrade_allowed {
-        return Err(anyhow!(
-            "release {} does not allow background auto-upgrade",
-            plan.latest_version
-        ));
-    }
-    if dry_run {
-        write_state_checked(data_root, &plan, "dry_run")?;
-        let warnings = plan.warnings.clone();
-        return Ok(UpgradeOutcome {
-            command: "upgrade",
-            status: "dry_run",
-            message: format!(
-                "ctx {} would upgrade to {}.",
-                plan.current_version, plan.latest_version
-            ),
-            plan: Some(plan),
-            applied: false,
-            dry_run: true,
-            warnings,
-        });
-    }
-    let bytes = net::get_bytes_limited(&plan.artifact_url, RELEASE_ARTIFACT_MAX_BYTES)
-        .with_context(|| format!("download {}", plan.artifact_url))?;
-    verify_artifact_sha(&bytes, &plan.artifact_sha256)?;
-    let runtime_bytes = match (
-        plan.metadata.onnxruntime.as_ref(),
-        plan.onnxruntime_artifact_url(),
-    ) {
-        (Some(runtime), Some(runtime_url)) => {
-            let bytes =
-                net::get_bytes_limited(&runtime_url, RELEASE_ONNXRUNTIME_ARTIFACT_MAX_BYTES)
-                    .with_context(|| format!("download {runtime_url}"))?;
-            verify_artifact_sha(&bytes, &runtime.sha256)?;
-            Some(bytes)
+        if plan.update_available
+            && plan.semantic_provisioning.is_none()
+            && plan.metadata.onnxruntime.is_none()
+        {
+            return Err(anyhow!(
+                "release {} is newer than this ctx build but has no complete ONNX Runtime sidecar metadata; refusing a downgrade-compatible legacy update",
+                plan.latest_version
+            ));
         }
-        (None, None) => None,
-        _ => return Err(anyhow!("incomplete ONNX Runtime upgrade plan")),
-    };
-    let apply_result = apply_artifact(
-        &plan,
-        &bytes,
-        runtime_bytes.as_deref(),
-        data_root,
-        upgrade_lock.path(),
-    )?;
-    let mut warnings = plan.warnings.clone();
-    if let ApplyResult::Scheduled { helper_pid } = apply_result {
-        #[cfg(windows)]
-        upgrade_lock.transfer_to(helper_pid)?;
-        #[cfg(not(windows))]
-        let _ = helper_pid;
-        record_post_apply_state(data_root, &plan, "scheduled", &mut warnings);
-        return Ok(UpgradeOutcome {
-            command: "upgrade",
-            status: "scheduled",
-            message: format!(
-                "scheduled ctx {} -> {} at {}; replacement will finish after this process exits",
+        if dry_run {
+            write_state_checked_locked(
+                data_root,
+                &upgrade_lock,
+                &attempt,
+                &plan,
+                "dry_run",
+                config.upgrade.interval,
+            )?;
+            let warnings = plan.warnings.clone();
+            return Ok(UpgradeOutcome {
+                command: "upgrade",
+                status: "dry_run",
+                message: if plan.update_available {
+                    format!(
+                        "ctx {} would upgrade to {}.",
+                        plan.current_version, plan.latest_version
+                    )
+                } else {
+                    format!(
+                        "ctx {} would provision signed Semantic model and runtime assets.",
+                        plan.current_version
+                    )
+                },
+                plan: Some(plan),
+                applied: false,
+                dry_run: true,
+                warnings,
+                attempt_id: Some(attempt.id().to_owned()),
+            });
+        }
+        let mut artifact = if plan.update_available {
+            Some(
+                DownloadedArtifact::download_verified(
+                    data_root,
+                    &plan.artifact_url,
+                    &plan.artifact_sha256,
+                    RELEASE_ARTIFACT_MAX_BYTES as u64,
+                    RELEASE_ARTIFACT_TIMEOUT,
+                )
+                .with_context(|| format!("download {}", plan.artifact_url))?,
+            )
+        } else {
+            None
+        };
+        let mut runtime_artifact = if plan.update_available && plan.semantic_provisioning.is_none()
+        {
+            match (
+                plan.metadata.onnxruntime.as_ref(),
+                plan.onnxruntime_artifact_url(),
+            ) {
+                (Some(runtime), Some(runtime_url)) => Some(
+                    DownloadedArtifact::download_or_reuse_verified(
+                        data_root,
+                        &runtime_url,
+                        &runtime.sha256,
+                        RELEASE_ONNXRUNTIME_ARTIFACT_MAX_BYTES as u64,
+                        RELEASE_ARTIFACT_TIMEOUT,
+                    )
+                    .with_context(|| format!("download or reuse {runtime_url}"))?,
+                ),
+                (None, None) => None,
+                _ => return Err(anyhow!("incomplete ONNX Runtime upgrade plan")),
+            }
+        } else {
+            None
+        };
+        let mut semantic_artifacts = Vec::new();
+        if semantic_repair_required {
+            let provisioning = plan
+                .semantic_provisioning
+                .as_ref()
+                .ok_or_else(|| anyhow!("Semantic repair has no signed provisioning plan"))?;
+            for asset in &provisioning.assets {
+                let url = plan.semantic_artifact_url(&asset.metadata.artifact);
+                semantic_artifacts.push(
+                    DownloadedArtifact::download_or_reuse_verified(
+                        data_root,
+                        &url,
+                        &asset.metadata.archive_sha256,
+                        semantic_archive_download_limit(&asset.metadata)?,
+                        RELEASE_ARTIFACT_TIMEOUT,
+                    )
+                    .with_context(|| format!("download or reuse {url}"))?,
+                );
+            }
+        }
+        write_state_phase_locked(&upgrade_lock, &attempt, "quiescing")?;
+        let daemon_handoff =
+            crate::semantic::begin_daemon_upgrade_handoff(data_root, attempt.id())?;
+        let daemon_restart = daemon_handoff.replacement_restart();
+        let mut before_publish = || Ok(());
+        let apply_result = match apply_artifact(
+            upgrade_lock.installation(),
+            &plan,
+            artifact.as_mut(),
+            runtime_artifact.as_mut(),
+            &mut semantic_artifacts,
+            data_root,
+            attempt.id(),
+            daemon_restart,
+            &mut before_publish,
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                let restart = daemon_handoff.resume_with(&plan.install_path);
+                return match restart {
+                    Ok(()) => Err(error),
+                    Err(restart_error) => Err(error.context(format!(
+                        "also failed to resume daemon lifecycle after upgrade failure: {restart_error:#}"
+                    ))),
+                };
+            }
+        };
+        let mut warnings = plan.warnings.clone();
+        if let ApplyResult::Scheduled { helper_pid } = apply_result {
+            if let Err(error) = daemon_handoff.transfer_to_replacement_helper(helper_pid) {
+                warnings.push(format!(
+                    "replacement helper is ready, but daemon handoff bookkeeping remains pending: {error:#}"
+                ));
+            }
+            record_post_apply_state(
+                data_root,
+                &upgrade_lock,
+                &attempt,
+                &plan,
+                "scheduled",
+                config.upgrade.interval,
+                &mut warnings,
+            );
+            let message = if plan.update_available {
+                format!(
+                    "scheduled ctx {} -> {} at {}; replacement will finish after this process exits",
+                    plan.current_version,
+                    plan.latest_version,
+                    plan.install_path.display()
+                )
+            } else {
+                "scheduled signed Semantic asset repair; replacement will finish after this process exits"
+                    .to_owned()
+            };
+            return Ok(UpgradeOutcome {
+                command: "upgrade",
+                status: "scheduled",
+                message,
+                plan: Some(plan),
+                applied: false,
+                dry_run: false,
+                warnings,
+                attempt_id: Some(attempt.id().to_owned()),
+            });
+        }
+        if let Some(warning) = apply_result.cleanup_warning() {
+            warnings.push(warning.to_owned());
+        }
+        record_post_apply_state(
+            data_root,
+            &upgrade_lock,
+            &attempt,
+            &plan,
+            "applied",
+            config.upgrade.interval,
+            &mut warnings,
+        );
+        // Filesystem publication is the commit point.  A daemon restart is a
+        // follow-up operation: report it for retry, but never turn a committed
+        // upgrade into scheduler failure/backoff.
+        if let Err(error) = daemon_handoff.resume_with(&plan.install_path) {
+            warnings.push(format!(
+                "ctx upgrade applied, but daemon restart is pending: {error:#}"
+            ));
+        }
+        let message = if plan.update_available {
+            format!(
+                "upgraded ctx {} -> {} at {}",
                 plan.current_version,
                 plan.latest_version,
                 plan.install_path.display()
-            ),
+            )
+        } else {
+            format!(
+                "provisioned signed Semantic model and runtime assets for ctx {}",
+                plan.current_version
+            )
+        };
+        Ok(UpgradeOutcome {
+            command: "upgrade",
+            status: "applied",
+            message,
             plan: Some(plan),
-            applied: false,
+            applied: true,
             dry_run: false,
             warnings,
-        });
+            attempt_id: Some(attempt.id().to_owned()),
+        })
+    })();
+    if let Err(error) = &result {
+        let _ = write_state_error_locked(
+            data_root,
+            &upgrade_lock,
+            &attempt,
+            "failed",
+            &format!("{error:#}"),
+        );
     }
-    record_post_apply_state(data_root, &plan, "applied", &mut warnings);
-    Ok(UpgradeOutcome {
-        command: "upgrade",
-        status: "applied",
-        message: format!(
-            "upgraded ctx {} -> {} at {}",
-            plan.current_version,
-            plan.latest_version,
-            plan.install_path.display()
-        ),
-        plan: Some(plan),
-        applied: true,
-        dry_run: false,
-        warnings,
-    })
+    result
 }
 
 fn record_post_apply_state(
     data_root: &Path,
+    lock: &UpgradeLock,
+    attempt: &UpgradeAttempt,
     plan: &UpgradePlan,
     status: &str,
+    interval: std::time::Duration,
     warnings: &mut Vec<String>,
 ) {
-    if let Err(error) = write_state_checked(data_root, plan, status) {
+    if let Err(error) = write_state_checked_locked(data_root, lock, attempt, plan, status, interval)
+    {
         warnings.push(format!(
             "upgrade {status}, but local upgrade state could not be written: {error:#}"
         ));
     }
 }
 
-fn write_background_skip_state(data_root: &Path, status: &str) -> Result<()> {
-    let body = json!({
-        "schema_version": 1,
-        "status": status,
-        "checked_at": utc_now(),
-        "last_checked_unix_s": now_unix_s(),
-        "update_available": false,
-    });
-    atomic_write_json(&data_root.join(STATE_FILE), &body)
-}
-
 fn build_upgrade_plan(
+    lock: &UpgradeLock,
     config: &AppConfig,
     channel_override: Option<&str>,
     require_managed: bool,
 ) -> Result<UpgradePlan> {
-    let current_version = env!("CARGO_PKG_VERSION").to_owned();
+    let fallback_current_version = env!("CARGO_PKG_VERSION").to_owned();
     let platform = platform_key()?.to_owned();
     let channel = channel_override
         .filter(|value| !value.trim().is_empty())
         .unwrap_or(config.upgrade.channel.as_str())
         .to_owned();
     let mut warnings = Vec::new();
-    let marker = install_marker_for_plan(
+    let snapshot = capture_install_snapshot(
+        lock.installation(),
         require_managed,
         &platform,
         &channel,
-        &current_version,
+        &fallback_current_version,
         &mut warnings,
     )?;
+    let current_version = snapshot.marker.version.clone();
     let managed = warnings.is_empty();
-    let path = path_diagnostics(&marker.install_path, &current_version);
+    let path = path_diagnostics(&snapshot.marker.install_path, &current_version);
     warnings.extend(path.warnings.clone());
     let metadata_url = metadata_url(config, &channel);
     let signature_url = metadata_signature_url(&metadata_url);
@@ -569,7 +892,8 @@ fn build_upgrade_plan(
         net::get_bytes_limited(&signature_url, RELEASE_METADATA_SIGNATURE_MAX_BYTES)
             .with_context(|| format!("download release metadata signature {signature_url}"))?;
     verify_metadata_signature(&metadata_bytes, &signature_bytes)?;
-    let metadata = parse_release_metadata(&metadata_bytes, &platform, &channel)?;
+    let semantic_enabled = config.semantic_search_enabled();
+    let metadata = parse_release_metadata(&metadata_bytes, &platform, &channel, semantic_enabled)?;
     let artifact_url = format!(
         "{}/{}",
         metadata.base_url.trim_end_matches('/'),
@@ -578,6 +902,21 @@ fn build_upgrade_plan(
     validate_artifact_url(&metadata.base_url, &metadata.artifact)?;
     if let Some(runtime) = &metadata.onnxruntime {
         validate_artifact_url(&metadata.base_url, &runtime.artifact)?;
+    }
+    let accelerator = if metadata.semantic.is_some() {
+        semantic_accelerator(&platform)?
+    } else {
+        None
+    };
+    let semantic_provisioning = metadata
+        .semantic
+        .as_ref()
+        .map(|semantic| semantic.select(&platform, accelerator))
+        .transpose()?;
+    if let Some(provisioning) = &semantic_provisioning {
+        for asset in &provisioning.assets {
+            validate_artifact_url(&metadata.base_url, &asset.metadata.artifact)?;
+        }
     }
     let update_available = version_gt(&metadata.version, &current_version);
     Ok(UpgradePlan {
@@ -588,12 +927,14 @@ fn build_upgrade_plan(
         metadata_url,
         artifact_url,
         artifact_sha256: metadata.sha256.clone(),
-        install_path: marker.install_path.clone(),
+        install_path: snapshot.marker.install_path.clone(),
+        install_fingerprint: snapshot.fingerprint,
         update_available,
         managed,
         warnings,
         path,
         metadata,
+        semantic_provisioning,
     })
 }
 
@@ -607,130 +948,4 @@ fn render_outcome(outcome: &UpgradeOutcome, json_output: bool) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn render_status(data_root: &Path, json_output: bool) -> Result<()> {
-    let state = read_json_file(&data_root.join(STATE_FILE)).unwrap_or_else(|| {
-        json!({
-            "schema_version": 1,
-            "status": "never_checked"
-        })
-    });
-    let current_version = env!("CARGO_PKG_VERSION");
-    let current_exe = current_install_path().ok();
-    let path_diagnostics = current_exe
-        .as_ref()
-        .map(|path| path_diagnostics(path, current_version));
-    let marker_result = read_verified_install_marker_for_current_exe();
-    let state = reconcile_scheduled_state(state, marker_result.as_ref().ok());
-    let marker = marker_result
-        .map(|marker| {
-            json!({
-                "managed": true,
-                "install_path": marker.install_path,
-                "platform": marker.platform,
-                "channel": marker.channel,
-                "version": marker.version,
-                "sha256": marker.sha256,
-            })
-        })
-        .unwrap_or_else(|error| {
-            json!({
-                "managed": false,
-                "reason": error.to_string()
-            })
-        });
-    let pro = crate::pro::lifecycle_status_json(data_root);
-    let value = json!({
-        "schema_version": 1,
-        "command": "upgrade_status",
-        "current_version": current_version,
-        "state": state,
-        "install": marker,
-        "path": path_diagnostics.as_ref().map(PathDiagnostics::json),
-        "warnings": path_diagnostics
-            .as_ref()
-            .map(|diagnostics| diagnostics.warnings.clone())
-            .unwrap_or_default(),
-        "pro": pro,
-    });
-    if json_output {
-        println!("{}", serde_json::to_string_pretty(&value)?);
-    } else if marker.get("managed").and_then(Value::as_bool) == Some(true) {
-        let status = state
-            .get("status")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        println!("ctx upgrade status: {status}");
-        if status == "error" {
-            if let Some(error) = state.get("error").and_then(Value::as_str) {
-                println!("{error}");
-            }
-        }
-        if let Some(path) = marker.get("install_path").and_then(Value::as_str) {
-            println!("install: {path}");
-        }
-        if let Some(diagnostics) = &path_diagnostics {
-            println!("current_exe: {}", diagnostics.current_exe.display());
-            if let Some(first) = diagnostics.entries.first() {
-                println!("path_ctx: {}", first.path.display());
-            }
-            for warning in &diagnostics.warnings {
-                eprintln!("warning: {warning}");
-            }
-        }
-        if pro["installed"].as_bool() == Some(true) {
-            println!(
-                "pro: {} (helper updates through `ctx pro`)",
-                pro["state"].as_str().unwrap_or("unavailable")
-            );
-        }
-    } else {
-        println!("ctx upgrade status: unmanaged install");
-        if let Some(reason) = marker.get("reason").and_then(Value::as_str) {
-            println!("{reason}");
-        }
-        if let Some(diagnostics) = &path_diagnostics {
-            println!("current_exe: {}", diagnostics.current_exe.display());
-            if let Some(first) = diagnostics.entries.first() {
-                println!("path_ctx: {}", first.path.display());
-            }
-            for warning in &diagnostics.warnings {
-                eprintln!("warning: {warning}");
-            }
-        }
-    }
-    Ok(())
-}
-
-fn reconcile_scheduled_state(
-    mut state: Value,
-    marker: Option<&super::install::InstallMarker>,
-) -> Value {
-    if state.get("status").and_then(Value::as_str) != Some("scheduled") {
-        return state;
-    }
-    let Some(marker) = marker else {
-        return state;
-    };
-    let Some(latest_version) = state.get("latest_version").and_then(Value::as_str) else {
-        return state;
-    };
-    let Some(install_path) = state.get("install_path").and_then(Value::as_str) else {
-        return state;
-    };
-    if Path::new(install_path) != marker.install_path {
-        return state;
-    }
-    if marker.version == latest_version {
-        if let Some(object) = state.as_object_mut() {
-            object.insert("status".to_owned(), Value::String("applied".to_owned()));
-            object.insert("applied".to_owned(), Value::Bool(true));
-            object.insert(
-                "reconciled_from".to_owned(),
-                Value::String("scheduled".to_owned()),
-            );
-        }
-    }
-    state
 }

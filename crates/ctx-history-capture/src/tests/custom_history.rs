@@ -1,21 +1,19 @@
 use crate::provider::custom_history_jsonl::{
     custom_history_internal_session_id, custom_history_jsonl_v1_cursor_stream,
+    decode_custom_history_jsonl_v1_cursor,
+    import_custom_history_nativepath as import_custom_history_jsonl_v1,
+    import_custom_history_nativepath_reader as import_custom_history_jsonl_v1_reader,
 };
-use crate::provider::importer::{provider_session_uuid, provider_source_cursor_stream};
+use crate::provider::importer::provider_session_uuid;
 use crate::tests::support::fixtures::jsonl::{jsonl_line, oversized_jsonl_line};
-use crate::tests::support::paths::{
-    custom_history_fixture, provider_fixture, provider_history_fixture, tempdir,
-};
-use crate::tests::support::provider_state::{
-    fixed_import_options, provider_fixture_session_id, provider_import_session_id_for_path,
-};
+use crate::tests::support::paths::{custom_history_fixture, provider_history_fixture, tempdir};
+use crate::tests::support::provider_state::provider_import_session_id_for_path;
 use crate::{
-    import_codex_history_jsonl, import_custom_history_jsonl_v1,
-    import_custom_history_jsonl_v1_reader, import_provider_fixture_jsonl,
-    CodexHistoryImportOptions, CustomHistoryJsonlV1ImportOptions,
+    import_codex_history_jsonl, CaptureWorkLimit, CodexHistoryImportOptions,
+    CustomHistoryJsonlV1ImportOptions, ProviderImportWorkResult,
 };
 use ctx_history_core::{CaptureProvider, EventRole, EventType, Fidelity};
-use ctx_history_store::Store;
+use ctx_history_store::{decode_native_path_committed_cursor, Store};
 use serde_json::json;
 use std::fs;
 use std::path::PathBuf;
@@ -95,12 +93,16 @@ fn codex_history_import_is_prompt_only_summary_fidelity_and_idempotent() {
         )
         .unwrap()
         .unwrap();
-    let certified = crate::provider::importer::CertifiedProviderCursor::decode(&cursor.cursor)
-        .expect("Codex history cursor should use the captured-batch encoding");
+    let committed = decode_native_path_committed_cursor(&cursor.cursor)
+        .expect("Codex history cursor should use the committed NativePath encoding");
+    let provider_cursor: serde_json::Value =
+        serde_json::from_str(committed.provider_cursor()).unwrap();
     assert_eq!(
-        crate::captured_batch::jsonl::jsonl_position_offset(certified.native_position()).unwrap(),
+        provider_cursor["observation"]["len"].as_u64().unwrap(),
         fs::metadata(&fixture).unwrap().len()
     );
+    assert_eq!(provider_cursor["phase"]["phase"], "complete");
+    assert_eq!(provider_cursor["phase"]["missing"], false);
 }
 
 #[test]
@@ -158,7 +160,8 @@ fn custom_history_jsonl_imports_full_shape_and_is_idempotent() {
     assert_eq!(spawned_edges, 1);
     let cursor_count: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM sync_cursors WHERE stream LIKE 'provider:custom:demo-agent:%'",
+            "SELECT COUNT(*) FROM sync_cursors
+             WHERE stream LIKE 'provider:custom:ctx-history-jsonl-v1:%'",
             [],
             |row| row.get(0),
         )
@@ -166,12 +169,17 @@ fn custom_history_jsonl_imports_full_shape_and_is_idempotent() {
     assert_eq!(cursor_count, 1);
     let cursor: String = conn
         .query_row(
-            "SELECT cursor FROM sync_cursors WHERE stream LIKE 'provider:custom:demo-agent:%'",
+            "SELECT cursor FROM sync_cursors
+             WHERE stream LIKE 'provider:custom:ctx-history-jsonl-v1:%'",
             [],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(cursor, "5");
+    let committed = decode_native_path_committed_cursor(&cursor).unwrap();
+    assert!(committed
+        .provider_cursor()
+        .contains(r#""phase":"complete""#));
+    assert!(!committed.provider_cursor().contains(r#""cursor":"5""#));
     let raw_cursor_count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM sync_cursors WHERE stream = 'demo-agent:demo-source'",
@@ -180,6 +188,19 @@ fn custom_history_jsonl_imports_full_shape_and_is_idempotent() {
         )
         .unwrap();
     assert_eq!(raw_cursor_count, 0);
+    let upstream = store
+        .get_sync_cursor(
+            None,
+            "fixture-host",
+            &custom_history_jsonl_v1_cursor_stream("demo-agent", "demo-source", "demo-jsonl"),
+        )
+        .unwrap()
+        .unwrap();
+    assert!(decode_native_path_committed_cursor(&upstream.cursor).is_ok());
+    assert_eq!(
+        decode_custom_history_jsonl_v1_cursor(&upstream.cursor).unwrap(),
+        "5"
+    );
     drop(conn);
 
     let second = import_custom_history_jsonl_v1(
@@ -196,12 +217,220 @@ fn custom_history_jsonl_imports_full_shape_and_is_idempotent() {
     assert_eq!(second.imported_sessions, 0);
     assert_eq!(second.imported_events, 0);
     assert_eq!(second.imported_edges, 0);
-    assert_eq!(second.skipped_events, 2);
-    assert_eq!(second.skipped_edges, 2);
+    assert_eq!(second.work_result(), ProviderImportWorkResult::NoOp);
+    assert_eq!(second.skipped_events, 0);
+    assert_eq!(second.skipped_edges, 0);
 }
 
 #[test]
-fn custom_history_jsonl_reader_import_persists_normalized_cursor() {
+fn custom_history_cursor_decoder_accepts_released_raw_cursors() {
+    assert_eq!(
+        decode_custom_history_jsonl_v1_cursor("released-plugin-cursor").unwrap(),
+        "released-plugin-cursor"
+    );
+    assert_eq!(
+        decode_custom_history_jsonl_v1_cursor(r#"{"message_id":11}"#).unwrap(),
+        r#"{"message_id":11}"#
+    );
+    assert!(decode_custom_history_jsonl_v1_cursor(r#"{"publication_id":"corrupt"}"#).is_err());
+}
+
+#[test]
+fn custom_history_nativepath_publishes_upstream_only_after_bounded_core() {
+    let temp = tempdir();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let input = [
+        r#"{"record_type":"manifest","schema_version":"ctx-history-jsonl-v1"}"#,
+        r#"{"record_type":"source","source_id":"src","provider_key":"bounded-agent","source_format":"bounded-v1","cursor":{"after":{"stream":"native","cursor":"bounded-upstream","observed_at":"2026-07-25T12:00:03Z"}}}"#,
+        r#"{"record_type":"session","source_id":"src","session_id":"run","started_at":"2026-07-25T12:00:00Z"}"#,
+        r#"{"record_type":"event","source_id":"src","session_id":"run","event_index":0,"event_type":"message","role":"user","occurred_at":"2026-07-25T12:00:01Z","payload":{"text":"bounded Core first"}}"#,
+    ]
+    .join("\n");
+    let stream = custom_history_jsonl_v1_cursor_stream("bounded-agent", "src", "bounded-v1");
+    let options = || CustomHistoryJsonlV1ImportOptions {
+        source_path: Some(PathBuf::from("bounded-custom-history.jsonl")),
+        capture_work_limit: CaptureWorkLimit::OneSafeGroup,
+        ..CustomHistoryJsonlV1ImportOptions::default()
+    };
+
+    let first =
+        import_custom_history_jsonl_v1_reader(std::io::Cursor::new(&input), &mut store, options())
+            .unwrap();
+    assert!(first.work_remaining);
+    assert!(store
+        .get_sync_cursor(
+            None,
+            &CustomHistoryJsonlV1ImportOptions::default().machine_id,
+            &stream,
+        )
+        .unwrap()
+        .is_none());
+
+    for attempt in 0..6 {
+        let summary = import_custom_history_jsonl_v1_reader(
+            std::io::Cursor::new(&input),
+            &mut store,
+            options(),
+        )
+        .unwrap();
+        if let Some(cursor) = store
+            .get_sync_cursor(
+                None,
+                &CustomHistoryJsonlV1ImportOptions::default().machine_id,
+                &stream,
+            )
+            .unwrap()
+        {
+            assert_eq!(
+                decode_custom_history_jsonl_v1_cursor(&cursor.cursor).unwrap(),
+                "bounded-upstream"
+            );
+            assert!(!summary.work_remaining);
+            return;
+        }
+        assert!(
+            summary.work_remaining,
+            "bounded import stopped before upstream publication on attempt {attempt}"
+        );
+    }
+    panic!("bounded custom history import did not publish its upstream cursor");
+}
+
+#[test]
+fn custom_history_nativepath_reconciles_file_lifecycle_across_restart() {
+    let temp = tempdir();
+    let path = temp.path().join("custom-history.jsonl");
+    let database = temp.path().join("work.sqlite");
+    let document = |session: &str, events: &[(u64, &str)]| {
+        let mut lines = vec![
+            r#"{"record_type":"manifest","schema_version":"ctx-history-jsonl-v1"}"#.to_owned(),
+            r#"{"record_type":"source","source_id":"src","provider_key":"native-agent","source_format":"native-v1"}"#.to_owned(),
+            format!(
+                r#"{{"record_type":"session","source_id":"src","session_id":"{session}","started_at":"2026-07-20T12:00:00Z"}}"#
+            ),
+        ];
+        lines.extend(events.iter().map(|(index, text)| {
+            format!(
+                r#"{{"record_type":"event","source_id":"src","session_id":"{session}","event_index":{index},"event_type":"message","role":"assistant","occurred_at":"2026-07-20T12:00:00Z","payload":{{"text":"{text}"}}}}"#
+            )
+        }));
+        lines.join("\n")
+    };
+    let options = |imported_at: &str| CustomHistoryJsonlV1ImportOptions {
+        source_path: Some(path.clone()),
+        imported_at: imported_at.parse().unwrap(),
+        ..CustomHistoryJsonlV1ImportOptions::default()
+    };
+
+    fs::write(&path, document("run", &[(0, "first")])).unwrap();
+    let mut store = Store::open(&database).unwrap();
+    let fresh =
+        import_custom_history_jsonl_v1(&path, &mut store, options("2026-07-20T12:01:00Z")).unwrap();
+    assert_eq!(fresh.imported_sessions, 1);
+    assert_eq!(fresh.imported_events, 1);
+
+    let noop =
+        import_custom_history_jsonl_v1(&path, &mut store, options("2026-07-20T12:02:00Z")).unwrap();
+    assert_eq!(noop.work_result(), ProviderImportWorkResult::NoOp);
+
+    fs::write(&path, document("run", &[(0, "first"), (1, "appended")])).unwrap();
+    let appended =
+        import_custom_history_jsonl_v1(&path, &mut store, options("2026-07-20T12:03:00Z")).unwrap();
+    assert_eq!(appended.imported_events, 1);
+    assert_eq!(store.list_sessions().unwrap().len(), 1);
+    assert_eq!(
+        store
+            .events_for_session(store.list_sessions().unwrap()[0].id)
+            .unwrap()
+            .len(),
+        2
+    );
+
+    drop(store);
+    let mut store = Store::open(&database).unwrap();
+    let restarted =
+        import_custom_history_jsonl_v1(&path, &mut store, options("2026-07-20T12:04:00Z")).unwrap();
+    assert_eq!(restarted.work_result(), ProviderImportWorkResult::NoOp);
+
+    fs::write(&path, document("run", &[(1, "rewritten")])).unwrap();
+    import_custom_history_jsonl_v1(&path, &mut store, options("2026-07-20T12:05:00Z")).unwrap();
+    let session = store.list_sessions().unwrap()[0].id;
+    let rewritten = store
+        .events_for_session(session)
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.sync.deleted_at.is_none())
+        .collect::<Vec<_>>();
+    assert_eq!(rewritten.len(), 1);
+    assert!(rewritten[0].payload.to_string().contains("rewritten"));
+
+    fs::write(
+        &path,
+        [
+            r#"{"record_type":"manifest","schema_version":"ctx-history-jsonl-v1"}"#,
+            r#"{"record_type":"source","source_id":"src","provider_key":"native-agent","source_format":"native-v1"}"#,
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    import_custom_history_jsonl_v1(&path, &mut store, options("2026-07-20T12:06:00Z")).unwrap();
+    assert!(store
+        .list_sessions()
+        .unwrap()
+        .iter()
+        .all(|session| session.sync.deleted_at.is_some()));
+
+    fs::remove_file(&path).unwrap();
+    fs::write(&path, document("replacement", &[(0, "replacement")])).unwrap();
+    import_custom_history_jsonl_v1(&path, &mut store, options("2026-07-20T12:07:00Z")).unwrap();
+    assert_eq!(
+        store
+            .list_sessions()
+            .unwrap()
+            .iter()
+            .filter(|session| session.sync.deleted_at.is_none())
+            .count(),
+        1
+    );
+
+    fs::remove_file(&path).unwrap();
+    let disappeared =
+        import_custom_history_jsonl_v1(&path, &mut store, options("2026-07-20T12:08:00Z")).unwrap();
+    assert_eq!(disappeared.work_result(), ProviderImportWorkResult::Changed);
+    assert_eq!(
+        store
+            .list_sessions()
+            .unwrap()
+            .iter()
+            .filter(|session| session.sync.deleted_at.is_none())
+            .count(),
+        1,
+        "source disappearance revokes authority without deleting Core history"
+    );
+    let conn = rusqlite::Connection::open(&database).unwrap();
+    let cursor: String = conn
+        .query_row(
+            "SELECT cursor FROM sync_cursors
+             WHERE stream LIKE 'provider:custom:ctx-history-jsonl-v1:%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(decode_native_path_committed_cursor(&cursor)
+        .unwrap()
+        .provider_cursor()
+        .contains(r#""retired":true"#));
+    drop(conn);
+    let disappeared_again =
+        import_custom_history_jsonl_v1(&path, &mut store, options("2026-07-20T12:09:00Z")).unwrap();
+    assert_eq!(
+        disappeared_again.work_result(),
+        ProviderImportWorkResult::NoOp
+    );
+}
+
+#[test]
+fn custom_history_jsonl_reader_publishes_store_wrapped_upstream_cursor() {
     let temp = tempdir();
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
     let input = [
@@ -226,7 +455,7 @@ fn custom_history_jsonl_reader_import_persists_normalized_cursor() {
     assert_eq!(summary.failed, 0, "{:?}", summary.failures);
     assert_eq!(summary.imported_sessions, 1);
     assert_eq!(summary.imported_events, 1);
-    let cursor = store
+    let upstream = store
         .get_sync_cursor(
             None,
             &CustomHistoryJsonlV1ImportOptions::default().machine_id,
@@ -234,11 +463,28 @@ fn custom_history_jsonl_reader_import_persists_normalized_cursor() {
         )
         .unwrap()
         .unwrap();
-    assert_eq!(cursor.cursor, r#"{"message_id":7}"#);
+    assert_eq!(
+        decode_custom_history_jsonl_v1_cursor(&upstream.cursor).unwrap(),
+        r#"{"message_id":7}"#
+    );
+    let conn = rusqlite::Connection::open(temp.path().join("work.sqlite")).unwrap();
+    let cursor: String = conn
+        .query_row(
+            "SELECT cursor FROM sync_cursors
+             WHERE stream LIKE 'provider:custom:ctx-history-jsonl-v1:%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let committed = decode_native_path_committed_cursor(&cursor).unwrap();
+    assert!(committed
+        .provider_cursor()
+        .contains(r#""phase":"complete""#));
+    assert!(!committed.provider_cursor().contains("message_id"));
 }
 
 #[test]
-fn custom_history_jsonl_reader_persists_source_only_cursor() {
+fn custom_history_jsonl_reader_publishes_source_only_upstream_cursor() {
     let temp = tempdir();
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
     let input = [
@@ -260,7 +506,7 @@ fn custom_history_jsonl_reader_persists_source_only_cursor() {
     assert_eq!(summary.failed, 0, "{:?}", summary.failures);
     assert_eq!(summary.imported_sessions, 0);
     assert_eq!(summary.imported_events, 0);
-    let cursor = store
+    let upstream = store
         .get_sync_cursor(
             None,
             &CustomHistoryJsonlV1ImportOptions::default().machine_id,
@@ -268,7 +514,24 @@ fn custom_history_jsonl_reader_persists_source_only_cursor() {
         )
         .unwrap()
         .unwrap();
-    assert_eq!(cursor.cursor, r#"{"message_id":9}"#);
+    assert_eq!(
+        decode_custom_history_jsonl_v1_cursor(&upstream.cursor).unwrap(),
+        r#"{"message_id":9}"#
+    );
+    let conn = rusqlite::Connection::open(temp.path().join("work.sqlite")).unwrap();
+    let cursor: String = conn
+        .query_row(
+            "SELECT cursor FROM sync_cursors
+             WHERE stream LIKE 'provider:custom:ctx-history-jsonl-v1:%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let committed = decode_native_path_committed_cursor(&cursor).unwrap();
+    assert!(committed
+        .provider_cursor()
+        .contains(r#""phase":"complete""#));
+    assert!(!committed.provider_cursor().contains("message_id"));
 }
 
 #[test]
@@ -305,8 +568,8 @@ fn custom_history_jsonl_imports_valid_records_reports_rejections_and_remains_ret
         .query_row("SELECT COUNT(*) FROM sync_cursors", [], |row| row.get(0))
         .unwrap();
     assert_eq!(
-        cursors, 0,
-        "a rejected record must keep the source retryable"
+        cursors, 1,
+        "the blocked NativePath frontier must be durable"
     );
 
     drop(conn);
@@ -323,18 +586,15 @@ fn custom_history_jsonl_imports_valid_records_reports_rejections_and_remains_ret
 
     assert_eq!(retry.imported_sessions, 0);
     assert_eq!(retry.imported_events, 0);
-    assert_eq!(retry.skipped_sessions, 1);
-    assert_eq!(retry.skipped_events, 1);
+    assert_eq!(retry.skipped_sessions, 0);
+    assert_eq!(retry.skipped_events, 0);
     assert_eq!(retry.failed, 1);
-    assert!(retry.accepted_content_records > 0);
+    assert_eq!(retry.work_result(), ProviderImportWorkResult::NoOp);
     let conn = rusqlite::Connection::open(temp.path().join("work.sqlite")).unwrap();
     let cursors: i64 = conn
         .query_row("SELECT COUNT(*) FROM sync_cursors", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(
-        cursors, 0,
-        "retry must not advance past the rejected record"
-    );
+    assert_eq!(cursors, 1, "retry must preserve the blocked frontier");
 }
 
 #[test]
@@ -375,12 +635,13 @@ fn custom_history_semantic_event_rejection_keeps_independent_valid_event() {
         1
     );
     let conn = rusqlite::Connection::open(temp.path().join("work.sqlite")).unwrap();
-    assert_eq!(
-        conn.query_row("SELECT COUNT(*) FROM sync_cursors", [], |row| row
-            .get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
+    let cursor: String = conn
+        .query_row("SELECT cursor FROM sync_cursors", [], |row| row.get(0))
+        .unwrap();
+    assert!(decode_native_path_committed_cursor(&cursor)
+        .unwrap()
+        .provider_cursor()
+        .contains(r#""phase":"blocked""#));
 }
 
 #[test]
@@ -903,60 +1164,4 @@ fn custom_history_jsonl_dedupes_explicit_parent_child_edge_from_session_parent()
         )
         .unwrap();
     assert_eq!(parent_child_edges, 1);
-}
-
-#[test]
-fn provider_fixture_replay_imports_valid_rows_and_reports_malformed_rows() {
-    let temp = tempdir();
-    let fixture = provider_fixture("malformed-mixed.jsonl");
-    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
-    let summary =
-        import_provider_fixture_jsonl(&fixture, &mut store, fixed_import_options(fixture.clone()))
-            .unwrap();
-
-    assert_eq!(summary.imported_sessions, 1);
-    assert_eq!(summary.imported_events, 2);
-    assert_eq!(summary.failed, 1);
-    assert!(summary.accepted_content_records > 0);
-    assert_eq!(summary.failures.len(), 1);
-    assert_eq!(summary.failures[0].line, 3);
-    let session_id =
-        provider_fixture_session_id(CaptureProvider::Codex, "malformed-mixed-session", &fixture);
-    let events = store.events_for_session(session_id).unwrap();
-    assert_eq!(events.len(), 2);
-    assert!(events[0]
-        .payload
-        .to_string()
-        .contains("Valid event before malformed line."));
-    assert!(events[1]
-        .payload
-        .to_string()
-        .contains("Valid event after malformed line."));
-    let source_path = fixture.display().to_string();
-    let cursor_stream = provider_source_cursor_stream(
-        CaptureProvider::Codex,
-        "normalized_provider_fixture_jsonl",
-        Some(&source_path),
-    );
-    assert!(store
-        .get_sync_cursor(None, "test-machine", &cursor_stream)
-        .unwrap()
-        .is_none());
-}
-
-#[test]
-fn provider_fixture_replay_rejects_expected_provider_mismatch() {
-    let temp = tempdir();
-    let fixture = provider_fixture("claude.jsonl");
-    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
-    let mut options = fixed_import_options(fixture.clone());
-    options.expected_provider = Some(CaptureProvider::Codex);
-
-    let summary = import_provider_fixture_jsonl(fixture, &mut store, options).unwrap();
-
-    assert_eq!(summary.imported, 0);
-    assert_eq!(summary.failed, 2);
-    assert!(summary.failures.iter().all(|failure| failure
-        .error
-        .contains("has provider `claude` but expected `codex`")));
 }

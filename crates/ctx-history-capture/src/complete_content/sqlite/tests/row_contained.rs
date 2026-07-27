@@ -54,12 +54,12 @@ fn kiro_and_zed_row_contained_cohorts_recover_exact_message_text() {
     .unwrap();
     drop(conn);
     let kiro_values = vec![
-        CapturedSqliteValue::Integer(1),
-        CapturedSqliteValue::Text("/workspace".to_owned()),
-        CapturedSqliteValue::Text("kiro-session".to_owned()),
-        CapturedSqliteValue::Text(kiro_json),
-        CapturedSqliteValue::Integer(CREATED_AT),
-        CapturedSqliteValue::Integer(CREATED_AT + 1),
+        NativeSqliteValue::Integer(1),
+        NativeSqliteValue::Text("/workspace".to_owned()),
+        NativeSqliteValue::Text("kiro-session".to_owned()),
+        NativeSqliteValue::Text(kiro_json),
+        NativeSqliteValue::Integer(CREATED_AT),
+        NativeSqliteValue::Integer(CREATED_AT + 1),
     ];
     let kiro_row =
         kiro::decode_kiro_conversation_for_complete("conversations_v2", &kiro_values).unwrap();
@@ -173,16 +173,16 @@ fn kiro_and_zed_row_contained_cohorts_recover_exact_message_text() {
     .unwrap();
     drop(conn);
     let zed_values = vec![
-        CapturedSqliteValue::Integer(1),
-        CapturedSqliteValue::Text("zed-session".to_owned()),
-        CapturedSqliteValue::Null,
-        CapturedSqliteValue::Null,
-        CapturedSqliteValue::Null,
-        CapturedSqliteValue::Text("Zed fixture".to_owned()),
-        CapturedSqliteValue::Text("2026-07-21T12:00:00Z".to_owned()),
-        CapturedSqliteValue::Text("json".to_owned()),
-        CapturedSqliteValue::Blob(zed_data),
-        CapturedSqliteValue::Null,
+        NativeSqliteValue::Integer(1),
+        NativeSqliteValue::Text("zed-session".to_owned()),
+        NativeSqliteValue::Null,
+        NativeSqliteValue::Null,
+        NativeSqliteValue::Null,
+        NativeSqliteValue::Text("Zed fixture".to_owned()),
+        NativeSqliteValue::Text("2026-07-21T12:00:00Z".to_owned()),
+        NativeSqliteValue::Text("json".to_owned()),
+        NativeSqliteValue::Blob(zed_data),
+        NativeSqliteValue::Null,
     ];
     let zed_row = zed::decode_zed_thread_for_complete(&zed_values).unwrap();
     let zed_decoded = zed::decode_zed_thread_events(&zed_row).unwrap();
@@ -191,6 +191,14 @@ fn kiro_and_zed_row_contained_cohorts_recover_exact_message_text() {
         .unwrap()
         .unwrap()
         .event;
+    let zed_event = test_provider_event(
+        zed_event.provider_event_index,
+        zed_event.provider_event_hash,
+        zed_event.cursor,
+        zed_event.event_type,
+        zed_event.payload,
+        json!({}),
+    );
     let zed_request = request_for(
         &zed_path,
         CaptureProvider::Zed,
@@ -247,24 +255,32 @@ fn zed_result_locator_reopens_exact_row_without_persisting_output() {
     .unwrap();
     drop(conn);
     let values = vec![
-        CapturedSqliteValue::Integer(1),
-        CapturedSqliteValue::Text("zed-result-session".to_owned()),
-        CapturedSqliteValue::Null,
-        CapturedSqliteValue::Null,
-        CapturedSqliteValue::Null,
-        CapturedSqliteValue::Text("Zed result fixture".to_owned()),
-        CapturedSqliteValue::Text("2026-07-21T12:00:00Z".to_owned()),
-        CapturedSqliteValue::Text("json".to_owned()),
-        CapturedSqliteValue::Blob(data),
-        CapturedSqliteValue::Null,
+        NativeSqliteValue::Integer(1),
+        NativeSqliteValue::Text("zed-result-session".to_owned()),
+        NativeSqliteValue::Null,
+        NativeSqliteValue::Null,
+        NativeSqliteValue::Null,
+        NativeSqliteValue::Text("Zed result fixture".to_owned()),
+        NativeSqliteValue::Text("2026-07-21T12:00:00Z".to_owned()),
+        NativeSqliteValue::Text("json".to_owned()),
+        NativeSqliteValue::Blob(data),
+        NativeSqliteValue::Null,
     ];
     let row = zed::decode_zed_thread_for_complete(&values).unwrap();
     let decoded = zed::decode_zed_thread_events(&row).unwrap();
-    let mut event = decoded
+    let event = decoded
         .event_at("zed-result-session", 0)
         .unwrap()
         .unwrap()
         .event;
+    let mut event = test_provider_event(
+        event.provider_event_index,
+        event.provider_event_hash,
+        event.cursor,
+        event.event_type,
+        event.payload,
+        json!({}),
+    );
     assert_eq!(event.event_type, EventType::ToolOutput);
     let locator = NativeLocator::new(ZED_LOCATOR_KIND, 1_i64.to_be_bytes().to_vec()).unwrap();
     attach_sqlite_result_content_locator(
@@ -402,12 +418,12 @@ fn malformed_and_truncated_kiro_records_fail_closed() {
         ),
     ] {
         let values = vec![
-            CapturedSqliteValue::Integer(rowid),
-            CapturedSqliteValue::Text(key.to_owned()),
-            CapturedSqliteValue::Text(session_id.to_owned()),
-            CapturedSqliteValue::Text(stored_value.to_owned()),
-            CapturedSqliteValue::Integer(CREATED_AT),
-            CapturedSqliteValue::Integer(CREATED_AT),
+            NativeSqliteValue::Integer(rowid),
+            NativeSqliteValue::Text(key.to_owned()),
+            NativeSqliteValue::Text(session_id.to_owned()),
+            NativeSqliteValue::Text(stored_value.to_owned()),
+            NativeSqliteValue::Integer(CREATED_AT),
+            NativeSqliteValue::Integer(CREATED_AT),
         ];
         let row = kiro::decode_kiro_conversation_for_complete("conversations_v2", &values).unwrap();
         let body = long_body("untrusted fallback must not be returned");
@@ -461,9 +477,9 @@ fn legacy_kiro_row_preserves_decoder_identity_locator_and_content() {
     .unwrap();
     drop(conn);
     let values = vec![
-        CapturedSqliteValue::Integer(1),
-        CapturedSqliteValue::Text("/legacy".to_owned()),
-        CapturedSqliteValue::Text(encoded),
+        NativeSqliteValue::Integer(1),
+        NativeSqliteValue::Text("/legacy".to_owned()),
+        NativeSqliteValue::Text(encoded),
     ];
     let row = kiro::decode_kiro_conversation_for_complete("conversations", &values).unwrap();
     let provider_session_id = kiro::kiro_provider_session_id(&row, &value);
@@ -476,8 +492,8 @@ fn legacy_kiro_row_preserves_decoder_identity_locator_and_content() {
         Some("conversations:kiro-legacy-session:0:user")
     );
     assert_eq!(
-        decoded.event.cursor.as_deref(),
-        Some("conversations:kiro-legacy-session:history:0:user")
+        decoded.event.cursor,
+        "conversations:kiro-legacy-session:history:0:user"
     );
     let mut locator = vec![2_u8];
     locator.extend_from_slice(&(1_u64 ^ (1_u64 << 63)).to_be_bytes());
@@ -527,12 +543,12 @@ fn oversized_kiro_record_fails_before_json_decode() {
     .unwrap();
     drop(conn);
     let values = vec![
-        CapturedSqliteValue::Integer(1),
-        CapturedSqliteValue::Text("/oversized".to_owned()),
-        CapturedSqliteValue::Text("kiro-oversized".to_owned()),
-        CapturedSqliteValue::Text(oversized_value),
-        CapturedSqliteValue::Integer(CREATED_AT),
-        CapturedSqliteValue::Integer(CREATED_AT),
+        NativeSqliteValue::Integer(1),
+        NativeSqliteValue::Text("/oversized".to_owned()),
+        NativeSqliteValue::Text("kiro-oversized".to_owned()),
+        NativeSqliteValue::Text(oversized_value),
+        NativeSqliteValue::Integer(CREATED_AT),
+        NativeSqliteValue::Integer(CREATED_AT),
     ];
     let row = kiro::decode_kiro_conversation_for_complete("conversations_v2", &values).unwrap();
     let body = long_body("oversized row fallback");

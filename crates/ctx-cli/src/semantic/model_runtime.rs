@@ -1,5 +1,5 @@
 use std::{
-    env,
+    fmt,
     path::Path,
     sync::{Arc, Mutex},
     time::Instant,
@@ -18,10 +18,11 @@ use super::{
     },
     indexing::{semantic_e5_passage_text, semantic_e5_query_text_value},
     model_contract::{
-        semantic_model_key, SemanticCpuModelCacheMissing, SemanticCpuModelIntegrityError,
-        SemanticModelFile, SEMANTIC_DIMENSIONS, SEMANTIC_HF_MODEL_CACHE_DIR,
-        SEMANTIC_MANAGED_MODEL_CACHE_DIR, SEMANTIC_MODEL_ID, SEMANTIC_MODEL_REVISION,
-        SEMANTIC_REQUIRED_MODEL_FILES,
+        semantic_model_key, SemanticBackendKind, SemanticCpuModelCacheMissing,
+        SemanticCpuModelIntegrityError, SemanticModelFile, SemanticOrtModelVariant,
+        SEMANTIC_BACKEND, SEMANTIC_DIMENSIONS, SEMANTIC_HF_MODEL_CACHE_DIR,
+        SEMANTIC_MANAGED_MODEL_CACHE_DIR, SEMANTIC_MODEL_CONTRACT_VERSION, SEMANTIC_MODEL_ID,
+        SEMANTIC_MODEL_REVISION, SEMANTIC_REQUIRED_MODEL_FILES,
     },
     resource_policy::{
         semantic_quiet_policy, throttle_semantic_batch, SemanticComputeClass, SemanticQuietPolicy,
@@ -31,8 +32,12 @@ use super::{
 
 #[cfg(any(target_os = "macos", test))]
 use super::health_search::semantic_model_acquisition_integrity_error;
+#[cfg(any(target_os = "macos", test))]
+use super::model_contract::SemanticModelLoadDeferred;
 #[cfg(test)]
-use super::resource_policy::semantic_model_load_deferred;
+use super::resource_policy::{
+    semantic_model_load_deferred, SEMANTIC_ACCELERATOR_MODEL_LOAD_MIN_AVAILABLE_BYTES,
+};
 
 #[derive(Clone, Default)]
 pub(super) struct SharedSemanticRuntime {
@@ -45,6 +50,16 @@ impl SharedSemanticRuntime {
             .lock()
             .map(|embedder| embedder.is_some())
             .unwrap_or(false)
+    }
+
+    pub(super) fn release_if_idle(&self) -> Result<bool> {
+        match self.embedder.try_lock() {
+            Ok(mut embedder) => Ok(embedder.take().is_some()),
+            Err(std::sync::TryLockError::WouldBlock) => Ok(false),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                Err(anyhow!("semantic embedder lock is poisoned"))
+            }
+        }
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Option<SemanticEmbedder>>> {
@@ -61,20 +76,77 @@ impl SharedSemanticRuntime {
     }
 
     pub(super) fn ensure_loaded_from_cache(&self, cache_dir: &Path) -> Result<Option<u64>> {
-        self.ensure_loaded(cache_dir, SemanticModelAccess::ForegroundCacheOnly)
+        self.ensure_loaded(cache_dir, None)
     }
 
-    pub(super) fn ensure_loaded_for_daemon(&self, cache_dir: &Path) -> Result<Option<u64>> {
-        self.ensure_loaded(cache_dir, SemanticModelAccess::DaemonNetwork)
+    pub(super) fn acquire_for_daemon(
+        &self,
+        cache_dir: &Path,
+    ) -> Result<SemanticDaemonModelAcquisition> {
+        acquire_semantic_model_for_daemon(cache_dir)
     }
 
-    fn ensure_loaded(&self, cache_dir: &Path, access: SemanticModelAccess) -> Result<Option<u64>> {
+    pub(super) fn acquire_cpu_fallback_for_daemon(
+        &self,
+        cache_dir: &Path,
+        fallback: &'static str,
+    ) -> Result<SemanticDaemonModelAcquisition> {
+        #[cfg(ctx_semantic_fastembed)]
+        {
+            let accelerator = match fallback {
+                "cuda_load_error" => Some(SemanticModelAcquisitionBackend::Cuda),
+                "windows_ml_load_error" => Some(SemanticModelAcquisitionBackend::WindowsMl),
+                _ => None,
+            };
+            match accelerator {
+                Some(backend) => match acquire_accelerator_model_for_daemon(cache_dir, backend) {
+                    Ok(acquisition) => Ok(acquisition
+                        .as_cpu_fallback_for(backend)
+                        .with_fallback(fallback)),
+                    Err(_) => acquire_cpu_model_for_daemon(cache_dir)
+                        .map(|acquisition| acquisition.with_fallback(fallback)),
+                },
+                None => acquire_cpu_model_for_daemon(cache_dir)
+                    .map(|acquisition| acquisition.with_fallback(fallback)),
+            }
+        }
+        #[cfg(not(ctx_semantic_fastembed))]
+        {
+            let _ = (cache_dir, fallback);
+            Err(anyhow!(
+                "semantic embedding model {SEMANTIC_MODEL_ID} is not supported on this platform"
+            ))
+        }
+    }
+
+    pub(super) fn ensure_loaded_after_daemon_acquisition(
+        &self,
+        cache_dir: &Path,
+        acquisition: SemanticDaemonModelAcquisition,
+    ) -> Result<Option<u64>> {
+        self.ensure_loaded(cache_dir, Some(acquisition))
+    }
+
+    fn ensure_loaded(
+        &self,
+        cache_dir: &Path,
+        acquisition: Option<SemanticDaemonModelAcquisition>,
+    ) -> Result<Option<u64>> {
         let mut embedder = self.lock()?;
         if embedder.is_some() {
             return Ok(None);
         }
         let started = Instant::now();
-        *embedder = Some(acquire_semantic_embedder_with_mode(cache_dir, access)?);
+        let mut acquired = match acquisition {
+            Some(acquisition) => {
+                acquire_semantic_embedder_after_daemon_acquisition(cache_dir, acquisition)?
+            }
+            None => acquire_semantic_embedder_from_cache(cache_dir)?,
+        };
+        if let Some(acquisition) = acquisition {
+            acquisition.apply_to(&mut acquired);
+        }
+        *embedder = Some(acquired);
         Ok(Some(started.elapsed().as_millis() as u64))
     }
 
@@ -206,72 +278,214 @@ impl SharedSemanticRuntime {
     }
 }
 
-pub(super) const SEMANTIC_BACKEND_PREFERENCE_ENV: &str = "CTX_INTERNAL_SEMANTIC_BACKEND";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SemanticModelAccess {
-    ForegroundCacheOnly,
-    DaemonNetwork,
-}
-
-impl SemanticModelAccess {
-    pub(super) fn network_allowed(self) -> bool {
-        self == Self::DaemonNetwork
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum BackendPreference {
-    Auto,
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+pub(super) enum SemanticModelAcquisitionBackend {
     Cpu,
     CoreMl,
+    Cuda,
+    WindowsMl,
 }
 
-impl BackendPreference {
-    pub(super) fn from_env() -> Result<Self> {
-        Self::parse(env::var(SEMANTIC_BACKEND_PREFERENCE_ENV).ok().as_deref())
-    }
-
-    pub(super) fn parse(value: Option<&str>) -> Result<Self> {
-        match value.map(str::trim).filter(|value| !value.is_empty()) {
-            None | Some("auto") => Ok(Self::Auto),
-            Some("cpu") => Ok(Self::Cpu),
-            Some("coreml") => Ok(Self::CoreMl),
-            Some(value) => Err(anyhow!(
-                "unsupported {SEMANTIC_BACKEND_PREFERENCE_ENV} value {value:?}; expected auto, cpu, or coreml"
-            )),
-        }
-    }
-
-    pub(super) fn as_str(self) -> &'static str {
+impl SemanticModelAcquisitionBackend {
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn as_str(self) -> &'static str {
         match self {
-            Self::Auto => "auto",
             Self::Cpu => "cpu",
             Self::CoreMl => "coreml",
+            Self::Cuda => "ort_cuda",
+            Self::WindowsMl => "windows_ml",
+        }
+    }
+
+    fn kind(self) -> SemanticBackendKind {
+        match self {
+            Self::Cpu => SemanticBackendKind::Cpu,
+            Self::CoreMl => SemanticBackendKind::CoreMl,
+            Self::Cuda => SemanticBackendKind::OrtCuda,
+            Self::WindowsMl => SemanticBackendKind::WindowsMl,
+        }
+    }
+
+    fn model_variant(self) -> Option<SemanticOrtModelVariant> {
+        match self {
+            Self::Cpu => Some(SemanticOrtModelVariant::CpuFp32),
+            Self::Cuda | Self::WindowsMl => Some(SemanticOrtModelVariant::AcceleratorO4Fp16),
+            Self::CoreMl => None,
         }
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SemanticModelAcquisitionSource {
+    Cache,
+    Download,
+}
+
+impl SemanticModelAcquisitionSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Cache => "cache",
+            Self::Download => "download",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SemanticDaemonModelAcquisition {
+    backend: SemanticModelAcquisitionBackend,
+    assets: SemanticModelAcquisitionBackend,
+    model_variant: Option<SemanticOrtModelVariant>,
+    source: SemanticModelAcquisitionSource,
+    fallback: Option<&'static str>,
+    allow_cpu_fallback: bool,
+}
+
+impl SemanticDaemonModelAcquisition {
+    fn new(
+        backend: SemanticModelAcquisitionBackend,
+        source: SemanticModelAcquisitionSource,
+    ) -> Self {
+        Self {
+            backend,
+            assets: backend,
+            model_variant: backend.model_variant(),
+            source,
+            fallback: None,
+            allow_cpu_fallback: false,
+        }
+    }
+
+    fn with_fallback(mut self, fallback: &'static str) -> Self {
+        self.fallback = Some(fallback);
+        self
+    }
+
+    fn allowing_cpu_fallback_for_auto(mut self) -> Self {
+        self.allow_cpu_fallback = true;
+        self
+    }
+
+    fn as_cpu_fallback_for(mut self, assets: SemanticModelAcquisitionBackend) -> Self {
+        self.backend = SemanticModelAcquisitionBackend::Cpu;
+        self.assets = assets;
+        self.model_variant = assets.model_variant();
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn verified_cpu_cache_for_test() -> Self {
+        Self::new(
+            SemanticModelAcquisitionBackend::Cpu,
+            SemanticModelAcquisitionSource::Cache,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn verified_coreml_cache_for_test() -> Self {
+        Self::new(
+            SemanticModelAcquisitionBackend::CoreMl,
+            SemanticModelAcquisitionSource::Cache,
+        )
+        .allowing_cpu_fallback_for_auto()
+    }
+
+    #[cfg(test)]
+    pub(super) fn downloaded_cpu_fallback_for_test(fallback: &'static str) -> Self {
+        Self::new(
+            SemanticModelAcquisitionBackend::Cpu,
+            SemanticModelAcquisitionSource::Download,
+        )
+        .with_fallback(fallback)
+    }
+
+    #[cfg(test)]
+    pub(super) fn fallback(self) -> Option<&'static str> {
+        self.fallback
+    }
+
+    #[cfg(test)]
+    pub(super) fn source(self) -> &'static str {
+        self.source.as_str()
+    }
+
+    #[cfg(ctx_semantic_fastembed)]
+    fn apply_to(self, embedder: &mut SemanticEmbedder) {
+        if embedder.backend.kind() == self.backend.kind() {
+            embedder.acquisition_source = self.source.as_str();
+            embedder.acquisition_fallback = self.fallback;
+        }
+    }
+
+    #[cfg(not(ctx_semantic_fastembed))]
+    fn apply_to(self, _embedder: &mut SemanticEmbedder) {}
+}
+
+#[derive(Debug)]
+pub(super) struct SemanticDaemonCpuFallbackRequired {
+    reason: &'static str,
+    accelerator_error: String,
+}
+
+impl SemanticDaemonCpuFallbackRequired {
+    fn new(reason: &'static str, error: &anyhow::Error) -> Self {
+        Self {
+            reason,
+            accelerator_error: format!("{error:#}"),
+        }
+    }
+
+    pub(super) fn reason(&self) -> &'static str {
+        self.reason
+    }
+}
+
+impl fmt::Display for SemanticDaemonCpuFallbackRequired {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "daemon CPU fallback required after accelerator load failure: {}",
+            self.accelerator_error
+        )
+    }
+}
+
+impl std::error::Error for SemanticDaemonCpuFallbackRequired {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SemanticEmbeddingRuntimeInfo {
     preference: BackendPreference,
-    backend: &'static str,
+    backend: SemanticBackendKind,
+    assets_backend: SemanticBackendKind,
+    model_variant: Option<SemanticOrtModelVariant>,
     compute_class: SemanticComputeClass,
     compute_mode: Option<&'static str>,
     acquisition_source: &'static str,
     acquisition_fallback: Option<&'static str>,
+    runtime_artifact_identity: String,
+    model_fingerprint: String,
+    backend_fingerprint: String,
+    canary_passed: bool,
 }
 
 impl SemanticEmbeddingRuntimeInfo {
     pub(super) fn to_json(&self) -> Value {
         compact_json(json!({
             "preference": self.preference.as_str(),
-            "backend": self.backend,
+            "backend": self.backend.as_str(),
+            "execution_provider": self.backend.execution_provider(),
             "compute_class": self.compute_class.as_str(),
             "compute_mode": self.compute_mode,
             "model_id": SEMANTIC_MODEL_ID,
             "model_key": semantic_model_key(),
+            "model_contract": SEMANTIC_BACKEND,
+            "model_contract_version": SEMANTIC_MODEL_CONTRACT_VERSION,
+            "model_variant": self.model_variant.map(SemanticOrtModelVariant::as_str),
+            "model_fingerprint": self.model_fingerprint,
+            "backend_fingerprint": self.backend_fingerprint,
+            "runtime_artifact_identity": self.runtime_artifact_identity,
             "dimensions": SEMANTIC_DIMENSIONS,
+            "canary": if self.canary_passed { "passed" } else { "not_run" },
             "acquisition_source": self.acquisition_source,
             "acquisition_fallback": self.acquisition_fallback,
         }))
@@ -280,7 +494,14 @@ impl SemanticEmbeddingRuntimeInfo {
 
 #[cfg(ctx_semantic_fastembed)]
 enum SemanticEmbeddingBackend {
-    Cpu(fastembed::TextEmbedding),
+    Ort {
+        model: fastembed::TextEmbedding,
+        kind: SemanticBackendKind,
+        assets: SemanticBackendKind,
+        variant: SemanticOrtModelVariant,
+        runtime_artifact_identity: String,
+        _windows_ml_registration: Option<windows_ml::WindowsMlProviderRegistration>,
+    },
     #[cfg(target_os = "macos")]
     CoreMl(CoreMlE5Embedder),
 }
@@ -290,7 +511,7 @@ impl SemanticEmbeddingBackend {
     pub(super) fn embed_query(&mut self, query: String) -> Result<Vec<f32>> {
         let query = semantic_e5_query_text_value(&query);
         let raw = match self {
-            Self::Cpu(model) => model
+            Self::Ort { model, .. } => model
                 .embed(vec![query], Some(1))
                 .with_context(|| format!("embed query with semantic model {SEMANTIC_MODEL_ID}"))?,
             #[cfg(target_os = "macos")]
@@ -316,26 +537,59 @@ impl SemanticEmbeddingBackend {
             .map(|text| semantic_e5_passage_text(&text))
             .collect::<Vec<_>>();
         let raw = match self {
-            Self::Cpu(model) => model.embed(documents, Some(batch_size)).with_context(|| {
-                format!("embed documents with semantic model {SEMANTIC_MODEL_ID}")
-            })?,
+            Self::Ort { model, .. } => {
+                model.embed(documents, Some(batch_size)).with_context(|| {
+                    format!("embed documents with semantic model {SEMANTIC_MODEL_ID}")
+                })?
+            }
             #[cfg(target_os = "macos")]
             Self::CoreMl(model) => model.embed_documents(documents)?,
         };
         normalize_and_validate_embeddings(raw, expected)
     }
 
-    pub(super) fn name(&self) -> &'static str {
+    pub(super) fn kind(&self) -> SemanticBackendKind {
         match self {
-            Self::Cpu(_) => "cpu",
+            Self::Ort { kind, .. } => *kind,
             #[cfg(target_os = "macos")]
-            Self::CoreMl(_) => "coreml",
+            Self::CoreMl(_) => SemanticBackendKind::CoreMl,
+        }
+    }
+
+    pub(super) fn model_variant(&self) -> Option<SemanticOrtModelVariant> {
+        match self {
+            Self::Ort { variant, .. } => Some(*variant),
+            #[cfg(target_os = "macos")]
+            Self::CoreMl(_) => None,
+        }
+    }
+
+    pub(super) fn assets_backend(&self) -> SemanticBackendKind {
+        match self {
+            Self::Ort { assets, .. } => *assets,
+            #[cfg(target_os = "macos")]
+            Self::CoreMl(_) => SemanticBackendKind::CoreMl,
+        }
+    }
+
+    pub(super) fn runtime_artifact_identity(&self) -> String {
+        match self {
+            Self::Ort {
+                runtime_artifact_identity,
+                ..
+            } => runtime_artifact_identity.clone(),
+            #[cfg(target_os = "macos")]
+            Self::CoreMl(_) => "coreml-native:0.2.0".to_owned(),
         }
     }
 
     pub(super) fn compute_class(&self) -> SemanticComputeClass {
         match self {
-            Self::Cpu(_) => SemanticComputeClass::Cpu,
+            Self::Ort {
+                kind: SemanticBackendKind::Cpu,
+                ..
+            } => SemanticComputeClass::Cpu,
+            Self::Ort { .. } => SemanticComputeClass::Accelerator,
             #[cfg(target_os = "macos")]
             Self::CoreMl(model) => model.compute_class(),
         }
@@ -343,7 +597,11 @@ impl SemanticEmbeddingBackend {
 
     pub(super) fn compute_mode(&self) -> Option<&'static str> {
         match self {
-            Self::Cpu(_) => None,
+            Self::Ort {
+                kind: SemanticBackendKind::WindowsMl,
+                ..
+            } => Some("gpu_high_performance"),
+            Self::Ort { .. } => None,
             #[cfg(target_os = "macos")]
             Self::CoreMl(model) => Some(model.compute_mode()),
         }
@@ -358,6 +616,9 @@ pub(super) struct SemanticEmbedder {
     preference: BackendPreference,
     acquisition_source: &'static str,
     acquisition_fallback: Option<&'static str>,
+    model_fingerprint: String,
+    backend_fingerprint: String,
+    canary_passed: bool,
 }
 
 #[cfg(ctx_semantic_fastembed)]
@@ -371,13 +632,20 @@ impl SemanticEmbedder {
     }
 
     pub(super) fn runtime_info(&self) -> SemanticEmbeddingRuntimeInfo {
+        let backend = self.backend.kind();
         SemanticEmbeddingRuntimeInfo {
             preference: self.preference,
-            backend: self.backend.name(),
+            backend,
+            assets_backend: self.backend.assets_backend(),
+            model_variant: self.backend.model_variant(),
             compute_class: self.backend.compute_class(),
             compute_mode: self.backend.compute_mode(),
             acquisition_source: self.acquisition_source,
             acquisition_fallback: self.acquisition_fallback,
+            runtime_artifact_identity: self.backend.runtime_artifact_identity(),
+            model_fingerprint: self.model_fingerprint.clone(),
+            backend_fingerprint: self.backend_fingerprint.clone(),
+            canary_passed: self.canary_passed,
         }
     }
 
@@ -429,52 +697,188 @@ pub(super) fn normalize_and_validate_embeddings(
 }
 
 #[cfg(ctx_semantic_fastembed)]
-fn acquire_semantic_embedder_with_mode(
-    cache_dir: &Path,
-    access: SemanticModelAccess,
-) -> Result<SemanticEmbedder> {
+fn acquire_semantic_embedder_from_cache(cache_dir: &Path) -> Result<SemanticEmbedder> {
     let preference = BackendPreference::from_env()?;
-    match preference {
+    let acquired = match preference {
         BackendPreference::Cpu => acquire_cpu_backend(
             cache_dir,
             semantic_embed_policy_for(SemanticComputeClass::Cpu),
             preference,
-            access.network_allowed(),
         ),
-        BackendPreference::CoreMl => {
-            acquire_coreml_backend(cache_dir, preference, None, access.network_allowed())
+        BackendPreference::CoreMl => acquire_coreml_backend(cache_dir, preference, None),
+        BackendPreference::Cuda => {
+            acquire_accelerator_backend(cache_dir, preference, SemanticBackendKind::OrtCuda)
+        }
+        BackendPreference::WindowsMl => {
+            acquire_accelerator_backend(cache_dir, preference, SemanticBackendKind::WindowsMl)
         }
         BackendPreference::Auto => {
             #[cfg(target_os = "macos")]
             {
-                match acquire_coreml_backend(cache_dir, preference, None, access.network_allowed())
-                {
-                    Ok(embedder) => Ok(embedder),
-                    Err(error) if semantic_model_acquisition_integrity_error(&error) => Err(error),
-                    Err(error) => {
-                        let fallback = coreml_fallback_reason(&error);
+                acquire_auto_coreml_backend_with(
+                    || {
+                        acquire_coreml_backend(cache_dir, preference, None)
+                            .and_then(authorize_loaded_backend)
+                    },
+                    |fallback| {
                         acquire_cpu_backend(
                             cache_dir,
                             semantic_embed_policy_for(SemanticComputeClass::Cpu),
                             preference,
-                            access.network_allowed(),
                         )
                         .map(|mut embedder| {
                             embedder.acquisition_fallback = Some(fallback);
                             embedder
                         })
-                    }
-                }
+                    },
+                )
             }
             #[cfg(not(target_os = "macos"))]
             {
-                acquire_cpu_backend(
-                    cache_dir,
-                    semantic_embed_policy_for(SemanticComputeClass::Cpu),
-                    preference,
-                    access.network_allowed(),
+                match automatic_ort_accelerator_backend() {
+                    Some(kind) => match acquire_accelerator_backend(cache_dir, preference, kind) {
+                        Ok(embedder) => Ok(embedder),
+                        Err(error) => acquire_cpu_fallback_backend(
+                            cache_dir,
+                            semantic_embed_policy_for(SemanticComputeClass::Cpu),
+                            preference,
+                            kind,
+                        )
+                        .map(|mut embedder| {
+                            embedder.acquisition_fallback = Some(accelerator_fallback_reason(kind));
+                            embedder
+                        })
+                        .with_context(|| {
+                            format!(
+                                "accelerator {} was unusable and CPU fallback failed: {error:#}",
+                                kind.as_str()
+                            )
+                        }),
+                    },
+                    None => acquire_cpu_backend(
+                        cache_dir,
+                        semantic_embed_policy_for(SemanticComputeClass::Cpu),
+                        preference,
+                    ),
+                }
+            }
+        }
+    }?;
+    authorize_loaded_backend(acquired)
+}
+
+#[cfg(ctx_semantic_fastembed)]
+fn acquire_semantic_embedder_after_daemon_acquisition(
+    cache_dir: &Path,
+    acquisition: SemanticDaemonModelAcquisition,
+) -> Result<SemanticEmbedder> {
+    let preference = BackendPreference::from_env()?;
+    let acquired = match acquisition.backend {
+        SemanticModelAcquisitionBackend::Cpu => acquire_ort_backend(
+            cache_dir,
+            semantic_embed_policy_for(SemanticComputeClass::Cpu),
+            preference,
+            SemanticBackendKind::Cpu,
+            acquisition.assets.kind(),
+        ),
+        SemanticModelAcquisitionBackend::CoreMl => {
+            match acquire_coreml_backend(cache_dir, preference, None)
+                .and_then(authorize_loaded_backend)
+            {
+                Ok(embedder) => Ok(embedder),
+                #[cfg(any(target_os = "macos", test))]
+                Err(error) => Err(map_daemon_coreml_load_error(acquisition, error)),
+                #[cfg(not(any(target_os = "macos", test)))]
+                Err(error) => Err(error),
+            }
+        }
+        SemanticModelAcquisitionBackend::Cuda | SemanticModelAcquisitionBackend::WindowsMl => {
+            let kind = acquisition.backend.kind();
+            acquire_accelerator_backend(cache_dir, preference, kind)
+                .map_err(|error| map_daemon_accelerator_load_error(acquisition, error))
+        }
+    }?;
+    authorize_loaded_backend(acquired)
+}
+
+#[cfg(all(ctx_semantic_fastembed, any(target_os = "macos", test)))]
+pub(super) fn map_daemon_coreml_load_error(
+    acquisition: SemanticDaemonModelAcquisition,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    if acquisition.allow_cpu_fallback
+        && error.downcast_ref::<SemanticModelLoadDeferred>().is_none()
+        && !semantic_model_acquisition_integrity_error(&error)
+    {
+        let fallback = coreml_fallback_reason(&error);
+        SemanticDaemonCpuFallbackRequired::new(fallback, &error).into()
+    } else {
+        error
+    }
+}
+
+#[cfg(ctx_semantic_fastembed)]
+fn acquire_semantic_model_for_daemon(cache_dir: &Path) -> Result<SemanticDaemonModelAcquisition> {
+    let preference = BackendPreference::from_env()?;
+    match preference {
+        BackendPreference::Cpu => acquire_cpu_model_for_daemon(cache_dir),
+        BackendPreference::CoreMl => acquire_coreml_model_for_daemon(cache_dir),
+        BackendPreference::Cuda => {
+            acquire_accelerator_model_for_daemon(cache_dir, SemanticModelAcquisitionBackend::Cuda)
+        }
+        BackendPreference::WindowsMl => acquire_accelerator_model_for_daemon(
+            cache_dir,
+            SemanticModelAcquisitionBackend::WindowsMl,
+        ),
+        BackendPreference::Auto => {
+            #[cfg(target_os = "macos")]
+            {
+                acquire_auto_semantic_model_for_daemon_with(
+                    || acquire_coreml_model_for_daemon(cache_dir),
+                    || acquire_cpu_model_for_daemon(cache_dir),
                 )
             }
+            #[cfg(not(target_os = "macos"))]
+            {
+                match automatic_ort_accelerator_backend() {
+                    Some(kind) => {
+                        let backend = match kind {
+                            SemanticBackendKind::OrtCuda => SemanticModelAcquisitionBackend::Cuda,
+                            SemanticBackendKind::WindowsMl => {
+                                SemanticModelAcquisitionBackend::WindowsMl
+                            }
+                            _ => unreachable!(),
+                        };
+                        match acquire_accelerator_model_for_daemon(cache_dir, backend) {
+                            Ok(acquisition) => Ok(acquisition.allowing_cpu_fallback_for_auto()),
+                            Err(_) => acquire_cpu_model_for_daemon(cache_dir).map(|acquisition| {
+                                acquisition.with_fallback(accelerator_fallback_reason(kind))
+                            }),
+                        }
+                    }
+                    None => acquire_cpu_model_for_daemon(cache_dir),
+                }
+            }
+        }
+    }
+}
+
+#[cfg(all(ctx_semantic_fastembed, any(target_os = "macos", test)))]
+fn acquire_auto_semantic_model_for_daemon_with<CoreMl, Cpu>(
+    acquire_coreml: CoreMl,
+    acquire_cpu: Cpu,
+) -> Result<SemanticDaemonModelAcquisition>
+where
+    CoreMl: FnOnce() -> Result<SemanticDaemonModelAcquisition>,
+    Cpu: FnOnce() -> Result<SemanticDaemonModelAcquisition>,
+{
+    match acquire_coreml() {
+        Ok(acquisition) => Ok(acquisition.allowing_cpu_fallback_for_auto()),
+        Err(error) if error.downcast_ref::<SemanticModelLoadDeferred>().is_some() => Err(error),
+        Err(error) if semantic_model_acquisition_integrity_error(&error) => Err(error),
+        Err(error) => {
+            let fallback = coreml_fallback_reason(&error);
+            acquire_cpu().map(|acquisition| acquisition.with_fallback(fallback))
         }
     }
 }
@@ -484,150 +888,110 @@ fn reacquire_semantic_embedder(
     cache_dir: &Path,
     runtime: &SemanticEmbeddingRuntimeInfo,
 ) -> Result<SemanticEmbedder> {
-    match runtime.backend {
-        "cpu" => acquire_cpu_backend(
+    let acquired = match runtime.backend {
+        SemanticBackendKind::Cpu => acquire_ort_backend(
             cache_dir,
             semantic_embed_policy_for(SemanticComputeClass::Cpu),
             runtime.preference,
-            false,
+            SemanticBackendKind::Cpu,
+            runtime.assets_backend,
         )
         .map(|mut embedder| {
             embedder.acquisition_fallback = runtime.acquisition_fallback;
             embedder
         }),
-        "coreml" => acquire_coreml_backend(
-            cache_dir,
+        SemanticBackendKind::CoreMl => recover_coreml_after_inference_with(
             runtime.preference,
-            runtime.acquisition_fallback,
-            false,
+            || acquire_coreml_backend(cache_dir, runtime.preference, runtime.acquisition_fallback),
+            || {
+                acquire_cpu_backend(
+                    cache_dir,
+                    semantic_embed_policy_for(SemanticComputeClass::Cpu),
+                    runtime.preference,
+                )
+                .map(|mut embedder| {
+                    embedder.acquisition_fallback =
+                        Some(accelerator_fallback_reason(SemanticBackendKind::CoreMl));
+                    embedder
+                })
+            },
         ),
-        backend => Err(anyhow!(
-            "cannot reacquire unsupported semantic backend {backend:?}"
-        )),
-    }
+        SemanticBackendKind::OrtCuda | SemanticBackendKind::WindowsMl => {
+            acquire_cpu_fallback_backend(
+                cache_dir,
+                semantic_embed_policy_for(SemanticComputeClass::Cpu),
+                runtime.preference,
+                runtime.assets_backend,
+            )
+            .map(|mut embedder| {
+                embedder.acquisition_fallback = Some(accelerator_fallback_reason(runtime.backend));
+                embedder
+            })
+        }
+    }?;
+    authorize_loaded_backend(acquired)
 }
 
 mod cpu;
-#[cfg(all(ctx_semantic_fastembed, not(test)))]
-use cpu::acquire_cpu_backend;
 #[cfg(all(test, ctx_semantic_fastembed))]
 pub(super) use cpu::acquire_cpu_backend;
+pub(crate) use cpu::prepare_platform_semantic_acceleration;
+pub(super) use cpu::BackendPreference;
+#[cfg(all(ctx_semantic_fastembed, not(test)))]
+use cpu::{
+    accelerator_fallback_reason, acquire_accelerator_backend, acquire_accelerator_model_for_daemon,
+    acquire_cpu_backend, acquire_cpu_fallback_backend, acquire_cpu_model_for_daemon,
+    acquire_ort_backend, authorize_loaded_backend, automatic_ort_accelerator_backend,
+    map_daemon_accelerator_load_error,
+};
+#[cfg(all(test, ctx_semantic_fastembed))]
+use cpu::{
+    accelerator_fallback_reason, acquire_accelerator_backend, acquire_accelerator_model_for_daemon,
+    acquire_cpu_fallback_backend, acquire_cpu_model_for_daemon, acquire_ort_backend,
+    authorize_loaded_backend, automatic_ort_accelerator_backend, map_daemon_accelerator_load_error,
+    run_semantic_contract_canary, semantic_backend_requires_contract_canary,
+    SemanticContractCanaryExecutor,
+};
+pub(crate) use cpu::{semantic_native_accelerator_target, SemanticNativeAcceleratorTarget};
 mod coreml;
-#[cfg(ctx_semantic_fastembed)]
-use coreml::acquire_coreml_backend;
 #[cfg(test)]
 use coreml::*;
 #[cfg(all(ctx_semantic_fastembed, target_os = "macos"))]
-use coreml::{coreml_fallback_reason, CoreMlE5Embedder};
+use coreml::{acquire_auto_coreml_backend_with, coreml_fallback_reason, CoreMlE5Embedder};
+#[cfg(ctx_semantic_fastembed)]
+use coreml::{
+    acquire_coreml_backend, acquire_coreml_model_for_daemon, recover_coreml_after_inference_with,
+};
 #[cfg(all(test, ctx_semantic_fastembed))]
 pub(super) use coreml::{pad_texts_to_exact_batch, semantic_fixed_shape_from_values};
 mod cache;
 mod onnx;
+mod windows_ml;
 #[cfg(ctx_semantic_fastembed)]
 pub(super) use cache::{
-    maybe_cleanup_semantic_cpu_download_cache_after_cached_acquisition, read_semantic_model_file,
-    replace_cpu_model_cache_from_pinned_revision, semantic_cpu_cache_repairable,
-    semantic_cpu_cache_snapshot,
+    maybe_cleanup_semantic_cpu_download_cache_after_cached_acquisition,
+    read_semantic_ort_model_file, replace_cpu_model_cache_from_pinned_revision,
+    semantic_cpu_cache_repairable, semantic_cpu_cache_snapshot, semantic_ort_cache_snapshot,
 };
+#[cfg(all(test, ctx_semantic_fastembed))]
+pub(super) use onnx::load_missing_semantic_onnxruntime_for_test;
 
 #[cfg(not(ctx_semantic_fastembed))]
 pub(super) struct SemanticEmbedder;
 
 #[cfg(not(ctx_semantic_fastembed))]
-fn acquire_semantic_embedder_with_mode(
-    _cache_dir: &Path,
-    _access: SemanticModelAccess,
-) -> Result<SemanticEmbedder> {
+fn acquire_semantic_embedder_from_cache(_cache_dir: &Path) -> Result<SemanticEmbedder> {
+    Err(anyhow!(
+        "semantic embedding model {SEMANTIC_MODEL_ID} is not supported on this platform"
+    ))
+}
+
+#[cfg(not(ctx_semantic_fastembed))]
+fn acquire_semantic_model_for_daemon(_cache_dir: &Path) -> Result<SemanticDaemonModelAcquisition> {
     Err(anyhow!(
         "semantic embedding model {SEMANTIC_MODEL_ID} is not supported on this platform"
     ))
 }
 
 #[cfg(all(test, ctx_semantic_fastembed))]
-mod embedding_backend_tests {
-    use super::*;
-
-    #[test]
-    pub(super) fn backend_preference_is_strict() {
-        assert_eq!(
-            BackendPreference::parse(None).unwrap(),
-            BackendPreference::Auto
-        );
-        assert_eq!(
-            BackendPreference::parse(Some("cpu")).unwrap(),
-            BackendPreference::Cpu
-        );
-        assert_eq!(
-            BackendPreference::parse(Some("coreml")).unwrap(),
-            BackendPreference::CoreMl
-        );
-        assert!(BackendPreference::parse(Some("gpu")).is_err());
-        assert!(BackendPreference::parse(Some("CPU")).is_err());
-    }
-
-    #[test]
-    pub(super) fn foreground_model_access_is_cache_only() {
-        assert!(!SemanticModelAccess::ForegroundCacheOnly.network_allowed());
-        assert!(SemanticModelAccess::DaemonNetwork.network_allowed());
-    }
-
-    #[test]
-    pub(super) fn coreml_cpu_only_uses_cpu_quiet_policy_class() {
-        let cpu_only = CoreMlComputeMode::parse("cpu").unwrap();
-        assert_eq!(cpu_only.compute_class(), SemanticComputeClass::Cpu);
-        assert_eq!(cpu_only.as_str(), "cpu_only");
-        let all = CoreMlComputeMode::parse("all").unwrap();
-        assert_eq!(all.compute_class(), SemanticComputeClass::Accelerator);
-
-        let available = 5 * 512 * 1024 * 1024;
-        assert!(semantic_model_load_deferred(Some(available), cpu_only.compute_class()).is_none());
-        assert!(semantic_model_load_deferred(Some(available), all.compute_class()).is_some());
-    }
-
-    #[test]
-    pub(super) fn normalization_is_central_and_strict() {
-        let mut vector = vec![0.0; SEMANTIC_DIMENSIONS];
-        vector[0] = 3.0;
-        vector[1] = 4.0;
-        let normalized = normalize_and_validate_embeddings(vec![vector], 1).unwrap();
-        assert!((normalized[0][0] - 0.6).abs() < 1e-6);
-        assert!((normalized[0][1] - 0.8).abs() < 1e-6);
-
-        assert!(normalize_and_validate_embeddings(Vec::new(), 1).is_err());
-        assert!(normalize_and_validate_embeddings(vec![vec![1.0]], 1).is_err());
-        assert!(
-            normalize_and_validate_embeddings(vec![vec![0.0; SEMANTIC_DIMENSIONS]], 1).is_err()
-        );
-        let mut non_finite = vec![1.0; SEMANTIC_DIMENSIONS];
-        non_finite[0] = f32::NAN;
-        assert!(normalize_and_validate_embeddings(vec![non_finite], 1).is_err());
-    }
-
-    #[test]
-    pub(super) fn runtime_info_keeps_space_identity_backend_independent() {
-        let cpu = SemanticEmbeddingRuntimeInfo {
-            preference: BackendPreference::Auto,
-            backend: "cpu",
-            compute_class: SemanticComputeClass::Cpu,
-            compute_mode: None,
-            acquisition_source: "cache",
-            acquisition_fallback: None,
-        };
-        let coreml = SemanticEmbeddingRuntimeInfo {
-            backend: "coreml",
-            ..cpu.clone()
-        };
-        assert_eq!(cpu.to_json()["model_key"], coreml.to_json()["model_key"]);
-        assert_ne!(cpu.to_json()["backend"], coreml.to_json()["backend"]);
-    }
-
-    #[test]
-    pub(super) fn shared_runtime_clones_one_model_state_owner() {
-        let runtime = SharedSemanticRuntime::default();
-        let query_runtime = runtime.clone();
-
-        assert!(Arc::ptr_eq(&runtime.embedder, &query_runtime.embedder));
-        assert!(!runtime.is_loaded());
-        assert!(!query_runtime.is_loaded());
-    }
-}
+mod tests;

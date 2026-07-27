@@ -10,7 +10,10 @@ pub(crate) enum CountBucket {
     SixToTwenty,
     TwentyOneToOneHundred,
     OneHundredOneToOneThousand,
-    OverOneThousand,
+    OneThousandOneToTenThousand,
+    TenThousandOneToOneHundredThousand,
+    OneHundredThousandOneToOneMillion,
+    OverOneMillion,
 }
 
 impl CountBucket {
@@ -22,7 +25,10 @@ impl CountBucket {
             Self::SixToTwenty => "6-20",
             Self::TwentyOneToOneHundred => "21-100",
             Self::OneHundredOneToOneThousand => "101-1k",
-            Self::OverOneThousand => "1k+",
+            Self::OneThousandOneToTenThousand => "1k-10k",
+            Self::TenThousandOneToOneHundredThousand => "10k-100k",
+            Self::OneHundredThousandOneToOneMillion => "100k-1m",
+            Self::OverOneMillion => "1m+",
         }
     }
 }
@@ -35,7 +41,10 @@ pub(crate) fn count_bucket(count: u64) -> CountBucket {
         6..=20 => CountBucket::SixToTwenty,
         21..=100 => CountBucket::TwentyOneToOneHundred,
         101..=1_000 => CountBucket::OneHundredOneToOneThousand,
-        _ => CountBucket::OverOneThousand,
+        1_001..=10_000 => CountBucket::OneThousandOneToTenThousand,
+        10_001..=100_000 => CountBucket::TenThousandOneToOneHundredThousand,
+        100_001..=1_000_000 => CountBucket::OneHundredThousandOneToOneMillion,
+        _ => CountBucket::OverOneMillion,
     }
 }
 
@@ -47,7 +56,9 @@ pub(crate) enum BytesBucket {
     OneToTenMb,
     TenToOneHundredMb,
     OneHundredMbToOneGb,
-    OverOneGb,
+    OneToTenGb,
+    TenToOneHundredGb,
+    OverOneHundredGb,
 }
 
 impl BytesBucket {
@@ -59,7 +70,9 @@ impl BytesBucket {
             Self::OneToTenMb => "1mb-10mb",
             Self::TenToOneHundredMb => "10mb-100mb",
             Self::OneHundredMbToOneGb => "100mb-1gb",
-            Self::OverOneGb => "1gb+",
+            Self::OneToTenGb => "1gb-10gb",
+            Self::TenToOneHundredGb => "10gb-100gb",
+            Self::OverOneHundredGb => "100gb+",
         }
     }
 }
@@ -72,7 +85,9 @@ pub(crate) fn bytes_bucket(bytes: u64) -> BytesBucket {
         1_048_576..=10_485_759 => BytesBucket::OneToTenMb,
         10_485_760..=104_857_599 => BytesBucket::TenToOneHundredMb,
         104_857_600..=1_073_741_823 => BytesBucket::OneHundredMbToOneGb,
-        _ => BytesBucket::OverOneGb,
+        1_073_741_824..=10_737_418_239 => BytesBucket::OneToTenGb,
+        10_737_418_240..=107_374_182_399 => BytesBucket::TenToOneHundredGb,
+        _ => BytesBucket::OverOneHundredGb,
     }
 }
 
@@ -109,21 +124,29 @@ pub(crate) fn text_length_bucket(chars: usize) -> TextLengthBucket {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DurationBucket {
+    Unknown,
     UnderOneHundredMs,
     UnderOneSecond,
     UnderFiveSeconds,
     UnderThirtySeconds,
-    AtLeastThirtySeconds,
+    UnderTwoMinutes,
+    UnderTenMinutes,
+    UnderOneHour,
+    AtLeastOneHour,
 }
 
 impl DurationBucket {
     pub(super) fn as_str(self) -> &'static str {
         match self {
+            Self::Unknown => "unknown",
             Self::UnderOneHundredMs => "lt_100ms",
             Self::UnderOneSecond => "lt_1s",
             Self::UnderFiveSeconds => "lt_5s",
             Self::UnderThirtySeconds => "lt_30s",
-            Self::AtLeastThirtySeconds => "gte_30s",
+            Self::UnderTwoMinutes => "lt_2m",
+            Self::UnderTenMinutes => "lt_10m",
+            Self::UnderOneHour => "lt_1h",
+            Self::AtLeastOneHour => "gte_1h",
         }
     }
 }
@@ -134,7 +157,10 @@ pub(crate) fn duration_bucket(duration: Duration) -> DurationBucket {
         100..=999 => DurationBucket::UnderOneSecond,
         1_000..=4_999 => DurationBucket::UnderFiveSeconds,
         5_000..=29_999 => DurationBucket::UnderThirtySeconds,
-        _ => DurationBucket::AtLeastThirtySeconds,
+        30_000..=119_999 => DurationBucket::UnderTwoMinutes,
+        120_000..=599_999 => DurationBucket::UnderTenMinutes,
+        600_000..=3_599_999 => DurationBucket::UnderOneHour,
+        _ => DurationBucket::AtLeastOneHour,
     }
 }
 

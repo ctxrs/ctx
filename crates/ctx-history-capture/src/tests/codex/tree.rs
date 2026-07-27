@@ -71,7 +71,8 @@ fn codex_session_paths_imports_only_explicit_subset() {
 
     assert_eq!(summary.failed, 0, "{:?}", summary.failures);
     assert_eq!(summary.imported_sessions, 1);
-    assert_eq!(summary.imported_events, 6);
+    assert_eq!(summary.imported_events, 5);
+    assert_eq!(summary.skipped_events, 1);
     assert_eq!(summary.imported_edges, 0);
     assert_eq!(store.list_sessions().unwrap().len(), 1);
     let root_id = stored_provider_session_id(&store, CaptureProvider::Codex, "codex-session-root");
@@ -81,7 +82,7 @@ fn codex_session_paths_imports_only_explicit_subset() {
         &fixture,
         "codex-session-child",
     );
-    assert_eq!(store.events_for_session(root_id).unwrap().len(), 6);
+    assert_eq!(store.events_for_session(root_id).unwrap().len(), 5);
     assert!(store.events_for_session(child_id).unwrap().is_empty());
 
     let progress = progress.lock().unwrap();
@@ -109,7 +110,8 @@ fn codex_session_paths_reimport_skips_existing_events() {
     .unwrap();
     assert_eq!(first.failed, 0, "{:?}", first.failures);
     assert_eq!(first.imported_sessions, 2);
-    assert_eq!(first.imported_events, 8);
+    assert_eq!(first.imported_events, 7);
+    assert_eq!(first.skipped_events, 1);
     assert_eq!(first.imported_edges, 1);
 
     let second = import_codex_session_paths(

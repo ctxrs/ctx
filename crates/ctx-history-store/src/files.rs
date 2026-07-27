@@ -96,6 +96,17 @@ impl Store {
             .is_some())
     }
 
+    pub(crate) fn get_file_touched(&self, id: Uuid) -> Result<FileTouched> {
+        self.conn
+            .query_row(
+                file_touched_select_sql("WHERE id = ?1").as_str(),
+                params![id.to_string()],
+                file_touched_from_row,
+            )
+            .optional()?
+            .ok_or(crate::StoreError::NotFound(id))
+    }
+
     pub(crate) fn list_files_touched(&self) -> Result<Vec<FileTouched>> {
         let mut stmt = self
             .conn

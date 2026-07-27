@@ -10,8 +10,28 @@ use anyhow::{bail, Context, Result};
 use crate::deprecated_controls::DeprecatedControls;
 
 pub const CONFIG_FILE: &str = "config.toml";
+pub const AUTO_UPGRADE_DEFAULT_MODE: &str = "apply";
 pub const DAEMON_DEFAULT_ENABLED: bool = true;
 pub const SEMANTIC_SEARCH_DEFAULT_ENABLED: bool = false;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoUpgradeMode {
+    Apply,
+    Off,
+}
+
+impl AutoUpgradeMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Apply => "apply",
+            Self::Off => "off",
+        }
+    }
+
+    pub const fn enabled(self) -> bool {
+        matches!(self, Self::Apply)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct AppConfig {
@@ -54,8 +74,8 @@ impl Default for AppConfig {
                 endpoint: "https://cli.ctx.rs/functions/v1/analytics".to_owned(),
             },
             upgrade: UpgradeConfig {
-                // `ctx upgrade` remains available, but background checks are opt-in.
-                auto: "off".to_owned(),
+                // Managed installs check and apply in the background unless explicitly disabled.
+                auto: AUTO_UPGRADE_DEFAULT_MODE.to_owned(),
                 channel: "stable".to_owned(),
                 interval: Duration::from_secs(24 * 60 * 60),
                 functions_base: "https://cli.ctx.rs/functions/v1".to_owned(),
@@ -69,6 +89,18 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
+    pub fn auto_upgrade_mode(&self) -> AutoUpgradeMode {
+        if self.upgrade.auto.eq_ignore_ascii_case("apply") {
+            AutoUpgradeMode::Apply
+        } else {
+            AutoUpgradeMode::Off
+        }
+    }
+
+    pub fn auto_upgrade_enabled(&self) -> bool {
+        self.auto_upgrade_mode().enabled()
+    }
+
     pub fn semantic_search_enabled(&self) -> bool {
         self.search
             .semantic
@@ -161,13 +193,20 @@ impl AppConfig {
                 self.analytics.endpoint = endpoint;
             }
         }
-        if let Ok(auto) = env::var("CTX_UPGRADE_AUTO") {
-            if !auto.trim().is_empty() {
-                self.upgrade.auto = auto;
+        let upgrade_config_disabled = self.auto_upgrade_mode() == AutoUpgradeMode::Off;
+        let upgrade_env_mode = match env::var("CTX_UPGRADE_AUTO") {
+            Ok(auto) if !auto.trim().is_empty() => {
+                Some(parse_upgrade_auto_text("CTX_UPGRADE_AUTO", auto.trim())?)
             }
-        }
-        if deprecated_controls.disables_auto_upgrade() {
-            self.upgrade.auto = "off".to_owned();
+            _ => None,
+        };
+        if upgrade_config_disabled
+            || upgrade_env_mode == Some(AutoUpgradeMode::Off)
+            || deprecated_controls.disables_auto_upgrade()
+        {
+            self.upgrade.auto = AutoUpgradeMode::Off.as_str().to_owned();
+        } else if upgrade_env_mode == Some(AutoUpgradeMode::Apply) {
+            self.upgrade.auto = AutoUpgradeMode::Apply.as_str().to_owned();
         }
         if let Ok(channel) = env::var("CTX_UPGRADE_CHANNEL") {
             if !channel.trim().is_empty() {
@@ -215,6 +254,14 @@ pub fn write_default_config(data_root: &Path) -> Result<()> {
 }
 
 pub fn set_daemon_enabled(data_root: &Path, enabled: bool) -> Result<()> {
+    set_config_bool(data_root, "daemon", "enabled", enabled)
+}
+
+pub fn set_semantic_search_enabled(data_root: &Path, enabled: bool) -> Result<()> {
+    set_config_bool(data_root, "search", "semantic", enabled)
+}
+
+fn set_config_bool(data_root: &Path, section: &str, key: &str, enabled: bool) -> Result<()> {
     fs::create_dir_all(data_root)?;
     let path = AppConfig::config_path(data_root);
     let text = match fs::read_to_string(&path) {
@@ -227,13 +274,16 @@ pub fn set_daemon_enabled(data_root: &Path, enabled: bool) -> Result<()> {
     config
         .apply_values(&parsed)
         .with_context(|| format!("load {}", path.display()))?;
-    let updated = set_toml_bool(&text, "daemon", "enabled", enabled);
+    let updated = set_toml_bool(&text, section, key, enabled);
     let parsed =
         parse_toml_subset(&updated).with_context(|| format!("parse updated {}", path.display()))?;
     let mut config = AppConfig::default();
     config
         .apply_values(&parsed)
         .with_context(|| format!("load updated {}", path.display()))?;
+    if updated == text {
+        return Ok(());
+    }
     fs::write(&path, updated).with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }
@@ -411,12 +461,16 @@ fn parse_config_u64(key: &str, value: &ConfigValue) -> Result<u64> {
 
 fn parse_upgrade_auto(value: &ConfigValue) -> Result<String> {
     let auto = parse_non_empty_string("upgrade.auto", value)?;
-    match auto.to_ascii_lowercase().as_str() {
-        "apply" | "off" => Ok(auto.to_ascii_lowercase()),
-        _ => bail!(
-            "upgrade.auto at line {} must be either \"apply\" or \"off\"",
-            value.line
-        ),
+    parse_upgrade_auto_text("upgrade.auto", &auto)
+        .map(|mode| mode.as_str().to_owned())
+        .with_context(|| format!("upgrade.auto at line {}", value.line))
+}
+
+fn parse_upgrade_auto_text(key: &str, value: &str) -> Result<AutoUpgradeMode> {
+    match value.to_ascii_lowercase().as_str() {
+        "apply" => Ok(AutoUpgradeMode::Apply),
+        "off" => Ok(AutoUpgradeMode::Off),
+        _ => bail!("{key} must be either \"apply\" or \"off\""),
     }
 }
 

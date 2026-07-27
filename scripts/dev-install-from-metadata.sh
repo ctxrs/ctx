@@ -5,7 +5,7 @@ expected_onnxruntime_version="1.27.0"
 
 usage() {
   cat <<'USAGE'
-usage: scripts/dev-install-from-metadata.sh --metadata PATH_OR_URL [--artifact-dir DIR] [--platform PLATFORM] [--bin-dir DIR] [--runtime-dir DIR] [--no-runtime] [--no-modify-path] [--no-setup] [--no-skill] [--skill-agent AGENT] [--all-skill-agents] [--no-man]
+usage: scripts/dev-install-from-metadata.sh --metadata PATH_OR_URL [--artifact-dir DIR] [--platform PLATFORM] [--bin-dir DIR] [--runtime-dir DIR] [--no-runtime] [--no-modify-path] [--no-setup] [--no-daemon] [--no-skill] [--skill-agent AGENT] [--all-skill-agents] [--no-man]
 
 Development/CI installer for explicit ctx release metadata.
 
@@ -37,6 +37,8 @@ Options:
                          directory is not on PATH.
   --no-setup             Install only; do not install the skill or run ctx setup
                          unless a skill flag is also passed.
+  --no-daemon            Run installer setup with ctx setup --no-daemon.
+                         CTX_INSTALL_NO_DAEMON=1 is equivalent.
   --no-skill             Do not install the bundled ctx agent skill.
   --skill-agent AGENT    Install the skill into a specific agent skill dir.
                          Repeat for multiple agents.
@@ -560,6 +562,7 @@ man_dir="${CTX_MAN_DIR:-${HOME:-}/.local/share/man/man1}"
 dry_run=0
 modify_path=1
 run_setup=1
+setup_no_daemon=0
 run_skill=1
 install_runtime=1
 no_skill_requested=0
@@ -598,6 +601,9 @@ while (($# > 0)); do
       ;;
     --no-setup)
       run_setup=0
+      ;;
+    --no-daemon)
+      setup_no_daemon=1
       ;;
     --no-skill)
       run_skill=0
@@ -708,6 +714,10 @@ fi
 
 if [[ "${CTX_INSTALL_NO_SETUP:-0}" == "1" ]]; then
   run_setup=0
+fi
+
+if [[ "${CTX_INSTALL_NO_DAEMON:-0}" == "1" ]]; then
+  setup_no_daemon=1
 fi
 
 if [[ "${CTX_INSTALL_NO_RUNTIME:-0}" == "1" ]]; then
@@ -828,13 +838,21 @@ fi
 
 if ((run_setup)); then
   setup_progress="${CTX_SETUP_PROGRESS:-auto}"
+  setup_args=(setup --progress "${setup_progress}")
+  if ((setup_no_daemon)); then
+    setup_args+=(--no-daemon)
+  fi
   printf '\nIndexing local agent history...\n'
   setup_status=0
-  if "${install_path}" setup --progress "${setup_progress}"; then
+  if "${install_path}" "${setup_args[@]}"; then
     :
   else
     setup_status=$?
-    printf 'warning: ctx setup failed after install; run %s setup --progress %s to retry\n' "${install_path}" "${setup_progress}" >&2
+    if ((setup_no_daemon)); then
+      printf 'warning: ctx setup failed after install; run %s setup --progress %s --no-daemon to retry\n' "${install_path}" "${setup_progress}" >&2
+    else
+      printf 'warning: ctx setup failed after install; run %s setup --progress %s to retry\n' "${install_path}" "${setup_progress}" >&2
+    fi
   fi
 else
   setup_status=0

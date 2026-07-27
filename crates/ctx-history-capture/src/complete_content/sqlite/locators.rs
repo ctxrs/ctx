@@ -189,12 +189,12 @@ pub(super) fn decode_kiro_rowid(
     Ok((table, (encoded ^ (1_u64 << 63)) as i64))
 }
 
-pub(super) fn optional_integer(value: Option<i64>) -> CapturedSqliteValue {
-    value.map_or(CapturedSqliteValue::Null, CapturedSqliteValue::Integer)
+pub(super) fn optional_integer(value: Option<i64>) -> NativeSqliteValue {
+    value.map_or(NativeSqliteValue::Null, NativeSqliteValue::Integer)
 }
 
-pub(super) fn optional_text(value: Option<String>) -> CapturedSqliteValue {
-    value.map_or(CapturedSqliteValue::Null, CapturedSqliteValue::Text)
+pub(super) fn optional_text(value: Option<String>) -> NativeSqliteValue {
+    value.map_or(NativeSqliteValue::Null, NativeSqliteValue::Text)
 }
 
 pub(super) fn optional_column<'a>(
@@ -209,40 +209,22 @@ pub(super) fn optional_column<'a>(
 }
 
 /// Adds the bounded local-only locator only when the canonical message text was
-/// actually truncated. Provider projectors call this while the exact logical
+/// actually truncated. NativePath publishers call this while the exact logical
 /// SQLite row and complete text are still available.
 pub(crate) fn attach_sqlite_complete_content_locator(
-    event: &mut ProviderEventEnvelope,
     provider: CaptureProvider,
     source_format: &str,
+    native_record_id: &str,
+    payload: &Value,
+    metadata: &mut Value,
     locator: &NativeLocator,
-    values: &[CapturedSqliteValue],
+    digest_values: &[NativeSqliteValue],
     complete_text: impl FnOnce() -> String,
 ) -> crate::Result<()> {
-    attach_sqlite_complete_content_locator_with_digest_values(
-        event,
-        provider,
-        source_format,
-        locator,
-        values,
-        complete_text,
-    )
-}
-
-pub(crate) fn attach_sqlite_complete_content_locator_with_digest_values(
-    event: &mut ProviderEventEnvelope,
-    provider: CaptureProvider,
-    source_format: &str,
-    locator: &NativeLocator,
-    digest_values: &[CapturedSqliteValue],
-    complete_text: impl FnOnce() -> String,
-) -> crate::Result<()> {
-    if event.event_type != EventType::Message
-        || event
-            .payload
-            .pointer("/text_retention/truncated")
-            .and_then(Value::as_bool)
-            != Some(true)
+    if payload
+        .pointer("/text_retention/truncated")
+        .and_then(Value::as_bool)
+        != Some(true)
     {
         return Ok(());
     }
@@ -267,120 +249,20 @@ pub(crate) fn attach_sqlite_complete_content_locator_with_digest_values(
         CompleteContentSourceFamily::Sqlite,
         locator.kind(),
         locator.value(),
-        native_record_id(event),
+        native_record_id.to_owned(),
         record_digest,
     )
     .ok_or(CaptureError::SystemInvariant(
         "SQLite complete-content locator exceeds the bounded canonical schema",
     ))?;
-    attach_verified_content_locator(&mut event.metadata, persisted).ok_or(
-        CaptureError::SystemInvariant("verified-content locator collection is malformed"),
-    )?;
-    Ok(())
-}
-
-/// Attaches a source-backed result locator and one shared content identity.
-/// Provider projectors call this while the exact logical row and full result
-/// body are transiently available; no result bytes are persisted.
-pub(crate) fn attach_sqlite_result_content_locator(
-    event: &mut ProviderEventEnvelope,
-    provider: CaptureProvider,
-    source_format: &str,
-    locator: &NativeLocator,
-    values: &[CapturedSqliteValue],
-    complete_content: Option<String>,
-) -> crate::Result<()> {
-    if !matches!(
-        event.event_type,
-        EventType::ToolOutput | EventType::CommandOutput
-    ) {
-        return Ok(());
-    }
-    let Some(complete_content) = complete_content else {
-        return Ok(());
-    };
-    if complete_content.len() > COMPLETE_CONTENT_MAX_BODY_BYTES {
-        return Ok(());
-    }
-    let content_ref = ContentRef::from_bytes(complete_content.as_bytes()).ok_or(
-        CaptureError::SystemInvariant("SQLite result length exceeds ContentRef bounds"),
-    )?;
-    let mut payload = event.payload.clone();
-    let payload_object = payload
-        .as_object_mut()
-        .ok_or(CaptureError::SystemInvariant(
-            "provider result payload must be an object",
-        ))?;
-    payload_object.insert(
-        "result_content_ref".to_owned(),
-        serde_json::to_value(&content_ref).map_err(CaptureError::Json)?,
-    );
-    let profile =
-        sqlite_result_profile(provider, source_format).ok_or(CaptureError::SystemInvariant(
-            "supported SQLite result route must have a verified-content profile",
-        ))?;
-    let persisted = VerifiedContentLocatorV1::new(
-        VerifiedContentRole::ResultBody,
-        profile,
-        content_ref,
-        CompleteContentSourceFamily::Sqlite,
-        locator.kind(),
-        locator.value(),
-        native_record_id(event),
-        sqlite_logical_record_digest(values),
-    )
-    .ok_or(CaptureError::SystemInvariant(
-        "SQLite result locator exceeds the bounded canonical schema",
+    attach_verified_content_locator(metadata, persisted).ok_or(CaptureError::SystemInvariant(
+        "verified-content locator collection is malformed",
     ))?;
-    let mut metadata = event.metadata.clone();
-    attach_verified_content_locator(&mut metadata, persisted).ok_or(
-        CaptureError::SystemInvariant("verified-content locator collection is malformed"),
-    )?;
-    event.payload = payload;
-    event.metadata = metadata;
     Ok(())
-}
-
-/// Attaches Shelley message/result addresses while the exact message and its
-/// relationship parent are both available.
-pub(crate) fn attach_shelley_content_locator(
-    event: &mut ProviderEventEnvelope,
-    message: &shelley::ShelleyMessageRow,
-    conversation: &shelley::ShelleyConversationRow,
-    parent_bearing: bool,
-    complete_text: &str,
-) -> crate::Result<()> {
-    let mut coordinate = Vec::with_capacity(17);
-    coordinate.push(if parent_bearing { 1 } else { 2 });
-    coordinate.extend_from_slice(&(message.rowid as u64 ^ (1_u64 << 63)).to_be_bytes());
-    coordinate.extend_from_slice(&(conversation.rowid as u64 ^ (1_u64 << 63)).to_be_bytes());
-    let locator = NativeLocator::new(SHELLEY_LOCATOR_KIND, coordinate).map_err(|_| {
-        CaptureError::SystemInvariant("Shelley content coordinate exceeds native locator bounds")
-    })?;
-    let values = shelley::shelley_verified_record_values(message, conversation, parent_bearing);
-    if event.event_type == EventType::Message {
-        attach_sqlite_complete_content_locator_with_digest_values(
-            event,
-            CaptureProvider::Shelley,
-            crate::SHELLEY_SQLITE_SOURCE_FORMAT,
-            &locator,
-            &values,
-            || complete_text.to_owned(),
-        )
-    } else {
-        attach_sqlite_result_content_locator(
-            event,
-            CaptureProvider::Shelley,
-            crate::SHELLEY_SQLITE_SOURCE_FORMAT,
-            &locator,
-            &values,
-            Some(complete_text.to_owned()),
-        )
-    }
 }
 
 pub(super) fn sqlite_logical_record_digest(
-    values: &[CapturedSqliteValue],
+    values: &[NativeSqliteValue],
 ) -> CompleteContentBodyDigest {
     const DOMAIN: &[u8] = b"ctx-complete-content-sqlite-logical-row-v1\0";
     let mut digest = Sha256::new();
@@ -388,21 +270,21 @@ pub(super) fn sqlite_logical_record_digest(
     digest.update((values.len() as u64).to_be_bytes());
     for value in values {
         match value {
-            CapturedSqliteValue::Null => digest.update([0]),
-            CapturedSqliteValue::Integer(value) => {
+            NativeSqliteValue::Null => digest.update([0]),
+            NativeSqliteValue::Integer(value) => {
                 digest.update([1]);
                 digest.update(value.to_be_bytes());
             }
-            CapturedSqliteValue::RealBits(value) => {
+            NativeSqliteValue::RealBits(value) => {
                 digest.update([2]);
                 digest.update(value.to_be_bytes());
             }
-            CapturedSqliteValue::Text(value) => {
+            NativeSqliteValue::Text(value) => {
                 digest.update([3]);
                 digest.update((value.len() as u64).to_be_bytes());
                 digest.update(value.as_bytes());
             }
-            CapturedSqliteValue::Blob(value) => {
+            NativeSqliteValue::Blob(value) => {
                 digest.update([4]);
                 digest.update((value.len() as u64).to_be_bytes());
                 digest.update(value);

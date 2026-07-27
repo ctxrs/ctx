@@ -8,11 +8,13 @@
         "test:analytics": "//crates/ctx-cli:analytics_tests",
         "test:analytics_identity": "//crates/ctx-cli:analytics_identity_tests",
         "test:analytics_policy": "//crates/ctx-cli:analytics_policy_tests",
+        "test:auto_upgrade_acceptance": "//crates/ctx-cli:auto_upgrade_acceptance_tests",
         "test:cli_public_help_docs": "//crates/ctx-cli:cli_public_help_docs_tests",
         "test:cloud_removed": "//crates/ctx-cli:cloud_removed_tests",
         "test:custom_root_discovery": "//crates/ctx-cli:custom_root_discovery_tests",
         "test:explicit_path_revision_upgrade": "//crates/ctx-cli:explicit_path_revision_upgrade_tests",
         "test:history_source_plugins": "//crates/ctx-cli:history_source_plugins_tests",
+        "test:import_change_reporting": "//crates/ctx-cli:import_change_reporting_tests",
         "test:index": "//crates/ctx-cli:index_tests",
         "test:integrations": "//crates/ctx-cli:integrations_tests",
         "test:integrations_mcp": "//crates/ctx-cli:integrations_mcp_tests",
@@ -33,7 +35,9 @@
         "test:setup_sources_import": "//crates/ctx-cli:setup_sources_import_tests",
         "test:skill": "//crates/ctx-cli:skill_tests",
         "test:slash_command_e2e": "//crates/ctx-cli:slash_command_e2e_tests",
+        "test:source_backed_content": "//crates/ctx-cli:source_backed_content_tests",
         "test:upgrade": "//crates/ctx-cli:upgrade_tests",
+        "test:upgrade_analytics": "//crates/ctx-cli:upgrade_analytics_tests",
         "custom-build:build-script-build": "//:cli_build_cfg_parity_check"
       },
       "native_unit": "//crates/ctx-cli:unit_tests"
@@ -42,7 +46,7 @@
       "manifest": "crates/ctx-history-capture/Cargo.toml",
       "targets": {
         "lib:ctx_history_capture": "//crates/ctx-history-capture:lib",
-        "test:captured_batch_characterization": "//crates/ctx-history-capture:captured_batch_characterization_tests",
+        "test:codex_tail_nativepath": "//crates/ctx-history-capture:codex_tail_nativepath_tests",
         "test:complete_content_jsonl": "//crates/ctx-history-capture:complete_content_jsonl_tests",
         "test:complete_content_sqlite": "//crates/ctx-history-capture:complete_content_sqlite_tests",
         "test:structured_complete_content": "//crates/ctx-history-capture:structured_complete_content_tests",

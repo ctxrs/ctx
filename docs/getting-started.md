@@ -22,9 +22,10 @@ updates the current PowerShell session. Use `sh -s -- --no-modify-path` on Unix,
 to manage `PATH` yourself.
 
 The install script installs `ctx`, runs the bundled agent-history skill
-installer, and runs `ctx setup` so discovered local history is indexed before it
-exits. Daemon maintenance is enabled by default, so that setup run can also
-start the ctx-owned background daemon for native-history freshness. Semantic
+installer, and runs `ctx setup` so discovered local history is inventoried and
+indexing begins. Daemon maintenance is enabled by default, so that setup run
+requests the ctx-owned background daemon after setup output for native-history
+freshness. Semantic
 catch-up remains disabled unless semantic search is explicitly enabled. The
 skill installer opens an agent picker when interactive;
 otherwise it installs the universal `~/.agents/skills` copy plus detected
@@ -37,14 +38,25 @@ To keep installer setup but opt out of setup daemon autostart, use
 `sh -s -- --no-daemon` on Unix, `-NoDaemon` on Windows, or set
 `CTX_INSTALL_NO_DAEMON=1`.
 
+```bash
+curl -fsSL https://ctx.rs/install | sh -s -- --no-daemon
+```
+
+```powershell
+& ([scriptblock]::Create((irm https://ctx.rs/install.ps1))) -NoDaemon
+```
+
 To skip only the skill step, use `--no-skill` on Unix or `-NoSkill` on Windows,
 or set `CTX_INSTALL_NO_SKILL=1`. To target agent-specific skill folders during
 install, use `--skill-agent codex`, repeat `--skill-agent`, or use
 `--all-skill-agents`; Windows exposes the same controls as `-SkillAgent` and
 `-AllSkillAgents`.
 
-When working from source, use `cargo build -p ctx` or
-`cargo install --path crates/ctx-cli`.
+For contributor builds from a checkout, use
+`scripts/bazelw build //crates/ctx-cli:ctx --config=dev-linux`. For an unmanaged
+source installation, use the Cargo install command documented in
+[Package Managers And Unmanaged Installs](unmanaged-installs.md); that
+installation path is not the contributor build/test workflow.
 
 For GitHub release binaries, mise, Homebrew, and source builds, see
 [Package Managers And Unmanaged Installs](unmanaged-installs.md).
@@ -64,8 +76,11 @@ execute history-source plugin commands. The default data root is `~/.ctx`.
 Daemon maintenance is enabled by default. Use `ctx daemon disable` for a durable
 opt-out or `ctx setup --no-daemon` for a one-run opt-out. Existing configurations
 that already set `[daemon] enabled = false` remain disabled after upgrade.
-`ctx setup --catalog-only` and `ctx setup --json` do
-not autostart daemon maintenance.
+`ctx setup --catalog-only` does not autostart daemon maintenance.
+Machine-readable setup does not start or nudge the daemon. Its result reports
+`background_indexing.daemon_autostart.status: "not_needed"` with reason
+`machine_readable_output`; use a human-readable setup or an explicit daemon
+command when background maintenance should start.
 
 Use a different root when testing:
 
@@ -123,7 +138,8 @@ background daemon profile after the foreground import finishes.
 The daemon refreshes native history within local budgets and, when semantic is
 enabled, may acquire the local embedding model and perform semantic catch-up.
 Use `ctx import --no-daemon` for a one-run opt-out. JSON import output does not
-autostart daemon maintenance.
+start or nudge the daemon. Use a human-readable native import or an explicit
+daemon command when background maintenance should start.
 
 After upgrading an older data root to `0.10.x` or newer, the first refresh or import may
 re-read previously indexed provider transcripts once. That rebuilds search
@@ -195,31 +211,31 @@ remain local.
 
 ```bash
 ctx pro
-ctx locate commit <sha> --json | jq '.results[].resource'
-ctx show commit '<chosen-resource-id>' --json
-ctx blame src/lib.rs --line 42
-ctx timeline file src/lib.rs
-ctx facts commit <sha>
+ctx blame file src/lib.rs --lines 42
+ctx blame commit <sha> --json
+ctx blame pr 42 --repository forge:github.com/ctxrs/ctx
 ```
 
 Repositories and worktrees are detected from indexed activity; setup does not
 need a repository path. Query `--repository` accepts a logical repository
 identity such as `forge:github.com/ctxrs/ctx`, rather than a filesystem path.
-Most queries do not need it. When an
-unscoped query has multiple matches, inspect `results[].resource` and pass the chosen opaque
-`resource.id` back as the same kind's value, as above. Do not parse the ID.
+Numeric PR selectors require it; canonical supported PR/MR URLs do not.
 
-Setup, daemon freshness, and graph queries can catch the derived graph up.
-Canonical history is never changed by that work. Query results carry exact
-canonical citations. `facts` and `timeline` can be paged with `--limit` and their returned
-`--cursor`; `show`, `locate`, and `blame` are bounded, unpaged point views. The
+Setup, daemon freshness, and blame can catch the derived graph up. Canonical
+history is never changed by that work. Blame returns typed file, commit, or PR
+matches with complete deduplicated evidence and optional continuation cursors.
+PR activity remains separate from code production. Associated commits appear
+only when a recognized structured forge record names the canonical PR and exact
+Git object ID; without that proof, membership is explicitly unproven. The
 helper uses the platform key store.
 
 Bare `ctx pro` runs the idempotent setup, resume, repair, and graph catch-up
-flow. `ctx pro setup` remains a supported explicit synonym. If setup creates a
-Stripe Checkout session, the command prints its URL, attempts to open it, waits
-for access, and then continues helper installation and materialization in the
-same invocation. `ctx status` does not mutate canonical history or graph data;
+flow. `ctx pro setup` remains a supported explicit synonym. First use starts a
+14-day trial without an account or payment method. The official interactive
+installer can offer that trial before the initial import so Core and Pro index
+in one pass; unattended installation remains Core-only unless Pro is explicitly
+requested. Paid conversion and billing management use the browser later.
+`ctx status` does not mutate canonical history or graph data;
 entitlement authorization may advance nonsecret anti-clock-rollback metadata.
 
 ## 8. Built-In Docs And Upgrades
@@ -238,5 +254,7 @@ available for human shell use.
 
 `ctx upgrade` works for official installer-managed binaries. Source builds,
 `cargo install`, package-manager installs, and copied binaries are treated as
-unmanaged and will not self-upgrade. Background auto-upgrade is disabled by
-default; use `ctx upgrade enable` to opt in for a managed binary.
+unmanaged and will not self-upgrade. Automatic upgrade is on by default for a
+managed binary while the daemon is enabled; use `ctx upgrade disable` for a
+persistent upgrade-only opt-out or `ctx daemon disable` to disable all daemon
+maintenance, including automatic upgrade.

@@ -12,8 +12,9 @@
       "archive": "tar.gz",
       "vault": "secret-service",
       "runtime_authority": "native-freebsd-x86_64",
-      "diagnostic_authorities": [],
-      "platform_signature": "release-manifest"
+      "diagnostic_authorities": ["freebsd-15.1"],
+      "platform_signature": "release-manifest",
+      "linux_build": null
     },
     {
       "id": "linux-arm64",
@@ -27,7 +28,15 @@
       "vault": "secret-service",
       "runtime_authority": "native-linux-aarch64",
       "diagnostic_authorities": ["qemu-user"],
-      "platform_signature": "release-manifest"
+      "platform_signature": "release-manifest",
+      "linux_build": {
+        "builder_image": "docker.io/library/ubuntu:22.04@sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982",
+        "ubuntu_snapshot": "20260701T000000Z",
+        "glibc_max": "2.35",
+        "rust_toolchain": "1.97.1",
+        "rust_commit": "8bab26f4f68e0e26f0bb7960be334d5b520ea452",
+        "rust_sysroot": "/opt/rustup/toolchains/1.97.1-aarch64-unknown-linux-gnu"
+      }
     },
     {
       "id": "linux-x64",
@@ -41,7 +50,15 @@
       "vault": "secret-service",
       "runtime_authority": "native-linux-x86_64",
       "diagnostic_authorities": [],
-      "platform_signature": "release-manifest"
+      "platform_signature": "release-manifest",
+      "linux_build": {
+        "builder_image": "docker.io/library/ubuntu:22.04@sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982",
+        "ubuntu_snapshot": "20260701T000000Z",
+        "glibc_max": "2.35",
+        "rust_toolchain": "1.97.1",
+        "rust_commit": "8bab26f4f68e0e26f0bb7960be334d5b520ea452",
+        "rust_sysroot": "/opt/rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu"
+      }
     },
     {
       "id": "macos-arm64",
@@ -55,7 +72,8 @@
       "vault": "keychain",
       "runtime_authority": "native-apple-arm64",
       "diagnostic_authorities": [],
-      "platform_signature": "developer-id-notarized"
+      "platform_signature": "developer-id-notarized",
+      "linux_build": null
     },
     {
       "id": "macos-x64",
@@ -69,7 +87,8 @@
       "vault": "keychain",
       "runtime_authority": "native-macos-x86_64",
       "diagnostic_authorities": ["rosetta-2", "non-apple-qemu"],
-      "platform_signature": "developer-id-notarized"
+      "platform_signature": "developer-id-notarized",
+      "linux_build": null
     },
     {
       "id": "windows-x64",
@@ -83,7 +102,8 @@
       "vault": "credential-manager",
       "runtime_authority": "native-windows-x86_64",
       "diagnostic_authorities": [],
-      "platform_signature": "unsigned"
+      "platform_signature": "unsigned",
+      "linux_build": null
     }
   ]
 }
