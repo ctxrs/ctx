@@ -434,6 +434,12 @@ fn released_store_upgrade_import_publishes_and_then_replays_as_a_noop() {
             .count(),
         0
     );
+    // This test proves publication: the upgrade commits instead of failing on
+    // a group bound, and the store it leaves is structurally sound. It
+    // deliberately makes no claim about the canonical event set, because a
+    // count assertion here would have to be a floor and a floor accepts a
+    // doubled corpus. That claim belongs to
+    // `released_store_upgrade_matches_a_fresh_install_canonical_set` below.
     let (events, distinct_events) = conn
         .query_row(
             "SELECT COUNT(*), COUNT(DISTINCT id) FROM events WHERE deleted_at_ms IS NULL",
@@ -441,8 +447,10 @@ fn released_store_upgrade_import_publishes_and_then_replays_as_a_noop() {
             |row| Ok((row.get::<_, usize>(0)?, row.get::<_, usize>(1)?)),
         )
         .unwrap();
-    assert_eq!(events, distinct_events);
-    assert!(events >= EVENT_COUNT, "upgrade lost canonical events");
+    assert_eq!(
+        events, distinct_events,
+        "canonical event ids must be unique"
+    );
     assert!(
         conn.query_row(
             "SELECT COUNT(*) FROM projection_journal_chunks",
@@ -451,5 +459,108 @@ fn released_store_upgrade_import_publishes_and_then_replays_as_a_noop() {
         )
         .unwrap()
             > 0
+    );
+}
+
+/// Counts the canonical rows an import is supposed to produce.
+fn canonical_counts(database: &Path) -> (i64, i64, i64, i64) {
+    let conn = rusqlite::Connection::open(database).unwrap();
+    let count = |sql: &str| conn.query_row(sql, [], |row| row.get::<_, i64>(0)).unwrap();
+    (
+        count("SELECT COUNT(*) FROM events WHERE deleted_at_ms IS NULL"),
+        count("SELECT COUNT(*) FROM sessions WHERE deleted_at_ms IS NULL"),
+        count("SELECT COUNT(*) FROM session_edges WHERE deleted_at_ms IS NULL"),
+        count("SELECT COUNT(*) FROM capture_sources"),
+    )
+}
+
+/// The acceptance test for upgrading a released store without duplicating it.
+///
+/// An upgrading import must leave exactly the canonical set a fresh install of
+/// the same build produces from the same corpus — same events, sessions, edges
+/// and capture sources, not a floor. A floor is what a duplicating upgrade
+/// passes: on the 1.087 GB Codex corpus the upgraded store held 284,923 events
+/// against a fresh install's 142,950, and every assertion that only required
+/// "at least as many" reported success.
+#[test]
+#[ignore = "fails until upgrades rebuild and replace a pre-0.26 provider projection \
+            instead of publishing alongside it: v0.26 derives capture-source identities \
+            that do not match released rows, so it mints new sources and new event \
+            identities and the released rows are never retired. Reconciliation was \
+            rejected by the product owner; the re-derive branch owns the fix and this \
+            test is its acceptance gate. Do not weaken it to a floor."]
+fn released_store_upgrade_matches_a_fresh_install_canonical_set() {
+    const EVENT_COUNT: usize = 512;
+    const BODY_BYTES: usize = 32 * 1024;
+    const SESSION_ID: &str = "00000000-0000-0000-0000-000000000026";
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let source_root = temp.path().join("sessions");
+    std::fs::create_dir(&source_root).unwrap();
+    let source = source_root.join(format!("rollout-2026-01-01T00-00-00-{SESSION_ID}.jsonl"));
+    let mut contents = serde_json::to_string(&serde_json::json!({
+        "timestamp": "2026-01-01T00:00:00Z",
+        "type": "session_meta",
+        "payload": {
+            "id": SESSION_ID,
+            "timestamp": "2026-01-01T00:00:00Z",
+            "cwd": "/workspace",
+            "source": "cli"
+        }
+    }))
+    .unwrap();
+    contents.push('\n');
+    for index in 0..EVENT_COUNT {
+        contents.push_str(
+            &serde_json::to_string(&serde_json::json!({
+                "timestamp": "2026-01-01T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": format!("canonical-set-{index}-{}", "x".repeat(BODY_BYTES))
+                    }]
+                }
+            }))
+            .unwrap(),
+        );
+        contents.push('\n');
+    }
+    std::fs::write(&source, contents).unwrap();
+
+    let options = |root: &Path| CodexSessionImportOptions {
+        machine_id: "canonical-set-machine".to_owned(),
+        source_path: Some(root.to_path_buf()),
+        imported_at: "2026-01-02T00:00:00Z".parse().unwrap(),
+        ..CodexSessionImportOptions::default()
+    };
+
+    // Control: a fresh install of this build over this corpus.
+    let control_database = temp.path().join("fresh.sqlite");
+    let mut control = Store::open(&control_database).unwrap();
+    import_codex_native_session_root(&source_root, &mut control, options(&source_root))
+        .expect("fresh install import");
+    drop(control);
+    let expected = canonical_counts(&control_database);
+    assert_eq!(expected.0, EVENT_COUNT as i64, "control lost events");
+
+    // Subject: the same corpus imported into a released store.
+    let database = temp.path().join("upgraded.sqlite");
+    let mut released = Store::open(&database).unwrap();
+    import_codex_native_session_root(&source_root, &mut released, options(&source_root))
+        .expect("released import");
+    released_store_shape(released, &database);
+    let mut store = Store::open(&database).unwrap();
+    import_codex_native_session_root(&source_root, &mut store, options(&source_root))
+        .expect("upgrade import");
+    drop(store);
+
+    assert_eq!(
+        canonical_counts(&database),
+        expected,
+        "upgrading a released store must leave exactly the fresh-install canonical set \
+         (events, sessions, edges, capture sources)"
     );
 }

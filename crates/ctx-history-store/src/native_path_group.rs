@@ -62,10 +62,29 @@ use crate::{
 //   cost is a function of rows already in the Store. No coordinator can see it,
 //   and splitting the group does not reduce it.
 //
-// Both remain exactly measured and reported on the receipt. Transaction size
-// stays bounded by the limits above, and the journal stays bounded where the
-// resource actually is: `GroupJournalCollector` retains one physical chunk and
-// writes each completed chunk into the same publication transaction.
+// Both remain exactly measured and reported on the receipt.
+//
+// What that does and does not bound, precisely:
+//
+// * Group *input* is bounded by the four limits above.
+// * Journal *memory* is bounded by one physical chunk:
+//   `GroupJournalCollector` writes each completed chunk into this transaction
+//   as soon as it fills and retains only the one in flight.
+// * Journal *work per transaction* is bounded by the group's own admitted
+//   content only while every parent row the group writes is left unchanged.
+//   `upsert_capture_source` and `upsert_session` compare the stored row and
+//   skip their dependent fanout when it did not change, so a coordinator that
+//   re-asserts the same source and session once per group — which is every
+//   group after the first for a source — emits at most one journal record per
+//   typed mutation.
+// * It is *not* bounded when a parent row genuinely changes. The fanout then
+//   re-journals every dependent canonical observation, which is a function of
+//   rows already stored, and it has to be atomic with the mutation that caused
+//   it or the published cursor would carry a checkpoint claiming a consistency
+//   the journal does not have. Bounding that case needs the fanout itself to
+//   become resumable across transactions — a durable dirty-entity queue drained
+//   in bounded pages, in the shape `retire_source_generation_page` already uses
+//   — which needs a schema change and is deliberately not attempted here.
 pub const NATIVE_PATH_MAX_GROUP_PAGES: usize = 512;
 pub const NATIVE_PATH_MAX_GROUP_SOURCES: usize = 512;
 pub const NATIVE_PATH_MAX_RETAINED_PAGE_BYTES: usize = 8 * 1024 * 1024;
