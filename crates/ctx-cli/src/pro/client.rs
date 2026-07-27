@@ -65,6 +65,8 @@ pub(crate) use output::ProOutputImport;
 mod client_status;
 #[cfg(all(test, unix))]
 use client_status::smoke_helper_at_path_with_authorization;
+#[cfg(ctx_pro_qualification)]
+pub(crate) use client_status::smoke_qualification_helper;
 #[cfg(test)]
 use client_status::status_outcome;
 #[cfg(test)]

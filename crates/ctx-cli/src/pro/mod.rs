@@ -6,12 +6,15 @@ mod commercial_api;
 mod commercial_config;
 mod commercial_deletion;
 mod commercial_lifecycle;
+mod commercial_production_record;
 mod credential_vault;
 mod graph_key_deletion;
 mod helper_command;
 mod lifecycle;
 mod local_deletion;
 mod pending_materialization;
+#[cfg(any(test, ctx_pro_qualification))]
+mod qualification_helper;
 mod referral;
 mod render;
 mod request_identity;

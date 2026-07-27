@@ -2,13 +2,13 @@ use anyhow::{bail, Result};
 use ctx_pro_host_protocol::{Capability, PROTOCOL_FINGERPRINT, PROTOCOL_VERSION};
 
 use super::{
-    artifact_delivery::VerifiedArtifactBundle, client::HelperSmoke, lifecycle::SetupInstallation,
+    artifact_delivery::SetupArtifactBundle, client::HelperSmoke, lifecycle::SetupInstallation,
 };
 
 pub(super) fn setup_artifact(
     installation: &SetupInstallation,
-    artifact: Option<VerifiedArtifactBundle>,
-) -> Result<Option<VerifiedArtifactBundle>> {
+    artifact: Option<SetupArtifactBundle>,
+) -> Result<Option<SetupArtifactBundle>> {
     if artifact.is_none() && !matches!(installation, SetupInstallation::Current(_)) {
         bail!("invalid_response: Pro setup returned no helper artifact for an install or repair");
     }

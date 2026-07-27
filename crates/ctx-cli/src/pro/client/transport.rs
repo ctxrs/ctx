@@ -10,6 +10,7 @@ pub(crate) struct ProClient {
     pub(super) helper_version: String,
     pub(super) authorization_state: Option<EntitlementAccessState>,
     pub(super) entitlement_schedule: Option<EntitlementSchedule>,
+    pub(super) _execution_guard: Option<VerifiedHelperExecutable>,
 }
 
 impl ProClient {
@@ -56,12 +57,23 @@ impl ProClient {
         // staged setup smoke, status, journal, and deletion operations.
         let query_only = required.len() == 1 && required.contains(&Capability::Query);
         let git_executable = (!query_only).then(git_executable).transpose()?;
-        let mut command = helper_command::new(path, data_root, git_executable.as_deref())?;
+        let prepared_execution = execution_guard
+            .as_ref()
+            .map(VerifiedHelperExecutable::prepare_execution)
+            .transpose()?;
+        let program = prepared_execution
+            .as_ref()
+            .map(|execution| execution.program())
+            .unwrap_or(path);
+        let mut command = helper_command::new(program, data_root, git_executable.as_deref())?;
         command
             .arg("serve-stdio")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if let Some(execution) = &prepared_execution {
+            execution.configure_command(&mut command);
+        }
         #[cfg(target_os = "linux")]
         {
             let expected_parent = unsafe { libc::getpid() };
@@ -80,14 +92,10 @@ impl ProClient {
         }
         #[cfg(unix)]
         command.process_group(0);
-        #[cfg(windows)]
-        if let Some(executable) = execution_guard.as_ref() {
-            executable.verify_execution_identity()?;
-        }
         let mut child = command
             .spawn()
             .with_context(|| format!("helper_crashed: start Pro helper {}", path.display()))?;
-        drop(execution_guard);
+        drop(prepared_execution);
         let stdin = child
             .stdin
             .take()
@@ -110,6 +118,7 @@ impl ProClient {
             helper_version: String::new(),
             authorization_state: None,
             entitlement_schedule: None,
+            _execution_guard: execution_guard,
         };
         let offered = BTreeSet::from([
             Capability::EntitlementAuthorization,

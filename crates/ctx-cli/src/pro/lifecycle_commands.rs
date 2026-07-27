@@ -22,13 +22,14 @@ use super::{
     transaction_journal_next_path, transaction_journal_path, transaction_marker_path, Persistence,
     SetupInstallation,
 };
-use crate::pro::artifact_delivery::VerifiedArtifactBundle;
+use crate::pro::artifact_delivery::SetupArtifactBundle;
+#[cfg(ctx_pro_qualification)]
+use crate::pro::client::smoke_qualification_helper;
 #[cfg(test)]
 use crate::pro::client::HelperSmoke;
 use crate::pro::client::{
     materialize, smoke_helper_at_path, status, ProSetupRepairability, ProStatus,
 };
-use crate::pro::commercial_config::CommercialConfig;
 use crate::pro::commercial_lifecycle::CommercialLifecycleService;
 use crate::pro::lifecycle::lifecycle_manifest::ReleaseTrust;
 use crate::pro::local_deletion::{
@@ -163,7 +164,7 @@ impl ProArgs {
 
 #[derive(Debug)]
 pub(crate) struct ProSetupPlan {
-    pub(crate) artifact: Option<VerifiedArtifactBundle>,
+    pub(crate) artifact: Option<SetupArtifactBundle>,
     pub(crate) account_state: String,
 }
 
@@ -224,9 +225,6 @@ fn run_lifecycle_inner(
     telemetry: &mut ProLifecycleTelemetryV1,
 ) -> Result<()> {
     args.validate_invocation()?;
-    if args.referral.is_some() {
-        CommercialConfig::ensure_referrals_available()?;
-    }
     let json_output = args.json_output();
     let defer_materialization = matches!(
         &args.command,
@@ -428,25 +426,44 @@ fn run_setup(
     telemetry.access_state = ProAccessStateV1::from_safe_name(&plan.account_state);
     let artifact = setup_artifact(&installation, plan.artifact)?;
     let helper_updated = if let Some(bundle) = artifact {
-        let smoke = match smoke_helper_at_path(data_root, &bundle.artifact) {
-            Ok(smoke) => {
-                telemetry.helper_connection = ProHelperConnectionOutcomeV1::Connected;
-                smoke
+        match bundle {
+            SetupArtifactBundle::Release(bundle) => {
+                let smoke = record_helper_smoke(
+                    smoke_helper_at_path(data_root, &bundle.artifact),
+                    telemetry,
+                )?;
+                validate_staged_helper(&smoke)?;
+                install_verified_bundle(&bundle, data_root, trust)?;
+                telemetry.reconcile = if replacing_existing {
+                    ProReconcileOutcomeV1::Updated
+                } else {
+                    ProReconcileOutcomeV1::Installed
+                };
+                true
             }
-            Err(error) => {
-                telemetry.helper_connection =
-                    crate::analytics::pro_helper_connection_outcome(stable_error_code(&error));
-                return Err(error);
+            #[cfg(ctx_pro_qualification)]
+            SetupArtifactBundle::Qualification(bundle) => {
+                let executable =
+                    crate::pro::verified_executable::VerifiedHelperExecutable::open_qualification(
+                        bundle,
+                    )?;
+                let smoke = record_helper_smoke(
+                    smoke_qualification_helper(data_root, executable),
+                    telemetry,
+                )?;
+                validate_staged_helper(&smoke)?;
+                false
             }
-        };
-        validate_staged_helper(&smoke)?;
-        install_verified_bundle(&bundle, data_root, trust)?;
-        telemetry.reconcile = if replacing_existing {
-            ProReconcileOutcomeV1::Updated
-        } else {
-            ProReconcileOutcomeV1::Installed
-        };
-        true
+            #[cfg(all(test, not(ctx_pro_qualification)))]
+            SetupArtifactBundle::Qualification(bundle) => {
+                let smoke = record_helper_smoke(
+                    smoke_helper_at_path(data_root, bundle.verified_path()?),
+                    telemetry,
+                )?;
+                validate_staged_helper(&smoke)?;
+                false
+            }
+        }
     } else {
         false
     };
@@ -482,6 +499,23 @@ fn run_setup(
         println!("materialized observations: {}", report.observations);
     }
     Ok(())
+}
+
+fn record_helper_smoke(
+    smoke: Result<crate::pro::client::HelperSmoke>,
+    telemetry: &mut ProLifecycleTelemetryV1,
+) -> Result<crate::pro::client::HelperSmoke> {
+    match smoke {
+        Ok(smoke) => {
+            telemetry.helper_connection = ProHelperConnectionOutcomeV1::Connected;
+            Ok(smoke)
+        }
+        Err(error) => {
+            telemetry.helper_connection =
+                crate::analytics::pro_helper_connection_outcome(stable_error_code(&error));
+            Err(error)
+        }
+    }
 }
 
 fn run_manage(
