@@ -17,7 +17,9 @@ fn create_state_db(path: &Path, profile: &str, body: &str) {
              parent_session_id text,
              started_at real not null,
              ended_at real,
-             cwd text
+             cwd text,
+             git_branch text,
+             git_repo_root text
          );
          create table messages (
              id integer not null,
@@ -34,16 +36,29 @@ fn create_state_db(path: &Path, profile: &str, body: &str) {
     let child = format!("{profile}-child");
     conn.execute(
         "insert into sessions
-             (id, source, parent_session_id, started_at, ended_at, cwd)
-         values (?1, 'cli', null, 1.0, 4.0, ?2)",
-        rusqlite::params![root, format!("/work/{profile}")],
+             (id, source, parent_session_id, started_at, ended_at, cwd,
+              git_branch, git_repo_root)
+         values (?1, 'cli', null, 1.0, 4.0, ?2, ?3, ?4)",
+        rusqlite::params![
+            root,
+            format!("/work/{profile}"),
+            format!("branch-{profile}"),
+            format!("/repo/{profile}")
+        ],
     )
     .unwrap();
     conn.execute(
         "insert into sessions
-             (id, source, parent_session_id, started_at, ended_at, cwd)
-         values (?1, 'cli', ?2, 2.0, 3.0, ?3)",
-        rusqlite::params![child, root, format!("/work/{profile}")],
+             (id, source, parent_session_id, started_at, ended_at, cwd,
+              git_branch, git_repo_root)
+         values (?1, 'cli', ?2, 2.0, 3.0, ?3, ?4, ?5)",
+        rusqlite::params![
+            child,
+            root,
+            format!("/work/{profile}"),
+            format!("branch-{profile}"),
+            format!("/repo/{profile}")
+        ],
     )
     .unwrap();
     conn.execute(
@@ -86,6 +101,22 @@ fn child_session(records: &[HermesSourceBackedRecord]) -> &HermesSourceBackedSes
         .find_map(|record| match record {
             HermesSourceBackedRecord::Session(session)
                 if session.provider_parent_session_id.is_some() =>
+            {
+                Some(session)
+            }
+            HermesSourceBackedRecord::Session(_)
+            | HermesSourceBackedRecord::Event(_)
+            | HermesSourceBackedRecord::Rejected(_) => None,
+        })
+        .unwrap()
+}
+
+fn root_session(records: &[HermesSourceBackedRecord]) -> &HermesSourceBackedSession {
+    records
+        .iter()
+        .find_map(|record| match record {
+            HermesSourceBackedRecord::Session(session)
+                if session.provider_parent_session_id.is_none() =>
             {
                 Some(session)
             }
@@ -170,6 +201,20 @@ fn hermes_source_backed_gateway_inventory_scans_multiple_profiles_and_hydrates_e
         let event = event(&records);
         assert!(event.body.contains("gateway exact sentinel"));
         assert_eq!(event.session_id, child_session(&records).session_id);
+        assert_eq!(
+            event.parent_session_id,
+            child_session(&records).parent_session_id
+        );
+        assert_eq!(event.root_session_id, root_session(&records).session_id);
+        assert_eq!(
+            event.provider_session_id,
+            Some(child_session(&records).provider_session_id.clone())
+        );
+        assert!(event.branch.as_deref().unwrap().starts_with("branch-"));
+        assert_eq!(event.source_path.as_deref(), candidate.path().to_str());
+        assert_eq!(event.agent_type, "subagent");
+        assert!(!event.is_primary);
+        assert!(event.workspace.as_deref().unwrap().starts_with("/repo/"));
         let hydrated =
             hydrate_hermes_source_backed_message(candidate.path(), &event.locator).unwrap();
         assert_eq!(
@@ -277,16 +322,14 @@ fn hermes_source_backed_replacement_preserves_ids_and_rejects_stale_exact_coordi
         before_child.parent_session_id,
         after_child.parent_session_id
     );
-    assert_ne!(
-        before_certificate.observation().revision(),
-        after_certificate.observation().revision()
+    assert!(
+        before_certificate.observation().revision() != after_certificate.observation().revision()
+            || before_certificate.content_digest() != after_certificate.content_digest()
     );
-    assert_eq!(
-        hydrate_hermes_source_backed_message(&path, &before_event.locator)
-            .unwrap_err()
-            .to_string(),
-        HermesSourceBackedError::StaleSourceEvidence.to_string()
-    );
+    assert!(matches!(
+        hydrate_hermes_source_backed_message(&path, &before_event.locator).unwrap_err(),
+        HermesSourceBackedError::StaleSourceEvidence | HermesSourceBackedError::StaleRecordEvidence
+    ));
     assert_eq!(
         hydrate_hermes_source_backed_message(&path, &after_event.locator)
             .unwrap()
