@@ -140,6 +140,18 @@ pub(super) struct MuxFileObservation {
 }
 
 impl MuxFileObservation {
+    pub(super) fn from_admitted(
+        canonical_path: PathBuf,
+        content: &Metadata,
+        metadata: Option<&Metadata>,
+    ) -> Result<Self> {
+        Ok(Self {
+            canonical_path,
+            content: MuxFrozenFile::from_metadata(content)?,
+            metadata: metadata.map(MuxFrozenFile::from_metadata).transpose()?,
+        })
+    }
+
     pub(super) fn read(path: &Path, metadata_path: Option<&Path>) -> Result<Self> {
         Ok(Self {
             canonical_path: fs::canonicalize(path)?,

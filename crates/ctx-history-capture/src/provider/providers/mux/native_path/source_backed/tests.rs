@@ -8,15 +8,7 @@ use ctx_history_core::{EventType, LocatorRevisionPolicy, NativeRecordCoordinate,
 use serde_json::{json, Value};
 
 use super::*;
-use crate::{
-    complete_content::{
-        jsonl::JsonlCompleteContentResolver, verified_content_profile_for_locator,
-        AuthorizedSourceRoute, CompleteContentErrorKind, CompleteContentHashAuthority,
-        CompleteContentResolverRegistry, CompleteContentSourceFamily, CompleteMessageRequest,
-        SourceAccessBroker, SourceSnapshot, VerifiedContentRole,
-    },
-    test_support_paths::tempdir,
-};
+use crate::test_support_paths::tempdir;
 
 fn message(id: &str, role: &str, sequence: i64, text: &str) -> Value {
     json!({
@@ -159,7 +151,7 @@ fn cold_append_and_rewrite_keep_stable_ids_and_bounded_projection() {
     let MuxSourceBackedDisposition::Replacement { evidence } = replacement.disposition else {
         panic!("chat rewrite must be replacement");
     };
-    assert_eq!(evidence.reason, MuxReplacementReason::ChatPrefixChanged);
+    assert_eq!(evidence.reason, MuxReplacementReason::ChatTruncated);
     assert_ne!(
         evidence.prior_content_digest,
         evidence.replacement_content_digest
@@ -216,13 +208,10 @@ fn partial_snapshot_uses_exact_revision_and_replacement_evidence() {
         .locator
         .certified_source_revision_digest()
         .is_some());
+    assert_eq!(chat.document.source_path.as_deref(), session.join("chat.jsonl").to_str());
     assert_eq!(
-        mux_source_path_for_locator(&candidate, &chat.document.locator),
-        Some(session.join("chat.jsonl").as_path())
-    );
-    assert_eq!(
-        mux_source_path_for_locator(&candidate, &partial.document.locator),
-        Some(session.join("partial.json").as_path())
+        partial.document.source_path.as_deref(),
+        session.join("partial.json").to_str()
     );
     assert_eq!(resolve_exact(&candidate, chat).unwrap(), chat_body);
     assert_eq!(resolve_exact(&candidate, partial).unwrap(), partial_body);
@@ -239,10 +228,10 @@ fn partial_snapshot_uses_exact_revision_and_replacement_evidence() {
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(
+    assert!(matches!(
         resolve_exact(&candidate, partial).unwrap_err(),
-        CompleteContentErrorKind::SourceChanged
-    );
+        MuxSourceBackedError::StaleLocator
+    ));
 
     let (replacement, replacement_records, _) = collect_scan(&candidate, Some(&cold.certificate));
     let MuxSourceBackedDisposition::Replacement { evidence } = replacement.disposition else {
@@ -395,63 +384,17 @@ fn subagent_chat_is_supported_but_chat_archive_is_not() {
 fn resolve_exact(
     candidate: &MuxSourceBackedCandidate,
     record: &MuxSourceBackedRecord,
-) -> Result<String, CompleteContentErrorKind> {
+) -> MuxSourceBackedResult<String> {
     let locator = mux_complete_content_locator(&record.document.locator)
         .expect("source-backed locator must bridge to the existing Mux route");
     assert_eq!(locator, record.complete_content_locator);
-    let path = mux_source_path_for_locator(candidate, &record.document.locator).unwrap();
-    let event_id = record.document.event_id.as_uuid();
-    let source_access = SourceAccessBroker::new()
-        .admit(
-            AuthorizedSourceRoute {
-                source_id: candidate.source_key.identity().as_uuid(),
-                provider: CaptureProvider::Mux,
-                source_format: MUX_SOURCE_FORMAT.to_owned(),
-                family: CompleteContentSourceFamily::Jsonl,
-                raw_source_path: path.to_path_buf(),
-                source_root: Some(candidate.source.session_dir.clone()),
-                source_identity: Some(candidate.source_key.identity().to_string()),
-                source_snapshot: SourceSnapshot {
-                    size_bytes: Some(fs::metadata(path).unwrap().len()),
-                    ..SourceSnapshot::default()
-                },
-            },
-            event_id,
-        )
-        .unwrap();
-    let request = CompleteMessageRequest {
-        event_id,
-        provider: CaptureProvider::Mux,
-        source_format: MUX_SOURCE_FORMAT.to_owned(),
-        source_access,
-        source_family: Some(CompleteContentSourceFamily::Jsonl),
-        content_profile: verified_content_profile_for_locator(
-            CaptureProvider::Mux,
-            MUX_SOURCE_FORMAT,
-            CompleteContentSourceFamily::Jsonl,
-            VerifiedContentRole::MessageBody,
-            locator.kind(),
-        )
-        .unwrap()
-        .to_owned(),
-        source_locator: Some(locator),
-        provider_session_id: Some(candidate.provider_session_id().to_owned()),
-        source_record_ordinal: record.source_record_ordinal,
-        source_record_subrecord_index: 0,
-        expected_provider_event_hash: record.native_record_id.clone(),
-        expected_hash_authority: CompleteContentHashAuthority::ProviderSupplied,
-        expected_native_record_id: Some(record.native_record_id.clone()),
-        expected_record_digest: Some(record.complete_content_record_digest.clone()),
-        expected_content_ref: record.message_content_ref.clone(),
-        indexed_text: record.document.body.clone(),
-        indexed_limit_chars: MAX_BODY_PREVIEW_CHARS,
-    };
-    let mut registry = CompleteContentResolverRegistry::new();
-    registry.register(JsonlCompleteContentResolver::new());
-    registry
-        .resolve(&[request])
-        .map(|messages| messages[0].text.clone())
-        .map_err(|error| error.kind)
+    let provider_bytes =
+        hydrate_mux_source_backed_record(candidate, &record.document.locator)?;
+    let value: Value = serde_json::from_slice(&provider_bytes)?;
+    Ok(crate::provider::providers::mux::mux_event_text(
+        &value,
+        crate::provider::providers::mux::mux_event_type(&value),
+    ))
 }
 
 #[test]
@@ -475,4 +418,52 @@ fn provider_native_locator_is_tagged_and_rejects_foreign_coordinates() {
     assert_eq!(namespace, MUX_PROVIDER_NATIVE_LOCATOR_NAMESPACE);
     assert_eq!(value.first(), Some(&1));
     assert_eq!(records[0].document.event_type, EventType::Message.as_str());
+}
+
+#[test]
+fn compound_authority_mux_rejects_missing_auxiliary_and_sibling_swap() {
+    let temp = tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    let session = root.join("session-1");
+    fs::create_dir_all(&session).unwrap();
+    write_chat(&session, &[message("message-0", "user", 0, "hello")]);
+    let candidate = source_candidates(&root).pop().unwrap();
+
+    write_metadata(&session, "session-1");
+    assert!(matches!(
+        scan_mux_source_backed(&candidate, None, |_| Ok(())),
+        Err(MuxSourceBackedError::CandidateChanged)
+    ));
+
+    fs::remove_file(session.join("metadata.json")).unwrap();
+    let candidate = source_candidates(&root).pop().unwrap();
+    let result = scan_mux_source_backed(&candidate, None, |_| {
+        fs::write(
+            session.join("partial.json"),
+            serde_json::to_vec(&message("partial", "assistant", 1, "replacement")).unwrap(),
+        )
+        .unwrap();
+        Ok(())
+    });
+    assert!(result.is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn compound_authority_mux_rejects_ancestor_swap_and_stale_locator() {
+    let temp = tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    let session = root.join("session-1");
+    fs::create_dir_all(&session).unwrap();
+    write_metadata(&session, "session-1");
+    write_chat(&session, &[message("message-0", "user", 0, "hello")]);
+    let candidate = source_candidates(&root).pop().unwrap();
+    let (_, records, _) = collect_scan(&candidate, None);
+
+    fs::rename(&root, temp.path().join("retired-sessions")).unwrap();
+    fs::create_dir_all(&session).unwrap();
+    write_metadata(&session, "session-1");
+    write_chat(&session, &[message("message-0", "user", 0, "hello")]);
+
+    assert!(hydrate_mux_source_backed_record(&candidate, &records[0].document.locator).is_err());
 }

@@ -7,8 +7,7 @@
 //! bounded pages without learning Mux file-layout or locator details.
 
 use std::{
-    fs::File,
-    io::Read,
+    io::{self, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 
@@ -27,9 +26,10 @@ use thiserror::Error;
 
 use super::{
     model::{MuxFrontier, MuxPreparedRow, MuxSourcePlan, MuxStreamKind, MuxUnaddressableOutput},
-    parse::{open_reader_at_frontier, read_core_page},
+    parse::read_core_page,
 };
 use crate::{
+    common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
     complete_content::{
         jsonl::{valid_mux_locator, MUX_LOCATOR_KIND},
         CompleteContentBodyDigest, CompleteContentSourceLocator,
@@ -39,7 +39,7 @@ use crate::{
 };
 
 use crate::provider::providers::mux::{
-    metadata::{mux_bounded_session_metadata, MuxBoundedSessionMetadata},
+    metadata::{mux_bounded_session_metadata_from_bytes, MuxBoundedSessionMetadata},
     source::{MuxFileObservation, MuxSessionSource},
 };
 
@@ -81,6 +81,10 @@ pub(crate) enum MuxSourceBackedError {
     CountOverflow,
     #[error("Mux source-backed record digest is malformed")]
     InvalidRecordDigest,
+    #[error("Mux source-backed locator is malformed or belongs to another source")]
+    InvalidLocator,
+    #[error("Mux source-backed locator evidence is stale")]
+    StaleLocator,
 }
 
 pub(crate) type MuxSourceBackedResult<T> = Result<T, MuxSourceBackedError>;
@@ -91,7 +95,12 @@ pub(crate) type MuxSourceBackedResult<T> = Result<T, MuxSourceBackedError>;
 #[derive(Debug, Clone)]
 pub(crate) struct MuxSourceBackedCandidate {
     configured_root: PathBuf,
+    authority: ProviderSourceRoot,
     source: MuxSessionSource,
+    session_relative_path: PathBuf,
+    chat_relative_path: Option<PathBuf>,
+    partial_relative_path: Option<PathBuf>,
+    metadata_relative_path: Option<PathBuf>,
     metadata: MuxBoundedSessionMetadata,
     source_key: SourceKey,
     session_id: StableEntityId,
@@ -227,11 +236,31 @@ struct MuxCompoundObservationWire {
     metadata_revision: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct MuxObservedSource {
     wire: MuxCompoundObservationWire,
     chat: Option<MuxFileObservation>,
     partial: Option<MuxFileObservation>,
+    chat_file: Option<OpenedProviderSourceFile>,
+    partial_file: Option<OpenedProviderSourceFile>,
+    metadata_file: Option<OpenedProviderSourceFile>,
+    metadata_bytes: Option<Vec<u8>>,
+}
+
+impl MuxObservedSource {
+    fn revalidate(&self, authority: &ProviderSourceRoot) -> MuxSourceBackedResult<()> {
+        if let Some(chat) = &self.chat_file {
+            chat.revalidate()?;
+        }
+        if let Some(partial) = &self.partial_file {
+            partial.revalidate()?;
+        }
+        if let Some(metadata) = &self.metadata_file {
+            metadata.revalidate()?;
+        }
+        authority.revalidate()?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -285,13 +314,50 @@ pub(crate) fn discover_mux_source_backed_sources(
 ) -> MuxSourceBackedResult<Vec<MuxSourceBackedCandidate>> {
     let mut sources = discover_sessions(root)?;
     sources.sort_by(|left, right| left.session_dir.cmp(&right.session_dir));
+    let selected = std::fs::canonicalize(root)?;
+    let authority_path = if std::fs::metadata(root)?.is_file() {
+        selected
+            .parent()
+            .ok_or(CaptureError::InvalidProviderTranscriptPath {
+                path: selected.clone(),
+                reason: "Mux selected file has no authority directory",
+            })?
+            .to_path_buf()
+    } else {
+        selected
+    };
+    let authority = ProviderSourceRoot::open(&authority_path)?;
     let mut candidates = Vec::with_capacity(sources.len());
     for source in sources {
-        let observation = observe_mux_source(&source)?;
-        let metadata = mux_bounded_session_metadata(
+        let session_relative_path = relative_to_mux_authority(&authority, &source.session_dir)?;
+        let chat_relative_path = source
+            .chat_path
+            .as_deref()
+            .map(|path| relative_to_mux_authority(&authority, path))
+            .transpose()?;
+        let partial_relative_path = source
+            .partial_path
+            .as_deref()
+            .map(|path| relative_to_mux_authority(&authority, path))
+            .transpose()?;
+        let metadata_relative_path = source
+            .metadata_path
+            .as_deref()
+            .map(|path| relative_to_mux_authority(&authority, path))
+            .transpose()?;
+        let observation = admit_mux_source(
+            &authority,
+            &source,
+            &session_relative_path,
+            chat_relative_path.as_deref(),
+            partial_relative_path.as_deref(),
+            metadata_relative_path.as_deref(),
+        )?;
+        let metadata = mux_bounded_session_metadata_from_bytes(
             &source,
             &observation.wire.metadata_revision,
             observed_at,
+            observation.metadata_bytes.as_deref(),
         )?;
         let source_key = mux_source_key(&metadata.provider_session_id)?;
         let session_id = mux_session_identity(&source_key, &metadata.provider_session_id)?;
@@ -309,7 +375,12 @@ pub(crate) fn discover_mux_source_backed_sources(
             .unwrap_or(session_id);
         candidates.push(MuxSourceBackedCandidate {
             configured_root: root.to_path_buf(),
+            authority: authority.clone(),
             source,
+            session_relative_path,
+            chat_relative_path,
+            partial_relative_path,
+            metadata_relative_path,
             metadata,
             source_key,
             session_id,
@@ -330,7 +401,7 @@ pub(crate) fn scan_mux_source_backed(
     base: Option<&CertifiedSource>,
     mut emit: impl FnMut(MuxSourceBackedPage) -> MuxSourceBackedResult<()>,
 ) -> MuxSourceBackedResult<MuxSourceBackedScanReceipt> {
-    let opening = observe_mux_source(&candidate.source)?;
+    let opening = admit_mux_candidate(candidate)?;
     if opening.wire.metadata_revision != candidate.metadata.metadata_revision {
         return Err(MuxSourceBackedError::CandidateChanged);
     }
@@ -343,7 +414,9 @@ pub(crate) fn scan_mux_source_backed(
             .validate_exact_descriptor(base.observation().source())?;
         let checkpoint = decode_checkpoint(base)?;
         if base.parser_revision() == MUX_PARSER_REVISION && checkpoint.observation == opening.wire {
-            let closing = observe_mux_source(&candidate.source)?;
+            opening.revalidate(&candidate.authority)?;
+            let closing = admit_mux_candidate(candidate)?;
+            closing.revalidate(&candidate.authority)?;
             if closing.wire != opening.wire
                 || base.observation().revision() != opening_observation.revision()
             {
@@ -358,7 +431,7 @@ pub(crate) fn scan_mux_source_backed(
         }
     }
 
-    let plan = classify_scan(candidate, base, &opening)?;
+    let plan = classify_scan(base, &opening)?;
     let mut emitted_documents = 0_u64;
     let mut emitted_unaddressable = 0_u64;
     let mut session = candidate.metadata.clone();
@@ -391,13 +464,15 @@ pub(crate) fn scan_mux_source_backed(
     let chat_scan = match (
         candidate.source.chat_path.as_ref(),
         opening.chat.as_ref(),
+        opening.chat_file.as_ref(),
         prior_checkpoint,
     ) {
-        (Some(path), Some(observation), _) => Some(scan_leaf(
+        (Some(path), Some(observation), Some(file), _) => Some(scan_leaf(
             candidate,
             &context,
             &mut session,
             path,
+            file,
             MuxStreamKind::Chat,
             observation,
             chat_start,
@@ -406,7 +481,7 @@ pub(crate) fn scan_mux_source_backed(
             &mut emitted_unaddressable,
             &mut emit,
         )?),
-        (None, None, Some(checkpoint)) if !scan_partial => {
+        (None, None, None, Some(checkpoint)) if !scan_partial => {
             checkpoint.chat.as_ref().map(|chat| MuxLeafScan {
                 checkpoint: chat.clone(),
                 complete_records: 0,
@@ -415,7 +490,7 @@ pub(crate) fn scan_mux_source_backed(
                 unaddressable_records: 0,
             })
         }
-        (None, None, _) => None,
+        (None, None, None, _) => None,
         _ => return Err(MuxSourceBackedError::CandidateChanged),
     };
 
@@ -423,12 +498,14 @@ pub(crate) fn scan_mux_source_backed(
         match (
             candidate.source.partial_path.as_ref(),
             opening.partial.as_ref(),
+            opening.partial_file.as_ref(),
         ) {
-            (Some(path), Some(observation)) => Some(scan_leaf(
+            (Some(path), Some(observation), Some(file)) => Some(scan_leaf(
                 candidate,
                 &context,
                 &mut session,
                 path,
+                file,
                 MuxStreamKind::Partial,
                 observation,
                 MuxFrontier::initial(),
@@ -437,7 +514,7 @@ pub(crate) fn scan_mux_source_backed(
                 &mut emitted_unaddressable,
                 &mut emit,
             )?),
-            (None, None) => None,
+            (None, None, None) => None,
             _ => return Err(MuxSourceBackedError::CandidateChanged),
         }
     } else {
@@ -455,9 +532,11 @@ pub(crate) fn scan_mux_source_backed(
     let metadata = if matches!(plan, MuxScanPlan::Append { .. }) {
         prior_checkpoint.and_then(|checkpoint| checkpoint.metadata.clone())
     } else {
-        digest_optional_file(candidate.source.metadata_path.as_deref())?
+        digest_optional_file(opening.metadata_bytes.as_deref())?
     };
-    let closing = observe_mux_source(&candidate.source)?;
+    opening.revalidate(&candidate.authority)?;
+    let closing = admit_mux_candidate(candidate)?;
+    closing.revalidate(&candidate.authority)?;
     if closing.wire != opening.wire {
         return Err(MuxSourceBackedError::CandidateChanged);
     }
@@ -540,15 +619,15 @@ pub(crate) fn revalidate_mux_source_backed(
         return Ok(false);
     }
     let checkpoint = decode_checkpoint(certificate)?;
-    let observed = observe_mux_source(&candidate.source)?;
+    let observed = admit_mux_candidate(candidate)?;
+    observed.revalidate(&candidate.authority)?;
     let observation = source_observation(&candidate.source_key, &observed.wire)?;
     Ok(checkpoint.observation == observed.wire
         && certificate.observation().revision() == observation.revision())
 }
 
 /// Translates the provider-native envelope back into the existing exact Mux
-/// route locator. The integration registry only needs to supply brokered source
-/// access for the path selected by [`mux_source_path_for_locator`].
+/// route locator.
 pub(crate) fn mux_complete_content_locator(
     locator: &SourceRecordLocator,
 ) -> Option<CompleteContentSourceLocator> {
@@ -571,23 +650,92 @@ pub(crate) fn mux_complete_content_locator(
     CompleteContentSourceLocator::new(MUX_LOCATOR_KIND, value.clone())
 }
 
-pub(crate) fn mux_source_path_for_locator<'a>(
-    candidate: &'a MuxSourceBackedCandidate,
+pub(crate) fn hydrate_mux_source_backed_record(
+    candidate: &MuxSourceBackedCandidate,
     locator: &SourceRecordLocator,
-) -> Option<&'a Path> {
+) -> MuxSourceBackedResult<Vec<u8>> {
     if !candidate.source_key.exact_descriptor_eq(locator.source()) {
-        return None;
+        return Err(MuxSourceBackedError::InvalidLocator);
     }
-    let locator = mux_complete_content_locator(locator)?;
-    match locator.value().first().copied() {
-        Some(1) => candidate.source.chat_path.as_deref(),
-        Some(2) => candidate.source.partial_path.as_deref(),
-        _ => None,
+    locator.validate_contract()?;
+    let complete =
+        mux_complete_content_locator(locator).ok_or(MuxSourceBackedError::InvalidLocator)?;
+    let value = complete.value();
+    let tag = value[0];
+    let byte_start = u64::from_be_bytes(
+        value[1..9]
+            .try_into()
+            .map_err(|_| MuxSourceBackedError::InvalidLocator)?,
+    );
+    let byte_end = u64::from_be_bytes(
+        value[9..17]
+            .try_into()
+            .map_err(|_| MuxSourceBackedError::InvalidLocator)?,
+    );
+    let byte_length = byte_end
+        .checked_sub(byte_start)
+        .ok_or(MuxSourceBackedError::InvalidLocator)?;
+    if byte_length == 0 || byte_length > MAX_PROVIDER_JSONL_LINE_BYTES.saturating_add(2) as u64 {
+        return Err(MuxSourceBackedError::InvalidLocator);
     }
+    let opening = admit_mux_candidate(candidate)?;
+    let current_observation = source_observation(&candidate.source_key, &opening.wire)?;
+    let current_revision_digest: [u8; 32] = Sha256::digest(current_observation.revision()).into();
+    let source = match tag {
+        1 => opening
+            .chat_file
+            .as_ref()
+            .ok_or(MuxSourceBackedError::StaleLocator)?,
+        2 if byte_start == 0
+            && locator.certified_source_revision_digest() == Some(&current_revision_digest) =>
+        {
+            opening
+                .partial_file
+                .as_ref()
+                .ok_or(MuxSourceBackedError::StaleLocator)?
+        }
+        _ => return Err(MuxSourceBackedError::StaleLocator),
+    };
+    let length =
+        usize::try_from(byte_length).map_err(|_| MuxSourceBackedError::InvalidLocator)?;
+    let provider_bytes = source
+        .read_exact_range(
+            byte_start,
+            length,
+            MAX_PROVIDER_JSONL_LINE_BYTES.saturating_add(2),
+        )
+        .map_err(|_| MuxSourceBackedError::StaleLocator)?;
+    let payload = if tag == 1 {
+        let first_newline = provider_bytes.iter().position(|byte| *byte == b'\n');
+        if first_newline.is_some_and(|position| position + 1 != provider_bytes.len())
+            || (first_newline.is_none() && byte_end != source.len())
+        {
+            return Err(MuxSourceBackedError::StaleLocator);
+        }
+        provider_bytes
+            .strip_suffix(b"\n")
+            .unwrap_or(&provider_bytes)
+            .strip_suffix(b"\r")
+            .unwrap_or_else(|| provider_bytes.strip_suffix(b"\n").unwrap_or(&provider_bytes))
+    } else {
+        if byte_end != source.len() {
+            return Err(MuxSourceBackedError::StaleLocator);
+        }
+        &provider_bytes
+    };
+    if Sha256::digest(payload).as_slice() != locator.record_digest() {
+        return Err(MuxSourceBackedError::StaleLocator);
+    }
+    opening.revalidate(&candidate.authority)?;
+    let closing = admit_mux_candidate(candidate)?;
+    closing.revalidate(&candidate.authority)?;
+    if closing.wire != opening.wire {
+        return Err(MuxSourceBackedError::StaleLocator);
+    }
+    Ok(payload.to_vec())
 }
 
 fn classify_scan(
-    candidate: &MuxSourceBackedCandidate,
     base: Option<&CertifiedSource>,
     opening: &MuxObservedSource,
 ) -> MuxSourceBackedResult<MuxScanPlan> {
@@ -615,10 +763,10 @@ fn classify_scan(
         };
         return Ok(MuxScanPlan::Replacement { reason, checkpoint });
     }
-    let (Some(prior_chat), Some(current_chat), Some(chat_path)) = (
+    let (Some(prior_chat), Some(current_chat), Some(chat_file)) = (
         checkpoint.chat.as_ref(),
         opening.wire.chat.as_ref(),
-        candidate.source.chat_path.as_deref(),
+        opening.chat_file.as_ref(),
     ) else {
         return Ok(MuxScanPlan::Replacement {
             reason: MuxReplacementReason::SourceSetChanged,
@@ -645,7 +793,7 @@ fn classify_scan(
             checkpoint,
         });
     }
-    if !prefix_matches_checkpoint(chat_path, &prior_chat.frontier)? {
+    if !prefix_matches_checkpoint(chat_file, &prior_chat.frontier)? {
         return Ok(MuxScanPlan::Replacement {
             reason: MuxReplacementReason::ChatPrefixChanged,
             checkpoint,
@@ -660,6 +808,7 @@ fn scan_leaf(
     context: &ProviderAdapterContext,
     session: &mut MuxBoundedSessionMetadata,
     path: &Path,
+    file: &OpenedProviderSourceFile,
     kind: MuxStreamKind,
     observation: &MuxFileObservation,
     initial_frontier: MuxFrontier,
@@ -675,7 +824,7 @@ fn scan_leaf(
         observation.clone(),
         initial_frontier.clone(),
     );
-    let (mut reader, mut hasher) = open_reader_at_frontier(path, &initial_frontier)?;
+    let (mut reader, mut hasher) = open_reader_at_frontier(file, &initial_frontier)?;
     let mut frontier = initial_frontier.clone();
     let mut retained_records = 0_u64;
     let mut indexed_documents = 0_u64;
@@ -956,16 +1105,65 @@ fn sum_leaf(
     )
 }
 
-fn observe_mux_source(source: &MuxSessionSource) -> MuxSourceBackedResult<MuxObservedSource> {
-    let chat = source
-        .chat_path
-        .as_deref()
-        .map(|path| MuxFileObservation::read(path, source.metadata_path.as_deref()))
+fn admit_mux_candidate(
+    candidate: &MuxSourceBackedCandidate,
+) -> MuxSourceBackedResult<MuxObservedSource> {
+    admit_mux_source(
+        &candidate.authority,
+        &candidate.source,
+        &candidate.session_relative_path,
+        candidate.chat_relative_path.as_deref(),
+        candidate.partial_relative_path.as_deref(),
+        candidate.metadata_relative_path.as_deref(),
+    )
+}
+
+fn admit_mux_source(
+    authority: &ProviderSourceRoot,
+    _source: &MuxSessionSource,
+    session_relative_path: &Path,
+    expected_chat: Option<&Path>,
+    expected_partial: Option<&Path>,
+    expected_metadata: Option<&Path>,
+) -> MuxSourceBackedResult<MuxObservedSource> {
+    let chat_relative = session_relative_path.join("chat.jsonl");
+    let partial_relative = session_relative_path.join("partial.json");
+    let metadata_relative = session_relative_path.join("metadata.json");
+    let chat_file = open_optional_mux_file(authority, &chat_relative)?;
+    let partial_file = open_optional_mux_file(authority, &partial_relative)?;
+    let metadata_file = open_optional_mux_file(authority, &metadata_relative)?;
+    if chat_file.is_some() != expected_chat.is_some()
+        || partial_file.is_some() != expected_partial.is_some()
+        || metadata_file.is_some() != expected_metadata.is_some()
+    {
+        return Err(MuxSourceBackedError::CandidateChanged);
+    }
+    let metadata_bytes = metadata_file
+        .as_ref()
+        .map(|metadata| metadata.read_all_bounded(MAX_PROVIDER_JSONL_LINE_BYTES))
         .transpose()?;
-    let partial = source
-        .partial_path
-        .as_deref()
-        .map(|path| MuxFileObservation::read(path, source.metadata_path.as_deref()))
+    let metadata_stamp = metadata_file
+        .as_ref()
+        .map(OpenedProviderSourceFile::metadata);
+    let chat = chat_file
+        .as_ref()
+        .map(|file| {
+            MuxFileObservation::from_admitted(
+                authority.named_path().join(&chat_relative),
+                file.metadata(),
+                metadata_stamp,
+            )
+        })
+        .transpose()?;
+    let partial = partial_file
+        .as_ref()
+        .map(|file| {
+            MuxFileObservation::from_admitted(
+                authority.named_path().join(&partial_relative),
+                file.metadata(),
+                metadata_stamp,
+            )
+        })
         .transpose()?;
     let metadata_revision = chat
         .as_ref()
@@ -987,7 +1185,39 @@ fn observe_mux_source(source: &MuxSessionSource) -> MuxSourceBackedResult<MuxObs
         },
         chat,
         partial,
+        chat_file,
+        partial_file,
+        metadata_file,
+        metadata_bytes,
     })
+}
+
+fn open_optional_mux_file(
+    authority: &ProviderSourceRoot,
+    relative_path: &Path,
+) -> MuxSourceBackedResult<Option<OpenedProviderSourceFile>> {
+    match authority.open_file(relative_path) {
+        Ok(file) => Ok(Some(file)),
+        Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn relative_to_mux_authority(
+    authority: &ProviderSourceRoot,
+    path: &Path,
+) -> MuxSourceBackedResult<PathBuf> {
+    let canonical = std::fs::canonicalize(path)?;
+    canonical
+        .strip_prefix(authority.named_path())
+        .map(Path::to_path_buf)
+        .map_err(|_| {
+            CaptureError::InvalidProviderTranscriptPath {
+                path: canonical,
+                reason: "Mux compound leaves must share one authority root",
+            }
+            .into()
+        })
 }
 
 fn leaf_observation(
@@ -1076,8 +1306,44 @@ fn decode_checkpoint(base: &CertifiedSource) -> MuxSourceBackedResult<MuxSourceB
     Ok(checkpoint)
 }
 
-fn prefix_matches_checkpoint(path: &Path, frontier: &MuxFrontier) -> MuxSourceBackedResult<bool> {
-    let mut file = File::open(path)?;
+fn open_reader_at_frontier(
+    source: &OpenedProviderSourceFile,
+    frontier: &MuxFrontier,
+) -> MuxSourceBackedResult<(BufReader<std::fs::File>, Sha256)> {
+    let mut file = source.file().try_clone()?;
+    file.seek(SeekFrom::Start(0))?;
+    let mut remaining = frontier.next_offset;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    while remaining != 0 {
+        let take = usize::try_from(remaining.min(buffer.len() as u64))
+            .map_err(|_| MuxSourceBackedError::CountOverflow)?;
+        let read = file.read(&mut buffer[..take])?;
+        if read == 0 {
+            return Err(CaptureError::InvalidPayload(
+                "Mux cursor frontier exceeds its source".to_owned(),
+            )
+            .into());
+        }
+        hasher.update(&buffer[..read]);
+        remaining = remaining.saturating_sub(read as u64);
+    }
+    if <[u8; 32]>::from(hasher.clone().finalize()) != frontier.prefix_sha256 {
+        return Err(CaptureError::InvalidPayload(
+            "Mux cursor prefix no longer matches its source".to_owned(),
+        )
+        .into());
+    }
+    file.seek(SeekFrom::Start(frontier.next_offset))?;
+    Ok((BufReader::new(file), hasher))
+}
+
+fn prefix_matches_checkpoint(
+    source: &OpenedProviderSourceFile,
+    frontier: &MuxFrontier,
+) -> MuxSourceBackedResult<bool> {
+    let mut file = source.file().try_clone()?;
+    file.seek(SeekFrom::Start(0))?;
     let mut remaining = frontier.next_offset;
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
@@ -1094,23 +1360,12 @@ fn prefix_matches_checkpoint(path: &Path, frontier: &MuxFrontier) -> MuxSourceBa
     Ok(<[u8; 32]>::from(hasher.finalize()) == frontier.prefix_sha256)
 }
 
-fn digest_optional_file(path: Option<&Path>) -> MuxSourceBackedResult<Option<MuxComponentDigest>> {
-    let Some(path) = path else {
+fn digest_optional_file(
+    bytes: Option<&[u8]>,
+) -> MuxSourceBackedResult<Option<MuxComponentDigest>> {
+    let Some(bytes) = bytes else {
         return Ok(None);
     };
-    let mut file = File::open(path)?;
-    let maximum = u64::try_from(MAX_PROVIDER_JSONL_LINE_BYTES)
-        .map_err(|_| MuxSourceBackedError::CountOverflow)?;
-    let mut bytes = Vec::new();
-    file.by_ref()
-        .take(maximum.saturating_add(1))
-        .read_to_end(&mut bytes)?;
-    if bytes.len() > MAX_PROVIDER_JSONL_LINE_BYTES {
-        return Err(CaptureError::InvalidPayload(
-            "Mux metadata.json exceeds the supported size".to_owned(),
-        )
-        .into());
-    }
     Ok(Some(MuxComponentDigest {
         bytes: u64::try_from(bytes.len()).map_err(|_| MuxSourceBackedError::CountOverflow)?,
         digest: Sha256::digest(&bytes).into(),

@@ -37,6 +37,60 @@ pub(super) fn mux_bounded_session_metadata(
 ) -> Result<MuxBoundedSessionMetadata> {
     let mut summary = ProviderImportSummary::default();
     let metadata = read_mux_metadata(source.metadata_path.as_deref(), &mut summary);
+    mux_bounded_session_metadata_from_value(
+        source,
+        metadata_revision,
+        imported_at,
+        metadata,
+        summary,
+    )
+}
+
+pub(super) fn mux_bounded_session_metadata_from_bytes(
+    source: &MuxSessionSource,
+    metadata_revision: &str,
+    imported_at: DateTime<Utc>,
+    bytes: Option<&[u8]>,
+) -> Result<MuxBoundedSessionMetadata> {
+    let mut summary = ProviderImportSummary::default();
+    let metadata = match bytes {
+        None => Value::Null,
+        Some(bytes) => match serde_json::from_slice::<Value>(bytes) {
+            Ok(value) if value.is_object() => value,
+            Ok(_) => {
+                push_provider_import_failure(
+                    &mut summary,
+                    0,
+                    "Mux metadata.json must contain a JSON object".to_owned(),
+                );
+                Value::Null
+            }
+            Err(error) => {
+                push_provider_import_failure(
+                    &mut summary,
+                    0,
+                    format!("invalid Mux metadata.json: {error}"),
+                );
+                Value::Null
+            }
+        },
+    };
+    mux_bounded_session_metadata_from_value(
+        source,
+        metadata_revision,
+        imported_at,
+        metadata,
+        summary,
+    )
+}
+
+fn mux_bounded_session_metadata_from_value(
+    source: &MuxSessionSource,
+    metadata_revision: &str,
+    imported_at: DateTime<Utc>,
+    metadata: Value,
+    summary: ProviderImportSummary,
+) -> Result<MuxBoundedSessionMetadata> {
     let provider_session_id = bounded_mux_id(
         mux_string_pointer(&metadata, &["/workspaceId", "/sessionId"])
             .unwrap_or_else(|| source.provider_session_id.clone()),
