@@ -23,6 +23,7 @@ clap.workspace = true
 clap_mangen.workspace = true
 ed25519-dalek.workspace = true
 jsonc-parser = { version = "0.33", features = ["serde", "serde_json"] }
+memmap2.workspace = true
 ring.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
@@ -75,7 +76,6 @@ fastembed = { version = "5.17.2", default-features = false, features = ["hf-hub-
 fs2 = "0.4.3"
 hf-hub = { version = "0.5.0", default-features = false, features = ["ureq", "rustls-tls"] }
 ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dynamic", "ndarray", "std", "api-24", "cuda", "directml"] }
-sqlite-vec = "=0.1.9"
 [dev-dependencies]
 assert_cmd.workspace = true
 predicates.workspace = true
