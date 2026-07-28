@@ -13,10 +13,11 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use super::dto::GeminiEventBody;
 use super::{
-    read_gemini_transcript_pages_with_profile, GeminiEventBody, GeminiEventIdentity,
-    GeminiFileObservation, GeminiNativePage, GeminiNativePageReader, GeminiNativePathProfile,
-    GeminiRetainedEvent, GeminiScanError, GeminiSession, GeminiTranscriptSource,
+    read_gemini_transcript_pages_with_profile, GeminiEventIdentity, GeminiFileObservation,
+    GeminiNativePage, GeminiNativePageReader, GeminiNativePathProfile, GeminiRetainedEvent,
+    GeminiScanError, GeminiSession, GeminiTranscriptSource,
 };
 use crate::{
     provider::providers::native_jsonl::{
@@ -608,10 +609,10 @@ fn decode_display_text(
     let _line_number = physical_ordinal
         .checked_add(1)
         .ok_or(GeminiSourceBackedError::CountOverflow)?;
-    Ok(native_jsonl_event_text(
+    Ok(Some(native_jsonl_event_text(
         CaptureProvider::Gemini,
         &value,
         event_type,
         &entry_type,
-    ))
+    )))
 }
