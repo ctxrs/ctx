@@ -81,6 +81,11 @@ mod parse;
 mod projection;
 mod publication;
 mod source;
+#[allow(
+    dead_code,
+    reason = "provider adapter awaits central source-backed registration"
+)]
+mod source_backed;
 
 use lifecycle::*;
 use manifest::*;
@@ -89,6 +94,17 @@ use parse::*;
 use projection::*;
 use publication::*;
 use source::*;
+
+#[allow(
+    unused_imports,
+    reason = "provider adapter awaits central source-backed registration"
+)]
+pub(crate) use source_backed::{
+    discover_rovodev_source_backed, hydrate_rovodev_source_record, RovoDevHydratedSourceRecord,
+    RovoDevSourceBackedDisposition, RovoDevSourceBackedError, RovoDevSourceBackedInventory,
+    RovoDevSourceBackedLeaf, RovoDevSourceBackedPage, RovoDevSourceBackedReader,
+    RovoDevSourceBackedResult, RovoDevSourceBackedScan,
+};
 
 pub(super) const ROVODEV_NATIVE_MAX_COLLECTION_ELEMENTS: usize = 65_536;
 
