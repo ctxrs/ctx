@@ -6,6 +6,7 @@ mod reasons;
 mod resolvers;
 mod selectors;
 mod specs;
+mod sqlite_source;
 mod types;
 
 pub use context::{
@@ -26,6 +27,10 @@ pub(crate) use ordinary_file::{
     observe_ordinary_file_strong_metadata, open_ordinary_file_without_following,
 };
 pub use specs::{provider_source_spec, provider_source_specs};
+pub(crate) use sqlite_source::{
+    open_sqlite_source_snapshot, SqliteSourceAccessError, SqliteSourceEvidence,
+    SqliteSourceReadSnapshot,
+};
 pub use types::{
     DiscoveryIssue, DiscoveryIssueKind, DiscoveryReport, ProviderCatalogSupport,
     ProviderDefaultLocation, ProviderImportSupport, ProviderSource, ProviderSourceKind,
