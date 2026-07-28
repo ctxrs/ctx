@@ -1,10 +1,9 @@
 use std::{
     collections::BTreeSet,
-    fs::{self, File, OpenOptions},
+    fs::File,
     io::{Read, Seek, SeekFrom},
     ops::Deref,
-    path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    path::Path,
 };
 
 use rusqlite::{limits::Limit, Connection};
@@ -15,7 +14,8 @@ use crate::common::io::ensure_regular_provider_transcript_file;
 use crate::compute_payload_hash;
 use crate::provider_sources::{
     observe_ordinary_file, open_ordinary_file_without_following, open_sqlite_source_snapshot,
-    OrdinaryFileObservation, SqliteSourceAccessError, SqliteSourceReadSnapshot,
+    OrdinaryFileObservation, SqliteSourceAccessError, SqliteSourceEvidence,
+    SqliteSourceReadSnapshot,
 };
 
 use crate::{CaptureError, Result, MAX_PROVIDER_SQLITE_VALUE_BYTES};
@@ -139,97 +139,6 @@ impl Drop for SqliteLengthPreflightGuard<'_> {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
-struct ProviderSqliteFrozenFileMetadata {
-    length: u64,
-    modified: SystemTime,
-    readonly: bool,
-    device: Option<u64>,
-    inode: Option<u64>,
-    change_token: [u8; 32],
-}
-
-impl ProviderSqliteFrozenFileMetadata {
-    fn read(path: &Path, invalid_reason: &'static str) -> Result<Self> {
-        let metadata = fs::symlink_metadata(path)?;
-        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-            return Err(CaptureError::InvalidProviderTranscriptPath {
-                path: path.to_path_buf(),
-                reason: invalid_reason,
-            });
-        }
-        let observation = observe_ordinary_file(path)?;
-        if metadata.len() != observation.len()
-            || metadata.modified().ok() != Some(observation.modified_at())
-        {
-            return Err(CaptureError::SourceChangedDuringCapture);
-        }
-        let change_token = sqlite_component_change_token(path, &observation)?;
-        Self::from_metadata(&metadata, change_token)
-    }
-
-    fn read_optional(path: &Path, invalid_reason: &'static str) -> Result<Option<Self>> {
-        match fs::symlink_metadata(path) {
-            Ok(metadata)
-                if metadata.file_type().is_file() && !metadata.file_type().is_symlink() =>
-            {
-                Self::read(path, invalid_reason).map(Some)
-            }
-            Ok(_) => Err(CaptureError::InvalidProviderTranscriptPath {
-                path: path.to_path_buf(),
-                reason: invalid_reason,
-            }),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(CaptureError::Io(error)),
-        }
-    }
-
-    fn from_metadata(metadata: &fs::Metadata, change_token: [u8; 32]) -> Result<Self> {
-        #[cfg(unix)]
-        use std::os::unix::fs::MetadataExt;
-
-        if !metadata.file_type().is_file() {
-            return Err(CaptureError::InvalidPayload(
-                "provider SQLite source component is not a regular file".to_owned(),
-            ));
-        }
-        Ok(Self {
-            length: metadata.len(),
-            modified: metadata.modified()?,
-            readonly: metadata.permissions().readonly(),
-            #[cfg(unix)]
-            device: Some(metadata.dev()),
-            #[cfg(not(unix))]
-            device: None,
-            #[cfg(unix)]
-            inode: Some(metadata.ino()),
-            #[cfg(not(unix))]
-            inode: None,
-            change_token,
-        })
-    }
-
-    fn revision_component(&self) -> String {
-        let (sign, seconds, nanos) = match self.modified.duration_since(UNIX_EPOCH) {
-            Ok(duration) => ('+', duration.as_secs(), duration.subsec_nanos()),
-            Err(error) => {
-                let duration = error.duration();
-                ('-', duration.as_secs(), duration.subsec_nanos())
-            }
-        };
-        format!(
-            "length={};modified={sign}{seconds}.{nanos:09};readonly={};device={};inode={};change={}",
-            self.length,
-            self.readonly,
-            self.device
-                .map_or_else(|| "none".to_owned(), |value| value.to_string()),
-            self.inode
-                .map_or_else(|| "none".to_owned(), |value| value.to_string()),
-            hex_token(&self.change_token),
-        )
-    }
-}
-
 const SQLITE_COMPONENT_TOKEN_DOMAIN: &[u8] = b"ctx-provider-sqlite-component-v1\0";
 const SQLITE_HEADER_BYTES: usize = 100;
 const SQLITE_WAL_HEADER_BYTES: usize = 32;
@@ -239,7 +148,7 @@ pub(crate) fn sqlite_component_change_token(
     path: &Path,
     observation: &OrdinaryFileObservation,
 ) -> Result<[u8; 32]> {
-    let mut file = open_sqlite_component_without_following(path)?;
+    let mut file = open_ordinary_file_without_following(path)?;
     let metadata = file.metadata()?;
     if !metadata.file_type().is_file() || metadata.len() != observation.len() {
         return Err(CaptureError::SourceChangedDuringCapture);
@@ -302,43 +211,13 @@ fn sqlite_wal_last_frame_header(
     Ok(Some(header))
 }
 
-#[cfg(unix)]
-fn open_sqlite_component_without_following(path: &Path) -> Result<File> {
-    use std::os::unix::fs::OpenOptionsExt;
-
-    Ok(OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)?)
-}
-
-#[cfg(target_os = "windows")]
-fn open_sqlite_component_without_following(path: &Path) -> Result<File> {
-    use std::os::windows::fs::OpenOptionsExt;
-
-    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-
-    Ok(OpenOptions::new()
-        .read(true)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)?)
-}
-
-#[cfg(not(any(unix, target_os = "windows")))]
-fn open_sqlite_component_without_following(path: &Path) -> Result<File> {
-    Ok(File::open(path)?)
-}
-
 fn hex_token(token: &[u8; 32]) -> String {
     token.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct ProviderSqliteSourceSnapshot {
-    database: ProviderSqliteFrozenFileMetadata,
-    wal: Option<ProviderSqliteFrozenFileMetadata>,
-    shared_memory: Option<ProviderSqliteFrozenFileMetadata>,
-    rollback_journal: Option<ProviderSqliteFrozenFileMetadata>,
+    evidence: SqliteSourceEvidence,
     source_invalid_reason: &'static str,
     sidecar_invalid_reason: &'static str,
 }
@@ -350,19 +229,7 @@ impl ProviderSqliteSourceSnapshot {
         sidecar_invalid_reason: &'static str,
     ) -> Result<Self> {
         Ok(Self {
-            database: ProviderSqliteFrozenFileMetadata::read(path, source_invalid_reason)?,
-            wal: ProviderSqliteFrozenFileMetadata::read_optional(
-                &sqlite_sidecar_path(path, "-wal"),
-                sidecar_invalid_reason,
-            )?,
-            shared_memory: ProviderSqliteFrozenFileMetadata::read_optional(
-                &sqlite_sidecar_path(path, "-shm"),
-                sidecar_invalid_reason,
-            )?,
-            rollback_journal: ProviderSqliteFrozenFileMetadata::read_optional(
-                &sqlite_sidecar_path(path, "-journal"),
-                sidecar_invalid_reason,
-            )?,
+            evidence: read_sqlite_source_evidence(path)?,
             source_invalid_reason,
             sidecar_invalid_reason,
         })
@@ -370,11 +237,10 @@ impl ProviderSqliteSourceSnapshot {
 
     pub(crate) fn revision_component(&self) -> String {
         format!(
-            "database={};wal={};shm={};journal={}",
-            self.database.revision_component(),
-            optional_sqlite_revision_component(self.wal.as_ref()),
-            optional_sqlite_revision_component(self.shared_memory.as_ref()),
-            optional_sqlite_revision_component(self.rollback_journal.as_ref()),
+            "identity={};length={};revision={}",
+            hex_token(self.evidence.identity()),
+            self.evidence.length(),
+            hex_token(self.evidence.revision()),
         )
     }
 
@@ -394,16 +260,12 @@ impl ProviderSqliteSourceSnapshot {
     }
 }
 
-fn optional_sqlite_revision_component(
-    metadata: Option<&ProviderSqliteFrozenFileMetadata>,
-) -> String {
-    metadata.map_or_else(|| "absent".to_owned(), |value| value.revision_component())
-}
-
-fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
-    let mut sidecar = path.as_os_str().to_os_string();
-    sidecar.push(suffix);
-    PathBuf::from(sidecar)
+fn read_sqlite_source_evidence(path: &Path) -> Result<SqliteSourceEvidence> {
+    ensure_regular_provider_transcript_file(path)?;
+    let root_bound_database = open_ordinary_file_without_following(path)?;
+    open_sqlite_source_snapshot(path, &root_bound_database)
+        .and_then(SqliteSourceReadSnapshot::finish)
+        .map_err(map_sqlite_source_access_error)
 }
 
 pub(crate) struct ReadOnlySqliteConnection {
@@ -517,10 +379,7 @@ pub(crate) fn sqlite_schema_fingerprint(conn: &Connection) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        panic::{catch_unwind, AssertUnwindSafe},
-    };
+    use std::panic::{catch_unwind, AssertUnwindSafe};
 
     use rusqlite::{limits::Limit, params, types::Value as SqlValue, Connection};
 
@@ -587,13 +446,19 @@ mod tests {
         assert_eq!(conn.limit(Limit::SQLITE_LIMIT_LENGTH), TEST_LENGTH_LIMIT);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
-    fn provider_sqlite_snapshot_tracks_database_and_sidecars() {
+    fn provider_sqlite_snapshot_uses_root_bound_guard_evidence() {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let database = temp.path().join("provider.sqlite");
-        let wal = temp.path().join("provider.sqlite-wal");
-        fs::write(&database, b"database-v1").unwrap();
-        fs::write(&wal, b"wal-v1").unwrap();
+        let writer = Connection::open(&database).unwrap();
+        writer
+            .execute("CREATE TABLE messages (body TEXT NOT NULL)", [])
+            .unwrap();
+        writer
+            .execute("INSERT INTO messages (body) VALUES ('v1')", [])
+            .unwrap();
+        drop(writer);
 
         let snapshot = ProviderSqliteSourceSnapshot::read(
             &database,
@@ -602,10 +467,14 @@ mod tests {
         )
         .unwrap();
         assert!(snapshot.revalidate(&database).unwrap());
-        assert!(snapshot.revision_component().contains("database=length=11"));
-        assert!(snapshot.revision_component().contains("wal=length=6"));
+        assert!(snapshot.revision_component().contains("identity="));
+        assert!(snapshot.revision_component().contains(";revision="));
 
-        fs::write(&wal, b"wal-v2-with-more-bytes").unwrap();
+        let writer = Connection::open(&database).unwrap();
+        writer
+            .execute("INSERT INTO messages (body) VALUES ('v2')", [])
+            .unwrap();
+        drop(writer);
         assert!(!snapshot.revalidate(&database).unwrap());
     }
 
