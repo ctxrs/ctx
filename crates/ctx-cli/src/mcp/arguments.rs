@@ -59,19 +59,6 @@ pub(super) fn optional_f32(arguments: &Value, key: &str) -> Result<Option<f32>> 
     }
 }
 
-pub(super) fn required_uuid(arguments: &Value, key: &str) -> Result<Uuid> {
-    optional_uuid(arguments, key)?.ok_or_else(|| invalid_tool_request(format!("{key} is required")))
-}
-
-fn optional_uuid(arguments: &Value, key: &str) -> Result<Option<Uuid>> {
-    optional_string(arguments, key)?
-        .map(|value| {
-            Uuid::parse_str(&value)
-                .map_err(|error| invalid_tool_request(format!("invalid {key}: {error}")))
-        })
-        .transpose()
-}
-
 pub(super) fn optional_provider(arguments: &Value, key: &str) -> Result<Option<ProviderArg>> {
     let Some(provider) = optional_string(arguments, key)? else {
         return Ok(None);
