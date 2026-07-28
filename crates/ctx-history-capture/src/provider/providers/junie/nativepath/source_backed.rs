@@ -7,12 +7,12 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CertifiedSource, ContentSourceResolver,
-    EventHydrationRequest, EventIdentityInput, HydratedProviderRecord, HydrationFailure,
-    HydrationFailureKind, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
-    NativeSessionKey, PositionStability, ProjectionContractError, ScannedSourceCounts,
-    SessionHydrationRequest, SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation,
-    SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource,
+    ContentSourceResolver, EventHydrationRequest, EventIdentityInput, HydratedProviderRecord,
+    HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy, NativeItemKey,
+    NativeRecordCoordinate, NativeSessionKey, PositionStability, ProjectionContractError,
+    ScannedSourceCounts, SessionHydrationRequest, SessionIdentityInput, SourceAnchor, SourceKey,
+    SourceObservation, SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
 };
 use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
 use serde_json::Value;
@@ -40,7 +40,7 @@ use crate::{
             MAX_JUNIE_TRANSIENT_TURN_BYTES,
         },
     },
-    AgentType, CaptureError, CaptureProvider, JUNIE_SESSION_EVENTS_SOURCE_FORMAT,
+    CaptureError, JUNIE_SESSION_EVENTS_SOURCE_FORMAT,
 };
 
 const SOURCE_ANCHOR_NAMESPACE: &str = "junie.session-events";
