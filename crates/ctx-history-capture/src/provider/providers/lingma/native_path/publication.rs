@@ -454,9 +454,14 @@ pub(super) fn attach_lingma_complete_content_locator(
 pub(in super::super) fn lingma_logical_record_digest(
     values: &[NativeSqliteValue],
 ) -> Result<CompleteContentBodyDigest> {
-    CompleteContentBodyDigest::parse(format!("{:x}", lingma_logical_record_sha256(values))).ok_or(
-        CaptureError::SystemInvariant("Lingma logical-row digest is not canonical SHA-256"),
-    )
+    let digest = lingma_logical_record_sha256(values);
+    let encoded = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    CompleteContentBodyDigest::parse(encoded).ok_or(CaptureError::SystemInvariant(
+        "Lingma logical-row digest is not canonical SHA-256",
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
