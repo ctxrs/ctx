@@ -715,6 +715,11 @@ fn attach_firebender_complete_content(
 }
 
 fn firebender_record_digest(values: &[NativeSqliteValue]) -> CompleteContentBodyDigest {
+    CompleteContentBodyDigest::parse(hex(&firebender_raw_row_digest(values)))
+        .expect("SHA-256 formatter must return a valid digest")
+}
+
+pub(super) fn firebender_raw_row_digest(values: &[NativeSqliteValue]) -> [u8; 32] {
     const DOMAIN: &[u8] = b"ctx-complete-content-sqlite-logical-row-v1\0";
     let mut digest = Sha256::new();
     digest.update(DOMAIN);
@@ -742,8 +747,17 @@ fn firebender_record_digest(values: &[NativeSqliteValue]) -> CompleteContentBody
             }
         }
     }
-    CompleteContentBodyDigest::parse(format!("{:x}", digest.finalize()))
-        .expect("SHA-256 formatter must return a valid digest")
+    digest.finalize().into()
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }
 
 fn core_event_count(page: &FirebenderPage) -> usize {

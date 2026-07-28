@@ -668,3 +668,190 @@ fn output_failure_keeps_core_success_and_later_replay_catches_up() {
         [SECRET.as_bytes()]
     );
 }
+
+fn drain_source_backed_plan(
+    plan: FirebenderSourceBackedPlan,
+) -> (
+    ctx_history_core::CertifiedSource,
+    Vec<ctx_history_index::LexicalDocument>,
+    Vec<usize>,
+) {
+    let FirebenderSourceBackedPlan::Replacement(mut scanner) = plan else {
+        panic!("expected a replacement scan");
+    };
+    let mut documents = Vec::new();
+    let mut page_sizes = Vec::new();
+    while let Some(page) = scanner.next_page().unwrap() {
+        assert!(page.retained_bytes() <= NATIVE_PATH_MAX_RETAINED_PAGE_BYTES);
+        page_sizes.push(page.documents().len());
+        documents.extend(page.into_documents());
+    }
+    let certificate = scanner.finish().unwrap();
+    (certificate, documents, page_sizes)
+}
+
+#[test]
+fn firebender_source_backed_cold_and_exact_are_bounded_and_hydratable() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("project");
+    let messages = (0..61)
+        .map(|index| {
+            if index == 0 {
+                json!({
+                    "role": "user",
+                    "content": "x".repeat(ctx_history_index::MAX_BODY_PREVIEW_CHARS + 100),
+                })
+            } else {
+                json!({
+                    "role": "assistant",
+                    "content": format!("bounded Firebender message {index}"),
+                })
+            }
+        })
+        .collect::<Vec<_>>();
+    create_test_database(
+        &root,
+        &[("stable-session", 10, &Value::Array(messages).to_string())],
+    );
+
+    let cold = prepare_firebender_source_backed(&root, None).unwrap();
+    let (certificate, documents, page_sizes) = drain_source_backed_plan(cold);
+    assert_eq!(page_sizes, vec![60, 1]);
+    assert_eq!(documents.len(), 61);
+    assert_eq!(certificate.counts().complete_records, 61);
+    assert_eq!(certificate.counts().retained_records, 61);
+    assert_eq!(certificate.counts().indexed_documents, 61);
+    assert_eq!(certificate.counts().rejected_records, 0);
+    assert_eq!(certificate.counts().ignored_records, 0);
+    assert!(certificate.counts().certified_bytes > 0);
+    assert!(documents.iter().all(|document| {
+        document.body.chars().count() <= ctx_history_index::MAX_BODY_PREVIEW_CHARS
+            && &document.source == certificate.observation().source()
+            && document.event_id.source_digest()
+                == certificate.observation().source().identity().digest()
+    }));
+
+    let first = &documents[0];
+    let ctx_history_core::NativeRecordCoordinate::ProviderSqlite {
+        logical_relation,
+        primary_key: ctx_history_core::TypedKey::I64(rowid),
+        row_version: Some(ctx_history_core::TypedKey::Composite(version)),
+    } = first.locator.coordinate()
+    else {
+        panic!("expected a typed Firebender SQLite locator");
+    };
+    assert_eq!(logical_relation, "chat_sessions.messages_json");
+    assert_eq!(*rowid, 1);
+    assert_eq!(
+        version,
+        &vec![
+            ctx_history_core::TypedKey::Utf8("stable-session".to_owned()),
+            ctx_history_core::TypedKey::I64(10),
+            ctx_history_core::TypedKey::U64(0),
+        ]
+    );
+    assert!(first.locator.certified_source_revision_digest().is_some());
+    assert!(documents
+        .iter()
+        .all(|document| document.locator.record_digest() == first.locator.record_digest()));
+
+    let hydrated = hydrate_firebender_source_backed_row(&root, &first.locator).unwrap();
+    assert_eq!(hydrated.provider_session_id(), "stable-session");
+    assert_eq!(hydrated.message_index(), 0);
+    let hydrated_messages: Value = serde_json::from_slice(hydrated.messages_json()).unwrap();
+    assert_eq!(
+        hydrated_messages.pointer("/0/role").and_then(Value::as_str),
+        Some("user")
+    );
+
+    let exact = prepare_firebender_source_backed(&root, Some(&certificate)).unwrap();
+    let FirebenderSourceBackedPlan::Exact(exact_certificate) = exact else {
+        panic!("unchanged Firebender snapshot was reparsed");
+    };
+    assert_eq!(exact_certificate, certificate);
+}
+
+#[test]
+fn firebender_source_backed_replacement_keeps_ids_and_stales_old_row_evidence() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("project");
+    let database = create_test_database(
+        &root,
+        &[(
+            "stable-session",
+            10,
+            r#"[
+                {"role":"user","content":"original"},
+                {"role":"assistant","content":"answer"}
+            ]"#,
+        )],
+    );
+    let (before, before_documents, _) =
+        drain_source_backed_plan(prepare_firebender_source_backed(&root, None).unwrap());
+    let old_locator = before_documents[0].locator.clone();
+    let old_ids = before_documents
+        .iter()
+        .map(|document| document.event_id)
+        .collect::<Vec<_>>();
+
+    replace_messages(
+        &database,
+        "stable-session",
+        20,
+        json!([
+            {"role": "user", "content": "replacement"},
+            {"role": "assistant", "content": "answer"}
+        ]),
+    );
+    let replacement =
+        prepare_firebender_source_backed(&root, Some(&before)).expect("replacement plan");
+    let (after, after_documents, _) = drain_source_backed_plan(replacement);
+    assert_ne!(after.observation(), before.observation());
+    assert_eq!(
+        after_documents
+            .iter()
+            .map(|document| document.event_id)
+            .collect::<Vec<_>>(),
+        old_ids
+    );
+    assert_eq!(after_documents[0].body, "replacement");
+    assert_ne!(
+        after_documents[0].locator.record_digest(),
+        old_locator.record_digest()
+    );
+    assert!(matches!(
+        hydrate_firebender_source_backed_row(&root, &old_locator),
+        Err(FirebenderSourceBackedError::StaleSourceEvidence)
+    ));
+    assert_eq!(
+        hydrate_firebender_source_backed_row(&root, &after_documents[0].locator)
+            .unwrap()
+            .provider_session_id(),
+        "stable-session"
+    );
+}
+
+#[test]
+fn firebender_source_backed_does_not_create_automatic_leaf_discovery() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("project");
+    create_test_database(
+        &root,
+        &[(
+            "explicit-only",
+            10,
+            r#"[{"role":"user","content":"explicit"}]"#,
+        )],
+    );
+
+    let report = crate::provider_sources::discover_provider_sources_for_provider_report(
+        temp.path(),
+        CaptureProvider::Firebender,
+    );
+    assert!(report.sources.is_empty());
+    assert_eq!(report.issues.len(), 1);
+    assert_eq!(
+        report.issues[0].kind,
+        crate::provider_sources::DiscoveryIssueKind::InsufficientOfficialEvidence
+    );
+}
