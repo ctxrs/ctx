@@ -96,7 +96,9 @@ where
     let (root, central_path) = explicit_project_paths(path)?;
     let snapshot = NanoClawProjectSnapshot::read_source_backed(&root, &central_path)?;
     let central = open_provider_sqlite_readonly(&central_path)?;
-    let user_version = central.query_row("pragma user_version", [], |row| row.get(0))?;
+    let user_version = central
+        .query_row("pragma user_version", [], |row| row.get(0))
+        .map_err(CaptureError::from)?;
     let schema_fingerprint = sqlite_schema_fingerprint(&central)?;
     let revision = snapshot.source_backed_revision_evidence(user_version, &schema_fingerprint)?;
     let source = nanoclaw_source_key(catalog_lineage)?;
@@ -208,7 +210,9 @@ pub(crate) fn hydrate_nanoclaw_source_backed_exact(
     let (root, central_path) = explicit_project_paths(path)?;
     let snapshot = NanoClawProjectSnapshot::read_source_backed(&root, &central_path)?;
     let central = open_provider_sqlite_readonly(&central_path)?;
-    let user_version = central.query_row("pragma user_version", [], |row| row.get(0))?;
+    let user_version = central
+        .query_row("pragma user_version", [], |row| row.get(0))
+        .map_err(CaptureError::from)?;
     let schema_fingerprint = sqlite_schema_fingerprint(&central)?;
     let revision = snapshot.source_backed_revision_evidence(user_version, &schema_fingerprint)?;
     let current_revision_digest: [u8; 32] = Sha256::digest(&revision).into();
@@ -249,7 +253,7 @@ pub(crate) fn nanoclaw_source_key(
 
 fn explicit_project_paths(path: &Path) -> NanoClawSourceBackedResult<(PathBuf, PathBuf)> {
     let selected = nanoclaw_project_root(path)?;
-    let root = fs::canonicalize(selected)?;
+    let root = fs::canonicalize(selected).map_err(CaptureError::from)?;
     let central_path = root.join("data").join("v2.db");
     Ok((root, central_path))
 }
