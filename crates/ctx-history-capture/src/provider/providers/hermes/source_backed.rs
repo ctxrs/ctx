@@ -275,9 +275,10 @@ pub(crate) fn scan_hermes_source_backed(
         .to_owned();
     let snapshot = hermes_snapshot(&candidate.path)?;
     let conn = open_provider_sqlite_readonly(&candidate.path)?;
-    conn.execute_batch("BEGIN")?;
-    let sqlite_user_version =
-        conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?;
+    conn.execute_batch("BEGIN").map_err(CaptureError::from)?;
+    let sqlite_user_version = conn
+        .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+        .map_err(CaptureError::from)?;
     let schema_fingerprint = sqlite_schema_fingerprint(&conn)?;
     let schema = HermesSchema::detect(&conn)?;
     let revision = hermes_source_revision(&snapshot, sqlite_user_version, &schema_fingerprint);
@@ -973,10 +974,11 @@ pub(crate) fn hydrate_hermes_source_backed_message(
     let (provider_session_id, message_id, rowid) = decode_message_coordinate(locator)?;
     let snapshot = hermes_snapshot(path)?;
     let conn = open_provider_sqlite_readonly(path)?;
-    conn.execute_batch("BEGIN")?;
+    conn.execute_batch("BEGIN").map_err(CaptureError::from)?;
     let operation = (|| {
-        let sqlite_user_version =
-            conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?;
+        let sqlite_user_version = conn
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .map_err(CaptureError::from)?;
         let schema_fingerprint = sqlite_schema_fingerprint(&conn)?;
         HermesSchema::detect(&conn)?;
         let revision = hermes_source_revision(&snapshot, sqlite_user_version, &schema_fingerprint);
