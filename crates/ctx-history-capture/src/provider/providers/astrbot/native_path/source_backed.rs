@@ -49,7 +49,7 @@ const CONVERSATION_OUTPUT_RELATION: &str = "astrbot.conversation-output-v0";
 const PLATFORM_MESSAGE_RELATION: &str = "astrbot.platform-message-v0";
 
 #[derive(Debug, Error)]
-pub(super) enum AstrBotSourceBackedErrorV0 {
+pub(in crate::provider::providers) enum AstrBotSourceBackedErrorV0 {
     #[error(transparent)]
     Capture(#[from] CaptureError),
     #[error(transparent)]
@@ -74,43 +74,46 @@ pub(super) enum AstrBotSourceBackedErrorV0 {
     SinkRejected,
 }
 
-pub(super) type AstrBotSourceBackedResultV0<T> = std::result::Result<T, AstrBotSourceBackedErrorV0>;
+pub(in crate::provider::providers) type AstrBotSourceBackedResultV0<T> =
+    std::result::Result<T, AstrBotSourceBackedErrorV0>;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) enum AstrBotSourceIdentityV0 {
+pub(in crate::provider::providers) enum AstrBotSourceIdentityV0 {
     SelectedCore,
     LauncherInstance(String),
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct AstrBotSourceBackedSourceV0 {
+pub(in crate::provider::providers) struct AstrBotSourceBackedSourceV0 {
     path: PathBuf,
     identity: AstrBotSourceIdentityV0,
     source_key: SourceKey,
 }
 
 impl AstrBotSourceBackedSourceV0 {
-    pub(super) fn path(&self) -> &Path {
+    pub(in crate::provider::providers) fn path(&self) -> &Path {
         &self.path
     }
 
-    pub(super) fn identity(&self) -> &AstrBotSourceIdentityV0 {
+    pub(in crate::provider::providers) fn identity(&self) -> &AstrBotSourceIdentityV0 {
         &self.identity
     }
 
-    pub(super) fn source_key(&self) -> &SourceKey {
+    pub(in crate::provider::providers) fn source_key(&self) -> &SourceKey {
         &self.source_key
     }
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct AstrBotSourceBackedInventoryV0 {
+pub(in crate::provider::providers) struct AstrBotSourceBackedInventoryV0 {
     observation: SourceInventoryObservation,
     sources: Vec<AstrBotSourceBackedSourceV0>,
 }
 
 impl AstrBotSourceBackedInventoryV0 {
-    pub(super) fn discover(context: &DiscoveryContext) -> AstrBotSourceBackedResultV0<Self> {
+    pub(in crate::provider::providers) fn discover(
+        context: &DiscoveryContext,
+    ) -> AstrBotSourceBackedResultV0<Self> {
         let report =
             discover_provider_sources_for_provider_with_context(context, CaptureProvider::AstrBot);
         if !report.issues.is_empty() {
@@ -167,11 +170,11 @@ impl AstrBotSourceBackedInventoryV0 {
         })
     }
 
-    pub(super) fn sources(&self) -> &[AstrBotSourceBackedSourceV0] {
+    pub(in crate::provider::providers) fn sources(&self) -> &[AstrBotSourceBackedSourceV0] {
         &self.sources
     }
 
-    pub(super) fn certify(
+    pub(in crate::provider::providers) fn certify(
         &self,
         closing: &Self,
     ) -> AstrBotSourceBackedResultV0<CertifiedSourceInventory> {
@@ -187,7 +190,7 @@ impl AstrBotSourceBackedInventoryV0 {
     }
 }
 
-pub(super) trait AstrBotSourceBackedSinkV0 {
+pub(in crate::provider::providers) trait AstrBotSourceBackedSinkV0 {
     fn emit(&mut self, document: LexicalDocument) -> AstrBotSourceBackedResultV0<()>;
 }
 
@@ -200,7 +203,7 @@ where
     }
 }
 
-pub(super) fn scan_astrbot_source_backed_v0(
+pub(in crate::provider::providers) fn scan_astrbot_source_backed_v0(
     source: &AstrBotSourceBackedSourceV0,
     sink: &mut impl AstrBotSourceBackedSinkV0,
 ) -> AstrBotSourceBackedResultV0<CertifiedSource> {
@@ -390,12 +393,12 @@ pub(super) fn scan_astrbot_source_backed_v0(
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct AstrBotSourceBackedResolverV0 {
+pub(in crate::provider::providers) struct AstrBotSourceBackedResolverV0 {
     sources: BTreeMap<[u8; 32], AstrBotSourceBackedSourceV0>,
 }
 
 impl AstrBotSourceBackedResolverV0 {
-    pub(super) fn from_inventory(
+    pub(in crate::provider::providers) fn from_inventory(
         inventory: &AstrBotSourceBackedInventoryV0,
     ) -> AstrBotSourceBackedResultV0<Self> {
         let sources = inventory
