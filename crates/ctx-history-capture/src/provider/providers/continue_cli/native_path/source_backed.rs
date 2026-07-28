@@ -1,10 +1,11 @@
 use std::path::{Path, PathBuf};
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, EventIdentityInput,
-    EventType, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
-    ProjectionContractError, ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey,
-    SourceObservation, SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource,
+    EventIdentityInput, EventType, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
+    NativeSessionKey, ProjectionContractError, ScannedSourceCounts, SessionIdentityInput,
+    SourceAnchor, SourceKey, SourceObservation, SourceRecordLocator, SourceResolverContractError,
+    StableEntityId, TypedKey,
 };
 use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
 use serde::Serialize;
@@ -340,9 +341,22 @@ fn project_event(
     Ok(LexicalDocument {
         event_id,
         session_id: active.session_id,
+        parent_session_id: None,
+        root_session_id: active.session_id,
         source: active.source.clone(),
         locator,
         provider_session_id: Some(active.prepared.session.identity.0.clone()),
+        branch: None,
+        source_path: Some(
+            active
+                .prepared
+                .observation
+                .canonical_path()
+                .display()
+                .to_string(),
+        ),
+        agent_type: AgentType::Primary.as_str().to_owned(),
+        is_primary: true,
         event_sequence: event.identity.history_ordinal,
         occurred_at_unix_ms,
         event_type: match event.kind {
@@ -804,6 +818,18 @@ mod tests {
         assert!(first_documents
             .iter()
             .all(|document| !document.body.contains("must stay excluded")));
+        assert!(first_documents.iter().all(|document| {
+            document.parent_session_id.is_none()
+                && document.root_session_id == document.session_id
+                && document.provider_session_id.as_deref() == Some("continue-primary")
+                && document.branch.is_none()
+                && document
+                    .source_path
+                    .as_deref()
+                    .is_some_and(|path| path.ends_with("primary.json"))
+                && document.agent_type == AgentType::Primary.as_str()
+                && document.is_primary
+        }));
         assert_eq!(first.leaf().certificate.counts().complete_records, 2);
         assert_eq!(first.leaf().certificate.counts().indexed_documents, 2);
         assert_eq!(first.leaf().output_exclusion.native_results_observed, 1);
