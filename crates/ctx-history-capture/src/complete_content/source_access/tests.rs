@@ -9,11 +9,12 @@ use uuid::Uuid;
 
 use super::{jsonl::finish_jsonl_read, AuthorizedSourceRoute, SourceAccessBroker};
 #[cfg(unix)]
+use crate::complete_content::CompleteContentBodyDigest;
+#[cfg(unix)]
 use crate::KIMI_CODE_CLI_SOURCE_FORMAT;
 use crate::{
     complete_content::{
-        CompleteContentBodyDigest, CompleteContentError, CompleteContentErrorKind,
-        CompleteContentSourceFamily, SourceSnapshot,
+        CompleteContentError, CompleteContentErrorKind, CompleteContentSourceFamily, SourceSnapshot,
     },
     CODEX_SESSION_SOURCE_FORMAT, MISTRAL_VIBE_SOURCE_FORMAT, OPENCLAW_SOURCE_FORMAT,
 };
