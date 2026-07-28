@@ -22,6 +22,7 @@ use super::{
     publication::{hex_digest, ZedNativePageBuilder},
     ZedNativePathError, ZedNativeResult, ZedNativeSink,
 };
+use crate::provider::providers::zed::thread::ZedThreadRow;
 
 const ZED_CANDIDATE_PAGE_ROWS: i64 = 256;
 pub(super) const ZED_THREAD_ID_MAX_BYTES: usize = 64 * 1024;
@@ -207,6 +208,9 @@ pub(super) fn scan_zed_native_snapshot(
         for candidate in candidates {
             last_invalid_rowid = Some(candidate.rowid);
             counters.native_thread_rows = counters.native_thread_rows.saturating_add(1);
+            counters.certified_logical_bytes = counters
+                .certified_logical_bytes
+                .saturating_add(u64::try_from(candidate.retained_bytes).unwrap_or(u64::MAX));
             hash_candidate(&mut source_hasher, &candidate);
             counters.rejected_threads = counters.rejected_threads.saturating_add(1);
             let (kind, reason) = if candidate.storage_error != 0 {
@@ -266,6 +270,9 @@ pub(super) fn scan_zed_native_snapshot(
             })?;
             last_thread_id = Some(id.to_owned());
             counters.native_thread_rows = counters.native_thread_rows.saturating_add(1);
+            counters.certified_logical_bytes = counters
+                .certified_logical_bytes
+                .saturating_add(u64::try_from(candidate.retained_bytes).unwrap_or(u64::MAX));
             hash_candidate(&mut source_hasher, &candidate);
             if candidate.storage_error != 0 {
                 counters.rejected_threads = counters.rejected_threads.saturating_add(1);
@@ -460,6 +467,54 @@ fn zed_logical_record_digest(
         NativeSqliteValue::Blob(row.data.clone()),
         optional_native_text(row.created_at.clone()),
     ])
+}
+
+pub(super) fn hydrate_zed_thread_row(
+    connection: &Connection,
+    thread_id: &str,
+) -> ZedNativeResult<
+    Option<(
+        ZedThreadRow,
+        crate::complete_content::CompleteContentBodyDigest,
+    )>,
+> {
+    let schema = ZedNativeSchema::detect(connection)?;
+    let sql = format!(
+        "select rowid, id, summary, updated_at, data_type, data, \
+                {}, {}, {}, {} \
+         from threads where id = ?1 collate binary",
+        schema.parent_id, schema.folder_paths, schema.folder_paths_order, schema.created_at,
+    );
+    let hydrated = {
+        let _guard = SqliteLengthPreflightGuard::new(connection);
+        connection
+            .query_row(&sql, [thread_id], |row| {
+                Ok(ZedHydratedRow {
+                    rowid: row.get(0)?,
+                    id: row.get(1)?,
+                    summary: row.get(2)?,
+                    updated_at: row.get(3)?,
+                    data_type: row.get(4)?,
+                    data: row.get(5)?,
+                    parent_id: row.get(6)?,
+                    folder_paths: row.get(7)?,
+                    folder_paths_order: row.get(8)?,
+                    created_at: row.get(9)?,
+                })
+            })
+            .optional()?
+    };
+    Ok(hydrated.map(|row| {
+        let digest = zed_logical_record_digest(&row);
+        let thread = ZedThreadRow {
+            rowid: row.rowid,
+            id: row.id,
+            updated_at: row.updated_at,
+            data_type: row.data_type,
+            data: row.data,
+        };
+        (thread, digest)
+    }))
 }
 
 fn optional_native_text(value: Option<String>) -> NativeSqliteValue {

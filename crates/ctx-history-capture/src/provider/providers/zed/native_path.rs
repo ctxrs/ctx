@@ -24,9 +24,15 @@ mod dto;
 mod output;
 mod publication;
 mod query;
+mod source_backed;
 mod staging;
 mod vertical;
 
+pub(super) use source_backed::{
+    hydrate_zed_locator_v0, ingest_zed_source_backed_v0, ZedHydratedRecordV0, ZedLocatorResolverV0,
+    ZedSourceBackedCountersV0, ZedSourceBackedErrorV0, ZedSourceBackedIngestReceiptV0,
+    ZedSourceBackedResultV0,
+};
 pub(super) use vertical::import_zed_nativepath;
 
 use dto::{
@@ -46,7 +52,7 @@ const ZED_SOURCE_INVALID_REASON: &str = "Zed SQLite source must be a regular non
 const ZED_SIDECAR_INVALID_REASON: &str = "Zed SQLite sidecar must be a regular non-symlink file";
 
 #[derive(Debug, Error)]
-pub(super) enum ZedNativePathError {
+pub(crate) enum ZedNativePathError {
     #[error(transparent)]
     Capture(#[from] CaptureError),
     #[error("I/O error while preparing Zed NativePath source: {0}")]
@@ -96,6 +102,24 @@ pub(super) fn decode_complete_message(
     message_ordinal: u64,
     record_digest: CompleteContentBodyDigest,
 ) -> ZedNativeResult<Option<super::ZedNativePathCompleteMessage>> {
+    Ok(
+        decode_complete_message_with_identity(row, message_ordinal, record_digest)?
+            .map(|resolved| resolved.message),
+    )
+}
+
+struct ZedResolvedCompleteMessage {
+    message: super::ZedNativePathCompleteMessage,
+    native_message_id: Option<String>,
+    native_message_ordinal: u64,
+    native_sub_ordinal: u32,
+}
+
+fn decode_complete_message_with_identity(
+    row: &super::thread::ZedThreadRow,
+    message_ordinal: u64,
+    record_digest: CompleteContentBodyDigest,
+) -> ZedNativeResult<Option<ZedResolvedCompleteMessage>> {
     let updated_at = super::thread::zed_required_timestamp(&row.updated_at, "updated_at")?;
     let decoded =
         match decode::decode_zed_native_payload(&row.id, &row.data_type, &row.data, updated_at)? {
@@ -128,13 +152,22 @@ pub(super) fn decode_complete_message(
                 "Zed normalized payload has no cursor",
             ))?
             .to_owned();
-        resolved = Some(super::ZedNativePathCompleteMessage {
-            provider_event_index,
-            legacy_provider_event_hash: event.legacy_content_hash,
-            cursor,
-            event_type: event.event_type,
-            payload: event.payload,
-            complete_text,
+        let native_message_id = match &event.identity.message {
+            dto::ZedNativeMessageIdentity::ProviderId { value, .. } => Some(value.clone()),
+            dto::ZedNativeMessageIdentity::MessageOrdinal(_) => None,
+        };
+        resolved = Some(ZedResolvedCompleteMessage {
+            native_message_id,
+            native_message_ordinal: event.native_order.message_ordinal,
+            native_sub_ordinal: event.native_order.sub_ordinal,
+            message: super::ZedNativePathCompleteMessage {
+                provider_event_index,
+                legacy_provider_event_hash: event.legacy_content_hash,
+                cursor,
+                event_type: event.event_type,
+                payload: event.payload,
+                complete_text,
+            },
         });
         Ok(())
     })?;
