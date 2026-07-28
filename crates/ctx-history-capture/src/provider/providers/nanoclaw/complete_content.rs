@@ -20,7 +20,8 @@ use super::position::{
     decode_nanoclaw_message_locator, NanoClawMessageLocator, NanoClawMessageSource,
 };
 use super::project::{
-    nanoclaw_project_root, NanoClawProjectDatabaseSnapshot, NanoClawSqliteSnapshot,
+    nanoclaw_project_root, NanoClawProjectDatabaseSnapshot, NanoClawProjectSnapshot,
+    NanoClawSqliteSnapshot,
 };
 use super::projection::{nanoclaw_core_event, NanoClawCoreEvent};
 use super::rows::{
@@ -97,6 +98,85 @@ pub(crate) fn selected_component_addresses(
         });
     }
     Ok(addresses.into_iter().collect())
+}
+
+pub(crate) fn resolve_source_backed_exact(
+    central: &rusqlite::Connection,
+    snapshot: &NanoClawProjectSnapshot,
+    locator: &NativeLocator,
+    query_budget: CompleteContentSqliteQueryBudget,
+) -> Result<Option<NanoClawCompleteRecord>, CompleteContentSqliteBoundError> {
+    configure_complete_content_sqlite_connection(central, query_budget)?;
+    let session_columns = nanoclaw_session_columns(central)?;
+    let coordinate = decode_nanoclaw_message_locator(locator)?;
+    let Some(candidate) =
+        nanoclaw_session_candidate_by_rowid(central, &session_columns, coordinate.session_rowid)?
+    else {
+        return Ok(None);
+    };
+    let session = nanoclaw_hydrate_native_session(central, &session_columns, candidate.rowid)?;
+    if !provider_safe_path_segment(&session.agent_group_id)
+        || !provider_safe_path_segment(&session.id)
+    {
+        return Err(CaptureError::SourceChangedDuringCapture.into());
+    }
+    let component = snapshot.database(
+        coordinate.session_rowid,
+        &session.agent_group_id,
+        &session.id,
+        coordinate.source,
+    )?;
+    let Some(read) = component.open_read()? else {
+        return Ok(None);
+    };
+    let query_result = (|| {
+        let connection = read.connection()?;
+        configure_complete_content_sqlite_connection(connection, query_budget)?;
+        let table = coordinate.source.table();
+        if !sqlite_table_exists(connection, table)? {
+            return Err(CaptureError::InvalidPayload(format!(
+                "NanoClaw {table} component is missing its message table"
+            ))
+            .into());
+        }
+        let columns = sqlite_table_columns(connection, table)?;
+        ensure_sqlite_table_columns(&columns, table, &["id"])?;
+        let message = match nanoclaw_hydrate_native_message(
+            connection,
+            &columns,
+            coordinate.source,
+            coordinate.message_rowid,
+        ) {
+            Ok(values) => values,
+            Err(CaptureError::Sqlite(rusqlite::Error::QueryReturnedNoRows)) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let logical_values = nanoclaw_message_digest_values(&message);
+        let seq = message
+            .seq
+            .map(|value| {
+                u64::try_from(value).map_err(|_| {
+                    CaptureError::InvalidPayload(
+                        "NanoClaw complete-content message seq must be nonnegative".to_owned(),
+                    )
+                })
+            })
+            .transpose()?;
+        let (event, text) =
+            nanoclaw_core_event(&session, &message, seq, chrono::DateTime::UNIX_EPOCH);
+        Ok(Some(NanoClawCompleteRecord {
+            provider_session_id: format!("{}/{}", session.agent_group_id, session.id),
+            event,
+            text,
+            values: logical_values,
+        }))
+    })();
+    let finish_result = read.finish(component).map_err(Into::into);
+    match (query_result, finish_result) {
+        (_, Err(error)) => Err(error),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(record), Ok(())) => Ok(record),
+    }
 }
 
 impl NanoClawCompleteProject {

@@ -7,8 +7,7 @@ use sha2::{Digest, Sha256};
 use crate::native_source::NativeLocator;
 use crate::provider::provider_safe_path_segment;
 use crate::provider::sqlite::{
-    ensure_sqlite_table_columns, open_provider_sqlite_readonly, sqlite_table_columns,
-    sqlite_table_exists, ReadOnlySqliteConnection,
+    ensure_sqlite_table_columns, sqlite_table_columns, sqlite_table_exists,
 };
 use crate::{CaptureError, Result};
 
@@ -16,7 +15,9 @@ use super::position::{
     nanoclaw_message_locator, nanoclaw_next_ordinal, NanoClawFrontier, NanoClawMessageSource,
     NanoClawPositionPhase,
 };
-use super::project::{NanoClawProjectDatabaseSnapshot, NanoClawProjectSnapshot};
+use super::project::{
+    NanoClawDatabaseRead, NanoClawProjectDatabaseSnapshot, NanoClawProjectSnapshot,
+};
 use super::rows::{
     nanoclaw_fetch_message_candidate, nanoclaw_fetch_session_candidate,
     nanoclaw_hydrate_native_message, nanoclaw_hydrate_native_session, nanoclaw_message_after,
@@ -34,7 +35,7 @@ const NANOCLAW_PREFIX_DOMAIN: &[u8] = b"ctx-nanoclaw-nativepath-prefix-v1\0";
 struct NanoClawDatabaseSource<'snapshot> {
     source: NanoClawMessageSource,
     snapshot: &'snapshot NanoClawProjectDatabaseSnapshot,
-    conn: ReadOnlySqliteConnection,
+    read: NanoClawDatabaseRead,
     columns: BTreeSet<String>,
 }
 
@@ -46,10 +47,13 @@ impl<'snapshot> NanoClawDatabaseSource<'snapshot> {
         if !snapshot.is_present() {
             return Ok(None);
         }
-        let conn = open_provider_sqlite_readonly(snapshot.path())?;
-        if !snapshot.revalidate()? {
+        let read = snapshot.open_read()?.ok_or(CaptureError::SystemInvariant(
+            "NanoClaw present component did not open a database",
+        ))?;
+        if !read.revalidate(snapshot)? {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
+        let conn = read.connection()?;
         let table = source.table();
         if !sqlite_table_exists(&conn, table)? {
             return Err(CaptureError::InvalidPayload(format!(
@@ -69,17 +73,25 @@ impl<'snapshot> NanoClawDatabaseSource<'snapshot> {
         Ok(Some(Self {
             source,
             snapshot,
-            conn,
+            read,
             columns,
         }))
     }
 
     fn revalidate(&self) -> Result<bool> {
-        self.snapshot.revalidate()
+        self.read.revalidate(self.snapshot)
+    }
+
+    fn connection(&self) -> Result<&Connection> {
+        self.read.connection()
+    }
+
+    fn finish(self) -> Result<()> {
+        self.read.finish(self.snapshot)
     }
 
     fn message_after(&self, frontier: NanoClawFrontier) -> Result<NanoClawMessageAfter> {
-        nanoclaw_message_after(&self.conn, &self.columns, self.source, frontier)
+        nanoclaw_message_after(self.connection()?, &self.columns, self.source, frontier)
     }
 
     fn fetch_candidate(
@@ -89,8 +101,12 @@ impl<'snapshot> NanoClawDatabaseSource<'snapshot> {
         if !self.revalidate()? {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
-        let candidate =
-            nanoclaw_fetch_message_candidate(&self.conn, &self.columns, self.source, after)?;
+        let candidate = nanoclaw_fetch_message_candidate(
+            self.connection()?,
+            &self.columns,
+            self.source,
+            after,
+        )?;
         if !self.revalidate()? {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
@@ -102,7 +118,7 @@ impl<'snapshot> NanoClawDatabaseSource<'snapshot> {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
         let message =
-            nanoclaw_hydrate_native_message(&self.conn, &self.columns, self.source, rowid)?;
+            nanoclaw_hydrate_native_message(self.connection()?, &self.columns, self.source, rowid)?;
         if !self.revalidate()? {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
@@ -136,6 +152,16 @@ impl NanoClawActiveSession<'_> {
             }
         }
         Ok(true)
+    }
+
+    fn finish(self) -> Result<()> {
+        if let Some(inbound) = self.inbound {
+            inbound.finish()?;
+        }
+        if let Some(outbound) = self.outbound {
+            outbound.finish()?;
+        }
+        Ok(())
     }
 }
 
@@ -213,6 +239,15 @@ impl<'connection, 'snapshot> NanoClawNativeScanner<'connection, 'snapshot> {
         self.prefix_bytes
     }
 
+    pub(super) fn finish(mut self) -> Result<()> {
+        self.finish_active_session()?;
+        if self.snapshot.revalidate()? {
+            Ok(())
+        } else {
+            Err(CaptureError::SourceChangedDuringCapture)
+        }
+    }
+
     /// Replays only provider-owned rows to prove that a released NativePath
     /// boundary still names the exact same semantic prefix.
     pub(super) fn seek(
@@ -271,7 +306,7 @@ impl<'connection, 'snapshot> NanoClawNativeScanner<'connection, 'snapshot> {
                 match self.fetch_message(frontier)? {
                     Some(unit) => Some(unit),
                     None => {
-                        self.active_session = None;
+                        self.finish_active_session()?;
                         self.fetch_session_header(frontier.session_rowid, frontier.next_ordinal)?
                     }
                 }
@@ -320,7 +355,7 @@ impl<'connection, 'snapshot> NanoClawNativeScanner<'connection, 'snapshot> {
             message_rowid: 0,
         };
         if let Some(reason) = candidate.rejection_reason() {
-            self.active_session = None;
+            self.finish_active_session()?;
             return Ok(Some((
                 NanoClawNativeUnit::Rejection {
                     ordinal,
@@ -332,7 +367,7 @@ impl<'connection, 'snapshot> NanoClawNativeScanner<'connection, 'snapshot> {
         let observed_bytes = match candidate.observed_bytes() {
             Ok(bytes) => bytes,
             Err(CaptureError::InvalidPayload(reason)) => {
-                self.active_session = None;
+                self.finish_active_session()?;
                 return Ok(Some((
                     NanoClawNativeUnit::Rejection { ordinal, reason },
                     next_frontier,
@@ -341,7 +376,7 @@ impl<'connection, 'snapshot> NanoClawNativeScanner<'connection, 'snapshot> {
             Err(error) => return Err(error),
         };
         if observed_bytes > NANOCLAW_NATIVE_MAX_RECORD_BYTES {
-            self.active_session = None;
+            self.finish_active_session()?;
             return Ok(Some((
                 NanoClawNativeUnit::Rejection {
                     ordinal,
@@ -359,7 +394,7 @@ impl<'connection, 'snapshot> NanoClawNativeScanner<'connection, 'snapshot> {
         ) {
             Ok(session) => session,
             Err(error) if nanoclaw_row_decode_error_is_local(&error) => {
-                self.active_session = None;
+                self.finish_active_session()?;
                 return Ok(Some((
                     NanoClawNativeUnit::Rejection {
                         ordinal,
@@ -376,7 +411,7 @@ impl<'connection, 'snapshot> NanoClawNativeScanner<'connection, 'snapshot> {
         if !provider_safe_path_segment(&session.agent_group_id)
             || !provider_safe_path_segment(&session.id)
         {
-            self.active_session = None;
+            self.finish_active_session()?;
             return Ok(Some((
                 NanoClawNativeUnit::Rejection {
                     ordinal,
@@ -411,6 +446,7 @@ impl<'connection, 'snapshot> NanoClawNativeScanner<'connection, 'snapshot> {
         {
             return Ok(());
         }
+        self.finish_active_session()?;
         let retained = nanoclaw_retained_length_expr(&nanoclaw_session_projection(
             self.central,
             &self.session_columns,
@@ -435,6 +471,13 @@ impl<'connection, 'snapshot> NanoClawNativeScanner<'connection, 'snapshot> {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
         self.active_session = Some(self.open_active_session(rowid, session, observed_bytes)?);
+        Ok(())
+    }
+
+    fn finish_active_session(&mut self) -> Result<()> {
+        if let Some(active) = self.active_session.take() {
+            active.finish()?;
+        }
         Ok(())
     }
 

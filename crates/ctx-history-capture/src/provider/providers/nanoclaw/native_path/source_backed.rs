@@ -1,7 +1,4 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::Path;
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, EventIdentityInput,
@@ -22,14 +19,14 @@ use crate::{
     provider::{
         normalization::provider_local_preview,
         providers::nanoclaw::{
-            complete_content::{NanoClawCompleteProject, NanoClawCompleteRecord},
+            complete_content::{resolve_source_backed_exact, NanoClawCompleteRecord},
             position::decode_nanoclaw_message_locator,
-            project::{nanoclaw_project_root, NanoClawProjectSnapshot},
+            project::NanoClawSourceBackedProject,
             projection::nanoclaw_core_event,
             rows::nanoclaw_message_digest_values,
             NANOCLAW_MESSAGE_LOCATOR_KIND,
         },
-        sqlite::{open_provider_sqlite_readonly, sqlite_schema_fingerprint},
+        sqlite::sqlite_schema_fingerprint,
     },
     CaptureError, NANOCLAW_SOURCE_FORMAT,
 };
@@ -81,6 +78,46 @@ pub(crate) struct NanoClawSourceBackedReceipt {
     pub(crate) emitted_pages: u64,
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static BEFORE_SOURCE_BACKED_FINISH: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct NanoClawSourceBackedFinishHook;
+
+#[cfg(test)]
+impl Drop for NanoClawSourceBackedFinishHook {
+    fn drop(&mut self) {
+        BEFORE_SOURCE_BACKED_FINISH.with(|installed| {
+            installed.borrow_mut().take();
+        });
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn set_before_source_backed_finish_hook(
+    hook: impl FnOnce() + 'static,
+) -> NanoClawSourceBackedFinishHook {
+    BEFORE_SOURCE_BACKED_FINISH.with(|installed| {
+        *installed.borrow_mut() = Some(Box::new(hook));
+    });
+    NanoClawSourceBackedFinishHook
+}
+
+#[cfg(test)]
+fn run_before_source_backed_finish_hook() {
+    BEFORE_SOURCE_BACKED_FINISH.with(|installed| {
+        if let Some(hook) = installed.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn run_before_source_backed_finish_hook() {}
+
 /// Scans exactly one caller-selected NanoClaw project.
 ///
 /// `catalog_lineage` is persisted shared-catalog authority. It deliberately
@@ -93,14 +130,15 @@ pub(crate) fn scan_nanoclaw_source_backed<F>(
 where
     F: FnMut(NanoClawSourceBackedPage) -> NanoClawSourceBackedResult<()>,
 {
-    let (root, central_path) = explicit_project_paths(path)?;
-    let snapshot = NanoClawProjectSnapshot::read_source_backed(&root, &central_path)?;
-    let central = open_provider_sqlite_readonly(&central_path)?;
+    let project = NanoClawSourceBackedProject::open(path)?;
+    let central = project.connection()?;
     let user_version = central
         .query_row("pragma user_version", [], |row| row.get(0))
         .map_err(CaptureError::from)?;
     let schema_fingerprint = sqlite_schema_fingerprint(&central)?;
-    let revision = snapshot.source_backed_revision_evidence(user_version, &schema_fingerprint)?;
+    let revision = project
+        .snapshot()
+        .source_backed_revision_evidence(user_version, &schema_fingerprint)?;
     let source = nanoclaw_source_key(catalog_lineage)?;
     let opening = SourceObservation::new(
         source.clone(),
@@ -108,15 +146,15 @@ where
         revision.clone(),
     )?;
     let source_revision_digest = Sha256::digest(&revision).into();
-    let source_path = root.display().to_string();
+    let source_path = project.root_path().display().to_string();
 
-    let mut scanner = NanoClawNativeScanner::new(&central, &snapshot)?;
+    let mut scanner = NanoClawNativeScanner::new(central, project.snapshot())?;
     let mut complete_records = 0_u64;
     let mut retained_records = 0_u64;
     let mut rejected_records = 0_u64;
     let mut ignored_records = 0_u64;
     let mut indexed_documents = 0_u64;
-    let mut emitted_pages = 0_u64;
+    let mut pending_pages = Vec::new();
     loop {
         let page = scanner.next_page()?;
         let terminal = page.terminal;
@@ -155,17 +193,18 @@ where
             }
         }
         if !documents.is_empty() {
-            emit(NanoClawSourceBackedPage { documents })?;
-            emitted_pages = checked_add(emitted_pages, 1)?;
+            pending_pages.push(NanoClawSourceBackedPage { documents });
         }
         if terminal {
             break;
         }
     }
 
-    if !snapshot.revalidate_before_commit()? {
-        return Err(NanoClawSourceBackedError::StaleCompoundSourceEvidence);
-    }
+    let prefix_digest = scanner.prefix_digest_bytes();
+    let certified_bytes = scanner.prefix_bytes();
+    scanner.finish()?;
+    run_before_source_backed_finish_hook();
+    let snapshot = project.finish()?;
     let classified = retained_records
         .checked_add(rejected_records)
         .and_then(|value| value.checked_add(ignored_records))
@@ -182,16 +221,21 @@ where
         opening,
         closing,
         NANOCLAW_SOURCE_BACKED_PARSER_REVISION,
-        scanner.prefix_digest_bytes(),
+        prefix_digest,
         ScannedSourceCounts {
             complete_records,
             retained_records,
             rejected_records,
             ignored_records,
             indexed_documents,
-            certified_bytes: scanner.prefix_bytes(),
+            certified_bytes,
         },
     )?;
+    let mut emitted_pages = 0_u64;
+    for page in pending_pages {
+        emit(page)?;
+        emitted_pages = checked_add(emitted_pages, 1)?;
+    }
     Ok(NanoClawSourceBackedReceipt {
         source: certificate,
         emitted_pages,
@@ -207,35 +251,32 @@ pub(crate) fn hydrate_nanoclaw_source_backed_exact(
 ) -> NanoClawSourceBackedResult<NanoClawCompleteRecord> {
     let source = nanoclaw_source_key(catalog_lineage)?;
     let native_locator = project_message_locator(&source, locator)?;
-    let (root, central_path) = explicit_project_paths(path)?;
-    let snapshot = NanoClawProjectSnapshot::read_source_backed(&root, &central_path)?;
-    let central = open_provider_sqlite_readonly(&central_path)?;
+    let project = NanoClawSourceBackedProject::open(path)?;
+    let central = project.connection()?;
     let user_version = central
         .query_row("pragma user_version", [], |row| row.get(0))
         .map_err(CaptureError::from)?;
     let schema_fingerprint = sqlite_schema_fingerprint(&central)?;
-    let revision = snapshot.source_backed_revision_evidence(user_version, &schema_fingerprint)?;
+    let revision = project
+        .snapshot()
+        .source_backed_revision_evidence(user_version, &schema_fingerprint)?;
     let current_revision_digest: [u8; 32] = Sha256::digest(&revision).into();
     if locator.certified_source_revision_digest() != Some(&current_revision_digest) {
         return Err(NanoClawSourceBackedError::StaleCompoundSourceEvidence);
     }
 
-    let project = NanoClawCompleteProject::open(
-        &root,
-        std::slice::from_ref(&native_locator),
+    let record = resolve_source_backed_exact(
+        central,
+        project.snapshot(),
+        &native_locator,
         CompleteContentSqliteQueryBudget::new(),
     )
-    .map_err(map_exact_route_error)?;
-    let record = project
-        .resolve(&native_locator)
-        .map_err(map_exact_route_error)?
-        .ok_or(NanoClawSourceBackedError::MissingProjectMessage)?;
+    .map_err(map_exact_route_error)?
+    .ok_or(NanoClawSourceBackedError::MissingProjectMessage)?;
     if nanoclaw_logical_record_digest_bytes(&record.values) != *locator.record_digest() {
         return Err(NanoClawSourceBackedError::StaleProjectMessageEvidence);
     }
-    if !snapshot.revalidate_before_commit()? {
-        return Err(NanoClawSourceBackedError::StaleCompoundSourceEvidence);
-    }
+    project.finish()?;
     Ok(record)
 }
 
@@ -249,13 +290,6 @@ pub(crate) fn nanoclaw_source_key(
         1,
         SourceAnchor::CatalogLineage(catalog_lineage),
     )?)
-}
-
-fn explicit_project_paths(path: &Path) -> NanoClawSourceBackedResult<(PathBuf, PathBuf)> {
-    let selected = nanoclaw_project_root(path)?;
-    let root = fs::canonicalize(selected).map_err(CaptureError::from)?;
-    let central_path = root.join("data").join("v2.db");
-    Ok((root, central_path))
 }
 
 #[allow(clippy::too_many_arguments)]

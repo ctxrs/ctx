@@ -16,8 +16,10 @@ use uuid::Uuid;
 
 use super::native_path::source_backed::{
     hydrate_nanoclaw_source_backed_exact, scan_nanoclaw_source_backed,
+    set_before_source_backed_finish_hook,
 };
 use super::position::{nanoclaw_message_locator, NanoClawMessageSource};
+use super::project::set_before_central_guard_open_hook;
 use super::rows::NANOCLAW_NATIVE_MAX_RECORD_BYTES;
 use super::*;
 use crate::complete_content::{
@@ -1152,4 +1154,170 @@ fn source_root_safety_nanoclaw_broker_rejects_concurrent_leaf_swap() {
         .unwrap_err();
     assert_eq!(error.kind, CompleteContentErrorKind::SourceChanged);
     assert_eq!(error.event_id, event_id);
+#[test]
+fn source_backed_component_mutation_is_rejected_before_any_page_is_emitted() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = create_project(&temp, "finish-mutation", 1);
+    let (inbound, _) = create_message_stores(&root, "session-0000");
+    insert_inbound(&inbound, "inbound", 1, 1_000, "pre-finish-content");
+    let mutate = inbound.clone();
+    let _hook = set_before_source_backed_finish_hook(move || {
+        Connection::open(mutate)
+            .unwrap()
+            .execute(
+                "update messages_in set content = 'new-generation' where id = 'inbound'",
+                [],
+            )
+            .unwrap();
+    });
+    let mut emitted = 0;
+
+    let error = scan_nanoclaw_source_backed(&root, [0x31; 32], |_| {
+        emitted += 1;
+        Ok(())
+    })
+    .unwrap_err();
+
+    assert!(error.to_string().contains("changed"), "{error}");
+    assert_eq!(emitted, 0);
+}
+
+#[test]
+fn source_backed_compound_inventory_certifies_central_and_session_sidecars() {
+    for family in ["central", "session-component"] {
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let temp = crate::test_support_paths::tempdir().unwrap();
+            let root = create_project(&temp, &format!("{family}-sidecar-{}", &suffix[1..]), 1);
+            let (inbound, _) = create_message_stores(&root, "session-0000");
+            insert_inbound(&inbound, "inbound", 1, 1_000, "sidecar-inventory");
+            let base = if family == "central" {
+                root.join("data").join("v2.db")
+            } else {
+                inbound
+            };
+            let sidecar = {
+                let mut path = base.as_os_str().to_os_string();
+                path.push(suffix);
+                PathBuf::from(path)
+            };
+            let _hook = set_before_source_backed_finish_hook(move || {
+                fs::write(sidecar, b"new compound generation").unwrap();
+            });
+            let mut emitted = 0;
+
+            let error = scan_nanoclaw_source_backed(&root, [0x32; 32], |_| {
+                emitted += 1;
+                Ok(())
+            })
+            .unwrap_err();
+
+            assert!(
+                error.to_string().contains("changed"),
+                "{family} {suffix}: {error}"
+            );
+            assert_eq!(emitted, 0, "{family} {suffix}");
+        }
+    }
+}
+
+#[test]
+fn source_backed_selected_root_replacement_has_no_pathname_fallback() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = create_project(&temp, "selected-root", 1);
+    let (inbound, _) = create_message_stores(&root, "session-0000");
+    insert_inbound(&inbound, "inbound", 1, 1_000, "selected-original");
+    let held = temp.path().join("selected-root-held");
+    let replacement = create_project(&temp, "selected-root-replacement", 1);
+    let (replacement_inbound, _) = create_message_stores(&replacement, "session-0000");
+    insert_inbound(
+        &replacement_inbound,
+        "replacement",
+        1,
+        1_000,
+        "must-not-emit-replacement",
+    );
+    let selected = root.clone();
+    let _hook = set_before_source_backed_finish_hook(move || {
+        fs::rename(&selected, &held).unwrap();
+        fs::rename(&replacement, &selected).unwrap();
+    });
+    let mut emitted = 0;
+
+    let error = scan_nanoclaw_source_backed(&root, [0x33; 32], |_| {
+        emitted += 1;
+        Ok(())
+    })
+    .unwrap_err();
+
+    assert!(error.to_string().contains("changed"), "{error}");
+    assert_eq!(emitted, 0);
+}
+
+#[test]
+fn source_backed_central_guard_rejects_root_swap_before_query() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = create_project(&temp, "central-bind", 1);
+    let (inbound, _) = create_message_stores(&root, "session-0000");
+    insert_inbound(&inbound, "inbound", 1, 1_000, "bound-original");
+    let held = temp.path().join("central-bind-held");
+    let replacement = create_project(&temp, "central-bind-replacement", 1);
+    let selected = root.clone();
+    let _hook = set_before_central_guard_open_hook(move || {
+        fs::rename(&selected, &held).unwrap();
+        fs::rename(&replacement, &selected).unwrap();
+    });
+    let mut emitted = 0;
+
+    let error = scan_nanoclaw_source_backed(&root, [0x35; 32], |_| {
+        emitted += 1;
+        Ok(())
+    })
+    .unwrap_err();
+
+    assert!(
+        error.to_string().contains("identity does not match"),
+        "{error}"
+    );
+    assert_eq!(emitted, 0);
+}
+
+#[test]
+fn source_backed_wal_component_is_typed_fail_closed_without_copying() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = create_project(&temp, "wal-fail-closed", 1);
+    let (inbound, _) = create_message_stores(&root, "session-0000");
+    let writer = Connection::open(&inbound).unwrap();
+    let mode: String = writer
+        .query_row("pragma journal_mode=wal", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    writer
+        .execute(
+            "insert into messages_in values (
+                'wal-message', 1, 'chat', 1000, 'done', 'message', 'chat-1',
+                'telegram', 'thread', 'wal-only-content', null, 0
+            )",
+            [],
+        )
+        .unwrap();
+    writer
+        .set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+            true,
+        )
+        .unwrap();
+    drop(writer);
+    assert!(PathBuf::from(format!("{}-wal", inbound.display())).exists());
+    assert!(PathBuf::from(format!("{}-shm", inbound.display())).exists());
+    let mut emitted = 0;
+
+    let error = scan_nanoclaw_source_backed(&root, [0x34; 32], |_| {
+        emitted += 1;
+        Ok(())
+    })
+    .unwrap_err();
+
+    assert!(error.to_string().contains("WAL"), "{error}");
+    assert!(error.to_string().contains("root-handle VFS"), "{error}");
+    assert_eq!(emitted, 0);
 }
