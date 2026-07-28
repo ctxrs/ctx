@@ -86,6 +86,8 @@ mod parse;
 mod projection;
 mod publication;
 mod source;
+#[cfg_attr(not(test), allow(dead_code))]
+mod source_backed;
 
 use core::*;
 use lifecycle::*;
@@ -95,6 +97,14 @@ use parse::*;
 use projection::*;
 use publication::*;
 use source::*;
+
+pub(crate) use source_backed::{
+    discover_mux_source_backed_sources, mux_complete_content_locator, mux_source_path_for_locator,
+    scan_mux_source_backed, MuxBoundedProjection, MuxReplacementEvidence, MuxReplacementReason,
+    MuxSourceBackedCandidate, MuxSourceBackedDisposition, MuxSourceBackedError,
+    MuxSourceBackedPage, MuxSourceBackedRecord, MuxSourceBackedResult, MuxSourceBackedScanReceipt,
+    MuxUnaddressableReason, MuxUnaddressableRecord,
+};
 
 pub(crate) fn import_mux_native_path(
     path: &Path,

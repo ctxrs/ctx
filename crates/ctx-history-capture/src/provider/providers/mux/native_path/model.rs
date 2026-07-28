@@ -16,7 +16,7 @@ pub(super) const MUX_MAX_ORDINAL: u64 = (1_u64 << MUX_ORDINAL_BITS) - 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum MuxStreamKind {
+pub(crate) enum MuxStreamKind {
     Chat,
     Partial,
 }
@@ -113,9 +113,16 @@ pub(super) struct MuxPreparedRow {
     pub(super) source_record_digest: CompleteContentBodyDigest,
     pub(super) native_record_id: String,
     pub(super) message_content_ref: Option<ContentRef>,
+    pub(super) unaddressable_output: Option<MuxUnaddressableOutput>,
     pub(super) event: Option<MuxCoreEvent>,
     pub(super) event_hash: Option<String>,
     pub(super) file_touches: Vec<MuxFileTouch>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MuxUnaddressableOutput {
+    Redacted,
+    Missing,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
