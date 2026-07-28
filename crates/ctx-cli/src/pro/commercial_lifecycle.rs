@@ -164,6 +164,33 @@ impl CommercialLifecycleService {
         self.persist_tokens(self.workos.refresh(refresh_token)?)
     }
 
+    fn refresh_rejected_access_token_noninteractive(
+        &self,
+        rejected_access_token: &str,
+    ) -> Result<String> {
+        let session = match self.vault.load(CredentialRecordKind::WorkOsSession) {
+            Ok(CredentialRecord::WorkOsSession(session)) => session,
+            Ok(_) => bail!("key_store_unavailable: WorkOS session record mismatch"),
+            Err(CredentialVaultError::NotFound) => {
+                bail!("authentication_required: run `ctx pro`")
+            }
+            Err(error) => return Err(vault_error(error)),
+        };
+        if session.access_token() != rejected_access_token
+            && session.access_expires_at_unix() > unix_time()?
+            && self
+                .workos
+                .validate_access_token(session.access_token())
+                .is_ok()
+        {
+            return Ok(session.access_token().to_owned());
+        }
+        let refresh_token = session
+            .refresh_token()
+            .ok_or_else(|| anyhow!("authentication_required: run `ctx pro`"))?;
+        self.persist_tokens(self.workos.refresh(refresh_token)?)
+    }
+
     fn device_sign_in(&self) -> Result<String> {
         let authorization = self.workos.begin()?;
         eprintln!("Sign in to ctx Pro at:");
@@ -205,19 +232,22 @@ impl CommercialLifecycleService {
 
     fn active_state(
         &self,
-        access_token: &str,
+        access_token: &mut String,
         referral_claim_token: Option<&str>,
     ) -> Result<CommercialState> {
         resolve_active_state(
-            || self.api.account(access_token),
-            || self.api.checkout(access_token, referral_claim_token),
-            |state, checkout| self.await_checkout_access(access_token, state, checkout),
+            access_token,
+            |access_token| self.api.account(access_token),
+            |access_token| self.api.checkout(access_token, referral_claim_token),
+            |access_token, state, checkout| {
+                self.await_checkout_access(access_token, state, checkout)
+            },
         )
     }
 
     fn await_checkout_access(
         &self,
-        access_token: &str,
+        access_token: &mut String,
         initial_state: &CommercialState,
         checkout: CheckoutResult,
     ) -> Result<CommercialState> {
@@ -240,21 +270,15 @@ impl CommercialLifecycleService {
             unix_time,
             || poll_started.elapsed(),
             thread::sleep,
-            || match self.api.account(access_token) {
-                Ok(state)
-                    if state.subject != initial_state.subject
-                        || state.account_id != initial_state.account_id =>
-                {
-                    CheckoutPoll::Fatal(anyhow!(
-                        "invalid_response: commercial account changed during Checkout"
-                    ))
-                }
-                Ok(state) if state.grants_access() => CheckoutPoll::Granted(state),
-                Ok(_) => CheckoutPoll::Pending,
-                Err(error) if is_retryable_checkout_failure(&error) => {
-                    CheckoutPoll::Retryable(checkout_retry_after(&error))
-                }
-                Err(error) => CheckoutPoll::Fatal(error),
+            || {
+                poll_checkout_account(
+                    access_token,
+                    initial_state,
+                    |access_token| self.api.account(access_token),
+                    |rejected_access_token| {
+                        self.refresh_rejected_access_token_noninteractive(rejected_access_token)
+                    },
+                )
             },
             |elapsed_seconds| {
                 eprintln!(
@@ -484,7 +508,7 @@ impl CommercialLifecycleService {
         let mut access_token = self.access_token()?;
         let mut referral_claim_token = self.checkout_referral_claim_token()?;
         let result = (|| {
-            let state = self.active_state(&access_token, referral_claim_token.as_deref())?;
+            let state = self.active_state(&mut access_token, referral_claim_token.as_deref())?;
             let public_key = self.installation_public_key()?;
             let entitlement = self
                 .api
@@ -570,16 +594,17 @@ impl CommercialLifecycleService {
     }
 }
 
-fn resolve_active_state(
-    mut account: impl FnMut() -> Result<CommercialState>,
-    mut checkout: impl FnMut() -> Result<CheckoutResult>,
-    mut await_checkout: impl FnMut(&CommercialState, CheckoutResult) -> Result<CommercialState>,
+fn resolve_active_state<C>(
+    context: &mut C,
+    mut account: impl FnMut(&C) -> Result<CommercialState>,
+    mut checkout: impl FnMut(&C) -> Result<CheckoutResult>,
+    mut await_checkout: impl FnMut(&mut C, &CommercialState, CheckoutResult) -> Result<CommercialState>,
 ) -> Result<CommercialState> {
-    let state = account()?;
+    let state = account(context)?;
     if state.grants_access() {
         return Ok(state);
     }
-    let checkout = checkout()?;
+    let checkout = checkout(context)?;
     match checkout.kind.as_str() {
         "already_subscribed" => {
             let state = checkout.state.ok_or_else(|| {
@@ -589,10 +614,68 @@ fn resolve_active_state(
                 return Ok(state);
             }
         }
-        "checkout_created" | "checkout_pending" => return await_checkout(&state, checkout),
+        "checkout_created" | "checkout_pending" => {
+            return await_checkout(context, &state, checkout)
+        }
         _ => bail!("invalid_response: commercial API returned an invalid Checkout result"),
     }
     bail!("commercial_access_locked: an active trial or subscription is required")
+}
+
+fn poll_checkout_account(
+    access_token: &mut String,
+    initial_state: &CommercialState,
+    mut account: impl FnMut(&str) -> Result<CommercialState>,
+    mut refresh: impl FnMut(&str) -> Result<String>,
+) -> CheckoutPoll<CommercialState> {
+    match account(access_token) {
+        Ok(state) => classify_checkout_account_state(initial_state, state),
+        Err(error) if is_checkout_authentication_failure(&error) => {
+            let refreshed_access_token = match refresh(access_token) {
+                Ok(access_token) => access_token,
+                Err(error) if is_retryable_checkout_failure(&error) => {
+                    return CheckoutPoll::Retryable(checkout_retry_after(&error))
+                }
+                Err(error) => return CheckoutPoll::Fatal(error),
+            };
+            replace_access_token(access_token, refreshed_access_token);
+            match account(access_token) {
+                Ok(state) => classify_checkout_account_state(initial_state, state),
+                Err(error) if is_retryable_checkout_failure(&error) => {
+                    CheckoutPoll::Retryable(checkout_retry_after(&error))
+                }
+                Err(error) => CheckoutPoll::Fatal(error),
+            }
+        }
+        Err(error) if is_retryable_checkout_failure(&error) => {
+            CheckoutPoll::Retryable(checkout_retry_after(&error))
+        }
+        Err(error) => CheckoutPoll::Fatal(error),
+    }
+}
+
+fn classify_checkout_account_state(
+    initial_state: &CommercialState,
+    state: CommercialState,
+) -> CheckoutPoll<CommercialState> {
+    if state.subject != initial_state.subject || state.account_id != initial_state.account_id {
+        CheckoutPoll::Fatal(anyhow!(
+            "invalid_response: commercial account changed during Checkout"
+        ))
+    } else if state.grants_access() {
+        CheckoutPoll::Granted(state)
+    } else {
+        CheckoutPoll::Pending
+    }
+}
+
+fn is_checkout_authentication_failure(error: &anyhow::Error) -> bool {
+    error.to_string().starts_with("authentication_required:")
+}
+
+fn replace_access_token(access_token: &mut String, refreshed_access_token: String) {
+    let mut rejected_access_token = std::mem::replace(access_token, refreshed_access_token);
+    rejected_access_token.zeroize();
 }
 
 enum CheckoutPoll<T> {
