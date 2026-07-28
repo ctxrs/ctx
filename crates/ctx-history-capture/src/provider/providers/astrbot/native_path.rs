@@ -424,6 +424,8 @@ mod identity;
 mod relationships;
 mod replay;
 mod sessions;
+#[allow(dead_code)]
+pub(super) mod source_backed;
 mod source_projection;
 
 use core_import::*;
