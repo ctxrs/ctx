@@ -1,13 +1,16 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
-use ctx_history_capture::CodexLocatorResolverV0;
-use ctx_history_core::{CaptureProvider, EventHydrationRequest, EventType};
+use ctx_history_capture::{
+    build_automatic_source_backed_registry, source_backed_route_inventory, DiscoveryContext,
+    SourceBackedHydrationSupport, SourceBackedResolverRegistry,
+};
+use ctx_history_core::{CaptureProvider, ContentSourceResolver, EventHydrationRequest, EventType};
 use ctx_history_index::{
     AgentScope, EventRecord, EventSearchCandidate, EventSearchFilters, ExcludedSessionTree,
     SessionRecord, VerifiedIndex,
@@ -25,7 +28,7 @@ use crate::{
         ContentPolicy, CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
     },
     output::{compact_json, print_json, JsonOutputFormat, OutputFormat},
-    provider_sources::discovered_sources_for_provider_report,
+    provider_sources::home_dir,
     search_filters::parse_since_filter,
     semantic::{
         coordinate_source_backed_refresh, PinnedSourceBackedGeneration, SourceBackedRefreshMode,
@@ -36,8 +39,6 @@ use crate::{
 };
 
 const INDEX_DIRECTORY: &str = "source-backed-lexical-v0";
-const CODEX_DISCOVERY_SOURCE_FORMAT: &str = "codex_session_jsonl_tree";
-const CODEX_LOCATOR_SOURCE_FORMAT: &str = "codex_session_jsonl";
 const MAX_SESSION_DIVERSITY_CANDIDATES: usize = 64 * 1024;
 const MIN_CANDIDATE_BATCH: usize = 256;
 const CANDIDATE_OVERSAMPLE: usize = 8;
@@ -117,10 +118,6 @@ struct ResolvedIndexContent {
     complete_content_available: bool,
     complete: bool,
     source_verified: bool,
-}
-
-struct ExactContentResolverRegistry {
-    codex: Option<CodexLocatorResolverV0>,
 }
 
 pub(crate) fn index_is_available(data_root: &Path) -> bool {
@@ -890,12 +887,48 @@ fn resolve_contents(
             })
             .collect());
     }
+    if events.is_empty() {
+        return Ok(Vec::new());
+    }
 
-    let registry = ExactContentResolverRegistry::discover(events)?;
+    let registry = automatic_exact_content_resolver_registry()?;
+    resolve_complete_contents(events, output_limit_bytes, &registry)
+}
+
+fn resolve_complete_contents(
+    events: &[&EventRecord],
+    output_limit_bytes: usize,
+    resolver: &dyn ContentSourceResolver,
+) -> Result<Vec<ResolvedIndexContent>> {
     let mut output_bytes = 0usize;
     let mut resolved = Vec::with_capacity(events.len());
     for event in events {
-        let text = registry.hydrate(event)?;
+        let request = EventHydrationRequest::new(event.event_id, event.locator.clone())
+            .with_context(|| format!("validate typed locator for event {}", event.event_id))?;
+        let hydrated = resolver.hydrate_event(&request).map_err(|failure| {
+            anyhow!(
+                "hydrate source-backed {} event {} through the provider registry: {:?}: {}",
+                event.provider,
+                event.event_id,
+                failure.kind,
+                failure.detail
+            )
+        })?;
+        if hydrated.event_id != event.event_id {
+            return Err(anyhow!(
+                "provider registry returned event {} while hydrating event {}",
+                hydrated.event_id,
+                event.event_id
+            ));
+        }
+        let text = String::from_utf8(hydrated.provider_bytes).map_err(|error| {
+            anyhow!(
+                "provider registry returned non-UTF-8 exact content for {} event {}: {}",
+                event.provider,
+                event.event_id,
+                error.utf8_error()
+            )
+        })?;
         output_bytes = output_bytes.saturating_add(text.len());
         if output_bytes > output_limit_bytes {
             return Err(anyhow!(
@@ -913,60 +946,29 @@ fn resolve_contents(
     Ok(resolved)
 }
 
-impl ExactContentResolverRegistry {
-    fn discover(events: &[&EventRecord]) -> Result<Self> {
-        let routes = events
-            .iter()
-            .map(|event| (event.provider.as_str(), event.source_format.as_str()))
-            .collect::<BTreeSet<_>>();
-        let mut needs_codex = false;
-        for (provider, source_format) in routes {
-            match (provider, source_format) {
-                ("codex", CODEX_LOCATOR_SOURCE_FORMAT) => needs_codex = true,
-                _ => {
-                    return Err(anyhow!(
-                        "source-backed complete content is unsupported for provider {provider} and source format {source_format}; indexed previews remain available"
-                    ))
-                }
-            }
-        }
-        let codex = if needs_codex {
-            Some(CodexLocatorResolverV0::discover(codex_session_roots()?)?)
-        } else {
-            None
-        };
-        Ok(Self { codex })
-    }
-
-    fn hydrate(&self, event: &EventRecord) -> Result<String> {
-        let request = EventHydrationRequest::new(event.event_id, event.locator.clone())
-            .with_context(|| format!("validate typed locator for event {}", event.event_id))?;
-        match (event.provider.as_str(), event.source_format.as_str()) {
-            ("codex", CODEX_LOCATOR_SOURCE_FORMAT) => {
-                let resolver = self
-                    .codex
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("Codex exact-content resolver was not initialized"))?;
-                let hydrated = resolver.hydrate(request.locator()).with_context(|| {
-                    format!("hydrate source-backed Codex event {}", event.event_id)
-                })?;
-                hydrated.decoded_display_text.ok_or_else(|| {
-                    anyhow!(
-                        "provider resolver verified event {} but returned no exact display content",
-                        event.event_id
-                    )
-                })
-            }
-            (provider, source_format) => Err(anyhow!(
-                "source-backed complete content is unsupported for provider {provider} and source format {source_format}"
-            )),
-        }
-    }
+fn automatic_exact_content_resolver_registry() -> Result<SourceBackedResolverRegistry> {
+    let home = home_dir().ok_or_else(|| {
+        anyhow!("cannot discover provider sources because the user home directory is unavailable")
+    })?;
+    let build = build_automatic_source_backed_registry(&DiscoveryContext::from_process(home));
+    Ok(build.registry.resolver_registry())
 }
 
 fn exact_route_supported(event: &EventRecord) -> bool {
-    event.provider == CaptureProvider::Codex.as_str()
-        && event.source_format == CODEX_LOCATOR_SOURCE_FORMAT
+    exact_route_supported_for(&event.provider, &event.source_format)
+}
+
+fn exact_route_supported_for(provider: &str, source_format: &str) -> bool {
+    source_backed_route_inventory().iter().any(|route| {
+        route.provider.as_str() == provider
+            && route.certified_source_format == source_format
+            && route.automatic
+            && route.unsupported_reason.is_none()
+            && matches!(
+                route.exact_hydration,
+                SourceBackedHydrationSupport::Full | SourceBackedHydrationSupport::Partial
+            )
+    })
 }
 
 fn write_show_value(
@@ -1220,31 +1222,6 @@ fn open_index(data_root: &Path) -> Result<VerifiedIndex> {
         .with_context(|| format!("open verified source-backed Core index {}", root.display()))
 }
 
-fn codex_session_roots() -> Result<Vec<PathBuf>> {
-    let report = discovered_sources_for_provider_report(CaptureProvider::Codex);
-    let mut roots = report
-        .sources
-        .into_iter()
-        .filter(|source| {
-            source.exists
-                && source.source_format == CODEX_DISCOVERY_SOURCE_FORMAT
-                && source.status == ctx_history_capture::ProviderSourceStatus::Available
-        })
-        .map(|source| source.path)
-        .collect::<Vec<_>>();
-    roots.sort();
-    roots.dedup();
-    if roots.is_empty() {
-        let detail = report
-            .issues
-            .first()
-            .map(|issue| issue.reason)
-            .unwrap_or("no ordinary Codex rollout/session JSONL tree was discovered");
-        return Err(anyhow!("cannot discover Codex session sources: {detail}"));
-    }
-    Ok(roots)
-}
-
 fn index_root(data_root: &Path) -> PathBuf {
     data_root.join(INDEX_DIRECTORY)
 }
@@ -1286,9 +1263,19 @@ fn phase_attribution(query: Duration) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::Cell, fs};
+    use std::{
+        cell::{Cell, RefCell},
+        collections::HashMap,
+        fs,
+    };
 
     use ctx_history_capture::ingest_codex_source_backed_v0;
+    use ctx_history_core::{
+        derive_event_id, derive_session_id, EventIdentityInput, HydratedProviderRecord,
+        HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy, NativeItemKey,
+        NativeRecordCoordinate, NativeSessionKey, SessionHydrationRequest, SessionIdentityInput,
+        SourceAnchor, SourceKey, SourceRecordLocator, StableEntityId, TypedKey,
+    };
     use serde_json::json;
     use tempfile::tempdir;
 
@@ -1298,6 +1285,124 @@ mod tests {
 
     const TEST_SESSION_ID: &str = "019fa000-0000-7000-8000-0000000000d1";
     const TEST_QUERY: &str = "pinnedgenerationrouting";
+
+    #[derive(Default)]
+    struct MockContentResolver {
+        bodies: HashMap<StableEntityId, Vec<u8>>,
+        calls: RefCell<Vec<(String, String)>>,
+    }
+
+    impl MockContentResolver {
+        fn with_body(mut self, event: &EventRecord, body: impl Into<Vec<u8>>) -> Self {
+            self.bodies.insert(event.event_id, body.into());
+            self
+        }
+    }
+
+    impl ContentSourceResolver for MockContentResolver {
+        fn hydrate_event(
+            &self,
+            request: &EventHydrationRequest,
+        ) -> std::result::Result<HydratedProviderRecord, HydrationFailure> {
+            self.calls.borrow_mut().push((
+                request.locator().source().provider().to_owned(),
+                request.locator().source().source_format().to_owned(),
+            ));
+            let provider_bytes =
+                self.bodies
+                    .get(&request.event_id())
+                    .cloned()
+                    .ok_or_else(|| HydrationFailure {
+                        kind: HydrationFailureKind::MissingRecord,
+                        detail: "mock provider record is absent".to_owned(),
+                    })?;
+            Ok(HydratedProviderRecord {
+                event_id: request.event_id(),
+                provider_bytes,
+            })
+        }
+
+        fn hydrate_session(
+            &self,
+            request: &SessionHydrationRequest,
+        ) -> std::result::Result<Vec<HydratedProviderRecord>, HydrationFailure> {
+            request
+                .events()
+                .iter()
+                .map(|event| self.hydrate_event(event))
+                .collect()
+        }
+    }
+
+    fn fixture_event(
+        provider: CaptureProvider,
+        source_format: &str,
+        lineage: u8,
+        sequence: u64,
+        preview: &str,
+    ) -> EventRecord {
+        let source = SourceKey::derive(
+            provider.as_str(),
+            source_format,
+            "fixture",
+            1,
+            SourceAnchor::CatalogLineage([lineage; 32]),
+        )
+        .unwrap();
+        let native_session_key = NativeSessionKey::native_id(
+            "session",
+            TypedKey::utf8(format!("fixture-session-{lineage}")).unwrap(),
+        )
+        .unwrap();
+        let session_id = derive_session_id(SessionIdentityInput {
+            source: &source,
+            logical_session_kind: "thread",
+            native_session_key: &native_session_key,
+        })
+        .unwrap();
+        let native_item_key = NativeItemKey::native_id("message", TypedKey::U64(sequence)).unwrap();
+        let event_id = derive_event_id(EventIdentityInput {
+            source: &source,
+            session_id,
+            logical_item_kind: "message",
+            native_item_key: &native_item_key,
+            subrecord_selector: None,
+        })
+        .unwrap();
+        let locator = SourceRecordLocator::new(
+            source,
+            NativeRecordCoordinate::ProviderNative {
+                namespace: "fixture".to_owned(),
+                coordinate: TypedKey::U64(sequence),
+            },
+            LocatorRevisionPolicy::ExactSourceRevision,
+            Some([lineage; 32]),
+            [sequence as u8; 32],
+        )
+        .unwrap();
+        EventRecord {
+            event_id,
+            session_id,
+            parent_session_id: None,
+            root_session_id: session_id,
+            locator,
+            provider: provider.as_str().to_owned(),
+            source_format: source_format.to_owned(),
+            provider_session_id: Some(format!("fixture-session-{lineage}")),
+            branch: None,
+            source_path: None,
+            agent_type: "primary".to_owned(),
+            is_primary: true,
+            event_sequence: sequence,
+            occurred_at_unix_ms: None,
+            event_type: "message".to_owned(),
+            role: Some("assistant".to_owned()),
+            preview: preview.to_owned(),
+            workspace: None,
+            cwd: None,
+            touched_files: Vec::new(),
+        }
+    }
 
     fn request(refresh: RefreshArg) -> SourceSearchRequest {
         SourceSearchRequest {
@@ -1425,5 +1530,108 @@ mod tests {
         assert_eq!(index.generation_id(), generation);
         assert_eq!(value["retrieval"]["generation_id"], generation);
         assert_eq!(collection.hits.len(), 1);
+    }
+
+    #[test]
+    fn exact_route_support_comes_from_automatic_provider_metadata() {
+        assert!(exact_route_supported_for("codex", "codex_session_jsonl"));
+        assert!(exact_route_supported_for("warp", "warp_sqlite"));
+        assert!(exact_route_supported_for("mux", "mux_session_jsonl"));
+        assert!(!exact_route_supported_for("codex", "codex_history_jsonl"));
+        assert!(!exact_route_supported_for(
+            "unknown",
+            "unknown_source_format"
+        ));
+    }
+
+    #[test]
+    fn complete_content_hydrates_typed_locators_for_multiple_providers() {
+        let codex = fixture_event(
+            CaptureProvider::Codex,
+            "codex_session_jsonl",
+            1,
+            1,
+            "stored Codex preview",
+        );
+        let warp = fixture_event(
+            CaptureProvider::Warp,
+            "warp_sqlite",
+            2,
+            2,
+            "stored Warp preview",
+        );
+        let resolver = MockContentResolver::default()
+            .with_body(&codex, "complete Codex source")
+            .with_body(&warp, "complete Warp source");
+        let resolved = resolve_complete_contents(&[&codex, &warp], usize::MAX, &resolver).unwrap();
+
+        assert_eq!(resolved[0].text, "complete Codex source");
+        assert_eq!(resolved[1].text, "complete Warp source");
+        assert!(resolved.iter().all(|content| {
+            content.complete && content.source_verified && content.complete_content_available
+        }));
+        assert_eq!(
+            resolver.calls.into_inner(),
+            vec![
+                ("codex".to_owned(), "codex_session_jsonl".to_owned()),
+                ("warp".to_owned(), "warp_sqlite".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn complete_content_never_falls_back_to_the_index_preview() {
+        let event = fixture_event(
+            CaptureProvider::Warp,
+            "warp_sqlite",
+            3,
+            3,
+            "indexed fallback must not be returned",
+        );
+        let error =
+            resolve_complete_contents(&[&event], usize::MAX, &MockContentResolver::default())
+                .unwrap_err();
+
+        assert!(format!("{error:#}").contains("mock provider record is absent"));
+    }
+
+    #[test]
+    fn complete_content_rejects_non_utf8_provider_bytes() {
+        let event = fixture_event(
+            CaptureProvider::Warp,
+            "warp_sqlite",
+            4,
+            4,
+            "bounded preview",
+        );
+        let resolver = MockContentResolver::default().with_body(&event, vec![b'o', b'k', 0x80]);
+        let error = resolve_complete_contents(&[&event], usize::MAX, &resolver).unwrap_err();
+
+        assert!(format!("{error:#}").contains("non-UTF-8 exact content"));
+    }
+
+    #[test]
+    fn complete_content_preserves_the_cumulative_output_limit() {
+        let first = fixture_event(
+            CaptureProvider::Codex,
+            "codex_session_jsonl",
+            5,
+            5,
+            "bounded preview",
+        );
+        let second = fixture_event(
+            CaptureProvider::Warp,
+            "warp_sqlite",
+            6,
+            6,
+            "bounded preview",
+        );
+        let resolver = MockContentResolver::default()
+            .with_body(&first, "four")
+            .with_body(&second, "five");
+        let error = resolve_complete_contents(&[&first, &second], 7, &resolver).unwrap_err();
+
+        assert!(format!("{error:#}").contains("exceeds the 7-byte output limit"));
+        assert!(format!("{error:#}").contains(&second.event_id.to_string()));
     }
 }
