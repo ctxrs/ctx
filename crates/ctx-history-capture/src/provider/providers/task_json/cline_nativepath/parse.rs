@@ -546,6 +546,7 @@ fn rejected_item_with_key(
         rejection: Some(rejection),
         transient_rejections: Vec::new(),
         core_bytes: 0,
+        source_record: None,
     }
 }
 

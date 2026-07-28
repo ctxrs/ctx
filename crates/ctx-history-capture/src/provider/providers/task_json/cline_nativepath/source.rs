@@ -344,6 +344,26 @@ impl ClineLiveTaskObservation {
         };
         Ok(canonical == self.canonical_task_path)
     }
+
+    pub(crate) fn revalidate_all_components(&self) -> Result<bool, ClineNativePathError> {
+        if !self.revalidate_directory()? {
+            return Ok(false);
+        }
+        for component in [
+            ClineComponent::ApiHistory,
+            ClineComponent::UiMessages,
+            ClineComponent::FallbackHistory,
+            ClineComponent::TaskMetadata,
+            ClineComponent::HistoryItem,
+            ClineComponent::TaskIndex,
+        ] {
+            let expected = self.component(component);
+            if observe_task_component(&expected.path, component)? != *expected {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -368,6 +388,23 @@ impl ClineRootAuthority {
 
     pub(crate) fn is_complete(&self) -> bool {
         self.complete
+    }
+
+    pub(crate) fn source_backed_revision(&self) -> Vec<u8> {
+        let mut revision = Vec::with_capacity(1 + 8 + 32);
+        revision.push(u8::from(self.complete));
+        if let Some(inventory) = &self.inventory {
+            revision.extend_from_slice(
+                &u64::try_from(inventory.entries)
+                    .unwrap_or(u64::MAX)
+                    .to_le_bytes(),
+            );
+            revision.extend_from_slice(&inventory.digest);
+        } else {
+            revision.extend_from_slice(&0_u64.to_le_bytes());
+            revision.extend_from_slice(&[0_u8; 32]);
+        }
+        revision
     }
 
     /// This is catalog authority only. Component pages never depend on it.

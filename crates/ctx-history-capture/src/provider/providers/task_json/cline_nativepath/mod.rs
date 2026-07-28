@@ -10,11 +10,14 @@ mod normalize;
 mod parse;
 mod reader;
 mod source;
+mod source_backed;
 mod store_adapter;
 mod vertical;
 
 #[cfg(test)]
 mod roo_production_tests;
+#[cfg(test)]
+mod source_backed_tests;
 #[cfg(test)]
 mod tests;
 
@@ -40,6 +43,13 @@ pub(super) use source::{
     discover_cline_root, discover_roo_root, revalidate_cline_component_source, ClineComponent,
     ClineComponentObservation, ClineDiscovery, ClineFileStamp, ClineLiveTaskObservation,
     ClineObservedFileState, TaskJsonNativeDialect,
+};
+pub(crate) use source_backed::{
+    cline_task_json_source_backed_adapter, cline_task_json_source_backed_resolver,
+    roo_task_json_source_backed_adapter, roo_task_json_source_backed_resolver,
+    TaskJsonCertifiedTask, TaskJsonSourceBackedAdapter, TaskJsonSourceBackedCompletion,
+    TaskJsonSourceBackedError, TaskJsonSourceBackedPage, TaskJsonSourceBackedResolver,
+    TaskJsonSourceBackedResult, TaskJsonSourceBackedSession,
 };
 pub(crate) use vertical::{import_cline_nativepath_history, import_roo_nativepath_history};
 
