@@ -231,13 +231,29 @@ pub(super) fn hydrate_row(
     rowid: i64,
     observed_bytes: u64,
 ) -> Result<CrushHydratedRow> {
+    hydrate_row_from_connection(
+        &source.connection,
+        &source.schema,
+        phase,
+        rowid,
+        observed_bytes,
+    )
+}
+
+pub(super) fn hydrate_row_from_connection(
+    connection: &Connection,
+    schema: &CrushNativeSchema,
+    phase: CrushNativePhase,
+    rowid: i64,
+    observed_bytes: u64,
+) -> Result<CrushHydratedRow> {
     let retained_bytes = usize::try_from(observed_bytes)
         .unwrap_or(usize::MAX)
         .saturating_add(CRUSH_NATIVE_PAGE_OVERHEAD_BYTES);
     match phase {
         CrushNativePhase::Sessions => {
-            let projection = session_projection(&source.schema.session_columns, "s");
-            let values = source.connection.query_row(
+            let projection = session_projection(&schema.session_columns, "s");
+            let values = connection.query_row(
                 &format!("select s.rowid, {projection} from sessions s where s.rowid = ?1"),
                 [rowid],
                 |row| raw_sqlite_values(row, 10),
@@ -248,12 +264,10 @@ pub(super) fn hydrate_row(
             })
         }
         CrushNativePhase::Messages => {
-            let parent_created_at =
-                optional_session_column(&source.schema.session_columns, "created_at");
-            let parent_updated_at =
-                optional_session_column(&source.schema.session_columns, "updated_at");
-            let projection = message_projection(&source.schema.message_columns, "m");
-            let values = source.connection.query_row(
+            let parent_created_at = optional_session_column(&schema.session_columns, "created_at");
+            let parent_updated_at = optional_session_column(&schema.session_columns, "updated_at");
+            let projection = message_projection(&schema.message_columns, "m");
+            let values = connection.query_row(
                 &format!(
                     "select s.rowid, {parent_created_at}, \
                      {parent_updated_at}, {projection} \
@@ -265,8 +279,7 @@ pub(super) fn hydrate_row(
                 |row| raw_sqlite_values(row, 13),
             )?;
             let child = decode_message_child(&values)?;
-            let session =
-                message_parent_session(&source.connection, &source.schema.session_columns, &child)?;
+            let session = message_parent_session(connection, &schema.session_columns, &child)?;
             Ok(CrushHydratedRow::Message {
                 row: child.message,
                 session,
@@ -275,16 +288,14 @@ pub(super) fn hydrate_row(
             })
         }
         CrushNativePhase::Files => {
-            let columns =
-                source
-                    .schema
-                    .file_columns
-                    .as_ref()
-                    .ok_or(CaptureError::SystemInvariant(
-                        "Crush file phase has no schema",
-                    ))?;
+            let columns = schema
+                .file_columns
+                .as_ref()
+                .ok_or(CaptureError::SystemInvariant(
+                    "Crush file phase has no schema",
+                ))?;
             let projection = file_projection(columns, "f");
-            let values = source.connection.query_row(
+            let values = connection.query_row(
                 &format!("select {projection} from files f where f.rowid = ?1"),
                 [rowid],
                 |row| raw_sqlite_values(row, 6),
@@ -296,15 +307,14 @@ pub(super) fn hydrate_row(
         }
         CrushNativePhase::ReadFiles => {
             let columns =
-                source
-                    .schema
+                schema
                     .read_file_columns
                     .as_ref()
                     .ok_or(CaptureError::SystemInvariant(
                         "Crush read-file phase has no schema",
                     ))?;
             let projection = read_file_projection(columns, "r");
-            let values = source.connection.query_row(
+            let values = connection.query_row(
                 &format!("select {projection} from read_files r where r.rowid = ?1"),
                 [rowid],
                 |row| raw_sqlite_values(row, 4),

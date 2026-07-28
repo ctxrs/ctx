@@ -58,6 +58,13 @@ pub(super) fn message_locator(rowid: i64) -> Result<NativeLocator> {
 pub(super) fn message_record_digest(
     values: &[NativeSqliteValue],
 ) -> Result<CompleteContentBodyDigest> {
+    let digest = message_record_digest_bytes(values);
+    CompleteContentBodyDigest::parse(hex_digest(&digest)).ok_or(CaptureError::SystemInvariant(
+        "Crush SQLite record digest is not valid SHA-256",
+    ))
+}
+
+pub(super) fn message_record_digest_bytes(values: &[NativeSqliteValue]) -> [u8; 32] {
     const DOMAIN: &[u8] = b"ctx-complete-content-sqlite-logical-row-v1\0";
     let mut digest = Sha256::new();
     digest.update(DOMAIN);
@@ -85,9 +92,11 @@ pub(super) fn message_record_digest(
             }
         }
     }
-    CompleteContentBodyDigest::parse(format!("{:x}", digest.finalize())).ok_or(
-        CaptureError::SystemInvariant("Crush SQLite record digest is not valid SHA-256"),
-    )
+    digest.finalize().into()
+}
+
+fn hex_digest(digest: &[u8; 32]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn ordered_i64(value: i64) -> u64 {
