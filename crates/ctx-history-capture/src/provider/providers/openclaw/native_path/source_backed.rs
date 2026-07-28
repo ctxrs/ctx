@@ -6,11 +6,12 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, EventIdentityInput,
-    LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
-    PositionStability, ProjectionContractError, ScannedSourceCounts, SessionIdentityInput,
-    SourceAnchor, SourceFrontier, SourceKey, SourceObservation as ProjectionSourceObservation,
-    SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource,
+    EventIdentityInput, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
+    NativeSessionKey, PositionStability, ProjectionContractError, ScannedSourceCounts,
+    SessionIdentityInput, SourceAnchor, SourceFrontier, SourceKey,
+    SourceObservation as ProjectionSourceObservation, SourceRecordLocator,
+    SourceResolverContractError, StableEntityId, TypedKey,
 };
 use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
 use serde_json::Value;
@@ -289,8 +290,7 @@ impl OpenClawSourceBackedReaderV0 {
             .map_err(|_| OpenClawSourceBackedErrorV0::CountOverflow)?;
         let rejected_records = u64::try_from(page.rejections.len())
             .map_err(|_| OpenClawSourceBackedErrorV0::CountOverflow)?;
-        let provider_session_id = page.session.cursor.provider_session_id.clone();
-        let cwd = page.session.cursor.cwd.as_deref();
+        let session = self.lexical_session(&page.session)?;
         let mut touched_by_event = BTreeMap::<u64, BTreeSet<String>>::new();
         for touch in page.touches {
             if let Some(event_ordinal) = touch.event_ordinal {
@@ -307,9 +307,7 @@ impl OpenClawSourceBackedReaderV0 {
                 .remove(&event.raw_ordinal)
                 .map(|paths| paths.into_iter().collect())
                 .unwrap_or_default();
-            if let Some(document) =
-                self.lexical_document(event, &provider_session_id, cwd, touched_files)?
-            {
+            if let Some(document) = self.lexical_document(event, &session, touched_files)? {
                 documents.push(document);
             }
         }
@@ -380,8 +378,7 @@ impl OpenClawSourceBackedReaderV0 {
     fn lexical_document(
         &self,
         event: CoreEvent,
-        provider_session_id: &str,
-        cwd: Option<&str>,
+        session: &OpenClawLexicalSessionV0,
         touched_files: Vec<String>,
     ) -> OpenClawSourceBackedResultV0<Option<LexicalDocument>> {
         let Some(text) = event.payload.get("text").and_then(Value::as_str) else {
@@ -435,19 +432,73 @@ impl OpenClawSourceBackedReaderV0 {
         Ok(Some(LexicalDocument {
             event_id,
             session_id: self.session_id,
+            parent_session_id: session.parent_session_id,
+            root_session_id: session.root_session_id,
             source: self.source.clone(),
             locator,
-            provider_session_id: Some(provider_session_id.to_owned()),
+            provider_session_id: Some(session.provider_session_id.clone()),
+            branch: session.branch.clone(),
+            source_path: Some(self.inner.path.display().to_string()),
+            agent_type: AgentType::Primary.as_str().to_owned(),
+            is_primary: true,
             event_sequence: event.provider_event_sequence_index,
             occurred_at_unix_ms: Some(event.occurred_at.timestamp_millis()),
             event_type: event.event_type.as_str().to_owned(),
             role: event.role.map(|role| role.as_str().to_owned()),
             body,
             workspace: None,
-            cwd: cwd.map(str::to_owned),
+            cwd: session.cwd.clone(),
             touched_files,
         }))
     }
+
+    fn lexical_session(
+        &self,
+        session: &super::SessionFact,
+    ) -> OpenClawSourceBackedResultV0<OpenClawLexicalSessionV0> {
+        let provider_session_id = session.cursor.provider_session_id.clone();
+        let parent_session_id = session
+            .cursor
+            .parent_provider_session_id
+            .as_deref()
+            .map(|parent_provider_session_id| {
+                related_session_identity(
+                    parent_provider_session_id,
+                    &provider_session_id,
+                    self.session_id,
+                )
+            })
+            .transpose()?;
+        let root_session_id = session
+            .cursor
+            .root_provider_session_id
+            .as_deref()
+            .map(|root_provider_session_id| {
+                related_session_identity(
+                    root_provider_session_id,
+                    &provider_session_id,
+                    self.session_id,
+                )
+            })
+            .transpose()?
+            .or(parent_session_id)
+            .unwrap_or(self.session_id);
+        Ok(OpenClawLexicalSessionV0 {
+            provider_session_id,
+            parent_session_id,
+            root_session_id,
+            branch: explicit_branch(&session.index).or_else(|| explicit_branch(&session.header)),
+            cwd: session.cursor.cwd.clone(),
+        })
+    }
+}
+
+struct OpenClawLexicalSessionV0 {
+    provider_session_id: String,
+    parent_session_id: Option<StableEntityId>,
+    root_session_id: StableEntityId,
+    branch: Option<String>,
+    cwd: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -637,6 +688,35 @@ fn source_key(native_session_id: &str) -> OpenClawSourceBackedResultV0<SourceKey
     )?)
 }
 
+fn related_session_identity(
+    related_provider_session_id: &str,
+    direct_provider_session_id: &str,
+    direct_session_id: StableEntityId,
+) -> OpenClawSourceBackedResultV0<StableEntityId> {
+    if related_provider_session_id == direct_provider_session_id {
+        return Ok(direct_session_id);
+    }
+    let related_source = source_key(related_provider_session_id)?;
+    let related_session_key = NativeSessionKey::native_id(
+        NATIVE_SESSION_NAMESPACE,
+        TypedKey::utf8(related_provider_session_id)?,
+    )?;
+    Ok(derive_session_id(SessionIdentityInput {
+        source: &related_source,
+        logical_session_kind: LOGICAL_SESSION_KIND,
+        native_session_key: &related_session_key,
+    })?)
+}
+
+fn explicit_branch(value: &Value) -> Option<String> {
+    ["branch", "gitBranch", "git_branch"]
+        .into_iter()
+        .find_map(|field| value.get(field).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty())
+        .map(super::capped_text)
+}
+
 fn native_session_id(path: &Path) -> String {
     let fallback_id = path
         .file_stem()
@@ -715,6 +795,25 @@ mod tests {
             first_documents[0].source.identity(),
             second_documents[0].source.identity()
         );
+        assert_eq!(
+            first_documents[0].provider_session_id.as_deref(),
+            Some("personal-agent/session-1")
+        );
+        assert!(first_documents[0].parent_session_id.is_some());
+        assert_ne!(
+            first_documents[0].root_session_id,
+            first_documents[0].session_id
+        );
+        assert_eq!(
+            first_documents[0].branch.as_deref(),
+            Some("feature/openclaw")
+        );
+        assert_eq!(
+            first_documents[0].source_path.as_deref(),
+            transcript.to_str()
+        );
+        assert_eq!(first_documents[0].agent_type, "primary");
+        assert!(first_documents[0].is_primary);
         assert_eq!(
             first_documents[0].body.chars().count(),
             MAX_BODY_PREVIEW_CHARS
@@ -859,6 +958,9 @@ mod tests {
                 "session-1": {
                     "sessionId": "session-1",
                     "label": "source-backed fixture",
+                    "parentSessionId": "parent-1",
+                    "rootSessionId": "root-1",
+                    "branch": "feature/openclaw",
                 }
             })
             .to_string(),

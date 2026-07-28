@@ -35,6 +35,9 @@ pub(crate) use complete_content::{
     source_from_admitted as openclaw_complete_content_source_from_admitted,
 };
 pub(crate) use native_path::import_openclaw_nativepath_tree;
+// The central source-backed registry consumes this provider-local hook after
+// provider fan-in; keep the complete typed surface available in the interim.
+#[allow(unused_imports)]
 pub(crate) use native_path::{
     openclaw_source_backed_adapter_v0, OpenClawHydratedRecordV0, OpenClawSourceBackedAdapterV0,
     OpenClawSourceBackedDispositionV0, OpenClawSourceBackedErrorV0, OpenClawSourceBackedPageV0,
