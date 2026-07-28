@@ -13,18 +13,18 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, CertifiedSourceAppend,
-    CertifiedSourceDeletion, CertifiedSourceInventory, EventIdentityInput, LocatorRevisionPolicy,
-    NativeItemKey, NativeRecordCoordinate, NativeSessionKey, ProjectionContractError,
-    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceFrontier,
-    SourceInventoryObservation, SourceKey, SourceObservation, SourceRecordLocator,
+    derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource,
+    CertifiedSourceAppend, CertifiedSourceDeletion, CertifiedSourceInventory, EventIdentityInput,
+    LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
+    ProjectionContractError, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
+    SourceFrontier, SourceInventoryObservation, SourceKey, SourceObservation, SourceRecordLocator,
     SourceResolverContractError, StableEntityId, TypedKey,
 };
 use ctx_history_index::{
     CommitReceipt, GenerationWriter, IndexError, LexicalDocument, RevalidationTarget,
     VerifiedIndex, WriterOptions, MAX_BODY_PREVIEW_CHARS,
 };
-use rusqlite::{limits::Limit, Connection, OpenFlags};
+use rusqlite::{limits::Limit, Connection, OpenFlags, OptionalExtension};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -73,6 +73,7 @@ const CRUSH_LOGICAL_EVENT_KIND: &str = "crush-message";
 const CRUSH_MESSAGE_RELATION: &str = "crush.messages-with-parent-session";
 const CRUSH_MESSAGE_DIGEST_DOMAIN: &[u8] = b"ctx-crush-source-backed-message-set-v0\0";
 const MAX_CRUSH_PROJECT_DATABASES: usize = 128;
+const MAX_CRUSH_SESSION_LINEAGE_DEPTH: usize = 256;
 
 #[derive(Debug, Error)]
 pub enum CrushSourceBackedErrorV0 {
@@ -102,12 +103,20 @@ pub enum CrushSourceBackedErrorV0 {
     DuplicateDatabasePath,
     #[error("Crush project inventory contains a null project key")]
     NullProjectKey,
+    #[error("Crush project database path is not valid UTF-8: {0:?}")]
+    NonUtf8DatabasePath(PathBuf),
     #[error("Crush source count overflow")]
     CountOverflow,
     #[error("Crush source certificate does not support exact replay")]
     InvalidReplayCertificate,
     #[error("Crush message scan produced an unexpected native row")]
     UnexpectedNativeRow,
+    #[error("Crush session lineage contains a cycle at provider session {0}")]
+    SessionLineageCycle(String),
+    #[error(
+        "Crush session lineage exceeds the finite {MAX_CRUSH_SESSION_LINEAGE_DEPTH}-session bound"
+    )]
+    SessionLineageTooDeep,
     #[error("Crush locator does not address a parented typed message row")]
     InvalidLocator,
     #[error("Crush locator source is not present in the selected/registered project inventory")]
@@ -739,9 +748,13 @@ fn scan_source(
                     counts.rejected_records = checked_add(counts.rejected_records, 1)?;
                 }
                 CrushRecordProjection::Message(projection) if projection.event.is_some() => {
+                    let session = session
+                        .as_ref()
+                        .ok_or(CrushSourceBackedErrorV0::UnexpectedNativeRow)?;
                     writer.add_document(lexical_document(
                         source,
                         &row,
+                        session,
                         &digest_values,
                         record_digest,
                         &projection,
@@ -765,19 +778,13 @@ fn scan_source(
 fn lexical_document(
     source: &OpenedSource,
     row: &super::super::projection::CrushMessageRow,
+    session: &CrushSessionRow,
     digest_values: &[NativeSqliteValue],
     record_digest: [u8; 32],
     projection: &CrushMessageProjection,
 ) -> CrushSourceBackedResultV0<LexicalDocument> {
-    let session_key = NativeSessionKey::native_id(
-        CRUSH_NATIVE_SESSION_NAMESPACE,
-        TypedKey::utf8(row.session_id.clone())?,
-    )?;
-    let session_id = derive_session_id(SessionIdentityInput {
-        source: &source.database.source_key,
-        logical_session_kind: CRUSH_LOGICAL_SESSION_KIND,
-        native_session_key: &session_key,
-    })?;
+    let session_id = crush_session_id(&source.database.source_key, &row.session_id)?;
+    let lineage = session_lineage(source, session, session_id)?;
     let item_key = NativeItemKey::native_id(
         CRUSH_NATIVE_MESSAGE_NAMESPACE,
         TypedKey::utf8(row.id.clone())?,
@@ -814,9 +821,27 @@ fn lexical_document(
     Ok(LexicalDocument {
         event_id,
         session_id,
+        parent_session_id: lineage.parent_session_id,
+        root_session_id: lineage.root_session_id,
         source: source.database.source_key.clone(),
         locator,
         provider_session_id: Some(row.session_id.clone()),
+        // Crush's native schema has no branch-name field.
+        branch: None,
+        source_path: Some(
+            source
+                .database
+                .canonical_path
+                .to_str()
+                .ok_or_else(|| {
+                    CrushSourceBackedErrorV0::NonUtf8DatabasePath(
+                        source.database.canonical_path.clone(),
+                    )
+                })?
+                .to_owned(),
+        ),
+        agent_type: lineage.agent_type.as_str().to_owned(),
+        is_primary: lineage.is_primary,
         event_sequence: u64::try_from(row.rowid)
             .map_err(|_| CrushSourceBackedErrorV0::UnexpectedNativeRow)?,
         occurred_at_unix_ms: Some(event.occurred_at.timestamp_millis()),
@@ -827,6 +852,82 @@ fn lexical_document(
         cwd: None,
         touched_files: touched_paths(projection)?,
     })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SessionLineage {
+    parent_session_id: Option<StableEntityId>,
+    root_session_id: StableEntityId,
+    agent_type: AgentType,
+    is_primary: bool,
+}
+
+fn session_lineage(
+    source: &OpenedSource,
+    session: &CrushSessionRow,
+    session_id: StableEntityId,
+) -> CrushSourceBackedResultV0<SessionLineage> {
+    let Some(parent_provider_session_id) = session.parent_session_id.as_deref() else {
+        return Ok(SessionLineage {
+            parent_session_id: None,
+            root_session_id: session_id,
+            agent_type: AgentType::Primary,
+            is_primary: true,
+        });
+    };
+    let parent_session_id =
+        crush_session_id(&source.database.source_key, parent_provider_session_id)?;
+    let mut seen = HashSet::from([session.id.clone()]);
+    let mut root_provider_session_id = parent_provider_session_id.to_owned();
+    for depth in 0..MAX_CRUSH_SESSION_LINEAGE_DEPTH {
+        if !seen.insert(root_provider_session_id.clone()) {
+            return Err(CrushSourceBackedErrorV0::SessionLineageCycle(
+                root_provider_session_id,
+            ));
+        }
+        let next_parent = source
+            .connection
+            .query_row(
+                "select parent_session_id
+                   from sessions
+                  where typeof(id) = 'text'
+                    and id collate binary = ?1 collate binary",
+                [&root_provider_session_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        let Some(next_parent) = next_parent else {
+            let root_session_id =
+                crush_session_id(&source.database.source_key, &root_provider_session_id)?;
+            return Ok(SessionLineage {
+                parent_session_id: Some(parent_session_id),
+                root_session_id,
+                agent_type: AgentType::Subagent,
+                is_primary: false,
+            });
+        };
+        root_provider_session_id = next_parent;
+        if depth + 1 == MAX_CRUSH_SESSION_LINEAGE_DEPTH {
+            return Err(CrushSourceBackedErrorV0::SessionLineageTooDeep);
+        }
+    }
+    Err(CrushSourceBackedErrorV0::SessionLineageTooDeep)
+}
+
+fn crush_session_id(
+    source: &SourceKey,
+    provider_session_id: &str,
+) -> CrushSourceBackedResultV0<StableEntityId> {
+    let session_key = NativeSessionKey::native_id(
+        CRUSH_NATIVE_SESSION_NAMESPACE,
+        TypedKey::utf8(provider_session_id)?,
+    )?;
+    Ok(derive_session_id(SessionIdentityInput {
+        source,
+        logical_session_kind: CRUSH_LOGICAL_SESSION_KIND,
+        native_session_key: &session_key,
+    })?)
 }
 
 fn lexical_preview(projection: &CrushMessageProjection) -> String {
@@ -1003,6 +1104,7 @@ mod tests {
         let second = temp.path().join("second.db");
         write_database(&first, "session-a", "message-a", "alpha exact body");
         write_database(&second, "session-b", "message-b", "beta exact body");
+        add_session_lineage(&first, "session-a", "middle-a", "root-a");
         let inventory = TestInventory::new(inventory(
             b"inventory-1",
             vec![
@@ -1019,8 +1121,32 @@ mod tests {
         let index = VerifiedIndex::open(&index_root).unwrap();
         let alpha = index.search_event_candidates("alpha exact", 10).unwrap();
         assert_eq!(alpha.len(), 1);
-        let event_id = alpha[0].event.event_id;
-        let locator = alpha[0].event.locator.clone();
+        let alpha_event = &alpha[0].event;
+        assert_eq!(
+            alpha_event.provider_session_id.as_deref(),
+            Some("session-a")
+        );
+        assert!(alpha_event.parent_session_id.is_some());
+        assert_ne!(
+            alpha_event.parent_session_id,
+            Some(alpha_event.root_session_id)
+        );
+        assert_ne!(alpha_event.root_session_id, alpha_event.session_id);
+        assert_eq!(alpha_event.branch, None);
+        assert_eq!(
+            alpha_event.source_path.as_deref(),
+            std::fs::canonicalize(&first).unwrap().to_str()
+        );
+        assert_eq!(alpha_event.agent_type, AgentType::Subagent.as_str());
+        assert!(!alpha_event.is_primary);
+        let beta = index.search_event_candidates("beta exact", 10).unwrap();
+        assert_eq!(beta.len(), 1);
+        assert_eq!(beta[0].event.parent_session_id, None);
+        assert_eq!(beta[0].event.root_session_id, beta[0].event.session_id);
+        assert_eq!(beta[0].event.agent_type, AgentType::Primary.as_str());
+        assert!(beta[0].event.is_primary);
+        let event_id = alpha_event.event_id;
+        let locator = alpha_event.locator.clone();
         let hydrated = CrushLocatorResolverV0::discover(&inventory)
             .unwrap()
             .hydrate(&locator)
@@ -1196,6 +1322,36 @@ mod tests {
                     model, is_summary_message
                  ) values (?1, ?2, 'assistant', ?3, 1001, 1001, 'test', 'model', 0)",
                 (message_id, session_id, parts),
+            )
+            .unwrap();
+    }
+
+    fn add_session_lineage(path: &Path, child: &str, parent: &str, root: &str) {
+        let connection = Connection::open(path).unwrap();
+        connection
+            .execute(
+                "insert into sessions (
+                    id, parent_session_id, title, prompt_tokens, completion_tokens,
+                    cost, created_at, updated_at, summary_message_id
+                 ) values (?1, null, 'root', 1, 1, 0, 900, 900, null)",
+                [root],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "insert into sessions (
+                    id, parent_session_id, title, prompt_tokens, completion_tokens,
+                    cost, created_at, updated_at, summary_message_id
+                 ) values (?1, ?2, 'parent', 1, 1, 0, 950, 950, null)",
+                (parent, root),
+            )
+            .unwrap();
+        connection
+            .execute(
+                "update sessions
+                    set parent_session_id = ?2
+                  where id = ?1",
+                (child, parent),
             )
             .unwrap();
     }
