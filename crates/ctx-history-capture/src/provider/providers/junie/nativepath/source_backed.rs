@@ -40,7 +40,7 @@ use crate::{
             MAX_JUNIE_TRANSIENT_TURN_BYTES,
         },
     },
-    CaptureError, CaptureProvider, JUNIE_SESSION_EVENTS_SOURCE_FORMAT,
+    AgentType, CaptureError, CaptureProvider, JUNIE_SESSION_EVENTS_SOURCE_FORMAT,
 };
 
 const SOURCE_ANCHOR_NAMESPACE: &str = "junie.session-events";
@@ -232,17 +232,26 @@ impl CurrentSource {
             return Err(JunieSourceBackedErrorV0::StalledScanner);
         }
         self.rejected_records = checked_add(self.rejected_records, parsed.rejection_count)?;
-        let cwd = self
+        let workspace = self
             .session_path
             .index_meta
             .project_dir
             .as_deref()
             .map(|value| provider_local_preview(value, MAX_BODY_PREVIEW_CHARS).0);
+        let cwd = parsed
+            .after_state
+            .cwd
+            .as_deref()
+            .map(|value| provider_local_preview(value, MAX_BODY_PREVIEW_CHARS).0)
+            .or_else(|| workspace.clone());
+        let source_path = self.opening_native.canonical_path.to_string_lossy();
         for row in parsed.rows {
             let document = lexical_document(
                 &self.source,
                 self.session_id,
                 &self.provider_session_id,
+                source_path.as_ref(),
+                workspace.as_deref(),
                 cwd.as_deref(),
                 row,
             )?;
@@ -343,6 +352,8 @@ fn lexical_document(
     source: &SourceKey,
     session_id: StableEntityId,
     provider_session_id: &str,
+    source_path: &str,
+    workspace: Option<&str>,
     cwd: Option<&str>,
     row: EventDraft,
 ) -> JunieSourceBackedResultV0<LexicalDocument> {
@@ -376,15 +387,21 @@ fn lexical_document(
     Ok(LexicalDocument {
         event_id,
         session_id,
+        parent_session_id: None,
+        root_session_id: session_id,
         source: source.clone(),
         locator,
         provider_session_id: Some(provider_session_id.to_owned()),
+        branch: None,
+        source_path: Some(source_path.to_owned()),
+        agent_type: AgentType::Primary.as_str().to_owned(),
+        is_primary: true,
         event_sequence: row.event_index,
         occurred_at_unix_ms: Some(row.occurred_at.timestamp_millis()),
         event_type: row.event_type.as_str().to_owned(),
         role: row.role.map(|role| role.as_str().to_owned()),
         body,
-        workspace: None,
+        workspace: workspace.map(str::to_owned),
         cwd: cwd.map(str::to_owned),
         touched_files,
     })
@@ -1042,6 +1059,21 @@ mod tests {
         );
         let documents = scan_documents(temp.path());
         assert_eq!(documents.len(), 1);
+        assert_eq!(documents[0].parent_session_id, None);
+        assert_eq!(documents[0].root_session_id, documents[0].session_id);
+        assert_eq!(
+            documents[0].provider_session_id.as_deref(),
+            Some("ordinary-session")
+        );
+        assert_eq!(documents[0].branch, None);
+        assert!(documents[0]
+            .source_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with("/ordinary-session/events.jsonl")));
+        assert_eq!(documents[0].agent_type, AgentType::Primary.as_str());
+        assert!(documents[0].is_primary);
+        assert_eq!(documents[0].workspace.as_deref(), Some("/workspace/junie"));
+        assert_eq!(documents[0].cwd.as_deref(), Some("/workspace/junie"));
         assert!(matches!(
             documents[0].locator.coordinate(),
             NativeRecordCoordinate::Jsonl { .. }
