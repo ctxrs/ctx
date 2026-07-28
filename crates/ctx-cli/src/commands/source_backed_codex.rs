@@ -293,6 +293,13 @@ fn phase_attribution(receipts: &[CodexSourceBackedIngestReceiptV0], query: Durat
                 .saturating_add(receipt.counters.scanner_legacy_row_json_serializations)
         }).sum::<u64>(),
         "legacy_json_serialized_bytes": receipts.iter().map(|receipt| receipt.counters.scanner_legacy_json_serialized_bytes).sum::<u64>(),
+        "legacy_normalized_payload_hashes": receipts.iter().map(|receipt| receipt.counters.scanner_legacy_normalized_payload_hashes).sum::<u64>(),
+        "legacy_file_touch_rows": receipts.iter().map(|receipt| receipt.counters.scanner_legacy_file_touch_rows).sum::<u64>(),
+        "legacy_complete_content_locators": receipts.iter().map(|receipt| receipt.counters.scanner_legacy_complete_content_locators).sum::<u64>(),
+        "legacy_duplicate_preview_allocations": receipts.iter().map(|receipt| receipt.counters.scanner_legacy_duplicate_preview_allocations).sum::<u64>(),
+        "legacy_page_owner_json_serializations": receipts.iter().map(|receipt| receipt.counters.scanner_legacy_page_owner_json_serializations).sum::<u64>(),
+        "legacy_page_identity_owner_json_serializations": receipts.iter().map(|receipt| receipt.counters.scanner_legacy_page_identity_owner_json_serializations).sum::<u64>(),
+        "legacy_page_identity_row_json_serializations": receipts.iter().map(|receipt| receipt.counters.scanner_legacy_page_identity_row_json_serializations).sum::<u64>(),
     })
 }
 
