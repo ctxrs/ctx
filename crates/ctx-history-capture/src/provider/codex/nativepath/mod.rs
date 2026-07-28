@@ -52,8 +52,8 @@ pub(crate) use source::{
 };
 pub use source_backed::{
     hydrate_codex_locator, ingest_codex_source_backed_v0, CodexHydratedRecordV0,
-    CodexSourceBackedCountersV0, CodexSourceBackedErrorV0, CodexSourceBackedIngestReceiptV0,
-    CodexSourceBackedPhaseTimingsV0, CodexSourceBackedResultV0,
+    CodexLocatorResolverV0, CodexSourceBackedCountersV0, CodexSourceBackedErrorV0,
+    CodexSourceBackedIngestReceiptV0, CodexSourceBackedPhaseTimingsV0, CodexSourceBackedResultV0,
 };
 pub(crate) use vertical::{
     finish_pending_codex_native_retirement, prepare_codex_native_output_replay,
