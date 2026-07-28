@@ -12,11 +12,11 @@ use std::{
 };
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, AgentType, CertifiedSource, CertifiedSourceInventory,
-    ContentRef, EventIdentityInput, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
-    NativeSessionKey, ProjectionContractError, ScannedSourceCounts, SessionIdentityInput,
-    SourceAnchor, SourceFrontier, SourceInventoryObservation, SourceKey, SourceObservation,
-    SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource,
+    CertifiedSourceInventory, ContentRef, EventIdentityInput, LocatorRevisionPolicy, NativeItemKey,
+    NativeRecordCoordinate, NativeSessionKey, ProjectionContractError, ScannedSourceCounts,
+    SessionIdentityInput, SourceAnchor, SourceFrontier, SourceInventoryObservation, SourceKey,
+    SourceObservation, SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
 };
 use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
 use sha2::{Digest, Sha256};
@@ -36,8 +36,7 @@ use crate::{
         SourceAccessBroker, SourceSnapshot, VerifiedContentRole,
     },
     provider::normalization::{provider_block_text, provider_message_id, provider_string_field},
-    CaptureError, CaptureProvider, ProviderAdapterContext, MAX_PROVIDER_JSONL_LINE_BYTES,
-    ROVODEV_SOURCE_FORMAT,
+    CaptureError, ProviderAdapterContext, MAX_PROVIDER_JSONL_LINE_BYTES, ROVODEV_SOURCE_FORMAT,
 };
 
 const SOURCE_ANCHOR_NAMESPACE: &str = "rovodev.session";
