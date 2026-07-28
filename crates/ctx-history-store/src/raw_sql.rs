@@ -103,101 +103,108 @@ impl RawSqlValue {
 
 impl Store {
     pub fn raw_sql_query(&self, sql: &str, options: RawSqlOptions) -> Result<RawSqlResult> {
-        let sql = sql.trim();
-        if sql.is_empty() {
-            return Err(StoreError::RawSqlEmpty);
-        }
-        validate_raw_sql_options(&options)?;
-        validate_raw_sql_statement_bytes(sql, &options)?;
-        reject_sql_tail(&self.conn, sql)?;
-        let _limits = RawSqlLimitGuard::apply(&self.conn, &options)?;
+        raw_sql_query_connection(&self.conn, sql, options)
+    }
+}
 
-        let mut stmt = self.conn.prepare(sql)?;
-        if stmt.parameter_count() > 0 {
-            return Err(StoreError::RawSqlHasParameters);
+pub(crate) fn raw_sql_query_connection(
+    conn: &Connection,
+    sql: &str,
+    options: RawSqlOptions,
+) -> Result<RawSqlResult> {
+    let sql = sql.trim();
+    if sql.is_empty() {
+        return Err(StoreError::RawSqlEmpty);
+    }
+    validate_raw_sql_options(&options)?;
+    validate_raw_sql_statement_bytes(sql, &options)?;
+    reject_sql_tail(conn, sql)?;
+    let _limits = RawSqlLimitGuard::apply(conn, &options)?;
+
+    let mut stmt = conn.prepare(sql)?;
+    if stmt.parameter_count() > 0 {
+        return Err(StoreError::RawSqlHasParameters);
+    }
+    if !stmt.readonly() {
+        return Err(StoreError::RawSqlNotReadOnly);
+    }
+    let column_count = stmt.column_count();
+    if column_count == 0 {
+        return Err(StoreError::RawSqlNoColumns);
+    }
+    if column_count > options.max_columns {
+        return Err(StoreError::RawSqlTooManyColumns {
+            columns: column_count,
+            max_columns: options.max_columns,
+        });
+    }
+    validate_raw_sql_result_preview_budget(&options, column_count)?;
+
+    let columns = stmt
+        .column_names()
+        .into_iter()
+        .map(|name| RawSqlColumn {
+            name: name.to_owned(),
+        })
+        .collect::<Vec<_>>();
+    let started = Instant::now();
+    let timeout = options.timeout;
+    let progress_started = started;
+    conn.progress_handler(1_000, Some(move || progress_started.elapsed() >= timeout));
+
+    let query_result = (|| -> Result<RawSqlResult> {
+        let mut rows = stmt.query([])?;
+        let mut output_rows = Vec::new();
+        let mut rows_truncated = false;
+        let mut values_truncated = false;
+
+        while let Some(row) = rows.next()? {
+            if output_rows.len() >= options.max_rows {
+                rows_truncated = true;
+                break;
+            }
+            let mut output_row = Vec::with_capacity(column_count);
+            for index in 0..column_count {
+                let value = raw_sql_value(row.get_ref(index)?, options.max_value_bytes);
+                if value.is_truncated() {
+                    values_truncated = true;
+                }
+                output_row.push(value);
+            }
+            output_rows.push(output_row);
         }
-        if !stmt.readonly() {
-            return Err(StoreError::RawSqlNotReadOnly);
-        }
-        let column_count = stmt.column_count();
-        if column_count == 0 {
-            return Err(StoreError::RawSqlNoColumns);
-        }
-        if column_count > options.max_columns {
-            return Err(StoreError::RawSqlTooManyColumns {
-                columns: column_count,
+
+        Ok(RawSqlResult {
+            returned_rows: output_rows.len(),
+            columns,
+            rows: output_rows,
+            truncated: RawSqlTruncation {
+                rows: rows_truncated,
+                values: values_truncated,
+            },
+            elapsed: started.elapsed(),
+            limits: RawSqlLimits {
+                max_rows: options.max_rows,
                 max_columns: options.max_columns,
-            });
-        }
-        validate_raw_sql_result_preview_budget(&options, column_count)?;
+                max_value_bytes: options.max_value_bytes,
+                max_sql_bytes: options.max_sql_bytes,
+                timeout_ms: duration_ms(options.timeout),
+            },
+        })
+    })();
 
-        let columns = stmt
-            .column_names()
-            .into_iter()
-            .map(|name| RawSqlColumn {
-                name: name.to_owned(),
+    conn.progress_handler(0, None::<fn() -> bool>);
+
+    match query_result {
+        Err(StoreError::Sql(rusqlite::Error::SqliteFailure(error, _)))
+            if error.code == ErrorCode::OperationInterrupted
+                && started.elapsed() >= options.timeout =>
+        {
+            Err(StoreError::RawSqlTimedOut {
+                timeout_ms: duration_ms(options.timeout),
             })
-            .collect::<Vec<_>>();
-        let started = Instant::now();
-        let timeout = options.timeout;
-        let progress_started = started;
-        self.conn
-            .progress_handler(1_000, Some(move || progress_started.elapsed() >= timeout));
-
-        let query_result = (|| -> Result<RawSqlResult> {
-            let mut rows = stmt.query([])?;
-            let mut output_rows = Vec::new();
-            let mut rows_truncated = false;
-            let mut values_truncated = false;
-
-            while let Some(row) = rows.next()? {
-                if output_rows.len() >= options.max_rows {
-                    rows_truncated = true;
-                    break;
-                }
-                let mut output_row = Vec::with_capacity(column_count);
-                for index in 0..column_count {
-                    let value = raw_sql_value(row.get_ref(index)?, options.max_value_bytes);
-                    if value.is_truncated() {
-                        values_truncated = true;
-                    }
-                    output_row.push(value);
-                }
-                output_rows.push(output_row);
-            }
-
-            Ok(RawSqlResult {
-                returned_rows: output_rows.len(),
-                columns,
-                rows: output_rows,
-                truncated: RawSqlTruncation {
-                    rows: rows_truncated,
-                    values: values_truncated,
-                },
-                elapsed: started.elapsed(),
-                limits: RawSqlLimits {
-                    max_rows: options.max_rows,
-                    max_columns: options.max_columns,
-                    max_value_bytes: options.max_value_bytes,
-                    max_sql_bytes: options.max_sql_bytes,
-                    timeout_ms: duration_ms(options.timeout),
-                },
-            })
-        })();
-
-        self.conn.progress_handler(0, None::<fn() -> bool>);
-
-        match query_result {
-            Err(StoreError::Sql(rusqlite::Error::SqliteFailure(error, _)))
-                if error.code == ErrorCode::OperationInterrupted
-                    && started.elapsed() >= options.timeout =>
-            {
-                Err(StoreError::RawSqlTimedOut {
-                    timeout_ms: duration_ms(options.timeout),
-                })
-            }
-            other => other,
         }
+        other => other,
     }
 }
 

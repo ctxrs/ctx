@@ -20,6 +20,7 @@ mod schema;
 mod search;
 mod semantic_projection_epoch;
 mod sessions;
+pub mod source_backed_relational;
 mod source_generations;
 mod source_locators;
 mod sources;
@@ -74,6 +75,13 @@ pub use raw_sql::{
 };
 pub use search::projections::{EventEmbeddingDocument, EventSearchHit, SemanticProjectionSnapshot};
 pub use semantic_projection_epoch::CanonicalSemanticProjectionVersion;
+pub use source_backed_relational::{
+    CommittedCoreGeneration, RelationalEventMetadata, RelationalFileTouchMetadata,
+    RelationalProjectionError, RelationalProjectionMetadata, RelationalProjectionReceipt,
+    RelationalProjectionRecord, RelationalProjectionStatus, RelationalSessionMetadata,
+    RelationalSourceMetadata, SourceBackedRelationalProjection, RELATIONAL_EVENT_PREVIEW_MAX_CHARS,
+    RELATIONAL_PROJECTION_CONTRACT_VERSION, RELATIONAL_PROJECTION_SCHEMA_VERSION,
+};
 pub use source_generations::{
     NativePathRetainedSourceEntities, NativePathSourceEntityFrontier, NativePathSourceEntityKind,
     NativePathSourceGenerationKey, NativePathSourceRetirementPage,
