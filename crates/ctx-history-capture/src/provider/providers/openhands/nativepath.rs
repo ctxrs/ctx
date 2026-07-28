@@ -69,7 +69,7 @@ use super::{
     source::{
         discover_openhands_event_paths, hex, openhands_legacy_filename_index_candidate,
         openhands_line_number, openhands_missing_event_files, openhands_physical_fingerprint,
-        OpenHandsFileObservation, OpenHandsObservedFile,
+        OpenHandsFileObservation, OpenHandsInventory, OpenHandsObservedFile,
     },
 };
 
@@ -310,6 +310,7 @@ pub(crate) fn import_openhands_nativepath(
         replay_outputs_or_mark_behind(
             store,
             &live_paths,
+            &inventory,
             &known_routes,
             &relocation_state,
             &configured_source_root,
@@ -333,7 +334,7 @@ pub(crate) fn import_openhands_nativepath(
             if stopped {
                 break;
             }
-            let source = OpenHandsObservedFile::open(event_path)?;
+            let source = inventory.open_source(event_path)?;
             let current_route = current_route_for_source(&all_known_routes, &source)?;
             let relocation_route = if current_route.is_none() {
                 relocation_route_for_source(&all_known_routes, &source)?
@@ -391,6 +392,7 @@ pub(crate) fn import_openhands_nativepath(
                 }
             }
         }
+        inventory.revalidate()?;
         if stopped {
             summary.work_remaining = true;
             return Ok(summary);
@@ -422,6 +424,7 @@ pub(crate) fn import_openhands_nativepath(
         replay_outputs_or_mark_behind(
             store,
             &live_paths,
+            &inventory,
             &known_routes,
             &relocation_state,
             &configured_source_root,

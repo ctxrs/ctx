@@ -162,6 +162,74 @@ fn replacement_keeps_native_ids_but_invalidates_old_leaf_evidence() {
 }
 
 #[test]
+fn retained_resolver_rejects_leaf_swap() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("profile");
+    let path = write_event(
+        &root,
+        "conversation-leaf-swap",
+        "event.json",
+        message("stable-event-id", "trusted body"),
+    );
+    let projection = project_openhands_source_backed_v1(&root).unwrap();
+    let locator = projection.documents()[0].locator.clone();
+    let resolver = OpenHandsLocatorResolverV1::discover(&root).unwrap();
+
+    fs::rename(&path, path.with_extension("old")).unwrap();
+    fs::write(
+        &path,
+        serde_json::to_vec(&message("stable-event-id", "replacement body")).unwrap(),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        resolver.hydrate(&locator),
+        Err(OpenHandsSourceBackedErrorV1::LeafRevisionMismatch)
+    ));
+}
+
+#[test]
+fn retained_resolver_rejects_selected_root_swap() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("profile");
+    write_event(
+        &root,
+        "conversation-root-swap",
+        "event.json",
+        message("stable-event-id", "trusted body"),
+    );
+    let projection = project_openhands_source_backed_v1(&root).unwrap();
+    let locator = projection.documents()[0].locator.clone();
+    let resolver = OpenHandsLocatorResolverV1::discover(&root).unwrap();
+
+    let displaced = temp.path().join("displaced-profile");
+    fs::rename(&root, &displaced).unwrap();
+    write_event(
+        &root,
+        "conversation-root-swap",
+        "event.json",
+        message("stable-event-id", "replacement body"),
+    );
+
+    assert!(resolver.hydrate(&locator).is_err());
+}
+
+#[test]
+fn unavailable_selected_root_fails_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let missing = temp.path().join("missing-profile");
+
+    assert!(matches!(
+        project_openhands_source_backed_v1(&missing),
+        Err(OpenHandsSourceBackedErrorV1::NoV1EventFiles { .. })
+    ));
+    assert!(matches!(
+        OpenHandsLocatorResolverV1::discover(&missing),
+        Err(OpenHandsSourceBackedErrorV1::NoV1EventFiles { .. })
+    ));
+}
+
+#[test]
 fn exact_locator_uses_relative_leaf_and_native_object_coordinate() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("profile");

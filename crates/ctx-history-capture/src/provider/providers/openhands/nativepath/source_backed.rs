@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     convert::Infallible,
-    fs, io,
+    io,
     path::{Component, Path, PathBuf},
 };
 
@@ -19,6 +19,7 @@ use thiserror::Error;
 
 use super::output::openhands_output_outcome;
 use crate::{
+    common::io::{open_provider_source_path, OpenedProviderSourcePath, ProviderSourceDirectory},
     provider::{
         file_touches::{
             event_type_supports_structured_file_touches,
@@ -31,7 +32,10 @@ use crate::{
 
 use crate::provider::providers::openhands::{
     event::{decode_openhands_event, OpenHandsDecodedEvent},
-    source::{discover_openhands_event_paths, OpenHandsFileObservation, OpenHandsObservedFile},
+    source::{
+        discover_openhands_event_paths, normalized_openhands_authority_path,
+        OpenHandsFileObservation, OpenHandsInventory, OpenHandsObservedFile,
+    },
 };
 
 const OPENHANDS_SOURCE_ANCHOR_NAMESPACE: &str = "openhands.v1-conversation";
@@ -146,6 +150,7 @@ impl OpenHandsSourceBackedProjectionV1 {
 #[derive(Debug)]
 pub(crate) struct OpenHandsSourceBackedAdapterV1 {
     selected_root: PathBuf,
+    inventory: OpenHandsInventory,
 }
 
 impl OpenHandsSourceBackedAdapterV1 {
@@ -153,7 +158,7 @@ impl OpenHandsSourceBackedAdapterV1 {
         let selected_root = selected_root.as_ref();
         let inventory = discover_openhands_event_paths(selected_root)?;
         if inventory.paths.is_empty() {
-            return if detects_current_cli_format(selected_root)? {
+            return if detects_current_cli_format(inventory.selected_path())? {
                 Err(OpenHandsSourceBackedErrorV1::UnsupportedCurrentCliFormat {
                     root: selected_root.to_path_buf(),
                 })
@@ -164,14 +169,15 @@ impl OpenHandsSourceBackedAdapterV1 {
             };
         }
         Ok(Self {
-            selected_root: fs::canonicalize(selected_root)?,
+            selected_root: inventory.selected_path().to_path_buf(),
+            inventory,
         })
     }
 
     pub(crate) fn project(
         &self,
     ) -> OpenHandsSourceBackedResultV1<OpenHandsSourceBackedProjectionV1> {
-        let opening_paths = discover_required_paths(&self.selected_root)?;
+        let opening_paths = discover_required_paths(&self.inventory)?;
         let opening_inventory = inventory_observation(&self.selected_root, &opening_paths)?;
         let plans = bind_conversations(&opening_paths)?;
         let source_keys = plans
@@ -185,7 +191,7 @@ impl OpenHandsSourceBackedAdapterV1 {
         let mut witnesses = Vec::with_capacity(opening_paths.len());
 
         for plan in plans.values() {
-            let projected = project_conversation(plan)?;
+            let projected = project_conversation(&self.inventory, plan)?;
             witnesses.extend(projected.witnesses);
             documents.extend(projected.documents);
             rejections.extend(projected.rejections);
@@ -199,7 +205,7 @@ impl OpenHandsSourceBackedAdapterV1 {
             return Err(OpenHandsSourceBackedErrorV1::SourceChangedDuringProjection);
         }
 
-        let closing_paths = discover_required_paths(&self.selected_root)?;
+        let closing_paths = discover_required_paths(&self.inventory)?;
         let closing_inventory = inventory_observation(&self.selected_root, &closing_paths)?;
         let inventory = CertifiedSourceInventory::certify(
             opening_inventory,
@@ -207,6 +213,7 @@ impl OpenHandsSourceBackedAdapterV1 {
             OPENHANDS_PARSER_REVISION,
             source_keys,
         )?;
+        self.inventory.revalidate()?;
 
         Ok(OpenHandsSourceBackedProjectionV1 {
             inventory,
@@ -237,13 +244,14 @@ struct LocatorRoute {
 
 #[derive(Debug)]
 pub(crate) struct OpenHandsLocatorResolverV1 {
+    inventory: OpenHandsInventory,
     routes: BTreeMap<([u8; 32], String), LocatorRoute>,
 }
 
 impl OpenHandsLocatorResolverV1 {
     pub(crate) fn discover(selected_root: impl AsRef<Path>) -> OpenHandsSourceBackedResultV1<Self> {
         let adapter = OpenHandsSourceBackedAdapterV1::discover(selected_root)?;
-        let paths = discover_required_paths(&adapter.selected_root)?;
+        let paths = discover_required_paths(&adapter.inventory)?;
         let plans = bind_conversations(&paths)?;
         let mut routes = BTreeMap::new();
         for plan in plans.values() {
@@ -266,7 +274,10 @@ impl OpenHandsLocatorResolverV1 {
                 }
             }
         }
-        Ok(Self { routes })
+        Ok(Self {
+            inventory: adapter.inventory,
+            routes,
+        })
     }
 
     pub(crate) fn hydrate(
@@ -298,7 +309,7 @@ impl OpenHandsLocatorResolverV1 {
             return Err(OpenHandsSourceBackedErrorV1::InvalidLocator);
         }
 
-        let mut observed = OpenHandsObservedFile::open(&route.path)?;
+        let mut observed = self.inventory.open_source(&route.path)?;
         let provider_bytes = observed.raw_bytes.take().ok_or_else(|| {
             OpenHandsSourceBackedErrorV1::RecordTooLarge {
                 path: route.path.clone(),
@@ -328,6 +339,7 @@ impl OpenHandsLocatorResolverV1 {
         if !observed.revalidate()? {
             return Err(OpenHandsSourceBackedErrorV1::SourceChangedDuringProjection);
         }
+        self.inventory.revalidate()?;
         Ok(OpenHandsHydratedRecordV1 {
             provider_bytes,
             decoded_display_text: decoded.text().to_owned(),
@@ -420,12 +432,14 @@ struct ProjectedConversation {
     witnesses: Vec<OpenHandsObservedFile>,
 }
 
-fn discover_required_paths(root: &Path) -> OpenHandsSourceBackedResultV1<Vec<PathBuf>> {
-    let inventory = discover_openhands_event_paths(root)?;
-    if inventory.paths.is_empty() {
+fn discover_required_paths(
+    inventory: &OpenHandsInventory,
+) -> OpenHandsSourceBackedResultV1<Vec<PathBuf>> {
+    let paths = inventory.refresh_paths()?;
+    if paths.is_empty() {
         return Err(OpenHandsSourceBackedErrorV1::SourceChangedDuringProjection);
     }
-    Ok(inventory.paths)
+    Ok(paths)
 }
 
 fn bind_conversations(
@@ -462,6 +476,7 @@ fn bind_conversations(
 }
 
 fn project_conversation(
+    inventory: &OpenHandsInventory,
     plan: &ConversationPlan,
 ) -> OpenHandsSourceBackedResultV1<ProjectedConversation> {
     let session_id = session_identity(&plan.source, &plan.conversation_id)?;
@@ -478,7 +493,7 @@ fn project_conversation(
     let mut counts = ScannedSourceCounts::default();
 
     for (sequence, event) in plan.events.iter().enumerate() {
-        let mut observed = OpenHandsObservedFile::open(&event.path)?;
+        let mut observed = inventory.open_source(&event.path)?;
         let provider_bytes = observed.raw_bytes.take().ok_or_else(|| {
             OpenHandsSourceBackedErrorV1::RecordTooLarge {
                 path: event.path.clone(),
@@ -923,59 +938,88 @@ fn bounded_reason(mut reason: String) -> String {
     reason
 }
 
-fn detects_current_cli_format(path: &Path) -> io::Result<bool> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error),
+fn detects_current_cli_format(path: &Path) -> OpenHandsSourceBackedResultV1<bool> {
+    let path = normalized_openhands_authority_path(path)?;
+    let opened = match open_provider_source_path(&path) {
+        Ok(opened) => opened,
+        Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(false)
+        }
+        Err(error) => return Err(error.into()),
     };
-    if metadata.is_file() {
-        return Ok(current_cli_event_file(path)
+    if let OpenedProviderSourcePath::File(file) = opened {
+        let detected = current_cli_event_file(&path)
             && path
                 .parent()
                 .and_then(Path::file_name)
-                .is_some_and(|name| name == "events"));
+                .is_some_and(|name| name == "events");
+        file.revalidate()?;
+        return Ok(detected);
     }
-    if !metadata.is_dir() {
-        return Ok(false);
-    }
+    let OpenedProviderSourcePath::Directory(directory) = opened else {
+        return Err(CaptureError::SystemInvariant(
+            "OpenHands CLI format root classification is incomplete",
+        )
+        .into());
+    };
     if path.file_name().is_some_and(|name| name == "events")
-        && directory_has_current_cli_event(path)?
+        && directory_has_current_cli_event(&directory)?
     {
         return Ok(true);
     }
-    let entries = bounded_direct_entries(path)?;
-    let direct_events = path.join("events");
-    if direct_events.is_dir() && directory_has_current_cli_event(&direct_events)? {
-        return Ok(true);
-    }
-    for entry in entries {
-        let events = entry.join("events");
-        if events.is_dir() && directory_has_current_cli_event(&events)? {
-            return Ok(true);
+    let entries = directory.entries(OPENHANDS_CURRENT_CLI_MAX_ENTRIES.saturating_add(1))?;
+    for name in &entries {
+        if name == "events" {
+            if let OpenedProviderSourcePath::Directory(events) = directory.open_child(name)? {
+                if directory_has_current_cli_event(&events)? {
+                    return Ok(true);
+                }
+            }
         }
     }
+    for name in entries {
+        let OpenedProviderSourcePath::Directory(child) = directory.open_child(&name)? else {
+            continue;
+        };
+        match child.open_child(std::ffi::OsStr::new("events")) {
+            Ok(OpenedProviderSourcePath::Directory(events))
+                if directory_has_current_cli_event(&events)? =>
+            {
+                return Ok(true);
+            }
+            Ok(_) => {}
+            Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        child.revalidate()?;
+    }
+    directory.revalidate()?;
     Ok(false)
 }
 
-fn directory_has_current_cli_event(path: &Path) -> io::Result<bool> {
-    Ok(bounded_direct_entries(path)?
-        .into_iter()
-        .any(|path| path.is_file() && current_cli_event_file(&path)))
-}
-
-fn bounded_direct_entries(path: &Path) -> io::Result<Vec<PathBuf>> {
-    let mut entries = Vec::new();
-    for entry in fs::read_dir(path)? {
-        if entries.len() == OPENHANDS_CURRENT_CLI_MAX_ENTRIES {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "OpenHands CLI history selector exceeds its bounded entry limit",
-            ));
+fn directory_has_current_cli_event(
+    directory: &ProviderSourceDirectory,
+) -> OpenHandsSourceBackedResultV1<bool> {
+    let names = directory.entries(OPENHANDS_CURRENT_CLI_MAX_ENTRIES.saturating_add(1))?;
+    if names.len() > OPENHANDS_CURRENT_CLI_MAX_ENTRIES {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: directory.relative_path().to_path_buf(),
+            reason: "OpenHands CLI history selector exceeds its bounded entry limit",
         }
-        entries.push(entry?.path());
+        .into());
     }
-    Ok(entries)
+    for name in names {
+        if !current_cli_event_file(Path::new(&name)) {
+            continue;
+        }
+        if let OpenedProviderSourcePath::File(file) = directory.open_child(&name)? {
+            file.revalidate()?;
+            directory.revalidate()?;
+            return Ok(true);
+        }
+    }
+    directory.revalidate()?;
+    Ok(false)
 }
 
 fn current_cli_event_file(path: &Path) -> bool {

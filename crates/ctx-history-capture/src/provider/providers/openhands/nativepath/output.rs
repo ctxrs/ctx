@@ -58,6 +58,7 @@ impl OpenHandsOutputFrontier {
 pub(super) fn replay_outputs_or_mark_behind(
     store: &Store,
     live_paths: &BTreeSet<PathBuf>,
+    inventory: &OpenHandsInventory,
     known_routes: &[KnownOpenHandsRoute],
     relocation_state: &OpenHandsRelocationState,
     source_root: &Path,
@@ -70,6 +71,7 @@ pub(super) fn replay_outputs_or_mark_behind(
     if let Err(error) = replay_outputs(
         store,
         live_paths,
+        inventory,
         known_routes,
         relocation_state,
         source_root,
@@ -86,6 +88,7 @@ pub(super) fn replay_outputs_or_mark_behind(
 fn replay_outputs(
     store: &Store,
     live_paths: &BTreeSet<PathBuf>,
+    inventory: &OpenHandsInventory,
     known_routes: &[KnownOpenHandsRoute],
     relocation_state: &OpenHandsRelocationState,
     source_root: &Path,
@@ -93,7 +96,7 @@ fn replay_outputs(
     sink: &dyn ProOutputSink,
 ) -> Result<()> {
     for path in live_paths {
-        let source = OpenHandsObservedFile::open(path)?;
+        let source = inventory.open_source(path)?;
         if !core_source_is_committed(store, &source, context)? {
             sink.mark_behind(ProOutputSinkError::new(
                 "openhands_core_not_committed",

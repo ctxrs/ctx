@@ -1,7 +1,8 @@
 use std::{
-    fs::{self, File, Metadata},
-    io::{self, Read},
-    path::{Path, PathBuf},
+    fs::Metadata,
+    io,
+    path::{Component, Path, PathBuf},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -14,8 +15,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     common::io::{
-        ensure_provider_path_parents_are_not_symlinks, ensure_regular_provider_transcript_file,
-        path_has_component,
+        open_provider_source_file, open_provider_source_path, path_has_component,
+        OpenedProviderSourceFile, OpenedProviderSourcePath, ProviderSourceRoot,
     },
     fnv1a64,
     provider::importer::{provider_path_identity, provider_source_cursor_stream_for_path},
@@ -104,30 +105,29 @@ pub(super) struct OpenHandsObservedFile {
     pub(super) observation: OpenHandsFileObservation,
     pub(super) raw_bytes: Option<Vec<u8>>,
     pub(super) content_sha256: Option<[u8; 32]>,
+    opened: Arc<OpenedProviderSourceFile>,
 }
 
 impl OpenHandsObservedFile {
     pub(super) fn open(path: &Path) -> Result<Self> {
-        ensure_regular_provider_transcript_file(path)?;
-        let canonical_path = fs::canonicalize(path)?;
+        let canonical_path = normalized_openhands_authority_path(path)?;
+        let opened = open_openhands_source_file(&canonical_path)?;
+        Self::from_opened(canonical_path, opened)
+    }
+
+    fn from_opened(canonical_path: PathBuf, opened: OpenedProviderSourceFile) -> Result<Self> {
         let canonical_path_text = openhands_checked_path_text(&canonical_path)?;
         let session_id = openhands_conversation_id_from_path(&canonical_path)
-            .ok_or_else(|| openhands_missing_event_files(path))
+            .ok_or_else(|| openhands_missing_event_files(&canonical_path))
             .and_then(|value| openhands_bounded_derived_text(value, "conversation id"))?;
         let user_id = openhands_user_id_from_path(&canonical_path)
             .map(|value| openhands_bounded_derived_text(value, "user id"))
             .transpose()?;
         let conversation_dir = canonical_path
             .parent()
-            .ok_or_else(|| openhands_missing_event_files(path))?
+            .ok_or_else(|| openhands_missing_event_files(&canonical_path))?
             .to_path_buf();
-        let mut file = open_openhands_source_file(&canonical_path)?;
-        let descriptor_observation = OpenHandsFileObservation::from_metadata(&file.metadata()?)?;
-        let path_observation =
-            OpenHandsFileObservation::from_metadata(&fs::metadata(&canonical_path)?)?;
-        if descriptor_observation != path_observation {
-            return Err(CaptureError::SourceChangedDuringCapture);
-        }
+        let descriptor_observation = OpenHandsFileObservation::from_metadata(opened.metadata())?;
 
         let limit = u64::try_from(MAX_PROVIDER_JSONL_LINE_BYTES).map_err(|_| {
             CaptureError::SystemInvariant("OpenHands record byte limit exceeds u64")
@@ -135,13 +135,7 @@ impl OpenHandsObservedFile {
         let raw_bytes = if descriptor_observation.length > limit {
             None
         } else {
-            let capacity = usize::try_from(descriptor_observation.length).map_err(|_| {
-                CaptureError::SystemInvariant("OpenHands file length exceeds platform limits")
-            })?;
-            let mut bytes = Vec::with_capacity(capacity);
-            file.by_ref()
-                .take(limit.saturating_add(1))
-                .read_to_end(&mut bytes)?;
+            let bytes = opened.read_all_bounded(MAX_PROVIDER_JSONL_LINE_BYTES)?;
             if u64::try_from(bytes.len()).ok() != Some(descriptor_observation.length)
                 || bytes.len() > MAX_PROVIDER_JSONL_LINE_BYTES
             {
@@ -149,11 +143,7 @@ impl OpenHandsObservedFile {
             }
             Some(bytes)
         };
-        let after_descriptor = OpenHandsFileObservation::from_metadata(&file.metadata()?)?;
-        let after_path = OpenHandsFileObservation::from_metadata(&fs::metadata(&canonical_path)?)?;
-        if after_descriptor != descriptor_observation || after_path != descriptor_observation {
-            return Err(CaptureError::SourceChangedDuringCapture);
-        }
+        opened.revalidate()?;
         let content_sha256 = raw_bytes
             .as_deref()
             .map(|bytes| <[u8; 32]>::from(Sha256::digest(bytes)));
@@ -176,16 +166,17 @@ impl OpenHandsObservedFile {
             observation: descriptor_observation,
             raw_bytes,
             content_sha256,
+            opened: Arc::new(opened),
         })
     }
 
     pub(super) fn revalidate(&self) -> Result<bool> {
-        match fs::metadata(&self.canonical_path) {
-            Ok(metadata) => {
-                Ok(OpenHandsFileObservation::from_metadata(&metadata)? == self.observation)
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(error.into()),
+        match self.opened.revalidate() {
+            Ok(()) => Ok(true),
+            Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(CaptureError::InvalidProviderTranscriptPath { .. })
+            | Err(CaptureError::SourceChangedDuringCapture) => Ok(false),
+            Err(error) => Err(error),
         }
     }
 
@@ -273,14 +264,14 @@ std::thread_local! {
     static OPENHANDS_SOURCE_FILE_OPEN_COUNT: Cell<Option<usize>> = const { Cell::new(None) };
 }
 
-fn open_openhands_source_file(path: &Path) -> Result<File> {
+fn open_openhands_source_file(path: &Path) -> Result<OpenedProviderSourceFile> {
     #[cfg(test)]
     OPENHANDS_SOURCE_FILE_OPEN_COUNT.with(|count| {
         if let Some(current) = count.get() {
             count.set(Some(current.saturating_add(1)));
         }
     });
-    Ok(File::open(path)?)
+    open_provider_source_file(path)
 }
 
 #[cfg(test)]
@@ -312,86 +303,205 @@ fn route_sha256(path_identity: &str) -> [u8; 32] {
 pub(super) struct OpenHandsInventory {
     pub(super) paths: Vec<PathBuf>,
     pub(super) root_missing: bool,
+    pub(super) authority: Option<ProviderSourceRoot>,
+    selected_path: PathBuf,
+    selected_file: bool,
 }
 
 pub(super) fn discover_openhands_event_paths(root: &Path) -> Result<OpenHandsInventory> {
-    match fs::symlink_metadata(root) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            return Err(CaptureError::InvalidProviderTranscriptPath {
-                path: root.to_path_buf(),
-                reason: "symlinked provider transcript roots are rejected",
-            });
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+    let root = normalized_openhands_authority_path(root)?;
+    let opened = match open_provider_source_path(&root) {
+        Ok(opened) => opened,
+        Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(OpenHandsInventory {
                 paths: Vec::new(),
                 root_missing: true,
+                authority: None,
+                selected_path: root,
+                selected_file: false,
             });
         }
-        Err(error) => return Err(error.into()),
-    }
-    ensure_provider_path_parents_are_not_symlinks(root)?;
-    let mut paths = Vec::new();
-    let mut visited_entries = 0_usize;
-    discover_at(root, 0, &mut visited_entries, &mut paths)?;
-    paths.sort();
-    paths.dedup();
+        Err(error) => return Err(error),
+    };
+    let (authority, selected_path, selected_file) = match opened {
+        OpenedProviderSourcePath::Directory(directory) => {
+            let authority = directory.authority_root();
+            (
+                authority.clone(),
+                authority.named_path().to_path_buf(),
+                false,
+            )
+        }
+        OpenedProviderSourcePath::File(file) => {
+            let name = root
+                .file_name()
+                .ok_or_else(|| openhands_missing_event_files(&root))?;
+            let parent = root
+                .parent()
+                .ok_or_else(|| openhands_missing_event_files(&root))?;
+            let authority = ProviderSourceRoot::open(parent)?;
+            let selected_path = authority.named_path().join(name);
+            authority.open_file(Path::new(name))?.revalidate()?;
+            file.revalidate()?;
+            (authority, selected_path, true)
+        }
+    };
+    let paths = discover_with_openhands_authority(&authority, &selected_path, selected_file)?;
+    authority.revalidate()?;
     Ok(OpenHandsInventory {
         paths,
         root_missing: false,
+        authority: Some(authority),
+        selected_path,
+        selected_file,
     })
 }
 
+impl OpenHandsInventory {
+    pub(super) fn selected_path(&self) -> &Path {
+        &self.selected_path
+    }
+
+    pub(super) fn open_source(&self, path: &Path) -> Result<OpenHandsObservedFile> {
+        let authority = self
+            .authority
+            .as_ref()
+            .ok_or(CaptureError::SystemInvariant(
+                "OpenHands inventory has no retained authority",
+            ))?;
+        let relative = path.strip_prefix(authority.named_path()).map_err(|_| {
+            CaptureError::InvalidProviderTranscriptPath {
+                path: path.to_path_buf(),
+                reason: "OpenHands source escaped its retained authority root",
+            }
+        })?;
+        OpenHandsObservedFile::from_opened(path.to_path_buf(), authority.open_file(relative)?)
+    }
+
+    pub(super) fn refresh_paths(&self) -> Result<Vec<PathBuf>> {
+        let authority = self
+            .authority
+            .as_ref()
+            .ok_or(CaptureError::SystemInvariant(
+                "OpenHands inventory has no retained authority",
+            ))?;
+        let paths =
+            discover_with_openhands_authority(authority, &self.selected_path, self.selected_file)?;
+        authority.revalidate()?;
+        Ok(paths)
+    }
+
+    pub(super) fn revalidate(&self) -> Result<()> {
+        match self.authority.as_ref() {
+            Some(authority) => authority.revalidate(),
+            None if self.root_missing => Ok(()),
+            None => Err(CaptureError::SystemInvariant(
+                "OpenHands complete inventory has no retained authority",
+            )),
+        }
+    }
+}
+
+fn discover_with_openhands_authority(
+    authority: &ProviderSourceRoot,
+    selected_path: &Path,
+    selected_file: bool,
+) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    let mut visited_entries = 0_usize;
+    let relative = selected_path
+        .strip_prefix(authority.named_path())
+        .map_err(|_| CaptureError::InvalidProviderTranscriptPath {
+            path: selected_path.to_path_buf(),
+            reason: "OpenHands selected source escaped its retained authority root",
+        })?;
+    if selected_file {
+        let file = authority.open_file(relative)?;
+        if openhands_json_path_is_event(selected_path) {
+            file.revalidate()?;
+            paths.push(selected_path.to_path_buf());
+        }
+    } else {
+        discover_at(authority, relative, 0, &mut visited_entries, &mut paths)?;
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
 fn discover_at(
-    path: &Path,
+    authority: &ProviderSourceRoot,
+    relative_path: &Path,
     depth: usize,
     visited_entries: &mut usize,
     paths: &mut Vec<PathBuf>,
 ) -> Result<()> {
+    let path = authority.named_path().join(relative_path);
     if depth > OPENHANDS_DISCOVERY_MAX_DEPTH {
         return Err(CaptureError::InvalidProviderTranscriptPath {
             path: path.to_path_buf(),
             reason: "OpenHands event directory nesting exceeds the supported limit",
         });
     }
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() {
-        return Err(CaptureError::InvalidProviderTranscriptPath {
-            path: path.to_path_buf(),
-            reason: "symlinked OpenHands event entries are rejected",
-        });
-    }
-    if metadata.is_file() {
-        if openhands_json_path_is_event(path) {
-            ensure_regular_provider_transcript_file(path)?;
-            paths.push(fs::canonicalize(path)?);
+    match authority.open_path(relative_path)? {
+        OpenedProviderSourcePath::File(file) => {
+            if openhands_json_path_is_event(&path) {
+                file.revalidate()?;
+                paths.push(path);
+            }
+            return Ok(());
         }
-        return Ok(());
-    }
-    if !metadata.is_dir() {
-        return Ok(());
-    }
-    let mut children = fs::read_dir(path)?
-        .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    *visited_entries =
-        visited_entries
-            .checked_add(children.len())
-            .ok_or(CaptureError::SystemInvariant(
-                "OpenHands discovery entry count overflowed",
-            ))?;
-    if *visited_entries > OPENHANDS_DISCOVERY_MAX_ENTRIES {
-        return Err(CaptureError::InvalidProviderTranscriptPath {
-            path: path.to_path_buf(),
-            reason: "OpenHands event discovery exceeds the supported entry limit",
-        });
-    }
-    children.sort();
-    for child in children {
-        discover_at(&child, depth.saturating_add(1), visited_entries, paths)?;
+        OpenedProviderSourcePath::Directory(directory) => {
+            let remaining = OPENHANDS_DISCOVERY_MAX_ENTRIES.saturating_sub(*visited_entries);
+            let children = directory.entries(remaining.saturating_add(1))?;
+            *visited_entries = visited_entries.checked_add(children.len()).ok_or(
+                CaptureError::SystemInvariant("OpenHands discovery entry count overflowed"),
+            )?;
+            if *visited_entries > OPENHANDS_DISCOVERY_MAX_ENTRIES {
+                return Err(CaptureError::InvalidProviderTranscriptPath {
+                    path,
+                    reason: "OpenHands event discovery exceeds the supported entry limit",
+                });
+            }
+            for child in children {
+                discover_at(
+                    authority,
+                    &relative_path.join(child),
+                    depth.saturating_add(1),
+                    visited_entries,
+                    paths,
+                )?;
+            }
+            directory.revalidate()?;
+        }
     }
     Ok(())
+}
+
+pub(super) fn normalized_openhands_authority_path(path: &Path) -> Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(CaptureError::InvalidProviderTranscriptPath {
+                        path: path.to_path_buf(),
+                        reason: "OpenHands roots cannot escape the filesystem root",
+                    });
+                }
+            }
+        }
+    }
+    Ok(normalized)
 }
 
 pub(super) fn openhands_missing_event_files(path: &Path) -> CaptureError {
