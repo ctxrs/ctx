@@ -13,6 +13,9 @@ pub(crate) use dto::{
 pub(crate) use parser::{
     read_gemini_transcript_pages_with_profile, GeminiNativePage, GeminiNativePageReader,
 };
+// This is the provider-local handoff surface for the shared coordinator; its
+// caller lands separately from provider adapters.
+#[allow(unused_imports)]
 pub(crate) use source_backed::{
     hydrate_gemini_source_backed_record, GeminiHydratedSourceRecord, GeminiSourceBackedError,
     GeminiSourceBackedLeaf, GeminiSourceBackedLeafReader, GeminiSourceBackedPage,
