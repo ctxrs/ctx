@@ -1,14 +1,17 @@
 use std::{
-    fmt, fs, io,
-    path::{Path, PathBuf},
+    fmt, io,
+    path::{Component, Path, PathBuf},
+    sync::Arc,
 };
 
 use ctx_history_core::CaptureProvider;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    common::io::ensure_provider_path_parents_are_not_symlinks,
-    provider_sources::{observe_ordinary_file, OrdinaryFileObservation},
+    common::io::{
+        OpenedProviderSourceFile, OpenedProviderSourcePath, ProviderSourceDirectory,
+        ProviderSourceRoot,
+    },
     CaptureError, CLINE_TASK_JSON_SOURCE_FORMAT, ROO_TASK_JSON_SOURCE_FORMAT,
 };
 
@@ -217,10 +220,11 @@ impl ClineComponent {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub(crate) struct ClineFileStamp {
     len: u64,
-    ordinary: OrdinaryFileObservation,
+    token: [u8; 32],
+    opened: Arc<OpenedProviderSourceFile>,
 }
 
 impl ClineFileStamp {
@@ -228,21 +232,33 @@ impl ClineFileStamp {
         self.len
     }
 
-    pub(super) fn ordinary(&self) -> &OrdinaryFileObservation {
-        &self.ordinary
+    pub(super) fn opened(&self) -> Arc<OpenedProviderSourceFile> {
+        self.opened.clone()
     }
 
     pub(crate) fn token(&self) -> String {
-        self.ordinary.token_hex()
+        hex(&self.token)
+    }
+
+    pub(super) fn token_bytes(&self) -> &[u8; 32] {
+        &self.token
     }
 }
+
+impl PartialEq for ClineFileStamp {
+    fn eq(&self, other: &Self) -> bool {
+        self.len == other.len && self.token == other.token
+    }
+}
+
+impl Eq for ClineFileStamp {}
 
 impl fmt::Debug for ClineFileStamp {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ClineFileStamp")
             .field("len", &self.len)
-            .field("ordinary_token", &self.ordinary.token_hex())
+            .field("token", &self.token())
             .finish()
     }
 }
@@ -254,12 +270,25 @@ pub(crate) enum ClineObservedFileState {
     Unavailable(Box<str>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct ClineComponentObservation {
     pub(crate) component: ClineComponent,
     pub(crate) path: PathBuf,
     pub(crate) state: ClineObservedFileState,
+    pub(super) authority: Option<ProviderSourceRoot>,
+    pub(super) relative_path: Option<PathBuf>,
 }
+
+impl PartialEq for ClineComponentObservation {
+    fn eq(&self, other: &Self) -> bool {
+        self.component == other.component
+            && self.path == other.path
+            && self.state == other.state
+            && self.relative_path == other.relative_path
+    }
+}
+
+impl Eq for ClineComponentObservation {}
 
 impl ClineComponentObservation {
     pub(crate) fn stamp(&self) -> Option<&ClineFileStamp> {
@@ -274,7 +303,20 @@ impl ClineComponentObservation {
     }
 
     pub(crate) fn revalidate(&self) -> Result<bool, ClineNativePathError> {
-        let current = observe_component_optional(&self.path, self.component)?;
+        let (Some(authority), Some(relative)) =
+            (self.authority.as_ref(), self.relative_path.as_deref())
+        else {
+            return Ok(false);
+        };
+        if authority.revalidate().is_err() {
+            return Ok(false);
+        }
+        if let Some(stamp) = self.stamp() {
+            if stamp.opened.revalidate().is_err() {
+                return Ok(false);
+            }
+        }
+        let current = observe_component_optional(authority, relative, &self.path, self.component)?;
         Ok(current == *self)
     }
 
@@ -288,7 +330,7 @@ impl ClineComponentObservation {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct ClineLiveTaskObservation {
     pub(crate) dialect: TaskJsonNativeDialect,
     pub(crate) requested_task_path: PathBuf,
@@ -300,7 +342,27 @@ pub(crate) struct ClineLiveTaskObservation {
     pub(crate) task_metadata: ClineComponentObservation,
     pub(crate) history_item: ClineComponentObservation,
     pub(crate) task_index: ClineComponentObservation,
+    authority: ProviderSourceRoot,
+    task_relative: PathBuf,
 }
+
+impl PartialEq for ClineLiveTaskObservation {
+    fn eq(&self, other: &Self) -> bool {
+        self.dialect == other.dialect
+            && self.requested_task_path == other.requested_task_path
+            && self.canonical_task_path == other.canonical_task_path
+            && self.directory_task_id == other.directory_task_id
+            && self.api_history == other.api_history
+            && self.ui_messages == other.ui_messages
+            && self.fallback_history == other.fallback_history
+            && self.task_metadata == other.task_metadata
+            && self.history_item == other.history_item
+            && self.task_index == other.task_index
+            && self.task_relative == other.task_relative
+    }
+}
+
+impl Eq for ClineLiveTaskObservation {}
 
 impl ClineLiveTaskObservation {
     pub(crate) fn component(&self, component: ClineComponent) -> &ClineComponentObservation {
@@ -337,12 +399,25 @@ impl ClineLiveTaskObservation {
     }
 
     pub(crate) fn revalidate_directory(&self) -> Result<bool, ClineNativePathError> {
-        let canonical = match fs::canonicalize(&self.requested_task_path) {
-            Ok(path) => path,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => return Err(source_access(&self.requested_task_path, error)),
-        };
-        Ok(canonical == self.canonical_task_path)
+        match self.authority.open_directory(&self.task_relative) {
+            Ok(directory) => {
+                directory.revalidate().map_err(|error| {
+                    capture_source_error(
+                        &self.requested_task_path,
+                        "revalidate task directory",
+                        error,
+                    )
+                })?;
+                Ok(self.authority.revalidate().is_ok())
+            }
+            Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(CaptureError::InvalidProviderTranscriptPath { .. }) => Ok(false),
+            Err(error) => Err(capture_source_error(
+                &self.requested_task_path,
+                "revalidate task directory",
+                error,
+            )),
+        }
     }
 
     pub(crate) fn revalidate_all_components(&self) -> Result<bool, ClineNativePathError> {
@@ -358,7 +433,7 @@ impl ClineLiveTaskObservation {
             ClineComponent::TaskIndex,
         ] {
             let expected = self.component(component);
-            if observe_task_component(&expected.path, component)? != *expected {
+            if !expected.revalidate()? {
                 return Ok(false);
             }
         }
@@ -372,14 +447,27 @@ struct ClineRootInventoryProof {
     digest: [u8; 32],
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct ClineRootAuthority {
     data_root: PathBuf,
     tasks_root: PathBuf,
     dialect: TaskJsonNativeDialect,
     inventory: Option<ClineRootInventoryProof>,
     complete: bool,
+    authority: ProviderSourceRoot,
 }
+
+impl PartialEq for ClineRootAuthority {
+    fn eq(&self, other: &Self) -> bool {
+        self.data_root == other.data_root
+            && self.tasks_root == other.tasks_root
+            && self.dialect == other.dialect
+            && self.inventory == other.inventory
+            && self.complete == other.complete
+    }
+}
+
+impl Eq for ClineRootAuthority {}
 
 impl ClineRootAuthority {
     pub(crate) fn tasks_root(&self) -> &Path {
@@ -409,18 +497,19 @@ impl ClineRootAuthority {
 
     /// This is catalog authority only. Component pages never depend on it.
     pub(crate) fn revalidate_catalog(&self) -> Result<bool, ClineNativePathError> {
-        ensure_directory_without_symlink(&self.data_root)?;
-        ensure_directory_without_symlink(&self.tasks_root)?;
+        if self.authority.revalidate().is_err() {
+            return Ok(false);
+        }
         let Some(expected) = &self.inventory else {
             return Ok(true);
         };
-        Ok(observe_direct_child_inventory(&self.tasks_root, self.dialect)?.proof == *expected)
+        Ok(observe_direct_child_inventory(&self.authority, self.dialect)?.proof == *expected)
     }
 }
 
 struct ClineRootInventory {
     proof: ClineRootInventoryProof,
-    task_paths: Vec<PathBuf>,
+    task_relatives: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -461,34 +550,52 @@ fn discover_task_json_root(
     root: &Path,
     dialect: TaskJsonNativeDialect,
 ) -> Result<ClineDiscovery, ClineNativePathError> {
-    let data_root = resolve_data_root(root, dialect)?;
-    let tasks_root = data_root.join("tasks");
-    ensure_directory_without_symlink(&data_root)?;
-    ensure_directory_without_symlink(&tasks_root)?;
-    let inventory = observe_direct_child_inventory(&tasks_root, dialect)?;
+    let (data_root, authority) = resolve_data_root(root, dialect)?;
+    let tasks_root = authority.named_path().join("tasks");
+    if let Some(error) =
+        injected_io_failure(ClineInjectedIoOperation::RootAuthorityStat, &data_root)
+    {
+        return Err(source_io(&data_root, "stat root authority", error));
+    }
+    if let Some(error) =
+        injected_io_failure(ClineInjectedIoOperation::RootAuthorityStat, &tasks_root)
+    {
+        return Err(source_io(&tasks_root, "stat root authority", error));
+    }
+    authority
+        .open_directory(Path::new("tasks"))
+        .and_then(|directory| directory.revalidate())
+        .map_err(|error| capture_source_error(&tasks_root, "open tasks root", error))?;
+    let inventory = observe_direct_child_inventory(&authority, dialect)?;
     let root_authority = ClineRootAuthority {
-        data_root: fs::canonicalize(&data_root)
-            .map_err(|error| source_access(&data_root, error))?,
-        tasks_root: fs::canonicalize(&tasks_root)
-            .map_err(|error| source_access(&tasks_root, error))?,
+        data_root: authority.named_path().to_path_buf(),
+        tasks_root,
         dialect,
         inventory: Some(inventory.proof.clone()),
         complete: true,
+        authority: authority.clone(),
     };
     let root_index = match dialect.root_index_file {
-        Some(file) => observe_component_optional(
-            &data_root.join("state").join(file),
-            ClineComponent::RootIndex,
-        )?,
+        Some(file) => {
+            let relative = PathBuf::from("state").join(file);
+            observe_component_optional(
+                &authority,
+                &relative,
+                &authority.named_path().join(&relative),
+                ClineComponent::RootIndex,
+            )?
+        }
         None => ClineComponentObservation {
             component: ClineComponent::RootIndex,
-            path: data_root.join("state").join(ROOT_INDEX_FILE),
+            path: authority.named_path().join("state").join(ROOT_INDEX_FILE),
             state: ClineObservedFileState::Missing,
+            authority: Some(authority.clone()),
+            relative_path: Some(PathBuf::from("state").join(ROOT_INDEX_FILE)),
         },
     };
-    let mut routes = Vec::with_capacity(inventory.task_paths.len());
-    for path in inventory.task_paths {
-        routes.push(observe_live_task(&path, dialect)?);
+    let mut routes = Vec::with_capacity(inventory.task_relatives.len());
+    for relative in inventory.task_relatives {
+        routes.push(observe_live_task(&authority, &relative, dialect)?);
     }
     routes.sort_by(|left, right| left.requested_task_path.cmp(&right.requested_task_path));
     Ok(ClineDiscovery {
@@ -500,23 +607,29 @@ fn discover_task_json_root(
 }
 
 pub(crate) fn revalidate_cline_component_source(
-    path: &Path,
-    component: ClineComponent,
+    observation: &ClineComponentObservation,
     expected_stamp_token: &str,
 ) -> Result<bool, ClineNativePathError> {
-    let current = observe_component_optional(path, component)?;
-    let current_token = current
+    let current_token = observation
         .stamp()
         .map_or_else(|| "missing".to_owned(), ClineFileStamp::token);
-    Ok(current_token == expected_stamp_token)
+    if current_token != expected_stamp_token || !observation.revalidate()? {
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 fn observe_live_task(
-    path: &Path,
+    authority: &ProviderSourceRoot,
+    task_relative: &Path,
     dialect: TaskJsonNativeDialect,
 ) -> Result<ClineLiveTaskObservation, ClineNativePathError> {
-    ensure_directory_without_symlink(path)?;
-    let canonical_task_path = fs::canonicalize(path).map_err(|error| source_access(path, error))?;
+    let path = authority.named_path().join(task_relative);
+    authority
+        .open_directory(task_relative)
+        .and_then(|directory| directory.revalidate())
+        .map_err(|error| capture_source_error(&path, "open task directory", error))?;
+    let canonical_task_path = path.clone();
     let directory_task_id = path
         .file_name()
         .and_then(|value| value.to_str())
@@ -531,124 +644,175 @@ fn observe_live_task(
         requested_task_path: path.to_path_buf(),
         canonical_task_path,
         directory_task_id,
-        api_history: observe_task_component(&path.join(API_FILE), ClineComponent::ApiHistory)?,
-        ui_messages: observe_task_component(&path.join(UI_FILE), ClineComponent::UiMessages)?,
+        api_history: observe_task_component(
+            authority,
+            &task_relative.join(API_FILE),
+            ClineComponent::ApiHistory,
+        )?,
+        ui_messages: observe_task_component(
+            authority,
+            &task_relative.join(UI_FILE),
+            ClineComponent::UiMessages,
+        )?,
         fallback_history: observe_task_component(
-            &path.join(ROO_FALLBACK_FILE),
+            authority,
+            &task_relative.join(ROO_FALLBACK_FILE),
             ClineComponent::FallbackHistory,
         )?,
         task_metadata: observe_task_component(
-            &path.join(METADATA_FILE),
+            authority,
+            &task_relative.join(METADATA_FILE),
             ClineComponent::TaskMetadata,
         )?,
         history_item: observe_task_component(
-            &path.join(ROO_HISTORY_ITEM_FILE),
+            authority,
+            &task_relative.join(ROO_HISTORY_ITEM_FILE),
             ClineComponent::HistoryItem,
         )?,
         task_index: observe_task_component(
-            &path.join(ROO_TASK_INDEX_FILE),
+            authority,
+            &task_relative.join(ROO_TASK_INDEX_FILE),
             ClineComponent::TaskIndex,
         )?,
+        authority: authority.clone(),
+        task_relative: task_relative.to_path_buf(),
     })
 }
 
 fn observe_component_optional(
+    authority: &ProviderSourceRoot,
+    relative_path: &Path,
     path: &Path,
     component: ClineComponent,
 ) -> Result<ClineComponentObservation, ClineNativePathError> {
     if let Some(error) = injected_io_failure(ClineInjectedIoOperation::ComponentStat, path) {
         return Err(source_io(path, "stat component", error));
     }
-    match fs::symlink_metadata(path) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+    let opened = match authority.open_path(relative_path) {
+        Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(ClineComponentObservation {
                 component,
                 path: path.to_path_buf(),
                 state: ClineObservedFileState::Missing,
+                authority: Some(authority.clone()),
+                relative_path: Some(relative_path.to_path_buf()),
             });
         }
-        Err(error) => return Err(source_access(path, error)),
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.file_type().is_file() => {
+        Err(error) => {
+            return Err(capture_source_error(
+                path,
+                "open component observation",
+                error,
+            ))
+        }
+        Ok(OpenedProviderSourcePath::Directory(directory)) => {
+            directory.revalidate().map_err(|error| {
+                capture_source_error(path, "revalidate component directory", error)
+            })?;
             return Err(ClineNativePathError::SourceAccess {
                 path: path.to_path_buf(),
                 message: "Cline components must be ordinary files".to_owned(),
             });
         }
-        Ok(_) => {}
-    }
-    ensure_provider_path_parents_are_not_symlinks(path)
-        .map_err(|error| capture_source_error(path, "validate component parents", error))?;
-    let ordinary = observe_ordinary_file(path)
-        .map_err(|error| capture_source_error(path, "observe component metadata", error))?;
+        Ok(OpenedProviderSourcePath::File(file)) => file,
+    };
+    let token = opened_file_token(&opened, path)?;
+    opened
+        .revalidate()
+        .map_err(|error| capture_source_error(path, "revalidate component observation", error))?;
     Ok(ClineComponentObservation {
         component,
         path: path.to_path_buf(),
         state: ClineObservedFileState::Present(ClineFileStamp {
-            len: ordinary.len(),
-            ordinary,
+            len: opened.len(),
+            token,
+            opened: Arc::new(opened),
         }),
+        authority: Some(authority.clone()),
+        relative_path: Some(relative_path.to_path_buf()),
     })
 }
 
 fn observe_task_component(
-    path: &Path,
+    authority: &ProviderSourceRoot,
+    relative_path: &Path,
     component: ClineComponent,
 ) -> Result<ClineComponentObservation, ClineNativePathError> {
-    match observe_component_optional(path, component) {
+    let path = authority.named_path().join(relative_path);
+    match observe_component_optional(authority, relative_path, &path, component) {
         Ok(observation) => Ok(observation),
         Err(error) if is_component_local_error(&error) => Ok(ClineComponentObservation {
             component,
-            path: path.to_path_buf(),
+            path,
             state: ClineObservedFileState::Unavailable(error.to_string().into_boxed_str()),
+            authority: Some(authority.clone()),
+            relative_path: Some(relative_path.to_path_buf()),
         }),
         Err(error) => Err(error),
     }
 }
 
 fn observe_direct_child_inventory(
-    tasks_root: &Path,
+    authority: &ProviderSourceRoot,
     dialect: TaskJsonNativeDialect,
 ) -> Result<ClineRootInventory, ClineNativePathError> {
+    let tasks_root = authority.named_path().join("tasks");
+    let directory = authority
+        .open_directory(Path::new("tasks"))
+        .map_err(|error| capture_source_error(&tasks_root, "open tasks inventory", error))?;
     let mut children = Vec::new();
-    for entry in fs::read_dir(tasks_root).map_err(|error| source_access(tasks_root, error))? {
-        let entry = entry.map_err(|error| source_access(tasks_root, error))?;
-        if children.len() == MAX_TASK_DIRECT_CHILDREN {
-            return Err(ClineNativePathError::SourceAccess {
-                path: tasks_root.to_path_buf(),
-                message: "Cline tasks root exceeds the 4096-child inventory bound".to_owned(),
-            });
-        }
-        let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|error| source_access(&path, error))?;
-        if file_type.is_symlink() {
-            return Err(ClineNativePathError::SourceAccess {
-                path,
-                message: "symlinked Cline task inventory entries are rejected".to_owned(),
-            });
-        }
+    let names = directory
+        .entries(MAX_TASK_DIRECT_CHILDREN.saturating_add(1))
+        .map_err(|error| capture_source_error(&tasks_root, "enumerate tasks inventory", error))?;
+    if names.len() > MAX_TASK_DIRECT_CHILDREN {
+        return Err(ClineNativePathError::SourceAccess {
+            path: tasks_root,
+            message: "Cline tasks root exceeds the 4096-child inventory bound".to_owned(),
+        });
+    }
+    for name in names {
+        let path = authority.named_path().join("tasks").join(&name);
+        let opened = directory
+            .open_child(&name)
+            .map_err(|error| capture_source_error(&path, "open task inventory entry", error))?;
         let mut component_states = Vec::new();
         let mut identity = [0_u8; 32];
-        if file_type.is_dir() {
-            for (file, _) in dialect.all_task_files() {
-                component_states.push(inventory_component_state(&path.join(file))?);
+        let (is_directory, is_file, has_component) = match opened {
+            OpenedProviderSourcePath::Directory(task_directory) => {
+                let mut has_component = false;
+                for (file, _) in dialect.all_task_files() {
+                    let (state, present) =
+                        inventory_component_state(&task_directory, file, &path.join(file))?;
+                    component_states.extend_from_slice(&state);
+                    has_component |= present;
+                }
+                identity = directory_inventory_identity(&name);
+                task_directory.revalidate().map_err(|error| {
+                    capture_source_error(&path, "revalidate task inventory directory", error)
+                })?;
+                (true, false, has_component)
             }
-            identity = directory_inventory_identity(&path)?;
-        }
+            OpenedProviderSourcePath::File(file) => {
+                file.revalidate().map_err(|error| {
+                    capture_source_error(&path, "revalidate task inventory file", error)
+                })?;
+                (false, true, false)
+            }
+        };
         children.push((
             path,
-            file_type.is_dir(),
-            file_type.is_file(),
+            is_directory,
+            is_file,
             component_states,
             identity,
+            has_component,
         ));
     }
     children.sort_by(|left, right| left.0.cmp(&right.0));
     let mut hasher = Sha256::new();
     hasher.update(ROOT_INVENTORY_DOMAIN);
-    let mut task_paths = Vec::new();
-    for (path, directory, file, states, identity) in &children {
+    let mut task_relatives = Vec::new();
+    for (path, directory, file, states, identity, has_component) in &children {
         let name = path
             .file_name()
             .ok_or_else(|| ClineNativePathError::InvalidNativeIdentity {
@@ -660,57 +824,72 @@ fn observe_direct_child_inventory(
         hasher.update([u8::from(*directory), u8::from(*file)]);
         hasher.update(states);
         hasher.update(identity);
-        if *directory && states.iter().any(|state| *state != 0) {
-            if task_paths.len() == MAX_TASK_DIRECTORIES {
+        if *directory && *has_component {
+            if task_relatives.len() == MAX_TASK_DIRECTORIES {
                 return Err(ClineNativePathError::SourceAccess {
-                    path: tasks_root.to_path_buf(),
+                    path: authority.named_path().join("tasks"),
                     message: "Cline tasks root exceeds the 4096-task authority bound".to_owned(),
                 });
             }
-            task_paths.push(path.clone());
+            task_relatives.push(PathBuf::from("tasks").join(name));
         }
     }
+    directory
+        .revalidate()
+        .and_then(|()| authority.revalidate())
+        .map_err(|error| capture_source_error(&tasks_root, "revalidate tasks inventory", error))?;
     Ok(ClineRootInventory {
         proof: ClineRootInventoryProof {
             entries: children.len(),
             digest: hasher.finalize().into(),
         },
-        task_paths,
+        task_relatives,
     })
 }
 
-fn directory_inventory_identity(path: &Path) -> Result<[u8; 32], ClineNativePathError> {
-    let canonical = fs::canonicalize(path).map_err(|error| source_access(path, error))?;
-    let metadata =
-        fs::symlink_metadata(&canonical).map_err(|error| source_access(&canonical, error))?;
+fn directory_inventory_identity(name: &std::ffi::OsStr) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"ctx-cline-nativepath-directory-inventory-v1\0");
-    hasher.update(canonical.as_os_str().as_encoded_bytes());
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        hasher.update(metadata.dev().to_le_bytes());
-        hasher.update(metadata.ino().to_le_bytes());
-        hasher.update(metadata.mode().to_le_bytes());
-        hasher.update(metadata.uid().to_le_bytes());
-        hasher.update(metadata.gid().to_le_bytes());
-    }
-    #[cfg(not(unix))]
-    hasher.update([u8::from(metadata.permissions().readonly())]);
-    Ok(hasher.finalize().into())
+    hasher.update(name.as_encoded_bytes());
+    hasher.finalize().into()
 }
 
-fn inventory_component_state(path: &Path) -> Result<u8, ClineNativePathError> {
-    let metadata = injected_io_failure(ClineInjectedIoOperation::InventoryComponentStat, path)
-        .map_or_else(|| fs::symlink_metadata(path), Err);
-    match metadata {
-        Ok(metadata) if metadata.file_type().is_file() => Ok(1),
-        Ok(_) => Ok(2),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
+fn inventory_component_state(
+    directory: &ProviderSourceDirectory,
+    name: &str,
+    path: &Path,
+) -> Result<(Vec<u8>, bool), ClineNativePathError> {
+    if let Some(error) = injected_io_failure(ClineInjectedIoOperation::InventoryComponentStat, path)
+    {
+        let classified = source_io(path, "inventory component stat", error);
+        return if is_component_local_error(&classified) {
+            Ok((vec![3], true))
+        } else {
+            Err(classified)
+        };
+    }
+    match directory.open_child(std::ffi::OsStr::new(name)) {
+        Ok(OpenedProviderSourcePath::File(file)) => {
+            let mut state = vec![1];
+            state.extend_from_slice(&opened_file_token(&file, path)?);
+            file.revalidate().map_err(|error| {
+                capture_source_error(path, "revalidate inventory component", error)
+            })?;
+            Ok((state, true))
+        }
+        Ok(OpenedProviderSourcePath::Directory(child)) => {
+            child.revalidate().map_err(|error| {
+                capture_source_error(path, "revalidate inventory component directory", error)
+            })?;
+            Ok((vec![2], true))
+        }
+        Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+            Ok((vec![0], false))
+        }
         Err(error) => {
-            let classified = source_io(path, "inventory component stat", error);
+            let classified = capture_source_error(path, "open inventory component", error);
             if is_component_local_error(&classified) {
-                Ok(3)
+                Ok((vec![3], true))
             } else {
                 Err(classified)
             }
@@ -721,100 +900,140 @@ fn inventory_component_state(path: &Path) -> Result<u8, ClineNativePathError> {
 fn resolve_data_root(
     path: &Path,
     dialect: TaskJsonNativeDialect,
-) -> Result<PathBuf, ClineNativePathError> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| source_access(path, error))?;
-    if metadata.file_type().is_symlink() {
-        return Err(ClineNativePathError::SourceAccess {
-            path: path.to_path_buf(),
-            message: "symlinked Cline roots are rejected".to_owned(),
-        });
-    }
-    if metadata.file_type().is_file() {
-        return match path.file_name().and_then(|value| value.to_str()) {
-            Some(file) if dialect.root_index_file == Some(file) => path
-                .parent()
-                .and_then(Path::parent)
-                .map(Path::to_path_buf)
-                .ok_or_else(|| ClineNativePathError::UnsupportedRoot {
-                    path: path.to_path_buf(),
-                }),
-            Some(file)
-                if dialect
-                    .all_task_files()
-                    .any(|(candidate, _)| candidate == file) =>
-            {
-                task_dir_data_root(path.parent().unwrap_or(path))
-            }
-            _ => Err(ClineNativePathError::UnsupportedRoot {
-                path: path.to_path_buf(),
-            }),
-        };
-    }
-    if !metadata.file_type().is_dir() {
-        return Err(ClineNativePathError::UnsupportedRoot {
-            path: path.to_path_buf(),
-        });
-    }
-    if path.file_name().and_then(|value| value.to_str()) == Some("tasks") {
-        return path.parent().map(Path::to_path_buf).ok_or_else(|| {
+) -> Result<(PathBuf, ProviderSourceRoot), ClineNativePathError> {
+    let requested = normalized_task_json_authority_path(path)?;
+    let (data_root, selected_route) =
+        selected_task_json_route(&requested, dialect).ok_or_else(|| {
             ClineNativePathError::UnsupportedRoot {
-                path: path.to_path_buf(),
+                path: requested.clone(),
             }
-        });
+        })?;
+    let authority = ProviderSourceRoot::open(&data_root)
+        .map_err(|error| capture_source_error(&data_root, "open task-json data root", error))?;
+    let tasks = match authority.open_directory(Path::new("tasks")) {
+        Ok(tasks) => tasks,
+        Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(ClineNativePathError::UnsupportedRoot { path: requested });
+        }
+        Err(error) => {
+            return Err(capture_source_error(
+                &data_root.join("tasks"),
+                "open selected tasks directory",
+                error,
+            ));
+        }
+    };
+    tasks.revalidate().map_err(|error| {
+        capture_source_error(
+            &data_root.join("tasks"),
+            "revalidate selected tasks directory",
+            error,
+        )
+    })?;
+    match selected_route {
+        SelectedTaskJsonRoute::DataRoot | SelectedTaskJsonRoute::TasksRoot => {}
+        SelectedTaskJsonRoute::TaskDirectory(relative) => {
+            let directory = authority.open_directory(&relative).map_err(|error| {
+                capture_source_error(&requested, "open selected task directory", error)
+            })?;
+            if !task_dir_has_component(&directory, &requested, dialect)? {
+                return Err(ClineNativePathError::UnsupportedRoot { path: requested });
+            }
+            directory.revalidate().map_err(|error| {
+                capture_source_error(&requested, "revalidate selected task directory", error)
+            })?;
+        }
+        SelectedTaskJsonRoute::File(relative) => {
+            authority
+                .open_file(&relative)
+                .and_then(|file| file.revalidate())
+                .map_err(|error| {
+                    capture_source_error(&requested, "open selected task-json file", error)
+                })?;
+        }
     }
-    if task_dir_has_component(path, dialect)? {
-        return task_dir_data_root(path);
-    }
-    if path.join("tasks").is_dir() {
-        return Ok(path.to_path_buf());
-    }
-    Err(ClineNativePathError::UnsupportedRoot {
-        path: path.to_path_buf(),
-    })
+    authority.revalidate().map_err(|error| {
+        capture_source_error(&data_root, "revalidate task-json data root", error)
+    })?;
+    Ok((authority.named_path().to_path_buf(), authority))
 }
 
-fn task_dir_data_root(task_dir: &Path) -> Result<PathBuf, ClineNativePathError> {
+enum SelectedTaskJsonRoute {
+    DataRoot,
+    TasksRoot,
+    TaskDirectory(PathBuf),
+    File(PathBuf),
+}
+
+fn selected_task_json_route(
+    requested: &Path,
+    dialect: TaskJsonNativeDialect,
+) -> Option<(PathBuf, SelectedTaskJsonRoute)> {
+    let file_name = requested.file_name().and_then(|value| value.to_str());
+    if file_name.is_some_and(|name| dialect.root_index_file == Some(name)) {
+        let data_root = requested.parent()?.parent()?.to_path_buf();
+        let relative = requested.strip_prefix(&data_root).ok()?.to_path_buf();
+        return Some((data_root, SelectedTaskJsonRoute::File(relative)));
+    }
+    if file_name.is_some_and(|name| {
+        dialect
+            .all_task_files()
+            .any(|(candidate, _)| candidate == name)
+    }) {
+        let task_dir = requested.parent()?;
+        let data_root = task_dir_data_root(task_dir)?;
+        let relative = requested.strip_prefix(&data_root).ok()?.to_path_buf();
+        return Some((data_root, SelectedTaskJsonRoute::File(relative)));
+    }
+    if file_name == Some("tasks") {
+        return Some((
+            requested.parent()?.to_path_buf(),
+            SelectedTaskJsonRoute::TasksRoot,
+        ));
+    }
+    if requested
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|value| value.to_str())
+        == Some("tasks")
+    {
+        let data_root = task_dir_data_root(requested)?;
+        let relative = requested.strip_prefix(&data_root).ok()?.to_path_buf();
+        return Some((data_root, SelectedTaskJsonRoute::TaskDirectory(relative)));
+    }
+    Some((requested.to_path_buf(), SelectedTaskJsonRoute::DataRoot))
+}
+
+fn task_dir_data_root(task_dir: &Path) -> Option<PathBuf> {
     let tasks = task_dir
         .parent()
-        .filter(|path| path.file_name().and_then(|value| value.to_str()) == Some("tasks"))
-        .ok_or_else(|| ClineNativePathError::UnsupportedRoot {
-            path: task_dir.to_path_buf(),
-        })?;
-    tasks
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| ClineNativePathError::UnsupportedRoot {
-            path: task_dir.to_path_buf(),
-        })
-}
-
-fn ensure_directory_without_symlink(path: &Path) -> Result<(), ClineNativePathError> {
-    if let Some(error) = injected_io_failure(ClineInjectedIoOperation::RootAuthorityStat, path) {
-        return Err(source_io(path, "stat root authority", error));
-    }
-    ensure_provider_path_parents_are_not_symlinks(path)
-        .map_err(|error| capture_source_error(path, "validate directory parents", error))?;
-    let metadata = fs::symlink_metadata(path).map_err(|error| source_access(path, error))?;
-    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
-        return Err(ClineNativePathError::SourceAccess {
-            path: path.to_path_buf(),
-            message: "Cline task roots must be ordinary directories".to_owned(),
-        });
-    }
-    Ok(())
+        .filter(|path| path.file_name().and_then(|value| value.to_str()) == Some("tasks"))?;
+    tasks.parent().map(Path::to_path_buf)
 }
 
 fn task_dir_has_component(
+    directory: &ProviderSourceDirectory,
     path: &Path,
     dialect: TaskJsonNativeDialect,
 ) -> Result<bool, ClineNativePathError> {
     for (file, _) in dialect.all_task_files() {
         let component = path.join(file);
-        match fs::symlink_metadata(&component) {
-            Ok(_) => return Ok(true),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        match directory.open_child(std::ffi::OsStr::new(file)) {
+            Ok(OpenedProviderSourcePath::File(opened)) => {
+                opened.revalidate().map_err(|error| {
+                    capture_source_error(&component, "revalidate task component", error)
+                })?;
+                return Ok(true);
+            }
+            Ok(OpenedProviderSourcePath::Directory(opened)) => {
+                opened.revalidate().map_err(|error| {
+                    capture_source_error(&component, "revalidate task component directory", error)
+                })?;
+                return Ok(true);
+            }
+            Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => {
-                let classified = source_io(&component, "stat task component", error);
+                let classified = capture_source_error(&component, "inspect task component", error);
                 if is_component_local_error(&classified) {
                     return Ok(true);
                 }
@@ -825,8 +1044,81 @@ fn task_dir_has_component(
     Ok(false)
 }
 
+fn normalized_task_json_authority_path(path: &Path) -> Result<PathBuf, ClineNativePathError> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| source_access(path, error))?
+            .join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(ClineNativePathError::UnsupportedRoot {
+                        path: path.to_path_buf(),
+                    });
+                }
+            }
+        }
+    }
+    Ok(normalized)
+}
+
 fn valid_task_id(value: &str) -> bool {
     !value.is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)
+}
+
+fn opened_file_token(
+    file: &OpenedProviderSourceFile,
+    path: &Path,
+) -> Result<[u8; 32], ClineNativePathError> {
+    let metadata = file.metadata();
+    let mut hasher = Sha256::new();
+    hasher.update(b"ctx-task-json-opened-file-token-v1\0");
+    hasher.update(metadata.len().to_le_bytes());
+    let modified = metadata
+        .modified()
+        .map_err(|error| source_io(path, "read component modification time", error))?;
+    match modified.duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => {
+            hasher.update([0]);
+            hasher.update(duration.as_secs().to_le_bytes());
+            hasher.update(duration.subsec_nanos().to_le_bytes());
+        }
+        Err(error) => {
+            hasher.update([1]);
+            hasher.update(error.duration().as_secs().to_le_bytes());
+            hasher.update(error.duration().subsec_nanos().to_le_bytes());
+        }
+    }
+    hasher.update([u8::from(metadata.permissions().readonly())]);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        hasher.update(metadata.dev().to_le_bytes());
+        hasher.update(metadata.ino().to_le_bytes());
+        hasher.update(metadata.mode().to_le_bytes());
+        hasher.update(metadata.ctime().to_le_bytes());
+        hasher.update(metadata.ctime_nsec().to_le_bytes());
+    }
+    Ok(hasher.finalize().into())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        output.push(char::from(HEX[usize::from(byte >> 4)]));
+        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    output
 }
 
 pub(super) fn is_component_local_error(error: &ClineNativePathError) -> bool {

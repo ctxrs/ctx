@@ -275,8 +275,7 @@ pub(super) fn revalidate_page_source(
     page: &NativeIngestionPage<ClineCertifiedPage>,
 ) -> std::result::Result<(), ClineNativeVerticalError> {
     if !super::super::revalidate_cline_component_source(
-        &page.core.source.canonical_path,
-        page.core.source.component,
+        &page.core.authority_observation,
         &page.core.source_revision.observed_stamp_token,
     )? {
         return Err(ClineNativeVerticalError::SourceChanged);

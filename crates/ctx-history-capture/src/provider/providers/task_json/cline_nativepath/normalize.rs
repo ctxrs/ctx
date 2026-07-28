@@ -711,6 +711,7 @@ pub(crate) struct ClineTransientOutputPayload {
 pub(crate) struct ClineCertifiedPage {
     pub(crate) identity: ClineNativePageIdentity,
     pub(crate) source: ClineFileSourceIdentity,
+    pub(crate) authority_observation: ClineComponentObservation,
     pub(crate) source_revision: ClineCertifiedRevision,
     pub(crate) expected_frontier: ClinePageFrontier,
     pub(crate) next_safe_frontier: ClinePageFrontier,

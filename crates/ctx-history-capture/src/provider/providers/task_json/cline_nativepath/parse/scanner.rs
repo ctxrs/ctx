@@ -13,6 +13,7 @@ pub(in super::super) struct ParsedItem {
 
 pub(in super::super) struct ClineArrayScanner {
     reader: BufReader<File>,
+    opened: Arc<OpenedProviderSourceFile>,
     observation: ClineComponentObservation,
     offset: u64,
     started: bool,
@@ -60,42 +61,33 @@ impl ClineArrayScanner {
                 error,
             ));
         }
-        let before = observe_ordinary_file(&observation.path).map_err(|error| {
-            classify_capture_error(observation, "observe component before streaming", error)
-        })?;
-        if &before != expected.ordinary() {
-            return Err(ClineLocalReadError::Local(source_changed_failure(
-                observation,
-            )));
-        }
-        let file = open_ordinary_file_without_following(&observation.path)
-            .map_err(|error| classify_capture_error(observation, "open component stream", error))?;
-        let declared_len = file
-            .metadata()
-            .map_err(|error| classify_io_error(observation, "stat open component stream", error))?
-            .len();
+        let opened = expected.opened();
+        let declared_len = opened.len();
         if declared_len != expected.len() {
             return Err(ClineLocalReadError::Local(source_changed_failure(
                 observation,
             )));
         }
-        let after_open = observe_ordinary_file(&observation.path).map_err(|error| {
-            classify_capture_error(observation, "revalidate opened component stream", error)
-        })?;
-        if &after_open != expected.ordinary() {
+        if opened.revalidate().is_err() {
             return Err(ClineLocalReadError::Local(source_changed_failure(
                 observation,
             )));
         }
+        let mut file = opened.file().try_clone().map_err(|error| {
+            classify_io_error(observation, "clone component stream capability", error)
+        })?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|error| classify_io_error(observation, "seek component stream", error))?;
         let mut revision = Sha256::new();
         revision.update(b"ctx-cline-nativepath-observed-revision-v1\0");
         revision.update([observation.component as u8]);
         revision.update(expected.len().to_le_bytes());
-        revision.update(expected.ordinary().token());
+        revision.update(expected.token_bytes());
         stats.component_hydrations = stats.component_hydrations.saturating_add(1);
         stats.component_parse_passes = stats.component_parse_passes.saturating_add(1);
         Ok(Self {
             reader: BufReader::new(file),
+            opened,
             observation: observation.clone(),
             offset: 0,
             started: false,
@@ -117,15 +109,10 @@ impl ClineArrayScanner {
             .observation
             .stamp()
             .ok_or_else(|| ClineLocalReadError::Local(source_changed_failure(&self.observation)))?;
-        let current_len = self
-            .reader
-            .get_ref()
-            .metadata()
-            .map_err(|error| {
-                classify_io_error(&self.observation, "stat pinned component stream", error)
-            })?
-            .len();
-        Ok(current_len == expected.len())
+        if self.opened.len() != expected.len() {
+            return Ok(false);
+        }
+        Ok(self.opened.revalidate().is_ok())
     }
 
     pub(in super::super) fn next_step(

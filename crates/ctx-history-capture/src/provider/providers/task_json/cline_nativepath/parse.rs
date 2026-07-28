@@ -2,7 +2,8 @@ use std::{
     collections::BTreeMap,
     fmt,
     fs::File,
-    io::{BufRead, BufReader, Read, Seek, SeekFrom},
+    io::{BufRead, BufReader, Seek, SeekFrom},
+    sync::Arc,
 };
 
 use chrono::DateTime;
@@ -14,11 +15,11 @@ use serde_json::{value::RawValue, Value};
 use sha2::{Digest, Sha256};
 
 use crate::{
+    common::io::OpenedProviderSourceFile,
     provider::file_touches::{
         visit_provider_file_touch_drafts_with_limit, MAX_PROVIDER_FILE_TOUCHES_PER_EVENT,
         PROVIDER_FILE_TOUCH_LIMIT_REJECTION,
     },
-    provider_sources::{observe_ordinary_file, open_ordinary_file_without_following},
     OutputAssociations, OutputNativeCoordinate, OutputObservationKind, OutputOutcome,
     OutputOutcomeMetadata, OutputSourceLocator, ProOutputObservation,
 };
@@ -58,11 +59,11 @@ const MAX_EXPLICIT_RESULT_DEPTH: usize = 64;
 pub(super) struct HydratedComponent {
     pub(super) bytes: Vec<u8>,
     pub(super) content_sha256: [u8; 32],
-    pinned_file: File,
+    pinned_file: Arc<OpenedProviderSourceFile>,
 }
 
 pub(super) struct ClinePinnedContentAuthority {
-    file: File,
+    file: Arc<OpenedProviderSourceFile>,
     observation: ClineComponentObservation,
     content_sha256: [u8; 32],
 }
@@ -72,61 +73,41 @@ impl ClinePinnedContentAuthority {
         let Some(expected) = self.observation.stamp() else {
             return Ok(false);
         };
-        let before_len = self
-            .file
-            .metadata()
-            .map_err(|error| {
-                classify_io_error(&self.observation, "stat pinned metadata component", error)
-            })?
-            .len();
-        if before_len != expected.len() {
+        if self.file.len() != expected.len() {
             return Ok(false);
         }
-        self.file.seek(SeekFrom::Start(0)).map_err(|error| {
-            classify_io_error(&self.observation, "seek pinned metadata component", error)
-        })?;
-        let mut hasher = Sha256::new();
-        hasher.update(COMPONENT_REVISION_DOMAIN);
-        hasher.update([self.observation.component as u8]);
-        let mut observed = 0_u64;
-        let mut buffer = [0_u8; 64 * 1024];
-        loop {
-            if let Some(error) = injected_io_failure(
-                ClineInjectedIoOperation::ComponentRead,
-                &self.observation.path,
-            ) {
-                return Err(classify_io_error(
-                    &self.observation,
-                    "certify pinned metadata component",
-                    error,
-                ));
-            }
-            let read = self.file.read(&mut buffer).map_err(|error| {
-                classify_io_error(
+        let maximum_bytes = component_byte_bound(self.observation.component)?;
+        let Ok(length) = usize::try_from(expected.len()) else {
+            return Ok(false);
+        };
+        if length > maximum_bytes {
+            return Ok(false);
+        }
+        if let Some(error) = injected_io_failure(
+            ClineInjectedIoOperation::ComponentRead,
+            &self.observation.path,
+        ) {
+            return Err(classify_io_error(
+                &self.observation,
+                "certify pinned metadata component",
+                error,
+            ));
+        }
+        let bytes = self
+            .file
+            .read_exact_range(0, length, maximum_bytes)
+            .map_err(|error| {
+                classify_capture_error(
                     &self.observation,
                     "certify pinned metadata component",
                     error,
                 )
             })?;
-            if read == 0 {
-                break;
-            }
-            observed = observed.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
-            if observed > expected.len() {
-                return Ok(false);
-            }
-            hasher.update(&buffer[..read]);
-        }
-        let after_len = self
-            .file
-            .metadata()
-            .map_err(|error| {
-                classify_io_error(&self.observation, "restat pinned metadata component", error)
-            })?
-            .len();
-        Ok(observed == expected.len()
-            && after_len == expected.len()
-            && <[u8; 32]>::from(hasher.finalize()) == self.content_sha256)
+        let mut hasher = Sha256::new();
+        hasher.update(COMPONENT_REVISION_DOMAIN);
+        hasher.update([self.observation.component as u8]);
+        hasher.update(bytes);
+        Ok(<[u8; 32]>::from(hasher.finalize()) == self.content_sha256)
     }
 }
 
@@ -167,22 +148,7 @@ pub(super) fn hydrate_component(
             true,
         ));
     };
-    let max_bytes = match observation.component {
-        ClineComponent::TaskMetadata | ClineComponent::HistoryItem | ClineComponent::TaskIndex => {
-            MAX_METADATA_JSON_BYTES
-        }
-        ClineComponent::RootIndex => MAX_ROOT_INDEX_JSON_BYTES,
-        ClineComponent::ApiHistory
-        | ClineComponent::UiMessages
-        | ClineComponent::FallbackHistory => {
-            return Err(ClineLocalReadError::Fatal(
-                ClineNativePathError::Invariant {
-                    message: "Cline history arrays must use the pinned streaming component reader"
-                        .to_owned(),
-                },
-            ));
-        }
-    };
+    let max_bytes = component_byte_bound(observation.component)?;
     if expected.len() > max_bytes as u64 {
         return Err(local_failure(
             observation,
@@ -196,60 +162,29 @@ pub(super) fn hydrate_component(
     {
         return Err(classify_io_error(observation, "open component", error));
     }
-    let before = observe_ordinary_file(&observation.path).map_err(|error| {
-        classify_capture_error(observation, "observe component before hydration", error)
-    })?;
-    if &before != expected.ordinary() {
-        return Err(ClineLocalReadError::Local(source_changed_failure(
-            observation,
-        )));
-    }
-    let mut file = open_ordinary_file_without_following(&observation.path)
-        .map_err(|error| classify_capture_error(observation, "open component", error))?;
-    let declared_len = file
-        .metadata()
-        .map_err(|error| classify_io_error(observation, "stat open component", error))?
-        .len();
+    let file = expected.opened();
+    let declared_len = file.len();
     if declared_len != expected.len() {
         return Err(ClineLocalReadError::Local(source_changed_failure(
             observation,
         )));
     }
-    let capacity = usize::try_from(declared_len)
-        .unwrap_or(max_bytes)
-        .min(max_bytes);
-    let mut bytes = Vec::with_capacity(capacity);
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        if let Some(error) =
-            injected_io_failure(ClineInjectedIoOperation::ComponentRead, &observation.path)
-        {
-            return Err(classify_io_error(observation, "read component", error));
-        }
-        let read = file
-            .read(&mut buffer)
-            .map_err(|error| classify_io_error(observation, "read component", error))?;
-        if read == 0 {
-            break;
-        }
-        if bytes.len().saturating_add(read) > max_bytes {
-            return Err(local_failure(
-                observation,
-                super::normalize::ClineComponentFailureKind::AuthorityBound,
-                &format!("component exceeds the fixed {max_bytes}-byte authority bound"),
-                false,
-            ));
-        }
-        bytes.extend_from_slice(&buffer[..read]);
-    }
-    let after = observe_ordinary_file(&observation.path).map_err(|error| {
-        classify_capture_error(observation, "observe component after hydration", error)
-    })?;
-    if after != before || bytes.len() as u64 != declared_len {
-        return Err(ClineLocalReadError::Local(source_changed_failure(
+    let length = usize::try_from(declared_len).map_err(|_| {
+        local_failure(
             observation,
-        )));
+            super::normalize::ClineComponentFailureKind::AuthorityBound,
+            &format!("component exceeds the fixed {max_bytes}-byte authority bound"),
+            false,
+        )
+    })?;
+    if let Some(error) =
+        injected_io_failure(ClineInjectedIoOperation::ComponentRead, &observation.path)
+    {
+        return Err(classify_io_error(observation, "read component", error));
     }
+    let bytes = file
+        .read_exact_range(0, length, max_bytes)
+        .map_err(|error| classify_capture_error(observation, "read component", error))?;
     let mut hasher = Sha256::new();
     hasher.update(COMPONENT_REVISION_DOMAIN);
     hasher.update([observation.component as u8]);
@@ -271,18 +206,6 @@ pub(super) fn pin_component_content(
             observation,
         )));
     };
-    let before = observe_ordinary_file(&observation.path).map_err(|error| {
-        classify_capture_error(
-            observation,
-            "observe metadata component before authority pin",
-            error,
-        )
-    })?;
-    if &before != expected.ordinary() {
-        return Err(ClineLocalReadError::Local(source_changed_failure(
-            observation,
-        )));
-    }
     if let Some(error) =
         injected_io_failure(ClineInjectedIoOperation::ComponentOpen, &observation.path)
     {
@@ -292,23 +215,8 @@ pub(super) fn pin_component_content(
             error,
         ));
     }
-    let file = open_ordinary_file_without_following(&observation.path).map_err(|error| {
-        classify_capture_error(observation, "pin metadata component authority", error)
-    })?;
-    if file
-        .metadata()
-        .map_err(|error| classify_io_error(observation, "stat pinned metadata component", error))?
-        .len()
-        != expected.len()
-    {
-        return Err(ClineLocalReadError::Local(source_changed_failure(
-            observation,
-        )));
-    }
-    let after = observe_ordinary_file(&observation.path).map_err(|error| {
-        classify_capture_error(observation, "revalidate pinned metadata component", error)
-    })?;
-    if after != before {
+    let file = expected.opened();
+    if file.len() != expected.len() || file.revalidate().is_err() {
         return Err(ClineLocalReadError::Local(source_changed_failure(
             observation,
         )));
@@ -324,6 +232,23 @@ pub(super) fn pin_component_content(
         )));
     }
     Ok(authority)
+}
+
+fn component_byte_bound(component: ClineComponent) -> Result<usize, ClineLocalReadError> {
+    match component {
+        ClineComponent::TaskMetadata | ClineComponent::HistoryItem | ClineComponent::TaskIndex => {
+            Ok(MAX_METADATA_JSON_BYTES)
+        }
+        ClineComponent::RootIndex => Ok(MAX_ROOT_INDEX_JSON_BYTES),
+        ClineComponent::ApiHistory
+        | ClineComponent::UiMessages
+        | ClineComponent::FallbackHistory => Err(ClineLocalReadError::Fatal(
+            ClineNativePathError::Invariant {
+                message: "Cline history arrays must use the pinned streaming component reader"
+                    .to_owned(),
+            },
+        )),
+    }
 }
 
 fn classify_capture_error(

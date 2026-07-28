@@ -268,6 +268,10 @@ impl ClineNativeReader {
                 };
                 let page = match self.make_array_page(
                     active.source.clone(),
+                    active
+                        .task
+                        .component(active.component.source_component())
+                        .clone(),
                     active.revision.clone(),
                     active.frontier.clone(),
                     active.frontier.clone(),
@@ -370,6 +374,10 @@ impl ClineNativeReader {
                 });
                 let page = match self.make_array_page(
                     active.source.clone(),
+                    active
+                        .task
+                        .component(active.component.source_component())
+                        .clone(),
                     active.revision.clone(),
                     expected,
                     next,

@@ -199,6 +199,26 @@ fn roo_dialect_discovers_supplemental_metadata_and_fallback_history() {
 }
 
 #[test]
+fn accepted_root_shapes_resolve_under_one_data_root_authority() {
+    let fixture = Fixture::new(api_messages(&["hello"]), json!([]));
+    let task = fixture.api.parent().expect("task directory").to_path_buf();
+    for selected in [
+        fixture.root.clone(),
+        fixture.root.join("tasks"),
+        task,
+        fixture.api.clone(),
+        fixture.root.join("state/taskHistory.json"),
+    ] {
+        let discovery = discover_cline_root(&selected).expect("accepted Cline root shape");
+        assert_eq!(
+            discovery.root_authority().tasks_root(),
+            fixture.root.join("tasks")
+        );
+        assert_eq!(discovery.task_routes().len(), 1);
+    }
+}
+
+#[test]
 fn each_changed_component_is_hydrated_and_parsed_once() {
     let fixture = Fixture::new(api_messages(&["hello"]), json!([]));
     let result = read_all(&fixture.root, &[], ClineNativeProfile::CoreOnly);

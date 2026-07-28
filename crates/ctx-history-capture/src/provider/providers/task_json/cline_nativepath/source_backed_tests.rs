@@ -33,6 +33,39 @@ fn roo_source_backed_cold_exact_replacement_and_delete_ready() {
 }
 
 #[test]
+fn source_backed_resolvers_reject_swapped_authority_roots() {
+    for provider in [CaptureProvider::Cline, CaptureProvider::RooCode] {
+        let fixture = Fixture::new(provider);
+        let selected = exact_source(provider, fixture.root.clone());
+        let (pages, _) = scan(provider, &selected);
+        let locator = pages[0].documents[0].locator.clone();
+        let resolver = resolver(provider, std::slice::from_ref(&selected));
+        let displaced = fixture.root.with_extension("displaced");
+        fs::rename(&fixture.root, &displaced).expect("displace selected authority root");
+        Fixture::write_task(provider, &fixture.task, fixture.task_id, "cold body");
+
+        let error = resolver
+            .hydrate_locator(&locator)
+            .expect_err("swapped root must not satisfy retained authority");
+        assert_eq!(error.kind, HydrationFailureKind::StaleSourceEvidence);
+    }
+}
+
+#[test]
+fn unavailable_roots_remain_explicit_without_source_opens() {
+    for provider in [CaptureProvider::Cline, CaptureProvider::RooCode] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut selected = exact_source(provider, temp.path().join("unavailable"));
+        selected.exists = false;
+        selected.status = ProviderSourceStatus::Missing;
+        let (_, completion) = scan(provider, &selected);
+        assert!(completion.inventories.is_empty());
+        assert!(completion.tasks.is_empty());
+        assert_eq!(completion.unavailable.as_ref(), &[selected]);
+    }
+}
+
+#[test]
 fn current_cline_sdk_format_remains_detected_but_unsupported() {
     let temp = tempfile::tempdir().expect("tempdir");
     let sdk = temp.path().join("sdk-sessions");
