@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeSet,
+    ffi::OsStr,
     fs::File,
     io::{Read, Seek, SeekFrom},
     ops::Deref,
@@ -10,10 +11,11 @@ use rusqlite::{limits::Limit, Connection};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-use crate::common::io::ensure_regular_provider_transcript_file;
+use crate::common::io::ProviderSourceRoot;
 use crate::compute_payload_hash;
 use crate::provider_sources::{
-    observe_ordinary_file, open_ordinary_file_without_following, open_sqlite_source_snapshot,
+    observe_ordinary_file, open_ordinary_file_without_following,
+    open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
     OrdinaryFileObservation, SqliteSourceAccessError, SqliteSourceEvidence,
     SqliteSourceReadSnapshot,
 };
@@ -261,26 +263,119 @@ impl ProviderSqliteSourceSnapshot {
 }
 
 fn read_sqlite_source_evidence(path: &Path) -> Result<SqliteSourceEvidence> {
-    ensure_regular_provider_transcript_file(path)?;
-    let root_bound_database = open_ordinary_file_without_following(path)?;
-    open_sqlite_source_snapshot(path, &root_bound_database)
-        .and_then(SqliteSourceReadSnapshot::finish)
-        .map_err(map_sqlite_source_access_error)
+    RootAuthorizedProviderSqliteSnapshot::open(path)?.finish()
 }
 
-pub(crate) struct ReadOnlySqliteConnection {
+struct RootAuthorizedProviderSqliteSnapshot {
     snapshot: Option<SqliteSourceReadSnapshot>,
-    _root_bound_database: File,
+    authority_root: ProviderSourceRoot,
+}
+
+impl RootAuthorizedProviderSqliteSnapshot {
+    fn open(path: &Path) -> Result<Self> {
+        let (parent_path, database_name) = sqlite_parent_and_leaf(path)?;
+        let authority_root = ProviderSourceRoot::open(parent_path)?;
+        let parent = authority_root.directory()?;
+        let parent_handle = parent.try_clone_authority_handle()?;
+        let sqlite_authority = retain_sqlite_source_directory_authority(&parent_handle)
+            .map_err(map_sqlite_source_access_error)?;
+        let snapshot = open_root_handle_sqlite_source_snapshot(&sqlite_authority, database_name)
+            .map_err(map_sqlite_source_access_error)?;
+        Ok(Self {
+            snapshot: Some(snapshot),
+            authority_root,
+        })
+    }
+
+    fn connection(&self) -> Result<&Connection> {
+        self.snapshot
+            .as_ref()
+            .ok_or(CaptureError::SystemInvariant(
+                "provider SQLite source snapshot is inactive",
+            ))?
+            .connection()
+            .map_err(map_sqlite_source_access_error)
+    }
+
+    fn finish(mut self) -> Result<SqliteSourceEvidence> {
+        let snapshot = self.snapshot.take().ok_or(CaptureError::SystemInvariant(
+            "provider SQLite source snapshot is inactive",
+        ))?;
+        let finish = snapshot.finish().map_err(map_sqlite_source_access_error);
+        let root_revalidation = self.authority_root.revalidate();
+        match (finish, root_revalidation) {
+            (Ok(evidence), Ok(())) => Ok(evidence),
+            (Err(error), _) => Err(error),
+            (_, Err(error)) => Err(error),
+        }
+    }
+}
+
+impl Drop for RootAuthorizedProviderSqliteSnapshot {
+    fn drop(&mut self) {
+        if let Some(snapshot) = self.snapshot.take() {
+            let _ = snapshot.finish();
+            let _ = self.authority_root.revalidate();
+        }
+    }
+}
+
+fn sqlite_parent_and_leaf(path: &Path) -> Result<(&Path, &OsStr)> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "provider SQLite path has no absolute parent directory",
+        })?;
+    let database_name =
+        path.file_name()
+            .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
+                path: path.to_path_buf(),
+                reason: "provider SQLite path has no database leaf name",
+            })?;
+    Ok((parent, database_name))
+}
+
+/// Provider-neutral SQLite read guard.
+///
+/// Call [`Self::finish`] after the final query and before publishing values
+/// read through this connection so source-family and outer-route changes are
+/// returned as capture errors.
+#[must_use = "call finish() before publishing provider SQLite observations"]
+pub(crate) struct ReadOnlySqliteConnection {
+    snapshot: Option<RootAuthorizedProviderSqliteSnapshot>,
+}
+
+impl ReadOnlySqliteConnection {
+    fn connection(&self) -> Result<&Connection> {
+        self.snapshot
+            .as_ref()
+            .ok_or(CaptureError::SystemInvariant(
+                "provider SQLite source snapshot is inactive",
+            ))?
+            .connection()
+    }
+
+    #[allow(
+        dead_code,
+        reason = "named provider adapters adopt explicit finish in their separately owned migrations"
+    )]
+    pub(crate) fn finish(mut self) -> Result<SqliteSourceEvidence> {
+        self.snapshot
+            .take()
+            .ok_or(CaptureError::SystemInvariant(
+                "provider SQLite source snapshot is inactive",
+            ))?
+            .finish()
+    }
 }
 
 impl Deref for ReadOnlySqliteConnection {
     type Target = Connection;
 
     fn deref(&self) -> &Self::Target {
-        let Some(snapshot) = self.snapshot.as_ref() else {
-            inactive_readonly_sqlite_connection()
-        };
-        match snapshot.connection() {
+        match self.connection() {
             Ok(connection) => connection,
             Err(_) => inactive_readonly_sqlite_connection(),
         }
@@ -302,20 +397,17 @@ pub(crate) fn open_provider_sqlite_readonly(path: &Path) -> Result<ReadOnlySqlit
             "provider SQLite value byte limit is unrepresentable: {MAX_PROVIDER_SQLITE_VALUE_BYTES}"
         ))
     })?;
-    conn.set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit);
-    conn.busy_timeout(std::time::Duration::from_secs(5))?;
-    conn.pragma_update(None, "query_only", true)?;
+    let connection = conn.connection()?;
+    connection.set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit);
+    connection.busy_timeout(std::time::Duration::from_secs(5))?;
+    connection.pragma_update(None, "query_only", true)?;
     Ok(conn)
 }
 
 pub(crate) fn open_sqlite_readonly_source(path: &Path) -> Result<ReadOnlySqliteConnection> {
-    ensure_regular_provider_transcript_file(path)?;
-    let root_bound_database = open_ordinary_file_without_following(path)?;
-    let snapshot = open_sqlite_source_snapshot(path, &root_bound_database)
-        .map_err(map_sqlite_source_access_error)?;
+    let snapshot = RootAuthorizedProviderSqliteSnapshot::open(path)?;
     Ok(ReadOnlySqliteConnection {
         snapshot: Some(snapshot),
-        _root_bound_database: root_bound_database,
     })
 }
 
@@ -323,8 +415,8 @@ pub(crate) fn with_sqlite_read_snapshot<T>(
     conn: &Connection,
     read: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    // Root-authorized connections already own the snapshot transaction pinned
-    // by `open_sqlite_source_snapshot`; never nest another transaction in it.
+    // Root-authorized connections already own the snapshot transaction pinned by
+    // `open_root_handle_sqlite_source_snapshot`; never nest another transaction in it.
     if !conn.is_autocommit() {
         return read();
     }
@@ -379,14 +471,22 @@ pub(crate) fn sqlite_schema_fingerprint(conn: &Connection) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::{
+        fs,
+        panic::{catch_unwind, AssertUnwindSafe},
+        path::Path,
+    };
 
+    #[cfg(target_os = "linux")]
+    use rusqlite::config::DbConfig;
     use rusqlite::{limits::Limit, params, types::Value as SqlValue, Connection};
 
     use super::{
         open_provider_sqlite_readonly, optional_text_column_expr, optional_timestamp_millis_expr,
-        BTreeSet, ProviderSqliteSourceSnapshot, SqliteLengthPreflightGuard,
+        BTreeSet, ProviderSqliteSourceSnapshot, SqliteLengthPreflightGuard, SqliteSourceEvidence,
     };
+    #[cfg(target_os = "linux")]
+    use crate::Result;
 
     const TEST_LENGTH_LIMIT: i32 = 16 * 1024;
 
@@ -395,6 +495,39 @@ mod tests {
         conn.set_limit(Limit::SQLITE_LIMIT_LENGTH, TEST_LENGTH_LIMIT);
         assert_eq!(conn.limit(Limit::SQLITE_LIMIT_LENGTH), TEST_LENGTH_LIMIT);
         conn
+    }
+
+    #[cfg(target_os = "linux")]
+    fn create_persistent_wal(path: &Path) {
+        let writer = Connection::open(path).unwrap();
+        let mode: String = writer
+            .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        writer
+            .execute("CREATE TABLE messages (body TEXT NOT NULL)", [])
+            .unwrap();
+        writer
+            .execute("INSERT INTO messages (body) VALUES ('from-wal')", [])
+            .unwrap();
+        writer
+            .set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
+            .unwrap();
+        drop(writer);
+        assert!(path.with_file_name("provider.sqlite-wal").exists());
+        assert!(path.with_file_name("provider.sqlite-shm").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    fn read_provider_body_with_finish(
+        path: &Path,
+        before_finish: impl FnOnce(),
+    ) -> Result<(String, SqliteSourceEvidence)> {
+        let connection = open_provider_sqlite_readonly(path)?;
+        let body = connection.query_row("SELECT body FROM messages", [], |row| row.get(0))?;
+        before_finish();
+        let evidence = connection.finish()?;
+        Ok((body, evidence))
     }
 
     #[test]
@@ -501,6 +634,110 @@ mod tests {
             .query_row("SELECT body FROM messages", [], |row| row.get(0))
             .unwrap();
         assert_eq!(body, "guarded");
+        connection.finish().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn provider_sqlite_opener_reads_active_wal_without_provider_writes() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let database = temp.path().join("provider.sqlite");
+        let wal = temp.path().join("provider.sqlite-wal");
+        let shared_memory = temp.path().join("provider.sqlite-shm");
+        create_persistent_wal(&database);
+        let before_database = fs::read(&database).unwrap();
+        let before_wal = fs::read(&wal).unwrap();
+        let before_shared_memory = fs::read(&shared_memory).unwrap();
+
+        let source_snapshot = ProviderSqliteSourceSnapshot::read(
+            &database,
+            "test database must be regular",
+            "test sidecar must be regular",
+        )
+        .unwrap();
+        assert!(source_snapshot.evidence.wal_length().is_some());
+        let (body, evidence) = read_provider_body_with_finish(&database, || {}).unwrap();
+
+        assert_eq!(body, "from-wal");
+        assert!(evidence.wal_length().is_some());
+        assert!(evidence.shared_memory_length().is_some());
+        assert_eq!(fs::read(&database).unwrap(), before_database);
+        assert_eq!(fs::read(&wal).unwrap(), before_wal);
+        assert_eq!(fs::read(&shared_memory).unwrap(), before_shared_memory);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn provider_sqlite_leaf_swap_prevents_observation_escape() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let database = temp.path().join("provider.sqlite");
+        let admitted = temp.path().join("admitted.sqlite");
+        let attacker = temp.path().join("attacker.sqlite");
+        let writer = Connection::open(&database).unwrap();
+        writer
+            .execute("CREATE TABLE messages (body TEXT NOT NULL)", [])
+            .unwrap();
+        writer
+            .execute("INSERT INTO messages (body) VALUES ('expected')", [])
+            .unwrap();
+        drop(writer);
+        let writer = Connection::open(&attacker).unwrap();
+        writer
+            .execute("CREATE TABLE messages (body TEXT NOT NULL)", [])
+            .unwrap();
+        writer
+            .execute("INSERT INTO messages (body) VALUES ('attacker')", [])
+            .unwrap();
+        drop(writer);
+
+        let result = read_provider_body_with_finish(&database, || {
+            fs::rename(&database, &admitted).unwrap();
+            fs::rename(&attacker, &database).unwrap();
+        });
+
+        assert!(
+            result.is_err(),
+            "the value read before final source revalidation must not escape"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn provider_sqlite_parent_swap_prevents_observation_escape() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let live = temp.path().join("live");
+        let admitted = temp.path().join("admitted");
+        let replacement = temp.path().join("replacement");
+        fs::create_dir(&live).unwrap();
+        fs::create_dir(&replacement).unwrap();
+        let database = live.join("provider.sqlite");
+        let attacker = replacement.join("provider.sqlite");
+        let writer = Connection::open(&database).unwrap();
+        writer
+            .execute("CREATE TABLE messages (body TEXT NOT NULL)", [])
+            .unwrap();
+        writer
+            .execute("INSERT INTO messages (body) VALUES ('expected')", [])
+            .unwrap();
+        drop(writer);
+        let writer = Connection::open(&attacker).unwrap();
+        writer
+            .execute("CREATE TABLE messages (body TEXT NOT NULL)", [])
+            .unwrap();
+        writer
+            .execute("INSERT INTO messages (body) VALUES ('attacker')", [])
+            .unwrap();
+        drop(writer);
+
+        let result = read_provider_body_with_finish(&database, || {
+            fs::rename(&live, &admitted).unwrap();
+            fs::rename(&replacement, &live).unwrap();
+        });
+
+        assert!(
+            result.is_err(),
+            "the retained parent route must be revalidated before returning the value"
+        );
     }
 
     #[test]
