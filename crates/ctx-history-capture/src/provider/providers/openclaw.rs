@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use crate::common::io::{ensure_regular_provider_transcript_file, read_text_file_limited};
 use crate::provider::normalization::{
-    provider_capped_json, provider_output_event_is_failure, provider_result_outcome_evidence,
+    provider_capped_json_value, provider_output_event_is_failure, provider_result_outcome_evidence,
 };
 use crate::provider::tool_input;
 use crate::{
@@ -148,6 +148,36 @@ pub(super) struct OpenClawSessionObservation {
 }
 
 impl OpenClawSessionObservation {
+    pub(super) fn from_admitted(
+        canonical_path: PathBuf,
+        transcript_metadata: &Metadata,
+        index: Option<(&Metadata, &[u8])>,
+    ) -> Result<Self> {
+        let transcript = OpenClawFrozenFileMetadata::from_metadata(transcript_metadata)?;
+        let (index_file, index) = match index {
+            Some((metadata, bytes)) => {
+                let parsed = std::str::from_utf8(bytes)
+                    .ok()
+                    .and_then(|text| serde_json::from_str::<Value>(text).ok())
+                    .map(|value| openclaw_session_index_for_file(&canonical_path, &value))
+                    .unwrap_or(Value::Null);
+                (
+                    Some(OpenClawFrozenFileMetadata::from_metadata(metadata)?),
+                    provider_capped_json_value(&parsed, PROVIDER_MAX_PREVIEW_CHARS),
+                )
+            }
+            None => (None, Value::Null),
+        };
+        let index_revision = openclaw_index_revision(&index)?;
+        Ok(Self {
+            canonical_path,
+            transcript,
+            index_file,
+            index,
+            index_revision,
+        })
+    }
+
     pub(super) fn read(path: &Path) -> Result<Self> {
         let transcript = OpenClawFrozenFileMetadata::read(path)?;
         let canonical_path = fs::canonicalize(path)?;
@@ -169,7 +199,7 @@ impl OpenClawSessionObservation {
         } else {
             Value::Null
         };
-        let index = provider_capped_json(&index, PROVIDER_MAX_PREVIEW_CHARS);
+        let index = provider_capped_json_value(&index, PROVIDER_MAX_PREVIEW_CHARS);
         let index_revision = openclaw_index_revision(&index)?;
         Ok(Self {
             canonical_path,

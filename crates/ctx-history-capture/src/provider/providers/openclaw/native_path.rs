@@ -24,6 +24,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
+    common::io::OpenedProviderSourceFile,
     complete_content::VERIFIED_CONTENT_LOCATORS_METADATA_KEY,
     provider::{
         file_touches::visit_all_file_touch_drafts,
@@ -370,6 +371,7 @@ struct PageReader {
     path_identity: String,
     generation: u64,
     reader: BufReader<File>,
+    admitted_transcript: Option<OpenedProviderSourceFile>,
     prefix_hasher: Sha256,
     complete_prefix_end: u64,
     next_raw_ordinal: u64,

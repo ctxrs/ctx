@@ -10,12 +10,65 @@ pub(super) fn open_pages(
 ) -> Result<PageReader> {
     let observation = OpenClawSessionObservation::read(path)?;
     let canonical_path = observation.canonical_path.clone();
-    let path_identity = provider_path_identity(&canonical_path)?;
-    let source_revision = source_revision(&observation, inventory_observation_token);
-    let mut file = File::open(&canonical_path)?;
+    let file = File::open(&canonical_path)?;
     if OpenClawFrozenFileMetadata::from_metadata(&file.metadata()?)? != observation.transcript {
         return Err(CaptureError::SourceChangedDuringCapture);
     }
+    open_pages_from_file(
+        canonical_path,
+        imported_at,
+        collect_outputs,
+        inventory_observation_token,
+        reactivate_retired_route,
+        previous,
+        observation,
+        file,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn open_pages_from_admitted(
+    canonical_path: PathBuf,
+    imported_at: DateTime<Utc>,
+    collect_outputs: bool,
+    inventory_observation_token: Option<&str>,
+    reactivate_retired_route: bool,
+    previous: Option<&Checkpoint>,
+    observation: OpenClawSessionObservation,
+    transcript: OpenedProviderSourceFile,
+) -> Result<PageReader> {
+    let file = transcript.file().try_clone()?;
+    if OpenClawFrozenFileMetadata::from_metadata(&file.metadata()?)? != observation.transcript {
+        return Err(CaptureError::SourceChangedDuringCapture);
+    }
+    open_pages_from_file(
+        canonical_path,
+        imported_at,
+        collect_outputs,
+        inventory_observation_token,
+        reactivate_retired_route,
+        previous,
+        observation,
+        file,
+        Some(transcript),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn open_pages_from_file(
+    canonical_path: PathBuf,
+    imported_at: DateTime<Utc>,
+    collect_outputs: bool,
+    inventory_observation_token: Option<&str>,
+    reactivate_retired_route: bool,
+    previous: Option<&Checkpoint>,
+    observation: OpenClawSessionObservation,
+    mut file: File,
+    admitted_transcript: Option<OpenedProviderSourceFile>,
+) -> Result<PageReader> {
+    let path_identity = provider_path_identity(&canonical_path)?;
+    let source_revision = source_revision(&observation, inventory_observation_token);
     let mut prefix_hasher = new_prefix_hasher();
     let mut complete_prefix_end = 0_u64;
     let mut next_raw_ordinal = 0_u64;
@@ -96,6 +149,7 @@ pub(super) fn open_pages(
         path_identity,
         generation,
         reader: BufReader::new(file),
+        admitted_transcript,
         prefix_hasher,
         complete_prefix_end,
         next_raw_ordinal,
@@ -468,7 +522,9 @@ impl PageReader {
     }
 
     pub(super) fn finish(&mut self, terminal: bool) -> Result<()> {
-        if !self.observation.revalidate(&self.path)? {
+        if let Some(transcript) = &self.admitted_transcript {
+            transcript.revalidate()?;
+        } else if !self.observation.revalidate(&self.path)? {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
         self.outcome = Some(ScanOutcome {
@@ -479,6 +535,15 @@ impl PageReader {
         });
         self.finished = true;
         Ok(())
+    }
+
+    pub(super) fn revalidate_admitted_transcript(&self) -> Result<()> {
+        match &self.admitted_transcript {
+            Some(transcript) => transcript.revalidate(),
+            None => Err(CaptureError::SystemInvariant(
+                "OpenClaw source-backed reader lost its admitted transcript",
+            )),
+        }
     }
 }
 
