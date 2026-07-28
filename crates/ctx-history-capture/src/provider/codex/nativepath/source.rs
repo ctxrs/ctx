@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
+    sync::Arc,
     time::SystemTime,
 };
 
@@ -10,8 +11,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{checkpoint::CodexNativeCheckpoint, reader::CodexSourceScan};
 use crate::{
-    common::time::system_time_ms, CaptureError, Result as CaptureResult,
-    CODEX_SESSION_SOURCE_FORMAT,
+    common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
+    common::time::system_time_ms,
+    CaptureError, Result as CaptureResult, CODEX_SESSION_SOURCE_FORMAT,
 };
 
 const CATALOG_CHANGE_TOKEN_KEY: &str = "inventory_file_change_token_v1";
@@ -34,7 +36,7 @@ impl CodexFileObservation {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct CodexCatalogSource {
     pub(crate) source_root: String,
     pub(crate) source_path: PathBuf,
@@ -43,7 +45,24 @@ pub(crate) struct CodexCatalogSource {
     pub(crate) catalog_native_session_id: Option<String>,
     pub(crate) catalog_parent_native_session_id: Option<String>,
     pub(crate) catalog_root_native_session_id: Option<String>,
+    pub(crate) opened: Option<Arc<OpenedProviderSourceFile>>,
+    pub(crate) authority_root: Option<ProviderSourceRoot>,
+    pub(crate) authority_relative_path: Option<PathBuf>,
 }
+
+impl PartialEq for CodexCatalogSource {
+    fn eq(&self, other: &Self) -> bool {
+        self.source_root == other.source_root
+            && self.source_path == other.source_path
+            && self.cataloged_at_ms == other.cataloged_at_ms
+            && self.catalog_observation == other.catalog_observation
+            && self.catalog_native_session_id == other.catalog_native_session_id
+            && self.catalog_parent_native_session_id == other.catalog_parent_native_session_id
+            && self.catalog_root_native_session_id == other.catalog_root_native_session_id
+    }
+}
+
+impl Eq for CodexCatalogSource {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CodexCatalogRejection {
@@ -123,6 +142,9 @@ fn catalog_source(session: &CatalogSession) -> Result<CodexCatalogSource, &'stat
             .get("root_external_session_id")
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned),
+        opened: None,
+        authority_root: None,
+        authority_relative_path: None,
     })
 }
 

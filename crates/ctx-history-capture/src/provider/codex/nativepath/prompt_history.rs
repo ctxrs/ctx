@@ -1,8 +1,11 @@
+#[cfg(test)]
+use std::fs;
 use std::{
     collections::BTreeMap,
-    fs::{self, File, Metadata},
+    fs::{File, Metadata},
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::Path,
+    sync::Arc,
     time::UNIX_EPOCH,
 };
 
@@ -25,9 +28,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    common::io::{
-        ensure_provider_path_parents_are_not_symlinks, ensure_regular_provider_transcript_file,
-    },
+    common::io::{open_provider_source_file, OpenedProviderSourceFile},
     provider::{
         codex::events::{codex_canonical_event, CodexNativeEvent},
         importer::{
@@ -76,8 +77,9 @@ std::thread_local! {
 }
 
 #[inline]
-fn open_prompt_history_source(path: &Path) -> Result<File> {
-    let file = crate::provider_sources::open_ordinary_file_without_following(path)?;
+fn open_prompt_history_source(source: &OpenedProviderSourceFile) -> Result<File> {
+    let mut file = source.file().try_clone()?;
+    file.seek(SeekFrom::Start(0))?;
     #[cfg(test)]
     PROMPT_HISTORY_IO_METRICS.with(|metrics| {
         let current = metrics.get();
@@ -135,11 +137,6 @@ struct FileObservation {
 }
 
 impl FileObservation {
-    fn read(path: &Path) -> Result<Self> {
-        let file = crate::provider_sources::open_ordinary_file_without_following(path)?;
-        Self::from_metadata(&file.metadata()?)
-    }
-
     fn from_metadata(metadata: &Metadata) -> Result<Self> {
         #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
@@ -176,15 +173,11 @@ impl FileObservation {
         }
     }
 
-    fn revalidate(&self, path: &Path) -> Result<bool> {
-        match Self::read(path) {
-            Ok(current) => Ok(current == *self),
-            Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                Ok(false)
-            }
-            Err(CaptureError::InvalidProviderTranscriptPath { .. }) => Ok(false),
-            Err(error) => Err(error),
+    fn revalidate(&self, source: &OpenedProviderSourceFile) -> Result<bool> {
+        if source.revalidate().is_err() {
+            return Ok(false);
         }
+        Ok(Self::from_metadata(&source.file().metadata()?)? == *self)
     }
 }
 
@@ -388,6 +381,7 @@ struct SourceAuthority {
     cursor_stream: String,
     proposed_source_identity: String,
     canonical_source_identity: String,
+    opened: Option<Arc<OpenedProviderSourceFile>>,
 }
 
 impl SourceAuthority {
@@ -412,6 +406,18 @@ impl SourceAuthority {
             "Codex prompt-history canonical source identity is unavailable",
         ))?;
         let canonical_source_identity = proposed_source_identity.clone();
+        let authority_path = std::path::absolute(path)?;
+        let opened = match open_provider_source_file(&authority_path) {
+            Ok(opened) => Some(Arc::new(opened)),
+            Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotADirectory => {
+                return Err(CaptureError::InvalidProviderTranscriptPath {
+                    path: path.to_path_buf(),
+                    reason: "linked provider transcript path components are rejected",
+                });
+            }
+            Err(error) => return Err(error),
+        };
         Ok(Self {
             physical_path: path.to_path_buf(),
             machine_id: machine_id.to_owned(),
@@ -421,6 +427,7 @@ impl SourceAuthority {
             cursor_stream,
             proposed_source_identity,
             canonical_source_identity,
+            opened,
         })
     }
 
@@ -433,6 +440,19 @@ impl SourceAuthority {
             &format!("codex-prompt-history:{canonical_source_identity}"),
             "native-source",
         )
+    }
+
+    fn opened(&self) -> Result<&OpenedProviderSourceFile> {
+        self.opened.as_deref().ok_or_else(|| {
+            CaptureError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "Codex prompt-history source is unavailable",
+            ))
+        })
+    }
+
+    fn is_missing(&self) -> bool {
+        self.opened.is_none()
     }
 }
 
@@ -484,7 +504,7 @@ pub(crate) fn import_codex_native_prompt_history(
         replay_no_outputs(store, &authority, &options)?;
         return Ok(ProviderImportSummary::default());
     }
-    if source_is_missing(path)? {
+    if authority.is_missing() {
         return retire_disappeared_source(store, &authority, stored, &options);
     }
     if matches!(
@@ -511,7 +531,7 @@ pub(crate) fn import_codex_native_prompt_history(
     };
     let had_durable_authority = !matches!(&stored, StoredCursor::None);
     let digest = digest_source(
-        path,
+        &authority,
         prior_native.map(|cursor| cursor.observation.len),
         options.inventory_observation_token.as_deref(),
     )?;

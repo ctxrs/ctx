@@ -147,7 +147,7 @@ fn exact_repeat_does_not_open_or_parse_unchanged_source_and_append_still_resumes
 
     assert_eq!(replay.imported_sessions, 0);
     assert_eq!(replay.imported_events, 0);
-    assert_eq!(replay.skipped_sessions, 1);
+    assert_eq!(replay.skipped_sessions, 1, "{replay:?}");
     assert_eq!(
         observer
             .query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))
@@ -311,6 +311,9 @@ fn rejection_source_label_is_path_free_escaped_and_bounded() {
         catalog_native_session_id: None,
         catalog_parent_native_session_id: None,
         catalog_root_native_session_id: None,
+        opened: None,
+        authority_root: None,
+        authority_relative_path: None,
     };
     let label = bounded_rejection_source_label(&source);
 

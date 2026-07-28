@@ -100,7 +100,7 @@ fn prepared_page_surfaces_rejection_only_without_retained_content() {
     fs::write(&source, b"{not-json}\n").unwrap();
     let authority =
         SourceAuthority::new(&source, &source, "prompt-history-page-outcome-test").unwrap();
-    let digest = digest_source(&source, None, None).unwrap();
+    let digest = digest_source(&authority, None, None).unwrap();
     let cursor = plan_cursor(
         &authority,
         StoredCursor::None,

@@ -132,12 +132,13 @@ pub(super) fn load_cursor(store: &Store, machine_id: &str, stream: &str) -> Resu
 }
 
 pub(super) fn digest_source(
-    path: &Path,
+    authority: &SourceAuthority,
     prior_len: Option<u64>,
     inventory_observation_token: Option<&str>,
 ) -> Result<SourceDigest> {
-    let observation = FileObservation::read(path)?;
-    let file = open_prompt_history_source(path)?;
+    let source = authority.opened()?;
+    let observation = FileObservation::from_metadata(source.metadata())?;
+    let file = open_prompt_history_source(source)?;
     if FileObservation::from_metadata(&file.metadata()?)? != observation {
         return Err(CaptureError::SourceChangedDuringCapture);
     }
@@ -166,7 +167,7 @@ pub(super) fn digest_source(
                 "Codex prompt-history source length overflowed",
             ))?;
     }
-    if read != observation.len || !observation.revalidate(path)? {
+    if read != observation.len || !observation.revalidate(source)? {
         return Err(CaptureError::SourceChangedDuringCapture);
     }
     let hash: [u8; 32] = full.finalize().into();
@@ -175,22 +176,6 @@ pub(super) fn digest_source(
         revision: revision_string(&hash, inventory_observation_token),
         prefix_at_prior_len: prior_len.map(|_| prefix.finalize().into()),
     })
-}
-
-pub(super) fn source_is_missing(path: &Path) -> Result<bool> {
-    // `Path::exists` follows links and would classify a dangling link as a
-    // vanished source. That is unsafe because disappearance retires the exact
-    // provider route. Validate the literal path and its parents first so every
-    // link-like path is rejected as an invalid transcript instead.
-    ensure_provider_path_parents_are_not_symlinks(path)?;
-    match fs::symlink_metadata(path) {
-        Ok(_) => {
-            ensure_regular_provider_transcript_file(path)?;
-            Ok(false)
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
-        Err(error) => Err(error.into()),
-    }
 }
 
 pub(super) fn read_record(

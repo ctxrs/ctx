@@ -45,7 +45,8 @@ impl PromptHistoryScanner {
         start_ordinal: u64,
         expected_prefix: [u8; 32],
     ) -> Result<Self> {
-        let file = open_prompt_history_source(&authority.physical_path)?;
+        let source = authority.opened()?;
+        let file = open_prompt_history_source(source)?;
         if FileObservation::from_metadata(&file.metadata()?)? != digest.observation {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
@@ -430,7 +431,7 @@ pub(super) fn publish_core_page(
         }
         group.stage_source_generation_page(&generation_key(authority, cursor), &retained)?;
         group.prepare_journal_checkpoint()?;
-        if !digest.observation.revalidate(&authority.physical_path)? {
+        if !digest.observation.revalidate(authority.opened()?)? {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
         group.publish_cursor_set()?;
@@ -444,7 +445,7 @@ pub(super) fn publish_core_page(
         for failure in page.failures {
             summary.record_failure(failure);
         }
-    } else if !digest.observation.revalidate(&authority.physical_path)? {
+    } else if !digest.observation.revalidate(authority.opened()?)? {
         return Err(CaptureError::SourceChangedDuringCapture);
     }
     group.commit()?;

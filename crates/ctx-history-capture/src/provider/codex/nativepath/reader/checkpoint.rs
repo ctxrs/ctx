@@ -332,12 +332,22 @@ pub(super) fn invalid_checkpoint_proof(reason: &str) -> CaptureError {
 }
 
 pub(super) fn observed_file(source: &CodexCatalogSource) -> Result<CodexFileObservation> {
-    let observation = observe_ordinary_file(&source.source_path)?;
-    let observed = CodexFileObservation::from_parts(
-        observation.len(),
-        observation.modified_at(),
-        *observation.token(),
-    );
+    let opened = match source.opened.as_ref() {
+        Some(opened) => Arc::clone(opened),
+        None => {
+            let authority_path = std::path::absolute(&source.source_path)?;
+            Arc::new(open_provider_source_file(&authority_path)?)
+        }
+    };
+    observed_opened_file(source, &opened)
+}
+
+pub(super) fn observed_opened_file(
+    source: &CodexCatalogSource,
+    opened: &OpenedProviderSourceFile,
+) -> Result<CodexFileObservation> {
+    let observed = opened_file_observation(&source.source_path, opened.file())?;
+    opened.revalidate()?;
     if observed != source.catalog_observation {
         return Err(CaptureError::InvalidPayload(
             "Codex catalog observation changed before NativePath admission".to_owned(),
@@ -350,11 +360,33 @@ pub(crate) fn revalidate_codex_source_observation(
     source: &CodexCatalogSource,
     certified: &CodexFileObservation,
 ) -> Result<()> {
-    let observed = observed_file(source)?;
+    let opened = open_codex_source_capability(source)?;
+    let observed = observed_opened_file(source, &opened)?;
     if &observed != certified {
         return Err(source_changed_during_scan());
     }
     Ok(())
+}
+
+pub(crate) fn open_codex_source_capability(
+    source: &CodexCatalogSource,
+) -> Result<Arc<OpenedProviderSourceFile>> {
+    if let Some(opened) = source.opened.as_ref() {
+        return Ok(Arc::clone(opened));
+    }
+    match (
+        source.authority_root.as_ref(),
+        source.authority_relative_path.as_ref(),
+    ) {
+        (Some(root), Some(relative_path)) => Ok(Arc::new(root.open_file(relative_path)?)),
+        (None, None) => {
+            let authority_path = std::path::absolute(&source.source_path)?;
+            Ok(Arc::new(open_provider_source_file(&authority_path)?))
+        }
+        _ => Err(CaptureError::SystemInvariant(
+            "Codex source route authority is incomplete",
+        )),
+    }
 }
 
 pub(super) fn validate_open_file_metadata(
@@ -368,7 +400,7 @@ pub(super) fn validate_open_file_metadata(
     Ok(())
 }
 
-pub(super) fn opened_file_observation(path: &Path, file: &File) -> Result<CodexFileObservation> {
+pub(crate) fn opened_file_observation(path: &Path, file: &File) -> Result<CodexFileObservation> {
     let metadata = file.metadata()?;
     if !metadata.file_type().is_file() {
         return Err(source_changed_during_scan());

@@ -1,7 +1,5 @@
 use std::{
     collections::{HashMap, HashSet},
-    fs,
-    io::{Read, Seek, SeekFrom},
     panic::{catch_unwind, AssertUnwindSafe},
     path::{Path, PathBuf},
     sync::{
@@ -10,7 +8,7 @@ use std::{
         Arc,
     },
     thread,
-    time::{Duration, Instant, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use ctx_history_core::{
@@ -37,12 +35,17 @@ use super::{
     CodexAppendProof, CodexCheckpointGeneration, CodexNativeCheckpoint, CodexNativeOwnedPage,
     CodexNativeScanner, CodexSessionRow,
 };
+#[cfg(test)]
+use crate::provider::codex::catalog::discover_codex_session_catalog;
 use crate::{
+    common::io::ProviderSourceRoot,
     provider::codex::{
-        catalog::discover_codex_session_catalog, events::codex_content_text,
-        nativepath::revalidate_codex_source_observation,
+        catalog::{
+            discover_codex_session_catalog_retained, rediscover_codex_session_catalog_retained,
+        },
+        events::codex_content_text,
+        nativepath::{open_codex_source_capability, revalidate_codex_source_observation},
     },
-    provider_sources::open_ordinary_file_without_following,
     CaptureError, CODEX_SESSION_SOURCE_FORMAT,
 };
 
@@ -260,6 +263,7 @@ struct ColdSourcePlanV0 {
 pub(crate) struct CodexRootInventoryV0 {
     pub(crate) sources: Vec<(CodexCatalogSource, SourceKey, String)>,
     pub(crate) certificate: CertifiedSourceInventory,
+    root: ProviderSourceRoot,
 }
 
 #[derive(Debug)]
@@ -343,16 +347,20 @@ impl CodexLocatorResolverV0 {
     {
         let mut sources_by_native_session = HashMap::new();
         for session_root in session_roots {
-            let (catalog_summary, sessions) =
-                discover_codex_session_catalog(session_root.as_ref())?;
-            let discovery = super::discover_codex_catalog_sources(&sessions);
-            if catalog_summary.failed_sessions != 0 || !discovery.rejections.is_empty() {
+            let retained = discover_codex_session_catalog_retained(session_root.as_ref())?;
+            let discovery = super::discover_codex_catalog_sources(&retained.sessions);
+            if retained.summary.failed_sessions != 0 || !discovery.rejections.is_empty() {
                 return Err(CodexSourceBackedErrorV0::IncompleteCatalog {
                     rejected: discovery.rejections.len(),
-                    failed: catalog_summary.failed_sessions,
+                    failed: retained.summary.failed_sessions,
                 });
             }
-            for (source, source_key, native_session_id) in bind_source_keys(discovery.sources)? {
+            let sources = bind_catalog_capabilities(
+                discovery.sources,
+                &retained.root,
+                session_root.as_ref(),
+            )?;
+            for (source, source_key, native_session_id) in bind_source_keys(sources)? {
                 if sources_by_native_session
                     .insert(native_session_id.clone(), (source, source_key))
                     .is_some()
@@ -427,6 +435,7 @@ fn ingest_codex_source_backed_inner_v0(
     let CodexRootInventoryV0 {
         mut sources,
         certificate: opening_certificate,
+        root: opening_root,
     } = opening_inventory;
     counters.catalog_source_bytes = sources.iter().fold(0_u64, |total, (source, _, _)| {
         total.saturating_add(source.catalog_observation.len)
@@ -486,7 +495,7 @@ fn ingest_codex_source_backed_inner_v0(
     // degenerate inventory explicitly; every non-empty refresh is fenced
     // inside prepare_commit below.
     if revalidation.is_empty() && counters.deleted_sources == 0 {
-        let closing = discover_codex_root_inventory_v0(session_root)?;
+        let closing = rediscover_codex_root_inventory_v0(session_root, &opening_root)?;
         if closing.certificate != opening_certificate {
             return Err(CodexSourceBackedErrorV0::Capture(
                 CaptureError::SourceChangedDuringCapture,
@@ -499,7 +508,7 @@ fn ingest_codex_source_backed_inner_v0(
     let commit = writer.commit(|target| {
         if closing_inventory.is_none() {
             closing_inventory = Some(
-                discover_codex_root_inventory_v0(session_root)
+                rediscover_codex_root_inventory_v0(session_root, &opening_root)
                     .ok()
                     .and_then(|closing| {
                         (closing.certificate == opening_certificate).then_some(closing.certificate)
@@ -1148,18 +1157,19 @@ fn hydrate_codex_source_record(
     byte_length: u64,
     physical_ordinal: u64,
 ) -> CodexSourceBackedResultV0<CodexHydratedRecordV0> {
-    let range_end = byte_offset
-        .checked_add(byte_length)
-        .ok_or(CodexSourceBackedErrorV0::LocatorRangeTooLarge)?;
-    let mut file = open_ordinary_file_without_following(&source.source_path)?;
-    if file.metadata()?.len() < range_end {
-        return Err(CodexSourceBackedErrorV0::LocatorRangeMissing);
-    }
-    file.seek(SeekFrom::Start(byte_offset))?;
     let byte_length =
         usize::try_from(byte_length).map_err(|_| CodexSourceBackedErrorV0::LocatorRangeTooLarge)?;
-    let mut provider_bytes = vec![0_u8; byte_length];
-    file.read_exact(&mut provider_bytes)?;
+    let opened = open_codex_source_capability(source)?;
+    let provider_bytes = opened
+        .read_exact_range(
+            byte_offset,
+            byte_length,
+            MAX_HYDRATED_CODEX_RECORD_BYTES as usize,
+        )
+        .map_err(|error| match error {
+            CaptureError::InvalidPayload(_) => CodexSourceBackedErrorV0::LocatorRangeMissing,
+            other => CodexSourceBackedErrorV0::Capture(other),
+        })?;
     let actual_digest: [u8; 32] = Sha256::digest(&provider_bytes).into();
     if &actual_digest != locator.record_digest() {
         return Err(CodexSourceBackedErrorV0::LocatorDigestMismatch);
@@ -1169,6 +1179,23 @@ fn hydrate_codex_source_record(
         provider_bytes,
         decoded_display_text,
     })
+}
+
+fn bind_catalog_capabilities(
+    mut sources: Vec<CodexCatalogSource>,
+    root: &ProviderSourceRoot,
+    session_root: &Path,
+) -> CodexSourceBackedResultV0<Vec<CodexCatalogSource>> {
+    for source in &mut sources {
+        let relative_path = source.source_path.strip_prefix(session_root).map_err(|_| {
+            CodexSourceBackedErrorV0::Capture(CaptureError::SystemInvariant(
+                "Codex catalog source escaped its retained root authority",
+            ))
+        })?;
+        source.authority_root = Some(root.clone());
+        source.authority_relative_path = Some(relative_path.to_path_buf());
+    }
+    Ok(sources)
 }
 
 fn bind_source_keys(
@@ -1196,24 +1223,37 @@ fn bind_source_keys(
 pub(crate) fn discover_codex_root_inventory_v0(
     session_root: &Path,
 ) -> CodexSourceBackedResultV0<CodexRootInventoryV0> {
-    let opening_root_revision = codex_root_revision_v0(session_root)?;
-    let (catalog_summary, sessions) = discover_codex_session_catalog(session_root)?;
-    let discovery = super::discover_codex_catalog_sources(&sessions);
-    if catalog_summary.failed_sessions != 0 || !discovery.rejections.is_empty() {
+    let retained = discover_codex_session_catalog_retained(session_root)?;
+    build_codex_root_inventory_v0(session_root, retained)
+}
+
+fn rediscover_codex_root_inventory_v0(
+    session_root: &Path,
+    root: &ProviderSourceRoot,
+) -> CodexSourceBackedResultV0<CodexRootInventoryV0> {
+    let retained = rediscover_codex_session_catalog_retained(session_root, root)?;
+    build_codex_root_inventory_v0(session_root, retained)
+}
+
+fn build_codex_root_inventory_v0(
+    session_root: &Path,
+    retained: crate::provider::codex::catalog::RetainedCodexSessionCatalog,
+) -> CodexSourceBackedResultV0<CodexRootInventoryV0> {
+    let root_revision = codex_root_revision_v0(session_root)?;
+    let discovery = super::discover_codex_catalog_sources(&retained.sessions);
+    if retained.summary.failed_sessions != 0 || !discovery.rejections.is_empty() {
         return Err(CodexSourceBackedErrorV0::IncompleteCatalog {
             rejected: discovery.rejections.len(),
-            failed: catalog_summary.failed_sessions,
+            failed: retained.summary.failed_sessions,
         });
     }
-    let sources = bind_source_keys(discovery.sources)?;
-    let closing_root_revision = codex_root_revision_v0(session_root)?;
-    if opening_root_revision != closing_root_revision {
-        return Err(CodexSourceBackedErrorV0::Capture(
-            CaptureError::SourceChangedDuringCapture,
-        ));
-    }
-    let observation =
-        codex_inventory_observation_v0(session_root, &opening_root_revision, &sources)?;
+    let sources = bind_source_keys(bind_catalog_capabilities(
+        discovery.sources,
+        &retained.root,
+        session_root,
+    )?)?;
+    retained.root.revalidate()?;
+    let observation = codex_inventory_observation_v0(session_root, &root_revision, &sources)?;
     let source_keys = sources
         .iter()
         .map(|(_, source_key, _)| source_key.clone())
@@ -1227,6 +1267,7 @@ pub(crate) fn discover_codex_root_inventory_v0(
     Ok(CodexRootInventoryV0 {
         sources,
         certificate,
+        root: retained.root,
     })
 }
 
@@ -1273,57 +1314,10 @@ fn hash_inventory_field(hasher: &mut Sha256, value: &[u8]) {
 }
 
 fn codex_root_revision_v0(session_root: &Path) -> CodexSourceBackedResultV0<[u8; 32]> {
-    let metadata = fs::symlink_metadata(session_root)?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(CodexSourceBackedErrorV0::Capture(
-            CaptureError::InvalidProviderTranscriptPath {
-                path: session_root.to_path_buf(),
-                reason: "Codex session root must be a non-symlink directory",
-            },
-        ));
-    }
     let root_identity = crate::provider::importer::provider_path_identity(session_root)?;
     let mut revision = Sha256::new();
     revision.update(b"ctx.codex-session-root-revision-v0\0");
     hash_inventory_field(&mut revision, root_identity.as_bytes());
-    revision.update(metadata.len().to_be_bytes());
-    if let Ok(modified) = metadata.modified() {
-        let since_epoch = modified.duration_since(UNIX_EPOCH).unwrap_or_default();
-        revision.update([1]);
-        revision.update(since_epoch.as_secs().to_be_bytes());
-        revision.update(since_epoch.subsec_nanos().to_be_bytes());
-    } else {
-        revision.update([0]);
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-
-        revision.update(metadata.dev().to_be_bytes());
-        revision.update(metadata.ino().to_be_bytes());
-        revision.update(metadata.ctime().to_be_bytes());
-        revision.update(metadata.ctime_nsec().to_be_bytes());
-        revision.update(metadata.mode().to_be_bytes());
-        revision.update(metadata.uid().to_be_bytes());
-        revision.update(metadata.gid().to_be_bytes());
-    }
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::fs::MetadataExt;
-
-        revision.update(metadata.file_attributes().to_be_bytes());
-        revision.update(metadata.creation_time().to_be_bytes());
-        revision.update(metadata.last_write_time().to_be_bytes());
-        revision.update(metadata.file_size().to_be_bytes());
-        revision.update(
-            metadata
-                .volume_serial_number()
-                .unwrap_or_default()
-                .to_be_bytes(),
-        );
-        revision.update(metadata.file_index().unwrap_or_default().to_be_bytes());
-    }
     Ok(revision.finalize().into())
 }
 

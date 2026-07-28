@@ -3,6 +3,7 @@ use std::{
     fs::File,
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::Path,
+    sync::Arc,
 };
 
 use chrono::{DateTime, Utc};
@@ -29,18 +30,19 @@ use super::{
     source::{CodexAppendProof, CodexCatalogSource, CodexFileObservation},
 };
 use crate::{
-    observe_ordinary_file,
+    common::io::{open_provider_source_file, OpenedProviderSourceFile},
     provider::codex::events::{codex_is_command_tool, codex_result_content, CodexToolCallContext},
     provider::file_touches::{
         event_type_supports_structured_file_touches, visit_provider_file_touch_drafts_with_limit,
         MAX_PACKED_PROVIDER_EVENT_INDEX, MAX_PROVIDER_FILE_TOUCHES_PER_EVENT,
         PROVIDER_FILE_TOUCH_LIMIT_REJECTION,
     },
-    provider_sources::open_ordinary_file_without_following,
     CaptureError, OutputAssociations, OutputCommandContext, OutputNativeCoordinate,
     OutputObservationKind, OutputOutcome, OutputOutcomeMetadata, OutputSourceLocator,
     ProOutputObservation, Result,
 };
+#[cfg(test)]
+use crate::{observe_ordinary_file, provider_sources::open_ordinary_file_without_following};
 
 const MAX_REJECTION_DETAILS: usize = 32;
 const CHECKPOINT_READ_BUFFER_BYTES: usize = 64 * 1024;
@@ -408,6 +410,7 @@ impl CodexSourceScan {
 #[derive(Debug)]
 pub(crate) struct CodexNativeScanner {
     source: CodexCatalogSource,
+    opened: Arc<OpenedProviderSourceFile>,
     before: CodexFileObservation,
     reader: BufReader<File>,
     profile: CodexNativeProfile,
@@ -490,6 +493,9 @@ mod scanner;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use checkpoint::revalidate_codex_source_observation;
 use checkpoint::*;
+pub(crate) use checkpoint::{
+    open_codex_source_capability, opened_file_observation as opened_codex_file_observation,
+    revalidate_codex_source_observation,
+};
 use identity::*;

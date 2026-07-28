@@ -49,7 +49,6 @@ use crate::{
             NativeProReplayFailure, NativeProReplayPage, NativeSafeFrontier, NativeSourceIdentity,
         },
     },
-    provider_sources::observe_ordinary_file_strong_metadata,
     stable_capture_uuid, CaptureError, OutputNativeCursor, OutputSourceIdentity, ProOutputProgress,
     ProOutputSink, ProOutputSinkError, ProOutputSourceDisposition, Result as CaptureResult,
     CODEX_SESSION_SOURCE_FORMAT,
