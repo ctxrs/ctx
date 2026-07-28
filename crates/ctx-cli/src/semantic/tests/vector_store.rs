@@ -76,7 +76,7 @@ fn create_legacy_sidecar(path: &Path, user_version: i64) -> Result<()> {
 }
 
 #[test]
-fn clean_v6_schema_has_one_vector_representation_and_no_plaintext() -> Result<()> {
+fn clean_v7_schema_has_source_metadata_one_vector_representation_and_no_plaintext() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("vectors.sqlite");
     let store = SemanticVectorStore::open(&path)?;
@@ -100,12 +100,21 @@ fn clean_v6_schema_has_one_vector_representation_and_no_plaintext() -> Result<()
     assert!(!schema.contains("embedding_f32"));
     assert!(!schema.contains("chunk_text"));
     assert!(!schema.contains("event_embeddings"));
+    assert!(schema.contains("semantic_source_documents"));
+    assert_eq!(
+        store.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('semantic_source_documents')",
+            [],
+            |row| row.get::<_, i64>(0)
+        )?,
+        6
+    );
     assert_eq!(store.plaintext_value_count()?, 0);
     Ok(())
 }
 
 #[test]
-fn recognized_v3_and_v5_sidecars_reset_to_clean_v6() -> Result<()> {
+fn recognized_v3_and_v5_sidecars_reset_to_clean_v7() -> Result<()> {
     for version in [3, 5] {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join(format!("vectors-v{version}.sqlite"));
@@ -131,6 +140,44 @@ fn recognized_v3_and_v5_sidecars_reset_to_clean_v6() -> Result<()> {
 }
 
 #[test]
+fn recognized_owned_v6_sidecar_resets_to_source_backed_v7() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("vectors.sqlite");
+    {
+        let mut store = SemanticVectorStore::open(&path)?;
+        store.upsert_chunk_embeddings(&[(
+            test_chunk(Uuid::new_v4(), 1, "legacy-v6"),
+            test_embedding(1.0, 0.0),
+        )])?;
+    }
+    {
+        let connection = Connection::open(&path)?;
+        connection.execute_batch(
+            "DROP TABLE semantic_source_documents;
+             PRAGMA user_version = 6;",
+        )?;
+    }
+
+    let store = SemanticVectorStore::open(&path)?;
+    assert_eq!(store.cached_or_exact_stats()?.embedded_items, 0);
+    assert_eq!(
+        store.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('semantic_source_documents')",
+            [],
+            |row| row.get::<_, i64>(0)
+        )?,
+        6
+    );
+    assert_eq!(
+        store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?,
+        SEMANTIC_VECTOR_SCHEMA_VERSION
+    );
+    Ok(())
+}
+
+#[test]
 fn future_owned_schema_is_preserved_and_rejected() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("vectors.sqlite");
@@ -141,7 +188,7 @@ fn future_owned_schema_is_preserved_and_rejected() -> Result<()> {
             r#"
             CREATE TABLE future_marker(value TEXT NOT NULL);
             INSERT INTO future_marker(value) VALUES ('preserve-me');
-            PRAGMA user_version = 7;
+            PRAGMA user_version = 8;
             "#,
         )?;
     }
@@ -160,7 +207,7 @@ fn future_owned_schema_is_preserved_and_rejected() -> Result<()> {
     assert_eq!(marker, "preserve-me");
     assert_eq!(
         connection.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?,
-        7
+        SEMANTIC_VECTOR_SCHEMA_VERSION + 1
     );
     Ok(())
 }
