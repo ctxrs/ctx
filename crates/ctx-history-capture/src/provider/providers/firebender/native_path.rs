@@ -247,13 +247,14 @@ impl FirebenderSqliteDatabase {
         self.revalidate()?;
         let snapshot = open_sqlite_source_snapshot(path, self.opened.file())
             .map_err(|error| firebender_sqlite_source_error(path, error))?;
-        if snapshot.evidence() != &self.evidence {
-            return Err(CaptureError::SourceChangedDuringCapture);
-        }
-        let result = snapshot
-            .connection()
-            .map_err(|error| firebender_sqlite_source_error(path, error))
-            .and_then(query);
+        let result = if snapshot.evidence() == &self.evidence {
+            snapshot
+                .connection()
+                .map_err(|error| firebender_sqlite_source_error(path, error))
+                .and_then(query)
+        } else {
+            Err(CaptureError::SourceChangedDuringCapture)
+        };
         let finished = snapshot
             .finish()
             .map_err(|error| firebender_sqlite_source_error(path, error))?;
