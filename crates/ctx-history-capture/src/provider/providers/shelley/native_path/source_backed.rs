@@ -5,15 +5,16 @@
 //! remembered project roots or manual paths into this discovery entrypoint.
 
 use std::{
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CertifiedSource, EventIdentityInput, LocatorRevisionPolicy,
-    NativeItemKey, NativeRecordCoordinate, NativeSessionKey, ProjectionContractError,
-    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation,
-    SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, AgentType, CertifiedSource, EventIdentityInput,
+    LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
+    ProjectionContractError, ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey,
+    SourceObservation, SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
 };
 use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
 use sha2::{Digest, Sha256};
@@ -55,6 +56,8 @@ const SHELLEY_LOGICAL_EVENT_KIND: &str = "shelley-message";
 const SHELLEY_NATIVE_MESSAGE_NAMESPACE: &str = "shelley.message";
 const SHELLEY_COMPOUND_LOCATOR_RELATION: &str = "shelley-compound-message-row-v1";
 const SHELLEY_CERTIFIED_STREAM_DOMAIN: &[u8] = b"ctx-shelley-source-backed-stream-v1\0";
+const SHELLEY_MAX_LINEAGE_DEPTH: usize = 256;
+const SHELLEY_LINEAGE_LABEL_MAX_CHARS: usize = 256;
 
 #[derive(Debug, Error)]
 pub(crate) enum ShelleySourceBackedError {
@@ -76,6 +79,8 @@ pub(crate) enum ShelleySourceBackedError {
     StaleRecordEvidence,
     #[error("Shelley source-backed projection produced no bounded lexical body")]
     MissingLexicalBody,
+    #[error("Shelley source-backed conversation lineage is invalid: {0}")]
+    InvalidLineage(String),
 }
 
 pub(crate) type ShelleySourceBackedResult<T> = Result<T, ShelleySourceBackedError>;
@@ -108,8 +113,9 @@ impl ShelleySourceBackedAdapter {
             return Err(CaptureError::SourceChangedDuringCapture.into());
         }
 
-        let sqlite_user_version =
-            conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?;
+        let sqlite_user_version = conn
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .map_err(CaptureError::from)?;
         let schema_fingerprint = sqlite_schema_fingerprint(&conn)?;
         let conversation_columns = shelley_conversation_columns(&conn)?;
         let message_columns = shelley_message_columns(&conn)?;
@@ -148,6 +154,7 @@ impl ShelleySourceBackedAdapter {
             content_digest,
             counts: ScannedSourceCounts::default(),
             emitted_pages: 0,
+            session_lineages: HashMap::new(),
             receipt: None,
         })
     }
@@ -223,8 +230,8 @@ impl ShelleySourceBackedAdapter {
 pub(crate) fn discover_shelley_source_backed_exact_cwd(
     cwd: &Path,
 ) -> ShelleySourceBackedResult<Option<ShelleySourceBackedAdapter>> {
-    let exact_cwd = fs::canonicalize(cwd)?;
-    let cwd_metadata = fs::symlink_metadata(&exact_cwd)?;
+    let exact_cwd = fs::canonicalize(cwd).map_err(CaptureError::from)?;
+    let cwd_metadata = fs::symlink_metadata(&exact_cwd).map_err(CaptureError::from)?;
     if !cwd_metadata.file_type().is_dir() {
         return Err(CaptureError::InvalidProviderTranscriptPath {
             path: exact_cwd,
@@ -273,6 +280,7 @@ pub(crate) struct ShelleySourceBackedScan {
     content_digest: Sha256,
     counts: ScannedSourceCounts,
     emitted_pages: u64,
+    session_lineages: HashMap<String, ShelleyDocumentLineage>,
     receipt: Option<ShelleySourceBackedReceipt>,
 }
 
@@ -338,7 +346,10 @@ impl ShelleySourceBackedScan {
                         value.parent_bearing,
                     );
                     let record_digest = shelley_logical_record_digest(&values);
-                    match build_document(&self.source, &self.context, &value, record_digest) {
+                    let lineage = self.resolve_document_lineage(&value.conversation);
+                    match lineage.and_then(|lineage| {
+                        build_document(&self.source, &self.context, &value, record_digest, &lineage)
+                    }) {
                         Ok(Some(document)) => {
                             self.hash_record(
                                 rowid,
@@ -362,7 +373,8 @@ impl ShelleySourceBackedScan {
                         Err(
                             error @ (ShelleySourceBackedError::Projection(_)
                             | ShelleySourceBackedError::Resolver(_)
-                            | ShelleySourceBackedError::MissingLexicalBody),
+                            | ShelleySourceBackedError::MissingLexicalBody
+                            | ShelleySourceBackedError::InvalidLineage(_)),
                         ) => {
                             self.hash_record(
                                 rowid,
@@ -413,6 +425,132 @@ impl ShelleySourceBackedScan {
                 self.content_digest.update(digest);
             }
             None => self.content_digest.update([0]),
+        }
+    }
+
+    fn resolve_document_lineage(
+        &mut self,
+        conversation: &super::super::relationships::ShelleyConversationRow,
+    ) -> ShelleySourceBackedResult<ShelleyDocumentLineage> {
+        if let Some(lineage) = self.session_lineages.get(&conversation.conversation_id) {
+            return Ok(lineage.clone());
+        }
+
+        let session_id = shelley_session_identity(&self.source, &conversation.conversation_id)?;
+        let parent_session_id = conversation
+            .parent_conversation_id
+            .as_deref()
+            .map(|parent| shelley_session_identity(&self.source, parent))
+            .transpose()?;
+        let is_primary =
+            conversation.parent_conversation_id.is_none() && conversation.user_initiated;
+        let agent_type = if is_primary {
+            AgentType::Primary
+        } else {
+            AgentType::Subagent
+        };
+
+        let mut seen = HashSet::from([conversation.conversation_id.clone()]);
+        let mut next_parent = conversation.parent_conversation_id.clone();
+        let mut root_provider_session_id = conversation.conversation_id.clone();
+        let mut cached_root = None;
+        for _ in 0..SHELLEY_MAX_LINEAGE_DEPTH {
+            let Some(parent_provider_session_id) = next_parent.take() else {
+                break;
+            };
+            // Validate every ancestor key before retaining or reporting it.
+            let _ = shelley_session_identity(&self.source, &parent_provider_session_id)?;
+            if !seen.insert(parent_provider_session_id.clone()) {
+                return Err(ShelleySourceBackedError::InvalidLineage(format!(
+                    "cycle containing {}",
+                    shelley_lineage_label(&parent_provider_session_id)
+                )));
+            }
+            if let Some(parent_lineage) = self.session_lineages.get(&parent_provider_session_id) {
+                cached_root = Some(parent_lineage.root_session_id);
+                break;
+            }
+            root_provider_session_id = parent_provider_session_id.clone();
+            next_parent = self.load_parent_conversation_id(&parent_provider_session_id)?;
+        }
+        if next_parent.is_some() {
+            return Err(ShelleySourceBackedError::InvalidLineage(format!(
+                "conversation {} exceeds the {SHELLEY_MAX_LINEAGE_DEPTH}-ancestor limit",
+                shelley_lineage_label(&conversation.conversation_id)
+            )));
+        }
+        let root_session_id = cached_root.unwrap_or(shelley_session_identity(
+            &self.source,
+            &root_provider_session_id,
+        )?);
+        let lineage = ShelleyDocumentLineage {
+            session_id,
+            parent_session_id,
+            root_session_id,
+            agent_type: agent_type.as_str().to_owned(),
+            is_primary,
+        };
+        self.session_lineages
+            .insert(conversation.conversation_id.clone(), lineage.clone());
+        Ok(lineage)
+    }
+
+    fn load_parent_conversation_id(
+        &self,
+        provider_session_id: &str,
+    ) -> ShelleySourceBackedResult<Option<String>> {
+        let sql = format!(
+            "select {}, {}
+             from conversations c
+             where typeof(c.conversation_id) = 'text' and c.conversation_id = ?1
+             order by c.rowid limit 2",
+            self.conversation_select[1], self.conversation_select[8],
+        );
+        let mut statement = self.conn.prepare(&sql).map_err(CaptureError::from)?;
+        let candidates = statement
+            .query_map([provider_session_id], |row| {
+                Ok((
+                    row.get::<_, rusqlite::types::Value>(0)?,
+                    row.get::<_, rusqlite::types::Value>(1)?,
+                ))
+            })
+            .map_err(CaptureError::from)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(CaptureError::from)?;
+        let [(resolved_provider_session_id, parent_provider_session_id)] = candidates.as_slice()
+        else {
+            let issue = if candidates.is_empty() {
+                "missing"
+            } else {
+                "duplicate"
+            };
+            return Err(ShelleySourceBackedError::InvalidLineage(format!(
+                "{issue} ancestor conversation {}",
+                shelley_lineage_label(provider_session_id)
+            )));
+        };
+        let rusqlite::types::Value::Text(resolved_provider_session_id) =
+            resolved_provider_session_id
+        else {
+            return Err(ShelleySourceBackedError::InvalidLineage(
+                "ancestor conversation ID is not text".to_owned(),
+            ));
+        };
+        if resolved_provider_session_id.as_str() != provider_session_id {
+            return Err(ShelleySourceBackedError::InvalidLineage(format!(
+                "ancestor conversation key mismatch for {}",
+                shelley_lineage_label(provider_session_id)
+            )));
+        }
+        match parent_provider_session_id {
+            rusqlite::types::Value::Null => Ok(None),
+            rusqlite::types::Value::Text(parent_provider_session_id) => {
+                Ok(Some(parent_provider_session_id.clone()))
+            }
+            _ => Err(ShelleySourceBackedError::InvalidLineage(format!(
+                "ancestor conversation {} has a non-text parent ID",
+                shelley_lineage_label(provider_session_id)
+            ))),
         }
     }
 
@@ -471,11 +609,41 @@ enum RecordDisposition {
     Ignored = 3,
 }
 
+#[derive(Debug, Clone)]
+struct ShelleyDocumentLineage {
+    session_id: StableEntityId,
+    parent_session_id: Option<StableEntityId>,
+    root_session_id: StableEntityId,
+    agent_type: String,
+    is_primary: bool,
+}
+
+fn shelley_session_identity(
+    source: &SourceKey,
+    provider_session_id: &str,
+) -> ShelleySourceBackedResult<StableEntityId> {
+    let native_session_key = NativeSessionKey::native_id(
+        SHELLEY_NATIVE_SESSION_NAMESPACE,
+        TypedKey::utf8(provider_session_id.to_owned())?,
+    )?;
+    derive_session_id(SessionIdentityInput {
+        source,
+        logical_session_kind: SHELLEY_LOGICAL_SESSION_KIND,
+        native_session_key: &native_session_key,
+    })
+    .map_err(Into::into)
+}
+
+fn shelley_lineage_label(provider_session_id: &str) -> String {
+    provider_local_preview(provider_session_id, SHELLEY_LINEAGE_LABEL_MAX_CHARS).0
+}
+
 fn build_document(
     source: &SourceKey,
     context: &ProviderAdapterContext,
     value: &ShelleyMessage,
     record_digest: [u8; 32],
+    lineage: &ShelleyDocumentLineage,
 ) -> ShelleySourceBackedResult<Option<LexicalDocument>> {
     let Some(event) = shelley_core_event(
         &value.message,
@@ -486,15 +654,6 @@ fn build_document(
     else {
         return Ok(None);
     };
-    let native_session_key = NativeSessionKey::native_id(
-        SHELLEY_NATIVE_SESSION_NAMESPACE,
-        TypedKey::utf8(value.message.conversation_id.clone())?,
-    )?;
-    let session_id = derive_session_id(SessionIdentityInput {
-        source,
-        logical_session_kind: SHELLEY_LOGICAL_SESSION_KIND,
-        native_session_key: &native_session_key,
-    })?;
     let native_item_key = NativeItemKey::composite(
         SHELLEY_NATIVE_MESSAGE_NAMESPACE,
         vec![
@@ -505,7 +664,7 @@ fn build_document(
     )?;
     let event_id = derive_event_id(EventIdentityInput {
         source,
-        session_id,
+        session_id: lineage.session_id,
         logical_item_kind: SHELLEY_LOGICAL_EVENT_KIND,
         native_item_key: &native_item_key,
         subrecord_selector: None,
@@ -546,10 +705,19 @@ fn build_document(
     let occurred_at = shelley_timestamp(value.message.created_at.as_deref(), started_at);
     Ok(Some(LexicalDocument {
         event_id,
-        session_id,
+        session_id: lineage.session_id,
+        parent_session_id: lineage.parent_session_id,
+        root_session_id: lineage.root_session_id,
         source: source.clone(),
         locator,
         provider_session_id: Some(value.message.conversation_id.clone()),
+        branch: None,
+        source_path: context
+            .source_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        agent_type: lineage.agent_type.clone(),
+        is_primary: lineage.is_primary,
         event_sequence: value.provider_event_index,
         occurred_at_unix_ms: Some(occurred_at.timestamp_millis()),
         event_type: event.event_type.as_str().to_owned(),
@@ -630,9 +798,11 @@ mod tests {
         conn.execute_batch(
             "create table conversations (
                  conversation_id text not null,
+                 user_initiated integer,
                  created_at text,
                  updated_at text,
-                 cwd text
+                 cwd text,
+                 parent_conversation_id text
              );
              create table messages (
                  message_id text not null,
@@ -648,13 +818,16 @@ mod tests {
         .unwrap();
         conn.execute(
             "insert into conversations (
-                 conversation_id, created_at, updated_at, cwd
-             ) values (?1, ?2, ?3, ?4)",
+                 conversation_id, user_initiated, created_at, updated_at, cwd,
+                 parent_conversation_id
+             ) values (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 "conversation-1",
+                1_i64,
                 "2026-07-28T20:00:00Z",
                 "2026-07-28T20:01:00Z",
-                "/workspace/project"
+                "/workspace/project",
+                Option::<String>::None,
             ],
         )
         .unwrap();
@@ -706,6 +879,12 @@ mod tests {
         let cold = &cold_documents[0];
         assert_eq!(cold.body.chars().count(), MAX_BODY_PREVIEW_CHARS);
         assert_eq!(cold.provider_session_id.as_deref(), Some("conversation-1"));
+        assert_eq!(cold.parent_session_id, None);
+        assert_eq!(cold.root_session_id, cold.session_id);
+        assert_eq!(cold.branch, None);
+        assert_eq!(cold.source_path.as_deref(), database.to_str());
+        assert_eq!(cold.agent_type, AgentType::Primary.as_str());
+        assert!(cold.is_primary);
         assert_eq!(cold_receipt.emitted_pages, 1);
         assert_eq!(
             cold_receipt.certificate.counts(),
@@ -770,6 +949,82 @@ mod tests {
             adapter.hydrate(&replaced.locator).unwrap().text,
             replacement
         );
+    }
+
+    #[test]
+    fn shelley_source_backed_lineage_uses_native_parent_and_root_threads() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let database = create_fixture(temp.path(), "root");
+        let conn = Connection::open(&database).unwrap();
+        conn.execute(
+            "insert into conversations (
+                 conversation_id, user_initiated, created_at, updated_at, cwd,
+                 parent_conversation_id
+             ) values (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                "conversation-child",
+                0_i64,
+                "2026-07-28T20:02:00Z",
+                "2026-07-28T20:03:00Z",
+                "/workspace/project",
+                "conversation-1",
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "insert into conversations (
+                 conversation_id, user_initiated, created_at, updated_at, cwd,
+                 parent_conversation_id
+             ) values (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                "conversation-grandchild",
+                0_i64,
+                "2026-07-28T20:04:00Z",
+                "2026-07-28T20:05:00Z",
+                "/workspace/project",
+                "conversation-child",
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "insert into messages (
+                 message_id, conversation_id, sequence_id, type, user_data, created_at
+             ) values (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                "message-grandchild",
+                "conversation-grandchild",
+                1_i64,
+                "assistant",
+                "nested Shelley message",
+                "2026-07-28T20:04:30Z",
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let adapter = discover_shelley_source_backed_exact_cwd(temp.path())
+            .unwrap()
+            .unwrap();
+        let (documents, _) = drain(&adapter);
+        let root = documents
+            .iter()
+            .find(|document| document.provider_session_id.as_deref() == Some("conversation-1"))
+            .unwrap();
+        let nested = documents
+            .iter()
+            .find(|document| {
+                document.provider_session_id.as_deref() == Some("conversation-grandchild")
+            })
+            .unwrap();
+        let child_session_id =
+            shelley_session_identity(adapter.source(), "conversation-child").unwrap();
+
+        assert_eq!(nested.parent_session_id, Some(child_session_id));
+        assert_eq!(nested.root_session_id, root.session_id);
+        assert_eq!(nested.agent_type, AgentType::Subagent.as_str());
+        assert!(!nested.is_primary);
+        assert_eq!(nested.branch, None);
+        assert_eq!(nested.source_path.as_deref(), database.to_str());
     }
 
     #[test]
