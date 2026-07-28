@@ -5,6 +5,7 @@ impl ClineNativeReader {
     pub(super) fn make_array_page(
         &self,
         source: ClineFileSourceIdentity,
+        authority_observation: ClineComponentObservation,
         revision: ClineCertifiedRevision,
         expected: ClinePageFrontier,
         next: ClinePageFrontier,
@@ -113,6 +114,7 @@ impl ClineNativeReader {
         Ok(ClineCertifiedPage {
             identity,
             source,
+            authority_observation,
             source_revision: revision,
             expected_frontier: expected,
             next_safe_frontier: next,
@@ -199,6 +201,7 @@ impl ClineNativeReader {
         Ok(ClineCertifiedPage {
             identity,
             source,
+            authority_observation: checkpoint.observation.clone(),
             source_revision: revision,
             expected_frontier: expected,
             next_safe_frontier: next,
@@ -267,6 +270,7 @@ impl ClineNativeReader {
         Ok(ClineCertifiedPage {
             identity: page_identity(&source, &revision, &expected, &next, true, &fingerprint),
             source,
+            authority_observation: observation.clone(),
             source_revision: revision,
             expected_frontier: expected,
             next_safe_frontier: next,

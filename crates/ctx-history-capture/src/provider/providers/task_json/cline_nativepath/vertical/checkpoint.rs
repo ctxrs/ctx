@@ -288,6 +288,8 @@ impl ClinePersistedObservation {
                 component,
                 path: self.path,
                 state: ClineObservedFileState::Missing,
+                authority: None,
+                relative_path: None,
             });
         }
         Ok(ClineComponentObservation {
@@ -296,6 +298,8 @@ impl ClinePersistedObservation {
             state: ClineObservedFileState::Unavailable(
                 "persisted prior Cline component observation".into(),
             ),
+            authority: None,
+            relative_path: None,
         })
     }
 }
