@@ -21,11 +21,34 @@ pub(crate) fn provider_output_run_is_retained_failure(run: &Run) -> bool {
 }
 
 impl Store {
+    /// Reads the exact stored run row.
+    ///
+    /// `Run` covers every `runs` column, and `metadata_json` is compared as
+    /// parsed JSON, so equal rows here imply equal results for every dependent
+    /// read of this row.
+    fn stored_run_row(&self, id: Uuid) -> Result<Option<Run>> {
+        self.conn
+            .prepare_cached(run_select_sql("WHERE id = ?1").as_str())?
+            .query_row(params![id.to_string()], run_from_row)
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn upsert_run(&self, run: &Run) -> Result<()> {
         self.with_atomic_write(|| {
             if !provider_output_run_is_retained_failure(run) {
                 return Ok(());
             }
+            // Dependent fanout re-derives one canonical observation per event
+            // and file touch of this run, which is a function of rows already
+            // stored rather than of this mutation. A run row left identical
+            // cannot change any observation that reads it.
+            let journal_active = self.projection_journal_active_for_mutation()?;
+            let previous_row = if journal_active {
+                self.stored_run_row(run.id)?
+            } else {
+                None
+            };
             self.conn.execute(
                 r#"
                 INSERT INTO runs
@@ -76,7 +99,9 @@ impl Store {
                     serde_json::to_string(&run.sync.metadata)?,
                 ],
             )?;
-            self.journal_run_mutated(run.id)?;
+            if journal_active && self.stored_run_row(run.id)? != previous_row {
+                self.journal_run_mutated(run.id)?;
+            }
             Ok(())
         })
     }
