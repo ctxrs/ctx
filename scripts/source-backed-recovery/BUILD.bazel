@@ -1,0 +1,155 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "local_fault_harness_sources",
+    srcs = [
+        "fault_shim.c",
+        "run-linux-fault-tests.sh",
+    ],
+    tags = [
+        "manual",
+        "source-backed-recovery",
+    ],
+)
+
+cc_binary(
+    name = "libctx_source_recovery_fault.so",
+    srcs = ["fault_shim.c"],
+    copts = [
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+    ],
+    linkopts = ["-ldl"],
+    linkshared = True,
+    linkstatic = True,
+    tags = [
+        "fault-injection",
+        "linux-only",
+        "source-backed-recovery",
+    ],
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+SOURCE_BACKED_RECOVERY_FAULT_RUNFILES = [
+    ":libctx_source_recovery_fault.so",
+    "//crates/ctx-history-index:source_backed_recovery_tests",
+]
+
+SOURCE_BACKED_RECOVERY_FAULT_TAGS = [
+    "fault-injection",
+    "linux-only",
+    "source-backed-recovery",
+]
+
+# Each leaf target names one ignored Rust test so a failed fault point has an
+# exact Bazel reproduction. The runner receives only declared runfiles and
+# confines temporary state to Bazel's private test directory.
+sh_test(
+    name = "exact_manifest_and_tantivy_swap_process_death_matrix",
+    srcs = ["run-bazel-linux-fault-test.sh"],
+    args = [
+        "$(rootpath //crates/ctx-history-index:source_backed_recovery_tests)",
+        "$(rootpath :libctx_source_recovery_fault.so)",
+        "exact_manifest_and_tantivy_swap_process_death_matrix",
+    ],
+    data = SOURCE_BACKED_RECOVERY_FAULT_RUNFILES,
+    size = "medium",
+    tags = SOURCE_BACKED_RECOVERY_FAULT_TAGS,
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+sh_test(
+    name = "retry_after_pre_meta_crash_reclaims_tantivy_candidate_files",
+    srcs = ["run-bazel-linux-fault-test.sh"],
+    args = [
+        "$(rootpath //crates/ctx-history-index:source_backed_recovery_tests)",
+        "$(rootpath :libctx_source_recovery_fault.so)",
+        "retry_after_pre_meta_crash_reclaims_tantivy_candidate_files",
+    ],
+    data = SOURCE_BACKED_RECOVERY_FAULT_RUNFILES,
+    size = "medium",
+    tags = SOURCE_BACKED_RECOVERY_FAULT_TAGS,
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+sh_test(
+    name = "injected_enospc_and_write_sync_failures_preserve_previous_generation",
+    srcs = ["run-bazel-linux-fault-test.sh"],
+    args = [
+        "$(rootpath //crates/ctx-history-index:source_backed_recovery_tests)",
+        "$(rootpath :libctx_source_recovery_fault.so)",
+        "injected_enospc_and_write_sync_failures_preserve_previous_generation",
+    ],
+    data = SOURCE_BACKED_RECOVERY_FAULT_RUNFILES,
+    size = "medium",
+    tags = SOURCE_BACKED_RECOVERY_FAULT_TAGS,
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+sh_test(
+    name = "reproduction_crash_orphan_survives_writer_reopen",
+    srcs = ["run-bazel-linux-fault-test.sh"],
+    args = [
+        "$(rootpath //crates/ctx-history-index:source_backed_recovery_tests)",
+        "$(rootpath :libctx_source_recovery_fault.so)",
+        "reproduction_crash_orphan_survives_writer_reopen",
+    ],
+    data = SOURCE_BACKED_RECOVERY_FAULT_RUNFILES,
+    size = "medium",
+    tags = SOURCE_BACKED_RECOVERY_FAULT_TAGS + [
+        "manual",
+        "negative-reproduction",
+    ],
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+sh_test(
+    name = "reproduction_reused_manifest_skips_directory_durability_fence",
+    srcs = ["run-bazel-linux-fault-test.sh"],
+    args = [
+        "$(rootpath //crates/ctx-history-index:source_backed_recovery_tests)",
+        "$(rootpath :libctx_source_recovery_fault.so)",
+        "reproduction_reused_manifest_skips_directory_durability_fence",
+    ],
+    data = SOURCE_BACKED_RECOVERY_FAULT_RUNFILES,
+    size = "medium",
+    tags = SOURCE_BACKED_RECOVERY_FAULT_TAGS + [
+        "manual",
+        "negative-reproduction",
+    ],
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+test_suite(
+    name = "fault_qualification",
+    tests = [
+        ":exact_manifest_and_tantivy_swap_process_death_matrix",
+        ":injected_enospc_and_write_sync_failures_preserve_previous_generation",
+        ":retry_after_pre_meta_crash_reclaims_tantivy_candidate_files",
+    ],
+)
+
+# The full target also runs known-bug witness tests. Keep it explicit and manual
+# so those negative reproductions never masquerade as positive CI qualification.
+sh_test(
+    name = "full_fault_reproductions",
+    srcs = ["run-bazel-linux-fault-test.sh"],
+    args = [
+        "$(rootpath //crates/ctx-history-index:source_backed_recovery_tests)",
+        "$(rootpath :libctx_source_recovery_fault.so)",
+        "*",
+    ],
+    data = SOURCE_BACKED_RECOVERY_FAULT_RUNFILES,
+    size = "medium",
+    tags = SOURCE_BACKED_RECOVERY_FAULT_TAGS + [
+        "destructive-fault-injection",
+        "manual",
+        "negative-reproduction",
+    ],
+    target_compatible_with = ["@platforms//os:linux"],
+)

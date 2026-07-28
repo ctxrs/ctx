@@ -60,3 +60,33 @@ ctx_rust_test(
     ),
     rustc_env = COMMON_RUSTC_ENV,
 )
+
+ctx_rust_test(
+    name = "source_backed_recovery_tests",
+    srcs = ["tests/source_backed_recovery.rs"],
+    crate_name = "source_backed_recovery",
+    crate_root = "tests/source_backed_recovery.rs",
+    edition = crate_edition(),
+    aliases = aliases(
+        normal_dev = True,
+        proc_macro_dev = True,
+    ),
+    deps = all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ) + [
+        ":lib",
+        "//crates/ctx-history-core:lib",
+    ],
+    proc_macro_deps = all_crate_deps(
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    rustc_env = COMMON_RUSTC_ENV,
+    tags = [
+        "linux-only",
+        "safe-presubmit",
+        "source-backed-recovery",
+    ],
+    target_compatible_with = ["@platforms//os:linux"],
+)
