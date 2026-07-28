@@ -454,34 +454,7 @@ pub(super) fn attach_lingma_complete_content_locator(
 pub(in super::super) fn lingma_logical_record_digest(
     values: &[NativeSqliteValue],
 ) -> Result<CompleteContentBodyDigest> {
-    const DOMAIN: &[u8] = b"ctx-complete-content-sqlite-logical-row-v1\0";
-    let mut digest = Sha256::new();
-    digest.update(DOMAIN);
-    digest.update((values.len() as u64).to_be_bytes());
-    for value in values {
-        match value {
-            NativeSqliteValue::Null => digest.update([0]),
-            NativeSqliteValue::Integer(value) => {
-                digest.update([1]);
-                digest.update(value.to_be_bytes());
-            }
-            NativeSqliteValue::RealBits(value) => {
-                digest.update([2]);
-                digest.update(value.to_be_bytes());
-            }
-            NativeSqliteValue::Text(value) => {
-                digest.update([3]);
-                digest.update((value.len() as u64).to_be_bytes());
-                digest.update(value.as_bytes());
-            }
-            NativeSqliteValue::Blob(value) => {
-                digest.update([4]);
-                digest.update((value.len() as u64).to_be_bytes());
-                digest.update(value);
-            }
-        }
-    }
-    CompleteContentBodyDigest::parse(format!("{:x}", digest.finalize())).ok_or(
+    CompleteContentBodyDigest::parse(format!("{:x}", lingma_logical_record_sha256(values))).ok_or(
         CaptureError::SystemInvariant("Lingma logical-row digest is not canonical SHA-256"),
     )
 }

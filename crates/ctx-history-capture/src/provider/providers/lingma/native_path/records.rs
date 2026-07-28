@@ -232,6 +232,37 @@ pub(super) fn optional_native_integer(
     }
 }
 
+pub(super) fn lingma_logical_record_sha256(values: &[NativeSqliteValue]) -> [u8; 32] {
+    const DOMAIN: &[u8] = b"ctx-complete-content-sqlite-logical-row-v1\0";
+    let mut digest = Sha256::new();
+    digest.update(DOMAIN);
+    digest.update((values.len() as u64).to_be_bytes());
+    for value in values {
+        match value {
+            NativeSqliteValue::Null => digest.update([0]),
+            NativeSqliteValue::Integer(value) => {
+                digest.update([1]);
+                digest.update(value.to_be_bytes());
+            }
+            NativeSqliteValue::RealBits(value) => {
+                digest.update([2]);
+                digest.update(value.to_be_bytes());
+            }
+            NativeSqliteValue::Text(value) => {
+                digest.update([3]);
+                digest.update((value.len() as u64).to_be_bytes());
+                digest.update(value.as_bytes());
+            }
+            NativeSqliteValue::Blob(value) => {
+                digest.update([4]);
+                digest.update((value.len() as u64).to_be_bytes());
+                digest.update(value);
+            }
+        }
+    }
+    digest.finalize().into()
+}
+
 pub(super) fn hash_bytes(hasher: &mut Sha256, bytes: &[u8]) {
     hasher.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
     hasher.update(bytes);
