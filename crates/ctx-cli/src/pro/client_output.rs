@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use ctx_history_capture::{
     ImportProfile, OutputAssociations as CaptureOutputAssociations,
@@ -20,10 +20,7 @@ use ctx_history_capture::{
     ProOutputObservation as CaptureOutputObservation, ProOutputPageResult, ProOutputProgress,
     ProOutputSink, ProOutputSinkError, ProOutputSourceDisposition,
 };
-use ctx_history_core::{
-    CertifiedSource, CertifiedSourceDeletion, CertifiedSourceInventory, EventHydrationRequest,
-    SessionHydrationRequest, SourceFrontier, SourceKey, SourceRecordLocator, StableEntityId,
-};
+use ctx_history_core::{CertifiedSource, SourceFrontier, SourceKey};
 use ctx_pro_host_protocol::{
     BeginOutputInventoryRequest, Capability, FinishOutputInventoryRequest, HelperMessage,
     HostMessage, ObserveOutputSourceRequest, OutputAssociations, OutputCommandContext,
@@ -33,7 +30,6 @@ use ctx_pro_host_protocol::{
     OutputSourceIdentity, OutputSourceLocator, ProOutputMaterializationPage, ProOutputObservation,
     TransientOutputContent, OUTPUT_MATERIALIZATION_CONTRACT_VERSION,
 };
-use sha2::{Digest, Sha256};
 
 use super::{protocol_error, stable_error_code, ProClient, BATCH_TIMEOUT};
 
@@ -197,167 +193,30 @@ impl ProOutputImport {
     }
 }
 
-/// Public source-authority seam awaiting the matching Pro protocol messages.
+/// Deferred Pro catch-up over the authoritative source-backed wire contract.
 ///
-/// The module is production code, but its only current consumer is the focused
-/// contract suite until the private helper implements `SourceBackedProConsumer`.
+/// Core is already published before this coordinator runs. Any helper or
+/// hydration failure therefore leaves Core intact and Pro retryable from its
+/// independently committed per-source progress.
 #[allow(dead_code)]
 pub(crate) mod source_backed_feed {
     use super::*;
+    use ctx_pro_host_protocol::{
+        certified_source_revision_sha256, BeginSourceManifestRequest, DeleteSourceRequest,
+        FinishSourceManifestRequest, MaterializeSourcePageRequest, PrepareSourceRequest,
+        SourceDeleted, SourceDisposition, SourceManifest, SourceManifestBegan,
+        SourceManifestFinished, SourceManifestReceipt, SourcePageMaterialized, SourcePrepared,
+        SourceProgress, SourceRecord, SourceRemoval,
+    };
 
-    pub(crate) const SOURCE_BACKED_PRO_FEED_CONTRACT_VERSION: u16 = 1;
-    const MAX_TRANSIENT_CANONICAL_RECORD_BYTES: usize = 16 * 1024 * 1024;
-    const MAX_TRANSIENT_CANONICAL_PAGE_BYTES: usize = 32 * 1024 * 1024;
     const MAX_CANONICAL_SOURCE_PAGES: u64 = 1_000_000;
 
-    /// A Core-accepted deletion paired with the exact complete provider inventory
-    /// that witnessed it.
-    #[derive(Debug, Clone)]
-    pub(crate) struct SourceBackedProRemoval {
-        pub(crate) deletion: CertifiedSourceDeletion,
-        pub(crate) inventory: CertifiedSourceInventory,
-    }
-
-    impl SourceBackedProRemoval {
-        pub(crate) fn new(
-            deletion: CertifiedSourceDeletion,
-            inventory: CertifiedSourceInventory,
-        ) -> Result<Self> {
-            if !deletion.verifies(&inventory) {
-                bail!("invalid_request: source deletion does not match its complete inventory");
-            }
-            Ok(Self {
-                deletion,
-                inventory,
-            })
-        }
-    }
-
-    /// Immutable, content-addressed Core source authority consumed by Pro.
-    ///
-    /// It contains source certificates and complete-inventory deletion witnesses,
-    /// never provider record bodies. `core_generation_id` is the committed Core
-    /// receipt and is not advanced or rolled back by this bridge.
-    #[derive(Debug, Clone)]
-    pub(crate) struct SourceBackedProManifest {
-        pub(crate) contract_version: u16,
-        pub(crate) core_generation_id: String,
-        pub(crate) sources: Vec<CertifiedSource>,
-        pub(crate) removals: Vec<SourceBackedProRemoval>,
-    }
-
-    impl SourceBackedProManifest {
-        pub(crate) fn new(
-            core_generation_id: impl Into<String>,
-            mut sources: Vec<CertifiedSource>,
-            mut removals: Vec<SourceBackedProRemoval>,
-        ) -> Result<Self> {
-            let core_generation_id = core_generation_id.into();
-            if !is_sha256_hex(&core_generation_id) {
-                bail!("invalid_request: Core generation ID is not canonical SHA-256");
-            }
-            for source in &sources {
-                source.validate_contract().map_err(|error| {
-                    anyhow!("invalid_request: invalid source certificate: {error}")
-                })?;
-            }
-            sources.sort_by_key(source_identity_digest);
-            if sources
-                .windows(2)
-                .any(|pair| source_identity_digest(&pair[0]) == source_identity_digest(&pair[1]))
-            {
-                bail!("invalid_request: source manifest contains duplicate source lineages");
-            }
-            removals.sort_by_key(|removal| removal.deletion.source().identity().digest());
-            if removals.windows(2).any(|pair| {
-                pair[0].deletion.source().identity().digest()
-                    == pair[1].deletion.source().identity().digest()
-            }) {
-                bail!("invalid_request: source manifest contains duplicate deletion witnesses");
-            }
-            if removals
-                .iter()
-                .any(|removal| !removal.deletion.verifies(&removal.inventory))
-            {
-                bail!("invalid_request: source manifest contains an invalid deletion witness");
-            }
-            if removals.iter().any(|removal| {
-                sources.iter().any(|source| {
-                    source_identity_digest(source) == removal.deletion.source().identity().digest()
-                })
-            }) {
-                bail!("invalid_request: source manifest both retains and deletes one source");
-            }
-            Ok(Self {
-                contract_version: SOURCE_BACKED_PRO_FEED_CONTRACT_VERSION,
-                core_generation_id,
-                sources,
-                removals,
-            })
-        }
-    }
-
-    #[derive(Debug, Clone, Default, PartialEq, Eq)]
-    pub(crate) struct SourceBackedProRecordMetadata {
-        pub(crate) provider_session_id: Option<String>,
-        pub(crate) event_sequence: u64,
-        pub(crate) occurred_at_unix_ms: Option<i64>,
-        pub(crate) event_type: String,
-        pub(crate) role: Option<String>,
-        pub(crate) workspace: Option<String>,
-        pub(crate) cwd: Option<String>,
-        pub(crate) touched_files: Vec<String>,
-    }
-
-    /// One provider record hydrated through its typed locator for this exchange.
-    ///
-    /// `provider_bytes` is transient. Consumers must derive facts during
-    /// `materialize_source_page` and retain only identities, locators, frontiers,
-    /// and derived graph state.
-    #[derive(Debug, Clone)]
-    pub(crate) struct SourceBackedProRecord {
-        pub(crate) event_id: StableEntityId,
-        pub(crate) session_id: StableEntityId,
-        pub(crate) locator: SourceRecordLocator,
-        pub(crate) metadata: SourceBackedProRecordMetadata,
-        pub(crate) provider_bytes: Vec<u8>,
-    }
-
-    impl SourceBackedProRecord {
-        pub(crate) fn new(
-            event_id: StableEntityId,
-            session_id: StableEntityId,
-            locator: SourceRecordLocator,
-            metadata: SourceBackedProRecordMetadata,
-            provider_bytes: Vec<u8>,
-        ) -> Result<Self> {
-            let record = Self {
-                event_id,
-                session_id,
-                locator,
-                metadata,
-                provider_bytes,
-            };
-            record.validate()?;
-            Ok(record)
-        }
-
-        fn validate(&self) -> Result<()> {
-            if self.provider_bytes.len() > MAX_TRANSIENT_CANONICAL_RECORD_BYTES {
-                bail!("invalid_request: transient provider record exceeds 16 MiB");
-            }
-            let event = EventHydrationRequest::new(self.event_id, self.locator.clone())
-                .map_err(|error| anyhow!("invalid_request: invalid event locator: {error}"))?;
-            SessionHydrationRequest::new(self.session_id, vec![event]).map_err(|error| {
-                anyhow!("invalid_request: invalid session locator set: {error}")
-            })?;
-            let actual_digest: [u8; 32] = Sha256::digest(&self.provider_bytes).into();
-            if actual_digest != *self.locator.record_digest() {
-                bail!("source_changed: hydrated provider record failed locator digest validation");
-            }
-            Ok(())
-        }
-    }
+    pub(crate) type SourceBackedProManifest = SourceManifest;
+    pub(crate) type SourceBackedProRemoval = SourceRemoval;
+    pub(crate) type SourceBackedProProgress = SourceProgress;
+    pub(crate) type SourceBackedProRecord = SourceRecord;
+    pub(crate) type SourceBackedProReceipt = SourceManifestReceipt;
+    pub(crate) type SourceBackedProDisposition = SourceDisposition;
 
     /// Provider-owned page produced by rereading an exact certified source.
     #[derive(Debug, Clone)]
@@ -367,92 +226,6 @@ pub(crate) mod source_backed_feed {
         pub(crate) next_frontier: Option<SourceFrontier>,
         pub(crate) terminal: bool,
         pub(crate) records: Vec<SourceBackedProRecord>,
-    }
-
-    /// Content-free Pro progress for one canonical source.
-    #[derive(Debug, Clone)]
-    pub(crate) struct SourceBackedProProgress {
-        pub(crate) source: SourceKey,
-        pub(crate) source_epoch: u64,
-        pub(crate) certified_revision: [u8; 32],
-        pub(crate) frontier: Option<SourceFrontier>,
-        pub(crate) materializer_revision: String,
-        pub(crate) terminal: bool,
-    }
-
-    #[derive(Debug, Clone)]
-    pub(crate) struct SourceBackedProConsumerState {
-        pub(crate) materializer_revision: String,
-        pub(crate) sources: Vec<SourceBackedProProgress>,
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub(crate) enum SourceBackedProDisposition {
-        NewSource,
-        Resume,
-        Rewrite,
-    }
-
-    #[derive(Debug, Clone)]
-    pub(crate) struct PrepareSourceBackedProSource {
-        pub(crate) core_generation_id: String,
-        pub(crate) source: SourceKey,
-        pub(crate) certified_revision: [u8; 32],
-        pub(crate) materializer_revision: String,
-        pub(crate) disposition: SourceBackedProDisposition,
-        pub(crate) expected_prior: Option<SourceBackedProProgress>,
-    }
-
-    #[derive(Debug, Clone)]
-    pub(crate) struct PreparedSourceBackedProSource {
-        pub(crate) source: SourceKey,
-        pub(crate) source_epoch: u64,
-        pub(crate) certified_revision: [u8; 32],
-        pub(crate) frontier: Option<SourceFrontier>,
-        pub(crate) terminal: bool,
-    }
-
-    /// One independently CAS-guarded source page sent to Pro.
-    #[derive(Debug)]
-    pub(crate) struct MaterializeSourceBackedProPage {
-        pub(crate) core_generation_id: String,
-        pub(crate) source: SourceKey,
-        pub(crate) source_epoch: u64,
-        pub(crate) certified_revision: [u8; 32],
-        pub(crate) expected_prior_frontier: Option<SourceFrontier>,
-        pub(crate) next_frontier: Option<SourceFrontier>,
-        pub(crate) terminal: bool,
-        pub(crate) records: Vec<SourceBackedProRecord>,
-    }
-
-    #[derive(Debug, Clone)]
-    pub(crate) struct MaterializedSourceBackedProPage {
-        pub(crate) source: SourceKey,
-        pub(crate) source_epoch: u64,
-        pub(crate) certified_revision: [u8; 32],
-        pub(crate) committed_frontier: Option<SourceFrontier>,
-        pub(crate) terminal: bool,
-        pub(crate) accepted_records: u64,
-    }
-
-    #[derive(Debug, Clone)]
-    pub(crate) struct DeleteSourceBackedProSource {
-        pub(crate) core_generation_id: String,
-        pub(crate) removal: SourceBackedProRemoval,
-        pub(crate) expected_prior: SourceBackedProProgress,
-    }
-
-    #[derive(Debug, Clone)]
-    pub(crate) struct DeletedSourceBackedProSource {
-        pub(crate) source: SourceKey,
-        pub(crate) removed_source_epoch: u64,
-    }
-
-    #[derive(Debug, Clone)]
-    pub(crate) struct SourceBackedProReceipt {
-        pub(crate) core_generation_id: String,
-        pub(crate) materializer_revision: String,
-        pub(crate) sources: Vec<SourceBackedProProgress>,
     }
 
     #[derive(Debug, Clone)]
@@ -479,36 +252,114 @@ pub(crate) mod source_backed_feed {
         ) -> Result<SourceBackedProviderPage>;
     }
 
-    /// Public-side protocol adapter implemented by the Pro helper client.
-    ///
-    /// Every durable input and acknowledgement is content-free. Provider bytes
-    /// cross only `materialize_source_page` and must be dropped before it returns.
+    /// Public-side protocol adapter implemented by the Pro helper session.
     pub(crate) trait SourceBackedProConsumer {
         fn begin_source_manifest(
             &mut self,
             manifest: &SourceBackedProManifest,
-        ) -> Result<SourceBackedProConsumerState>;
+        ) -> Result<SourceManifestBegan>;
 
-        fn prepare_source(
-            &mut self,
-            request: &PrepareSourceBackedProSource,
-        ) -> Result<PreparedSourceBackedProSource>;
+        fn prepare_source(&mut self, request: &PrepareSourceRequest) -> Result<SourcePrepared>;
 
         fn materialize_source_page(
             &mut self,
-            request: &MaterializeSourceBackedProPage,
-        ) -> Result<MaterializedSourceBackedProPage>;
+            request: &MaterializeSourcePageRequest,
+        ) -> Result<SourcePageMaterialized>;
 
-        fn delete_source(
-            &mut self,
-            request: &DeleteSourceBackedProSource,
-        ) -> Result<DeletedSourceBackedProSource>;
+        fn delete_source(&mut self, request: &DeleteSourceRequest) -> Result<SourceDeleted>;
 
         fn finish_source_manifest(
             &mut self,
+            request: &FinishSourceManifestRequest,
+        ) -> Result<SourceManifestFinished>;
+    }
+
+    struct ProtocolSourceBackedProConsumer {
+        client: Arc<SharedProClient>,
+    }
+
+    impl ProtocolSourceBackedProConsumer {
+        fn exchange(&self, message: HostMessage) -> Result<HelperMessage> {
+            self.client.exchange(message, BATCH_TIMEOUT)
+        }
+    }
+
+    impl SourceBackedProConsumer for ProtocolSourceBackedProConsumer {
+        fn begin_source_manifest(
+            &mut self,
             manifest: &SourceBackedProManifest,
-            expected_sources: &[SourceBackedProProgress],
-        ) -> Result<SourceBackedProReceipt>;
+        ) -> Result<SourceManifestBegan> {
+            let request = BeginSourceManifestRequest {
+                manifest: manifest.clone(),
+            };
+            validate_request(&request)?;
+            match self.exchange(HostMessage::BeginSourceManifest(request))? {
+                HelperMessage::SourceManifestBegan(result) => {
+                    validate_response(&result)?;
+                    Ok(result)
+                }
+                HelperMessage::Error(error) => Err(protocol_error(error)),
+                _ => bail!("invalid_response: helper returned a non-source-manifest response"),
+            }
+        }
+
+        fn prepare_source(&mut self, request: &PrepareSourceRequest) -> Result<SourcePrepared> {
+            validate_request(request)?;
+            match self.exchange(HostMessage::PrepareSource(request.clone()))? {
+                HelperMessage::SourcePrepared(result) => {
+                    validate_response(&result)?;
+                    Ok(result)
+                }
+                HelperMessage::Error(error) => Err(protocol_error(error)),
+                _ => bail!("invalid_response: helper returned a non-source-prepared response"),
+            }
+        }
+
+        fn materialize_source_page(
+            &mut self,
+            request: &MaterializeSourcePageRequest,
+        ) -> Result<SourcePageMaterialized> {
+            validate_request(request)?;
+            match self.exchange(HostMessage::MaterializeSourcePage(request.clone()))? {
+                HelperMessage::SourcePageMaterialized(result) => {
+                    validate_response(&result)?;
+                    Ok(result)
+                }
+                HelperMessage::Error(error) => Err(protocol_error(error)),
+                _ => {
+                    bail!("invalid_response: helper returned a non-source-page response")
+                }
+            }
+        }
+
+        fn delete_source(&mut self, request: &DeleteSourceRequest) -> Result<SourceDeleted> {
+            validate_request(request)?;
+            match self.exchange(HostMessage::DeleteSource(request.clone()))? {
+                HelperMessage::SourceDeleted(result) => {
+                    validate_response(&result)?;
+                    Ok(result)
+                }
+                HelperMessage::Error(error) => Err(protocol_error(error)),
+                _ => bail!("invalid_response: helper returned a non-source-deleted response"),
+            }
+        }
+
+        fn finish_source_manifest(
+            &mut self,
+            request: &FinishSourceManifestRequest,
+        ) -> Result<SourceManifestFinished> {
+            validate_request(request)?;
+            match self.exchange(HostMessage::FinishSourceManifest(request.clone()))? {
+                HelperMessage::SourceManifestFinished(result) => {
+                    validate_response(&result)?;
+                    Ok(result)
+                }
+                HelperMessage::Error(error) => Err(protocol_error(error)),
+                _ => {
+                    bail!("invalid_response: helper returned a non-source-finished response")
+                }
+            }
+        }
     }
 
     /// Reconciles Pro to one already-committed Core source manifest.
@@ -525,13 +376,13 @@ pub(crate) mod source_backed_feed {
         P: SourceBackedProProvider,
         C: SourceBackedProConsumer,
     {
-        if manifest.contract_version != SOURCE_BACKED_PRO_FEED_CONTRACT_VERSION {
-            bail!("invalid_request: unsupported source-backed Pro feed contract");
-        }
+        manifest
+            .validate()
+            .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
         let consumer_state = consumer.begin_source_manifest(&manifest)?;
-        validate_consumer_state(&consumer_state)?;
+        validate_consumer_state(&manifest, &consumer_state)?;
         let mut progress_by_source = BTreeMap::new();
-        for progress in consumer_state.sources {
+        for progress in consumer_state.progress {
             let source_id = progress.source.identity().digest();
             if progress_by_source.insert(source_id, progress).is_some() {
                 bail!("invalid_response: Pro returned duplicate canonical source progress");
@@ -555,24 +406,25 @@ pub(crate) mod source_backed_feed {
                 .cloned()
                 .ok_or_else(|| anyhow!("invalid_response: missing stale source progress"))?;
             let removal = manifest
-            .removals
-            .iter()
-            .find(|removal| removal.deletion.source().identity().digest() == source_id)
-            .ok_or_else(|| {
-                anyhow!(
-                    "source_changed: Pro source is absent from the manifest without a certified deletion"
-                )
-            })?;
+                .removals
+                .iter()
+                .find(|removal| removal.deletion.source().identity().digest() == source_id)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "source_changed: Pro source is absent from the manifest without a certified deletion"
+                    )
+                })?;
             if !removal.deletion.source().exact_descriptor_eq(&prior.source) {
                 bail!("source_changed: deletion witness does not describe Pro's source generation");
             }
-            let request = DeleteSourceBackedProSource {
+            let request = DeleteSourceRequest {
                 core_generation_id: manifest.core_generation_id.clone(),
                 removal: removal.clone(),
                 expected_prior: prior.clone(),
             };
             let deleted = consumer.delete_source(&request)?;
-            if !deleted.source.exact_descriptor_eq(&prior.source)
+            if deleted.core_generation_id != manifest.core_generation_id
+                || !deleted.source.exact_descriptor_eq(&prior.source)
                 || deleted.removed_source_epoch != prior.source_epoch
             {
                 bail!("invalid_response: Pro acknowledged the wrong source deletion CAS");
@@ -589,13 +441,14 @@ pub(crate) mod source_backed_feed {
         for source in &manifest.sources {
             let source_key = source.observation().source();
             let source_id = source_identity_digest(source);
-            let certified_revision = certified_source_revision(source)?;
+            let certified_revision_sha256 = certified_source_revision_sha256(source)
+                .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
             let prior = progress_by_source.remove(&source_id);
             let disposition = match prior.as_ref() {
                 None => SourceBackedProDisposition::NewSource,
                 Some(progress)
                     if progress.source.exact_descriptor_eq(source_key)
-                        && progress.certified_revision == certified_revision
+                        && progress.certified_revision_sha256 == certified_revision_sha256
                         && progress.materializer_revision
                             == consumer_state.materializer_revision =>
                 {
@@ -603,16 +456,17 @@ pub(crate) mod source_backed_feed {
                 }
                 Some(_) => SourceBackedProDisposition::Rewrite,
             };
-            let prepare = PrepareSourceBackedProSource {
+            let prepare = PrepareSourceRequest {
                 core_generation_id: manifest.core_generation_id.clone(),
                 source: source_key.clone(),
-                certified_revision,
+                certified_revision_sha256: certified_revision_sha256.clone(),
                 materializer_revision: consumer_state.materializer_revision.clone(),
                 disposition,
                 expected_prior: prior.clone(),
             };
-            let mut prepared = consumer.prepare_source(&prepare)?;
+            let prepared = consumer.prepare_source(&prepare)?;
             validate_prepared_source(&prepare, &prepared)?;
+            let mut prepared = prepared.progress;
             prepared_sources = prepared_sources.saturating_add(1);
             if disposition == SourceBackedProDisposition::Rewrite {
                 rewritten_sources = rewritten_sources.saturating_add(1);
@@ -626,24 +480,23 @@ pub(crate) mod source_backed_feed {
                 }
                 let page = provider.reread_source_page(source, prepared.frontier.as_ref())?;
                 validate_provider_page(source, &prepared, &page)?;
-                let accepted_records = u64::try_from(page.records.len())
+                let accepted_records = u32::try_from(page.records.len())
                     .map_err(|_| anyhow!("invalid_request: source page record count overflow"))?;
-                let request = MaterializeSourceBackedProPage {
+                let request = MaterializeSourcePageRequest {
                     core_generation_id: manifest.core_generation_id.clone(),
-                    source: source_key.clone(),
-                    source_epoch: prepared.source_epoch,
-                    certified_revision,
-                    expected_prior_frontier: prepared.frontier.clone(),
+                    expected_prior: prepared.clone(),
                     next_frontier: page.next_frontier,
                     terminal: page.terminal,
                     records: page.records,
                 };
+                request
+                    .validate()
+                    .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
                 let materialized = consumer.materialize_source_page(&request)?;
                 validate_materialized_page(&request, &materialized, accepted_records)?;
-                prepared.frontier = materialized.committed_frontier;
-                prepared.terminal = materialized.terminal;
+                prepared = materialized.progress;
                 reread_pages = reread_pages.saturating_add(1);
-                reread_records = reread_records.saturating_add(accepted_records);
+                reread_records = reread_records.saturating_add(u64::from(accepted_records));
             }
             if prepared.frontier.as_ref() != source.frontier() {
                 bail!("invalid_response: Pro terminated at the wrong certified source frontier");
@@ -651,7 +504,7 @@ pub(crate) mod source_backed_feed {
             final_sources.push(SourceBackedProProgress {
                 source: source_key.clone(),
                 source_epoch: prepared.source_epoch,
-                certified_revision,
+                certified_revision_sha256,
                 frontier: prepared.frontier,
                 materializer_revision: consumer_state.materializer_revision.clone(),
                 terminal: true,
@@ -661,7 +514,15 @@ pub(crate) mod source_backed_feed {
             bail!("invalid_response: unreconciled Pro source progress remains");
         }
         final_sources.sort_by_key(|progress| progress.source.identity().digest());
-        let receipt = consumer.finish_source_manifest(&manifest, &final_sources)?;
+        let finish = FinishSourceManifestRequest {
+            manifest: manifest.clone(),
+            expected_progress: final_sources.clone(),
+        };
+        finish
+            .validate()
+            .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
+        let finished = consumer.finish_source_manifest(&finish)?;
+        let receipt = finished.receipt;
         validate_source_backed_receipt(
             &manifest,
             &consumer_state.materializer_revision,
@@ -678,49 +539,53 @@ pub(crate) mod source_backed_feed {
         })
     }
 
-    fn validate_consumer_state(state: &SourceBackedProConsumerState) -> Result<()> {
-        if state.materializer_revision.is_empty() {
-            bail!("invalid_response: Pro materializer revision is empty");
-        }
-        for progress in &state.sources {
-            progress.source.validate_contract().map_err(|error| {
-                anyhow!("invalid_response: invalid Pro source identity: {error}")
-            })?;
-            if progress.source_epoch == 0 || progress.materializer_revision.is_empty() {
-                bail!("invalid_response: invalid Pro source progress");
-            }
+    fn validate_consumer_state(
+        manifest: &SourceBackedProManifest,
+        state: &SourceManifestBegan,
+    ) -> Result<()> {
+        state
+            .validate()
+            .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
+        if state.core_generation_id != manifest.core_generation_id {
+            bail!("invalid_response: Pro began the wrong source manifest");
         }
         Ok(())
     }
 
     fn validate_prepared_source(
-        request: &PrepareSourceBackedProSource,
-        prepared: &PreparedSourceBackedProSource,
+        request: &PrepareSourceRequest,
+        prepared: &SourcePrepared,
     ) -> Result<()> {
-        if !prepared.source.exact_descriptor_eq(&request.source)
-            || prepared.certified_revision != request.certified_revision
-            || prepared.source_epoch == 0
+        prepared
+            .validate()
+            .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
+        let progress = &prepared.progress;
+        if prepared.core_generation_id != request.core_generation_id
+            || !progress.source.exact_descriptor_eq(&request.source)
+            || progress.certified_revision_sha256 != request.certified_revision_sha256
+            || progress.materializer_revision != request.materializer_revision
         {
             bail!("invalid_response: Pro prepared the wrong canonical source");
         }
         match (request.disposition, request.expected_prior.as_ref()) {
             (SourceBackedProDisposition::NewSource, None) => {
-                if prepared.frontier.is_some() || prepared.terminal {
+                if progress.source_epoch != 1 || progress.frontier.is_some() || progress.terminal {
                     bail!("invalid_response: new Pro source did not start from genesis");
                 }
             }
             (SourceBackedProDisposition::Resume, Some(prior)) => {
-                if prepared.source_epoch != prior.source_epoch
-                    || prepared.frontier != prior.frontier
-                    || prepared.terminal != prior.terminal
-                {
+                if !progress.exact_eq(prior) {
                     bail!("invalid_response: Pro did not resume the exact source CAS");
                 }
             }
             (SourceBackedProDisposition::Rewrite, Some(prior)) => {
-                if prepared.source_epoch == prior.source_epoch
-                    || prepared.frontier.is_some()
-                    || prepared.terminal
+                if progress.source_epoch
+                    != prior
+                        .source_epoch
+                        .checked_add(1)
+                        .ok_or_else(|| anyhow!("invalid_request: source epoch is exhausted"))?
+                    || progress.frontier.is_some()
+                    || progress.terminal
                 {
                     bail!("invalid_response: Pro did not invalidate the rewritten source epoch");
                 }
@@ -732,7 +597,7 @@ pub(crate) mod source_backed_feed {
 
     fn validate_provider_page(
         source: &CertifiedSource,
-        prepared: &PreparedSourceBackedProSource,
+        prepared: &SourceBackedProProgress,
         page: &SourceBackedProviderPage,
     ) -> Result<()> {
         let source_key = source.observation().source();
@@ -752,36 +617,19 @@ pub(crate) mod source_backed_feed {
         {
             bail!("source_changed: provider returned a non-progressing source page");
         }
-        let mut page_bytes = 0_usize;
-        let mut event_ids = BTreeSet::new();
-        for record in &page.records {
-            record.validate()?;
-            if !record.locator.source().exact_descriptor_eq(source_key) {
-                bail!("source_changed: provider record locator belongs to another source");
-            }
-            page_bytes = page_bytes
-                .checked_add(record.provider_bytes.len())
-                .ok_or_else(|| anyhow!("invalid_request: transient source page size overflow"))?;
-            if page_bytes > MAX_TRANSIENT_CANONICAL_PAGE_BYTES {
-                bail!("invalid_request: transient source page exceeds 32 MiB");
-            }
-            if !event_ids.insert(record.event_id.digest()) {
-                bail!("invalid_request: source page contains a duplicate stable event ID");
-            }
-        }
         Ok(())
     }
 
     fn validate_materialized_page(
-        request: &MaterializeSourceBackedProPage,
-        materialized: &MaterializedSourceBackedProPage,
-        accepted_records: u64,
+        request: &MaterializeSourcePageRequest,
+        materialized: &SourcePageMaterialized,
+        accepted_records: u32,
     ) -> Result<()> {
-        if !materialized.source.exact_descriptor_eq(&request.source)
-            || materialized.source_epoch != request.source_epoch
-            || materialized.certified_revision != request.certified_revision
-            || materialized.committed_frontier != request.next_frontier
-            || materialized.terminal != request.terminal
+        materialized
+            .validate()
+            .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
+        if materialized.core_generation_id != request.core_generation_id
+            || !materialized.progress.exact_eq(&request.next_progress())
             || materialized.accepted_records != accepted_records
         {
             bail!("invalid_response: Pro acknowledged the wrong source page CAS");
@@ -797,9 +645,9 @@ pub(crate) mod source_backed_feed {
     ) -> Result<()> {
         if receipt.core_generation_id != manifest.core_generation_id
             || receipt.materializer_revision != materializer_revision
-            || receipt.sources.len() != expected_sources.len()
+            || receipt.progress.len() != expected_sources.len()
             || !receipt
-                .sources
+                .progress
                 .iter()
                 .zip(expected_sources)
                 .all(|(actual, expected)| source_progress_exact_eq(actual, expected))
@@ -813,33 +661,119 @@ pub(crate) mod source_backed_feed {
         left: &SourceBackedProProgress,
         right: &SourceBackedProProgress,
     ) -> bool {
-        left.source.exact_descriptor_eq(&right.source)
-            && left.source_epoch == right.source_epoch
-            && left.certified_revision == right.certified_revision
-            && left.frontier == right.frontier
-            && left.materializer_revision == right.materializer_revision
-            && left.terminal == right.terminal
+        left.exact_eq(right)
     }
 
-    pub(crate) fn certified_source_revision(source: &CertifiedSource) -> Result<[u8; 32]> {
-        source
-            .validate_contract()
-            .map_err(|error| anyhow!("invalid_request: invalid source certificate: {error}"))?;
-        let bytes = serde_json::to_vec(source)
-            .context("invalid_request: encode certified source revision")?;
-        Ok(Sha256::digest(bytes).into())
+    pub(crate) fn sync_source_backed_pro_feed_deferred<P>(
+        data_root: &Path,
+        manifest: SourceBackedProManifest,
+        provider: &mut P,
+    ) -> Result<SourceBackedProSyncReport>
+    where
+        P: SourceBackedProProvider,
+    {
+        let required = BTreeSet::from([Capability::SourceMaterialization]);
+        let client = ProClient::connect(data_root, &required)?;
+        let mut consumer = ProtocolSourceBackedProConsumer {
+            client: Arc::new(SharedProClient::new(client)),
+        };
+        sync_source_backed_pro_feed(manifest, provider, &mut consumer)
     }
 
     fn source_identity_digest(source: &CertifiedSource) -> [u8; 32] {
         source.observation().source().identity().digest()
     }
 
-    pub(crate) fn is_sha256_hex(value: &str) -> bool {
-        value.len() == 64
-            && value
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    fn validate_request<T>(request: &T) -> Result<()>
+    where
+        T: SourceRequestValidation,
+    {
+        request
+            .validate_request()
+            .map_err(|error| anyhow!("invalid_request: {}", error.message))
     }
+
+    fn validate_response<T>(response: &T) -> Result<()>
+    where
+        T: SourceResponseValidation,
+    {
+        response
+            .validate_response()
+            .map_err(|error| anyhow!("invalid_response: {}", error.message))
+    }
+
+    trait SourceRequestValidation {
+        fn validate_request(&self)
+            -> std::result::Result<(), ctx_pro_host_protocol::ProtocolError>;
+    }
+
+    impl SourceRequestValidation for BeginSourceManifestRequest {
+        fn validate_request(
+            &self,
+        ) -> std::result::Result<(), ctx_pro_host_protocol::ProtocolError> {
+            self.validate()
+        }
+    }
+
+    impl SourceRequestValidation for PrepareSourceRequest {
+        fn validate_request(
+            &self,
+        ) -> std::result::Result<(), ctx_pro_host_protocol::ProtocolError> {
+            self.validate()
+        }
+    }
+
+    impl SourceRequestValidation for MaterializeSourcePageRequest {
+        fn validate_request(
+            &self,
+        ) -> std::result::Result<(), ctx_pro_host_protocol::ProtocolError> {
+            self.validate()
+        }
+    }
+
+    impl SourceRequestValidation for DeleteSourceRequest {
+        fn validate_request(
+            &self,
+        ) -> std::result::Result<(), ctx_pro_host_protocol::ProtocolError> {
+            self.validate()
+        }
+    }
+
+    impl SourceRequestValidation for FinishSourceManifestRequest {
+        fn validate_request(
+            &self,
+        ) -> std::result::Result<(), ctx_pro_host_protocol::ProtocolError> {
+            self.validate()
+        }
+    }
+
+    trait SourceResponseValidation {
+        fn validate_response(
+            &self,
+        ) -> std::result::Result<(), ctx_pro_host_protocol::ProtocolError>;
+    }
+
+    macro_rules! source_response_validation {
+        ($($type:ty),+ $(,)?) => {
+            $(
+                impl SourceResponseValidation for $type {
+                    fn validate_response(
+                        &self,
+                    ) -> std::result::Result<(), ctx_pro_host_protocol::ProtocolError> {
+                        self.validate()
+                    }
+                }
+            )+
+        };
+    }
+
+    source_response_validation!(
+        SourceManifestBegan,
+        SourcePrepared,
+        SourcePageMaterialized,
+        SourceDeleted,
+        SourceManifestFinished,
+    );
 }
 
 impl Drop for ProOutputImport {
@@ -1179,7 +1113,14 @@ mod tests {
         SourceInventoryObservation, SourceObservation, TypedKey,
     };
     use ctx_history_index::VerifiedIndex;
-    use ctx_pro_host_protocol::{ErrorClass, ProtocolError};
+    use ctx_pro_host_protocol::{
+        certified_source_revision_sha256, DeleteSourceRequest, ErrorClass,
+        FinishSourceManifestRequest, MaterializeSourcePageRequest, PrepareSourceRequest,
+        ProtocolError, SourceDeleted, SourceManifestBegan, SourceManifestFinished,
+        SourceMessageFact, SourcePageMaterialized, SourcePrepared, SourceRecordMetadata,
+        SourceSessionRelationships, TransientSourceContent, TransientSourceFact,
+    };
+    use sha2::{Digest, Sha256};
     use tempfile::tempdir;
 
     const MATERIALIZER_REVISION: &str = "pro-source-materializer-v1";
@@ -1294,19 +1235,17 @@ mod tests {
     impl SourceBackedProConsumer for FixtureConsumer {
         fn begin_source_manifest(
             &mut self,
-            _manifest: &SourceBackedProManifest,
-        ) -> Result<SourceBackedProConsumerState> {
-            Ok(SourceBackedProConsumerState {
+            manifest: &SourceBackedProManifest,
+        ) -> Result<SourceManifestBegan> {
+            Ok(SourceManifestBegan {
+                core_generation_id: manifest.core_generation_id.clone(),
                 materializer_revision: self.materializer_revision.clone(),
-                sources: self.progress.values().cloned().collect(),
+                progress: self.progress.values().cloned().collect(),
+                replayed: false,
             })
         }
 
-        fn prepare_source(
-            &mut self,
-            request: &PrepareSourceBackedProSource,
-        ) -> Result<PreparedSourceBackedProSource> {
-            assert!(is_sha256_hex(&request.core_generation_id));
+        fn prepare_source(&mut self, request: &PrepareSourceRequest) -> Result<SourcePrepared> {
             assert_eq!(request.materializer_revision, self.materializer_revision);
             self.dispositions.push(request.disposition);
             let (source_epoch, frontier, terminal) = match request.disposition {
@@ -1322,56 +1261,51 @@ mod tests {
                     (prior.source_epoch.saturating_add(1), None, false)
                 }
             };
-            Ok(PreparedSourceBackedProSource {
-                source: request.source.clone(),
-                source_epoch,
-                certified_revision: request.certified_revision,
-                frontier,
-                terminal,
+            Ok(SourcePrepared {
+                core_generation_id: request.core_generation_id.clone(),
+                progress: SourceBackedProProgress {
+                    source: request.source.clone(),
+                    source_epoch,
+                    certified_revision_sha256: request.certified_revision_sha256.clone(),
+                    frontier,
+                    materializer_revision: request.materializer_revision.clone(),
+                    terminal,
+                },
+                replayed: false,
             })
         }
 
         fn materialize_source_page(
             &mut self,
-            request: &MaterializeSourceBackedProPage,
-        ) -> Result<MaterializedSourceBackedProPage> {
-            assert!(is_sha256_hex(&request.core_generation_id));
-            let source_id = request.source.identity().digest();
+            request: &MaterializeSourcePageRequest,
+        ) -> Result<SourcePageMaterialized> {
+            let source_id = request.expected_prior.source.identity().digest();
             let durable = self.durable_event_ids.entry(source_id).or_default();
             for record in &request.records {
                 self.transient_record_digests
-                    .push(Sha256::digest(&record.provider_bytes).into());
+                    .push(Sha256::digest(serde_json::to_vec(&record.facts).unwrap()).into());
                 durable.insert(record.event_id.digest());
             }
-            self.progress.insert(
-                source_id,
-                SourceBackedProProgress {
-                    source: request.source.clone(),
-                    source_epoch: request.source_epoch,
-                    certified_revision: request.certified_revision,
-                    frontier: request.next_frontier.clone(),
-                    materializer_revision: self.materializer_revision.clone(),
-                    terminal: request.terminal,
-                },
-            );
-            let accepted_records = u64::try_from(request.records.len())
-                .expect("fixture page record count fits u64")
-                .saturating_add(u64::from(self.corrupt_page_ack));
-            Ok(MaterializedSourceBackedProPage {
-                source: request.source.clone(),
-                source_epoch: request.source_epoch,
-                certified_revision: request.certified_revision,
-                committed_frontier: request.next_frontier.clone(),
-                terminal: request.terminal,
+            let progress = request.next_progress();
+            self.progress.insert(source_id, progress.clone());
+            let accepted_records = u32::try_from(request.records.len())
+                .expect("fixture page record count fits u32")
+                .saturating_add(u32::from(self.corrupt_page_ack));
+            let materialized_facts = request.records.iter().fold(0_u32, |total, record| {
+                total.saturating_add(
+                    u32::try_from(record.facts.len()).expect("fixture fact count fits u32"),
+                )
+            });
+            Ok(SourcePageMaterialized {
+                core_generation_id: request.core_generation_id.clone(),
+                progress,
                 accepted_records,
+                materialized_facts,
+                replayed: false,
             })
         }
 
-        fn delete_source(
-            &mut self,
-            request: &DeleteSourceBackedProSource,
-        ) -> Result<DeletedSourceBackedProSource> {
-            assert!(is_sha256_hex(&request.core_generation_id));
+        fn delete_source(&mut self, request: &DeleteSourceRequest) -> Result<SourceDeleted> {
             assert!(request
                 .removal
                 .deletion
@@ -1382,27 +1316,32 @@ mod tests {
             self.durable_event_ids.remove(&source_id);
             self.deleted_epochs
                 .push(request.expected_prior.source_epoch);
-            Ok(DeletedSourceBackedProSource {
+            Ok(SourceDeleted {
+                core_generation_id: request.core_generation_id.clone(),
                 source: request.expected_prior.source.clone(),
                 removed_source_epoch: request.expected_prior.source_epoch,
+                replayed: false,
             })
         }
 
         fn finish_source_manifest(
             &mut self,
-            manifest: &SourceBackedProManifest,
-            expected_sources: &[SourceBackedProProgress],
-        ) -> Result<SourceBackedProReceipt> {
+            request: &FinishSourceManifestRequest,
+        ) -> Result<SourceManifestFinished> {
             self.finish_called = true;
-            self.progress = expected_sources
+            self.progress = request
+                .expected_progress
                 .iter()
                 .cloned()
                 .map(|progress| (progress.source.identity().digest(), progress))
                 .collect();
-            Ok(SourceBackedProReceipt {
-                core_generation_id: manifest.core_generation_id.clone(),
-                materializer_revision: self.materializer_revision.clone(),
-                sources: expected_sources.to_vec(),
+            Ok(SourceManifestFinished {
+                receipt: SourceBackedProReceipt {
+                    core_generation_id: request.manifest.core_generation_id.clone(),
+                    materializer_revision: self.materializer_revision.clone(),
+                    progress: request.expected_progress.clone(),
+                },
+                replayed: false,
             })
         }
     }
@@ -1459,7 +1398,7 @@ mod tests {
     }
 
     #[test]
-    fn new_and_lagging_pro_reread_public_codex_records_from_independent_frontiers() {
+    fn source_backed_pro_new_and_lagging_reread_from_independent_frontiers() {
         let fixture = public_codex_fixture();
 
         let mut new_provider = fixture.provider();
@@ -1490,11 +1429,11 @@ mod tests {
                 .collect()
         );
 
-        let revision = certified_source_revision(&fixture.source).expect("source revision");
+        let revision = certified_source_revision_sha256(&fixture.source).expect("source revision");
         let lagging_progress = SourceBackedProProgress {
             source: fixture.source.observation().source().clone(),
             source_epoch: 7,
-            certified_revision: revision,
+            certified_revision_sha256: revision,
             frontier: Some(fixture.intermediate_frontier.clone()),
             materializer_revision: MATERIALIZER_REVISION.to_owned(),
             terminal: false,
@@ -1535,16 +1474,16 @@ mod tests {
     }
 
     #[test]
-    fn rewritten_source_invalidates_old_epoch_before_stable_id_reread() {
+    fn source_backed_pro_rewrite_invalidates_old_epoch_before_reread() {
         let fixture = public_codex_fixture();
         let rewritten = rewritten_certificate(&fixture.source);
-        let old_revision = certified_source_revision(&fixture.source).expect("old revision");
+        let old_revision = certified_source_revision_sha256(&fixture.source).expect("old revision");
         let prior = SourceBackedProProgress {
             source: fixture.source.observation().source().clone(),
             source_epoch: 11,
-            certified_revision: old_revision,
+            certified_revision_sha256: old_revision,
             frontier: fixture.source.frontier().cloned(),
-            materializer_revision: MATERIALIZER_REVISION.to_owned(),
+            materializer_revision: "pro-source-materializer-v0".to_owned(),
             terminal: true,
         };
         let source_id = prior.source.identity().digest();
@@ -1584,17 +1523,17 @@ mod tests {
         assert!(!consumer
             .durable_ids_for(fixture.source.observation().source())
             .contains(&fixture.records[0].event_id.digest()));
-        assert_eq!(report.receipt.sources[0].source_epoch, 12);
+        assert_eq!(report.receipt.progress[0].source_epoch, 12);
     }
 
     #[test]
-    fn certified_inventory_deletion_removes_source_and_missing_proof_fails_closed() {
+    fn source_backed_pro_deletion_requires_certified_complete_inventory() {
         let fixture = public_codex_fixture();
         let source = fixture.source.observation().source().clone();
         let prior = SourceBackedProProgress {
             source: source.clone(),
             source_epoch: 17,
-            certified_revision: certified_source_revision(&fixture.source).unwrap(),
+            certified_revision_sha256: certified_source_revision_sha256(&fixture.source).unwrap(),
             frontier: fixture.source.frontier().cloned(),
             materializer_revision: MATERIALIZER_REVISION.to_owned(),
             terminal: true,
@@ -1632,7 +1571,7 @@ mod tests {
         assert_eq!(consumer.deleted_epochs, [17]);
         assert!(consumer.durable_ids_for(&source).is_empty());
         assert!(consumer.finish_called);
-        assert!(report.receipt.sources.is_empty());
+        assert!(report.receipt.progress.is_empty());
 
         let manifest_without_proof =
             SourceBackedProManifest::new("e".repeat(64), Vec::new(), Vec::new()).unwrap();
@@ -1647,7 +1586,7 @@ mod tests {
     }
 
     #[test]
-    fn mismatched_source_page_ack_never_publishes_manifest_receipt() {
+    fn source_backed_pro_mismatched_page_ack_never_publishes_receipt() {
         let fixture = public_codex_fixture();
         let mut provider = fixture.provider();
         let mut consumer = FixtureConsumer::new(Vec::new());
@@ -1720,12 +1659,34 @@ mod tests {
                 let hydrated = resolver
                     .hydrate(&event.locator)
                     .expect("hydrate fixture record");
+                let provider_record: serde_json::Value =
+                    serde_json::from_slice(&hydrated.provider_bytes)
+                        .expect("parse hydrated fixture record");
+                let detector_message = provider_record
+                    .pointer("/payload/content")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|part| part.get("text").and_then(serde_json::Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(
+                    !detector_message.is_empty(),
+                    "fixture provider adapter must normalize detector message content"
+                );
                 SourceBackedProRecord::new(
                     event.event_id,
                     event.session_id,
                     event.locator,
-                    SourceBackedProRecordMetadata {
+                    SourceSessionRelationships {
+                        direct_session_id: event.session_id,
+                        root_session_id: event.session_id,
+                        parent_session_id: None,
                         provider_session_id: event.provider_session_id,
+                        agent_id: None,
+                    },
+                    None,
+                    SourceRecordMetadata {
                         event_sequence: event.event_sequence,
                         occurred_at_unix_ms: event.occurred_at_unix_ms,
                         event_type: event.event_type,
@@ -1734,7 +1695,10 @@ mod tests {
                         cwd: event.cwd,
                         touched_files: event.touched_files,
                     },
-                    hydrated.provider_bytes,
+                    vec![TransientSourceFact::Message(SourceMessageFact {
+                        content: TransientSourceContent::from_bytes(detector_message.as_bytes())
+                            .expect("fixture detector content bound"),
+                    })],
                 )
                 .expect("source-backed Pro record")
             })

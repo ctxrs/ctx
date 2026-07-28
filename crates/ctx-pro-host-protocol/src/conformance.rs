@@ -1,5 +1,12 @@
 use std::{collections::BTreeSet, io::Cursor};
 
+use ctx_history_core::{
+    derive_event_id, derive_session_id, CertifiedSource, CertifiedSourceDeletion,
+    CertifiedSourceInventory, EventIdentityInput, LocatorRevisionPolicy, NativeItemKey,
+    NativeRecordCoordinate, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput,
+    SourceAnchor, SourceFrontier, SourceInventoryObservation, SourceObservation,
+    SourceRecordLocator, TypedKey,
+};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -72,6 +79,11 @@ fn host_kind(message: &HostMessage) -> &'static str {
         HostMessage::MaterializeOutputPage(_) => "materialize_output_page",
         HostMessage::FinishOutputInventory(_) => "finish_output_inventory",
         HostMessage::GetOutputProgress(_) => "get_output_progress",
+        HostMessage::BeginSourceManifest(_) => "begin_source_manifest",
+        HostMessage::PrepareSource(_) => "prepare_source",
+        HostMessage::MaterializeSourcePage(_) => "materialize_source_page",
+        HostMessage::DeleteSource(_) => "delete_source",
+        HostMessage::FinishSourceManifest(_) => "finish_source_manifest",
         HostMessage::Blame(_) => "blame",
     }
 }
@@ -89,6 +101,11 @@ fn helper_kind(message: &HelperMessage) -> &'static str {
         HelperMessage::OutputPageMaterialized(_) => "output_page_materialized",
         HelperMessage::OutputInventoryFinished(_) => "output_inventory_finished",
         HelperMessage::OutputProgress(_) => "output_progress",
+        HelperMessage::SourceManifestBegan(_) => "source_manifest_began",
+        HelperMessage::SourcePrepared(_) => "source_prepared",
+        HelperMessage::SourcePageMaterialized(_) => "source_page_materialized",
+        HelperMessage::SourceDeleted(_) => "source_deleted",
+        HelperMessage::SourceManifestFinished(_) => "source_manifest_finished",
         HelperMessage::Blame(_) => "blame",
         HelperMessage::Error(_) => "error",
     }
@@ -206,7 +223,12 @@ fn host_operation_kind(message: &HostMessage) -> Option<&'static str> {
         | HostMessage::Status(_)
         | HostMessage::BeginOutputInventory(_)
         | HostMessage::FinishOutputInventory(_)
-        | HostMessage::GetOutputProgress(_) => None,
+        | HostMessage::GetOutputProgress(_)
+        | HostMessage::BeginSourceManifest(_)
+        | HostMessage::PrepareSource(_)
+        | HostMessage::MaterializeSourcePage(_)
+        | HostMessage::DeleteSource(_)
+        | HostMessage::FinishSourceManifest(_) => None,
     }
 }
 
@@ -279,6 +301,11 @@ fn helper_operation_kind(message: &HelperMessage) -> Option<&'static str> {
         | HelperMessage::OutputPageMaterialized(_)
         | HelperMessage::OutputInventoryFinished(_)
         | HelperMessage::OutputProgress(_)
+        | HelperMessage::SourceManifestBegan(_)
+        | HelperMessage::SourcePrepared(_)
+        | HelperMessage::SourcePageMaterialized(_)
+        | HelperMessage::SourceDeleted(_)
+        | HelperMessage::SourceManifestFinished(_)
         | HelperMessage::Error(_) => None,
     }
 }
@@ -396,6 +423,152 @@ fn output_page() -> ProOutputMaterializationPage {
     }
 }
 
+fn certified_source() -> CertifiedSource {
+    let source = ctx_history_core::SourceKey::derive(
+        "conformance",
+        "conformance_jsonl",
+        "conformance-v1",
+        1,
+        SourceAnchor::CatalogLineage([3; 32]),
+    )
+    .unwrap();
+    let observation = SourceObservation::new(source, "conformance-revision-v1", vec![7]).unwrap();
+    let counts = ScannedSourceCounts {
+        complete_records: 1,
+        retained_records: 1,
+        indexed_documents: 1,
+        certified_bytes: 10,
+        ..ScannedSourceCounts::default()
+    };
+    let frontier =
+        SourceFrontier::new("conformance-frontier-v1", TypedKey::U64(1), 10, [9; 32]).unwrap();
+    CertifiedSource::certify_with_frontier(
+        observation.clone(),
+        observation,
+        "conformance-parser-v1",
+        [9; 32],
+        counts,
+        Some(frontier),
+    )
+    .unwrap()
+}
+
+fn source_manifest() -> SourceManifest {
+    SourceManifest::new("a".repeat(64), vec![certified_source()], Vec::new()).unwrap()
+}
+
+fn source_progress(terminal: bool) -> SourceProgress {
+    let source = certified_source();
+    SourceProgress {
+        source: source.observation().source().clone(),
+        source_epoch: 1,
+        certified_revision_sha256: certified_source_revision_sha256(&source).unwrap(),
+        frontier: terminal.then(|| source.frontier().unwrap().clone()),
+        materializer_revision: "conformance-source-materializer-v1".to_owned(),
+        terminal,
+    }
+}
+
+fn source_record() -> SourceRecord {
+    let source = certified_source().observation().source().clone();
+    let session_key =
+        NativeSessionKey::native_id("conformance-session", TypedKey::utf8("session-1").unwrap())
+            .unwrap();
+    let session_id = derive_session_id(SessionIdentityInput {
+        source: &source,
+        logical_session_kind: "conformance-session",
+        native_session_key: &session_key,
+    })
+    .unwrap();
+    let item_key = NativeItemKey::native_id("conformance-event", TypedKey::U64(1)).unwrap();
+    let event_id = derive_event_id(EventIdentityInput {
+        source: &source,
+        session_id,
+        logical_item_kind: "conformance-event",
+        native_item_key: &item_key,
+        subrecord_selector: None,
+    })
+    .unwrap();
+    let locator = SourceRecordLocator::new(
+        source,
+        NativeRecordCoordinate::ProviderNative {
+            namespace: "conformance-record".to_owned(),
+            coordinate: TypedKey::U64(1),
+        },
+        LocatorRevisionPolicy::ExactSourceRevision,
+        Some([8; 32]),
+        [6; 32],
+    )
+    .unwrap();
+    SourceRecord::new(
+        event_id,
+        session_id,
+        locator,
+        SourceSessionRelationships {
+            direct_session_id: session_id,
+            root_session_id: session_id,
+            parent_session_id: None,
+            provider_session_id: Some("provider-session-1".to_owned()),
+            agent_id: Some("agent-1".to_owned()),
+        },
+        Some(SourceRepositoryContext {
+            repository_id: "repository-1".to_owned(),
+            checkout_id: Some("checkout-1".to_owned()),
+            worktree_id: Some("worktree-1".to_owned()),
+            object_format: Some("sha1".to_owned()),
+        }),
+        SourceRecordMetadata {
+            event_sequence: 1,
+            occurred_at_unix_ms: Some(1_753_232_400_000),
+            event_type: "assistant_message".to_owned(),
+            role: Some("assistant".to_owned()),
+            workspace: Some("/workspace".to_owned()),
+            cwd: Some("/workspace/ctx".to_owned()),
+            touched_files: vec!["src/lib.rs".to_owned()],
+        },
+        vec![
+            TransientSourceFact::Message(SourceMessageFact {
+                content: TransientSourceContent::from_bytes(b"conformance message").unwrap(),
+            }),
+            TransientSourceFact::Command(SourceCommandFact {
+                call_id: Some("call-1".to_owned()),
+                tool_name: Some("exec_command".to_owned()),
+                command: TransientSourceContent::from_bytes(b"cargo test").unwrap(),
+                working_directory: Some("/workspace/ctx".to_owned()),
+            }),
+            TransientSourceFact::Result(SourceResultFact {
+                call_id: Some("call-1".to_owned()),
+                outcome: SourceOutcome::Success,
+                exit_code: Some(0),
+                duration_ms: Some(42),
+                content: TransientSourceContent::from_bytes(b"ok").unwrap(),
+            }),
+        ],
+    )
+    .unwrap()
+}
+
+fn source_removal() -> SourceRemoval {
+    let source = certified_source().observation().source().clone();
+    let observation = SourceInventoryObservation::new(
+        source.provider(),
+        "conformance-root",
+        TypedKey::utf8("conformance-authority").unwrap(),
+        "conformance-inventory-v1",
+        vec![1],
+    )
+    .unwrap();
+    let inventory = CertifiedSourceInventory::certify(
+        observation.clone(),
+        observation,
+        "conformance-discovery-v1",
+        Vec::new(),
+    )
+    .unwrap();
+    let deletion = CertifiedSourceDeletion::from_inventory(source, &inventory).unwrap();
+    SourceRemoval::new(deletion, inventory).unwrap()
+}
+
 fn provider_output_citation() -> EvidenceCitation {
     EvidenceCitation {
         observation_id: None,
@@ -486,6 +659,7 @@ fn host_messages() -> Vec<HostMessage> {
                 Capability::Status,
                 Capability::JournalSync,
                 Capability::OutputMaterialization,
+                Capability::SourceMaterialization,
                 Capability::Query,
                 Capability::GitRead,
             ]),
@@ -510,6 +684,33 @@ fn host_messages() -> Vec<HostMessage> {
         HostMessage::GetOutputProgress(OutputProgressRequest {
             sources: vec![output_source()],
         }),
+        HostMessage::BeginSourceManifest(BeginSourceManifestRequest {
+            manifest: source_manifest(),
+        }),
+        HostMessage::PrepareSource(PrepareSourceRequest {
+            core_generation_id: "a".repeat(64),
+            source: source_progress(false).source,
+            certified_revision_sha256: source_progress(false).certified_revision_sha256,
+            materializer_revision: "conformance-source-materializer-v1".to_owned(),
+            disposition: SourceDisposition::NewSource,
+            expected_prior: None,
+        }),
+        HostMessage::MaterializeSourcePage(MaterializeSourcePageRequest {
+            core_generation_id: "a".repeat(64),
+            expected_prior: source_progress(false),
+            next_frontier: source_progress(true).frontier,
+            terminal: true,
+            records: vec![source_record()],
+        }),
+        HostMessage::DeleteSource(DeleteSourceRequest {
+            core_generation_id: "a".repeat(64),
+            removal: source_removal(),
+            expected_prior: source_progress(true),
+        }),
+        HostMessage::FinishSourceManifest(FinishSourceManifestRequest {
+            manifest: source_manifest(),
+            expected_progress: vec![source_progress(true)],
+        }),
         HostMessage::Blame(blame()),
     ]
 }
@@ -521,6 +722,7 @@ fn helper_messages() -> Vec<HelperMessage> {
         Capability::Status,
         Capability::JournalSync,
         Capability::OutputMaterialization,
+        Capability::SourceMaterialization,
         Capability::Query,
         Capability::GitRead,
     ]);
@@ -595,6 +797,38 @@ fn helper_messages() -> Vec<HelperMessage> {
                 last_seen_inventory: Some(1),
             }],
         }),
+        HelperMessage::SourceManifestBegan(SourceManifestBegan {
+            core_generation_id: "a".repeat(64),
+            materializer_revision: "conformance-source-materializer-v1".to_owned(),
+            progress: Vec::new(),
+            replayed: false,
+        }),
+        HelperMessage::SourcePrepared(SourcePrepared {
+            core_generation_id: "a".repeat(64),
+            progress: source_progress(false),
+            replayed: false,
+        }),
+        HelperMessage::SourcePageMaterialized(SourcePageMaterialized {
+            core_generation_id: "a".repeat(64),
+            progress: source_progress(true),
+            accepted_records: 1,
+            materialized_facts: 3,
+            replayed: false,
+        }),
+        HelperMessage::SourceDeleted(SourceDeleted {
+            core_generation_id: "a".repeat(64),
+            source: source_progress(true).source,
+            removed_source_epoch: 1,
+            replayed: false,
+        }),
+        HelperMessage::SourceManifestFinished(SourceManifestFinished {
+            receipt: SourceManifestReceipt {
+                core_generation_id: "a".repeat(64),
+                materializer_revision: "conformance-source-materializer-v1".to_owned(),
+                progress: vec![source_progress(true)],
+            },
+            replayed: false,
+        }),
         HelperMessage::Blame(provider_output_blame_result()),
         HelperMessage::Error(ProtocolError::new(
             ErrorClass::ProtocolMismatch,
@@ -639,6 +873,7 @@ fn inventory_freezes_every_message_kind_capability_and_error() {
         Capability::Status,
         Capability::JournalSync,
         Capability::OutputMaterialization,
+        Capability::SourceMaterialization,
         Capability::Query,
         Capability::GitRead,
     ];

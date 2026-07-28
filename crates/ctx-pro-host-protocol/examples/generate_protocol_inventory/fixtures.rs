@@ -1,4 +1,11 @@
 use super::*;
+use ctx_history_core::{
+    derive_event_id, derive_session_id, CertifiedSource, CertifiedSourceDeletion,
+    CertifiedSourceInventory, EventIdentityInput, LocatorRevisionPolicy, NativeItemKey,
+    NativeRecordCoordinate, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput,
+    SourceAnchor, SourceFrontier, SourceInventoryObservation, SourceObservation,
+    SourceRecordLocator, TypedKey,
+};
 
 fn inventory_initial_journal_digest(generation: u64, fingerprint: &str) -> String {
     let mut hash = Sha256::new();
@@ -6,6 +13,159 @@ fn inventory_initial_journal_digest(generation: u64, fingerprint: &str) -> Strin
     hash.update(generation.to_be_bytes());
     hash.update(fingerprint.as_bytes());
     hex(&hash.finalize())
+}
+
+fn certified_source() -> CertifiedSource {
+    let source = ctx_history_core::SourceKey::derive(
+        "golden",
+        "golden_jsonl",
+        "golden-v1",
+        1,
+        SourceAnchor::CatalogLineage([3; 32]),
+    )
+    .expect("golden source key");
+    let observation =
+        SourceObservation::new(source, "golden-revision-v1", vec![7]).expect("golden observation");
+    let counts = ScannedSourceCounts {
+        complete_records: 1,
+        retained_records: 1,
+        indexed_documents: 1,
+        certified_bytes: 10,
+        ..ScannedSourceCounts::default()
+    };
+    let frontier = SourceFrontier::new("golden-frontier-v1", TypedKey::U64(1), 10, [9; 32])
+        .expect("golden frontier");
+    CertifiedSource::certify_with_frontier(
+        observation.clone(),
+        observation,
+        "golden-parser-v1",
+        [9; 32],
+        counts,
+        Some(frontier),
+    )
+    .expect("golden certified source")
+}
+
+pub(super) fn source_manifest() -> SourceManifest {
+    SourceManifest::new("a".repeat(64), vec![certified_source()], Vec::new())
+        .expect("golden source manifest")
+}
+
+pub(super) fn source_progress(terminal: bool) -> SourceProgress {
+    let source = certified_source();
+    SourceProgress {
+        source: source.observation().source().clone(),
+        source_epoch: 1,
+        certified_revision_sha256: certified_source_revision_sha256(&source)
+            .expect("golden certified source revision"),
+        frontier: terminal.then(|| source.frontier().expect("golden frontier").clone()),
+        materializer_revision: "golden-source-materializer-v1".to_owned(),
+        terminal,
+    }
+}
+
+pub(super) fn source_record() -> SourceRecord {
+    let source = certified_source().observation().source().clone();
+    let session_key =
+        NativeSessionKey::native_id("golden-session", TypedKey::utf8("session-1").unwrap())
+            .expect("golden session key");
+    let session_id = derive_session_id(SessionIdentityInput {
+        source: &source,
+        logical_session_kind: "golden-session",
+        native_session_key: &session_key,
+    })
+    .expect("golden session ID");
+    let item_key =
+        NativeItemKey::native_id("golden-event", TypedKey::U64(1)).expect("golden event key");
+    let event_id = derive_event_id(EventIdentityInput {
+        source: &source,
+        session_id,
+        logical_item_kind: "golden-event",
+        native_item_key: &item_key,
+        subrecord_selector: None,
+    })
+    .expect("golden event ID");
+    let locator = SourceRecordLocator::new(
+        source,
+        NativeRecordCoordinate::ProviderNative {
+            namespace: "golden-record".to_owned(),
+            coordinate: TypedKey::U64(1),
+        },
+        LocatorRevisionPolicy::ExactSourceRevision,
+        Some([8; 32]),
+        [6; 32],
+    )
+    .expect("golden locator");
+    SourceRecord::new(
+        event_id,
+        session_id,
+        locator,
+        SourceSessionRelationships {
+            direct_session_id: session_id,
+            root_session_id: session_id,
+            parent_session_id: None,
+            provider_session_id: Some("provider-session-1".to_owned()),
+            agent_id: Some("agent-1".to_owned()),
+        },
+        Some(SourceRepositoryContext {
+            repository_id: "repository-1".to_owned(),
+            checkout_id: Some("checkout-1".to_owned()),
+            worktree_id: Some("worktree-1".to_owned()),
+            object_format: Some("sha1".to_owned()),
+        }),
+        SourceRecordMetadata {
+            event_sequence: 1,
+            occurred_at_unix_ms: Some(1_753_232_400_000),
+            event_type: "assistant_message".to_owned(),
+            role: Some("assistant".to_owned()),
+            workspace: Some("/workspace".to_owned()),
+            cwd: Some("/workspace/ctx".to_owned()),
+            touched_files: vec!["src/lib.rs".to_owned()],
+        },
+        vec![
+            TransientSourceFact::Message(SourceMessageFact {
+                content: TransientSourceContent::from_bytes(b"golden message")
+                    .expect("golden message content"),
+            }),
+            TransientSourceFact::Command(SourceCommandFact {
+                call_id: Some("call-1".to_owned()),
+                tool_name: Some("exec_command".to_owned()),
+                command: TransientSourceContent::from_bytes(b"cargo test")
+                    .expect("golden command content"),
+                working_directory: Some("/workspace/ctx".to_owned()),
+            }),
+            TransientSourceFact::Result(SourceResultFact {
+                call_id: Some("call-1".to_owned()),
+                outcome: SourceOutcome::Success,
+                exit_code: Some(0),
+                duration_ms: Some(42),
+                content: TransientSourceContent::from_bytes(b"ok").expect("golden result content"),
+            }),
+        ],
+    )
+    .expect("golden source record")
+}
+
+pub(super) fn source_removal() -> SourceRemoval {
+    let source = certified_source().observation().source().clone();
+    let observation = SourceInventoryObservation::new(
+        source.provider(),
+        "golden-root",
+        TypedKey::utf8("golden-authority").expect("golden authority"),
+        "golden-inventory-v1",
+        vec![1],
+    )
+    .expect("golden inventory observation");
+    let inventory = CertifiedSourceInventory::certify(
+        observation.clone(),
+        observation,
+        "golden-discovery-v1",
+        Vec::new(),
+    )
+    .expect("golden certified inventory");
+    let deletion = CertifiedSourceDeletion::from_inventory(source, &inventory)
+        .expect("golden certified deletion");
+    SourceRemoval::new(deletion, inventory).expect("golden source removal")
 }
 
 pub(super) fn checkpoint(fingerprint: &str) -> JournalCheckpoint {
