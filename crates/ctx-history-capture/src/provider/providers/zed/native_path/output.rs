@@ -84,7 +84,7 @@ fn replay_zed_outputs(
     authority: &ZedOutputReplayAuthority<'_>,
     sink: &dyn ProOutputSink,
 ) -> Result<(), ProOutputSinkError> {
-    let snapshot = match acquire_immutable_snapshot(path).map_err(output_source_error)? {
+    let mut snapshot = match acquire_immutable_snapshot(path).map_err(output_source_error)? {
         ZedSnapshotAcquisition::Acquired(snapshot) => *snapshot,
         ZedSnapshotAcquisition::Incomplete { .. } => {
             return Err(ProOutputSinkError::new(
@@ -94,6 +94,7 @@ fn replay_zed_outputs(
         }
     };
     if snapshot.snapshot_revision != authority.generation.snapshot_revision {
+        snapshot.finish().map_err(output_source_error)?;
         return Err(ProOutputSinkError::new(
             "zed_output_revision_mismatch",
             "Zed output replay no longer matches the committed Core generation",
@@ -101,16 +102,18 @@ fn replay_zed_outputs(
     }
     let mut discard = ZedOutputCoreDiscard;
     let verification = scan_zed_native_snapshot(
-        &snapshot.connection,
+        snapshot.connection().map_err(output_source_error)?,
         &snapshot.physical_locator,
         &snapshot.snapshot_revision,
         &mut discard,
     )
     .map_err(output_source_error)?;
-    if verification.capability_digest != authority.generation.capability_digest
-        || verification.source_integrity_digest != authority.generation.source_integrity_digest
-        || verification.core_generation_digest != authority.generation.core_generation_digest
-    {
+    let verification_matches = verification.capability_digest
+        == authority.generation.capability_digest
+        && verification.source_integrity_digest == authority.generation.source_integrity_digest
+        && verification.core_generation_digest == authority.generation.core_generation_digest;
+    snapshot.finish().map_err(output_source_error)?;
+    if !verification_matches {
         return Err(ProOutputSinkError::new(
             "zed_output_revision_mismatch",
             "Zed output replay bytes do not match the committed Core generation",
@@ -124,12 +127,6 @@ fn replay_zed_outputs(
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .map_err(output_sqlite_error)?;
-    let hydration_sql =
-        "SELECT rowid, id, updated_at, data_type, data FROM threads WHERE id = ?1 COLLATE BINARY";
-    let mut hydrate = snapshot
-        .connection
-        .prepare(hydration_sql)
-        .map_err(output_sqlite_error)?;
     let mut identities = evidence
         .prepare(
             "SELECT id FROM output_threads
@@ -141,17 +138,8 @@ fn replay_zed_outputs(
         .map_err(output_sqlite_error)?;
     for id in ids {
         let id = id.map_err(output_sqlite_error)?;
-        let row = hydrate
-            .query_row([&id], |row| {
-                Ok(super::super::thread::ZedThreadRow {
-                    rowid: row.get(0)?,
-                    id: row.get(1)?,
-                    updated_at: row.get(2)?,
-                    data_type: row.get(3)?,
-                    data: row.get(4)?,
-                })
-            })
-            .map_err(output_sqlite_error)?;
+        let row =
+            hydrate_certified_output_thread(path, &authority.generation.snapshot_revision, &id)?;
         let (parent_thread_id, root_thread_id) = staging
             .session_relationship(&id)
             .map_err(output_source_error)?
@@ -171,17 +159,56 @@ fn replay_zed_outputs(
             sink,
         )?;
     }
-    if !snapshot
-        .observed
-        .revalidate(path)
-        .map_err(output_source_error)?
-    {
+    drop(identities);
+    drop(evidence);
+    Ok(())
+}
+
+fn hydrate_certified_output_thread(
+    path: &Path,
+    expected_snapshot_revision: &str,
+    id: &str,
+) -> Result<super::super::thread::ZedThreadRow, ProOutputSinkError> {
+    let mut snapshot = match acquire_immutable_snapshot(path).map_err(output_source_error)? {
+        ZedSnapshotAcquisition::Acquired(snapshot) => *snapshot,
+        ZedSnapshotAcquisition::Incomplete { .. } => {
+            return Err(ProOutputSinkError::new(
+                "zed_output_source_changed",
+                "Zed output source changed while acquiring a row snapshot",
+            ));
+        }
+    };
+    if snapshot.snapshot_revision != expected_snapshot_revision {
+        snapshot.finish().map_err(output_source_error)?;
         return Err(ProOutputSinkError::new(
-            "zed_output_source_changed",
-            "Zed output source changed before replay completed",
+            "zed_output_revision_mismatch",
+            "Zed output row no longer matches the committed Core generation",
         ));
     }
-    Ok(())
+    let row = snapshot
+        .connection()
+        .map_err(output_source_error)?
+        .query_row(
+            "SELECT rowid, id, updated_at, data_type, data
+             FROM threads WHERE id = ?1 COLLATE BINARY",
+            [id],
+            |row| {
+                Ok(super::super::thread::ZedThreadRow {
+                    rowid: row.get(0)?,
+                    id: row.get(1)?,
+                    updated_at: row.get(2)?,
+                    data_type: row.get(3)?,
+                    data: row.get(4)?,
+                })
+            },
+        )
+        .map_err(output_sqlite_error);
+    let finish = snapshot.finish().map_err(output_source_error);
+    match (row, finish) {
+        (Ok(row), Ok(())) => Ok(row),
+        (_, Err(error)) => Err(error),
+        (Err(error), Ok(())) => Err(error),
+    }
 }
 
 struct ZedOutputCoreDiscard;

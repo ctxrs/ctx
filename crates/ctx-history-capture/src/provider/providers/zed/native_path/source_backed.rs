@@ -124,9 +124,11 @@ impl ZedLocatorResolverV0 {
         locator: &SourceRecordLocator,
     ) -> ZedSourceBackedResultV0<ZedHydratedRecordV0> {
         let coordinate = validate_zed_locator(&self.source, locator)?;
-        let snapshot = acquire_snapshot(&self.selected_database_path)?;
+        let mut snapshot = acquire_snapshot(&self.selected_database_path)?;
         verify_snapshot_revision(&snapshot.snapshot_revision, &coordinate)?;
-        hydrate_coordinate(&snapshot.connection, &coordinate)
+        let hydrated = hydrate_coordinate(snapshot.connection()?, &coordinate)?;
+        snapshot.finish()?;
+        Ok(hydrated)
     }
 }
 
@@ -163,16 +165,23 @@ impl ContentSourceResolver for ZedLocatorResolverV0 {
             return Err(hydration_failure(ZedSourceBackedErrorV0::InvalidZedLocator));
         }
 
-        let snapshot = acquire_snapshot(&self.selected_database_path).map_err(hydration_failure)?;
+        let mut snapshot =
+            acquire_snapshot(&self.selected_database_path).map_err(hydration_failure)?;
         for coordinate in &coordinates {
             verify_snapshot_revision(&snapshot.snapshot_revision, coordinate)
                 .map_err(hydration_failure)?;
         }
-        let (row, row_digest) = hydrate_zed_thread_row(&snapshot.connection, &first.thread_id)
-            .map_err(ZedSourceBackedErrorV0::from)
-            .map_err(hydration_failure)?
-            .ok_or(ZedSourceBackedErrorV0::LocatorRecordMissing)
-            .map_err(hydration_failure)?;
+        let (row, row_digest) = hydrate_zed_thread_row(
+            snapshot
+                .connection()
+                .map_err(ZedSourceBackedErrorV0::from)
+                .map_err(hydration_failure)?,
+            &first.thread_id,
+        )
+        .map_err(ZedSourceBackedErrorV0::from)
+        .map_err(hydration_failure)?
+        .ok_or(ZedSourceBackedErrorV0::LocatorRecordMissing)
+        .map_err(hydration_failure)?;
         let row_digest_bytes = digest_bytes(&row_digest).map_err(hydration_failure)?;
         if coordinates
             .iter()
@@ -183,7 +192,7 @@ impl ContentSourceResolver for ZedLocatorResolverV0 {
             ));
         }
 
-        request
+        let hydrated = request
             .events()
             .iter()
             .zip(coordinates.iter())
@@ -195,7 +204,12 @@ impl ContentSourceResolver for ZedLocatorResolverV0 {
                     })
                     .map_err(hydration_failure)
             })
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        snapshot
+            .finish()
+            .map_err(ZedSourceBackedErrorV0::from)
+            .map_err(hydration_failure)?;
+        Ok(hydrated)
     }
 }
 
@@ -212,7 +226,7 @@ pub(crate) fn ingest_zed_source_backed_v0(
 ) -> ZedSourceBackedResultV0<ZedSourceBackedIngestReceiptV0> {
     let selected_database_path = selected_database_path.as_ref();
     let source = zed_source_key()?;
-    let snapshot = acquire_snapshot(selected_database_path)?;
+    let mut snapshot = acquire_snapshot(selected_database_path)?;
     let revision_digest = snapshot_revision_digest(&snapshot.snapshot_revision);
     let selected_source_path = selected_database_path.to_string_lossy().into_owned();
 
@@ -220,13 +234,13 @@ pub(crate) fn ingest_zed_source_backed_v0(
     writer.begin_source(source.clone())?;
     let mut sink = ZedSourceBackedSinkV0::new(
         &mut writer,
-        &snapshot.connection,
+        snapshot.connection()?,
         source.clone(),
         revision_digest,
         selected_source_path,
     )?;
     let scan_result = scan_zed_native_snapshot(
-        &snapshot.connection,
+        snapshot.connection()?,
         &snapshot.physical_locator,
         &snapshot.snapshot_revision,
         &mut sink,
@@ -237,9 +251,7 @@ pub(crate) fn ingest_zed_source_backed_v0(
     let staged_documents = sink.staged_documents;
     drop(sink);
     let scan = scan_result?;
-    if !snapshot.observed.revalidate(selected_database_path)? {
-        return Err(ZedSourceBackedErrorV0::SourceChangedAfterScan);
-    }
+    snapshot.finish()?;
     if staged_documents != scan.counters.retained_events {
         return Err(ZedSourceBackedErrorV0::ScanCountMismatch);
     }
@@ -764,7 +776,9 @@ mod tests {
     #[test]
     fn source_backed_zed_cold_exact_and_replacement_preserve_stable_ids() {
         let temp = tempfile::tempdir().unwrap();
-        let database = temp.path().join("threads.db");
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        let database = source.join("threads.db");
         let index = temp.path().join("index");
         create_database(&database, "cold exact sentinel");
 
@@ -843,7 +857,9 @@ mod tests {
     #[test]
     fn source_backed_zed_indexes_native_thread_lineage_and_filters() {
         let temp = tempfile::tempdir().unwrap();
-        let database = temp.path().join("threads.db");
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        let database = source.join("threads.db");
         let index = temp.path().join("index");
         create_database(&database, "root lineage sentinel");
         insert_child_thread(&database, "child lineage sentinel");

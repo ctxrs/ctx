@@ -365,6 +365,105 @@ fn later_pro_activation_replays_exact_outputs_without_republishing_core() {
     assert_eq!(store.events_for_session(session.id).unwrap().len(), 1);
 }
 
+struct SourceMutatingProSink {
+    path: PathBuf,
+    writes: AtomicUsize,
+    behind: AtomicUsize,
+}
+
+impl crate::ProOutputSink for SourceMutatingProSink {
+    fn inventory_generation(&self) -> u64 {
+        1
+    }
+
+    fn materializer_revision(&self) -> &str {
+        "zed-finished-guard-test-v1"
+    }
+
+    fn observe_source(
+        &self,
+        _source: &crate::OutputSourceIdentity,
+    ) -> std::result::Result<Option<crate::ProOutputProgress>, crate::ProOutputSinkError> {
+        Ok(None)
+    }
+
+    fn materialize_page(
+        &self,
+        page: crate::ProOutputMaterializationPage,
+    ) -> std::result::Result<crate::ProOutputPageResult, crate::ProOutputSinkError> {
+        let writer = Connection::open(&self.path).map_err(|error| {
+            crate::ProOutputSinkError::new("zed_test_writer", error.to_string())
+        })?;
+        writer
+            .execute(
+                "UPDATE threads SET summary = summary || ' after certified output'",
+                [],
+            )
+            .map_err(|error| {
+                crate::ProOutputSinkError::new("zed_test_writer", error.to_string())
+            })?;
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        let accepted_outputs = u32::try_from(page.observations.len()).unwrap_or(u32::MAX);
+        Ok(crate::ProOutputPageResult {
+            source_epoch: page.source_epoch,
+            committed_cursor: page.next_safe_cursor,
+            accepted_outputs,
+            materialized_facts: accepted_outputs,
+            replayed: false,
+        })
+    }
+
+    fn mark_behind(&self, _error: crate::ProOutputSinkError) {
+        self.behind.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn pro_observations_are_published_only_after_the_row_guard_finishes() {
+    let directory = tempdir().unwrap();
+    let source_directory = directory.path().join("source");
+    fs::create_dir(&source_directory).unwrap();
+    let path = source_directory.join("threads.db");
+    let connection = new_database(&path);
+    insert_thread(
+        &connection,
+        "finished-guard-thread",
+        None,
+        "json",
+        &thread(vec![output_message(
+            "finished-guard-call",
+            "src/finished.rs",
+            "certified output",
+            false,
+        )]),
+    );
+    drop(connection);
+
+    let mut store = ctx_history_store::Store::open(directory.path().join("store.sqlite")).unwrap();
+    let sink = Arc::new(SourceMutatingProSink {
+        path: path.clone(),
+        writes: AtomicUsize::new(0),
+        behind: AtomicUsize::new(0),
+    });
+    let summary = import_zed_nativepath(
+        &path,
+        &mut store,
+        adapter_context(&path, "zed-finished-guard-test-machine"),
+        crate::ProviderImportOptions {
+            import_profile: crate::ImportProfile::CoreAndPro(sink.clone()),
+            ..crate::ProviderImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        summary.work_result(),
+        crate::ProviderImportWorkResult::Changed
+    );
+    assert_eq!(sink.writes.load(Ordering::SeqCst), 1);
+    assert_eq!(sink.behind.load(Ordering::SeqCst), 0);
+}
+
 #[test]
 fn pro_failure_marks_only_output_behind_after_core_commit() {
     let directory = tempdir().unwrap();
@@ -757,13 +856,23 @@ fn cross_device_relocation_reuses_identity_only_after_prior_path_is_missing() {
         crate::ProviderImportOptions::default(),
     )
     .unwrap();
-    import_zed_nativepath(
+    let relocated_guard = import_zed_nativepath(
         &relocated_path,
         &mut guard_store,
         adapter_context(&relocated_path, "zed-relocation-guard-machine"),
         crate::ProviderImportOptions::default(),
-    )
-    .unwrap();
+    );
+    if matches!(
+        relocated_guard,
+        Err(crate::CaptureError::InvalidProviderTranscriptPath {
+            reason: "provider source roots require a qualified local Linux filesystem",
+            ..
+        })
+    ) {
+        assert_eq!(guard_store.list_capture_sources().unwrap().len(), 1);
+        return;
+    }
+    relocated_guard.unwrap();
     let guarded_identities = guard_store
         .list_capture_sources()
         .unwrap()
