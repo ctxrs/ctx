@@ -215,8 +215,19 @@ impl CodexNativeScanner {
 
         loop {
             let core_is_full = self.active_core_page.as_ref().is_some_and(|page| {
-                page.physical_records >= MAX_CODEX_PAGE_UNITS as u64
-                    || page.units() >= MAX_CODEX_PAGE_UNITS
+                page.units() >= MAX_CODEX_PAGE_UNITS
+                    || match self.profile.projection_mode() {
+                        CodexProjectionMode::Legacy => {
+                            page.physical_records >= MAX_CODEX_PAGE_UNITS as u64
+                        }
+                        CodexProjectionMode::SourceBackedV0 => {
+                            page.physical_records >= MAX_CODEX_SOURCE_BACKED_PAGE_RECORDS
+                                || self
+                                    .offset
+                                    .saturating_sub(page.expected_frontier.complete_prefix_end)
+                                    >= MAX_CODEX_SOURCE_BACKED_PAGE_PROGRESS_BYTES
+                        }
+                    }
             });
             if core_is_full {
                 return self.emit_active_core_page().map(Some);

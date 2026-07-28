@@ -390,6 +390,69 @@ fn source_backed_projection_prefilters_with_legacy_equivalent_scan_accounting() 
 }
 
 #[test]
+fn source_backed_projection_batches_ignored_records_without_changing_legacy_pages() {
+    const IGNORED_RECORDS: usize = 256;
+
+    let ignored = jsonl(json!({
+        "type": "event_msg",
+        "payload": {
+            "type": "token_count",
+            "info": {"total_token_usage": {"input_tokens": 42}}
+        }
+    }));
+    let mut contents = session_meta("source-backed-batching-owner");
+    for _ in 0..IGNORED_RECORDS {
+        contents.push_str(&ignored);
+    }
+    contents.push_str(&message("assistant", "one retained projection"));
+    let (_temp, path) = write_source(&contents);
+
+    let (legacy_scan, legacy) =
+        scan_collect(discover_one(&path, "source-backed-batching-owner"), None);
+    let mut scanner = CodexNativeScanner::new_source_backed_v0(
+        discover_one(&path, "source-backed-batching-owner"),
+        None,
+    )
+    .unwrap();
+    let mut source_backed_rows = Vec::new();
+    let mut source_backed_physical_records = Vec::new();
+    while let Some(page) = scanner.next_page().unwrap() {
+        match page {
+            CodexNativeOwnedPage::Core(page) => {
+                assert!(page.core_rows.is_empty());
+                source_backed_physical_records.push(page.physical_records);
+                source_backed_rows.extend(page.source_backed_rows);
+            }
+            CodexNativeOwnedPage::Pro(_) => {
+                panic!("source-backed Core-only projection must not emit Pro pages")
+            }
+        }
+    }
+    let source_backed_scan = scanner.finish().unwrap();
+
+    assert_eq!(legacy.physical_records, vec![64, 64, 64, 64, 2]);
+    assert_eq!(legacy_scan.counters.emitted_pages, 5);
+    assert_eq!(
+        source_backed_physical_records,
+        vec![(IGNORED_RECORDS + 2) as u64]
+    );
+    assert_eq!(source_backed_scan.counters.emitted_pages, 1);
+    assert_eq!(source_backed_rows.len(), 1);
+    assert_eq!(
+        legacy_scan.full_revision_sha256,
+        source_backed_scan.full_revision_sha256
+    );
+    assert_eq!(
+        legacy_scan.complete_prefix_sha256,
+        source_backed_scan.complete_prefix_sha256
+    );
+    assert_eq!(
+        legacy_scan.next_raw_ordinal,
+        source_backed_scan.next_raw_ordinal
+    );
+}
+
+#[test]
 fn core_and_pro_profiles_match_while_pro_receives_success_failure_timeout_and_unknown() {
     let success_marker = "SUCCESS_OUTPUT_ONLY_MARKER";
     let failure_marker = "FAILURE_BODY_MUST_NOT_SURVIVE";
