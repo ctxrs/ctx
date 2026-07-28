@@ -1,8 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     ops::Range,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use chrono::{DateTime, Utc};
@@ -24,6 +23,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::{
+    common::io::{open_provider_source_file, OpenedProviderSourceFile},
     complete_content::{
         attach_verified_content_locator, verified_content_profile, CompleteContentBodyDigest,
         CompleteContentSourceFamily, VerifiedContentLocatorV1, VerifiedContentRole,
@@ -45,10 +45,12 @@ use crate::{
         normalization::{provider_output_event_is_failure, provider_result_outcome_evidence},
         providers::task_json::task_json_string_field,
         sqlite::{
-            open_provider_sqlite_readonly, sqlite_schema_fingerprint, sqlite_table_columns,
-            sqlite_table_exists, with_sqlite_read_snapshot, ProviderSqliteSourceSnapshot,
-            ReadOnlySqliteConnection, SqliteLengthPreflightGuard,
+            sqlite_schema_fingerprint, sqlite_table_columns, sqlite_table_exists,
+            SqliteLengthPreflightGuard,
         },
+    },
+    provider_sources::{
+        open_sqlite_source_snapshot, SqliteSourceAccessError, SqliteSourceEvidence,
     },
     stable_capture_uuid, CaptureError, CaptureWorkLimit, OutputAssociations, OutputCommandContext,
     OutputNativeCoordinate, OutputObservationKind, OutputOutcome, OutputOutcomeMetadata,
@@ -183,8 +185,8 @@ struct TraeRootManifest {
     sources: Vec<TraeRouteState>,
 }
 
-#[derive(Clone)]
 struct TraeSourceAuthority {
+    database: TraeSqliteDatabase,
     path: PathBuf,
     source_root: PathBuf,
     raw_source_path: String,
@@ -195,7 +197,77 @@ struct TraeSourceAuthority {
     proposed_source_identity: String,
     source_revision: String,
     observed_at: DateTime<Utc>,
-    snapshot: ProviderSqliteSourceSnapshot,
+}
+
+struct TraeSqliteDatabase {
+    opened: OpenedProviderSourceFile,
+    evidence: SqliteSourceEvidence,
+}
+
+impl TraeSqliteDatabase {
+    fn open<T>(path: &Path, query: impl FnOnce(&Connection) -> Result<T>) -> Result<(Self, T)> {
+        let opened = open_provider_source_file(path)?;
+        let snapshot = open_sqlite_source_snapshot(path, opened.file())
+            .map_err(|error| trae_sqlite_source_error(path, error))?;
+        let evidence = snapshot.evidence().clone();
+        let result = snapshot
+            .connection()
+            .map_err(|error| trae_sqlite_source_error(path, error))
+            .and_then(query);
+        let finished = snapshot
+            .finish()
+            .map_err(|error| trae_sqlite_source_error(path, error))?;
+        opened.revalidate()?;
+        if finished != evidence {
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
+        Ok((Self { opened, evidence }, result?))
+    }
+
+    fn read<T>(&self, path: &Path, query: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        self.revalidate()?;
+        let snapshot = open_sqlite_source_snapshot(path, self.opened.file())
+            .map_err(|error| trae_sqlite_source_error(path, error))?;
+        let result = if snapshot.evidence() == &self.evidence {
+            snapshot
+                .connection()
+                .map_err(|error| trae_sqlite_source_error(path, error))
+                .and_then(query)
+        } else {
+            Err(CaptureError::SourceChangedDuringCapture)
+        };
+        let finished = snapshot
+            .finish()
+            .map_err(|error| trae_sqlite_source_error(path, error))?;
+        self.revalidate()?;
+        if finished != self.evidence {
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
+        result
+    }
+
+    fn revalidate(&self) -> Result<()> {
+        self.opened.revalidate()
+    }
+
+    fn evidence(&self) -> &SqliteSourceEvidence {
+        &self.evidence
+    }
+}
+
+fn trae_sqlite_source_error(path: &Path, error: SqliteSourceAccessError) -> CaptureError {
+    match error {
+        SqliteSourceAccessError::SourceChanged
+        | SqliteSourceAccessError::ConnectionIdentityMismatch => {
+            CaptureError::SourceChangedDuringCapture
+        }
+        error => CaptureError::ProviderSource {
+            provider: CaptureProvider::Trae.as_str(),
+            path: path.to_path_buf(),
+            kind: crate::ProviderSourceFailureKind::SourceDatabase,
+            detail: error.to_string(),
+        },
+    }
 }
 
 struct TraeSessionPlan {
@@ -214,7 +286,6 @@ struct TraeActiveKey {
 }
 
 struct TraeScanner<'a> {
-    conn: &'a Connection,
     authority: &'a TraeSourceAuthority,
     frontier: TraeFrontier,
     active: Option<TraeActiveKey>,
@@ -307,7 +378,7 @@ pub(crate) fn import_trae_nativepath(
     context: ProviderAdapterContext,
     options: ProviderImportOptions,
 ) -> Result<ProviderImportSummary> {
-    let configured_path = path.to_path_buf();
+    let configured_path = absolute_trae_path(path)?;
     let source_root = context
         .source_root
         .clone()
@@ -315,13 +386,13 @@ pub(crate) fn import_trae_nativepath(
         .unwrap_or_else(|| configured_path.clone());
     let root_stream = root_cursor_stream(&configured_path)?;
     let prior_manifest = load_root_manifest(store, &context.machine_id, &root_stream)?;
-    let mut paths = match collect_trae_state_vscdb_paths(path) {
+    let mut paths = match collect_trae_state_vscdb_paths(&configured_path) {
         Ok(paths) => paths,
         Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(error) => return Err(error),
     };
     for candidate in &mut paths {
-        *candidate = fs::canonicalize(&*candidate)?;
+        *candidate = absolute_trae_path(candidate)?;
     }
     paths.sort();
     paths.dedup();
@@ -478,9 +549,41 @@ fn trae_source_failure_is_local(error: &CaptureError) -> bool {
             | CaptureError::Time(_)
             | CaptureError::Uuid(_)
             | CaptureError::InvalidProviderTranscriptPath { .. }
+            | CaptureError::ProviderSource { .. }
             | CaptureError::SourceChangedDuringCapture
             | CaptureError::InvalidJsonLine { .. }
     )
+}
+
+fn absolute_trae_path(path: &Path) -> Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    Ok(normalized)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }
 
 #[allow(clippy::too_many_arguments)]
