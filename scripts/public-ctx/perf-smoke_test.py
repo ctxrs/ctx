@@ -30,7 +30,7 @@ REPO_ROOT = SCRIPT.parents[2]
 # behavior or artifact-schema change. Last updated to add the released-store
 # upgrade arm, which imports into a data root another release already wrote.
 FROZEN_PYTHON_SOURCE_SHA256 = (
-    "d97ffb5ebe8181153cfb8cb0ec2a836c4f6ce3976a3f09fe33967a9a8c3c4391"
+    "46f0c03554e7b73396d7b59cf750473b5130175ed187003681ba65810bf1ecec"
 )
 PHASES = (
     "initial_import",
