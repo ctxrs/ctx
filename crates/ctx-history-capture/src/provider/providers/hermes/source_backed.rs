@@ -5,13 +5,17 @@
 //! replacement/deletion lifecycle, and projection fanout remain shared
 //! responsibilities.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+};
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, EventIdentityInput,
-    LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
-    ProjectionContractError, ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey,
-    SourceObservation, SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource,
+    EventIdentityInput, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
+    NativeSessionKey, ProjectionContractError, ScannedSourceCounts, SessionIdentityInput,
+    SourceAnchor, SourceKey, SourceObservation, SourceRecordLocator, SourceResolverContractError,
+    StableEntityId, TypedKey,
 };
 use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
 use sha2::{Digest, Sha256};
@@ -53,6 +57,7 @@ const HERMES_SOURCE_PARSER_REVISION: &str = "hermes-source-backed-v1";
 const HERMES_SESSION_RELATION: &str = "sessions";
 const HERMES_MESSAGE_RELATION: &str = "messages";
 const HERMES_SESSION_METADATA_MAX_CHARS: usize = 8 * 1024;
+const HERMES_PARENT_CHAIN_MAX_DEPTH: usize = 256;
 const HERMES_SOURCE_DIGEST_DOMAIN: &[u8] = b"ctx-hermes-source-backed-snapshot-v1\0";
 const HERMES_SESSION_DIGEST_DOMAIN: &[u8] = b"ctx-hermes-source-backed-session-v1\0";
 const HERMES_REJECTION_DIGEST_DOMAIN: &[u8] = b"ctx-hermes-source-backed-rejection-v1\0";
@@ -221,10 +226,16 @@ fn hermes_source_key(anchor: SourceAnchor) -> HermesSourceBackedResult<SourceKey
 pub(crate) struct HermesSourceBackedSession {
     pub(crate) session_id: StableEntityId,
     pub(crate) parent_session_id: Option<StableEntityId>,
+    pub(crate) root_session_id: StableEntityId,
     pub(crate) provider_session_id: String,
     pub(crate) provider_parent_session_id: Option<String>,
+    pub(crate) branch: Option<String>,
+    pub(crate) source_path: String,
+    pub(crate) agent_type: String,
+    pub(crate) is_primary: bool,
     pub(crate) started_at_unix_ms: i64,
     pub(crate) ended_at_unix_ms: Option<i64>,
+    pub(crate) workspace: Option<String>,
     pub(crate) cwd: Option<String>,
     pub(crate) locator: SourceRecordLocator,
 }
@@ -257,6 +268,11 @@ pub(crate) fn scan_hermes_source_backed(
     mut emit: impl FnMut(HermesSourceBackedPage) -> HermesSourceBackedResult<()>,
 ) -> HermesSourceBackedResult<CertifiedSource> {
     candidate.source.validate_contract()?;
+    let source_path = candidate
+        .path
+        .to_str()
+        .ok_or_else(|| HermesSourceBackedError::InvalidProfilePath(candidate.path.clone()))?
+        .to_owned();
     let snapshot = hermes_snapshot(&candidate.path)?;
     let conn = open_provider_sqlite_readonly(&candidate.path)?;
     conn.execute_batch("BEGIN")?;
@@ -306,6 +322,7 @@ pub(crate) fn scan_hermes_source_backed(
                 &conn,
                 &schema,
                 &candidate.source,
+                &source_path,
                 revision_digest,
                 native,
                 logical_digest,
@@ -404,6 +421,12 @@ fn hermes_source_revision(
 #[derive(Debug, Clone)]
 struct HermesSessionContext {
     session_id: StableEntityId,
+    parent_session_id: Option<StableEntityId>,
+    root_session_id: StableEntityId,
+    branch: Option<String>,
+    agent_type: String,
+    is_primary: bool,
+    workspace: Option<String>,
     cwd: Option<String>,
 }
 
@@ -411,6 +434,7 @@ fn project_native_row(
     conn: &rusqlite::Connection,
     schema: &HermesSchema,
     source: &SourceKey,
+    source_path: &str,
     revision_digest: [u8; 32],
     native: HermesNativeRow,
     logical_digest: [u8; 32],
@@ -421,7 +445,30 @@ fn project_native_row(
     let ordinal = native.ordinal;
     match native.record {
         HermesNativeRecord::Session(row) => {
-            match project_session(source, revision_digest, rowid, row, logical_digest) {
+            let context = match load_session_context(conn, schema, source, &row.id) {
+                Ok(Some(context)) => context,
+                Ok(None) => {
+                    return Ok(rejected(
+                        phase,
+                        rowid,
+                        ordinal,
+                        format!("Hermes session {} disappeared during projection", row.id),
+                    ));
+                }
+                Err(CaptureError::InvalidPayload(reason)) => {
+                    return Ok(rejected(phase, rowid, ordinal, reason));
+                }
+                Err(error) => return Err(error.into()),
+            };
+            match project_session(
+                source,
+                source_path,
+                revision_digest,
+                rowid,
+                row,
+                context,
+                logical_digest,
+            ) {
                 Ok(session) => Ok(HermesSourceBackedRecord::Session(session)),
                 Err(error) => Ok(rejected(phase, rowid, ordinal, error.to_string())),
             }
@@ -463,6 +510,7 @@ fn project_native_row(
             };
             match project_message(
                 source,
+                source_path,
                 revision_digest,
                 rowid,
                 ordinal,
@@ -495,17 +543,13 @@ fn rejected(
 
 fn project_session(
     source: &SourceKey,
+    source_path: &str,
     revision_digest: [u8; 32],
     rowid: i64,
     row: HermesSessionRow,
+    context: HermesSessionContext,
     record_digest: [u8; 32],
 ) -> HermesSourceBackedResult<HermesSourceBackedSession> {
-    let session_id = hermes_session_id(source, &row.id)?;
-    let parent_session_id = row
-        .parent_session_id
-        .as_deref()
-        .map(|parent| hermes_session_id(source, parent))
-        .transpose()?;
     let started_at =
         provider_required_timestamp_seconds(row.started_at, "Hermes session started_at")?;
     let ended_at = row
@@ -524,19 +568,26 @@ fn project_session(
         record_digest,
     )?;
     Ok(HermesSourceBackedSession {
-        session_id,
-        parent_session_id,
+        session_id: context.session_id,
+        parent_session_id: context.parent_session_id,
+        root_session_id: context.root_session_id,
         provider_session_id: row.id,
         provider_parent_session_id: row.parent_session_id,
+        branch: context.branch,
+        source_path: source_path.to_owned(),
+        agent_type: context.agent_type,
+        is_primary: context.is_primary,
         started_at_unix_ms: started_at.timestamp_millis(),
         ended_at_unix_ms: ended_at.map(|value| value.timestamp_millis()),
-        cwd: bounded_optional(row.cwd.as_deref(), HERMES_SESSION_METADATA_MAX_CHARS),
+        workspace: context.workspace,
+        cwd: context.cwd,
         locator,
     })
 }
 
 fn project_message(
     source: &SourceKey,
+    source_path: &str,
     revision_digest: [u8; 32],
     rowid: i64,
     ordinal: u64,
@@ -583,15 +634,21 @@ fn project_message(
     Ok(LexicalDocument {
         event_id,
         session_id: session.session_id,
+        parent_session_id: session.parent_session_id,
+        root_session_id: session.root_session_id,
         source: source.clone(),
         locator,
         provider_session_id: Some(row.session_id),
+        branch: session.branch,
+        source_path: Some(source_path.to_owned()),
+        agent_type: session.agent_type,
+        is_primary: session.is_primary,
         event_sequence: native.provider_event_index,
         occurred_at_unix_ms: Some(native.occurred_at.timestamp_millis()),
         event_type: native.event_type.as_str().to_owned(),
         role: native.role.map(|role| role.as_str().to_owned()),
         body: bounded_text(body, MAX_BODY_PREVIEW_CHARS),
-        workspace: None,
+        workspace: session.workspace,
         cwd: session.cwd,
         touched_files: Vec::new(),
     })
@@ -618,6 +675,52 @@ fn load_session_context(
     source: &SourceKey,
     provider_session_id: &str,
 ) -> Result<Option<HermesSessionContext>, CaptureError> {
+    let Some(row) = load_session_row(conn, schema, provider_session_id)? else {
+        return Ok(None);
+    };
+    provider_required_timestamp_seconds(row.started_at, "Hermes session started_at")?;
+    row.ended_at
+        .map(|value| provider_required_timestamp_seconds(value, "Hermes session ended_at"))
+        .transpose()?;
+    let session_id = hermes_session_id(source, &row.id)
+        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+    let parent_session_id = row
+        .parent_session_id
+        .as_deref()
+        .map(|parent| hermes_session_id(source, parent))
+        .transpose()
+        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+    let root_provider_session_id =
+        root_provider_session_id(conn, schema, &row.id, row.parent_session_id.as_deref())?;
+    let root_session_id = hermes_session_id(source, &root_provider_session_id)
+        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+    let is_primary = row.parent_session_id.is_none();
+    Ok(Some(HermesSessionContext {
+        session_id,
+        parent_session_id,
+        root_session_id,
+        branch: bounded_optional(row.git_branch.as_deref(), HERMES_SESSION_METADATA_MAX_CHARS),
+        agent_type: if is_primary {
+            AgentType::Primary
+        } else {
+            AgentType::Subagent
+        }
+        .as_str()
+        .to_owned(),
+        is_primary,
+        workspace: bounded_optional(
+            row.git_repo_root.as_deref(),
+            HERMES_SESSION_METADATA_MAX_CHARS,
+        ),
+        cwd: bounded_optional(row.cwd.as_deref(), HERMES_SESSION_METADATA_MAX_CHARS),
+    }))
+}
+
+fn load_session_row(
+    conn: &rusqlite::Connection,
+    schema: &HermesSchema,
+    provider_session_id: &str,
+) -> Result<Option<HermesSessionRow>, CaptureError> {
     let sql = format!(
         "select {} from sessions s \
          where typeof(s.id) = 'text' and s.id collate binary = ?1 collate binary limit 2",
@@ -636,16 +739,42 @@ fn load_session_context(
             provider_session_id
         )));
     }
-    provider_required_timestamp_seconds(row.started_at, "Hermes session started_at")?;
-    row.ended_at
-        .map(|value| provider_required_timestamp_seconds(value, "Hermes session ended_at"))
-        .transpose()?;
-    let session_id = hermes_session_id(source, &row.id)
-        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
-    Ok(Some(HermesSessionContext {
-        session_id,
-        cwd: bounded_optional(row.cwd.as_deref(), HERMES_SESSION_METADATA_MAX_CHARS),
-    }))
+    Ok(Some(row))
+}
+
+fn root_provider_session_id(
+    conn: &rusqlite::Connection,
+    schema: &HermesSchema,
+    provider_session_id: &str,
+    direct_parent: Option<&str>,
+) -> Result<String, CaptureError> {
+    let mut root = provider_session_id.to_owned();
+    let mut parent = direct_parent.map(str::to_owned);
+    let mut visited = BTreeSet::new();
+    visited.insert(root.clone());
+    for _ in 0..HERMES_PARENT_CHAIN_MAX_DEPTH {
+        let Some(parent_id) = parent.take() else {
+            return Ok(root);
+        };
+        if !visited.insert(parent_id.clone()) {
+            return Err(CaptureError::InvalidPayload(format!(
+                "Hermes session {} has a cyclic parent chain",
+                provider_session_id
+            )));
+        }
+        root.clone_from(&parent_id);
+        parent = match load_session_row(conn, schema, &parent_id)? {
+            Some(row) => row.parent_session_id,
+            None => return Ok(root),
+        };
+        if parent.is_none() {
+            return Ok(root);
+        }
+    }
+    Err(CaptureError::InvalidPayload(format!(
+        "Hermes session {} exceeds the {}-level parent bound",
+        provider_session_id, HERMES_PARENT_CHAIN_MAX_DEPTH
+    )))
 }
 
 fn bound_projected_record(
@@ -683,6 +812,10 @@ fn projected_owned_bytes(record: &HermesSourceBackedRecord) -> Result<usize, ser
                     .map(str::len)
                     .unwrap_or(0),
             )
+            .saturating_add(session.branch.as_deref().map(str::len).unwrap_or(0))
+            .saturating_add(session.source_path.len())
+            .saturating_add(session.agent_type.len())
+            .saturating_add(session.workspace.as_deref().map(str::len).unwrap_or(0))
             .saturating_add(session.cwd.as_deref().map(str::len).unwrap_or(0))
             .saturating_add(serde_json::to_vec(&session.locator)?.len())),
         HermesSourceBackedRecord::Event(event) => Ok(fixed
@@ -694,6 +827,10 @@ fn projected_owned_bytes(record: &HermesSourceBackedRecord) -> Result<usize, ser
                     .map(str::len)
                     .unwrap_or(0),
             )
+            .saturating_add(event.branch.as_deref().map(str::len).unwrap_or(0))
+            .saturating_add(event.source_path.as_deref().map(str::len).unwrap_or(0))
+            .saturating_add(event.agent_type.len())
+            .saturating_add(event.workspace.as_deref().map(str::len).unwrap_or(0))
             .saturating_add(event.cwd.as_deref().map(str::len).unwrap_or(0))
             .saturating_add(serde_json::to_vec(&event.locator)?.len())),
         HermesSourceBackedRecord::Rejected(rejection) => {
