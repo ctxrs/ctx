@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -119,7 +120,27 @@ fn cold_scan_emits_stable_bounded_documents_tree_coordinates_and_exact_counts() 
     assert!(pages.last().is_some_and(|page| page.terminal));
     assert!(documents[0].body.chars().count() <= MAX_BODY_PREVIEW_CHARS);
     assert_eq!(documents[0].session_id, leaf.session_id());
+    assert_eq!(documents[0].parent_session_id, None);
+    assert_eq!(documents[0].root_session_id, leaf.session_id());
     assert_eq!(documents[0].source, *leaf.source_key());
+    assert_eq!(
+        documents[0].provider_session_id.as_deref(),
+        Some("session-a")
+    );
+    assert_eq!(
+        documents[0].branch.as_deref(),
+        Some("feature/source-backed")
+    );
+    assert_eq!(
+        documents[0].source_path.as_deref(),
+        Some(
+            root.join("session-a/session_context.json")
+                .to_str()
+                .unwrap()
+        )
+    );
+    assert_eq!(documents[0].agent_type, AgentType::Primary.as_str());
+    assert!(documents[0].is_primary);
     assert_eq!(
         documents[0].locator.certified_source_revision_digest(),
         Some(cold.source.content_digest())
@@ -151,6 +172,61 @@ fn cold_scan_emits_stable_bounded_documents_tree_coordinates_and_exact_counts() 
     assert!(noop_documents.is_empty());
     assert!(noop_pages.is_empty());
     assert_eq!(noop.source, cold.source);
+}
+
+#[test]
+fn lineage_fields_bind_parent_root_thread_and_agent_semantics() {
+    let temp = tempdir().unwrap();
+    let root = temp.path().join(".rovodev/sessions");
+    for (provider_session_id, parent_session_id) in [
+        ("root-thread", None),
+        ("child-thread", Some("root-thread")),
+        ("grandchild-thread", Some("child-thread")),
+    ] {
+        write_session(
+            &root,
+            provider_session_id,
+            provider_session_id,
+            parent_session_id,
+            &[json!({
+                "id": format!("{provider_session_id}-message"),
+                "role": "assistant",
+                "content": provider_session_id,
+            })],
+        );
+    }
+    let context = adapter_context(&root);
+    let inventory = discover_rovodev_source_backed(&root, context.clone()).unwrap();
+    let mut documents = HashMap::new();
+    for leaf in inventory.leaves() {
+        let (_, mut leaf_documents, _) = collect_scan(leaf, context.clone(), None);
+        assert_eq!(leaf_documents.len(), 1);
+        let document = leaf_documents.pop().unwrap();
+        documents.insert(
+            document.provider_session_id.clone().unwrap(),
+            (leaf.session_id(), document),
+        );
+    }
+
+    let (root_session_id, root_document) = &documents["root-thread"];
+    let (child_session_id, child_document) = &documents["child-thread"];
+    let (grandchild_session_id, grandchild_document) = &documents["grandchild-thread"];
+    assert_eq!(root_document.parent_session_id, None);
+    assert_eq!(root_document.root_session_id, *root_session_id);
+    assert_eq!(root_document.agent_type, AgentType::Primary.as_str());
+    assert!(root_document.is_primary);
+    assert_eq!(child_document.parent_session_id, Some(*root_session_id));
+    assert_eq!(child_document.root_session_id, *root_session_id);
+    assert_eq!(child_document.agent_type, AgentType::Subagent.as_str());
+    assert!(!child_document.is_primary);
+    assert_eq!(
+        grandchild_document.parent_session_id,
+        Some(*child_session_id)
+    );
+    assert_eq!(grandchild_document.root_session_id, *root_session_id);
+    assert_eq!(grandchild_document.agent_type, AgentType::Subagent.as_str());
+    assert!(!grandchild_document.is_primary);
+    assert_ne!(grandchild_session_id, root_session_id);
 }
 
 #[test]
