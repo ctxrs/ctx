@@ -77,11 +77,53 @@ if command -v ruby >/dev/null 2>&1; then
     actual_keys = steps.filter_map { |step| step["key"] if step.is_a?(Hash) }
     required_keys.each { |key| abort "missing gated artifact step #{key}" unless actual_keys.include?(key) }
     artifact_keys = required_keys.first(6)
+    artifact_bases = {
+      "public-cli-linux-x64" => "ctx",
+      "public-cli-linux-aarch64" => "ctx-linux-aarch64",
+      "public-cli-windows-x64" => "ctx.exe",
+      "public-cli-freebsd-x64" => "ctx-freebsd-x64",
+      "public-cli-macos-arm64" => "ctx-macos-arm64",
+      "public-cli-macos-x64" => "ctx-macos-x64",
+    }
     steps.drop(2).each do |step|
       next unless step.is_a?(Hash) && artifact_keys.include?(step["key"])
       abort "artifact step #{step["key"]} must be gated" unless step["if"].to_s.include?("CTX_PUBLIC_CLI_ARTIFACT_MATRIX")
       artifact_paths = Array(step["artifact_paths"]).map(&:to_s)
-      abort "artifact step #{step["key"]} must upload build-info evidence" unless artifact_paths.any? { |path| path.end_with?(".build-info.json") }
+      artifact_base = "target/public-cli-artifacts/#{artifact_bases.fetch(step["key"])}"
+      %w[
+        .build-info.json
+        .cdx.json
+        .cdx.json.sha256
+        .third-party-notices.txt
+        .third-party-notices.txt.sha256
+        .size.json
+        .candidate.json
+      ].each do |suffix|
+        evidence_path = artifact_base + suffix
+        abort "artifact step #{step["key"]} must upload #{evidence_path}" unless artifact_paths.include?(evidence_path)
+      end
+    end
+    authorities = {
+      "public-cli-linux-x64" => [
+        "scripts/release/build-linux-bazel-release.sh",
+        "--platform linux-x64",
+      ],
+      "public-cli-linux-aarch64" => [
+        "scripts/release/build-linux-bazel-release.sh",
+        "--platform linux-arm64",
+      ],
+      "public-cli-windows-x64" => ["//:ctx_release_windows_x64"],
+      "public-cli-freebsd-x64" => ["//:ctx_release_freebsd_x64"],
+      "public-cli-macos-arm64" => ["//:ctx_release_macos_arm64"],
+      "public-cli-macos-x64" => ["//:ctx_release_macos_x64"],
+    }
+    authorities.each do |key, snippets|
+      step = steps.find { |candidate| candidate.is_a?(Hash) && candidate["key"] == key }
+      command = step["command"].to_s
+      snippets.each do |snippet|
+        abort "#{key} does not use its authoritative Bazel route" unless command.include?(snippet)
+      end
+      abort "#{key} still uses the Cargo artifact constructor" if command.include?("build-public-cli-artifact.sh")
     end
     %w[public-cli-macos-arm64 public-cli-macos-x64].each do |key|
       step = steps.find { |candidate| candidate.is_a?(Hash) && candidate["key"] == key }
@@ -329,12 +371,17 @@ for required in \
   'queue: "release-linux-managed"' \
   'ctx-runner-class: "release-linux-control"' \
   'CTX_PUBLIC_CLI_ARTIFACT_MATRIX' \
-  'scripts/build-public-cli-artifact.sh linux-x64' \
-  'scripts/build-public-cli-artifact.sh linux-aarch64' \
-  'scripts/build-public-cli-artifact.sh windows-x64' \
-  'scripts/build-public-cli-artifact.sh freebsd-x64' \
-  'scripts/build-public-cli-artifact.sh macos-arm64' \
-  'scripts/build-public-cli-artifact.sh macos-x64' \
+  'scripts/release/build-linux-bazel-release.sh' \
+  '--platform linux-x64' \
+  '--platform linux-arm64' \
+  '//:ctx_release_windows_x64' \
+  '//:ctx_release_freebsd_x64' \
+  '//:ctx_release_macos_arm64' \
+  '//:ctx_release_macos_x64' \
+  '.cdx.json.sha256' \
+  '.third-party-notices.txt.sha256' \
+  '.size.json' \
+  '.candidate.json' \
   'scripts/build-onnxruntime-sidecar.sh windows-x64-windowsml' \
   'scripts/build-onnxruntime-sidecar.sh linux-x64-cuda12' \
   'scripts/stage-semantic-release-handoff.sh' \
@@ -410,6 +457,11 @@ for required in \
     exit 1
   fi
 done
+
+if grep -Fq 'build-public-cli-artifact.sh' "${pipeline}"; then
+  echo "Buildkite release candidates still use the Cargo artifact helper" >&2
+  exit 1
+fi
 
 python3 - \
   "${artifact_script}" \

@@ -8,6 +8,7 @@ load(
 load(
     "//tools/bazel:release_inventory.bzl",
     "configured_dependency_inventory",
+    "configured_license_materials",
 )
 
 filegroup(
@@ -98,7 +99,10 @@ LOC_CHECK_DATA = [
 RELEASE_PACKAGE_AUDIT_DATA = NON_RUST_GATE_DATA + [
     "//crates/ctx-cli:cargo_package_data",
     "//crates/ctx-history-capture:cargo_package_data",
+    "//crates/ctx-history-core:cargo_package_data",
+    "//crates/ctx-history-index:cargo_package_data",
     "//crates/ctx-history-search:cargo_package_data",
+    "//crates/ctx-history-store:cargo_package_data",
 ]
 
 REAL_HARNESS_DATA = NON_RUST_GATE_DATA + ["//crates/ctx-cli:ctx"]
@@ -147,6 +151,7 @@ filegroup(
     name = "release_contracts",
     srcs = [
         "contracts/public-control-surface-v1.json",
+        "contracts/release-candidate-manifest-v1.schema.json",
         "contracts/release-targets-v1.json",
         "contracts/release-version-v1.json",
     ],
@@ -397,6 +402,7 @@ sh_test(
         "scripts/check-macos-release-signing.sh",
         "scripts/check-public-cli-build-info.py",
         "scripts/macos-release-signing-evidence.py",
+        "scripts/release-sbom.py",
         "scripts/stage-github-release-assets.sh",
         "scripts/verify-macos-release-attestation.sh",
     ],
@@ -440,6 +446,7 @@ sh_binary(
         "MODULE.bazel",
         "MODULE.bazel.lock",
         "contracts/public-control-surface-v1.json",
+        "contracts/release-candidate-manifest-v1.schema.json",
         "contracts/release-targets-v1.json",
         "scripts/apple-developer-id-g2-ca.pem",
         "scripts/check-macos-release-signing.sh",
@@ -465,7 +472,7 @@ sh_binary(
         "scripts/write-public-cli-build-info.py",
         "tests/fixtures/custom-history-jsonl/basic.jsonl",
         "//crates/ctx-cli:Cargo.toml",
-    ],
+    ] + CARGO_WORKSPACE_PACKAGE_DATA,
     tags = [
         "manual",
         "release-gate",
@@ -478,9 +485,28 @@ configured_dependency_inventory(
     target = "//crates/ctx-cli:ctx",
 )
 
+configured_license_materials(
+    name = "ctx_release_license_materials",
+    target = "//crates/ctx-cli:ctx",
+    workspace_materials = [
+        "Cargo.toml",
+        "LICENSE",
+        "//crates/ctx-cli:Cargo.toml",
+        "//crates/ctx-history-capture:Cargo.toml",
+        "//crates/ctx-history-core:Cargo.toml",
+        "//crates/ctx-history-index:Cargo.toml",
+        "//crates/ctx-history-search:Cargo.toml",
+        "//crates/ctx-history-store:Cargo.toml",
+        "//crates/ctx-pro-host-protocol:Cargo.toml",
+        "//crates/ctx-protocol:Cargo.toml",
+        "//crates/ctx-sdk:Cargo.toml",
+    ],
+)
+
 public_cli_release_route(
     name = "ctx_release_linux_x64",
     artifact = "//crates/ctx-cli:ctx",
+    license_materials = ":ctx_release_license_materials",
     packager = ":ctx_release_packager",
     rustc = "//tools/bazel:pinned_rustc",
     sbom_inventory = ":ctx_release_dependency_inventory",
@@ -490,6 +516,7 @@ public_cli_release_route(
 public_cli_release_route(
     name = "ctx_release_linux_arm64",
     artifact = "//crates/ctx-cli:ctx",
+    license_materials = ":ctx_release_license_materials",
     packager = ":ctx_release_packager",
     rustc = "//tools/bazel:pinned_rustc",
     sbom_inventory = ":ctx_release_dependency_inventory",
@@ -499,6 +526,7 @@ public_cli_release_route(
 public_cli_release_route(
     name = "ctx_release_macos_arm64",
     artifact = "//crates/ctx-cli:ctx",
+    license_materials = ":ctx_release_license_materials",
     packager = ":ctx_release_packager",
     rustc = "//tools/bazel:pinned_rustc",
     sbom_inventory = ":ctx_release_dependency_inventory",
@@ -508,6 +536,7 @@ public_cli_release_route(
 public_cli_release_route(
     name = "ctx_release_macos_x64",
     artifact = "//crates/ctx-cli:ctx",
+    license_materials = ":ctx_release_license_materials",
     packager = ":ctx_release_packager",
     rustc = "//tools/bazel:pinned_rustc",
     sbom_inventory = ":ctx_release_dependency_inventory",
@@ -517,6 +546,7 @@ public_cli_release_route(
 public_cli_release_route(
     name = "ctx_release_windows_x64",
     artifact = "//crates/ctx-cli:ctx",
+    license_materials = ":ctx_release_license_materials",
     packager = ":ctx_release_packager",
     rustc = "//tools/bazel:pinned_rustc",
     sbom_inventory = ":ctx_release_dependency_inventory",
@@ -526,6 +556,7 @@ public_cli_release_route(
 public_cli_release_route(
     name = "ctx_release_freebsd_x64",
     artifact = "//crates/ctx-cli:ctx",
+    license_materials = ":ctx_release_license_materials",
     packager = ":ctx_release_packager",
     rustc = "//tools/bazel:pinned_rustc",
     sbom_inventory = ":ctx_release_dependency_inventory",
@@ -550,8 +581,10 @@ sh_test(
     data = [
         ".bazelversion",
         "Cargo.lock",
+        "Cargo.toml",
         "MODULE.bazel",
         "MODULE.bazel.lock",
+        "contracts/release-candidate-manifest-v1.schema.json",
         "contracts/release-targets-v1.json",
         "scripts/check-public-cli-build-info.py",
         "scripts/check-release-target-matrix.py",
@@ -564,6 +597,7 @@ sh_test(
         "scripts/write-public-cli-build-info.py",
         "tests/fixtures/custom-history-jsonl/basic.jsonl",
         "//crates/ctx-cli:Cargo.toml",
+        "//crates/ctx-history-index:Cargo.toml",
     ],
     tags = ["release-gate"],
 )
@@ -581,6 +615,19 @@ py_test(
         "MODULE.bazel.lock",
         "contracts/release-targets-v1.json",
         "scripts/release/linux-bazel-release.Dockerfile",
+    ],
+    tags = ["release-gate"],
+)
+
+sh_test(
+    name = "native_bazel_packaging_contract_tests",
+    srcs = ["scripts/tests/native-bazel-packaging-contract-test.sh"],
+    data = [
+        ".buildkite/pipeline.yml",
+        "contracts/release-targets-v1.json",
+        "scripts/release/build-linux-bazel-release.sh",
+        "scripts/release/linux-bazel-release.Dockerfile",
+        "scripts/stage-github-release-assets.sh",
     ],
     tags = ["release-gate"],
 )
@@ -842,6 +889,7 @@ test_suite(
         ":linux_release_construction_tests",
         ":loc_check",
         ":macos_release_signing_tests",
+        ":native_bazel_packaging_contract_tests",
         ":native_candidate_smoke_tests",
         ":native_rust_smoke",
         ":package_audit_fast",
@@ -854,6 +902,7 @@ test_suite(
         "//tools/bazel:release_route_analysis_tests",
         ":release_binary_compat_tests",
         ":release_binary_string_audit_tests",
+        ":release_sbom_tests",
         ":release_source_surface_audit_tests",
         ":release_target_matrix_check",
         ":release_target_matrix_tests",

@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -n "${TEST_SRCDIR:-}" && -n "${TEST_WORKSPACE:-}" ]]; then
+  source_root="${TEST_SRCDIR}/${TEST_WORKSPACE}"
+else
+  source_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+fi
+
+wrapper="${source_root}/scripts/release/build-linux-bazel-release.sh"
+recipe="${source_root}/scripts/release/linux-bazel-release.Dockerfile"
+pipeline="${source_root}/.buildkite/pipeline.yml"
+matrix="${source_root}/contracts/release-targets-v1.json"
+staging="${source_root}/scripts/stage-github-release-assets.sh"
+
+for required in \
+  'route_target=//:ctx_release_linux_x64' \
+  'route_target=//:ctx_release_linux_arm64' \
+  'docker_platform=linux/amd64' \
+  'docker_platform=linux/arm64' \
+  'requires a native ${expected_host_arch} host' \
+  'requires a native ${expected_host_arch} Docker daemon' \
+  'emulation is diagnostic only' \
+  'scripts/public-cli-host-runtime-evidence.sh' \
+  'scripts/public-cli-runtime-authority.sh' \
+  '/build/release-input/${CTX_RELEASE_BINARY_NAME}.build-info.json' \
+  '--network none' \
+  '--lockfile_mode=error' \
+  '${CTX_PUBLIC_TARGET_BINARY}.cdx.json.sha256' \
+  '${CTX_PUBLIC_TARGET_BINARY}.third-party-notices.txt.sha256' \
+  '${CTX_PUBLIC_TARGET_BINARY}.size.json' \
+  '${CTX_PUBLIC_TARGET_BINARY}.candidate.json' \
+  'd7aedc8565ed47b6231badb80b09f034e389c5f2b1c2ac2c55406f7c661d8b88' \
+  'c97f02133adce63f0c28678ac1f21d65fa8255c80429b588aeeba8a1fac6202b'; do
+  grep -Fq -- "${required}" "${wrapper}" || {
+    printf 'native Linux Bazel wrapper missing contract: %s\n' "${required}" >&2
+    exit 1
+  }
+done
+if grep -Eq 'cargo (build|zigbuild)|qemu-' "${wrapper}"; then
+  echo "native Linux Bazel wrapper contains Cargo construction or emulation" >&2
+  exit 1
+fi
+
+for required in \
+  'ARG BAZEL_ARCH' \
+  'ARG BAZEL_SHA256' \
+  'ARG RELEASE_ARCH' \
+  'org.ctx.release.arch' \
+  'bazel-${BAZEL_VERSION}-linux-${BAZEL_ARCH}' \
+  '"${BAZEL_SHA256}"'; do
+  grep -Fq -- "${required}" "${recipe}" || {
+    printf 'native Linux Bazel recipe missing architecture pin: %s\n' \
+      "${required}" >&2
+    exit 1
+  }
+done
+
+if grep -Fq 'build-public-cli-artifact.sh' "${pipeline}"; then
+  echo "Buildkite release candidates still use the Cargo constructor" >&2
+  exit 1
+fi
+for required in \
+  'scripts/release/build-linux-bazel-release.sh' \
+  '--platform linux-x64' \
+  '--platform linux-arm64' \
+  '//:ctx_release_windows_x64' \
+  '//:ctx_release_freebsd_x64' \
+  '//:ctx_release_macos_arm64' \
+  '//:ctx_release_macos_x64' \
+  '.cdx.json.sha256' \
+  '.third-party-notices.txt.sha256' \
+  '.size.json' \
+  '.candidate.json'; do
+  grep -Fq -- "${required}" "${pipeline}" || {
+    printf 'Buildkite release graph missing Bazel/evidence contract: %s\n' \
+      "${required}" >&2
+    exit 1
+  }
+done
+
+for required in \
+  'scripts/release-sbom.py verify-bundle' \
+  '.cdx.json' \
+  '.third-party-notices.txt'; do
+  grep -Fq -- "${required}" "${staging}" || {
+    printf 'GitHub staging missing verified CLI evidence: %s\n' "${required}" >&2
+    exit 1
+  }
+done
+
+python3 - "${matrix}" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+value = json.loads(Path(sys.argv[1]).read_bytes())
+targets = value["targets"]
+expected = {
+    "linux-x64",
+    "linux-arm64",
+    "macos-arm64",
+    "macos-x64",
+    "windows-x64",
+    "freebsd-x64",
+}
+assert {target["id"] for target in targets} == expected
+for target in targets:
+    target_id = target["id"]
+    assert target["public_construction_authority"] == "bazel-release-route-v1"
+    assert target["public_construction_label"] == (
+        f"//:ctx_release_{target_id.replace('-', '_')}"
+    )
+windows = next(target for target in targets if target["id"] == "windows-x64")
+assert windows["public_rust_target"] == "x86_64-pc-windows-gnu"
+assert windows["helper_rust_target"] == "x86_64-pc-windows-msvc"
+PY
+
+printf 'native Bazel packaging contract tests: OK\n'

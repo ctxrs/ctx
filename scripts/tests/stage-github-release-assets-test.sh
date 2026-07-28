@@ -21,6 +21,9 @@ SH
 cat > "${fake_bin}/python3" <<'SH'
 #!/bin/sh
 case "$*" in
+  *release-sbom.py\ verify-bundle*)
+    printf '%s\n' "$*" >> "${CTX_FAKE_SBOM_LOG:?}"
+    ;;
   *check-public-cli-build-info.py*)
     printf '%064d\n' 0
     ;;
@@ -83,6 +86,15 @@ done
 
 for binary in "${cli_sources[@]}"; do
   printf '{}\n' > "${matrix}/${binary}.build-info.json"
+  printf '{}\n' > "${matrix}/${binary}.cdx.json"
+  sha256sum "${matrix}/${binary}.cdx.json" \
+    | awk '{print $1}' > "${matrix}/${binary}.cdx.json.sha256"
+  printf 'third-party notices\n' \
+    > "${matrix}/${binary}.third-party-notices.txt"
+  sha256sum "${matrix}/${binary}.third-party-notices.txt" \
+    | awk '{print $1}' > "${matrix}/${binary}.third-party-notices.txt.sha256"
+  printf '{}\n' > "${matrix}/${binary}.size.json"
+  printf '{}\n' > "${matrix}/${binary}.candidate.json"
 done
 for platform in macos-arm64 macos-x64; do
   printf '{}\n' > "${matrix}/ctx-${platform}.signing.json"
@@ -176,6 +188,21 @@ default_assets=(
   ctx-onnxruntime-windows-x64.zip
   ctx-windows-x64.exe
 )
+cli_evidence_assets=(
+  ctx-freebsd-x64.cdx.json
+  ctx-freebsd-x64.third-party-notices.txt
+  ctx-linux-aarch64.cdx.json
+  ctx-linux-aarch64.third-party-notices.txt
+  ctx-linux-x64.cdx.json
+  ctx-linux-x64.third-party-notices.txt
+  ctx-macos-arm64.cdx.json
+  ctx-macos-arm64.third-party-notices.txt
+  ctx-macos-x64.cdx.json
+  ctx-macos-x64.third-party-notices.txt
+  ctx-windows-x64.exe.cdx.json
+  ctx-windows-x64.exe.third-party-notices.txt
+)
+default_assets+=("${cli_evidence_assets[@]}")
 native_assets=(
   ctx-freebsd-x64
   ctx-linux-aarch64
@@ -190,6 +217,7 @@ native_assets=(
   ctx-windows-x64.exe
   ctx-windowsml-windows-x64.zip
 )
+native_assets+=("${cli_evidence_assets[@]}")
 semantic_assets=(
   "${default_assets[@]}"
   "${semantic_runtimes[@]}"
@@ -213,18 +241,23 @@ assert_exact_assets() {
 }
 
 default_output="${tmp_dir}/default"
-PATH="${fake_bin}:${PATH}" /bin/bash "${stage}" "${matrix}" "${default_output}"
-assert_exact_assets "${default_output}" 12 "${default_assets[@]}"
+default_sbom_log="${tmp_dir}/default-sbom.log"
+CTX_FAKE_SBOM_LOG="${default_sbom_log}" PATH="${fake_bin}:${PATH}" \
+  /bin/bash "${stage}" "${matrix}" "${default_output}"
+assert_exact_assets "${default_output}" 24 "${default_assets[@]}"
+test "$(wc -l < "${default_sbom_log}")" -eq 6
 
 semantic_output="${tmp_dir}/semantic"
-PATH="${fake_bin}:${PATH}" /bin/bash "${stage}" \
+CTX_FAKE_SBOM_LOG="${tmp_dir}/semantic-sbom.log" PATH="${fake_bin}:${PATH}" \
+  /bin/bash "${stage}" \
   --with-semantic "${matrix}" "${semantic_output}"
-assert_exact_assets "${semantic_output}" 22 "${semantic_assets[@]}"
+assert_exact_assets "${semantic_output}" 34 "${semantic_assets[@]}"
 
 native_output="${tmp_dir}/native"
 cp "${matrix}/ctx-windows-x64.native-runtime-proof.txt" \
   "${matrix}/ctx-windows-x64.windowsml-native-runtime-proof.txt"
-if PATH="${fake_bin}:${PATH}" /bin/bash "${stage}" \
+if CTX_FAKE_SBOM_LOG="${tmp_dir}/native-invalid-sbom.log" \
+  PATH="${fake_bin}:${PATH}" /bin/bash "${stage}" \
   --native-candidate "${matrix}" "${native_output}-legacy-proof" \
   >"${tmp_dir}/native-legacy-proof.out" 2>"${tmp_dir}/native-legacy-proof.err"
 then
@@ -235,21 +268,24 @@ grep -Fq 'runtime proof has wrong runtime' "${tmp_dir}/native-legacy-proof.err"
 rm "${matrix}/ctx-windows-x64.windowsml-native-runtime-proof.txt"
 
 write_windowsml_proof
-PATH="${fake_bin}:${PATH}" /bin/bash "${stage}" \
+CTX_FAKE_SBOM_LOG="${tmp_dir}/native-sbom.log" PATH="${fake_bin}:${PATH}" \
+  /bin/bash "${stage}" \
   --native-candidate "${matrix}" "${native_output}"
-assert_exact_assets "${native_output}" 12 "${native_assets[@]}"
+assert_exact_assets "${native_output}" 24 "${native_assets[@]}"
 test ! -e "${native_output}/ctx-onnxruntime-windows-x64.zip"
 
 semantic_with_both_output="${tmp_dir}/semantic-with-both-proofs"
-PATH="${fake_bin}:${PATH}" /bin/bash "${stage}" \
+CTX_FAKE_SBOM_LOG="${tmp_dir}/semantic-both-sbom.log" PATH="${fake_bin}:${PATH}" \
+  /bin/bash "${stage}" \
   --with-semantic "${matrix}" "${semantic_with_both_output}"
-assert_exact_assets "${semantic_with_both_output}" 22 "${semantic_assets[@]}"
+assert_exact_assets "${semantic_with_both_output}" 34 "${semantic_assets[@]}"
 
 cp "${matrix}/ctx-windows-x64.windowsml-native-runtime-proof.txt" \
   "${tmp_dir}/valid-windowsml-proof.txt"
 sed -i 's/^semantic_contract_canary=passed$/semantic_contract_canary=failed/' \
   "${matrix}/ctx-windows-x64.windowsml-native-runtime-proof.txt"
-if PATH="${fake_bin}:${PATH}" /bin/bash "${stage}" \
+if CTX_FAKE_SBOM_LOG="${tmp_dir}/native-mutation-sbom.log" \
+  PATH="${fake_bin}:${PATH}" /bin/bash "${stage}" \
   --native-candidate "${matrix}" "${native_output}-canary-mutation" \
   >"${tmp_dir}/native-canary-mutation.out" 2>"${tmp_dir}/native-canary-mutation.err"
 then

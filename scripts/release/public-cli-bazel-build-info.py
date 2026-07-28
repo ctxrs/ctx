@@ -179,22 +179,28 @@ def target_from_matrix(matrix_bytes: bytes, platform: str) -> dict[str, Any]:
     targets = matrix.get("targets")
     if not isinstance(targets, list):
         raise BuildInfoError("release-target matrix targets are invalid")
+    target_id = "linux-arm64" if platform == "linux-aarch64" else platform
     matches = [
         target
         for target in targets
-        if isinstance(target, dict) and target.get("id") == platform
+        if isinstance(target, dict) and target.get("id") == target_id
     ]
     if len(matches) != 1:
         raise BuildInfoError("release-target matrix does not contain the exact target")
     target = matches[0]
+    expected = {
+        "linux-x64": ("x86_64", "x86_64-unknown-linux-gnu"),
+        "linux-aarch64": ("aarch64", "aarch64-unknown-linux-gnu"),
+    }
+    expected_target = expected.get(platform)
     if (
-        platform != "linux-x64"
+        expected_target is None
         or target.get("os") != "linux"
-        or target.get("arch") != "x86_64"
-        or target.get("public_rust_target") != "x86_64-unknown-linux-gnu"
+        or (target.get("arch"), target.get("public_rust_target"))
+        != expected_target
         or not isinstance(target.get("linux_build"), dict)
     ):
-        raise BuildInfoError("producer only accepts the owned Linux x64 target")
+        raise BuildInfoError("producer only accepts an owned native Linux target")
     return target
 
 
@@ -399,12 +405,18 @@ def run_container_gates(
     inspector_image_id: str,
 ) -> None:
     artifact_dir = artifact.parent
+    docker_platform = {
+        "linux-x64": "linux/amd64",
+        "linux-aarch64": "linux/arm64",
+    }.get(platform)
+    if docker_platform is None:
+        raise BuildInfoError("container gates require an owned native Linux target")
     common = [
         docker,
         "run",
         "--rm",
         "--platform",
-        "linux/amd64",
+        docker_platform,
         "--network",
         "none",
         "--user",
@@ -513,7 +525,11 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--matrix", type=Path, required=True)
     parser.add_argument("--module-file", type=Path, required=True)
     parser.add_argument("--module-lock", type=Path, required=True)
-    parser.add_argument("--platform", choices=("linux-x64",), required=True)
+    parser.add_argument(
+        "--platform",
+        choices=("linux-aarch64", "linux-x64"),
+        required=True,
+    )
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--source-repo", type=Path, required=True)
     parser.add_argument("--version", required=True)
@@ -529,6 +545,7 @@ def create(args: argparse.Namespace) -> None:
     inspector_image_id = image_id(args.inspector_image_id, "inspector")
     linux_build = target["linux_build"]
     base_labels = {
+        "org.ctx.release.arch": target["arch"],
         "org.ctx.release.base-image": linux_build["builder_image"],
         "org.ctx.release.ubuntu-snapshot": linux_build["ubuntu_snapshot"],
     }

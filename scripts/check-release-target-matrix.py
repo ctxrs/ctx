@@ -18,6 +18,8 @@ EXPECTED = {
         "helper_rust_target": "x86_64-unknown-freebsd",
         "public_artifact": "ctx-freebsd-x64",
         "helper_artifact": "ctx-pro-freebsd-x64",
+        "public_construction_authority": "bazel-release-route-v1",
+        "public_construction_label": "//:ctx_release_freebsd_x64",
         "archive": "tar.gz",
         "vault": "secret-service",
         "runtime_authority": "native-freebsd-x86_64",
@@ -32,6 +34,8 @@ EXPECTED = {
         "helper_rust_target": "aarch64-unknown-linux-gnu",
         "public_artifact": "ctx-linux-aarch64",
         "helper_artifact": "ctx-pro-linux-arm64",
+        "public_construction_authority": "bazel-release-route-v1",
+        "public_construction_label": "//:ctx_release_linux_arm64",
         "archive": "tar.gz",
         "vault": "secret-service",
         "runtime_authority": "native-linux-aarch64",
@@ -55,6 +59,8 @@ EXPECTED = {
         "helper_rust_target": "x86_64-unknown-linux-gnu",
         "public_artifact": "ctx-linux-x64",
         "helper_artifact": "ctx-pro-linux-x64",
+        "public_construction_authority": "bazel-release-route-v1",
+        "public_construction_label": "//:ctx_release_linux_x64",
         "archive": "tar.gz",
         "vault": "secret-service",
         "runtime_authority": "native-linux-x86_64",
@@ -78,6 +84,8 @@ EXPECTED = {
         "helper_rust_target": "aarch64-apple-darwin",
         "public_artifact": "ctx-macos-arm64",
         "helper_artifact": "ctx-pro-macos-arm64",
+        "public_construction_authority": "bazel-release-route-v1",
+        "public_construction_label": "//:ctx_release_macos_arm64",
         "archive": "tar.gz",
         "vault": "keychain",
         "runtime_authority": "native-apple-arm64",
@@ -92,6 +100,8 @@ EXPECTED = {
         "helper_rust_target": "x86_64-apple-darwin",
         "public_artifact": "ctx-macos-x64",
         "helper_artifact": "ctx-pro-macos-x64",
+        "public_construction_authority": "bazel-release-route-v1",
+        "public_construction_label": "//:ctx_release_macos_x64",
         "archive": "tar.gz",
         "vault": "keychain",
         "runtime_authority": "native-macos-x86_64",
@@ -106,6 +116,8 @@ EXPECTED = {
         "helper_rust_target": "x86_64-pc-windows-msvc",
         "public_artifact": "ctx-windows-x64.exe",
         "helper_artifact": "ctx-pro-windows-x64.exe",
+        "public_construction_authority": "bazel-release-route-v1",
+        "public_construction_label": "//:ctx_release_windows_x64",
         "archive": "zip",
         "vault": "credential-manager",
         "runtime_authority": "native-windows-x86_64",
@@ -122,6 +134,8 @@ REQUIRED_STRING_FIELDS = {
     "helper_rust_target",
     "public_artifact",
     "helper_artifact",
+    "public_construction_authority",
+    "public_construction_label",
     "archive",
     "vault",
     "runtime_authority",
@@ -159,6 +173,12 @@ def load_and_validate(path: Path = MATRIX_PATH) -> dict[str, object]:
             raise ValueError("diagnostic authorities must be non-empty strings")
         if target["platform_signature"] not in PLATFORM_SIGNATURES:
             raise ValueError("unsupported platform signature policy")
+        if target["public_construction_authority"] != "bazel-release-route-v1":
+            raise ValueError("public construction authority must be Bazel release V1")
+        if target["public_construction_label"] != (
+            f"//:ctx_release_{target['id'].replace('-', '_')}"
+        ):
+            raise ValueError("public construction label does not match target ID")
         target_id = target["id"]
         ids.append(target_id)
         if target["runtime_authority"] in diagnostics:

@@ -242,6 +242,25 @@ stage_asset() {
   printf '%s  %s\n' "${actual_sha}" "${dest_name}" >> "${out_dir%/}/SHA256SUMS"
 }
 
+verify_and_stage_cli_evidence() {
+  local source_name="$1"
+  local dest_name="$2"
+  local source_path="${artifact_dir%/}/${source_name}"
+
+  python3 -I scripts/release-sbom.py verify-bundle \
+    --artifact "${source_path}" \
+    --build-info "${source_path}.build-info.json" \
+    --sbom "${source_path}.cdx.json" \
+    --notices "${source_path}.third-party-notices.txt" \
+    --size-report "${source_path}.size.json" \
+    --candidate-manifest "${source_path}.candidate.json"
+  stage_asset \
+    "${source_name}.cdx.json" "${dest_name}.cdx.json" 0644
+  stage_asset \
+    "${source_name}.third-party-notices.txt" \
+    "${dest_name}.third-party-notices.txt" 0644
+}
+
 stage_runtime_asset() {
   local platform="$1"
   local asset_name
@@ -695,6 +714,17 @@ validate_macos_signing_evidence macos-arm64
 validate_macos_signing_evidence macos-x64
 
 mkdir -p "${out_dir}"
+for cli_dest in \
+  ctx-linux-aarch64 \
+  ctx-linux-x64 \
+  ctx-macos-arm64 \
+  ctx-macos-x64 \
+  ctx-windows-x64.exe \
+  ctx-freebsd-x64; do
+  rm -f \
+    "${out_dir%/}/${cli_dest}.cdx.json" \
+    "${out_dir%/}/${cli_dest}.third-party-notices.txt"
+done
 rm -f \
   "${out_dir%/}/ctx-linux-aarch64" \
   "${out_dir%/}/ctx-linux-x64" \
@@ -721,11 +751,17 @@ rm -f \
   "${out_dir%/}/SHA256SUMS"
 
 stage_asset ctx ctx-linux-x64
+verify_and_stage_cli_evidence ctx ctx-linux-x64
 stage_asset ctx-linux-aarch64 ctx-linux-aarch64
+verify_and_stage_cli_evidence ctx-linux-aarch64 ctx-linux-aarch64
 stage_asset ctx-macos-arm64 ctx-macos-arm64
+verify_and_stage_cli_evidence ctx-macos-arm64 ctx-macos-arm64
 stage_asset ctx-macos-x64 ctx-macos-x64
+verify_and_stage_cli_evidence ctx-macos-x64 ctx-macos-x64
 stage_asset ctx.exe ctx-windows-x64.exe
+verify_and_stage_cli_evidence ctx.exe ctx-windows-x64.exe
 stage_asset ctx-freebsd-x64 ctx-freebsd-x64
+verify_and_stage_cli_evidence ctx-freebsd-x64 ctx-freebsd-x64
 stage_runtime_asset linux-x64
 stage_runtime_asset linux-aarch64
 stage_runtime_asset macos-arm64

@@ -72,6 +72,12 @@ def shell_values(target: dict[str, Any]) -> str:
         "CTX_PUBLIC_TARGET_TRIPLE": target["public_rust_target"],
         "CTX_PUBLIC_TARGET_ARTIFACT": target["public_artifact"],
         "CTX_PUBLIC_TARGET_BINARY": RAW_BINARIES[target_id],
+        "CTX_PUBLIC_TARGET_CONSTRUCTION_AUTHORITY": target[
+            "public_construction_authority"
+        ],
+        "CTX_PUBLIC_TARGET_CONSTRUCTION_LABEL": target[
+            "public_construction_label"
+        ],
         "CTX_PUBLIC_TARGET_ARCHIVE": target["archive"],
         "CTX_PUBLIC_TARGET_RUNTIME_AUTHORITY": target["runtime_authority"],
         "CTX_PUBLIC_TARGET_PLATFORM_SIGNATURE": target["platform_signature"],

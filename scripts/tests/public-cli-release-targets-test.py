@@ -52,6 +52,14 @@ class PublicCliReleaseTargetsTest(unittest.TestCase):
         self.assertIn("CTX_PUBLIC_TARGET_ID=linux-arm64", shell)
         self.assertIn("CTX_PUBLIC_TARGET_PLATFORM=linux-aarch64", shell)
         self.assertIn("CTX_PUBLIC_TARGET_TRIPLE=aarch64-unknown-linux-gnu", shell)
+        self.assertIn(
+            "CTX_PUBLIC_TARGET_CONSTRUCTION_AUTHORITY=bazel-release-route-v1",
+            shell,
+        )
+        self.assertIn(
+            "CTX_PUBLIC_TARGET_CONSTRUCTION_LABEL=//:ctx_release_linux_arm64",
+            shell,
+        )
 
     def test_unknown_target_fails_closed(self) -> None:
         with self.assertRaisesRegex(helper.ContractError, "unsupported release target"):

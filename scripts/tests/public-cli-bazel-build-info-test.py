@@ -72,22 +72,7 @@ class BuildInfoProducerTests(unittest.TestCase):
             (self.repo / "Cargo.lock").read_bytes()
         ).hexdigest()
         self.artifact = inputs / "ctx"
-        self.artifact.write_text(
-            f"""#!/usr/bin/env bash
-set -euo pipefail
-case "${{1:-}}" in
-  _release-build-identity)
-    printf 'CTX_RELEASE_BUILD_SOURCE_COMMIT={self.commit}\\n'
-    printf 'CTX_RELEASE_BUILD_CARGO_LOCK_SHA256={cargo_lock_sha256}\\n'
-    printf 'CTX_RELEASE_BUILD_TARGET=x86_64-unknown-linux-gnu\\n'
-    ;;
-  --version) printf 'ctx 0.26.0\\n' ;;
-  *) exit 1 ;;
-esac
-""",
-            encoding="utf-8",
-        )
-        self.artifact.chmod(0o755)
+        self.write_artifact("x86_64-unknown-linux-gnu", cargo_lock_sha256)
         self.rustc = inputs / "rustc"
         self.rustc.write_text(
             "#!/usr/bin/env sh\n"
@@ -115,6 +100,24 @@ esac
             "runtime_image_id": "sha256:" + "b" * 64,
             "inspector_image_id": "sha256:" + "c" * 64,
         }
+
+    def write_artifact(self, target: str, cargo_lock_sha256: str) -> None:
+        self.artifact.write_text(
+            f"""#!/usr/bin/env bash
+set -euo pipefail
+case "${{1:-}}" in
+  _release-build-identity)
+    printf 'CTX_RELEASE_BUILD_SOURCE_COMMIT={self.commit}\\n'
+    printf 'CTX_RELEASE_BUILD_CARGO_LOCK_SHA256={cargo_lock_sha256}\\n'
+    printf 'CTX_RELEASE_BUILD_TARGET={target}\\n'
+    ;;
+  --version) printf 'ctx 0.26.0\\n' ;;
+  *) exit 1 ;;
+esac
+""",
+            encoding="utf-8",
+        )
+        self.artifact.chmod(0o755)
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -155,6 +158,24 @@ esac
         digest = PRODUCER.verify(self.verify_args(first))
         self.assertEqual(digest, hashlib.sha256(first.read_bytes()).hexdigest())
 
+    def test_arm64_create_is_deterministic_and_verifies(self) -> None:
+        cargo_lock_sha256 = hashlib.sha256(
+            (self.repo / "Cargo.lock").read_bytes()
+        ).hexdigest()
+        self.write_artifact("aarch64-unknown-linux-gnu", cargo_lock_sha256)
+        self.common["platform"] = "linux-aarch64"
+        output = self.repo / "inputs/arm64.json"
+        self.create(output)
+        digest = PRODUCER.verify(self.verify_args(output))
+        value = json.loads(output.read_bytes())
+        self.assertEqual(digest, hashlib.sha256(output.read_bytes()).hexdigest())
+        self.assertEqual(value["platform"], "linux-aarch64")
+        self.assertEqual(value["target"], "aarch64-unknown-linux-gnu")
+        self.assertEqual(
+            value["linux_build"]["rust_sysroot"],
+            "/opt/rustup/toolchains/1.97.1-aarch64-unknown-linux-gnu",
+        )
+
     def test_dirty_tree_fails_closed(self) -> None:
         (self.repo / "tracked.txt").write_text("dirty\n", encoding="utf-8")
         with self.assertRaisesRegex(PRODUCER.BuildInfoError, "checkout is dirty"):
@@ -164,7 +185,7 @@ esac
         cases = (
             ({"source_commit": "f" * 40}, "source commit does not match"),
             ({"version": "0.26.3"}, "source version mismatch"),
-            ({"platform": "linux-arm64"}, "only accepts the owned Linux x64"),
+            ({"platform": "linux-arm64"}, "owned native Linux target"),
             ({"rust_version": "rustc 1.98.0 (fffffffff 2026-08-01)"}, "rustc"),
         )
         for index, (overrides, message) in enumerate(cases):
@@ -188,6 +209,34 @@ esac
             ROOT / "scripts/release/linux-bazel-release.Dockerfile"
         ).read_text(encoding="utf-8")
         self.assertIn("python3-tomli", recipe)
+        self.assertIn("bazel-${BAZEL_VERSION}-linux-${BAZEL_ARCH}", recipe)
+        self.assertIn('"${BAZEL_SHA256}"', recipe)
+
+    def test_container_gates_select_target_architecture(self) -> None:
+        for platform, docker_platform in (
+            ("linux-x64", "linux/amd64"),
+            ("linux-aarch64", "linux/arm64"),
+        ):
+            with (
+                self.subTest(platform=platform),
+                mock.patch.object(PRODUCER, "run_checked", return_value="") as checked,
+            ):
+                PRODUCER.run_container_gates(
+                    docker="/usr/bin/docker",
+                    source_repo=ROOT,
+                    artifact=self.artifact,
+                    version="0.26.0",
+                    platform=platform,
+                    runtime_image_id=self.images["runtime_image_id"],
+                    inspector_image_id=self.images["inspector_image_id"],
+                )
+                self.assertEqual(len(checked.call_args_list), 2)
+                for call in checked.call_args_list:
+                    command = call.args[0]
+                    self.assertEqual(
+                        command[command.index("--platform") + 1],
+                        docker_platform,
+                    )
 
     def test_verify_rejects_changed_bazel_binding(self) -> None:
         accepted = self.repo / "inputs/accepted.json"
@@ -206,9 +255,9 @@ esac
             self.create(output)
         self.assertEqual(output.read_text(encoding="utf-8"), "sentinel\n")
 
-    def test_dogfood_builder_exposes_release_inputs_to_pinned_inspector(self) -> None:
+    def test_native_linux_builder_routes_both_architectures_through_bazel(self) -> None:
         builder = (
-            ROOT / "scripts/release/build-linux-x64-bazel-dogfood.sh"
+            ROOT / "scripts/release/build-linux-bazel-release.sh"
         ).read_text(encoding="utf-8")
         packager = (
             ROOT / "scripts/package-public-cli-bazel-release.sh"
@@ -224,16 +273,24 @@ esac
         for permission_gate in permission_gates:
             self.assertIn(permission_gate, builder)
             self.assertLess(builder.index(permission_gate), builder.index(producer_call))
+        self.assertIn("route_target=//:ctx_release_linux_x64", builder)
+        self.assertIn("route_target=//:ctx_release_linux_arm64", builder)
+        self.assertIn("docker_platform=linux/arm64", builder)
+        self.assertIn("requires a native ${expected_host_arch} host", builder)
+        self.assertIn("host_authority", builder)
+        self.assertIn("emulation is diagnostic only", builder)
+        self.assertIn("requires a native ${expected_host_arch} Docker daemon", builder)
         self.assertIn(
-            "route=/build/bazel-links/bin/ctx_release_linux_x64",
+            "d7aedc8565ed47b6231badb80b09f034"
+            "e389c5f2b1c2ac2c55406f7c661d8b88",
             builder,
         )
         self.assertIn('BUILD_WORKSPACE_DIRECTORY="$PWD"', builder)
         self.assertIn('RUNFILES_DIR="$route.runfiles"', builder)
-        self.assertNotIn(
-            "scripts/bazelw run \\\n      //:ctx_release_linux_x64",
-            builder,
-        )
+        self.assertIn("--network none", builder)
+        self.assertNotIn("cargo build", builder)
+        self.assertNotIn("cargo zigbuild", builder)
+        self.assertNotIn("qemu-", builder)
         for release_script in (builder, packager):
             self.assertIn("cargo-version", release_script)
             self.assertNotIn("import tomllib", release_script)

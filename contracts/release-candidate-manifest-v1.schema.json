@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ctx.rs/contracts/release-candidate-manifest-v1.schema.json",
+  "title": "ctx public CLI candidate manifest V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "kind",
+    "construction",
+    "product",
+    "version",
+    "target",
+    "source",
+    "artifact",
+    "evidence",
+    "tantivy"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "kind": { "const": "ctx-public-cli-candidate" },
+    "construction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["authority", "label"],
+      "properties": {
+        "authority": { "const": "bazel-release-route-v1" },
+        "label": { "type": "string", "pattern": "^//:ctx_release_[a-z0-9_]+$" }
+      }
+    },
+    "product": { "const": "core" },
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "platform", "rust_triple"],
+      "properties": {
+        "id": { "type": "string" },
+        "platform": { "type": "string" },
+        "rust_triple": { "type": "string" }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commit", "clean"],
+      "properties": {
+        "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "clean": { "const": true }
+      }
+    },
+    "artifact": { "$ref": "#/$defs/artifact" },
+    "evidence": {
+      "type": "object",
+      "required": [
+        "binary_size_report",
+        "build_info",
+        "candidate_schema",
+        "cargo_lock",
+        "ctx_history_index_manifest",
+        "cyclonedx_sbom",
+        "license_materials_inventory",
+        "module_file",
+        "module_lock",
+        "target_dependency_inventory",
+        "target_matrix",
+        "third_party_notices",
+        "workspace_manifest"
+      ],
+      "propertyNames": {
+        "enum": [
+          "binary_size_report",
+          "build_info",
+          "candidate_schema",
+          "cargo_lock",
+          "ctx_history_index_manifest",
+          "cyclonedx_sbom",
+          "license_materials_inventory",
+          "module_file",
+          "module_lock",
+          "target_dependency_inventory",
+          "target_matrix",
+          "third_party_notices",
+          "workspace_manifest"
+        ]
+      },
+      "additionalProperties": { "$ref": "#/$defs/evidence" }
+    },
+    "tantivy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "default_features",
+        "features",
+        "resolved_crate_features",
+        "dependency_closure",
+        "dependency_closure_sha256"
+      ],
+      "properties": {
+        "version": { "const": "0.26.1" },
+        "default_features": { "const": false },
+        "features": {
+          "const": [
+            "columnar-zstd-compression",
+            "lz4-compression",
+            "mmap"
+          ]
+        },
+        "resolved_crate_features": {
+          "const": [
+            "columnar-zstd-compression",
+            "fs4",
+            "lz4-compression",
+            "lz4_flex",
+            "memmap2",
+            "mmap",
+            "tempfile"
+          ]
+        },
+        "dependency_closure": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/dependency" }
+        },
+        "dependency_closure_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "sha256", "size_bytes"],
+      "properties": {
+        "file": { "type": "string" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "size_bytes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "sha256"],
+      "properties": {
+        "file": { "type": "string" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "dependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["license", "name", "source", "version"],
+      "properties": {
+        "checksum": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "license": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "source": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

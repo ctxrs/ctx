@@ -92,6 +92,7 @@ exec "${{packager}}" \
   --declared-artifact-runfile "${{route_root}}/artifact" \
   --declared-rustc-runfile "${{route_root}}/rustc" \
   --declared-sbom-inventory-runfile "${{route_root}}/sbom-inventory.txt" \
+  --declared-license-materials-runfile "${{route_root}}/license-materials.txt" \
   --declared-cargo-lock-runfile "${{route_root}}/Cargo.lock" \
   --declared-target-matrix-runfile "${{route_root}}/release-targets-v1.json" \
   --declared-target "{target_id}" \
@@ -112,6 +113,7 @@ def _release_route_impl(ctx):
         files = [
             ctx.file.artifact,
             ctx.file.cargo_lock,
+            ctx.file.license_materials,
             ctx.file.rustc,
             ctx.file.sbom_inventory,
             ctx.file.target_matrix,
@@ -119,11 +121,15 @@ def _release_route_impl(ctx):
         symlinks = {
             "{}/Cargo.lock".format(route_root): ctx.file.cargo_lock,
             "{}/artifact".format(route_root): ctx.file.artifact,
+            "{}/license-materials.txt".format(route_root): ctx.file.license_materials,
             "{}/packager".format(route_root): ctx.executable.packager,
             "{}/release-targets-v1.json".format(route_root): ctx.file.target_matrix,
             "{}/rustc".format(route_root): ctx.file.rustc,
             "{}/sbom-inventory.txt".format(route_root): ctx.file.sbom_inventory,
         },
+    )
+    runfiles = runfiles.merge(
+        ctx.attr.license_materials[0][DefaultInfo].default_runfiles,
     )
     runfiles = runfiles.merge(ctx.attr.packager[DefaultInfo].default_runfiles)
     return [
@@ -146,6 +152,11 @@ _release_route = rule(
             mandatory = True,
         ),
         "cargo_lock": attr.label(allow_single_file = True, mandatory = True),
+        "license_materials": attr.label(
+            allow_single_file = True,
+            cfg = _route_transition,
+            mandatory = True,
+        ),
         "packager": attr.label(
             cfg = "exec",
             executable = True,
@@ -175,12 +186,14 @@ def public_cli_release_route(
         artifact,
         rustc,
         packager,
-        sbom_inventory):
+        sbom_inventory,
+        license_materials):
     """Declares one exact target-configured release route."""
     _release_route(
         name = name,
         artifact = artifact,
         cargo_lock = "//:release_cargo_lock",
+        license_materials = license_materials,
         packager = packager,
         rustc = rustc,
         sbom_inventory = sbom_inventory,

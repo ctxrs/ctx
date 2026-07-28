@@ -121,6 +121,7 @@ fi
 artifact_runfile=""
 rustc_runfile=""
 sbom_inventory_runfile=""
+license_materials_runfile=""
 cargo_lock_runfile=""
 target_matrix_runfile=""
 target_id=""
@@ -129,6 +130,7 @@ build_info=""
 seen_artifact=0
 seen_rustc=0
 seen_sbom_inventory=0
+seen_license_materials=0
 seen_cargo_lock=0
 seen_target_matrix=0
 seen_target=0
@@ -161,6 +163,14 @@ while [[ $# -gt 0 ]]; do
       shift
       [[ $# -gt 0 && -n "$1" ]] || usage_error "${option} requires a value"
       sbom_inventory_runfile="$1"
+      ;;
+    --declared-license-materials-runfile)
+      seen_license_materials=$((seen_license_materials + 1))
+      [[ "${seen_license_materials}" == "1" ]] \
+        || usage_error "duplicate reserved argument: ${option}"
+      shift
+      [[ $# -gt 0 && -n "$1" ]] || usage_error "${option} requires a value"
+      license_materials_runfile="$1"
       ;;
     --declared-cargo-lock-runfile)
       seen_cargo_lock=$((seen_cargo_lock + 1))
@@ -214,8 +224,8 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-[[ "${seen_artifact}:${seen_rustc}:${seen_sbom_inventory}:${seen_cargo_lock}:${seen_target_matrix}:${seen_target}" \
-  == "1:1:1:1:1:1" ]] || usage_error "release route declarations are incomplete"
+[[ "${seen_artifact}:${seen_rustc}:${seen_sbom_inventory}:${seen_license_materials}:${seen_cargo_lock}:${seen_target_matrix}:${seen_target}" \
+  == "1:1:1:1:1:1:1" ]] || usage_error "release route declarations are incomplete"
 
 artifact="$(resolve_declared_runfile "${artifact_runfile}")" \
   || die "declared Bazel artifact runfile is unavailable"
@@ -223,6 +233,8 @@ rustc="$(resolve_declared_runfile "${rustc_runfile}")" \
   || die "declared Bazel rustc runfile is unavailable"
 sbom_inventory="$(resolve_declared_runfile "${sbom_inventory_runfile}")" \
   || die "declared target SBOM inventory runfile is unavailable"
+license_materials="$(resolve_declared_runfile "${license_materials_runfile}")" \
+  || die "declared license materials inventory runfile is unavailable"
 declared_cargo_lock="$(resolve_declared_runfile "${cargo_lock_runfile}")" \
   || die "declared Cargo.lock runfile is unavailable"
 target_matrix="$(resolve_declared_runfile "${target_matrix_runfile}")" \
@@ -303,9 +315,14 @@ binary_name="${CTX_PUBLIC_TARGET_BINARY}"
 reserved_leaves=(
   "${binary_name}"
   "${binary_name}.build-info.json"
+  "${binary_name}.candidate.json"
   "${binary_name}.cdx.json"
+  "${binary_name}.cdx.json.sha256"
   "${binary_name}.expected-version"
   "${binary_name}.sha256"
+  "${binary_name}.size.json"
+  "${binary_name}.third-party-notices.txt"
+  "${binary_name}.third-party-notices.txt.sha256"
   "${binary_name}.version"
 )
 if [[ "${CTX_PUBLIC_TARGET_OS}" == "macos" ]]; then
@@ -499,9 +516,17 @@ if [[ "${CTX_PUBLIC_TARGET_OS}" == "linux" ]]; then
 fi
 
 staged_sbom="${staged}.cdx.json"
+staged_notices="${staged}.third-party-notices.txt"
+staged_size_report="${staged}.size.json"
+staged_candidate_manifest="${staged}.candidate.json"
+runfiles_args=()
+if [[ -n "${RUNFILES_DIR:-}" ]]; then
+  runfiles_args+=(--runfiles-root "${RUNFILES_DIR}")
+fi
 python3 -I "${repo_root}/scripts/release-sbom.py" generate \
   --product core \
   --version "${version}" \
+  --target-id "${target_id}" \
   --platform "${CTX_PUBLIC_TARGET_PLATFORM}" \
   --artifact "${staged}" \
   --build-info "${staged_build_info}" \
@@ -509,7 +534,19 @@ python3 -I "${repo_root}/scripts/release-sbom.py" generate \
   --module-lock "${repo_root}/MODULE.bazel.lock" \
   --module-file "${repo_root}/MODULE.bazel" \
   --target-inventory "${sbom_inventory}" \
-  --output "${staged_sbom}" >/dev/null
+  --license-materials "${license_materials}" \
+  --target-matrix "${target_matrix}" \
+  --candidate-schema \
+    "${repo_root}/contracts/release-candidate-manifest-v1.schema.json" \
+  --workspace-manifest "${repo_root}/Cargo.toml" \
+  --index-manifest "${repo_root}/crates/ctx-history-index/Cargo.toml" \
+  --output "${staged_sbom}" \
+  --notices-output "${staged_notices}" \
+  --size-report-output "${staged_size_report}" \
+  --candidate-manifest "${staged_candidate_manifest}" \
+  "${runfiles_args[@]}" >/dev/null
+printf '%s\n' "$(sha256_file "${staged_sbom}")" >"${staged_sbom}.sha256"
+printf '%s\n' "$(sha256_file "${staged_notices}")" >"${staged_notices}.sha256"
 
 if [[ "${CTX_PUBLIC_TARGET_OS}" == "windows" ]]; then
   printf '%s\n' "${version}" >"${staged}.expected-version"
@@ -531,6 +568,7 @@ fi
 python3 -I "${repo_root}/scripts/release-sbom.py" verify \
   --product core \
   --version "${version}" \
+  --target-id "${target_id}" \
   --platform "${CTX_PUBLIC_TARGET_PLATFORM}" \
   --artifact "${staged}" \
   --build-info "${staged_build_info}" \
@@ -538,7 +576,24 @@ python3 -I "${repo_root}/scripts/release-sbom.py" verify \
   --module-lock "${repo_root}/MODULE.bazel.lock" \
   --module-file "${repo_root}/MODULE.bazel" \
   --target-inventory "${sbom_inventory}" \
-  --sbom "${staged_sbom}" >/dev/null
+  --license-materials "${license_materials}" \
+  --target-matrix "${target_matrix}" \
+  --candidate-schema \
+    "${repo_root}/contracts/release-candidate-manifest-v1.schema.json" \
+  --workspace-manifest "${repo_root}/Cargo.toml" \
+  --index-manifest "${repo_root}/crates/ctx-history-index/Cargo.toml" \
+  --sbom "${staged_sbom}" \
+  --notices "${staged_notices}" \
+  --size-report "${staged_size_report}" \
+  --candidate-manifest "${staged_candidate_manifest}" \
+  "${runfiles_args[@]}" >/dev/null
+python3 -I "${repo_root}/scripts/release-sbom.py" verify-bundle \
+  --artifact "${staged}" \
+  --build-info "${staged_build_info}" \
+  --sbom "${staged_sbom}" \
+  --notices "${staged_notices}" \
+  --size-report "${staged_size_report}" \
+  --candidate-manifest "${staged_candidate_manifest}" >/dev/null
 
 install_args=(
   --stage "${stage_dir}"
