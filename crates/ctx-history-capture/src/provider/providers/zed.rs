@@ -10,7 +10,7 @@ use crate::{
 };
 
 mod event;
-mod native_path;
+pub(crate) mod native_path;
 mod thread;
 
 pub(crate) use thread::decode_zed_thread_for_complete;

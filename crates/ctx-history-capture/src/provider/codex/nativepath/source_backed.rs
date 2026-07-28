@@ -257,9 +257,9 @@ struct ColdSourcePlanV0 {
 }
 
 #[derive(Debug)]
-struct CodexRootInventoryV0 {
-    sources: Vec<(CodexCatalogSource, SourceKey, String)>,
-    certificate: CertifiedSourceInventory,
+pub(crate) struct CodexRootInventoryV0 {
+    pub(crate) sources: Vec<(CodexCatalogSource, SourceKey, String)>,
+    pub(crate) certificate: CertifiedSourceInventory,
 }
 
 #[derive(Debug)]
@@ -532,7 +532,7 @@ fn ingest_codex_source_backed_inner_v0(
     })
 }
 
-fn ingest_codex_sources_serial_v0(
+pub(crate) fn ingest_codex_sources_serial_v0(
     sources: Vec<(CodexCatalogSource, SourceKey, String)>,
     base_sources: &HashMap<SourceKey, CertifiedSource>,
     writer: &mut GenerationWriter,
@@ -1193,7 +1193,7 @@ fn bind_source_keys(
     Ok(bound)
 }
 
-fn discover_codex_root_inventory_v0(
+pub(crate) fn discover_codex_root_inventory_v0(
     session_root: &Path,
 ) -> CodexSourceBackedResultV0<CodexRootInventoryV0> {
     let opening_root_revision = codex_root_revision_v0(session_root)?;
@@ -1327,7 +1327,9 @@ fn codex_root_revision_v0(session_root: &Path) -> CodexSourceBackedResultV0<[u8;
     Ok(revision.finalize().into())
 }
 
-fn writer_base_sources(writer: &GenerationWriter) -> HashMap<SourceKey, CertifiedSource> {
+pub(crate) fn writer_base_sources(
+    writer: &GenerationWriter,
+) -> HashMap<SourceKey, CertifiedSource> {
     writer
         .base_manifest()
         .into_iter()
@@ -1337,7 +1339,7 @@ fn writer_base_sources(writer: &GenerationWriter) -> HashMap<SourceKey, Certifie
         .collect()
 }
 
-fn managed_codex_session_source(source: &SourceKey) -> bool {
+pub(crate) fn managed_codex_session_source(source: &SourceKey) -> bool {
     source.provider() == CaptureProvider::Codex.as_str()
         && source.source_format() == CODEX_SESSION_SOURCE_FORMAT
         && source.schema_variant() == CODEX_SOURCE_SCHEMA_VARIANT
@@ -1575,7 +1577,7 @@ fn checked_add(left: u64, right: u64) -> CodexSourceBackedResultV0<u64> {
         .ok_or(CodexSourceBackedErrorV0::CountOverflow)
 }
 
-fn source_observation(
+pub(crate) fn source_observation(
     source: &SourceKey,
     observation: &CodexFileObservation,
 ) -> CodexSourceBackedResultV0<SourceObservation> {

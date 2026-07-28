@@ -17,7 +17,7 @@ use crate::{
 };
 
 mod message_text;
-mod native_path;
+pub(crate) mod native_path;
 
 pub(crate) use message_text::{firebender_message_text, firebender_result_content};
 pub(crate) use native_path::import_firebender_nativepath;

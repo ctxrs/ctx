@@ -6,7 +6,7 @@ use crate::{ProviderAdapterContext, ProviderImportOptions, ProviderImportSummary
 
 mod complete_content;
 mod event;
-mod nativepath;
+pub(crate) mod nativepath;
 #[cfg(test)]
 mod tests;
 

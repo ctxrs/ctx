@@ -8,7 +8,7 @@ use crate::{CaptureError, Result};
 
 mod event;
 mod json_stream;
-mod nativepath;
+pub(crate) mod nativepath;
 mod workspace;
 
 #[allow(unused_imports)]

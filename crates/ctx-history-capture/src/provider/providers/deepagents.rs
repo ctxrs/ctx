@@ -6,7 +6,7 @@ use crate::{ProviderAdapterContext, ProviderImportOptions, ProviderImportSummary
 
 mod complete_content;
 mod message;
-mod native_path;
+pub(crate) mod native_path;
 mod source;
 
 pub(crate) use complete_content::{

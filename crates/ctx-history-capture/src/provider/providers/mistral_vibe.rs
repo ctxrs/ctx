@@ -1,6 +1,6 @@
 use crate::Result;
 
-mod native_path;
+pub(crate) mod native_path;
 mod schema;
 mod source;
 

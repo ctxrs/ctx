@@ -6,7 +6,7 @@ use crate::{stable_capture_uuid, ProviderAdapterContext, Result, KIMI_CODE_CLI_S
 
 mod event;
 mod layout;
-mod native_path;
+pub(crate) mod native_path;
 mod source;
 
 pub(crate) use native_path::import_kimi_nativepath_tree;

@@ -14,15 +14,13 @@ use ctx_history_index::{
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+pub(crate) use super::query::scan_zed_native_snapshot;
 use super::{
     acquire_immutable_snapshot, decode_complete_message_with_identity,
     dto::{
         ZedNativeEvent, ZedNativeMessageIdentity, ZedNativePage, ZedNativeSession, ZedNativeSink,
     },
-    query::{
-        hydrate_zed_thread_row, scan_zed_native_snapshot, ZedThreadLineage,
-        ZedThreadLineageResolver,
-    },
+    query::{hydrate_zed_thread_row, ZedThreadLineage, ZedThreadLineageResolver},
     revalidate_zed_snapshot_revision, ZedNativePathError, ZedNativeResult, ZedSnapshotAcquisition,
 };
 use crate::{
@@ -297,7 +295,7 @@ pub(crate) fn ingest_zed_source_backed_v0(
     })
 }
 
-struct ZedSourceBackedSinkV0<'writer, 'connection> {
+pub(crate) struct ZedSourceBackedSinkV0<'writer, 'connection> {
     writer: &'writer mut GenerationWriter,
     lineage: ZedThreadLineageResolver<'connection>,
     source: ctx_history_core::SourceKey,
@@ -317,7 +315,7 @@ struct ZedSessionProjectionContextV0 {
 }
 
 impl<'writer, 'connection> ZedSourceBackedSinkV0<'writer, 'connection> {
-    fn new(
+    pub(crate) fn new(
         writer: &'writer mut GenerationWriter,
         connection: &'connection rusqlite::Connection,
         source: ctx_history_core::SourceKey,
@@ -334,6 +332,14 @@ impl<'writer, 'connection> ZedSourceBackedSinkV0<'writer, 'connection> {
             staged_documents: 0,
             failure: None,
         })
+    }
+
+    pub(crate) fn take_failure(&mut self) -> Option<ZedSourceBackedErrorV0> {
+        self.failure.take()
+    }
+
+    pub(crate) fn staged_documents(&self) -> u64 {
+        self.staged_documents
     }
 
     fn project_session(
@@ -407,7 +413,7 @@ impl ZedNativeSink for ZedSourceBackedSinkV0<'_, '_> {
     }
 }
 
-fn zed_source_key() -> ZedSourceBackedResultV0<ctx_history_core::SourceKey> {
+pub(crate) fn zed_source_key() -> ZedSourceBackedResultV0<ctx_history_core::SourceKey> {
     let anchor = SourceAnchor::provider_native(
         ZED_SOURCE_ANCHOR_NAMESPACE,
         TypedKey::utf8(ZED_SOURCE_ANCHOR_KEY)?,
@@ -544,7 +550,7 @@ fn locator_message_identity(
     })
 }
 
-fn source_observation(
+pub(crate) fn source_observation(
     source: &ctx_history_core::SourceKey,
     snapshot_revision: &str,
 ) -> ZedSourceBackedResultV0<SourceObservation> {
@@ -555,11 +561,13 @@ fn source_observation(
     )?)
 }
 
-fn snapshot_revision_digest(snapshot_revision: &str) -> [u8; 32] {
+pub(crate) fn snapshot_revision_digest(snapshot_revision: &str) -> [u8; 32] {
     Sha256::digest(snapshot_revision.as_bytes()).into()
 }
 
-fn acquire_snapshot(path: &Path) -> ZedSourceBackedResultV0<super::ZedImmutableSqliteSnapshot> {
+pub(crate) fn acquire_snapshot(
+    path: &Path,
+) -> ZedSourceBackedResultV0<super::ZedImmutableSqliteSnapshot> {
     match acquire_immutable_snapshot(path)? {
         ZedSnapshotAcquisition::Acquired(snapshot) => Ok(*snapshot),
         ZedSnapshotAcquisition::Incomplete { .. } => {
@@ -689,7 +697,7 @@ fn digest_bytes(digest: &CompleteContentBodyDigest) -> ZedSourceBackedResultV0<[
     decode_sha256_hex(digest.as_str())
 }
 
-fn decode_sha256_hex(value: &str) -> ZedSourceBackedResultV0<[u8; 32]> {
+pub(crate) fn decode_sha256_hex(value: &str) -> ZedSourceBackedResultV0<[u8; 32]> {
     if value.len() != 64 {
         return Err(ZedSourceBackedErrorV0::InvalidDigest);
     }

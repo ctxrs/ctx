@@ -31,13 +31,13 @@ pub(super) const ZED_THREAD_ID_MAX_BYTES: usize = 64 * 1024;
 const ZED_SOURCE_DIGEST_DOMAIN: &[u8] = b"ctx-zed-source-integrity-v1\0";
 const ZED_RELATIONSHIP_MAX_DEPTH: usize = 1_024;
 
-pub(super) struct ZedNativeQueryResult {
-    pub(super) capability_digest: String,
-    pub(super) source_integrity_digest: String,
-    pub(super) core_generation_digest: String,
-    pub(super) output_index: ZedNativeOutputIndex,
-    pub(super) pages_emitted: u64,
-    pub(super) counters: ZedNativeCounters,
+pub(crate) struct ZedNativeQueryResult {
+    pub(crate) capability_digest: String,
+    pub(crate) source_integrity_digest: String,
+    pub(crate) core_generation_digest: String,
+    pub(crate) output_index: ZedNativeOutputIndex,
+    pub(crate) pages_emitted: u64,
+    pub(crate) counters: ZedNativeCounters,
 }
 
 pub(super) struct ZedThreadLineage {
@@ -236,7 +236,7 @@ impl ZedNativeSchema {
     }
 }
 
-pub(super) fn scan_zed_native_snapshot(
+pub(crate) fn scan_zed_native_snapshot(
     connection: &Connection,
     _physical_locator: &str,
     _snapshot_revision: &str,

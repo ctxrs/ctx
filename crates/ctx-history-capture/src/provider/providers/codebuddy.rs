@@ -1,4 +1,4 @@
-mod native_path;
+pub(crate) mod native_path;
 mod normalization;
 mod source;
 

@@ -50,6 +50,11 @@ pub(crate) use source::{
     CodexCatalogSource, CodexCheckpointGeneration, CodexFileObservation, CodexKnownSource,
     CodexSourceIdentity, CodexSourceLifecycle,
 };
+pub(crate) use source_backed::{
+    discover_codex_root_inventory_v0, ingest_codex_sources_serial_v0, managed_codex_session_source,
+    source_observation as codex_source_observation,
+    writer_base_sources as codex_writer_base_sources,
+};
 pub use source_backed::{
     hydrate_codex_locator, ingest_codex_source_backed_v0, CodexHydratedRecordV0,
     CodexLocatorResolverV0, CodexSourceBackedCountersV0, CodexSourceBackedErrorV0,

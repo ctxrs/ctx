@@ -26,7 +26,7 @@ use crate::{
 
 mod layout;
 mod native_path;
-mod source_backed;
+pub(crate) mod source_backed;
 mod sqlite;
 
 use self::layout::{decode_hermes_message, HermesMessageRow, HermesSchema, HermesSqliteValue};

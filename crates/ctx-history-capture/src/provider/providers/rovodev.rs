@@ -1,5 +1,5 @@
 mod event;
-mod native_path;
+pub(crate) mod native_path;
 mod source;
 
 pub(crate) use event::rovodev_result_content;

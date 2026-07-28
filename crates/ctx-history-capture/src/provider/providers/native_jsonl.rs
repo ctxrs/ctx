@@ -5,7 +5,7 @@ use ctx_history_core::CaptureProvider;
 use crate::Result;
 
 mod dialect;
-mod native_path;
+pub(crate) mod native_path;
 mod normalization;
 pub(crate) mod result_content;
 mod traversal;

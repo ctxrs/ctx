@@ -27,7 +27,7 @@ thread_local! {
 }
 
 mod complete_content;
-mod native_path;
+pub(crate) mod native_path;
 mod normalization;
 
 pub(crate) use complete_content::{

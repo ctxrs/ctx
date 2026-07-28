@@ -24,7 +24,7 @@ mod dto;
 mod output;
 mod publication;
 mod query;
-mod source_backed;
+pub(crate) mod source_backed;
 mod staging;
 mod vertical;
 
@@ -79,15 +79,15 @@ pub(crate) enum ZedNativePathError {
 
 pub(super) type ZedNativeResult<T> = std::result::Result<T, ZedNativePathError>;
 
-pub(super) struct ZedImmutableSqliteSnapshot {
-    pub(super) observed: ProviderSqliteSourceSnapshot,
-    pub(super) connection: Connection,
-    pub(super) physical_locator: String,
-    pub(super) snapshot_revision: String,
+pub(crate) struct ZedImmutableSqliteSnapshot {
+    pub(crate) observed: ProviderSqliteSourceSnapshot,
+    pub(crate) connection: Connection,
+    pub(crate) physical_locator: String,
+    pub(crate) snapshot_revision: String,
     _directory: TempDir,
 }
 
-pub(super) enum ZedSnapshotAcquisition {
+pub(crate) enum ZedSnapshotAcquisition {
     Acquired(Box<ZedImmutableSqliteSnapshot>),
     Incomplete { physical_locator: String },
 }
