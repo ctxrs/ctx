@@ -10,6 +10,14 @@ use crate::{ProviderAdapterContext, ProviderImportOptions, ProviderImportSummary
 
 mod native_path;
 
+pub(crate) use native_path::{
+    scan_lingma_source_backed_v0, LingmaDatabaseScanV0, LingmaDatabaseSourceV0,
+    LingmaExactContentCapabilityV0, LingmaExactContentFailureKindV0, LingmaExactContentFailureV0,
+    LingmaHydratedContentV0, LingmaSourceBackedErrorV0, LingmaSourceBackedRecordV0,
+    LingmaSourceBackedResolverV0, LingmaSourceBackedResultV0, LingmaSourceBackedScanV0,
+    LingmaSourceInventoryV0,
+};
+
 pub(crate) fn import_lingma_nativepath(
     path: &Path,
     store: &mut Store,
