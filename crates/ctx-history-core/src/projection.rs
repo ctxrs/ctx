@@ -12,6 +12,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub const IDENTITY_VERSION: u16 = 1;
+pub const STABLE_ENTITY_ID_CANONICAL_LEN: usize = 2 + 1 + 32 + 32 + 32 + 16;
 
 const MAX_PROVIDER_BYTES: usize = 128;
 const MAX_SOURCE_FORMAT_BYTES: usize = 256;
@@ -30,6 +31,12 @@ const IDENTITY_DOMAIN: &[u8] = b"ctx.identity\0";
 const ENTITY_SOURCE: u8 = 1;
 const ENTITY_SESSION: u8 = 2;
 const ENTITY_ITEM: u8 = 3;
+const STABLE_ENTITY_ID_KIND_OFFSET: usize = 2;
+const STABLE_ENTITY_ID_DIGEST_OFFSET: usize = STABLE_ENTITY_ID_KIND_OFFSET + 1;
+const STABLE_ENTITY_ID_SOURCE_DIGEST_OFFSET: usize = STABLE_ENTITY_ID_DIGEST_OFFSET + 32;
+const STABLE_ENTITY_ID_SOURCE_DESCRIPTOR_DIGEST_OFFSET: usize =
+    STABLE_ENTITY_ID_SOURCE_DIGEST_OFFSET + 32;
+const STABLE_ENTITY_ID_UUID_OFFSET: usize = STABLE_ENTITY_ID_SOURCE_DESCRIPTOR_DIGEST_OFFSET + 32;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ProjectionContractError {
@@ -1136,6 +1143,8 @@ pub struct StableEntityId {
 }
 
 impl StableEntityId {
+    pub const CANONICAL_LEN: usize = STABLE_ENTITY_ID_CANONICAL_LEN;
+
     pub fn contract_version(self) -> u16 {
         self.contract_version
     }
@@ -1158,6 +1167,70 @@ impl StableEntityId {
 
     pub fn as_uuid(self) -> Uuid {
         self.uuid
+    }
+
+    /// Encodes every identity component in one canonical fixed-size layout.
+    ///
+    /// The layout is the big-endian contract version, entity kind, full
+    /// digest, source digest, source descriptor digest, and compact UUID.
+    pub fn encode_canonical(
+        self,
+    ) -> ProjectionContractResult<[u8; STABLE_ENTITY_ID_CANONICAL_LEN]> {
+        self.validate_contract()?;
+        let mut encoded = [0_u8; STABLE_ENTITY_ID_CANONICAL_LEN];
+        encoded[..STABLE_ENTITY_ID_KIND_OFFSET]
+            .copy_from_slice(&self.contract_version.to_be_bytes());
+        encoded[STABLE_ENTITY_ID_KIND_OFFSET] = self.entity_kind as u8;
+        encoded[STABLE_ENTITY_ID_DIGEST_OFFSET..STABLE_ENTITY_ID_SOURCE_DIGEST_OFFSET]
+            .copy_from_slice(&self.digest);
+        encoded[STABLE_ENTITY_ID_SOURCE_DIGEST_OFFSET
+            ..STABLE_ENTITY_ID_SOURCE_DESCRIPTOR_DIGEST_OFFSET]
+            .copy_from_slice(&self.source_digest);
+        encoded[STABLE_ENTITY_ID_SOURCE_DESCRIPTOR_DIGEST_OFFSET..STABLE_ENTITY_ID_UUID_OFFSET]
+            .copy_from_slice(&self.source_descriptor_digest);
+        encoded[STABLE_ENTITY_ID_UUID_OFFSET..].copy_from_slice(self.uuid.as_bytes());
+        Ok(encoded)
+    }
+
+    /// Decodes the canonical fixed-size layout and validates every identity
+    /// invariant before returning a value.
+    pub fn decode_canonical(encoded: &[u8]) -> ProjectionContractResult<Self> {
+        if encoded.len() != STABLE_ENTITY_ID_CANONICAL_LEN {
+            return Err(ProjectionContractError::InvalidDerivedIdentity);
+        }
+        let contract_version = u16::from_be_bytes([encoded[0], encoded[1]]);
+        let entity_kind = match encoded[STABLE_ENTITY_ID_KIND_OFFSET] {
+            ENTITY_SOURCE => StableEntityKind::Source,
+            ENTITY_SESSION => StableEntityKind::Session,
+            ENTITY_ITEM => StableEntityKind::Event,
+            _ => return Err(ProjectionContractError::InvalidDerivedIdentity),
+        };
+        let mut digest = [0_u8; 32];
+        digest.copy_from_slice(
+            &encoded[STABLE_ENTITY_ID_DIGEST_OFFSET..STABLE_ENTITY_ID_SOURCE_DIGEST_OFFSET],
+        );
+        let mut source_digest = [0_u8; 32];
+        source_digest.copy_from_slice(
+            &encoded[STABLE_ENTITY_ID_SOURCE_DIGEST_OFFSET
+                ..STABLE_ENTITY_ID_SOURCE_DESCRIPTOR_DIGEST_OFFSET],
+        );
+        let mut source_descriptor_digest = [0_u8; 32];
+        source_descriptor_digest.copy_from_slice(
+            &encoded
+                [STABLE_ENTITY_ID_SOURCE_DESCRIPTOR_DIGEST_OFFSET..STABLE_ENTITY_ID_UUID_OFFSET],
+        );
+        let mut uuid = [0_u8; 16];
+        uuid.copy_from_slice(&encoded[STABLE_ENTITY_ID_UUID_OFFSET..]);
+        let identity = Self {
+            contract_version,
+            entity_kind,
+            digest,
+            source_digest,
+            source_descriptor_digest,
+            uuid: Uuid::from_bytes(uuid),
+        };
+        identity.validate_contract()?;
+        Ok(identity)
     }
 
     pub fn validate_contract(self) -> ProjectionContractResult<()> {
@@ -1845,6 +1918,121 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(first.as_uuid().get_version_num(), 8);
         assert_ne!(first.digest(), [0; 32]);
+    }
+
+    #[test]
+    fn stable_entity_id_canonical_encoding_is_exact_and_round_trips() {
+        let source = source(1);
+        let session_key = native_session_id("session");
+        let session_id = derive_session_id(SessionIdentityInput {
+            source: &source,
+            logical_session_kind: "thread",
+            native_session_key: &session_key,
+        })
+        .unwrap();
+        let event_id = derive_event_id(EventIdentityInput {
+            source: &source,
+            session_id,
+            logical_item_kind: "message",
+            native_item_key: &native_id("event-1"),
+            subrecord_selector: None,
+        })
+        .unwrap();
+
+        let encoded = event_id.encode_canonical().unwrap();
+        assert_eq!(encoded.len(), STABLE_ENTITY_ID_CANONICAL_LEN);
+        assert_eq!(
+            &encoded[..STABLE_ENTITY_ID_KIND_OFFSET],
+            &IDENTITY_VERSION.to_be_bytes()
+        );
+        assert_eq!(
+            encoded[STABLE_ENTITY_ID_KIND_OFFSET],
+            StableEntityKind::Event as u8
+        );
+        assert_eq!(
+            &encoded[STABLE_ENTITY_ID_DIGEST_OFFSET..STABLE_ENTITY_ID_SOURCE_DIGEST_OFFSET],
+            &event_id.digest()
+        );
+        assert_eq!(
+            &encoded[STABLE_ENTITY_ID_SOURCE_DIGEST_OFFSET
+                ..STABLE_ENTITY_ID_SOURCE_DESCRIPTOR_DIGEST_OFFSET],
+            &event_id.source_digest()
+        );
+        assert_eq!(
+            &encoded
+                [STABLE_ENTITY_ID_SOURCE_DESCRIPTOR_DIGEST_OFFSET..STABLE_ENTITY_ID_UUID_OFFSET],
+            &event_id.source_descriptor_digest()
+        );
+        assert_eq!(
+            &encoded[STABLE_ENTITY_ID_UUID_OFFSET..],
+            event_id.as_uuid().as_bytes()
+        );
+
+        let decoded = StableEntityId::decode_canonical(&encoded).unwrap();
+        assert_eq!(decoded.contract_version(), event_id.contract_version());
+        assert_eq!(decoded.entity_kind(), event_id.entity_kind());
+        assert_eq!(decoded.digest(), event_id.digest());
+        assert_eq!(decoded.source_digest(), event_id.source_digest());
+        assert_eq!(
+            decoded.source_descriptor_digest(),
+            event_id.source_descriptor_digest()
+        );
+        assert_eq!(decoded.as_uuid(), event_id.as_uuid());
+        assert_eq!(decoded.encode_canonical().unwrap(), encoded);
+    }
+
+    #[test]
+    fn stable_entity_id_canonical_decode_rejects_corruption() {
+        fn assert_invalid(encoded: &[u8]) {
+            assert_eq!(
+                StableEntityId::decode_canonical(encoded).unwrap_err(),
+                ProjectionContractError::InvalidDerivedIdentity
+            );
+        }
+
+        let source = source(1);
+        let session_key = native_session_id("session");
+        let session_id = derive_session_id(SessionIdentityInput {
+            source: &source,
+            logical_session_kind: "thread",
+            native_session_key: &session_key,
+        })
+        .unwrap();
+        let mut encoded = session_id.encode_canonical().unwrap();
+
+        assert_invalid(&encoded[..STABLE_ENTITY_ID_CANONICAL_LEN - 1]);
+        let mut extended = encoded.to_vec();
+        extended.push(0);
+        assert_invalid(&extended);
+
+        encoded[..STABLE_ENTITY_ID_KIND_OFFSET].copy_from_slice(&2_u16.to_be_bytes());
+        assert_invalid(&encoded);
+        encoded = session_id.encode_canonical().unwrap();
+
+        encoded[STABLE_ENTITY_ID_KIND_OFFSET] = 0;
+        assert_invalid(&encoded);
+        encoded[STABLE_ENTITY_ID_KIND_OFFSET] = u8::MAX;
+        assert_invalid(&encoded);
+        encoded = session_id.encode_canonical().unwrap();
+
+        encoded[STABLE_ENTITY_ID_DIGEST_OFFSET] ^= 1;
+        assert_invalid(&encoded);
+        encoded = session_id.encode_canonical().unwrap();
+
+        encoded[STABLE_ENTITY_ID_UUID_OFFSET + 6] ^= 0x10;
+        assert_invalid(&encoded);
+        encoded = session_id.encode_canonical().unwrap();
+
+        encoded[STABLE_ENTITY_ID_UUID_OFFSET + 8] ^= 0x40;
+        assert_invalid(&encoded);
+
+        let source_id = source.identity();
+        encoded = source_id.encode_canonical().unwrap();
+        encoded[STABLE_ENTITY_ID_SOURCE_DIGEST_OFFSET] ^= 1;
+        assert_invalid(&encoded);
+        encoded = source_id.encode_canonical().unwrap();
+        encoded[STABLE_ENTITY_ID_SOURCE_DESCRIPTOR_DIGEST_OFFSET] = 1;
+        assert_invalid(&encoded);
     }
 
     #[test]

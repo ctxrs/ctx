@@ -309,9 +309,8 @@ fn stored_identity(
     expected_kind: StableEntityKind,
     field_name: &'static str,
 ) -> Result<StableEntityId> {
-    let identity: StableEntityId =
-        serde_json::from_slice(required_bytes(document, identity_field, field_name)?)?;
-    identity.validate_contract()?;
+    let identity =
+        StableEntityId::decode_canonical(required_bytes(document, identity_field, field_name)?)?;
     let uuid = required_string(document, uuid_field, field_name)?;
     let digest = required_string(document, digest_field, field_name)?;
     if identity.entity_kind() != expected_kind

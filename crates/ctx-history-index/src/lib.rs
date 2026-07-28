@@ -38,7 +38,7 @@ use uuid::Uuid;
 use durable_directory::DurableMmapDirectory;
 
 pub const GENERATION_MANIFEST_VERSION: u32 = 1;
-pub const LEXICAL_SCHEMA_VERSION: u32 = 2;
+pub const LEXICAL_SCHEMA_VERSION: u32 = 3;
 pub const LEXICAL_ANALYZER_VERSION: u32 = 1;
 pub const MAX_BODY_PREVIEW_CHARS: usize = 2_048;
 
@@ -599,8 +599,8 @@ impl GenerationWriter {
 
     pub fn add_document(&mut self, document: LexicalDocument) -> Result<()> {
         let locator_bytes = document.validate()?;
-        let event_identity_bytes = serde_json::to_vec(&document.event_id)?;
-        let session_identity_bytes = serde_json::to_vec(&document.session_id)?;
+        let event_identity_bytes = document.event_id.encode_canonical()?;
+        let session_identity_bytes = document.session_id.encode_canonical()?;
         if document.event_id.entity_kind() != StableEntityKind::Event {
             return Err(IndexError::InvalidEventIdentityKind(
                 document.event_id.to_string(),
@@ -1497,6 +1497,7 @@ mod tests {
         ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceFrontier,
         SourceInventoryObservation, SourceObservation, TypedKey,
     };
+    use tantivy::{collector::DocSetCollector, query::AllQuery, schema::Value as TantivyValue};
     use tempfile::tempdir;
 
     use super::*;
@@ -1648,6 +1649,56 @@ mod tests {
         assert_eq!(index.generation_id(), receipt.generation_id);
         assert_eq!(index.manifest().indexed_documents, 1);
         assert_eq!(index.count_term("atomic").unwrap(), 1);
+    }
+
+    #[test]
+    fn stored_document_identities_use_canonical_fixed_bytes() {
+        let temp = tempdir().unwrap();
+        let source = source("session.jsonl");
+        let expected = document(&source, 1, "body");
+        let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        writer.begin_source(source.clone()).unwrap();
+        writer.add_document(expected.clone()).unwrap();
+        writer.certify_source(certificate(&source, 1, 1)).unwrap();
+        writer.commit(|_| true).unwrap();
+
+        let index = VerifiedIndex::open(temp.path()).unwrap();
+        let fields = fields_from_schema(index.searcher.schema()).unwrap();
+        let address = index
+            .searcher
+            .search(&AllQuery, &DocSetCollector)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let stored: TantivyDocument = index.searcher.doc(address).unwrap();
+        let event_bytes = stored
+            .get_first(fields.event_identity)
+            .and_then(|value| value.as_bytes())
+            .unwrap();
+        let session_bytes = stored
+            .get_first(fields.session_identity)
+            .and_then(|value| value.as_bytes())
+            .unwrap();
+
+        assert_eq!(event_bytes.len(), StableEntityId::CANONICAL_LEN);
+        assert_eq!(
+            event_bytes,
+            expected.event_id.encode_canonical().unwrap().as_slice()
+        );
+        assert_eq!(session_bytes.len(), StableEntityId::CANONICAL_LEN);
+        assert_eq!(
+            session_bytes,
+            expected.session_id.encode_canonical().unwrap().as_slice()
+        );
+        assert_eq!(
+            index
+                .event_by_id(expected.event_id.as_uuid())
+                .unwrap()
+                .unwrap()
+                .event_id,
+            expected.event_id
+        );
     }
 
     #[test]
@@ -1997,6 +2048,41 @@ mod tests {
             Err(error) => error,
         };
         assert!(matches!(error, IndexError::ManifestDigestMismatch { .. }));
+    }
+
+    #[test]
+    fn stale_v2_manifest_fails_closed_at_generation_boundary() {
+        let temp = tempdir().unwrap();
+        let source = source("session.jsonl");
+        let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        writer.begin_source(source.clone()).unwrap();
+        writer.add_document(document(&source, 1, "body")).unwrap();
+        writer.certify_source(certificate(&source, 1, 1)).unwrap();
+        writer.commit(|_| true).unwrap();
+
+        let index = VerifiedIndex::open(temp.path()).unwrap();
+        let mut stale_manifest = index.manifest().clone();
+        stale_manifest.lexical_schema_version = 2;
+        let stale_generation_id = stale_manifest.generation_id().unwrap();
+        write_manifest(temp.path(), &stale_generation_id, &stale_manifest).unwrap();
+        let mut stale_metas = index.searcher.index().load_metas().unwrap();
+        stale_metas.payload = Some(
+            serde_json::to_string(&CommitPayload {
+                version: COMMIT_PAYLOAD_VERSION,
+                generation_id: stale_generation_id,
+            })
+            .unwrap(),
+        );
+
+        let error = load_manifest_for_metas(temp.path(), &stale_metas).unwrap_err();
+        assert!(matches!(
+            error,
+            IndexError::GenerationContractMismatch {
+                identity: IDENTITY_VERSION,
+                schema: 2,
+                analyzer: LEXICAL_ANALYZER_VERSION,
+            }
+        ));
     }
 
     #[test]
