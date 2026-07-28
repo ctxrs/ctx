@@ -5,6 +5,7 @@
 //! publication, replacement, deletion, or retry policy.
 
 use std::{
+    collections::VecDeque,
     fs::{self, File},
     path::{Path, PathBuf},
 };
@@ -188,8 +189,8 @@ pub(crate) struct DeepAgentsSourceBackedScanV0 {
 pub(crate) struct DeepAgentsSourceBackedScannerV0 {
     selection: DeepAgentsDatabaseSelectionV0,
     snapshot: ProviderSqliteSourceSnapshot,
-    root_bound_database: File,
-    sqlite_snapshot: SqliteSourceReadSnapshot,
+    root_bound_database: Option<File>,
+    sqlite_snapshot: Option<SqliteSourceReadSnapshot>,
     source: SourceKey,
     observation: SourceObservation,
     source_revision_digest: [u8; 32],
@@ -202,6 +203,8 @@ pub(crate) struct DeepAgentsSourceBackedScannerV0 {
     counts: ScannedSourceCounts,
     content_digest: Sha256,
     exhausted: bool,
+    source_validated: bool,
+    validated_pages: VecDeque<Vec<LexicalDocument>>,
 }
 
 impl DeepAgentsSourceBackedScannerV0 {
@@ -238,8 +241,8 @@ impl DeepAgentsSourceBackedScannerV0 {
         Ok(Self {
             selection,
             snapshot,
-            root_bound_database,
-            sqlite_snapshot,
+            root_bound_database: Some(root_bound_database),
+            sqlite_snapshot: Some(sqlite_snapshot),
             source,
             observation,
             source_revision_digest,
@@ -252,6 +255,8 @@ impl DeepAgentsSourceBackedScannerV0 {
             counts: ScannedSourceCounts::default(),
             content_digest,
             exhausted: false,
+            source_validated: false,
+            validated_pages: VecDeque::new(),
         })
     }
 
@@ -263,8 +268,18 @@ impl DeepAgentsSourceBackedScannerV0 {
         &self.source_revision_digest
     }
 
-    /// Returns at most 64 bounded lexical records.
+    /// Returns at most 64 bounded lexical records after the complete source
+    /// read has finished and passed terminal revalidation.
     pub(crate) fn next_page(
+        &mut self,
+    ) -> DeepAgentsSourceBackedResultV0<Option<Vec<LexicalDocument>>> {
+        if !self.source_validated {
+            self.stage_and_validate_pages()?;
+        }
+        Ok(self.validated_pages.pop_front())
+    }
+
+    fn next_unvalidated_page(
         &mut self,
     ) -> DeepAgentsSourceBackedResultV0<Option<Vec<LexicalDocument>>> {
         if self.exhausted {
@@ -325,14 +340,13 @@ impl DeepAgentsSourceBackedScannerV0 {
     }
 
     pub(crate) fn finish(self) -> DeepAgentsSourceBackedResultV0<DeepAgentsSourceBackedScanV0> {
-        if !self.exhausted || self.pending.is_some() {
+        if !self.source_validated
+            || !self.validated_pages.is_empty()
+            || !self.exhausted
+            || self.pending.is_some()
+        {
             return Err(DeepAgentsSourceBackedErrorV0::ScannerNotExhausted);
         }
-        self.sqlite_snapshot.finish()?;
-        if !self.snapshot.revalidate(self.selection.path())? {
-            return Err(CaptureError::SourceChangedDuringCapture.into());
-        }
-        drop(self.root_bound_database);
         let content_digest = self.content_digest.finalize().into();
         let certificate = CertifiedSource::certify(
             self.observation.clone(),
@@ -349,12 +363,35 @@ impl DeepAgentsSourceBackedScannerV0 {
         })
     }
 
+    fn stage_and_validate_pages(&mut self) -> DeepAgentsSourceBackedResultV0<()> {
+        while let Some(page) = self.next_unvalidated_page()? {
+            self.validated_pages.push_back(page);
+        }
+        let sqlite_snapshot = self
+            .sqlite_snapshot
+            .take()
+            .ok_or(DeepAgentsSourceBackedErrorV0::ScannerNotExhausted)?;
+        sqlite_snapshot.finish()?;
+        if !self.snapshot.revalidate(self.selection.path())? {
+            return Err(CaptureError::SourceChangedDuringCapture.into());
+        }
+        drop(self.root_bound_database.take());
+        self.source_validated = true;
+        Ok(())
+    }
+
+    fn connection(&self) -> DeepAgentsSourceBackedResultV0<&rusqlite::Connection> {
+        self.sqlite_snapshot
+            .as_ref()
+            .ok_or(DeepAgentsSourceBackedErrorV0::ScannerNotExhausted)?
+            .connection()
+            .map_err(Into::into)
+    }
+
     fn prepare_next_write(&mut self) -> DeepAgentsSourceBackedResultV0<bool> {
         loop {
-            let Some(candidate) = deepagents_next_write_candidate(
-                self.sqlite_snapshot.connection()?,
-                self.after_rowid,
-            )?
+            let Some(candidate) =
+                deepagents_next_write_candidate(self.connection()?, self.after_rowid)?
             else {
                 return Ok(false);
             };
@@ -367,7 +404,7 @@ impl DeepAgentsSourceBackedScannerV0 {
             };
             self.refresh_thread(&key.thread_id)?;
             let Some(occurred_at) = deepagents_checkpoint_time(
-                self.sqlite_snapshot.connection()?,
+                self.connection()?,
                 &self.context,
                 &key.thread_id,
                 &key.checkpoint_id,
@@ -378,7 +415,7 @@ impl DeepAgentsSourceBackedScannerV0 {
                 continue;
             };
             let (value_type, value) =
-                deepagents_hydrate_write(self.sqlite_snapshot.connection()?, candidate.rowid)?;
+                deepagents_hydrate_write(self.connection()?, candidate.rowid)?;
             let record_digest = digest_bytes(&deepagents_write_record_digest(
                 &key,
                 value_type.as_deref(),
@@ -443,12 +480,8 @@ impl DeepAgentsSourceBackedScannerV0 {
         {
             return Ok(());
         }
-        self.current_thread = deepagents_thread_summary(
-            self.sqlite_snapshot.connection()?,
-            &self.context,
-            thread_id,
-            None,
-        )?;
+        self.current_thread =
+            deepagents_thread_summary(self.connection()?, &self.context, thread_id, None)?;
         self.next_event_sequence = 1;
         Ok(())
     }
