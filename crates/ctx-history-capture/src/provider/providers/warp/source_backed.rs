@@ -1,17 +1,18 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
     time::Duration,
 };
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, EventIdentityInput,
-    LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
-    ProjectionContractError, ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey,
-    SourceObservation, SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource,
+    EventIdentityInput, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
+    NativeSessionKey, ProjectionContractError, ScannedSourceCounts, SessionIdentityInput,
+    SourceAnchor, SourceKey, SourceObservation, SourceRecordLocator, SourceResolverContractError,
+    StableEntityId, TypedKey,
 };
-use ctx_history_index::LexicalDocument;
+use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
 use rusqlite::{limits::Limit, Connection, OpenFlags, OptionalExtension};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -19,8 +20,8 @@ use thiserror::Error;
 use super::{
     nativepath::{
         scan_warp_source_backed_connection, WarpNativeEvent, WarpNativeMessageIdentity,
-        WarpNativePage, WarpNativeProOutputPage, WarpNativeProOutputPageReceipt, WarpNativeSink,
-        WarpNativeSourceBackedScan,
+        WarpNativePage, WarpNativeProOutputPage, WarpNativeProOutputPageReceipt, WarpNativeSession,
+        WarpNativeSink, WarpNativeSourceBackedScan,
     },
     schema::WarpSqliteSchema,
     warp_message_content_at,
@@ -40,7 +41,6 @@ const WARP_SOURCE_SCHEMA_VARIANT: &str = "warp-agent-task-protobuf-v1";
 const WARP_SOURCE_REVISION_KIND: &str = "warp-sqlite-snapshot-observation-v0";
 const WARP_SOURCE_BACKED_PARSER_REVISION: &str = "warp-source-backed-v0";
 const WARP_TASK_MESSAGE_RELATION: &str = "agent_tasks.task-message.v1";
-const WARP_LEXICAL_BODY_MAX_CHARS: usize = 2_048;
 const WARP_SOURCE_INVALID_REASON: &str = "Warp SQLite source must be a regular non-symlink file";
 const WARP_SIDECAR_INVALID_REASON: &str = "Warp SQLite sidecar must be a regular non-symlink file";
 const WARP_SOURCE_REVISION_DIGEST_DOMAIN: &[u8] = b"ctx.warp.source-backed.revision.v0\0";
@@ -65,6 +65,8 @@ pub(crate) enum WarpSourceBackedErrorV0 {
     SourceChanged,
     #[error("Warp source-backed scan count overflow")]
     CountOverflow,
+    #[error("Warp source-backed parser counts do not match its emitted records")]
+    ScanCountMismatch,
     #[error("Warp source-backed digest is not canonical lowercase SHA-256")]
     InvalidDigest,
     #[error("Warp source-backed parser emitted an empty lexical record")]
@@ -157,7 +159,11 @@ pub(crate) fn project_warp_source_backed_v0(
     let opening_revision = opening_snapshot.revision_component();
     let revision_digest = source_revision_digest(&source, &opening_revision);
     let connection = open_direct_read_only(&canonical_path)?;
-    let mut sink = WarpProjectionSink::new(source.clone(), revision_digest);
+    let mut sink = WarpProjectionSink::new(
+        source.clone(),
+        revision_digest,
+        canonical_path.to_string_lossy().into_owned(),
+    );
     let native_scan = scan_warp_source_backed_connection(&connection, &mut sink)?;
     drop(connection);
 
@@ -255,34 +261,86 @@ pub(crate) fn resolve_warp_locator_v0(
 struct WarpProjectionSink {
     source: SourceKey,
     source_revision_digest: [u8; 32],
+    source_path: String,
+    session_lineage: BTreeMap<String, WarpSessionLineage>,
     documents: Vec<LexicalDocument>,
     rejected_records: u64,
+    ignored_records: u64,
+}
+
+struct WarpSessionLineage {
+    parent_conversation_id: Option<String>,
+    root_conversation_id: String,
 }
 
 impl WarpProjectionSink {
-    fn new(source: SourceKey, source_revision_digest: [u8; 32]) -> Self {
+    fn new(source: SourceKey, source_revision_digest: [u8; 32], source_path: String) -> Self {
         Self {
             source,
             source_revision_digest,
+            source_path,
+            session_lineage: BTreeMap::new(),
             documents: Vec::new(),
             rejected_records: 0,
+            ignored_records: 0,
         }
     }
 }
 
 impl WarpNativeSink for WarpProjectionSink {
     fn push_page(&mut self, page: WarpNativePage) -> CaptureResult<()> {
+        let WarpNativePage {
+            sessions,
+            hierarchy_edges,
+            events,
+            rejections,
+            ..
+        } = page;
         self.rejected_records = self
             .rejected_records
-            .checked_add(u64::try_from(page.rejections.len()).map_err(|_| {
+            .checked_add(u64::try_from(rejections.len()).map_err(|_| {
                 CaptureError::SystemInvariant("Warp source-backed rejection count exceeds u64")
             })?)
             .ok_or(CaptureError::SystemInvariant(
                 "Warp source-backed rejection count overflowed",
             ))?;
-        for event in page.events {
-            let document = lexical_document(&self.source, self.source_revision_digest, event)
-                .map_err(source_backed_capture_error)?;
+        let ignored_records = sessions
+            .len()
+            .checked_add(hierarchy_edges.len())
+            .and_then(|count| u64::try_from(count).ok())
+            .ok_or(CaptureError::SystemInvariant(
+                "Warp source-backed ignored count exceeds u64",
+            ))?;
+        self.ignored_records = self.ignored_records.checked_add(ignored_records).ok_or(
+            CaptureError::SystemInvariant("Warp source-backed ignored count overflowed"),
+        )?;
+        for session in sessions {
+            let conversation_id = session.conversation_id.clone();
+            if self
+                .session_lineage
+                .insert(conversation_id, WarpSessionLineage::from(session))
+                .is_some()
+            {
+                return Err(CaptureError::SystemInvariant(
+                    "Warp source-backed parser repeated a session",
+                ));
+            }
+        }
+        for event in events {
+            let lineage = self
+                .session_lineage
+                .get(&event.identity.conversation_id)
+                .ok_or(CaptureError::SystemInvariant(
+                    "Warp source-backed event has no session lineage",
+                ))?;
+            let document = lexical_document(
+                &self.source,
+                self.source_revision_digest,
+                &self.source_path,
+                lineage,
+                event,
+            )
+            .map_err(source_backed_capture_error)?;
             self.documents.push(document);
         }
         Ok(())
@@ -296,20 +354,30 @@ impl WarpNativeSink for WarpProjectionSink {
     }
 }
 
+impl From<WarpNativeSession> for WarpSessionLineage {
+    fn from(session: WarpNativeSession) -> Self {
+        Self {
+            parent_conversation_id: session.parent_conversation_id,
+            root_conversation_id: session.root_conversation_id,
+        }
+    }
+}
+
 fn lexical_document(
     source: &SourceKey,
     source_revision_digest: [u8; 32],
+    source_path: &str,
+    lineage: &WarpSessionLineage,
     event: WarpNativeEvent,
 ) -> WarpSourceBackedResultV0<LexicalDocument> {
-    let session_key = NativeSessionKey::native_id(
-        WARP_NATIVE_SESSION_NAMESPACE,
-        TypedKey::utf8(&event.identity.conversation_id)?,
-    )?;
-    let session_id = derive_session_id(SessionIdentityInput {
-        source,
-        logical_session_kind: WARP_LOGICAL_SESSION_KIND,
-        native_session_key: &session_key,
-    })?;
+    let session_id = warp_session_id(source, &event.identity.conversation_id)?;
+    let parent_session_id = lineage
+        .parent_conversation_id
+        .as_deref()
+        .map(|parent| warp_session_id(source, parent))
+        .transpose()?;
+    let root_session_id = warp_session_id(source, &lineage.root_conversation_id)?;
+    let is_primary = parent_session_id.is_none();
     let message_key = match &event.identity.message {
         WarpNativeMessageIdentity::ProviderId(message_id) => TypedKey::composite(vec![
             TypedKey::utf8("provider-id")?,
@@ -354,9 +422,22 @@ fn lexical_document(
     Ok(LexicalDocument {
         event_id,
         session_id,
+        parent_session_id,
+        root_session_id,
         source: source.clone(),
         locator,
         provider_session_id: Some(event.identity.conversation_id),
+        // Warp's certified task-message model does not expose a VCS branch.
+        branch: None,
+        source_path: Some(source_path.to_owned()),
+        agent_type: if is_primary {
+            AgentType::Primary
+        } else {
+            AgentType::Subagent
+        }
+        .as_str()
+        .to_owned(),
+        is_primary,
         event_sequence: event.native_order.provider_event_index,
         occurred_at_unix_ms: event.occurred_at.map(|value| value.timestamp_millis()),
         event_type: event.event_type.as_str().to_owned(),
@@ -366,6 +447,21 @@ fn lexical_document(
         cwd: None,
         touched_files: Vec::new(),
     })
+}
+
+fn warp_session_id(
+    source: &SourceKey,
+    conversation_id: &str,
+) -> WarpSourceBackedResultV0<StableEntityId> {
+    let session_key = NativeSessionKey::native_id(
+        WARP_NATIVE_SESSION_NAMESPACE,
+        TypedKey::utf8(conversation_id)?,
+    )?;
+    Ok(derive_session_id(SessionIdentityInput {
+        source,
+        logical_session_kind: WARP_LOGICAL_SESSION_KIND,
+        native_session_key: &session_key,
+    })?)
 }
 
 fn warp_source_key(selection: &WarpSourceSelectionV0) -> WarpSourceBackedResultV0<SourceKey> {
@@ -388,8 +484,22 @@ fn scan_counts(
 ) -> WarpSourceBackedResultV0<ScannedSourceCounts> {
     let retained_records =
         u64::try_from(sink.documents.len()).map_err(|_| WarpSourceBackedErrorV0::CountOverflow)?;
+    if retained_records != native_scan.counters.retained_events
+        || u64::try_from(sink.session_lineage.len())
+            .map_err(|_| WarpSourceBackedErrorV0::CountOverflow)?
+            != native_scan.counters.sessions_retained
+        || sink.ignored_records
+            != native_scan
+                .counters
+                .sessions_retained
+                .checked_add(native_scan.counters.hierarchy_edges)
+                .ok_or(WarpSourceBackedErrorV0::CountOverflow)?
+    {
+        return Err(WarpSourceBackedErrorV0::ScanCountMismatch);
+    }
     let complete_records = retained_records
         .checked_add(sink.rejected_records)
+        .and_then(|count| count.checked_add(sink.ignored_records))
         .ok_or(WarpSourceBackedErrorV0::CountOverflow)?;
     let conversation_bytes = native_scan
         .counters
@@ -405,7 +515,7 @@ fn scan_counts(
         complete_records,
         retained_records,
         rejected_records: sink.rejected_records,
-        ignored_records: 0,
+        ignored_records: sink.ignored_records,
         indexed_documents: retained_records,
         certified_bytes: conversation_bytes
             .checked_add(task_bytes)
@@ -531,10 +641,10 @@ fn digest_bytes(value: &str) -> WarpSourceBackedResultV0<[u8; 32]> {
 fn bounded_lexical_body(body: &str, fallback: &str) -> String {
     let bounded = body
         .chars()
-        .take(WARP_LEXICAL_BODY_MAX_CHARS)
+        .take(MAX_BODY_PREVIEW_CHARS)
         .collect::<String>();
     if bounded.is_empty() {
-        fallback.chars().take(WARP_LEXICAL_BODY_MAX_CHARS).collect()
+        fallback.chars().take(MAX_BODY_PREVIEW_CHARS).collect()
     } else {
         bounded
     }

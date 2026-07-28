@@ -11,6 +11,8 @@ mod schema;
 mod source_backed;
 mod wire;
 
+#[allow(unused_imports)]
+// Provider-local source-backed seam, intentionally awaiting central registration.
 pub(crate) use source_backed::{
     project_selected_warp_sources_v0, project_warp_source_backed_v0, resolve_warp_locator_v0,
     WarpHydratedRecordV0, WarpSourceBackedErrorV0, WarpSourceBackedSnapshotV0,
