@@ -3,6 +3,7 @@ use std::{
     io::BufReader,
     path::{Path, PathBuf},
     thread,
+    time::SystemTime,
 };
 
 use ctx_history_core::{AgentType, CaptureProvider};
@@ -25,6 +26,24 @@ use crate::provider::codex::{CODEX_CAPTURE_REVISION, CODEX_POLICY_REVISION};
 use crate::provider::importer::provider_path_identity;
 
 pub(crate) const CODEX_CATALOG_MAX_SOURCES: usize = 131_072;
+
+pub(crate) fn discover_codex_session_catalog(
+    root: &Path,
+) -> Result<(CatalogSummary, Vec<CatalogSession>)> {
+    provider_path_identity(root)?;
+    let mut paths = Vec::new();
+    collect_jsonl_paths_bounded(root, &mut paths, CODEX_CATALOG_MAX_SOURCES)?;
+    ensure_catalog_source_bound(paths.len())?;
+    for path in &paths {
+        provider_path_identity(path)?;
+    }
+    catalog_codex_session_paths(
+        paths,
+        &root.display().to_string(),
+        system_time_ms(SystemTime::now()),
+        None,
+    )
+}
 
 fn apply_codex_session_import_bounds(
     paths: &mut Vec<PathBuf>,

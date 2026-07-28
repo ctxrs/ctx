@@ -286,6 +286,7 @@ impl CodexNativeScanner {
                     &record_buffer[..record_read.stored_len],
                     record_start,
                     record_end,
+                    record_read.sha256,
                 );
                 self.record_buffer = record_buffer;
                 result?

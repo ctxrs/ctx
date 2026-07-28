@@ -22,6 +22,8 @@ use crate::{
     PROVIDER_MAX_PREVIEW_CHARS, PROVIDER_MAX_TEXT_CHARS,
 };
 
+const CODEX_LEXICAL_PREVIEW_CHARS: usize = 2_048;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CodexSessionRow {
@@ -44,6 +46,14 @@ pub(crate) struct CodexEventRow {
     pub(crate) normalized_body_hash: String,
     pub(crate) provider_event: CodexNativeEvent,
     pub(crate) file_touches: Vec<CodexFileTouch>,
+    source_record: Option<CodexRecordEvidence>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CodexRecordEvidence {
+    pub(crate) byte_offset: u64,
+    pub(crate) byte_length: u64,
+    pub(crate) record_digest: [u8; 32],
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -106,6 +116,48 @@ impl CodexEventRow {
             ))
             .saturating_add(self.file_touches.len())
     }
+
+    pub(crate) fn bind_source_record(
+        &mut self,
+        byte_offset: u64,
+        byte_end_exclusive: u64,
+        record_digest: [u8; 32],
+    ) -> CaptureResult<()> {
+        let byte_length =
+            byte_end_exclusive
+                .checked_sub(byte_offset)
+                .ok_or(CaptureError::SystemInvariant(
+                    "Codex source record range is reversed",
+                ))?;
+        if byte_length == 0 {
+            return Err(CaptureError::SystemInvariant(
+                "Codex source record range is empty",
+            ));
+        }
+        self.source_record = Some(CodexRecordEvidence {
+            byte_offset,
+            byte_length,
+            record_digest,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn source_record(&self) -> Option<CodexRecordEvidence> {
+        self.source_record
+    }
+
+    pub(crate) fn lexical_preview(&self) -> Option<String> {
+        ["text", "summary", "command", "arguments_preview"]
+            .into_iter()
+            .find_map(|field| {
+                self.provider_event
+                    .payload
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.is_empty())
+            })
+            .map(|text| codex_local_preview(text, CODEX_LEXICAL_PREVIEW_CHARS).0)
+    }
 }
 
 pub(super) enum CodexRetainedNonMaterialized {
@@ -164,6 +216,7 @@ pub(super) fn build_event_row(
         normalized_body_hash,
         provider_event,
         file_touches: Vec::new(),
+        source_record: None,
     }))
 }
 
@@ -313,6 +366,7 @@ pub(super) fn build_sparse_output_row(
         normalized_body_hash,
         provider_event,
         file_touches: Vec::new(),
+        source_record: None,
     })
 }
 

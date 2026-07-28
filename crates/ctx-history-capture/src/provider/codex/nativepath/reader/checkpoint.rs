@@ -87,7 +87,7 @@ pub(super) fn read_bounded_record(
                 oversized,
                 stored_len: storage.len(),
                 byte_len,
-                sha256: [0; 32],
+                sha256: record_hasher.finalize().into(),
             }));
         }
     }

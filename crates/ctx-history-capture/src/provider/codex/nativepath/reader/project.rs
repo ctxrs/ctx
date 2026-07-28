@@ -6,6 +6,7 @@ impl CodexNativeScanner {
         record: &[u8],
         start_byte: u64,
         end_byte: u64,
+        record_digest: [u8; 32],
     ) -> Result<CodexRecordProjection> {
         let record = trim_jsonl_terminator(record);
         if record.iter().all(u8::is_ascii_whitespace) {
@@ -98,6 +99,7 @@ impl CodexNativeScanner {
                         return Ok(CodexRecordProjection::default());
                     }
                 };
+                row.bind_source_record(start_byte, end_byte, record_digest)?;
                 attach_complete_message_locator(&mut row, &retained, record, start_byte, end_byte)?;
                 let raw_source_path = self.source.source_path.display().to_string();
                 let line_number = usize::try_from(self.raw_ordinal)
@@ -147,7 +149,8 @@ impl CodexNativeScanner {
                     );
                 }
                 let body_bytes = serde_json::to_vec(&row.provider_event.payload)?.len();
-                let row_bytes = serde_json::to_vec(&row)?.len().saturating_add(1);
+                let row_json_bytes = serde_json::to_vec(&row)?.len();
+                let row_bytes = row_json_bytes.saturating_add(1);
                 self.counters.retained_records = self.counters.retained_records.saturating_add(1);
                 self.counters.retained_body_bytes = self
                     .counters
@@ -155,6 +158,19 @@ impl CodexNativeScanner {
                     .saturating_add(u64::try_from(body_bytes).unwrap_or(u64::MAX));
                 self.counters.retained_hashes_created =
                     self.counters.retained_hashes_created.saturating_add(1);
+                self.counters.legacy_body_json_serializations = self
+                    .counters
+                    .legacy_body_json_serializations
+                    .saturating_add(1);
+                self.counters.legacy_row_json_serializations = self
+                    .counters
+                    .legacy_row_json_serializations
+                    .saturating_add(1);
+                self.counters.legacy_json_serialized_bytes = self
+                    .counters
+                    .legacy_json_serialized_bytes
+                    .saturating_add(u64::try_from(body_bytes).unwrap_or(u64::MAX))
+                    .saturating_add(u64::try_from(row_json_bytes).unwrap_or(u64::MAX));
                 let context_mutation = tool_context_from_row(&row).map(|(call_id, context)| {
                     let authority = CodexPendingToolAuthority::new(
                         &call_id,
@@ -172,9 +188,14 @@ impl CodexNativeScanner {
                     pro_serialized_bytes: 0,
                 })
             }
-            CodexRecordClass::ExcludedResult(result_kind) => {
-                self.process_output(record, &probe, result_kind, start_byte, end_byte)
-            }
+            CodexRecordClass::ExcludedResult(result_kind) => self.process_output(
+                record,
+                &probe,
+                result_kind,
+                start_byte,
+                end_byte,
+                record_digest,
+            ),
         }
     }
 
@@ -185,6 +206,7 @@ impl CodexNativeScanner {
         result_kind: CodexResultKind,
         start_byte: u64,
         end_byte: u64,
+        record_digest: [u8; 32],
     ) -> Result<CodexRecordProjection> {
         self.counters.native_result_records = self.counters.native_result_records.saturating_add(1);
         self.counters.native_result_record_bytes = self
@@ -242,7 +264,7 @@ impl CodexNativeScanner {
             return Ok(CodexRecordProjection::default());
         }
 
-        let core_row = build_sparse_output_row(
+        let mut core_row = build_sparse_output_row(
             self.raw_ordinal,
             occurred_at,
             result_kind,
@@ -251,11 +273,15 @@ impl CodexNativeScanner {
             &structural.outcome,
             structural.output_bytes,
         );
-        let core_bytes = core_row
+        if let Some(row) = core_row.as_mut() {
+            row.bind_source_record(start_byte, end_byte, record_digest)?;
+        }
+        let row_json_bytes = core_row
             .as_ref()
-            .map(|row| serde_json::to_vec(row).map(|bytes| bytes.len().saturating_add(1)))
+            .map(|row| serde_json::to_vec(row).map(|bytes| bytes.len()))
             .transpose()?
             .unwrap_or_default();
+        let core_bytes = usize::from(core_row.is_some()).saturating_add(row_json_bytes);
         if let Some(row) = core_row.as_ref() {
             let body_bytes = serde_json::to_vec(&row.provider_event.payload)?.len();
             self.counters.retained_records = self.counters.retained_records.saturating_add(1);
@@ -265,6 +291,19 @@ impl CodexNativeScanner {
                 .saturating_add(u64::try_from(body_bytes).unwrap_or(u64::MAX));
             self.counters.retained_hashes_created =
                 self.counters.retained_hashes_created.saturating_add(1);
+            self.counters.legacy_body_json_serializations = self
+                .counters
+                .legacy_body_json_serializations
+                .saturating_add(1);
+            self.counters.legacy_row_json_serializations = self
+                .counters
+                .legacy_row_json_serializations
+                .saturating_add(1);
+            self.counters.legacy_json_serialized_bytes = self
+                .counters
+                .legacy_json_serialized_bytes
+                .saturating_add(u64::try_from(body_bytes).unwrap_or(u64::MAX))
+                .saturating_add(u64::try_from(row_json_bytes).unwrap_or(u64::MAX));
         }
         let context_mutation =
             call_id.map(|call_id| CodexContextMutation::Remove(call_id.to_owned()));
@@ -444,6 +483,8 @@ impl CodexNativeScanner {
         } else {
             self.counters.malformed_records = self.counters.malformed_records.saturating_add(1);
         }
+        self.counters.rejected_complete_records =
+            self.counters.rejected_complete_records.saturating_add(1);
         if self.rejections.len() < MAX_REJECTION_DETAILS {
             self.rejections.push(CodexRecordRejection {
                 raw_ordinal: self.raw_ordinal,
