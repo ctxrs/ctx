@@ -636,16 +636,10 @@ fn ingest_codex_sources_serial_v0(
                 .as_ref()
                 .ok_or(CodexSourceBackedErrorV0::MissingPageOwner)?;
             validate_owner(owner, &native_session_id)?;
-            let cwd = owner.cwd.clone();
             for row in page.source_backed_rows {
                 let conversion_started = Instant::now();
-                let document = codex_lexical_document(
-                    &source_key,
-                    session_id,
-                    &native_session_id,
-                    cwd.as_deref(),
-                    row,
-                )?;
+                let document =
+                    codex_lexical_document(&source, &source_key, session_id, owner, row)?;
                 timings.scanner_worker_busy += conversion_started.elapsed();
                 let add_started = Instant::now();
                 let add_result = writer.add_document(document);
@@ -910,14 +904,13 @@ fn run_cold_scan_lane_v0(
                 .as_ref()
                 .ok_or(CodexSourceBackedErrorV0::MissingPageOwner)?;
             validate_owner(owner, &job.native_session_id)?;
-            let cwd = owner.cwd.clone();
             let mut documents = Vec::with_capacity(page.source_backed_rows.len());
             for row in page.source_backed_rows {
                 documents.push(codex_lexical_document(
+                    &job.source,
                     &job.source_key,
                     job.session_id,
-                    &job.native_session_id,
-                    cwd.as_deref(),
+                    owner,
                     row,
                 )?);
                 staged_documents = staged_documents
@@ -1381,12 +1374,25 @@ fn codex_session_identity(
 }
 
 fn codex_lexical_document(
+    catalog_source: &CodexCatalogSource,
     source: &SourceKey,
     session_id: StableEntityId,
-    native_session_id: &str,
-    cwd: Option<&str>,
+    owner: &CodexSessionRow,
     row: CodexSourceBackedRowV0,
 ) -> CodexSourceBackedResultV0<LexicalDocument> {
+    let native_session_id = owner.native_session_id.as_str();
+    let parent_session_id = owner
+        .parent_native_session_id
+        .as_deref()
+        .map(codex_session_id_for_native_id)
+        .transpose()?;
+    let root_session_id = owner
+        .root_native_session_id
+        .as_deref()
+        .map(codex_session_id_for_native_id)
+        .transpose()?
+        .unwrap_or(session_id);
+    let is_primary = parent_session_id.is_none();
     let CodexSourceBackedRowV0 {
         raw_ordinal,
         source_record: evidence,
@@ -1427,18 +1433,35 @@ fn codex_lexical_document(
     Ok(LexicalDocument {
         event_id,
         session_id,
+        parent_session_id,
+        root_session_id,
         source: source.clone(),
         locator,
         provider_session_id: Some(native_session_id.to_owned()),
+        branch: None,
+        source_path: Some(catalog_source.source_path.display().to_string()),
+        agent_type: if is_primary {
+            "primary".to_owned()
+        } else {
+            "subagent".to_owned()
+        },
+        is_primary,
         event_sequence: raw_ordinal,
         occurred_at_unix_ms: Some(occurred_at.timestamp_millis()),
         event_type: event_type.as_str().to_owned(),
         role: role.map(|role| role.as_str().to_owned()),
         body: lexical_body,
-        workspace: None,
-        cwd: cwd.map(str::to_owned),
+        workspace: owner.cwd.clone(),
+        cwd: owner.cwd.clone(),
         touched_files: touched_paths,
     })
+}
+
+fn codex_session_id_for_native_id(
+    native_session_id: &str,
+) -> CodexSourceBackedResultV0<StableEntityId> {
+    let source = codex_source_key(native_session_id)?;
+    codex_session_identity(&source, native_session_id)
 }
 
 fn validate_owner(
