@@ -287,7 +287,6 @@ fn hash_session(hasher: &mut Sha256, session: &ZedNativeSession) {
 fn hash_event(hasher: &mut Sha256, event: &ZedNativeEvent) {
     hasher.update(b"event\0");
     hasher.update(event.sqlite_rowid.to_le_bytes());
-    hash_text(hasher, event.record_digest.as_str());
     hash_text(hasher, &event.identity.thread_id);
     match &event.identity.message {
         ZedNativeMessageIdentity::ProviderId {

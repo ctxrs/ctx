@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     fs,
+    io::Write,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -22,7 +23,7 @@ use crate::{
         CompleteContentSourceFamily, CompleteMessageRequest, SourceSnapshot,
         VerifiedContentLocatorsV1, VerifiedContentRole, VERIFIED_CONTENT_LOCATORS_METADATA_KEY,
     },
-    PROVIDER_MAX_TEXT_CHARS, ZED_THREADS_SQLITE_SOURCE_FORMAT,
+    MAX_PROVIDER_SQLITE_VALUE_BYTES, PROVIDER_MAX_TEXT_CHARS, ZED_THREADS_SQLITE_SOURCE_FORMAT,
 };
 use ctx_history_core::CaptureProvider;
 
@@ -1036,7 +1037,7 @@ fn oversized_unknown_encoding_diagnostic_is_bounded_and_siblings_survive() {
 }
 
 #[test]
-fn committed_wal_generation_is_snapshotted_without_mutating_provider_db_or_wal() {
+fn active_wal_generation_fails_closed_without_mutating_provider_db_family() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("threads.db");
     let connection = Connection::open(&path).unwrap();
@@ -1057,6 +1058,7 @@ fn committed_wal_generation_is_snapshotted_without_mutating_provider_db_or_wal()
     connection
         .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
         .unwrap();
+    let checkpointed_database = fs::read(&path).unwrap();
     update_thread(
         &connection,
         "thread-main",
@@ -1064,18 +1066,64 @@ fn committed_wal_generation_is_snapshotted_without_mutating_provider_db_or_wal()
         &thread(vec![user("after", "committed only in wal")]),
     );
     let wal_path = PathBuf::from(format!("{}-wal", path.display()));
+    let shm_path = PathBuf::from(format!("{}-shm", path.display()));
+    assert_eq!(fs::read(&path).unwrap(), checkpointed_database);
     assert!(wal_path.metadata().unwrap().len() > 32);
     let database_before = fs::read(&path).unwrap();
     let wal_before = fs::read(&wal_path).unwrap();
+    let shm_before = shm_path.exists().then(|| fs::read(&shm_path).unwrap());
 
-    let (authority, sink) = scan(&path);
+    let mut sink = CollectingSink::default();
+    let error = scan_zed_nativepath(&ZedNativeSourceSelection::exact(&path), &mut sink)
+        .expect_err("stock-VFS Zed unexpectedly admitted an active WAL family");
 
-    assert_eq!(sink.events()[0].body, "committed only in wal");
-    assert_eq!(sink.sessions()[0].encoding, dto::ZedNativeEncoding::Zstd);
-    assert!(authority.snapshot_revision.contains("wal=length="));
+    assert!(matches!(
+        error,
+        ZedNativePathError::SqliteSourceAccess(
+            SqliteSourceAccessError::UnsupportedSidecarIdentity {
+                component: SqliteSourceComponent::Wal,
+                ..
+            }
+        )
+    ));
+    assert!(sink.pages.is_empty());
     assert_eq!(fs::read(&path).unwrap(), database_before);
     assert_eq!(fs::read(&wal_path).unwrap(), wal_before);
+    assert_eq!(
+        shm_path.exists().then(|| fs::read(&shm_path).unwrap()),
+        shm_before
+    );
     drop(connection);
+}
+
+#[test]
+fn root_authorized_snapshot_preserves_zed_revision_contract() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("threads.db");
+    let connection = new_database(&path);
+    insert_thread(
+        &connection,
+        "thread-main",
+        None,
+        "json",
+        &thread(vec![user("revision", "revision contract")]),
+    );
+    drop(connection);
+
+    let expected = crate::provider::sqlite::ProviderSqliteSourceSnapshot::read(
+        &path,
+        ZED_SOURCE_INVALID_REASON,
+        ZED_SIDECAR_INVALID_REASON,
+    )
+    .unwrap()
+    .revision_component();
+    let ZedSnapshotAcquisition::Acquired(mut snapshot) = acquire_immutable_snapshot(&path).unwrap()
+    else {
+        panic!("stable Zed database should acquire a root-authorized snapshot");
+    };
+
+    assert_eq!(snapshot.snapshot_revision, expected);
+    snapshot.finish().unwrap();
 }
 
 #[test]
@@ -1095,11 +1143,9 @@ fn source_mutation_after_scan_is_reported_incomplete() {
     let mut sink = CollectingSink::default();
     let selection = ZedNativeSourceSelection::exact(&path);
     let outcome = scan_zed_nativepath_with_finalizer(&selection, &mut sink, || {
-        let connection = Connection::open(&path)?;
-        connection.execute(
-            "UPDATE threads SET summary='changed after snapshot' WHERE id='thread-main'",
-            [],
-        )?;
+        let mut source = fs::OpenOptions::new().append(true).open(&path)?;
+        source.write_all(b"ctx-zed-post-scan-mutation")?;
+        source.sync_all()?;
         Ok(())
     })
     .unwrap();
@@ -1111,6 +1157,51 @@ fn source_mutation_after_scan_is_reported_incomplete() {
         ZedNativeIncompleteReason::SourceChangedAfterScan
     );
     assert!(incomplete.pages_emitted > 0);
+}
+
+#[test]
+fn source_leaf_swap_after_scan_cannot_certify_the_replacement_route() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("threads.db");
+    let connection = new_database(&path);
+    insert_thread(
+        &connection,
+        "thread-main",
+        None,
+        "json",
+        &thread(vec![user("original", "opened original generation")]),
+    );
+    drop(connection);
+
+    let displaced = directory.path().join("displaced.db");
+    let mut sink = CollectingSink::default();
+    let selection = ZedNativeSourceSelection::exact(&path);
+    let outcome = scan_zed_nativepath_with_finalizer(&selection, &mut sink, || {
+        fs::rename(&path, &displaced)?;
+        let replacement = new_database(&path);
+        insert_thread(
+            &replacement,
+            "thread-main",
+            None,
+            "json",
+            &thread(vec![user(
+                "replacement",
+                "replacement must not be observed",
+            )]),
+        );
+        drop(replacement);
+        Ok(())
+    })
+    .unwrap();
+
+    assert_eq!(sink.events()[0].body, "opened original generation");
+    let ZedNativeScanOutcome::Incomplete(incomplete) = outcome else {
+        panic!("a swapped source route must not produce generation authority");
+    };
+    assert_eq!(
+        incomplete.reason,
+        ZedNativeIncompleteReason::SourceChangedAfterScan
+    );
 }
 
 #[test]

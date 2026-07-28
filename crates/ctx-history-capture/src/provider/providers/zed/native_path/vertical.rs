@@ -134,8 +134,12 @@ pub(in crate::provider::providers::zed) fn import_zed_nativepath(
         Err(error) => return Err(error.into()),
     }
 
-    let canonical_path = std::fs::canonicalize(path)?;
-    let selection = ZedNativeSourceSelection::exact(&canonical_path)
+    let authority_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let selection = ZedNativeSourceSelection::exact(&authority_path)
         .with_inventory_observation_token(options.inventory_observation_token.clone());
     let mut staging = ZedNativeStaging::new().map_err(map_native_error)?;
     let authority = match scan_zed_nativepath(&selection, &mut staging).map_err(map_native_error)? {
@@ -146,11 +150,11 @@ pub(in crate::provider::providers::zed) fn import_zed_nativepath(
     };
     staging.validate_relationships().map_err(map_native_error)?;
 
-    let raw_source_path = canonical_path.display().to_string();
+    let raw_source_path = authority_path.display().to_string();
     let source_root = context
         .source_root_display()
         .unwrap_or_else(|| raw_source_path.clone());
-    let locator_identity = provider_path_identity(&canonical_path)?;
+    let locator_identity = provider_path_identity(&authority_path)?;
     let cursor_stream = provider_source_cursor_stream_for_path(
         CaptureProvider::Zed,
         ZED_THREADS_SQLITE_SOURCE_FORMAT,
@@ -185,7 +189,7 @@ pub(in crate::provider::providers::zed) fn import_zed_nativepath(
         &cursor_stream,
         &locator_identity,
         &canonical_source_identity,
-        &canonical_path,
+        &authority_path,
         &source_revision,
         &authority,
         session_count,
@@ -193,7 +197,7 @@ pub(in crate::provider::providers::zed) fn import_zed_nativepath(
         rejection_count,
     )?;
     let publication = ZedPublicationContext {
-        path: &canonical_path,
+        path: &authority_path,
         raw_source_path,
         source_root,
         locator_identity,
