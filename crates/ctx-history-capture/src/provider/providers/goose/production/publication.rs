@@ -159,7 +159,6 @@ pub(super) fn publish_goose_page(
             &value.session,
             event,
             &resolution.canonical_source_identity,
-            reader.snapshot_connection(),
             &mut summary,
         )?;
     }
@@ -443,7 +442,6 @@ pub(super) fn publish_goose_event(
     session: &Session,
     native: &GooseNativeEvent,
     canonical_source_identity: &str,
-    snapshot: &rusqlite::Connection,
     summary: &mut ProviderImportSummary,
 ) -> Result<()> {
     if native.file_touches.len() > GOOSE_MAX_TOUCHES_PER_EVENT {
@@ -552,12 +550,17 @@ pub(super) fn publish_goose_event(
         let complete_text =
             super::super::normalization::goose_complete_content_text(&native.content)
                 .unwrap_or_else(|| native.searchable_text.clone());
+        let logical_row_digest = native
+            .logical_row_digest
+            .ok_or(CaptureError::SystemInvariant(
+                "Goose retained event omitted its logical-row digest",
+            ))?;
         super::super::content::attach_message_locator(
-            snapshot,
             native.sqlite_rowid,
             &native.provider_message_identity,
             &payload,
             &mut sync_metadata,
+            logical_row_digest,
             complete_text,
         )?;
     }

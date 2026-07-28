@@ -1,13 +1,13 @@
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    CaptureError, OutputAssociations, OutputNativeCoordinate, OutputObservationKind, OutputOutcome,
-    OutputSourceLocator, ProOutputObservation, Result,
+    provider_sources::SqliteSourceReadSnapshot, CaptureError, OutputAssociations,
+    OutputNativeCoordinate, OutputObservationKind, OutputOutcome, OutputSourceLocator,
+    ProOutputObservation, Result,
 };
 
 use super::{
@@ -193,7 +193,11 @@ impl GooseNativePathReader {
             ));
         }
         let snapshot = GooseSnapshotGeneration::acquire(&selection.selected_path)?;
-        let schema = GooseNativeSchema::probe(snapshot.connection())?;
+        let connection = snapshot.connection()?;
+        let schema = GooseNativeSchema::probe(snapshot.connection_ref(&connection)?)?;
+        if !snapshot.finish_connection(connection)? {
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
         let authority = GooseNativeSourceAuthority::ExactDispatchedDatabase {
             path: snapshot.observation().source_path().to_path_buf(),
             inventory_observation_token: selection.inventory_observation_token,
@@ -242,13 +246,27 @@ impl GooseNativePathReader {
         &self.schema
     }
 
-    pub(super) fn snapshot_connection(&self) -> &Connection {
+    pub(super) fn snapshot_connection(&self) -> Result<SqliteSourceReadSnapshot> {
         self.snapshot.connection()
+    }
+
+    pub(super) fn snapshot_connection_ref<'a>(
+        &self,
+        connection: &'a SqliteSourceReadSnapshot,
+    ) -> Result<&'a rusqlite::Connection> {
+        self.snapshot.connection_ref(connection)
+    }
+
+    pub(super) fn finish_snapshot_connection(
+        &self,
+        connection: SqliteSourceReadSnapshot,
+    ) -> Result<bool> {
+        self.snapshot.finish_connection(connection)
     }
 }
 
 pub(super) struct GooseNativeScanner<'connection> {
-    conn: &'connection Connection,
+    conn: Option<SqliteSourceReadSnapshot>,
     schema: &'connection GooseNativeSchema,
     snapshot: &'connection GooseSnapshotGeneration,
     limits: GooseNativePageLimits,
@@ -276,14 +294,20 @@ impl<'connection> GooseNativeScanner<'connection> {
         limits: GooseNativePageLimits,
         profile: GooseNativeProfile,
     ) -> Result<Self> {
-        let conn = snapshot.connection();
-        goose_prepare_native_identity_index(conn, schema, limits)?;
+        let conn = snapshot.connection()?;
+        let preparation =
+            goose_prepare_native_identity_index(snapshot.connection_ref(&conn)?, schema, limits);
+        let finished = snapshot.finish_connection(conn)?;
+        if !finished {
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
+        preparation?;
         let mut semantic_hasher = Sha256::new();
         semantic_hasher.update(GOOSE_SEMANTIC_DIGEST_DOMAIN);
         let mut session_inventory_hasher = Sha256::new();
         session_inventory_hasher.update(GOOSE_SESSION_INVENTORY_DIGEST_DOMAIN);
         Ok(Self {
-            conn,
+            conn: None,
             schema,
             snapshot,
             limits,
@@ -308,7 +332,18 @@ impl<'connection> GooseNativeScanner<'connection> {
         })
     }
 
+    fn connection(&self) -> Result<&rusqlite::Connection> {
+        let connection = self.conn.as_ref().ok_or(CaptureError::SystemInvariant(
+            "Goose scanner queried its SQLite snapshot after finish",
+        ))?;
+        self.snapshot.connection_ref(connection)
+    }
+
     pub(super) fn next_page(&mut self) -> Result<Option<GooseNativePage>> {
+        self.with_query_snapshot(Self::next_page_inner)
+    }
+
+    fn next_page_inner(&mut self) -> Result<Option<GooseNativePage>> {
         if self.core_certified {
             return Ok(None);
         }
@@ -319,7 +354,7 @@ impl<'connection> GooseNativeScanner<'connection> {
                     self.metrics.session_page_queries =
                         self.metrics.session_page_queries.saturating_add(1);
                     let rows = goose_fetch_native_session_page(
-                        self.conn,
+                        self.connection()?,
                         self.schema,
                         self.position.keyset,
                         self.limits,
@@ -399,9 +434,9 @@ impl<'connection> GooseNativeScanner<'connection> {
                         page.sessions.push(session);
                     }
                     let last_rowid = self.position.keyset.bound();
-                    if !goose_has_native_session_after(self.conn, last_rowid)? {
+                    if !goose_has_native_session_after(self.connection()?, last_rowid)? {
                         self.position = self.position.start_messages();
-                        if !goose_has_any_native_message(self.conn)? {
+                        if !goose_has_any_native_message(self.connection()?)? {
                             self.position = self.position.complete();
                         }
                     }
@@ -423,7 +458,7 @@ impl<'connection> GooseNativeScanner<'connection> {
                     self.metrics.message_page_queries =
                         self.metrics.message_page_queries.saturating_add(1);
                     let rows = goose_fetch_native_message_page(
-                        self.conn,
+                        self.connection()?,
                         self.schema,
                         self.position.keyset,
                         self.limits,
@@ -442,7 +477,7 @@ impl<'connection> GooseNativeScanner<'connection> {
                         self.project_message(scanned, &mut page)?;
                     }
                     let last_rowid = self.position.keyset.bound();
-                    if !goose_has_native_message_after(self.conn, last_rowid)? {
+                    if !goose_has_native_message_after(self.connection()?, last_rowid)? {
                         self.position = self.position.complete();
                     }
                     page.position = self.position;
@@ -480,6 +515,11 @@ impl<'connection> GooseNativeScanner<'connection> {
                 "Goose NativePath retry scanner cannot certify a partial generation".to_owned(),
             ));
         }
+        if self.conn.is_some() {
+            return Err(CaptureError::SystemInvariant(
+                "Goose Core scanner retained a SQLite guard between pages",
+            ));
+        }
         if !self.snapshot.revalidate_live()? {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
@@ -509,6 +549,10 @@ impl<'connection> GooseNativeScanner<'connection> {
     }
 
     pub(super) fn next_pro_output_page(&mut self) -> Result<Option<GooseNativeProOutputPage>> {
+        self.with_query_snapshot(Self::next_pro_output_page_inner)
+    }
+
+    fn next_pro_output_page_inner(&mut self) -> Result<Option<GooseNativeProOutputPage>> {
         if self.profile == GooseNativeProfile::CoreOnly || self.pro_frontier.terminal {
             return Ok(None);
         }
@@ -519,7 +563,8 @@ impl<'connection> GooseNativeScanner<'connection> {
             .map_or(super::position::GooseNativeRowKeyset::Unstarted, |rowid| {
                 super::position::GooseNativeRowKeyset::After(rowid)
             });
-        let rows = goose_fetch_native_output_page(self.conn, self.schema, keyset, self.limits)?;
+        let rows =
+            goose_fetch_native_output_page(self.connection()?, self.schema, keyset, self.limits)?;
         if rows.is_empty() {
             self.pro_frontier.terminal = true;
             return Ok(None);
@@ -566,8 +611,12 @@ impl<'connection> GooseNativeScanner<'connection> {
                 .ok_or(CaptureError::SystemInvariant(
                     "Goose nonempty Pro page lost its final rowid",
                 ))?;
-        self.pro_frontier.terminal =
-            !goose_has_native_output_after(self.conn, self.schema, last_rowid)?;
+        self.pro_frontier.terminal = !goose_has_native_output_after(
+            self.connection()?,
+            self.schema,
+            last_rowid,
+            self.limits,
+        )?;
         let mut page = GooseNativeProOutputPage {
             identity: GooseNativeProPageIdentity::default(),
             expected_frontier,
@@ -607,10 +656,15 @@ impl<'connection> GooseNativeScanner<'connection> {
         Ok(())
     }
 
-    pub(super) fn finish_pro_replay(&self) -> Result<GooseNativeProReplaySummary> {
+    pub(super) fn finish_pro_replay(&mut self) -> Result<GooseNativeProReplaySummary> {
         if self.profile != GooseNativeProfile::CoreAndPro || !self.pro_frontier.terminal {
             return Err(CaptureError::InvalidPayload(
                 "Goose Pro replay must exhaust its exact output frontier before finish".to_owned(),
+            ));
+        }
+        if self.conn.is_some() {
+            return Err(CaptureError::SystemInvariant(
+                "Goose Pro scanner retained a SQLite guard between pages",
             ));
         }
         if !self.snapshot.revalidate_live()? {
@@ -623,6 +677,29 @@ impl<'connection> GooseNativeScanner<'connection> {
             frontier: self.pro_frontier,
             complete: true,
         })
+    }
+
+    fn with_query_snapshot<T>(
+        &mut self,
+        operation: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        if self.conn.is_some() {
+            return Err(CaptureError::SystemInvariant(
+                "Goose scanner opened overlapping SQLite guards",
+            ));
+        }
+        self.conn = Some(self.snapshot.connection()?);
+        let result = operation(self);
+        let connection = self.conn.take().ok_or(CaptureError::SystemInvariant(
+            "Goose scanner lost its SQLite guard before page certification",
+        ))?;
+        let finished = self.snapshot.finish_connection(connection);
+        match (result, finished) {
+            (_, Ok(false)) => Err(CaptureError::SourceChangedDuringCapture),
+            (Ok(value), Ok(true)) => Ok(value),
+            (Err(error), Ok(true)) => Err(error),
+            (_, Err(error)) => Err(error),
+        }
     }
 
     fn build_summary(&self, certified: bool) -> GooseNativeScanSummary {

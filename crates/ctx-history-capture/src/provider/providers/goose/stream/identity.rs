@@ -5,72 +5,31 @@ pub(crate) fn goose_prepare_native_identity_index(
     schema: &GooseNativeSchema,
     limits: GooseNativePageLimits,
 ) -> Result<()> {
-    conn.execute_batch(&format!(
-        "drop table if exists temp.{GOOSE_NATIVE_IDENTITY_TABLE};
-         drop table if exists temp.{GOOSE_NATIVE_MESSAGE_METADATA_TABLE};
-         drop table if exists temp.{GOOSE_NATIVE_ACCEPTED_SESSION_TABLE};
-         create temp table {GOOSE_NATIVE_IDENTITY_TABLE} (
-             message_id text primary key,
-             uses integer not null
-         ) without rowid;
-         create temp table {GOOSE_NATIVE_MESSAGE_METADATA_TABLE} (
-             sqlite_rowid integer primary key,
-             native_message_id text,
-             message_id_uses integer not null,
-             message_ordinal integer not null
-         );
-         create temp table {GOOSE_NATIVE_ACCEPTED_SESSION_TABLE} (
-             sqlite_rowid integer primary key,
-             session_identity text not null unique
-         );"
-    ))?;
-    let message_id = schema.message_id_expression("m");
-    let normalized = goose_normalized_message_id_sql(&message_id);
-    conn.execute(
-        &format!(
-            "insert into temp.{GOOSE_NATIVE_IDENTITY_TABLE} (message_id, uses)
-             select {normalized}, count(*)
-             from messages m
-             where {normalized} is not null
-             group by {normalized}"
-        ),
-        [],
-    )?;
-    conn.execute(
-        &format!(
-            "insert into temp.{GOOSE_NATIVE_MESSAGE_METADATA_TABLE} (
-                 sqlite_rowid, native_message_id, message_id_uses, message_ordinal
-             )
-             select
-                 m.rowid,
-                 {normalized},
-                 coalesce(ids.uses, 0),
-                 row_number() over (order by m.rowid) - 1
-             from messages m
-             left join temp.{GOOSE_NATIVE_IDENTITY_TABLE} ids
-               on ids.message_id = {normalized}
-             order by m.rowid"
-        ),
-        [],
-    )?;
     let session_expressions = schema.session_hydration_expressions("s");
     let retained_bytes = goose_retained_length_expr(&session_expressions);
     let max_session_bytes = i64::try_from(goose_projection_page_budget(limits, false)?)
         .map_err(|_| CaptureError::SystemInvariant("Goose session page limit exceeds i64"))?;
-    conn.execute(
+    let duplicate_accepted_identity = conn.query_row(
         &format!(
-            "insert into temp.{GOOSE_NATIVE_ACCEPTED_SESSION_TABLE} (
-                 sqlite_rowid, session_identity
-             )
-             select s.rowid, s.id
-             from sessions s
-             where {}
-               and trim(s.id) != ''
-               and {retained_bytes} <= ?1",
+            "select exists(
+                 select 1
+                 from sessions s
+                 where {}
+                   and trim(s.id) != ''
+                   and {retained_bytes} <= ?1
+                 group by s.id
+                 having count(*) > 1
+             )",
             schema.session_storage_class_predicate("s")
         ),
         [max_session_bytes],
+        |row| row.get::<_, bool>(0),
     )?;
+    if duplicate_accepted_identity {
+        return Err(CaptureError::InvalidPayload(
+            "Goose accepted session identities are not unique".to_owned(),
+        ));
+    }
     Ok(())
 }
 

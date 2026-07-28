@@ -27,6 +27,12 @@ use crate::{
 use super::super::import_goose_nativepath;
 use super::{create_goose_tables, insert_message, insert_session};
 
+fn isolated_source_path(root: &std::path::Path) -> std::path::PathBuf {
+    let source_root = root.join("provider-source");
+    std::fs::create_dir(&source_root).unwrap();
+    source_root.join("sessions.db")
+}
+
 fn context(source_path: &std::path::Path, root: &std::path::Path) -> ProviderAdapterContext {
     ProviderAdapterContext {
         machine_id: "goose-nativepath-production".to_owned(),
@@ -217,7 +223,7 @@ impl ProOutputSink for TestOutputSink {
 #[test]
 fn production_upgrades_v025_source_scoped_events_across_unchanged_append_and_rewrite() {
     let temp = crate::test_support_paths::tempdir().unwrap();
-    let source_path = temp.path().join("sessions.db");
+    let source_path = isolated_source_path(temp.path());
     let source = Connection::open(&source_path).unwrap();
     create_goose_tables(&source);
     insert_session(&source, "v025-upgrade");
@@ -309,7 +315,7 @@ fn production_upgrades_v025_source_scoped_events_across_unchanged_append_and_rew
 #[test]
 fn production_records_rejected_sessions_and_their_children_without_publication_failure() {
     let temp = crate::test_support_paths::tempdir().unwrap();
-    let source_path = temp.path().join("sessions.db");
+    let source_path = isolated_source_path(temp.path());
     let source = Connection::open(&source_path).unwrap();
     create_goose_tables(&source);
     insert_session(&source, "accepted-parent");
@@ -352,7 +358,7 @@ fn production_records_rejected_sessions_and_their_children_without_publication_f
 #[test]
 fn production_core_is_idempotent_rewrites_and_excludes_successful_outputs() {
     let temp = crate::test_support_paths::tempdir().unwrap();
-    let source_path = temp.path().join("sessions.db");
+    let source_path = isolated_source_path(temp.path());
     let source = Connection::open(&source_path).unwrap();
     create_goose_tables(&source);
     insert_session(&source, "native-production");
@@ -435,7 +441,7 @@ fn production_core_is_idempotent_rewrites_and_excludes_successful_outputs() {
 #[test]
 fn production_missing_source_retires_route_without_deleting_history() {
     let temp = crate::test_support_paths::tempdir().unwrap();
-    let source_path = temp.path().join("sessions.db");
+    let source_path = isolated_source_path(temp.path());
     let source = Connection::open(&source_path).unwrap();
     create_goose_tables(&source);
     insert_session(&source, "missing-source");
@@ -473,7 +479,7 @@ fn production_missing_source_retires_route_without_deleting_history() {
 #[test]
 fn production_supports_late_pro_replay_and_pro_failure_never_blocks_core() {
     let temp = crate::test_support_paths::tempdir().unwrap();
-    let source_path = temp.path().join("sessions.db");
+    let source_path = isolated_source_path(temp.path());
     let source = Connection::open(&source_path).unwrap();
     create_goose_tables(&source);
     insert_session(&source, "pro-lifecycle");

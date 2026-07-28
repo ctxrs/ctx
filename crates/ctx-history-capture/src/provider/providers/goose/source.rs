@@ -1,16 +1,21 @@
 use std::{
-    fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    cell::RefCell,
+    io::{self, Read},
     path::{Path, PathBuf},
     time::SystemTime,
 };
 
-use rusqlite::{limits::Limit, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tempfile::TempDir;
 
-use crate::{CaptureError, Result, MAX_PROVIDER_SQLITE_VALUE_BYTES};
+use crate::{
+    common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
+    provider_sources::{
+        open_sqlite_source_snapshot, SqliteSourceAccessError, SqliteSourceComponent,
+        SqliteSourceReadSnapshot,
+    },
+    CaptureError, Result,
+};
 
 const GOOSE_SNAPSHOT_ATTEMPTS: u64 = 4;
 const GOOSE_SNAPSHOT_HASH_DOMAIN: &[u8] = b"ctx-goose-nativepath-snapshot-v1\0";
@@ -25,35 +30,12 @@ struct GooseComponentSignature {
     inode: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub(super) enum GooseNativePhysicalSourceIdentity {
-    Unix { device: u64, inode: u64 },
-    UnsupportedPlatform,
-}
-
 impl GooseComponentSignature {
-    fn read(path: &Path, required: bool) -> Result<Option<Self>> {
-        let metadata = match fs::symlink_metadata(path) {
-            Ok(metadata) => metadata,
-            Err(error) if !required && error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(None);
-            }
-            Err(error) => return Err(CaptureError::Io(error)),
-        };
-        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-            return Err(CaptureError::InvalidProviderTranscriptPath {
-                path: path.to_path_buf(),
-                reason: "Goose SQLite generation components must be regular non-symlink files",
-            });
-        }
-        Ok(Some(Self::from_metadata(&metadata)?))
-    }
-
-    fn from_metadata(metadata: &fs::Metadata) -> Result<Self> {
+    fn from_opened(file: &OpenedProviderSourceFile) -> Result<Self> {
         #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
 
+        let metadata = file.metadata();
         Ok(Self {
             length: metadata.len(),
             modified: metadata.modified()?,
@@ -65,30 +47,11 @@ impl GooseComponentSignature {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct GooseSourceMetadata {
-    database: GooseComponentSignature,
-    wal: Option<GooseComponentSignature>,
-    rollback_journal: Option<GooseComponentSignature>,
-}
-
-impl GooseSourceMetadata {
-    fn read(path: &Path) -> Result<Self> {
-        let database = GooseComponentSignature::read(path, true)?.ok_or_else(|| {
-            CaptureError::InvalidProviderTranscriptPath {
-                path: path.to_path_buf(),
-                reason: "Goose SQLite database does not exist",
-            }
-        })?;
-        Ok(Self {
-            database,
-            wal: GooseComponentSignature::read(&goose_sidecar_path(path, "-wal"), false)?,
-            rollback_journal: GooseComponentSignature::read(
-                &goose_sidecar_path(path, "-journal"),
-                false,
-            )?,
-        })
-    }
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(super) enum GooseNativePhysicalSourceIdentity {
+    Unix { device: u64, inode: u64 },
+    UnsupportedPlatform,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,37 +61,23 @@ struct GooseSnapshotComponent {
 }
 
 impl GooseSnapshotComponent {
-    fn read(path: &Path, required: bool) -> Result<Option<Self>> {
-        let Some(expected) = GooseComponentSignature::read(path, required)? else {
-            return Ok(None);
-        };
-        let mut file = match open_goose_component(path) {
-            Ok(file) => file,
-            Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(CaptureError::SourceChangedDuringCapture);
+    fn read(file: &OpenedProviderSourceFile) -> Result<Self> {
+        let signature = GooseComponentSignature::from_opened(file)?;
+        let mut reader = file.bounded_reader(file.len())?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let count = reader.read(&mut buffer)?;
+            if count == 0 {
+                break;
             }
-            Err(error) => return Err(error),
-        };
-        let opened = GooseComponentSignature::from_metadata(&file.metadata()?)?;
-        if opened != expected {
-            return Err(CaptureError::SourceChangedDuringCapture);
+            hasher.update(&buffer[..count]);
         }
-        let digest = goose_hash_reader(&mut file)?;
-        let closed = GooseComponentSignature::from_metadata(&file.metadata()?)?;
-        let current = match GooseComponentSignature::read(path, true) {
-            Ok(current) => current,
-            Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(CaptureError::SourceChangedDuringCapture);
-            }
-            Err(error) => return Err(error),
-        };
-        if closed != expected || current.as_ref() != Some(&expected) {
-            return Err(CaptureError::SourceChangedDuringCapture);
-        }
-        Ok(Some(Self {
-            signature: expected,
-            digest,
-        }))
+        file.revalidate()?;
+        Ok(Self {
+            signature,
+            digest: hasher.finalize().into(),
+        })
     }
 }
 
@@ -141,31 +90,11 @@ pub(super) struct GooseLiveObservation {
 }
 
 impl GooseLiveObservation {
-    pub(super) fn read(path: &Path) -> Result<Self> {
-        let database = GooseSnapshotComponent::read(path, true)?.ok_or_else(|| {
-            CaptureError::InvalidProviderTranscriptPath {
-                path: path.to_path_buf(),
-                reason: "Goose SQLite database does not exist",
-            }
-        })?;
-        Ok(Self {
-            source_path: path.to_path_buf(),
-            database,
-            wal: GooseSnapshotComponent::read(&goose_sidecar_path(path, "-wal"), false)?,
-            rollback_journal: GooseSnapshotComponent::read(
-                &goose_sidecar_path(path, "-journal"),
-                false,
-            )?,
-        })
-    }
-
     pub(super) fn generation_digest(&self) -> String {
         goose_hex_digest(self.generation_digest_bytes())
     }
 
     pub(super) fn generation_digest_bytes(&self) -> [u8; 32] {
-        // This hashes immutable source components only as a control-plane fence.
-        // It is never an event/output hash and is not publication content.
         let mut hasher = Sha256::new();
         hasher.update(GOOSE_SNAPSHOT_HASH_DOMAIN);
         goose_hash_observed_component(&mut hasher, b"database", Some(&self.database));
@@ -210,20 +139,147 @@ impl GooseLiveObservation {
     }
 }
 
+#[derive(Debug)]
+struct GooseAdmittedSqliteComponent {
+    file: OpenedProviderSourceFile,
+    observation: GooseSnapshotComponent,
+}
+
+impl GooseAdmittedSqliteComponent {
+    fn open(root: &ProviderSourceRoot, relative_path: &Path) -> Result<Self> {
+        let file = root.open_file(relative_path)?;
+        let observation = GooseSnapshotComponent::read(&file)?;
+        Ok(Self { file, observation })
+    }
+
+    fn open_optional(root: &ProviderSourceRoot, relative_path: &Path) -> Result<Option<Self>> {
+        match Self::open(root, relative_path) {
+            Ok(component) => Ok(Some(component)),
+            Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct GooseAdmittedSqliteFamily {
+    root: ProviderSourceRoot,
+    database: GooseAdmittedSqliteComponent,
+    wal: Option<GooseAdmittedSqliteComponent>,
+    shared_memory: Option<GooseAdmittedSqliteComponent>,
+    rollback_journal: Option<GooseAdmittedSqliteComponent>,
+}
+
+impl GooseAdmittedSqliteFamily {
+    fn open(path: &Path) -> Result<Self> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
+                path: path.to_path_buf(),
+                reason: "Goose SQLite path has no authority parent",
+            })?;
+        let filename =
+            path.file_name()
+                .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
+                    path: path.to_path_buf(),
+                    reason: "Goose SQLite path has no file name",
+                })?;
+        let root = ProviderSourceRoot::open(parent)?;
+        let database = GooseAdmittedSqliteComponent::open(&root, Path::new(filename))?;
+        let wal = GooseAdmittedSqliteComponent::open_optional(
+            &root,
+            &goose_sidecar_relative_path(filename, "-wal"),
+        )?;
+        let shared_memory = GooseAdmittedSqliteComponent::open_optional(
+            &root,
+            &goose_sidecar_relative_path(filename, "-shm"),
+        )?;
+        let rollback_journal = GooseAdmittedSqliteComponent::open_optional(
+            &root,
+            &goose_sidecar_relative_path(filename, "-journal"),
+        )?;
+        let family = Self {
+            root,
+            database,
+            wal,
+            shared_memory,
+            rollback_journal,
+        };
+        if !family.revalidate()? {
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
+        Ok(family)
+    }
+
+    fn observation(&self, source_path: PathBuf) -> GooseLiveObservation {
+        GooseLiveObservation {
+            source_path,
+            database: self.database.observation.clone(),
+            wal: self.wal.as_ref().map(|value| value.observation.clone()),
+            rollback_journal: self
+                .rollback_journal
+                .as_ref()
+                .map(|value| value.observation.clone()),
+        }
+    }
+
+    fn unsupported_stock_vfs_sidecar(&self) -> Option<SqliteSourceAccessError> {
+        let (component, capability) = if self.wal.is_some() {
+            (
+                SqliteSourceComponent::Wal,
+                "the stock Unix VFS cannot bind the opened WAL to the admitted Goose WAL handle",
+            )
+        } else if self.rollback_journal.is_some() {
+            (
+                SqliteSourceComponent::RollbackJournal,
+                "rollback recovery is not permitted without a root-handle SQLite VFS",
+            )
+        } else if self.shared_memory.is_some() {
+            (
+                SqliteSourceComponent::SharedMemory,
+                "the stock Unix VFS exposes no native SHM identity",
+            )
+        } else {
+            return None;
+        };
+        Some(SqliteSourceAccessError::UnsupportedSidecarIdentity {
+            component,
+            capability,
+        })
+    }
+
+    fn revalidate(&self) -> Result<bool> {
+        let result = (|| -> Result<()> {
+            self.database.file.revalidate()?;
+            for component in self
+                .wal
+                .iter()
+                .chain(self.shared_memory.iter())
+                .chain(self.rollback_journal.iter())
+            {
+                component.file.revalidate()?;
+            }
+            self.root.revalidate()
+        })();
+        match result {
+            Ok(()) => Ok(true),
+            Err(CaptureError::InvalidProviderTranscriptPath { .. })
+            | Err(CaptureError::SourceChangedDuringCapture) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+}
+
 pub(super) struct GooseSnapshotGeneration {
     observation: GooseLiveObservation,
-    #[cfg(test)]
-    snapshot_path: PathBuf,
-    connection: Connection,
-    _snapshot_dir: TempDir,
+    authority: GooseAdmittedSqliteFamily,
+    initial_connection: RefCell<Option<SqliteSourceReadSnapshot>>,
     attempts: u64,
 }
 
 impl GooseSnapshotGeneration {
     pub(super) fn acquire(selected_path: &Path) -> Result<Self> {
-        // Reject a selected symlink before canonicalization can hide it.
-        let _ = GooseSourceMetadata::read(selected_path)?;
-        let source_path = fs::canonicalize(selected_path)?;
+        let source_path = goose_absolute_authority_path(selected_path)?;
         let mut last_changed = false;
         for attempt in 1..=GOOSE_SNAPSHOT_ATTEMPTS {
             match Self::acquire_once(&source_path, attempt) {
@@ -242,82 +298,74 @@ impl GooseSnapshotGeneration {
     }
 
     fn acquire_once(source_path: &Path, attempts: u64) -> Result<Self> {
-        let before = GooseSourceMetadata::read(source_path)?;
-        let snapshot_dir = tempfile::Builder::new()
-            .prefix("ctx-goose-nativepath-")
-            .tempdir()?;
-        let file_name =
-            source_path
-                .file_name()
-                .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
-                    path: source_path.to_path_buf(),
-                    reason: "Goose SQLite path has no file name",
-                })?;
-        let snapshot_path = snapshot_dir.path().join(file_name);
-        let copied_database = goose_copy_component(source_path, &snapshot_path)?;
-        let copied_wal = goose_copy_optional_component(
-            source_path,
-            &snapshot_path,
-            "-wal",
-            before.wal.is_some(),
-        )?;
-        let copied_journal = goose_copy_optional_component(
-            source_path,
-            &snapshot_path,
-            "-journal",
-            before.rollback_journal.is_some(),
-        )?;
-        let copied = GooseLiveObservation {
-            source_path: source_path.to_path_buf(),
-            database: copied_database,
-            wal: copied_wal,
-            rollback_journal: copied_journal,
-        };
-        let after = GooseLiveObservation::read(source_path)?;
-        if before.database != after.database.signature
-            || before.wal.as_ref() != after.wal.as_ref().map(|value| &value.signature)
-            || before.rollback_journal.as_ref()
-                != after
-                    .rollback_journal
-                    .as_ref()
-                    .map(|value| &value.signature)
-            || copied.database.digest != after.database.digest
-            || copied.wal.as_ref().map(|value| value.digest)
-                != after.wal.as_ref().map(|value| value.digest)
-            || copied.rollback_journal.as_ref().map(|value| value.digest)
-                != after.rollback_journal.as_ref().map(|value| value.digest)
-        {
+        let authority = GooseAdmittedSqliteFamily::open(source_path)?;
+        if let Some(error) = authority.unsupported_stock_vfs_sidecar() {
+            return Err(goose_sqlite_access_error(error));
+        }
+        let connection =
+            match open_sqlite_source_snapshot(source_path, authority.database.file.file()) {
+                Ok(connection) => connection,
+                Err(
+                    SqliteSourceAccessError::SourceChanged
+                    | SqliteSourceAccessError::ConnectionIdentityMismatch,
+                ) => return Err(CaptureError::SourceChangedDuringCapture),
+                Err(error) => return Err(goose_sqlite_access_error(error)),
+            };
+        if !authority.revalidate()? {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
-
-        let connection = Connection::open_with_flags(
-            &snapshot_path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
-        let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
-            .map_err(|_| CaptureError::SystemInvariant("Goose SQLite value limit exceeds i32"))?;
-        connection.set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit);
-        connection.busy_timeout(std::time::Duration::from_secs(5))?;
-        let integrity: String =
-            connection.pragma_query_value(None, "quick_check", |row| row.get(0))?;
-        if integrity != "ok" {
-            return Err(CaptureError::InvalidPayload(format!(
-                "Goose immutable SQLite generation failed quick_check: {integrity}"
-            )));
-        }
-
+        let observation = authority.observation(source_path.to_path_buf());
         Ok(Self {
-            observation: after,
-            #[cfg(test)]
-            snapshot_path,
-            connection,
-            _snapshot_dir: snapshot_dir,
+            observation,
+            authority,
+            initial_connection: RefCell::new(Some(connection)),
             attempts,
         })
     }
 
-    pub(super) fn connection(&self) -> &Connection {
-        &self.connection
+    pub(super) fn connection(&self) -> Result<SqliteSourceReadSnapshot> {
+        let connection = self
+            .initial_connection
+            .borrow_mut()
+            .take()
+            .map(Ok)
+            .unwrap_or_else(|| {
+                open_sqlite_source_snapshot(
+                    self.observation.source_path(),
+                    self.authority.database.file.file(),
+                )
+                .map_err(|error| match error {
+                    SqliteSourceAccessError::SourceChanged
+                    | SqliteSourceAccessError::ConnectionIdentityMismatch => {
+                        CaptureError::SourceChangedDuringCapture
+                    }
+                    error => goose_sqlite_access_error(error),
+                })
+            })?;
+        if !self.authority.revalidate()? {
+            drop(connection);
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
+        Ok(connection)
+    }
+
+    pub(super) fn connection_ref<'a>(
+        &self,
+        connection: &'a SqliteSourceReadSnapshot,
+    ) -> Result<&'a rusqlite::Connection> {
+        connection.connection().map_err(goose_sqlite_access_error)
+    }
+
+    pub(super) fn finish_connection(&self, connection: SqliteSourceReadSnapshot) -> Result<bool> {
+        match connection.finish() {
+            Ok(_) => {}
+            Err(
+                SqliteSourceAccessError::SourceChanged
+                | SqliteSourceAccessError::ConnectionIdentityMismatch,
+            ) => return Ok(false),
+            Err(error) => return Err(goose_sqlite_access_error(error)),
+        }
+        self.authority.revalidate()
     }
 
     pub(super) fn observation(&self) -> &GooseLiveObservation {
@@ -326,7 +374,7 @@ impl GooseSnapshotGeneration {
 
     #[cfg(test)]
     pub(super) fn snapshot_path(&self) -> &Path {
-        &self.snapshot_path
+        self.observation.source_path()
     }
 
     pub(super) fn attempts(&self) -> u64 {
@@ -334,94 +382,8 @@ impl GooseSnapshotGeneration {
     }
 
     pub(super) fn revalidate_live(&self) -> Result<bool> {
-        match GooseLiveObservation::read(self.observation.source_path()) {
-            Ok(current) => Ok(current == self.observation),
-            Err(CaptureError::SourceChangedDuringCapture) => Ok(false),
-            Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                Ok(false)
-            }
-            Err(CaptureError::InvalidProviderTranscriptPath { .. }) => Ok(false),
-            Err(error) => Err(error),
-        }
+        self.authority.revalidate()
     }
-}
-
-fn goose_copy_optional_component(
-    source_path: &Path,
-    snapshot_path: &Path,
-    suffix: &str,
-    expected: bool,
-) -> Result<Option<GooseSnapshotComponent>> {
-    if !expected {
-        return Ok(None);
-    }
-    let source = goose_sidecar_path(source_path, suffix);
-    let destination = goose_sidecar_path(snapshot_path, suffix);
-    match goose_copy_component(&source, &destination) {
-        Ok(component) => Ok(Some(component)),
-        Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-            Err(CaptureError::SourceChangedDuringCapture)
-        }
-        Err(error) => Err(error),
-    }
-}
-
-fn goose_copy_component(source: &Path, destination: &Path) -> Result<GooseSnapshotComponent> {
-    let expected = GooseComponentSignature::read(source, true)?.ok_or_else(|| {
-        CaptureError::InvalidProviderTranscriptPath {
-            path: source.to_path_buf(),
-            reason: "Goose SQLite generation component disappeared",
-        }
-    })?;
-    let mut input = open_goose_component(source)?;
-    if GooseComponentSignature::from_metadata(&input.metadata()?)? != expected {
-        return Err(CaptureError::SourceChangedDuringCapture);
-    }
-    let mut output = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(destination)?;
-    let mut hasher = Sha256::new();
-    let mut copied = 0_u64;
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = input.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-        output.write_all(&buffer[..read])?;
-        copied = copied
-            .checked_add(u64::try_from(read).map_err(|_| {
-                CaptureError::SystemInvariant("Goose snapshot read size exceeds u64")
-            })?)
-            .ok_or(CaptureError::SystemInvariant(
-                "Goose snapshot byte count overflowed",
-            ))?;
-    }
-    output.flush()?;
-    let closed = GooseComponentSignature::from_metadata(&input.metadata()?)?;
-    let current = GooseComponentSignature::read(source, true)?;
-    if copied != expected.length || closed != expected || current.as_ref() != Some(&expected) {
-        return Err(CaptureError::SourceChangedDuringCapture);
-    }
-    Ok(GooseSnapshotComponent {
-        signature: expected,
-        digest: hasher.finalize().into(),
-    })
-}
-
-fn goose_hash_reader(reader: &mut File) -> Result<[u8; 32]> {
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = reader.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(hasher.finalize().into())
 }
 
 fn goose_hash_observed_component(
@@ -441,39 +403,27 @@ fn goose_hash_observed_component(
     }
 }
 
-fn goose_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
-    let mut sidecar = path.as_os_str().to_os_string();
+fn goose_sidecar_relative_path(filename: &std::ffi::OsStr, suffix: &str) -> PathBuf {
+    let mut sidecar = filename.to_os_string();
     sidecar.push(suffix);
     PathBuf::from(sidecar)
 }
 
+fn goose_absolute_authority_path(path: &Path) -> Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
+}
+
+pub(super) fn goose_sqlite_access_error(error: SqliteSourceAccessError) -> CaptureError {
+    CaptureError::SystemIo {
+        operation: "accessing a root-authorized Goose SQLite source",
+        source: io::Error::other(error),
+    }
+}
+
 fn goose_hex_digest(digest: [u8; 32]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-#[cfg(unix)]
-fn open_goose_component(path: &Path) -> Result<File> {
-    use std::os::unix::fs::OpenOptionsExt;
-
-    Ok(OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)?)
-}
-
-#[cfg(target_os = "windows")]
-fn open_goose_component(path: &Path) -> Result<File> {
-    use std::os::windows::fs::OpenOptionsExt;
-
-    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-
-    Ok(OpenOptions::new()
-        .read(true)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)?)
-}
-
-#[cfg(not(any(unix, target_os = "windows")))]
-fn open_goose_component(path: &Path) -> Result<File> {
-    Ok(File::open(path)?)
 }

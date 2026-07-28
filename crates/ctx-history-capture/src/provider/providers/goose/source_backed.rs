@@ -598,10 +598,10 @@ impl GooseSourceBackedResolverV0 {
     fn hydrate_with_reader(
         &self,
         reader: &GooseNativePathReader,
+        connection: &rusqlite::Connection,
         request: &EventHydrationRequest,
     ) -> Result<HydratedProviderRecord, HydrationFailure> {
         let rowid = validate_goose_locator(request.locator())?;
-        let connection = reader.snapshot_connection();
         let exists = connection
             .query_row(
                 "select exists(select 1 from messages where rowid = ?1)",
@@ -638,7 +638,7 @@ impl GooseSourceBackedResolverV0 {
                 "Goose exact row digest changed",
             ));
         }
-        let scanned = goose_scanned_message_at(reader, rowid)?;
+        let scanned = goose_scanned_message_at(reader, connection, rowid)?;
         if scanned.logical_row_digest != Some(digest) {
             return Err(hydration_failure(
                 HydrationFailureKind::StaleRecordEvidence,
@@ -694,8 +694,20 @@ impl ContentSourceResolver for GooseSourceBackedResolverV0 {
         request: &EventHydrationRequest,
     ) -> Result<HydratedProviderRecord, HydrationFailure> {
         let reader = self.acquire(request.locator())?;
+        let snapshot = reader.snapshot_connection().map_err(|_| {
+            hydration_failure(
+                HydrationFailureKind::TemporarilyUnavailable,
+                "Goose exact snapshot is unavailable",
+            )
+        })?;
+        let connection = reader.snapshot_connection_ref(&snapshot).map_err(|_| {
+            hydration_failure(
+                HydrationFailureKind::TemporarilyUnavailable,
+                "Goose exact snapshot is unavailable",
+            )
+        })?;
         goose_prepare_native_identity_index(
-            reader.snapshot_connection(),
+            connection,
             reader.schema(),
             GooseNativePageLimits::default(),
         )
@@ -705,7 +717,9 @@ impl ContentSourceResolver for GooseSourceBackedResolverV0 {
                 "Goose stream parser could not prepare the exact snapshot",
             )
         })?;
-        self.hydrate_with_reader(&reader, request)
+        let hydrated = self.hydrate_with_reader(&reader, connection, request)?;
+        finish_goose_hydration(&reader, snapshot)?;
+        Ok(hydrated)
     }
 
     fn hydrate_session(
@@ -729,8 +743,20 @@ impl ContentSourceResolver for GooseSourceBackedResolverV0 {
                 "Goose session hydration mixed source generations",
             ));
         }
+        let snapshot = reader.snapshot_connection().map_err(|_| {
+            hydration_failure(
+                HydrationFailureKind::TemporarilyUnavailable,
+                "Goose exact snapshot is unavailable",
+            )
+        })?;
+        let connection = reader.snapshot_connection_ref(&snapshot).map_err(|_| {
+            hydration_failure(
+                HydrationFailureKind::TemporarilyUnavailable,
+                "Goose exact snapshot is unavailable",
+            )
+        })?;
         goose_prepare_native_identity_index(
-            reader.snapshot_connection(),
+            connection,
             reader.schema(),
             GooseNativePageLimits::default(),
         )
@@ -740,11 +766,13 @@ impl ContentSourceResolver for GooseSourceBackedResolverV0 {
                 "Goose stream parser could not prepare the exact snapshot",
             )
         })?;
-        request
+        let hydrated = request
             .events()
             .iter()
-            .map(|event| self.hydrate_with_reader(&reader, event))
-            .collect()
+            .map(|event| self.hydrate_with_reader(&reader, connection, event))
+            .collect::<Result<Vec<_>, _>>()?;
+        finish_goose_hydration(&reader, snapshot)?;
+        Ok(hydrated)
     }
 }
 
@@ -786,6 +814,7 @@ fn validate_goose_locator(locator: &SourceRecordLocator) -> Result<i64, Hydratio
 
 fn goose_scanned_message_at(
     reader: &GooseNativePathReader,
+    connection: &rusqlite::Connection,
     rowid: i64,
 ) -> Result<GooseScannedMessage, HydrationFailure> {
     let keyset = if rowid == i64::MIN {
@@ -800,18 +829,13 @@ fn goose_scanned_message_at(
                 "Goose exact-row parser limits are invalid",
             )
         })?;
-    let mut rows = goose_fetch_native_message_page(
-        reader.snapshot_connection(),
-        reader.schema(),
-        keyset,
-        limits,
-    )
-    .map_err(|_| {
-        hydration_failure(
-            HydrationFailureKind::StaleRecordEvidence,
-            "Goose exact row could not be parsed",
-        )
-    })?;
+    let mut rows = goose_fetch_native_message_page(connection, reader.schema(), keyset, limits)
+        .map_err(|_| {
+            hydration_failure(
+                HydrationFailureKind::StaleRecordEvidence,
+                "Goose exact row could not be parsed",
+            )
+        })?;
     if rows.len() != 1 || rows[0].sqlite_rowid != rowid {
         return Err(hydration_failure(
             HydrationFailureKind::MissingRecord,
@@ -819,6 +843,23 @@ fn goose_scanned_message_at(
         ));
     }
     Ok(rows.remove(0))
+}
+
+fn finish_goose_hydration(
+    reader: &GooseNativePathReader,
+    snapshot: crate::provider_sources::SqliteSourceReadSnapshot,
+) -> Result<(), HydrationFailure> {
+    match reader.finish_snapshot_connection(snapshot) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(hydration_failure(
+            HydrationFailureKind::StaleSourceEvidence,
+            "Goose exact source changed before hydration finished",
+        )),
+        Err(_) => Err(hydration_failure(
+            HydrationFailureKind::TemporarilyUnavailable,
+            "Goose exact source could not be revalidated",
+        )),
+    }
 }
 
 fn hydration_failure(kind: HydrationFailureKind, detail: impl Into<String>) -> HydrationFailure {

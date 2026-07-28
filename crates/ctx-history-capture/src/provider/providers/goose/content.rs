@@ -1,8 +1,9 @@
 use rusqlite::{Connection, OptionalExtension};
 
-use ctx_history_core::CaptureProvider;
+use ctx_history_core::{CaptureProvider, ContentRef};
 
 use crate::{
+    complete_content::CompleteContentBodyDigest,
     native_source::{NativeLocator, NativeSqliteValue},
     CaptureError, Result, GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
 };
@@ -97,31 +98,37 @@ pub(super) fn complete_message_with_normalized_hash(
 }
 
 pub(super) fn attach_message_locator(
-    conn: &Connection,
     rowid: i64,
     native_record_id: &str,
     payload: &serde_json::Value,
     metadata: &mut serde_json::Value,
+    logical_row_digest: [u8; 32],
     complete_text: String,
 ) -> Result<()> {
-    let Some(values) = message_values_at_rowid(conn, rowid)? else {
-        return Err(CaptureError::InvalidPayload(format!(
-            "Goose retained message row {rowid} disappeared from its immutable snapshot"
-        )));
-    };
     let (kind, value) = goose_message_locator(rowid);
     let locator = NativeLocator::new(kind, value)
         .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
-    crate::complete_content::sqlite::attach_sqlite_complete_content_locator(
+    let record_digest = CompleteContentBodyDigest::parse(goose_hex_digest(logical_row_digest))
+        .ok_or(CaptureError::SystemInvariant(
+            "Goose logical-row digest must be valid SHA-256",
+        ))?;
+    let content_ref = ContentRef::from_bytes(complete_text.as_bytes()).ok_or(
+        CaptureError::SystemInvariant("Goose complete content exceeds ContentRef bounds"),
+    )?;
+    crate::complete_content::sqlite::attach_sqlite_complete_content_locator_with_ref(
         CaptureProvider::Goose,
         GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
         native_record_id,
         payload,
         metadata,
         &locator,
-        &values,
-        || complete_text,
+        record_digest,
+        content_ref,
     )
+}
+
+fn goose_hex_digest(digest: [u8; 32]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn message_values_at_rowid(
