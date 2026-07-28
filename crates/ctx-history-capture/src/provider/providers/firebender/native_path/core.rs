@@ -3,8 +3,6 @@ use super::*;
 #[allow(clippy::too_many_arguments)]
 pub(super) fn import_core(
     store: &mut Store,
-    conn: &Connection,
-    snapshot: &ProviderSqliteSourceSnapshot,
     authority: &mut FirebenderSourceAuthority,
     context: &ProviderAdapterContext,
     options: &ProviderImportOptions,
@@ -85,13 +83,9 @@ pub(super) fn import_core(
     let operation = (|| {
         let mut summary = ProviderImportSummary::default();
         loop {
-            if !snapshot.revalidate(&authority.database_path)? {
-                return Err(CaptureError::SourceChangedDuringCapture);
-            }
-            let page = with_sqlite_read_snapshot(conn, || build_page(conn, &scan_frontier, false))?;
-            if !snapshot.revalidate(&authority.database_path)? {
-                return Err(CaptureError::SourceChangedDuringCapture);
-            }
+            let page = authority.database.read(&authority.database_path, |conn| {
+                build_page(conn, &scan_frontier, false)
+            })?;
             let page_accepted_sessions = u64::from(
                 page.message_start == 0 && page.row.as_ref().is_some_and(row_has_core_content),
             );
@@ -139,7 +133,6 @@ pub(super) fn import_core(
                 store,
                 &committed_store,
                 &bulk_guard,
-                snapshot,
                 authority,
                 context,
                 options,
@@ -181,7 +174,6 @@ fn publish_core_page(
     store: &mut Store,
     committed_store: &Store,
     bulk_guard: &EventSearchBulkGuard,
-    snapshot: &ProviderSqliteSourceSnapshot,
     authority: &FirebenderSourceAuthority,
     context: &ProviderAdapterContext,
     options: &ProviderImportOptions,
@@ -305,9 +297,7 @@ fn publish_core_page(
             }),
         );
     }
-    if !snapshot.revalidate(&authority.database_path)? {
-        return Err(CaptureError::SourceChangedDuringCapture);
-    }
+    authority.database.revalidate()?;
     group.prepare_journal_checkpoint()?;
     group.publish_cursor_set()?;
     group.commit()?;

@@ -17,18 +17,14 @@ use thiserror::Error;
 use super::super::FirebenderOutputEvidence;
 use super::{
     build_page, core::firebender_raw_row_digest, firebender_path_identity,
-    firebender_source_revision, firebender_source_snapshot, validate_schema, FirebenderFrontier,
-    FirebenderPage, FirebenderRow,
+    firebender_source_revision, validate_schema, FirebenderFrontier, FirebenderPage, FirebenderRow,
+    FirebenderSqliteDatabase, SqliteSourceEvidence,
 };
 use crate::{
     native_source::NativeSqliteValue,
     provider::{
         normalization::{provider_local_preview, provider_timestamp_millis},
-        sqlite::{
-            open_provider_sqlite_readonly, sqlite_schema_fingerprint, sqlite_table_columns,
-            with_sqlite_read_snapshot, ProviderSqliteSourceSnapshot, ReadOnlySqliteConnection,
-            SqliteLengthPreflightGuard,
-        },
+        sqlite::{sqlite_schema_fingerprint, sqlite_table_columns, SqliteLengthPreflightGuard},
     },
     CaptureError, Result as CaptureResult, FIREBENDER_SQLITE_SOURCE_FORMAT,
 };
@@ -128,8 +124,7 @@ pub(crate) struct FirebenderSourceBackedScanner {
     workspace: Option<String>,
     source: SourceKey,
     opening: SourceObservation,
-    opening_snapshot: ProviderSqliteSourceSnapshot,
-    conn: ReadOnlySqliteConnection,
+    database: FirebenderSqliteDatabase,
     frontier: FirebenderFrontier,
     counts: ScannedSourceCounts,
     drained: bool,
@@ -153,8 +148,7 @@ pub(crate) fn prepare_firebender_source_backed(
             database_path: opened.database_path,
             source: opened.source,
             opening: opened.observation,
-            opening_snapshot: opened.snapshot,
-            conn: opened.conn,
+            database: opened.database,
             frontier: FirebenderFrontier::initial(),
             counts: ScannedSourceCounts::default(),
             drained: false,
@@ -177,11 +171,9 @@ impl FirebenderSourceBackedScanner {
         if self.drained {
             return Ok(None);
         }
-        self.revalidate()?;
-        let page = with_sqlite_read_snapshot(&self.conn, || {
-            build_page(&self.conn, &self.frontier, false)
+        let page = self.database.read(&self.database_path, |conn| {
+            build_page(conn, &self.frontier, false)
         })?;
-        self.revalidate()?;
         self.frontier = page.next.clone();
         if page.row.is_none() && page.rejection.is_none() {
             self.drained = page.next.terminal;
@@ -199,16 +191,12 @@ impl FirebenderSourceBackedScanner {
         if !self.drained || !self.frontier.terminal {
             return Err(FirebenderSourceBackedError::ScanNotComplete);
         }
-        self.revalidate()?;
-        let closing_snapshot = firebender_source_snapshot(&self.database_path)?;
+        self.database.revalidate()?;
         let closing = SourceObservation::new(
             self.source.clone(),
             FIREBENDER_SOURCE_REVISION_KIND,
             self.opening.revision().to_vec(),
         )?;
-        if closing_snapshot != self.opening_snapshot {
-            return Err(CaptureError::SourceChangedDuringCapture.into());
-        }
         Ok(CertifiedSource::certify(
             self.opening,
             closing,
@@ -274,14 +262,6 @@ impl FirebenderSourceBackedScanner {
         }
         Ok(documents)
     }
-
-    fn revalidate(&self) -> FirebenderSourceBackedResult<()> {
-        if self.opening_snapshot.revalidate(&self.database_path)? {
-            Ok(())
-        } else {
-            Err(CaptureError::SourceChangedDuringCapture.into())
-        }
-    }
 }
 
 pub(crate) fn hydrate_firebender_source_backed_row(
@@ -300,10 +280,10 @@ pub(crate) fn hydrate_firebender_source_backed_row(
     }
     let (rowid, expected_session_id, expected_updated_at, message_index) =
         decode_locator_coordinate(locator)?;
-    opened.revalidate()?;
-    let row = with_sqlite_read_snapshot(&opened.conn, || load_exact_row(&opened.conn, rowid))?
+    let row = opened
+        .database
+        .read(&opened.database_path, |conn| load_exact_row(conn, rowid))?
         .ok_or(FirebenderSourceBackedError::MissingSourceRow)?;
-    opened.revalidate()?;
     if row.id != expected_session_id || row.updated_at != expected_updated_at {
         return Err(FirebenderSourceBackedError::StaleRowEvidence);
     }
@@ -326,38 +306,31 @@ struct OpenedFirebenderSource {
     database_path: PathBuf,
     source: SourceKey,
     observation: SourceObservation,
-    snapshot: ProviderSqliteSourceSnapshot,
-    conn: ReadOnlySqliteConnection,
+    database: FirebenderSqliteDatabase,
 }
 
 impl OpenedFirebenderSource {
     fn open(explicit_path: &Path) -> FirebenderSourceBackedResult<Self> {
         let identity = firebender_path_identity(explicit_path)?;
         let database_path = identity.canonical_database_path;
-        let snapshot = firebender_source_snapshot(&database_path)?;
-        let conn = open_provider_sqlite_readonly(&database_path)?;
-        if !snapshot.revalidate(&database_path)? {
-            return Err(CaptureError::SourceChangedDuringCapture.into());
-        }
-        validate_schema(&conn, &database_path)?;
-        let schema_fingerprint = sqlite_schema_fingerprint(&conn)?;
+        let (database, schema_fingerprint) =
+            FirebenderSqliteDatabase::open(&database_path, |conn| {
+                validate_schema(conn, &database_path)?;
+                sqlite_schema_fingerprint(conn)
+            })?;
         let source = firebender_source_key(&identity.route_identity)?;
-        let observation = source_observation(source.clone(), &snapshot, &schema_fingerprint)?;
+        let observation =
+            source_observation(source.clone(), database.evidence(), &schema_fingerprint)?;
         Ok(Self {
             database_path,
             source,
             observation,
-            snapshot,
-            conn,
+            database,
         })
     }
 
     fn revalidate(&self) -> FirebenderSourceBackedResult<()> {
-        if self.snapshot.revalidate(&self.database_path)? {
-            Ok(())
-        } else {
-            Err(CaptureError::SourceChangedDuringCapture.into())
-        }
+        self.database.revalidate().map_err(Into::into)
     }
 }
 
@@ -377,13 +350,13 @@ fn firebender_source_key(route_identity: &str) -> FirebenderSourceBackedResult<S
 
 fn source_observation(
     source: SourceKey,
-    snapshot: &ProviderSqliteSourceSnapshot,
+    evidence: &SqliteSourceEvidence,
     schema_fingerprint: &str,
 ) -> FirebenderSourceBackedResult<SourceObservation> {
     Ok(SourceObservation::new(
         source,
         FIREBENDER_SOURCE_REVISION_KIND,
-        firebender_source_revision(snapshot, schema_fingerprint).into_bytes(),
+        firebender_source_revision(evidence, schema_fingerprint).into_bytes(),
     )?)
 }
 
