@@ -155,6 +155,10 @@ pub(super) fn goose_core_page_encoded_bytes(page: &GooseNativePage) -> usize {
         counter.optional_string(event.timestamp.as_deref());
         counter.optional_string(event.tokens_json.as_deref());
         counter.optional_string(event.metadata_json.as_deref());
+        counter.fixed(1);
+        if let Some(logical_row_digest) = event.logical_row_digest {
+            counter.bytes(&logical_row_digest);
+        }
         for touch in &event.file_touches {
             counter.string(&touch.path);
             counter.optional_string(touch.old_path.as_deref());

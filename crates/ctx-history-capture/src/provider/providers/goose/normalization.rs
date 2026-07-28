@@ -381,6 +381,7 @@ pub(super) struct GooseNativeEvent {
     pub(super) tokens_json: Option<String>,
     pub(super) metadata_json: Option<String>,
     pub(super) retained_content_bytes: u64,
+    pub(super) logical_row_digest: Option<[u8; 32]>,
     pub(super) file_touches: Vec<GooseNativeFileTouch>,
 }
 
@@ -503,6 +504,7 @@ pub(super) fn normalize_goose_native_message(
         tokens_json: message.tokens_json,
         metadata_json: message.metadata_json,
         retained_content_bytes: message.content_bytes,
+        logical_row_digest: Some(message.logical_row_digest),
         file_touches,
     })
 }
@@ -575,6 +577,7 @@ pub(super) fn normalize_goose_native_output_diagnostic(
         tokens_json: None,
         metadata_json: None,
         retained_content_bytes,
+        logical_row_digest: message.logical_row_digest,
         file_touches: Vec::new(),
     })
 }
