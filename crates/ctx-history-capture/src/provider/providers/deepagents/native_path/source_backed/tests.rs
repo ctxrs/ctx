@@ -205,8 +205,11 @@ fn bounded_cold_scan_emits_compound_exact_row_locators() {
         std::mem::size_of::<[u8; 32]>()
     );
     let scanner_source = scanner.source().clone();
-    let mut documents = Vec::new();
-    let mut page_lengths = Vec::new();
+    let first_page = scanner.next_page().unwrap().unwrap();
+    assert!(scanner.sqlite_snapshot.is_none());
+    assert!(scanner.source_validated);
+    let mut page_lengths = vec![first_page.len()];
+    let mut documents = first_page;
     while let Some(page) = scanner.next_page().unwrap() {
         page_lengths.push(page.len());
         documents.extend(page);

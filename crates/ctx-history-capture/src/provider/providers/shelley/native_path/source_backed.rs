@@ -5,7 +5,7 @@
 //! remembered project roots or manual paths into this discovery entrypoint.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     fs::{self, File},
     path::{Path, PathBuf},
 };
@@ -149,7 +149,7 @@ impl ShelleySourceBackedAdapter {
             database_path: self.database_path.clone(),
             source: self.source.clone(),
             snapshot,
-            _root_bound_database: root_bound_database,
+            root_bound_database: Some(root_bound_database),
             sqlite_snapshot: Some(sqlite_snapshot),
             opening_observation,
             conversation_select,
@@ -162,6 +162,7 @@ impl ShelleySourceBackedAdapter {
             counts: ScannedSourceCounts::default(),
             emitted_pages: 0,
             session_lineages: HashMap::new(),
+            validated_pages: VecDeque::new(),
             receipt: None,
         })
     }
@@ -280,7 +281,7 @@ pub(crate) struct ShelleySourceBackedScan {
     database_path: PathBuf,
     source: SourceKey,
     snapshot: crate::provider::sqlite::ProviderSqliteSourceSnapshot,
-    _root_bound_database: File,
+    root_bound_database: Option<File>,
     sqlite_snapshot: Option<SqliteSourceReadSnapshot>,
     opening_observation: SourceObservation,
     conversation_select: Vec<String>,
@@ -293,21 +294,34 @@ pub(crate) struct ShelleySourceBackedScan {
     counts: ScannedSourceCounts,
     emitted_pages: u64,
     session_lineages: HashMap<String, ShelleyDocumentLineage>,
+    validated_pages: VecDeque<ShelleySourceBackedPage>,
     receipt: Option<ShelleySourceBackedReceipt>,
 }
 
 impl ShelleySourceBackedScan {
-    /// Emits at most 64 native records and one bounded lexical preview per
-    /// retained record. Certification is available only after this returns
-    /// `None`, which performs final source revalidation.
+    /// Returns at most 64 native records and one bounded lexical preview per
+    /// retained record after the complete source read has finished and passed
+    /// terminal revalidation.
     pub(crate) fn next_page(
         &mut self,
     ) -> ShelleySourceBackedResult<Option<ShelleySourceBackedPage>> {
+        if let Some(page) = self.validated_pages.pop_front() {
+            return Ok(Some(page));
+        }
         if self.receipt.is_some() {
             return Ok(None);
         }
+        while let Some(page) = self.next_unvalidated_page()? {
+            self.validated_pages.push_back(page);
+        }
+        self.finalize()?;
+        Ok(self.validated_pages.pop_front())
+    }
+
+    fn next_unvalidated_page(
+        &mut self,
+    ) -> ShelleySourceBackedResult<Option<ShelleySourceBackedPage>> {
         if self.source_exhausted {
-            self.finalize()?;
             return Ok(None);
         }
 
@@ -407,9 +421,6 @@ impl ShelleySourceBackedScan {
         }
 
         if page.counts.complete_records == 0 {
-            if self.source_exhausted {
-                self.finalize()?;
-            }
             return Ok(None);
         }
         merge_counts(&mut self.counts, page.counts)?;
@@ -418,6 +429,9 @@ impl ShelleySourceBackedScan {
     }
 
     pub(crate) fn finish(self) -> ShelleySourceBackedResult<ShelleySourceBackedReceipt> {
+        if !self.validated_pages.is_empty() {
+            return Err(ShelleySourceBackedError::ScanIncomplete);
+        }
         self.receipt.ok_or(ShelleySourceBackedError::ScanIncomplete)
     }
 
@@ -578,6 +592,7 @@ impl ShelleySourceBackedScan {
         if !self.snapshot.revalidate(&self.database_path)? {
             return Err(CaptureError::SourceChangedDuringCapture.into());
         }
+        drop(self.root_bound_database.take());
         let mut content_digest = self.content_digest.clone();
         hash_counts(&mut content_digest, self.counts);
         let certificate = CertifiedSource::certify(
@@ -1099,7 +1114,7 @@ mod tests {
     }
 
     #[test]
-    fn shelley_source_backed_leaf_replacement_fails_terminal_certification() {
+    fn shelley_source_backed_finishes_before_releasing_first_page() {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let database = create_fixture(temp.path(), "before replacement");
         let original = temp.path().join("original.db");
@@ -1107,16 +1122,18 @@ mod tests {
             .unwrap()
             .unwrap();
         let mut scan = adapter.start_scan().unwrap();
-        assert!(scan.next_page().unwrap().is_some());
+        let page = scan.next_page().unwrap().unwrap();
+        assert!(page
+            .documents
+            .iter()
+            .any(|document| document.body.contains("before replacement")));
+        assert!(scan.sqlite_snapshot.is_none());
+        assert!(scan.receipt.is_some());
 
         fs::rename(&database, &original).unwrap();
         create_fixture(temp.path(), "after replacement");
-        assert!(matches!(
-            scan.next_page(),
-            Err(ShelleySourceBackedError::SqliteSource(
-                SqliteSourceAccessError::ConnectionIdentityMismatch
-            ))
-        ));
+        assert!(scan.next_page().unwrap().is_none());
+        scan.finish().unwrap();
     }
 
     #[test]
