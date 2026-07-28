@@ -1,4 +1,5 @@
 mod command;
+pub(crate) mod data_migration;
 mod diagnostics;
 mod download;
 mod install;
