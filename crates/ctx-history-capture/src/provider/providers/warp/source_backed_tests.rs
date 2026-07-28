@@ -154,13 +154,87 @@ fn coexisting_selected_surfaces_project_cold_without_collapsing_lineage() {
     assert_eq!(snapshots[1].documents[0].body, "tui body");
     for snapshot in &snapshots {
         assert_eq!(snapshot.documents.len(), 1);
+        assert_eq!(snapshot.documents[0].parent_session_id, None);
+        assert_eq!(
+            snapshot.documents[0].root_session_id,
+            snapshot.documents[0].session_id
+        );
+        assert_eq!(
+            snapshot.documents[0].provider_session_id.as_deref(),
+            Some("same-conversation")
+        );
+        assert_eq!(snapshot.documents[0].branch, None);
+        let canonical_path = fs::canonicalize(snapshot.selection.path()).unwrap();
+        assert_eq!(
+            snapshot.documents[0].source_path.as_deref(),
+            canonical_path.to_str()
+        );
+        assert_eq!(snapshot.documents[0].agent_type, "primary");
+        assert!(snapshot.documents[0].is_primary);
         assert_eq!(snapshot.certified_source.counts().retained_records, 1);
+        assert_eq!(snapshot.certified_source.counts().ignored_records, 1);
         assert_eq!(snapshot.certified_source.counts().indexed_documents, 1);
         assert_eq!(
             snapshot.certified_source.observation().source(),
             &snapshot.source
         );
     }
+}
+
+#[test]
+fn provider_hierarchy_populates_index_lineage_filters() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("warp.sqlite");
+    create_source(
+        &path,
+        "child-conversation",
+        "task-1",
+        "message-1",
+        "child body",
+    );
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute(
+            "update agent_conversations
+             set conversation_data =
+                 '{\"agent_name\":\"Child\",\"parent_conversation_id\":\"root-conversation\"}'
+             where conversation_id = 'child-conversation'",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "insert into agent_conversations
+             (conversation_id, conversation_data, last_modified_at)
+             values (
+                 'root-conversation',
+                 '{\"agent_name\":\"Root\"}',
+                 '2026-07-24 11:59:00'
+             )",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    let snapshot = project_warp_source_backed_v0(
+        WarpSourceSelectionV0::new(&path, "linux:stable:gui").unwrap(),
+    )
+    .unwrap();
+    let document = &snapshot.documents[0];
+
+    assert_ne!(document.parent_session_id, Some(document.session_id));
+    assert_eq!(document.parent_session_id, Some(document.root_session_id));
+    assert_eq!(
+        document.provider_session_id.as_deref(),
+        Some("child-conversation")
+    );
+    assert_eq!(document.agent_type, "subagent");
+    assert!(!document.is_primary);
+    assert_eq!(document.branch, None);
+    let canonical_path = fs::canonicalize(&path).unwrap();
+    assert_eq!(document.source_path.as_deref(), canonical_path.to_str());
+    assert_eq!(snapshot.certified_source.counts().retained_records, 1);
+    assert_eq!(snapshot.certified_source.counts().ignored_records, 3);
 }
 
 #[test]
