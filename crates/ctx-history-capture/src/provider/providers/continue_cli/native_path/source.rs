@@ -1,8 +1,8 @@
 use std::{
     ffi::{OsStr, OsString},
-    fs::{self, File, Metadata},
+    fs::{File, Metadata},
     io::{self, Read, Write},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::Arc,
 };
 
@@ -15,7 +15,10 @@ use std::sync::{
 };
 
 use crate::{
-    provider_sources::{observe_ordinary_file, open_ordinary_file_without_following},
+    common::io::{
+        open_provider_source_path, OpenedProviderSourceFile, OpenedProviderSourcePath,
+        ProviderSourceRoot,
+    },
     CaptureError, MAX_PROVIDER_JSONL_LINE_BYTES,
 };
 
@@ -33,7 +36,7 @@ use common::*;
 use index::*;
 #[cfg(all(test, windows))]
 pub(super) use inventory::metadata_identity;
-use inventory::observe_inventory;
+use inventory::{observe_inventory, opened_file_token};
 pub(crate) use spool::ContinuePathIter;
 use spool::{ContinuePathSpool, RootMutationWatch};
 
@@ -120,23 +123,37 @@ fn injected_io_failure(_operation: ContinueInjectedIoOperation, _path: &Path) ->
     None
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 struct ExactFileSnapshot {
     path: PathBuf,
     canonical_path: PathBuf,
-    ordinary_observation: crate::provider_sources::OrdinaryFileObservation,
+    file_token: [u8; 32],
     bytes: Box<[u8]>,
     revision: String,
+    opened: Arc<OpenedProviderSourceFile>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct ContinueSourceObservation {
     requested_path: PathBuf,
     canonical_path: PathBuf,
-    ordinary_observation: crate::provider_sources::OrdinaryFileObservation,
+    file_token: [u8; 32],
     session_revision: String,
     raw_bytes: u64,
+    opened: Arc<OpenedProviderSourceFile>,
 }
+
+impl PartialEq for ContinueSourceObservation {
+    fn eq(&self, other: &Self) -> bool {
+        self.requested_path == other.requested_path
+            && self.canonical_path == other.canonical_path
+            && self.file_token == other.file_token
+            && self.session_revision == other.session_revision
+            && self.raw_bytes == other.raw_bytes
+    }
+}
+
+impl Eq for ContinueSourceObservation {}
 
 impl ContinueSourceObservation {
     pub(crate) fn requested_path(&self) -> &Path {
@@ -156,8 +173,9 @@ impl ContinueSourceObservation {
     }
 
     pub(crate) fn revalidate(&self) -> Result<bool, ContinueNativePathError> {
-        let snapshot = match read_exact_file(
+        let snapshot = match read_opened_exact_file(
             &self.requested_path,
+            self.opened.clone(),
             MAX_CONTINUE_SESSION_BYTES,
             SESSION_REVISION_DOMAIN,
         ) {
@@ -170,7 +188,7 @@ impl ContinueSourceObservation {
             Err(error) => return Err(error),
         };
         Ok(snapshot.canonical_path == self.canonical_path
-            && snapshot.ordinary_observation == self.ordinary_observation
+            && snapshot.file_token == self.file_token
             && snapshot.revision == self.session_revision
             && u64::try_from(snapshot.bytes.len()).ok() == Some(self.raw_bytes))
     }
@@ -183,8 +201,16 @@ pub(crate) struct ContinueSourceSnapshot {
 }
 
 impl ContinueSourceSnapshot {
-    pub(crate) fn read(path: &Path) -> Result<Self, ContinueNativePathError> {
-        let snapshot = read_exact_file(path, MAX_CONTINUE_SESSION_BYTES, SESSION_REVISION_DOMAIN)?;
+    fn read_opened(
+        path: &Path,
+        opened: OpenedProviderSourceFile,
+    ) -> Result<Self, ContinueNativePathError> {
+        let snapshot = read_opened_exact_file(
+            path,
+            Arc::new(opened),
+            MAX_CONTINUE_SESSION_BYTES,
+            SESSION_REVISION_DOMAIN,
+        )?;
         let raw_bytes = u64::try_from(snapshot.bytes.len()).map_err(|_| {
             ContinueNativePathError::SourceTooLarge {
                 path: path.to_path_buf(),
@@ -196,9 +222,10 @@ impl ContinueSourceSnapshot {
             observation: ContinueSourceObservation {
                 requested_path: snapshot.path,
                 canonical_path: snapshot.canonical_path,
-                ordinary_observation: snapshot.ordinary_observation,
+                file_token: snapshot.file_token,
                 session_revision: snapshot.revision,
                 raw_bytes,
+                opened: snapshot.opened,
             },
             bytes: snapshot.bytes,
         })
@@ -259,6 +286,8 @@ pub(crate) struct ContinueIndexMetadata {
 pub(crate) struct ContinueIndexSnapshot {
     observation: ContinueIndexObservation,
     metadata_entries: Vec<ContinueIndexEntry>,
+    authority: ProviderSourceRoot,
+    relative_path: PathBuf,
     #[cfg(test)]
     entry_count: usize,
     #[cfg(test)]
@@ -280,8 +309,8 @@ impl ContinueIndexMetadataLookup {
 }
 
 impl ContinueIndexSnapshot {
-    fn observe(root: &Path) -> Self {
-        observe_continue_index(root.join("sessions.json"))
+    fn observe(authority: &ProviderSourceRoot, relative_path: PathBuf) -> Self {
+        observe_continue_index(authority, relative_path)
     }
 
     pub(crate) fn observation(&self) -> &ContinueIndexObservation {
@@ -308,13 +337,17 @@ impl ContinueIndexSnapshot {
     }
 
     pub(crate) fn revalidate(&self) -> bool {
-        observe_continue_index(self.observation.path.clone()).observation == self.observation
+        observe_continue_index(&self.authority, self.relative_path.clone()).observation
+            == self.observation
     }
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct ContinueRootAuthority {
     root: PathBuf,
+    authority: ProviderSourceRoot,
+    selected_relative: PathBuf,
+    selected_file: bool,
     complete: bool,
     #[cfg(test)]
     discovered_sources: usize,
@@ -365,7 +398,30 @@ impl ContinueRootAuthority {
             .mutation_watch
             .as_ref()
             .is_some_and(|watch| watch.mutated());
-        let current = observe_inventory(&self.root, None, self.mutation_watch.as_deref())?;
+        let current = match observe_inventory(
+            &self.authority,
+            &self.selected_relative,
+            self.selected_file,
+            None,
+            self.mutation_watch.as_deref(),
+        ) {
+            Ok(current) => current,
+            Err(ContinueNativePathError::SourceChanged { .. })
+            | Err(ContinueNativePathError::SourceIo {
+                kind: io::ErrorKind::NotFound,
+                ..
+            })
+            | Err(ContinueNativePathError::SourceAccess { .. }) => {
+                return Ok(ContinueRootRevalidation {
+                    authoritative: false,
+                    inventory_entries: 0,
+                    inventory_digest: String::new(),
+                    before_token: [0; 32],
+                    after_token: [0; 32],
+                });
+            }
+            Err(error) => return Err(error),
+        };
         let mutated_after = self
             .mutation_watch
             .as_ref()
@@ -432,6 +488,24 @@ impl ContinueDiscovery {
         &self.root_authority
     }
 
+    pub(crate) fn open_source(
+        &self,
+        path: &Path,
+    ) -> Result<ContinueSourceSnapshot, ContinueNativePathError> {
+        let relative = path
+            .strip_prefix(self.root_authority.authority.named_path())
+            .map_err(|_| ContinueNativePathError::SourceAccess {
+                path: path.to_path_buf(),
+                message: "Continue source escaped its retained root authority".to_owned(),
+            })?;
+        let opened = self
+            .root_authority
+            .authority
+            .open_file(relative)
+            .map_err(|error| capture_source_error(path, "open Continue source", error))?;
+        ContinueSourceSnapshot::read_opened(path, opened)
+    }
+
     #[cfg(test)]
     pub(crate) fn stats(&self) -> ContinueDiscoveryStats {
         self.stats
@@ -441,22 +515,63 @@ impl ContinueDiscovery {
 pub(crate) fn discover_continue_root(
     root: &Path,
 ) -> Result<ContinueDiscovery, ContinueNativePathError> {
-    let metadata = fs::symlink_metadata(root).map_err(|error| source_access(root, error))?;
-    let index_root = if metadata.file_type().is_file() {
-        root.parent().unwrap_or(root)
-    } else {
-        root
+    let requested_root = normalized_continue_authority_path(root)?;
+    let opened = open_provider_source_path(&requested_root)
+        .map_err(|error| capture_source_error(root, "open Continue root", error))?;
+    let (authority, selected_relative, selected_path, selected_file) = match opened {
+        OpenedProviderSourcePath::Directory(directory) => {
+            let authority = directory.authority_root();
+            let selected_path = authority.named_path().to_path_buf();
+            (authority, PathBuf::new(), selected_path, false)
+        }
+        OpenedProviderSourcePath::File(file) => {
+            let name = requested_root.file_name().ok_or_else(|| {
+                ContinueNativePathError::SourceAccess {
+                    path: root.to_path_buf(),
+                    message: "Continue file roots require a named parent entry".to_owned(),
+                }
+            })?;
+            let parent =
+                requested_root
+                    .parent()
+                    .ok_or_else(|| ContinueNativePathError::SourceAccess {
+                        path: root.to_path_buf(),
+                        message: "Continue file roots require a parent directory".to_owned(),
+                    })?;
+            let authority = ProviderSourceRoot::open(parent)
+                .map_err(|error| capture_source_error(root, "open Continue root parent", error))?;
+            let selected_relative = PathBuf::from(name);
+            let selected_path = authority.named_path().join(&selected_relative);
+            authority
+                .open_file(&selected_relative)
+                .and_then(|opened| opened.revalidate())
+                .map_err(|error| capture_source_error(root, "bind Continue file root", error))?;
+            file.revalidate().map_err(|error| {
+                capture_source_error(root, "revalidate Continue file root", error)
+            })?;
+            (authority, selected_relative, selected_path, true)
+        }
     };
-    let mut spool = ContinuePathSpool::new(root)?;
-    let mutation_watch = Arc::new(RootMutationWatch::new(root)?);
-    let inventory = observe_inventory(root, Some(&mut spool), Some(&mutation_watch))?;
+    let index_relative = if selected_file {
+        PathBuf::from("sessions.json")
+    } else {
+        selected_relative.join("sessions.json")
+    };
+    let mut spool = ContinuePathSpool::new(&selected_path)?;
+    let mutation_watch = Arc::new(RootMutationWatch::new(&selected_path)?);
+    let inventory = observe_inventory(
+        &authority,
+        &selected_relative,
+        selected_file,
+        Some(&mut spool),
+        Some(&mutation_watch),
+    )?;
     if inventory.before_token != inventory.after_token || mutation_watch.mutated() {
         return Err(ContinueNativePathError::SourceChanged {
-            path: root.to_path_buf(),
+            path: selected_path,
         });
     }
-    let canonical_root = fs::canonicalize(root).map_err(|error| source_access(root, error))?;
-    let index = ContinueIndexSnapshot::observe(index_root);
+    let index = ContinueIndexSnapshot::observe(&authority, index_relative);
     #[cfg(test)]
     let stats = ContinueDiscoveryStats {
         scanned_session_paths: spool.entries,
@@ -472,7 +587,10 @@ pub(crate) fn discover_continue_root(
     };
     Ok(ContinueDiscovery {
         root_authority: ContinueRootAuthority {
-            root: canonical_root,
+            root: selected_path,
+            authority,
+            selected_relative,
+            selected_file,
             complete: true,
             #[cfg(test)]
             discovered_sources: spool.entries,
@@ -494,16 +612,10 @@ pub(crate) fn observe_continue_pending_paths(
     root: &Path,
     source_paths: impl IntoIterator<Item = PathBuf>,
 ) -> Result<ContinueDiscovery, ContinueNativePathError> {
-    let metadata = fs::symlink_metadata(root).map_err(|error| source_access(root, error))?;
-    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
-        return Err(ContinueNativePathError::SourceAccess {
-            path: root.to_path_buf(),
-            message: "pending Continue observations require a regular directory root".to_owned(),
-        });
-    }
-    crate::common::io::ensure_provider_path_parents_are_not_symlinks(root)
-        .map_err(|error| capture_source_error(root, "validate Continue root parents", error))?;
-    let canonical_root = fs::canonicalize(root).map_err(|error| source_access(root, error))?;
+    let normalized_root = normalized_continue_authority_path(root)?;
+    let authority = ProviderSourceRoot::open(&normalized_root)
+        .map_err(|error| capture_source_error(root, "open pending Continue root", error))?;
+    let canonical_root = authority.named_path().to_path_buf();
     let mut bounded_paths = Vec::with_capacity(MAX_CONTINUE_PENDING_PAGE_PATHS);
     for path in source_paths {
         if bounded_paths.len() >= MAX_CONTINUE_PENDING_PAGE_PATHS {
@@ -517,14 +629,21 @@ pub(crate) fn observe_continue_pending_paths(
     let mut canonical_paths = Vec::with_capacity(bounded_paths.len());
     let mut spool = ContinuePathSpool::new(root)?;
     for path in bounded_paths {
-        let canonical_path =
-            fs::canonicalize(&path).map_err(|error| source_access(&path, error))?;
-        if canonical_path.parent() != Some(canonical_root.as_path()) {
+        let canonical_path = normalized_continue_authority_path(&path)?;
+        let relative = canonical_path.strip_prefix(&canonical_root).map_err(|_| {
+            ContinueNativePathError::SourceAccess {
+                path: path.clone(),
+                message: "pending Continue observation must be a direct child of its retained root"
+                    .to_owned(),
+            }
+        })?;
+        if relative.components().count() != 1
+            || !matches!(relative.components().next(), Some(Component::Normal(_)))
+        {
             return Err(ContinueNativePathError::SourceAccess {
                 path,
-                message:
-                    "pending Continue observation must be a direct child of its canonical root"
-                        .to_owned(),
+                message: "pending Continue observation must be a direct child of its retained root"
+                    .to_owned(),
             });
         }
         if !super::super::continue_session_json_path(&canonical_path) {
@@ -533,9 +652,12 @@ pub(crate) fn observe_continue_pending_paths(
                 message: "pending Continue observation is not a session JSON document".to_owned(),
             });
         }
-        crate::common::io::ensure_regular_provider_transcript_file(&path).map_err(|error| {
-            capture_source_error(&path, "validate pending Continue source", error)
-        })?;
+        authority
+            .open_file(relative)
+            .and_then(|opened| opened.revalidate())
+            .map_err(|error| {
+                capture_source_error(&path, "validate pending Continue source", error)
+            })?;
         canonical_paths.push(canonical_path);
     }
     canonical_paths.sort();
@@ -543,7 +665,7 @@ pub(crate) fn observe_continue_pending_paths(
     for path in canonical_paths {
         spool.push(&path)?;
     }
-    let index = ContinueIndexSnapshot::observe(&canonical_root);
+    let index = ContinueIndexSnapshot::observe(&authority, PathBuf::from("sessions.json"));
     let stats = ContinueDiscoveryStats {
         scanned_session_paths: spool.entries,
         inventory_entries: 0,
@@ -559,6 +681,9 @@ pub(crate) fn observe_continue_pending_paths(
     Ok(ContinueDiscovery {
         root_authority: ContinueRootAuthority {
             root: canonical_root,
+            authority,
+            selected_relative: PathBuf::new(),
+            selected_file: false,
             complete: false,
             discovered_sources: spool.entries,
             inventory_entries: 0,
@@ -571,4 +696,32 @@ pub(crate) fn observe_continue_pending_paths(
         index,
         stats,
     })
+}
+
+fn normalized_continue_authority_path(path: &Path) -> Result<PathBuf, ContinueNativePathError> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| source_access(path, error))?
+            .join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(ContinueNativePathError::SourceAccess {
+                        path: path.to_path_buf(),
+                        message: "Continue root cannot escape the filesystem root".to_owned(),
+                    });
+                }
+            }
+        }
+    }
+    Ok(normalized)
 }

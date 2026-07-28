@@ -25,7 +25,7 @@ use super::{
         locate_continue_exact_history_item, ContinueExactHistoryLookup, ContinueIncompleteSource,
         ContinueOutputExclusionStats, ContinueSourceFailure,
     },
-    source::{ContinueDiscovery, ContinueRootAuthority, ContinueSourceSnapshot},
+    source::{ContinueDiscovery, ContinueRootAuthority},
     ContinueEventKind, ContinueEventRole, ContinueEventRow, ContinueGenerationAuthority,
     ContinueIndexObservation, ContinueNativePathError, ContinueSessionRow,
     ContinueSourceObservation,
@@ -563,7 +563,7 @@ pub(crate) fn hydrate_continue_source_backed_record(
     let mut resolved: Option<(PathBuf, Vec<u8>)> = None;
     for path in &mut paths {
         let path = path?;
-        let snapshot = ContinueSourceSnapshot::read(&path)?;
+        let snapshot = discovery.open_source(&path)?;
         let observed_revision = decode_hex_digest(snapshot.observation().session_revision())
             .ok_or(ContinueSourceBackedError::InvalidRevisionEvidence)?;
         if observed_revision != certified_revision {
@@ -590,6 +590,12 @@ pub(crate) fn hydrate_continue_source_backed_record(
     }
     let (_path, provider_bytes) =
         resolved.ok_or(ContinueSourceBackedError::LocatorSourceRevisionNotFound)?;
+    if !discovery.root_authority().revalidate()?.authoritative {
+        return Err(ContinueNativePathError::SourceChanged {
+            path: discovery.index().observation().path().to_path_buf(),
+        }
+        .into());
+    }
     let actual_digest: [u8; 32] = Sha256::digest(&provider_bytes).into();
     if &actual_digest != locator.record_digest() {
         return Err(ContinueSourceBackedError::LocatorDigestMismatch);

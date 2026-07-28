@@ -21,10 +21,7 @@ pub(super) fn known_continue_routes(
         ) else {
             continue;
         };
-        let mut path = PathBuf::from(raw_source_path);
-        if let Ok(canonical) = fs::canonicalize(&path) {
-            path = canonical;
-        }
+        let path = PathBuf::from(raw_source_path);
         let locator_identity = provider_path_identity(&path)?;
         let stream = provider_source_cursor_stream_for_path(
             CaptureProvider::Continue,
