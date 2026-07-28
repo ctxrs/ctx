@@ -46,6 +46,22 @@ fn source_backed_cold_projection_is_stable_and_bounded() {
     assert!(!first.documents()[0]
         .body
         .contains("private successful output"));
+    assert_eq!(first.documents()[0].parent_session_id, None);
+    assert_eq!(
+        first.documents()[0].root_session_id,
+        first.documents()[0].session_id
+    );
+    assert_eq!(
+        first.documents()[0].provider_session_id.as_deref(),
+        Some("conversation-cold")
+    );
+    assert_eq!(first.documents()[0].branch, None);
+    assert!(first.documents()[0]
+        .source_path
+        .as_deref()
+        .is_some_and(|path| path.ends_with("event-a.json")));
+    assert_eq!(first.documents()[0].agent_type, "primary");
+    assert!(first.documents()[0].is_primary);
     assert_eq!(first.rejections().len(), 1);
 
     assert_eq!(
