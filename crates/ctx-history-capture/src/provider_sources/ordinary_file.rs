@@ -8,7 +8,10 @@ use std::{
 
 use sha2::{Digest, Sha256};
 
-use crate::{common::io::ensure_regular_provider_transcript_file, CaptureError, Result};
+use crate::{
+    common::io::{open_provider_source_file, OpenedProviderSourceFile},
+    Result,
+};
 
 #[cfg(test)]
 use std::{
@@ -121,33 +124,21 @@ pub fn observe_ordinary_file(path: impl AsRef<Path>) -> Result<OrdinaryFileObser
 pub(crate) fn observe_ordinary_file_strong_metadata(
     path: &Path,
 ) -> Result<Option<OrdinaryFileObservation>> {
-    #[cfg(unix)]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "windows"
+    ))]
     {
-        ensure_regular_provider_transcript_file(path)?;
-        let before = std::fs::symlink_metadata(path)?;
-        let platform_before = unix_platform_token(&before);
-        let after = std::fs::symlink_metadata(path)?;
-        let platform_after = unix_platform_token(&after);
-        if !after.file_type().is_file()
-            || after.len() != before.len()
-            || after.modified().ok() != before.modified().ok()
-            || platform_after != platform_before
-        {
-            return Err(file_changed_during_observation().into());
-        }
-        Ok(Some(OrdinaryFileObservation {
-            len: before.len(),
-            modified_at: before.modified().unwrap_or(UNIX_EPOCH),
-            token: combined_token(Some(platform_before), None),
-        }))
-    }
-    #[cfg(target_os = "windows")]
-    {
-        // Windows change time and file identity require a metadata handle, but
-        // the supported platform token still avoids every content read.
         observe_ordinary_file(path).map(Some)
     }
-    #[cfg(not(any(unix, target_os = "windows")))]
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "windows"
+    )))]
     {
         let _ = path;
         Ok(None)
@@ -159,12 +150,18 @@ fn observe_ordinary_file_inner(
     before_open: impl FnOnce(),
 ) -> Result<OrdinaryFileObservation> {
     before_open();
-    let mut file = open_ordinary_file_without_following(path)?;
-    let metadata = file.metadata()?;
-    if !metadata.file_type().is_file() {
-        return Err(invalid_ordinary_file(path));
-    }
-    let platform_before = platform_token(path, &file, &metadata)?;
+    #[cfg(test)]
+    reject_forbidden_content_open(path)?;
+    let opened = open_provider_source_file(path)?;
+    observe_opened_ordinary_file(path, opened)
+}
+
+fn observe_opened_ordinary_file(
+    path: &Path,
+    opened: OpenedProviderSourceFile,
+) -> Result<OrdinaryFileObservation> {
+    let metadata = opened.metadata().clone();
+    let platform_before = platform_token(path, opened.file(), &metadata)?;
     // Supported platforms expose a stable file identity plus a change-time
     // value that cannot be restored through ordinary file timestamp APIs. That
     // is both stronger and substantially cheaper than reopening and sampling
@@ -173,16 +170,18 @@ fn observe_ordinary_file_inner(
     let content_fingerprint = if platform_before.is_some() {
         None
     } else {
+        let mut file = opened.file().try_clone()?;
         Some(content_fingerprint(&mut file, &metadata)?)
     };
-    let current = file.metadata()?;
-    let platform_after = platform_token(path, &file, &current)?;
+    let current = opened.file().metadata()?;
+    let platform_after = platform_token(path, opened.file(), &current)?;
     if current.len() != metadata.len()
         || current.modified().ok() != metadata.modified().ok()
         || platform_after != platform_before
     {
         return Err(file_changed_during_observation().into());
     }
+    opened.revalidate()?;
 
     Ok(OrdinaryFileObservation {
         len: metadata.len(),
@@ -191,117 +190,13 @@ fn observe_ordinary_file_inner(
     })
 }
 
-#[cfg(target_os = "linux")]
-pub(crate) fn open_ordinary_file_without_following(path: &Path) -> Result<File> {
-    use std::{
-        ffi::CString,
-        os::{fd::FromRawFd, unix::ffi::OsStrExt},
-    };
-
-    #[repr(C)]
-    struct OpenHow {
-        flags: u64,
-        mode: u64,
-        resolve: u64,
-    }
-
-    const RESOLVE_NO_SYMLINKS: u64 = 0x04;
-
-    #[cfg(test)]
-    reject_forbidden_content_open(path)?;
-    let c_path =
-        CString::new(path.as_os_str().as_bytes()).map_err(|_| invalid_ordinary_file(path))?;
-    let flags = u64::try_from(libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW)
-        .map_err(|_| CaptureError::SystemInvariant("Linux open flags exceed u64"))?;
-    let how = OpenHow {
-        flags,
-        mode: 0,
-        resolve: RESOLVE_NO_SYMLINKS,
-    };
-    let descriptor = unsafe {
-        libc::syscall(
-            libc::SYS_openat2,
-            libc::AT_FDCWD,
-            c_path.as_ptr(),
-            &how,
-            std::mem::size_of::<OpenHow>(),
-        )
-    };
-    if descriptor >= 0 {
-        let descriptor = i32::try_from(descriptor)
-            .map_err(|_| CaptureError::SystemInvariant("openat2 returned an invalid descriptor"))?;
-        return Ok(unsafe { File::from_raw_fd(descriptor) });
-    }
-
-    let error = std::io::Error::last_os_error();
-    match error.raw_os_error() {
-        Some(libc::ENOSYS) | Some(libc::EINVAL) | Some(libc::EPERM) => {
-            open_ordinary_file_portable_unix(path)
-        }
-        Some(libc::ELOOP) => Err(invalid_ordinary_file(path)),
-        _ => Err(error.into()),
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn open_ordinary_file_portable_unix(path: &Path) -> Result<File> {
-    use std::{fs::OpenOptions, os::unix::fs::OpenOptionsExt};
-
-    #[cfg(test)]
-    reject_forbidden_content_open(path)?;
-    ensure_regular_provider_transcript_file(path)?;
-    Ok(OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)?)
-}
-
-#[cfg(all(unix, not(target_os = "linux")))]
-pub(crate) fn open_ordinary_file_without_following(path: &Path) -> Result<File> {
-    use std::{fs::OpenOptions, os::unix::fs::OpenOptionsExt};
-
-    #[cfg(test)]
-    reject_forbidden_content_open(path)?;
-    ensure_regular_provider_transcript_file(path)?;
-    Ok(OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)?)
-}
-
-#[cfg(target_os = "windows")]
-pub(crate) fn open_ordinary_file_without_following(path: &Path) -> Result<File> {
-    use std::{fs::OpenOptions, os::windows::fs::OpenOptionsExt};
-
-    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-
-    #[cfg(test)]
-    reject_forbidden_content_open(path)?;
-    ensure_regular_provider_transcript_file(path)?;
-    Ok(OpenOptions::new()
-        .read(true)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)?)
-}
-
-#[cfg(not(any(unix, target_os = "windows")))]
 pub(crate) fn open_ordinary_file_without_following(path: &Path) -> Result<File> {
     #[cfg(test)]
     reject_forbidden_content_open(path)?;
-    ensure_regular_provider_transcript_file(path)?;
-    let file = File::open(path)?;
-    let current = std::fs::symlink_metadata(path)?;
-    if current.file_type().is_symlink() {
-        return Err(invalid_ordinary_file(path));
-    }
-    Ok(file)
-}
-
-fn invalid_ordinary_file(path: &Path) -> CaptureError {
-    CaptureError::InvalidProviderTranscriptPath {
-        path: path.to_path_buf(),
-        reason: "provider transcript paths must be regular files",
-    }
+    open_provider_source_file(path)?
+        .file()
+        .try_clone()
+        .map_err(Into::into)
 }
 
 #[cfg(unix)]
@@ -345,7 +240,7 @@ fn platform_token(path: &Path, file: &File, metadata: &Metadata) -> Result<Optio
         return Err(std::io::Error::last_os_error().into());
     }
     if basic_info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        return Err(CaptureError::InvalidProviderTranscriptPath {
+        return Err(crate::CaptureError::InvalidProviderTranscriptPath {
             path: path.to_path_buf(),
             reason: "reparse-point provider transcript files are rejected",
         });

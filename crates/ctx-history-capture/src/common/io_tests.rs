@@ -303,14 +303,23 @@ fn windows_ordinary_absolute_provider_file_is_accepted() {
 
 #[cfg(target_os = "windows")]
 #[test]
-fn windows_supported_rooted_prefixes_are_accepted_without_io() {
+fn windows_local_rooted_prefixes_are_accepted_without_io() {
     for path in [
         Path::new(r"C:\provider.db"),
         Path::new(r"\\?\C:\provider.db"),
+    ] {
+        ensure_supported_windows_provider_path_prefix(path).unwrap();
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_network_roots_are_rejected_without_io() {
+    for path in [
         Path::new(r"\\server\share\provider.db"),
         Path::new(r"\\?\UNC\server\share\provider.db"),
     ] {
-        ensure_supported_windows_provider_path_prefix(path).unwrap();
+        assert!(ensure_supported_windows_provider_path_prefix(path).is_err());
     }
 }
 
