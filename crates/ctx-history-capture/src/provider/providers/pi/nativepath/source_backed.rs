@@ -6,8 +6,8 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    io::{Read, Seek, SeekFrom},
     path::{Component, Path, PathBuf},
+    sync::Arc,
 };
 
 use ctx_history_core::{
@@ -27,15 +27,14 @@ use thiserror::Error;
 use super::{
     checkpoint::PiNativeCheckpoint,
     reader::{
-        open_pi_native_session, PiNativeOpenOutcome, PiNativeOwnedPage, PiNativeProfile,
-        PiNativeScanOptions, PiSourceLifecycle,
+        open_pi_native_session, open_pi_native_session_retained, PiNativeOpenOutcome,
+        PiNativeOwnedPage, PiNativeProfile, PiNativeScanOptions, PiSourceLifecycle,
     },
     rows::{PiNativeCoreUnit, PiNativeEventRow, PiNativeFileTouchRow, PiNativeSessionRow},
-    source::{
-        discover_pi_sessions, revalidate_pi_source_revision, PiFrozenSource, PiNativePathError,
-    },
+    source::{discover_pi_sessions, PiFrozenSource, PiNativePathError},
 };
 use crate::{
+    common::io::OpenedProviderSourceFile,
     provider::{
         importer::provider_path_identity,
         normalization::provider_local_preview,
@@ -171,6 +170,7 @@ pub(crate) struct PiSourceRoute {
     pub(crate) source: SourceKey,
     pub(crate) path: PathBuf,
     pub(crate) source_revision: String,
+    opened: Arc<OpenedProviderSourceFile>,
 }
 
 #[derive(Debug)]
@@ -193,15 +193,16 @@ pub(crate) struct PiSourceBackedRootProjection {
     pub(crate) sources: Vec<PiSourceBackedProjection>,
 }
 
-/// Bounded pull projector for one Pi JSONL source.
+/// Bounded pull scanner for one Pi JSONL source.
 ///
 /// At most one scanner page and its lexical documents are retained. Calling
 /// `finish` produces evidence only; it cannot publish any lifecycle action.
-pub(crate) struct PiSourceBackedProjector {
+pub(crate) struct PiSourceBackedScanner {
     scanner: Box<super::reader::PiNativeScanner>,
     path: PathBuf,
     source_path: String,
     source_revision: String,
+    opened: Arc<OpenedProviderSourceFile>,
     previous: Option<CertifiedSource>,
     source: Option<SourceKey>,
     session_id: Option<StableEntityId>,
@@ -216,7 +217,7 @@ pub(crate) struct PiSourceBackedProjector {
     indexed_delta: u64,
 }
 
-impl PiSourceBackedProjector {
+impl PiSourceBackedScanner {
     pub(crate) fn open(
         path: impl AsRef<Path>,
         mut context: ProviderAdapterContext,
@@ -232,16 +233,48 @@ impl PiSourceBackedProjector {
         let PiNativeOpenOutcome::Ready(scanner) = open_pi_native_session(&path, options)? else {
             return Err(PiSourceBackedError::SourceDeleted(path));
         };
+        Self::from_scanner(path, source_path, previous, scanner)
+    }
+
+    fn open_retained(
+        path: &Path,
+        opened: Arc<OpenedProviderSourceFile>,
+        mut context: ProviderAdapterContext,
+        previous: Option<CertifiedSource>,
+    ) -> PiSourceBackedResult<Self> {
+        let path = path.to_path_buf();
+        let source_path = provider_path_identity(&path)?;
+        context.source_path = Some(path.clone());
+        let mut options = PiNativeScanOptions::new(context, PiNativeProfile::CoreOnly);
+        if let Some(previous) = previous.as_ref() {
+            options.resume.core = Some(decode_checkpoint(previous)?);
+        }
+        let PiNativeOpenOutcome::Ready(scanner) =
+            open_pi_native_session_retained(&path, opened, options)?
+        else {
+            return Err(PiSourceBackedError::SourceDeleted(path));
+        };
+        Self::from_scanner(path, source_path, previous, scanner)
+    }
+
+    fn from_scanner(
+        path: PathBuf,
+        source_path: String,
+        previous: Option<CertifiedSource>,
+        scanner: Box<super::reader::PiNativeScanner>,
+    ) -> PiSourceBackedResult<Self> {
+        let opened = scanner.opened_source();
         let source_revision = scanner.source_revision().to_owned();
         let provider_session_id = scanner.provider_session_id().map(str::to_owned);
         let parent_provider_session_id = scanner.parent_provider_session_id().map(str::to_owned);
         let cwd = scanner.session_cwd().map(str::to_owned);
         let saw_header = provider_session_id.is_some();
-        let mut projector = Self {
+        let mut scanner = Self {
             scanner,
             path,
             source_path,
             source_revision,
+            opened,
             previous,
             source: None,
             session_id: None,
@@ -256,9 +289,9 @@ impl PiSourceBackedProjector {
             indexed_delta: 0,
         };
         if let Some(provider_session_id) = provider_session_id {
-            projector.bind_session(&provider_session_id, parent_provider_session_id.as_deref())?;
+            scanner.bind_session(&provider_session_id, parent_provider_session_id.as_deref())?;
         }
-        Ok(projector)
+        Ok(scanner)
     }
 
     pub(crate) fn next_page(&mut self) -> PiSourceBackedResult<Option<PiSourceBackedPage>> {
@@ -295,9 +328,7 @@ impl PiSourceBackedProjector {
         let source = self
             .source
             .ok_or_else(|| PiSourceBackedError::MissingSessionHeader(self.path.clone()))?;
-        if !revalidate_pi_source_revision(&self.path, &self.source_revision)? {
-            return Err(PiNativePathError::SourceChanged.into());
-        }
+        self.scanner.revalidate_source()?;
 
         let base_counts = if matches!(
             lifecycle,
@@ -354,6 +385,7 @@ impl PiSourceBackedProjector {
                 source,
                 path: self.path,
                 source_revision: self.source_revision,
+                opened: self.opened,
             },
             lifecycle,
             certificate,
@@ -556,14 +588,19 @@ pub(crate) fn project_pi_source_backed_root_cold(
     mut emit: impl FnMut(PiSourceBackedPage),
 ) -> PiSourceBackedResult<PiSourceBackedRootProjection> {
     let opening = observe_root(root)?;
-    let mut sources = Vec::with_capacity(opening.sessions.len());
+    let mut sources = Vec::with_capacity(opening.discovery.sessions.len());
     let mut native_sessions = HashSet::new();
-    for path in &opening.sessions {
-        let mut projector = PiSourceBackedProjector::open(path, context.clone(), None)?;
-        while let Some(page) = projector.next_page()? {
+    for path in &opening.discovery.sessions {
+        let mut scanner = PiSourceBackedScanner::open_retained(
+            path,
+            opening.discovery.opened(path)?,
+            context.clone(),
+            None,
+        )?;
+        while let Some(page) = scanner.next_page()? {
             emit(page);
         }
-        let projection = projector.finish()?;
+        let projection = scanner.finish()?;
         let SourceAnchor::ProviderNative { key, .. } = projection.route.source.anchor() else {
             return Err(PiSourceBackedError::PriorSourceMismatch);
         };
@@ -577,8 +614,8 @@ pub(crate) fn project_pi_source_backed_root_cold(
         }
         sources.push(projection);
     }
-    let closing = observe_root(root)?;
-    if opening.sessions != closing.sessions {
+    let closing = observe_retained_root(root, &opening.discovery)?;
+    if opening.discovery.sessions != closing.discovery.sessions {
         return Err(PiSourceBackedError::InventoryChanged);
     }
     let inventory = CertifiedSourceInventory::certify(
@@ -595,18 +632,32 @@ pub(crate) fn project_pi_source_backed_root_cold(
 
 #[derive(Debug)]
 struct PiRootObservation {
-    sessions: Vec<PathBuf>,
+    discovery: super::source::PiDiscovery,
     observation: SourceInventoryObservation,
 }
 
 fn observe_root(root: &PiSourceBackedRoot) -> PiSourceBackedResult<PiRootObservation> {
     let discovery = discover_pi_sessions(root.path())?;
+    observe_discovery(root, discovery)
+}
+
+fn observe_retained_root(
+    root: &PiSourceBackedRoot,
+    opening: &super::source::PiDiscovery,
+) -> PiSourceBackedResult<PiRootObservation> {
+    observe_discovery(root, opening.rediscover()?)
+}
+
+fn observe_discovery(
+    root: &PiSourceBackedRoot,
+    discovery: super::source::PiDiscovery,
+) -> PiSourceBackedResult<PiRootObservation> {
     let root_identity = provider_path_identity(root.path())?;
     let mut digest = Sha256::new();
     digest.update(PI_INVENTORY_DIGEST_DOMAIN);
     digest.update((discovery.sessions.len() as u64).to_be_bytes());
     for path in &discovery.sessions {
-        let (_, source) = PiFrozenSource::open(path)?;
+        let (_, source) = PiFrozenSource::from_opened(path, discovery.opened(path)?)?;
         hash_inventory_field(&mut digest, provider_path_identity(path)?.as_bytes());
         hash_inventory_field(&mut digest, source.source_revision().as_bytes());
     }
@@ -618,7 +669,7 @@ fn observe_root(root: &PiSourceBackedRoot) -> PiSourceBackedResult<PiRootObserva
         digest.finalize().to_vec(),
     )?;
     Ok(PiRootObservation {
-        sessions: discovery.sessions,
+        discovery,
         observation,
     })
 }
@@ -691,18 +742,21 @@ impl PiSourceBackedResolver {
         if !route.source.exact_descriptor_eq(request.locator().source()) {
             return Err(PiSourceBackedError::InvalidPiLocator);
         }
-        let (mut file, source) = PiFrozenSource::open(&route.path)?;
+        let (file, source) = PiFrozenSource::from_opened(&route.path, Arc::clone(&route.opened))?;
         let range_end = byte_offset
             .checked_add(byte_length)
             .ok_or(PiSourceBackedError::LocatorRangeTooLarge)?;
         if range_end > source.len {
             return Err(PiSourceBackedError::LocatorRangeMissing);
         }
-        file.seek(SeekFrom::Start(byte_offset))?;
         let byte_length =
             usize::try_from(byte_length).map_err(|_| PiSourceBackedError::LocatorRangeTooLarge)?;
-        let mut provider_bytes = vec![0_u8; byte_length];
-        file.read_exact(&mut provider_bytes)?;
+        let provider_bytes = route.opened.read_exact_range(
+            byte_offset,
+            byte_length,
+            usize::try_from(MAX_HYDRATED_PI_RECORD_BYTES)
+                .map_err(|_| PiSourceBackedError::LocatorRangeTooLarge)?,
+        )?;
         source.fence(&file)?;
         let digest: [u8; 32] = Sha256::digest(json_record_bytes(&provider_bytes)).into();
         if &digest != request.locator().record_digest() {

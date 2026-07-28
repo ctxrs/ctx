@@ -733,3 +733,20 @@ fn provider_private_discovery_is_sorted_bounded_and_rejects_symlinks() {
         ));
     }
 }
+
+#[test]
+fn retained_discovery_rejects_same_path_root_replacement() {
+    let temp = tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    let source = root.join("2026/07/session.jsonl");
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    fs::write(&source, b"").unwrap();
+    let discovery = discover_pi_sessions(&root).unwrap();
+
+    let displaced = temp.path().join("sessions-displaced");
+    fs::rename(&root, &displaced).unwrap();
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    fs::write(&source, b"").unwrap();
+
+    assert!(discovery.rediscover().is_err());
+}

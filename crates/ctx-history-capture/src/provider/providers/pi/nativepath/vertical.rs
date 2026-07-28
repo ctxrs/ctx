@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use chrono::{DateTime, Utc};
@@ -42,10 +42,10 @@ use crate::{
 
 use super::source::PiNativePathError;
 use super::{
-    discover_pi_sessions, open_pi_native_session, revalidate_pi_source_revision,
-    PiNativeCheckpoint, PiNativeCorePage, PiNativeCoreUnit, PiNativeEventRow, PiNativeFileTouchRow,
-    PiNativeOpenOutcome, PiNativeOwnedPage, PiNativeProfile, PiNativeResume, PiNativeScanOptions,
-    PiNativeSessionRow, PiSourceLifecycle,
+    discover_pi_sessions, open_pi_native_session_retained, revalidate_pi_source_revision,
+    PiDiscovery, PiNativeCheckpoint, PiNativeCorePage, PiNativeCoreUnit, PiNativeEventRow,
+    PiNativeFileTouchRow, PiNativeOpenOutcome, PiNativeOwnedPage, PiNativeProfile, PiNativeResume,
+    PiNativeScanOptions, PiNativeSessionRow, PiSourceLifecycle,
 };
 use crate::provider::providers::pi::PI_SOURCE_FORMAT;
 
@@ -152,7 +152,9 @@ pub(crate) fn import_pi_nativepath_history(
     let committed_store = Store::open_read_only(store.path())?;
     let prior_manifest =
         load_root_manifest(&committed_store, &options.machine_id, &configured_root)?;
-    let (paths, root_missing) = discover_paths(path)?;
+    let discovery = discover_paths(path)?;
+    let paths = discovery.paths.clone();
+    let root_missing = discovery.root_missing;
     if paths.is_empty() && prior_manifest.is_none() {
         return Err(CaptureError::InvalidProviderTranscriptPath {
             path: path.to_path_buf(),
@@ -167,8 +169,17 @@ pub(crate) fn import_pi_nativepath_history(
         let mut relocated_source_ids = BTreeSet::new();
         let mut changed_core_pages = 0_usize;
         for source_path in &paths {
+            let opened = discovery
+                .discovery
+                .as_ref()
+                .ok_or(CaptureError::SystemInvariant(
+                    "Pi discovered source lost its root authority",
+                ))?
+                .opened(source_path)
+                .map_err(map_native_error)?;
             let result = import_one_source(
                 source_path,
+                opened,
                 store,
                 &committed_store,
                 &bulk_guard,
@@ -194,6 +205,12 @@ pub(crate) fn import_pi_nativepath_history(
                 root_entry_from_store(&committed_store, store, &options.machine_id, source_path)
             })
             .collect::<Result<Vec<_>>>()?;
+        if let Some(opening) = discovery.discovery.as_ref() {
+            let closing = opening.rediscover().map_err(map_native_error)?;
+            if closing.sessions != paths {
+                return Err(CaptureError::SourceChangedDuringCapture);
+            }
+        }
         if let Some(prior) = &prior_manifest {
             let current = paths.iter().collect::<BTreeSet<_>>();
             for entry in &prior.entries {
@@ -252,6 +269,7 @@ struct SourceImportResult {
 #[allow(clippy::too_many_arguments)]
 fn import_one_source(
     path: &Path,
+    opened: Arc<crate::common::io::OpenedProviderSourceFile>,
     store: &mut Store,
     committed_store: &Store,
     bulk_guard: &EventSearchBulkGuard,
@@ -358,7 +376,7 @@ fn import_one_source(
     scan_options.force_output_rewrite = output_progress.is_some() && !can_resume_output;
 
     let PiNativeOpenOutcome::Ready(mut scanner) =
-        open_pi_native_session(path, scan_options).map_err(map_native_error)?
+        open_pi_native_session_retained(path, opened, scan_options).map_err(map_native_error)?
     else {
         return Err(CaptureError::SourceChangedDuringCapture);
     };
