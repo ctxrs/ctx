@@ -26,6 +26,7 @@ mod entry;
 mod explicit;
 mod inventory;
 mod manifest;
+mod migration;
 mod native;
 mod pro_output;
 mod provider_refresh;
