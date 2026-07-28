@@ -148,6 +148,7 @@ pub struct CodexSourceBackedCountersV0 {
     pub ignored_records_scanned: u64,
     pub scanner_bytes_read: u64,
     pub checkpoint_validation_bytes: u64,
+    pub prefiltered_records: u64,
     pub structural_json_parses: u64,
     pub typed_json_parses: u64,
     pub emitted_pages: u64,
@@ -184,6 +185,9 @@ impl CodexSourceBackedCountersV0 {
         self.checkpoint_validation_bytes = self
             .checkpoint_validation_bytes
             .saturating_add(scan.checkpoint_validation_bytes);
+        self.prefiltered_records = self
+            .prefiltered_records
+            .saturating_add(scan.prefiltered_records);
         self.structural_json_parses = self
             .structural_json_parses
             .saturating_add(scan.structural_json_parses);
