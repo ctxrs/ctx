@@ -15,7 +15,11 @@ use ctx_history_core::{database_path, utc_now};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::{compact_json, config::AppConfig, DaemonStartModeArg, DaemonTriggerCommandArg};
+use crate::{
+    compact_json,
+    config::{AppConfig, DAEMON_MODE_ENV},
+    DaemonStartModeArg, DaemonTriggerCommandArg,
+};
 
 #[cfg(windows)]
 const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;

@@ -407,6 +407,22 @@ Use `ctx setup --no-daemon` or `ctx import --no-daemon` for a one-run opt-out.
 override. An explicit disabled override continues to win after CLI upgrades and
 over `CTX_DAEMON_ENABLED=true`.
 
+For a daemon that serves and serializes only atomic source-backed refreshes,
+set:
+
+```toml
+[daemon]
+mode = "source-refresh-only"
+```
+
+The equivalent process override is
+`CTX_DAEMON_MODE=source-refresh-only`; `full` selects the normal maintenance
+profile. Autostart propagates the effective mode to its detached child. In
+source-refresh-only mode, the source refresh IPC endpoint, all-provider capture
+registry, atomic generation publication, status reporting, disable behavior,
+and idle exit remain active. History refresh, semantic indexing and serving,
+canonical and Pro maintenance, and automatic upgrades do not run.
+
 Local semantic search requires daemon maintenance and remains disabled by
 default. Its opt-in is:
 

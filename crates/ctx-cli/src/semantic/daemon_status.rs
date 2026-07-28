@@ -16,12 +16,36 @@ pub(super) fn print_daemon_status_human(daemon: &Value) {
             .unwrap_or("unknown")
     );
     println!(
+        "daemon_mode: {}",
+        daemon.get("mode").and_then(Value::as_str).unwrap_or("full")
+    );
+    println!(
         "daemon_running: {}",
         daemon
             .get("running")
             .and_then(Value::as_bool)
             .unwrap_or(false)
     );
+    if let Some(pid) = daemon.get("live_pid").and_then(Value::as_u64) {
+        println!("daemon_pid: {pid}");
+    }
+    if let Some(provenance) = daemon.get("trigger_provenance").and_then(Value::as_str) {
+        println!("daemon_trigger_provenance: {provenance}");
+    }
+    if let Some(path) = daemon
+        .get("source_refresh_endpoint")
+        .and_then(|endpoint| endpoint.get("identity_path"))
+        .and_then(Value::as_str)
+    {
+        println!("source_refresh_endpoint_identity: {path}");
+    }
+    if let Some(owner) = daemon
+        .get("lock_identity")
+        .and_then(|lock| lock.get("owner_id"))
+        .and_then(Value::as_str)
+    {
+        println!("daemon_lock_identity: {owner}");
+    }
     println!(
         "daemon_config_reload_status: {}",
         daemon
@@ -81,6 +105,18 @@ pub(super) fn print_daemon_status_human(daemon: &Value) {
         .and_then(Value::as_str)
     {
         println!("source_backed_refresh_progress: {phase}");
+    }
+    if let Some(count) = source_backed_refresh
+        .and_then(|job| job.get("certified_source_count"))
+        .and_then(Value::as_u64)
+    {
+        println!("source_backed_refresh_certified_sources: {count}");
+    }
+    if let Some(bytes) = source_backed_refresh
+        .and_then(|job| job.get("certified_source_bytes"))
+        .and_then(Value::as_u64)
+    {
+        println!("source_backed_refresh_certified_bytes: {bytes}");
     }
     if let Some(error) = source_backed_refresh
         .and_then(|job| job.get("last_error"))

@@ -12,6 +12,7 @@ use crate::deprecated_controls::DeprecatedControls;
 pub const CONFIG_FILE: &str = "config.toml";
 pub const AUTO_UPGRADE_DEFAULT_MODE: &str = "apply";
 pub const DAEMON_DEFAULT_ENABLED: bool = true;
+pub const DAEMON_MODE_ENV: &str = "CTX_DAEMON_MODE";
 pub const LOCAL_USAGE_DEFAULT_ENABLED: bool = true;
 pub const SEMANTIC_SEARCH_DEFAULT_ENABLED: bool = false;
 
@@ -44,6 +45,39 @@ impl AutoUpgradeMode {
 
     pub const fn enabled(self) -> bool {
         matches!(self, Self::Apply)
+    }
+}
+
+/// Selects which production daemon scheduler surface is active.
+///
+/// Configure this with `daemon.mode = "source-refresh-only"` or the
+/// `CTX_DAEMON_MODE=source-refresh-only` environment override. Autostart
+/// explicitly propagates the effective environment value to its child.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DaemonMode {
+    #[default]
+    Full,
+    SourceRefreshOnly,
+}
+
+impl DaemonMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::SourceRefreshOnly => "source-refresh-only",
+        }
+    }
+
+    pub const fn runs_only_source_refresh(self) -> bool {
+        matches!(self, Self::SourceRefreshOnly)
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "full" => Some(Self::Full),
+            "source-refresh-only" => Some(Self::SourceRefreshOnly),
+            _ => None,
+        }
     }
 }
 
@@ -206,6 +240,7 @@ pub struct UpgradeConfig {
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
     pub enabled: bool,
+    pub mode: DaemonMode,
 }
 
 #[derive(Debug, Clone)]
@@ -234,6 +269,7 @@ impl Default for AppConfig {
             },
             daemon: DaemonConfig {
                 enabled: DAEMON_DEFAULT_ENABLED,
+                mode: DaemonMode::Full,
             },
             search: SearchConfig { semantic: None },
         }
@@ -324,6 +360,9 @@ impl AppConfig {
                 "daemon.enabled" => {
                     self.daemon.enabled = parse_config_bool(key, value)?;
                 }
+                "daemon.mode" => {
+                    self.daemon.mode = parse_daemon_mode(value)?;
+                }
                 "search.semantic" => {
                     self.search.semantic = Some(parse_config_bool(key, value)?);
                 }
@@ -395,6 +434,11 @@ impl AppConfig {
             self.daemon.enabled = false;
         } else if daemon_enabled_override == Some(true) {
             self.daemon.enabled = true;
+        }
+        if let Ok(mode) = env::var(DAEMON_MODE_ENV) {
+            if !mode.trim().is_empty() {
+                self.daemon.mode = parse_daemon_mode_text(DAEMON_MODE_ENV, mode.trim())?;
+            }
         }
         if let Ok(value) = env::var("CTX_SEARCH_SEMANTIC") {
             if let Some(enabled) = parse_bool_value(&value) {
@@ -865,6 +909,17 @@ fn parse_upgrade_auto_text(key: &str, value: &str) -> Result<AutoUpgradeMode> {
         "off" => Ok(AutoUpgradeMode::Off),
         _ => bail!("{key} must be either \"apply\" or \"off\""),
     }
+}
+
+fn parse_daemon_mode(value: &ConfigValue) -> Result<DaemonMode> {
+    let mode = parse_non_empty_string("daemon.mode", value)?;
+    parse_daemon_mode_text("daemon.mode", &mode)
+        .with_context(|| format!("daemon.mode at line {}", value.line))
+}
+
+fn parse_daemon_mode_text(key: &str, value: &str) -> Result<DaemonMode> {
+    DaemonMode::parse(value)
+        .ok_or_else(|| anyhow::anyhow!("{key} must be either \"full\" or \"source-refresh-only\""))
 }
 
 fn parse_bool_value(value: &str) -> Option<bool> {

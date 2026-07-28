@@ -167,6 +167,40 @@ fn autostart_child_inherits_effective_analytics_policy() {
         .all(|(key, _)| key != std::ffi::OsStr::new("CTX_ANALYTICS_ENABLED")));
 }
 
+#[test]
+fn configured_autostart_child_inherits_source_refresh_only_mode() {
+    struct RestoreModeEnv(Option<std::ffi::OsString>);
+    impl Drop for RestoreModeEnv {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => env::set_var(DAEMON_MODE_ENV, value),
+                None => env::remove_var(DAEMON_MODE_ENV),
+            }
+        }
+    }
+
+    let _env_lock = crate::config::TEST_LOCAL_USAGE_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _restore = RestoreModeEnv(env::var_os(DAEMON_MODE_ENV));
+    env::set_var(DAEMON_MODE_ENV, "source-refresh-only");
+    let temp = tempfile::tempdir().unwrap();
+
+    let command = configured_daemon_autostart_command(
+        Path::new("ctx"),
+        temp.path(),
+        DaemonTriggerCommandArg::Search,
+        None,
+    );
+    let mode = command
+        .get_envs()
+        .find(|(key, _)| *key == std::ffi::OsStr::new(DAEMON_MODE_ENV))
+        .and_then(|(_, value)| value)
+        .and_then(std::ffi::OsStr::to_str);
+
+    assert_eq!(mode, Some("source-refresh-only"));
+}
+
 #[cfg(unix)]
 #[test]
 fn autostart_child_detaches_from_the_invoking_terminal_session() -> Result<()> {
