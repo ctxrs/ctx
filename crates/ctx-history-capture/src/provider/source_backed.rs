@@ -1851,20 +1851,21 @@ fn register_zed_route(
     let driver = SourceBackedRouteDriver::new(
         move |sink| {
             let source_key = zed_source_key().map_err(route_error)?;
-            let snapshot = acquire_zed_snapshot(&capture_path).map_err(route_error)?;
+            let mut snapshot = acquire_zed_snapshot(&capture_path).map_err(route_error)?;
             let revision_digest = zed_snapshot_revision_digest(&snapshot.snapshot_revision);
             sink.begin_source(source_key.clone())
                 .map_err(route_coordinator_error)?;
+            let connection = snapshot.connection().map_err(route_error)?;
             let mut zed_sink = ZedSourceBackedSinkV0::new(
                 sink.writer,
-                &snapshot.connection,
+                connection,
                 source_key.clone(),
                 revision_digest,
                 capture_path.to_string_lossy().into_owned(),
             )
             .map_err(route_error)?;
             let scan = scan_zed_native_snapshot(
-                &snapshot.connection,
+                connection,
                 &snapshot.physical_locator,
                 &snapshot.snapshot_revision,
                 &mut zed_sink,
@@ -1875,16 +1876,7 @@ fn register_zed_route(
             }
             let staged_documents = zed_sink.staged_documents();
             drop(zed_sink);
-            if !snapshot
-                .observed
-                .revalidate(&capture_path)
-                .map_err(route_error)?
-            {
-                return Err(SourceBackedRouteError::new(
-                    SourceBackedRouteErrorKind::SourceChanged,
-                    "Zed selected database changed during staging",
-                ));
-            }
+            snapshot.finish().map_err(route_error)?;
             if staged_documents != scan.counters.retained_events {
                 return Err(SourceBackedRouteError::new(
                     SourceBackedRouteErrorKind::Internal,
@@ -1928,18 +1920,13 @@ fn register_zed_route(
                 let Ok(source_key) = zed_source_key() else {
                     return false;
                 };
-                let Ok(snapshot) = acquire_zed_snapshot(&revalidation_path) else {
+                let Ok(mut snapshot) = acquire_zed_snapshot(&revalidation_path) else {
                     return false;
                 };
-                zed_source_observation(&source_key, &snapshot.snapshot_revision).is_ok_and(
-                    |observation| {
-                        observation == *expected.observation()
-                            && snapshot
-                                .observed
-                                .revalidate(&revalidation_path)
-                                .unwrap_or(false)
-                    },
-                )
+                let matches =
+                    zed_source_observation(&source_key, &snapshot.snapshot_revision)
+                        .is_ok_and(|observation| observation == *expected.observation());
+                matches && snapshot.finish().is_ok()
             }
             SourceBackedRevalidationTarget::Deletion(_) => false,
         },

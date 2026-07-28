@@ -98,7 +98,7 @@ pub(crate) enum ZedSnapshotAcquisition {
 }
 
 impl ZedImmutableSqliteSnapshot {
-    pub(super) fn connection(&self) -> ZedNativeResult<&Connection> {
+    pub(crate) fn connection(&self) -> ZedNativeResult<&Connection> {
         self.connection
             .as_ref()
             .ok_or_else(|| {
@@ -112,7 +112,7 @@ impl ZedImmutableSqliteSnapshot {
 
     /// Ends SQLite's pinned transaction and then certifies every retained
     /// DB-family handle and the named parent-directory route.
-    pub(super) fn finish(&mut self) -> ZedNativeResult<()> {
+    pub(crate) fn finish(&mut self) -> ZedNativeResult<()> {
         let snapshot = self.connection.take().ok_or_else(|| {
             ZedNativePathError::Capture(CaptureError::SystemInvariant(
                 "Zed SQLite snapshot was finished more than once",
