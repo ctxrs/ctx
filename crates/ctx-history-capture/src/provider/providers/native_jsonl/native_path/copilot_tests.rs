@@ -40,6 +40,10 @@ fn source_backed_cold_projection_and_exact_locator() {
         "copilot-life",
         SENTINEL,
         &expected_record,
+        None,
+        "copilot-life",
+        "primary",
+        true,
     );
 }
 

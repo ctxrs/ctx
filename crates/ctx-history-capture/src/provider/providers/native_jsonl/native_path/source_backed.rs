@@ -20,7 +20,7 @@ use thiserror::Error;
 
 use super::{
     open_direct_jsonl_pages, DirectJsonlCheckpoint, DirectJsonlEvent, DirectJsonlFileObservation,
-    DirectJsonlSourceChange,
+    DirectJsonlSession, DirectJsonlSourceChange,
 };
 use crate::{
     provider::normalization::provider_local_preview, CaptureError, ProviderJsonlInventoryLimit,
@@ -389,7 +389,7 @@ pub(crate) struct DirectJsonlSourcePage {
 pub(crate) struct DirectJsonlSourceReader {
     adapter: DirectJsonlSourceAdapter,
     leaf: DirectJsonlInventoryLeaf,
-    reader: super::DirectJsonlPageReader,
+    reader: super::reader::DirectJsonlPageReader,
     source: Option<SourceKey>,
     session_id: Option<StableEntityId>,
     native_session_id: Option<String>,
@@ -461,11 +461,12 @@ impl DirectJsonlSourceReader {
                 .native_session_id
                 .as_deref()
                 .ok_or(DirectJsonlSourceBackedError::NativeSessionChanged)?;
-            let cwd = page
+            let session = page
                 .next_checkpoint
                 .session
                 .as_ref()
-                .and_then(|session| session.cwd.as_deref());
+                .ok_or(DirectJsonlSourceBackedError::NativeSessionChanged)?;
+            let source_path = self.leaf.path.to_str();
             let mut documents = Vec::with_capacity(page.events.len());
             for event in page.events {
                 documents.push(project_event(
@@ -473,7 +474,8 @@ impl DirectJsonlSourceReader {
                     &source,
                     session_id,
                     native_session_id,
-                    cwd,
+                    session,
+                    source_path,
                     event,
                 )?);
             }
@@ -575,16 +577,8 @@ impl DirectJsonlSourceReader {
             }
             return Ok(());
         }
-        let source = self.adapter.source_key(&session.native_session_id)?;
-        let native_session_key = NativeSessionKey::native_id(
-            format!("{}.direct-jsonl-session", self.adapter.provider.as_str()),
-            TypedKey::utf8(&session.native_session_id)?,
-        )?;
-        let session_id = derive_session_id(SessionIdentityInput {
-            source: &source,
-            logical_session_kind: "direct-jsonl-session",
-            native_session_key: &native_session_key,
-        })?;
+        let (source, session_id) =
+            direct_jsonl_session_identity(self.adapter, &session.native_session_id)?;
         self.native_session_id = Some(session.native_session_id.clone());
         self.session_id = Some(session_id);
         self.source = Some(source);
@@ -621,7 +615,8 @@ fn project_event(
     source: &SourceKey,
     session_id: StableEntityId,
     native_session_id: &str,
-    cwd: Option<&str>,
+    session: &DirectJsonlSession,
+    source_path: Option<&str>,
     event: DirectJsonlEvent,
 ) -> DirectJsonlSourceBackedResult<LexicalDocument> {
     let evidence = &event.source_record;
@@ -682,6 +677,18 @@ fn project_event(
         None,
         evidence.record_digest,
     )?;
+    let parent_session_id = session
+        .parent_provider_session_id
+        .as_deref()
+        .map(|parent| direct_jsonl_session_identity(adapter, parent).map(|(_, id)| id))
+        .transpose()?;
+    let root_session_id = match session.root_provider_session_id.as_deref() {
+        Some(root) if root == session.native_session_id || root == session.provider_session_id => {
+            session_id
+        }
+        Some(root) => direct_jsonl_session_identity(adapter, root)?.1,
+        None => session_id,
+    };
     let body = lexical_body(&event);
     let touched_files = event
         .touches
@@ -693,18 +700,41 @@ fn project_event(
     Ok(LexicalDocument {
         event_id,
         session_id,
+        parent_session_id,
+        root_session_id,
         source: source.clone(),
         locator,
-        provider_session_id: Some(native_session_id.to_owned()),
+        provider_session_id: Some(session.provider_session_id.clone()),
+        branch: None,
+        source_path: source_path.map(str::to_owned),
+        agent_type: session.agent_type.as_str().to_owned(),
+        is_primary: session.is_primary,
         event_sequence: event.provider_event_sequence_index,
         occurred_at_unix_ms: Some(event.occurred_at.timestamp_millis()),
         event_type: event.event_type.as_str().to_owned(),
         role: Some(event.role.as_str().to_owned()),
         body,
         workspace: None,
-        cwd: cwd.map(str::to_owned),
+        cwd: session.cwd.clone(),
         touched_files,
     })
+}
+
+fn direct_jsonl_session_identity(
+    adapter: DirectJsonlSourceAdapter,
+    native_session_id: &str,
+) -> DirectJsonlSourceBackedResult<(SourceKey, StableEntityId)> {
+    let source = adapter.source_key(native_session_id)?;
+    let native_session_key = NativeSessionKey::native_id(
+        format!("{}.direct-jsonl-session", adapter.provider.as_str()),
+        TypedKey::utf8(native_session_id)?,
+    )?;
+    let session_id = derive_session_id(SessionIdentityInput {
+        source: &source,
+        logical_session_kind: "direct-jsonl-session",
+        native_session_key: &native_session_key,
+    })?;
+    Ok((source, session_id))
 }
 
 fn lexical_body(event: &DirectJsonlEvent) -> String {
@@ -809,6 +839,10 @@ pub(super) fn assert_source_backed_fixture(
     expected_native_session_id: &str,
     expected_body: &str,
     expected_record: &[u8],
+    expected_parent_provider_session_id: Option<&str>,
+    expected_root_provider_session_id: &str,
+    expected_agent_type: &str,
+    expected_is_primary: bool,
 ) {
     use ctx_history_core::NativeRecordCoordinate;
 
@@ -837,6 +871,18 @@ pub(super) fn assert_source_backed_fixture(
         document.provider_session_id.as_deref(),
         Some(expected_native_session_id)
     );
+    let expected_parent_session_id = expected_parent_provider_session_id
+        .map(|parent| direct_jsonl_session_identity(adapter, parent).unwrap().1);
+    let expected_root_session_id =
+        direct_jsonl_session_identity(adapter, expected_root_provider_session_id)
+            .unwrap()
+            .1;
+    assert_eq!(document.parent_session_id, expected_parent_session_id);
+    assert_eq!(document.root_session_id, expected_root_session_id);
+    assert_eq!(document.agent_type, expected_agent_type);
+    assert_eq!(document.is_primary, expected_is_primary);
+    assert_eq!(document.branch, None);
+    assert_eq!(document.source_path.as_deref(), leaf.path().to_str());
     let NativeRecordCoordinate::Jsonl {
         byte_length,
         native_session_key,

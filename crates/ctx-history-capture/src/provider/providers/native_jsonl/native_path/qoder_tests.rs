@@ -41,6 +41,10 @@ fn source_backed_cold_projection_and_exact_locator() {
         "qoder-life",
         SENTINEL,
         &expected_record,
+        None,
+        "qoder-life",
+        "primary",
+        true,
     );
 }
 

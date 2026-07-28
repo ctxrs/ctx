@@ -36,6 +36,10 @@ fn source_backed_cold_projection_and_exact_locator() {
         "windsurf-hook-trajectory",
         SENTINEL,
         &expected_record,
+        None,
+        "windsurf-hook-trajectory",
+        "primary",
+        true,
     );
 }
 
