@@ -32,11 +32,16 @@ pub(super) const CLINE_NATIVE_MAX_FAILURE_PREVIEW_BYTES: usize = 4_000;
 pub(crate) enum ClineNativeProfile {
     CoreOnly,
     CoreAndPro,
+    SourceBackedCoreOnly,
 }
 
 impl ClineNativeProfile {
     pub(super) fn wants_outputs(self) -> bool {
         self == Self::CoreAndPro
+    }
+
+    pub(super) fn wants_record_evidence(self) -> bool {
+        self == Self::SourceBackedCoreOnly
     }
 }
 
@@ -144,6 +149,14 @@ pub(crate) struct ClineFileTouch {
     pub(crate) metadata: Value,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ClineSourceRecordEvidence {
+    pub(crate) native_index: u64,
+    pub(crate) byte_start: u64,
+    pub(crate) byte_length: u64,
+    pub(crate) record_digest: [u8; 32],
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ClineEventRow {
     pub(crate) identity: ClineEventIdentity,
@@ -157,6 +170,7 @@ pub(crate) struct ClineEventRow {
     pub(crate) tool_call: Option<ClineToolCall>,
     pub(crate) sparse_output: Option<ClineSparseOutputDiagnostic>,
     pub(crate) file_touches: Box<[ClineFileTouch]>,
+    pub(crate) source_record: Option<ClineSourceRecordEvidence>,
 }
 
 impl ClineEventRow {
@@ -183,6 +197,7 @@ impl ClineEventRow {
             tool_call: None,
             sparse_output: None,
             file_touches: Box::default(),
+            source_record: None,
         }
     }
 
@@ -221,6 +236,7 @@ impl ClineEventRow {
             }),
             sparse_output: None,
             file_touches: Box::default(),
+            source_record: None,
         }
     }
 
@@ -257,6 +273,7 @@ impl ClineEventRow {
             tool_call: None,
             sparse_output: Some(diagnostic),
             file_touches: Box::default(),
+            source_record: None,
         }
     }
 
@@ -703,6 +720,7 @@ pub(crate) struct ClineCertifiedPage {
     pub(crate) accounting: ClinePageAccounting,
     pub(crate) core: ClineCorePayload,
     pub(crate) transient: Option<ClineTransientOutputPayload>,
+    pub(crate) source_record: Option<ClineSourceRecordEvidence>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

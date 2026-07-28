@@ -58,6 +58,7 @@ pub(in super::super) fn estimated_event_bytes(row: &ClineEventRow) -> usize {
         .saturating_add(encoded_option_i64(row.occurred_at_millis))
         .saturating_add(encoded_option_str(row.body.as_deref()))
         .saturating_add(32)
+        .saturating_add(1 + usize::from(row.source_record.is_some()) * (8 + 8 + 8 + 32))
         .saturating_add(encoded_option_str(row.preview.as_deref()))
         .saturating_add(row.tool_call.as_ref().map_or(1, |call| {
             1_usize

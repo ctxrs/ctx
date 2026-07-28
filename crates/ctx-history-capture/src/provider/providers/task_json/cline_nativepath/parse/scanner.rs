@@ -8,6 +8,7 @@ pub(in super::super) struct ParsedItem {
     pub(in super::super) rejection: Option<ClineItemRejection>,
     pub(in super::super) transient_rejections: Vec<ClineItemRejection>,
     pub(in super::super) core_bytes: usize,
+    pub(in super::super) source_record: Option<ClineSourceRecordEvidence>,
 }
 
 pub(in super::super) struct ClineArrayScanner {
@@ -18,6 +19,7 @@ pub(in super::super) struct ClineArrayScanner {
     finished: bool,
     native_index: u64,
     revision_sha256: [u8; 32],
+    record_evidence: bool,
 }
 
 pub(in super::super) enum ClineArrayScanStep {
@@ -26,10 +28,11 @@ pub(in super::super) enum ClineArrayScanStep {
 }
 
 pub(in super::super) struct ClineScannedItem {
-    bytes: Option<Vec<u8>>,
+    pub(in super::super) bytes: Option<Vec<u8>>,
     pub(in super::super) native_index: u64,
     pub(in super::super) byte_start: u64,
     pub(in super::super) observed_bytes: u64,
+    pub(in super::super) record_digest: Option<[u8; 32]>,
     pub(in super::super) terminal: bool,
     pub(in super::super) complete_bytes: Option<u64>,
 }
@@ -38,6 +41,7 @@ impl ClineArrayScanner {
     pub(in super::super) fn open(
         observation: &ClineComponentObservation,
         stats: &mut ClinePublicationStats,
+        record_evidence: bool,
     ) -> Result<Self, ClineLocalReadError> {
         let Some(expected) = observation.stamp() else {
             return Err(local_failure(
@@ -98,6 +102,7 @@ impl ClineArrayScanner {
             finished: false,
             native_index: 0,
             revision_sha256: revision.finalize().into(),
+            record_evidence,
         })
     }
 
@@ -178,10 +183,15 @@ impl ClineArrayScanner {
             self.structure_failure("Cline history array ended before an item", true)
         })?;
         let mut bytes = Vec::with_capacity(64 * 1024);
-        retain_item_byte(&mut bytes, first);
+        let mut record_digest = self.record_evidence.then(|| {
+            let mut digest = Sha256::new();
+            digest.update(b"ctx-task-json-native-record-v1\0");
+            digest
+        });
+        retain_item_byte(&mut bytes, record_digest.as_mut(), first);
         let complete = match first {
-            b'"' => self.scan_string(&mut bytes)?,
-            b'[' | b'{' => self.scan_composite(&mut bytes)?,
+            b'"' => self.scan_string(&mut bytes, record_digest.as_mut())?,
+            b'[' | b'{' => self.scan_composite(&mut bytes, record_digest.as_mut())?,
             _ => {
                 while let Some(byte) = self.peek_byte()? {
                     if byte.is_ascii_whitespace() || matches!(byte, b',' | b']') {
@@ -190,7 +200,7 @@ impl ClineArrayScanner {
                     let byte = self.read_byte()?.ok_or_else(|| {
                         self.structure_failure("Cline scanner lost a peeked item byte", false)
                     })?;
-                    retain_item_byte(&mut bytes, byte);
+                    retain_item_byte(&mut bytes, record_digest.as_mut(), byte);
                 }
                 true
             }
@@ -242,6 +252,7 @@ impl ClineArrayScanner {
             native_index,
             byte_start,
             observed_bytes,
+            record_digest: record_digest.map(|digest| digest.finalize().into()),
             terminal,
             complete_bytes: terminal.then_some(self.offset),
         }))
@@ -255,10 +266,15 @@ impl ClineArrayScanner {
         Ok(())
     }
 
-    fn scan_string(&mut self, bytes: &mut Vec<u8>) -> Result<bool, ClineLocalReadError> {
+    fn scan_string(
+        &mut self,
+        bytes: &mut Vec<u8>,
+        record_digest: Option<&mut Sha256>,
+    ) -> Result<bool, ClineLocalReadError> {
+        let mut record_digest = record_digest;
         let mut escaped = false;
         while let Some(byte) = self.read_byte()? {
-            retain_item_byte(bytes, byte);
+            retain_item_byte(bytes, record_digest.as_deref_mut(), byte);
             if escaped {
                 escaped = false;
             } else if byte == b'\\' {
@@ -270,12 +286,17 @@ impl ClineArrayScanner {
         Ok(false)
     }
 
-    fn scan_composite(&mut self, bytes: &mut Vec<u8>) -> Result<bool, ClineLocalReadError> {
+    fn scan_composite(
+        &mut self,
+        bytes: &mut Vec<u8>,
+        record_digest: Option<&mut Sha256>,
+    ) -> Result<bool, ClineLocalReadError> {
+        let mut record_digest = record_digest;
         let mut depth = 1_u64;
         let mut in_string = false;
         let mut escaped = false;
         while let Some(byte) = self.read_byte()? {
-            retain_item_byte(bytes, byte);
+            retain_item_byte(bytes, record_digest.as_deref_mut(), byte);
             if in_string {
                 if escaped {
                     escaped = false;
@@ -351,7 +372,10 @@ impl ClineArrayScanner {
     }
 }
 
-fn retain_item_byte(bytes: &mut Vec<u8>, byte: u8) {
+fn retain_item_byte(bytes: &mut Vec<u8>, record_digest: Option<&mut Sha256>, byte: u8) {
+    if let Some(record_digest) = record_digest {
+        record_digest.update([byte]);
+    }
     if bytes.len() < MAX_ARRAY_ITEM_BYTES {
         bytes.push(byte);
     }
@@ -375,8 +399,16 @@ pub(in super::super) fn parse_scanned_item(
             .as_ref()
             .map_or(MAX_ARRAY_ITEM_BYTES, Vec::len),
     );
+    let source_record = scanned
+        .record_digest
+        .map(|record_digest| ClineSourceRecordEvidence {
+            native_index: scanned.native_index,
+            byte_start: scanned.byte_start,
+            byte_length: scanned.observed_bytes,
+            record_digest,
+        });
     let Some(bytes) = scanned.bytes else {
-        return rejected_item(
+        let mut item = rejected_item(
             component,
             scanned.native_index,
             None,
@@ -387,11 +419,13 @@ pub(in super::super) fn parse_scanned_item(
             ),
             stats,
         );
+        item.source_record = source_record;
+        return item;
     };
     let raw = match serde_json::from_slice::<&RawValue>(&bytes) {
         Ok(raw) => raw,
         Err(error) => {
-            return rejected_item(
+            let mut item = rejected_item(
                 component,
                 scanned.native_index,
                 None,
@@ -400,9 +434,11 @@ pub(in super::super) fn parse_scanned_item(
                 &error.to_string(),
                 stats,
             );
+            item.source_record = source_record;
+            return item;
         }
     };
-    parse_item(
+    let mut item = parse_item(
         raw,
         ItemParseContext {
             source,
@@ -415,5 +451,10 @@ pub(in super::super) fn parse_scanned_item(
         scanned.byte_start,
         native_id_occurrences,
         stats,
-    )
+    );
+    for row in &mut item.rows {
+        row.source_record = source_record;
+    }
+    item.source_record = source_record;
+    item
 }

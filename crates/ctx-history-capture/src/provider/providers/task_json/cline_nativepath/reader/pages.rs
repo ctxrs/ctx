@@ -23,6 +23,7 @@ impl ClineNativeReader {
             estimated_page_envelope_bytes(&source, &revision, &expected, &next, evidence.as_ref());
         let mut potential_output_units = 0_usize;
         let mut fingerprint_items = Vec::new();
+        let source_record = item.as_ref().and_then(|item| item.source_record);
         if let Some(item) = item {
             potential_output_units =
                 usize::try_from(item.checkpoint.output_outcomes).unwrap_or(usize::MAX);
@@ -35,6 +36,9 @@ impl ClineNativeReader {
                 core_bytes = core_bytes.saturating_add(estimated_rejection_bytes(&rejection));
                 rejections.push(rejection);
             }
+        }
+        if source_record.is_some() {
+            core_bytes = core_bytes.saturating_add(1 + 8 + 8 + 8 + 32);
         }
         if let Some(session) = session.as_ref() {
             core_bytes = core_bytes.saturating_add(estimated_session_bytes(session));
@@ -138,6 +142,7 @@ impl ClineNativeReader {
                     observations: outputs,
                     rejected_outputs: transient_rejections.into_boxed_slice(),
                 }),
+            source_record,
         })
     }
 
@@ -223,6 +228,7 @@ impl ClineNativeReader {
                     observations: Vec::new(),
                     rejected_outputs: Box::new([]),
                 }),
+            source_record: None,
         })
     }
 
@@ -290,6 +296,7 @@ impl ClineNativeReader {
                     observations: Vec::new(),
                     rejected_outputs: Box::new([]),
                 }),
+            source_record: None,
         })
     }
 

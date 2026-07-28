@@ -818,5 +818,6 @@ pub(super) fn parse_item(
         rejection: None,
         transient_rejections,
         core_bytes,
+        source_record: None,
     }
 }
