@@ -18,11 +18,14 @@ use std::{
 };
 
 use uuid::Uuid;
+use windows_sys::Win32::Foundation::ERROR_HANDLE_EOF;
 use windows_sys::Win32::Storage::FileSystem::{
     FileBasicInfo, FileIdInfo, GetDriveTypeW, GetFileInformationByHandleEx,
-    GetFinalPathNameByHandleW, FILE_ATTRIBUTE_REPARSE_POINT, FILE_BASIC_INFO, FILE_ID_INFO,
-    FILE_NAME_NORMALIZED, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, VOLUME_NAME_DOS,
+    GetFinalPathNameByHandleW, ReadFile, FILE_ATTRIBUTE_REPARSE_POINT, FILE_BASIC_INFO,
+    FILE_ID_INFO, FILE_NAME_NORMALIZED, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    VOLUME_NAME_DOS,
 };
+use windows_sys::Win32::System::IO::{OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0};
 
 use super::{map_io_error, CompleteContentError, CompleteContentErrorKind};
 
@@ -283,16 +286,64 @@ pub(super) fn file_identity(file: &File) -> io::Result<WindowsFileIdentity> {
 }
 
 pub(super) fn read_exact_at(file: &File, mut buffer: &mut [u8], mut offset: u64) -> io::Result<()> {
-    use std::os::windows::fs::FileExt;
     while !buffer.is_empty() {
-        let read = file.seek_read(buffer, offset)?;
+        let read = read_at(file, buffer, offset)?;
         if read == 0 {
             return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
         }
-        offset = offset.saturating_add(read as u64);
+        offset = offset
+            .checked_add(read as u64)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "range offset overflow"))?;
         buffer = &mut buffer[read..];
     }
     Ok(())
+}
+
+fn read_at(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<usize> {
+    if buffer.is_empty() {
+        return Ok(0);
+    }
+    let requested = u32::try_from(buffer.len()).unwrap_or(u32::MAX);
+    let mut read = 0_u32;
+    let mut operation = OVERLAPPED {
+        Internal: 0,
+        InternalHigh: 0,
+        Anonymous: OVERLAPPED_0 {
+            Anonymous: OVERLAPPED_0_0 {
+                Offset: offset as u32,
+                OffsetHigh: (offset >> 32) as u32,
+            },
+        },
+        hEvent: std::ptr::null_mut(),
+    };
+    // Broker admission opens synchronous handles. Supplying OVERLAPPED here
+    // selects the exact 64-bit offset while ReadFile still completes before
+    // this stack buffer is released, and never reopens the named source path.
+    let result = unsafe {
+        ReadFile(
+            file.as_raw_handle(),
+            buffer.as_mut_ptr(),
+            requested,
+            &mut read,
+            &mut operation,
+        )
+    };
+    if result != 0 {
+        if read > requested {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Windows returned an oversized complete-content read",
+            ));
+        }
+        Ok(read as usize)
+    } else {
+        let cause = io::Error::last_os_error();
+        if cause.raw_os_error() == Some(ERROR_HANDLE_EOF as i32) {
+            Ok(0)
+        } else {
+            Err(cause)
+        }
+    }
 }
 
 fn open_path_handle(

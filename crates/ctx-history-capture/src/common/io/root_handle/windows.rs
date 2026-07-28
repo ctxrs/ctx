@@ -5,22 +5,24 @@ use std::{
     mem::size_of,
     os::windows::{
         ffi::{OsStrExt, OsStringExt},
-        fs::{FileExt, OpenOptionsExt},
+        fs::OpenOptionsExt,
         io::{AsRawHandle, FromRawHandle},
     },
     path::{Component, Path, PathBuf, Prefix},
 };
 
+use windows_sys::Win32::Foundation::ERROR_HANDLE_EOF;
 use windows_sys::Win32::Storage::FileSystem::{
     FileAttributeTagInfo, FileBasicInfo, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo,
     FileIdInfo, GetDriveTypeW, GetFileInformationByHandleEx, GetFileType,
-    GetFinalPathNameByHandleW, GetVolumeInformationByHandleW, FILE_ATTRIBUTE_OFFLINE,
+    GetFinalPathNameByHandleW, GetVolumeInformationByHandleW, ReadFile, FILE_ATTRIBUTE_OFFLINE,
     FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, FILE_ATTRIBUTE_RECALL_ON_OPEN,
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_BOTH_DIR_INFO, FILE_ID_INFO,
     FILE_NAME_NORMALIZED, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK,
     VOLUME_NAME_DOS,
 };
+use windows_sys::Win32::System::IO::{OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0};
 
 use super::AuthorityOpenError;
 
@@ -227,7 +229,7 @@ pub(super) fn object_stamp(file: &File, metadata: &Metadata) -> io::Result<Objec
 
 pub(super) fn read_exact_at(file: &File, mut bytes: &mut [u8], mut offset: u64) -> io::Result<()> {
     while !bytes.is_empty() {
-        let read = file.seek_read(bytes, offset)?;
+        let read = read_at(file, bytes, offset)?;
         if read == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -240,6 +242,53 @@ pub(super) fn read_exact_at(file: &File, mut bytes: &mut [u8], mut offset: u64) 
         bytes = &mut bytes[read..];
     }
     Ok(())
+}
+
+fn read_at(file: &File, bytes: &mut [u8], offset: u64) -> io::Result<usize> {
+    if bytes.is_empty() {
+        return Ok(0);
+    }
+    let requested = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
+    let mut read = 0_u32;
+    let mut operation = OVERLAPPED {
+        Internal: 0,
+        InternalHigh: 0,
+        Anonymous: OVERLAPPED_0 {
+            Anonymous: OVERLAPPED_0_0 {
+                Offset: offset as u32,
+                OffsetHigh: (offset >> 32) as u32,
+            },
+        },
+        hEvent: std::ptr::null_mut(),
+    };
+    // Every handle admitted by this module is synchronous. Supplying an
+    // OVERLAPPED value selects the exact 64-bit offset without reopening the
+    // named path; ReadFile still completes before this stack buffer is released.
+    let result = unsafe {
+        ReadFile(
+            file.as_raw_handle(),
+            bytes.as_mut_ptr(),
+            requested,
+            &mut read,
+            &mut operation,
+        )
+    };
+    if result != 0 {
+        if read > requested {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Windows returned an oversized provider source read",
+            ));
+        }
+        Ok(read as usize)
+    } else {
+        let cause = io::Error::last_os_error();
+        if cause.raw_os_error() == Some(ERROR_HANDLE_EOF as i32) {
+            Ok(0)
+        } else {
+            Err(cause)
+        }
+    }
 }
 
 fn qualified_drive_components(path: &Path) -> Result<(u8, Vec<&OsStr>), AuthorityOpenError> {

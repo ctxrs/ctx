@@ -1613,7 +1613,7 @@
           "@@//crates/ctx-history-store/Cargo.toml": "17b88098f973b8702f9904b1fec9f612a5b7c5a76b350f05c1696106f4ee19b1",
           "@@//MODULE.bazel": "9eaa1f9e06af7d2a031bae4461ec648d392ce44e77fbb0cb575a5891c872a366",
           "@@//crates/ctx-history-search/Cargo.toml": "f61d13bf8b5d76d778cb580f368fa66183a1fc4bd53cd0037ba512639a83e41c",
-          "@@//crates/ctx-history-capture/Cargo.toml": "01bce51f33d4f1dc5606ba383c9ffacca34c48014ae0c8f8ae293f9a38b443d7",
+          "@@//crates/ctx-history-capture/Cargo.toml": "8ee7cad624663567a10b518e4f4aa434c1e87c9be0602295783359052a22462f",
           "@@//crates/ctx-sdk/Cargo.toml": "36d7b44b8415faf5a6b81989f92d421ad145f43a8bf822a08599ebf5c56b2b2c",
           "@@//crates/ctx-cli/Cargo.toml": "a046ff271cf670f420f4b5c64c8bfe583dd33d4fe6a8d7538d322acaeb34f84c",
           "@@//crates/ctx-history-core/Cargo.toml": "f968b8eb395e1ec2fbc6ca0cfeb4511a18af112c8d1069d7ce2737543408d1a3",
