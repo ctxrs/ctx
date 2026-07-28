@@ -2,6 +2,7 @@
 //! required before Tantivy may garbage-collect the previous generation.
 
 use std::{
+    ffi::OsStr,
     fmt,
     fs::{self, File, OpenOptions},
     io::{self, Write},
@@ -56,6 +57,41 @@ impl DurableMmapDirectory {
     fn resolve_path(&self, relative_path: &Path) -> PathBuf {
         self.root_path.join(relative_path)
     }
+}
+
+pub(crate) fn reclaim_abandoned_atomic_writes(directory_path: &Path) -> io::Result<()> {
+    let mut removed_file = false;
+    for entry in fs::read_dir(directory_path)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() || !is_atomic_temporary_file(&entry.file_name()) {
+            continue;
+        }
+        match fs::remove_file(entry.path()) {
+            Ok(()) => removed_file = true,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    if removed_file {
+        ParentDirectorySync::open(directory_path)?.sync()?;
+    }
+    Ok(())
+}
+
+fn is_atomic_temporary_file(name: &OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    let Some(identifier) = name
+        .strip_prefix(TEMPORARY_FILE_PREFIX)
+        .and_then(|name| name.strip_suffix(".tmp"))
+    else {
+        return false;
+    };
+    identifier.len() == 32
+        && identifier
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 impl fmt::Debug for DurableMmapDirectory {
@@ -343,6 +379,32 @@ mod tests {
         assert!(sync_attempted.load(Ordering::SeqCst));
         assert_eq!(fs::read(&target_path).unwrap(), b"replacement");
         assert_no_temporary_files(temporary_directory.path());
+    }
+
+    #[test]
+    fn abandoned_atomic_write_reclamation_is_limited_to_owned_regular_files() {
+        let temporary_directory = tempdir().unwrap();
+        let owned = temporary_directory
+            .path()
+            .join(".ctx-tantivy-atomic-0123456789abcdef0123456789abcdef.tmp");
+        let near_miss = temporary_directory
+            .path()
+            .join(".ctx-tantivy-atomic-0123456789abcdef0123456789abcdef.tmp.keep");
+        let foreign = temporary_directory.path().join("foreign.tmp");
+        let matching_directory = temporary_directory
+            .path()
+            .join(".ctx-tantivy-atomic-fedcba9876543210fedcba9876543210.tmp");
+        fs::write(&owned, b"abandoned").unwrap();
+        fs::write(&near_miss, b"preserve").unwrap();
+        fs::write(&foreign, b"preserve").unwrap();
+        fs::create_dir(&matching_directory).unwrap();
+
+        reclaim_abandoned_atomic_writes(temporary_directory.path()).unwrap();
+
+        assert!(!owned.exists());
+        assert!(near_miss.is_file());
+        assert!(foreign.is_file());
+        assert!(matching_directory.is_dir());
     }
 
     fn assert_no_temporary_files(directory: &Path) {
