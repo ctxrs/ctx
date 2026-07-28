@@ -7,6 +7,7 @@ pub(crate) mod importer;
 pub(crate) mod native_ingestion;
 pub(crate) mod normalization;
 pub(crate) mod providers;
+pub mod source_backed;
 pub(crate) mod sqlite;
 pub(crate) mod tool_input;
 

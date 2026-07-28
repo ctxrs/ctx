@@ -40,9 +40,7 @@ pub(crate) use source::{
     ContinueSourceObservation,
 };
 pub(crate) use source_backed::{
-    hydrate_continue_source_backed_record, ContinueHydratedSourceRecord, ContinueSourceBackedError,
-    ContinueSourceBackedLeaf, ContinueSourceBackedOutcome, ContinueSourceBackedPage,
-    ContinueSourceBackedReader, ContinueSourceBackedResult,
+    hydrate_continue_source_backed_record, ContinueSourceBackedOutcome, ContinueSourceBackedReader,
 };
 pub(crate) use store_adapter::{
     ContinueNativePageAdapter, ContinueNativeStoreCursor, ContinuePageFrontier,

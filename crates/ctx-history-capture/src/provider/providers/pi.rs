@@ -9,7 +9,7 @@ use crate::PROVIDER_MAX_PREVIEW_CHARS;
 
 pub(crate) const PI_SOURCE_FORMAT: &str = "pi_session_jsonl";
 
-mod nativepath;
+pub(crate) mod nativepath;
 mod text;
 
 pub(crate) use nativepath::import_pi_nativepath_history;

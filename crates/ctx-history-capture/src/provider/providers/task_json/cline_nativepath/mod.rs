@@ -47,9 +47,7 @@ pub(super) use source::{
 pub(crate) use source_backed::{
     cline_task_json_source_backed_adapter, cline_task_json_source_backed_resolver,
     roo_task_json_source_backed_adapter, roo_task_json_source_backed_resolver,
-    TaskJsonCertifiedTask, TaskJsonSourceBackedAdapter, TaskJsonSourceBackedCompletion,
-    TaskJsonSourceBackedError, TaskJsonSourceBackedPage, TaskJsonSourceBackedResolver,
-    TaskJsonSourceBackedResult, TaskJsonSourceBackedSession,
+    TaskJsonSourceBackedCompletion, TaskJsonSourceBackedPage, TaskJsonSourceBackedResolver,
 };
 pub(crate) use vertical::{import_cline_nativepath_history, import_roo_nativepath_history};
 

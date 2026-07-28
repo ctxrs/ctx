@@ -6,7 +6,7 @@ use crate::native_source::NativeSqliteValue;
 use crate::{ProviderAdapterContext, ProviderImportOptions, ProviderImportSummary, Result};
 
 mod capture;
-mod native_path;
+pub(crate) mod native_path;
 mod projection;
 mod source;
 

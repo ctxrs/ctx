@@ -11,7 +11,7 @@ use crate::{ProviderAdapterContext, ProviderImportOptions, ProviderImportSummary
 
 mod event;
 mod history;
-mod native_path;
+pub(crate) mod native_path;
 
 #[cfg(test)]
 pub(crate) use event::KiroNativeEvent;

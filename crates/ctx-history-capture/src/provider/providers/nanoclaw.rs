@@ -4,7 +4,7 @@ use ctx_history_store::Store;
 
 use crate::{ProviderAdapterContext, ProviderImportOptions, ProviderImportSummary, Result};
 
-mod native_path;
+pub(crate) mod native_path;
 mod position;
 mod project;
 mod projection;

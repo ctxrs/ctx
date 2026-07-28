@@ -64,7 +64,7 @@ mod output;
 mod parse;
 mod publication;
 mod source;
-pub(super) mod source_backed;
+pub(crate) mod source_backed;
 
 pub(crate) use lifecycle::import_auggie_sessions_nativepath;
 #[cfg(test)]

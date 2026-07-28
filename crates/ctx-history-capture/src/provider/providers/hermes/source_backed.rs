@@ -124,7 +124,7 @@ impl HermesSourceCandidate {
         self.status
     }
 
-    fn automatic(source: ProviderSource) -> HermesSourceBackedResult<Self> {
+    pub(crate) fn automatic(source: ProviderSource) -> HermesSourceBackedResult<Self> {
         let selection = automatic_selection(&source.path)?;
         let profile = match &selection {
             HermesSourceSelection::DefaultProfile => "default",

@@ -14,7 +14,7 @@ use crate::{
     PROVIDER_MAX_PREVIEW_CHARS,
 };
 
-mod native_path;
+pub(crate) mod native_path;
 
 pub(crate) use native_path::import_auggie_sessions_nativepath;
 

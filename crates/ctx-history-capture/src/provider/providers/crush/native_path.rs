@@ -8,7 +8,7 @@ mod lifecycle;
 mod output;
 mod publication;
 mod query;
-pub(super) mod source_backed;
+pub(crate) mod source_backed;
 
 use std::{
     collections::{BTreeMap, BTreeSet},

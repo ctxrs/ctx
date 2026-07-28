@@ -61,11 +61,11 @@ use super::super::{
 const CRUSH_SOURCE_ANCHOR_NAMESPACE: &str = "crush.project-database";
 const CRUSH_INVENTORY_AUTHORITY_NAMESPACE: &str = "crush.project-inventory";
 const CRUSH_INVENTORY_REVISION_KIND: &str = "crush-selected-registered-projects-v0";
-const CRUSH_DISCOVERY_REVISION: &str = "crush-project-inventory-source-backed-v0";
-const CRUSH_SOURCE_SCHEMA_VARIANT: &str = "crush-project-sqlite-v0";
+pub(crate) const CRUSH_DISCOVERY_REVISION: &str = "crush-project-inventory-source-backed-v0";
+pub(crate) const CRUSH_SOURCE_SCHEMA_VARIANT: &str = "crush-project-sqlite-v0";
 const CRUSH_SOURCE_REVISION_KIND: &str = "crush-sqlite-snapshot-v1";
-const CRUSH_FRONTIER_KIND: &str = "crush-sqlite-exact-snapshot-v0";
-const CRUSH_PARSER_REVISION: &str = "crush-sqlite-source-backed-v0";
+pub(crate) const CRUSH_FRONTIER_KIND: &str = "crush-sqlite-exact-snapshot-v0";
+pub(crate) const CRUSH_PARSER_REVISION: &str = "crush-sqlite-source-backed-v0";
 const CRUSH_NATIVE_SESSION_NAMESPACE: &str = "crush.session";
 const CRUSH_NATIVE_MESSAGE_NAMESPACE: &str = "crush.message";
 const CRUSH_LOGICAL_SESSION_KIND: &str = "crush-session";
@@ -245,32 +245,32 @@ pub struct CrushHydratedRecordV0 {
 }
 
 #[derive(Debug, Clone)]
-struct BoundDatabase {
-    source_key: SourceKey,
-    canonical_path: PathBuf,
+pub(crate) struct BoundDatabase {
+    pub(crate) source_key: SourceKey,
+    pub(crate) canonical_path: PathBuf,
 }
 
 #[derive(Debug)]
-struct FrozenInventory {
-    observation: SourceInventoryObservation,
-    databases: Vec<BoundDatabase>,
+pub(crate) struct FrozenInventory {
+    pub(crate) observation: SourceInventoryObservation,
+    pub(crate) databases: Vec<BoundDatabase>,
 }
 
 impl FrozenInventory {
-    fn source_keys(&self) -> Vec<SourceKey> {
+    pub(crate) fn source_keys(&self) -> Vec<SourceKey> {
         self.databases
             .iter()
             .map(|database| database.source_key.clone())
             .collect()
     }
 
-    fn contains_exact_source(&self, source: &SourceKey) -> bool {
+    pub(crate) fn contains_exact_source(&self, source: &SourceKey) -> bool {
         self.databases
             .iter()
             .any(|database| database.source_key.exact_descriptor_eq(source))
     }
 
-    fn matches(
+    pub(crate) fn matches(
         &self,
         observation: CrushProjectInventoryObservationV0,
     ) -> CrushSourceBackedResultV0<bool> {
@@ -293,19 +293,19 @@ struct SourceRevalidation {
     snapshot: crate::provider::sqlite::ProviderSqliteSourceSnapshot,
 }
 
-struct OpenedSource {
-    database: BoundDatabase,
-    snapshot: crate::provider::sqlite::ProviderSqliteSourceSnapshot,
+pub(crate) struct OpenedSource {
+    pub(crate) database: BoundDatabase,
+    pub(crate) snapshot: crate::provider::sqlite::ProviderSqliteSourceSnapshot,
     connection: Connection,
     schema: CrushNativeSchema,
-    observation: SourceObservation,
+    pub(crate) observation: SourceObservation,
     revision_digest: [u8; 32],
 }
 
 #[derive(Debug, Clone, Copy)]
-struct SourceScan {
-    content_digest: [u8; 32],
-    counts: ScannedSourceCounts,
+pub(crate) struct SourceScan {
+    pub(crate) content_digest: [u8; 32],
+    pub(crate) counts: ScannedSourceCounts,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -575,7 +575,7 @@ impl CrushLocatorResolverV0 {
     }
 }
 
-fn bind_inventory(
+pub(crate) fn bind_inventory(
     observation: CrushProjectInventoryObservationV0,
 ) -> CrushSourceBackedResultV0<FrozenInventory> {
     if observation.databases.len() > MAX_CRUSH_PROJECT_DATABASES {
@@ -626,7 +626,7 @@ fn crush_source_key(project_key: TypedKey) -> CrushSourceBackedResultV0<SourceKe
     )?)
 }
 
-fn open_source(database: BoundDatabase) -> CrushSourceBackedResultV0<OpenedSource> {
+pub(crate) fn open_source(database: BoundDatabase) -> CrushSourceBackedResultV0<OpenedSource> {
     ensure_regular_provider_transcript_file(&database.canonical_path)?;
     let snapshot = source_snapshot(&database.canonical_path)?;
     let connection = open_direct_readonly(&database.canonical_path)?;
@@ -664,7 +664,7 @@ fn open_direct_readonly(path: &Path) -> CrushSourceBackedResultV0<Connection> {
     Ok(connection)
 }
 
-fn exact_replay_matches(base: &CertifiedSource, source: &OpenedSource) -> bool {
+pub(crate) fn exact_replay_matches(base: &CertifiedSource, source: &OpenedSource) -> bool {
     base.parser_revision() == CRUSH_PARSER_REVISION
         && base.observation() == &source.observation
         && base.frontier().is_some_and(|frontier| {
@@ -673,7 +673,9 @@ fn exact_replay_matches(base: &CertifiedSource, source: &OpenedSource) -> bool {
         })
 }
 
-fn closing_observation(source: &OpenedSource) -> CrushSourceBackedResultV0<SourceObservation> {
+pub(crate) fn closing_observation(
+    source: &OpenedSource,
+) -> CrushSourceBackedResultV0<SourceObservation> {
     if !source
         .snapshot
         .revalidate(&source.database.canonical_path)?
@@ -687,7 +689,7 @@ fn closing_observation(source: &OpenedSource) -> CrushSourceBackedResultV0<Sourc
     )?)
 }
 
-fn scan_source(
+pub(crate) fn scan_source(
     source: &OpenedSource,
     writer: &mut GenerationWriter,
 ) -> CrushSourceBackedResultV0<SourceScan> {

@@ -7,7 +7,7 @@ use ctx_history_store::Store;
 use crate::Result;
 
 mod event;
-mod nativepath;
+pub(crate) mod nativepath;
 mod source;
 
 #[cfg(test)]

@@ -9,7 +9,7 @@ use crate::{
 
 mod complete_content;
 mod content_locator;
-mod native_path;
+pub(crate) mod native_path;
 mod normalization;
 mod schema;
 

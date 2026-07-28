@@ -17,9 +17,8 @@ pub(super) use rows::{
 };
 pub(super) use source::{discover_pi_sessions, revalidate_pi_source_revision};
 pub(crate) use source_backed::{
-    project_pi_source_backed_root_cold, PiSourceBackedError, PiSourceBackedPage,
-    PiSourceBackedProjection, PiSourceBackedProjector, PiSourceBackedResolver, PiSourceBackedRoot,
-    PiSourceBackedRootProjection, PiSourceRoute,
+    project_pi_source_backed_root_cold, PiSourceBackedError, PiSourceBackedProjector,
+    PiSourceBackedResolver, PiSourceBackedRoot,
 };
 pub(crate) use vertical::import_pi_nativepath_history;
 

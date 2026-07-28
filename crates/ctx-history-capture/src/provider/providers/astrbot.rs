@@ -1,5 +1,5 @@
 mod model;
-mod native_path;
+pub(crate) mod native_path;
 mod preferences;
 mod source;
 
