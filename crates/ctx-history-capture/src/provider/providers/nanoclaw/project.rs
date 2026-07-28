@@ -6,6 +6,7 @@ use std::{
 };
 
 use rusqlite::Connection;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::provider::provider_safe_path_segment;
@@ -257,10 +258,45 @@ pub(super) struct NanoClawProjectSnapshot {
 
 impl NanoClawProjectSnapshot {
     pub(super) fn read(project_root: &Path, central_path: &Path) -> Result<Self> {
+        Self::read_inner(project_root, central_path, None)
+    }
+
+    /// Freezes only the explicitly selected project and rejects component
+    /// databases that resolve outside its `data/v2-sessions` authority.
+    pub(super) fn read_source_backed(project_root: &Path, central_path: &Path) -> Result<Self> {
+        let canonical_root = fs::canonicalize(project_root)?;
+        let canonical_central = fs::canonicalize(central_path)?;
+        if !canonical_central.starts_with(&canonical_root) {
+            return Err(CaptureError::InvalidProviderTranscriptPath {
+                path: central_path.to_path_buf(),
+                reason: "NanoClaw data/v2.db escapes the selected project root",
+            });
+        }
+        let sessions_root = canonical_root.join("data").join("v2-sessions");
+        let sessions_metadata = fs::symlink_metadata(&sessions_root)?;
+        if sessions_metadata.file_type().is_symlink() || !sessions_metadata.is_dir() {
+            return Err(CaptureError::InvalidProviderTranscriptPath {
+                path: sessions_root,
+                reason: "NanoClaw data/v2-sessions must be a real directory",
+            });
+        }
+        Self::read_inner(
+            &canonical_root,
+            &canonical_central,
+            Some(canonical_root.join("data").join("v2-sessions")),
+        )
+    }
+
+    fn read_inner(
+        project_root: &Path,
+        central_path: &Path,
+        contained_sessions_root: Option<PathBuf>,
+    ) -> Result<Self> {
         let central = NanoClawSqliteSnapshot::read(central_path)?;
         let conn = open_provider_sqlite_readonly(central_path)?;
-        let inventory =
-            with_sqlite_read_snapshot(&conn, || nanoclaw_stream_inventory(project_root, &conn))?;
+        let inventory = with_sqlite_read_snapshot(&conn, || {
+            nanoclaw_stream_inventory(project_root, &conn, contained_sessions_root.as_deref())
+        })?;
         let snapshot = Self {
             central_path: central_path.to_path_buf(),
             central,
@@ -270,6 +306,32 @@ impl NanoClawProjectSnapshot {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
         Ok(snapshot)
+    }
+
+    pub(super) fn source_backed_revision_evidence(
+        &self,
+        user_version: i64,
+        schema_fingerprint: &str,
+    ) -> Result<Vec<u8>> {
+        let component_databases = self
+            .inventory
+            .session_databases
+            .iter()
+            .map(|session| {
+                u64::from(session.inbound.is_present()) + u64::from(session.outbound.is_present())
+            })
+            .sum();
+        Ok(serde_json::to_vec(&NanoClawCompoundRevisionEvidence {
+            version: 1,
+            capture_revision: NANOCLAW_CAPTURE_REVISION,
+            policy_revision: NANOCLAW_POLICY_REVISION,
+            user_version,
+            schema_fingerprint,
+            central_sha256: nanoclaw_hex(&self.central.digest()),
+            session_inventory_sha256: nanoclaw_hex(&self.inventory.digest),
+            sessions: self.inventory.session_count,
+            component_databases,
+        })?)
     }
 
     pub(super) fn source_revision(&self, user_version: i64, schema_fingerprint: &str) -> String {
@@ -351,6 +413,7 @@ impl NanoClawInventoryPacer {
 fn nanoclaw_stream_inventory(
     project_root: &Path,
     conn: &Connection,
+    contained_sessions_root: Option<&Path>,
 ) -> Result<NanoClawProjectInventory> {
     let columns = nanoclaw_session_columns(conn)?;
     let retained = nanoclaw_retained_length_expr(&nanoclaw_session_projection(conn, &columns)?);
@@ -385,14 +448,28 @@ fn nanoclaw_stream_inventory(
                     .join("v2-sessions")
                     .join(&agent_group_id)
                     .join(&session_id);
-                let inbound = NanoClawProjectDatabaseSnapshot::read(
-                    &session_dir,
-                    NanoClawMessageSource::Inbound,
-                )?;
-                let outbound = NanoClawProjectDatabaseSnapshot::read(
-                    &session_dir,
-                    NanoClawMessageSource::Outbound,
-                )?;
+                let read_component = |source| {
+                    let component_path = session_dir.join(source.file_name());
+                    if let Some(contained_sessions_root) = contained_sessions_root {
+                        match fs::symlink_metadata(&component_path) {
+                            Ok(_) => {
+                                let canonical_path = fs::canonicalize(&component_path)?;
+                                if !canonical_path.starts_with(contained_sessions_root) {
+                                    return Err(CaptureError::InvalidProviderTranscriptPath {
+                                        path: component_path,
+                                        reason:
+                                            "NanoClaw message database escapes data/v2-sessions",
+                                    });
+                                }
+                            }
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                            Err(error) => return Err(CaptureError::Io(error)),
+                        }
+                    }
+                    NanoClawProjectDatabaseSnapshot::read(&session_dir, source)
+                };
+                let inbound = read_component(NanoClawMessageSource::Inbound)?;
+                let outbound = read_component(NanoClawMessageSource::Outbound)?;
                 inbound.update_hash(&mut hasher);
                 outbound.update_hash(&mut hasher);
                 session_databases.push(NanoClawSessionDatabaseSnapshot {
@@ -418,6 +495,19 @@ fn nanoclaw_stream_inventory(
         session_count: count,
         session_databases,
     })
+}
+
+#[derive(Serialize)]
+struct NanoClawCompoundRevisionEvidence<'a> {
+    version: u32,
+    capture_revision: u32,
+    policy_revision: u32,
+    user_version: i64,
+    schema_fingerprint: &'a str,
+    central_sha256: String,
+    session_inventory_sha256: String,
+    sessions: u64,
+    component_databases: u64,
 }
 
 fn nanoclaw_sidecar_path(path: &Path, suffix: &str) -> PathBuf {

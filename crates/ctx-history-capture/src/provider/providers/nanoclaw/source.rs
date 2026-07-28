@@ -180,6 +180,7 @@ pub(super) struct NanoClawNativeScanner<'connection, 'snapshot> {
     active_session: Option<NanoClawActiveSession<'snapshot>>,
     frontier: NanoClawFrontier,
     prefix_hasher: Sha256,
+    prefix_bytes: u64,
 }
 
 impl<'connection, 'snapshot> NanoClawNativeScanner<'connection, 'snapshot> {
@@ -196,11 +197,20 @@ impl<'connection, 'snapshot> NanoClawNativeScanner<'connection, 'snapshot> {
             active_session: None,
             frontier: NanoClawFrontier::initial(),
             prefix_hasher,
+            prefix_bytes: 0,
         })
     }
 
     pub(super) fn prefix_digest(&self) -> String {
         hex(&self.prefix_hasher.clone().finalize())
+    }
+
+    pub(super) fn prefix_digest_bytes(&self) -> [u8; 32] {
+        self.prefix_hasher.clone().finalize().into()
+    }
+
+    pub(super) fn prefix_bytes(&self) -> u64 {
+        self.prefix_bytes
     }
 
     /// Replays only provider-owned rows to prove that a released NativePath
@@ -269,12 +279,18 @@ impl<'connection, 'snapshot> NanoClawNativeScanner<'connection, 'snapshot> {
         };
         if let Some((unit, next_frontier)) = unit {
             let encoded = serde_json::to_vec(&unit)?;
-            self.prefix_hasher.update(
-                u64::try_from(encoded.len())
-                    .unwrap_or(u64::MAX)
-                    .to_be_bytes(),
-            );
+            let encoded_bytes = u64::try_from(encoded.len()).map_err(|_| {
+                CaptureError::SystemInvariant("NanoClaw native unit length exceeds u64")
+            })?;
+            self.prefix_hasher.update(encoded_bytes.to_be_bytes());
             self.prefix_hasher.update(encoded);
+            self.prefix_bytes = self
+                .prefix_bytes
+                .checked_add(8)
+                .and_then(|value| value.checked_add(encoded_bytes))
+                .ok_or(CaptureError::SystemInvariant(
+                    "NanoClaw certified prefix byte count overflowed",
+                ))?;
             self.frontier = next_frontier;
             Ok(Some(unit))
         } else {
