@@ -11,6 +11,7 @@ use std::{
     fs::{self, File, Metadata},
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use chrono::{DateTime, Utc};
@@ -32,6 +33,7 @@ use uuid::Uuid;
 use crate::{
     common::io::{
         ensure_provider_path_parents_are_not_symlinks, ensure_regular_provider_transcript_file,
+        OpenedProviderSourceFile, ProviderSourceDirectory, ProviderSourceRoot,
     },
     complete_content::{
         attach_verified_content_locator, jsonl::EXACT_JSONL_COMPLETE_CONTENT_LOCATOR_KIND,
@@ -72,7 +74,7 @@ use super::{
         CodeBuddyEventDraft, CodeBuddyEventInput, CodeBuddyNativeShape, CodeBuddySessionDraft,
         CodeBuddySessionInput,
     },
-    source::CodeBuddyFrozenFile,
+    source::{CodeBuddyFrozenFile, CodeBuddyRevisionHasher},
     CODEBUDDY_CLI_POLICY_REVISION, CODEBUDDY_MAX_CHECKPOINT_FAILURES, CODEBUDDY_MAX_FAILURE_BYTES,
     CODEBUDDY_NATIVE_CURSOR_VERSION,
 };
@@ -84,8 +86,9 @@ mod extension_source;
 
 use extension_source::{
     codebuddy_extension_line_number, codebuddy_extension_message_file,
-    codebuddy_extension_metadata, codebuddy_extension_metadata_text, codebuddy_message_time,
-    CodeBuddyExtensionMessageError, CodeBuddyExtensionMetadata, CodeBuddyExtensionObservation,
+    codebuddy_extension_metadata, codebuddy_extension_metadata_from_admitted,
+    codebuddy_extension_metadata_text, codebuddy_message_time, CodeBuddyExtensionMessageError,
+    CodeBuddyExtensionMetadata, CodeBuddyExtensionObservation,
 };
 
 const CODEBUDDY_NATIVE_PAGE_MAX_UNITS: usize = 64;
@@ -270,6 +273,44 @@ struct CodeBuddySource {
     inventory_observation_token: Option<String>,
     session_ordinal: usize,
     frozen: Option<CodeBuddyFrozenFile>,
+    capability: Option<Arc<CodeBuddyCapabilitySource>>,
+}
+
+#[derive(Debug)]
+struct CodeBuddyCapabilitySource {
+    authority: ProviderSourceRoot,
+    relative_path: PathBuf,
+    primary: Option<OpenedProviderSourceFile>,
+    extension: Option<CodeBuddyExtensionCapability>,
+    revision: String,
+}
+
+#[derive(Debug)]
+struct CodeBuddyExtensionCapability {
+    metadata: CodeBuddyExtensionMetadata,
+    session_index: OpenedProviderSourceFile,
+    project_index: Option<OpenedProviderSourceFile>,
+    messages_directory: ProviderSourceDirectory,
+    messages: BTreeMap<String, OpenedProviderSourceFile>,
+}
+
+impl CodeBuddyCapabilitySource {
+    fn revalidate(&self) -> Result<()> {
+        if let Some(primary) = &self.primary {
+            primary.revalidate()?;
+        }
+        if let Some(extension) = &self.extension {
+            extension.session_index.revalidate()?;
+            if let Some(project_index) = &extension.project_index {
+                project_index.revalidate()?;
+            }
+            extension.messages_directory.revalidate()?;
+            for message in extension.messages.values() {
+                message.revalidate()?;
+            }
+        }
+        self.authority.revalidate()
+    }
 }
 
 impl CodeBuddySource {
@@ -282,6 +323,9 @@ impl CodeBuddySource {
     }
 
     fn revalidate(&self) -> Result<bool> {
+        if let Some(capability) = &self.capability {
+            return Ok(capability.revalidate().is_ok());
+        }
         match self.shape {
             CodeBuddySourceShape::Cli => self
                 .frozen

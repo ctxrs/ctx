@@ -27,7 +27,14 @@ pub(super) fn next_cli_page(
             "CodeBuddy CLI cursor exceeds its source".to_owned(),
         ));
     }
-    let file = File::open(&source.path)?;
+    let file = match source
+        .capability
+        .as_ref()
+        .and_then(|capability| capability.primary.as_ref())
+    {
+        Some(file) => file.file().try_clone()?,
+        None => File::open(&source.path)?,
+    };
     if CodeBuddyFrozenFile::from_metadata(&file.metadata()?)? != *frozen {
         return Err(CaptureError::SourceChangedDuringCapture);
     }
@@ -216,7 +223,7 @@ pub(super) fn next_cli_page(
         reached_eof = true;
     }
     next.terminal = reached_eof;
-    next.certified_prefix_sha256 = file_prefix_sha256(&source.path, next.next_native_offset)?;
+    next.certified_prefix_sha256 = source_prefix_sha256(source, next.next_native_offset)?;
     retained_bytes = retained_bytes
         .saturating_add(serde_json::to_vec(&next)?.len())
         .saturating_add(serde_json::to_vec(cursor)?.len());
@@ -286,9 +293,20 @@ pub(super) fn codebuddy_session_title(
     session: &CodeBuddySessionCheckpoint,
 ) -> Result<Option<String>> {
     if source.shape == CodeBuddySourceShape::Extension {
-        let (metadata, _) = codebuddy_extension_metadata(&source.path, source.session_ordinal)?;
-        let metadata = metadata.ok_or(CaptureError::SourceChangedDuringCapture)?;
-        if let Some(title) = codebuddy_extension_metadata_text(&metadata, &["name", "title"]) {
+        let admitted = source
+            .capability
+            .as_ref()
+            .and_then(|capability| capability.extension.as_ref());
+        let owned;
+        let metadata = if let Some(admitted) = admitted {
+            &admitted.metadata
+        } else {
+            let (metadata, _) =
+                codebuddy_extension_metadata(&source.path, source.session_ordinal)?;
+            owned = metadata.ok_or(CaptureError::SourceChangedDuringCapture)?;
+            &owned
+        };
+        if let Some(title) = codebuddy_extension_metadata_text(metadata, &["name", "title"]) {
             return Ok(Some(title));
         }
     }
@@ -316,7 +334,14 @@ pub(super) fn codebuddy_session_title(
                     "CodeBuddy CLI title anchor exceeds its record bound".to_owned(),
                 ));
             }
-            let mut file = File::open(&source.path)?;
+            let mut file = match source
+                .capability
+                .as_ref()
+                .and_then(|capability| capability.primary.as_ref())
+            {
+                Some(file) => file.file().try_clone()?,
+                None => File::open(&source.path)?,
+            };
             file.seek(SeekFrom::Start(*byte_start))?;
             let mut record = vec![
                 0_u8;
@@ -404,12 +429,25 @@ pub(super) fn next_extension_page(
     cursor: &CodeBuddyNativeCursor,
     context: &ProviderAdapterContext,
 ) -> Result<CodeBuddyPage> {
-    let (metadata, metadata_summary) =
-        codebuddy_extension_metadata(&source.path, source.session_ordinal)?;
-    let metadata = metadata.ok_or(CaptureError::InvalidProviderTranscriptPath {
-        path: source.path.clone(),
-        reason: "CodeBuddy extension session index is unreadable",
-    })?;
+    let admitted = source
+        .capability
+        .as_ref()
+        .and_then(|capability| capability.extension.as_ref());
+    let owned_metadata;
+    let metadata_summary;
+    let metadata = if let Some(admitted) = admitted {
+        metadata_summary = ProviderImportSummary::default();
+        &admitted.metadata
+    } else {
+        let (metadata, summary) =
+            codebuddy_extension_metadata(&source.path, source.session_ordinal)?;
+        metadata_summary = summary;
+        owned_metadata = metadata.ok_or(CaptureError::InvalidProviderTranscriptPath {
+            path: source.path.clone(),
+            reason: "CodeBuddy extension session index is unreadable",
+        })?;
+        &owned_metadata
+    };
     let mut next = cursor.clone();
     next.source_revision.clone_from(&source.source_revision);
     next.terminal = false;
@@ -426,8 +464,22 @@ pub(super) fn next_extension_page(
     }
 
     for (message_index, message_ref) in metadata.messages().iter().enumerate() {
-        let (message_path, frozen) =
-            match codebuddy_extension_message_file(&metadata.session_dir, message_ref) {
+        let admitted_message = message_ref
+            .get("id")
+            .and_then(Value::as_str)
+            .and_then(|message_id| admitted.and_then(|admitted| admitted.messages.get(message_id)));
+        let (message_path, frozen) = match admitted_message {
+            Some(file) => (
+                metadata
+                    .session_dir
+                    .join("messages")
+                    .join(format!(
+                        "{}.json",
+                        message_ref.get("id").and_then(Value::as_str).unwrap_or_default()
+                    )),
+                CodeBuddyFrozenFile::from_metadata(file.metadata())?,
+            ),
+            None => match codebuddy_extension_message_file(&metadata.session_dir, message_ref) {
                 Ok(value) => value,
                 Err(error) => {
                     let error = error.rejected()?;
@@ -440,7 +492,8 @@ pub(super) fn next_extension_page(
                     }
                     continue;
                 }
-            };
+            },
+        };
         let ordinal = valid_ordinal;
         valid_ordinal = valid_ordinal
             .checked_add(1)
@@ -498,10 +551,16 @@ pub(super) fn next_extension_page(
             retained_bytes = retained_bytes.saturating_add(256);
             continue;
         }
-        let record_bytes = fs::read(&message_path)?;
-        if !frozen.revalidate(&message_path)? {
-            return Err(CaptureError::SourceChangedDuringCapture);
-        }
+        let record_bytes = match admitted_message {
+            Some(file) => file.read_all_bounded(CODEBUDDY_NATIVE_RECORD_MAX_BYTES)?,
+            None => {
+                let bytes = fs::read(&message_path)?;
+                if !frozen.revalidate(&message_path)? {
+                    return Err(CaptureError::SourceChangedDuringCapture);
+                }
+                bytes
+            }
+        };
         let raw_message = match serde_json::from_slice::<Value>(&record_bytes) {
             Ok(value) => value,
             Err(error) => {

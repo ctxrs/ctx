@@ -77,7 +77,7 @@ pub(crate) fn scan_codebuddy_source_backed_root(
         source_root: Some(root.to_path_buf()),
         imported_at,
     };
-    let inventory = discover_sources(
+    let mut inventory = discover_sources(
         root,
         root,
         &ProviderImportOptions {
@@ -87,6 +87,10 @@ pub(crate) fn scan_codebuddy_source_backed_root(
     )?;
     if inventory.root_missing {
         return Ok(Vec::new());
+    }
+    let authority = codebuddy_authority(root)?;
+    for source in &mut inventory.sources {
+        bind_codebuddy_capability(source, &authority)?;
     }
     inventory
         .sources
@@ -102,7 +106,11 @@ pub(crate) fn hydrate_codebuddy_source_backed_record(
     locator: &SourceRecordLocator,
 ) -> Result<CodeBuddyHydratedSourceRecord> {
     contract(locator.validate_contract(), "locator")?;
-    let inventory = discover_sources(root, root, &ProviderImportOptions::default())?;
+    let mut inventory = discover_sources(root, root, &ProviderImportOptions::default())?;
+    let authority = codebuddy_authority(root)?;
+    for source in &mut inventory.sources {
+        bind_codebuddy_capability(source, &authority)?;
+    }
     let mut matched = None;
     for source in &inventory.sources {
         let cursor = initial_cursor(
@@ -132,9 +140,7 @@ pub(crate) fn hydrate_codebuddy_source_backed_record(
         CodeBuddySourceShape::Cli => hydrate_cli(source, &cursor.session, locator),
         CodeBuddySourceShape::Extension => hydrate_extension(source, &cursor.session, locator),
     }?;
-    if !source.revalidate()? {
-        return Err(CaptureError::SourceChangedDuringCapture);
-    }
+    revalidate_codebuddy_capability(source)?;
     Ok(hydrated)
 }
 
@@ -224,9 +230,7 @@ fn scan_source(
             "CodeBuddy source-backed scan stopped before the terminal frontier",
         ));
     }
-    if !source.revalidate()? {
-        return Err(CaptureError::SourceChangedDuringCapture);
-    }
+    revalidate_codebuddy_capability(source)?;
 
     let (content_digest, certified_bytes, frontier) = match source.shape {
         CodeBuddySourceShape::Cli => {
@@ -279,6 +283,157 @@ fn scan_source(
         pages,
         rejections,
     })
+}
+
+fn codebuddy_authority(root: &Path) -> Result<ProviderSourceRoot> {
+    let selected = fs::canonicalize(root)?;
+    let authority_path = if fs::metadata(root)?.is_file() {
+        selected
+            .parent()
+            .ok_or(CaptureError::InvalidProviderTranscriptPath {
+                path: selected.clone(),
+                reason: "CodeBuddy selected file has no authority directory",
+            })?
+            .to_path_buf()
+    } else {
+        selected
+    };
+    ProviderSourceRoot::open(&authority_path)
+}
+
+fn bind_codebuddy_capability(
+    source: &mut CodeBuddySource,
+    authority: &ProviderSourceRoot,
+) -> Result<()> {
+    let relative_path = source
+        .canonical_path
+        .strip_prefix(authority.named_path())
+        .map(Path::to_path_buf)
+        .map_err(|_| CaptureError::InvalidProviderTranscriptPath {
+            path: source.canonical_path.clone(),
+            reason: "CodeBuddy compound leaves must share one authority root",
+        })?;
+    let capability = match source.shape {
+        CodeBuddySourceShape::Cli => {
+            let primary = authority.open_file(&relative_path)?;
+            let frozen = CodeBuddyFrozenFile::from_metadata(primary.metadata())?;
+            let base_revision =
+                frozen.source_revision_with_policy("cli-jsonl", CODEBUDDY_CLI_POLICY_REVISION);
+            let revision = effective_source_revision(
+                &base_revision,
+                source.inventory_observation_token.as_deref(),
+            );
+            source.frozen = Some(frozen);
+            source.base_source_revision = base_revision;
+            source.source_revision.clone_from(&revision);
+            CodeBuddyCapabilitySource {
+                authority: authority.clone(),
+                relative_path,
+                primary: Some(primary),
+                extension: None,
+                revision,
+            }
+        }
+        CodeBuddySourceShape::Extension => {
+            let session_index_relative = relative_path.join("index.json");
+            let messages_relative = relative_path.join("messages");
+            let project_index_relative = relative_path
+                .parent()
+                .unwrap_or_else(|| Path::new(""))
+                .join("index.json");
+            let session_index = authority.open_file(&session_index_relative)?;
+            let project_index = match authority.open_file(&project_index_relative) {
+                Ok(file) => Some(file),
+                Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error),
+            };
+            let messages_directory = authority.open_directory(&messages_relative)?;
+            let session_index_bytes =
+                session_index.read_all_bounded(MAX_PROVIDER_JSONL_LINE_BYTES)?;
+            let project_index_bytes = project_index
+                .as_ref()
+                .map(|file| file.read_all_bounded(MAX_PROVIDER_JSONL_LINE_BYTES))
+                .transpose()?;
+            let metadata = codebuddy_extension_metadata_from_admitted(
+                &source.path,
+                &session_index_bytes,
+                project_index_bytes.as_deref(),
+            )?;
+            let mut messages = BTreeMap::new();
+            let mut revision = CodeBuddyRevisionHasher::new();
+            revision.update(b"codebuddy-extension-capability-v1");
+            revision.update(&session_index_bytes);
+            match project_index_bytes.as_deref() {
+                Some(bytes) => {
+                    revision.update(b"project-index");
+                    revision.update(bytes);
+                }
+                None => revision.update(b"missing-project-index"),
+            }
+            for message_ref in metadata.messages() {
+                serde_json::to_writer(&mut revision, message_ref)?;
+                let Some(message_id) = message_ref
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| provider_safe_path_segment(id))
+                else {
+                    revision.update(b"rejected-message-id");
+                    continue;
+                };
+                let relative = messages_relative.join(format!("{message_id}.json"));
+                let file = authority.open_file(&relative)?;
+                let frozen = CodeBuddyFrozenFile::from_metadata(file.metadata())?;
+                frozen.update_revision(&mut revision);
+                messages.insert(message_id.to_owned(), file);
+            }
+            let base_revision = format!(
+                "codebuddy-extension-capability-v1:fnv1a64:{:016x}",
+                revision.finish()
+            );
+            let effective_revision = effective_source_revision(
+                &base_revision,
+                source.inventory_observation_token.as_deref(),
+            );
+            source.base_source_revision = base_revision;
+            source.source_revision.clone_from(&effective_revision);
+            CodeBuddyCapabilitySource {
+                authority: authority.clone(),
+                relative_path,
+                primary: None,
+                extension: Some(CodeBuddyExtensionCapability {
+                    metadata,
+                    session_index,
+                    project_index,
+                    messages_directory,
+                    messages,
+                }),
+                revision: effective_revision,
+            }
+        }
+    };
+    source.capability = Some(Arc::new(capability));
+    Ok(())
+}
+
+fn revalidate_codebuddy_capability(source: &CodeBuddySource) -> Result<()> {
+    let capability = source.capability.as_ref().ok_or(CaptureError::SystemInvariant(
+        "CodeBuddy source-backed source lost its authority capability",
+    ))?;
+    capability.revalidate()?;
+    let mut closing = source.clone();
+    closing.capability = None;
+    bind_codebuddy_capability(&mut closing, &capability.authority)?;
+    let closing_capability = closing
+        .capability
+        .as_ref()
+        .ok_or(CaptureError::SystemInvariant(
+            "CodeBuddy closing admission lost its authority capability",
+        ))?;
+    closing_capability.revalidate()?;
+    if closing_capability.revision != capability.revision {
+        return Err(CaptureError::SourceChangedDuringCapture);
+    }
+    Ok(())
 }
 
 fn codebuddy_source_key(
@@ -612,7 +767,19 @@ fn hydrate_cli(
             "CLI locator exceeds the bounded record size",
         ));
     }
-    let provider_bytes = read_exact_range(&source.path, *byte_offset, *byte_length)?;
+    let provider_bytes = match source
+        .capability
+        .as_ref()
+        .and_then(|capability| capability.primary.as_ref())
+    {
+        Some(file) => file.read_exact_range(
+            *byte_offset,
+            usize::try_from(*byte_length)
+                .map_err(|_| invalid_source_backed("CLI locator range is too large"))?,
+            CODEBUDDY_NATIVE_RECORD_MAX_BYTES,
+        )?,
+        None => read_exact_range(&source.path, *byte_offset, *byte_length)?,
+    };
     let payload = jsonl_payload(&provider_bytes);
     if Sha256::digest(payload).as_slice() != locator.record_digest() {
         return Err(invalid_source_backed(
@@ -680,16 +847,29 @@ fn hydrate_extension(
         ));
     }
     let path = source.path.join(&relative_path);
-    let frozen = CodeBuddyFrozenFile::read(&path)?;
+    let admitted = source
+        .capability
+        .as_ref()
+        .and_then(|capability| capability.extension.as_ref())
+        .and_then(|extension| extension.messages.get(message_id));
+    let frozen = match admitted {
+        Some(file) => CodeBuddyFrozenFile::from_metadata(file.metadata())?,
+        None => CodeBuddyFrozenFile::read(&path)?,
+    };
     if frozen.length > CODEBUDDY_NATIVE_RECORD_MAX_BYTES as u64 {
         return Err(invalid_source_backed(
             "structured locator exceeds the bounded record size",
         ));
     }
-    let provider_bytes = fs::read(&path)?;
-    if !frozen.revalidate(&path)?
-        || Sha256::digest(&provider_bytes).as_slice() != locator.record_digest()
-    {
+    let provider_bytes = match admitted {
+        Some(file) => file.read_all_bounded(CODEBUDDY_NATIVE_RECORD_MAX_BYTES)?,
+        None => fs::read(&path)?,
+    };
+    let revalidated = match admitted {
+        Some(file) => file.revalidate().is_ok(),
+        None => frozen.revalidate(&path)?,
+    };
+    if !revalidated || Sha256::digest(&provider_bytes).as_slice() != locator.record_digest() {
         return Err(invalid_source_backed(
             "structured locator record digest no longer matches provider bytes",
         ));
@@ -1039,5 +1219,71 @@ mod tests {
                 .unwrap();
             assert_ne!(scan.source.content_digest(), prior.source.content_digest());
         }
+    }
+
+    #[test]
+    fn compound_authority_codebuddy_rejects_missing_auxiliary_and_sibling_swap() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("codebuddy");
+        write_dual_store(&root, "cli", "extension");
+        let project_index = root.join("history/shared-project/index.json");
+        fs::remove_file(&project_index).unwrap();
+        let mut inventory =
+            discover_sources(&root, &root, &ProviderImportOptions::default()).unwrap();
+        let authority = codebuddy_authority(&root).unwrap();
+        let extension = inventory
+            .sources
+            .iter_mut()
+            .find(|source| source.shape == CodeBuddySourceShape::Extension)
+            .unwrap();
+        bind_codebuddy_capability(extension, &authority).unwrap();
+        fs::write(&project_index, br#"{"conversations":[]}"#).unwrap();
+        assert!(revalidate_codebuddy_capability(extension).is_err());
+
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("codebuddy");
+        write_dual_store(&root, "cli", "extension");
+        let mut inventory =
+            discover_sources(&root, &root, &ProviderImportOptions::default()).unwrap();
+        let authority = codebuddy_authority(&root).unwrap();
+        let extension = inventory
+            .sources
+            .iter_mut()
+            .find(|source| source.shape == CodeBuddySourceShape::Extension)
+            .unwrap();
+        bind_codebuddy_capability(extension, &authority).unwrap();
+        let message =
+            root.join("history/shared-project/shared-session/messages/extension-message.json");
+        let bytes = fs::read(&message).unwrap();
+        fs::rename(&message, message.with_extension("retired")).unwrap();
+        fs::write(&message, bytes).unwrap();
+        assert!(revalidate_codebuddy_capability(extension).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compound_authority_codebuddy_rejects_ancestor_swap_and_stale_locator() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("codebuddy");
+        write_dual_store(&root, "cli before", "extension before");
+        let scans = scan(&root);
+        let stale_extension = documents(&scans)[CODEBUDDY_EXTENSION_SCHEMA_VARIANT]
+            .locator
+            .clone();
+
+        let mut inventory =
+            discover_sources(&root, &root, &ProviderImportOptions::default()).unwrap();
+        let authority = codebuddy_authority(&root).unwrap();
+        for source in &mut inventory.sources {
+            bind_codebuddy_capability(source, &authority).unwrap();
+        }
+        let retired = temp.path().join("retired-codebuddy");
+        fs::rename(&root, &retired).unwrap();
+        write_dual_store(&root, "cli after", "extension after");
+        assert!(inventory
+            .sources
+            .iter()
+            .all(|source| revalidate_codebuddy_capability(source).is_err()));
+        assert!(hydrate_codebuddy_source_backed_record(&root, &stale_extension).is_err());
     }
 }

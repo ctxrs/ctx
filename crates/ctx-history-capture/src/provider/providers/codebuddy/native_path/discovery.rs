@@ -127,6 +127,7 @@ pub(super) fn build_source(
         inventory_observation_token,
         session_ordinal,
         frozen,
+        capability: None,
     })
 }
 
@@ -393,11 +394,22 @@ pub(super) fn initial_cursor(
             }
         }
         CodeBuddySourceShape::Extension => {
-            let (metadata, _) = codebuddy_extension_metadata(&source.path, source.session_ordinal)?;
-            let metadata = metadata.ok_or(CaptureError::InvalidProviderTranscriptPath {
-                path: source.path.clone(),
-                reason: "CodeBuddy extension session index is unreadable",
-            })?;
+            let admitted = source
+                .capability
+                .as_ref()
+                .and_then(|capability| capability.extension.as_ref());
+            let owned;
+            let metadata = if let Some(admitted) = admitted {
+                &admitted.metadata
+            } else {
+                let (metadata, _) =
+                    codebuddy_extension_metadata(&source.path, source.session_ordinal)?;
+                owned = metadata.ok_or(CaptureError::InvalidProviderTranscriptPath {
+                    path: source.path.clone(),
+                    reason: "CodeBuddy extension session index is unreadable",
+                })?;
+                &owned
+            };
             CodeBuddySessionCheckpoint {
                 native_session_id: metadata.native_session_id.clone(),
                 project_hash: metadata.project_hash.clone(),
@@ -460,12 +472,29 @@ pub(super) fn cli_prefix_matches(
     {
         return Ok(false);
     }
-    Ok(file_prefix_sha256(&source.path, cursor.next_native_offset)?
+    Ok(source_prefix_sha256(source, cursor.next_native_offset)?
         == cursor.certified_prefix_sha256)
+}
+
+pub(super) fn source_prefix_sha256(source: &CodeBuddySource, length: u64) -> Result<String> {
+    if let Some(file) = source
+        .capability
+        .as_ref()
+        .and_then(|capability| capability.primary.as_ref())
+    {
+        let mut file = file.file().try_clone()?;
+        file.seek(SeekFrom::Start(0))?;
+        return reader_prefix_sha256(&mut file, length);
+    }
+    file_prefix_sha256(&source.path, length)
 }
 
 pub(super) fn file_prefix_sha256(path: &Path, length: u64) -> Result<String> {
     let mut file = File::open(path)?;
+    reader_prefix_sha256(&mut file, length)
+}
+
+fn reader_prefix_sha256(file: &mut File, length: u64) -> Result<String> {
     let mut remaining = length;
     let mut buffer = [0_u8; 64 * 1024];
     let mut digest = Sha256::new();
