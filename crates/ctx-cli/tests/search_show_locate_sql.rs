@@ -168,12 +168,7 @@ fn sql_reads_existing_store_and_supports_formats_and_input_sources() {
 fn sql_rejects_nonexistent_file_path() {
     let temp = tempdir();
     let path = temp.path().join("does-not-exist.sql");
-    let stderr = failure_stderr(
-        ctx(&temp)
-            .arg("sql")
-            .arg("--file")
-            .arg(&path),
-    );
+    let stderr = failure_stderr(ctx(&temp).arg("sql").arg("--file").arg(&path));
     assert!(stderr.contains("SQL file does not exist"), "{stderr}");
     assert!(stderr.contains(path.to_str().unwrap()), "{stderr}");
 }
