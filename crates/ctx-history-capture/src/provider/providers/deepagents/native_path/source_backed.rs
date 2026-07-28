@@ -11,11 +11,11 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, EventIdentityInput,
-    LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
-    PositionStability, ProjectionContractError, ScannedSourceCounts, SessionIdentityInput,
-    SourceAnchor, SourceKey, SourceObservation, SourceRecordLocator, SourceResolverContractError,
-    StableEntityId, SubrecordSelector, TypedKey,
+    derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource,
+    EventIdentityInput, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
+    NativeSessionKey, PositionStability, ProjectionContractError, ScannedSourceCounts,
+    SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation, SourceRecordLocator,
+    SourceResolverContractError, StableEntityId, SubrecordSelector, TypedKey,
 };
 use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
 use sha2::{Digest, Sha256};
@@ -166,6 +166,7 @@ struct PendingWriteV0 {
     session_id: StableEntityId,
     occurred_at: DateTime<Utc>,
     cwd: Option<String>,
+    branch: Option<String>,
     messages: Vec<DeepAgentsMessage>,
     next_message_offset: usize,
     first_event_sequence: u64,
@@ -188,6 +189,7 @@ pub(crate) struct DeepAgentsSourceBackedScannerV0 {
     observation: SourceObservation,
     source_revision_digest: [u8; 32],
     context: ProviderAdapterContext,
+    source_path: String,
     after_rowid: Option<i64>,
     pending: Option<PendingWriteV0>,
     current_thread: Option<DeepAgentsThreadSummary>,
@@ -226,6 +228,7 @@ impl DeepAgentsSourceBackedScannerV0 {
             source_root: None,
             imported_at,
         };
+        let source_path = selection.path().display().to_string();
         Ok(Self {
             selection,
             snapshot,
@@ -234,6 +237,7 @@ impl DeepAgentsSourceBackedScannerV0 {
             observation,
             source_revision_digest,
             context,
+            source_path,
             after_rowid: None,
             pending: None,
             current_thread: None,
@@ -296,6 +300,8 @@ impl DeepAgentsSourceBackedScannerV0 {
                     offset,
                     pending.occurred_at,
                     pending.cwd.as_deref(),
+                    pending.branch.as_deref(),
+                    &self.source_path,
                     message,
                 )?);
                 self.counts.indexed_documents = checked_add(self.counts.indexed_documents, 1)?;
@@ -407,6 +413,10 @@ impl DeepAgentsSourceBackedScannerV0 {
                     .current_thread
                     .as_ref()
                     .and_then(|summary| summary.thread.cwd.clone()),
+                branch: self
+                    .current_thread
+                    .as_ref()
+                    .and_then(|summary| summary.thread.git_branch.clone()),
                 messages: decoded.messages,
                 next_message_offset: 0,
                 first_event_sequence,
@@ -586,6 +596,8 @@ fn deepagents_lexical_document(
     message_offset: usize,
     occurred_at: DateTime<Utc>,
     cwd: Option<&str>,
+    branch: Option<&str>,
+    source_path: &str,
     message: &DeepAgentsMessage,
 ) -> DeepAgentsSourceBackedResultV0<LexicalDocument> {
     let write_key = vec![
@@ -646,9 +658,15 @@ fn deepagents_lexical_document(
     Ok(LexicalDocument {
         event_id,
         session_id,
+        parent_session_id: None,
+        root_session_id: session_id,
         source: source.clone(),
         locator,
         provider_session_id: Some(key.thread_id.clone()),
+        branch: branch.map(str::to_owned),
+        source_path: Some(source_path.to_owned()),
+        agent_type: AgentType::Primary.as_str().to_owned(),
+        is_primary: true,
         event_sequence,
         occurred_at_unix_ms: Some(occurred_at.timestamp_millis()),
         event_type: event_type.as_str().to_owned(),
