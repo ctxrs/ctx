@@ -36,6 +36,28 @@ pub(super) use publication::{
 };
 use query::scan_warp_native_snapshot;
 
+pub(in super::super) struct WarpNativeSourceBackedScan {
+    pub(in super::super) source_integrity_digest: String,
+    pub(in super::super) counters: WarpNativeCounters,
+}
+
+/// Runs the existing Warp parser against a caller-owned SQLite read
+/// connection. Source-backed ingestion owns certification and deliberately
+/// does not enter the legacy snapshot-copy or Store publication paths.
+pub(in super::super) fn scan_warp_source_backed_connection(
+    connection: &Connection,
+    sink: &mut dyn WarpNativeSink,
+) -> Result<WarpNativeSourceBackedScan> {
+    let schema = WarpSqliteSchema::detect(connection)?;
+    validate_snapshot_cursor_compatibility(connection)?;
+    let result =
+        scan_warp_native_snapshot(connection, &schema, WarpNativeProfile::CoreOnly, None, sink)?;
+    Ok(WarpNativeSourceBackedScan {
+        source_integrity_digest: result.source_integrity_digest,
+        counters: result.counters,
+    })
+}
+
 pub(super) fn resolve_warp_task_message(
     task_bytes: &[u8],
     conversation_id: &str,

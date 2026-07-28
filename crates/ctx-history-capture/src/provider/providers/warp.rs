@@ -8,7 +8,14 @@ use crate::{ProviderAdapterContext, ProviderImportOptions, ProviderImportSummary
 mod nativepath;
 mod production;
 mod schema;
+mod source_backed;
 mod wire;
+
+pub(crate) use source_backed::{
+    project_selected_warp_sources_v0, project_warp_source_backed_v0, resolve_warp_locator_v0,
+    WarpHydratedRecordV0, WarpSourceBackedErrorV0, WarpSourceBackedSnapshotV0,
+    WarpSourceSelectionV0,
+};
 
 pub(crate) struct WarpTaskContent {
     pub(crate) event_type: EventType,
@@ -43,3 +50,6 @@ pub(crate) fn import_warp_nativepath(
 #[cfg(test)]
 #[path = "warp/production_tests.rs"]
 mod production_tests;
+#[cfg(test)]
+#[path = "warp/source_backed_tests.rs"]
+mod source_backed_tests;
