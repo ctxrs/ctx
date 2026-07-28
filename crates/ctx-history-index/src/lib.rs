@@ -516,6 +516,12 @@ impl GenerationWriter {
         })
     }
 
+    /// Returns the base generation captured after this writer acquired
+    /// Tantivy's exclusive writer lock.
+    pub fn base_manifest(&self) -> Option<&GenerationManifest> {
+        self.base_manifest.as_ref()
+    }
+
     /// Starts replacing every lexical document owned by `source`.
     ///
     /// Documents can then be submitted as they are parsed; no whole-source or
@@ -1649,6 +1655,37 @@ mod tests {
         assert_eq!(index.generation_id(), receipt.generation_id);
         assert_eq!(index.manifest().indexed_documents, 1);
         assert_eq!(index.count_term("atomic").unwrap(), 1);
+    }
+
+    #[test]
+    fn writer_exposes_the_base_manifest_captured_under_its_lock() {
+        let temp = tempdir().unwrap();
+        let source = source("session.jsonl");
+        let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        assert!(first.base_manifest().is_none());
+        first.begin_source(source.clone()).unwrap();
+        first.add_document(document(&source, 1, "base")).unwrap();
+        first.certify_source(certificate(&source, 1, 1)).unwrap();
+        let receipt = first.commit(|_| true).unwrap();
+
+        let writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        let base = writer.base_manifest().unwrap();
+        assert_eq!(base.generation_id().unwrap(), receipt.generation_id);
+        assert_eq!(base.sources.len(), 1);
+        assert_eq!(base.sources[0].observation().source(), &source);
+
+        let error = match GenerationWriter::open(temp.path(), WriterOptions::default()) {
+            Ok(_) => panic!("competing writer unexpectedly acquired the writer lock"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            IndexError::Tantivy(tantivy::TantivyError::LockFailure(_, _))
+        ));
+        assert_eq!(
+            writer.base_manifest().unwrap().generation_id().unwrap(),
+            receipt.generation_id
+        );
     }
 
     #[test]

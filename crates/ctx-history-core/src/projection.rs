@@ -559,6 +559,17 @@ impl CertifiedSourceDeletion {
     pub fn observed_sources(&self) -> u64 {
         self.observed_sources
     }
+
+    /// Verifies this deletion against the exact complete inventory that
+    /// certified it.
+    pub fn verifies(&self, inventory: &CertifiedSourceInventory) -> bool {
+        self.source.provider == inventory.observation.provider
+            && &self.inventory == inventory.observation()
+            && self.discovery_revision == inventory.discovery_revision()
+            && self.inventory_digest == *inventory.inventory_digest()
+            && self.observed_sources == inventory.observed_sources() as u64
+            && !inventory.contains(&self.source)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -2485,6 +2496,54 @@ mod tests {
             error,
             ProjectionContractError::InventoryContainsDeletedSource
         );
+    }
+
+    #[test]
+    fn deletion_witness_verifies_only_the_exact_complete_inventory() {
+        let deleted = source(1);
+        let retained = source(2);
+        let observation = SourceInventoryObservation::new(
+            "codex",
+            "sessions-root",
+            TypedKey::utf8("root-lineage").unwrap(),
+            "tree-inventory-v1",
+            vec![1],
+        )
+        .unwrap();
+        let inventory = CertifiedSourceInventory::certify(
+            observation.clone(),
+            observation,
+            "codex-discovery-v1",
+            vec![retained],
+        )
+        .unwrap();
+        let witness = CertifiedSourceDeletion::from_inventory(deleted.clone(), &inventory).unwrap();
+
+        assert!(witness.verifies(&inventory));
+
+        let mut wrong_provider = inventory.clone();
+        wrong_provider.observation.provider = "claude_code".to_owned();
+        assert!(!witness.verifies(&wrong_provider));
+
+        let mut wrong_authority = inventory.clone();
+        wrong_authority.observation.authority_key = TypedKey::utf8("other-root").unwrap();
+        assert!(!witness.verifies(&wrong_authority));
+
+        let mut wrong_discovery_contract = inventory.clone();
+        wrong_discovery_contract.discovery_revision = "codex-discovery-v2".to_owned();
+        assert!(!witness.verifies(&wrong_discovery_contract));
+
+        let mut wrong_digest = inventory.clone();
+        wrong_digest.inventory_digest = [9; 32];
+        assert!(!witness.verifies(&wrong_digest));
+
+        let mut wrong_count = inventory.clone();
+        wrong_count.source_digests.clear();
+        assert!(!witness.verifies(&wrong_count));
+
+        let mut containing_inventory = inventory;
+        containing_inventory.source_digests = vec![deleted.identity.digest];
+        assert!(!witness.verifies(&containing_inventory));
     }
 
     #[test]
