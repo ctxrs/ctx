@@ -126,6 +126,7 @@ impl ProClient {
             Capability::Status,
             Capability::JournalSync,
             Capability::OutputMaterialization,
+            Capability::SourceMaterialization,
             Capability::Query,
             Capability::GitRead,
         ]);

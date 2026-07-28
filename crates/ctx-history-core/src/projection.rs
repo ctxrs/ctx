@@ -426,10 +426,29 @@ impl SourceInventoryObservation {
     pub fn revision(&self) -> &[u8] {
         &self.revision
     }
+
+    pub fn validate_contract(&self) -> ProjectionContractResult<()> {
+        validate_text("inventory_provider", &self.provider, MAX_PROVIDER_BYTES)?;
+        validate_text(
+            "inventory_authority_namespace",
+            &self.authority_namespace,
+            MAX_KEY_NAMESPACE_BYTES,
+        )?;
+        let mut encoded = Vec::new();
+        encode_typed_key(&mut encoded, &self.authority_key)?;
+        validate_bytes("inventory_authority_key", &encoded, MAX_TYPED_KEY_BYTES)?;
+        validate_text(
+            "inventory_revision_kind",
+            &self.revision_kind,
+            MAX_REVISION_KIND_BYTES,
+        )?;
+        validate_nonempty_bytes("inventory_revision", &self.revision, MAX_REVISION_BYTES)
+    }
 }
 
 /// A complete, internally digested provider inventory observed unchanged.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CertifiedSourceInventory {
     observation: SourceInventoryObservation,
     discovery_revision: String,
@@ -508,10 +527,37 @@ impl CertifiedSourceInventory {
             .binary_search(&source.identity.digest)
             .is_ok()
     }
+
+    pub fn validate_contract(&self) -> ProjectionContractResult<()> {
+        self.observation.validate_contract()?;
+        validate_text(
+            "discovery_revision",
+            &self.discovery_revision,
+            MAX_PARSER_REVISION_BYTES,
+        )?;
+        if self
+            .source_digests
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+        {
+            return Err(ProjectionContractError::DuplicateInventorySource);
+        }
+        let mut digest = Sha256::new();
+        digest.update(b"ctx.source-inventory\0");
+        digest.update((self.source_digests.len() as u64).to_be_bytes());
+        for source_digest in &self.source_digests {
+            digest.update(source_digest);
+        }
+        if self.inventory_digest != <[u8; 32]>::from(digest.finalize()) {
+            return Err(ProjectionContractError::InventoryRevisionChanged);
+        }
+        Ok(())
+    }
 }
 
 /// Proof that a complete authoritative inventory omitted one exact source.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CertifiedSourceDeletion {
     source: SourceKey,
     inventory: SourceInventoryObservation,
@@ -569,6 +615,20 @@ impl CertifiedSourceDeletion {
             && self.inventory_digest == *inventory.inventory_digest()
             && self.observed_sources == inventory.observed_sources() as u64
             && !inventory.contains(&self.source)
+    }
+
+    pub fn validate_contract(&self) -> ProjectionContractResult<()> {
+        self.source.validate_contract()?;
+        self.inventory.validate_contract()?;
+        validate_text(
+            "discovery_revision",
+            &self.discovery_revision,
+            MAX_PARSER_REVISION_BYTES,
+        )?;
+        if self.source.provider != self.inventory.provider {
+            return Err(ProjectionContractError::InventoryProviderMismatch);
+        }
+        Ok(())
     }
 }
 
@@ -762,7 +822,7 @@ impl SourceFrontier {
         &self.certified_prefix_digest
     }
 
-    fn validate_contract(&self) -> ProjectionContractResult<()> {
+    pub fn validate_contract(&self) -> ProjectionContractResult<()> {
         validate_text(
             "source_checkpoint_kind",
             &self.checkpoint_kind,

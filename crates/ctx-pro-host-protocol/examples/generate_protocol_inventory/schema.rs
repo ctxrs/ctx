@@ -11,6 +11,7 @@ pub(super) fn inventory() -> Value {
         Capability::Status,
         Capability::JournalSync,
         Capability::OutputMaterialization,
+        Capability::SourceMaterialization,
         Capability::Query,
         Capability::GitRead,
     ];
@@ -66,6 +67,20 @@ pub(super) fn inventory() -> Value {
             "output_identity_bytes": MAX_OUTPUT_IDENTITY_BYTES,
             "output_command_bytes": MAX_OUTPUT_COMMAND_BYTES,
             "output_progress_sources": MAX_OUTPUT_PROGRESS_SOURCES,
+            "source_manifest_sources": MAX_SOURCE_MANIFEST_SOURCES,
+            "source_manifest_removals": MAX_SOURCE_MANIFEST_REMOVALS,
+            "source_inventory_sources": MAX_SOURCE_INVENTORY_SOURCES,
+            "source_progress_sources": MAX_SOURCE_PROGRESS_SOURCES,
+            "source_records_per_page": MAX_SOURCE_RECORDS_PER_PAGE,
+            "source_facts_per_record": MAX_SOURCE_FACTS_PER_RECORD,
+            "source_touched_files_per_record": MAX_SOURCE_TOUCHED_FILES_PER_RECORD,
+            "source_content_bytes": MAX_SOURCE_CONTENT_BYTES,
+            "source_content_bytes_per_page": MAX_SOURCE_CONTENT_BYTES_PER_PAGE,
+            "source_manifest_wire_bytes": MAX_SOURCE_MANIFEST_WIRE_BYTES,
+            "source_control_wire_bytes": MAX_SOURCE_CONTROL_WIRE_BYTES,
+            "source_page_wire_bytes": MAX_SOURCE_PAGE_WIRE_BYTES,
+            "source_identity_bytes": MAX_SOURCE_IDENTITY_BYTES,
+            "source_path_bytes": MAX_SOURCE_PATH_BYTES,
             "blame_results": MAX_BLAME_RESULTS,
             "blame_cursor_bytes": MAX_BLAME_CURSOR_BYTES,
             "blame_evidence": MAX_BLAME_EVIDENCE,
@@ -77,12 +92,16 @@ pub(super) fn inventory() -> Value {
             "hello", "authorize", "prepare_graph_key_deletion",
             "confirm_graph_key_deletion", "status", "sync_journal",
             "begin_output_inventory", "observe_output_source", "materialize_output_page",
-            "finish_output_inventory", "get_output_progress", "blame"
+            "finish_output_inventory", "get_output_progress",
+            "begin_source_manifest", "prepare_source", "materialize_source_page",
+            "delete_source", "finish_source_manifest", "blame"
         ],
         "helper_message_kinds": [
             "hello", "authorized", "graph_key_deletion_prepared", "graph_key_deleted",
             "status", "journal_synced", "output_inventory_began", "output_source_observed",
             "output_page_materialized", "output_inventory_finished", "output_progress",
+            "source_manifest_began", "source_prepared", "source_page_materialized",
+            "source_deleted", "source_manifest_finished",
             "blame", "error"
         ],
         "capabilities": wire_names(&capabilities, Capability::wire_name),
@@ -120,6 +139,16 @@ pub(super) fn inventory() -> Value {
             "output_outcome": ["success", "failure", "timeout", "unknown"],
             "output_source_availability": ["available", "unavailable", "error"],
             "output_source_disposition": ["append_or_resume", "new_source", "rewrite"],
+            "source_disposition": ["new_source", "resume", "rewrite"],
+            "source_outcome": ["success", "failure", "timeout", "unknown"],
+            "transient_source_fact_kind": ["message", "command", "result"],
+            "stable_entity_kind": ["Source", "Session", "Event"],
+            "source_anchor": ["ProviderNative", "CatalogLineage"],
+            "typed_key": ["Null", "Bytes", "Utf8", "I64", "U64", "F64Bits", "Bool", "Composite"],
+            "locator_revision_policy": ["ExactSourceRevision", "StableRecordEvidence"],
+            "native_record_coordinate": [
+                "Jsonl", "ProviderSqlite", "Document", "TreeRecord", "ProviderNative"
+            ],
             "production_relationship": ["produced_by", "possibly_produced_by"],
             "pull_request_action": [
                 "referenced", "created", "reviewed", "commented",
@@ -142,6 +171,7 @@ pub(super) fn inventory() -> Value {
             ], &[]),
             "ByteRange": fields(&["start", "end_exclusive"], &[]),
             "BeginOutputInventoryRequest": fields(&["generation"], &[]),
+            "BeginSourceManifestRequest": fields(&["manifest"], &[]),
             "BlameContinuation": fields(&["cursor", "reason"], &[]),
             "BlameRequest": fields(&["target", "limit", "expected_snapshot"], &["cursor"]),
             "BlameResult": fields(&["target", "matches", "evidence"], &["git_snapshot", "next"]),
@@ -154,6 +184,15 @@ pub(super) fn inventory() -> Value {
                 "evidence_numbers"
             ], &["object", "fact_occurred_at_ms", "direct_actor", "owning_root"]),
             "ContentRef": fields(&["sha256", "byte_len"], &[]),
+            "CertifiedSource": fields(
+                &["observation", "parser_revision", "content_digest", "counts"],
+                &["frontier"]),
+            "CertifiedSourceDeletion": fields(&[
+                "source", "inventory", "discovery_revision", "inventory_digest", "observed_sources"
+            ], &[]),
+            "CertifiedSourceInventory": fields(&[
+                "observation", "discovery_revision", "source_digests", "inventory_digest"
+            ], &[]),
             "EntitlementGrant": fields(&[
                 "schema_version", "issuer", "key_id", "grant_id", "subject", "account_id",
                 "product", "access_kind", "installation_key_thumbprint", "issued_at_unix",
@@ -204,6 +243,7 @@ pub(super) fn inventory() -> Value {
             "LineRange": fields(&["start", "end"], &[]),
             "NumberedEvidence": fields(&["number", "citation"], &[]),
             "FinishOutputInventoryRequest": fields(&["generation"], &[]),
+            "FinishSourceManifestRequest": fields(&["manifest", "expected_progress"], &[]),
             "ObserveOutputSourceRequest": fields(
                 &["generation", "source", "availability"], &[]),
             "OutputAssociations": fields(
@@ -268,11 +308,95 @@ pub(super) fn inventory() -> Value {
             "ResolvedBlameTarget.pull_request": fields(
                 &["kind", "selector", "pull_request", "repository"], &[]),
             "SignedEntitlement": fields(&["grant", "signature_base64url"], &[]),
+            "ScannedSourceCounts": fields(&[
+                "complete_records", "retained_records", "rejected_records", "ignored_records",
+                "indexed_documents", "certified_bytes"
+            ], &[]),
+            "SourceCommandFact": fields(
+                &["command"], &["call_id", "tool_name", "working_directory"]),
+            "SourceDeleted": fields(&[
+                "core_generation_id", "source", "removed_source_epoch", "replayed"
+            ], &[]),
+            "SourceFrontier": fields(&[
+                "checkpoint_kind", "checkpoint", "certified_prefix_bytes",
+                "certified_prefix_digest"
+            ], &[]),
+            "SourceInventoryObservation": fields(&[
+                "provider", "authority_namespace", "authority_key", "revision_kind", "revision"
+            ], &[]),
+            "SourceKey": fields(&[
+                "provider", "source_format", "schema_variant", "provider_identity_version",
+                "anchor", "identity"
+            ], &[]),
+            "SourceManifest": fields(&[
+                "contract_version", "core_generation_id", "sources", "removals"
+            ], &[]),
+            "SourceManifestBegan": fields(&[
+                "core_generation_id", "materializer_revision", "progress", "replayed"
+            ], &[]),
+            "SourceManifestFinished": fields(&["receipt", "replayed"], &[]),
+            "SourceManifestReceipt": fields(&[
+                "core_generation_id", "materializer_revision", "progress"
+            ], &[]),
+            "SourceMessageFact": fields(&["content"], &[]),
+            "SourceObservation": fields(&["source", "revision_kind", "revision"], &[]),
+            "SourcePageMaterialized": fields(&[
+                "core_generation_id", "progress", "accepted_records", "materialized_facts",
+                "replayed"
+            ], &[]),
+            "SourcePrepared": fields(&["core_generation_id", "progress", "replayed"], &[]),
+            "SourceProgress": fields(
+                &[
+                    "source", "source_epoch", "certified_revision_sha256",
+                    "materializer_revision", "terminal"
+                ],
+                &["frontier"]),
+            "SourceRecord": fields(
+                &["event_id", "session_id", "locator", "relationships", "metadata", "facts"],
+                &["repository"]),
+            "SourceRecordLocator": fields(
+                &["locator_version", "source", "coordinate", "revision_policy", "record_digest"],
+                &["certified_source_revision_digest"]),
+            "SourceRecordMetadata": fields(
+                &["event_sequence", "event_type", "touched_files"],
+                &["occurred_at_unix_ms", "role", "workspace", "cwd"]),
+            "SourceRemoval": fields(&["deletion", "inventory"], &[]),
+            "SourceRepositoryContext": fields(
+                &["repository_id"], &["checkout_id", "worktree_id", "object_format"]),
+            "SourceResultFact": fields(
+                &["outcome", "content"], &["call_id", "exit_code", "duration_ms"]),
+            "SourceSessionRelationships": fields(
+                &["direct_session_id", "root_session_id"],
+                &["parent_session_id", "provider_session_id", "agent_id"]),
+            "StableEntityId": fields(&[
+                "contract_version", "entity_kind", "digest", "source_digest",
+                "source_descriptor_digest", "uuid"
+            ], &[]),
             "StatusRequest": fields(&[], &[]),
             "StatusResult": fields(&["state"], &["checkpoint"]),
+            "PrepareSourceRequest": fields(
+                &[
+                    "core_generation_id", "source", "certified_revision_sha256",
+                    "materializer_revision", "disposition"
+                ],
+                &["expected_prior"]),
+            "MaterializeSourcePageRequest": fields(
+                &["core_generation_id", "expected_prior", "terminal", "records"],
+                &["next_frontier"]),
+            "DeleteSourceRequest": fields(&[
+                "core_generation_id", "removal", "expected_prior"
+            ], &[]),
             "TransientOutputContent": {
                 "wire_type": "canonical_base64_string",
                 "debug": "redacted"
+            },
+            "TransientSourceContent": {
+                "wire_type": "canonical_base64_string",
+                "debug": "redacted"
+            },
+            "TransientSourceFact": {
+                "wire_type": "internally_tagged_kind_with_body",
+                "variants": ["message", "command", "result"]
             }
         },
         "canonical_payload": {
@@ -350,6 +474,23 @@ pub(super) fn inventory() -> Value {
             "ordering": "strict_native_sequence_then_unit_key",
             "commit": "page_sent_only_after_core_safe_group_commit_and_source_revalidation",
             "progress": "independent_per_source_epoch_and_native_cursor_compare_and_swap"
+        },
+        "source_materialization": {
+            "contract_version": SOURCE_MATERIALIZATION_CONTRACT_VERSION,
+            "authority": "certified_public_source_manifest_and_provider_reread_are_the_sole_body_authority",
+            "lifecycle": [
+                "begin_source_manifest", "prepare_source", "materialize_source_page",
+                "delete_source", "finish_source_manifest"
+            ],
+            "progress": "independent_per_source_epoch_certified_revision_and_frontier_compare_and_swap",
+            "materializer_upgrade": "begin_may_return_prior_revision_progress_which_prepare_rewrite_invalidates",
+            "finish": "one_bounded_request_contains_the_exact_manifest_and_expected_terminal_progress",
+            "deletion": "requires_certified_source_deletion_paired_with_its_complete_inventory_witness",
+            "detector_input": "normalized_transient_message_command_and_result_facts_with_call_outcome_session_and_repository_context",
+            "relationships": "root_and_parent_session_ids_may_reference_other_source_lineages",
+            "durability": "transient_detector_content_is_request_only_and_not_retained_as_full_body_after_page_handling",
+            "failure": "core_is_already_published_and_pro_remains_retryable_from_committed_progress",
+            "legacy_output_inventory_authority": "forbidden"
         },
         "evidence_citation": {
             "branches": {

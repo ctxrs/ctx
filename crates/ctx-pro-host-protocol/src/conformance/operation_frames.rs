@@ -145,7 +145,12 @@ fn operation_frames_cover_every_typed_request_response_and_operation_variant() {
             | HostMessage::Status(_)
             | HostMessage::BeginOutputInventory(_)
             | HostMessage::FinishOutputInventory(_)
-            | HostMessage::GetOutputProgress(_) => {
+            | HostMessage::GetOutputProgress(_)
+            | HostMessage::BeginSourceManifest(_)
+            | HostMessage::PrepareSource(_)
+            | HostMessage::MaterializeSourcePage(_)
+            | HostMessage::DeleteSource(_)
+            | HostMessage::FinishSourceManifest(_) => {
                 panic!("{name} is not an operation-specific host fixture");
             }
         }
@@ -245,6 +250,11 @@ fn operation_frames_cover_every_typed_request_response_and_operation_variant() {
             | HelperMessage::OutputPageMaterialized(_)
             | HelperMessage::OutputInventoryFinished(_)
             | HelperMessage::OutputProgress(_)
+            | HelperMessage::SourceManifestBegan(_)
+            | HelperMessage::SourcePrepared(_)
+            | HelperMessage::SourcePageMaterialized(_)
+            | HelperMessage::SourceDeleted(_)
+            | HelperMessage::SourceManifestFinished(_)
             | HelperMessage::Error(_) => {
                 panic!("{name} is not an operation-specific helper fixture");
             }

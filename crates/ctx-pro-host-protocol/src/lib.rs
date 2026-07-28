@@ -93,6 +93,21 @@ pub use query::{
     PullRequestCommit, PullRequestCommitRelationship, QuerySnapshotExpectation,
     ResolvedBlameTarget, WorktreeStatus,
 };
+mod source_materialization;
+pub use source_materialization::{
+    certified_source_revision_sha256, BeginSourceManifestRequest, DeleteSourceRequest,
+    FinishSourceManifestRequest, MaterializeSourcePageRequest, PrepareSourceRequest,
+    SourceCommandFact, SourceDeleted, SourceDisposition, SourceManifest, SourceManifestBegan,
+    SourceManifestFinished, SourceManifestReceipt, SourceMessageFact, SourceOutcome,
+    SourcePageMaterialized, SourcePrepared, SourceProgress, SourceRecord, SourceRecordMetadata,
+    SourceRemoval, SourceRepositoryContext, SourceResultFact, SourceSessionRelationships,
+    TransientSourceContent, TransientSourceFact, MAX_SOURCE_CONTENT_BYTES,
+    MAX_SOURCE_CONTENT_BYTES_PER_PAGE, MAX_SOURCE_CONTROL_WIRE_BYTES, MAX_SOURCE_FACTS_PER_RECORD,
+    MAX_SOURCE_IDENTITY_BYTES, MAX_SOURCE_INVENTORY_SOURCES, MAX_SOURCE_MANIFEST_REMOVALS,
+    MAX_SOURCE_MANIFEST_SOURCES, MAX_SOURCE_MANIFEST_WIRE_BYTES, MAX_SOURCE_PAGE_WIRE_BYTES,
+    MAX_SOURCE_PATH_BYTES, MAX_SOURCE_PROGRESS_SOURCES, MAX_SOURCE_RECORDS_PER_PAGE,
+    MAX_SOURCE_TOUCHED_FILES_PER_RECORD, SOURCE_MATERIALIZATION_CONTRACT_VERSION,
+};
 mod fake;
 pub use fake::{FakeBlameFailure, FakeHelper};
 

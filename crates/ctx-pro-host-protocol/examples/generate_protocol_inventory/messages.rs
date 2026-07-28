@@ -5,7 +5,7 @@ use super::blame::{
 use super::fixtures::{
     authorization, blame, blame_request, checkpoint, journal_operation_requests, journal_request,
     output_cursor, output_operation_pages, output_page, output_source,
-    provider_output_blame_result,
+    provider_output_blame_result, source_manifest, source_progress, source_record, source_removal,
 };
 use super::*;
 
@@ -16,6 +16,7 @@ fn host_messages(fingerprint: &str) -> Vec<(&'static str, HostMessage)> {
         Capability::Status,
         Capability::JournalSync,
         Capability::OutputMaterialization,
+        Capability::SourceMaterialization,
         Capability::Query,
         Capability::GitRead,
     ]);
@@ -73,6 +74,48 @@ fn host_messages(fingerprint: &str) -> Vec<(&'static str, HostMessage)> {
                 sources: vec![output_source()],
             }),
         ),
+        (
+            "begin_source_manifest",
+            HostMessage::BeginSourceManifest(BeginSourceManifestRequest {
+                manifest: source_manifest(),
+            }),
+        ),
+        (
+            "prepare_source",
+            HostMessage::PrepareSource(PrepareSourceRequest {
+                core_generation_id: "a".repeat(64),
+                source: source_progress(false).source,
+                certified_revision_sha256: source_progress(false).certified_revision_sha256,
+                materializer_revision: "golden-source-materializer-v1".to_owned(),
+                disposition: SourceDisposition::NewSource,
+                expected_prior: None,
+            }),
+        ),
+        (
+            "materialize_source_page",
+            HostMessage::MaterializeSourcePage(MaterializeSourcePageRequest {
+                core_generation_id: "a".repeat(64),
+                expected_prior: source_progress(false),
+                next_frontier: source_progress(true).frontier,
+                terminal: true,
+                records: vec![source_record()],
+            }),
+        ),
+        (
+            "delete_source",
+            HostMessage::DeleteSource(DeleteSourceRequest {
+                core_generation_id: "a".repeat(64),
+                removal: source_removal(),
+                expected_prior: source_progress(true),
+            }),
+        ),
+        (
+            "finish_source_manifest",
+            HostMessage::FinishSourceManifest(FinishSourceManifestRequest {
+                manifest: source_manifest(),
+                expected_progress: vec![source_progress(true)],
+            }),
+        ),
         ("blame", HostMessage::Blame(blame(None, fingerprint))),
     ]
 }
@@ -84,6 +127,7 @@ fn helper_messages(fingerprint: &str) -> Vec<(&'static str, HelperMessage)> {
         Capability::Status,
         Capability::JournalSync,
         Capability::OutputMaterialization,
+        Capability::SourceMaterialization,
         Capability::Query,
         Capability::GitRead,
     ]);
@@ -189,6 +233,53 @@ fn helper_messages(fingerprint: &str) -> Vec<(&'static str, HelperMessage)> {
                     availability: OutputSourceAvailability::Available,
                     last_seen_inventory: Some(1),
                 }],
+            }),
+        ),
+        (
+            "source_manifest_began",
+            HelperMessage::SourceManifestBegan(SourceManifestBegan {
+                core_generation_id: "a".repeat(64),
+                materializer_revision: "golden-source-materializer-v1".to_owned(),
+                progress: Vec::new(),
+                replayed: false,
+            }),
+        ),
+        (
+            "source_prepared",
+            HelperMessage::SourcePrepared(SourcePrepared {
+                core_generation_id: "a".repeat(64),
+                progress: source_progress(false),
+                replayed: false,
+            }),
+        ),
+        (
+            "source_page_materialized",
+            HelperMessage::SourcePageMaterialized(SourcePageMaterialized {
+                core_generation_id: "a".repeat(64),
+                progress: source_progress(true),
+                accepted_records: 1,
+                materialized_facts: 3,
+                replayed: false,
+            }),
+        ),
+        (
+            "source_deleted",
+            HelperMessage::SourceDeleted(SourceDeleted {
+                core_generation_id: "a".repeat(64),
+                source: source_progress(true).source,
+                removed_source_epoch: 1,
+                replayed: false,
+            }),
+        ),
+        (
+            "source_manifest_finished",
+            HelperMessage::SourceManifestFinished(SourceManifestFinished {
+                receipt: SourceManifestReceipt {
+                    core_generation_id: "a".repeat(64),
+                    materializer_revision: "golden-source-materializer-v1".to_owned(),
+                    progress: vec![source_progress(true)],
+                },
+                replayed: false,
             }),
         ),
         (

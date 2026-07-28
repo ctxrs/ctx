@@ -4,12 +4,15 @@ use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    AuthorizationRequest, AuthorizationResult, BeginOutputInventoryRequest, BlameRequest,
-    BlameResult, ConfirmGraphKeyDeletionRequest, FinishOutputInventoryRequest, GraphKeyDeleted,
-    GraphKeyDeletionPrepared, JournalCheckpoint, JournalSyncRequest, JournalSyncResult,
-    ObserveOutputSourceRequest, OutputInventoryBegan, OutputInventoryFinished,
-    OutputPageMaterialized, OutputProgressRequest, OutputProgressResult, OutputSourceObserved,
-    PrepareGraphKeyDeletionRequest, ProOutputMaterializationPage, ProtocolError,
+    AuthorizationRequest, AuthorizationResult, BeginOutputInventoryRequest,
+    BeginSourceManifestRequest, BlameRequest, BlameResult, ConfirmGraphKeyDeletionRequest,
+    DeleteSourceRequest, FinishOutputInventoryRequest, FinishSourceManifestRequest,
+    GraphKeyDeleted, GraphKeyDeletionPrepared, JournalCheckpoint, JournalSyncRequest,
+    JournalSyncResult, MaterializeSourcePageRequest, ObserveOutputSourceRequest,
+    OutputInventoryBegan, OutputInventoryFinished, OutputPageMaterialized, OutputProgressRequest,
+    OutputProgressResult, OutputSourceObserved, PrepareGraphKeyDeletionRequest,
+    PrepareSourceRequest, ProOutputMaterializationPage, ProtocolError, SourceDeleted,
+    SourceManifestBegan, SourceManifestFinished, SourcePageMaterialized, SourcePrepared,
     PROTOCOL_FINGERPRINT, PROTOCOL_VERSION,
 };
 
@@ -96,6 +99,11 @@ pub enum HostMessage {
     MaterializeOutputPage(ProOutputMaterializationPage),
     FinishOutputInventory(FinishOutputInventoryRequest),
     GetOutputProgress(OutputProgressRequest),
+    BeginSourceManifest(BeginSourceManifestRequest),
+    PrepareSource(PrepareSourceRequest),
+    MaterializeSourcePage(MaterializeSourcePageRequest),
+    DeleteSource(DeleteSourceRequest),
+    FinishSourceManifest(FinishSourceManifestRequest),
     Blame(BlameRequest),
 }
 
@@ -118,6 +126,11 @@ pub enum HelperMessage {
     OutputPageMaterialized(OutputPageMaterialized),
     OutputInventoryFinished(OutputInventoryFinished),
     OutputProgress(OutputProgressResult),
+    SourceManifestBegan(SourceManifestBegan),
+    SourcePrepared(SourcePrepared),
+    SourcePageMaterialized(SourcePageMaterialized),
+    SourceDeleted(SourceDeleted),
+    SourceManifestFinished(SourceManifestFinished),
     Blame(BlameResult),
     Error(ProtocolError),
 }
@@ -131,6 +144,7 @@ pub enum Capability {
     Status,
     JournalSync,
     OutputMaterialization,
+    SourceMaterialization,
     Query,
     GitRead,
 }
@@ -143,6 +157,7 @@ impl Capability {
             Self::Status => "status",
             Self::JournalSync => "journal_sync",
             Self::OutputMaterialization => "output_materialization",
+            Self::SourceMaterialization => "source_materialization",
             Self::Query => "query",
             Self::GitRead => "git_read",
         }
