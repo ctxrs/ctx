@@ -63,9 +63,10 @@ use crate::{
 
 use super::{
     schema::{
-        mistral_vibe_bounded_metadata, mistral_vibe_event_id, mistral_vibe_event_text,
-        mistral_vibe_event_type, mistral_vibe_metadata_pointer_string,
-        mistral_vibe_metadata_string, mistral_vibe_metadata_timestamp, mistral_vibe_result_content,
+        mistral_vibe_bounded_metadata, mistral_vibe_bounded_metadata_from_bytes,
+        mistral_vibe_event_id, mistral_vibe_event_text, mistral_vibe_event_type,
+        mistral_vibe_metadata_pointer_string, mistral_vibe_metadata_string,
+        mistral_vibe_metadata_timestamp, mistral_vibe_result_content,
     },
     source::{visit_mistral_vibe_session_sources, MistralVibeSessionSource},
     MISTRAL_VIBE_CAPTURE_REVISION, MISTRAL_VIBE_POLICY_REVISION,

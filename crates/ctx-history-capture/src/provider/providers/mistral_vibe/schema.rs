@@ -25,6 +25,43 @@ pub(super) fn mistral_vibe_bounded_metadata(
 ) -> Result<(Value, Option<String>)> {
     let mut summary = ProviderImportSummary::default();
     let metadata = read_mistral_vibe_metadata(&source.metadata_path, &mut summary);
+    mistral_vibe_bounded_metadata_from_value(source, imported_at, metadata, summary)
+}
+
+pub(super) fn mistral_vibe_bounded_metadata_from_bytes(
+    source: &MistralVibeSessionSource,
+    imported_at: DateTime<Utc>,
+    bytes: &[u8],
+) -> Result<(Value, Option<String>)> {
+    let mut summary = ProviderImportSummary::default();
+    let metadata = match serde_json::from_slice::<Value>(bytes) {
+        Ok(value) if value.is_object() => value,
+        Ok(_) => {
+            push_provider_import_failure(
+                &mut summary,
+                0,
+                "Mistral Vibe meta.json must contain a JSON object".to_owned(),
+            );
+            Value::Null
+        }
+        Err(error) => {
+            push_provider_import_failure(
+                &mut summary,
+                0,
+                format!("invalid Mistral Vibe meta.json: {error}"),
+            );
+            Value::Null
+        }
+    };
+    mistral_vibe_bounded_metadata_from_value(source, imported_at, metadata, summary)
+}
+
+fn mistral_vibe_bounded_metadata_from_value(
+    source: &MistralVibeSessionSource,
+    imported_at: DateTime<Utc>,
+    metadata: Value,
+    summary: ProviderImportSummary,
+) -> Result<(Value, Option<String>)> {
     let provider_session_id = bounded_mistral_vibe_identity(
         mistral_vibe_metadata_string(&metadata, "session_id").or_else(|| {
             source
