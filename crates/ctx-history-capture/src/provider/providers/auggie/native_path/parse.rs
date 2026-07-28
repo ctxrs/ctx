@@ -7,18 +7,26 @@ pub(super) fn parse_auggie_source(
     include_outputs: bool,
 ) -> Result<ParsedAuggieSource> {
     let before = AuggieFileStamp::observe(path)?;
+    parse_opened_auggie_source(before, context, inventory_token, include_outputs)
+}
+
+pub(super) fn parse_opened_auggie_source(
+    before: AuggieFileStamp,
+    context: &ProviderAdapterContext,
+    inventory_token: Option<&str>,
+    include_outputs: bool,
+) -> Result<ParsedAuggieSource> {
     let max_bytes = u64::try_from(MAX_PROVIDER_JSONL_LINE_BYTES).unwrap_or(u64::MAX);
     if before.len > max_bytes {
         return Err(CaptureError::InvalidPayload(format!(
             "Auggie session JSON exceeds the {MAX_PROVIDER_JSONL_LINE_BYTES} byte limit"
         )));
     }
-    let bytes = fs::read(&before.canonical_path)?;
+    let bytes = before.read_all_bounded(MAX_PROVIDER_JSONL_LINE_BYTES)?;
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) != before.len {
         return Err(CaptureError::SourceChangedDuringCapture);
     }
-    let after = AuggieFileStamp::observe(&before.canonical_path)?;
-    if after != before {
+    if !before.revalidate()? {
         return Err(CaptureError::SourceChangedDuringCapture);
     }
     let root = serde_json::from_slice::<Value>(&bytes).map_err(|error| {

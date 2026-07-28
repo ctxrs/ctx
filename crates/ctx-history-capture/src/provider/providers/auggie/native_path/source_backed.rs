@@ -6,10 +6,13 @@
 
 use std::{
     collections::HashSet,
-    fs, io,
+    io,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(test)]
+use std::fs;
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, CertifiedSource, EventIdentityInput, LocatorRevisionPolicy,
@@ -23,14 +26,13 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::{
-    auggie_request_text, auggie_response_text, invalid_source_path, parse_auggie_source,
+    auggie_request_text, auggie_response_text, invalid_source_path,
+    normalized_auggie_authority_path, parse_auggie_source, parse_opened_auggie_source,
     AuggieFileStamp, ParsedAuggieEvent, ParsedAuggieSession, AUGGIE_MAX_DISCOVERED_FILES,
     AUGGIE_PARSER_REVISION,
 };
 use crate::{
-    common::io::{
-        ensure_provider_path_parents_are_not_symlinks, ensure_regular_provider_transcript_file,
-    },
+    common::io::{open_provider_source_path, OpenedProviderSourcePath, ProviderSourceRoot},
     CaptureError, ProviderAdapterContext, AUGGIE_SESSION_JSON_SOURCE_FORMAT,
     MAX_PROVIDER_JSONL_LINE_BYTES,
 };
@@ -121,16 +123,31 @@ pub(crate) enum AuggieSourceBackedInventoryStatus {
 }
 
 /// Provider-local inventory only. Shared code owns deletion certification.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct AuggieSourceBackedInventory {
     pub(crate) authority_root: PathBuf,
     pub(crate) status: AuggieSourceBackedInventoryStatus,
     pub(crate) paths: Vec<PathBuf>,
+    authority: Option<ProviderSourceRoot>,
 }
 
 impl AuggieSourceBackedInventory {
     pub(crate) fn is_complete(&self) -> bool {
         self.status == AuggieSourceBackedInventoryStatus::Complete
+    }
+
+    fn open_source(&self, path: &Path) -> AuggieSourceBackedResult<AuggieFileStamp> {
+        let authority = self
+            .authority
+            .as_ref()
+            .ok_or(CaptureError::SystemInvariant(
+                "complete Auggie source-backed inventory has no retained authority",
+            ))?;
+        let relative = path.strip_prefix(authority.named_path()).map_err(|_| {
+            invalid_source_path(path, "Auggie source escaped its retained authority root")
+        })?;
+        let opened = authority.open_file(relative)?;
+        AuggieFileStamp::from_opened(path.to_path_buf(), opened).map_err(Into::into)
     }
 }
 
@@ -156,78 +173,76 @@ pub(crate) struct AuggieHydratedSourceRecord {
 pub(crate) fn discover_auggie_source_backed(
     root: &AuggieSourceBackedRoot,
 ) -> AuggieSourceBackedResult<AuggieSourceBackedInventory> {
-    let selected = selected_sessions_path(root)?;
-    let metadata = match fs::symlink_metadata(&selected) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+    let selected = normalized_auggie_authority_path(&selected_sessions_path(root)?)?;
+    let opened = match open_provider_source_path(&selected) {
+        Ok(opened) => opened,
+        Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(AuggieSourceBackedInventory {
                 authority_root: selected,
                 status: AuggieSourceBackedInventoryStatus::Unavailable,
                 paths: Vec::new(),
+                authority: None,
             });
         }
-        Err(error) => return Err(CaptureError::from(error).into()),
+        Err(error) => return Err(error.into()),
     };
-    if metadata.file_type().is_symlink() {
-        return Err(invalid_source_path(
-            &selected,
-            "symlinked Auggie source-backed roots are rejected",
-        )
-        .into());
-    }
-    ensure_provider_path_parents_are_not_symlinks(&selected)?;
 
-    if metadata.is_file() {
-        ensure_regular_provider_transcript_file(&selected)?;
+    if let OpenedProviderSourcePath::File(opened_file) = opened {
+        let file_name = selected.file_name().ok_or_else(|| {
+            invalid_source_path(&selected, "Auggie source file has no final component")
+        })?;
+        let parent = selected.parent().ok_or_else(|| {
+            invalid_source_path(&selected, "Auggie source file has no authority parent")
+        })?;
+        let authority = ProviderSourceRoot::open(parent)?;
+        let selected = authority.named_path().join(file_name);
+        authority.open_file(Path::new(file_name))?.revalidate()?;
+        opened_file.revalidate()?;
         let paths = if is_json_path(&selected) {
-            vec![fs::canonicalize(&selected)?]
+            vec![selected.clone()]
         } else {
             Vec::new()
         };
         return Ok(AuggieSourceBackedInventory {
-            authority_root: fs::canonicalize(&selected)?,
+            authority_root: selected,
             status: AuggieSourceBackedInventoryStatus::Complete,
             paths,
+            authority: Some(authority),
         });
     }
-    if !metadata.is_dir() {
-        return Err(invalid_source_path(
-            &selected,
-            "Auggie source-backed root is neither a file nor a directory",
+    let OpenedProviderSourcePath::Directory(directory) = opened else {
+        return Err(CaptureError::SystemInvariant(
+            "Auggie source-backed root classification is incomplete",
         )
         .into());
-    }
-
-    let mut entries = fs::read_dir(&selected)?.collect::<io::Result<Vec<_>>>()?;
-    entries.sort_by_key(fs::DirEntry::file_name);
+    };
+    let authority = directory.authority_root();
+    let entries = directory.entries(AUGGIE_MAX_DISCOVERED_FILES.saturating_add(1))?;
     let mut paths = Vec::new();
-    for entry in entries {
-        let path = entry.path();
-        let file_type = entry.file_type()?;
-        if file_type.is_symlink() {
-            return Err(invalid_source_path(
-                &path,
-                "symlinked Auggie source-backed entries are rejected",
-            )
-            .into());
+    for name in entries {
+        let path = authority.named_path().join(&name);
+        match directory.open_child(&name)? {
+            OpenedProviderSourcePath::File(opened) if is_json_path(&path) => {
+                opened.revalidate()?;
+                paths.push(path);
+            }
+            OpenedProviderSourcePath::File(_) | OpenedProviderSourcePath::Directory(_) => {}
         }
-        if !file_type.is_file() || !is_json_path(&path) {
-            continue;
-        }
-        ensure_regular_provider_transcript_file(&path)?;
-        paths.push(fs::canonicalize(path)?);
         if paths.len() > AUGGIE_MAX_DISCOVERED_FILES {
             return Err(invalid_source_path(
-                &selected,
+                authority.named_path(),
                 "Auggie source-backed discovery exceeds the file bound",
             )
             .into());
         }
     }
+    directory.revalidate()?;
+    authority.revalidate()?;
     Ok(AuggieSourceBackedInventory {
-        authority_root: fs::canonicalize(selected)?,
+        authority_root: authority.named_path().to_path_buf(),
         status: AuggieSourceBackedInventoryStatus::Complete,
         paths,
+        authority: Some(authority),
     })
 }
 
@@ -237,6 +252,20 @@ pub(crate) fn project_auggie_source_backed(
     context: &ProviderAdapterContext,
 ) -> AuggieSourceBackedResult<AuggieSourceBackedSource> {
     let parsed = parse_auggie_source(path, context, None, false)?;
+    project_parsed_auggie_source_backed(parsed)
+}
+
+fn project_opened_auggie_source_backed(
+    stamp: AuggieFileStamp,
+    context: &ProviderAdapterContext,
+) -> AuggieSourceBackedResult<AuggieSourceBackedSource> {
+    let parsed = parse_opened_auggie_source(stamp, context, None, false)?;
+    project_parsed_auggie_source_backed(parsed)
+}
+
+fn project_parsed_auggie_source_backed(
+    parsed: super::ParsedAuggieSource,
+) -> AuggieSourceBackedResult<AuggieSourceBackedSource> {
     let source = auggie_source_key(&parsed.session.provider_session_id)?;
     let session_id = auggie_session_id(&source, &parsed.session.provider_session_id)?;
     let mut documents = Vec::with_capacity(parsed.events.len());
@@ -292,7 +321,7 @@ pub(crate) fn project_auggie_source_backed_inventory(
     let mut source_ids = HashSet::with_capacity(inventory.paths.len());
     let mut sources = Vec::with_capacity(inventory.paths.len());
     for path in &inventory.paths {
-        let source = project_auggie_source_backed(path, context)?;
+        let source = project_opened_auggie_source_backed(inventory.open_source(path)?, context)?;
         let provider_session_id = source
             .documents
             .first()
@@ -306,6 +335,9 @@ pub(crate) fn project_auggie_source_backed_inventory(
             ));
         }
         sources.push(source);
+    }
+    if let Some(authority) = inventory.authority.as_ref() {
+        authority.revalidate()?;
     }
     Ok(sources)
 }
@@ -326,9 +358,9 @@ pub(crate) fn hydrate_auggie_source_backed(
         ))
         .into());
     }
-    let provider_bytes = fs::read(&before.canonical_path)?;
+    let provider_bytes = before.read_all_bounded(MAX_PROVIDER_JSONL_LINE_BYTES)?;
     if u64::try_from(provider_bytes.len()).unwrap_or(u64::MAX) != before.len
-        || AuggieFileStamp::observe(&before.canonical_path)? != before
+        || !before.revalidate()?
     {
         return Err(CaptureError::SourceChangedDuringCapture.into());
     }
@@ -376,37 +408,30 @@ pub(crate) fn hydrate_auggie_source_backed(
 
 fn selected_sessions_path(root: &AuggieSourceBackedRoot) -> AuggieSourceBackedResult<PathBuf> {
     if !root.is_explicit() {
-        return Ok(root.path.clone());
+        return normalized_auggie_authority_path(&root.path).map_err(Into::into);
     }
-    let metadata = match fs::symlink_metadata(&root.path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(root.path.clone()),
-        Err(error) => return Err(CaptureError::from(error).into()),
+    let root_path = normalized_auggie_authority_path(&root.path)?;
+    let opened = match open_provider_source_path(&root_path) {
+        Ok(opened) => opened,
+        Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(root_path);
+        }
+        Err(error) => return Err(error.into()),
     };
-    if metadata.file_type().is_symlink() {
-        return Err(invalid_source_path(
-            &root.path,
-            "symlinked explicit Auggie roots are rejected",
-        )
-        .into());
-    }
-    if metadata.is_dir() {
-        let sessions = root.path.join("sessions");
-        match fs::symlink_metadata(&sessions) {
-            Ok(child) if child.file_type().is_symlink() => {
-                return Err(invalid_source_path(
-                    &sessions,
-                    "symlinked explicit Auggie sessions roots are rejected",
-                )
-                .into());
+    if let OpenedProviderSourcePath::Directory(directory) = opened {
+        let sessions = root_path.join("sessions");
+        match directory.open_child(std::ffi::OsStr::new("sessions")) {
+            Ok(OpenedProviderSourcePath::Directory(child)) => {
+                child.revalidate()?;
+                directory.revalidate()?;
+                return Ok(sessions);
             }
-            Ok(child) if child.is_dir() => return Ok(sessions),
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(CaptureError::from(error).into()),
+            Ok(OpenedProviderSourcePath::File(_)) => {}
+            Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
     }
-    Ok(root.path.clone())
+    Ok(root_path)
 }
 
 fn is_json_path(path: &Path) -> bool {

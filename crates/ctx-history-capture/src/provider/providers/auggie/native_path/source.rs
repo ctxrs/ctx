@@ -1,6 +1,6 @@
 use super::*;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(super) struct AuggieFileStamp {
     pub(super) canonical_path: PathBuf,
     pub(super) len: u64,
@@ -8,12 +8,25 @@ pub(super) struct AuggieFileStamp {
     pub(super) readonly: bool,
     pub(super) device: Option<u64>,
     pub(super) inode: Option<u64>,
+    opened: Arc<OpenedProviderSourceFile>,
 }
 
+impl PartialEq for AuggieFileStamp {
+    fn eq(&self, other: &Self) -> bool {
+        self.canonical_path == other.canonical_path
+            && self.len == other.len
+            && self.modified == other.modified
+            && self.readonly == other.readonly
+            && self.device == other.device
+            && self.inode == other.inode
+    }
+}
+
+impl Eq for AuggieFileStamp {}
+
 impl AuggieFileStamp {
-    pub(super) fn observe(path: &Path) -> Result<Self> {
-        ensure_regular_provider_transcript_file(path)?;
-        let metadata = fs::symlink_metadata(path)?;
+    pub(super) fn from_opened(path: PathBuf, opened: OpenedProviderSourceFile) -> Result<Self> {
+        let metadata = opened.metadata();
         #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
 
@@ -23,22 +36,42 @@ impl AuggieFileStamp {
         let (device, inode) = (None, None);
 
         Ok(Self {
-            canonical_path: fs::canonicalize(path)?,
+            canonical_path: path,
             len: metadata.len(),
             modified: metadata.modified()?,
             readonly: metadata.permissions().readonly(),
             device,
             inode,
+            opened: Arc::new(opened),
         })
     }
 
+    pub(super) fn observe(path: &Path) -> Result<Self> {
+        let path = normalized_auggie_authority_path(path)?;
+        let opened = match open_provider_source_path(&path)? {
+            OpenedProviderSourcePath::File(opened) => opened,
+            OpenedProviderSourcePath::Directory(_) => {
+                return Err(invalid_source_path(
+                    &path,
+                    "Auggie transcript paths must be regular files",
+                ));
+            }
+        };
+        Self::from_opened(path, opened)
+    }
+
     pub(super) fn revalidate(&self) -> Result<bool> {
-        match Self::observe(&self.canonical_path) {
-            Ok(current) => Ok(&current == self),
+        match self.opened.revalidate() {
+            Ok(()) => Ok(true),
             Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-            Err(CaptureError::InvalidProviderTranscriptPath { .. }) => Ok(false),
+            Err(CaptureError::InvalidProviderTranscriptPath { .. })
+            | Err(CaptureError::SourceChangedDuringCapture) => Ok(false),
             Err(error) => Err(error),
         }
+    }
+
+    pub(super) fn read_all_bounded(&self, maximum: usize) -> Result<Vec<u8>> {
+        self.opened.read_all_bounded(maximum)
     }
 
     pub(super) fn revision_material(&self, digest: &mut Sha256) {
@@ -63,94 +96,129 @@ impl AuggieFileStamp {
 pub(super) struct AuggieInventory {
     pub(super) paths: BTreeSet<PathBuf>,
     pub(super) root_missing: bool,
+    pub(super) authority: Option<ProviderSourceRoot>,
+}
+
+impl AuggieInventory {
+    pub(super) fn open_source(&self, path: &Path) -> Result<AuggieFileStamp> {
+        let authority = self
+            .authority
+            .as_ref()
+            .ok_or(CaptureError::SystemInvariant(
+                "Auggie inventory has no retained source authority",
+            ))?;
+        let relative = path.strip_prefix(authority.named_path()).map_err(|_| {
+            invalid_source_path(path, "Auggie source escaped its retained authority root")
+        })?;
+        AuggieFileStamp::from_opened(path.to_path_buf(), authority.open_file(relative)?)
+    }
+
+    pub(super) fn revalidate(&self) -> Result<()> {
+        match self.authority.as_ref() {
+            Some(root) => root.revalidate(),
+            None if self.root_missing => Ok(()),
+            None => Err(CaptureError::SystemInvariant(
+                "Auggie complete inventory has no retained authority",
+            )),
+        }
+    }
 }
 
 pub(super) fn discover_auggie_sources(root: &Path) -> Result<AuggieInventory> {
-    let root_metadata = match fs::symlink_metadata(root) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+    let root = normalized_auggie_authority_path(root)?;
+    let opened_root = match open_provider_source_path(&root) {
+        Ok(opened) => opened,
+        Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(AuggieInventory {
                 paths: BTreeSet::new(),
                 root_missing: true,
+                authority: None,
             });
         }
-        Err(error) => return Err(error.into()),
+        Err(error) => return Err(error),
     };
-    if root_metadata.file_type().is_symlink() {
-        return Err(invalid_source_path(
-            root,
-            "symlinked provider transcript roots are rejected",
-        ));
-    }
-    ensure_provider_path_parents_are_not_symlinks(root)?;
-    if root_metadata.is_file() {
-        ensure_regular_provider_transcript_file(root)?;
+    if let OpenedProviderSourcePath::File(opened) = opened_root {
+        let file_name = root.file_name().ok_or_else(|| {
+            invalid_source_path(&root, "Auggie transcript file has no final path component")
+        })?;
+        let parent = root.parent().ok_or_else(|| {
+            invalid_source_path(&root, "Auggie transcript file has no authority parent")
+        })?;
+        let authority = ProviderSourceRoot::open(parent)?;
+        let path = authority.named_path().join(file_name);
+        let retained = authority.open_file(Path::new(file_name))?;
         let mut paths = BTreeSet::new();
         if root.extension().and_then(|extension| extension.to_str()) == Some("json") {
-            paths.insert(fs::canonicalize(root)?);
+            paths.insert(path.clone());
         }
+        opened.revalidate()?;
+        retained.revalidate()?;
         return Ok(AuggieInventory {
             paths,
             root_missing: false,
+            authority: Some(authority),
         });
     }
-    if !root_metadata.is_dir() {
-        return Err(invalid_source_path(
-            root,
-            "Auggie transcript root is neither a file nor a directory",
+    let OpenedProviderSourcePath::Directory(root_directory) = opened_root else {
+        return Err(CaptureError::SystemInvariant(
+            "Auggie source root classification is incomplete",
         ));
-    }
+    };
+    let authority = root_directory.authority_root();
 
     let mut paths = BTreeSet::new();
-    let mut stack = vec![(root.to_path_buf(), 0_usize)];
+    let mut stack = vec![(PathBuf::new(), 0_usize)];
     let mut directories = 0_usize;
-    while let Some((directory, depth)) = stack.pop() {
+    while let Some((relative_directory, depth)) = stack.pop() {
         directories = directories.saturating_add(1);
         if directories > AUGGIE_MAX_DISCOVERED_DIRECTORIES {
             return Err(invalid_source_path(
-                root,
+                authority.named_path(),
                 "Auggie transcript discovery exceeds the directory bound",
             ));
         }
         if depth > AUGGIE_MAX_DISCOVERY_DEPTH {
             return Err(invalid_source_path(
-                root,
+                authority.named_path(),
                 "Auggie transcript discovery exceeds the depth bound",
             ));
         }
-        let mut entries = fs::read_dir(&directory)?.collect::<io::Result<Vec<_>>>()?;
-        entries.sort_by_key(fs::DirEntry::file_name);
-        for entry in entries.into_iter().rev() {
-            let entry_path = entry.path();
-            let file_type = entry.file_type()?;
-            if file_type.is_symlink() {
-                return Err(invalid_source_path(
-                    &entry_path,
-                    "symlinked Auggie transcript entries are rejected",
-                ));
-            }
-            if file_type.is_dir() {
-                stack.push((entry_path, depth.saturating_add(1)));
-            } else if file_type.is_file()
-                && entry_path
-                    .extension()
-                    .and_then(|extension| extension.to_str())
-                    == Some("json")
-            {
-                ensure_regular_provider_transcript_file(&entry_path)?;
-                paths.insert(fs::canonicalize(entry_path)?);
-                if paths.len() > AUGGIE_MAX_DISCOVERED_FILES {
-                    return Err(invalid_source_path(
-                        root,
-                        "Auggie transcript discovery exceeds the file bound",
-                    ));
+        let directory = authority.open_directory(&relative_directory)?;
+        let names = directory.entries(
+            AUGGIE_MAX_DISCOVERED_FILES.saturating_add(AUGGIE_MAX_DISCOVERED_DIRECTORIES),
+        )?;
+        for name in names.into_iter().rev() {
+            let relative_path = relative_directory.join(&name);
+            let entry_path = authority.named_path().join(&relative_path);
+            match directory.open_child(&name)? {
+                OpenedProviderSourcePath::Directory(_) => {
+                    stack.push((relative_path, depth.saturating_add(1)));
                 }
+                OpenedProviderSourcePath::File(opened)
+                    if entry_path
+                        .extension()
+                        .and_then(|extension| extension.to_str())
+                        == Some("json") =>
+                {
+                    opened.revalidate()?;
+                    paths.insert(entry_path);
+                    if paths.len() > AUGGIE_MAX_DISCOVERED_FILES {
+                        return Err(invalid_source_path(
+                            authority.named_path(),
+                            "Auggie transcript discovery exceeds the file bound",
+                        ));
+                    }
+                }
+                OpenedProviderSourcePath::File(_) => {}
             }
         }
+        directory.revalidate()?;
     }
+    authority.revalidate()?;
     Ok(AuggieInventory {
         paths,
         root_missing: false,
+        authority: Some(authority),
     })
 }
 

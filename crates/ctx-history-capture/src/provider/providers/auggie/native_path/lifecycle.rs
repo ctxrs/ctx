@@ -45,8 +45,8 @@ pub(crate) fn import_auggie_sessions_nativepath(
             .collect::<BTreeMap<_, _>>();
 
         for source_path in &inventory.paths {
-            let parsed = match parse_auggie_source(
-                source_path,
+            let parsed = match parse_opened_auggie_source(
+                inventory.open_source(source_path)?,
                 &context,
                 import_options.inventory_observation_token.as_deref(),
                 import_options.import_profile.sink().is_some(),
@@ -140,6 +140,7 @@ pub(crate) fn import_auggie_sessions_nativepath(
                 return Ok(summary);
             }
         }
+        inventory.revalidate()?;
         Ok(summary)
     })();
     let finish = store
