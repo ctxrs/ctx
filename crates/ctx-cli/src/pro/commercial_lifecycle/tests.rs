@@ -80,16 +80,18 @@ fn already_subscribed_uses_embedded_state_without_a_second_account_request() {
     let await_calls = Cell::new(0_u32);
     let initial = commercial_state("none", None);
     let subscribed = commercial_state("active", Some(2_000));
+    let mut context = ();
 
     let state = resolve_active_state(
-        || {
+        &mut context,
+        |_| {
             account_calls.set(account_calls.get() + 1);
             if account_calls.get() > 1 {
                 bail!("unexpected second account request");
             }
             Ok(initial.clone())
         },
-        || {
+        |_| {
             checkout_calls.set(checkout_calls.get() + 1);
             Ok(CheckoutResult {
                 kind: "already_subscribed".to_owned(),
@@ -98,7 +100,7 @@ fn already_subscribed_uses_embedded_state_without_a_second_account_request() {
                 state: Some(subscribed.clone()),
             })
         },
-        |_, _| {
+        |_, _, _| {
             await_calls.set(await_calls.get() + 1);
             bail!("Checkout polling must not run for an existing subscription")
         },
@@ -116,10 +118,12 @@ fn url_less_pending_checkout_uses_the_polling_path() {
     let await_calls = Cell::new(0_u32);
     let initial = commercial_state("none", None);
     let active = commercial_state("active", Some(2_000));
+    let mut context = ();
 
     let state = resolve_active_state(
-        || Ok(initial.clone()),
-        || {
+        &mut context,
+        |_| Ok(initial.clone()),
+        |_| {
             Ok(CheckoutResult {
                 kind: "checkout_pending".to_owned(),
                 url: None,
@@ -127,7 +131,7 @@ fn url_less_pending_checkout_uses_the_polling_path() {
                 state: None,
             })
         },
-        |observed, checkout| {
+        |_, observed, checkout| {
             await_calls.set(await_calls.get() + 1);
             assert_eq!(observed.access_state, "none");
             assert_eq!(checkout.kind, "checkout_pending");
@@ -140,6 +144,175 @@ fn url_less_pending_checkout_uses_the_polling_path() {
 
     assert_eq!(state.access_state, "active");
     assert_eq!(await_calls.get(), 1);
+}
+
+#[test]
+fn checkout_poll_refreshes_an_expired_token_during_a_long_poll() {
+    let clock = Cell::new(1_000_i64);
+    let account_calls = Cell::new(0_u32);
+    let refresh_calls = Cell::new(0_u32);
+    let initial = commercial_state("none", None);
+    let active = commercial_state("active", Some(2_000));
+    let mut access_token = "original-access-token".to_owned();
+
+    let state = poll_checkout_access(
+        2_000,
+        || Ok(clock.get()),
+        || elapsed_since(&clock, 1_000),
+        |duration| {
+            clock.set(clock.get() + i64::try_from(duration.as_secs()).unwrap());
+        },
+        || {
+            poll_checkout_account(
+                &mut access_token,
+                &initial,
+                |observed_access_token| {
+                    account_calls.set(account_calls.get() + 1);
+                    if observed_access_token == "original-access-token" {
+                        if clock.get() < 1_360 {
+                            Ok(initial.clone())
+                        } else {
+                            bail!("authentication_required: access token expired")
+                        }
+                    } else if observed_access_token == "refreshed-access-token" {
+                        Ok(active.clone())
+                    } else {
+                        bail!("invalid_response: unexpected access token")
+                    }
+                },
+                |rejected_access_token| {
+                    refresh_calls.set(refresh_calls.get() + 1);
+                    assert_eq!(rejected_access_token, "original-access-token");
+                    Ok("refreshed-access-token".to_owned())
+                },
+            )
+        },
+        |_| {},
+    )
+    .unwrap();
+
+    assert_eq!(state.access_state, "active");
+    assert!(clock.get() >= 1_360);
+    assert_eq!(refresh_calls.get(), 1);
+    assert_eq!(access_token, "refreshed-access-token");
+    assert!(account_calls.get() > 2);
+}
+
+#[test]
+fn checkout_poll_retries_transient_refresh_failures() {
+    let clock = Cell::new(1_000_i64);
+    let refresh_calls = Cell::new(0_u32);
+    let initial = commercial_state("none", None);
+    let active = commercial_state("active", Some(2_000));
+    let mut access_token = "expired-access-token".to_owned();
+
+    let state = poll_checkout_access(
+        2_000,
+        || Ok(clock.get()),
+        || elapsed_since(&clock, 1_000),
+        |duration| {
+            clock.set(clock.get() + i64::try_from(duration.as_secs()).unwrap());
+        },
+        || {
+            poll_checkout_account(
+                &mut access_token,
+                &initial,
+                |observed_access_token| {
+                    if observed_access_token == "fresh-access-token" {
+                        Ok(active.clone())
+                    } else {
+                        bail!("authentication_required: access token expired")
+                    }
+                },
+                |_| {
+                    refresh_calls.set(refresh_calls.get() + 1);
+                    if refresh_calls.get() == 1 {
+                        bail!("service_unavailable: WorkOS token refresh failed")
+                    }
+                    Ok("fresh-access-token".to_owned())
+                },
+            )
+        },
+        |_| {},
+    )
+    .unwrap();
+
+    assert_eq!(state.access_state, "active");
+    assert_eq!(refresh_calls.get(), 2);
+    assert_eq!(access_token, "fresh-access-token");
+}
+
+#[test]
+fn checkout_poll_stops_after_one_fatal_refresh_failure() {
+    let clock = Cell::new(1_000_i64);
+    let account_calls = Cell::new(0_u32);
+    let refresh_calls = Cell::new(0_u32);
+    let initial = commercial_state("none", None);
+    let mut access_token = "expired-access-token".to_owned();
+
+    let error = poll_checkout_access::<CommercialState>(
+        2_000,
+        || Ok(clock.get()),
+        || elapsed_since(&clock, 1_000),
+        |duration| {
+            clock.set(clock.get() + i64::try_from(duration.as_secs()).unwrap());
+        },
+        || {
+            poll_checkout_account(
+                &mut access_token,
+                &initial,
+                |_| {
+                    account_calls.set(account_calls.get() + 1);
+                    bail!("authentication_required: access token expired")
+                },
+                |_| {
+                    refresh_calls.set(refresh_calls.get() + 1);
+                    bail!("authentication_failed: WorkOS refresh token was rejected")
+                },
+            )
+        },
+        |_| {},
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "authentication_failed: WorkOS refresh token was rejected"
+    );
+    assert_eq!(clock.get(), 1_000);
+    assert_eq!(account_calls.get(), 1);
+    assert_eq!(refresh_calls.get(), 1);
+    assert_eq!(access_token, "expired-access-token");
+}
+
+#[test]
+fn checkout_poll_rejects_identity_changes_after_token_refresh() {
+    let initial = commercial_state("none", None);
+    let mut changed = commercial_state("active", Some(2_000));
+    changed.subject = "user_456".to_owned();
+    let mut access_token = "expired-access-token".to_owned();
+
+    let outcome = poll_checkout_account(
+        &mut access_token,
+        &initial,
+        |observed_access_token| {
+            if observed_access_token == "fresh-access-token" {
+                Ok(changed.clone())
+            } else {
+                bail!("authentication_required: access token expired")
+            }
+        },
+        |_| Ok("fresh-access-token".to_owned()),
+    );
+
+    let CheckoutPoll::Fatal(error) = outcome else {
+        panic!("identity changes must fail closed");
+    };
+    assert_eq!(
+        error.to_string(),
+        "invalid_response: commercial account changed during Checkout"
+    );
+    assert_eq!(access_token, "fresh-access-token");
 }
 
 #[test]
