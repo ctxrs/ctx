@@ -12,6 +12,9 @@ const CODEBUDDY_MAX_CHECKPOINT_TEXT_BYTES: usize = 8 * 1024;
 const CODEBUDDY_MAX_FAILURE_BYTES: usize = 2 * 1024;
 const CODEBUDDY_MAX_CHECKPOINT_FAILURES: usize = 64;
 
+// Consumed by the shared source-backed provider registrar after branch
+// integration; this leaf intentionally does not edit that registry.
+#[allow(unused_imports)]
 pub(crate) use native_path::{
     codebuddy_cli_complete_content_record, codebuddy_cli_complete_content_source_from_admitted,
     hydrate_codebuddy_source_backed_record, import_codebuddy_nativepath,

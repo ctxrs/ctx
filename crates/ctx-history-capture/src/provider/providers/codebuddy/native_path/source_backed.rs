@@ -7,11 +7,13 @@
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, CertifiedSource, EventIdentityInput, LocatorRevisionPolicy,
-    NativeItemKey, NativeRecordCoordinate, NativeSessionKey, PositionStability,
-    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceFrontier, SourceKey,
-    SourceObservation, SourceRecordLocator, TypedKey,
+    NativeItemKey, NativeRecordCoordinate, NativeSessionKey, ScannedSourceCounts,
+    SessionIdentityInput, SourceAnchor, SourceFrontier, SourceKey, SourceObservation,
+    SourceRecordLocator, TypedKey,
 };
 use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
+
+use crate::provider::provider_safe_path_segment;
 
 use super::*;
 
@@ -448,9 +450,15 @@ fn codebuddy_lexical_document(
     Ok(LexicalDocument {
         event_id,
         session_id,
+        parent_session_id: None,
+        root_session_id: session_id,
         source: source_key.clone(),
         locator,
         provider_session_id: Some(provider_session_id),
+        branch: None,
+        source_path: Some(source.canonical_path.display().to_string()),
+        agent_type: AgentType::Primary.as_str().to_owned(),
+        is_primary: true,
         event_sequence: record.native_ordinal,
         occurred_at_unix_ms: Some(core.event.occurred_at.timestamp_millis()),
         event_type: core.event.event_type.as_str().to_owned(),
