@@ -38,13 +38,61 @@ pub(super) use fetch::{
 };
 use prefix::compute_ordered_prefix_evidence;
 use sql::*;
-pub(super) use sql::{
-    decode_order, event_digest, native_record_identity, source_backed_event_source_sql,
-};
 use stage::{stage_events, stage_sessions};
 
 const JSON_HINT_BYTES: usize = 256;
 const SESSION_INDEX_FIXED_BYTES: u64 = 64;
+
+pub(super) fn source_backed_event_sql(
+    schema: &OpenCodeNativeSchema,
+    profile: OpenCodeNativeProfile,
+) -> String {
+    sql::source_backed_event_source_sql(schema, profile)
+}
+
+pub(super) fn source_backed_decode_order(
+    order_tag: i64,
+    session_identity: &str,
+    message_identity: &str,
+    native_identity: &str,
+    order_a: i64,
+    order_b: i64,
+) -> Result<OpenCodeNativeOrder> {
+    sql::decode_order(
+        order_tag,
+        session_identity,
+        message_identity,
+        native_identity,
+        order_a,
+        order_b,
+    )
+}
+
+pub(super) fn source_backed_event_digest(
+    family: OpenCodeNativeSchemaFamily,
+    native_identity: &str,
+    native_order: &OpenCodeNativeOrder,
+    time_created: i64,
+    time_updated: i64,
+    retained: &OpenCodeRetainedJson,
+) -> Result<String> {
+    sql::event_digest(
+        family,
+        native_identity,
+        native_order,
+        time_created,
+        time_updated,
+        retained,
+    )
+}
+
+pub(super) fn source_backed_native_record_identity(
+    family: OpenCodeNativeSchemaFamily,
+    message_identity: &str,
+    native_identity: &str,
+) -> String {
+    sql::native_record_identity(family, message_identity, native_identity)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct ScannedSession {

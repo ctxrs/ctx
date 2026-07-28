@@ -28,8 +28,14 @@ use super::{
         OpenCodeJsonProjection, OpenCodeRetainedJson,
     },
     model::{OpenCodeNativeEventKind, OpenCodeNativeProfile, OpenCodeNativeSchemaFamily},
-    query::{decode_order, event_digest, native_record_identity, source_backed_event_source_sql},
-    scanner::{retained_event_kind, retained_file_touches, retained_searchable_text},
+    query::{
+        source_backed_decode_order, source_backed_event_digest, source_backed_event_sql,
+        source_backed_native_record_identity,
+    },
+    scanner::{
+        source_backed_retained_event_kind, source_backed_retained_file_touches,
+        source_backed_retained_searchable_text,
+    },
     schema::OpenCodeNativeSchema,
 };
 use crate::{
@@ -64,6 +70,8 @@ const SQLITE_SIDECAR_INVALID_REASON: &str =
 pub(crate) enum OpenCodeSourceBackedError {
     #[error(transparent)]
     Capture(#[from] CaptureError),
+    #[error(transparent)]
+    Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]
@@ -318,7 +326,7 @@ fn stream_events(
     hash_str(&mut hasher, &schema.capability_digest);
     hash_sessions(&mut hasher, sessions);
 
-    let mut sql = source_backed_event_source_sql(schema, OpenCodeNativeProfile::CoreOnly);
+    let mut sql = source_backed_event_sql(schema, OpenCodeNativeProfile::CoreOnly);
     sql.push_str(" order by 3, 4, 5, 6, 2, 1, 12");
     let max_json_bytes = i64::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
         .map_err(|_| OpenCodeSourceBackedError::CountOverflow)?;
@@ -403,7 +411,7 @@ fn decode_source_event_row(
     }
     let projection = decode_projection(&projection_bytes)?;
     Ok(SourceEventRow {
-        native_order: decode_order(
+        native_order: source_backed_decode_order(
             order_tag,
             &session_identity,
             &message_identity,
@@ -462,7 +470,7 @@ fn lexical_document(
         .pointer("/time/created")
         .and_then(serde_json::Value::as_i64)
         .unwrap_or(event.time_created);
-    let semantic_digest = event_digest(
+    let semantic_digest = source_backed_event_digest(
         family,
         &event.native_identity,
         &event.native_order,
@@ -470,8 +478,11 @@ fn lexical_document(
         event.time_updated,
         &retained,
     )?;
-    let native_record_identity =
-        native_record_identity(family, &event.message_identity, &event.native_identity);
+    let native_record_identity = source_backed_native_record_identity(
+        family,
+        &event.message_identity,
+        &event.native_identity,
+    );
     let native_item_key = if family == OpenCodeNativeSchemaFamily::MessagePart {
         NativeItemKey::composite(
             family.identity_semantics(),
@@ -509,10 +520,12 @@ fn lexical_document(
         record_digest,
     )?;
 
-    let kind = retained_event_kind(&retained.effective_type, &retained.role, &retained.body);
-    let searchable = retained_searchable_text(kind, &retained.effective_type, &retained.body);
+    let kind =
+        source_backed_retained_event_kind(&retained.effective_type, &retained.role, &retained.body);
+    let searchable =
+        source_backed_retained_searchable_text(kind, &retained.effective_type, &retained.body);
     let body = bounded_preview(&searchable);
-    let (file_touches, _) = retained_file_touches(kind, &retained.body);
+    let (file_touches, _) = source_backed_retained_file_touches(kind, &retained.body);
     let event_sequence = *next_sequence;
     *next_sequence = checked_add(*next_sequence, 1)?;
     Ok(LexicalDocument {
@@ -579,7 +592,7 @@ fn load_sessions(
     let mut sessions = BTreeMap::new();
     for (identity, (_, parent, directory, branch, agent)) in &raw {
         let root_native_identity = root_session_identity(identity, &raw);
-        let session_id = session_id(source, identity)?;
+        let derived_session_id = session_id(source, identity)?;
         let parent_session_id = parent
             .as_deref()
             .map(|identity| session_id(source, identity))
@@ -591,7 +604,7 @@ fn load_sessions(
                 native_identity: identity.clone(),
                 parent_native_identity: parent.clone(),
                 root_native_identity,
-                session_id,
+                session_id: derived_session_id,
                 parent_session_id,
                 root_session_id,
                 directory: directory.clone(),
@@ -775,6 +788,7 @@ fn checked_add(left: u64, right: u64) -> OpenCodeSourceBackedResult<u64> {
 fn source_backed_as_capture(error: OpenCodeSourceBackedError) -> CaptureError {
     match error {
         OpenCodeSourceBackedError::Capture(error) => error,
+        OpenCodeSourceBackedError::Sqlite(error) => CaptureError::Sqlite(error),
         error => CaptureError::InvalidPayload(error.to_string()),
     }
 }
@@ -922,7 +936,7 @@ fn hydrate_exact_row(
         ));
     }
 
-    let mut sql = source_backed_event_source_sql(&schema, OpenCodeNativeProfile::CoreOnly);
+    let mut sql = source_backed_event_sql(&schema, OpenCodeNativeProfile::CoreOnly);
     let alias = if schema.family == OpenCodeNativeSchemaFamily::MessagePart {
         "p"
     } else {
@@ -981,7 +995,7 @@ fn hydrate_exact_row(
         .pointer("/time/created")
         .and_then(serde_json::Value::as_i64)
         .unwrap_or(event.time_created);
-    let semantic_digest = event_digest(
+    let semantic_digest = source_backed_event_digest(
         schema.family,
         &event.native_identity,
         &event.native_order,
