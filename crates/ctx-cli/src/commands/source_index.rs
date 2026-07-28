@@ -1,15 +1,12 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
-use ctx_history_capture::{
-    ingest_codex_source_backed_v0, CodexLocatorResolverV0, CodexSourceBackedIngestReceiptV0,
-};
+use ctx_history_capture::CodexLocatorResolverV0;
 use ctx_history_core::{CaptureProvider, EventHydrationRequest, EventType};
 use ctx_history_index::{
     AgentScope, EventRecord, EventSearchCandidate, EventSearchFilters, ExcludedSessionTree,
@@ -30,6 +27,10 @@ use crate::{
     output::{compact_json, print_json, JsonOutputFormat, OutputFormat},
     provider_sources::discovered_sources_for_provider_report,
     search_filters::parse_since_filter,
+    semantic::{
+        coordinate_source_backed_refresh, PinnedSourceBackedGeneration, SourceBackedRefreshMode,
+        SourceBackedRefreshObservation,
+    },
     transcript::{normalize_uuid_prefix, shell_quote_arg, write_output, TranscriptMode},
     RefreshArg, SearchArgs, SearchBackendArg, ShowArgs, ShowTarget,
 };
@@ -104,10 +105,10 @@ struct SearchHit {
     more_matches_in_session: usize,
 }
 
-#[derive(Debug)]
 struct RefreshOutcome {
-    receipts: Vec<CodexSourceBackedIngestReceiptV0>,
+    pin: PinnedSourceBackedGeneration,
     status: &'static str,
+    source_count: usize,
 }
 
 #[derive(Debug)]
@@ -147,11 +148,15 @@ pub(crate) fn run_search(
     telemetry.refresh_duration = Some(duration_bucket(refresh_started.elapsed()));
     telemetry.refresh_mode = Some(request.refresh);
     telemetry.refresh_status = Some(RefreshStatus::from_safe_summary(refresh.status));
-    telemetry.refresh_source_count = Some(count_bucket(refresh.receipts.len() as u64));
+    telemetry.refresh_source_count = Some(count_bucket(refresh.source_count as u64));
 
     let query_started = Instant::now();
-    let (value, collection, index) =
-        search_existing_generation(&request, &data_root, &refresh.receipts)?;
+    let (value, collection, index) = search_existing_generation(
+        &request,
+        refresh.pin.into_index(),
+        refresh.status,
+        refresh.source_count,
+    )?;
     let query_duration = query_started.elapsed();
     telemetry.query_duration = Some(duration_bucket(query_duration));
     telemetry.query_length = Some(text_length_bucket(request.query.chars().count()));
@@ -180,7 +185,8 @@ pub(crate) fn run_search(
 }
 
 pub(crate) fn mcp_search(request: SourceSearchRequest, data_root: &Path) -> Result<Value> {
-    let (value, _, _) = search_existing_generation(&request, data_root, &[])?;
+    let (value, _, _) =
+        search_existing_generation(&request, open_index(data_root)?, "existing_generation", 0)?;
     Ok(value)
 }
 
@@ -314,49 +320,55 @@ pub(crate) fn mcp_show_event(
 }
 
 fn refresh_for_search(request: &SourceSearchRequest, data_root: &Path) -> Result<RefreshOutcome> {
+    refresh_for_search_with(request, data_root, coordinate_source_backed_refresh)
+}
+
+fn refresh_for_search_with<Coordinate>(
+    request: &SourceSearchRequest,
+    data_root: &Path,
+    coordinate: Coordinate,
+) -> Result<RefreshOutcome>
+where
+    Coordinate: FnOnce(&Path, SourceBackedRefreshMode) -> Result<SourceBackedRefreshObservation>,
+{
     validate_search_request(request)?;
-    if request.refresh != RefreshArg::Wait {
-        if !index_is_available(data_root) {
-            return Err(anyhow!(
-                "the source-backed Core index does not exist; retry a Codex search with `--refresh wait`"
-            ));
-        }
-        return Ok(RefreshOutcome {
-            receipts: Vec::new(),
-            status: "existing_generation",
-        });
-    }
-    if request
-        .provider
-        .is_some_and(|provider| provider != CaptureProvider::Codex)
-    {
+    let mode = source_backed_refresh_mode(request.refresh);
+    let observation = coordinate(data_root, mode)?;
+    if observation.mode != mode {
         return Err(anyhow!(
-            "synchronous source-backed refresh is currently available only for Codex; no legacy refresh was run"
+            "source-backed refresh coordinator returned mode {:?} for requested mode {:?}",
+            observation.mode,
+            mode
         ));
     }
-    fs::create_dir_all(data_root)
-        .with_context(|| format!("create ctx data root {}", data_root.display()))?;
-    let index_root = index_root(data_root);
-    let mut receipts = Vec::new();
-    for root in codex_session_roots()? {
-        receipts.push(
-            ingest_codex_source_backed_v0(&root, &index_root)
-                .with_context(|| format!("refresh source-backed Codex tree {}", root.display()))?,
-        );
-    }
+    let status = match mode {
+        SourceBackedRefreshMode::Off => "existing_generation",
+        SourceBackedRefreshMode::Background if observation.daemon_available => "daemon_background",
+        SourceBackedRefreshMode::Background => "daemon_unavailable",
+        SourceBackedRefreshMode::Wait => "completed",
+    };
     Ok(RefreshOutcome {
-        receipts,
-        status: "completed",
+        pin: observation.pin,
+        status,
+        source_count: observation.source_count,
     })
+}
+
+fn source_backed_refresh_mode(refresh: RefreshArg) -> SourceBackedRefreshMode {
+    match refresh {
+        RefreshArg::Off => SourceBackedRefreshMode::Off,
+        RefreshArg::Background => SourceBackedRefreshMode::Background,
+        RefreshArg::Wait => SourceBackedRefreshMode::Wait,
+    }
 }
 
 fn search_existing_generation(
     request: &SourceSearchRequest,
-    data_root: &Path,
-    receipts: &[CodexSourceBackedIngestReceiptV0],
+    index: VerifiedIndex,
+    refresh_status: &str,
+    refresh_source_count: usize,
 ) -> Result<(Value, SearchCollection, VerifiedIndex)> {
     validate_search_request(request)?;
-    let index = open_index(data_root)?;
     let filters = index_search_filters(request, &index)?;
     let query_started = Instant::now();
     let collection = collect_search_hits(
@@ -367,7 +379,14 @@ fn search_existing_generation(
         &filters,
     )?;
     let query_duration = query_started.elapsed();
-    let value = search_json(request, &index, &collection, receipts, query_duration);
+    let value = search_json(
+        request,
+        &index,
+        &collection,
+        refresh_status,
+        refresh_source_count,
+        query_duration,
+    );
     Ok((value, collection, index))
 }
 
@@ -544,7 +563,8 @@ fn search_json(
     request: &SourceSearchRequest,
     index: &VerifiedIndex,
     collection: &SearchCollection,
-    receipts: &[CodexSourceBackedIngestReceiptV0],
+    refresh_status: &str,
+    refresh_source_count: usize,
     query_duration: Duration,
 ) -> Value {
     let result_scope = if request.events { "event" } else { "session" };
@@ -553,7 +573,7 @@ fn search_json(
         .iter()
         .map(|hit| search_result_json(hit, result_scope, &request.query))
         .collect::<Vec<_>>();
-    let phase_attribution = phase_attribution(receipts, query_duration);
+    let phase_attribution = phase_attribution(query_duration);
     compact_json(json!({
         "schema_version": 1,
         "payload_type": "search_results",
@@ -572,8 +592,8 @@ fn search_json(
         },
         "freshness": {
             "mode": request.refresh.as_str(),
-            "status": if receipts.is_empty() { "existing_generation" } else { "completed" },
-            "source_count": receipts.len(),
+            "status": refresh_status,
+            "source_count": refresh_source_count,
         },
         "retrieval": {
             "requested_mode": "lexical",
@@ -1235,34 +1255,175 @@ fn timestamp_json(timestamp: Option<i64>) -> Option<String> {
         .map(|time| time.to_rfc3339_opts(SecondsFormat::Millis, true))
 }
 
-fn phase_attribution(receipts: &[CodexSourceBackedIngestReceiptV0], query: Duration) -> Value {
-    let seconds = |select: fn(&CodexSourceBackedIngestReceiptV0) -> Duration| {
-        receipts.iter().map(select).sum::<Duration>().as_secs_f64()
-    };
+fn phase_attribution(query: Duration) -> Value {
     json!({
-        "discovery_seconds": seconds(|receipt| receipt.timings.discovery),
-        "writer_open_seconds": seconds(|receipt| receipt.timings.writer_open),
-        "scan_and_stage_seconds": seconds(|receipt| receipt.timings.scan_and_stage),
-        "scanner_worker_busy_seconds": seconds(|receipt| receipt.timings.scanner_worker_busy),
-        "writer_add_document_seconds": seconds(|receipt| receipt.timings.writer_add_document),
-        "certification_seconds": seconds(|receipt| receipt.timings.certification),
-        "index_commit_seconds": seconds(|receipt| receipt.timings.commit),
-        "refresh_total_seconds": seconds(|receipt| receipt.timings.total),
+        "discovery_seconds": 0.0,
+        "writer_open_seconds": 0.0,
+        "scan_and_stage_seconds": 0.0,
+        "scanner_worker_busy_seconds": 0.0,
+        "writer_add_document_seconds": 0.0,
+        "certification_seconds": 0.0,
+        "index_commit_seconds": 0.0,
+        "refresh_total_seconds": 0.0,
         "query_seconds": query.as_secs_f64(),
-        "catalog_sources": receipts.iter().map(|receipt| receipt.counters.catalog_sources).sum::<u64>(),
-        "catalog_source_bytes": receipts.iter().map(|receipt| receipt.counters.catalog_source_bytes).sum::<u64>(),
-        "cold_sources": receipts.iter().map(|receipt| receipt.counters.cold_sources).sum::<u64>(),
-        "appended_sources": receipts.iter().map(|receipt| receipt.counters.appended_sources).sum::<u64>(),
-        "replaced_sources": receipts.iter().map(|receipt| receipt.counters.replaced_sources).sum::<u64>(),
-        "replayed_sources": receipts.iter().map(|receipt| receipt.counters.replayed_sources).sum::<u64>(),
-        "deleted_sources": receipts.iter().map(|receipt| receipt.counters.deleted_sources).sum::<u64>(),
-        "scanner_bytes_read": receipts.iter().map(|receipt| receipt.counters.scanner_bytes_read).sum::<u64>(),
-        "checkpoint_validation_bytes": receipts.iter().map(|receipt| receipt.counters.checkpoint_validation_bytes).sum::<u64>(),
-        "scanner_workers": receipts.iter().map(|receipt| receipt.counters.scanner_workers).max().unwrap_or(0),
-        "complete_records_scanned": receipts.iter().map(|receipt| receipt.counters.complete_records_scanned).sum::<u64>(),
-        "retained_records_scanned": receipts.iter().map(|receipt| receipt.counters.retained_records_scanned).sum::<u64>(),
-        "rejected_records_scanned": receipts.iter().map(|receipt| receipt.counters.rejected_records_scanned).sum::<u64>(),
-        "ignored_records_scanned": receipts.iter().map(|receipt| receipt.counters.ignored_records_scanned).sum::<u64>(),
-        "staged_documents": receipts.iter().map(|receipt| receipt.counters.staged_documents).sum::<u64>(),
+        "catalog_sources": 0,
+        "catalog_source_bytes": 0,
+        "cold_sources": 0,
+        "appended_sources": 0,
+        "replaced_sources": 0,
+        "replayed_sources": 0,
+        "deleted_sources": 0,
+        "scanner_bytes_read": 0,
+        "checkpoint_validation_bytes": 0,
+        "scanner_workers": 0,
+        "complete_records_scanned": 0,
+        "retained_records_scanned": 0,
+        "rejected_records_scanned": 0,
+        "ignored_records_scanned": 0,
+        "staged_documents": 0,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::Cell, fs};
+
+    use ctx_history_capture::ingest_codex_source_backed_v0;
+    use serde_json::json;
+    use tempfile::tempdir;
+
+    use crate::semantic::SourceBackedRefreshDaemonUnavailable;
+
+    use super::*;
+
+    const TEST_SESSION_ID: &str = "019fa000-0000-7000-8000-0000000000d1";
+    const TEST_QUERY: &str = "pinnedgenerationrouting";
+
+    fn request(refresh: RefreshArg) -> SourceSearchRequest {
+        SourceSearchRequest {
+            query: TEST_QUERY.to_owned(),
+            terms: Vec::new(),
+            limit: 10,
+            provider: Some(CaptureProvider::Codex),
+            history_source: None,
+            provider_key: None,
+            source_id: None,
+            source_format: None,
+            workspace: None,
+            since: None,
+            primary_only: false,
+            include_subagents: false,
+            event_type: None,
+            file: None,
+            session: None,
+            events: false,
+            include_current_session: true,
+            backend: Some(SearchBackendArg::Lexical),
+            refresh,
+        }
+    }
+
+    fn write_test_generation(data_root: &Path) {
+        let sessions = data_root.join("sessions");
+        let source = sessions.join(format!("rollout-{TEST_SESSION_ID}.jsonl"));
+        fs::create_dir_all(&sessions).unwrap();
+        let records = [
+            json!({
+                "timestamp": "2026-07-28T12:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": TEST_SESSION_ID,
+                    "timestamp": "2026-07-28T12:00:00Z",
+                    "cwd": "/workspace/pinned",
+                    "originator": "codex_cli_rs",
+                    "cli_version": "0.1.0",
+                    "source": "cli",
+                    "model_provider": "openai"
+                }
+            }),
+            json!({
+                "timestamp": "2026-07-28T12:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{
+                        "type": "output_text",
+                        "text": format!("{TEST_QUERY} sentinel")
+                    }],
+                    "phase": "final_answer"
+                }
+            }),
+        ];
+        let body = records
+            .iter()
+            .map(|record| format!("{}\n", serde_json::to_string(record).unwrap()))
+            .collect::<String>();
+        fs::write(source, body).unwrap();
+        ingest_codex_source_backed_v0(&sessions, index_root(data_root)).unwrap();
+    }
+
+    #[test]
+    fn core_refresh_modes_map_to_the_daemon_contract() {
+        assert_eq!(
+            source_backed_refresh_mode(RefreshArg::Off),
+            SourceBackedRefreshMode::Off
+        );
+        assert_eq!(
+            source_backed_refresh_mode(RefreshArg::Background),
+            SourceBackedRefreshMode::Background
+        );
+        assert_eq!(
+            source_backed_refresh_mode(RefreshArg::Wait),
+            SourceBackedRefreshMode::Wait
+        );
+    }
+
+    #[test]
+    fn daemon_unavailable_error_remains_typed_through_core_routing() {
+        let temp = tempdir().unwrap();
+        let error = match refresh_for_search(&request(RefreshArg::Wait), temp.path()) {
+            Ok(_) => panic!("refresh unexpectedly succeeded without a daemon"),
+            Err(error) => error,
+        };
+        assert!(error
+            .downcast_ref::<SourceBackedRefreshDaemonUnavailable>()
+            .is_some());
+        assert!(format!("{error:#}").contains("no foreground writer was started"));
+    }
+
+    #[test]
+    fn core_search_consumes_the_coordinator_pin_without_reopening() {
+        let temp = tempdir().unwrap();
+        write_test_generation(temp.path());
+        let requested_mode = Cell::new(None);
+        let outcome =
+            refresh_for_search_with(&request(RefreshArg::Off), temp.path(), |data_root, mode| {
+                requested_mode.set(Some(mode));
+                Ok(SourceBackedRefreshObservation {
+                    mode,
+                    status: "off".to_owned(),
+                    request_id: None,
+                    daemon_available: false,
+                    source_count: 0,
+                    pin: PinnedSourceBackedGeneration::from_index(open_index(data_root)?),
+                })
+            })
+            .unwrap();
+        assert_eq!(requested_mode.get(), Some(SourceBackedRefreshMode::Off));
+        let generation = outcome.pin.generation_id().to_owned();
+
+        fs::remove_file(index_root(temp.path()).join("meta.json")).unwrap();
+        let (value, collection, index) = search_existing_generation(
+            &request(RefreshArg::Off),
+            outcome.pin.into_index(),
+            outcome.status,
+            outcome.source_count,
+        )
+        .unwrap();
+
+        assert_eq!(index.generation_id(), generation);
+        assert_eq!(value["retrieval"]["generation_id"], generation);
+        assert_eq!(collection.hits.len(), 1);
+    }
 }
