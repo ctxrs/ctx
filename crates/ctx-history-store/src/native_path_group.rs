@@ -72,10 +72,11 @@ use crate::{
 //   as soon as it fills and retains only the one in flight.
 // * Journal *work per transaction* is bounded by the group's own admitted
 //   content only while every parent row the group writes is left unchanged.
-//   `upsert_capture_source` and `upsert_session` compare the stored row and
-//   skip their dependent fanout when it did not change, so a coordinator that
-//   re-asserts the same source and session once per group — which is every
-//   group after the first for a source — emits at most one journal record per
+//   Every mutation whose journal impact fans out over stored rows —
+//   `upsert_capture_source`, `upsert_session` and `upsert_run` — compares the
+//   stored row and skips that fanout when it did not change, so a coordinator
+//   that re-asserts the same source and session once per group, which is every
+//   group after the first for a source, emits at most one journal record per
 //   typed mutation.
 // * It is *not* bounded when a parent row genuinely changes. The fanout then
 //   re-journals every dependent canonical observation, which is a function of
