@@ -51,20 +51,64 @@ CREATE VIRTUAL TABLE IF NOT EXISTS event_search_scriptgram USING fts5(
 );
 "#;
 
+/// Keeps the contentless event indexes consistent when the key they are
+/// addressed by moves or disappears.
+///
+/// `events.seq` is not immutable per event id: it is derived from
+/// `provider_event_sequence_index` while `events.id` is derived from the
+/// separate `provider_event_index`, `avoid_provider_source_event_seq_collision`
+/// reassigns it on collision, and the event upsert persists that with
+/// `ON CONFLICT(id) DO UPDATE SET seq = excluded.seq`. A contentless row can
+/// only be addressed by rowid, so a seq that moves without the old posting
+/// being removed leaves that posting orphaned.
+///
+/// These triggers fire inside the same statement as the `events` write, which
+/// `with_atomic_write` has already wrapped in `BEGIN IMMEDIATE` together with
+/// the projection insert that follows. So the old posting's removal and the new
+/// posting's insertion commit together or not at all: a crash cannot leave the
+/// event indexed under a stale key, and - the direction that matters more - it
+/// cannot leave the event unindexed either, because losing the insert also
+/// rolls back the delete.
+///
+/// Doing this in SQL rather than in the Rust write path is deliberate. It
+/// covers every writer of `events`, including migrations and repairs, and it
+/// costs nothing on the cold path where events are inserted rather than
+/// updated.
+pub(crate) const EVENT_FTS_KEY_TRIGGERS_SQL: &str = r#"
+CREATE TRIGGER IF NOT EXISTS ctx_event_search_rekey_on_seq_change
+AFTER UPDATE OF seq ON events
+WHEN old.seq IS NOT new.seq
+BEGIN
+    DELETE FROM event_search WHERE rowid = old.seq;
+    DELETE FROM event_search_scriptgram WHERE rowid = old.seq;
+END;
+
+CREATE TRIGGER IF NOT EXISTS ctx_event_search_prune_on_event_delete
+AFTER DELETE ON events
+BEGIN
+    DELETE FROM event_search WHERE rowid = old.seq;
+    DELETE FROM event_search_scriptgram WHERE rowid = old.seq;
+END;
+"#;
+
 /// The event FTS tables whose on-disk shape changed in schema v48.
 pub(crate) const CONTENTLESS_EVENT_FTS_TABLES: [&str; 2] =
     ["event_search", "event_search_scriptgram"];
 
 pub(crate) fn create_fts_tables_if_supported(conn: &Connection) -> Result<()> {
-    match conn.execute_batch(FTS_TABLES_SQL) {
-        Ok(()) => Ok(()),
-        Err(rusqlite::Error::SqliteFailure(error, message))
-            if is_missing_fts_module(error.extended_code, message.as_deref()) =>
-        {
-            Ok(())
-        }
-        Err(err) => Err(StoreError::Sql(err)),
+    if let Err(error) = conn.execute_batch(FTS_TABLES_SQL) {
+        return match error {
+            rusqlite::Error::SqliteFailure(code, message)
+                if is_missing_fts_module(code.extended_code, message.as_deref()) =>
+            {
+                Ok(())
+            }
+            other => Err(StoreError::Sql(other)),
+        };
     }
+    // Only meaningful once the tables they reference exist.
+    conn.execute_batch(EVENT_FTS_KEY_TRIGGERS_SQL)?;
+    Ok(())
 }
 
 pub(crate) fn drop_fts_table_if_exists(conn: &Connection, table: &str) -> Result<()> {
