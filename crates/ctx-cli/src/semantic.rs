@@ -117,10 +117,12 @@ mod daemon_status;
 #[cfg(test)]
 use daemon_retry::*;
 mod source_backed_refresh_coordinator;
-#[allow(unused_imports)] // The source-backed CLI owner consumes this cross-lane seam.
+#[allow(unused_imports)] // Provider-neutral executor types are the capture coordinator seam.
 pub(crate) use source_backed_refresh_coordinator::{
-    coordinate_source_backed_refresh, PinnedSourceBackedGeneration, SourceBackedRefreshMode,
-    SourceBackedRefreshObservation,
+    coordinate_source_backed_refresh, PinnedSourceBackedGeneration,
+    SourceBackedRefreshDaemonUnavailable, SourceBackedRefreshExecution,
+    SourceBackedRefreshExecutor, SourceBackedRefreshMode, SourceBackedRefreshObservation,
+    SourceBackedRefreshPublication,
 };
 mod daemon_scheduler;
 #[cfg(test)]

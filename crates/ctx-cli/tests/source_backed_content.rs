@@ -4,6 +4,7 @@ use ctx_history_capture::complete_content::{
     VerifiedContentLocatorsV1, VerifiedContentRole, COMPLETE_CONTENT_INDEXED_MESSAGE_LIMIT_CHARS,
     VERIFIED_CONTENT_LOCATORS_METADATA_KEY,
 };
+use ctx_history_capture::ingest_codex_source_backed_v0;
 use support::*;
 
 const BEGIN_SENTINEL: &str = "CTX_HYDRATION_BEGIN-";
@@ -69,6 +70,11 @@ fn source_indexed_codex_message() -> SourceIndexedMessage {
         .map(|record| format!("{}\n", serde_json::to_string(record).unwrap()))
         .collect::<String>();
     fs::write(&source, transcript).unwrap();
+    ingest_codex_source_backed_v0(
+        temp.path().join(".codex/sessions"),
+        temp.path().join("source-backed-lexical-v0"),
+    )
+    .unwrap();
 
     let bootstrap = json_output(ctx(&temp).args([
         "search",
@@ -76,7 +82,7 @@ fn source_indexed_codex_message() -> SourceIndexedMessage {
         "--provider",
         "codex",
         "--refresh",
-        "wait",
+        "off",
         "--format=json",
     ]));
     assert_eq!(bootstrap["payload_type"], "search_results");
@@ -257,7 +263,7 @@ fn source_generation_is_the_normal_core_search_and_show_route() {
         json_output(ctx(&fixture.temp).args(["search", SOURCE_INDEX_QUERY, "--format=json"]));
     assert_eq!(search["payload_type"], "search_results");
     assert_eq!(search["freshness"]["mode"], "background");
-    assert_eq!(search["freshness"]["status"], "existing_generation");
+    assert_eq!(search["freshness"]["status"], "daemon_unavailable");
     assert_eq!(search["retrieval"]["requested_mode"], "lexical");
     assert_eq!(search["retrieval"]["effective_mode"], "lexical");
     assert_eq!(search["retrieval"]["index"], "source_backed");
