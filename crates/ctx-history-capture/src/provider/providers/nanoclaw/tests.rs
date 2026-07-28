@@ -1154,6 +1154,8 @@ fn source_root_safety_nanoclaw_broker_rejects_concurrent_leaf_swap() {
         .unwrap_err();
     assert_eq!(error.kind, CompleteContentErrorKind::SourceChanged);
     assert_eq!(error.event_id, event_id);
+}
+
 #[test]
 fn source_backed_component_mutation_is_rejected_before_any_page_is_emitted() {
     let temp = crate::test_support_paths::tempdir().unwrap();
