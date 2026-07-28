@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
@@ -27,6 +29,7 @@ use crate::provider::providers::zed::thread::ZedThreadRow;
 const ZED_CANDIDATE_PAGE_ROWS: i64 = 256;
 pub(super) const ZED_THREAD_ID_MAX_BYTES: usize = 64 * 1024;
 const ZED_SOURCE_DIGEST_DOMAIN: &[u8] = b"ctx-zed-source-integrity-v1\0";
+const ZED_RELATIONSHIP_MAX_DEPTH: usize = 1_024;
 
 pub(super) struct ZedNativeQueryResult {
     pub(super) capability_digest: String,
@@ -35,6 +38,79 @@ pub(super) struct ZedNativeQueryResult {
     pub(super) output_index: ZedNativeOutputIndex,
     pub(super) pages_emitted: u64,
     pub(super) counters: ZedNativeCounters,
+}
+
+pub(super) struct ZedThreadLineage {
+    pub(super) parent_thread_id: Option<String>,
+    pub(super) root_thread_id: String,
+}
+
+pub(super) struct ZedThreadLineageResolver<'connection> {
+    connection: &'connection Connection,
+    parent_statement: rusqlite::Statement<'connection>,
+}
+
+impl<'connection> ZedThreadLineageResolver<'connection> {
+    pub(super) fn new(connection: &'connection Connection) -> ZedNativeResult<Self> {
+        let schema = ZedNativeSchema::detect(connection)?;
+        let parent_statement = connection.prepare(&format!(
+            "select {} from threads where id = ?1 collate binary",
+            schema.parent_id
+        ))?;
+        Ok(Self {
+            connection,
+            parent_statement,
+        })
+    }
+
+    pub(super) fn resolve(&mut self, thread_id: &str) -> ZedNativeResult<Option<ZedThreadLineage>> {
+        let mut visited = HashSet::new();
+        let mut current = thread_id.to_owned();
+        let mut root_thread_id = thread_id.to_owned();
+        let mut parent_thread_id = None;
+        let mut depth = 0_usize;
+
+        loop {
+            if !visited.insert(current.clone()) {
+                return Err(ZedNativePathError::UnsupportedSchema(
+                    "Zed thread relationships contain a cycle".to_owned(),
+                ));
+            }
+            let parent = {
+                let _guard = SqliteLengthPreflightGuard::new(self.connection);
+                self.parent_statement
+                    .query_row([current.as_str()], |row| row.get::<_, Option<String>>(0))
+                    .optional()?
+            };
+            let Some(parent) = parent else {
+                return if depth == 0 {
+                    Ok(None)
+                } else {
+                    Ok(Some(ZedThreadLineage {
+                        parent_thread_id,
+                        root_thread_id,
+                    }))
+                };
+            };
+            if depth > ZED_RELATIONSHIP_MAX_DEPTH {
+                return Err(ZedNativePathError::UnsupportedSchema(
+                    "Zed thread relationships exceed the bounded depth".to_owned(),
+                ));
+            }
+            if depth == 1 {
+                parent_thread_id = Some(current.clone());
+            }
+            root_thread_id = current;
+            let Some(next) = parent else {
+                return Ok(Some(ZedThreadLineage {
+                    parent_thread_id,
+                    root_thread_id,
+                }));
+            };
+            current = next;
+            depth = depth.saturating_add(1);
+        }
+    }
 }
 
 struct ZedNativeSchema {
