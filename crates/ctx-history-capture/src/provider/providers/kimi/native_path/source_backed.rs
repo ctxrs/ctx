@@ -7,7 +7,6 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, File, Metadata},
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
@@ -28,7 +27,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
-    common::io::ensure_regular_provider_transcript_file,
+    common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
     provider::normalization::provider_local_preview, CaptureError, KIMI_CODE_CLI_SOURCE_FORMAT,
     MAX_PROVIDER_JSONL_LINE_BYTES,
 };
@@ -163,7 +162,7 @@ impl KimiCompoundObservation {
 
 #[derive(Clone, Debug)]
 struct KimiSourceLeaf {
-    path: PathBuf,
+    relative_path: PathBuf,
     source: SourceKey,
     provider_session_id: String,
     relative_file_key: Vec<u8>,
@@ -171,9 +170,30 @@ struct KimiSourceLeaf {
 
 #[derive(Clone, Debug)]
 struct CatalogSnapshot {
-    source_root: PathBuf,
     observation: SourceInventoryObservation,
     leaves: BTreeMap<SourceKey, KimiSourceLeaf>,
+}
+
+#[derive(Debug)]
+struct AdmittedKimiCompound {
+    compound: KimiCompoundObservation,
+    wire: OpenedProviderSourceFile,
+    state: Option<OpenedProviderSourceFile>,
+    index: Option<OpenedProviderSourceFile>,
+}
+
+impl AdmittedKimiCompound {
+    fn revalidate(&self, authority: &ProviderSourceRoot) -> KimiSourceBackedResult<()> {
+        self.wire.revalidate()?;
+        if let Some(state) = &self.state {
+            state.revalidate()?;
+        }
+        if let Some(index) = &self.index {
+            index.revalidate()?;
+        }
+        authority.revalidate()?;
+        Ok(())
+    }
 }
 
 /// One certified, complete Kimi root inventory.
@@ -183,17 +203,30 @@ struct CatalogSnapshot {
 #[derive(Clone, Debug)]
 pub(crate) struct KimiSourceBackedCatalog {
     source_root: PathBuf,
+    selected_path: PathBuf,
+    authority: ProviderSourceRoot,
     inventory: CertifiedSourceInventory,
     leaves: BTreeMap<SourceKey, KimiSourceLeaf>,
 }
 
 impl KimiSourceBackedCatalog {
     pub(crate) fn discover(path: impl AsRef<Path>) -> KimiSourceBackedResult<Self> {
-        let opening = discover_snapshot(path.as_ref())?;
-        let closing = discover_snapshot(path.as_ref())?;
-        if opening.source_root != closing.source_root
-            || opening.leaves.keys().ne(closing.leaves.keys())
-        {
+        let selected_path = path.as_ref().to_path_buf();
+        let opening_inventory = discover_kimi_wire_files(&selected_path)?;
+        if opening_inventory.root_missing {
+            return Err(KimiSourceBackedError::InventoryUnavailable);
+        }
+        let source_root = opening_inventory.source_root.clone();
+        let authority = ProviderSourceRoot::open(&source_root)?;
+        let opening = bind_snapshot(opening_inventory, &authority)?;
+        authority.revalidate()?;
+        let closing_inventory = discover_kimi_wire_files(&selected_path)?;
+        if closing_inventory.root_missing || closing_inventory.source_root != source_root {
+            return Err(KimiSourceBackedError::InventoryChanged);
+        }
+        let closing = bind_snapshot(closing_inventory, &authority)?;
+        authority.revalidate()?;
+        if opening.leaves.keys().ne(closing.leaves.keys()) {
             return Err(KimiSourceBackedError::InventoryChanged);
         }
         let sources = opening.leaves.keys().cloned().collect::<Vec<_>>();
@@ -204,7 +237,9 @@ impl KimiSourceBackedCatalog {
             sources,
         )?;
         Ok(Self {
-            source_root: closing.source_root,
+            source_root,
+            selected_path,
+            authority,
             inventory,
             leaves: closing.leaves,
         })
@@ -235,7 +270,7 @@ impl KimiSourceBackedCatalog {
         if !leaf.source.exact_descriptor_eq(source) {
             return Err(KimiSourceBackedError::UnknownSource);
         }
-        scan_leaf(&self.source_root, leaf, &mut emit)
+        scan_leaf(&self.authority, leaf, &mut emit)
     }
 
     /// Final precommit source witness for the shared generation coordinator.
@@ -246,13 +281,19 @@ impl KimiSourceBackedCatalog {
         let Some(leaf) = self.leaves.get(certificate.observation().source()) else {
             return Ok(false);
         };
-        let current = observe_compound_leaf(&self.source_root, &leaf.path)?;
-        Ok(current.observation == *certificate.observation())
+        let current = admit_compound_leaf(&self.authority, &leaf.relative_path)?;
+        current.revalidate(&self.authority)?;
+        Ok(current.compound.observation == *certificate.observation())
     }
 
     /// Final precommit inventory witness for coordinator-owned deletion.
     pub(crate) fn revalidate_inventory(&self) -> KimiSourceBackedResult<bool> {
-        let current = discover_snapshot(&self.source_root)?;
+        let inventory = discover_kimi_wire_files(&self.selected_path)?;
+        if inventory.root_missing || inventory.source_root != self.source_root {
+            return Ok(false);
+        }
+        let current = bind_snapshot(inventory, &self.authority)?;
+        self.authority.revalidate()?;
         Ok(current.observation == *self.inventory.observation()
             && current.leaves.keys().eq(self.leaves.keys()))
     }
@@ -294,9 +335,10 @@ impl KimiSourceBackedResolver {
             ));
         }
 
-        let opening = observe_compound_leaf(&self.catalog.source_root, &leaf.path)
+        let opening = admit_compound_leaf(&self.catalog.authority, &leaf.relative_path)
             .map_err(map_hydration_error)?;
         let expected_revision = opening
+            .compound
             .source_revision_digest()
             .map_err(map_hydration_error)?;
         let mut decoded = Vec::with_capacity(requests.len());
@@ -317,7 +359,10 @@ impl KimiSourceBackedResolver {
             decoded.push(coordinate);
         }
 
-        let mut file = File::open(&leaf.path)
+        let mut file = opening
+            .wire
+            .file()
+            .try_clone()
             .map_err(|error| map_hydration_error(KimiSourceBackedError::Io(error)))?;
         let mut hydrated = Vec::with_capacity(requests.len());
         for (request, coordinate) in requests.iter().zip(decoded) {
@@ -328,9 +373,15 @@ impl KimiSourceBackedResolver {
                 provider_bytes,
             });
         }
-        let closing = observe_compound_leaf(&self.catalog.source_root, &leaf.path)
+        opening
+            .revalidate(&self.catalog.authority)
             .map_err(map_hydration_error)?;
-        if opening.observation != closing.observation {
+        let closing = admit_compound_leaf(&self.catalog.authority, &leaf.relative_path)
+            .map_err(map_hydration_error)?;
+        closing
+            .revalidate(&self.catalog.authority)
+            .map_err(map_hydration_error)?;
+        if opening.compound.observation != closing.compound.observation {
             return Err(hydration_failure(
                 HydrationFailureKind::StaleSourceEvidence,
                 "Kimi compound source changed during hydration",
@@ -371,17 +422,22 @@ struct DecodedKimiLocator {
     native_event_id: String,
 }
 
-fn discover_snapshot(path: &Path) -> KimiSourceBackedResult<CatalogSnapshot> {
-    let inventory = discover_kimi_wire_files(path)?;
-    if inventory.root_missing {
-        return Err(KimiSourceBackedError::InventoryUnavailable);
-    }
+fn bind_snapshot(
+    inventory: KimiInventory,
+    authority: &ProviderSourceRoot,
+) -> KimiSourceBackedResult<CatalogSnapshot> {
     let source_root = inventory.source_root;
     let mut leaves = BTreeMap::new();
     let mut native_lineages = BTreeSet::new();
     let mut observations = Vec::with_capacity(inventory.paths.len());
     for wire_path in inventory.paths {
-        let compound = observe_compound_leaf(&source_root, &wire_path)?;
+        let relative_path = wire_path
+            .strip_prefix(&source_root)
+            .map_err(|_| KimiSourceBackedError::SourceChanged)?
+            .to_path_buf();
+        let admitted = admit_compound_leaf(authority, &relative_path)?;
+        admitted.revalidate(authority)?;
+        let compound = admitted.compound;
         let provider_session_id = compound.native.session.provider_session_id.clone();
         if !native_lineages.insert(provider_session_id.clone()) {
             return Err(KimiSourceBackedError::DuplicateLineage(provider_session_id));
@@ -392,7 +448,7 @@ fn discover_snapshot(path: &Path) -> KimiSourceBackedResult<CatalogSnapshot> {
             compound.observation.revision().to_vec(),
         ));
         let leaf = KimiSourceLeaf {
-            path: compound.native.canonical_path().to_path_buf(),
+            relative_path,
             source: compound.source.clone(),
             provider_session_id,
             relative_file_key: compound.relative_file_key,
@@ -421,33 +477,49 @@ fn discover_snapshot(path: &Path) -> KimiSourceBackedResult<CatalogSnapshot> {
         revision.finalize().to_vec(),
     )?;
     Ok(CatalogSnapshot {
-        source_root,
         observation,
         leaves,
     })
 }
 
-fn observe_compound_leaf(
-    source_root: &Path,
-    path: &Path,
-) -> KimiSourceBackedResult<KimiCompoundObservation> {
-    let native = KimiWireObservation::read(path)?;
-    let relative = native
-        .canonical_path()
-        .strip_prefix(source_root)
+fn admit_compound_leaf(
+    authority: &ProviderSourceRoot,
+    relative_path: &Path,
+) -> KimiSourceBackedResult<AdmittedKimiCompound> {
+    let wire = authority.open_file(relative_path)?;
+    let display_path = authority.named_path().join(relative_path);
+    let (state_path, index_path) =
+        super::super::layout::complete_content_auxiliary_paths(&display_path)?;
+    let state_relative = state_path
+        .strip_prefix(authority.named_path())
         .map_err(|_| KimiSourceBackedError::SourceChanged)?;
-    let relative_file_key = relative.as_os_str().as_encoded_bytes().to_vec();
+    let index_relative = index_path
+        .strip_prefix(authority.named_path())
+        .map_err(|_| KimiSourceBackedError::SourceChanged)?;
+    let state = open_optional_file(authority, state_relative)?;
+    let index = open_optional_file(authority, index_relative)?;
+    let state_bytes = read_auxiliary_bytes(state.as_ref())?;
+    let index_bytes = read_auxiliary_bytes(index.as_ref())?;
+    let native = KimiWireObservation::read_from_admitted(
+        &display_path,
+        display_path.clone(),
+        wire.metadata(),
+        state
+            .as_ref()
+            .zip(state_bytes.as_deref())
+            .map(|(file, bytes)| (file.metadata(), bytes)),
+        index
+            .as_ref()
+            .zip(index_bytes.as_deref())
+            .map(|(file, bytes)| (file.metadata(), bytes)),
+    )?;
+    let relative_file_key = relative_path.as_os_str().as_encoded_bytes().to_vec();
     if relative_file_key.is_empty() {
         return Err(KimiSourceBackedError::SourceChanged);
     }
     let source = source_key(&native.session.provider_session_id)?;
-    let (state_path, index_path) =
-        super::super::layout::complete_content_auxiliary_paths(native.canonical_path())?;
-    let state = read_auxiliary_snapshot(&state_path)?;
-    let index = read_auxiliary_snapshot(&index_path)?;
-    if !native.revalidate(native.canonical_path())? {
-        return Err(KimiSourceBackedError::SourceChanged);
-    }
+    let state_snapshot = auxiliary_snapshot(state.as_ref(), state_bytes.as_deref())?;
+    let index_snapshot = auxiliary_snapshot(index.as_ref(), index_bytes.as_deref())?;
     let mut revision = Sha256::new();
     revision.update(KIMI_REVISION_DOMAIN);
     revision.update(source.exact_descriptor_digest());
@@ -456,59 +528,68 @@ fn observe_compound_leaf(
     let wire_revision = native.wire().revision_component();
     revision.update((wire_revision.len() as u64).to_be_bytes());
     revision.update(wire_revision.as_bytes());
-    state.feed_revision(&mut revision, b"state.json");
-    index.feed_revision(&mut revision, b"session_index.jsonl");
+    state_snapshot.feed_revision(&mut revision, b"state.json");
+    index_snapshot.feed_revision(&mut revision, b"session_index.jsonl");
     let observation = SourceObservation::new(
         source.clone(),
         KIMI_SOURCE_REVISION_KIND,
         revision.finalize().to_vec(),
     )?;
-    Ok(KimiCompoundObservation {
-        native,
-        source,
-        observation,
-        relative_file_key,
+    Ok(AdmittedKimiCompound {
+        compound: KimiCompoundObservation {
+            native,
+            source,
+            observation,
+            relative_file_key,
+            state: state_snapshot,
+            index: index_snapshot,
+        },
+        wire,
         state,
         index,
     })
 }
 
-fn read_auxiliary_snapshot(path: &Path) -> KimiSourceBackedResult<AuxiliarySnapshot> {
-    let before = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(AuxiliarySnapshot::absent())
-        }
-        Err(error) => return Err(error.into()),
+fn open_optional_file(
+    authority: &ProviderSourceRoot,
+    relative_path: &Path,
+) -> KimiSourceBackedResult<Option<OpenedProviderSourceFile>> {
+    match authority.open_file(relative_path) {
+        Ok(file) => Ok(Some(file)),
+        Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn read_auxiliary_bytes(
+    file: Option<&OpenedProviderSourceFile>,
+) -> KimiSourceBackedResult<Option<Vec<u8>>> {
+    let Some(file) = file else {
+        return Ok(None);
     };
-    ensure_regular_provider_transcript_file(path)?;
-    if before.len() > super::super::layout::KIMI_WIRE_LAYOUT_MAX_AGGREGATE_BYTES as u64 {
+    if file.len() > super::super::layout::KIMI_WIRE_LAYOUT_MAX_AGGREGATE_BYTES as u64 {
         return Err(CaptureError::InvalidPayload(
             "Kimi source-backed auxiliary file exceeds its bounded layout limit".to_owned(),
         )
         .into());
     }
-    let mut file = File::open(path)?;
-    let opened = file.metadata()?;
-    if !same_file_metadata(&before, &opened)? {
-        return Err(KimiSourceBackedError::SourceChanged);
-    }
-    let mut bytes = Vec::with_capacity(usize::try_from(opened.len()).unwrap_or(0));
-    file.read_to_end(&mut bytes)?;
-    let after = fs::symlink_metadata(path)?;
-    if !same_file_metadata(&before, &after)? || bytes.len() as u64 != before.len() {
-        return Err(KimiSourceBackedError::SourceChanged);
-    }
-    Ok(AuxiliarySnapshot {
-        length: before.len(),
-        digest: Sha256::digest(&bytes).into(),
-        revision: Some(KimiFrozenFileMetadata::from_metadata(&before)?.revision_component()),
-    })
+    Ok(Some(file.read_all_bounded(
+        super::super::layout::KIMI_WIRE_LAYOUT_MAX_AGGREGATE_BYTES,
+    )?))
 }
 
-fn same_file_metadata(left: &Metadata, right: &Metadata) -> KimiSourceBackedResult<bool> {
-    Ok(KimiFrozenFileMetadata::from_metadata(left)?
-        == KimiFrozenFileMetadata::from_metadata(right)?)
+fn auxiliary_snapshot(
+    file: Option<&OpenedProviderSourceFile>,
+    bytes: Option<&[u8]>,
+) -> KimiSourceBackedResult<AuxiliarySnapshot> {
+    let (Some(file), Some(bytes)) = (file, bytes) else {
+        return Ok(AuxiliarySnapshot::absent());
+    };
+    Ok(AuxiliarySnapshot {
+        length: file.len(),
+        digest: Sha256::digest(&bytes).into(),
+        revision: Some(KimiFrozenFileMetadata::from_metadata(file.metadata())?.revision_component()),
+    })
 }
 
 fn source_key(provider_session_id: &str) -> KimiSourceBackedResult<SourceKey> {
@@ -546,34 +627,32 @@ fn lineage_session_identity(provider_session_id: &str) -> KimiSourceBackedResult
 }
 
 fn scan_leaf<F>(
-    source_root: &Path,
+    authority: &ProviderSourceRoot,
     leaf: &KimiSourceLeaf,
     emit: &mut F,
 ) -> KimiSourceBackedResult<CertifiedSource>
 where
     F: FnMut(LexicalDocument) -> KimiSourceBackedResult<()>,
 {
-    let opening = observe_compound_leaf(source_root, &leaf.path)?;
-    if !opening.source.exact_descriptor_eq(&leaf.source)
-        || opening.relative_file_key != leaf.relative_file_key
-        || opening.native.session.provider_session_id != leaf.provider_session_id
+    let opening = admit_compound_leaf(authority, &leaf.relative_path)?;
+    if !opening.compound.source.exact_descriptor_eq(&leaf.source)
+        || opening.compound.relative_file_key != leaf.relative_file_key
+        || opening.compound.native.session.provider_session_id != leaf.provider_session_id
     {
         return Err(KimiSourceBackedError::SourceChanged);
     }
-    let source_revision_digest = opening.source_revision_digest()?;
+    let source_revision_digest = opening.compound.source_revision_digest()?;
     let session_id = session_identity(&leaf.source, &leaf.provider_session_id)?;
     let fallback_timestamp = opening
+        .compound
         .native
         .session
         .started_at
         .or_else(|| DateTime::<Utc>::from_timestamp(0, 0))
         .ok_or(KimiSourceBackedError::SourceChanged)?;
-    let mut file = File::open(&leaf.path)?;
-    if KimiFrozenFileMetadata::from_metadata(&file.metadata()?)? != *opening.native.wire() {
-        return Err(KimiSourceBackedError::SourceChanged);
-    }
+    let file = opening.wire.file().try_clone()?;
     let mut reader = std::io::BufReader::new(file);
-    let mut content_hasher = opening.content_hasher();
+    let mut content_hasher = opening.compound.content_hasher();
     let mut counts = ScannedSourceCounts::default();
     let mut offset = 0_u64;
     let mut ordinal = 0_u64;
@@ -643,7 +722,7 @@ where
             .checked_add(1)
             .ok_or(KimiSourceBackedError::CountOverflow)?;
         let Some(document) = lexical_document(
-            &opening,
+            &opening.compound,
             session_id,
             current_ordinal,
             byte_start,
@@ -663,15 +742,17 @@ where
             .ok_or(KimiSourceBackedError::CountOverflow)?;
     }
 
-    if offset != opening.native.wire().length {
+    if offset != opening.compound.native.wire().length {
         return Err(KimiSourceBackedError::SourceChanged);
     }
-    counts.certified_bytes = opening.certified_bytes()?;
-    let closing = observe_compound_leaf(source_root, &leaf.path)?;
+    counts.certified_bytes = opening.compound.certified_bytes()?;
+    opening.revalidate(authority)?;
+    let closing = admit_compound_leaf(authority, &leaf.relative_path)?;
+    closing.revalidate(authority)?;
     let content_digest = content_hasher.finalize().into();
     Ok(CertifiedSource::certify(
-        opening.observation,
-        closing.observation,
+        opening.compound.observation,
+        closing.compound.observation,
         KIMI_SOURCE_PARSER_REVISION,
         content_digest,
         counts,
