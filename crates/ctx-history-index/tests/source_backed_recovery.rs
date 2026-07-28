@@ -21,6 +21,7 @@ use ctx_history_core::{
 use ctx_history_index::{
     CommitReceipt, GenerationWriter, IndexError, LexicalDocument, VerifiedIndex, WriterOptions,
 };
+use tantivy::Index;
 use tempfile::{tempdir, TempDir};
 
 const CHILD_MODE_ENV: &str = "CTX_SOURCE_RECOVERY_CHILD_MODE";
@@ -198,8 +199,14 @@ fn active_segment_corruption_is_detected_and_rebuild_is_deterministic() {
         .unwrap()
         .is_empty());
     let damaged_path = corrupt_active_store(&corrupt_copy);
-    let corrupt_reader = VerifiedIndex::open(&corrupt_copy).unwrap();
-    let damaged = corrupt_reader.validate_checksums().unwrap();
+    assert!(
+        VerifiedIndex::open(&corrupt_copy).is_err(),
+        "verified open admitted a malformed active document"
+    );
+    let damaged = Index::open_in_dir(&corrupt_copy)
+        .unwrap()
+        .validate_checksum()
+        .unwrap();
     assert!(
         damaged.iter().any(|path| path == &damaged_path),
         "checksum scrub did not identify {damaged_path:?}: {damaged:?}"
@@ -392,9 +399,22 @@ fn retry_resynchronizes_a_reused_manifest_before_meta_publication() {
         "candidate",
     );
 
-    let retry_fence = FaultCase::stop("sync", "manifest_dir", "after", None, Visibility::Old);
-    let mut retry = fixture.spawn_stopped_child("commit", Some((&shim, retry_fence)));
-    fixture.kill_at_marker(&mut retry);
+    let retry_file_fence =
+        FaultCase::stop("sync", "manifest_final", "after", None, Visibility::Old);
+    let mut file_retry = fixture.spawn_stopped_child("commit", Some((&shim, retry_file_fence)));
+    fixture.kill_at_marker(&mut file_retry);
+    assert_generation(
+        &fixture.root,
+        &fixture.baseline.generation_id,
+        "previous",
+        "candidate",
+    );
+
+    let retry_directory_fence =
+        FaultCase::stop("sync", "manifest_dir", "after", None, Visibility::Old);
+    let mut directory_retry =
+        fixture.spawn_stopped_child("commit", Some((&shim, retry_directory_fence)));
+    fixture.kill_at_marker(&mut directory_retry);
     assert_generation(
         &fixture.root,
         &fixture.baseline.generation_id,
