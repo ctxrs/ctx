@@ -266,6 +266,34 @@ fn source_generation_is_the_normal_core_search_and_show_route() {
     assert_eq!(search["results"][0]["result_type"], "session_result");
     assert_eq!(search["results"][0]["ctx_event_id"], fixture.event_id);
     assert_eq!(search["results"][0]["ctx_session_id"], fixture.session_id);
+    assert_eq!(search["results"][0]["agent_type"], "primary");
+    assert_eq!(search["results"][0]["is_primary"], true);
+
+    let filtered = json_output(ctx(&fixture.temp).args([
+        "search",
+        SOURCE_INDEX_QUERY,
+        "--provider",
+        "codex",
+        "--source-format",
+        "codex_session_jsonl_tree",
+        "--workspace",
+        "SOURCE-INDEX",
+        "--since",
+        "2026-07-28T12:00:00Z",
+        "--event-type",
+        "message",
+        "--primary-only",
+        "--format=json",
+    ]));
+    assert_eq!(filtered["results"][0]["ctx_event_id"], fixture.event_id);
+    assert_eq!(filtered["filters"]["provider"], "codex");
+    assert_eq!(
+        filtered["filters"]["source_format"],
+        "codex_session_jsonl_tree"
+    );
+    assert_eq!(filtered["filters"]["workspace"], "SOURCE-INDEX");
+    assert_eq!(filtered["filters"]["event_type"], "message");
+    assert_eq!(filtered["filters"]["primary_only"], true);
 
     let event_prefix = &fixture.event_id[..8];
     let indexed = json_output(ctx(&fixture.temp).args([
@@ -428,7 +456,15 @@ fn source_generation_routes_search_and_prefix_show_over_mcp() {
                 "method": "tools/call",
                 "params": {
                     "name": "search",
-                    "arguments": { "query": SOURCE_INDEX_QUERY }
+                    "arguments": {
+                        "query": SOURCE_INDEX_QUERY,
+                        "provider": "codex",
+                        "source_format": "codex_session_jsonl_tree",
+                        "workspace": "SOURCE-INDEX",
+                        "since": "2026-07-28T12:00:00Z",
+                        "event_type": "message",
+                        "primary_only": true
+                    }
                 }
             }),
             json!({
@@ -475,7 +511,7 @@ fn source_generation_routes_search_and_prefix_show_over_mcp() {
     assert_eq!(event["event"]["content"]["source_verified"], true);
     assert_useful_mcp_text(
         &responses[2]["result"],
-        &["ctx show event", &fixture.event_id, END_SENTINEL],
+        &["ctx show event", &fixture.event_id, BEGIN_SENTINEL],
     );
 
     let session = &responses[3]["result"]["structuredContent"];

@@ -636,13 +636,6 @@ fn tool_search(arguments: &Value, data_root: &Path) -> Result<Value> {
         source_id,
         source_format,
     };
-    validate_search_filter_arguments(
-        provider.as_ref(),
-        &source_identity,
-        session.as_deref(),
-        since.as_deref(),
-        event_type.as_deref(),
-    )?;
     if !search_has_intent(SearchIntentInput {
         query: Some(&query),
         terms: &[],
@@ -676,6 +669,13 @@ fn tool_search(arguments: &Value, data_root: &Path) -> Result<Value> {
             data_root,
         );
     }
+    validate_search_filter_arguments(
+        provider.as_ref(),
+        &source_identity,
+        session.as_deref(),
+        since.as_deref(),
+        event_type.as_deref(),
+    )?;
     let config = config::AppConfig::load(data_root)?;
     let backend = resolve_search_backend(backend, &config)?;
     let store = open_existing_store(data_root)?;
