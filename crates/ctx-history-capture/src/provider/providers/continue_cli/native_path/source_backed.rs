@@ -25,10 +25,10 @@ use super::{
         locate_continue_exact_history_item, ContinueExactHistoryLookup, ContinueIncompleteSource,
         ContinueOutputExclusionStats, ContinueSourceFailure,
     },
-    source::{ContinueRootAuthority, ContinueSourceSnapshot},
-    ContinueDiscovery, ContinueEventKind, ContinueEventRole, ContinueEventRow,
-    ContinueGenerationAuthority, ContinueIndexObservation, ContinueNativePathError,
-    ContinueSessionRow, ContinueSourceObservation,
+    source::{ContinueDiscovery, ContinueRootAuthority, ContinueSourceSnapshot},
+    ContinueEventKind, ContinueEventRole, ContinueEventRow, ContinueGenerationAuthority,
+    ContinueIndexObservation, ContinueNativePathError, ContinueSessionRow,
+    ContinueSourceObservation,
 };
 use crate::{
     provider::providers::continue_cli::continue_history_item_text, CONTINUE_CLI_SOURCE_FORMAT,
