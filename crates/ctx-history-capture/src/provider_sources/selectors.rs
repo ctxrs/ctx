@@ -1,7 +1,6 @@
 use std::{
     collections::BTreeMap,
-    fs,
-    io::Read,
+    io::ErrorKind,
     path::{Path, PathBuf},
 };
 
@@ -9,11 +8,10 @@ use quick_xml::{encoding::Decoder, events::Event, Reader};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::common::io::{
-    ensure_provider_path_parents_are_not_symlinks, provider_metadata_is_link_like,
+use crate::{
+    common::io::{open_provider_source_file, open_provider_source_path, OpenedProviderSourcePath},
+    CaptureError,
 };
-
-use super::open_ordinary_file_without_following;
 
 pub(super) const MAX_SELECTOR_FILE_BYTES: usize = 1024 * 1024;
 pub(super) const MAX_SELECTOR_FILES_PER_PROVIDER: usize = 64;
@@ -41,6 +39,8 @@ pub(super) enum SelectorFormat {
 pub(super) enum SelectorReadError {
     #[error("selector file is unavailable or is not an ordinary no-follow file")]
     Unavailable,
+    #[error("selector source root is unsupported or unsafe")]
+    UnsupportedRoot,
     #[error("selector file exceeds the fixed byte limit")]
     FileTooLarge,
     #[error("selector file count exceeds the per-provider limit")]
@@ -55,6 +55,19 @@ pub(super) enum SelectorReadError {
     DirectoryLimit,
     #[error("XML document types and entity declarations are not accepted")]
     XmlDoctype,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SourcePathKind {
+    File,
+    Directory,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SourcePathError {
+    Missing,
+    Unsupported,
+    Unavailable(ErrorKind),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -210,24 +223,13 @@ impl SelectorReader {
 }
 
 fn read_selector_text(path: &Path) -> Result<String, SelectorReadError> {
-    let file =
-        open_ordinary_file_without_following(path).map_err(|_| SelectorReadError::Unavailable)?;
-    let metadata = file
-        .metadata()
-        .map_err(|_| SelectorReadError::Unavailable)?;
-    if !metadata.file_type().is_file() {
-        return Err(SelectorReadError::Unavailable);
-    }
-    if metadata.len() > MAX_SELECTOR_FILE_BYTES as u64 {
+    let file = open_provider_source_file(path).map_err(selector_open_error)?;
+    if file.len() > MAX_SELECTOR_FILE_BYTES as u64 {
         return Err(SelectorReadError::FileTooLarge);
     }
-    let mut bytes = Vec::new();
-    file.take((MAX_SELECTOR_FILE_BYTES as u64).saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|_| SelectorReadError::Unavailable)?;
-    if bytes.len() > MAX_SELECTOR_FILE_BYTES {
-        return Err(SelectorReadError::FileTooLarge);
-    }
+    let bytes = file
+        .read_all_bounded(MAX_SELECTOR_FILE_BYTES)
+        .map_err(selector_open_error)?;
     String::from_utf8(bytes).map_err(|_| SelectorReadError::Parse)
 }
 
@@ -464,38 +466,111 @@ pub(super) fn sort_paths(paths: &mut [PathBuf]) {
     paths.sort_by_cached_key(|path| encoded_path_sort_key(path));
 }
 
-pub(super) fn direct_entries(path: &Path) -> Result<Vec<PathBuf>, SelectorReadError> {
-    let metadata = fs::symlink_metadata(path).map_err(|_| SelectorReadError::Unavailable)?;
-    if provider_metadata_is_link_like(&metadata) || !metadata.file_type().is_dir() {
-        return Err(SelectorReadError::Unavailable);
-    }
-    ensure_provider_path_parents_are_not_symlinks(path)
-        .map_err(|_| SelectorReadError::Unavailable)?;
+pub(super) fn source_path_kind(path: &Path) -> Result<SourcePathKind, SourcePathError> {
+    let opened = open_provider_source_path(path).map_err(source_path_error)?;
+    let kind = match &opened {
+        OpenedProviderSourcePath::File(_) => SourcePathKind::File,
+        OpenedProviderSourcePath::Directory(_) => SourcePathKind::Directory,
+    };
+    revalidate_opened_path(&opened).map_err(source_path_error)?;
+    Ok(kind)
+}
 
-    let entries = fs::read_dir(path).map_err(|_| SelectorReadError::Unavailable)?;
-    let mut paths = Vec::new();
-    let mut examined = 0usize;
-    for entry in entries {
-        let entry = entry.map_err(|_| SelectorReadError::Unavailable)?;
-        examined = examined.saturating_add(1);
-        if examined > MAX_DIRECT_DIRECTORY_ENTRIES {
-            return Err(SelectorReadError::DirectoryLimit);
-        }
-        let entry_path = entry.path();
-        let metadata =
-            fs::symlink_metadata(&entry_path).map_err(|_| SelectorReadError::Unavailable)?;
-        if provider_metadata_is_link_like(&metadata) {
-            return Err(SelectorReadError::Unavailable);
-        }
-        paths.push(entry_path);
+pub(super) fn ordinary_file(path: &Path) -> bool {
+    source_path_kind(path) == Ok(SourcePathKind::File)
+}
+
+pub(super) fn ordinary_directory(path: &Path) -> bool {
+    source_path_kind(path) == Ok(SourcePathKind::Directory)
+}
+
+pub(super) fn ordinary_path(path: &Path) -> bool {
+    source_path_kind(path).is_ok()
+}
+
+pub(super) fn ordinary_empty_file(path: &Path) -> Result<bool, SelectorReadError> {
+    let file = open_provider_source_file(path).map_err(selector_open_error)?;
+    let empty = file.is_empty();
+    file.revalidate().map_err(selector_open_error)?;
+    Ok(empty)
+}
+
+pub(super) fn read_bounded_bytes(
+    path: &Path,
+    maximum_bytes: usize,
+) -> Result<Vec<u8>, SelectorReadError> {
+    let file = open_provider_source_file(path).map_err(selector_open_error)?;
+    if file.len() > u64::try_from(maximum_bytes).map_err(|_| SelectorReadError::FileTooLarge)? {
+        return Err(SelectorReadError::FileTooLarge);
     }
+    file.read_all_bounded(maximum_bytes)
+        .map_err(selector_open_error)
+}
+
+pub(super) fn direct_entries(path: &Path) -> Result<Vec<PathBuf>, SelectorReadError> {
+    let opened = open_provider_source_path(path).map_err(selector_open_error)?;
+    let OpenedProviderSourcePath::Directory(directory) = opened else {
+        return Err(SelectorReadError::Unavailable);
+    };
+    let authority = directory.authority_root();
+    let names = directory
+        .entries(MAX_DIRECT_DIRECTORY_ENTRIES.saturating_add(1))
+        .map_err(selector_open_error)?;
+    if names.len() > MAX_DIRECT_DIRECTORY_ENTRIES {
+        return Err(SelectorReadError::DirectoryLimit);
+    }
+
+    let mut opened_children = Vec::with_capacity(names.len());
+    for name in names {
+        let child = directory.open_child(&name).map_err(selector_open_error)?;
+        opened_children.push((path.join(name), child));
+    }
+    for (_, child) in &opened_children {
+        revalidate_opened_path(child).map_err(selector_open_error)?;
+    }
+    directory.revalidate().map_err(selector_open_error)?;
+    authority.revalidate().map_err(selector_open_error)?;
+
+    let mut paths = opened_children
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect::<Vec<_>>();
     sort_paths(&mut paths);
     Ok(paths)
+}
+
+fn revalidate_opened_path(opened: &OpenedProviderSourcePath) -> crate::Result<()> {
+    match opened {
+        OpenedProviderSourcePath::File(file) => file.revalidate(),
+        OpenedProviderSourcePath::Directory(directory) => {
+            directory.revalidate()?;
+            directory.authority_root().revalidate()
+        }
+    }
+}
+
+fn source_path_error(error: CaptureError) -> SourcePathError {
+    match error {
+        CaptureError::Io(error) if error.kind() == ErrorKind::NotFound => SourcePathError::Missing,
+        CaptureError::Io(error) => SourcePathError::Unavailable(error.kind()),
+        CaptureError::InvalidProviderTranscriptPath { .. } => SourcePathError::Unsupported,
+        _ => SourcePathError::Unavailable(ErrorKind::Other),
+    }
+}
+
+fn selector_open_error(error: CaptureError) -> SelectorReadError {
+    match source_path_error(error) {
+        SourcePathError::Unsupported => SelectorReadError::UnsupportedRoot,
+        SourcePathError::Missing | SourcePathError::Unavailable(_) => {
+            SelectorReadError::Unavailable
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn tempdir() -> tempfile::TempDir {
         crate::test_support_paths::tempdir()

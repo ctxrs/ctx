@@ -1,5 +1,4 @@
 use std::{
-    fs,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
 };
@@ -7,17 +6,21 @@ use std::{
 use ctx_history_core::CaptureProvider;
 use serde_json::Value;
 
+use crate::common::io::open_provider_source_file;
+
 use super::super::{
-    open_ordinary_file_without_following,
     probes::{default_location_import_probe, BoundedProbe},
     provider_source_spec,
     resolvers::unsupported_source,
-    selectors, ProviderCatalogSupport, ProviderDefaultLocation, ProviderImportSupport,
-    ProviderSource, ProviderSourceKind, ProviderSourceSpec, ProviderSourceStatus,
+    selectors::{self, SourcePathError, SourcePathKind},
+    ProviderCatalogSupport, ProviderDefaultLocation, ProviderImportSupport, ProviderSource,
+    ProviderSourceKind, ProviderSourceSpec, ProviderSourceStatus,
 };
 
 const CODEX_AMBIGUOUS_JSONL_REASON: &str =
     "Codex JSONL schema is ambiguous; the bounded first-record probe requires either prompt-history fields (session_id, ts, text) or rollout fields (timestamp, type, payload)";
+const UNSUPPORTED_EXPLICIT_ROOT_REASON: &str =
+    "the explicit provider path uses an unsupported, non-local, or unsafe source root";
 
 pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> ProviderSource {
     let unknown_spec = ProviderSourceSpec {
@@ -29,14 +32,16 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         unsupported_reason: Some("provider is not registered for native local-history import"),
     };
     let spec = provider_source_spec(provider).unwrap_or(&unknown_spec);
-    if let Some(reason) = exact_current_unsupported_reason(provider, &path) {
+    let observed = selectors::source_path_kind(&path);
+    let is_directory = observed == Ok(SourcePathKind::Directory);
+    if let Some(reason) = exact_current_unsupported_reason(provider, &path, observed.ok()) {
         return unsupported_source(spec, path, reason);
     }
-    let exists = path.exists();
+    let exists = !matches!(observed, Err(SourcePathError::Missing));
 
     let source_format = match provider {
-        CaptureProvider::Codex if path.is_dir() => "codex_session_jsonl_tree",
-        CaptureProvider::Codex if exists => {
+        CaptureProvider::Codex if is_directory => "codex_session_jsonl_tree",
+        CaptureProvider::Codex if observed == Ok(SourcePathKind::File) => {
             let Some(source_format) = codex_explicit_jsonl_source_format(&path) else {
                 return unsupported_source(spec, path, CODEX_AMBIGUOUS_JSONL_REASON);
             };
@@ -75,19 +80,19 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::Zed => "zed_threads_sqlite",
         CaptureProvider::CopilotCli => "copilot_cli_session_events_jsonl",
         CaptureProvider::FactoryAiDroid => "factory_ai_droid_sessions_jsonl",
-        CaptureProvider::QwenCode if path.is_dir() => "qwen_code_chat_jsonl_tree",
+        CaptureProvider::QwenCode if is_directory => "qwen_code_chat_jsonl_tree",
         CaptureProvider::QwenCode => "qwen_code_chat_jsonl",
-        CaptureProvider::KimiCodeCli if path.is_dir() => "kimi_code_cli_wire_jsonl_tree",
+        CaptureProvider::KimiCodeCli if is_directory => "kimi_code_cli_wire_jsonl_tree",
         CaptureProvider::KimiCodeCli => "kimi_code_cli_wire_jsonl",
         CaptureProvider::Auggie => "auggie_session_json",
-        CaptureProvider::Junie if path.is_dir() => "junie_session_events_jsonl_tree",
+        CaptureProvider::Junie if is_directory => "junie_session_events_jsonl_tree",
         CaptureProvider::Junie => "junie_session_events_jsonl",
         CaptureProvider::Firebender => "firebender_chat_history_sqlite",
         CaptureProvider::ForgeCode => "forgecode_sqlite",
         CaptureProvider::DeepAgents => "deepagents_sessions_sqlite",
-        CaptureProvider::MistralVibe if path.is_dir() => "mistral_vibe_session_jsonl_tree",
+        CaptureProvider::MistralVibe if is_directory => "mistral_vibe_session_jsonl_tree",
         CaptureProvider::MistralVibe => "mistral_vibe_session_jsonl",
-        CaptureProvider::Mux if path.is_dir() => "mux_session_jsonl_tree",
+        CaptureProvider::Mux if is_directory => "mux_session_jsonl_tree",
         CaptureProvider::Mux => "mux_session_jsonl",
         CaptureProvider::RovoDev => "rovodev_session_json_tree",
         CaptureProvider::OpenClaw => "openclaw_session_jsonl_tree",
@@ -101,7 +106,7 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::RooCode => "roo_task_directory_json",
         CaptureProvider::Lingma => "lingma_sqlite",
         CaptureProvider::Trae => "trae_state_vscdb",
-        CaptureProvider::Qoder if path.is_dir() => "qoder_transcript_jsonl_tree",
+        CaptureProvider::Qoder if is_directory => "qoder_transcript_jsonl_tree",
         CaptureProvider::Qoder => "qoder_transcript_jsonl",
         CaptureProvider::Warp => "warp_sqlite",
         CaptureProvider::CodeBuddy => "codebuddy_history_json",
@@ -122,20 +127,28 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         source_kind,
         import_support: explicit_import_support,
         catalog_support: spec.catalog_support,
-        status: if matches!(explicit_import_support, ProviderImportSupport::Unsupported) {
+        status: if matches!(explicit_import_support, ProviderImportSupport::Unsupported)
+            || matches!(observed, Err(SourcePathError::Unsupported))
+        {
             ProviderSourceStatus::Unsupported
-        } else if exists {
+        } else if observed.is_ok() {
             ProviderSourceStatus::Available
-        } else {
+        } else if matches!(observed, Err(SourcePathError::Missing)) {
             ProviderSourceStatus::Missing
+        } else {
+            ProviderSourceStatus::Unknown
         },
-        unsupported_reason: spec.unsupported_reason,
+        unsupported_reason: if matches!(observed, Err(SourcePathError::Unsupported)) {
+            Some(UNSUPPORTED_EXPLICIT_ROOT_REASON)
+        } else {
+            spec.unsupported_reason
+        },
     }
 }
 
 fn codex_explicit_jsonl_source_format(path: &Path) -> Option<&'static str> {
-    let file = open_ordinary_file_without_following(path).ok()?;
-    let mut reader = BufReader::new(file);
+    let file = open_provider_source_file(path).ok()?;
+    let mut reader = BufReader::new(file.file().try_clone().ok()?);
     let mut record = Vec::new();
     loop {
         let available = reader.fill_buf().ok()?;
@@ -168,22 +181,21 @@ fn codex_explicit_jsonl_source_format(path: &Path) -> Option<&'static str> {
     let rollout = object.get("timestamp").and_then(Value::as_str).is_some()
         && object.get("type").and_then(Value::as_str).is_some()
         && object.get("payload").and_then(Value::as_object).is_some();
-    match (prompt_history, rollout) {
+    let format = match (prompt_history, rollout) {
         (true, false) => Some("codex_history_jsonl"),
         (false, true) => Some("codex_session_jsonl"),
         _ => None,
-    }
+    };
+    file.revalidate().ok()?;
+    format
 }
 
 fn exact_current_unsupported_reason(
     provider: CaptureProvider,
     path: &Path,
+    kind: Option<SourcePathKind>,
 ) -> Option<&'static str> {
-    let metadata = fs::symlink_metadata(path).ok()?;
-    if metadata.file_type().is_symlink() {
-        return None;
-    }
-    if metadata.file_type().is_dir() && has_supported_explicit_history(provider, path) {
+    if kind == Some(SourcePathKind::Directory) && has_supported_explicit_history(provider, path) {
         return None;
     }
 
@@ -191,22 +203,22 @@ fn exact_current_unsupported_reason(
         CaptureProvider::Codex if is_named_regular_file(path, |name| name.ends_with(".jsonl.zst")) => {
             Some("Codex compressed .jsonl.zst history is detected but unsupported")
         }
-        CaptureProvider::KiroCli if is_current_kiro_shape(path, &metadata) => {
+        CaptureProvider::KiroCli if is_current_kiro_shape(path, kind?) => {
             Some("Kiro ACP/v3 session history is detected but unsupported")
         }
-        CaptureProvider::Qoder if is_qoder_direct_sdk_shape(path, &metadata) => {
+        CaptureProvider::Qoder if is_qoder_direct_sdk_shape(path, kind?) => {
             Some("Qoder direct SDK JSONL history without a transcript directory is detected but unsupported")
         }
-        CaptureProvider::OpenClaw if contains_openclaw_sqlite(path, &metadata) => {
+        CaptureProvider::OpenClaw if contains_openclaw_sqlite(path, kind?) => {
             Some("OpenClaw openclaw-agent.sqlite history is detected but unsupported")
         }
-        CaptureProvider::OpenHands if is_openhands_cli_events_shape(path, &metadata) => {
+        CaptureProvider::OpenHands if is_openhands_cli_events_shape(path, kind?) => {
             Some("OpenHands CLI events/event-*.json history is detected but unsupported")
         }
-        CaptureProvider::Mux if contains_mux_archive(path, &metadata) => {
+        CaptureProvider::Mux if contains_mux_archive(path, kind?) => {
             Some("Mux chat-archive.jsonl history is detected but unsupported")
         }
-        CaptureProvider::Cline if is_current_cline_sdk_shape(path, &metadata) => {
+        CaptureProvider::Cline if is_current_cline_sdk_shape(path, kind?) => {
             Some("current Cline SDK session history is detected but unsupported")
         }
         _ => None,
@@ -233,8 +245,8 @@ fn has_supported_explicit_history(provider: CaptureProvider, path: &Path) -> boo
     )
 }
 
-fn is_current_kiro_shape(path: &Path, metadata: &fs::Metadata) -> bool {
-    if metadata.file_type().is_dir() {
+fn is_current_kiro_shape(path: &Path, kind: SourcePathKind) -> bool {
+    if kind == SourcePathKind::Directory {
         let cli = if path.file_name().and_then(|name| name.to_str()) == Some("sessions") {
             path.join("cli")
         } else if path.file_name().and_then(|name| name.to_str()) == Some("cli")
@@ -265,7 +277,7 @@ fn is_current_kiro_shape(path: &Path, metadata: &fs::Metadata) -> bool {
             })
         });
     }
-    if !metadata.file_type().is_file() {
+    if kind != SourcePathKind::File {
         return false;
     }
     let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
@@ -284,11 +296,11 @@ fn is_current_kiro_shape(path: &Path, metadata: &fs::Metadata) -> bool {
         && is_named_regular_file(&counterpart, |_| true)
 }
 
-fn is_qoder_direct_sdk_shape(path: &Path, metadata: &fs::Metadata) -> bool {
+fn is_qoder_direct_sdk_shape(path: &Path, kind: SourcePathKind) -> bool {
     if path_has_component(path, "transcript") {
         return false;
     }
-    if metadata.file_type().is_file() {
+    if kind == SourcePathKind::File {
         return path.extension().and_then(|extension| extension.to_str()) == Some("jsonl")
             && path
                 .parent()
@@ -297,7 +309,7 @@ fn is_qoder_direct_sdk_shape(path: &Path, metadata: &fs::Metadata) -> bool {
                     projects.file_name().and_then(|name| name.to_str()) == Some("projects")
                 });
     }
-    if !metadata.file_type().is_dir() {
+    if kind != SourcePathKind::Directory {
         return false;
     }
     if path
@@ -322,11 +334,11 @@ fn is_qoder_direct_sdk_shape(path: &Path, metadata: &fs::Metadata) -> bool {
         })
 }
 
-fn contains_openclaw_sqlite(path: &Path, metadata: &fs::Metadata) -> bool {
-    if metadata.file_type().is_file() {
+fn contains_openclaw_sqlite(path: &Path, kind: SourcePathKind) -> bool {
+    if kind == SourcePathKind::File {
         return is_named_regular_file(path, |name| name == "openclaw-agent.sqlite");
     }
-    if !metadata.file_type().is_dir() {
+    if kind != SourcePathKind::Directory {
         return false;
     }
     if is_named_regular_file(&path.join("openclaw-agent.sqlite"), |name| {
@@ -350,14 +362,14 @@ fn contains_openclaw_sqlite(path: &Path, metadata: &fs::Metadata) -> bool {
     })
 }
 
-fn is_openhands_cli_events_shape(path: &Path, metadata: &fs::Metadata) -> bool {
+fn is_openhands_cli_events_shape(path: &Path, kind: SourcePathKind) -> bool {
     if path_has_component(path, "v1_conversations") {
         return false;
     }
-    if metadata.file_type().is_file() {
+    if kind == SourcePathKind::File {
         return is_openhands_cli_event_file(path);
     }
-    if !metadata.file_type().is_dir() {
+    if kind != SourcePathKind::Directory {
         return false;
     }
     let events = if path.file_name().and_then(|name| name.to_str()) == Some("events") {
@@ -380,11 +392,11 @@ fn is_openhands_cli_event_file(path: &Path) -> bool {
         })
 }
 
-fn contains_mux_archive(path: &Path, metadata: &fs::Metadata) -> bool {
-    if metadata.file_type().is_file() {
+fn contains_mux_archive(path: &Path, kind: SourcePathKind) -> bool {
+    if kind == SourcePathKind::File {
         return is_named_regular_file(path, |name| name == "chat-archive.jsonl");
     }
-    metadata.file_type().is_dir()
+    kind == SourcePathKind::Directory
         && (is_named_regular_file(&path.join("chat-archive.jsonl"), |name| {
             name == "chat-archive.jsonl"
         }) || direct_entries(path).is_some_and(|entries| {
@@ -396,11 +408,11 @@ fn contains_mux_archive(path: &Path, metadata: &fs::Metadata) -> bool {
         }))
 }
 
-fn is_current_cline_sdk_shape(path: &Path, metadata: &fs::Metadata) -> bool {
-    if metadata.file_type().is_file() {
+fn is_current_cline_sdk_shape(path: &Path, kind: SourcePathKind) -> bool {
+    if kind == SourcePathKind::File {
         return is_current_cline_sdk_file(path);
     }
-    metadata.file_type().is_dir()
+    kind == SourcePathKind::Directory
         && direct_entries(path).is_some_and(|entries| {
             entries.iter().any(|entry| {
                 is_current_cline_sdk_file(entry)
@@ -438,10 +450,7 @@ fn direct_entries(path: &Path) -> Option<Vec<PathBuf>> {
 }
 
 fn is_named_regular_file(path: &Path, matches: impl FnOnce(&str) -> bool) -> bool {
-    let Ok(metadata) = fs::symlink_metadata(path) else {
-        return false;
-    };
-    metadata.file_type().is_file()
+    selectors::ordinary_file(path)
         && path
             .file_name()
             .and_then(|name| name.to_str())
