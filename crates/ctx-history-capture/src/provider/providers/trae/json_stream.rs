@@ -15,6 +15,7 @@ pub(super) enum TraeSessionSelection {
 
 pub(super) struct TraeStreamSession {
     pub(super) native_session_id: String,
+    pub(super) native_session_id_from_provider: bool,
     pub(super) metadata_preview: Value,
     pub(super) explicit_started_at: Option<DateTime<Utc>>,
     pub(super) explicit_ended_at: Option<DateTime<Utc>>,
@@ -99,8 +100,20 @@ pub(super) fn trae_stream_session(
         metadata.insert("ctx_metadata_truncated".to_owned(), Value::Bool(true));
     }
     let metadata_preview = Value::Object(metadata);
+    let provider_native_session_id = task_json_string_field(
+        &metadata_preview,
+        &[
+            "sessionId",
+            "session_id",
+            "id",
+            "conversationId",
+            "conversation_id",
+        ],
+    );
     Ok(Some(TraeStreamSession {
-        native_session_id: trae_session_id(&metadata_preview, session_index),
+        native_session_id_from_provider: provider_native_session_id.is_some(),
+        native_session_id: provider_native_session_id
+            .unwrap_or_else(|| format!("session-{}", session_index.saturating_add(1))),
         explicit_started_at: task_json_time_field(
             &metadata_preview,
             &["createdAt", "created_at", "timestamp", "time"],

@@ -287,6 +287,8 @@ impl<'a> TraeScanner<'a> {
             authority,
             frontier,
             active: None,
+            source_content_hasher: Sha256::new(),
+            certified_source_bytes: 0,
         }
     }
 
@@ -454,6 +456,14 @@ impl<'a> TraeScanner<'a> {
                         .saturating_add(core_event_bytes(&core_event));
                     page.core.push(TraeCoreRecord {
                         provider_session_id,
+                        native_session_id: session_plan.session.native_session_id.clone(),
+                        native_session_id_from_provider: session_plan
+                            .session
+                            .native_session_id_from_provider,
+                        native_message_id: event.native_message_id.clone(),
+                        native_message_id_from_provider: event.native_message_id_from_provider,
+                        chat_key: active.chat_key,
+                        value_digest: active.value_digest,
                         key_index: self.frontier.key_index,
                         raw_session_index: session_plan.raw_session_index,
                         legacy_session_index: self.frontier.session_index,
@@ -487,6 +497,14 @@ impl<'a> TraeScanner<'a> {
                     .saturating_add(core_event_bytes(&core_event));
                 page.core.push(TraeCoreRecord {
                     provider_session_id,
+                    native_session_id: session_plan.session.native_session_id.clone(),
+                    native_session_id_from_provider: session_plan
+                        .session
+                        .native_session_id_from_provider,
+                    native_message_id: event.native_message_id.clone(),
+                    native_message_id_from_provider: event.native_message_id_from_provider,
+                    chat_key: active.chat_key,
+                    value_digest: active.value_digest,
                     key_index: self.frontier.key_index,
                     raw_session_index: session_plan.raw_session_index,
                     legacy_session_index: self.frontier.session_index,
@@ -512,7 +530,7 @@ impl<'a> TraeScanner<'a> {
         Ok(Some(page))
     }
 
-    pub(super) fn load_key(&self, key_index: u16) -> Result<TraeLoadedKey> {
+    pub(super) fn load_key(&mut self, key_index: u16) -> Result<TraeLoadedKey> {
         let Some(chat_key) = TRAE_CHAT_KEYS.get(usize::from(key_index)).copied() else {
             return Ok(TraeLoadedKey::Missing);
         };
@@ -562,6 +580,22 @@ impl<'a> TraeScanner<'a> {
         if bytes.len() != usize::try_from(retained_bytes).unwrap_or(usize::MAX) {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
+        let key_bytes = u64::try_from(chat_key.len())
+            .map_err(|_| CaptureError::SystemInvariant("Trae chat key length overflow"))?;
+        let value_bytes = u64::try_from(bytes.len())
+            .map_err(|_| CaptureError::SystemInvariant("Trae value length overflow"))?;
+        self.source_content_hasher.update(key_bytes.to_be_bytes());
+        self.source_content_hasher.update(chat_key.as_bytes());
+        self.source_content_hasher.update(value_bytes.to_be_bytes());
+        self.source_content_hasher.update(&bytes);
+        self.certified_source_bytes = self
+            .certified_source_bytes
+            .checked_add(16)
+            .and_then(|total| total.checked_add(key_bytes))
+            .and_then(|total| total.checked_add(value_bytes))
+            .ok_or(CaptureError::SystemInvariant(
+                "Trae certified source byte count overflow",
+            ))?;
         if let Err(error) = serde_json::from_slice::<IgnoredAny>(&bytes) {
             return Ok(TraeLoadedKey::Rejected(format!(
                 "Trae ItemTable key `{chat_key}` contains invalid JSON: {error}"
@@ -573,6 +607,7 @@ impl<'a> TraeScanner<'a> {
                 &bytes,
                 TraeStreamSession {
                     native_session_id: "trae-cn-input-history".to_owned(),
+                    native_session_id_from_provider: true,
                     metadata_preview: json!({
                         "id": "trae-cn-input-history",
                         "title": "Trae CN input history",
@@ -610,10 +645,17 @@ impl<'a> TraeScanner<'a> {
         if !self.authority.snapshot.revalidate(&self.authority.path)? {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
+        let value_digest = Sha256::digest(&bytes);
+        let mut value_digest_bytes = [0_u8; 32];
+        value_digest_bytes.copy_from_slice(&value_digest);
+        let record_digest = CompleteContentBodyDigest::parse(format!("{value_digest:x}")).ok_or(
+            CaptureError::SystemInvariant("Trae SHA-256 digest encoding is invalid"),
+        )?;
         Ok(TraeLoadedKey::Active(TraeActiveKey {
             key_index,
             chat_key,
-            record_digest: CompleteContentBodyDigest::from_bytes(&bytes),
+            record_digest,
+            value_digest: value_digest_bytes,
             bytes,
             sessions,
         }))
@@ -640,6 +682,14 @@ impl<'a> TraeScanner<'a> {
                     "Trae message frontier exhausted",
                 ))?;
         Ok(())
+    }
+
+    pub(super) fn source_content_digest(&self) -> [u8; 32] {
+        self.source_content_hasher.clone().finalize().into()
+    }
+
+    pub(super) fn certified_source_bytes(&self) -> u64 {
+        self.certified_source_bytes
     }
 }
 

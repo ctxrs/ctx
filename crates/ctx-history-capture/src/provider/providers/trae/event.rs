@@ -15,6 +15,7 @@ use super::{TRAE_CN_INPUT_HISTORY_KEY, TRAE_STATE_VSCDB_SOURCE_FORMAT};
 pub(super) struct TraeEventInput {
     pub(super) provider_event_index: u64,
     pub(super) native_message_id: String,
+    pub(super) native_message_id_from_provider: bool,
     pub(super) role: Option<String>,
     pub(super) occurred_at: DateTime<Utc>,
     pub(super) text: String,
@@ -47,7 +48,7 @@ pub(super) fn trae_event_from_owned_message(
     if text.trim().is_empty() {
         return None;
     }
-    let native_message_id = task_json_string_field(
+    let provider_native_message_id = task_json_string_field(
         &message,
         &[
             "id",
@@ -57,8 +58,10 @@ pub(super) fn trae_event_from_owned_message(
             "requestId",
             "responseId",
         ],
-    )
-    .unwrap_or_else(|| format!("{workspace_id}:{provider_session_id}:{chat_key}:{message_index}"));
+    );
+    let native_message_id = provider_native_message_id.clone().unwrap_or_else(|| {
+        format!("{workspace_id}:{provider_session_id}:{chat_key}:{message_index}")
+    });
     let occurred_at = task_json_time_field(
         &message,
         &["createdAt", "created_at", "timestamp", "time", "date"],
@@ -71,6 +74,7 @@ pub(super) fn trae_event_from_owned_message(
     Some(TraeEventInput {
         provider_event_index: u64::try_from(message_index).unwrap_or(u64::MAX),
         native_message_id,
+        native_message_id_from_provider: provider_native_message_id.is_some(),
         role,
         occurred_at,
         text,

@@ -209,6 +209,7 @@ struct TraeActiveKey {
     chat_key: &'static str,
     bytes: Vec<u8>,
     record_digest: CompleteContentBodyDigest,
+    value_digest: [u8; 32],
     sessions: Vec<TraeSessionPlan>,
 }
 
@@ -217,6 +218,8 @@ struct TraeScanner<'a> {
     authority: &'a TraeSourceAuthority,
     frontier: TraeFrontier,
     active: Option<TraeActiveKey>,
+    source_content_hasher: Sha256,
+    certified_source_bytes: u64,
 }
 
 #[derive(Clone)]
@@ -232,6 +235,12 @@ struct TraeSessionFact {
 
 struct TraeCoreRecord {
     provider_session_id: String,
+    native_session_id: String,
+    native_session_id_from_provider: bool,
+    native_message_id: String,
+    native_message_id_from_provider: bool,
+    chat_key: &'static str,
+    value_digest: [u8; 32],
     key_index: u16,
     raw_session_index: u32,
     legacy_session_index: u32,
@@ -479,6 +488,7 @@ mod core_import;
 mod lifecycle;
 mod outputs;
 mod publication;
+mod source_backed;
 
 #[cfg(test)]
 #[path = "nativepath_tests.rs"]
@@ -488,3 +498,7 @@ use core_import::*;
 use lifecycle::*;
 use outputs::*;
 use publication::*;
+pub(crate) use source_backed::{
+    hydrate_trae_source_backed_locator_v0, scan_trae_source_backed_explicit_v0,
+    TraeHydratedRecordV0, TraeSourceBackedErrorV0, TraeSourceBackedPageV0, TraeSourceBackedScanV0,
+};
