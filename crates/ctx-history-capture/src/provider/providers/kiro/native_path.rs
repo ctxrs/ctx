@@ -1,8 +1,7 @@
 use std::{
     collections::BTreeSet,
     convert::Infallible,
-    fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use chrono::{DateTime, Utc};
@@ -26,6 +25,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
+    common::io::{open_provider_source_file, OpenedProviderSourceFile},
     complete_content::{
         attach_verified_content_locator, verified_content_profile, CompleteContentBodyDigest,
         CompleteContentSourceFamily, VerifiedContentLocatorV1, VerifiedContentLocatorsV1,
@@ -53,10 +53,12 @@ use crate::{
             NATIVE_INGESTION_PAGE_MAX_UNITS,
         },
         sqlite::{
-            ensure_sqlite_table_columns, open_provider_sqlite_readonly, sqlite_schema_fingerprint,
-            sqlite_table_columns, sqlite_table_exists, ProviderSqliteSourceSnapshot,
-            SqliteLengthPreflightGuard,
+            ensure_sqlite_table_columns, sqlite_schema_fingerprint, sqlite_table_columns,
+            sqlite_table_exists, SqliteLengthPreflightGuard,
         },
+    },
+    provider_sources::{
+        open_sqlite_source_snapshot, SqliteSourceAccessError, SqliteSourceEvidence,
     },
     CaptureError, CaptureWorkLimit, ImportProfile, OutputSourceIdentity, ProOutputProgress,
     ProOutputSink, ProOutputSinkError, ProOutputSourceDisposition, ProviderAdapterContext,
@@ -117,13 +119,16 @@ pub(super) fn import_kiro_native_path(
     mut context: ProviderAdapterContext,
     options: ProviderImportOptions,
 ) -> Result<ProviderImportSummary> {
+    let source_path = absolute_kiro_path(path)?;
     let configured_source_root = context
         .source_path
         .clone()
-        .unwrap_or_else(|| path.to_path_buf());
+        .map(|path| absolute_kiro_path(&path))
+        .transpose()?
+        .unwrap_or_else(|| source_path.clone());
     context.source_path = Some(configured_source_root.clone());
 
-    if !path.try_exists()? {
+    if !source_path.try_exists()? {
         if let Some(sink) = options.import_profile.sink() {
             sink.mark_behind(ProOutputSinkError::new(
                 "kiro_nativepath_source_missing",
@@ -133,11 +138,11 @@ pub(super) fn import_kiro_native_path(
         if options.import_profile.is_replay_only() {
             return Ok(ProviderImportSummary::default());
         }
-        return retire_missing_kiro_route(path, store, &context);
+        return retire_missing_kiro_route(&source_path, store, &context);
     }
 
     let source = KiroSource::acquire(
-        path,
+        &source_path,
         configured_source_root,
         options.inventory_observation_token.as_deref(),
     )?;
@@ -161,7 +166,9 @@ pub(super) fn import_kiro_native_path(
     let operation = (|| {
         if !started_in_retirement {
             let mut scanner = KiroScanner::new(&source, start.frontier, context.imported_at)?;
-            while let Some(page) = scanner.next_page()? {
+            while let Some(page) = source.database.read(&source.canonical_path, |connection| {
+                scanner.next_page(connection)
+            })? {
                 let page_summary = publish_core_page(
                     store,
                     &committed_store,
@@ -207,8 +214,7 @@ pub(super) fn import_kiro_native_path(
 struct KiroSource {
     canonical_path: PathBuf,
     configured_source_root: PathBuf,
-    snapshot: ProviderSqliteSourceSnapshot,
-    connection: crate::provider::sqlite::ReadOnlySqliteConnection,
+    database: KiroSqliteDatabase,
     tables: KiroTables,
     locator_identity: String,
     cursor_stream: String,
@@ -223,25 +229,22 @@ impl KiroSource {
         configured_source_root: PathBuf,
         inventory_token: Option<&str>,
     ) -> Result<Self> {
-        let canonical_path = fs::canonicalize(path)?;
-        let snapshot = ProviderSqliteSourceSnapshot::read(
-            &canonical_path,
-            "Kiro SQLite source must be a regular non-symlink file",
-            "Kiro SQLite sidecar must be a regular non-symlink file",
-        )?;
-        let connection = open_provider_sqlite_readonly(&canonical_path)?;
-        if !snapshot.revalidate(&canonical_path)? {
-            return Err(CaptureError::SourceChangedDuringCapture);
-        }
-        let user_version: i64 =
-            connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if user_version < 0 {
-            return Err(CaptureError::InvalidPayload(
-                "Kiro SQLite user_version must be nonnegative".to_owned(),
-            ));
-        }
-        let schema_fingerprint = sqlite_schema_fingerprint(&connection)?;
-        let tables = KiroTables::probe(&connection)?;
+        let canonical_path = absolute_kiro_path(path)?;
+        let (database, (user_version, schema_fingerprint, tables)) =
+            KiroSqliteDatabase::open(&canonical_path, |connection| {
+                let user_version: i64 =
+                    connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+                if user_version < 0 {
+                    return Err(CaptureError::InvalidPayload(
+                        "Kiro SQLite user_version must be nonnegative".to_owned(),
+                    ));
+                }
+                Ok((
+                    user_version,
+                    sqlite_schema_fingerprint(connection)?,
+                    KiroTables::probe(connection)?,
+                ))
+            })?;
         let locator_identity = provider_path_identity(&canonical_path)?;
         let cursor_stream = provider_source_cursor_stream_for_path(
             CaptureProvider::KiroCli,
@@ -249,8 +252,10 @@ impl KiroSource {
             &locator_identity,
         );
         let mut revision = format!(
-            "kiro-nativepath-source-v1;parser={KIRO_NATIVE_PARSER_REVISION};user_version={user_version};schema={schema_fingerprint};{}",
-            snapshot.revision_component()
+            "kiro-nativepath-source-v2;parser={KIRO_NATIVE_PARSER_REVISION};user_version={user_version};schema={schema_fingerprint};identity={};length={};revision={}",
+            hex(database.evidence().identity()),
+            database.evidence().length(),
+            hex(database.evidence().revision()),
         );
         if let Some(token) = inventory_token {
             let mut digest = Sha256::new();
@@ -262,8 +267,7 @@ impl KiroSource {
         Ok(Self {
             canonical_path,
             configured_source_root,
-            snapshot,
-            connection,
+            database,
             tables,
             locator_identity,
             cursor_stream,
@@ -274,15 +278,111 @@ impl KiroSource {
     }
 
     fn revalidate(&self) -> Result<()> {
-        if self.snapshot.revalidate(&self.canonical_path)? {
-            Ok(())
-        } else {
-            Err(CaptureError::SourceChangedDuringCapture)
-        }
+        self.database.revalidate()
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug)]
+struct KiroSqliteDatabase {
+    opened: OpenedProviderSourceFile,
+    evidence: SqliteSourceEvidence,
+}
+
+impl KiroSqliteDatabase {
+    fn open<T>(path: &Path, query: impl FnOnce(&Connection) -> Result<T>) -> Result<(Self, T)> {
+        let opened = open_provider_source_file(path)?;
+        let snapshot = open_sqlite_source_snapshot(path, opened.file())
+            .map_err(|error| kiro_sqlite_source_error(path, error))?;
+        let evidence = snapshot.evidence().clone();
+        let result = snapshot
+            .connection()
+            .map_err(|error| kiro_sqlite_source_error(path, error))
+            .and_then(query);
+        let finished = snapshot
+            .finish()
+            .map_err(|error| kiro_sqlite_source_error(path, error))?;
+        opened.revalidate()?;
+        if finished != evidence {
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
+        Ok((Self { opened, evidence }, result?))
+    }
+
+    fn read<T, E>(
+        &self,
+        path: &Path,
+        query: impl FnOnce(&Connection) -> std::result::Result<T, E>,
+    ) -> std::result::Result<T, E>
+    where
+        E: From<CaptureError>,
+    {
+        self.revalidate().map_err(E::from)?;
+        let snapshot = open_sqlite_source_snapshot(path, self.opened.file())
+            .map_err(|error| E::from(kiro_sqlite_source_error(path, error)))?;
+        let result = if snapshot.evidence() == &self.evidence {
+            snapshot
+                .connection()
+                .map_err(|error| E::from(kiro_sqlite_source_error(path, error)))
+                .and_then(query)
+        } else {
+            Err(E::from(CaptureError::SourceChangedDuringCapture))
+        };
+        let finished = snapshot
+            .finish()
+            .map_err(|error| E::from(kiro_sqlite_source_error(path, error)))?;
+        self.revalidate().map_err(E::from)?;
+        if finished != self.evidence {
+            return Err(E::from(CaptureError::SourceChangedDuringCapture));
+        }
+        result
+    }
+
+    fn revalidate(&self) -> Result<()> {
+        self.opened.revalidate()
+    }
+
+    fn evidence(&self) -> &SqliteSourceEvidence {
+        &self.evidence
+    }
+}
+
+fn kiro_sqlite_source_error(path: &Path, error: SqliteSourceAccessError) -> CaptureError {
+    match error {
+        SqliteSourceAccessError::SourceChanged
+        | SqliteSourceAccessError::ConnectionIdentityMismatch => {
+            CaptureError::SourceChangedDuringCapture
+        }
+        error => CaptureError::ProviderSource {
+            provider: CaptureProvider::KiroCli.as_str(),
+            path: path.to_path_buf(),
+            kind: crate::ProviderSourceFailureKind::SourceDatabase,
+            detail: error.to_string(),
+        },
+    }
+}
+
+fn absolute_kiro_path(path: &Path) -> Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    Ok(normalized)
+}
+
+#[derive(Debug, Clone, Copy)]
 struct KiroTables {
     v2: bool,
     legacy: bool,

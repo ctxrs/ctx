@@ -26,13 +26,12 @@ impl<'source> KiroScanner<'source> {
         })
     }
 
-    pub(super) fn next_page(&mut self) -> Result<Option<KiroCorePage>> {
+    pub(super) fn next_page(&mut self, connection: &Connection) -> Result<Option<KiroCorePage>> {
         if self.emitted_terminal {
             return Ok(None);
         }
-        self.source.revalidate()?;
         let expected = self.frontier.clone();
-        let candidate = self.next_candidate()?;
+        let candidate = self.next_candidate(connection)?;
         let Some(candidate) = candidate else {
             self.emitted_terminal = true;
             let next = self.frontier.clone();
@@ -41,7 +40,7 @@ impl<'source> KiroScanner<'source> {
         if let Some(reason) = candidate.rejection_reason() {
             self.hash_rejected_candidate(&candidate, reason);
             self.complete_candidate(candidate.phase, candidate.rowid)?;
-            let terminal = !self.has_more()?;
+            let terminal = !self.has_more(connection)?;
             if terminal {
                 self.emitted_terminal = true;
             }
@@ -61,7 +60,7 @@ impl<'source> KiroScanner<'source> {
             );
             self.hash_rejected_candidate(&candidate, &reason);
             self.complete_candidate(candidate.phase, candidate.rowid)?;
-            let terminal = !self.has_more()?;
+            let terminal = !self.has_more(connection)?;
             if terminal {
                 self.emitted_terminal = true;
             }
@@ -74,7 +73,7 @@ impl<'source> KiroScanner<'source> {
             )));
         }
 
-        let row = hydrate_row(&self.source.connection, candidate.phase, candidate.rowid)?;
+        let row = hydrate_row(connection, candidate.phase, candidate.rowid)?;
         let value: Value = match serde_json::from_str(&row.value) {
             Ok(value) => value,
             Err(error) => {
@@ -84,7 +83,7 @@ impl<'source> KiroScanner<'source> {
                 );
                 self.hash_raw_row(&row);
                 self.complete_candidate(candidate.phase, candidate.rowid)?;
-                let terminal = !self.has_more()?;
+                let terminal = !self.has_more(connection)?;
                 if terminal {
                     self.emitted_terminal = true;
                 }
@@ -106,7 +105,7 @@ impl<'source> KiroScanner<'source> {
             );
             self.hash_raw_row(&row);
             self.complete_candidate(candidate.phase, candidate.rowid)?;
-            let terminal = !self.has_more()?;
+            let terminal = !self.has_more(connection)?;
             if terminal {
                 self.emitted_terminal = true;
             }
@@ -118,11 +117,12 @@ impl<'source> KiroScanner<'source> {
                 reason,
             )));
         }
-        self.prepare_row_page(expected, candidate, row, value)
+        self.prepare_row_page(connection, expected, candidate, row, value)
     }
 
     fn prepare_row_page(
         &mut self,
+        connection: &Connection,
         expected: KiroFrontier,
         candidate: KiroCandidate,
         row: KiroConversationRow,
@@ -310,7 +310,7 @@ impl<'source> KiroScanner<'source> {
                 u64::try_from(next_history_index).unwrap_or(u64::MAX);
             self.frontier.next_event_ordinal = next_event_ordinal;
         }
-        let terminal = row_complete && !self.has_more()?;
+        let terminal = row_complete && !self.has_more(connection)?;
         if terminal {
             self.emitted_terminal = true;
         }
@@ -344,20 +344,20 @@ impl<'source> KiroScanner<'source> {
         self.imported_at
     }
 
-    fn next_candidate(&mut self) -> Result<Option<KiroCandidate>> {
+    fn next_candidate(&mut self, connection: &Connection) -> Result<Option<KiroCandidate>> {
         loop {
             let active = self.frontier.active_rowid;
             let after = self.frontier.after_rowid;
             if let Some(rowid) = active {
                 return candidate_at(
-                    &self.source.connection,
+                    connection,
                     self.frontier.phase,
                     rowid,
                     self.frontier.next_row_ordinal,
                 );
             }
             if let Some(candidate) = next_candidate(
-                &self.source.connection,
+                connection,
                 self.frontier.phase,
                 after,
                 self.frontier.next_row_ordinal,
@@ -388,12 +388,12 @@ impl<'source> KiroScanner<'source> {
         Ok(())
     }
 
-    fn has_more(&mut self) -> Result<bool> {
+    fn has_more(&mut self, connection: &Connection) -> Result<bool> {
         if self.frontier.active_rowid.is_some() {
             return Ok(true);
         }
         if next_candidate(
-            &self.source.connection,
+            connection,
             self.frontier.phase,
             self.frontier.after_rowid,
             self.frontier.next_row_ordinal,
@@ -404,7 +404,7 @@ impl<'source> KiroScanner<'source> {
         }
         if self.frontier.phase == KiroPhase::V2 && self.source.tables.legacy {
             return Ok(next_candidate(
-                &self.source.connection,
+                connection,
                 KiroPhase::Legacy,
                 None,
                 self.frontier.next_row_ordinal,
