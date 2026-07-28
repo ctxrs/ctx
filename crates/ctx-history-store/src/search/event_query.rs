@@ -1,5 +1,11 @@
 use rusqlite::types::Value;
 
+/// Builds the lexical event-search query.
+///
+/// `event_search` is contentless, so a match yields a rowid and a score and
+/// nothing else. The rowid is `events.seq`, so every projected column comes
+/// from the canonical rows via `JOIN events e ON e.seq = ranked.seq`, and
+/// `preview_text` is re-derived in Rust from `e.payload_json`.
 pub(super) fn lexical_event_search_query(
     match_clauses: Vec<String>,
     limit: usize,
@@ -13,13 +19,7 @@ pub(super) fn lexical_event_search_query(
         .map(|(term_index, clause)| {
             values.push(Value::Text(clause));
             format!(
-                r#"SELECT event_search.event_id,
-                          event_search.history_record_id,
-                          event_search.session_id,
-                          event_search.role,
-                          event_search.preview_text,
-                          {term_index},
-                          bm25(event_search)
+                r#"SELECT event_search.rowid, {term_index}, bm25(event_search)
                    FROM event_search
                    WHERE event_search MATCH ?{}"#,
                 values.len()
@@ -33,29 +33,22 @@ pub(super) fn lexical_event_search_query(
     let offset_parameter = values.len();
     let sql = format!(
         r#"
-        WITH matches(event_id, history_record_id, session_id, role, preview_text, term_index, score) AS MATERIALIZED (
+        WITH matches(seq, term_index, score) AS MATERIALIZED (
             {selects}
         ),
-        ranked(event_id, history_record_id, session_id, role, preview_text, matched_terms, score) AS (
-            -- Projection maintenance keeps one row per event. Grouping only by the
-            -- canonical event key also collapses legacy duplicate result rows.
-            SELECT event_id,
-                   MIN(history_record_id),
-                   MIN(session_id),
-                   MIN(role),
-                   MIN(preview_text),
-                   COUNT(*),
-                   SUM(score)
+        ranked(seq, matched_terms, score) AS (
+            -- FTS5 yields each document at most once per term, so the row count
+            -- per seq is the number of distinct query terms that matched.
+            SELECT seq, COUNT(*), SUM(score)
             FROM matches
-            GROUP BY event_id
+            GROUP BY seq
         )
         {}
         LIMIT ?{limit_parameter} OFFSET ?{offset_parameter}
         "#,
         event_search_hit_sql(
-            "ranked AS event_search",
-            &event_search_score("event_search.score", prefer_conversation),
-            "ORDER BY event_search.matched_terms DESC, search_score, e.occurred_at_ms DESC, e.seq DESC, event_search.event_id",
+            &event_search_score("ranked.score", prefer_conversation),
+            "ORDER BY ranked.matched_terms DESC, search_score, e.occurred_at_ms DESC, e.seq DESC, e.id",
         )
     );
     (sql, values)
@@ -71,18 +64,26 @@ pub(super) fn event_search_score(score_sql: &str, prefer_conversation: bool) -> 
     }
 }
 
-pub(super) fn event_search_hit_sql(from_sql: &str, score_sql: &str, tail_sql: &str) -> String {
+/// Projects one search hit from a `ranked(seq, matched_terms, score)` CTE.
+///
+/// The pre-v48 index stored `history_record_id` and `session_id` alongside the
+/// text, and the hit path read them as COALESCE fallbacks. Those stored values
+/// were `COALESCE(e.history_record_id, r.history_record_id, s.history_record_id,
+/// rs.history_record_id)` and `e.session_id` respectively, so substituting the
+/// live joins is exact rather than approximate - verified against all 735,006
+/// projected rows of the qualification corpus by
+/// `stored_projection_keys_still_equal_the_live_join`.
+pub(super) fn event_search_hit_sql(score_sql: &str, tail_sql: &str) -> String {
     format!(
         r#"
-        SELECT event_search.event_id,
-               COALESCE(e.history_record_id, event_search.history_record_id, s.history_record_id, rs.history_record_id),
-               COALESCE(e.session_id, event_search.session_id, s.id, rs.id),
+        SELECT e.id,
+               COALESCE(e.history_record_id, r.history_record_id, s.history_record_id, rs.history_record_id),
+               COALESCE(e.session_id, s.id, rs.id),
                e.run_id,
                e.seq,
                e.event_type,
                e.role,
                e.occurred_at_ms,
-               event_search.preview_text,
                {score_sql} AS search_score,
                COALESCE(s.provider, rs.provider, event_source.provider, session_source.provider, run_source.provider),
                COALESCE(s.external_session_id, rs.external_session_id),
@@ -112,15 +113,15 @@ pub(super) fn event_search_hit_sql(from_sql: &str, score_sql: &str, tail_sql: &s
                wr.title,
                wr.kind,
                wr.workspace
-        FROM {from_sql}
-        JOIN events e ON e.id = event_search.event_id
+        FROM ranked
+        JOIN events e ON e.seq = ranked.seq
         LEFT JOIN runs r ON r.id = e.run_id
-        LEFT JOIN sessions s ON s.id = COALESCE(e.session_id, event_search.session_id)
+        LEFT JOIN sessions s ON s.id = e.session_id
         LEFT JOIN sessions rs ON rs.id = r.session_id
         LEFT JOIN capture_sources event_source ON event_source.id = e.capture_source_id
         LEFT JOIN capture_sources session_source ON session_source.id = COALESCE(s.capture_source_id, rs.capture_source_id)
         LEFT JOIN capture_sources run_source ON run_source.id = r.source_id
-        LEFT JOIN history_records wr ON wr.id = COALESCE(e.history_record_id, event_search.history_record_id, s.history_record_id, rs.history_record_id, r.history_record_id)
+        LEFT JOIN history_records wr ON wr.id = COALESCE(e.history_record_id, r.history_record_id, s.history_record_id, rs.history_record_id)
         {tail_sql}
         "#
     )

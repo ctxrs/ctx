@@ -42,14 +42,7 @@ const V47_FTS_TABLES: &[(&str, &[&str])] = &[
     ),
     (
         "event_search",
-        &[
-            "event_id unindexed",
-            "history_record_id unindexed",
-            "session_id unindexed",
-            "role unindexed",
-            "preview_text",
-            "rank_bucket unindexed",
-        ],
+        &["preview_text", "content=''", "contentless_delete=1"],
     ),
     (
         "artifact_search",
@@ -65,14 +58,7 @@ const V47_FTS_TABLES: &[(&str, &[&str])] = &[
     ),
     (
         "event_search_scriptgram",
-        &[
-            "event_id unindexed",
-            "history_record_id unindexed",
-            "session_id unindexed",
-            "role unindexed",
-            "token_text",
-            "rank_bucket unindexed",
-        ],
+        &["token_text", "content=''", "contentless_delete=1"],
     ),
 ];
 const V47_EVENT_LOOKUP_COLUMNS: &[&str] = &[
@@ -100,8 +86,12 @@ pub(crate) fn prepare_v47_search_projection_tables(
             None => {}
             Some((object_type, sql)) => {
                 present += 1;
+                // FTS5 table options (`content=''`, `contentless_delete=1`)
+                // sit in the same comma-separated list as columns but are not
+                // columns, and `PRAGMA table_info` does not report them.
                 let expected_columns = column_definitions
                     .iter()
+                    .filter(|definition| !definition.contains('='))
                     .map(|definition| {
                         definition
                             .split_whitespace()
@@ -267,19 +257,55 @@ enum EventProjectionKind {
     Scriptgram,
 }
 
+/// The contentless event indexes expose no columns, so their canonical
+/// equivalence is proved over the rowid set rather than over stored values:
+/// exactly the seq of every eligible event is indexed, and nothing else. The
+/// indexed text itself is a pure function of the same payload the check reads,
+/// so a matching key set is the whole invariant that remains to prove.
+fn contentless_projection_key_set_is_exact(
+    conn: &Connection,
+    kind: EventProjectionKind,
+) -> Result<bool> {
+    let table = match kind {
+        EventProjectionKind::Search => "event_search",
+        EventProjectionKind::Scriptgram => "event_search_scriptgram",
+        EventProjectionKind::Lookup => return Ok(true),
+    };
+    if !load_actual_projection(conn, &format!("SELECT rowid, rowid FROM {table}"), 1)? {
+        return Ok(false);
+    }
+    let mut events = conn.prepare(STORED_EVENT_PROJECTION_SCAN_QUERY)?;
+    let mut rows = events.query([])?;
+    while let Some(row) = rows.next()? {
+        let Some(projection) = PreparedEventProjection::from_stored_row(row)? else {
+            continue;
+        };
+        let indexed = match kind {
+            EventProjectionKind::Search => true,
+            EventProjectionKind::Scriptgram => {
+                !scriptgram_index_text(&projection.preview).is_empty()
+            }
+            EventProjectionKind::Lookup => false,
+        };
+        if !indexed {
+            continue;
+        }
+        let seq = projection.seq.to_string();
+        if !consume_expected_projection(conn, &seq, &[Some(&seq)])? {
+            return Ok(false);
+        }
+    }
+    projection_scratch_is_empty(conn)
+}
+
 fn event_projection_is_exact(conn: &Connection, kind: EventProjectionKind) -> Result<bool> {
     let actual_query = match kind {
-        EventProjectionKind::Search => {
-            "SELECT event_id, history_record_id, session_id, role, preview_text, rank_bucket
-             FROM event_search"
+        EventProjectionKind::Search | EventProjectionKind::Scriptgram => {
+            return contentless_projection_key_set_is_exact(conn, kind)
         }
         EventProjectionKind::Lookup => {
             "SELECT event_id, history_record_id, session_id, role, preview_text, rank_bucket
              FROM event_search_lookup"
-        }
-        EventProjectionKind::Scriptgram => {
-            "SELECT event_id, history_record_id, session_id, role, token_text, rank_bucket
-             FROM event_search_scriptgram"
         }
     };
     if !load_actual_projection(conn, actual_query, 5)? {

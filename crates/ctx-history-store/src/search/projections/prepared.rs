@@ -8,8 +8,22 @@ use crate::Result;
 use super::eligibility::event_search_policy_allows;
 use super::encoding::event_search_preview_from_payload;
 
+/// SQLite rowids are signed. `events.seq` is declared `u64`, so a value past
+/// `i64::MAX` cannot be indexed; such an event is left out of the FTS index
+/// rather than silently aliased onto a negative rowid.
+fn seq_to_rowid(seq: u64) -> Option<i64> {
+    i64::try_from(seq).ok().filter(|value| *value > 0)
+}
+
+fn seq_to_rowid_i64(seq: i64) -> Option<i64> {
+    (seq > 0).then_some(seq)
+}
+
 pub(super) struct PreparedEventProjection {
     pub(super) event_id: String,
+    /// The FTS rowid. `events.seq` is a sparse but stable unique integer, so it
+    /// survives `VACUUM` where the implicit rowid would not.
+    pub(super) seq: i64,
     pub(super) history_record_id: Option<String>,
     pub(super) session_id: Option<String>,
     pub(super) role: Option<EventRole>,
@@ -21,6 +35,7 @@ impl PreparedEventProjection {
     pub(super) fn from_event(event_id: Uuid, event: &Event) -> Option<Self> {
         Self {
             event_id: event_id.to_string(),
+            seq: seq_to_rowid(event.seq)?,
             history_record_id: optional_uuid_string(event.history_record_id),
             session_id: optional_uuid_string(event.session_id),
             role: event.role,
@@ -46,8 +61,12 @@ impl PreparedEventProjection {
         let sync_state = parse_text_enum::<SyncState>(row.get::<_, String>(8)?)?;
         let deleted = row.get::<_, Option<i64>>(9)?.is_some();
 
+        let Some(seq) = seq_to_rowid_i64(row.get::<_, i64>(10)?) else {
+            return Ok(None);
+        };
         Ok(Self {
             event_id: row.get(0)?,
+            seq,
             history_record_id: row.get(1)?,
             session_id: row.get(2)?,
             role,

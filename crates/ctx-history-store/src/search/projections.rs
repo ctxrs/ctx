@@ -2,6 +2,8 @@
 mod contentless_cost_tests;
 #[cfg(test)]
 mod contentless_oracle_tests;
+#[cfg(test)]
+mod contentless_rowid_tests;
 mod eligibility;
 mod encoding;
 mod identity;

@@ -15,7 +15,10 @@ use crate::search::event_query::{
 };
 use crate::{Result, Store};
 
+use ctx_history_core::RedactionState;
+
 use super::eligibility::semantic_lite_turn_anchor_eligible_predicate;
+use super::encoding::event_search_preview_from_payload;
 use super::identity::{event_search_source_identity, EventSearchHit};
 use super::semantic_document::{
     semantic_lite_turn_document_select_sql, semantic_lite_turn_source_chunk,
@@ -79,7 +82,7 @@ impl Store {
         for (term_index, clause) in match_clauses.into_iter().enumerate() {
             values.push(Value::Text(clause));
             selects.push(format!(
-                r#"SELECT event_search.event_id, {term_index}, bm25(event_search)
+                r#"SELECT event_search.rowid, {term_index}, bm25(event_search)
                    FROM event_search
                    WHERE event_search MATCH ?{}"#,
                 values.len()
@@ -88,7 +91,7 @@ impl Store {
         for (term_index, clause) in scriptgram_clauses {
             values.push(Value::Text(clause));
             selects.push(format!(
-                r#"SELECT event_search_scriptgram.event_id, {term_index},
+                r#"SELECT event_search_scriptgram.rowid, {term_index},
                           bm25(event_search_scriptgram) + 0.35
                    FROM event_search_scriptgram
                    WHERE event_search_scriptgram MATCH ?{}"#,
@@ -101,27 +104,28 @@ impl Store {
         let offset_parameter = values.len();
         let sql = format!(
             r#"
-            WITH matches(event_id, term_index, score) AS MATERIALIZED (
+            WITH matches(seq, term_index, score) AS MATERIALIZED (
                 {}
             ),
-            term_matches(event_id, term_index, score) AS (
-                SELECT event_id, term_index, MIN(score)
+            term_matches(seq, term_index, score) AS (
+                -- Lexical and scriptgram can both match the same term, so keep
+                -- the better score per (event, term) before counting terms.
+                SELECT seq, term_index, MIN(score)
                 FROM matches
-                GROUP BY event_id, term_index
+                GROUP BY seq, term_index
             ),
-            ranked(event_id, matched_terms, score) AS (
-                SELECT event_id, COUNT(*), SUM(score)
+            ranked(seq, matched_terms, score) AS (
+                SELECT seq, COUNT(*), SUM(score)
                 FROM term_matches
-                GROUP BY event_id
+                GROUP BY seq
             )
             {}
             LIMIT ?{limit_parameter} OFFSET ?{offset_parameter}
             "#,
             selects.join(" UNION ALL "),
             event_search_hit_sql(
-                "ranked JOIN event_search ON event_search.event_id = ranked.event_id",
                 &event_search_score("ranked.score", prefer_conversation),
-                "ORDER BY ranked.matched_terms DESC, search_score, e.occurred_at_ms DESC, e.seq DESC, event_search.event_id",
+                "ORDER BY ranked.matched_terms DESC, search_score, e.occurred_at_ms DESC, e.seq DESC, e.id",
             )
         );
         let mut stmt = self.conn.prepare(&sql)?;
@@ -227,38 +231,86 @@ impl Store {
 }
 
 fn event_search_hit_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EventSearchHit> {
-    let payload_json = row.get::<_, String>(18)?;
-    let source_metadata_json = row.get::<_, Option<String>>(19)?;
+    let payload_json = row.get::<_, String>(17)?;
+    let source_metadata_json = row.get::<_, Option<String>>(18)?;
     let source_identity = event_search_source_identity(source_metadata_json.as_deref())?;
+    let event_type = parse_text_enum::<EventType>(row.get::<_, String>(5)?)?;
+    let role = parse_optional_text_enum::<EventRole>(row.get(6)?)?;
+    // A contentless index cannot return the indexed text, so the preview is
+    // re-derived from the payload the hit path already reads and already parses
+    // for the cursor. Parse once and serve both.
+    let payload = serde_json::from_str::<serde_json::Value>(&payload_json).ok();
+    let preview = payload
+        .as_ref()
+        .map(|payload| {
+            event_search_preview_from_payload(
+                event_type,
+                role,
+                payload,
+                RedactionState::SafePreview,
+            )
+        })
+        .unwrap_or_default();
     Ok(EventSearchHit {
         event_id: parse_uuid(row.get::<_, String>(0)?)?,
         history_record_id: parse_optional_uuid(row.get(1)?)?,
         session_id: parse_optional_uuid(row.get(2)?)?,
         run_id: parse_optional_uuid(row.get(3)?)?,
         seq: nonnegative_i64_to_u64(row.get(4)?)?,
-        event_type: parse_text_enum::<EventType>(row.get::<_, String>(5)?)?,
-        role: parse_optional_text_enum::<EventRole>(row.get(6)?)?,
+        event_type,
+        role,
         occurred_at: ms_to_time(row.get(7)?)?,
-        preview: row.get(8)?,
-        score: row.get(9)?,
-        provider: parse_optional_text_enum::<CaptureProvider>(row.get(10)?)?,
-        session_external_session_id: row.get(11)?,
+        preview,
+        score: row.get(8)?,
+        provider: parse_optional_text_enum::<CaptureProvider>(row.get(9)?)?,
+        session_external_session_id: row.get(10)?,
         history_source: source_identity.history_source,
         history_source_plugin: source_identity.history_source_plugin,
         provider_key: source_identity.provider_key,
         source_id: source_identity.source_id,
         source_format: source_identity.source_format,
-        session_parent_session_id: parse_optional_uuid(row.get(12)?)?,
-        session_root_session_id: parse_optional_uuid(row.get(13)?)?,
-        agent_type: parse_optional_text_enum::<AgentType>(row.get(14)?)?,
-        session_is_primary: row.get::<_, Option<i64>>(15)?.map(|value| value != 0),
-        cwd: row.get(16)?,
-        raw_source_path: row.get(17)?,
-        cursor: event_search_cursor(&payload_json, source_metadata_json.as_deref())?,
-        record_title: row.get(20)?,
-        record_kind: row.get(21)?,
-        record_workspace: row.get(22)?,
+        session_parent_session_id: parse_optional_uuid(row.get(11)?)?,
+        session_root_session_id: parse_optional_uuid(row.get(12)?)?,
+        agent_type: parse_optional_text_enum::<AgentType>(row.get(13)?)?,
+        session_is_primary: row.get::<_, Option<i64>>(14)?.map(|value| value != 0),
+        cwd: row.get(15)?,
+        raw_source_path: row.get(16)?,
+        cursor: event_search_cursor_from_parsed(payload.as_ref(), source_metadata_json.as_deref())?,
+        record_title: row.get(19)?,
+        record_kind: row.get(20)?,
+        record_workspace: row.get(21)?,
     })
+}
+
+/// Cursor extraction from an already-parsed payload, so the hit path parses
+/// `payload_json` once rather than once per consumer.
+fn event_search_cursor_from_parsed(
+    payload: Option<&serde_json::Value>,
+    source_metadata_json: Option<&str>,
+) -> rusqlite::Result<Option<String>> {
+    if let Some(payload) = payload {
+        if let Some(cursor) = payload.get("cursor").and_then(|value| value.as_str()) {
+            return Ok(Some(cursor.to_owned()));
+        }
+        if let Some(cursor) = payload
+            .get("body")
+            .and_then(|body| body.get("cursor"))
+            .and_then(|value| value.as_str())
+        {
+            return Ok(Some(cursor.to_owned()));
+        }
+    }
+    let Some(source_metadata_json) = source_metadata_json else {
+        return Ok(None);
+    };
+    let metadata: serde_json::Value = serde_json::from_str(source_metadata_json)
+        .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
+    Ok(metadata
+        .get("cursor")
+        .and_then(|cursor| cursor.get("after"))
+        .and_then(|after| after.get("cursor"))
+        .and_then(|value| value.as_str())
+        .map(str::to_owned))
 }
 
 pub(crate) fn fts_match_query(query: &str) -> Option<String> {

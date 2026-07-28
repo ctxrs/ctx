@@ -64,6 +64,48 @@ fn events_seq_is_a_usable_fts_rowid() {
     assert!(min >= 1, "events.seq must be a positive integer rowid");
 }
 
+/// The hit path reads `event_search.history_record_id` and
+/// `event_search.session_id` as COALESCE fallbacks. A contentless table cannot
+/// return them, so they have to be re-derived from the live rows. The
+/// substitutions are only sound if the stored projection values still equal
+/// what the joins produce today, which is what this checks.
+#[test]
+#[ignore = "requires CTX_CONTENTLESS_ORACLE_DB pointing at a real store"]
+fn stored_projection_keys_still_equal_the_live_join() {
+    let Some(conn) = oracle_db() else {
+        return;
+    };
+    // event_search.history_record_id was stored as
+    // COALESCE(e.history_record_id, r.history_record_id, s.history_record_id,
+    // rs.history_record_id); event_search.session_id was stored as
+    // e.session_id verbatim.
+    let (rows, hr_diff, sid_diff): (i64, i64, i64) = conn
+        .query_row(
+            "SELECT COUNT(*),
+                    SUM(es.history_record_id IS NOT COALESCE(
+                        e.history_record_id, r.history_record_id,
+                        s.history_record_id, rs.history_record_id)),
+                    SUM(es.session_id IS NOT e.session_id)
+             FROM event_search es
+             JOIN events e ON e.id = es.event_id
+             LEFT JOIN runs r ON r.id = e.run_id
+             LEFT JOIN sessions s ON s.id = e.session_id
+             LEFT JOIN sessions rs ON rs.id = r.session_id",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    println!("rows={rows} history_record_id_drift={hr_diff} session_id_drift={sid_diff}");
+    assert_eq!(
+        hr_diff, 0,
+        "stored history_record_id drifted from the live join"
+    );
+    assert_eq!(
+        sid_diff, 0,
+        "stored session_id drifted from events.session_id"
+    );
+}
+
 #[test]
 #[ignore = "requires CTX_CONTENTLESS_ORACLE_DB pointing at a real store"]
 fn recomputed_preview_matches_the_stored_projection_exactly() {

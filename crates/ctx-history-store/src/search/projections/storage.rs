@@ -25,7 +25,8 @@ const STORED_EVENT_PROJECTION_QUERY: &str = r#"
            'safe_preview',
            e.visibility,
            e.sync_state,
-           e.deleted_at_ms
+           e.deleted_at_ms,
+           e.seq
     FROM events e
     LEFT JOIN runs r ON r.id = e.run_id
     LEFT JOIN sessions s ON s.id = e.session_id
@@ -309,18 +310,7 @@ pub(crate) fn record_scriptgram_table_ready(conn: &Connection) -> Result<bool> {
 }
 
 pub(crate) fn event_scriptgram_table_ready(conn: &Connection) -> Result<bool> {
-    fts_table_has_columns(
-        conn,
-        "event_search_scriptgram",
-        &[
-            "event_id",
-            "history_record_id",
-            "session_id",
-            "role",
-            "token_text",
-            "rank_bucket",
-        ],
-    )
+    fts_table_has_columns(conn, "event_search_scriptgram", &["token_text"])
 }
 
 fn fts_table_has_columns(conn: &Connection, table: &str, required: &[&str]) -> Result<bool> {
@@ -408,21 +398,9 @@ fn event_search_lookup_table_malformed(conn: &Connection) -> Result<bool> {
 }
 
 fn event_search_lookup_has_candidate(conn: &Connection) -> Result<bool> {
-    if table_exists(conn, "event_search")? && validated_table_has_rows(conn, "event_search")? {
-        return Ok(conn.query_row(
-            r#"
-            SELECT EXISTS(
-                SELECT 1
-                FROM event_search
-                WHERE rank_bucket = 'message'
-                  AND role IN ('user', 'assistant')
-                LIMIT 1
-            )
-            "#,
-            [],
-            |row| row.get(0),
-        )?);
-    }
+    // The pre-v48 index carried rank_bucket and role columns this probe could
+    // read directly. A contentless index has no columns, so the question is
+    // asked of the canonical rows, which is where the answer came from anyway.
     if !table_exists(conn, "events")? {
         return Ok(false);
     }
@@ -621,24 +599,14 @@ fn populate_event_search_projection_from_query_with_counts(
     let mut stmt = conn.prepare(query)?;
     let mut rows = stmt.query([])?;
     let mut insert_event_search = if include_event_search {
-        Some(conn.prepare(
-            r#"
-            INSERT INTO event_search
-            (event_id, history_record_id, session_id, role, preview_text, rank_bucket)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-            "#,
-        )?)
+        Some(conn.prepare("INSERT INTO event_search(rowid, preview_text) VALUES (?1, ?2)")?)
     } else {
         None
     };
     let mut insert_event_scriptgram = if include_event_scriptgram {
-        Some(conn.prepare(
-            r#"
-            INSERT INTO event_search_scriptgram
-            (event_id, history_record_id, session_id, role, token_text, rank_bucket)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-            "#,
-        )?)
+        Some(
+            conn.prepare("INSERT INTO event_search_scriptgram(rowid, token_text) VALUES (?1, ?2)")?,
+        )
     } else {
         None
     };
@@ -660,27 +628,13 @@ fn populate_event_search_projection_from_query_with_counts(
         let role = projection.role.map(|role| role.as_str());
         let rank_bucket = projection.event_type.as_str();
         if let Some(insert_event_search) = insert_event_search.as_mut() {
-            insert_event_search.execute(params![
-                &projection.event_id,
-                &projection.history_record_id,
-                &projection.session_id,
-                role,
-                &projection.preview,
-                rank_bucket
-            ])?;
+            insert_event_search.execute(params![projection.seq, &projection.preview])?;
             counts.event_search = counts.event_search.saturating_add(1);
         }
         if let Some(insert_event_scriptgram) = insert_event_scriptgram.as_mut() {
             let token_text = scriptgram_index_text(&projection.preview);
             if !token_text.is_empty() {
-                insert_event_scriptgram.execute(params![
-                    &projection.event_id,
-                    &projection.history_record_id,
-                    &projection.session_id,
-                    role,
-                    token_text,
-                    rank_bucket
-                ])?;
+                insert_event_scriptgram.execute(params![projection.seq, token_text])?;
                 counts.event_scriptgram = counts.event_scriptgram.saturating_add(1);
             }
         }
@@ -726,19 +680,22 @@ pub(crate) fn upsert_event_search_projection_for_event(
         return Ok(());
     }
     let event_id_text = event_id.to_string();
-    if has_event_search {
-        account_single_text_bind(accounting.as_deref_mut(), &event_id_text);
-        conn.execute(
-            "DELETE FROM event_search WHERE event_id = ?1",
-            params![&event_id_text],
-        )?;
-    }
-    if has_event_scriptgram {
-        account_single_text_bind(accounting.as_deref_mut(), &event_id_text);
-        conn.execute(
-            "DELETE FROM event_search_scriptgram WHERE event_id = ?1",
-            params![&event_id_text],
-        )?;
+    // Contentless FTS5 has no columns to filter on, so the delete is by rowid.
+    // `contentless_delete=1` is what makes a plain DELETE legal here; without it
+    // the original column values would have to be replayed.
+    let rowid = event_search_rowid_for_event(conn, event_id)?;
+    if let Some(rowid) = rowid {
+        if has_event_search {
+            account_single_integer_bind(accounting.as_deref_mut());
+            conn.execute("DELETE FROM event_search WHERE rowid = ?1", params![rowid])?;
+        }
+        if has_event_scriptgram {
+            account_single_integer_bind(accounting.as_deref_mut());
+            conn.execute(
+                "DELETE FROM event_search_scriptgram WHERE rowid = ?1",
+                params![rowid],
+            )?;
+        }
     }
     if has_event_lookup {
         account_single_text_bind(accounting.as_deref_mut(), &event_id_text);
@@ -771,54 +728,18 @@ pub(crate) fn insert_event_search_projection_for_event_id(
     let role = projection.role.map(|role| role.as_str());
     let rank_bucket = projection.event_type.as_str();
     if has_event_search {
-        account_event_projection_binds(
-            accounting.as_deref_mut(),
-            &projection,
-            role,
-            &projection.preview,
-            rank_bucket,
-        );
-        conn.prepare_cached(
-            r#"
-            INSERT INTO event_search
-            (event_id, history_record_id, session_id, role, preview_text, rank_bucket)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-            "#,
-        )?
-        .execute(params![
-            &projection.event_id,
-            &projection.history_record_id,
-            &projection.session_id,
-            role,
-            &projection.preview,
-            rank_bucket,
-        ])?;
+        account_indexed_text_bind(accounting.as_deref_mut(), &projection.preview);
+        conn.prepare_cached("INSERT INTO event_search(rowid, preview_text) VALUES (?1, ?2)")?
+            .execute(params![projection.seq, &projection.preview])?;
     }
     if has_event_scriptgram {
         let token_text = scriptgram_index_text(&projection.preview);
         if !token_text.is_empty() {
-            account_event_projection_binds(
-                accounting.as_deref_mut(),
-                &projection,
-                role,
-                &token_text,
-                rank_bucket,
-            );
+            account_indexed_text_bind(accounting.as_deref_mut(), &token_text);
             conn.prepare_cached(
-                r#"
-                INSERT INTO event_search_scriptgram
-                (event_id, history_record_id, session_id, role, token_text, rank_bucket)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                "#,
+                "INSERT INTO event_search_scriptgram(rowid, token_text) VALUES (?1, ?2)",
             )?
-            .execute(params![
-                &projection.event_id,
-                &projection.history_record_id,
-                &projection.session_id,
-                role,
-                token_text,
-                rank_bucket,
-            ])?;
+            .execute(params![projection.seq, token_text])?;
         }
     }
     if has_event_lookup && semantic_lookup_event_parts(projection.event_type, role) {
@@ -857,6 +778,16 @@ fn account_single_text_bind(accounting: Option<&mut usize>, value: &str) {
     *accounting = accounting.saturating_add(values.finish());
 }
 
+fn account_single_integer_bind(accounting: Option<&mut usize>) {
+    let Some(accounting) = accounting else {
+        return;
+    };
+    let mut values = BoundEncoding::mutation();
+    values.integer();
+    *accounting = accounting.saturating_add(values.finish());
+}
+
+/// `event_search_lookup` is an ordinary table and keeps its six-value shape.
 fn account_event_projection_binds(
     accounting: Option<&mut usize>,
     projection: &PreparedEventProjection,
@@ -875,6 +806,28 @@ fn account_event_projection_binds(
     values.text(indexed_text);
     values.text(rank_bucket);
     *accounting = accounting.saturating_add(values.finish());
+}
+
+/// A contentless row is one rowid plus one indexed string.
+fn account_indexed_text_bind(accounting: Option<&mut usize>, indexed_text: &str) {
+    let Some(accounting) = accounting else {
+        return;
+    };
+    let mut values = BoundEncoding::mutation();
+    values.integer();
+    values.text(indexed_text);
+    *accounting = accounting.saturating_add(values.finish());
+}
+
+/// The FTS rowid for an event, or `None` when the event no longer exists.
+fn event_search_rowid_for_event(conn: &Connection, event_id: Uuid) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT seq FROM events WHERE id = ?1",
+            params![event_id.to_string()],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?)
 }
 
 pub(crate) fn detect_event_search_projection_capabilities(
