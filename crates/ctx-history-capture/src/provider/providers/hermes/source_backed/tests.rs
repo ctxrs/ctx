@@ -1,0 +1,318 @@
+use std::{fs, path::Path};
+
+use ctx_history_core::{CaptureProvider, NativeRecordCoordinate, SourceAnchor, TypedKey};
+use rusqlite::Connection;
+
+use super::*;
+
+fn create_state_db(path: &Path, profile: &str, body: &str) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    let conn = Connection::open(path).unwrap();
+    conn.execute_batch(
+        "create table sessions (
+             id text primary key,
+             source text not null,
+             parent_session_id text,
+             started_at real not null,
+             ended_at real,
+             cwd text
+         );
+         create table messages (
+             id integer not null,
+             session_id text not null,
+             role text not null,
+             content text,
+             timestamp real not null,
+             active integer not null default 1,
+             compacted integer not null default 0
+         );",
+    )
+    .unwrap();
+    let root = format!("{profile}-root");
+    let child = format!("{profile}-child");
+    conn.execute(
+        "insert into sessions
+             (id, source, parent_session_id, started_at, ended_at, cwd)
+         values (?1, 'cli', null, 1.0, 4.0, ?2)",
+        rusqlite::params![root, format!("/work/{profile}")],
+    )
+    .unwrap();
+    conn.execute(
+        "insert into sessions
+             (id, source, parent_session_id, started_at, ended_at, cwd)
+         values (?1, 'cli', ?2, 2.0, 3.0, ?3)",
+        rusqlite::params![child, root, format!("/work/{profile}")],
+    )
+    .unwrap();
+    conn.execute(
+        "insert into messages
+             (id, session_id, role, content, timestamp, active, compacted)
+         values (7, ?1, 'user', ?2, 2.5, 1, 0)",
+        rusqlite::params![child, body],
+    )
+    .unwrap();
+}
+
+fn scan_candidate(
+    candidate: &HermesSourceCandidate,
+) -> (CertifiedSource, Vec<HermesSourceBackedRecord>) {
+    let mut records = Vec::new();
+    let certified = scan_hermes_source_backed(candidate, |page| {
+        assert!(!page.records.is_empty());
+        assert!(page.records.len() <= NATIVE_INGESTION_PAGE_MAX_UNITS);
+        assert!(page.owned_bytes <= NATIVE_INGESTION_PAGE_MAX_BYTES);
+        records.extend(page.records);
+        Ok(())
+    })
+    .unwrap();
+    (certified, records)
+}
+
+fn event(records: &[HermesSourceBackedRecord]) -> &LexicalDocument {
+    records
+        .iter()
+        .find_map(|record| match record {
+            HermesSourceBackedRecord::Event(event) => Some(event),
+            HermesSourceBackedRecord::Session(_) | HermesSourceBackedRecord::Rejected(_) => None,
+        })
+        .unwrap()
+}
+
+fn child_session(records: &[HermesSourceBackedRecord]) -> &HermesSourceBackedSession {
+    records
+        .iter()
+        .find_map(|record| match record {
+            HermesSourceBackedRecord::Session(session)
+                if session.provider_parent_session_id.is_some() =>
+            {
+                Some(session)
+            }
+            HermesSourceBackedRecord::Session(_)
+            | HermesSourceBackedRecord::Event(_)
+            | HermesSourceBackedRecord::Rejected(_) => None,
+        })
+        .unwrap()
+}
+
+#[test]
+fn hermes_source_backed_gateway_inventory_scans_multiple_profiles_and_hydrates_exact_rows() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("cwd");
+    let root = home.join(".hermes");
+    fs::create_dir_all(&cwd).unwrap();
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        root.join("config.yaml"),
+        "gateway:\n  multiplex_profiles: true\n",
+    )
+    .unwrap();
+    create_state_db(
+        &root.join("state.db"),
+        "default",
+        "default gateway exact sentinel",
+    );
+    create_state_db(
+        &root.join("profiles/alpha/state.db"),
+        "alpha",
+        "alpha gateway exact sentinel",
+    );
+    create_state_db(
+        &root.join("profiles/zeta/state.db"),
+        "zeta",
+        "zeta gateway exact sentinel",
+    );
+    create_state_db(
+        &root.join("profiles/Bad.Name/state.db"),
+        "invalid",
+        "must not be inventoried",
+    );
+
+    let context = DiscoveryContext::new(
+        &home,
+        &cwd,
+        crate::provider_sources::DiscoveryPlatform::Linux,
+        crate::provider_sources::DiscoveryPlatformDirs::default(),
+    );
+    let inventory = discover_hermes_source_backed(&context).unwrap();
+    assert!(inventory.issues.is_empty());
+    assert_eq!(
+        inventory
+            .sources
+            .iter()
+            .map(|source| source.path().to_path_buf())
+            .collect::<Vec<_>>(),
+        vec![
+            root.join("state.db"),
+            root.join("profiles/alpha/state.db"),
+            root.join("profiles/zeta/state.db"),
+        ]
+    );
+
+    let mut source_ids = Vec::new();
+    for candidate in &inventory.sources {
+        assert_eq!(candidate.status(), ProviderSourceStatus::Available);
+        let (certified, records) = scan_candidate(candidate);
+        assert_eq!(
+            certified.counts(),
+            ScannedSourceCounts {
+                complete_records: 3,
+                retained_records: 3,
+                rejected_records: 0,
+                ignored_records: 0,
+                indexed_documents: 1,
+                certified_bytes: certified.counts().certified_bytes,
+            }
+        );
+        source_ids.push(candidate.source().identity());
+        let event = event(&records);
+        assert!(event.body.contains("gateway exact sentinel"));
+        assert_eq!(event.session_id, child_session(&records).session_id);
+        let hydrated =
+            hydrate_hermes_source_backed_message(candidate.path(), &event.locator).unwrap();
+        assert_eq!(
+            hydrated.provider_session_id,
+            event.provider_session_id.as_deref().unwrap()
+        );
+        assert_eq!(hydrated.provider_event_hash, "message:7");
+        assert!(hydrated.text.contains("gateway exact sentinel"));
+        assert!(!hydrated.provider_bytes.is_empty());
+    }
+    source_ids.sort_by_key(|identity| identity.as_uuid());
+    source_ids.dedup();
+    assert_eq!(source_ids.len(), 3);
+}
+
+#[test]
+fn hermes_source_backed_inactive_profiles_remain_explicit_only() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("cwd");
+    let root = home.join(".hermes");
+    fs::create_dir_all(&cwd).unwrap();
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("active_profile"), "active\n").unwrap();
+    create_state_db(
+        &root.join("profiles/active/state.db"),
+        "active",
+        "active exact sentinel",
+    );
+    let inactive_path = root.join("profiles/inactive/state.db");
+    create_state_db(&inactive_path, "inactive", "inactive explicit sentinel");
+
+    let context = DiscoveryContext::new(
+        &home,
+        &cwd,
+        crate::provider_sources::DiscoveryPlatform::Linux,
+        crate::provider_sources::DiscoveryPlatformDirs::default(),
+    );
+    let inventory = discover_hermes_source_backed(&context).unwrap();
+    assert_eq!(inventory.sources.len(), 1);
+    assert_eq!(
+        inventory.sources[0].selection(),
+        &HermesSourceSelection::NamedProfile("active".to_owned())
+    );
+    assert_eq!(
+        inventory.sources[0].path(),
+        root.join("profiles/active/state.db")
+    );
+
+    let explicit = hermes_source_backed_explicit(
+        &inactive_path,
+        SourceAnchor::provider_native(
+            HERMES_SOURCE_ANCHOR_NAMESPACE,
+            TypedKey::utf8("inactive").unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(explicit.selection(), &HermesSourceSelection::Explicit);
+    let (_, records) = scan_candidate(&explicit);
+    let event = event(&records);
+    assert_eq!(event.body, "inactive explicit sentinel");
+    assert_eq!(
+        hydrate_hermes_source_backed_message(explicit.path(), &event.locator)
+            .unwrap()
+            .text,
+        "inactive explicit sentinel"
+    );
+}
+
+#[test]
+fn hermes_source_backed_replacement_preserves_ids_and_rejects_stale_exact_coordinates() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    create_state_db(&path, "replacement", "before replacement sentinel");
+    let candidate = hermes_source_backed_explicit(
+        &path,
+        SourceAnchor::provider_native(
+            HERMES_SOURCE_ANCHOR_NAMESPACE,
+            TypedKey::utf8("replacement").unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let (before_certificate, before_records) = scan_candidate(&candidate);
+    let before_event = event(&before_records).clone();
+    let before_child = child_session(&before_records).clone();
+    assert_eq!(
+        hydrate_hermes_source_backed_message(&path, &before_event.locator)
+            .unwrap()
+            .text,
+        "before replacement sentinel"
+    );
+
+    fs::remove_file(&path).unwrap();
+    create_state_db(&path, "replacement", "after replacement exact sentinel");
+    let (after_certificate, after_records) = scan_candidate(&candidate);
+    let after_event = event(&after_records);
+    let after_child = child_session(&after_records);
+
+    assert_eq!(before_event.event_id, after_event.event_id);
+    assert_eq!(before_event.session_id, after_event.session_id);
+    assert_eq!(before_child.session_id, after_child.session_id);
+    assert_eq!(
+        before_child.parent_session_id,
+        after_child.parent_session_id
+    );
+    assert_ne!(
+        before_certificate.observation().revision(),
+        after_certificate.observation().revision()
+    );
+    assert_eq!(
+        hydrate_hermes_source_backed_message(&path, &before_event.locator)
+            .unwrap_err()
+            .to_string(),
+        HermesSourceBackedError::StaleSourceEvidence.to_string()
+    );
+    assert_eq!(
+        hydrate_hermes_source_backed_message(&path, &after_event.locator)
+            .unwrap()
+            .text,
+        "after replacement exact sentinel"
+    );
+
+    let NativeRecordCoordinate::ProviderSqlite {
+        logical_relation,
+        primary_key,
+        row_version,
+    } = after_event.locator.coordinate()
+    else {
+        panic!("expected Hermes SQLite coordinate");
+    };
+    assert_eq!(logical_relation, HERMES_MESSAGE_RELATION);
+    assert_eq!(
+        primary_key,
+        &TypedKey::Composite(vec![
+            TypedKey::Utf8("replacement-child".to_owned()),
+            TypedKey::I64(7),
+        ])
+    );
+    assert_eq!(row_version, &Some(TypedKey::I64(1)));
+    assert_eq!(
+        after_event.source.provider(),
+        CaptureProvider::Hermes.as_str()
+    );
+}

@@ -26,6 +26,7 @@ use crate::{
 
 mod layout;
 mod native_path;
+mod source_backed;
 mod sqlite;
 
 use self::layout::{decode_hermes_message, HermesMessageRow, HermesSchema, HermesSqliteValue};
@@ -114,6 +115,7 @@ struct HermesPreparedCompleteContent {
 #[derive(Clone, Debug)]
 struct HermesPreparedCoreMessage {
     native: HermesNativeEvent,
+    record_digest: CompleteContentBodyDigest,
     complete_content: Option<HermesPreparedCompleteContent>,
 }
 
@@ -138,6 +140,7 @@ fn prepare_hermes_core_message(
     values: &[HermesSqliteValue],
 ) -> Result<HermesPreparedCoreMessage> {
     let mut native = hermes_native_event(row, source_record_ordinal)?;
+    let record_digest = hermes_layout_record_digest(values);
     let complete_content = if native.event_type == EventType::Message
         && native
             .payload
@@ -148,14 +151,9 @@ fn prepare_hermes_core_message(
         let content_ref = ContentRef::from_bytes(native.complete_text.as_bytes()).ok_or(
             CaptureError::SystemInvariant("SQLite content length exceeds ContentRef bounds"),
         )?;
-        let values = values
-            .iter()
-            .cloned()
-            .map(native_source_value)
-            .collect::<Vec<_>>();
         Some(HermesPreparedCompleteContent {
             content_ref,
-            record_digest: hermes_record_digest(&values),
+            record_digest: record_digest.clone(),
         })
     } else {
         None
@@ -163,6 +161,7 @@ fn prepare_hermes_core_message(
     native.complete_text.clear();
     Ok(HermesPreparedCoreMessage {
         native,
+        record_digest,
         complete_content,
     })
 }
@@ -325,6 +324,33 @@ fn hermes_record_digest(values: &[NativeSqliteValue]) -> CompleteContentBodyDige
                 digest.update([4]);
                 digest.update((value.len() as u64).to_be_bytes());
                 digest.update(value);
+            }
+        }
+    }
+    CompleteContentBodyDigest::parse(format!("{:x}", digest.finalize()))
+        .expect("SHA-256 formatter must return a valid digest")
+}
+
+fn hermes_layout_record_digest(values: &[HermesSqliteValue]) -> CompleteContentBodyDigest {
+    const DOMAIN: &[u8] = b"ctx-complete-content-sqlite-logical-row-v1\0";
+    let mut digest = Sha256::new();
+    digest.update(DOMAIN);
+    digest.update((values.len() as u64).to_be_bytes());
+    for value in values {
+        match value {
+            HermesSqliteValue::Null => digest.update([0]),
+            HermesSqliteValue::Integer(value) => {
+                digest.update([1]);
+                digest.update(value.to_be_bytes());
+            }
+            HermesSqliteValue::RealBits(value) => {
+                digest.update([2]);
+                digest.update(value.to_be_bytes());
+            }
+            HermesSqliteValue::Text(value) => {
+                digest.update([3]);
+                digest.update((value.len() as u64).to_be_bytes());
+                digest.update(value.as_bytes());
             }
         }
     }
