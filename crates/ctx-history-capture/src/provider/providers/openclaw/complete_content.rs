@@ -154,12 +154,13 @@ fn exact_locator_value(
     let mut value = [0_u8; 80];
     value[..8].copy_from_slice(&byte_start.to_be_bytes());
     value[8..16].copy_from_slice(&byte_end_exclusive.to_be_bytes());
-    value[16..48].copy_from_slice(&domain_digest(
-        SOURCE_REVISION_DIGEST_DOMAIN,
-        source_revision,
-    ));
+    value[16..48].copy_from_slice(&exact_source_revision_digest(source_revision));
     value[48..80].copy_from_slice(&domain_digest(PATH_IDENTITY_DIGEST_DOMAIN, path_identity));
     value
+}
+
+pub(super) fn exact_source_revision_digest(source_revision: &str) -> [u8; 32] {
+    domain_digest(SOURCE_REVISION_DIGEST_DOMAIN, source_revision)
 }
 
 fn domain_digest(domain: &[u8], value: &str) -> [u8; 32] {

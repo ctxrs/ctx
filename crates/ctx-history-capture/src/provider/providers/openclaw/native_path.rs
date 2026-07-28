@@ -294,6 +294,10 @@ enum FileContinuity {
 #[derive(Debug)]
 struct CoreEvent {
     raw_ordinal: u64,
+    native_record_id: Option<String>,
+    byte_start: u64,
+    byte_end_exclusive: u64,
+    record_digest: [u8; 32],
     provider_event_index: u64,
     provider_event_sequence_index: u64,
     provider_event_hash: String,
@@ -385,6 +389,7 @@ mod output;
 mod publication;
 mod reader;
 mod routes;
+mod source_backed;
 
 use cursor::*;
 use lifecycle::*;
@@ -396,6 +401,12 @@ use routes::*;
 pub(crate) use lifecycle::import_openclaw_nativepath_tree;
 #[cfg(test)]
 pub(super) use routes::{committed_generation_for_test, install_released_cursor_for_test};
+pub(crate) use source_backed::{
+    openclaw_source_backed_adapter_v0, OpenClawHydratedRecordV0, OpenClawSourceBackedAdapterV0,
+    OpenClawSourceBackedDispositionV0, OpenClawSourceBackedErrorV0, OpenClawSourceBackedPageV0,
+    OpenClawSourceBackedReaderV0, OpenClawSourceBackedResultV0, OpenClawSourceBackedScanV0,
+    OpenClawSourceBackedSourceV0, OpenClawSourceBackedVerifiedPrefixV0,
+};
 
 #[cfg(test)]
 pub(super) fn acquisition_page_accounting_for_test(

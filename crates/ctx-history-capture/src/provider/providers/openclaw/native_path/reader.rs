@@ -381,7 +381,13 @@ impl PageReader {
                     &self.source_revision,
                     &self.path_identity,
                 )?;
-                projected.events.push(core_event(ordinal, event));
+                projected.events.push(core_event(
+                    ordinal,
+                    event,
+                    byte_start,
+                    byte_end_exclusive,
+                    bytes,
+                ));
                 for touch in &mut projected.touches {
                     touch.event_ordinal = Some(ordinal);
                 }
@@ -407,7 +413,13 @@ impl PageReader {
             touch.event_ordinal = Some(ordinal);
         }
         let mut projected = ProjectedLine {
-            events: vec![core_event(ordinal, event)],
+            events: vec![core_event(
+                ordinal,
+                event,
+                byte_start,
+                byte_end_exclusive,
+                bytes,
+            )],
             touches,
             ..ProjectedLine::default()
         };
@@ -509,13 +521,24 @@ impl ProjectedLine {
     }
 }
 
-pub(super) fn core_event(raw_ordinal: u64, event: normalization::OpenClawEventFact) -> CoreEvent {
+pub(super) fn core_event(
+    raw_ordinal: u64,
+    event: normalization::OpenClawEventFact,
+    byte_start: u64,
+    byte_end_exclusive: u64,
+    record_bytes: &[u8],
+) -> CoreEvent {
+    let native_record_id = event.provider_event_hash.clone();
     let provider_event_hash = event
         .provider_event_hash
         .clone()
         .unwrap_or_else(|| format!("line-{}", raw_ordinal.saturating_add(1)));
     CoreEvent {
         raw_ordinal,
+        native_record_id,
+        byte_start,
+        byte_end_exclusive,
+        record_digest: Sha256::digest(record_bytes).into(),
         provider_event_index: event.provider_event_index,
         provider_event_sequence_index: event.provider_event_index,
         provider_event_hash,
@@ -803,6 +826,7 @@ pub(super) fn session_wire_bytes(session: &SessionFact) -> usize {
 
 pub(super) fn event_wire_bytes(event: &CoreEvent) -> usize {
     EVENT_ENVELOPE_BYTES
+        .saturating_add(64)
         .saturating_add(event.provider_event_hash.len())
         .saturating_add(event.cursor.len())
         .saturating_add(serde_json::to_vec(&event.payload).map_or(usize::MAX, |v| v.len()))
