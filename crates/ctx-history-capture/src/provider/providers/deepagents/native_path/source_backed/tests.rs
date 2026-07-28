@@ -1,4 +1,4 @@
-use ctx_history_core::{LocatorRevisionPolicy, NativeRecordCoordinate, TypedKey};
+use ctx_history_core::{AgentType, LocatorRevisionPolicy, NativeRecordCoordinate, TypedKey};
 use rmpv::{encode::write_value as write_msgpack_value, Value as MsgpackValue};
 use rusqlite::{params, Connection};
 
@@ -38,6 +38,7 @@ fn insert_checkpoint(conn: &Connection, checkpoint_state: &[u8]) {
         "updated_at": "2026-07-28T20:00:00Z",
         "cwd": "/workspace/deepagents",
         "agent_name": "deepagents-test",
+        "git_branch": "feature/source-backed",
     }))
     .unwrap();
     conn.execute(
@@ -199,6 +200,19 @@ fn bounded_cold_scan_emits_compound_exact_row_locators() {
     assert_eq!(result.selected_path, path);
     assert_eq!(result.selected_route, DeepAgentsDatabaseRouteV0::Explicit);
     assert_eq!(documents[0].body.chars().count(), MAX_BODY_PREVIEW_CHARS);
+    assert_eq!(documents[0].parent_session_id, None);
+    assert_eq!(documents[0].root_session_id, documents[0].session_id);
+    assert_eq!(
+        documents[0].provider_session_id.as_deref(),
+        Some("thread-a")
+    );
+    assert_eq!(
+        documents[0].branch.as_deref(),
+        Some("feature/source-backed")
+    );
+    assert_eq!(documents[0].source_path.as_deref(), path.to_str());
+    assert_eq!(documents[0].agent_type, AgentType::Primary.as_str());
+    assert!(documents[0].is_primary);
     assert_eq!(
         documents[0].locator.revision_policy(),
         LocatorRevisionPolicy::ExactSourceRevision
