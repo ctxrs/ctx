@@ -1,9 +1,9 @@
-use std::{cmp::Reverse, collections::BTreeMap};
+use std::{cmp::Reverse, collections::BTreeMap, ops::Bound};
 
 use ctx_history_core::{SourceRecordLocator, StableEntityId, StableEntityKind};
 use tantivy::{
     collector::{DocSetCollector, TopDocs},
-    query::{BooleanQuery, Query, RegexQuery, TermQuery},
+    query::{BooleanQuery, ConstScoreQuery, Occur, Query, RangeQuery, RegexQuery, TermQuery},
     schema::{IndexRecordOption, Value as TantivyValue},
     tokenizer::TokenStream,
     DocAddress, Score, TantivyDocument, Term,
@@ -19,14 +19,53 @@ const BODY_ANALYZER: &str = "default";
 const EVENT_ID_HIGH_FIELD: &str = "event_id_high";
 const EVENT_ID_LOW_FIELD: &str = "event_id_low";
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AgentScope {
+    #[default]
+    All,
+    Primary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExcludedSessionTree {
+    pub provider: String,
+    pub provider_session_id: String,
+    pub session_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EventSearchFilters {
+    pub session_id: Option<Uuid>,
+    pub parent_session_id: Option<Uuid>,
+    pub root_session_id: Option<Uuid>,
+    pub provider: Option<String>,
+    pub source_format: Option<String>,
+    pub provider_session_id: Option<String>,
+    pub branch: Option<String>,
+    pub workspace: Option<String>,
+    pub since_unix_ms: Option<i64>,
+    pub event_type: Option<String>,
+    pub role: Option<String>,
+    pub agent_type: Option<String>,
+    pub agent_scope: AgentScope,
+    pub file: Option<String>,
+    pub exclude_session_tree: Option<ExcludedSessionTree>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventRecord {
     pub event_id: StableEntityId,
     pub session_id: StableEntityId,
+    pub parent_session_id: Option<StableEntityId>,
+    pub root_session_id: StableEntityId,
     pub locator: SourceRecordLocator,
     pub provider: String,
     pub source_format: String,
     pub provider_session_id: Option<String>,
+    pub branch: Option<String>,
+    pub source_path: Option<String>,
+    pub agent_type: String,
+    pub is_primary: bool,
     pub event_sequence: u64,
     pub occurred_at_unix_ms: Option<i64>,
     pub event_type: String,
@@ -46,9 +85,15 @@ pub struct EventSearchCandidate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRecord {
     pub session_id: StableEntityId,
+    pub parent_session_id: Option<StableEntityId>,
+    pub root_session_id: StableEntityId,
     pub provider: String,
     pub source_format: String,
     pub provider_session_id: Option<String>,
+    pub branch: Option<String>,
+    pub source_path: Option<String>,
+    pub agent_type: String,
+    pub is_primary: bool,
     pub workspace: Option<String>,
     pub cwd: Option<String>,
     pub first_event_sequence: u64,
@@ -65,6 +110,24 @@ impl VerifiedIndex {
         natural_text: &str,
         limit: usize,
     ) -> Result<Vec<EventSearchCandidate>> {
+        self.search_event_candidates_with_filters(
+            natural_text,
+            &EventSearchFilters::default(),
+            limit,
+        )
+    }
+
+    /// Searches bounded event previews with conjunctive metadata filters.
+    ///
+    /// Exact-value fields use their canonical stored spelling. Workspace and
+    /// touched-file filters use case-insensitive substring matching over
+    /// bounded indexed metadata.
+    pub fn search_event_candidates_with_filters(
+        &self,
+        natural_text: &str,
+        filters: &EventSearchFilters,
+        limit: usize,
+    ) -> Result<Vec<EventSearchCandidate>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -74,7 +137,7 @@ impl VerifiedIndex {
             return Ok(Vec::new());
         }
         validate_event_sort_fast_fields(&self.searcher)?;
-        let query = BooleanQuery::intersection(
+        let body_query = BooleanQuery::intersection(
             terms
                 .into_iter()
                 .map(|term| {
@@ -82,6 +145,7 @@ impl VerifiedIndex {
                 })
                 .collect(),
         );
+        let query = filtered_event_query(Box::new(body_query), filters, fields)?;
         let collector = TopDocs::with_limit(limit).tweak_score(|segment_reader| {
             // These readers were checked above. The fallbacks keep this
             // infallible collector closure panic-free if Tantivy ever changes
@@ -103,7 +167,7 @@ impl VerifiedIndex {
             }
         });
         let hits: Vec<((Score, Reverse<(u64, u64)>), DocAddress)> =
-            self.searcher.search(&query, &collector)?;
+            self.searcher.search(query.as_ref(), &collector)?;
         let mut candidates = Vec::with_capacity(hits.len());
         for ((score, _), address) in hits {
             candidates.push(EventSearchCandidate {
@@ -270,10 +334,26 @@ impl VerifiedIndex {
         Ok(EventRecord {
             event_id,
             session_id,
+            parent_session_id: optional_stored_identity(
+                &document,
+                fields.parent_session_identity,
+                fields.parent_session_id,
+                "parent_session_identity",
+            )?,
+            root_session_id: stored_identity_without_digest(
+                &document,
+                fields.root_session_identity,
+                fields.root_session_id,
+                "root_session_identity",
+            )?,
             locator,
             provider,
             source_format,
             provider_session_id: optional_string(&document, fields.provider_session_id)?,
+            branch: optional_string(&document, fields.branch)?,
+            source_path: optional_string(&document, fields.source_path)?,
+            agent_type: required_string(&document, fields.agent_type, "agent_type")?,
+            is_primary: required_bool(&document, fields.is_primary, "is_primary")?,
             event_sequence: required_u64(&document, fields.event_sequence, "event_sequence")?,
             occurred_at_unix_ms: optional_i64(&document, fields.occurred_at_unix_ms)?,
             event_type: required_string(&document, fields.event_type, "event_type")?,
@@ -290,15 +370,247 @@ impl From<&EventRecord> for SessionRecord {
     fn from(event: &EventRecord) -> Self {
         Self {
             session_id: event.session_id,
+            parent_session_id: event.parent_session_id,
+            root_session_id: event.root_session_id,
             provider: event.provider.clone(),
             source_format: event.source_format.clone(),
             provider_session_id: event.provider_session_id.clone(),
+            branch: event.branch.clone(),
+            source_path: event.source_path.clone(),
+            agent_type: event.agent_type.clone(),
+            is_primary: event.is_primary,
             workspace: event.workspace.clone(),
             cwd: event.cwd.clone(),
             first_event_sequence: event.event_sequence,
             first_occurred_at_unix_ms: event.occurred_at_unix_ms,
         }
     }
+}
+
+fn filtered_event_query(
+    body_query: Box<dyn Query>,
+    filters: &EventSearchFilters,
+    fields: Fields,
+) -> Result<Box<dyn Query>> {
+    let mut clauses = vec![(Occur::Must, body_query)];
+    add_optional_text_filter(
+        &mut clauses,
+        fields.provider,
+        "provider",
+        filters.provider.as_deref(),
+    )?;
+    add_optional_text_filter(
+        &mut clauses,
+        fields.source_format,
+        "source_format",
+        filters.source_format.as_deref(),
+    )?;
+    add_optional_text_filter(
+        &mut clauses,
+        fields.provider_session_id,
+        "provider_session_id",
+        filters.provider_session_id.as_deref(),
+    )?;
+    add_optional_uuid_filter(&mut clauses, fields.session_id, filters.session_id);
+    add_optional_uuid_filter(
+        &mut clauses,
+        fields.parent_session_id,
+        filters.parent_session_id,
+    );
+    add_optional_uuid_filter(
+        &mut clauses,
+        fields.root_session_id,
+        filters.root_session_id,
+    );
+    add_optional_text_filter(
+        &mut clauses,
+        fields.branch,
+        "branch",
+        filters.branch.as_deref(),
+    )?;
+    add_optional_text_filter(
+        &mut clauses,
+        fields.event_type,
+        "event_type",
+        filters.event_type.as_deref(),
+    )?;
+    add_optional_text_filter(&mut clauses, fields.role, "role", filters.role.as_deref())?;
+    add_optional_text_filter(
+        &mut clauses,
+        fields.agent_type,
+        "agent_type",
+        filters.agent_type.as_deref(),
+    )?;
+    if let Some(workspace) = filters.workspace.as_deref() {
+        add_filter_clause(
+            &mut clauses,
+            Box::new(metadata_contains_query(
+                fields.workspace_filter,
+                "workspace",
+                workspace,
+            )?),
+        );
+    }
+    if let Some(file) = filters.file.as_deref() {
+        add_filter_clause(
+            &mut clauses,
+            Box::new(metadata_contains_query(
+                fields.touched_file_filter,
+                "file",
+                file,
+            )?),
+        );
+    }
+    if let Some(since_unix_ms) = filters.since_unix_ms {
+        add_filter_clause(
+            &mut clauses,
+            Box::new(RangeQuery::new(
+                Bound::Included(Term::from_field_i64(
+                    fields.occurred_at_unix_ms,
+                    since_unix_ms,
+                )),
+                Bound::Unbounded,
+            )),
+        );
+    }
+    if filters.agent_scope == AgentScope::Primary && filters.session_id.is_none() {
+        add_filter_clause(
+            &mut clauses,
+            Box::new(BooleanQuery::union(vec![
+                Box::new(TermQuery::new(
+                    Term::from_field_u64(fields.is_primary, 1),
+                    IndexRecordOption::Basic,
+                )),
+                Box::new(TermQuery::new(
+                    Term::from_field_text(fields.agent_type, "primary"),
+                    IndexRecordOption::Basic,
+                )),
+            ])),
+        );
+    }
+    if let Some(excluded) = &filters.exclude_session_tree {
+        clauses.push((
+            Occur::MustNot,
+            excluded_session_tree_query(excluded, fields)?,
+        ));
+    }
+    Ok(Box::new(BooleanQuery::new(clauses)))
+}
+
+fn add_optional_text_filter(
+    clauses: &mut Vec<(Occur, Box<dyn Query>)>,
+    field: tantivy::schema::Field,
+    field_name: &'static str,
+    value: Option<&str>,
+) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let value = validated_filter_text(field_name, value)?;
+    add_filter_clause(
+        clauses,
+        Box::new(TermQuery::new(
+            Term::from_field_text(field, value),
+            IndexRecordOption::Basic,
+        )),
+    );
+    Ok(())
+}
+
+fn add_optional_uuid_filter(
+    clauses: &mut Vec<(Occur, Box<dyn Query>)>,
+    field: tantivy::schema::Field,
+    value: Option<Uuid>,
+) {
+    if let Some(value) = value {
+        add_filter_clause(
+            clauses,
+            Box::new(TermQuery::new(
+                Term::from_field_text(field, &value.to_string()),
+                IndexRecordOption::Basic,
+            )),
+        );
+    }
+}
+
+fn add_filter_clause(clauses: &mut Vec<(Occur, Box<dyn Query>)>, filter: Box<dyn Query>) {
+    clauses.push((Occur::Must, Box::new(ConstScoreQuery::new(filter, 0.0))));
+}
+
+fn metadata_contains_query(
+    field: tantivy::schema::Field,
+    field_name: &'static str,
+    value: &str,
+) -> Result<RegexQuery> {
+    let value = validated_filter_text(field_name, value)?.to_lowercase();
+    RegexQuery::from_pattern(&format!(".*{}.*", escape_regex_literal(&value)), field)
+        .map_err(IndexError::from)
+}
+
+fn excluded_session_tree_query(
+    excluded: &ExcludedSessionTree,
+    fields: Fields,
+) -> Result<Box<dyn Query>> {
+    let provider = validated_filter_text("excluded_provider", &excluded.provider)?;
+    let provider_session_id = validated_filter_text(
+        "excluded_provider_session_id",
+        &excluded.provider_session_id,
+    )?;
+    let provider_thread = BooleanQuery::intersection(vec![
+        Box::new(TermQuery::new(
+            Term::from_field_text(fields.provider, provider),
+            IndexRecordOption::Basic,
+        )),
+        Box::new(TermQuery::new(
+            Term::from_field_text(fields.provider_session_id, provider_session_id),
+            IndexRecordOption::Basic,
+        )),
+    ]);
+    let Some(session_id) = excluded.session_id else {
+        return Ok(Box::new(provider_thread));
+    };
+    let session_id = session_id.to_string();
+    let mut alternatives: Vec<Box<dyn Query>> = vec![Box::new(provider_thread)];
+    for field in [
+        fields.session_id,
+        fields.parent_session_id,
+        fields.root_session_id,
+    ] {
+        alternatives.push(Box::new(TermQuery::new(
+            Term::from_field_text(field, &session_id),
+            IndexRecordOption::Basic,
+        )));
+    }
+    Ok(Box::new(BooleanQuery::union(alternatives)))
+}
+
+fn validated_filter_text<'a>(field: &'static str, value: &'a str) -> Result<&'a str> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(IndexError::EmptyQueryFilter { field });
+    }
+    if value.len() > super::MAX_DOCUMENT_METADATA_BYTES {
+        return Err(IndexError::QueryFilterTooLarge {
+            field,
+            actual: value.len(),
+            maximum: super::MAX_DOCUMENT_METADATA_BYTES,
+        });
+    }
+    Ok(value)
+}
+
+fn escape_regex_literal(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if matches!(
+            character,
+            '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '|' | '[' | ']' | '{' | '}' | '^' | '$'
+        ) {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
 }
 
 fn stored_identity(
@@ -316,6 +628,53 @@ fn stored_identity(
     if identity.entity_kind() != expected_kind
         || uuid != identity.as_uuid().to_string()
         || digest != hex(&identity.digest())
+    {
+        return Err(IndexError::InvalidStoredDocumentField(field_name));
+    }
+    Ok(identity)
+}
+
+fn stored_identity_without_digest(
+    document: &TantivyDocument,
+    identity_field: tantivy::schema::Field,
+    uuid_field: tantivy::schema::Field,
+    field_name: &'static str,
+) -> Result<StableEntityId> {
+    decode_stored_session_identity(
+        required_bytes(document, identity_field, field_name)?,
+        required_string(document, uuid_field, field_name)?,
+        field_name,
+    )
+}
+
+fn optional_stored_identity(
+    document: &TantivyDocument,
+    identity_field: tantivy::schema::Field,
+    uuid_field: tantivy::schema::Field,
+    field_name: &'static str,
+) -> Result<Option<StableEntityId>> {
+    let identity = document
+        .get_first(identity_field)
+        .and_then(|value| value.as_bytes());
+    let uuid = document
+        .get_first(uuid_field)
+        .and_then(|value| value.as_str());
+    match (identity, uuid) {
+        (None, None) => Ok(None),
+        (Some(identity), Some(uuid)) => {
+            decode_stored_session_identity(identity, uuid.to_owned(), field_name).map(Some)
+        }
+        _ => Err(IndexError::InvalidStoredDocumentField(field_name)),
+    }
+}
+
+fn decode_stored_session_identity(
+    identity: &[u8],
+    uuid: String,
+    field_name: &'static str,
+) -> Result<StableEntityId> {
+    let identity = StableEntityId::decode_canonical(identity)?;
+    if identity.entity_kind() != StableEntityKind::Session || uuid != identity.as_uuid().to_string()
     {
         return Err(IndexError::InvalidStoredDocumentField(field_name));
     }
@@ -371,6 +730,18 @@ fn required_u64(
         .get_first(field)
         .and_then(|value| value.as_u64())
         .ok_or(IndexError::InvalidStoredDocumentField(field_name))
+}
+
+fn required_bool(
+    document: &TantivyDocument,
+    field: tantivy::schema::Field,
+    field_name: &'static str,
+) -> Result<bool> {
+    match required_u64(document, field, field_name)? {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(IndexError::InvalidStoredDocumentField(field_name)),
+    }
 }
 
 fn optional_i64(document: &TantivyDocument, field: tantivy::schema::Field) -> Result<Option<i64>> {
