@@ -2,6 +2,7 @@ use std::{
     fs,
     io::{self, BufRead, BufReader, Seek, SeekFrom},
     path::Path,
+    sync::Arc,
 };
 
 use chrono::{DateTime, Utc};
@@ -10,6 +11,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::{
+    common::io::OpenedProviderSourceFile,
     complete_content::{
         attach_verified_content_locator, jsonl::JSONL_COMPLETE_CONTENT_LOCATOR_KIND,
         verified_content_address_supported, verified_content_profile, CompleteContentBodyDigest,
@@ -474,13 +476,36 @@ pub(crate) fn open_pi_native_session(
     path: &Path,
     options: PiNativeScanOptions,
 ) -> Result<PiNativeOpenOutcome, PiNativePathError> {
-    let (file, source) = match PiFrozenSource::open(path) {
+    let opened = match PiFrozenSource::open(path) {
         Ok(source) => source,
         Err(PiNativePathError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
             return Ok(PiNativeOpenOutcome::Deleted);
         }
         Err(error) => return Err(error),
     };
+    open_pi_native_session_from_frozen(path, opened, options)
+}
+
+pub(crate) fn open_pi_native_session_retained(
+    path: &Path,
+    opened: Arc<OpenedProviderSourceFile>,
+    options: PiNativeScanOptions,
+) -> Result<PiNativeOpenOutcome, PiNativePathError> {
+    let frozen = match PiFrozenSource::from_opened(path, opened) {
+        Ok(source) => source,
+        Err(PiNativePathError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+            return Ok(PiNativeOpenOutcome::Deleted);
+        }
+        Err(error) => return Err(error),
+    };
+    open_pi_native_session_from_frozen(path, frozen, options)
+}
+
+fn open_pi_native_session_from_frozen(
+    path: &Path,
+    (file, source): (fs::File, PiFrozenSource),
+    options: PiNativeScanOptions,
+) -> Result<PiNativeOpenOutcome, PiNativePathError> {
     let source_revision = source.source_revision();
     let cursor_path = options.context.source_path.as_deref().unwrap_or(path);
     let cursor_path_identity = provider_path_identity(cursor_path)?;
@@ -662,6 +687,14 @@ pub(crate) fn open_pi_native_session(
 impl PiNativeScanner {
     pub(crate) fn source_revision(&self) -> &str {
         &self.source_revision
+    }
+
+    pub(crate) fn opened_source(&self) -> Arc<OpenedProviderSourceFile> {
+        self.source.opened()
+    }
+
+    pub(crate) fn revalidate_source(&self) -> Result<(), PiNativePathError> {
+        self.source.fence(self.reader.get_ref())
     }
 
     pub(crate) fn core_lifecycle(&self) -> Option<PiSourceLifecycle> {

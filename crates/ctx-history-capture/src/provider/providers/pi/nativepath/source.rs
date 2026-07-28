@@ -1,7 +1,9 @@
 use std::{
-    fs::{self, File, Metadata},
+    collections::BTreeMap,
+    fs::{File, Metadata},
     io,
     path::{Path, PathBuf},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -11,7 +13,8 @@ use thiserror::Error;
 
 use crate::{
     common::io::{
-        ensure_provider_path_parents_are_not_symlinks, ensure_regular_provider_transcript_file,
+        open_provider_source_file, open_provider_source_path, OpenedProviderSourceFile,
+        OpenedProviderSourcePath, ProviderSourceDirectory, ProviderSourceRoot,
     },
     provider::importer::provider_path_identity,
     CaptureError,
@@ -65,7 +68,7 @@ pub(crate) struct PiPhysicalFileId {
     pub(crate) inode: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(super) struct PiFrozenSource {
     pub(super) path: PathBuf,
     pub(super) canonical_path: PathBuf,
@@ -75,28 +78,51 @@ pub(super) struct PiFrozenSource {
     pub(super) len: u64,
     modified: SystemTime,
     readonly: bool,
+    opened: Arc<OpenedProviderSourceFile>,
 }
+
+impl PartialEq for PiFrozenSource {
+    fn eq(&self, other: &Self) -> bool {
+        self.path == other.path
+            && self.canonical_path == other.canonical_path
+            && self.route_identity == other.route_identity
+            && self.route_sha256 == other.route_sha256
+            && self.physical_file_id == other.physical_file_id
+            && self.len == other.len
+            && self.modified == other.modified
+            && self.readonly == other.readonly
+    }
+}
+
+impl Eq for PiFrozenSource {}
 
 impl PiFrozenSource {
     pub(super) fn open(path: &Path) -> Result<(File, Self), PiNativePathError> {
-        ensure_regular_provider_transcript_file(path).map_err(|error| match error {
-            CaptureError::Io(source) => PiNativePathError::io(path, source),
-            other => PiNativePathError::invalid(path, other.to_string()),
-        })?;
-        let canonical_path =
-            fs::canonicalize(path).map_err(|source| PiNativePathError::io(path, source))?;
-        let file = File::open(path).map_err(|source| PiNativePathError::io(path, source))?;
-        let metadata = file
-            .metadata()
+        let path = absolute_lexical_path(path)?;
+        let opened = Arc::new(
+            open_provider_source_file(&path).map_err(|error| map_capture_error(&path, error))?,
+        );
+        Self::from_opened(&path, opened)
+    }
+
+    pub(super) fn from_opened(
+        path: &Path,
+        opened: Arc<OpenedProviderSourceFile>,
+    ) -> Result<(File, Self), PiNativePathError> {
+        let file = opened
+            .file()
+            .try_clone()
             .map_err(|source| PiNativePathError::io(path, source))?;
+        let metadata = opened.metadata().clone();
         let route_identity = provider_path_identity(path)?;
         let route_sha256 = route_sha256(&route_identity);
         let frozen = Self::from_metadata(
             path.to_path_buf(),
-            canonical_path,
+            path.to_path_buf(),
             route_identity,
             route_sha256,
             &metadata,
+            opened,
         )?;
         Ok((file, frozen))
     }
@@ -107,6 +133,7 @@ impl PiFrozenSource {
         route_identity: String,
         route_sha256: [u8; 32],
         metadata: &Metadata,
+        opened: Arc<OpenedProviderSourceFile>,
     ) -> Result<Self, PiNativePathError> {
         #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
@@ -130,6 +157,7 @@ impl PiFrozenSource {
                 .modified()
                 .map_err(|source| PiNativePathError::io(Path::new("<metadata>"), source))?,
             readonly: metadata.permissions().readonly(),
+            opened,
         })
     }
 
@@ -158,9 +186,7 @@ impl PiFrozenSource {
         if !self.matches_metadata(&descriptor) {
             return Err(PiNativePathError::SourceChanged);
         }
-        let path_metadata =
-            fs::metadata(&self.path).map_err(|source| PiNativePathError::io(&self.path, source))?;
-        if !self.matches_metadata(&path_metadata) {
+        if self.opened.revalidate().is_err() {
             return Err(PiNativePathError::SourceChanged);
         }
         Ok(())
@@ -175,29 +201,24 @@ impl PiFrozenSource {
         }
         physical_file_id(metadata) == self.physical_file_id
     }
+
+    pub(super) fn opened(&self) -> Arc<OpenedProviderSourceFile> {
+        Arc::clone(&self.opened)
+    }
 }
 
 pub(crate) fn revalidate_pi_source_revision(
     path: &Path,
     expected_revision: &str,
 ) -> Result<bool, PiNativePathError> {
-    let metadata =
-        fs::symlink_metadata(path).map_err(|source| PiNativePathError::io(path, source))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Ok(false);
-    }
-    ensure_provider_path_parents_are_not_symlinks(path)
-        .map_err(|error| PiNativePathError::invalid(path, error.to_string()))?;
-    let canonical_path =
-        fs::canonicalize(path).map_err(|source| PiNativePathError::io(path, source))?;
-    let route_identity = provider_path_identity(path)?;
-    let observed = PiFrozenSource::from_metadata(
-        path.to_path_buf(),
-        canonical_path,
-        route_identity.clone(),
-        route_sha256(&route_identity),
-        &metadata,
-    )?;
+    let (_, observed) = match PiFrozenSource::open(path) {
+        Ok(observed) => observed,
+        Err(PiNativePathError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+            return Ok(false);
+        }
+        Err(PiNativePathError::InvalidSource { .. }) => return Ok(false),
+        Err(error) => return Err(error),
+    };
     Ok(observed.source_revision() == expected_revision)
 }
 
@@ -232,71 +253,133 @@ pub(crate) struct PiDiscoveryStats {
     pub(crate) peak_directory_entries: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(crate) struct PiDiscovery {
     pub(crate) sessions: Vec<PathBuf>,
     pub(crate) stats: PiDiscoveryStats,
+    authority: Option<ProviderSourceRoot>,
+    opened: BTreeMap<PathBuf, Arc<OpenedProviderSourceFile>>,
+}
+
+impl PartialEq for PiDiscovery {
+    fn eq(&self, other: &Self) -> bool {
+        self.sessions == other.sessions && self.stats == other.stats
+    }
+}
+
+impl Eq for PiDiscovery {}
+
+impl PiDiscovery {
+    pub(crate) fn opened(
+        &self,
+        path: &Path,
+    ) -> Result<Arc<OpenedProviderSourceFile>, PiNativePathError> {
+        self.opened
+            .get(path)
+            .cloned()
+            .ok_or_else(|| PiNativePathError::invalid(path, "Pi discovery lost its source handle"))
+    }
+
+    pub(crate) fn revalidate(&self) -> Result<(), PiNativePathError> {
+        for (path, opened) in &self.opened {
+            opened
+                .revalidate()
+                .map_err(|_| PiNativePathError::SourceChanged)?;
+            if !self.sessions.contains(path) {
+                return Err(PiNativePathError::SourceChanged);
+            }
+        }
+        if let Some(authority) = &self.authority {
+            authority
+                .revalidate()
+                .map_err(|_| PiNativePathError::SourceChanged)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn rediscover(&self) -> Result<Self, PiNativePathError> {
+        let Some(authority) = &self.authority else {
+            self.revalidate()?;
+            return Ok(self.clone());
+        };
+        let root = authority.named_path().to_path_buf();
+        let mut discovery = PiDiscovery {
+            sessions: Vec::new(),
+            stats: PiDiscoveryStats::default(),
+            authority: Some(authority.clone()),
+            opened: BTreeMap::new(),
+        };
+        let directory = authority
+            .directory()
+            .map_err(|error| map_capture_error(&root, error))?;
+        discover_at(&root, directory, 0, &mut discovery)?;
+        discovery.sessions.sort();
+        discovery.revalidate()?;
+        Ok(discovery)
+    }
 }
 
 pub(crate) fn discover_pi_sessions(root: &Path) -> Result<PiDiscovery, PiNativePathError> {
-    let metadata =
-        fs::symlink_metadata(root).map_err(|source| PiNativePathError::io(root, source))?;
-    if metadata.file_type().is_symlink() {
-        return Err(PiNativePathError::invalid(
-            root,
-            "symlinked Pi session roots are rejected",
-        ));
-    }
-    ensure_provider_path_parents_are_not_symlinks(root)
-        .map_err(|error| PiNativePathError::invalid(root, error.to_string()))?;
+    let root = absolute_lexical_path(root)?;
     let mut discovery = PiDiscovery {
         sessions: Vec::new(),
         stats: PiDiscoveryStats::default(),
+        authority: None,
+        opened: BTreeMap::new(),
     };
-    discover_at(root, 0, &mut discovery)?;
+    match open_provider_source_path(&root).map_err(|error| map_capture_error(&root, error))? {
+        OpenedProviderSourcePath::File(file) => {
+            discovery.sessions.push(root.clone());
+            discovery.opened.insert(root, Arc::new(file));
+            discovery.stats.selected_files = 1;
+        }
+        OpenedProviderSourcePath::Directory(directory) => {
+            let authority = directory.authority_root();
+            discover_at(&root, directory, 0, &mut discovery)?;
+            discovery.authority = Some(authority);
+        }
+    }
     discovery.sessions.sort();
+    discovery.revalidate()?;
     Ok(discovery)
 }
 
+fn absolute_lexical_path(path: &Path) -> Result<PathBuf, PiNativePathError> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|source| PiNativePathError::io(path, source))?
+            .join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    Ok(normalized)
+}
+
 fn discover_at(
-    path: &Path,
+    display_path: &Path,
+    directory: ProviderSourceDirectory,
     depth: usize,
     discovery: &mut PiDiscovery,
 ) -> Result<(), PiNativePathError> {
     if depth > PI_DISCOVERY_MAX_DEPTH {
         return Err(PiNativePathError::invalid(
-            path,
+            display_path,
             "Pi session directory nesting exceeds the supported limit",
         ));
     }
-    let metadata =
-        fs::symlink_metadata(path).map_err(|source| PiNativePathError::io(path, source))?;
-    if metadata.file_type().is_symlink() {
-        return Err(PiNativePathError::invalid(
-            path,
-            "symlinked Pi session entries are rejected",
-        ));
-    }
-    if metadata.is_file() {
-        if is_jsonl(path) {
-            ensure_regular_provider_transcript_file(path)
-                .map_err(|error| PiNativePathError::invalid(path, error.to_string()))?;
-            discovery.sessions.push(path.to_path_buf());
-            discovery.stats.selected_files = discovery.stats.selected_files.saturating_add(1);
-        }
-        return Ok(());
-    }
-    if !metadata.is_dir() {
-        return Ok(());
-    }
-    let mut children = fs::read_dir(path)
-        .map_err(|source| PiNativePathError::io(path, source))?
-        .map(|entry| {
-            entry
-                .map(|entry| entry.path())
-                .map_err(|source| PiNativePathError::io(path, source))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let children = directory
+        .entries(PI_DISCOVERY_MAX_ENTRIES.saturating_add(1))
+        .map_err(|error| map_capture_error(display_path, error))?;
     discovery.stats.visited_entries = discovery
         .stats
         .visited_entries
@@ -304,19 +387,42 @@ fn discover_at(
         .ok_or(PiNativePathError::PositionOverflow)?;
     if discovery.stats.visited_entries > PI_DISCOVERY_MAX_ENTRIES {
         return Err(PiNativePathError::invalid(
-            path,
+            display_path,
             "Pi session discovery exceeds the supported entry limit",
         ));
     }
     discovery.stats.peak_directory_entries =
         discovery.stats.peak_directory_entries.max(children.len());
-    children.sort();
-    for child in children {
-        discover_at(&child, depth.saturating_add(1), discovery)?;
+    for name in children {
+        let child_path = display_path.join(&name);
+        match directory
+            .open_child(&name)
+            .map_err(|error| map_capture_error(&child_path, error))?
+        {
+            OpenedProviderSourcePath::File(file) if is_jsonl(&child_path) => {
+                discovery.sessions.push(child_path.clone());
+                discovery.opened.insert(child_path, Arc::new(file));
+                discovery.stats.selected_files = discovery.stats.selected_files.saturating_add(1);
+            }
+            OpenedProviderSourcePath::Directory(child) => {
+                discover_at(&child_path, child, depth.saturating_add(1), discovery)?;
+            }
+            OpenedProviderSourcePath::File(_) => {}
+        }
     }
+    directory
+        .revalidate()
+        .map_err(|error| map_capture_error(display_path, error))?;
     Ok(())
 }
 
 fn is_jsonl(path: &Path) -> bool {
     path.extension().and_then(|value| value.to_str()) == Some("jsonl")
+}
+
+fn map_capture_error(path: &Path, error: CaptureError) -> PiNativePathError {
+    match error {
+        CaptureError::Io(source) => PiNativePathError::io(path, source),
+        other => PiNativePathError::invalid(path, other.to_string()),
+    }
 }

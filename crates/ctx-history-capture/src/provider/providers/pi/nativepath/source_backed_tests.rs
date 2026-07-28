@@ -208,17 +208,17 @@ fn cold_projection_certifies_lineage_and_old_locator_survives_append() {
         .write_all(format!("{}\n", message("appended-message", "append sentinel", 3)).as_bytes())
         .unwrap();
 
-    let mut append_projector = PiSourceBackedProjector::open(
+    let mut append_scanner = PiSourceBackedScanner::open(
         &child_path,
         context(&root),
         Some(child_cold.certificate.clone()),
     )
     .unwrap();
     let mut appended_documents = Vec::new();
-    while let Some(page) = append_projector.next_page().unwrap() {
+    while let Some(page) = append_scanner.next_page().unwrap() {
         appended_documents.extend(page.documents);
     }
-    let appended = append_projector.finish().unwrap();
+    let appended = append_scanner.finish().unwrap();
     assert_eq!(appended.lifecycle, PiSourceLifecycle::Append);
     assert_eq!(appended_documents.len(), 1);
     assert_eq!(appended.certificate.counts().complete_records, 3);

@@ -9,16 +9,17 @@ mod vertical;
 
 pub(crate) use checkpoint::PiNativeCheckpoint;
 pub(super) use reader::{
-    open_pi_native_session, PiNativeOpenOutcome, PiNativeOwnedPage, PiNativeProfile,
-    PiNativeResume, PiNativeScanOptions, PiSourceLifecycle,
+    open_pi_native_session, open_pi_native_session_retained, PiNativeOpenOutcome,
+    PiNativeOwnedPage, PiNativeProfile, PiNativeResume, PiNativeScanOptions, PiSourceLifecycle,
 };
 pub(super) use rows::{
     PiNativeCorePage, PiNativeCoreUnit, PiNativeEventRow, PiNativeFileTouchRow, PiNativeSessionRow,
 };
-pub(super) use source::{discover_pi_sessions, revalidate_pi_source_revision};
+pub(super) use source::{discover_pi_sessions, revalidate_pi_source_revision, PiDiscovery};
 pub(crate) use source_backed::{
-    project_pi_source_backed_root_cold, PiSourceBackedError, PiSourceBackedProjector,
-    PiSourceBackedResolver, PiSourceBackedRoot,
+    project_pi_source_backed_root_cold, PiSourceBackedError, PiSourceBackedPage,
+    PiSourceBackedProjection, PiSourceBackedResolver, PiSourceBackedRoot,
+    PiSourceBackedRootProjection, PiSourceBackedScanner, PiSourceRoute,
 };
 pub(crate) use vertical::import_pi_nativepath_history;
 

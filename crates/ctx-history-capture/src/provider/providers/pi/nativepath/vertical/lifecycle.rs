@@ -127,14 +127,29 @@ pub(super) fn checkpoint_covers(
             || committed.committed_prefix_sha256 == candidate.committed_prefix_sha256)
 }
 
-pub(super) fn discover_paths(path: &Path) -> Result<(Vec<PathBuf>, bool)> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.is_file() => Ok((vec![path.to_path_buf()], false)),
-        Ok(_) => discover_pi_sessions(path)
-            .map(|discovery| (discovery.sessions, false))
-            .map_err(map_native_error),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((Vec::new(), true)),
-        Err(error) => Err(CaptureError::Io(error)),
+pub(super) struct PiPathDiscovery {
+    pub(super) paths: Vec<PathBuf>,
+    pub(super) root_missing: bool,
+    pub(super) discovery: Option<super::PiDiscovery>,
+}
+
+pub(super) fn discover_paths(path: &Path) -> Result<PiPathDiscovery> {
+    match discover_pi_sessions(path) {
+        Ok(discovery) => Ok(PiPathDiscovery {
+            paths: discovery.sessions.clone(),
+            root_missing: false,
+            discovery: Some(discovery),
+        }),
+        Err(PiNativePathError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            Ok(PiPathDiscovery {
+                paths: Vec::new(),
+                root_missing: true,
+                discovery: None,
+            })
+        }
+        Err(error) => Err(map_native_error(error)),
     }
 }
 
@@ -151,7 +166,7 @@ pub(super) fn output_source_identity(
     path: &Path,
     cursor_stream: &str,
 ) -> Result<crate::OutputSourceIdentity> {
-    let canonical = fs::canonicalize(path)?;
+    let canonical = std::path::absolute(path)?;
     Ok(crate::OutputSourceIdentity {
         provider: CaptureProvider::Pi.as_str().to_owned(),
         namespace_id: cursor_stream.to_owned(),
