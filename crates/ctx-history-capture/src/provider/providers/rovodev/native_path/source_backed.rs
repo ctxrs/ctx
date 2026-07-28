@@ -12,8 +12,8 @@ use std::{
 };
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CertifiedSource, CertifiedSourceInventory, ContentRef,
-    EventIdentityInput, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
+    derive_event_id, derive_session_id, AgentType, CertifiedSource, CertifiedSourceInventory,
+    ContentRef, EventIdentityInput, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
     NativeSessionKey, ProjectionContractError, ScannedSourceCounts, SessionIdentityInput,
     SourceAnchor, SourceFrontier, SourceInventoryObservation, SourceKey, SourceObservation,
     SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
@@ -35,7 +35,7 @@ use crate::{
         CompleteContentSourceFamily, CompleteContentSourceLocator, CompleteMessageRequest,
         SourceAccessBroker, SourceSnapshot, VerifiedContentRole,
     },
-    provider::normalization::{provider_block_text, provider_message_id},
+    provider::normalization::{provider_block_text, provider_message_id, provider_string_field},
     CaptureError, CaptureProvider, ProviderAdapterContext, MAX_PROVIDER_JSONL_LINE_BYTES,
     ROVODEV_SOURCE_FORMAT,
 };
@@ -73,6 +73,8 @@ pub(crate) enum RovoDevSourceBackedError {
     NonAuthoritativeRoot,
     #[error("Rovo Dev authoritative inventory contains duplicate session identity {0:?}")]
     DuplicateSession(String),
+    #[error("Rovo Dev session lineage contains a cycle at provider thread {0:?}")]
+    LineageCycle(String),
     #[error("Rovo Dev source-backed scan was not drained to a terminal frontier")]
     IncompleteScan,
     #[error("Rovo Dev source-backed scan counts do not reconcile")]
@@ -255,6 +257,8 @@ pub(crate) struct RovoDevSourceBackedLeaf {
     source: RovoDevSessionSource,
     source_key: SourceKey,
     session_id: StableEntityId,
+    parent_session_id: Option<StableEntityId>,
+    root_session_id: StableEntityId,
     unique_message_ids: HashSet<String>,
     snapshot: RovoDevSnapshot,
 }
@@ -349,23 +353,19 @@ fn bind_inventory(
                 provider_session_id.to_owned(),
             ));
         }
-        let native_session_key = TypedKey::utf8(provider_session_id)?;
-        let session_key =
-            NativeSessionKey::native_id(SESSION_KEY_NAMESPACE, native_session_key.clone())?;
-        let session_id = derive_session_id(SessionIdentityInput {
-            source: &source_key,
-            logical_session_kind: LOGICAL_SESSION_KIND,
-            native_session_key: &session_key,
-        })?;
+        let session_id = rovodev_session_identity(&source_key, provider_session_id)?;
         let unique_message_ids = unique_message_ids(&snapshot);
         leaves.push(RovoDevSourceBackedLeaf {
             source: source.clone(),
             source_key,
             session_id,
+            parent_session_id: None,
+            root_session_id: session_id,
             unique_message_ids,
             snapshot,
         });
     }
+    bind_session_lineage(&mut leaves)?;
     let observation = inventory_observation(&canonical_root, &leaves)?;
     Ok(BoundInventory {
         canonical_root,
@@ -407,6 +407,72 @@ fn rovodev_source_key(provider_session_id: &str) -> RovoDevSourceBackedResult<So
         1,
         anchor,
     )?)
+}
+
+fn rovodev_session_identity(
+    source_key: &SourceKey,
+    provider_session_id: &str,
+) -> RovoDevSourceBackedResult<StableEntityId> {
+    let session_key =
+        NativeSessionKey::native_id(SESSION_KEY_NAMESPACE, TypedKey::utf8(provider_session_id)?)?;
+    Ok(derive_session_id(SessionIdentityInput {
+        source: source_key,
+        logical_session_kind: LOGICAL_SESSION_KIND,
+        native_session_key: &session_key,
+    })?)
+}
+
+fn provider_thread_session_identity(
+    provider_session_id: &str,
+) -> RovoDevSourceBackedResult<StableEntityId> {
+    let source_key = rovodev_source_key(provider_session_id)?;
+    rovodev_session_identity(&source_key, provider_session_id)
+}
+
+fn bind_session_lineage(leaves: &mut [RovoDevSourceBackedLeaf]) -> RovoDevSourceBackedResult<()> {
+    let parents = leaves
+        .iter()
+        .map(|leaf| {
+            (
+                leaf.provider_session_id().to_owned(),
+                leaf.snapshot
+                    .document
+                    .as_ref()
+                    .ok()
+                    .and_then(|document| document.parent_provider_session_id.clone()),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let mut bound = Vec::with_capacity(leaves.len());
+    for leaf in leaves.iter() {
+        let provider_session_id = leaf.provider_session_id();
+        let parent_provider_session_id =
+            parents.get(provider_session_id).and_then(Option::as_deref);
+        let parent_session_id = parent_provider_session_id
+            .map(provider_thread_session_identity)
+            .transpose()?;
+        let mut root_session_id = leaf.session_id;
+        let mut cursor = parent_provider_session_id;
+        let mut visited = HashSet::new();
+        visited.insert(provider_session_id.to_owned());
+        while let Some(ancestor_provider_session_id) = cursor {
+            if !visited.insert(ancestor_provider_session_id.to_owned()) {
+                return Err(RovoDevSourceBackedError::LineageCycle(
+                    ancestor_provider_session_id.to_owned(),
+                ));
+            }
+            root_session_id = provider_thread_session_identity(ancestor_provider_session_id)?;
+            cursor = parents
+                .get(ancestor_provider_session_id)
+                .and_then(Option::as_deref);
+        }
+        bound.push((parent_session_id, root_session_id));
+    }
+    for (leaf, (parent_session_id, root_session_id)) in leaves.iter_mut().zip(bound) {
+        leaf.parent_session_id = parent_session_id;
+        leaf.root_session_id = root_session_id;
+    }
+    Ok(())
 }
 
 fn inventory_observation(
@@ -751,9 +817,42 @@ fn lexical_document(
     Ok(LexicalDocument {
         event_id,
         session_id: leaf.session_id,
+        parent_session_id: leaf.parent_session_id,
+        root_session_id: leaf.root_session_id,
         source: leaf.source_key.clone(),
         locator,
         provider_session_id: Some(document.provider_session_id.clone()),
+        branch: provider_string_field(
+            &document.metadata,
+            &[
+                "branch",
+                "git_branch",
+                "gitBranch",
+                "vcs_branch",
+                "vcsBranch",
+            ],
+        )
+        .or_else(|| {
+            provider_string_field(
+                &document.context_metadata,
+                &[
+                    "branch",
+                    "git_branch",
+                    "gitBranch",
+                    "vcs_branch",
+                    "vcsBranch",
+                ],
+            )
+        }),
+        source_path: Some(leaf.source.context_path.display().to_string()),
+        agent_type: if document.parent_provider_session_id.is_some() {
+            AgentType::Subagent
+        } else {
+            AgentType::Primary
+        }
+        .as_str()
+        .to_owned(),
+        is_primary: document.parent_provider_session_id.is_none(),
         event_sequence: message_index,
         occurred_at_unix_ms: Some(event.occurred_at.timestamp_millis()),
         event_type: event.event_type.as_str().to_owned(),
