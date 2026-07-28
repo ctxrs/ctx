@@ -220,6 +220,14 @@ impl ProviderSourceDirectory {
         &self.relative_path
     }
 
+    /// Duplicates this exact retained directory capability without consulting
+    /// its pathname. Consumers such as the SQLite source VFS use the duplicate
+    /// only to open admitted leaf names relative to the already-authorized
+    /// directory.
+    pub(crate) fn try_clone_authority_handle(&self) -> io::Result<File> {
+        self.directory.try_clone()
+    }
+
     /// Returns at most `maximum_entries` sorted child names from the retained
     /// directory handle.
     pub(crate) fn entries(&self, maximum_entries: usize) -> Result<Vec<OsString>> {
