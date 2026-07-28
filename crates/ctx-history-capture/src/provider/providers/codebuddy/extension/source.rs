@@ -118,6 +118,49 @@ pub(super) fn codebuddy_extension_metadata(
     ))
 }
 
+pub(super) fn codebuddy_extension_metadata_from_admitted(
+    session_dir: &Path,
+    session_index_bytes: &[u8],
+    project_index_bytes: Option<&[u8]>,
+) -> Result<CodeBuddyExtensionMetadata> {
+    let session_index: Value = serde_json::from_slice(session_index_bytes)?;
+    let project_dir = session_dir.parent().unwrap_or(session_dir).to_path_buf();
+    let project_hash = project_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or("unknown-project")
+        .to_owned();
+    let native_session_id = session_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or("unknown-session")
+        .to_owned();
+    let project_index = project_index_bytes
+        .map(serde_json::from_slice::<Value>)
+        .transpose()?;
+    let conversation = project_index
+        .as_ref()
+        .and_then(|value| value.get("conversations"))
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item.get("id").and_then(Value::as_str) == Some(&native_session_id))
+        })
+        .cloned();
+    Ok(CodeBuddyExtensionMetadata {
+        session_dir: session_dir.to_path_buf(),
+        project_dir,
+        native_session_id,
+        project_hash,
+        project_index,
+        conversation,
+        session_index,
+    })
+}
+
 fn codebuddy_extension_source_revision(
     metadata: &CodeBuddyExtensionMetadata,
     session_ordinal: usize,
