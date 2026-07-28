@@ -33,6 +33,7 @@ pub(super) struct DeepAgentsMessageRejection {
 pub(super) struct DeepAgentsDecodedMessages {
     pub(super) messages: Vec<DeepAgentsMessage>,
     pub(super) rejected_entries: u64,
+    pub(super) ignored_entries: u64,
     pub(super) rejections: Vec<DeepAgentsMessageRejection>,
 }
 
@@ -87,7 +88,9 @@ impl DeepAgentsDecodedMessages {
     fn record(&mut self, entry_offset: usize, outcome: DeepAgentsMessageOutcome) {
         match outcome {
             DeepAgentsMessageOutcome::Message(message) => self.messages.push(message),
-            DeepAgentsMessageOutcome::System => {}
+            DeepAgentsMessageOutcome::System => {
+                self.ignored_entries = self.ignored_entries.saturating_add(1);
+            }
             DeepAgentsMessageOutcome::Rejected(error) => {
                 self.rejected_entries = self.rejected_entries.saturating_add(1);
                 if self.rejections.len() < MAX_RETAINED_MESSAGE_REJECTIONS {
