@@ -3,7 +3,29 @@ use super::*;
 mod page;
 
 use page::*;
-pub(super) use page::{retained_event_kind, retained_file_touches, retained_searchable_text};
+
+pub(super) fn source_backed_retained_event_kind(
+    effective_type: &str,
+    role: &str,
+    body: &Value,
+) -> OpenCodeNativeEventKind {
+    page::retained_event_kind(effective_type, role, body)
+}
+
+pub(super) fn source_backed_retained_searchable_text(
+    kind: OpenCodeNativeEventKind,
+    effective_type: &str,
+    body: &Value,
+) -> String {
+    page::retained_searchable_text(kind, effective_type, body)
+}
+
+pub(super) fn source_backed_retained_file_touches(
+    kind: OpenCodeNativeEventKind,
+    body: &Value,
+) -> (Vec<OpenCodeNativeFileTouch>, usize) {
+    page::retained_file_touches(kind, body)
+}
 
 pub(in super::super) struct OpenCodeNativeScanner<'reader> {
     schema: &'reader OpenCodeNativeSchema,
