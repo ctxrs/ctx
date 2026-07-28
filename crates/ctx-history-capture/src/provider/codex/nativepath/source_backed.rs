@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    fs,
     io::{Read, Seek, SeekFrom},
     panic::{catch_unwind, AssertUnwindSafe},
     path::{Path, PathBuf},
@@ -9,19 +10,21 @@ use std::{
         Arc,
     },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, CertifiedSourceAppend,
-    EventIdentityInput, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
-    NativeSessionKey, PositionStability, ProjectionContractError, ScannedSourceCounts,
-    SessionIdentityInput, SourceAnchor, SourceFrontier, SourceKey, SourceObservation,
-    SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
+    CertifiedSourceDeletion, CertifiedSourceInventory, EventIdentityInput, LocatorRevisionPolicy,
+    NativeItemKey, NativeRecordCoordinate, NativeSessionKey, PositionStability,
+    ProjectionContractError, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
+    SourceFrontier, SourceInventoryObservation, SourceKey, SourceObservation, SourceRecordLocator,
+    SourceResolverContractError, StableEntityId, TypedKey,
 };
+#[cfg(test)]
+use ctx_history_index::VerifiedIndex;
 use ctx_history_index::{
-    CommitReceipt, GenerationWriter, IndexError, LexicalDocument, RevalidationTarget,
-    VerifiedIndex, WriterOptions,
+    CommitReceipt, GenerationWriter, IndexError, LexicalDocument, RevalidationTarget, WriterOptions,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -52,6 +55,9 @@ const CODEX_SOURCE_SCHEMA_VARIANT: &str = "codex-nativepath-jsonl-v0";
 const CODEX_SOURCE_REVISION_KIND: &str = "codex-ordinary-file-observation-v0";
 const CODEX_FRONTIER_KIND: &str = "codex-nativepath-checkpoint-v4";
 const CODEX_PARSER_REVISION: &str = "codex-nativepath-source-backed-v0";
+const CODEX_INVENTORY_AUTHORITY_NAMESPACE: &str = "codex.sessions-root";
+const CODEX_INVENTORY_REVISION_KIND: &str = "codex-session-tree-inventory-v0";
+const CODEX_DISCOVERY_REVISION: &str = "codex-session-catalog-v0";
 const MAX_HYDRATED_CODEX_RECORD_BYTES: u64 = 16 * 1024 * 1024 + 1;
 const MAX_CODEX_SCANNER_WORKERS: usize = 16;
 const COLD_LANE_RECEIVE_TIMEOUT: Duration = Duration::from_millis(25);
@@ -139,7 +145,9 @@ pub struct CodexSourceBackedCountersV0 {
     pub catalog_source_bytes: u64,
     pub cold_sources: u64,
     pub appended_sources: u64,
+    pub replaced_sources: u64,
     pub replayed_sources: u64,
+    pub deleted_sources: u64,
     pub scanner_workers: u64,
     pub staged_documents: u64,
     pub complete_records_scanned: u64,
@@ -237,6 +245,8 @@ struct ColdParallelOptionsV0 {
     scanner_workers: Option<usize>,
     #[cfg(test)]
     fail_source_index: Option<usize>,
+    #[cfg(test)]
+    before_commit_revalidation: Option<fn(&Path)>,
 }
 
 #[derive(Debug)]
@@ -244,6 +254,12 @@ struct ColdSourcePlanV0 {
     source_key: SourceKey,
     native_session_id: String,
     session_id: StableEntityId,
+}
+
+#[derive(Debug)]
+struct CodexRootInventoryV0 {
+    sources: Vec<(CodexCatalogSource, SourceKey, String)>,
+    certificate: CertifiedSourceInventory,
 }
 
 #[derive(Debug)]
@@ -398,19 +414,23 @@ fn ingest_codex_source_backed_inner_v0(
     let mut counters = CodexSourceBackedCountersV0::default();
 
     let phase_started = Instant::now();
-    let (catalog_summary, sessions) = discover_codex_session_catalog(session_root)?;
-    let discovery = super::discover_codex_catalog_sources(&sessions);
-    if catalog_summary.failed_sessions != 0 || !discovery.rejections.is_empty() {
-        return Err(CodexSourceBackedErrorV0::IncompleteCatalog {
-            rejected: discovery.rejections.len(),
-            failed: catalog_summary.failed_sessions,
-        });
-    }
-    counters.catalog_sources = u64::try_from(discovery.sources.len())
+    let opening_inventory = discover_codex_root_inventory_v0(session_root)?;
+    counters.catalog_sources = u64::try_from(opening_inventory.sources.len())
         .map_err(|_| CodexSourceBackedErrorV0::CountOverflow)?;
-    counters.catalog_source_bytes = catalog_summary.source_bytes;
-    let mut sources = bind_source_keys(discovery.sources)?;
-    let base_sources = load_base_sources(global_index_root)?;
+    timings.discovery = phase_started.elapsed();
+
+    let writer_options = WriterOptions::default();
+    let phase_started = Instant::now();
+    let mut writer = GenerationWriter::open(global_index_root, writer_options.clone())?;
+    timings.writer_open = phase_started.elapsed();
+    let base_sources = writer_base_sources(&writer);
+    let CodexRootInventoryV0 {
+        mut sources,
+        certificate: opening_certificate,
+    } = opening_inventory;
+    counters.catalog_source_bytes = sources.iter().fold(0_u64, |total, (source, _, _)| {
+        total.saturating_add(source.catalog_observation.len)
+    });
     let use_parallel_cold = sources.len() > 1
         && sources
             .iter()
@@ -418,12 +438,6 @@ fn ingest_codex_source_backed_inner_v0(
     if use_parallel_cold {
         sources.sort_by_key(|(_, source_key, _)| source_key.identity().digest());
     }
-    timings.discovery = phase_started.elapsed();
-
-    let writer_options = WriterOptions::default();
-    let phase_started = Instant::now();
-    let mut writer = GenerationWriter::open(global_index_root, writer_options.clone())?;
-    timings.writer_open = phase_started.elapsed();
     let mut revalidation = HashMap::<SourceKey, (CodexCatalogSource, CodexFileObservation)>::new();
 
     if use_parallel_cold {
@@ -452,15 +466,62 @@ fn ingest_codex_source_backed_inner_v0(
         )?;
     }
 
+    for base in base_sources.values() {
+        let source = base.observation().source();
+        if managed_codex_session_source(source) && !opening_certificate.contains(source) {
+            let deletion =
+                CertifiedSourceDeletion::from_inventory(source.clone(), &opening_certificate)?;
+            writer.delete_source(deletion)?;
+            counters.deleted_sources = counters.deleted_sources.saturating_add(1);
+        }
+    }
+
+    #[cfg(test)]
+    if let Some(hook) = cold_options.before_commit_revalidation {
+        hook(session_root);
+    }
+
+    // An empty first generation has no source or deletion target through which
+    // GenerationWriter can invoke its terminal callback. Revalidate that
+    // degenerate inventory explicitly; every non-empty refresh is fenced
+    // inside prepare_commit below.
+    if revalidation.is_empty() && counters.deleted_sources == 0 {
+        let closing = discover_codex_root_inventory_v0(session_root)?;
+        if closing.certificate != opening_certificate {
+            return Err(CodexSourceBackedErrorV0::Capture(
+                CaptureError::SourceChangedDuringCapture,
+            ));
+        }
+    }
+
     let commit_started = Instant::now();
-    let commit = writer.commit(|target| match target {
-        RevalidationTarget::Source(certificate) => revalidation
-            .get_key_value(certificate.observation().source())
-            .is_some_and(|(source_key, (source, observation))| {
-                source_key.exact_descriptor_eq(certificate.observation().source())
-                    && revalidate_codex_source_observation(source, observation).is_ok()
-            }),
-        RevalidationTarget::Deletion(_) => false,
+    let mut closing_inventory = None::<Option<CertifiedSourceInventory>>;
+    let commit = writer.commit(|target| {
+        if closing_inventory.is_none() {
+            closing_inventory = Some(
+                discover_codex_root_inventory_v0(session_root)
+                    .ok()
+                    .and_then(|closing| {
+                        (closing.certificate == opening_certificate).then_some(closing.certificate)
+                    }),
+            );
+        }
+        let Some(closing) = closing_inventory
+            .as_ref()
+            .and_then(std::option::Option::as_ref)
+        else {
+            return false;
+        };
+        match target {
+            RevalidationTarget::Source(certificate) => revalidation
+                .get_key_value(certificate.observation().source())
+                .is_some_and(|(source_key, (source, observation))| {
+                    closing.contains(source_key)
+                        && source_key.exact_descriptor_eq(certificate.observation().source())
+                        && revalidate_codex_source_observation(source, observation).is_ok()
+                }),
+            RevalidationTarget::Deletion(deletion) => deletion.verifies(closing),
+        }
     })?;
     timings.commit = commit_started.elapsed();
     timings.total = total_started.elapsed();
@@ -481,31 +542,18 @@ fn ingest_codex_sources_serial_v0(
 ) -> CodexSourceBackedResultV0<()> {
     for (source, source_key, native_session_id) in sources {
         let base = base_sources.get(&source_key).cloned();
-        let proof = match base.as_ref() {
-            Some(base) => {
-                if !base.observation().source().exact_descriptor_eq(&source_key) {
-                    return Err(CodexSourceBackedErrorV0::UnsupportedLifecycle(
-                        native_session_id,
-                    ));
-                }
-                Some(decode_append_proof(&source, &source_key, base)?)
-            }
-            None => None,
-        };
-
-        match base.as_ref() {
-            Some(_) => {
-                let writer_base = writer.begin_source_append(source_key.clone())?;
-                if writer_base
-                    != base
-                        .as_ref()
-                        .ok_or(CodexSourceBackedErrorV0::MissingCheckpoint)?
-                {
-                    return Err(CodexSourceBackedErrorV0::InvalidCheckpoint);
-                }
-            }
-            None => writer.begin_source(source_key.clone())?,
+        if base
+            .as_ref()
+            .is_some_and(|base| !base.observation().source().exact_descriptor_eq(&source_key))
+        {
+            return Err(CodexSourceBackedErrorV0::UnsupportedLifecycle(
+                native_session_id,
+            ));
         }
+        let proof = base
+            .as_ref()
+            .filter(|base| base.parser_revision() == CODEX_PARSER_REVISION)
+            .and_then(|base| decode_append_proof(&source, &source_key, base).ok());
 
         // An unchanged strong file observation (identity + ctime-backed change
         // token + length + mtime) means the already-certified generation is
@@ -515,6 +563,10 @@ fn ingest_codex_sources_serial_v0(
         if let (Some(base), Some(proof)) = (base.as_ref(), proof.as_ref()) {
             if proof.checkpoint.observation == source.catalog_observation {
                 let certification_started = Instant::now();
+                let writer_base = writer.begin_source_append(source_key.clone())?;
+                if writer_base != base {
+                    return Err(CodexSourceBackedErrorV0::InvalidCheckpoint);
+                }
                 let base_frontier = base
                     .frontier()
                     .ok_or(CodexSourceBackedErrorV0::MissingCheckpoint)?;
@@ -535,7 +587,34 @@ fn ingest_codex_sources_serial_v0(
         let scan_started = Instant::now();
         counters.scanner_workers = 1;
         let scanner_started = Instant::now();
-        let mut scanner = CodexNativeScanner::new_source_backed_v0(source.clone(), proof.as_ref())?;
+        let append_base = match (base.as_ref(), proof.as_ref()) {
+            (Some(base), Some(proof))
+                if source.catalog_observation.len > proof.checkpoint.observation.len =>
+            {
+                match CodexNativeScanner::new_source_backed_v0(source.clone(), Some(proof)) {
+                    Ok(scanner) => Some((base, scanner)),
+                    Err(error) if invalid_append_proof(&error) => None,
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            _ => None,
+        };
+        let (append_base, mut scanner) = match append_base {
+            Some((base, scanner)) => {
+                let writer_base = writer.begin_source_append(source_key.clone())?;
+                if writer_base != base {
+                    return Err(CodexSourceBackedErrorV0::InvalidCheckpoint);
+                }
+                (Some(base), scanner)
+            }
+            None => {
+                writer.begin_source(source_key.clone())?;
+                (
+                    None,
+                    CodexNativeScanner::new_source_backed_v0(source.clone(), None)?,
+                )
+            }
+        };
         timings.scanner_worker_busy += scanner_started.elapsed();
         let session_id = codex_session_identity(&source_key, &native_session_id)?;
         let mut staged_for_source = 0_u64;
@@ -589,12 +668,16 @@ fn ingest_codex_sources_serial_v0(
             .ok_or(CodexSourceBackedErrorV0::CountOverflow)?;
 
         let certification_started = Instant::now();
-        match (base.as_ref(), scan.disposition) {
+        match (append_base, scan.disposition) {
             (None, CodexParseDisposition::FullGeneration) => {
                 let current =
                     certify_scan(&source_key, &scan, None, staged_for_source, scan_counters)?;
                 writer.certify_source(current)?;
-                counters.cold_sources = counters.cold_sources.saturating_add(1);
+                if base.is_some() {
+                    counters.replaced_sources = counters.replaced_sources.saturating_add(1);
+                } else {
+                    counters.cold_sources = counters.cold_sources.saturating_add(1);
+                }
             }
             (Some(base), CodexParseDisposition::AppendDelta) => {
                 let current = certify_scan(
@@ -616,22 +699,6 @@ fn ingest_codex_sources_serial_v0(
                 writer.certify_source_append(append)?;
                 counters.appended_sources = counters.appended_sources.saturating_add(1);
             }
-            (Some(base), CodexParseDisposition::ObservationReplay) => {
-                if staged_for_source != 0 {
-                    return Err(CodexSourceBackedErrorV0::ScanCountMismatch);
-                }
-                let base_frontier = base
-                    .frontier()
-                    .ok_or(CodexSourceBackedErrorV0::MissingCheckpoint)?;
-                let append = CertifiedSourceAppend::certify(
-                    base,
-                    base.clone(),
-                    base_frontier.certified_prefix_bytes(),
-                    *base_frontier.certified_prefix_digest(),
-                )?;
-                writer.certify_source_append(append)?;
-                counters.replayed_sources = counters.replayed_sources.saturating_add(1);
-            }
             _ => {
                 return Err(CodexSourceBackedErrorV0::UnsupportedLifecycle(
                     native_session_id,
@@ -642,6 +709,14 @@ fn ingest_codex_sources_serial_v0(
         revalidation.insert(source_key, (source, scan.after_observation.clone()));
     }
     Ok(())
+}
+
+fn invalid_append_proof(error: &CaptureError) -> bool {
+    matches!(
+        error,
+        CaptureError::InvalidPayload(detail)
+            if detail.starts_with("invalid Codex append proof:")
+    )
 }
 
 fn cold_scanner_worker_count(
@@ -1125,21 +1200,155 @@ fn bind_source_keys(
     Ok(bound)
 }
 
-fn load_base_sources(
-    global_index_root: &Path,
-) -> CodexSourceBackedResultV0<HashMap<SourceKey, CertifiedSource>> {
-    let meta_path = global_index_root.join("meta.json");
-    if !meta_path.is_file() {
-        return Ok(HashMap::new());
+fn discover_codex_root_inventory_v0(
+    session_root: &Path,
+) -> CodexSourceBackedResultV0<CodexRootInventoryV0> {
+    let opening_root_revision = codex_root_revision_v0(session_root)?;
+    let (catalog_summary, sessions) = discover_codex_session_catalog(session_root)?;
+    let discovery = super::discover_codex_catalog_sources(&sessions);
+    if catalog_summary.failed_sessions != 0 || !discovery.rejections.is_empty() {
+        return Err(CodexSourceBackedErrorV0::IncompleteCatalog {
+            rejected: discovery.rejections.len(),
+            failed: catalog_summary.failed_sessions,
+        });
     }
-    let verified = VerifiedIndex::open(global_index_root)?;
-    Ok(verified
-        .manifest()
-        .sources
+    let sources = bind_source_keys(discovery.sources)?;
+    let closing_root_revision = codex_root_revision_v0(session_root)?;
+    if opening_root_revision != closing_root_revision {
+        return Err(CodexSourceBackedErrorV0::Capture(
+            CaptureError::SourceChangedDuringCapture,
+        ));
+    }
+    let observation =
+        codex_inventory_observation_v0(session_root, &opening_root_revision, &sources)?;
+    let source_keys = sources
         .iter()
+        .map(|(_, source_key, _)| source_key.clone())
+        .collect::<Vec<_>>();
+    let certificate = CertifiedSourceInventory::certify(
+        observation.clone(),
+        observation,
+        CODEX_DISCOVERY_REVISION,
+        source_keys,
+    )?;
+    Ok(CodexRootInventoryV0 {
+        sources,
+        certificate,
+    })
+}
+
+fn codex_inventory_observation_v0(
+    session_root: &Path,
+    root_revision: &[u8; 32],
+    sources: &[(CodexCatalogSource, SourceKey, String)],
+) -> CodexSourceBackedResultV0<SourceInventoryObservation> {
+    let root_identity = crate::provider::importer::provider_path_identity(session_root)
+        .map_err(CodexSourceBackedErrorV0::Capture)?;
+    let authority_key: [u8; 32] = Sha256::digest(root_identity.as_bytes()).into();
+    let mut ordered = sources.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|(_, source_key, _)| source_key.identity().digest());
+
+    let mut revision = Sha256::new();
+    revision.update(b"ctx.codex-session-tree-inventory-v0\0");
+    revision.update(root_revision);
+    hash_inventory_field(&mut revision, root_identity.as_bytes());
+    revision.update((ordered.len() as u64).to_be_bytes());
+    for (source, source_key, native_session_id) in ordered {
+        revision.update(source_key.identity().digest());
+        revision.update(source_key.exact_descriptor_digest());
+        hash_inventory_field(&mut revision, source.source_root.as_bytes());
+        let path_identity = crate::provider::importer::provider_path_identity(&source.source_path)?;
+        hash_inventory_field(&mut revision, path_identity.as_bytes());
+        hash_inventory_field(&mut revision, native_session_id.as_bytes());
+        hash_inventory_field(
+            &mut revision,
+            &serde_json::to_vec(&source.catalog_observation)?,
+        );
+    }
+    Ok(SourceInventoryObservation::new(
+        CaptureProvider::Codex.as_str(),
+        CODEX_INVENTORY_AUTHORITY_NAMESPACE,
+        TypedKey::bytes(authority_key.to_vec())?,
+        CODEX_INVENTORY_REVISION_KIND,
+        revision.finalize().to_vec(),
+    )?)
+}
+
+fn hash_inventory_field(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value);
+}
+
+fn codex_root_revision_v0(session_root: &Path) -> CodexSourceBackedResultV0<[u8; 32]> {
+    let metadata = fs::symlink_metadata(session_root)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(CodexSourceBackedErrorV0::Capture(
+            CaptureError::InvalidProviderTranscriptPath {
+                path: session_root.to_path_buf(),
+                reason: "Codex session root must be a non-symlink directory",
+            },
+        ));
+    }
+    let root_identity = crate::provider::importer::provider_path_identity(session_root)?;
+    let mut revision = Sha256::new();
+    revision.update(b"ctx.codex-session-root-revision-v0\0");
+    hash_inventory_field(&mut revision, root_identity.as_bytes());
+    revision.update(metadata.len().to_be_bytes());
+    if let Ok(modified) = metadata.modified() {
+        let since_epoch = modified.duration_since(UNIX_EPOCH).unwrap_or_default();
+        revision.update([1]);
+        revision.update(since_epoch.as_secs().to_be_bytes());
+        revision.update(since_epoch.subsec_nanos().to_be_bytes());
+    } else {
+        revision.update([0]);
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        revision.update(metadata.dev().to_be_bytes());
+        revision.update(metadata.ino().to_be_bytes());
+        revision.update(metadata.ctime().to_be_bytes());
+        revision.update(metadata.ctime_nsec().to_be_bytes());
+        revision.update(metadata.mode().to_be_bytes());
+        revision.update(metadata.uid().to_be_bytes());
+        revision.update(metadata.gid().to_be_bytes());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::fs::MetadataExt;
+
+        revision.update(metadata.file_attributes().to_be_bytes());
+        revision.update(metadata.creation_time().to_be_bytes());
+        revision.update(metadata.last_write_time().to_be_bytes());
+        revision.update(metadata.file_size().to_be_bytes());
+        revision.update(
+            metadata
+                .volume_serial_number()
+                .unwrap_or_default()
+                .to_be_bytes(),
+        );
+        revision.update(metadata.file_index().unwrap_or_default().to_be_bytes());
+    }
+    Ok(revision.finalize().into())
+}
+
+fn writer_base_sources(writer: &GenerationWriter) -> HashMap<SourceKey, CertifiedSource> {
+    writer
+        .base_manifest()
+        .into_iter()
+        .flat_map(|manifest| manifest.sources.iter())
         .cloned()
         .map(|source| (source.observation().source().clone(), source))
-        .collect())
+        .collect()
+}
+
+fn managed_codex_session_source(source: &SourceKey) -> bool {
+    source.provider() == CaptureProvider::Codex.as_str()
+        && source.source_format() == CODEX_SESSION_SOURCE_FORMAT
+        && source.schema_variant() == CODEX_SOURCE_SCHEMA_VARIANT
+        && source.provider_identity_version() == 1
 }
 
 fn codex_source_key(native_session_id: &str) -> CodexSourceBackedResultV0<SourceKey> {
@@ -1677,6 +1886,7 @@ mod tests {
             ColdParallelOptionsV0 {
                 scanner_workers: Some(2),
                 fail_source_index: Some(0),
+                ..ColdParallelOptionsV0::default()
             },
         )
         .unwrap_err();
@@ -1789,6 +1999,7 @@ mod tests {
         assert_eq!(replay.counters.checkpoint_validation_bytes, 0);
         assert_eq!(replay.timings.scan_and_stage, Duration::ZERO);
         assert_eq!(replay.commit.indexed_documents, 2);
+        assert_eq!(replay.commit.generation_id, append.commit.generation_id);
         let replayed_index = VerifiedIndex::open(&index).unwrap();
         assert_eq!(replayed_index.document_count(), 2);
         assert_eq!(
@@ -1826,6 +2037,284 @@ mod tests {
             hydrated.decoded_display_text.as_deref(),
             Some("append sentinel")
         );
+    }
+
+    #[test]
+    fn source_backed_rewrite_with_failed_append_proof_replaces_the_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        let index = temp.path().join("global-index");
+        fs::create_dir_all(&sessions).unwrap();
+        let native_session_id = "019fa000-0000-7000-8000-000000000041";
+        write_session(
+            &sessions,
+            native_session_id,
+            &[message("user", "rewrite old sentinel")],
+        );
+        let cold = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+        let before = VerifiedIndex::open(&index).unwrap();
+        let before_events = before
+            .events_for_session(
+                codex_session_identity(
+                    &codex_source_key(native_session_id).unwrap(),
+                    native_session_id,
+                )
+                .unwrap()
+                .as_uuid(),
+            )
+            .unwrap();
+
+        write_session(
+            &sessions,
+            native_session_id,
+            &[
+                message("assistant", "rewrite replacement sentinel"),
+                message("user", "rewrite longer tail sentinel"),
+            ],
+        );
+        let replacement = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+        assert_eq!(replacement.counters.appended_sources, 0);
+        assert_eq!(replacement.counters.replaced_sources, 1);
+        assert_eq!(replacement.counters.staged_documents, 2);
+        assert_ne!(replacement.commit.generation_id, cold.commit.generation_id);
+
+        let after = VerifiedIndex::open(&index).unwrap();
+        assert_eq!(after.document_count(), 2);
+        assert!(search_event_ids(&after, "rewrite old sentinel").is_empty());
+        assert_eq!(
+            search_event_ids(&after, "rewrite replacement sentinel").len(),
+            1
+        );
+        let after_events = after
+            .events_for_session(
+                codex_session_identity(
+                    &codex_source_key(native_session_id).unwrap(),
+                    native_session_id,
+                )
+                .unwrap()
+                .as_uuid(),
+            )
+            .unwrap();
+        assert_eq!(after_events[0].event_id, before_events[0].event_id);
+    }
+
+    #[test]
+    fn source_backed_truncation_replaces_the_source_without_stale_documents() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        let index = temp.path().join("global-index");
+        fs::create_dir_all(&sessions).unwrap();
+        let native_session_id = "019fa000-0000-7000-8000-000000000042";
+        write_session(
+            &sessions,
+            native_session_id,
+            &[
+                message("user", "truncation retained sentinel"),
+                message("assistant", "truncation removed sentinel"),
+            ],
+        );
+        ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+
+        write_session(
+            &sessions,
+            native_session_id,
+            &[message("user", "truncation retained sentinel")],
+        );
+        let replacement = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+        assert_eq!(replacement.counters.appended_sources, 0);
+        assert_eq!(replacement.counters.replaced_sources, 1);
+        assert_eq!(replacement.counters.staged_documents, 1);
+
+        let after = VerifiedIndex::open(&index).unwrap();
+        assert_eq!(after.document_count(), 1);
+        assert_eq!(
+            search_event_ids(&after, "truncation retained sentinel").len(),
+            1
+        );
+        assert!(search_event_ids(&after, "truncation removed sentinel").is_empty());
+    }
+
+    #[test]
+    fn source_backed_native_session_replacement_is_one_atomic_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        let index = temp.path().join("global-index");
+        fs::create_dir_all(&sessions).unwrap();
+        let previous_id = "019fa000-0000-7000-8000-000000000047";
+        let replacement_id = "019fa000-0000-7000-8000-000000000048";
+        write_session(
+            &sessions,
+            previous_id,
+            &[message("user", "native owner before replacement")],
+        );
+        ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+
+        fs::write(
+            session_path(&sessions, previous_id),
+            format!(
+                "{}\n{}\n",
+                session_meta(replacement_id),
+                message("assistant", "native owner after replacement")
+            ),
+        )
+        .unwrap();
+        let replacement = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+        assert_eq!(replacement.counters.cold_sources, 1);
+        assert_eq!(replacement.counters.deleted_sources, 1);
+        assert_eq!(replacement.commit.certified_sources, 1);
+
+        let after = VerifiedIndex::open(&index).unwrap();
+        assert_eq!(after.document_count(), 1);
+        assert!(search_event_ids(&after, "native owner before replacement").is_empty());
+        assert_eq!(
+            search_event_ids(&after, "native owner after replacement").len(),
+            1
+        );
+        assert_eq!(
+            after.manifest().sources[0].observation().source(),
+            &codex_source_key(replacement_id).unwrap()
+        );
+    }
+
+    #[test]
+    fn source_backed_complete_inventory_certifies_deletion() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        let index = temp.path().join("global-index");
+        fs::create_dir_all(&sessions).unwrap();
+        let native_session_id = "019fa000-0000-7000-8000-000000000043";
+        write_session(
+            &sessions,
+            native_session_id,
+            &[message("user", "certified deletion sentinel")],
+        );
+        let cold = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+        fs::remove_file(session_path(&sessions, native_session_id)).unwrap();
+
+        let deletion = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+        assert_eq!(deletion.counters.deleted_sources, 1);
+        assert_ne!(deletion.commit.generation_id, cold.commit.generation_id);
+        let after = VerifiedIndex::open(&index).unwrap();
+        assert_eq!(after.document_count(), 0);
+        assert!(after.manifest().sources.is_empty());
+        assert!(search_event_ids(&after, "certified deletion sentinel").is_empty());
+    }
+
+    #[test]
+    fn source_backed_unavailable_root_preserves_the_prior_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        let unavailable = temp.path().join("sessions-unavailable");
+        let index = temp.path().join("global-index");
+        fs::create_dir_all(&sessions).unwrap();
+        let native_session_id = "019fa000-0000-7000-8000-000000000044";
+        write_session(
+            &sessions,
+            native_session_id,
+            &[message("user", "unavailable root sentinel")],
+        );
+        ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+        let before = VerifiedIndex::open(&index).unwrap();
+        let before_generation = before.generation_id().to_owned();
+        fs::rename(&sessions, &unavailable).unwrap();
+
+        assert!(ingest_codex_source_backed_v0(&sessions, &index).is_err());
+        let after = VerifiedIndex::open(&index).unwrap();
+        assert_eq!(after.generation_id(), before_generation);
+        assert_eq!(after.document_count(), 1);
+        assert_eq!(
+            search_event_ids(&after, "unavailable root sentinel").len(),
+            1
+        );
+    }
+
+    #[test]
+    fn source_backed_incomplete_inventory_preserves_the_prior_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        let index = temp.path().join("global-index");
+        fs::create_dir_all(&sessions).unwrap();
+        let native_session_id = "019fa000-0000-7000-8000-000000000049";
+        write_session(
+            &sessions,
+            native_session_id,
+            &[message("user", "incomplete inventory baseline")],
+        );
+        ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+        let before = VerifiedIndex::open(&index).unwrap();
+        let before_generation = before.generation_id().to_owned();
+        fs::write(
+            sessions.join("duplicate-native-session.jsonl"),
+            format!(
+                "{}\n{}\n",
+                session_meta(native_session_id),
+                message("assistant", "ambiguous duplicate inventory")
+            ),
+        )
+        .unwrap();
+
+        let error = ingest_codex_source_backed_v0(&sessions, &index).unwrap_err();
+        assert!(matches!(
+            error,
+            CodexSourceBackedErrorV0::DuplicateNativeSessionId(id)
+                if id == native_session_id
+        ));
+        let after = VerifiedIndex::open(&index).unwrap();
+        assert_eq!(after.generation_id(), before_generation);
+        assert_eq!(after.document_count(), 1);
+        assert_eq!(
+            search_event_ids(&after, "incomplete inventory baseline").len(),
+            1
+        );
+        assert!(search_event_ids(&after, "ambiguous duplicate inventory").is_empty());
+    }
+
+    #[test]
+    fn source_backed_final_inventory_revalidation_blocks_partial_publication() {
+        fn insert_source(session_root: &Path) {
+            write_session(
+                session_root,
+                "019fa000-0000-7000-8000-000000000046",
+                &[message("assistant", "late inventory sentinel")],
+            );
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        let index = temp.path().join("global-index");
+        fs::create_dir_all(&sessions).unwrap();
+        let baseline_id = "019fa000-0000-7000-8000-000000000045";
+        write_session(
+            &sessions,
+            baseline_id,
+            &[message("user", "inventory baseline sentinel")],
+        );
+        ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+        let before = VerifiedIndex::open(&index).unwrap();
+        let before_generation = before.generation_id().to_owned();
+
+        let error = ingest_codex_source_backed_inner_v0(
+            &sessions,
+            &index,
+            ColdParallelOptionsV0 {
+                before_commit_revalidation: Some(insert_source),
+                ..ColdParallelOptionsV0::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            CodexSourceBackedErrorV0::Index(IndexError::SourceInvalidated(_))
+        ));
+
+        let after = VerifiedIndex::open(&index).unwrap();
+        assert_eq!(after.generation_id(), before_generation);
+        assert_eq!(after.document_count(), 1);
+        assert_eq!(
+            search_event_ids(&after, "inventory baseline sentinel").len(),
+            1
+        );
+        assert!(search_event_ids(&after, "late inventory sentinel").is_empty());
     }
 
     #[test]
