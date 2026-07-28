@@ -312,6 +312,31 @@ pub fn ingest_codex_source_backed_v0(
             None => writer.begin_source(source_key.clone())?,
         }
 
+        // An unchanged strong file observation (identity + ctime-backed change
+        // token + length + mtime) means the already-certified generation is
+        // still the provider source. Rehashing every byte here made a no-op
+        // refresh O(total history bytes). Final commit revalidation repeats
+        // the observation before publishing.
+        if let (Some(base), Some(proof)) = (base.as_ref(), proof.as_ref()) {
+            if proof.checkpoint.observation == source.catalog_observation {
+                let certification_started = Instant::now();
+                let base_frontier = base
+                    .frontier()
+                    .ok_or(CodexSourceBackedErrorV0::MissingCheckpoint)?;
+                let append = CertifiedSourceAppend::certify(
+                    base,
+                    base.clone(),
+                    base_frontier.certified_prefix_bytes(),
+                    *base_frontier.certified_prefix_digest(),
+                )?;
+                writer.certify_source_append(append)?;
+                timings.certification += certification_started.elapsed();
+                counters.replayed_sources = counters.replayed_sources.saturating_add(1);
+                revalidation.insert(source_key, (source, proof.checkpoint.observation.clone()));
+                continue;
+            }
+        }
+
         let scan_started = Instant::now();
         let mut scanner =
             CodexNativeScanner::new(source.clone(), proof.as_ref(), CodexNativeProfile::CoreOnly)?;
@@ -877,6 +902,9 @@ mod tests {
         let replay = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
         assert_eq!(replay.counters.replayed_sources, 1);
         assert_eq!(replay.counters.staged_documents, 0);
+        assert_eq!(replay.counters.scanner_bytes_read, 0);
+        assert_eq!(replay.counters.checkpoint_validation_bytes, 0);
+        assert_eq!(replay.timings.scan_and_stage, Duration::ZERO);
         assert_eq!(replay.commit.indexed_documents, 2);
         let replayed_index = VerifiedIndex::open(&index).unwrap();
         assert_eq!(replayed_index.document_count(), 2);
