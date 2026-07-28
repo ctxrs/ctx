@@ -5,8 +5,8 @@ mod source;
 
 #[allow(unused_imports)]
 pub(crate) use native_path::{
-    discover_mux_source_backed_sources, import_mux_native_path, mux_complete_content_locator,
-    mux_source_path_for_locator, revalidate_mux_source_backed, scan_mux_source_backed,
+    discover_mux_source_backed_sources, hydrate_mux_source_backed_record, import_mux_native_path,
+    mux_complete_content_locator, revalidate_mux_source_backed, scan_mux_source_backed,
     MuxBoundedProjection, MuxReplacementEvidence, MuxReplacementReason, MuxSourceBackedCandidate,
     MuxSourceBackedDisposition, MuxSourceBackedError, MuxSourceBackedPage, MuxSourceBackedRecord,
     MuxSourceBackedResult, MuxSourceBackedScanReceipt, MuxUnaddressableReason,
