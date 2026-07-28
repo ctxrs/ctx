@@ -97,12 +97,19 @@ mod output;
 mod publication;
 #[path = "native_path_scan.rs"]
 mod scan;
+#[path = "source_backed.rs"]
+mod source_backed;
 
 use lifecycle::*;
 use model::*;
 use output::*;
 use publication::*;
 use scan::*;
+#[allow(unused_imports)]
+pub(crate) use source_backed::{
+    scan_kiro_source_backed_v0, KiroHydratedRecordV0, KiroLocatorResolverV0,
+    KiroSourceBackedErrorV0, KiroSourceBackedResultV0, KiroSourceBackedScanV0,
+};
 
 pub(super) fn import_kiro_native_path(
     path: &Path,

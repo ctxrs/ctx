@@ -474,16 +474,16 @@ impl<'source> KiroScanner<'source> {
     }
 }
 
-struct KiroCandidate {
-    phase: KiroPhase,
-    rowid: i64,
-    row_ordinal: u64,
-    retained_bytes: u64,
-    type_valid: [bool; 5],
+pub(super) struct KiroCandidate {
+    pub(super) phase: KiroPhase,
+    pub(super) rowid: i64,
+    pub(super) row_ordinal: u64,
+    pub(super) retained_bytes: u64,
+    pub(super) type_valid: [bool; 5],
 }
 
 impl KiroCandidate {
-    fn rejection_reason(&self) -> Option<&'static str> {
+    pub(super) fn rejection_reason(&self) -> Option<&'static str> {
         let [key, conversation_id, value, created_at, updated_at] = self.type_valid;
         if !key {
             return Some("Kiro conversation key has an unsupported SQLite storage class");
@@ -510,7 +510,7 @@ impl KiroCandidate {
     }
 }
 
-fn next_candidate(
+pub(super) fn next_candidate(
     connection: &Connection,
     phase: KiroPhase,
     after_rowid: Option<i64>,
@@ -563,7 +563,7 @@ fn next_candidate(
     }
 }
 
-fn candidate_at(
+pub(super) fn candidate_at(
     connection: &Connection,
     phase: KiroPhase,
     rowid: i64,
@@ -576,7 +576,7 @@ fn candidate_at(
     Ok(candidate.filter(|candidate| candidate.rowid == rowid))
 }
 
-fn hydrate_row(
+pub(super) fn hydrate_row(
     connection: &Connection,
     phase: KiroPhase,
     rowid: i64,
