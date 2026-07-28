@@ -1,12 +1,17 @@
-use std::{cmp::Reverse, collections::BTreeMap, ops::Bound};
+use std::{
+    cmp::{Ordering, Reverse},
+    collections::{BTreeMap, BinaryHeap},
+    ops::Bound,
+};
 
 use ctx_history_core::{SourceRecordLocator, StableEntityId, StableEntityKind};
+use serde::{Deserialize, Serialize};
 use tantivy::{
     collector::{DocSetCollector, TopDocs},
     query::{BooleanQuery, ConstScoreQuery, Occur, Query, RangeQuery, RegexQuery, TermQuery},
     schema::{IndexRecordOption, Value as TantivyValue},
     tokenizer::TokenStream,
-    DocAddress, Score, TantivyDocument, Term,
+    DocAddress, DocSet, Score, TantivyDocument, Term, TERMINATED,
 };
 use uuid::Uuid;
 
@@ -18,6 +23,82 @@ const ID_PREFIX_MATCH_LIMIT: usize = 2;
 const BODY_ANALYZER: &str = "default";
 const EVENT_ID_HIGH_FIELD: &str = "event_id_high";
 const EVENT_ID_LOW_FIELD: &str = "event_id_low";
+const EVENT_IDENTITY_DIGEST_FIELD: &str = "event_identity_digest";
+
+/// Maximum number of semantic event records materialized in one page.
+pub const MAX_SEMANTIC_EVENT_PAGE_ITEMS: usize = 64;
+
+/// Stable eligibility policy used by the source-backed semantic projection.
+///
+/// This contract is independent of lexical query terms, scores, and ranking.
+/// Future eligibility changes must add a new enum variant instead of changing
+/// the meaning of this variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticEligibility {
+    LiteTurnUserMessageV1,
+}
+
+impl SemanticEligibility {
+    pub const CURRENT: Self = Self::LiteTurnUserMessageV1;
+
+    pub fn includes(self, event: &EventRecord) -> bool {
+        match self {
+            Self::LiteTurnUserMessageV1 => {
+                event.event_type == "message"
+                    && event.role.as_deref() == Some("user")
+                    && !semantic_control_preview(&event.preview)
+            }
+        }
+    }
+}
+
+/// Exclusive full-identity keyset cursor bound to one verified generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticEventCursor {
+    generation_id: String,
+    eligibility: SemanticEligibility,
+    after: StableEntityId,
+}
+
+impl SemanticEventCursor {
+    pub fn new(generation_id: impl Into<String>, after: StableEntityId) -> Self {
+        Self {
+            generation_id: generation_id.into(),
+            eligibility: SemanticEligibility::CURRENT,
+            after,
+        }
+    }
+
+    pub fn generation_id(&self) -> &str {
+        &self.generation_id
+    }
+
+    pub fn eligibility(&self) -> SemanticEligibility {
+        self.eligibility
+    }
+
+    pub fn after(&self) -> StableEntityId {
+        self.after
+    }
+}
+
+/// One deterministic page of semantic-eligible events from a pinned index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticEventPage {
+    pub generation_id: String,
+    pub eligibility: SemanticEligibility,
+    pub eligible_total: u64,
+    pub items: Vec<EventRecord>,
+    pub next_cursor: Option<SemanticEventCursor>,
+    pub terminal: bool,
+}
+
+impl SemanticEventPage {
+    pub fn eligible_count(&self) -> usize {
+        self.items.len()
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum AgentScope {
@@ -101,6 +182,66 @@ pub struct SessionRecord {
 }
 
 impl VerifiedIndex {
+    /// Returns semantic-eligible events in strict full `StableEntityId` order.
+    ///
+    /// The cursor is an exclusive keyset bound to this pinned generation.
+    /// At most [`MAX_SEMANTIC_EVENT_PAGE_ITEMS`] records, plus one lookahead
+    /// record, are held while collecting a page.
+    pub fn semantic_event_page(
+        &self,
+        cursor: Option<&SemanticEventCursor>,
+        limit: usize,
+    ) -> Result<SemanticEventPage> {
+        if !(1..=MAX_SEMANTIC_EVENT_PAGE_ITEMS).contains(&limit) {
+            return Err(IndexError::InvalidSemanticEventPageSize {
+                requested: limit,
+                maximum: MAX_SEMANTIC_EVENT_PAGE_ITEMS,
+            });
+        }
+        let after = cursor
+            .map(|cursor| self.validate_semantic_event_cursor(cursor))
+            .transpose()?;
+        let eligibility = SemanticEligibility::CURRENT;
+        let eligible_total = self.semantic_eligible_event_count()?;
+        let mut items =
+            self.semantic_event_records_after(after, eligibility, limit.saturating_add(1))?;
+        let terminal = items.len() <= limit;
+        if !terminal {
+            items.truncate(limit);
+        }
+        let next_cursor = if terminal {
+            None
+        } else {
+            items
+                .last()
+                .map(|event| SemanticEventCursor::new(self.generation_id.clone(), event.event_id))
+        };
+        Ok(SemanticEventPage {
+            generation_id: self.generation_id.clone(),
+            eligibility,
+            eligible_total,
+            items,
+            next_cursor,
+            terminal,
+        })
+    }
+
+    /// Returns the exact total for the current semantic eligibility contract.
+    ///
+    /// The count is computed lazily from this immutable searcher and cached for
+    /// the lifetime of the pin.
+    pub fn semantic_eligible_event_count(&self) -> Result<u64> {
+        if let Some(count) = self.semantic_eligible_event_count.get() {
+            return Ok(*count);
+        }
+        let fields = fields_from_schema(self.searcher.schema())?;
+        let count = self.count_semantic_eligible_events(fields, SemanticEligibility::CURRENT)?;
+        if self.semantic_eligible_event_count.set(count).is_err() {
+            return Ok(*self.semantic_eligible_event_count.get().unwrap_or(&count));
+        }
+        Ok(count)
+    }
+
     /// Searches the bounded event previews using ordinary analyzed text.
     ///
     /// Every analyzed token is required. QueryParser operators and field
@@ -277,6 +418,135 @@ impl VerifiedIndex {
         Ok(events)
     }
 
+    fn validate_semantic_event_cursor(
+        &self,
+        cursor: &SemanticEventCursor,
+    ) -> Result<StableEntityId> {
+        if cursor.generation_id != self.generation_id {
+            return Err(IndexError::SemanticEventCursorGenerationMismatch {
+                cursor_generation: cursor.generation_id.clone(),
+                pinned_generation: self.generation_id.clone(),
+            });
+        }
+        if cursor.eligibility != SemanticEligibility::CURRENT {
+            return Err(IndexError::SemanticEventCursorEligibilityMismatch);
+        }
+        cursor.after.validate_contract()?;
+        if cursor.after.entity_kind() != StableEntityKind::Event {
+            return Err(IndexError::InvalidSemanticEventCursorIdentity);
+        }
+        Ok(cursor.after)
+    }
+
+    fn semantic_event_records_after(
+        &self,
+        after: Option<StableEntityId>,
+        eligibility: SemanticEligibility,
+        capacity: usize,
+    ) -> Result<Vec<EventRecord>> {
+        let fields = fields_from_schema(self.searcher.schema())?;
+        let after_digest = after.map(|identity| hex(&identity.digest()));
+        let mut candidates = BinaryHeap::with_capacity(capacity);
+
+        for (segment_ord, segment) in self.searcher.segment_readers().iter().enumerate() {
+            let inverted = segment.inverted_index(fields.event_identity_digest)?;
+            let terms = inverted.terms();
+            let mut stream = match after_digest.as_deref() {
+                Some(digest) => terms.range().gt(digest.as_bytes()).into_stream()?,
+                None => terms.stream()?,
+            };
+            while stream.advance() {
+                if candidates.len() == capacity
+                    && candidates
+                        .peek()
+                        .is_some_and(|largest: &SemanticEventCandidate| {
+                            stream.key() > largest.digest_term.as_bytes()
+                        })
+                {
+                    break;
+                }
+                let mut postings = inverted
+                    .read_postings_from_terminfo(stream.value(), IndexRecordOption::Basic)?;
+                let mut doc_id = postings.doc();
+                while doc_id != TERMINATED {
+                    if !segment.is_deleted(doc_id) {
+                        let address = DocAddress::new(segment_ord as u32, doc_id);
+                        let event = self.event_record(address, fields)?;
+                        let digest_term = hex(&event.event_id.digest());
+                        if digest_term.as_bytes() != stream.key() {
+                            return Err(IndexError::InvalidStoredDocumentField(
+                                EVENT_IDENTITY_DIGEST_FIELD,
+                            ));
+                        }
+                        if eligibility.includes(&event) {
+                            candidates.push(SemanticEventCandidate::new(event, digest_term)?);
+                            if candidates.len() > capacity {
+                                candidates.pop();
+                            }
+                        }
+                    }
+                    doc_id = postings.advance();
+                }
+            }
+        }
+
+        let mut candidates = candidates.into_vec();
+        candidates.sort_by(|left, right| left.identity.cmp(&right.identity));
+        Ok(candidates
+            .into_iter()
+            .map(|candidate| candidate.event)
+            .collect())
+    }
+
+    fn count_semantic_eligible_events(
+        &self,
+        fields: Fields,
+        eligibility: SemanticEligibility,
+    ) -> Result<u64> {
+        let message_term = Term::from_field_text(fields.event_type, "message");
+        let user_term = Term::from_field_text(fields.role, "user");
+        let mut count = 0_u64;
+
+        for (segment_ord, segment) in self.searcher.segment_readers().iter().enumerate() {
+            let Some(mut messages) = segment
+                .inverted_index(fields.event_type)?
+                .read_postings(&message_term, IndexRecordOption::Basic)?
+            else {
+                continue;
+            };
+            let Some(mut users) = segment
+                .inverted_index(fields.role)?
+                .read_postings(&user_term, IndexRecordOption::Basic)?
+            else {
+                continue;
+            };
+            let mut message_doc = messages.doc();
+            let mut user_doc = users.doc();
+            while message_doc != TERMINATED && user_doc != TERMINATED {
+                if message_doc < user_doc {
+                    message_doc = messages.seek(user_doc);
+                    continue;
+                }
+                if user_doc < message_doc {
+                    user_doc = users.seek(message_doc);
+                    continue;
+                }
+                let doc_id = message_doc;
+                message_doc = messages.advance();
+                user_doc = users.advance();
+                if segment.is_deleted(doc_id) {
+                    continue;
+                }
+                let event =
+                    self.event_record(DocAddress::new(segment_ord as u32, doc_id), fields)?;
+                if eligibility.includes(&event) {
+                    count = count.checked_add(1).ok_or(IndexError::CountOverflow)?;
+                }
+            }
+        }
+        Ok(count)
+    }
+
     fn event_record(&self, address: DocAddress, fields: Fields) -> Result<EventRecord> {
         let document: TantivyDocument = self.searcher.doc(address)?;
         let event_id = stored_identity(
@@ -364,6 +634,50 @@ impl VerifiedIndex {
             touched_files,
         })
     }
+}
+
+struct SemanticEventCandidate {
+    identity: [u8; StableEntityId::CANONICAL_LEN],
+    digest_term: String,
+    event: EventRecord,
+}
+
+impl SemanticEventCandidate {
+    fn new(event: EventRecord, digest_term: String) -> Result<Self> {
+        Ok(Self {
+            identity: event.event_id.encode_canonical()?,
+            digest_term,
+            event,
+        })
+    }
+}
+
+impl PartialEq for SemanticEventCandidate {
+    fn eq(&self, other: &Self) -> bool {
+        self.identity == other.identity
+    }
+}
+
+impl Eq for SemanticEventCandidate {}
+
+impl PartialOrd for SemanticEventCandidate {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for SemanticEventCandidate {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.identity.cmp(&other.identity)
+    }
+}
+
+fn semantic_control_preview(preview: &str) -> bool {
+    let trimmed = preview.trim();
+    trimmed.starts_with("<environment_context>")
+        || trimmed.starts_with("<turn_aborted>")
+        || trimmed.starts_with("<subagent_notification>")
+        || trimmed.starts_with("Warning: The maximum number of unified exec processes")
 }
 
 impl From<&EventRecord> for SessionRecord {
