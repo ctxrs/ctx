@@ -1,7 +1,8 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs, io,
-    path::{Path, PathBuf},
+    io,
+    path::{Component, Path, PathBuf},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -23,7 +24,8 @@ use uuid::Uuid;
 
 use crate::{
     common::io::{
-        ensure_provider_path_parents_are_not_symlinks, ensure_regular_provider_transcript_file,
+        open_provider_source_path, OpenedProviderSourceFile, OpenedProviderSourcePath,
+        ProviderSourceRoot,
     },
     complete_content::{
         attach_verified_content_locator, structured::STRUCTURED_COMPLETE_CONTENT_LOCATOR_KIND,
@@ -72,3 +74,29 @@ use output::*;
 use parse::*;
 use publication::*;
 use source::*;
+
+fn normalized_auggie_authority_path(path: &Path) -> Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(CaptureError::InvalidProviderTranscriptPath {
+                        path: path.to_path_buf(),
+                        reason: "Auggie provider roots cannot escape the filesystem root",
+                    });
+                }
+            }
+        }
+    }
+    Ok(normalized)
+}
