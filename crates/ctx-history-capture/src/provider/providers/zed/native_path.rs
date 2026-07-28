@@ -28,6 +28,8 @@ mod source_backed;
 mod staging;
 mod vertical;
 
+// Consumed by the provider registration seam once Zed is enabled there.
+#[allow(unused_imports)]
 pub(super) use source_backed::{
     hydrate_zed_locator_v0, ingest_zed_source_backed_v0, ZedHydratedRecordV0, ZedLocatorResolverV0,
     ZedSourceBackedCountersV0, ZedSourceBackedErrorV0, ZedSourceBackedIngestReceiptV0,

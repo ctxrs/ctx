@@ -91,7 +91,7 @@ impl ZedNativeEvent {
         .then(|| {
             ContentRef::from_bytes(draft.body.as_bytes()).map(|content_ref| {
                 ZedNativeCompleteMessageEvidence {
-                    record_digest,
+                    record_digest: record_digest.clone(),
                     content_ref,
                 }
             })
