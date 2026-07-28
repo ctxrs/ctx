@@ -7,10 +7,9 @@ use chrono::{DateTime, Duration, Utc};
 use ctx_history_core::{
     derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, CertifiedSourceInventory,
     EventHydrationRequest, EventIdentityInput, LocatorRevisionPolicy, NativeItemKey,
-    NativeRecordCoordinate, NativeSessionKey, PositionStability, ProjectionContractError,
-    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceInventoryObservation, SourceKey,
-    SourceObservation, SourceRecordLocator, SourceResolverContractError, StableEntityId,
-    SubrecordSelector, TypedKey,
+    NativeRecordCoordinate, NativeSessionKey, ProjectionContractError, ScannedSourceCounts,
+    SessionIdentityInput, SourceAnchor, SourceInventoryObservation, SourceKey, SourceObservation,
+    SourceRecordLocator, SourceResolverContractError, StableEntityId, SubrecordSelector, TypedKey,
 };
 use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
 use sha2::{Digest, Sha256};
@@ -24,7 +23,7 @@ use super::{
         assistant_text, event_base_index, lingma_logical_record_sha256, lingma_timestamp,
         native_values,
     },
-    Candidate, LingmaRow, SqliteEncoding,
+    LingmaRow, SqliteEncoding,
 };
 use crate::{
     provider::sqlite::{
@@ -313,8 +312,9 @@ fn scan_database(
         return Err(LingmaSourceBackedErrorV0::SourceChangedDuringScan);
     }
     let encoding = detect_schema(&connection)?;
-    let user_version =
-        connection.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?;
+    let user_version = connection
+        .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+        .map_err(CaptureError::from)?;
     let schema_fingerprint = sqlite_schema_fingerprint(&connection)?;
     let opening = source_observation(
         source.clone(),
@@ -324,16 +324,24 @@ fn scan_database(
         encoding,
     )?;
     let revision_scope = TypedKey::bytes(opening.revision().to_vec())?;
+    let source_path = database.path.display().to_string();
     let parsed = with_sqlite_read_snapshot(&connection, || {
-        scan_rows(&connection, encoding, &source, &revision_scope)
+        scan_rows(
+            &connection,
+            encoding,
+            &source,
+            &revision_scope,
+            &source_path,
+        )
     })?;
     drop(connection);
 
     let closing_snapshot = lingma_source_snapshot(&database.path)?;
     let closing_connection = open_provider_sqlite_readonly(&database.path)?;
     let closing_encoding = detect_schema(&closing_connection)?;
-    let closing_user_version =
-        closing_connection.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?;
+    let closing_user_version = closing_connection
+        .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+        .map_err(CaptureError::from)?;
     let closing_schema_fingerprint = sqlite_schema_fingerprint(&closing_connection)?;
     if !closing_snapshot.revalidate(&database.path)? {
         return Err(LingmaSourceBackedErrorV0::SourceChangedDuringScan);
@@ -388,6 +396,7 @@ fn scan_rows(
     encoding: SqliteEncoding,
     source: &SourceKey,
     revision_scope: &TypedKey,
+    source_path: &str,
 ) -> Result<ParsedScan, CaptureError> {
     let mut after_rowid = None;
     let mut physical_ordinal = 0_u64;
@@ -456,6 +465,7 @@ fn scan_rows(
         project_row(
             source,
             revision_scope,
+            source_path,
             &request_counts,
             parsed,
             &mut records,
@@ -494,6 +504,7 @@ fn request_identity_counts(rows: &[ParsedRow]) -> BTreeMap<(String, String), usi
 fn project_row(
     source: &SourceKey,
     revision_scope: &TypedKey,
+    source_path: &str,
     request_counts: &BTreeMap<(String, String), usize>,
     parsed: ParsedRow,
     records: &mut Vec<LingmaSourceBackedRecordV0>,
@@ -530,6 +541,7 @@ fn project_row(
         parsed.record_digest,
         user_sequence,
         USER_PROMPT_COORDINATE,
+        source_path,
         user_event,
         LingmaExactContentCapabilityV0::RowLocalUserPrompt,
     )?);
@@ -566,6 +578,7 @@ fn project_row(
             parsed.record_digest,
             user_sequence.saturating_add(1),
             coordinate,
+            source_path,
             assistant_event,
             LingmaExactContentCapabilityV0::AssistantPreviewOnly,
         )?);
@@ -611,6 +624,7 @@ fn project_event(
     record_digest: [u8; 32],
     event_sequence: u64,
     coordinate_kind: &'static str,
+    source_path: &str,
     event: super::LingmaCoreEvent,
     exact_content: LingmaExactContentCapabilityV0,
 ) -> LingmaSourceBackedResultV0<LingmaSourceBackedRecordV0> {
@@ -650,9 +664,15 @@ fn project_event(
         document: LexicalDocument {
             event_id,
             session_id,
+            parent_session_id: None,
+            root_session_id: session_id,
             source: source.clone(),
             locator,
             provider_session_id: Some(row.session_id.clone()),
+            branch: None,
+            source_path: Some(source_path.to_owned()),
+            agent_type: "primary".to_owned(),
+            is_primary: true,
             event_sequence,
             occurred_at_unix_ms: Some(event.occurred_at.timestamp_millis()),
             event_type: event.event_type.as_str().to_owned(),
@@ -922,6 +942,15 @@ mod tests {
         assert!(all_records(&scan)
             .iter()
             .all(|record| record.document.body.chars().count() <= MAX_BODY_PREVIEW_CHARS));
+        assert!(all_records(&scan).iter().all(|record| {
+            record.document.parent_session_id.is_none()
+                && record.document.root_session_id == record.document.session_id
+                && record.document.provider_session_id.is_some()
+                && record.document.branch.is_none()
+                && record.document.source_path.is_some()
+                && record.document.agent_type == "primary"
+                && record.document.is_primary
+        }));
         assert!(scan.databases.iter().all(|database| {
             database.certificate.counts().indexed_documents == 2
                 && database.certificate.counts().certified_bytes != 0
