@@ -9,6 +9,7 @@ mod normalize;
 mod parse;
 mod production;
 mod source;
+mod source_backed;
 mod store_adapter;
 
 #[cfg(test)]
@@ -37,6 +38,11 @@ pub(crate) use source::{
 pub(crate) use source::{
     discover_continue_root, ContinueIndexObservation, ContinueIndexSnapshot,
     ContinueSourceObservation,
+};
+pub(crate) use source_backed::{
+    hydrate_continue_source_backed_record, ContinueHydratedSourceRecord, ContinueSourceBackedError,
+    ContinueSourceBackedLeaf, ContinueSourceBackedOutcome, ContinueSourceBackedPage,
+    ContinueSourceBackedReader, ContinueSourceBackedResult,
 };
 pub(crate) use store_adapter::{
     ContinueNativePageAdapter, ContinueNativeStoreCursor, ContinuePageFrontier,
