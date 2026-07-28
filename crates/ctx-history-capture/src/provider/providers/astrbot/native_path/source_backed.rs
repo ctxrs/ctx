@@ -801,9 +801,15 @@ fn conversation_document(
     Ok(LexicalDocument {
         event_id,
         session_id,
+        parent_session_id: None,
+        root_session_id: session_id,
         source: source.source_key.clone(),
         locator,
         provider_session_id: Some(session.provider_session_id.clone()),
+        branch: None,
+        source_path: Some(source.path.to_string_lossy().into_owned()),
+        agent_type: AgentType::Primary.as_str().to_owned(),
+        is_primary: true,
         event_sequence: event.source_record_ordinal,
         occurred_at_unix_ms: Some(event.occurred_at.timestamp_millis()),
         event_type: event.event_type.as_str().to_owned(),
@@ -856,9 +862,15 @@ fn platform_document(
     Ok(LexicalDocument {
         event_id,
         session_id,
+        parent_session_id: None,
+        root_session_id: session_id,
         source: source.source_key.clone(),
         locator,
         provider_session_id: Some(session.provider_session_id.clone()),
+        branch: None,
+        source_path: Some(source.path.to_string_lossy().into_owned()),
+        agent_type: AgentType::Primary.as_str().to_owned(),
+        is_primary: true,
         event_sequence: event.source_record_ordinal,
         occurred_at_unix_ms: Some(event.occurred_at.timestamp_millis()),
         event_type: event.event_type.as_str().to_owned(),
@@ -1170,6 +1182,19 @@ mod tests {
             .find(|document| relation(document) == CONVERSATION_MESSAGE_RELATION)
             .expect("conversation document");
         assert_eq!(conversation.body.chars().count(), MAX_BODY_PREVIEW_CHARS);
+        assert_eq!(conversation.parent_session_id, None);
+        assert_eq!(conversation.root_session_id, conversation.session_id);
+        assert_eq!(
+            conversation.provider_session_id.as_deref(),
+            Some("exact-session")
+        );
+        assert_eq!(conversation.branch, None);
+        assert_eq!(
+            conversation.source_path.as_deref(),
+            Some(database.to_string_lossy().as_ref())
+        );
+        assert_eq!(conversation.agent_type, AgentType::Primary.as_str());
+        assert!(conversation.is_primary);
         let resolver = AstrBotSourceBackedResolverV0::from_inventory(&inventory).expect("resolver");
         let request =
             EventHydrationRequest::new(conversation.event_id, conversation.locator.clone())
