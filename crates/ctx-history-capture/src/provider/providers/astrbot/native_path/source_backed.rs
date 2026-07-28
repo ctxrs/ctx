@@ -6,6 +6,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsStr,
+    fs::File,
     path::{Component, Path, PathBuf},
 };
 
@@ -25,7 +26,11 @@ use uuid::Uuid;
 
 use crate::{
     discover_provider_sources_for_provider_with_context,
-    provider::sqlite::{open_provider_sqlite_readonly, sqlite_schema_fingerprint},
+    provider::sqlite::sqlite_schema_fingerprint,
+    provider_sources::{
+        open_ordinary_file_without_following, open_sqlite_source_snapshot, SqliteSourceAccessError,
+        SqliteSourceReadSnapshot,
+    },
     DiscoveryContext, ProviderSourceStatus,
 };
 
@@ -52,6 +57,8 @@ const PLATFORM_MESSAGE_RELATION: &str = "astrbot.platform-message-v0";
 pub(crate) enum AstrBotSourceBackedErrorV0 {
     #[error(transparent)]
     Capture(#[from] CaptureError),
+    #[error(transparent)]
+    SqliteSource(#[from] SqliteSourceAccessError),
     #[error(transparent)]
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]
@@ -205,12 +212,13 @@ pub(crate) fn scan_astrbot_source_backed_v0(
     sink: &mut impl AstrBotSourceBackedSinkV0,
 ) -> AstrBotSourceBackedResultV0<CertifiedSource> {
     let opening_snapshot = astrbot_source_snapshot(&source.path)?;
-    let conn = open_provider_sqlite_readonly(&source.path)?;
-    let sql = AstrBotSql::new(&conn)?;
+    let (root_bound_database, sqlite_snapshot) = open_root_authorized_snapshot(&source.path)?;
+    let conn = sqlite_snapshot.connection()?;
+    let sql = AstrBotSql::new(conn)?;
     let user_version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(CaptureError::from)?;
-    let schema_fingerprint = sqlite_schema_fingerprint(&conn)?;
+    let schema_fingerprint = sqlite_schema_fingerprint(conn)?;
     let opening = source_observation(
         &source.source_key,
         &opening_snapshot,
@@ -223,6 +231,8 @@ pub(crate) fn scan_astrbot_source_backed_v0(
     let mut content_chain = [0_u8; 32];
     let mut native_ordinal = 0_u64;
     let mut conversation_after = None;
+    let mut pending_documents = Vec::new();
+    let mut checkpoint_links = BTreeMap::new();
 
     loop {
         let Some(candidate) = fetch_candidate(
@@ -260,6 +270,18 @@ pub(crate) fn scan_astrbot_source_backed_v0(
             logical_values_digest(&super::super::model::conversation_values(row.clone()));
         content_chain = chain_hash(content_chain, row_digest);
         let (items, content_is_array) = conversation_items(&row.content);
+        let provider_session_id = provider_session_id(&row);
+        for item in &items {
+            if let Some(checkpoint) = checkpoint_id(item) {
+                checkpoint_links.insert(
+                    checkpoint,
+                    PlatformMessageLink {
+                        provider_session_id: provider_session_id.clone(),
+                        parent_created_at: row.created_at,
+                    },
+                );
+            }
+        }
         let item_count = items.len().max(1);
         let values = super::super::model::conversation_values(row.clone());
         for item_index in 0..item_count {
@@ -302,7 +324,7 @@ pub(crate) fn scan_astrbot_source_backed_v0(
                     &event,
                     &complete_text,
                 )?;
-                sink.emit(document)?;
+                pending_documents.push(document);
                 add_retained(&mut counts)?;
             } else {
                 add_ignored(&mut counts)?;
@@ -313,14 +335,11 @@ pub(crate) fn scan_astrbot_source_backed_v0(
         }
     }
 
-    prepare_relationship_projection(&conn, &sql)?;
     if let (Some(initial), Some(after)) = (
         sql.platform_message_candidate_initial.as_deref(),
         sql.platform_message_candidate_after.as_deref(),
     ) {
         let mut platform_after = None;
-        let platform_reader =
-            AstrBotReader::new(&conn, AstrBotSql::new(&conn)?, AstrBotFrontier::initial());
         loop {
             let Some(candidate) = fetch_candidate(&conn, initial, after, platform_after)? else {
                 break;
@@ -337,8 +356,13 @@ pub(crate) fn scan_astrbot_source_backed_v0(
                 );
                 add_rejected(&mut counts)?;
             } else {
-                let (unit, rejection, row_digest) =
-                    platform_reader.platform_unit(candidate, native_ordinal)?;
+                let (unit, rejection, row_digest) = source_backed_platform_unit(
+                    conn,
+                    &sql,
+                    candidate,
+                    native_ordinal,
+                    &checkpoint_links,
+                )?;
                 content_chain = chain_hash(content_chain, row_digest);
                 if rejection.is_some() {
                     add_rejected(&mut counts)?;
@@ -353,7 +377,7 @@ pub(crate) fn scan_astrbot_source_backed_v0(
                             &unit.session,
                             &event,
                         )?;
-                        sink.emit(document)?;
+                        pending_documents.push(document);
                         add_retained(&mut counts)?;
                     } else {
                         add_ignored(&mut counts)?;
@@ -368,6 +392,10 @@ pub(crate) fn scan_astrbot_source_backed_v0(
         }
     }
 
+    sqlite_snapshot.finish()?;
+    if !opening_snapshot.revalidate(&source.path)? {
+        return Err(CaptureError::SourceChangedDuringCapture.into());
+    }
     let closing_snapshot = astrbot_source_snapshot(&source.path)?;
     let closing = source_observation(
         &source.source_key,
@@ -380,13 +408,92 @@ pub(crate) fn scan_astrbot_source_backed_v0(
     digest.update(content_chain);
     digest.update(counts.complete_records.to_be_bytes());
     digest.update(counts.certified_bytes.to_be_bytes());
-    Ok(CertifiedSource::certify(
+    let certificate = CertifiedSource::certify(
         opening,
         closing,
         PARSER_REVISION,
         digest.finalize().into(),
         counts,
-    )?)
+    )?;
+    drop(root_bound_database);
+    for document in pending_documents {
+        sink.emit(document)?;
+    }
+    Ok(certificate)
+}
+
+fn source_backed_platform_unit(
+    conn: &rusqlite::Connection,
+    sql: &AstrBotSql,
+    candidate: RowCandidate,
+    native_ordinal: u64,
+    checkpoint_links: &BTreeMap<String, PlatformMessageLink>,
+) -> AstrBotSourceBackedResultV0<(Option<CoreUnit>, Option<String>, [u8; 32])> {
+    let hydration =
+        sql.platform_message_hydration
+            .as_deref()
+            .ok_or(CaptureError::SystemInvariant(
+                "AstrBot platform-message hydration SQL is missing",
+            ))?;
+    let row = hydrate_platform_message(conn, hydration, candidate.physical_rowid)?;
+    let row_sha256 = serialized_hash(b"astrbot-platform-row-v1\0", &row)?;
+    let link = row
+        .llm_checkpoint_id
+        .as_ref()
+        .and_then(|checkpoint| checkpoint_links.get(checkpoint));
+    let Some(text) = row
+        .content
+        .as_deref()
+        .map(provider_json_text)
+        .as_ref()
+        .and_then(provider_value_text)
+        .filter(|text| !text.trim().is_empty())
+    else {
+        return Ok((None, None, row_sha256));
+    };
+    let session = platform_session_fact(&row, link);
+    let role = if row.sender_id.as_deref() == row.user_id.as_deref() {
+        Some(EventRole::User)
+    } else {
+        Some(EventRole::Assistant)
+    };
+    let event_index = 1_000_000u64.saturating_add(u64::try_from(row.id).unwrap_or(0));
+    let event_type = EventType::Message;
+    let occurred_at = timestamp(row.created_at, session.started_at);
+    let body = json!({
+        "message_id": row.id,
+        "platform_id": row.platform_id,
+        "user_id": row.user_id,
+        "sender_id": row.sender_id,
+        "sender_name": row.sender_name,
+        "content": row.content.as_deref().map(provider_json_text),
+        "llm_checkpoint_id": row.llm_checkpoint_id,
+    });
+    Ok((
+        Some(CoreUnit {
+            session,
+            event: Some(EventFact {
+                provider_event_index: event_index,
+                legacy_provider_event_index: Some(event_index),
+                legacy_provider_event_hash: format!("platform-message:{}", row.id),
+                released_v025_payload_hash: None,
+                cursor: format!("platform_message_history:id:{}", row.id),
+                source_record_ordinal: native_ordinal,
+                source_record_subrecord_index: 0,
+                event_type,
+                role,
+                occurred_at,
+                payload: astrbot_event_payload(event_type, &text, &body),
+                metadata: json!({
+                    "source": "astrbot_platform_message_history",
+                    "source_format": ASTRBOT_SQLITE_SOURCE_FORMAT,
+                    "message_id": row.id,
+                }),
+            }),
+        }),
+        None,
+        row_sha256,
+    ))
 }
 
 #[derive(Debug, Clone)]
@@ -440,7 +547,9 @@ impl AstrBotSourceBackedResolverV0 {
         }
 
         let snapshot = astrbot_source_snapshot(&source.path).map_err(map_capture_hydration)?;
-        let conn = open_provider_sqlite_readonly(&source.path).map_err(map_capture_hydration)?;
+        let (root_bound_database, sqlite_snapshot) =
+            open_root_authorized_snapshot(&source.path).map_err(map_source_hydration)?;
+        let conn = sqlite_snapshot.connection().map_err(map_source_hydration)?;
         let user_version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(CaptureError::from)
@@ -508,6 +617,7 @@ impl AstrBotSourceBackedResolverV0 {
                 provider_bytes,
             });
         }
+        sqlite_snapshot.finish().map_err(map_source_hydration)?;
         if !snapshot
             .revalidate(&source.path)
             .map_err(map_capture_hydration)?
@@ -517,8 +627,32 @@ impl AstrBotSourceBackedResolverV0 {
                 "AstrBot SQLite snapshot changed during reopening",
             ));
         }
+        drop(root_bound_database);
         Ok(hydrated)
     }
+}
+
+fn open_root_authorized_snapshot(
+    path: &Path,
+) -> AstrBotSourceBackedResultV0<(File, SqliteSourceReadSnapshot)> {
+    open_root_authorized_snapshot_with_hook(path, || {})
+}
+
+fn open_root_authorized_snapshot_with_hook(
+    path: &Path,
+    after_authorize: impl FnOnce(),
+) -> AstrBotSourceBackedResultV0<(File, SqliteSourceReadSnapshot)> {
+    let root_bound_database = open_ordinary_file_without_following(path)?;
+    after_authorize();
+    let sqlite_snapshot = open_sqlite_source_snapshot(path, &root_bound_database)?;
+    let connection = sqlite_snapshot.connection()?;
+    let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
+        .map_err(|_| AstrBotSourceBackedErrorV0::CountOverflow)?;
+    connection.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, value_limit);
+    connection
+        .busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(CaptureError::from)?;
+    Ok((root_bound_database, sqlite_snapshot))
 }
 
 impl ContentSourceResolver for AstrBotSourceBackedResolverV0 {
@@ -974,6 +1108,13 @@ fn map_capture_hydration(error: CaptureError) -> HydrationFailure {
     }
 }
 
+fn map_source_hydration(error: impl std::fmt::Display) -> HydrationFailure {
+    hydration_failure(
+        HydrationFailureKind::TemporarilyUnavailable,
+        error.to_string(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -1034,6 +1175,28 @@ mod tests {
             ],
         )
         .expect("AstrBot conversation");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn source_backed_open_rejects_leaf_swap_after_authorization() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("data_v4.db");
+        let attacker = temp.path().join("attacker.db");
+        let original = temp.path().join("original.db");
+        create_database(&path, "expected", "expected");
+        create_database(&attacker, "attacker", "attacker");
+
+        let result = open_root_authorized_snapshot_with_hook(&path, || {
+            fs::rename(&path, &original).unwrap();
+            fs::rename(&attacker, &path).unwrap();
+        });
+        assert!(matches!(
+            result,
+            Err(AstrBotSourceBackedErrorV0::SqliteSource(
+                SqliteSourceAccessError::ConnectionIdentityMismatch
+            ))
+        ));
     }
 
     fn context(home: &Path, cwd: &Path) -> DiscoveryContext {

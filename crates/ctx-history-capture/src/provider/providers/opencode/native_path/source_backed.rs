@@ -6,6 +6,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    fs::File,
     path::{Path, PathBuf},
 };
 
@@ -18,7 +19,7 @@ use ctx_history_core::{
     SourceResolverContractError, StableEntityId, TypedKey,
 };
 use ctx_history_index::LexicalDocument;
-use rusqlite::{params, types::ValueRef, Connection, Row};
+use rusqlite::{limits::Limit, params, types::ValueRef, Connection, Row};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -41,13 +42,12 @@ use super::{
 use crate::{
     provider::{
         normalization::provider_required_timestamp_millis,
-        providers::opencode::OpenCodeSqliteDialect,
-        sqlite::{
-            open_provider_sqlite_readonly, with_sqlite_read_snapshot, ProviderSqliteSourceSnapshot,
-        },
+        providers::opencode::OpenCodeSqliteDialect, sqlite::ProviderSqliteSourceSnapshot,
     },
     provider_sources::{
-        discover_provider_sources_for_provider_with_context, DiscoveryContext, DiscoveryReport,
+        discover_provider_sources_for_provider_with_context, open_ordinary_file_without_following,
+        open_sqlite_source_snapshot, DiscoveryContext, DiscoveryReport, SqliteSourceAccessError,
+        SqliteSourceReadSnapshot,
     },
     CaptureError, Result as CaptureResult, MAX_PROVIDER_SQLITE_VALUE_BYTES,
     PROVIDER_MAX_PREVIEW_CHARS,
@@ -72,6 +72,8 @@ pub(crate) enum OpenCodeSourceBackedError {
     Capture(#[from] CaptureError),
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
+    #[error(transparent)]
+    SqliteSource(#[from] SqliteSourceAccessError),
     #[error(transparent)]
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]
@@ -261,36 +263,44 @@ fn scan_source(
     emit: &mut dyn FnMut(Vec<LexicalDocument>) -> OpenCodeSourceBackedResult<()>,
 ) -> OpenCodeSourceBackedResult<OpenCodeSourceBackedScan> {
     let opening_snapshot = provider_snapshot(path)?;
-    let connection = open_provider_sqlite_readonly(path)?;
-    register_projection_function(&connection, OpenCodeNativeProfile::CoreOnly, dialect)?;
-
-    let working = with_sqlite_read_snapshot(&connection, || {
-        let schema = OpenCodeNativeSchema::probe(&connection, dialect)?;
+    let (root_bound_database, sqlite_snapshot) = open_root_authorized_snapshot(path)?;
+    let mut pending_pages = Vec::new();
+    let working = {
+        let connection = sqlite_snapshot.connection()?;
+        register_projection_function(connection, OpenCodeNativeProfile::CoreOnly, dialect)?;
+        let schema = OpenCodeNativeSchema::probe(connection, dialect)?;
         let source = source_key(dialect, schema.family).map_err(source_backed_as_capture)?;
         let opening =
             source_observation(&source, &opening_snapshot).map_err(source_backed_as_capture)?;
         let sessions =
-            load_sessions(&connection, &schema, &source).map_err(source_backed_as_capture)?;
+            load_sessions(connection, &schema, &source).map_err(source_backed_as_capture)?;
         let (counts, content_digest, emitted_pages) = stream_events(
-            &connection,
+            connection,
             &schema,
             dialect,
             path,
             &source,
             &opening,
             &sessions,
-            emit,
+            &mut |page| {
+                pending_pages.push(page);
+                Ok(())
+            },
         )
         .map_err(source_backed_as_capture)?;
-        Ok(WorkingScan {
+        WorkingScan {
             source,
             opening,
             schema_family: schema.family.label(),
             counts,
             content_digest,
             emitted_pages,
-        })
-    })?;
+        }
+    };
+    sqlite_snapshot.finish()?;
+    if !opening_snapshot.revalidate(path)? {
+        return Err(CaptureError::SourceChangedDuringCapture.into());
+    }
 
     let closing_snapshot = provider_snapshot(path)?;
     let closing = source_observation(&working.source, &closing_snapshot)?;
@@ -302,6 +312,10 @@ fn scan_source(
         working.counts,
     )
     .map_err(map_certification_error)?;
+    drop(root_bound_database);
+    for page in pending_pages {
+        emit(page)?;
+    }
     Ok(OpenCodeSourceBackedScan {
         source: working.source,
         certificate,
@@ -684,6 +698,27 @@ fn provider_snapshot(path: &Path) -> CaptureResult<ProviderSqliteSourceSnapshot>
     )
 }
 
+fn open_root_authorized_snapshot(
+    path: &Path,
+) -> OpenCodeSourceBackedResult<(File, SqliteSourceReadSnapshot)> {
+    open_root_authorized_snapshot_with_hook(path, || {})
+}
+
+fn open_root_authorized_snapshot_with_hook(
+    path: &Path,
+    after_authorize: impl FnOnce(),
+) -> OpenCodeSourceBackedResult<(File, SqliteSourceReadSnapshot)> {
+    let root_bound_database = open_ordinary_file_without_following(path)?;
+    after_authorize();
+    let sqlite_snapshot = open_sqlite_source_snapshot(path, &root_bound_database)?;
+    let connection = sqlite_snapshot.connection()?;
+    let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
+        .map_err(|_| OpenCodeSourceBackedError::CountOverflow)?;
+    connection.set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit);
+    connection.busy_timeout(std::time::Duration::from_secs(5))?;
+    Ok((root_bound_database, sqlite_snapshot))
+}
+
 fn source_observation(
     source: &SourceKey,
     snapshot: &ProviderSqliteSourceSnapshot,
@@ -789,6 +824,9 @@ fn source_backed_as_capture(error: OpenCodeSourceBackedError) -> CaptureError {
     match error {
         OpenCodeSourceBackedError::Capture(error) => error,
         OpenCodeSourceBackedError::Sqlite(error) => CaptureError::Sqlite(error),
+        OpenCodeSourceBackedError::SqliteSource(error) => {
+            CaptureError::InvalidPayload(error.to_string())
+        }
         error => CaptureError::InvalidPayload(error.to_string()),
     }
 }
@@ -861,24 +899,29 @@ impl OpenCodeSourceBackedExactResolver {
             ));
         }
 
-        let connection =
-            open_provider_sqlite_readonly(&self.path).map_err(temporary_hydration_failure)?;
+        let (root_bound_database, sqlite_snapshot) =
+            open_root_authorized_snapshot(&self.path).map_err(temporary_hydration_failure)?;
+        let connection = sqlite_snapshot
+            .connection()
+            .map_err(temporary_hydration_failure)?;
         register_projection_function(
-            &connection,
+            connection,
             OpenCodeNativeProfile::CoreOnly,
             self.registration.dialect,
         )
         .map_err(temporary_hydration_failure)?;
-        let provider_bytes = with_sqlite_read_snapshot(&connection, || {
-            hydrate_exact_row(&connection, self.registration.dialect, locator).map_err(|failure| {
+        let provider_bytes = hydrate_exact_row(connection, self.registration.dialect, locator)
+            .map_err(|failure| {
                 CaptureError::InvalidPayload(format!(
                     "{}: {}",
                     hydration_kind_label(failure.kind),
                     failure.detail
                 ))
             })
-        })
-        .map_err(|error| decode_hydration_capture_error(error))?;
+            .map_err(decode_hydration_capture_error)?;
+        sqlite_snapshot
+            .finish()
+            .map_err(temporary_hydration_failure)?;
         if !snapshot
             .revalidate(&self.path)
             .map_err(temporary_hydration_failure)?
@@ -888,6 +931,7 @@ impl OpenCodeSourceBackedExactResolver {
                 "provider SQLite snapshot changed during exact-row hydration",
             ));
         }
+        drop(root_bound_database);
         Ok(provider_bytes)
     }
 }
@@ -1085,7 +1129,31 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::provider_sources::{DiscoveryPlatform, DiscoveryPlatformDirs, ProviderSourceStatus};
+    use crate::provider_sources::{
+        DiscoveryPlatform, DiscoveryPlatformDirs, ProviderSourceStatus, SqliteSourceComponent,
+    };
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn source_backed_open_rejects_leaf_swap_after_authorization() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let path = temp.path().join("opencode.sqlite");
+        let attacker = temp.path().join("attacker.sqlite");
+        let original = temp.path().join("original.sqlite");
+        create_fixture(&path, "opencode", 1);
+        create_fixture(&attacker, "opencode", 1);
+
+        let result = open_root_authorized_snapshot_with_hook(&path, || {
+            fs::rename(&path, &original).unwrap();
+            fs::rename(&attacker, &path).unwrap();
+        });
+        assert!(matches!(
+            result,
+            Err(OpenCodeSourceBackedError::SqliteSource(
+                SqliteSourceAccessError::ConnectionIdentityMismatch
+            ))
+        ));
+    }
 
     #[test]
     fn cold_scan_and_exact_row_hydration_cover_all_three_dialects() {
@@ -1175,8 +1243,9 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
-    fn snapshot_change_during_stream_prevents_certification() {
+    fn wal_source_is_typed_fail_closed_before_streaming() {
         let registration = opencode_source_backed_registration();
         let temp = crate::test_support_paths::tempdir().unwrap();
         let path = temp.path().join("opencode.sqlite");
@@ -1191,29 +1260,36 @@ mod tests {
                 [],
             )
             .unwrap();
-        let mut mutated = false;
+        writer
+            .set_db_config(
+                rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+                true,
+            )
+            .unwrap();
+        drop(writer);
+        assert!(path.with_file_name("opencode.sqlite-wal").exists());
+
+        let mut emitted = false;
         let error = registration
             .scan(&path, &mut |page| {
                 assert!(page.len() <= SOURCE_BACKED_PAGE_ROWS);
-                if !mutated {
-                    writer
-                        .execute(
-                            "update session_message
-                             set data = ?1, time_updated = time_updated + 1
-                             where id = 'message-0'",
-                            [r#"{"role":"user","text":"mutated during source scan"}"#],
-                        )
-                        .unwrap();
-                    mutated = true;
-                }
+                emitted = true;
                 Ok(())
             })
             .unwrap_err();
-        assert!(mutated);
-        assert!(matches!(
-            error,
-            OpenCodeSourceBackedError::Capture(CaptureError::SourceChangedDuringCapture)
-        ));
+        assert!(!emitted);
+        assert!(
+            matches!(
+                &error,
+                OpenCodeSourceBackedError::SqliteSource(
+                    SqliteSourceAccessError::UnsupportedSidecarIdentity {
+                        component: SqliteSourceComponent::Wal,
+                        ..
+                    }
+                )
+            ),
+            "unexpected error: {error:?}"
+        );
     }
 
     #[test]

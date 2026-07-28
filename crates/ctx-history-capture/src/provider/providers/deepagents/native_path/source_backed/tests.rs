@@ -33,6 +33,28 @@ fn create_database(path: &Path) -> Connection {
     conn
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn source_backed_open_rejects_leaf_swap_after_authorization() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let path = temp.path().join("sessions.db");
+    let attacker = temp.path().join("attacker.db");
+    let original = temp.path().join("original.db");
+    drop(create_database(&path));
+    drop(create_database(&attacker));
+
+    let result = open_root_authorized_snapshot_with_hook(&path, || {
+        fs::rename(&path, &original).unwrap();
+        fs::rename(&attacker, &path).unwrap();
+    });
+    assert!(matches!(
+        result,
+        Err(DeepAgentsSourceBackedErrorV0::SqliteSource(
+            SqliteSourceAccessError::ConnectionIdentityMismatch
+        ))
+    ));
+}
+
 fn insert_checkpoint(conn: &Connection, checkpoint_state: &[u8]) {
     let metadata = serde_json::to_vec(&serde_json::json!({
         "updated_at": "2026-07-28T20:00:00Z",
