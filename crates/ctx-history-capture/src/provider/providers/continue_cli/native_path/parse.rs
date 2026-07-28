@@ -2,6 +2,7 @@ use std::{ops::Range, path::PathBuf};
 
 use serde::Serialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::{
     provider::{file_touches::visit_provider_file_touch_drafts_with_limit, tool_input},
@@ -349,6 +350,7 @@ impl ContinueSourcePageStream {
                     )
                 })?;
                 observed = observed.saturating_add(1);
+                let source_record_digest = Sha256::digest(item.raw()).into();
                 let Some(item) =
                     parse_history_item(item, &mut output_exclusion).map_err(|message| {
                         ContinueSourceFailure::from_snapshot(
@@ -361,7 +363,7 @@ impl ContinueSourcePageStream {
                     rejected = rejected.saturating_add(1);
                     continue;
                 };
-                let event = normalize_event(&identity, ordinal, &item)
+                let event = normalize_event(&identity, ordinal, &item, source_record_digest)
                     .map_err(|error| normalization_failure(&snapshot, ordinal, error))?;
                 let event_bytes = event.estimated_bytes();
                 let event_page_bytes = ContinuePreparedPage::base_estimated_bytes(&identity)
@@ -556,6 +558,7 @@ impl ContinueSourcePageStream {
                 })?;
             let mut second_pass_stats = ContinueOutputExclusionStats::default();
             let item_span = item;
+            let source_record_digest = Sha256::digest(item_span.raw()).into();
             let Some(item) =
                 parse_history_item(item_span, &mut second_pass_stats).map_err(|message| {
                     ContinueSourceFailure::from_snapshot(
@@ -567,8 +570,9 @@ impl ContinueSourcePageStream {
             else {
                 continue;
             };
-            let event = normalize_event(&self.session_identity, ordinal, &item)
-                .map_err(|error| normalization_failure(&self.snapshot, ordinal, error))?;
+            let event =
+                normalize_event(&self.session_identity, ordinal, &item, source_record_digest)
+                    .map_err(|error| normalization_failure(&self.snapshot, ordinal, error))?;
             let outputs = if self.profile.wants_outputs() {
                 extract_continue_outputs(
                     item_span,
@@ -591,6 +595,61 @@ impl ContinueSourcePageStream {
             }));
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ContinueExactHistoryLookup<'a> {
+    DifferentSession,
+    MissingItem,
+    Item(&'a [u8]),
+}
+
+/// Resolves one exact physical `history` element with the same bounded
+/// structural parser used by ingestion.
+///
+/// The returned bytes borrow the already-certified whole-document snapshot;
+/// no second JSON representation or normalized record is created.
+pub(super) fn locate_continue_exact_history_item<'a>(
+    bytes: &'a [u8],
+    expected_session_id: &str,
+    history_ordinal: u64,
+) -> Result<ContinueExactHistoryLookup<'a>, String> {
+    let root = validate_and_root(bytes)
+        .map_err(|error| format!("invalid Continue session JSON: {error}"))?;
+    let (mut document, history) = parse_document(root)?;
+    if document.session_id_conflict {
+        return Err(
+            "Continue document asserts conflicting duplicate top-level sessionId values".to_owned(),
+        );
+    }
+    let session_id = document
+        .session_id
+        .take()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "Continue document has no nonempty top-level sessionId".to_owned())?;
+    if session_id.len() > MAX_CONTINUE_SESSION_ID_BYTES || session_id.chars().any(char::is_control)
+    {
+        return Err(
+            "Continue sessionId exceeds identity bounds or contains control characters".to_owned(),
+        );
+    }
+    if session_id != expected_session_id {
+        return Ok(ContinueExactHistoryLookup::DifferentSession);
+    }
+    let Some(history) = history else {
+        return Ok(ContinueExactHistoryLookup::MissingItem);
+    };
+    let mut cursor = JsonArrayCursor::new(history.raw()).map_err(scan_error)?;
+    let mut ordinal = 0_u64;
+    while let Some(item) = cursor.next(history.raw()).map_err(scan_error)? {
+        if ordinal == history_ordinal {
+            return Ok(ContinueExactHistoryLookup::Item(item.raw()));
+        }
+        ordinal = ordinal
+            .checked_add(1)
+            .ok_or_else(|| "Continue history ordinal exceeds u64".to_owned())?;
+    }
+    Ok(ContinueExactHistoryLookup::MissingItem)
 }
 
 fn extract_continue_outputs(

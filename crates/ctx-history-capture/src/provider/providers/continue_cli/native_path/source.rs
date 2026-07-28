@@ -207,6 +207,10 @@ impl ContinueSourceSnapshot {
     pub(crate) fn observation(&self) -> &ContinueSourceObservation {
         &self.observation
     }
+
+    pub(super) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
