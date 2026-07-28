@@ -14,5 +14,7 @@ const CODEBUDDY_MAX_CHECKPOINT_FAILURES: usize = 64;
 
 pub(crate) use native_path::{
     codebuddy_cli_complete_content_record, codebuddy_cli_complete_content_source_from_admitted,
-    import_codebuddy_nativepath,
+    hydrate_codebuddy_source_backed_record, import_codebuddy_nativepath,
+    scan_codebuddy_source_backed_root, CodeBuddyHydratedSourceRecord, CodeBuddySourceBackedPage,
+    CodeBuddySourceBackedRejection, CodeBuddySourceBackedScan,
 };

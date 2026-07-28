@@ -413,6 +413,7 @@ mod lifecycle;
 mod outputs;
 mod parsing;
 mod projection;
+mod source_backed;
 
 use discovery::*;
 pub(crate) use ingestion::import_codebuddy_nativepath;
@@ -425,6 +426,11 @@ pub(crate) use outputs::{
 };
 use parsing::*;
 use projection::*;
+pub(crate) use source_backed::{
+    hydrate_codebuddy_source_backed_record, scan_codebuddy_source_backed_root,
+    CodeBuddyHydratedSourceRecord, CodeBuddySourceBackedPage, CodeBuddySourceBackedRejection,
+    CodeBuddySourceBackedScan,
+};
 
 #[cfg(test)]
 #[path = "native_path_tests.rs"]
