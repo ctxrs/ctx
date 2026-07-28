@@ -274,13 +274,7 @@ pub(super) fn classify_codex_record(line: &[u8]) -> serde_json::Result<CodexReco
         .payload
         .as_ref()
         .and_then(|payload| payload.item_type.as_deref());
-    let class = match envelope.record_type.as_ref() {
-        "session_meta" => CodexRecordClass::SessionMeta,
-        "compacted" => CodexRecordClass::Retained(CodexRetainedKind::Compacted),
-        "response_item" => classify_response_item(item_type),
-        "event_msg" => classify_event_message(item_type),
-        _ => CodexRecordClass::Ignored,
-    };
+    let class = codex_record_class(envelope.record_type.as_ref(), item_type);
     let output = match class {
         CodexRecordClass::ExcludedResult(kind) if kind.is_eligible_output() => {
             Some(probe_structural_output(line)?)
@@ -293,6 +287,22 @@ pub(super) fn classify_codex_record(line: &[u8]) -> serde_json::Result<CodexReco
         call_id: envelope.payload.and_then(|payload| payload.call_id),
         output,
     })
+}
+
+/// The single authority that maps a Codex envelope/payload type pair onto the
+/// class the reader projects.
+///
+/// Both the typed structural probe and the pre-parse byte prefilter decide with
+/// this function, so the prefilter's skip set cannot drift away from what the
+/// reader materializes.
+pub(super) fn codex_record_class(record_type: &str, item_type: Option<&str>) -> CodexRecordClass {
+    match record_type {
+        "session_meta" => CodexRecordClass::SessionMeta,
+        "compacted" => CodexRecordClass::Retained(CodexRetainedKind::Compacted),
+        "response_item" => classify_response_item(item_type),
+        "event_msg" => classify_event_message(item_type),
+        _ => CodexRecordClass::Ignored,
+    }
 }
 
 fn classify_response_item(item_type: Option<&str>) -> CodexRecordClass {
@@ -345,8 +355,12 @@ fn result_like_item_type(item_type: &str) -> bool {
         )
 }
 
+mod prefilter;
 mod structural;
 
+#[cfg(test)]
+pub(super) use prefilter::codex_skip_projection;
+pub(super) use prefilter::{prefilter_codex_record, CodexRecordAdmission, CodexSkipProjection};
 use structural::probe_structural_output;
 
 #[derive(Debug, Deserialize)]

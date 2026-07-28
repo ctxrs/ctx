@@ -17,8 +17,9 @@ use super::{
         MAX_CODEX_TOOL_CONTEXTS,
     },
     record::{
-        classify_codex_record, parse_decoded_record, parse_session_meta, CodexRecordClass,
-        CodexRecordProbe, CodexResultKind,
+        classify_codex_record, parse_decoded_record, parse_session_meta, prefilter_codex_record,
+        CodexRecordAdmission, CodexRecordClass, CodexRecordProbe, CodexResultKind,
+        CodexSkipProjection,
     },
     rows::{
         attach_complete_message_locator, build_event_row, build_source_backed_event_row,
@@ -152,6 +153,8 @@ pub(crate) struct CodexScanCounters {
     pub(crate) malformed_records: u64,
     pub(crate) oversized_records: u64,
     pub(crate) incomplete_records: u64,
+    /// Records the pre-parse byte classifier answered without a structural parse.
+    pub(crate) prefiltered_records: u64,
     /// Actual structural parse attempts, including a record retried after page rollback.
     pub(crate) structural_json_parses: u64,
     /// Actual typed parse attempts, including a record retried after page rollback.

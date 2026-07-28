@@ -218,6 +218,7 @@ impl CodexNativeScanner {
 
     pub(super) fn restore(&mut self, position: ScannerPosition) -> Result<()> {
         let actual_parse_counts = (
+            self.counters.prefiltered_records,
             self.counters.structural_json_parses,
             self.counters.typed_json_parses,
             self.counters.structural_output_probes,
@@ -234,6 +235,7 @@ impl CodexNativeScanner {
         self.rejections.truncate(position.rejection_len);
         self.counters = position.counters;
         (
+            self.counters.prefiltered_records,
             self.counters.structural_json_parses,
             self.counters.typed_json_parses,
             self.counters.structural_output_probes,
