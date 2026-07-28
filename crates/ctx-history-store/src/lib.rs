@@ -12,6 +12,7 @@ mod identity;
 mod native_path_group;
 mod object_store;
 mod projection_journal;
+mod provider_projection;
 mod raw_sql;
 mod records;
 mod result_storage;
@@ -42,7 +43,8 @@ pub use catalog::{
 };
 #[doc(hidden)]
 pub use cold_store::{
-    ColdStoreBuild, ColdStoreBuildCounts, ColdStoreBuildReceipt, ColdStoreBuildTimings,
+    publish_over_existing_store, ColdStoreBuild, ColdStoreBuildCounts, ColdStoreBuildReceipt,
+    ColdStoreBuildTimings,
 };
 pub use error::{Result, StoreError};
 pub use events::ProviderEventHashAuthority;
@@ -64,6 +66,10 @@ pub use projection_journal::{
     PROJECTION_JOURNAL_CONTEXT_MAX_BYTES, PROJECTION_JOURNAL_CONTEXT_RECORDS,
     PROJECTION_JOURNAL_MAX_PAGE_BYTES, PROJECTION_JOURNAL_PAGE_SIZE,
     PROJECTION_JOURNAL_RECORD_MAX_BYTES,
+};
+pub use provider_projection::{
+    ProviderProjectionGeneration, ProviderProjectionState,
+    NATIVE_PROVIDER_PROJECTION_SCHEMA_VERSION,
 };
 pub use raw_sql::{
     RawSqlColumn, RawSqlLimits, RawSqlOptions, RawSqlResult, RawSqlTruncation, RawSqlValue,

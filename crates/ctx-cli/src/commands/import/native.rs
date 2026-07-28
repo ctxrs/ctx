@@ -33,6 +33,10 @@ const SEARCH_PROJECTION_REPAIR_REQUIRED: &str = "search projection repair requir
 use manifested::{import_manifested_source, manifest_pending_source_context};
 
 pub(crate) fn ensure_search_projection_ready_for_provider_import(store: &Store) -> Result<()> {
+    // A provider projection this binary cannot address must never be written
+    // into: every source would be indexed a second time. This is the single
+    // funnel every provider write into an existing Store passes through.
+    crate::provider_projection::ensure_native_provider_projection(store)?;
     if store.event_search_projection_needs_backfill()? {
         return Err(CaptureError::SystemInvariant(SEARCH_PROJECTION_REPAIR_REQUIRED).into());
     }

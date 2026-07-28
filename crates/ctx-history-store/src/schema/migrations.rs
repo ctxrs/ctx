@@ -9,6 +9,7 @@ mod v47_provider_session_repair;
 #[cfg(test)]
 mod v47_provider_session_repair_tests;
 
+use crate::provider_projection::record_provider_projection_generation;
 use crate::schema::provider_session_identity::prepare_provider_session_migrations;
 use crate::schema::rebuild::finish_result_blob_cleanup;
 use crate::schema::scriptgram::migrate_to_v45;
@@ -33,6 +34,9 @@ pub(crate) fn run_migrations(
     user_version: i64,
 ) -> Result<()> {
     prepare_provider_session_migrations(conn, user_version)?;
+    // Observe the incoming provider-projection generation before any migration
+    // rewrites the rows that prove it.
+    record_provider_projection_generation(conn, user_version)?;
     if user_version < 1 {
         migrate_to_v1(conn)?;
     }

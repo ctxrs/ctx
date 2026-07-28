@@ -150,6 +150,7 @@ pub(crate) fn run_cli() -> Result<()> {
                 .as_mut()
                 .expect("index has a telemetry draft")
                 .index_mut(),
+            &config,
         ),
         CommandRoot::Sources(args) => run_sources(
             args,

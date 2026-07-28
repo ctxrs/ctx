@@ -693,10 +693,88 @@ fn fsync_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn install_same_filesystem(stage: &Path, target: &Path) -> Result<()> {
-    match create_absent_hard_link_with(stage, target, |source, target| {
+/// Publishes an already validated cold generation over an existing Store path.
+///
+/// This is the same absent-target-only hard-link publication [`ColdStoreBuild`]
+/// uses; the only addition is retiring the current target first, because a
+/// re-derived generation replaces a Store that is already installed. Both steps
+/// are single filesystem operations, so the window in which the Store path does
+/// not resolve is one `rename` wide. If publication fails after the retirement,
+/// the original file is renamed straight back and the caller sees the failure
+/// with its Store intact.
+///
+/// `source` keeps its own link on success. The caller decides when to unlink
+/// the staged name and the retired generation, which is what makes an
+/// interrupted publication recoverable from the filesystem alone.
+#[doc(hidden)]
+pub fn publish_over_existing_store(source: &Path, target: &Path, retired: &Path) -> Result<()> {
+    publish_over_existing_store_with(source, target, retired, |source, target| {
         fs::hard_link(source, target)
-    })? {
+    })
+}
+
+fn publish_over_existing_store_with<HardLink>(
+    source: &Path,
+    target: &Path,
+    retired: &Path,
+    hard_link: HardLink,
+) -> Result<()>
+where
+    HardLink: FnOnce(&Path, &Path) -> std::io::Result<()>,
+{
+    if !matches!(cold_target_state(source)?, ColdTargetState::ExistingRegular) {
+        return Err(StoreError::ColdStoreTargetIneligible(source.to_path_buf()));
+    }
+    if !matches!(cold_target_state(retired)?, ColdTargetState::Absent) {
+        return Err(StoreError::ColdStoreTargetChanged(retired.to_path_buf()));
+    }
+    let parent = target
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let source_identity = Handle::from_path(source)?;
+    let retired_target = match cold_target_state(target)? {
+        ColdTargetState::ExistingRegular => {
+            fs::rename(target, retired)?;
+            true
+        }
+        ColdTargetState::Absent => false,
+    };
+    let published = install_same_filesystem_with(source, target, hard_link).and_then(|()| {
+        let installed = Handle::from_path(target).map_err(|_| StoreError::ColdStoreInvalidState)?;
+        if installed != source_identity {
+            return Err(StoreError::ColdStoreInvalidState);
+        }
+        fsync_directory(parent)
+    });
+    if let Err(error) = published {
+        if retired_target {
+            // The staged link is either absent or a link to the staged object;
+            // removing it can only remove the failed publication.
+            remove_stage_if_same(target, &source_identity);
+            fs::rename(retired, target)?;
+            let _ = fsync_directory(parent);
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn install_same_filesystem(stage: &Path, target: &Path) -> Result<()> {
+    install_same_filesystem_with(stage, target, |source, target| {
+        fs::hard_link(source, target)
+    })
+}
+
+fn install_same_filesystem_with<HardLink>(
+    stage: &Path,
+    target: &Path,
+    hard_link: HardLink,
+) -> Result<()>
+where
+    HardLink: FnOnce(&Path, &Path) -> std::io::Result<()>,
+{
+    match create_absent_hard_link_with(stage, target, hard_link)? {
         HardLinkOutcome::Linked => Ok(()),
         HardLinkOutcome::Unsupported => Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
@@ -811,6 +889,102 @@ mod tests {
         assert_eq!(Handle::from_path(&target).unwrap(), stage_identity);
         assert_eq!(fs::read(&target).unwrap(), b"stage");
         assert_eq!(fs::read(&stage).unwrap(), b"stage");
+    }
+
+    #[test]
+    fn publication_over_existing_store_retires_the_original_and_installs_the_stage() {
+        let temp = tempfile::tempdir().unwrap();
+        let staged = temp.path().join("rebuild").join("work.sqlite");
+        let target = temp.path().join("work.sqlite");
+        let retired = temp.path().join("work.sqlite.ctx-superseded");
+        fs::create_dir_all(staged.parent().unwrap()).unwrap();
+        fs::write(&staged, b"rebuilt").unwrap();
+        fs::write(&target, b"original").unwrap();
+        let staged_identity = Handle::from_path(&staged).unwrap();
+
+        publish_over_existing_store(&staged, &target, &retired).unwrap();
+
+        assert_eq!(Handle::from_path(&target).unwrap(), staged_identity);
+        assert_eq!(fs::read(&target).unwrap(), b"rebuilt");
+        assert_eq!(fs::read(&retired).unwrap(), b"original");
+        assert_eq!(fs::read(&staged).unwrap(), b"rebuilt");
+    }
+
+    #[test]
+    fn publication_over_an_absent_store_installs_without_retiring() {
+        let temp = tempfile::tempdir().unwrap();
+        let staged = temp.path().join("staged.sqlite");
+        let target = temp.path().join("work.sqlite");
+        let retired = temp.path().join("work.sqlite.ctx-superseded");
+        fs::write(&staged, b"rebuilt").unwrap();
+
+        publish_over_existing_store(&staged, &target, &retired).unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"rebuilt");
+        assert!(!retired.exists());
+    }
+
+    #[test]
+    fn publication_that_fails_after_retirement_restores_the_original_store() {
+        let temp = tempfile::tempdir().unwrap();
+        let staged = temp.path().join("staged.sqlite");
+        let target = temp.path().join("work.sqlite");
+        let retired = temp.path().join("work.sqlite.ctx-superseded");
+        fs::write(&staged, b"rebuilt").unwrap();
+        fs::write(&target, b"original").unwrap();
+        let original_identity = Handle::from_path(&target).unwrap();
+
+        let error = publish_over_existing_store_with(&staged, &target, &retired, |_, _| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "publication interrupted",
+            ))
+        })
+        .unwrap_err();
+
+        assert!(matches!(error, StoreError::Io(_)), "{error:?}");
+        assert_eq!(fs::read(&target).unwrap(), b"original");
+        assert_eq!(Handle::from_path(&target).unwrap(), original_identity);
+        assert!(!retired.exists(), "the retired generation is restored");
+        assert_eq!(fs::read(&staged).unwrap(), b"rebuilt");
+    }
+
+    #[test]
+    fn publication_refuses_an_occupied_retirement_path_without_touching_the_store() {
+        let temp = tempfile::tempdir().unwrap();
+        let staged = temp.path().join("staged.sqlite");
+        let target = temp.path().join("work.sqlite");
+        let retired = temp.path().join("work.sqlite.ctx-superseded");
+        fs::write(&staged, b"rebuilt").unwrap();
+        fs::write(&target, b"original").unwrap();
+        fs::write(&retired, b"earlier-attempt").unwrap();
+
+        let error = publish_over_existing_store(&staged, &target, &retired).unwrap_err();
+
+        assert!(matches!(
+            error,
+            StoreError::ColdStoreTargetChanged(path) if path == retired
+        ));
+        assert_eq!(fs::read(&target).unwrap(), b"original");
+        assert_eq!(fs::read(&retired).unwrap(), b"earlier-attempt");
+    }
+
+    #[test]
+    fn publication_refuses_a_missing_stage_and_leaves_the_store_installed() {
+        let temp = tempfile::tempdir().unwrap();
+        let staged = temp.path().join("staged.sqlite");
+        let target = temp.path().join("work.sqlite");
+        let retired = temp.path().join("work.sqlite.ctx-superseded");
+        fs::write(&target, b"original").unwrap();
+
+        let error = publish_over_existing_store(&staged, &target, &retired).unwrap_err();
+
+        assert!(matches!(
+            error,
+            StoreError::ColdStoreTargetIneligible(path) if path == staged
+        ));
+        assert_eq!(fs::read(&target).unwrap(), b"original");
+        assert!(!retired.exists());
     }
 
     #[test]
