@@ -8,6 +8,7 @@ mod lifecycle;
 mod output;
 mod publication;
 mod query;
+pub(super) mod source_backed;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -452,16 +453,8 @@ fn acquire_source(
     if !snapshot.revalidate(path)? {
         return Err(CaptureError::SourceChangedDuringCapture);
     }
-    let user_version = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    let schema_fingerprint = sqlite_schema_fingerprint(&connection)?;
-    let schema = CrushNativeSchema {
-        session_columns: session_columns(&connection)?,
-        message_columns: super::source::message_columns(&connection)?,
-        file_columns: optional_file_columns(&connection)?,
-        read_file_columns: optional_read_file_columns(&connection)?,
-        user_version,
-        schema_fingerprint: schema_fingerprint.clone(),
-    };
+    let schema = read_native_schema(&connection)?;
+    let schema_fingerprint = schema.schema_fingerprint.clone();
     if !snapshot.revalidate(path)? {
         return Err(CaptureError::SourceChangedDuringCapture);
     }
@@ -505,6 +498,17 @@ fn acquire_source(
         snapshot,
         connection,
         schema,
+    })
+}
+
+fn read_native_schema(connection: &Connection) -> Result<CrushNativeSchema> {
+    Ok(CrushNativeSchema {
+        session_columns: session_columns(connection)?,
+        message_columns: super::source::message_columns(connection)?,
+        file_columns: optional_file_columns(connection)?,
+        read_file_columns: optional_read_file_columns(connection)?,
+        user_version: connection.pragma_query_value(None, "user_version", |row| row.get(0))?,
+        schema_fingerprint: sqlite_schema_fingerprint(connection)?,
     })
 }
 
