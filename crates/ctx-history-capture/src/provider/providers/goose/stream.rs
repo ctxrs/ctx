@@ -1,5 +1,6 @@
 use rusqlite::Connection;
 
+use crate::native_source::NativeSqliteValue;
 use crate::provider::sqlite::SqliteLengthPreflightGuard;
 use crate::{CaptureError, OutputOutcome, Result};
 
@@ -128,6 +129,7 @@ pub(super) struct GooseScannedMessage {
     pub(super) timestamp: Option<String>,
     pub(super) tokens_json: Option<String>,
     pub(super) metadata_json: Option<String>,
+    pub(super) logical_row_digest: Option<[u8; 32]>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -146,6 +148,7 @@ pub(super) struct GooseRetainedMessage {
     pub(super) timestamp: Option<String>,
     pub(super) tokens_json: Option<String>,
     pub(super) metadata_json: Option<String>,
+    pub(super) logical_row_digest: [u8; 32],
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -184,6 +187,11 @@ impl GooseScannedMessage {
         let retained_class = self.retained_class.ok_or(CaptureError::SystemInvariant(
             "Goose retained message omitted its SQLite visitor class",
         ))?;
+        let logical_row_digest = self
+            .logical_row_digest
+            .ok_or(CaptureError::SystemInvariant(
+                "Goose retained message omitted its logical-row digest",
+            ))?;
         Ok(GooseRetainedMessage {
             sqlite_rowid: self.sqlite_rowid,
             native_order: self.native_order,
@@ -199,6 +207,7 @@ impl GooseScannedMessage {
             timestamp: self.timestamp,
             tokens_json: self.tokens_json,
             metadata_json: self.metadata_json,
+            logical_row_digest,
         })
     }
 }
@@ -357,6 +366,10 @@ pub(super) fn goose_fetch_native_message_page(
                  m.rowid as sqlite_rowid,
                  cast(m.id as integer) as native_order,
                  {normalized_message_id} as native_message_id,
+                 case
+                     when typeof({message_id}) in ('null', 'text')
+                     then cast({message_id} as text)
+                 end as source_message_id,
                  coalesce(ids.uses, 0) as message_id_uses,
                  coalesce(
                      case when typeof(m.session_id) = 'text' then m.session_id end,
@@ -446,6 +459,9 @@ pub(super) fn goose_fetch_native_message_page(
                   then cast(tokens_json as text) else null end,
              case when classified_disposition in (0, 9, 11, 12)
                   then cast(metadata_json as text) else null end
+             ,
+             parent_rowid,
+             source_message_id
          from measured
          where running_bytes <= ?4
          order by sqlite_rowid"
@@ -519,23 +535,68 @@ pub(super) fn goose_fetch_native_message_page(
             let raw_content_bytes: i64 = row.get(8)?;
             let content_bytes = u64::try_from(raw_content_bytes)
                 .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(8, raw_content_bytes))?;
+            let sqlite_rowid: i64 = row.get(0)?;
+            let session_identity: String = row.get(4)?;
+            let role: String = row.get(5)?;
+            let content_json: Option<String> = row.get(7)?;
+            let created_timestamp: Option<i64> = row.get(9)?;
+            let timestamp: Option<String> = row.get(10)?;
+            let tokens_json: Option<String> = row.get(11)?;
+            let metadata_json: Option<String> = row.get(12)?;
+            let parent_rowid: Option<i64> = row.get(13)?;
+            let source_message_id: Option<String> = row.get(14)?;
+            let logical_row_digest = content_json
+                .as_ref()
+                .map(|content_json| {
+                    super::content::goose_logical_row_digest(&[
+                        parent_rowid.map_or(NativeSqliteValue::Null, NativeSqliteValue::Integer),
+                        NativeSqliteValue::Integer(sqlite_rowid),
+                        NativeSqliteValue::Integer(native_order),
+                        source_message_id
+                            .clone()
+                            .map_or(NativeSqliteValue::Null, NativeSqliteValue::Text),
+                        NativeSqliteValue::Text(session_identity.clone()),
+                        NativeSqliteValue::Text(role.clone()),
+                        NativeSqliteValue::Text(content_json.clone()),
+                        created_timestamp
+                            .map_or(NativeSqliteValue::Null, NativeSqliteValue::Integer),
+                        timestamp
+                            .clone()
+                            .map_or(NativeSqliteValue::Null, NativeSqliteValue::Text),
+                        tokens_json
+                            .clone()
+                            .map_or(NativeSqliteValue::Null, NativeSqliteValue::Text),
+                        metadata_json
+                            .clone()
+                            .map_or(NativeSqliteValue::Null, NativeSqliteValue::Text),
+                    ])
+                })
+                .transpose()
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        7,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?;
             Ok(GooseScannedMessage {
-                sqlite_rowid: row.get(0)?,
+                sqlite_rowid,
                 native_order,
                 native_identity: identity.native_identity,
                 provider_message_identity: identity.provider_message_identity,
                 identity_degraded: identity.identity_degraded,
-                session_identity: row.get(4)?,
-                role: row.get(5)?,
+                session_identity,
+                role,
                 disposition,
                 output_outcome,
                 retained_class,
-                content_json: row.get(7)?,
+                content_json,
                 content_bytes,
-                created_timestamp: row.get(9)?,
-                timestamp: row.get(10)?,
-                tokens_json: row.get(11)?,
-                metadata_json: row.get(12)?,
+                created_timestamp,
+                timestamp,
+                tokens_json,
+                metadata_json,
+                logical_row_digest,
             })
         },
     )?;

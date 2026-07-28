@@ -335,6 +335,13 @@ pub(super) fn goose_event_content_digest(event: &GooseNativeEvent) -> String {
     goose_hash_optional_str(&mut hasher, event.timestamp.as_deref());
     goose_hash_optional_str(&mut hasher, event.tokens_json.as_deref());
     goose_hash_optional_str(&mut hasher, event.metadata_json.as_deref());
+    match event.logical_row_digest {
+        Some(logical_row_digest) => {
+            hasher.update([1]);
+            goose_hash_bytes(&mut hasher, &logical_row_digest);
+        }
+        None => hasher.update([0]),
+    }
     for touch in &event.file_touches {
         goose_hash_str(&mut hasher, &touch.path);
         goose_hash_optional_str(&mut hasher, touch.old_path.as_deref());

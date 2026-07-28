@@ -160,6 +160,10 @@ impl GooseLiveObservation {
     }
 
     pub(super) fn generation_digest(&self) -> String {
+        goose_hex_digest(self.generation_digest_bytes())
+    }
+
+    pub(super) fn generation_digest_bytes(&self) -> [u8; 32] {
         // This hashes immutable source components only as a control-plane fence.
         // It is never an event/output hash and is not publication content.
         let mut hasher = Sha256::new();
@@ -171,7 +175,20 @@ impl GooseLiveObservation {
             b"rollback-journal",
             self.rollback_journal.as_ref(),
         );
-        goose_hex_digest(hasher.finalize().into())
+        hasher.finalize().into()
+    }
+
+    pub(super) fn certified_bytes(&self) -> Result<u64> {
+        std::iter::once(&self.database)
+            .chain(self.wal.iter())
+            .chain(self.rollback_journal.iter())
+            .try_fold(0_u64, |total, component| {
+                total
+                    .checked_add(component.signature.length)
+                    .ok_or(CaptureError::SystemInvariant(
+                        "Goose certified source byte count overflowed",
+                    ))
+            })
     }
 
     pub(super) fn source_path(&self) -> &Path {

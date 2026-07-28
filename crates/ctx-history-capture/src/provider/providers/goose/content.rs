@@ -16,6 +16,30 @@ use super::{
     stream::{goose_native_message_identity_at, GooseRetainedContentClass, GooseRetainedMessage},
 };
 
+pub(super) fn goose_logical_row_digest(values: &[NativeSqliteValue]) -> Result<[u8; 32]> {
+    let digest = crate::complete_content::sqlite::sqlite_logical_record_digest(values);
+    let bytes = digest.as_str().as_bytes();
+    let mut decoded = [0_u8; 32];
+    for (index, pair) in bytes.chunks_exact(2).enumerate() {
+        decoded[index] = decode_hex_nibble(pair[0])
+            .and_then(|high| decode_hex_nibble(pair[1]).map(|low| (high << 4) | low))
+            .ok_or_else(|| {
+                CaptureError::InvalidPayload(
+                    "Goose exact-row resolver returned an invalid logical-row digest".to_owned(),
+                )
+            })?;
+    }
+    Ok(decoded)
+}
+
+fn decode_hex_nibble(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        _ => None,
+    }
+}
+
 pub(super) fn load_schema(conn: &Connection) -> Result<()> {
     GooseNativeSchema::probe(conn)?;
     Ok(())
@@ -54,6 +78,7 @@ pub(super) fn complete_message_with_normalized_hash(
         timestamp: message.timestamp,
         tokens_json: message.tokens,
         metadata_json: message.metadata_json,
+        logical_row_digest: goose_logical_row_digest(values)?,
     })?;
     if event.kind != GooseNativeEventKind::Message {
         return Err(CaptureError::InvalidPayload(
