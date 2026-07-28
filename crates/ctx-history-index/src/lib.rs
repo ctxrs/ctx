@@ -6,6 +6,9 @@
 //! either the previous complete generation or the new complete generation.
 
 mod durable_directory;
+mod query;
+
+pub use query::{EventRecord, EventSearchCandidate, SessionRecord};
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -35,13 +38,13 @@ use uuid::Uuid;
 use durable_directory::DurableMmapDirectory;
 
 pub const GENERATION_MANIFEST_VERSION: u32 = 1;
-pub const LEXICAL_SCHEMA_VERSION: u32 = 1;
+pub const LEXICAL_SCHEMA_VERSION: u32 = 2;
 pub const LEXICAL_ANALYZER_VERSION: u32 = 1;
+pub const MAX_BODY_PREVIEW_CHARS: usize = 2_048;
 
 const MANIFEST_DIRECTORY: &str = "ctx-generations";
 const COMMIT_PAYLOAD_VERSION: u32 = 1;
 const INDEX_MEMORY_MIN_PER_THREAD: usize = 15_000_000;
-const MAX_DOCUMENT_TEXT_CHARS: usize = 2_048;
 const MAX_DOCUMENT_METADATA_BYTES: usize = 64 * 1024;
 const MAX_TOUCHED_FILES: usize = 4_096;
 
@@ -131,6 +134,12 @@ pub enum IndexError {
         actual: usize,
         maximum: usize,
     },
+    #[error("stored lexical document field {0} is missing, malformed, or inconsistent")]
+    InvalidStoredDocumentField(&'static str),
+    #[error("ID prefix must contain 1 to 32 hexadecimal digits, with optional hyphens")]
+    InvalidIdPrefix,
+    #[error("lexical analyzer {0} is unavailable")]
+    MissingAnalyzer(&'static str),
     #[error("document source does not have an active replacement")]
     DocumentSourceNotActive,
     #[error("document {0} does not carry an event identity")]
@@ -199,6 +208,7 @@ pub struct LexicalDocument {
     pub occurred_at_unix_ms: Option<i64>,
     pub event_type: String,
     pub role: Option<String>,
+    /// An already-bounded searchable preview, never an unbounded event body.
     pub body: String,
     pub workspace: Option<String>,
     pub cwd: Option<String>,
@@ -224,11 +234,11 @@ impl LexicalDocument {
             return Err(IndexError::EmptyDocumentField { field: "body" });
         }
         let body_chars = self.body.chars().count();
-        if body_chars > MAX_DOCUMENT_TEXT_CHARS {
+        if body_chars > MAX_BODY_PREVIEW_CHARS {
             return Err(IndexError::DocumentFieldTooLarge {
                 field: "body_chars",
                 actual: body_chars,
-                maximum: MAX_DOCUMENT_TEXT_CHARS,
+                maximum: MAX_BODY_PREVIEW_CHARS,
             });
         }
         validate_optional_document_text(
@@ -364,8 +374,12 @@ pub enum RevalidationTarget<'a> {
 struct Fields {
     event_id: Field,
     event_identity_digest: Field,
+    event_identity: Field,
+    event_id_high: Field,
+    event_id_low: Field,
     session_id: Field,
     session_identity_digest: Field,
+    session_identity: Field,
     source_key: Field,
     native_locator: Field,
     provider: Field,
@@ -375,7 +389,7 @@ struct Fields {
     occurred_at_unix_ms: Field,
     event_type: Field,
     role: Field,
-    body: Field,
+    body_preview: Field,
     workspace: Field,
     cwd: Field,
     touched_file: Field,
@@ -585,6 +599,8 @@ impl GenerationWriter {
 
     pub fn add_document(&mut self, document: LexicalDocument) -> Result<()> {
         let locator_bytes = document.validate()?;
+        let event_identity_bytes = serde_json::to_vec(&document.event_id)?;
+        let session_identity_bytes = serde_json::to_vec(&document.session_id)?;
         if document.event_id.entity_kind() != StableEntityKind::Event {
             return Err(IndexError::InvalidEventIdentityKind(
                 document.event_id.to_string(),
@@ -645,11 +661,16 @@ impl GenerationWriter {
             self.fields.event_identity_digest,
             hex(&document.event_id.digest()),
         );
+        target.add_bytes(self.fields.event_identity, &event_identity_bytes);
+        let event_uuid = document.event_id.as_uuid().as_u128();
+        target.add_u64(self.fields.event_id_high, (event_uuid >> 64) as u64);
+        target.add_u64(self.fields.event_id_low, event_uuid as u64);
         target.add_text(self.fields.session_id, document.session_id.to_string());
         target.add_text(
             self.fields.session_identity_digest,
             hex(&document.session_id.digest()),
         );
+        target.add_bytes(self.fields.session_identity, &session_identity_bytes);
         target.add_text(self.fields.source_key, &token);
         target.add_bytes(self.fields.native_locator, &locator_bytes);
         target.add_text(self.fields.provider, document.source.provider());
@@ -665,7 +686,7 @@ impl GenerationWriter {
         if let Some(role) = document.role {
             target.add_text(self.fields.role, role);
         }
-        target.add_text(self.fields.body, document.body);
+        target.add_text(self.fields.body_preview, document.body);
         if let Some(workspace) = document.workspace {
             target.add_text(self.fields.workspace, workspace);
         }
@@ -890,6 +911,7 @@ impl GenerationWriter {
     }
 }
 
+/// A verified reader pinned to one immutable lexical generation.
 pub struct VerifiedIndex {
     searcher: Searcher,
     manifest: GenerationManifest,
@@ -942,7 +964,7 @@ impl VerifiedIndex {
     fn count_term(&self, term_text: &str) -> Result<usize> {
         use tantivy::query::TermQuery;
 
-        let body = required_field(self.searcher.schema(), "body")?;
+        let body = required_field(self.searcher.schema(), "body_preview")?;
         let query = TermQuery::new(
             Term::from_field_text(body, term_text),
             IndexRecordOption::Basic,
@@ -1198,8 +1220,12 @@ fn lexical_schema() -> Schema {
     let mut builder = Schema::builder();
     builder.add_text_field("event_id", STRING | STORED);
     builder.add_text_field("event_identity_digest", STRING | STORED);
+    builder.add_bytes_field("event_identity", STORED);
+    builder.add_u64_field("event_id_high", FAST);
+    builder.add_u64_field("event_id_low", FAST);
     builder.add_text_field("session_id", STRING | STORED);
     builder.add_text_field("session_identity_digest", STRING | STORED);
+    builder.add_bytes_field("session_identity", STORED);
     builder.add_text_field("source_key", STRING | STORED);
     builder.add_bytes_field("native_locator", STORED);
     builder.add_text_field("provider", STRING | STORED);
@@ -1213,8 +1239,10 @@ fn lexical_schema() -> Schema {
         .set_tokenizer("default")
         .set_index_option(IndexRecordOption::WithFreqsAndPositions);
     builder.add_text_field(
-        "body",
-        TextOptions::default().set_indexing_options(body_indexing),
+        "body_preview",
+        TextOptions::default()
+            .set_indexing_options(body_indexing)
+            .set_stored(),
     );
     builder.add_text_field("workspace", STRING | STORED);
     builder.add_text_field("cwd", STRING | STORED);
@@ -1226,8 +1254,12 @@ fn fields_from_schema(schema: &Schema) -> Result<Fields> {
     Ok(Fields {
         event_id: required_field(schema, "event_id")?,
         event_identity_digest: required_field(schema, "event_identity_digest")?,
+        event_identity: required_field(schema, "event_identity")?,
+        event_id_high: required_field(schema, "event_id_high")?,
+        event_id_low: required_field(schema, "event_id_low")?,
         session_id: required_field(schema, "session_id")?,
         session_identity_digest: required_field(schema, "session_identity_digest")?,
+        session_identity: required_field(schema, "session_identity")?,
         source_key: required_field(schema, "source_key")?,
         native_locator: required_field(schema, "native_locator")?,
         provider: required_field(schema, "provider")?,
@@ -1237,7 +1269,7 @@ fn fields_from_schema(schema: &Schema) -> Result<Fields> {
         occurred_at_unix_ms: required_field(schema, "occurred_at_unix_ms")?,
         event_type: required_field(schema, "event_type")?,
         role: required_field(schema, "role")?,
-        body: required_field(schema, "body")?,
+        body_preview: required_field(schema, "body_preview")?,
         workspace: required_field(schema, "workspace")?,
         cwd: required_field(schema, "cwd")?,
         touched_file: required_field(schema, "touched_file")?,
@@ -1619,6 +1651,132 @@ mod tests {
     }
 
     #[test]
+    fn pinned_query_api_returns_typed_records_in_deterministic_order() {
+        let temp = tempdir().unwrap();
+        let source = source("session.jsonl");
+        let first = document(&source, 1, "atomic generation");
+        let second = document(&source, 2, "atomic generation");
+        let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        writer.begin_source(source.clone()).unwrap();
+        writer.add_document(second.clone()).unwrap();
+        writer.add_document(first.clone()).unwrap();
+        writer.certify_source(certificate(&source, 1, 2)).unwrap();
+        writer.commit(|_| true).unwrap();
+
+        let index = VerifiedIndex::open(temp.path()).unwrap();
+        let candidates = index
+            .search_event_candidates("atomic:generation", 10)
+            .unwrap();
+        let mut expected_search_ids = vec![first.event_id.as_uuid(), second.event_id.as_uuid()];
+        expected_search_ids.sort();
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.event.event_id.as_uuid())
+                .collect::<Vec<_>>(),
+            expected_search_ids
+        );
+        assert_eq!(candidates[0].score, candidates[1].score);
+
+        let exact = index
+            .event_by_id(first.event_id.as_uuid())
+            .unwrap()
+            .unwrap();
+        assert_eq!(exact.event_id, first.event_id);
+        assert_eq!(exact.session_id, first.session_id);
+        assert_eq!(exact.locator, first.locator);
+        assert_eq!(exact.provider, "codex");
+        assert_eq!(exact.source_format, "codex_session_jsonl");
+        assert_eq!(exact.provider_session_id.as_deref(), Some("session"));
+        assert_eq!(exact.event_sequence, 1);
+        assert_eq!(exact.occurred_at_unix_ms, first.occurred_at_unix_ms);
+        assert_eq!(exact.event_type, "message");
+        assert_eq!(exact.role.as_deref(), Some("user"));
+        assert_eq!(exact.preview, "atomic generation");
+        assert_eq!(exact.workspace.as_deref(), Some("ctx"));
+        assert_eq!(exact.cwd.as_deref(), Some("/work/ctx"));
+        assert_eq!(exact.touched_files, vec!["src/lib.rs"]);
+
+        let event_id = first.event_id.to_string();
+        let event_prefix = &event_id[..8];
+        assert_eq!(
+            index.events_by_id_prefix(event_prefix).unwrap()[0].event_id,
+            first.event_id
+        );
+
+        let ordered = index
+            .events_for_session(first.session_id.as_uuid())
+            .unwrap();
+        assert_eq!(
+            ordered
+                .iter()
+                .map(|event| event.event_sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        let session = index
+            .session_by_id(first.session_id.as_uuid())
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.session_id, first.session_id);
+        assert_eq!(session.provider, "codex");
+        assert_eq!(session.source_format, "codex_session_jsonl");
+        assert_eq!(session.provider_session_id.as_deref(), Some("session"));
+        assert_eq!(session.first_event_sequence, 1);
+
+        let session_id = first.session_id.to_string();
+        let session_prefix = &session_id[..8];
+        assert_eq!(
+            index.sessions_by_id_prefix(session_prefix).unwrap(),
+            vec![session]
+        );
+    }
+
+    #[test]
+    fn maximum_length_preview_is_stored_and_returned() {
+        let temp = tempdir().unwrap();
+        let source = source("session.jsonl");
+        let preview = "界".repeat(MAX_BODY_PREVIEW_CHARS);
+        let expected = document(&source, 1, &preview);
+        let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        writer.begin_source(source.clone()).unwrap();
+        writer.add_document(expected.clone()).unwrap();
+        writer.certify_source(certificate(&source, 1, 1)).unwrap();
+        writer.commit(|_| true).unwrap();
+
+        let record = VerifiedIndex::open(temp.path())
+            .unwrap()
+            .event_by_id(expected.event_id.as_uuid())
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.preview, preview);
+        assert_eq!(record.preview.chars().count(), MAX_BODY_PREVIEW_CHARS);
+    }
+
+    #[test]
+    fn empty_or_invalid_programmatic_queries_are_safe() {
+        let temp = tempdir().unwrap();
+        let source = source("session.jsonl");
+        let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        writer.begin_source(source.clone()).unwrap();
+        writer.add_document(document(&source, 1, "body")).unwrap();
+        writer.certify_source(certificate(&source, 1, 1)).unwrap();
+        writer.commit(|_| true).unwrap();
+        let index = VerifiedIndex::open(temp.path()).unwrap();
+
+        assert!(index.search_event_candidates("", 10).unwrap().is_empty());
+        assert!(index.search_event_candidates("body", 0).unwrap().is_empty());
+        assert!(matches!(
+            index.events_by_id_prefix("not-a-uuid"),
+            Err(IndexError::InvalidIdPrefix)
+        ));
+        assert!(matches!(
+            index.sessions_by_id_prefix(""),
+            Err(IndexError::InvalidIdPrefix)
+        ));
+    }
+
+    #[test]
     fn failed_final_revalidation_keeps_the_previous_generation() {
         let temp = tempdir().unwrap();
         let source = source("session.jsonl");
@@ -1905,7 +2063,7 @@ mod tests {
             .add_document(document(
                 &source,
                 1,
-                &"界".repeat(MAX_DOCUMENT_TEXT_CHARS + 1),
+                &"界".repeat(MAX_BODY_PREVIEW_CHARS + 1),
             ))
             .unwrap_err();
         assert!(matches!(
