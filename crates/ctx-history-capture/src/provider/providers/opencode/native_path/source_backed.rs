@@ -267,6 +267,7 @@ fn scan_source(
             &connection,
             &schema,
             dialect,
+            path,
             &source,
             &opening,
             &sessions,
@@ -305,6 +306,7 @@ fn stream_events(
     connection: &Connection,
     schema: &OpenCodeNativeSchema,
     dialect: &OpenCodeSqliteDialect,
+    path: &Path,
     source: &SourceKey,
     opening: &SourceObservation,
     sessions: &BTreeMap<String, SourceSession>,
@@ -349,6 +351,7 @@ fn stream_events(
             source,
             schema.family,
             revision_digest,
+            path,
             session,
             event,
             retained,
@@ -443,6 +446,7 @@ fn lexical_document(
     source: &SourceKey,
     family: OpenCodeNativeSchemaFamily,
     source_revision_digest: [u8; 32],
+    source_path: &Path,
     session: &SourceSession,
     event: SourceEventRow,
     retained: OpenCodeRetainedJson,
@@ -514,9 +518,19 @@ fn lexical_document(
     Ok(LexicalDocument {
         event_id,
         session_id: session.session_id,
+        parent_session_id: session.parent_session_id,
+        root_session_id: session.root_session_id,
         source: source.clone(),
         locator,
         provider_session_id: Some(session.native_identity.clone()),
+        branch: session.branch.clone(),
+        source_path: Some(source_path.to_string_lossy().into_owned()),
+        agent_type: if session.parent_native_identity.is_some() {
+            "subagent".to_owned()
+        } else {
+            "primary".to_owned()
+        },
+        is_primary: session.parent_native_identity.is_none(),
         event_sequence,
         occurred_at_unix_ms: Some(normalized_time),
         event_type: event_kind_label(kind).to_owned(),
@@ -1090,6 +1104,16 @@ mod tests {
                 .iter()
                 .all(|document| document.body.chars().count() <= PROVIDER_MAX_PREVIEW_CHARS));
             assert_eq!(documents[0].provider_session_id.as_deref(), Some("child"));
+            let root_session_id = session_id(&scan.source, "root").unwrap();
+            assert_eq!(documents[0].parent_session_id, Some(root_session_id));
+            assert_eq!(documents[0].root_session_id, root_session_id);
+            assert_eq!(documents[0].branch.as_deref(), Some("feature"));
+            assert_eq!(
+                documents[0].source_path.as_deref(),
+                Some(path.to_string_lossy().as_ref())
+            );
+            assert_eq!(documents[0].agent_type, "subagent");
+            assert!(!documents[0].is_primary);
             assert_eq!(documents[0].event_sequence, 0);
             assert_eq!(documents[1].event_sequence, 1);
 
