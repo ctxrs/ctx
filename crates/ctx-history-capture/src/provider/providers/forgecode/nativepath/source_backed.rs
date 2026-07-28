@@ -374,9 +374,15 @@ fn lexical_document(
     Ok(LexicalDocument {
         event_id,
         session_id,
+        parent_session_id: None,
+        root_session_id: session_id,
         source: source.source.clone(),
         locator,
         provider_session_id: Some(row.conversation_id.clone()),
+        branch: forgecode_branch(row),
+        source_path: Some(source.canonical_path.display().to_string()),
+        agent_type: "primary".to_owned(),
+        is_primary: true,
         event_sequence: subrecord_index,
         occurred_at_unix_ms: Some(retained.event.occurred_at.timestamp_millis()),
         event_type: retained.event.event_type.as_str().to_owned(),
@@ -388,6 +394,25 @@ fn lexical_document(
             .get(&retained.provider_event_index)
             .cloned()
             .unwrap_or_default(),
+    })
+}
+
+fn forgecode_branch(row: &ForgeCodeConversationRow) -> Option<String> {
+    [
+        "/branch",
+        "/git_branch",
+        "/gitBranch",
+        "/repository/branch",
+        "/workspace/branch",
+    ]
+    .into_iter()
+    .find_map(|pointer| {
+        row.context_metadata
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|branch| !branch.is_empty())
+            .map(str::to_owned)
     })
 }
 

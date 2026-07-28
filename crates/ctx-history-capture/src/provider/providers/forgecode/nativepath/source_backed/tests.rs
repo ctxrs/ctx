@@ -39,6 +39,25 @@ fn forgecode_source_backed_cold_scan_is_bounded_and_stable() {
         .documents
         .iter()
         .all(|document| document.body.chars().count() <= MAX_BODY_PREVIEW_CHARS));
+    let canonical_source_path = fs::canonicalize(&source_path)
+        .unwrap()
+        .display()
+        .to_string();
+    for document in &first.documents {
+        assert_eq!(document.parent_session_id, None);
+        assert_eq!(document.root_session_id, document.session_id);
+        assert_eq!(
+            document.provider_session_id.as_deref(),
+            Some("cold-conversation")
+        );
+        assert_eq!(document.branch.as_deref(), Some("main"));
+        assert_eq!(
+            document.source_path.as_deref(),
+            Some(canonical_source_path.as_str())
+        );
+        assert_eq!(document.agent_type, "primary");
+        assert!(document.is_primary);
+    }
     assert_eq!(first.certificate.counts().complete_records, 18);
     assert_eq!(first.certificate.counts().retained_records, 18);
     assert_eq!(first.certificate.counts().indexed_documents, 18);
@@ -283,7 +302,12 @@ fn write_source(path: &Path, conversation_id: &str, messages: Value) {
                      '2026-01-01T00:00:01Z', NULL)",
             rusqlite::params![
                 conversation_id,
-                json!({"initiator": "forge", "messages": messages}).to_string()
+                json!({
+                    "initiator": "forge",
+                    "branch": "main",
+                    "messages": messages
+                })
+                .to_string()
             ],
         )
         .unwrap();
@@ -295,7 +319,12 @@ fn replace_messages(path: &Path, messages: Value) {
         .execute(
             "UPDATE conversations SET context = ?1, updated_at = ?2",
             rusqlite::params![
-                json!({"initiator": "forge", "messages": messages}).to_string(),
+                json!({
+                    "initiator": "forge",
+                    "branch": "main",
+                    "messages": messages
+                })
+                .to_string(),
                 "2026-01-01T00:00:02Z",
             ],
         )
