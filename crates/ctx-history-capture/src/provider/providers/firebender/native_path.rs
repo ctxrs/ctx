@@ -71,8 +71,16 @@ mod core;
 mod lifecycle;
 mod output;
 mod scan;
+mod source_backed;
 #[cfg(test)]
 mod tests;
+
+#[allow(unused_imports)]
+pub(crate) use source_backed::{
+    hydrate_firebender_source_backed_row, prepare_firebender_source_backed,
+    FirebenderHydratedSourceRow, FirebenderSourceBackedError, FirebenderSourceBackedPage,
+    FirebenderSourceBackedPlan, FirebenderSourceBackedResult, FirebenderSourceBackedScanner,
+};
 
 use self::{
     core::import_core,
