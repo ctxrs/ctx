@@ -16,6 +16,7 @@ pub(super) const PAGE_ACCOUNTING_OVERHEAD_BYTES: usize = 256 * 1024;
 pub(super) struct ParsedAuggieSource {
     pub(super) stamp: AuggieFileStamp,
     pub(super) source_revision: String,
+    pub(super) content_digest: [u8; 32],
     pub(super) session: ParsedAuggieSession,
     pub(super) events: Vec<ParsedAuggieEvent>,
     pub(super) outputs: Vec<ParsedAuggieOutput>,
@@ -38,6 +39,9 @@ pub(super) struct ParsedAuggieEvent {
     pub(super) event: AuggieEvent,
     pub(super) chat_index: usize,
     pub(super) sub_index: u32,
+    pub(super) message_kind: &'static str,
+    pub(super) native_event_id: Option<String>,
+    pub(super) json_pointer: String,
 }
 
 pub(super) struct ParsedAuggieOutput {
