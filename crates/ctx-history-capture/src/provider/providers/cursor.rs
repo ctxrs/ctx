@@ -9,6 +9,7 @@ mod layout;
 mod parser;
 mod projection;
 mod source;
+mod source_backed;
 
 pub(crate) use checkpoint::CursorCheckpoint;
 pub(crate) use layout::{
@@ -28,6 +29,11 @@ pub(crate) use source::{
     CursorMissingSourceDisposition, CursorPriorObservation, CursorReadOutcome,
     CursorSourceObservation,
 };
+pub(crate) use source_backed::{
+    extract_cursor_source_backed_cold, hydrate_cursor_source_backed_message,
+    CursorSourceBackedPage, CursorSourceBackedRecord, CursorSourceBackedSink,
+    CursorSourceBackedSourcePlan, CursorSourceBackedSummary, CursorSourceBackedTerminal,
+};
 
 #[cfg(test)]
 pub(crate) use checkpoint::CursorCheckpointDisposition;
@@ -36,5 +42,7 @@ pub(crate) use projection::{CURSOR_PUBLICATION_PAGE_MAX_BYTES, CURSOR_PUBLICATIO
 #[cfg(test)]
 pub(crate) use source::{scan_cursor_source, CursorSourceGeneration, CursorSourceMutation};
 
+#[cfg(test)]
+mod source_backed_tests;
 #[cfg(test)]
 mod tests;
