@@ -529,9 +529,15 @@ fn project_conversation(
                     documents.push(LexicalDocument {
                         event_id,
                         session_id,
+                        parent_session_id: None,
+                        root_session_id: session_id,
                         source: plan.source.clone(),
                         locator,
                         provider_session_id: Some(plan.conversation_id.clone()),
+                        branch: None,
+                        source_path: Some(observed.canonical_path_text.clone()),
+                        agent_type: ctx_history_core::AgentType::Primary.as_str().to_owned(),
+                        is_primary: true,
                         event_sequence: u64::try_from(sequence)
                             .map_err(|_| OpenHandsSourceBackedErrorV1::CountOverflow)?,
                         occurred_at_unix_ms: Some(decoded.timestamp().timestamp_millis()),
