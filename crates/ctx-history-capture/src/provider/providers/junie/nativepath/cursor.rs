@@ -289,7 +289,7 @@ pub(super) fn released_jsonl_position_offset(
 }
 
 pub(super) fn released_jsonl_prefix_is_proven(
-    path: &Path,
+    session_path: &JunieSessionPath,
     position: &crate::native_source::NativePosition,
 ) -> Result<bool> {
     let Some(offset) = released_jsonl_position_offset(position) else {
@@ -298,15 +298,15 @@ pub(super) fn released_jsonl_prefix_is_proven(
         ));
     };
     let proof_len = offset.min(64 * 1024);
-    if fs::metadata(path)?.len() < offset {
+    let opened = session_path.open_events()?;
+    if opened.len() < offset {
+        opened.revalidate()?;
         return Ok(false);
     }
-    let mut file = File::open(path)?;
-    file.seek(SeekFrom::Start(offset.saturating_sub(proof_len)))?;
     let proof_len_usize = usize::try_from(proof_len)
         .map_err(|_| CaptureError::SystemInvariant("Junie released cursor proof exceeds usize"))?;
-    let mut proof = vec![0_u8; proof_len_usize];
-    file.read_exact(&mut proof)?;
+    let proof =
+        opened.read_exact_range(offset.saturating_sub(proof_len), proof_len_usize, 64 * 1024)?;
     let mut digest = Sha256::new();
     digest.update(b"ctx-jsonl-append-boundary-sha256-v1\0");
     digest.update(offset.to_be_bytes());
@@ -405,7 +405,7 @@ pub(super) fn released_cursor_for_retirement(
 }
 
 pub(super) fn released_anchor_value(
-    path: &Path,
+    session_path: &JunieSessionPath,
     anchor: Option<&ReleasedJunieMetadataAnchor>,
     expected_kind: &'static str,
     field: &'static str,
@@ -416,10 +416,12 @@ pub(super) fn released_anchor_value(
     let length = usize::try_from(anchor.end.saturating_sub(anchor.start)).map_err(|_| {
         CaptureError::SystemInvariant("Junie released metadata anchor exceeds usize")
     })?;
-    let mut file = File::open(path)?;
-    file.seek(SeekFrom::Start(anchor.start))?;
-    let mut bytes = vec![0_u8; length];
-    file.read_exact(&mut bytes)?;
+    let opened = session_path.open_events()?;
+    let mut bytes = opened.read_exact_range(
+        anchor.start,
+        length,
+        crate::MAX_PROVIDER_JSONL_LINE_BYTES + 2,
+    )?;
     if bytes.last() == Some(&b'\n') {
         bytes.pop();
         if bytes.last() == Some(&b'\r') {
@@ -495,8 +497,7 @@ pub(super) fn plan_cursor(
                 ),
             )?;
             let revision_matches = cursor.source_revision == observation.source_revision();
-            let prefix_is_proven =
-                released_jsonl_prefix_is_proven(&path.events_path, &cursor.native_position)?;
+            let prefix_is_proven = released_jsonl_prefix_is_proven(path, &cursor.native_position)?;
             // The empty boundary proves no consumed bytes. A changed source
             // revision therefore needs a replacement generation.
             if !prefix_is_proven || (offset == 0 && !revision_matches) {
@@ -511,17 +512,14 @@ pub(super) fn plan_cursor(
             let meta = bounded_junie_index_meta(&path.index_meta);
             let checkpoint = cursor.checkpoint;
             let title = match checkpoint.title_anchor.as_ref() {
-                Some(anchor) => released_anchor_value(
-                    &path.events_path,
-                    Some(anchor),
-                    "AgentTaskNameUpdatedEvent",
-                    "name",
-                )?,
+                Some(anchor) => {
+                    released_anchor_value(path, Some(anchor), "AgentTaskNameUpdatedEvent", "name")?
+                }
                 None => meta.task_name,
             };
             let cwd = match checkpoint.cwd_anchor.as_ref() {
                 Some(anchor) => released_anchor_value(
-                    &path.events_path,
+                    path,
                     Some(anchor),
                     "CurrentDirectoryUpdatedEvent",
                     "currentDirectory",
@@ -558,7 +556,7 @@ pub(super) fn plan_cursor(
                         offset,
                         next_ordinal: checkpoint.next_ordinal,
                         next_event_index: checkpoint.provider_event_index,
-                        prefix_sha256: hash_prefix(&path.events_path, offset)?,
+                        prefix_sha256: hash_prefix(path, offset)?,
                         state: RuntimeState {
                             started_at_ms: checkpoint.started_at.timestamp_millis(),
                             last_ts_ms: checkpoint.last_ts.timestamp_millis(),
@@ -581,7 +579,7 @@ pub(super) fn plan_cursor(
                 |pending| (pending.end_offset, pending.after_prefix_sha256),
             );
             let prefix_matches = observation.events_file.length >= prefix_boundary
-                && hash_prefix(&path.events_path, prefix_boundary)? == expected_prefix;
+                && hash_prefix(path, prefix_boundary)? == expected_prefix;
             if cursor.retired || !same_physical || !prefix_matches {
                 let generation =
                     cursor
@@ -615,8 +613,12 @@ pub(super) fn plan_cursor(
     }
 }
 
-pub(super) fn hash_prefix(path: &Path, length: u64) -> Result<[u8; 32]> {
-    let mut file = File::open(path)?;
+pub(super) fn hash_prefix(session_path: &JunieSessionPath, length: u64) -> Result<[u8; 32]> {
+    let opened = session_path.open_events()?;
+    if opened.len() < length {
+        return Err(CaptureError::SourceChangedDuringCapture);
+    }
+    let mut file = opened.file().try_clone()?;
     let mut remaining = length;
     let mut digest = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
@@ -630,5 +632,6 @@ pub(super) fn hash_prefix(path: &Path, length: u64) -> Result<[u8; 32]> {
         digest.update(&buffer[..read]);
         remaining = remaining.saturating_sub(read as u64);
     }
+    opened.revalidate()?;
     Ok(digest.finalize().into())
 }

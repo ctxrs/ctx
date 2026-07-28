@@ -71,6 +71,7 @@ pub(crate) fn import_junie_nativepath(
                     return Ok(());
                 }
             }
+            inventory.revalidate()?;
             summary.merge_from(retire_missing(
                 store,
                 &context,
@@ -109,39 +110,55 @@ pub(super) struct Inventory {
     pub(super) root_missing: bool,
     pub(super) index_rejection_count: u64,
     pub(super) index_rejections: Vec<ProviderImportFailure>,
+    authority: Option<crate::common::io::ProviderSourceRoot>,
+}
+
+impl Inventory {
+    fn revalidate(&self) -> Result<()> {
+        match self.authority.as_ref() {
+            Some(authority) => authority.revalidate(),
+            None if self.root_missing => Ok(()),
+            None => Err(CaptureError::SystemInvariant(
+                "Junie inventory has no retained root authority",
+            )),
+        }
+    }
 }
 
 pub(super) fn discover(path: &Path) -> Result<Inventory> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+    let mut sessions = Vec::new();
+    let visit = match super::super::session_tree::visit_junie_session_event_paths(
+        path,
+        &mut |session, _| {
+            sessions.push(session);
+            Ok(())
+        },
+    ) {
+        Ok(visit) => visit,
+        Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(Inventory {
                 sessions: Vec::new(),
                 live_paths: BTreeSet::new(),
                 root_missing: true,
                 index_rejection_count: 0,
                 index_rejections: Vec::new(),
+                authority: None,
             });
         }
         Err(error) => return Err(error.into()),
-    }
-    let mut sessions = Vec::new();
-    let visit =
-        super::super::session_tree::visit_junie_session_event_paths(path, &mut |session, _| {
-            sessions.push(session);
-            Ok(())
-        })?;
+    };
     debug_assert_eq!(visit.visited, sessions.len());
-    let mut live_paths = BTreeSet::new();
-    for session in &sessions {
-        live_paths.insert(fs::canonicalize(&session.events_path)?);
-    }
+    let live_paths = sessions
+        .iter()
+        .map(|session| session.events_path.clone())
+        .collect();
     Ok(Inventory {
         sessions,
         live_paths,
         root_missing: false,
         index_rejection_count: visit.rejection_count,
         index_rejections: visit.rejections,
+        authority: visit.authority,
     })
 }
 
@@ -249,10 +266,7 @@ pub(super) fn retire_missing(
 ) -> Result<ProviderImportSummary> {
     let missing = known
         .iter()
-        .filter(|route| {
-            let comparable = fs::canonicalize(&route.path).unwrap_or_else(|_| route.path.clone());
-            !live_paths.contains(&comparable)
-        })
+        .filter(|route| !live_paths.contains(&route.path))
         .collect::<Vec<_>>();
     if missing.is_empty() {
         return Ok(ProviderImportSummary::default());

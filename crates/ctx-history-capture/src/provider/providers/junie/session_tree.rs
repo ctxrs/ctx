@@ -1,16 +1,14 @@
 use std::{
     collections::HashSet,
-    fs,
-    fs::File,
     io::{BufReader, Read},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use serde_json::{json, Value};
 
 use crate::common::io::{
-    ensure_provider_path_parents_are_not_symlinks, ensure_regular_provider_transcript_file,
-    read_provider_jsonl_line_or_skip_oversized, ProviderJsonlLineRead,
+    open_provider_source_path, read_provider_jsonl_line_or_skip_oversized,
+    OpenedProviderSourceFile, OpenedProviderSourcePath, ProviderJsonlLineRead, ProviderSourceRoot,
 };
 use crate::provider::importer::BoundedParserCheckpoint;
 use crate::provider::normalization::provider_local_preview;
@@ -37,6 +35,75 @@ pub(super) struct JunieSessionPath {
     pub(super) events_path: PathBuf,
     pub(super) index_meta: JunieIndexMeta,
     pub(super) require_supported_events: bool,
+    authority: ProviderSourceRoot,
+    events_relative: PathBuf,
+    index_authority: Option<ProviderSourceRoot>,
+    index_relative: Option<PathBuf>,
+}
+
+impl JunieSessionPath {
+    pub(super) fn open_events(&self) -> Result<OpenedProviderSourceFile> {
+        self.authority.open_file(&self.events_relative)
+    }
+
+    pub(super) fn open_index(&self) -> Result<Option<OpenedProviderSourceFile>> {
+        let (Some(authority), Some(relative)) = (
+            self.index_authority.as_ref(),
+            self.index_relative.as_deref(),
+        ) else {
+            return Ok(None);
+        };
+        match authority.open_file(relative) {
+            Ok(file) => Ok(Some(file)),
+            Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(super) fn revalidate_root(&self) -> Result<()> {
+        self.authority.revalidate()?;
+        if let Some(index_authority) = &self.index_authority {
+            index_authority.revalidate()?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+pub(super) fn junie_test_session_path(path: &Path) -> Result<JunieSessionPath> {
+    let events_path = normalized_junie_authority_path(path)?;
+    let parent =
+        events_path
+            .parent()
+            .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
+                path: events_path.clone(),
+                reason: "Junie test events path has no parent authority",
+            })?;
+    let name =
+        events_path
+            .file_name()
+            .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
+                path: events_path.clone(),
+                reason: "Junie test events path has no file name",
+            })?;
+    let authority = ProviderSourceRoot::open(parent)?;
+    let events_relative = PathBuf::from(name);
+    authority.open_file(&events_relative)?.revalidate()?;
+    let session_id = junie_session_id_from_events_path(&events_path)?;
+    Ok(JunieSessionPath {
+        events_path,
+        index_meta: JunieIndexMeta {
+            session_id,
+            ..JunieIndexMeta::default()
+        },
+        require_supported_events: true,
+        authority,
+        events_relative,
+        index_authority: None,
+        index_relative: None,
+    })
 }
 
 struct JunieIndex {
@@ -51,152 +118,234 @@ pub(super) struct JunieSessionTreeVisit {
     pub(super) visited: usize,
     pub(super) rejection_count: u64,
     pub(super) rejections: Vec<ProviderImportFailure>,
+    pub(super) authority: Option<ProviderSourceRoot>,
 }
 
 pub(super) fn visit_junie_session_event_paths(
     path: &Path,
     visit: &mut dyn FnMut(JunieSessionPath, usize) -> Result<()>,
 ) -> Result<JunieSessionTreeVisit> {
-    let metadata = fs::symlink_metadata(path)?;
-    let file_type = metadata.file_type();
-    if file_type.is_symlink() {
-        return Err(CaptureError::InvalidProviderTranscriptPath {
-            path: path.to_path_buf(),
-            reason: "symlinked provider transcript roots are rejected",
-        });
-    }
-    ensure_provider_path_parents_are_not_symlinks(path)?;
-    if file_type.is_file() {
-        if path.file_name().and_then(|name| name.to_str()) != Some("events.jsonl") {
+    let requested = normalized_junie_authority_path(path)?;
+    let opened = open_provider_source_path(&requested)?;
+    if let OpenedProviderSourcePath::File(file) = opened {
+        if requested.file_name().and_then(|name| name.to_str()) != Some("events.jsonl") {
+            file.revalidate()?;
             return Ok(JunieSessionTreeVisit::default());
         }
-        let session_id = junie_session_id_from_events_path(path)?;
+        let session_dir =
+            requested
+                .parent()
+                .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
+                    path: requested.clone(),
+                    reason: "Junie events.jsonl path has no session directory",
+                })?;
+        let index_root =
+            session_dir
+                .parent()
+                .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
+                    path: requested.clone(),
+                    reason: "Junie events.jsonl path has no retained tree root",
+                })?;
+        let authority = ProviderSourceRoot::open(session_dir)?;
+        let index_authority = ProviderSourceRoot::open(index_root)?;
+        let events_relative = PathBuf::from("events.jsonl");
+        authority.open_file(&events_relative)?.revalidate()?;
+        file.revalidate()?;
+        let events_path = authority.named_path().join(&events_relative);
+        let session_id = junie_session_id_from_events_path(&events_path)?;
+        let index_relative = PathBuf::from("index.jsonl");
         let index_meta =
-            junie_index_meta_for_events_path(path, &session_id).unwrap_or_else(|| JunieIndexMeta {
-                session_id,
-                ..JunieIndexMeta::default()
-            });
+            junie_index_meta_for_authority(&index_authority, &index_relative, &session_id)
+                .unwrap_or_else(|| JunieIndexMeta {
+                    session_id,
+                    ..JunieIndexMeta::default()
+                });
         visit(
             JunieSessionPath {
-                events_path: path.to_path_buf(),
+                events_path,
                 index_meta,
                 require_supported_events: true,
+                authority: authority.clone(),
+                events_relative,
+                index_authority: Some(index_authority.clone()),
+                index_relative: Some(index_relative),
             },
             0,
         )?;
+        authority.revalidate()?;
+        index_authority.revalidate()?;
         return Ok(JunieSessionTreeVisit {
             visited: 1,
+            authority: Some(authority),
             ..JunieSessionTreeVisit::default()
         });
     }
-    if !file_type.is_dir() {
-        return Ok(JunieSessionTreeVisit::default());
-    }
-
-    let direct_events = path.join("events.jsonl");
-    if direct_events.is_file() {
-        ensure_regular_provider_transcript_file(&direct_events)?;
-        let session_id = junie_session_id_from_events_path(&direct_events)?;
-        let index_meta = junie_index_meta_for_events_path(&direct_events, &session_id)
-            .unwrap_or_else(|| JunieIndexMeta {
-                session_id,
-                ..JunieIndexMeta::default()
+    let OpenedProviderSourcePath::Directory(selected_directory) = opened else {
+        return Err(CaptureError::SystemInvariant(
+            "Junie root classification is incomplete",
+        ));
+    };
+    match selected_directory.open_child(std::ffi::OsStr::new("events.jsonl")) {
+        Ok(OpenedProviderSourcePath::File(events)) => {
+            let parent =
+                requested
+                    .parent()
+                    .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
+                        path: requested.clone(),
+                        reason: "Junie session directory has no retained tree parent",
+                    })?;
+            let authority = selected_directory.authority_root();
+            let index_authority = ProviderSourceRoot::open(parent)?;
+            let events_relative = PathBuf::from("events.jsonl");
+            authority.open_file(&events_relative)?.revalidate()?;
+            events.revalidate()?;
+            let events_path = authority.named_path().join(&events_relative);
+            let session_id = junie_session_id_from_events_path(&events_path)?;
+            let index_relative = PathBuf::from("index.jsonl");
+            let index_meta =
+                junie_index_meta_for_authority(&index_authority, &index_relative, &session_id)
+                    .unwrap_or_else(|| JunieIndexMeta {
+                        session_id,
+                        ..JunieIndexMeta::default()
+                    });
+            visit(
+                JunieSessionPath {
+                    events_path,
+                    index_meta,
+                    require_supported_events: true,
+                    authority: authority.clone(),
+                    events_relative,
+                    index_authority: Some(index_authority.clone()),
+                    index_relative: Some(index_relative),
+                },
+                0,
+            )?;
+            authority.revalidate()?;
+            index_authority.revalidate()?;
+            return Ok(JunieSessionTreeVisit {
+                visited: 1,
+                authority: Some(authority),
+                ..JunieSessionTreeVisit::default()
             });
-        visit(
-            JunieSessionPath {
-                events_path: direct_events,
-                index_meta,
-                require_supported_events: true,
-            },
-            0,
-        )?;
-        return Ok(JunieSessionTreeVisit {
-            visited: 1,
-            ..JunieSessionTreeVisit::default()
-        });
+        }
+        Ok(OpenedProviderSourcePath::Directory(directory)) => directory.revalidate()?,
+        Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
     }
 
-    let index_path = path.join("index.jsonl");
-    if !index_path.is_file() {
-        return Ok(JunieSessionTreeVisit::default());
-    }
+    let authority = selected_directory.authority_root();
+    let index_relative = PathBuf::from("index.jsonl");
     let JunieIndex {
         ordered_metas,
         session_ids: indexed_session_ids,
         rejection_count,
         rejections,
-    } = read_junie_index(&index_path)?;
+    } = match read_junie_index(&authority, &index_relative) {
+        Ok(index) => index,
+        Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            authority.revalidate()?;
+            return Ok(JunieSessionTreeVisit {
+                authority: Some(authority),
+                ..JunieSessionTreeVisit::default()
+            });
+        }
+        Err(error) => return Err(error),
+    };
     let mut visited = 0_usize;
     for meta in ordered_metas {
-        let events_path = path.join(&meta.session_id).join("events.jsonl");
-        if events_path.is_file() {
-            ensure_regular_provider_transcript_file(&events_path)?;
-            let ordinal = visited;
-            visit(
-                JunieSessionPath {
-                    events_path,
-                    index_meta: meta,
-                    require_supported_events: true,
-                },
-                ordinal,
-            )?;
-            visited = visited.saturating_add(1);
-        }
-    }
-
-    let mut previous_session_id: Option<String> = None;
-    loop {
-        let mut next_session: Option<(String, PathBuf)> = None;
-        for entry in fs::read_dir(path)? {
-            let entry = entry?;
-            if !entry.file_type()?.is_dir() {
+        let events_relative = PathBuf::from(&meta.session_id).join("events.jsonl");
+        let events = match authority.open_path(&events_relative) {
+            Ok(OpenedProviderSourcePath::File(events)) => events,
+            Ok(OpenedProviderSourcePath::Directory(directory)) => {
+                directory.revalidate()?;
                 continue;
             }
-            let Some(session_id) = entry.file_name().to_str().map(str::to_owned) else {
-                continue;
-            };
-            if !junie_session_id_is_safe(&session_id)
-                || previous_session_id
-                    .as_ref()
-                    .is_some_and(|previous| session_id.as_str() <= previous.as_str())
-                || next_session
-                    .as_ref()
-                    .is_some_and(|(next, _)| session_id.as_str() >= next.as_str())
-            {
-                continue;
+            Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                continue
             }
-            next_session = Some((session_id, entry.path()));
-        }
-        let Some((session_id, session_dir)) = next_session else {
-            break;
+            Err(error) => return Err(error),
         };
-        previous_session_id = Some(session_id.clone());
-        if indexed_session_ids.contains(&session_id) {
-            continue;
-        }
-        let events_path = session_dir.join("events.jsonl");
-        if !events_path.is_file() {
-            continue;
-        }
-        ensure_regular_provider_transcript_file(&events_path)?;
+        events.revalidate()?;
         let ordinal = visited;
         visit(
             JunieSessionPath {
-                events_path,
-                index_meta: JunieIndexMeta {
-                    session_id,
-                    ..JunieIndexMeta::default()
-                },
-                require_supported_events: false,
+                events_path: authority.named_path().join(&events_relative),
+                index_meta: meta,
+                require_supported_events: true,
+                authority: authority.clone(),
+                events_relative,
+                index_authority: Some(authority.clone()),
+                index_relative: Some(index_relative.clone()),
             },
             ordinal,
         )?;
         visited = visited.saturating_add(1);
     }
+
+    let names = selected_directory.entries(MAX_JUNIE_INDEX_ENTRIES.saturating_add(1))?;
+    if names.len() > MAX_JUNIE_INDEX_ENTRIES {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: requested,
+            reason: "Junie session tree exceeds the bounded directory entry limit",
+        });
+    }
+    for name in names {
+        let Some(session_id) = name.to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !junie_session_id_is_safe(&session_id) {
+            continue;
+        }
+        let Ok(OpenedProviderSourcePath::Directory(session_dir)) =
+            selected_directory.open_child(&name)
+        else {
+            continue;
+        };
+        if indexed_session_ids.contains(&session_id) {
+            session_dir.revalidate()?;
+            continue;
+        }
+        let events = match session_dir.open_child(std::ffi::OsStr::new("events.jsonl")) {
+            Ok(OpenedProviderSourcePath::File(events)) => events,
+            Ok(OpenedProviderSourcePath::Directory(directory)) => {
+                directory.revalidate()?;
+                session_dir.revalidate()?;
+                continue;
+            }
+            Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                session_dir.revalidate()?;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let events_relative = PathBuf::from(&session_id).join("events.jsonl");
+        events.revalidate()?;
+        session_dir.revalidate()?;
+        let ordinal = visited;
+        visit(
+            JunieSessionPath {
+                events_path: authority.named_path().join(&events_relative),
+                index_meta: JunieIndexMeta {
+                    session_id,
+                    ..JunieIndexMeta::default()
+                },
+                require_supported_events: false,
+                authority: authority.clone(),
+                events_relative,
+                index_authority: Some(authority.clone()),
+                index_relative: Some(index_relative.clone()),
+            },
+            ordinal,
+        )?;
+        visited = visited.saturating_add(1);
+    }
+    selected_directory.revalidate()?;
+    authority.revalidate()?;
     Ok(JunieSessionTreeVisit {
         visited,
         rejection_count,
         rejections,
+        authority: Some(authority),
     })
 }
 
@@ -213,10 +362,6 @@ pub(super) fn junie_provider_session_id(session_path: &JunieSessionPath) -> Resu
         });
     }
     Ok(provider_session_id)
-}
-
-pub(super) fn junie_index_path_for_events(path: &Path) -> Option<PathBuf> {
-    Some(path.parent()?.parent()?.join("index.jsonl"))
 }
 
 pub(super) fn bounded_junie_index_meta(meta: &JunieIndexMeta) -> JunieIndexMeta {
@@ -253,22 +398,21 @@ pub(super) fn bounded_junie_index_meta(meta: &JunieIndexMeta) -> JunieIndexMeta 
     }
 }
 
-pub(super) fn junie_index_meta_for_events_path(
-    path: &Path,
+fn junie_index_meta_for_authority(
+    authority: &ProviderSourceRoot,
+    index_relative: &Path,
     session_id: &str,
 ) -> Option<JunieIndexMeta> {
-    let index_path = junie_index_path_for_events(path)?;
-    read_junie_index(&index_path)
+    read_junie_index(authority, index_relative)
         .ok()?
         .ordered_metas
         .into_iter()
         .find(|meta| meta.session_id == session_id)
 }
 
-fn read_junie_index(path: &Path) -> Result<JunieIndex> {
-    ensure_regular_provider_transcript_file(path)?;
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
+fn read_junie_index(authority: &ProviderSourceRoot, relative: &Path) -> Result<JunieIndex> {
+    let opened = authority.open_file(relative)?;
+    let mut reader = BufReader::new(opened.file().try_clone()?);
     let mut line = Vec::new();
     let mut entry_count = 0_usize;
     let mut total_bytes = 0_usize;
@@ -345,12 +489,40 @@ fn read_junie_index(path: &Path) -> Result<JunieIndex> {
             ordered_metas.push(meta);
         }
     }
+    opened.revalidate()?;
+    authority.revalidate()?;
     Ok(JunieIndex {
         ordered_metas,
         session_ids,
         rejection_count,
         rejections,
     })
+}
+
+fn normalized_junie_authority_path(path: &Path) -> Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(CaptureError::InvalidProviderTranscriptPath {
+                        path: path.to_path_buf(),
+                        reason: "Junie root cannot escape the filesystem root",
+                    });
+                }
+            }
+        }
+    }
+    Ok(normalized)
 }
 
 fn record_index_rejection(

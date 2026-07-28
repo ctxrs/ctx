@@ -114,7 +114,7 @@ pub(super) fn replay_output_source(
         || core_cursor.device != observation.events_file.device
         || core_cursor.inode != observation.events_file.inode
         || core_cursor.frontier.offset != observation.events_file.length
-        || hash_prefix(&session_path.events_path, core_cursor.frontier.offset)?
+        || hash_prefix(session_path, core_cursor.frontier.offset)?
             != core_cursor.frontier.prefix_sha256
     {
         return Ok(());
@@ -148,7 +148,7 @@ pub(super) fn replay_output_source(
         if !observation.revalidate(session_path)? {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
-        let parsed = parse_turn(&session_path.events_path, &state.cursor.frontier)?;
+        let parsed = parse_session_turn(session_path, &state.cursor.frontier)?;
         validate_output_pending_replay(&state.cursor.frontier, &parsed)?;
         if parsed.incomplete {
             return Ok(());
@@ -300,7 +300,7 @@ pub(super) fn output_replay_state(
                 && cursor.device == observation.events_file.device
                 && cursor.inode == observation.events_file.inode
                 && observation.events_file.length >= prefix_boundary
-                && hash_prefix(&session_path.events_path, prefix_boundary)
+                && hash_prefix(session_path, prefix_boundary)
                     .is_ok_and(|digest| digest == expected_prefix)
         });
     let rewrite = !can_resume;

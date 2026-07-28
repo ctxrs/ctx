@@ -1,9 +1,11 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, File},
     io::{self, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
+
+#[cfg(test)]
+use std::fs;
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{

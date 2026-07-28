@@ -166,9 +166,12 @@ pub(super) fn timestamp(millis: i64) -> DateTime<Utc> {
     DateTime::<Utc>::from_timestamp_millis(millis).unwrap_or(DateTime::<Utc>::UNIX_EPOCH)
 }
 
-pub(super) fn parse_turn(path: &Path, frontier: &Frontier) -> Result<ParsedTurn> {
-    crate::common::io::ensure_regular_provider_transcript_file(path)?;
-    let mut reader = BufReader::new(File::open(path)?);
+pub(super) fn parse_session_turn(
+    session_path: &JunieSessionPath,
+    frontier: &Frontier,
+) -> Result<ParsedTurn> {
+    let opened = session_path.open_events()?;
+    let mut reader = BufReader::new(opened.file().try_clone()?);
     reader.seek(SeekFrom::Start(frontier.offset))?;
     let start_offset = frontier.offset;
     let start_ordinal = frontier.next_ordinal;
@@ -269,6 +272,7 @@ pub(super) fn parse_turn(path: &Path, frontier: &Frontier) -> Result<ParsedTurn>
             );
             rows.clear();
             outputs.clear();
+            opened.revalidate()?;
             return Ok(ParsedTurn {
                 rows,
                 outputs,
@@ -438,8 +442,9 @@ pub(super) fn parse_turn(path: &Path, frontier: &Frontier) -> Result<ParsedTurn>
     }
 
     let end_offset = reader.stream_position()?;
-    let after_prefix_sha256 = hash_prefix(path, end_offset)?;
-    let turn_sha256 = hash_range(path, start_offset, end_offset)?;
+    let after_prefix_sha256 = hash_prefix(session_path, end_offset)?;
+    let turn_sha256 = hash_range(session_path, start_offset, end_offset)?;
+    opened.revalidate()?;
     Ok(ParsedTurn {
         rows,
         outputs,
@@ -459,6 +464,12 @@ pub(super) fn parse_turn(path: &Path, frontier: &Frontier) -> Result<ParsedTurn>
     })
 }
 
+#[cfg(test)]
+pub(super) fn parse_turn(path: &Path, frontier: &Frontier) -> Result<ParsedTurn> {
+    let session = super::super::session_tree::junie_test_session_path(path)?;
+    parse_session_turn(&session, frontier)
+}
+
 pub(super) fn strip_jsonl_ending(line: &[u8]) -> &[u8] {
     line.strip_suffix(b"\n")
         .unwrap_or(line)
@@ -466,11 +477,16 @@ pub(super) fn strip_jsonl_ending(line: &[u8]) -> &[u8] {
         .unwrap_or_else(|| line.strip_suffix(b"\n").unwrap_or(line))
 }
 
-pub(super) fn hash_range(path: &Path, start: u64, end: u64) -> Result<[u8; 32]> {
+pub(super) fn hash_range(
+    session_path: &JunieSessionPath,
+    start: u64,
+    end: u64,
+) -> Result<[u8; 32]> {
     let length = end
         .checked_sub(start)
         .ok_or(CaptureError::SystemInvariant("Junie range moved backwards"))?;
-    let mut file = File::open(path)?;
+    let opened = session_path.open_events()?;
+    let mut file = opened.file().try_clone()?;
     file.seek(SeekFrom::Start(start))?;
     let mut remaining = length;
     let mut digest = Sha256::new();
@@ -485,6 +501,7 @@ pub(super) fn hash_range(path: &Path, start: u64, end: u64) -> Result<[u8; 32]> 
         digest.update(&buffer[..read]);
         remaining = remaining.saturating_sub(read as u64);
     }
+    opened.revalidate()?;
     Ok(digest.finalize().into())
 }
 
