@@ -147,16 +147,49 @@ impl CodexEventRow {
     }
 
     pub(crate) fn lexical_preview(&self) -> Option<String> {
-        ["text", "summary", "command", "arguments_preview"]
+        let direct = ["text", "preview", "summary", "command", "message"]
             .into_iter()
             .find_map(|field| {
                 self.provider_event
                     .payload
                     .get(field)
                     .and_then(Value::as_str)
+                    .map(str::trim)
                     .filter(|text| !text.is_empty())
+            });
+        if let Some(direct) = direct {
+            return Some(codex_local_preview(direct, CODEX_LEXICAL_PREVIEW_CHARS).0);
+        }
+
+        let structured = ["tool", "name", "arguments_preview", "status"]
+            .into_iter()
+            .filter_map(|field| {
+                self.provider_event
+                    .payload
+                    .get(field)
+                    .and_then(|value| match value {
+                        Value::String(value) if !value.trim().is_empty() => {
+                            Some(format!("{field}: {}", value.trim()))
+                        }
+                        Value::Number(_) | Value::Bool(_) => Some(format!("{field}: {value}")),
+                        _ => None,
+                    })
             })
-            .map(|text| codex_local_preview(text, CODEX_LEXICAL_PREVIEW_CHARS).0)
+            .collect::<Vec<_>>()
+            .join(" | ");
+        if !structured.is_empty() {
+            return Some(codex_local_preview(&structured, CODEX_LEXICAL_PREVIEW_CHARS).0);
+        }
+
+        let role = self
+            .provider_event
+            .role
+            .map(|role| role.as_str())
+            .unwrap_or("event");
+        Some(format!(
+            "{} {role}",
+            self.provider_event.event_type.as_str()
+        ))
     }
 }
 
