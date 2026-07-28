@@ -109,17 +109,44 @@ fn source_backed_cold_and_noop_extract_stable_bounded_documents_and_frontiers() 
         .iter()
         .all(|document| document.body.chars().count() <= MAX_BODY_PREVIEW_CHARS));
     assert_eq!(cold_documents[0].session_id, leaf.session_id());
+    assert_eq!(cold_documents[0].parent_session_id, None);
+    assert_eq!(cold_documents[0].root_session_id, leaf.session_id());
     assert_eq!(&cold_documents[0].source, leaf.source_key());
+    assert_eq!(
+        cold_documents[0].provider_session_id.as_deref(),
+        Some("session-1")
+    );
+    assert_eq!(cold_documents[0].branch.as_deref(), Some("main"));
+    assert_eq!(cold_documents[0].source_path.as_deref(), primary.to_str());
+    assert_eq!(cold_documents[0].agent_type, "primary");
+    assert!(cold_documents[0].is_primary);
+    assert_eq!(cold_documents[0].cwd.as_deref(), Some("/workspace/project"));
     assert_eq!(cold_documents[1].touched_files, ["src/lib.rs"]);
     assert!(cold_frontiers
         .last()
         .is_some_and(|frontier| frontier.certified_prefix_bytes() > 0));
 
-    let (noop, noop_documents, noop_frontiers) = scan(leaf, Some(&cold.source));
+    let (noop, noop_documents, noop_frontiers) = scan(leaf.clone(), Some(&cold.source));
     assert_eq!(noop.disposition, ClaudeSourceBackedDisposition::Unchanged);
     assert!(noop_documents.is_empty());
     assert_eq!(noop.source, cold.source);
     assert!(noop_frontiers.is_empty());
+
+    let subagent_leaf = inventory
+        .leaves()
+        .iter()
+        .find(|leaf| leaf.provider_session_id().contains("/subagents/"))
+        .unwrap()
+        .clone();
+    let (_, subagent_documents, _) = scan(subagent_leaf, None);
+    assert_eq!(subagent_documents.len(), 1);
+    assert_eq!(
+        subagent_documents[0].parent_session_id,
+        Some(leaf.session_id())
+    );
+    assert_eq!(subagent_documents[0].root_session_id, leaf.session_id());
+    assert_eq!(subagent_documents[0].agent_type, "subagent");
+    assert!(!subagent_documents[0].is_primary);
 }
 
 #[test]

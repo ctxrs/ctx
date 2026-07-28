@@ -28,7 +28,8 @@ use super::{
     checkpoint::ChangeSignal,
     source::{open_discovered_file, revalidate_open_file, ClaudeDiscovery, ClaudeSessionKey},
     ClaudeEventKind, ClaudeNativeOwnedPage, ClaudeNativePathError, ClaudeNativeProfile,
-    ClaudeNativeScanner, ClaudeRetainedRow, DiscoveredClaudeSession, ParseCheckpoint,
+    ClaudeNativeScanner, ClaudeRetainedRow, ClaudeSessionMetadata, DiscoveredClaudeSession,
+    ParseCheckpoint, SessionLayout,
 };
 use crate::{CLAUDE_PROJECTS_SOURCE_FORMAT, MAX_PROVIDER_JSONL_LINE_BYTES};
 
@@ -90,7 +91,11 @@ pub(crate) struct ClaudeSourceBackedLeaf {
     source: DiscoveredClaudeSession,
     source_key: SourceKey,
     session_id: StableEntityId,
+    parent_session_id: Option<StableEntityId>,
+    root_session_id: StableEntityId,
     native_session_key: TypedKey,
+    agent_type: &'static str,
+    is_primary: bool,
 }
 
 impl ClaudeSourceBackedLeaf {
@@ -167,25 +172,37 @@ fn bind_discovery(
     let mut source_ids = HashSet::with_capacity(discovery.sessions.len());
     let mut leaves = Vec::with_capacity(discovery.sessions.len());
     for source in &discovery.sessions {
-        let native_session_key = claude_session_typed_key(&source.key)?;
-        let source_key = claude_source_key(&native_session_key)?;
+        let (native_session_key, source_key, session_id) = claude_session_identity(&source.key)?;
         if !source_ids.insert(source_key.identity().digest()) {
             return Err(ClaudeSourceBackedError::DuplicateLeaf(
                 source.key.provider_session_id(),
             ));
         }
-        let session_key =
-            NativeSessionKey::native_id(SESSION_KEY_NAMESPACE, native_session_key.clone())?;
-        let session_id = derive_session_id(SessionIdentityInput {
-            source: &source_key,
-            logical_session_kind: LOGICAL_SESSION_KIND,
-            native_session_key: &session_key,
-        })?;
+        let root_key = ClaudeSessionKey {
+            root_session_id: source.key.root_session_id.clone(),
+            workflow_run_id: None,
+            agent_id: None,
+        };
+        let root_session_id = if source.layout == SessionLayout::Primary {
+            session_id
+        } else {
+            claude_session_identity(&root_key)?.2
+        };
+        let parent_session_id = source.key.agent_id.as_ref().map(|_| root_session_id);
+        let (agent_type, is_primary) = match source.layout {
+            SessionLayout::Primary => ("primary", true),
+            SessionLayout::Subagent => ("subagent", false),
+            SessionLayout::WorkflowSubagent => ("workflow_subagent", false),
+        };
         leaves.push(ClaudeSourceBackedLeaf {
             source: source.clone(),
             source_key,
             session_id,
+            parent_session_id,
+            root_session_id,
             native_session_key,
+            agent_type,
+            is_primary,
         });
     }
     let observation = inventory_observation(discovery)?;
@@ -245,6 +262,21 @@ fn claude_source_key(native_session_key: &TypedKey) -> ClaudeSourceBackedResult<
         1,
         anchor,
     )?)
+}
+
+fn claude_session_identity(
+    key: &ClaudeSessionKey,
+) -> ClaudeSourceBackedResult<(TypedKey, SourceKey, StableEntityId)> {
+    let native_session_key = claude_session_typed_key(key)?;
+    let source_key = claude_source_key(&native_session_key)?;
+    let session_key =
+        NativeSessionKey::native_id(SESSION_KEY_NAMESPACE, native_session_key.clone())?;
+    let session_id = derive_session_id(SessionIdentityInput {
+        source: &source_key,
+        logical_session_kind: LOGICAL_SESSION_KIND,
+        native_session_key: &session_key,
+    })?;
+    Ok((native_session_key, source_key, session_id))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -310,6 +342,7 @@ impl ClaudeSourceBackedScanner {
             .inner
             .checkpoint_at(&page.next_safe_frontier, page.terminal);
         let next_frontier = source_frontier(&checkpoint)?;
+        let session = page.session.clone();
         let mut documents = Vec::with_capacity(page.rows.len());
         for row in page.rows {
             if self.last_retained_ordinal != Some(row.identity.source_record_ordinal) {
@@ -319,7 +352,7 @@ impl ClaudeSourceBackedScanner {
                     .ok_or(ClaudeSourceBackedError::CountMismatch)?;
                 self.last_retained_ordinal = Some(row.identity.source_record_ordinal);
             }
-            documents.push(lexical_document(&self.leaf, row)?);
+            documents.push(lexical_document(&self.leaf, &session, row)?);
             self.staged_documents = self
                 .staged_documents
                 .checked_add(1)
@@ -478,6 +511,7 @@ fn checked_add(left: u64, right: u64) -> ClaudeSourceBackedResult<u64> {
 
 fn lexical_document(
     leaf: &ClaudeSourceBackedLeaf,
+    session: &ClaudeSessionMetadata,
     row: ClaudeRetainedRow,
 ) -> ClaudeSourceBackedResult<LexicalDocument> {
     let native_item_key = native_item_key(&row)?;
@@ -525,9 +559,15 @@ fn lexical_document(
     Ok(LexicalDocument {
         event_id,
         session_id: leaf.session_id,
+        parent_session_id: leaf.parent_session_id,
+        root_session_id: leaf.root_session_id,
         source: leaf.source_key.clone(),
         locator,
         provider_session_id: Some(leaf.source.key.provider_session_id()),
+        branch: session.git_branch.clone(),
+        source_path: Some(leaf.source.canonical_path.to_string_lossy().into_owned()),
+        agent_type: leaf.agent_type.to_owned(),
+        is_primary: leaf.is_primary,
         event_sequence,
         occurred_at_unix_ms: row
             .occurred_at
@@ -538,7 +578,7 @@ fn lexical_document(
         role: row.role.clone(),
         body: lexical_preview(&row),
         workspace: leaf.source.project_dir.to_str().map(str::to_owned),
-        cwd: None,
+        cwd: session.cwd.clone(),
         touched_files,
     })
 }
