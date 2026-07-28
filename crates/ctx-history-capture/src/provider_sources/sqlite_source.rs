@@ -5,50 +5,47 @@
 //! pathname SQLite must open. It does not canonicalize or independently walk
 //! the authority root.
 //!
-//! On Linux, the bundled `unix` VFS is opened read-only. Before any provider SQL
-//! is exposed, this module obtains SQLite's public `sqlite3_file`, asks that
-//! exact VFS object to take a POSIX shared lock, and uses `F_OFD_GETLK` on the
-//! caller's root-bound handle to prove that the lock is on the same file.
-//! Ambiguous pre-existing lock state fails closed. A read transaction is then
-//! pinned and the expected handle is revalidated before the guard is returned
-//! and again when it is finished.
+//! [`open_root_handle_sqlite_source_snapshot`] is the adapter-facing opener. On
+//! Linux it opens DB/WAL/SHM names once, relative to a retained authorized
+//! parent directory, then registers a per-snapshot VFS implemented in
+//! `root_handle_sqlite_vfs`:
 //!
-//! Main-file-only snapshots are supported. Stock SQLite cannot provide the same
-//! proof for an active Unix WAL family:
+//! - `xOpen` duplicates only the admitted DB/WAL handles and rejects journals,
+//!   temporary files, writes, truncation, deletion, and unknown names;
+//! - main and SHM locking use OFD locks that conflict with ordinary SQLite
+//!   POSIX locks;
+//! - SHM is `MAP_SHARED | PROT_READ` and reported as read-only, so SQLite can
+//!   coordinate a WAL reader without modifying provider read marks; and
+//! - the pinned WAL prefix, family identities, named routes, and parent handle
+//!   are revalidated while the read transaction is still active.
 //!
-//! - `SQLITE_FCNTL_FILE_POINTER` exposes `main`, so its public `xLock` can be
-//!   challenged against the authorized handle;
-//! - `SQLITE_FCNTL_JOURNAL_POINTER` exposes the WAL, but bundled SQLite assigns
-//!   WAL files `nolockIoMethods`, so its public `xLock` creates no observable
-//!   lock on the authorized WAL handle; and
-//! - SQLite exposes no public native handle or `sqlite3_file` for SHM.
+//! The connection is query-only, disables checkpoint-on-close, stores temporary
+//! data in memory, and never copies provider bodies. Existing rollback journals
+//! fail closed because reading them could require recovery writes.
 //!
-//! Consequently active WAL and rollback-recovery cases return typed
-//! [`SqliteSourceAccessError::UnsupportedSidecarIdentity`] before a guard is
-//! exposed. Canonical paths, `HAS_MOVED`, or endpoint `/proc/self/fd` snapshots
-//! cannot repair this missing two-handle identity bridge.
+//! [`open_sqlite_source_snapshot`] remains a main-file-only compatibility seam.
+//! It proves stock `unix` VFS main identity with an OFD lock-owner challenge and
+//! rejects WAL because stock SQLite exposes no Unix WAL/SHM native identity.
 //!
-//! The smallest safe no-copy replacement is a per-snapshot read-only VFS whose
-//! `xOpen` duplicates only the DB/WAL handles already admitted by
-//! `root_handle`, whose SHM mapping is backed by the admitted SHM handle, and
-//! whose write/delete/truncate methods always return `SQLITE_READONLY`. It must
-//! implement SQLite-compatible main/SHM locks, use a private SHM mapping so read
-//! marks never modify provider state, reject hot rollback journals and temp
-//! files, and retain/revalidate the complete admitted family before
-//! publication. A pathname-delegating VFS is insufficient because it restores
-//! the same race inside `xOpen`.
+//! macOS, FreeBSD, Windows, non-local filesystems, and Linux filesystems without
+//! procfd, coherent mmap, mount identity, and OFD locks return typed errors.
 //!
 //! # Adapter migration
 //!
-//! 1. Open the database with `OpenedProviderSourceFile`.
-//! 2. Pass its `file()` and the original SQLite pathname to
-//!    [`open_sqlite_source_snapshot`].
-//! 3. Run provider SQL only through [`SqliteSourceReadSnapshot::connection`].
-//! 4. Call [`SqliteSourceReadSnapshot::finish`] before publishing observations,
-//!    then call `OpenedProviderSourceFile::revalidate` to certify the named
-//!    authority route.
+//! 1. Retain the `ProviderSourceDirectory` containing the database.
+//! 2. Hand its retained directory handle to
+//!    [`retain_sqlite_source_directory_authority`] once; never reopen it by
+//!    pathname.
+//! 3. Pass that capability and the single database leaf to
+//!    [`open_root_handle_sqlite_source_snapshot`].
+//! 4. Run provider SQL only through [`SqliteSourceReadSnapshot::connection`].
+//!    Transaction-control SQL is denied because the guard already owns the
+//!    pinned read transaction.
+//! 5. Call [`SqliteSourceReadSnapshot::finish`] before publishing observations,
+//!    then revalidate the ordinary authority root to certify its outer route.
 
 use std::{
+    ffi::OsStr,
     fs::File,
     path::{Path, PathBuf},
 };
@@ -58,13 +55,20 @@ use thiserror::Error;
 
 #[cfg(target_os = "linux")]
 use std::{
-    ffi::CStr,
+    ffi::{c_char, c_void, CStr},
     os::{fd::AsRawFd, unix::fs::MetadataExt},
+    ptr,
     sync::Mutex,
 };
 
 #[cfg(target_os = "linux")]
 use rusqlite::{config::DbConfig, ffi, OpenFlags};
+
+pub(crate) use super::root_handle_sqlite_vfs::SqliteSourceDirectoryAuthority;
+use super::root_handle_sqlite_vfs::{
+    RootHandleSqliteFamilyEvidence, RootHandleSqliteSource, RootHandleSqliteVfs,
+    RootHandleSqliteVfsError,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SqliteSourceComponent {
@@ -110,10 +114,7 @@ pub(crate) enum SqliteSourceAccessError {
     #[error("SQLite source VFS control {operation} failed with code {code}")]
     SqliteControl { operation: &'static str, code: i32 },
     #[error("SQLite source opened through unexpected VFS {actual:?}; expected {expected:?}")]
-    UnexpectedVfs {
-        expected: &'static str,
-        actual: String,
-    },
+    UnexpectedVfs { expected: String, actual: String },
     #[error("SQLite source connection is not read-only")]
     ConnectionNotReadOnly,
     #[error("SQLite main connection identity does not match the root-bound file")]
@@ -129,6 +130,8 @@ pub(crate) enum SqliteSourceAccessError {
     },
     #[error("SQLite source snapshot transaction is no longer active")]
     SnapshotNotActive,
+    #[error(transparent)]
+    RootHandleVfs(#[from] RootHandleSqliteVfsError),
 }
 
 pub(crate) type SqliteSourceAccessResult<T> = Result<T, SqliteSourceAccessError>;
@@ -141,6 +144,8 @@ pub(crate) struct SqliteSourceEvidence {
     modified_nanoseconds: i64,
     changed_seconds: i64,
     changed_nanoseconds: i64,
+    wal_length: Option<u64>,
+    shared_memory_length: Option<u64>,
     revision: [u8; 32],
 }
 
@@ -156,6 +161,14 @@ impl SqliteSourceEvidence {
     pub(crate) fn revision(&self) -> &[u8; 32] {
         &self.revision
     }
+
+    pub(crate) fn wal_length(&self) -> Option<u64> {
+        self.wal_length
+    }
+
+    pub(crate) fn shared_memory_length(&self) -> Option<u64> {
+        self.shared_memory_length
+    }
 }
 
 /// A read-only SQLite connection whose `main` file has already been matched to
@@ -166,16 +179,23 @@ pub(crate) struct SqliteSourceReadSnapshot {
     connection: Option<Connection>,
     evidence: SqliteSourceEvidence,
     #[cfg(target_os = "linux")]
-    expected_file: File,
+    expected_file: Option<File>,
     #[cfg(target_os = "linux")]
-    expected_state: LinuxFileState,
+    expected_state: Option<LinuxFileState>,
+    root_handle_source: Option<RootHandleSqliteSource>,
+    root_handle_evidence: Option<RootHandleSqliteFamilyEvidence>,
+    root_handle_vfs: Option<RootHandleSqliteVfs>,
 }
 
 impl SqliteSourceReadSnapshot {
     pub(crate) fn connection(&self) -> SqliteSourceAccessResult<&Connection> {
-        self.connection
+        let connection = self
+            .connection
             .as_ref()
-            .ok_or(SqliteSourceAccessError::SnapshotNotActive)
+            .ok_or(SqliteSourceAccessError::SnapshotNotActive)?;
+        #[cfg(target_os = "linux")]
+        verify_snapshot_active(connection)?;
+        Ok(connection)
     }
 
     pub(crate) fn evidence(&self) -> &SqliteSourceEvidence {
@@ -191,8 +211,24 @@ impl SqliteSourceReadSnapshot {
                 .connection
                 .as_ref()
                 .ok_or(SqliteSourceAccessError::SnapshotNotActive)?;
-            verify_sqlite_file_has_not_moved(connection)?;
-            verify_expected_file(&self.expected_file, &self.expected_state)?;
+            verify_snapshot_active(connection)?;
+            if let (Some(source), Some(evidence)) = (
+                self.root_handle_source.as_ref(),
+                self.root_handle_evidence.as_ref(),
+            ) {
+                source.revalidate(evidence)?;
+            } else {
+                verify_sqlite_file_has_not_moved(connection)?;
+                verify_expected_file(
+                    self.expected_file
+                        .as_ref()
+                        .ok_or(SqliteSourceAccessError::SnapshotNotActive)?,
+                    self.expected_state
+                        .as_ref()
+                        .ok_or(SqliteSourceAccessError::SnapshotNotActive)?,
+                )?;
+            }
+            clear_snapshot_authorizer(connection)?;
             connection.execute_batch("ROLLBACK").map_err(|source| {
                 SqliteSourceAccessError::Sqlite {
                     operation: "ending the provider read snapshot",
@@ -200,6 +236,13 @@ impl SqliteSourceReadSnapshot {
                 }
             })?;
             self.connection.take();
+            self.root_handle_vfs.take();
+            if let (Some(source), Some(evidence)) = (
+                self.root_handle_source.as_ref(),
+                self.root_handle_evidence.as_ref(),
+            ) {
+                source.revalidate(evidence)?;
+            }
             return Ok(self.evidence.clone());
         }
         #[cfg(not(target_os = "linux"))]
@@ -212,8 +255,12 @@ impl SqliteSourceReadSnapshot {
 impl Drop for SqliteSourceReadSnapshot {
     fn drop(&mut self) {
         if let Some(connection) = self.connection.as_ref() {
+            #[cfg(target_os = "linux")]
+            let _ = clear_snapshot_authorizer(connection);
             let _ = connection.execute_batch("ROLLBACK");
         }
+        self.connection.take();
+        self.root_handle_vfs.take();
     }
 }
 
@@ -237,15 +284,109 @@ pub(crate) fn open_sqlite_source_snapshot(
     }
 }
 
+/// Opens a SQLite family from one retained, root-authorized parent directory.
+///
+/// Every SQLite-read file is opened relative to `authority` before the VFS is
+/// registered. SQLite receives only duplicated handles for those exact
+/// objects; it never reopens the provider pathname.
+pub(crate) fn open_root_handle_sqlite_source_snapshot(
+    authority: &SqliteSourceDirectoryAuthority,
+    database_name: &OsStr,
+) -> SqliteSourceAccessResult<SqliteSourceReadSnapshot> {
+    open_root_handle_sqlite_source_snapshot_inner(authority, database_name, || {})
+}
+
+/// Retains the exact parent-directory handle supplied by the ordinary
+/// provider-source authority layer.
+///
+/// This is the narrow handoff seam until `ProviderSourceDirectory` exposes its
+/// retained handle directly. Callers must not construct it from a pathname
+/// reopen.
+pub(crate) fn retain_sqlite_source_directory_authority(
+    authorized_parent: &File,
+) -> SqliteSourceAccessResult<SqliteSourceDirectoryAuthority> {
+    SqliteSourceDirectoryAuthority::retain(authorized_parent).map_err(Into::into)
+}
+
+fn open_root_handle_sqlite_source_snapshot_inner(
+    authority: &SqliteSourceDirectoryAuthority,
+    database_name: &OsStr,
+    before_vfs_open: impl FnOnce(),
+) -> SqliteSourceAccessResult<SqliteSourceReadSnapshot> {
+    #[cfg(target_os = "linux")]
+    {
+        let source = RootHandleSqliteSource::open(authority, database_name)?;
+        before_vfs_open();
+        let vfs = source.register_vfs()?;
+        let vfs_name = vfs.name().to_owned();
+        let connection = Connection::open_with_flags_and_vfs(
+            vfs.virtual_path(),
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            &vfs_name,
+        )
+        .map_err(|source| SqliteSourceAccessError::Sqlite {
+            operation: "opening the root-handle provider database",
+            source,
+        })?;
+        verify_requested_vfs(&connection, &vfs_name)?;
+        let sqlite_file = sqlite_main_file(&connection)?;
+        if !vfs.connection_main_matches(sqlite_file, &source)? {
+            return Err(SqliteSourceAccessError::ConnectionIdentityMismatch);
+        }
+        verify_connection_read_only(&connection)?;
+        configure_and_pin_snapshot(&connection, true)?;
+        let family_evidence = source.capture_evidence()?;
+        source.revalidate(&family_evidence)?;
+        let evidence = SqliteSourceEvidence {
+            identity: *family_evidence.revision(),
+            length: family_evidence.database_length(),
+            modified_seconds: 0,
+            modified_nanoseconds: 0,
+            changed_seconds: 0,
+            changed_nanoseconds: 0,
+            wal_length: family_evidence.wal_length(),
+            shared_memory_length: family_evidence.shared_memory_length(),
+            revision: *family_evidence.revision(),
+        };
+        return Ok(SqliteSourceReadSnapshot {
+            connection: Some(connection),
+            evidence,
+            expected_file: None,
+            expected_state: None,
+            root_handle_source: Some(source),
+            root_handle_evidence: Some(family_evidence),
+            root_handle_vfs: Some(vfs),
+        });
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (authority, database_name, before_vfs_open);
+        Err(unsupported_platform())
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+fn open_root_handle_sqlite_source_snapshot_for_test(
+    authority: &SqliteSourceDirectoryAuthority,
+    database_name: &OsStr,
+    before_vfs_open: impl FnOnce(),
+) -> SqliteSourceAccessResult<SqliteSourceReadSnapshot> {
+    open_root_handle_sqlite_source_snapshot_inner(authority, database_name, before_vfs_open)
+}
+
 #[cfg(not(target_os = "linux"))]
 fn unsupported_platform() -> SqliteSourceAccessError {
     #[cfg(target_os = "macos")]
-    let capability = "the unix-posix OFD identity challenge is not implemented";
-    #[cfg(target_os = "freebsd")]
-    let capability = "a helper process is required to observe the connection's POSIX lock owner";
-    #[cfg(target_os = "windows")]
     let capability =
-        "WIN32_GET_HANDLE proves main but SQLite exposes no native SHM identity for WAL snapshots";
+        "the root-handle VFS requires an audited descriptor-relative open and SHM lock bridge";
+    #[cfg(target_os = "freebsd")]
+    let capability =
+        "the root-handle VFS requires an audited descriptor-relative open and SHM lock bridge";
+    #[cfg(target_os = "windows")]
+    let capability = "the root-handle VFS requires audited handle-relative family opens, file identity, and WAL shared-memory locking";
     #[cfg(not(any(target_os = "macos", target_os = "freebsd", target_os = "windows")))]
     let capability = "no safe native SQLite source-family identity binding is implemented";
     SqliteSourceAccessError::UnsupportedPlatform {
@@ -335,6 +476,8 @@ impl LinuxFileState {
             modified_nanoseconds: self.modified_nanoseconds,
             changed_seconds: self.changed_seconds,
             changed_nanoseconds: self.changed_nanoseconds,
+            wal_length: None,
+            shared_memory_length: None,
             revision: revision.finalize().into(),
         }
     }
@@ -374,7 +517,7 @@ fn open_linux_snapshot(
         source,
     })?;
 
-    verify_requested_vfs(&connection)?;
+    verify_requested_vfs(&connection, UNIX_VFS)?;
     verify_connection_read_only(&connection)?;
     verify_sqlite_file_has_not_moved(&connection)?;
 
@@ -382,19 +525,25 @@ fn open_linux_snapshot(
     // snapshots are not part of it.
     verify_main_identity_with_lock_challenge(&connection, &expected_file)?;
 
-    configure_and_pin_snapshot(&connection)?;
+    configure_and_pin_snapshot(&connection, false)?;
     verify_expected_file(&expected_file, &expected_state)?;
 
     Ok(SqliteSourceReadSnapshot {
         connection: Some(connection),
         evidence: expected_state.evidence(),
-        expected_file,
-        expected_state,
+        expected_file: Some(expected_file),
+        expected_state: Some(expected_state),
+        root_handle_source: None,
+        root_handle_evidence: None,
+        root_handle_vfs: None,
     })
 }
 
 #[cfg(target_os = "linux")]
-fn configure_and_pin_snapshot(connection: &Connection) -> SqliteSourceAccessResult<()> {
+fn configure_and_pin_snapshot(
+    connection: &Connection,
+    allow_wal: bool,
+) -> SqliteSourceAccessResult<()> {
     connection
         .set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)
         .map_err(|source| sqlite_error("disabling trusted provider schemas", source))?;
@@ -416,7 +565,7 @@ fn configure_and_pin_snapshot(connection: &Connection) -> SqliteSourceAccessResu
     let journal_mode: String = connection
         .pragma_query_value(None, "journal_mode", |row| row.get(0))
         .map_err(|source| sqlite_error("reading the provider journal mode", source))?;
-    if journal_mode.eq_ignore_ascii_case("wal") {
+    if journal_mode.eq_ignore_ascii_case("wal") && !allow_wal {
         return Err(SqliteSourceAccessError::UnsupportedSidecarIdentity {
             component: SqliteSourceComponent::Wal,
             capability:
@@ -431,7 +580,65 @@ fn configure_and_pin_snapshot(connection: &Connection) -> SqliteSourceAccessResu
             row.get::<_, i64>(0)
         })
         .map(|_| ())
-        .map_err(|source| sqlite_error("pinning the provider read snapshot", source))
+        .map_err(|source| sqlite_error("pinning the provider read snapshot", source))?;
+    install_snapshot_authorizer(connection)
+}
+
+#[cfg(target_os = "linux")]
+unsafe extern "C" fn deny_snapshot_transaction_control(
+    _context: *mut c_void,
+    action: i32,
+    _argument_one: *const c_char,
+    _argument_two: *const c_char,
+    _database: *const c_char,
+    _trigger: *const c_char,
+) -> i32 {
+    if matches!(action, ffi::SQLITE_TRANSACTION | ffi::SQLITE_SAVEPOINT) {
+        ffi::SQLITE_DENY
+    } else {
+        ffi::SQLITE_OK
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn install_snapshot_authorizer(connection: &Connection) -> SqliteSourceAccessResult<()> {
+    let code = unsafe {
+        ffi::sqlite3_set_authorizer(
+            connection.handle(),
+            Some(deny_snapshot_transaction_control),
+            ptr::null_mut(),
+        )
+    };
+    if code == ffi::SQLITE_OK {
+        Ok(())
+    } else {
+        Err(SqliteSourceAccessError::SqliteControl {
+            operation: "installing the provider snapshot transaction guard",
+            code,
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn clear_snapshot_authorizer(connection: &Connection) -> SqliteSourceAccessResult<()> {
+    let code = unsafe { ffi::sqlite3_set_authorizer(connection.handle(), None, ptr::null_mut()) };
+    if code == ffi::SQLITE_OK {
+        Ok(())
+    } else {
+        Err(SqliteSourceAccessError::SqliteControl {
+            operation: "clearing the provider snapshot transaction guard",
+            code,
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn verify_snapshot_active(connection: &Connection) -> SqliteSourceAccessResult<()> {
+    if unsafe { ffi::sqlite3_get_autocommit(connection.handle()) } == 0 {
+        Ok(())
+    } else {
+        Err(SqliteSourceAccessError::SnapshotNotActive)
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -550,7 +757,10 @@ fn verify_expected_file(file: &File, expected: &LinuxFileState) -> SqliteSourceA
 }
 
 #[cfg(target_os = "linux")]
-fn verify_requested_vfs(connection: &Connection) -> SqliteSourceAccessResult<()> {
+fn verify_requested_vfs(
+    connection: &Connection,
+    expected_vfs: &str,
+) -> SqliteSourceAccessResult<()> {
     let mut vfs = std::ptr::null_mut::<ffi::sqlite3_vfs>();
     let code = unsafe {
         ffi::sqlite3_file_control(
@@ -573,11 +783,11 @@ fn verify_requested_vfs(connection: &Connection) -> SqliteSourceAccessResult<()>
             CStr::from_ptr((*vfs).zName).to_string_lossy().into_owned()
         }
     };
-    if actual == UNIX_VFS {
+    if actual == expected_vfs {
         Ok(())
     } else {
         Err(SqliteSourceAccessError::UnexpectedVfs {
-            expected: UNIX_VFS,
+            expected: expected_vfs.to_owned(),
             actual,
         })
     }
@@ -640,13 +850,16 @@ fn qualify_linux_filesystem(file: &File, path: &Path) -> SqliteSourceAccessResul
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
-    use std::{fs, fs::File, path::Path};
+    use std::{ffi::OsStr, fs, fs::File, path::Path};
 
     use rusqlite::{config::DbConfig, ffi, params, Connection, OpenFlags};
 
     use super::{
-        open_linux_snapshot, open_sqlite_source_snapshot, probe_ofd_write_lock, LockProbe,
-        SqliteSourceAccessError, SqliteSourceComponent, SqliteSourceReadSnapshot,
+        open_linux_snapshot, open_root_handle_sqlite_source_snapshot,
+        open_root_handle_sqlite_source_snapshot_for_test, open_sqlite_source_snapshot,
+        probe_ofd_write_lock, retain_sqlite_source_directory_authority, LockProbe,
+        RootHandleSqliteVfsError, SqliteSourceAccessError, SqliteSourceComponent,
+        SqliteSourceDirectoryAuthority, SqliteSourceReadSnapshot,
     };
 
     fn create_database(path: &Path, value: &str) {
@@ -665,6 +878,11 @@ mod tests {
             .unwrap()
             .query_row("SELECT body FROM messages", [], |row| row.get(0))
             .unwrap()
+    }
+
+    fn retain_parent(path: &Path) -> SqliteSourceDirectoryAuthority {
+        let directory = File::open(path).unwrap();
+        retain_sqlite_source_directory_authority(&directory).unwrap()
     }
 
     fn create_persistent_wal(path: &Path) {
@@ -778,6 +996,161 @@ mod tests {
             ),
             "{result:?}"
         );
+    }
+
+    #[test]
+    fn root_handle_vfs_queries_active_wal_without_writes() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("provider.sqlite");
+        create_persistent_wal(&database);
+        let wal = database.with_file_name("provider.sqlite-wal");
+        let shm = database.with_file_name("provider.sqlite-shm");
+        let before_database = fs::read(&database).unwrap();
+        let before_wal = fs::read(&wal).unwrap();
+        let before_shm = fs::read(&shm).unwrap();
+        let parent = retain_parent(temp.path());
+
+        let snapshot =
+            open_root_handle_sqlite_source_snapshot(&parent, OsStr::new("provider.sqlite"))
+                .unwrap();
+        assert_eq!(read_value(&snapshot), "from-wal");
+        assert!(
+            snapshot
+                .connection()
+                .unwrap()
+                .execute_batch("COMMIT")
+                .is_err(),
+            "consumers may not replace the guard-owned read transaction"
+        );
+        assert_eq!(read_value(&snapshot), "from-wal");
+        assert!(snapshot.evidence().wal_length().is_some());
+        assert!(snapshot.evidence().shared_memory_length().is_some());
+        snapshot.finish().unwrap();
+        assert_eq!(fs::read(&database).unwrap(), before_database);
+        assert_eq!(fs::read(&wal).unwrap(), before_wal);
+        assert_eq!(fs::read(&shm).unwrap(), before_shm);
+    }
+
+    #[test]
+    fn root_handle_vfs_keeps_a_snapshot_while_wal_appends() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("provider.sqlite");
+        let writer = Connection::open(&database).unwrap();
+        let mode: String = writer
+            .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        writer
+            .execute("CREATE TABLE messages (body TEXT NOT NULL)", [])
+            .unwrap();
+        writer
+            .execute("INSERT INTO messages (body) VALUES ('pinned')", [])
+            .unwrap();
+        writer
+            .set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
+            .unwrap();
+        let parent = retain_parent(temp.path());
+        let snapshot =
+            open_root_handle_sqlite_source_snapshot(&parent, OsStr::new("provider.sqlite"))
+                .unwrap();
+
+        writer
+            .execute("INSERT INTO messages (body) VALUES ('later')", [])
+            .unwrap();
+        let values = snapshot
+            .connection()
+            .unwrap()
+            .prepare("SELECT body FROM messages ORDER BY rowid")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(values, ["pinned"]);
+        snapshot.finish().unwrap();
+        drop(writer);
+    }
+
+    #[test]
+    fn root_handle_vfs_leaf_swap_is_fail_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("provider.sqlite");
+        let attacker = temp.path().join("attacker.sqlite");
+        let admitted = temp.path().join("admitted.sqlite");
+        create_database(&database, "expected");
+        create_database(&attacker, "attacker");
+        let parent = retain_parent(temp.path());
+
+        let result = open_root_handle_sqlite_source_snapshot_for_test(
+            &parent,
+            OsStr::new("provider.sqlite"),
+            || {
+                fs::rename(&database, &admitted).unwrap();
+                fs::rename(&attacker, &database).unwrap();
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(SqliteSourceAccessError::RootHandleVfs(
+                RootHandleSqliteVfsError::SourceChanged { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn root_handle_vfs_ancestor_swap_cannot_redirect_reads() {
+        let temp = tempfile::tempdir().unwrap();
+        let live = temp.path().join("live");
+        let replacement = temp.path().join("replacement");
+        let admitted = temp.path().join("admitted");
+        fs::create_dir(&live).unwrap();
+        fs::create_dir(&replacement).unwrap();
+        create_database(&live.join("provider.sqlite"), "expected");
+        create_database(&replacement.join("provider.sqlite"), "attacker");
+        let parent = retain_parent(&live);
+
+        let result = open_root_handle_sqlite_source_snapshot_for_test(
+            &parent,
+            OsStr::new("provider.sqlite"),
+            || {
+                fs::rename(&live, &admitted).unwrap();
+                fs::rename(&replacement, &live).unwrap();
+            },
+        );
+        match result {
+            Ok(snapshot) => {
+                assert_eq!(read_value(&snapshot), "expected");
+                snapshot.finish().unwrap();
+            }
+            Err(SqliteSourceAccessError::RootHandleVfs(
+                RootHandleSqliteVfsError::SourceChanged { .. },
+            )) => {}
+            Err(error) => panic!("unexpected ancestor-swap result: {error:?}"),
+        }
+    }
+
+    #[test]
+    fn root_handle_vfs_sidecar_swap_is_rejected_before_publication() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("provider.sqlite");
+        create_persistent_wal(&database);
+        let wal = database.with_file_name("provider.sqlite-wal");
+        let admitted_wal = database.with_file_name("admitted.sqlite-wal");
+        let parent = retain_parent(temp.path());
+        let snapshot =
+            open_root_handle_sqlite_source_snapshot(&parent, OsStr::new("provider.sqlite"))
+                .unwrap();
+        assert_eq!(read_value(&snapshot), "from-wal");
+
+        fs::rename(&wal, &admitted_wal).unwrap();
+        fs::write(&wal, b"substituted WAL").unwrap();
+        let result = snapshot.finish();
+        assert!(matches!(
+            result,
+            Err(SqliteSourceAccessError::RootHandleVfs(
+                RootHandleSqliteVfsError::SourceChanged { .. }
+            ))
+        ));
     }
 
     #[test]
