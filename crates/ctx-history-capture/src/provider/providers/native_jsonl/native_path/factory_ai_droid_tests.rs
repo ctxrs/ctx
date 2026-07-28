@@ -17,6 +17,27 @@ const MACHINE: &str = "factory-droid-nativepath-test-machine";
 const SUCCESS_BODY: &str = "FACTORY_DROID_SUCCESS_BODY_MUST_NOT_ENTER_CORE";
 
 #[test]
+fn source_backed_cold_projection_and_exact_locator() {
+    const SENTINEL: &str = "FACTORY_DROID_SOURCE_BACKED_SENTINEL";
+
+    let temp = tempdir().unwrap();
+    let root = temp.path().join(".factory/sessions");
+    let transcript = transcript_path(&root);
+    let source_record = message("source-backed-user", "user", SENTINEL);
+    write_transcript(&transcript, &[header("droid-life"), source_record.clone()]);
+    let mut expected_record = serde_json::to_vec(&source_record).unwrap();
+    expected_record.push(b'\n');
+
+    super::super::source_backed::assert_source_backed_fixture(
+        factory_droid_source_backed_adapter(),
+        &root,
+        "droid-life",
+        SENTINEL,
+        &expected_record,
+    );
+}
+
+#[test]
 fn production_lifecycle_covers_replay_append_all_rewrites_and_disappearance() {
     let temp = tempdir().unwrap();
     let root = temp.path().join(".factory/sessions");

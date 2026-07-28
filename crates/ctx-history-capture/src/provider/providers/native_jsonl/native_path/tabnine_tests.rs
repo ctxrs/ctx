@@ -23,6 +23,30 @@ const MACHINE: &str = "tabnine-nativepath-test-machine";
 const SUCCESS_BODY: &str = "TABNINE_SUCCESS_BODY_MUST_NOT_ENTER_CORE";
 
 #[test]
+fn source_backed_cold_projection_and_exact_locator() {
+    const SENTINEL: &str = "TABNINE_SOURCE_BACKED_SENTINEL";
+
+    let temp = tempdir().unwrap();
+    let root = temp.path().join(".tabnine/agent");
+    let transcript = transcript_path(&root);
+    let source_record = message("source-backed-user", "user", SENTINEL);
+    write_transcript(
+        &transcript,
+        &[header("tabnine-life"), source_record.clone()],
+    );
+    let mut expected_record = serde_json::to_vec(&source_record).unwrap();
+    expected_record.push(b'\n');
+
+    super::super::source_backed::assert_source_backed_fixture(
+        tabnine_source_backed_adapter(),
+        &root,
+        "tabnine-life",
+        SENTINEL,
+        &expected_record,
+    );
+}
+
+#[test]
 fn production_lifecycle_covers_all_source_changes_and_retires_disappearance() {
     let temp = tempdir().unwrap();
     let root = temp.path().join(".tabnine/agent");

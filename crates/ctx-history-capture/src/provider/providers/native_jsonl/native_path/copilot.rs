@@ -45,6 +45,14 @@ use super::{
 const COPILOT_OUTPUT_FRONTIER_VERSION: u32 = 1;
 const COPILOT_OUTPUT_PARSER_REVISION: &str = "copilot-cli-direct-native-jsonl-v1";
 
+pub(crate) const fn copilot_source_backed_adapter() -> super::DirectJsonlSourceAdapter {
+    super::DirectJsonlSourceAdapter::new(
+        CaptureProvider::CopilotCli,
+        COPILOT_CLI_SOURCE_FORMAT,
+        "copilot-cli-direct-native-jsonl-v1",
+    )
+}
+
 pub(super) fn copilot_event_identity(value: &Value) -> Option<&str> {
     value
         .get("id")

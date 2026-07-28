@@ -3,8 +3,14 @@ use super::*;
 pub(super) enum DirectLine {
     EndOfFile,
     IncompleteTail,
-    Oversized { end: u64 },
-    Complete { bytes: Vec<u8>, end: u64 },
+    Oversized {
+        end: u64,
+    },
+    Complete {
+        bytes: Vec<u8>,
+        end: u64,
+        record_digest: [u8; 32],
+    },
 }
 
 pub(super) fn read_bounded_jsonl_line(
@@ -52,13 +58,18 @@ pub(super) fn read_bounded_jsonl_line(
             if oversized {
                 return Ok(DirectLine::Oversized { end });
             }
+            let record_digest = Sha256::digest(&bytes).into();
             if bytes.last() == Some(&b'\n') {
                 bytes.pop();
                 if bytes.last() == Some(&b'\r') {
                     bytes.pop();
                 }
             }
-            return Ok(DirectLine::Complete { bytes, end });
+            return Ok(DirectLine::Complete {
+                bytes,
+                end,
+                record_digest,
+            });
         }
     }
 }

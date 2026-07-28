@@ -199,6 +199,14 @@ pub(crate) fn windsurf_session_id_from_path(path: &Path) -> Option<String> {
         .map(str::to_owned)
 }
 
+pub(crate) const fn windsurf_source_backed_adapter() -> super::DirectJsonlSourceAdapter {
+    super::DirectJsonlSourceAdapter::new(
+        CaptureProvider::Windsurf,
+        WINDSURF_CASCADE_HOOK_TRANSCRIPT_SOURCE_FORMAT,
+        "windsurf-direct-native-jsonl-v1",
+    )
+}
+
 pub(crate) fn import_windsurf_nativepath_tree(
     store: &mut Store,
     request: NativePathJsonlTreeImport<'_>,

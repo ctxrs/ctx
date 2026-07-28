@@ -18,6 +18,27 @@ const MACHINE: &str = "qwen-code-nativepath-test-machine";
 const SUCCESS_BODY: &str = "QWEN_SUCCESS_BODY_MUST_NOT_ENTER_CORE";
 
 #[test]
+fn source_backed_cold_projection_and_exact_locator() {
+    const SENTINEL: &str = "QWEN_CODE_SOURCE_BACKED_SENTINEL";
+
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join(".qwen/projects");
+    let transcript = transcript_path(&root);
+    let source_record = message("qwen-life", "source-backed-user", "user", SENTINEL);
+    write_transcript(&transcript, std::slice::from_ref(&source_record));
+    let mut expected_record = serde_json::to_vec(&source_record).unwrap();
+    expected_record.push(b'\n');
+
+    super::super::source_backed::assert_source_backed_fixture(
+        qwen_code_source_backed_adapter(),
+        &root,
+        "qwen-life",
+        SENTINEL,
+        &expected_record,
+    );
+}
+
+#[test]
 fn production_lifecycle_covers_restart_append_rewrite_truncation_replacement_and_loss() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = temp.path().join(".qwen/projects");

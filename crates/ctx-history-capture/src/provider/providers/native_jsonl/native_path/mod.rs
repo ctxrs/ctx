@@ -16,11 +16,14 @@ mod qoder;
 mod qoder_parser;
 mod qwen_code;
 mod reader;
+mod source_backed;
 mod tabnine;
 mod windsurf;
 
-pub(crate) use antigravity::import_antigravity_nativepath_tree;
-pub(crate) use copilot::import_copilot_nativepath_tree;
+pub(crate) use antigravity::{
+    antigravity_source_backed_adapter, import_antigravity_nativepath_tree,
+};
+pub(crate) use copilot::{copilot_source_backed_adapter, import_copilot_nativepath_tree};
 pub(crate) use cursor::{
     committed_direct_jsonl_replay_authority, decode_direct_jsonl_cursor,
     decode_direct_jsonl_native_cursor, direct_jsonl_checkpoint_is_covered_by,
@@ -33,27 +36,36 @@ pub(crate) use factory_ai_droid::{
     enumerate_factory_droid_results, factory_droid_event_identity, factory_droid_event_text,
     factory_droid_event_type, factory_droid_file_is_selected, factory_droid_header_cwd,
     factory_droid_header_session_id, factory_droid_model, factory_droid_role,
-    factory_droid_session_relationships, import_factory_ai_droid_nativepath_tree,
+    factory_droid_session_relationships, factory_droid_source_backed_adapter,
+    import_factory_ai_droid_nativepath_tree,
 };
 pub(crate) use gemini::import_gemini_nativepath_tree;
 pub(crate) use model::{
     DirectJsonlCheckpoint, DirectJsonlEvent, DirectJsonlFileObservation, DirectJsonlObservedTime,
     DirectJsonlOutput, DirectJsonlPage, DirectJsonlRejection, DirectJsonlScanOutcome,
-    DirectJsonlSession, DirectJsonlSourceChange, DirectJsonlTouch,
+    DirectJsonlSession, DirectJsonlSourceChange, DirectJsonlSourceRecord, DirectJsonlTouch,
     DIRECT_JSONL_NATIVEPATH_PARSER_REVISION, DIRECT_JSONL_NATIVEPATH_POLICY_REVISION,
 };
 pub(crate) use publication::{
     publish_direct_jsonl_group, DirectJsonlPendingPage, DirectJsonlPublicationContext,
 };
-pub(crate) use qoder::import_qoder_nativepath_tree;
+pub(crate) use qoder::{import_qoder_nativepath_tree, qoder_source_backed_adapter};
 pub(crate) use qoder_parser::qoder_complete_content_message_record;
-pub(crate) use qwen_code::{import_qwen_code_nativepath_tree, qwen_code_file_is_selected};
+pub(crate) use qwen_code::{
+    import_qwen_code_nativepath_tree, qwen_code_file_is_selected, qwen_code_source_backed_adapter,
+};
 pub(crate) use reader::{
     direct_jsonl_complete_message_provider_event_hash, open_direct_jsonl_pages,
 };
-pub(crate) use tabnine::import_tabnine_nativepath_tree;
+pub(crate) use source_backed::{
+    DirectJsonlCertifiedLeaf, DirectJsonlInventoryFailure, DirectJsonlInventoryLeaf,
+    DirectJsonlSourceAdapter, DirectJsonlSourceBackedError, DirectJsonlSourceBackedResult,
+    DirectJsonlSourceInventory, DirectJsonlSourcePage, DirectJsonlSourceReader,
+};
+pub(crate) use tabnine::{import_tabnine_nativepath_tree, tabnine_source_backed_adapter};
 pub(crate) use windsurf::{
     import_windsurf_nativepath_tree, windsurf_event_role, windsurf_event_text, windsurf_event_type,
+    windsurf_source_backed_adapter,
 };
 
 #[cfg(test)]

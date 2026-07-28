@@ -40,6 +40,14 @@ use super::{
 const TABNINE_OUTPUT_FRONTIER_VERSION: u32 = 1;
 const TABNINE_OUTPUT_PARSER_REVISION: &str = "tabnine-direct-native-jsonl-v1";
 
+pub(crate) const fn tabnine_source_backed_adapter() -> super::DirectJsonlSourceAdapter {
+    super::DirectJsonlSourceAdapter::new(
+        CaptureProvider::Tabnine,
+        TABNINE_CLI_SOURCE_FORMAT,
+        "tabnine-direct-native-jsonl-v1",
+    )
+}
+
 pub(super) fn tabnine_event_identity(value: &Value) -> Option<&str> {
     value
         .get("id")

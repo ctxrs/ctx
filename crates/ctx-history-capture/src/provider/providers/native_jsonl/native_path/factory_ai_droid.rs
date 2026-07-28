@@ -43,6 +43,14 @@ const FACTORY_DROID_OUTPUT_FRONTIER_VERSION: u32 = 1;
 const FACTORY_DROID_OUTPUT_PARSER_REVISION: &str = "factory-droid-direct-native-jsonl-v1";
 const FACTORY_DROID_MISSING_REASON: &str = "no Factory AI Droid session JSONL transcripts found";
 
+pub(crate) const fn factory_droid_source_backed_adapter() -> super::DirectJsonlSourceAdapter {
+    super::DirectJsonlSourceAdapter::new(
+        CaptureProvider::FactoryAiDroid,
+        FACTORY_DROID_SOURCE_FORMAT,
+        "factory-droid-direct-native-jsonl-v1",
+    )
+}
+
 pub(crate) fn import_factory_ai_droid_nativepath_tree(
     store: &mut Store,
     request: NativePathJsonlTreeImport<'_>,
