@@ -35,6 +35,10 @@ fn source_backed_cold_projection_and_exact_locator() {
         "qwen-life",
         SENTINEL,
         &expected_record,
+        None,
+        "qwen-life",
+        "primary",
+        true,
     );
 }
 

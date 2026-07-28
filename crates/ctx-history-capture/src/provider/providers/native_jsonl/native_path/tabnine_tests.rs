@@ -43,6 +43,10 @@ fn source_backed_cold_projection_and_exact_locator() {
         "tabnine-life",
         SENTINEL,
         &expected_record,
+        None,
+        "tabnine-life",
+        "primary",
+        true,
     );
 }
 

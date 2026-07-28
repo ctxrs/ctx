@@ -37,6 +37,10 @@ fn source_backed_cold_projection_and_exact_locator() {
         "agy-life",
         SENTINEL,
         &expected_record,
+        None,
+        "agy-life",
+        "primary",
+        true,
     );
 }
 

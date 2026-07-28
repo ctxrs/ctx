@@ -20,9 +20,13 @@ mod source_backed;
 mod tabnine;
 mod windsurf;
 
+// Registration seam for the central coordinator; provider modules do not own
+// lifecycle or publication and therefore do not consume these exports here.
+#[allow(unused_imports)]
 pub(crate) use antigravity::{
     antigravity_source_backed_adapter, import_antigravity_nativepath_tree,
 };
+#[allow(unused_imports)]
 pub(crate) use copilot::{copilot_source_backed_adapter, import_copilot_nativepath_tree};
 pub(crate) use cursor::{
     committed_direct_jsonl_replay_authority, decode_direct_jsonl_cursor,
@@ -32,6 +36,7 @@ pub(crate) use cursor::{
 pub(crate) use cursor_provider::import_cursor_nativepath_tree;
 use driver::import_direct_native_jsonl_tree_core;
 pub(crate) use driver::NativePathJsonlTreeImport;
+#[allow(unused_imports)]
 pub(crate) use factory_ai_droid::{
     enumerate_factory_droid_results, factory_droid_event_identity, factory_droid_event_text,
     factory_droid_event_type, factory_droid_file_is_selected, factory_droid_header_cwd,
@@ -49,20 +54,25 @@ pub(crate) use model::{
 pub(crate) use publication::{
     publish_direct_jsonl_group, DirectJsonlPendingPage, DirectJsonlPublicationContext,
 };
+#[allow(unused_imports)]
 pub(crate) use qoder::{import_qoder_nativepath_tree, qoder_source_backed_adapter};
 pub(crate) use qoder_parser::qoder_complete_content_message_record;
+#[allow(unused_imports)]
 pub(crate) use qwen_code::{
     import_qwen_code_nativepath_tree, qwen_code_file_is_selected, qwen_code_source_backed_adapter,
 };
 pub(crate) use reader::{
     direct_jsonl_complete_message_provider_event_hash, open_direct_jsonl_pages,
 };
+#[allow(unused_imports)]
 pub(crate) use source_backed::{
     DirectJsonlCertifiedLeaf, DirectJsonlInventoryFailure, DirectJsonlInventoryLeaf,
     DirectJsonlSourceAdapter, DirectJsonlSourceBackedError, DirectJsonlSourceBackedResult,
     DirectJsonlSourceInventory, DirectJsonlSourcePage, DirectJsonlSourceReader,
 };
+#[allow(unused_imports)]
 pub(crate) use tabnine::{import_tabnine_nativepath_tree, tabnine_source_backed_adapter};
+#[allow(unused_imports)]
 pub(crate) use windsurf::{
     import_windsurf_nativepath_tree, windsurf_event_role, windsurf_event_text, windsurf_event_type,
     windsurf_source_backed_adapter,

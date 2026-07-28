@@ -24,7 +24,13 @@ fn source_backed_cold_projection_and_exact_locator() {
     let root = temp.path().join(".factory/sessions");
     let transcript = transcript_path(&root);
     let source_record = message("source-backed-user", "user", SENTINEL);
-    write_transcript(&transcript, &[header("droid-life"), source_record.clone()]);
+    write_transcript(
+        &transcript,
+        &[
+            child_header("droid-life", "droid-parent"),
+            source_record.clone(),
+        ],
+    );
     let mut expected_record = serde_json::to_vec(&source_record).unwrap();
     expected_record.push(b'\n');
 
@@ -34,6 +40,10 @@ fn source_backed_cold_projection_and_exact_locator() {
         "droid-life",
         SENTINEL,
         &expected_record,
+        Some("droid-parent"),
+        "droid-parent",
+        "subagent",
+        false,
     );
 }
 
