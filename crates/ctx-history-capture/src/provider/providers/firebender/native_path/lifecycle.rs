@@ -93,7 +93,7 @@ pub(super) fn retire_missing_firebender_source(
 
 pub(super) fn firebender_path_identity(path: &Path) -> Result<FirebenderPathIdentity> {
     let database_path = absolute_path(&firebender_chat_history_db_path(path)?)?;
-    let canonical_database_path = canonicalize_nearest_existing(&database_path)?;
+    let canonical_database_path = database_path.clone();
     let route_identity = provider_path_identity(&canonical_database_path)?;
     let cursor_stream = provider_source_cursor_stream_for_path(
         CaptureProvider::Firebender,
@@ -106,31 +106,6 @@ pub(super) fn firebender_path_identity(path: &Path) -> Result<FirebenderPathIden
         route_identity,
         cursor_stream,
     })
-}
-
-fn canonicalize_nearest_existing(path: &Path) -> Result<PathBuf> {
-    let mut candidate = path.to_path_buf();
-    let mut suffix = Vec::new();
-    loop {
-        match fs::canonicalize(&candidate) {
-            Ok(mut canonical) => {
-                for component in suffix.iter().rev() {
-                    canonical.push(component);
-                }
-                return Ok(canonical);
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                let Some(component) = candidate.file_name() else {
-                    return Err(CaptureError::Io(error));
-                };
-                suffix.push(component.to_os_string());
-                if !candidate.pop() {
-                    return Err(CaptureError::Io(error));
-                }
-            }
-            Err(error) => return Err(CaptureError::Io(error)),
-        }
-    }
 }
 
 pub(super) fn publication_id(
@@ -159,21 +134,15 @@ fn retirement_publication_id(retirement: &ProviderSourceRouteRetirement) -> Stri
     format!("firebender-retirement:{}", hex(&digest.finalize()))
 }
 
-pub(super) fn firebender_source_snapshot(path: &Path) -> Result<ProviderSqliteSourceSnapshot> {
-    ProviderSqliteSourceSnapshot::read(
-        path,
-        "Firebender SQLite source must be a regular non-symlink file",
-        "Firebender SQLite sidecar must be a regular non-symlink file",
-    )
-}
-
 pub(super) fn firebender_source_revision(
-    snapshot: &ProviderSqliteSourceSnapshot,
+    evidence: &SqliteSourceEvidence,
     schema_fingerprint: &str,
 ) -> String {
     format!(
-        "firebender-native-sqlite-v1:parser={FIREBENDER_NATIVE_PARSER_REVISION};policy={FIREBENDER_NATIVE_POLICY_REVISION};schema={schema_fingerprint};{}",
-        snapshot.revision_component(),
+        "firebender-native-sqlite-v2:parser={FIREBENDER_NATIVE_PARSER_REVISION};policy={FIREBENDER_NATIVE_POLICY_REVISION};schema={schema_fingerprint};identity={};length={};revision={}",
+        hex(evidence.identity()),
+        evidence.length(),
+        hex(evidence.revision()),
     )
 }
 

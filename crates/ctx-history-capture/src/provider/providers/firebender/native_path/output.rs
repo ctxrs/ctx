@@ -1,17 +1,13 @@
 use super::*;
 
 pub(super) fn replay_output(
-    conn: &Connection,
-    snapshot: &ProviderSqliteSourceSnapshot,
     authority: &FirebenderSourceAuthority,
     sink: &dyn ProOutputSink,
 ) -> Result<bool> {
-    replay_output_inner(conn, snapshot, authority, sink)
+    replay_output_inner(authority, sink)
 }
 
 fn replay_output_inner(
-    conn: &Connection,
-    snapshot: &ProviderSqliteSourceSnapshot,
     authority: &FirebenderSourceAuthority,
     sink: &dyn ProOutputSink,
 ) -> Result<bool> {
@@ -44,13 +40,9 @@ fn replay_output_inner(
         return Ok(false);
     }
     loop {
-        if !snapshot.revalidate(&authority.database_path)? {
-            return Err(CaptureError::SourceChangedDuringCapture);
-        }
-        let page = with_sqlite_read_snapshot(conn, || build_page(conn, &state.frontier, true))?;
-        if !snapshot.revalidate(&authority.database_path)? {
-            return Err(CaptureError::SourceChangedDuringCapture);
-        }
+        let page = authority.database.read(&authority.database_path, |conn| {
+            build_page(conn, &state.frontier, true)
+        })?;
         let output_page = (|| {
             let observations = output_observations(&page)?;
             let expected = safe_frontier(&page.expected)?;

@@ -363,7 +363,7 @@ fn inaccessible_source_preserves_permission_denied() {
 
 #[cfg(unix)]
 #[test]
-fn relative_and_symlink_aliases_retain_the_live_stream_for_deletion() {
+fn relative_paths_retain_the_live_stream_and_symlink_aliases_fail_closed() {
     use std::os::unix::fs::symlink;
 
     let current = std::env::current_dir().unwrap();
@@ -400,7 +400,7 @@ fn relative_and_symlink_aliases_retain_the_live_stream_for_deletion() {
 
     let real_parent = relative_temp.path().join("real");
     let real_root = real_parent.join("project");
-    let real_database = create_test_database(
+    create_test_database(
         &real_root,
         &[("alias", 10, r#"[{"role":"user","content":"alias"}]"#)],
     );
@@ -408,30 +408,17 @@ fn relative_and_symlink_aliases_retain_the_live_stream_for_deletion() {
     symlink(&real_parent, &alias_parent).unwrap();
     let alias_root = alias_parent.join("project");
     let mut alias_store = Store::open(relative_temp.path().join("alias-ctx.sqlite")).unwrap();
-    import_firebender_nativepath(
+    let error = import_firebender_nativepath(
         &alias_root,
         &mut alias_store,
         test_context(&alias_root),
         test_options(CaptureWorkLimit::Drain, true),
     )
-    .unwrap();
-    fs::remove_file(&real_database).unwrap();
-    let retired = import_firebender_nativepath(
-        &alias_root,
-        &mut alias_store,
-        test_context(&alias_root),
-        test_options(CaptureWorkLimit::Drain, true),
-    )
-    .unwrap();
-    assert_eq!(retired.work_result(), ProviderImportWorkResult::Changed);
-    let noop = import_firebender_nativepath(
-        &alias_root,
-        &mut alias_store,
-        test_context(&alias_root),
-        test_options(CaptureWorkLimit::Drain, true),
-    )
-    .unwrap();
-    assert_eq!(noop.work_result(), ProviderImportWorkResult::NoOp);
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        CaptureError::Io(_) | CaptureError::InvalidProviderTranscriptPath { .. }
+    ));
 }
 
 #[test]

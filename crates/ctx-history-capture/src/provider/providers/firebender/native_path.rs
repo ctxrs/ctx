@@ -23,6 +23,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
+    common::io::{open_provider_source_file, OpenedProviderSourceFile},
     complete_content::{
         attach_verified_content_locator, verified_content_profile, CompleteContentBodyDigest,
         CompleteContentSourceFamily, VerifiedContentLocatorV1, VerifiedContentLocatorsV1,
@@ -46,10 +47,12 @@ use crate::{
         },
         normalization::{provider_capped_json, provider_json_text, provider_timestamp_millis},
         sqlite::{
-            ensure_sqlite_table_columns, open_provider_sqlite_readonly, sqlite_schema_fingerprint,
-            sqlite_table_columns, sqlite_table_exists, with_sqlite_read_snapshot,
-            ProviderSqliteSourceSnapshot, SqliteLengthPreflightGuard,
+            ensure_sqlite_table_columns, sqlite_schema_fingerprint, sqlite_table_columns,
+            sqlite_table_exists, SqliteLengthPreflightGuard,
         },
+    },
+    provider_sources::{
+        open_sqlite_source_snapshot, SqliteSourceAccessError, SqliteSourceEvidence,
     },
     CaptureError, CaptureWorkLimit, OutputAssociations, OutputNativeCoordinate,
     OutputObservationKind, OutputOutcome, OutputOutcomeMetadata, OutputSourceIdentity,
@@ -85,8 +88,8 @@ pub(crate) use source_backed::{
 use self::{
     core::import_core,
     lifecycle::{
-        firebender_path_identity, firebender_source_revision, firebender_source_snapshot,
-        publication_id, retire_missing_firebender_source, validate_schema,
+        firebender_path_identity, firebender_source_revision, publication_id,
+        retire_missing_firebender_source, validate_schema,
     },
     output::replay_output,
     scan::{
@@ -202,6 +205,7 @@ impl FirebenderNativeCursor {
 
 #[derive(Debug)]
 struct FirebenderSourceAuthority {
+    database: FirebenderSqliteDatabase,
     configured_source_root: PathBuf,
     database_path: PathBuf,
     canonical_database_path: PathBuf,
@@ -211,6 +215,77 @@ struct FirebenderSourceAuthority {
     canonical_source_identity: String,
     source_revision: String,
     schema_fingerprint: String,
+}
+
+#[derive(Debug)]
+struct FirebenderSqliteDatabase {
+    opened: OpenedProviderSourceFile,
+    evidence: SqliteSourceEvidence,
+}
+
+impl FirebenderSqliteDatabase {
+    fn open<T>(path: &Path, query: impl FnOnce(&Connection) -> Result<T>) -> Result<(Self, T)> {
+        let opened = open_provider_source_file(path)?;
+        let snapshot = open_sqlite_source_snapshot(path, opened.file())
+            .map_err(|error| firebender_sqlite_source_error(path, error))?;
+        let evidence = snapshot.evidence().clone();
+        let result = snapshot
+            .connection()
+            .map_err(|error| firebender_sqlite_source_error(path, error))
+            .and_then(query);
+        let finished = snapshot
+            .finish()
+            .map_err(|error| firebender_sqlite_source_error(path, error))?;
+        opened.revalidate()?;
+        if finished != evidence {
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
+        Ok((Self { opened, evidence }, result?))
+    }
+
+    fn read<T>(&self, path: &Path, query: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        self.revalidate()?;
+        let snapshot = open_sqlite_source_snapshot(path, self.opened.file())
+            .map_err(|error| firebender_sqlite_source_error(path, error))?;
+        if snapshot.evidence() != &self.evidence {
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
+        let result = snapshot
+            .connection()
+            .map_err(|error| firebender_sqlite_source_error(path, error))
+            .and_then(query);
+        let finished = snapshot
+            .finish()
+            .map_err(|error| firebender_sqlite_source_error(path, error))?;
+        self.revalidate()?;
+        if finished != self.evidence {
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
+        result
+    }
+
+    fn revalidate(&self) -> Result<()> {
+        self.opened.revalidate()
+    }
+
+    fn evidence(&self) -> &SqliteSourceEvidence {
+        &self.evidence
+    }
+}
+
+fn firebender_sqlite_source_error(path: &Path, error: SqliteSourceAccessError) -> CaptureError {
+    match error {
+        SqliteSourceAccessError::SourceChanged
+        | SqliteSourceAccessError::ConnectionIdentityMismatch => {
+            CaptureError::SourceChangedDuringCapture
+        }
+        error => CaptureError::ProviderSource {
+            provider: CaptureProvider::Firebender.as_str(),
+            path: path.to_path_buf(),
+            kind: crate::ProviderSourceFailureKind::SourceDatabase,
+            detail: error.to_string(),
+        },
+    }
 }
 
 #[derive(Debug)]
@@ -322,14 +397,11 @@ pub(crate) fn import_firebender_nativepath(
 
     let canonical_database_path = path_identity.canonical_database_path;
     let database_path = canonical_database_path.clone();
-    let snapshot = firebender_source_snapshot(&database_path)?;
-    let conn = open_provider_sqlite_readonly(&database_path)?;
-    if !snapshot.revalidate(&database_path)? {
-        return Err(CaptureError::SourceChangedDuringCapture);
-    }
-    validate_schema(&conn, &database_path)?;
-    let schema_fingerprint = sqlite_schema_fingerprint(&conn)?;
-    let source_revision = firebender_source_revision(&snapshot, &schema_fingerprint);
+    let (database, schema_fingerprint) = FirebenderSqliteDatabase::open(&database_path, |conn| {
+        validate_schema(conn, &database_path)?;
+        sqlite_schema_fingerprint(conn)
+    })?;
+    let source_revision = firebender_source_revision(database.evidence(), &schema_fingerprint);
     let configured_source_root = context
         .source_root
         .clone()
@@ -357,6 +429,7 @@ pub(crate) fn import_firebender_nativepath(
         .map(|cursor| cursor.canonical_source_identity.clone())
         .unwrap_or_else(|| proposed_source_identity.clone());
     let mut authority = FirebenderSourceAuthority {
+        database,
         configured_source_root,
         database_path,
         canonical_database_path,
@@ -373,8 +446,6 @@ pub(crate) fn import_firebender_nativepath(
     if !replay_only {
         summary = import_core(
             store,
-            &conn,
-            &snapshot,
             &mut authority,
             &context,
             &import_options,
@@ -389,7 +460,7 @@ pub(crate) fn import_firebender_nativepath(
         return Ok(summary);
     }
     if let Some(sink) = import_options.import_profile.sink() {
-        if replay_output(&conn, &snapshot, &authority, sink.as_ref())? {
+        if replay_output(&authority, sink.as_ref())? {
             summary.record_failure(ProviderImportFailure {
                 line: 0,
                 error: "Firebender Pro output is behind committed Core".to_owned(),
