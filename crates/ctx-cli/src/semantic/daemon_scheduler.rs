@@ -6,7 +6,15 @@ pub(super) fn run_daemon_once(
     deadline: Option<Instant>,
     semantic_enabled: bool,
 ) -> Result<DaemonIteration> {
-    run_daemon_once_with_activity(args, data_root, runtime, deadline, semantic_enabled, None)
+    run_daemon_once_with_activity(
+        args,
+        data_root,
+        runtime,
+        deadline,
+        semantic_enabled,
+        None,
+        None,
+    )
 }
 
 pub(super) fn run_daemon_once_with_activity(
@@ -16,9 +24,14 @@ pub(super) fn run_daemon_once_with_activity(
     deadline: Option<Instant>,
     semantic_enabled: bool,
     query_activity: Option<&DaemonQueryActivity>,
+    source_refresh: Option<&SourceBackedRefreshCoordinator>,
 ) -> Result<DaemonIteration> {
+    let source_refresh_requested =
+        source_refresh.is_some_and(SourceBackedRefreshCoordinator::has_pending_request);
     let query_generation = query_activity.map(|activity| activity.snapshot().1);
-    if daemon_foreground_query_preempts(query_activity, query_generation) {
+    if !source_refresh_requested
+        && daemon_foreground_query_preempts(query_activity, query_generation)
+    {
         write_daemon_preempted_jobs(data_root, semantic_enabled, runtime)?;
         return Ok(DaemonIteration::new(
             false,
@@ -26,7 +39,10 @@ pub(super) fn run_daemon_once_with_activity(
             DaemonCycleStateV1::unknown(),
         ));
     }
-    if semantic_enabled && semantic_bootstrap_should_run_first(data_root, runtime)? {
+    if !source_refresh_requested
+        && semantic_enabled
+        && semantic_bootstrap_should_run_first(data_root, runtime)?
+    {
         let mut history_refresh_job =
             daemon_history_refresh_skipped_job("semantic_bootstrap_in_progress");
         preserve_daemon_history_runtime_state(&mut history_refresh_job, runtime);
@@ -58,6 +74,26 @@ pub(super) fn run_daemon_once_with_activity(
             &semantic_report,
         );
         return Ok(DaemonIteration::new(did_work, failed, state));
+    }
+    if source_refresh_requested {
+        let Some(run) = source_refresh.and_then(|coordinator| coordinator.run_next(data_root))
+        else {
+            return Ok(DaemonIteration::new(
+                false,
+                false,
+                DaemonCycleStateV1::unknown(),
+            ));
+        };
+        debug_assert_eq!(
+            run.failed,
+            run.job.get("status").and_then(Value::as_str) == Some("failed")
+        );
+        write_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root), &run.job)?;
+        return Ok(DaemonIteration::new(
+            run.did_work,
+            run.failed,
+            DaemonCycleStateV1::unknown(),
+        ));
     }
 
     let mut provider_refresh_events = Vec::new();
@@ -406,12 +442,13 @@ use super::{
         semantic_worker_report_for_daemon,
     },
     paths_status::{
-        daemon_history_refresh_job_path, daemon_semantic_job_path, semantic_worker_report,
-        write_daemon_job_status,
+        daemon_history_refresh_job_path, daemon_semantic_job_path,
+        daemon_source_backed_refresh_job_path, semantic_worker_report, write_daemon_job_status,
     },
     query_service::DaemonQueryActivity,
     reports::SemanticWorkerReport,
     runtime_limits::{
         DAEMON_MIN_REMAINING_FOR_JOB_SECS, DAEMON_SEMANTIC_BOOTSTRAP_PASSES_BEFORE_REFRESH,
     },
+    source_backed_refresh_coordinator::SourceBackedRefreshCoordinator,
 };

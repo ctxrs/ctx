@@ -1056,6 +1056,7 @@ fn foreground_query_preempts_daemon_background_jobs() -> Result<()> {
         None,
         true,
         Some(activity.as_ref()),
+        None,
     )?;
 
     assert!(!iteration.did_work);

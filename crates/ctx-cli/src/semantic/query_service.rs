@@ -29,14 +29,17 @@ mod transport;
 #[cfg(test)]
 pub(in crate::semantic) use transport::*;
 #[cfg(not(test))]
-pub(in crate::semantic) use transport::{daemon_query_request, DaemonQueryServiceUnavailable};
+pub(in crate::semantic) use transport::{
+    daemon_query_request, daemon_source_refresh_request, DaemonQueryServiceUnavailable,
+    DaemonSourceRefreshServiceUnavailable,
+};
 mod server;
 #[cfg(test)]
 pub(in crate::semantic) use server::*;
 #[cfg(not(test))]
 pub(in crate::semantic) use server::{
     daemon_can_begin_idle_shutdown, observe_daemon_query_activity, start_daemon_query_service,
-    DaemonQueryActivity, DaemonQueryService,
+    start_daemon_source_refresh_service, DaemonQueryActivity, DaemonQueryService,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -504,6 +507,10 @@ pub(super) fn warn_if(enabled: bool, message: &str) {
 
 pub(crate) fn semantic_query_service_supported() -> bool {
     cfg!(ctx_semantic_fastembed)
+}
+
+pub(in crate::semantic) fn daemon_query_service_transport_supported() -> bool {
+    cfg!(any(unix, windows))
 }
 
 pub(crate) fn daemon_query_service_available(data_root: &Path) -> bool {

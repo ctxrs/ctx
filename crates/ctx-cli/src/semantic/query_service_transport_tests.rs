@@ -25,6 +25,15 @@ fn start_test_query_service(data_root: &Path) -> Result<DaemonQueryService> {
 }
 
 #[cfg(any(unix, windows))]
+fn start_test_source_refresh_service(data_root: &Path) -> Result<DaemonQueryService> {
+    start_daemon_source_refresh_service_with_request_timeout(
+        data_root,
+        SharedSemanticRuntime::default(),
+        TEST_QUERY_REQUEST_READ_TIMEOUT,
+    )
+}
+
+#[cfg(any(unix, windows))]
 fn wait_for_active_query(service: &DaemonQueryService) -> Result<()> {
     let started = Instant::now();
     while started.elapsed() < StdDuration::from_secs(2) {
@@ -127,6 +136,8 @@ fn daemon_query_activity_prevents_idle_shutdown_during_a_request() {
     assert_ne!(completed_generation, generation);
     assert!(activity.try_stop_accepting_if_idle(completed_generation));
     assert!(activity.begin_request().is_none());
+    activity.resume_accepting();
+    assert!(activity.begin_request().is_some());
 }
 
 #[cfg(any(unix, windows))]
@@ -184,6 +195,43 @@ fn query_service_ping_stays_healthy_while_embedder_is_busy() -> Result<()> {
     assert_eq!(response.get("busy").and_then(Value::as_bool), Some(true));
     assert!(response["embedding_runtime"].is_null());
     assert!(started.elapsed() < StdDuration::from_millis(500));
+    drop(service);
+    Ok(())
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn query_service_coalesces_source_refresh_requests_on_one_daemon_ticket() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let service = start_test_source_refresh_service(temp.path())?;
+    let request = || {
+        daemon_source_refresh_request(
+            temp.path(),
+            compact_json(json!({
+                "schema_version": 1,
+                "op": "source_refresh_request",
+                "mode": "wait",
+            })),
+            StdDuration::from_secs(1),
+            64 * 1024,
+        )
+    };
+
+    let first = request()?.expect("first source refresh response");
+    let second = request()?.expect("coalesced source refresh response");
+
+    assert_eq!(first["request_state"], "queued");
+    assert_eq!(second["request_state"], "queued");
+    assert_eq!(first["request_id"], second["request_id"]);
+    assert_eq!(first["coalesced_requests"], 0);
+    assert_eq!(second["coalesced_requests"], 1);
+    assert!(service.source_refresh.has_pending_request());
+    let job = read_daemon_job_status(&daemon_source_backed_refresh_job_path(temp.path()))
+        .expect("queued source refresh job status");
+    assert_eq!(job["owner"], "daemon");
+    assert_eq!(job["request_state"], "queued");
+    assert_eq!(job["request_id"], first["request_id"]);
+    assert_eq!(job["coalesced_requests"], 1);
     drop(service);
     Ok(())
 }

@@ -59,6 +59,35 @@ pub(super) fn print_daemon_status_human(daemon: &Value) {
     let history_refresh = daemon
         .get("jobs")
         .and_then(|jobs| jobs.get("history_refresh"));
+    let source_backed_refresh = daemon
+        .get("jobs")
+        .and_then(|jobs| jobs.get("source_backed_refresh"));
+    println!(
+        "source_backed_refresh_status: {}",
+        source_backed_refresh
+            .and_then(|job| job.get("status"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+    );
+    if let Some(generation) = source_backed_refresh
+        .and_then(|job| job.get("published_generation"))
+        .and_then(Value::as_str)
+    {
+        println!("source_backed_refresh_published_generation: {generation}");
+    }
+    if let Some(phase) = source_backed_refresh
+        .and_then(|job| job.get("progress"))
+        .and_then(|progress| progress.get("phase"))
+        .and_then(Value::as_str)
+    {
+        println!("source_backed_refresh_progress: {phase}");
+    }
+    if let Some(error) = source_backed_refresh
+        .and_then(|job| job.get("last_error"))
+        .and_then(Value::as_str)
+    {
+        println!("source_backed_refresh_error: {error}");
+    }
     if let Some(rejected_records) = history_refresh
         .and_then(|job| {
             job.get("rejection_diagnostics")

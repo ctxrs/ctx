@@ -116,6 +116,12 @@ mod daemon_retry;
 mod daemon_status;
 #[cfg(test)]
 use daemon_retry::*;
+mod source_backed_refresh_coordinator;
+#[allow(unused_imports)] // The source-backed CLI owner consumes this cross-lane seam.
+pub(crate) use source_backed_refresh_coordinator::{
+    coordinate_source_backed_refresh, PinnedSourceBackedGeneration, SourceBackedRefreshMode,
+    SourceBackedRefreshObservation,
+};
 mod daemon_scheduler;
 #[cfg(test)]
 use daemon_scheduler::*;
