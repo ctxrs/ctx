@@ -47,9 +47,10 @@ pub(super) enum ResolverGroup {
 
 /// The result of one no-follow filesystem presence observation.
 ///
-/// Only a proven absent path is [`Missing`](Self::Missing). Link-mediated
-/// absence and every other inspection failure remain [`Unknown`](Self::Unknown)
-/// so a winner selector cannot silently unlock a stale fallback.
+/// Only a proven absent path is [`Missing`](Self::Missing). Unsafe or
+/// unqualified roots are [`Unsupported`](Self::Unsupported), while ambiguous
+/// inspection failures remain [`Unknown`](Self::Unknown), so a winner selector
+/// cannot silently unlock a stale fallback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PathPresence {
     Missing,
@@ -345,10 +346,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let dangling = temp.path().join("dangling");
         symlink(temp.path().join("absent-target"), &dangling).unwrap();
-        assert_eq!(path_presence(&dangling), PathPresence::Present);
+        assert_eq!(path_presence(&dangling), PathPresence::Unsupported);
         assert!(matches!(
             path_presence(&dangling.join("child")),
-            PathPresence::Unknown(_)
+            PathPresence::Unknown(ErrorKind::NotADirectory)
         ));
 
         let loop_link = temp.path().join("loop");
@@ -383,7 +384,7 @@ mod tests {
         let legacy = temp.path().join("legacy.db");
         fs::write(&legacy, b"legacy").unwrap();
 
-        assert!(matches!(path_presence(&current), PathPresence::Unknown(_)));
+        assert_eq!(path_presence(&current), PathPresence::Unsupported);
         assert_eq!(select_current_or_legacy(current.clone(), legacy), current);
     }
 

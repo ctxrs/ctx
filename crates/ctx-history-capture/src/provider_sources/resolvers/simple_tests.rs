@@ -3,6 +3,8 @@ use super::super::super::{
     discovery::provider_source_for_path,
     types::{DiscoveryIssueKind, ProviderSourceStatus},
 };
+use std::fs;
+
 use super::*;
 use crate::{provider_source_specs, test_support_paths};
 

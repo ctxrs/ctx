@@ -1,3 +1,5 @@
+use std::fs;
+
 use super::*;
 use crate::provider_sources::{
     context::DiscoveryPlatformDirs, discovery::provider_source_for_path,
