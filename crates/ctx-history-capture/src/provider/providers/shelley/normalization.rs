@@ -1,7 +1,6 @@
 use chrono::{DateTime, NaiveDateTime, Utc};
 use ctx_history_core::{CaptureProvider, ContentRef, EventRole, EventType};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 use crate::common::time::parse_rfc3339_utc;
 use crate::complete_content::{
@@ -504,35 +503,14 @@ fn attach_shelley_core_content_locator(
 fn shelley_logical_record_digest(
     values: &[NativeSqliteValue],
 ) -> Result<CompleteContentBodyDigest> {
-    let mut digest = Sha256::new();
-    digest.update(b"ctx-complete-content-sqlite-logical-row-v1\0");
-    digest.update((values.len() as u64).to_be_bytes());
-    for value in values {
-        match value {
-            NativeSqliteValue::Null => digest.update([0]),
-            NativeSqliteValue::Integer(value) => {
-                digest.update([1]);
-                digest.update(value.to_be_bytes());
-            }
-            NativeSqliteValue::RealBits(value) => {
-                digest.update([2]);
-                digest.update(value.to_be_bytes());
-            }
-            NativeSqliteValue::Text(value) => {
-                digest.update([3]);
-                digest.update((value.len() as u64).to_be_bytes());
-                digest.update(value.as_bytes());
-            }
-            NativeSqliteValue::Blob(value) => {
-                digest.update([4]);
-                digest.update((value.len() as u64).to_be_bytes());
-                digest.update(value);
-            }
-        }
-    }
-    CompleteContentBodyDigest::parse(format!("{:x}", digest.finalize())).ok_or(
-        CaptureError::SystemInvariant("Shelley SHA-256 formatting produced an invalid digest"),
-    )
+    let digest = super::relationships::shelley_logical_record_digest(values);
+    let encoded = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    CompleteContentBodyDigest::parse(encoded).ok_or(CaptureError::SystemInvariant(
+        "Shelley SHA-256 formatting produced an invalid digest",
+    ))
 }
 
 pub(super) fn shelley_timestamp(raw: Option<&str>, fallback: DateTime<Utc>) -> DateTime<Utc> {

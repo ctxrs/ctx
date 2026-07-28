@@ -66,6 +66,7 @@ mod cursor;
 mod output;
 mod publication;
 mod scanner;
+pub(crate) mod source_backed;
 
 use self::{
     cursor::{
