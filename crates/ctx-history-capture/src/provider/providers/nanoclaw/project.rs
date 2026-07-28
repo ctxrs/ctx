@@ -448,7 +448,7 @@ fn nanoclaw_stream_inventory(
                     .join("v2-sessions")
                     .join(&agent_group_id)
                     .join(&session_id);
-                let read_component = |source| {
+                let read_component = |source: NanoClawMessageSource| {
                     let component_path = session_dir.join(source.file_name());
                     if let Some(contained_sessions_root) = contained_sessions_root {
                         match fs::symlink_metadata(&component_path) {
