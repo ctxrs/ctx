@@ -7,15 +7,20 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
-use ctx_history_capture::{ingest_codex_source_backed_v0, ProviderSourceStatus};
+use ctx_history_capture::{
+    build_automatic_source_backed_registry, DiscoveryContext, ProviderSourceStatus,
+    SourceBackedAutomaticRegistryIssue, SourceBackedAutomaticUnavailableReason,
+    SourceBackedRefreshExecutor as CaptureSourceBackedRefreshExecutor,
+    SourceBackedRefreshProgress as CaptureSourceBackedRefreshProgress, SourceBackedRouteError,
+    SourceBackedRouteErrorKind, SourceBackedRouteResult,
+};
 use ctx_history_core::{utc_now, CaptureProvider};
-use ctx_history_index::VerifiedIndex;
+use ctx_history_index::{VerifiedIndex, WriterOptions};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{
-    compact_json,
-    provider_sources::discovered_sources_for_provider_report,
+    compact_json, identity,
     upgrade::data_migration::{self, MigrationPhase},
 };
 
@@ -25,7 +30,6 @@ use super::{
 };
 
 const SOURCE_BACKED_INDEX_DIRECTORY: &str = "source-backed-lexical-v0";
-const CODEX_SESSION_SOURCE_FORMAT: &str = "codex_session_jsonl_tree";
 const SOURCE_REFRESH_REQUEST_OP: &str = "source_refresh_request";
 const SOURCE_REFRESH_STATUS_OP: &str = "source_refresh_status";
 const SOURCE_REFRESH_ATTEMPT_HISTORY: usize = 64;
@@ -33,6 +37,7 @@ const SOURCE_REFRESH_POLL_INTERVAL: StdDuration = StdDuration::from_millis(50);
 const SOURCE_REFRESH_IPC_TIMEOUT: StdDuration = StdDuration::from_secs(2);
 const SOURCE_REFRESH_RESPONSE_MAX_BYTES: u64 = 64 * 1024;
 const SOURCE_REBUILD_MIGRATION_JOURNAL: &str = "state.jsonl";
+const SOURCE_REFRESH_BUILD_ISSUE_LIMIT: usize = 8;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum SourceBackedRefreshMode {
@@ -124,6 +129,11 @@ pub(crate) trait SourceBackedRefreshExecutor: Send + Sync {
         &self,
         execution: SourceBackedRefreshExecution<'_>,
     ) -> Result<SourceBackedRefreshPublication>;
+
+    #[cfg(test)]
+    fn implementation_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
 }
 
 impl<F> SourceBackedRefreshExecutor for F
@@ -137,6 +147,18 @@ where
         execution: SourceBackedRefreshExecution<'_>,
     ) -> Result<SourceBackedRefreshPublication> {
         self(execution)
+    }
+}
+
+#[derive(Debug, Default)]
+struct CaptureOwnedSourceBackedRefreshExecutor;
+
+impl SourceBackedRefreshExecutor for CaptureOwnedSourceBackedRefreshExecutor {
+    fn refresh(
+        &self,
+        execution: SourceBackedRefreshExecution<'_>,
+    ) -> Result<SourceBackedRefreshPublication> {
+        execute_capture_owned_refresh(execution)
     }
 }
 
@@ -270,7 +292,7 @@ pub(in crate::semantic) struct SourceBackedRefreshRun {
 
 impl SourceBackedRefreshCoordinator {
     pub(in crate::semantic) fn new() -> Self {
-        Self::with_executor(Arc::new(execute_codex_compatibility_refresh))
+        Self::with_executor(Arc::new(CaptureOwnedSourceBackedRefreshExecutor))
     }
 
     pub(in crate::semantic) fn with_executor(
@@ -630,53 +652,147 @@ fn execute_source_backed_refresh(
         .map(|publication| publication.generation_id)
 }
 
-/// Compatibility adapter until the central capture coordinator supplies one
-/// grouped provider-neutral publication callback.
-fn execute_codex_compatibility_refresh(
+fn execute_capture_owned_refresh(
     execution: SourceBackedRefreshExecution<'_>,
 ) -> Result<SourceBackedRefreshPublication> {
-    execution.report_progress("discovering", 0, 0, None)?;
-    let mut roots = discovered_codex_source_roots()?;
-    if roots.len() != 1 {
-        return Err(anyhow!(
-            "source-backed daemon refresh discovered {} Codex roots; atomic multi-root publication requires the capture-owned grouped refresh hook",
-            roots.len()
-        ));
-    }
-
-    let root = roots
-        .pop()
-        .ok_or_else(|| anyhow!("source-backed refresh lost its discovered Codex root"))?;
-    execution.report_progress("refreshing", 0, 1, Some(root.display().to_string()))?;
-    let receipt = ingest_codex_source_backed_v0(&root, execution.index_root)
-        .with_context(|| format!("refresh source-backed Codex tree {}", root.display()))?;
-    execution.report_progress("verifying", 1, 1, None)?;
-    Ok(SourceBackedRefreshPublication {
-        generation_id: receipt.commit.generation_id,
-    })
+    let discovery = source_backed_discovery_context()?;
+    execute_capture_owned_refresh_with(execution, &discovery, refresh_all_provider_sources)
 }
 
+fn execute_capture_owned_refresh_with<Refresh>(
+    execution: SourceBackedRefreshExecution<'_>,
+    discovery: &DiscoveryContext,
+    refresh_all: Refresh,
+) -> Result<SourceBackedRefreshPublication>
+where
+    Refresh: FnOnce(
+        &DiscoveryContext,
+        &Path,
+        &mut dyn FnMut(CaptureSourceBackedRefreshProgress) -> SourceBackedRouteResult<()>,
+    ) -> Result<String>,
+{
+    execution.report_progress("discovering", 0, 0, None)?;
+    let mut report_progress = |update: CaptureSourceBackedRefreshProgress| {
+        execution
+            .report_progress(
+                update.phase,
+                update.completed_sources,
+                update.total_sources,
+                update.current_source,
+            )
+            .map_err(|error| {
+                SourceBackedRouteError::new(
+                    SourceBackedRouteErrorKind::Internal,
+                    format!("persist daemon source-backed refresh progress: {error:#}"),
+                )
+            })
+    };
+    let generation_id = refresh_all(discovery, execution.index_root, &mut report_progress)?;
+    Ok(SourceBackedRefreshPublication { generation_id })
+}
+
+fn refresh_all_provider_sources(
+    discovery: &DiscoveryContext,
+    index_root: &Path,
+    report_progress: &mut dyn FnMut(
+        CaptureSourceBackedRefreshProgress,
+    ) -> SourceBackedRouteResult<()>,
+) -> Result<String> {
+    let build = build_automatic_source_backed_registry(discovery);
+    let (registry, issues) = build.into_parts();
+    reject_blocking_automatic_registry_issues(&issues)?;
+    let executor = CaptureSourceBackedRefreshExecutor::new(registry, WriterOptions::default());
+    let receipt = executor
+        .refresh(index_root, report_progress)
+        .context("run capture-owned all-provider source-backed refresh")?;
+    Ok(receipt.commit.generation_id)
+}
+
+fn source_backed_discovery_context() -> Result<DiscoveryContext> {
+    let home = identity::home_dir()
+        .context("resolve the user home for source-backed provider discovery")?;
+    Ok(DiscoveryContext::from_process(home))
+}
+
+fn reject_blocking_automatic_registry_issues(
+    issues: &[SourceBackedAutomaticRegistryIssue],
+) -> Result<()> {
+    let mut blocker_count = 0usize;
+    let mut blocker_details = Vec::new();
+    for issue in issues {
+        let SourceBackedAutomaticRegistryIssue::Unavailable { source, reason } = issue else {
+            continue;
+        };
+        let blocks_publication = match reason {
+            SourceBackedAutomaticUnavailableReason::SourceStatus(
+                ProviderSourceStatus::Missing | ProviderSourceStatus::Unknown,
+            ) => false,
+            SourceBackedAutomaticUnavailableReason::SourceStatus(_)
+            | SourceBackedAutomaticUnavailableReason::UnsupportedFormat { .. }
+            | SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable { .. }
+            | SourceBackedAutomaticUnavailableReason::RegistrationRejected { .. } => source.exists,
+        };
+        if !blocks_publication {
+            continue;
+        }
+        blocker_count = blocker_count.saturating_add(1);
+        if blocker_details.len() < SOURCE_REFRESH_BUILD_ISSUE_LIMIT {
+            blocker_details.push(format!(
+                "{} {}: {}",
+                source.provider.as_str(),
+                source.path.display(),
+                automatic_registry_issue_reason(reason),
+            ));
+        }
+    }
+    if blocker_count == 0 {
+        return Ok(());
+    }
+    let omitted = blocker_count.saturating_sub(blocker_details.len());
+    let omitted = if omitted == 0 {
+        String::new()
+    } else {
+        format!("; {omitted} additional blocking issue(s) omitted")
+    };
+    Err(anyhow!(
+        "capture automatic registry has {blocker_count} blocking detected-source issue(s): {}{omitted}",
+        blocker_details.join("; ")
+    ))
+}
+
+fn automatic_registry_issue_reason(reason: &SourceBackedAutomaticUnavailableReason) -> String {
+    match reason {
+        SourceBackedAutomaticUnavailableReason::SourceStatus(status) => {
+            format!("source status is {}", status.as_str())
+        }
+        SourceBackedAutomaticUnavailableReason::UnsupportedFormat { detail }
+        | SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable { detail } => {
+            (*detail).to_owned()
+        }
+        SourceBackedAutomaticUnavailableReason::RegistrationRejected { detail } => detail.clone(),
+    }
+}
+
+/// Bounded compatibility for the Codex-only semantic hydration adapter in
+/// `daemon_worker`. Default source-backed refresh never calls this helper.
 pub(super) fn discovered_codex_source_roots() -> Result<Vec<PathBuf>> {
-    let report = discovered_sources_for_provider_report(CaptureProvider::Codex);
-    let mut roots = report
-        .sources
-        .into_iter()
-        .filter(|source| {
-            source.exists
-                && source.source_format == CODEX_SESSION_SOURCE_FORMAT
-                && source.status == ProviderSourceStatus::Available
+    let discovery = source_backed_discovery_context()?;
+    let build = build_automatic_source_backed_registry(&discovery);
+    let mut roots = build
+        .registry
+        .routes()
+        .filter(|route| {
+            route.source.provider == CaptureProvider::Codex
+                && route.source.source_format == "codex_session_jsonl_tree"
         })
-        .map(|source| source.path)
+        .map(|route| route.source.path.clone())
         .collect::<Vec<_>>();
     roots.sort();
     roots.dedup();
     if roots.is_empty() {
-        let detail = report
-            .issues
-            .first()
-            .map(|issue| issue.reason)
-            .unwrap_or("no ordinary Codex rollout/session JSONL tree was discovered");
-        return Err(anyhow!("cannot discover Codex session sources: {detail}"));
+        return Err(anyhow!(
+            "the capture registry discovered no available Codex session tree for semantic compatibility hydration"
+        ));
     }
     Ok(roots)
 }
@@ -969,6 +1085,11 @@ mod tests {
         Arc, Barrier,
     };
 
+    use ctx_history_capture::{
+        DiscoveryPlatform, DiscoveryPlatformDirs, ProviderCatalogSupport, ProviderImportSupport,
+        ProviderSource, ProviderSourceKind,
+    };
+
     use super::*;
 
     struct TestExecutor {
@@ -1005,6 +1126,128 @@ mod tests {
             .and_then(Value::as_str)
             .expect("request ID")
             .to_owned()
+    }
+
+    #[test]
+    fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
+        let coordinator = SourceBackedRefreshCoordinator::new();
+        assert_eq!(
+            coordinator.executor.implementation_name(),
+            std::any::type_name::<CaptureOwnedSourceBackedRefreshExecutor>()
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let data_root = temp.path().join("data");
+        let index_root = source_backed_index_root(&data_root);
+        let discovery = DiscoveryContext::new(
+            temp.path(),
+            temp.path().join("cwd"),
+            DiscoveryPlatform::Linux,
+            DiscoveryPlatformDirs::default(),
+        );
+        let updates = Mutex::new(Vec::new());
+        let report_progress = |update: SourceBackedRefreshProgressUpdate| {
+            updates.lock().unwrap().push((
+                update.phase,
+                update.completed_sources,
+                update.total_sources,
+                update.current_source,
+            ));
+            Ok(())
+        };
+        let execution = SourceBackedRefreshExecution {
+            data_root: &data_root,
+            index_root: &index_root,
+            request_id: "all-provider-request",
+            report_progress: &report_progress,
+        };
+        let mut provider_wide_calls = 0;
+
+        let publication = execute_capture_owned_refresh_with(
+            execution,
+            &discovery,
+            |observed_discovery, observed_index_root, progress| {
+                provider_wide_calls += 1;
+                assert_eq!(observed_discovery, &discovery);
+                assert_eq!(observed_index_root, index_root);
+                progress(CaptureSourceBackedRefreshProgress {
+                    phase: "discovering",
+                    completed_sources: 0,
+                    total_sources: 2,
+                    current_source: None,
+                })?;
+                progress(CaptureSourceBackedRefreshProgress {
+                    phase: "refreshing",
+                    completed_sources: 1,
+                    total_sources: 2,
+                    current_source: Some("provider-wide-route".to_owned()),
+                })?;
+                progress(CaptureSourceBackedRefreshProgress {
+                    phase: "verifying",
+                    completed_sources: 2,
+                    total_sources: 2,
+                    current_source: None,
+                })?;
+                Ok("all-provider-generation".to_owned())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(provider_wide_calls, 1);
+        assert_eq!(publication.generation_id, "all-provider-generation");
+        assert_eq!(
+            updates.into_inner().unwrap(),
+            vec![
+                ("discovering".to_owned(), 0, 0, None),
+                ("discovering".to_owned(), 0, 2, None),
+                (
+                    "refreshing".to_owned(),
+                    1,
+                    2,
+                    Some("provider-wide-route".to_owned()),
+                ),
+                ("verifying".to_owned(), 2, 2, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_roots_are_nonblocking_but_detected_selector_gaps_block_publication() {
+        let source = |path: &'static str, exists, status| ProviderSource {
+            provider: CaptureProvider::Warp,
+            path: PathBuf::from(path),
+            exists,
+            source_format: "warp_sqlite",
+            source_kind: ProviderSourceKind::NativeHistory,
+            import_support: ProviderImportSupport::Native,
+            catalog_support: ProviderCatalogSupport::Native,
+            status,
+            unsupported_reason: None,
+        };
+        let missing = SourceBackedAutomaticRegistryIssue::Unavailable {
+            source: source(
+                "/unavailable/warp.sqlite",
+                false,
+                ProviderSourceStatus::Missing,
+            ),
+            reason: SourceBackedAutomaticUnavailableReason::SourceStatus(
+                ProviderSourceStatus::Missing,
+            ),
+        };
+        assert!(reject_blocking_automatic_registry_issues(&[missing]).is_ok());
+
+        let selector_gap = SourceBackedAutomaticRegistryIssue::Unavailable {
+            source: source(
+                "/detected/warp.sqlite",
+                true,
+                ProviderSourceStatus::Available,
+            ),
+            reason: SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable {
+                detail: "injected selector gap",
+            },
+        };
+        let error = reject_blocking_automatic_registry_issues(&[selector_gap]).unwrap_err();
+        assert!(format!("{error:#}").contains("injected selector gap"));
     }
 
     #[test]
@@ -1110,6 +1353,44 @@ mod tests {
         assert_eq!(run.job["status"], "failed");
         assert_eq!(run.job["published_generation"], "generation-1");
         assert_eq!(run.job["progress"]["phase"], "failed");
+    }
+
+    #[test]
+    fn unverified_returned_generation_is_never_recorded_as_published() {
+        let coordinator = SourceBackedRefreshCoordinator::new();
+        let request = coordinator.enqueue(Some("generation-1".to_owned()));
+        let request_id = request_id(&request);
+        let publication_records = AtomicUsize::new(0);
+        let failure_records = AtomicUsize::new(0);
+
+        let run = coordinator
+            .run_next_with(
+                |_, _| Ok("generation-2".to_owned()),
+                || Ok(Some("generation-1".to_owned())),
+                |_| {
+                    publication_records.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+                |_| {
+                    failure_records.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+            .expect("queued refresh");
+
+        assert!(run.failed);
+        assert!(!run.did_work);
+        assert_eq!(publication_records.load(Ordering::SeqCst), 0);
+        assert_eq!(failure_records.load(Ordering::SeqCst), 1);
+        let status = coordinator
+            .status(&request_id)
+            .expect("failed request status");
+        assert_eq!(status["request_state"], "failed");
+        assert_eq!(status["previous_generation"], "generation-1");
+        assert_eq!(status["published_generation"], "generation-1");
+        assert!(status["last_error"]
+            .as_str()
+            .is_some_and(|error| error.contains("returned generation generation-2")));
     }
 
     #[test]
