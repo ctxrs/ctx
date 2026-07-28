@@ -20,6 +20,27 @@ use crate::{
 const MACHINE: &str = "antigravity-nativepath-test-machine";
 
 #[test]
+fn source_backed_cold_projection_and_exact_locator() {
+    const SENTINEL: &str = "ANTIGRAVITY_SOURCE_BACKED_SENTINEL";
+
+    let temp = tempdir().unwrap();
+    let root = temp.path().join("brain");
+    let transcript = transcript_path(&root);
+    let source_record = record(0, "USER_INPUT", SENTINEL);
+    write_transcript(&transcript, std::slice::from_ref(&source_record));
+    let mut expected_record = serde_json::to_vec(&source_record).unwrap();
+    expected_record.push(b'\n');
+
+    super::super::source_backed::assert_source_backed_fixture(
+        antigravity_source_backed_adapter(),
+        &root,
+        "agy-life",
+        SENTINEL,
+        &expected_record,
+    );
+}
+
+#[test]
 fn released_positional_identity_and_hash_survive_upgrade_and_reorder() {
     const STABLE_TEXT: &str = "ANTIGRAVITY_RELEASED_EVENT_MUST_STAY_STABLE";
 

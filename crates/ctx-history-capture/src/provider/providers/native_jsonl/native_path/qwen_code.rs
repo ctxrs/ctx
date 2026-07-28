@@ -44,6 +44,14 @@ const QWEN_CODE_MISSING_REASON: &str =
 const QWEN_CODE_OUTPUT_FRONTIER_VERSION: u32 = 1;
 const QWEN_CODE_OUTPUT_PARSER_REVISION: &str = "qwen-code-direct-native-jsonl-v1";
 
+pub(crate) const fn qwen_code_source_backed_adapter() -> super::DirectJsonlSourceAdapter {
+    super::DirectJsonlSourceAdapter::new(
+        CaptureProvider::QwenCode,
+        QWEN_CODE_SOURCE_FORMAT,
+        "qwen-code-direct-native-jsonl-v1",
+    )
+}
+
 pub(crate) fn qwen_code_event_identity(value: &Value) -> Option<&str> {
     value
         .get("id")

@@ -42,6 +42,14 @@ use super::{
 const QODER_OUTPUT_FRONTIER_VERSION: u32 = 1;
 const QODER_OUTPUT_PARSER_REVISION: &str = "qoder-direct-native-jsonl-v1";
 
+pub(crate) const fn qoder_source_backed_adapter() -> super::DirectJsonlSourceAdapter {
+    super::DirectJsonlSourceAdapter::new(
+        CaptureProvider::Qoder,
+        QODER_SOURCE_FORMAT,
+        "qoder-direct-native-jsonl-v1",
+    )
+}
+
 pub(crate) fn import_qoder_nativepath_tree(
     store: &mut Store,
     request: NativePathJsonlTreeImport<'_>,

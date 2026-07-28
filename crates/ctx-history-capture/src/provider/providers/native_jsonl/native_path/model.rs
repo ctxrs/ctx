@@ -92,6 +92,15 @@ pub(crate) struct DirectJsonlEvent {
     pub(crate) payload: Value,
     pub(crate) metadata: Value,
     pub(crate) touches: Vec<DirectJsonlTouch>,
+    #[serde(skip, default)]
+    pub(crate) source_record: DirectJsonlSourceRecord,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct DirectJsonlSourceRecord {
+    pub(crate) byte_start: u64,
+    pub(crate) byte_end_exclusive: u64,
+    pub(crate) record_digest: [u8; 32],
 }
 
 #[derive(Debug, Clone, PartialEq)]

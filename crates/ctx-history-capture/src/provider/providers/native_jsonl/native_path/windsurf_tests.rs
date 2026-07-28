@@ -19,6 +19,27 @@ use crate::{
 const MACHINE: &str = "windsurf-nativepath-test-machine";
 
 #[test]
+fn source_backed_cold_projection_and_exact_locator() {
+    const SENTINEL: &str = "WINDSURF_SOURCE_BACKED_SENTINEL";
+
+    let temp = tempdir().unwrap();
+    let root = temp.path().join("transcripts");
+    let transcript = transcript_path(&root);
+    let source_record = user_input(0, SENTINEL);
+    write_transcript(&transcript, std::slice::from_ref(&source_record));
+    let mut expected_record = serde_json::to_vec(&source_record).unwrap();
+    expected_record.push(b'\n');
+
+    super::super::source_backed::assert_source_backed_fixture(
+        windsurf_source_backed_adapter(),
+        &root,
+        "windsurf-hook-trajectory",
+        SENTINEL,
+        &expected_record,
+    );
+}
+
+#[test]
 fn production_lifecycle_covers_all_source_changes_and_retires_disappearance() {
     let temp = tempdir().unwrap();
     let root = temp.path().join("transcripts");

@@ -7,6 +7,7 @@ impl DirectJsonlPageReader {
         ordinal: u64,
         byte_start: u64,
         byte_end_exclusive: u64,
+        record_digest: [u8; 32],
     ) -> Result<ProjectedLine> {
         if bytes.iter().all(u8::is_ascii_whitespace) {
             return Ok(ProjectedLine::default());
@@ -86,6 +87,7 @@ impl DirectJsonlPageReader {
                 byte_start,
                 byte_end_exclusive,
                 occurred_at,
+                record_digest,
             );
         }
         let result_profile = (event_type == EventType::ToolOutput)
@@ -100,6 +102,7 @@ impl DirectJsonlPageReader {
                 byte_start,
                 byte_end_exclusive,
                 occurred_at,
+                record_digest,
             );
         }
 
@@ -136,6 +139,11 @@ impl DirectJsonlPageReader {
             byte_end_exclusive,
             line_number,
         )?;
+        event.source_record = DirectJsonlSourceRecord {
+            byte_start,
+            byte_end_exclusive,
+            record_digest,
+        };
         Ok(ProjectedLine::event(event))
     }
 
@@ -149,6 +157,7 @@ impl DirectJsonlPageReader {
         byte_start: u64,
         byte_end_exclusive: u64,
         occurred_at: DateTime<Utc>,
+        record_digest: [u8; 32],
     ) -> Result<ProjectedLine> {
         let extracted = match self.provider {
             CaptureProvider::FactoryAiDroid => super::enumerate_factory_droid_results(value),
@@ -223,7 +232,7 @@ impl DirectJsonlPageReader {
                 subrecord.outcome.outcome,
                 OutputOutcome::Failure | OutputOutcome::Timeout
             ) {
-                projected.events.push(direct_event(
+                let mut event = direct_event(
                     self.provider,
                     &self.source_format,
                     value,
@@ -234,7 +243,13 @@ impl DirectJsonlPageReader {
                     true,
                     Some(&subrecord),
                     retained_failure_touches.clone(),
-                )?);
+                )?;
+                event.source_record = DirectJsonlSourceRecord {
+                    byte_start,
+                    byte_end_exclusive,
+                    record_digest,
+                };
+                projected.events.push(event);
             } else if self.collect_transient_outputs {
                 let Some(content) = subrecord.content else {
                     continue;
@@ -532,6 +547,7 @@ fn direct_event(
             "legacy_provider_event_index": raw_ordinal,
         }),
         touches,
+        source_record: DirectJsonlSourceRecord::default(),
     })
 }
 

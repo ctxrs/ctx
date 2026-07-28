@@ -42,6 +42,14 @@ use super::{
 const ANTIGRAVITY_OUTPUT_FRONTIER_VERSION: u32 = 1;
 const ANTIGRAVITY_OUTPUT_PARSER_REVISION: &str = "antigravity-direct-native-jsonl-v1";
 
+pub(crate) const fn antigravity_source_backed_adapter() -> super::DirectJsonlSourceAdapter {
+    super::DirectJsonlSourceAdapter::new(
+        CaptureProvider::Antigravity,
+        ANTIGRAVITY_CLI_SOURCE_FORMAT,
+        "antigravity-direct-native-jsonl-v1",
+    )
+}
+
 pub(crate) fn import_antigravity_nativepath_tree(
     store: &mut Store,
     request: NativePathJsonlTreeImport<'_>,

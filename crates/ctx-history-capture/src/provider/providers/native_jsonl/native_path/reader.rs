@@ -43,7 +43,7 @@ use super::{
     qoder_parser, qwen_code, tabnine, windsurf, DirectJsonlCheckpoint, DirectJsonlEvent,
     DirectJsonlFileObservation, DirectJsonlObservedTime, DirectJsonlOutput, DirectJsonlPage,
     DirectJsonlRejection, DirectJsonlScanOutcome, DirectJsonlSession, DirectJsonlSourceChange,
-    DirectJsonlTouch, DIRECT_JSONL_NATIVEPATH_PARSER_REVISION,
+    DirectJsonlSourceRecord, DirectJsonlTouch, DIRECT_JSONL_NATIVEPATH_PARSER_REVISION,
     DIRECT_JSONL_NATIVEPATH_POLICY_REVISION,
 };
 
@@ -222,7 +222,7 @@ impl DirectJsonlPageReader {
                 self.observation.length,
                 start,
             )?;
-            let (bytes, end) = match line {
+            let (bytes, end, record_digest) = match line {
                 DirectLine::EndOfFile => {
                     self.finish_terminal()?;
                     break;
@@ -264,10 +264,14 @@ impl DirectJsonlPageReader {
                     rejections.push(rejection);
                     continue;
                 }
-                DirectLine::Complete { bytes, end } => (bytes, end),
+                DirectLine::Complete {
+                    bytes,
+                    end,
+                    record_digest,
+                } => (bytes, end, record_digest),
             };
 
-            let projected = self.project_line(&bytes, ordinal, start, end)?;
+            let projected = self.project_line(&bytes, ordinal, start, end, record_digest)?;
             let projected_units = projected
                 .events
                 .iter()

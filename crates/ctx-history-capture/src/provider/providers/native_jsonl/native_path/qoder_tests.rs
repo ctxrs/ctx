@@ -24,6 +24,27 @@ const MACHINE: &str = "qoder-nativepath-test-machine";
 const SUCCESS_BODY: &str = "QODER_SUCCESS_BODY_MUST_NOT_ENTER_CORE";
 
 #[test]
+fn source_backed_cold_projection_and_exact_locator() {
+    const SENTINEL: &str = "QODER_SOURCE_BACKED_SENTINEL";
+
+    let temp = tempdir().unwrap();
+    let root = temp.path().join(".qoder/projects");
+    let transcript = transcript_path(&root);
+    let source_record = message("source-backed-user", "user", SENTINEL);
+    write_transcript(&transcript, &[header("qoder-life"), source_record.clone()]);
+    let mut expected_record = serde_json::to_vec(&source_record).unwrap();
+    expected_record.push(b'\n');
+
+    super::super::source_backed::assert_source_backed_fixture(
+        qoder_source_backed_adapter(),
+        &root,
+        "qoder-life",
+        SENTINEL,
+        &expected_record,
+    );
+}
+
+#[test]
 fn production_lifecycle_covers_all_source_changes_and_retires_disappearance() {
     let temp = tempdir().unwrap();
     let root = temp.path().join(".qoder/projects");
