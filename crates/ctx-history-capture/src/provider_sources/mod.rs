@@ -28,8 +28,8 @@ pub(crate) use ordinary_file::{
 };
 pub use specs::{provider_source_spec, provider_source_specs};
 pub(crate) use sqlite_source::{
-    open_sqlite_source_snapshot, SqliteSourceAccessError, SqliteSourceEvidence,
-    SqliteSourceReadSnapshot,
+    open_sqlite_source_snapshot, SqliteSourceAccessError, SqliteSourceComponent,
+    SqliteSourceEvidence, SqliteSourceReadSnapshot,
 };
 pub use types::{
     DiscoveryIssue, DiscoveryIssueKind, DiscoveryReport, ProviderCatalogSupport,

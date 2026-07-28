@@ -13,10 +13,30 @@
 //! pinned and the expected handle is revalidated before the guard is returned
 //! and again when it is finished.
 //!
-//! This first, intentionally narrow checkpoint accepts main-file-only
-//! snapshots. A connection that retains WAL or journal family files is rejected
-//! with [`SqliteSourceAccessError::UnsupportedSourceFamily`]; it is never
-//! exposed to provider queries.
+//! Main-file-only snapshots are supported. Stock SQLite cannot provide the same
+//! proof for an active Unix WAL family:
+//!
+//! - `SQLITE_FCNTL_FILE_POINTER` exposes `main`, so its public `xLock` can be
+//!   challenged against the authorized handle;
+//! - `SQLITE_FCNTL_JOURNAL_POINTER` exposes the WAL, but bundled SQLite assigns
+//!   WAL files `nolockIoMethods`, so its public `xLock` creates no observable
+//!   lock on the authorized WAL handle; and
+//! - SQLite exposes no public native handle or `sqlite3_file` for SHM.
+//!
+//! Consequently active WAL and rollback-recovery cases return typed
+//! [`SqliteSourceAccessError::UnsupportedSidecarIdentity`] before a guard is
+//! exposed. Canonical paths, `HAS_MOVED`, or endpoint `/proc/self/fd` snapshots
+//! cannot repair this missing two-handle identity bridge.
+//!
+//! The smallest safe no-copy replacement is a per-snapshot read-only VFS whose
+//! `xOpen` duplicates only the DB/WAL handles already admitted by
+//! `root_handle`, whose SHM mapping is backed by the admitted SHM handle, and
+//! whose write/delete/truncate methods always return `SQLITE_READONLY`. It must
+//! implement SQLite-compatible main/SHM locks, use a private SHM mapping so read
+//! marks never modify provider state, reject hot rollback journals and temp
+//! files, and retain/revalidate the complete admitted family before
+//! publication. A pathname-delegating VFS is insufficient because it restores
+//! the same race inside `xOpen`.
 //!
 //! # Adapter migration
 //!
@@ -45,6 +65,23 @@ use std::{
 
 #[cfg(target_os = "linux")]
 use rusqlite::{config::DbConfig, ffi, OpenFlags};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SqliteSourceComponent {
+    Wal,
+    SharedMemory,
+    RollbackJournal,
+}
+
+impl std::fmt::Display for SqliteSourceComponent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Wal => "WAL",
+            Self::SharedMemory => "SHM",
+            Self::RollbackJournal => "rollback journal",
+        })
+    }
+}
 
 #[derive(Debug, Error)]
 pub(crate) enum SqliteSourceAccessError {
@@ -85,8 +122,11 @@ pub(crate) enum SqliteSourceAccessError {
     AmbiguousLockState,
     #[error("SQLite source file changed while its read snapshot was active")]
     SourceChanged,
-    #[error("SQLite WAL/journal family snapshots are not supported by this guard")]
-    UnsupportedSourceFamily,
+    #[error("SQLite {component} identity is unsupported: {capability}")]
+    UnsupportedSidecarIdentity {
+        component: SqliteSourceComponent,
+        capability: &'static str,
+    },
     #[error("SQLite source snapshot transaction is no longer active")]
     SnapshotNotActive,
 }
@@ -197,11 +237,20 @@ pub(crate) fn open_sqlite_source_snapshot(
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn unsupported_platform() -> SqliteSourceAccessError {
+    #[cfg(target_os = "macos")]
+    let capability = "the unix-posix OFD identity challenge is not implemented";
+    #[cfg(target_os = "freebsd")]
+    let capability = "a helper process is required to observe the connection's POSIX lock owner";
+    #[cfg(target_os = "windows")]
+    let capability =
+        "WIN32_GET_HANDLE proves main but SQLite exposes no native SHM identity for WAL snapshots";
+    #[cfg(not(any(target_os = "macos", target_os = "freebsd", target_os = "windows")))]
+    let capability = "no safe native SQLite source-family identity binding is implemented";
     SqliteSourceAccessError::UnsupportedPlatform {
         platform: std::env::consts::OS,
-        capability:
-            "SQLite's public Unix VFS ABI does not expose a portable native main-file identity",
+        capability,
     }
 }
 
@@ -368,7 +417,11 @@ fn configure_and_pin_snapshot(connection: &Connection) -> SqliteSourceAccessResu
         .pragma_query_value(None, "journal_mode", |row| row.get(0))
         .map_err(|source| sqlite_error("reading the provider journal mode", source))?;
     if journal_mode.eq_ignore_ascii_case("wal") {
-        return Err(SqliteSourceAccessError::UnsupportedSourceFamily);
+        return Err(SqliteSourceAccessError::UnsupportedSidecarIdentity {
+            component: SqliteSourceComponent::Wal,
+            capability:
+                "the stock Unix VFS exposes no native WAL/SHM identity; a root-handle VFS is required",
+        });
     }
     connection
         .execute_batch("BEGIN DEFERRED")
@@ -589,11 +642,11 @@ fn qualify_linux_filesystem(file: &File, path: &Path) -> SqliteSourceAccessResul
 mod tests {
     use std::{fs, fs::File, path::Path};
 
-    use rusqlite::{params, Connection};
+    use rusqlite::{config::DbConfig, ffi, params, Connection, OpenFlags};
 
     use super::{
-        open_linux_snapshot, open_sqlite_source_snapshot, SqliteSourceAccessError,
-        SqliteSourceReadSnapshot,
+        open_linux_snapshot, open_sqlite_source_snapshot, probe_ofd_write_lock, LockProbe,
+        SqliteSourceAccessError, SqliteSourceComponent, SqliteSourceReadSnapshot,
     };
 
     fn create_database(path: &Path, value: &str) {
@@ -612,6 +665,26 @@ mod tests {
             .unwrap()
             .query_row("SELECT body FROM messages", [], |row| row.get(0))
             .unwrap()
+    }
+
+    fn create_persistent_wal(path: &Path) {
+        let writer = Connection::open(path).unwrap();
+        let mode: String = writer
+            .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        writer
+            .execute("CREATE TABLE messages (body TEXT NOT NULL)", [])
+            .unwrap();
+        writer
+            .execute("INSERT INTO messages (body) VALUES ('from-wal')", [])
+            .unwrap();
+        writer
+            .set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
+            .unwrap();
+        drop(writer);
+        assert!(path.with_file_name("provider.sqlite-wal").exists());
+        assert!(path.with_file_name("provider.sqlite-shm").exists());
     }
 
     #[test]
@@ -691,31 +764,71 @@ mod tests {
     fn wal_family_is_typed_fail_closed() {
         let temp = tempfile::tempdir().unwrap();
         let database = temp.path().join("provider.sqlite");
-        let writer = Connection::open(&database).unwrap();
-        let mode: String = writer
-            .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(mode, "wal");
-        writer
-            .execute("CREATE TABLE messages (body TEXT NOT NULL)", [])
-            .unwrap();
-        writer
-            .set_db_config(
-                rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
-                true,
-            )
-            .unwrap();
-        drop(writer);
-        assert!(database.with_file_name("provider.sqlite-wal").exists());
+        create_persistent_wal(&database);
         let root_bound = File::open(&database).unwrap();
 
         let result = open_sqlite_source_snapshot(&database, &root_bound);
         assert!(
             matches!(
                 result,
-                Err(SqliteSourceAccessError::UnsupportedSourceFamily)
+                Err(SqliteSourceAccessError::UnsupportedSidecarIdentity {
+                    component: SqliteSourceComponent::Wal,
+                    ..
+                })
             ),
             "{result:?}"
+        );
+    }
+
+    #[test]
+    fn stock_unix_wal_pointer_has_no_identity_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("provider.sqlite");
+        create_persistent_wal(&database);
+        let wal = File::open(database.with_file_name("provider.sqlite-wal")).unwrap();
+        let connection = Connection::open_with_flags_and_vfs(
+            &database,
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            "unix",
+        )
+        .unwrap();
+        connection
+            .query_row("SELECT count(*) FROM sqlite_schema", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+
+        let mut sqlite_wal = std::ptr::null_mut::<ffi::sqlite3_file>();
+        let code = unsafe {
+            ffi::sqlite3_file_control(
+                connection.handle(),
+                c"main".as_ptr(),
+                ffi::SQLITE_FCNTL_JOURNAL_POINTER,
+                (&mut sqlite_wal as *mut *mut ffi::sqlite3_file).cast(),
+            )
+        };
+        assert_eq!(code, ffi::SQLITE_OK);
+        assert!(!sqlite_wal.is_null());
+        assert_eq!(probe_ofd_write_lock(&wal).unwrap(), LockProbe::Unlocked);
+
+        let methods = unsafe { (*sqlite_wal).pMethods.as_ref().unwrap() };
+        let lock = methods.xLock.unwrap();
+        let unlock = methods.xUnlock.unwrap();
+        assert_eq!(
+            unsafe { lock(sqlite_wal, ffi::SQLITE_LOCK_SHARED) },
+            ffi::SQLITE_OK
+        );
+        assert_eq!(
+            probe_ofd_write_lock(&wal).unwrap(),
+            LockProbe::Unlocked,
+            "bundled SQLite gives WAL files nolockIoMethods, so xLock cannot link the WAL to the authorized handle"
+        );
+        assert_eq!(
+            unsafe { unlock(sqlite_wal, ffi::SQLITE_LOCK_NONE) },
+            ffi::SQLITE_OK
         );
     }
 }
