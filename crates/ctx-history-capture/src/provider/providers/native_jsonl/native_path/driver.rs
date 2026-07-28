@@ -12,8 +12,7 @@ use crate::{
 };
 
 use super::{
-    decode_direct_jsonl_cursor, open_direct_jsonl_pages, publish_direct_jsonl_group,
-    DirectJsonlCursorDecode, DirectJsonlPage, DirectJsonlPendingPage,
+    publish_direct_jsonl_group, DirectJsonlCursorDecode, DirectJsonlPage, DirectJsonlPendingPage,
     DirectJsonlPublicationContext,
 };
 
@@ -69,9 +68,10 @@ pub(super) fn import_direct_native_jsonl_tree_core(
     );
     let mut visited = 0_usize;
     let operation = super::super::traversal::visit_jsonl_tree_files(
+        provider,
         request.path,
-        &|path| super::super::dialect::native_jsonl_file_is_selected(provider, path),
-        &mut |path| {
+        &mut |source_file| {
+            let path = source_file.path();
             visited = visited.saturating_add(1);
             if accumulator.stopped() {
                 return Ok(());
@@ -82,8 +82,9 @@ pub(super) fn import_direct_native_jsonl_tree_core(
                         return Err(CaptureError::SourceChangedDuringCapture);
                     }
                 }
-                let observation = super::super::native_path::reader::observe_file(path)?;
-                let canonical_path = std::fs::canonicalize(path)?;
+                let observation =
+                    super::super::native_path::reader::observe_opened_file(source_file.opened())?;
+                let canonical_path = path.to_path_buf();
                 let path_identity = provider_path_identity(&canonical_path)?;
                 let stream =
                     provider_source_cursor_stream_for_path(provider, source_format, &path_identity);
@@ -94,12 +95,13 @@ pub(super) fn import_direct_native_jsonl_tree_core(
                 let decoded = stored
                     .as_ref()
                     .map(|cursor| {
-                        decode_direct_jsonl_cursor(
+                        super::decode_direct_jsonl_cursor_from_opened(
                             &cursor.cursor,
                             provider,
                             source_format,
                             &canonical_path,
                             &observation,
+                            source_file.opened(),
                         )
                     })
                     .transpose()?;
@@ -109,7 +111,7 @@ pub(super) fn import_direct_native_jsonl_tree_core(
                     | DirectJsonlCursorDecode::Migrated(checkpoint) => Some(checkpoint),
                     DirectJsonlCursorDecode::Reset => None,
                 });
-                let mut reader = open_direct_jsonl_pages(
+                let mut reader = super::reader::open_direct_jsonl_pages_from_opened(
                     provider,
                     source_format,
                     &canonical_path,
@@ -117,6 +119,7 @@ pub(super) fn import_direct_native_jsonl_tree_core(
                     request.imported_at,
                     collect_outputs,
                     previous.as_ref(),
+                    source_file.opened().clone(),
                 )?;
                 let mut emitted_page = false;
                 while let Some(page) = reader.next_page()? {

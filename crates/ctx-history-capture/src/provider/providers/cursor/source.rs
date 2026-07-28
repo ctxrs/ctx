@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeSet,
-    fs::{self, File, Metadata},
+    fs::{File, Metadata},
     io::{BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    common::io::ensure_regular_provider_transcript_file,
     provider::{
         importer::provider_path_identity,
         native_ingestion::{
@@ -106,8 +105,11 @@ impl CursorFrozenSource {
     }
 
     fn open(&self) -> Result<File> {
-        let (file, observed) =
-            open_observed_cursor_file(&self.observation.path, &self.observation.native_session_id)?;
+        let (file, observed) = open_observed_cursor_file(
+            self.transcript.source_file(),
+            &self.observation.path,
+            &self.observation.native_session_id,
+        )?;
         if !observed.same_strong_snapshot(&self.observation) {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
@@ -115,23 +117,31 @@ impl CursorFrozenSource {
     }
 
     pub(crate) fn revalidate(&self) -> Result<()> {
-        ensure_regular_provider_transcript_file(&self.observation.path)?;
-        let (_, observed) =
-            open_observed_cursor_file(&self.observation.path, &self.observation.native_session_id)?;
-        if !observed.same_strong_snapshot(&self.observation) {
+        if !observation_from_metadata(
+            &self.observation.path,
+            &self.observation.native_session_id,
+            self.transcript.source_file().metadata(),
+            self.observation.content_sha256,
+        )?
+        .same_strong_snapshot(&self.observation)
+        {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
-        Ok(())
+        self.transcript
+            .source_file()
+            .revalidate()
+            .map_err(|_| CaptureError::SourceChangedDuringCapture)
     }
 }
 
 pub(crate) fn freeze_cursor_source(
     transcript: &CursorTranscriptPath,
 ) -> Result<CursorFrozenSource> {
-    ensure_regular_provider_transcript_file(transcript.path())?;
-    let canonical_path = fs::canonicalize(transcript.path())?;
-    let (_, observation) =
-        open_observed_cursor_file(&canonical_path, transcript.native_session_id())?;
+    let (_, observation) = open_observed_cursor_file(
+        transcript.source_file(),
+        transcript.path(),
+        transcript.native_session_id(),
+    )?;
     Ok(CursorFrozenSource {
         transcript: transcript.clone(),
         observation,
@@ -249,10 +259,12 @@ impl CursorSourceObservation {
 }
 
 fn open_observed_cursor_file(
+    opened: &crate::common::io::OpenedProviderSourceFile,
     path: &Path,
     native_session_id: &str,
 ) -> Result<(File, CursorSourceObservation)> {
-    let mut file = File::open(path)?;
+    let mut file = opened.file().try_clone()?;
+    file.seek(SeekFrom::Start(0))?;
     let before = file.metadata()?;
     let content_sha256 = hash_cursor_file(&mut file)?;
     let after = file.metadata()?;
@@ -263,6 +275,9 @@ fn open_observed_cursor_file(
     if before_observation != after_observation {
         return Err(CaptureError::SourceChangedDuringCapture);
     }
+    opened
+        .revalidate()
+        .map_err(|_| CaptureError::SourceChangedDuringCapture)?;
     file.seek(SeekFrom::Start(0))?;
     Ok((file, after_observation))
 }
@@ -670,11 +685,9 @@ impl CursorCompletedExactInventory {
         inventory: &CursorRootInventory,
         observations: &[CursorSourceObservation],
     ) -> Option<Self> {
-        let root_metadata = fs::symlink_metadata(&inventory.input).ok()?;
         if !inventory.completed
             || inventory.input.file_name() != Some(std::ffi::OsStr::new("projects"))
-            || !root_metadata.file_type().is_dir()
-            || crate::common::io::provider_metadata_is_link_like(&root_metadata)
+            || inventory.revalidate().is_err()
             || inventory
                 .transcripts
                 .iter()
@@ -685,8 +698,8 @@ impl CursorCompletedExactInventory {
         }
         let mut expected = BTreeSet::new();
         for transcript in &inventory.transcripts {
-            let path = fs::canonicalize(transcript.path()).ok()?;
-            let locator_identity = provider_path_identity(&path).ok()?;
+            transcript.source_file().revalidate().ok()?;
+            let locator_identity = provider_path_identity(transcript.path()).ok()?;
             expected.insert((locator_identity, transcript.native_session_id().to_owned()));
         }
         let observed = observations

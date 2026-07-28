@@ -1,9 +1,8 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
-    fs::{File, OpenOptions},
+    fs::File,
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
-    path::Path,
 };
 
 use chrono::{DateTime, Utc};

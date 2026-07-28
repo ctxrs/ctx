@@ -1,5 +1,53 @@
 use super::*;
 
+#[cfg(unix)]
+fn authority_swap_fixture() -> (TempDir, PathBuf, PathBuf, PathBuf, GeminiTranscriptSource) {
+    let temp = TempDir::new().unwrap();
+    let ancestor = temp.path().join("authority");
+    let root = ancestor.join(".gemini");
+    let leaf = root.join("tmp/project/chats/session.jsonl");
+    fs::create_dir_all(leaf.parent().unwrap()).unwrap();
+    fs::write(&leaf, "{}\n").unwrap();
+    let discovery = discover_gemini_transcripts(&root).unwrap();
+    assert_eq!(discovery.transcripts.len(), 1);
+    let source = discovery.transcripts[0].clone();
+    (temp, ancestor, root, leaf, source)
+}
+
+#[cfg(unix)]
+#[test]
+fn gemini_discovery_rejects_root_swap_through_retained_source() {
+    let (_temp, _ancestor, root, _leaf, source) = authority_swap_fixture();
+    fs::rename(&root, root.with_file_name(".gemini-displaced")).unwrap();
+    let replacement = root.join("tmp/project/chats/session.jsonl");
+    fs::create_dir_all(replacement.parent().unwrap()).unwrap();
+    fs::write(replacement, "{\"replacement\":true}\n").unwrap();
+
+    assert!(source.source_file.revalidate().is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn gemini_discovery_rejects_ancestor_swap_through_retained_source() {
+    let (temp, ancestor, root, _leaf, source) = authority_swap_fixture();
+    fs::rename(&ancestor, temp.path().join("authority-displaced")).unwrap();
+    let replacement = root.join("tmp/project/chats/session.jsonl");
+    fs::create_dir_all(replacement.parent().unwrap()).unwrap();
+    fs::write(replacement, "{\"replacement\":true}\n").unwrap();
+
+    assert!(source.source_file.revalidate().is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn gemini_discovery_rejects_leaf_swap_through_retained_source() {
+    let (_temp, _ancestor, _root, leaf, source) = authority_swap_fixture();
+    fs::rename(&leaf, leaf.with_file_name("session-displaced.jsonl")).unwrap();
+    fs::write(&leaf, "{\"replacement\":true}\n").unwrap();
+
+    assert!(source.source_file.revalidate().is_err());
+}
+
 #[test]
 fn gemini_nativepath_discovers_only_exact_chat_layout_in_stable_order() {
     let temp = TempDir::new().unwrap();

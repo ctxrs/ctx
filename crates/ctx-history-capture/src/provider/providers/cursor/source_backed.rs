@@ -158,18 +158,23 @@ pub(crate) fn extract_cursor_source_backed_cold(
     selected_root: &Path,
     sink: &mut dyn CursorSourceBackedSink,
 ) -> Result<CursorSourceBackedSummary> {
-    let projects_root = cursor_projects_root(selected_root);
-    let inventory = discover_cursor_transcripts(&projects_root);
+    let inventory = discover_cursor_transcripts(selected_root);
     if !inventory.completed {
         return Err(CaptureError::InvalidProviderTranscriptPath {
             path: selected_root.to_path_buf(),
             reason: "Cursor source-backed transcript inventory could not be completed",
         });
     }
-    if inventory
-        .transcripts
-        .iter()
-        .any(|transcript| transcript.projects_root() != projects_root)
+    let projects_root = inventory
+        .projects_roots
+        .first()
+        .cloned()
+        .unwrap_or_else(|| inventory.input.clone());
+    if inventory.projects_roots.len() > 1
+        || inventory
+            .transcripts
+            .iter()
+            .any(|transcript| transcript.projects_root() != projects_root)
     {
         return Err(CaptureError::InvalidPayload(
             "Cursor source-backed discovery escaped the selected projects root".to_owned(),
@@ -288,8 +293,8 @@ pub(crate) fn hydrate_cursor_source_backed_message(
         .map_err(|error| contract_error("event hydration request", error))?;
     let (native_session_id, byte_offset, byte_length, physical_ordinal, part_ordinal) =
         validate_locator(record)?;
-    let projects_root = cursor_projects_root(selected_root);
-    let transcript = unique_transcript(&projects_root, &native_session_id)?;
+    let transcript = unique_transcript(selected_root, &native_session_id)?;
+    let projects_root = transcript.projects_root().to_path_buf();
     let expected_source = cursor_source_key(&native_session_id)?;
     if !expected_source.exact_descriptor_eq(record.locator.source()) {
         return Err(CaptureError::InvalidPayload(
@@ -382,15 +387,6 @@ pub(crate) fn hydrate_cursor_source_backed_message(
             "Cursor exact complete-content route returned no message",
         ))?;
     Ok(message.text)
-}
-
-fn cursor_projects_root(selected_root: &Path) -> PathBuf {
-    let nested = selected_root.join("projects");
-    if selected_root.is_dir() && nested.is_dir() {
-        nested
-    } else {
-        selected_root.to_path_buf()
-    }
 }
 
 fn source_plan(
@@ -923,13 +919,13 @@ fn source_terminal(
 }
 
 fn unique_transcript(
-    projects_root: &Path,
+    selected_root: &Path,
     native_session_id: &str,
 ) -> Result<CursorTranscriptPath> {
-    let inventory = discover_cursor_transcripts(projects_root);
+    let inventory = discover_cursor_transcripts(selected_root);
     if !inventory.completed {
         return Err(CaptureError::InvalidProviderTranscriptPath {
-            path: projects_root.to_path_buf(),
+            path: selected_root.to_path_buf(),
             reason: "Cursor source-backed hydration inventory could not be completed",
         });
     }

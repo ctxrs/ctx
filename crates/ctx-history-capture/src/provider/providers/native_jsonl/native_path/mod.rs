@@ -30,8 +30,9 @@ pub(crate) use antigravity::{
 pub(crate) use copilot::{copilot_source_backed_adapter, import_copilot_nativepath_tree};
 pub(crate) use cursor::{
     committed_direct_jsonl_replay_authority, decode_direct_jsonl_cursor,
-    decode_direct_jsonl_native_cursor, direct_jsonl_checkpoint_is_covered_by,
-    direct_jsonl_cursor_matches_publication, encode_direct_jsonl_cursor, DirectJsonlCursorDecode,
+    decode_direct_jsonl_cursor_from_opened, decode_direct_jsonl_native_cursor,
+    direct_jsonl_checkpoint_is_covered_by, direct_jsonl_cursor_matches_publication,
+    encode_direct_jsonl_cursor, DirectJsonlCursorDecode,
 };
 pub(crate) use cursor_provider::import_cursor_nativepath_tree;
 use driver::import_direct_native_jsonl_tree_core;

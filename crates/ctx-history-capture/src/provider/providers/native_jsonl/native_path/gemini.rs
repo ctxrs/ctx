@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io,
     path::{Path, PathBuf},
     time::UNIX_EPOCH,
 };
@@ -116,14 +115,11 @@ pub(crate) fn import_gemini_nativepath_tree(
         .or(request.source_path.clone())
         .unwrap_or_else(|| request.path.to_path_buf());
     let known_routes = known_gemini_routes(store, &request.machine_id, &configured_source_root)?;
-    let root_missing = match std::fs::symlink_metadata(request.path) {
-        Ok(_) => false,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => true,
-        Err(error) => return Err(error.into()),
+    let discovery = match discover_gemini_transcripts(request.path) {
+        Ok(discovery) => Some(discovery),
+        Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
     };
-    let discovery = (!root_missing)
-        .then(|| discover_gemini_transcripts(request.path))
-        .transpose()?;
     let sink = request.import_profile.sink().cloned();
     if request.import_profile.is_replay_only() {
         let Some(discovery) = discovery else {
@@ -612,8 +608,10 @@ fn replay_committed_gemini_outputs(
             continue;
         }
         if !matches!(
-            GeminiFileObservation::read(&pending.source.path),
-            Ok(observation) if observation == pending.source.observation
+            GeminiFileObservation::from_metadata(pending.source.source_file.metadata()),
+            Ok(observation)
+                if observation == pending.source.observation
+                    && pending.source.source_file.revalidate().is_ok()
         ) {
             sink.mark_behind(ProOutputSinkError::new(
                 "gemini_nativepath_output_source_changed",

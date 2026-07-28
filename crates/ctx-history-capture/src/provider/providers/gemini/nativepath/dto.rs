@@ -1,4 +1,4 @@
-use std::{path::PathBuf, time::SystemTime};
+use std::{path::PathBuf, sync::Arc, time::SystemTime};
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{AgentType, EventRole, EventType};
@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::CaptureError;
+use crate::{common::io::OpenedProviderSourceFile, CaptureError};
 
 pub(crate) const GEMINI_NATIVEPATH_PARSER_REVISION: u32 = 6;
 pub(crate) const GEMINI_NATIVEPATH_POLICY_REVISION: u32 = 4;
@@ -28,13 +28,25 @@ pub(crate) enum GeminiTranscriptLayout {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct GeminiTranscriptSource {
     pub(crate) path: PathBuf,
     pub(crate) relative_path: PathBuf,
     pub(crate) layout: GeminiTranscriptLayout,
     pub(crate) observation: GeminiFileObservation,
+    pub(crate) source_file: Arc<OpenedProviderSourceFile>,
 }
+
+impl PartialEq for GeminiTranscriptSource {
+    fn eq(&self, other: &Self) -> bool {
+        self.path == other.path
+            && self.relative_path == other.relative_path
+            && self.layout == other.layout
+            && self.observation == other.observation
+    }
+}
+
+impl Eq for GeminiTranscriptSource {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GeminiDiscovery {

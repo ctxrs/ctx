@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io,
     path::{Path, PathBuf},
 };
 
@@ -201,9 +200,9 @@ fn tabnine_source_failure(path: &Path, error: &CaptureError) -> ProviderImportFa
 }
 
 fn discover_live_transcripts(root: &Path) -> Result<TabnineInventory> {
-    let root_metadata = match std::fs::symlink_metadata(root) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+    let root_kind = match super::super::traversal::native_jsonl_root_kind(root)? {
+        Some(root_kind) => root_kind,
+        None => {
             return Ok(TabnineInventory {
                 paths: BTreeSet::new(),
                 failed_paths: BTreeSet::new(),
@@ -212,18 +211,15 @@ fn discover_live_transcripts(root: &Path) -> Result<TabnineInventory> {
                 isolate_selected_file_errors: false,
             });
         }
-        Err(error) => return Err(error.into()),
     };
     let mut paths = BTreeSet::new();
     let mut failed_paths = BTreeSet::new();
     let mut failures = Vec::new();
     super::super::traversal::visit_jsonl_tree_files_isolating_selected(
+        CaptureProvider::Tabnine,
         root,
-        &|path| {
-            super::super::dialect::native_jsonl_file_is_selected(CaptureProvider::Tabnine, path)
-        },
-        &mut |path| {
-            paths.insert(std::fs::canonicalize(path)?);
+        &mut |source_file| {
+            paths.insert(source_file.path().to_path_buf());
             Ok(())
         },
         &mut |path, error| {
@@ -237,7 +233,8 @@ fn discover_live_transcripts(root: &Path) -> Result<TabnineInventory> {
         failed_paths,
         failures,
         root_missing: false,
-        isolate_selected_file_errors: root_metadata.file_type().is_dir(),
+        isolate_selected_file_errors: root_kind
+            == super::super::traversal::NativeJsonlRootKind::Directory,
     })
 }
 

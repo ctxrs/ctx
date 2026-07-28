@@ -1,8 +1,7 @@
 use std::{
     collections::BTreeSet,
-    fs::{self, File},
-    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use chrono::{DateTime, Utc};
@@ -19,13 +18,13 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::{
-    open_direct_jsonl_pages, DirectJsonlCheckpoint, DirectJsonlEvent, DirectJsonlFileObservation,
-    DirectJsonlSession, DirectJsonlSourceChange,
+    DirectJsonlCheckpoint, DirectJsonlEvent, DirectJsonlFileObservation, DirectJsonlSession,
+    DirectJsonlSourceChange,
 };
 use crate::{
-    provider::normalization::provider_local_preview, CaptureError, ProviderJsonlInventoryLimit,
-    MAX_PROVIDER_JSONL_LINE_BYTES, PROVIDER_JSONL_INVENTORY_MAX_ELIGIBLE_PATHS,
-    PROVIDER_JSONL_INVENTORY_MAX_PATH_BYTES,
+    common::io::OpenedProviderSourceFile, provider::normalization::provider_local_preview,
+    CaptureError, ProviderJsonlInventoryLimit, MAX_PROVIDER_JSONL_LINE_BYTES,
+    PROVIDER_JSONL_INVENTORY_MAX_ELIGIBLE_PATHS, PROVIDER_JSONL_INVENTORY_MAX_PATH_BYTES,
 };
 
 const DIRECT_JSONL_SOURCE_IDENTITY_VERSION: u32 = 1;
@@ -113,44 +112,37 @@ impl DirectJsonlSourceAdapter {
         root: impl AsRef<Path>,
     ) -> DirectJsonlSourceBackedResult<DirectJsonlSourceInventory> {
         let root = root.as_ref();
-        let root_metadata = match fs::symlink_metadata(root) {
-            Ok(metadata) => Some(metadata),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error.into()),
-        };
-        if root_metadata.is_none() {
-            return self.missing_inventory(root);
-        }
-
         let mut paths = Vec::new();
         let mut failures = Vec::new();
         let mut aggregate_path_bytes = 0_usize;
-        let mut visit = |path: &Path| -> crate::Result<()> {
-            if paths.len() == PROVIDER_JSONL_INVENTORY_MAX_ELIGIBLE_PATHS {
-                return Err(CaptureError::ProviderJsonlInventoryLimitExceeded {
-                    limit: ProviderJsonlInventoryLimit::EligiblePaths,
-                    maximum: PROVIDER_JSONL_INVENTORY_MAX_ELIGIBLE_PATHS,
-                    observed: paths.len().saturating_add(1),
-                });
-            }
-            let canonical_path = fs::canonicalize(path)?;
-            aggregate_path_bytes =
-                aggregate_path_bytes.saturating_add(path_key(&canonical_path).len());
-            if aggregate_path_bytes > PROVIDER_JSONL_INVENTORY_MAX_PATH_BYTES {
-                return Err(CaptureError::InvalidPayload(
-                    "direct JSONL inventory paths exceed the aggregate byte limit".to_owned(),
+        let mut visit =
+            |source_file: super::super::traversal::NativeJsonlSourceFile| -> crate::Result<()> {
+                let path = source_file.path();
+                if paths.len() == PROVIDER_JSONL_INVENTORY_MAX_ELIGIBLE_PATHS {
+                    return Err(CaptureError::ProviderJsonlInventoryLimitExceeded {
+                        limit: ProviderJsonlInventoryLimit::EligiblePaths,
+                        maximum: PROVIDER_JSONL_INVENTORY_MAX_ELIGIBLE_PATHS,
+                        observed: paths.len().saturating_add(1),
+                    });
+                }
+                aggregate_path_bytes = aggregate_path_bytes.saturating_add(path_key(path).len());
+                if aggregate_path_bytes > PROVIDER_JSONL_INVENTORY_MAX_PATH_BYTES {
+                    return Err(CaptureError::InvalidPayload(
+                        "direct JSONL inventory paths exceed the aggregate byte limit".to_owned(),
+                    ));
+                }
+                let observation = super::reader::observe_opened_file(source_file.opened())?;
+                paths.push((
+                    path.to_path_buf(),
+                    source_file.opened().clone(),
+                    observation,
                 ));
-            }
-            let observation = super::reader::observe_file(&canonical_path)?;
-            paths.push((canonical_path, observation));
-            Ok(())
-        };
-        let selected =
-            |path: &Path| super::super::dialect::native_jsonl_file_is_selected(self.provider, path);
-        if self.provider == CaptureProvider::Tabnine {
+                Ok(())
+            };
+        let traversal = if self.provider == CaptureProvider::Tabnine {
             super::super::traversal::visit_jsonl_tree_files_isolating_selected(
+                self.provider,
                 root,
-                &selected,
                 &mut visit,
                 &mut |path, error| {
                     failures.push(DirectJsonlInventoryFailure {
@@ -159,23 +151,33 @@ impl DirectJsonlSourceAdapter {
                     });
                     Ok(())
                 },
-            )?;
+            )
         } else {
-            super::super::traversal::visit_jsonl_tree_files(root, &selected, &mut visit)?;
+            super::super::traversal::visit_jsonl_tree_files(self.provider, root, &mut visit)
+        };
+        match traversal {
+            Ok(_) => {}
+            Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return self.missing_inventory(root);
+            }
+            Err(error) => return Err(error.into()),
         }
 
-        let canonical_root = fs::canonicalize(root)?;
+        let canonical_root = root.to_path_buf();
         paths.sort_by(|left, right| path_key(&left.0).cmp(&path_key(&right.0)));
         let leaves = paths
             .into_iter()
-            .map(|(path, observation)| DirectJsonlInventoryLeaf {
-                provider: self.provider,
-                source_format: self.source_format,
-                source_root: canonical_root.clone(),
-                route_key: relative_route_key(&canonical_root, &path),
-                path,
-                observation,
-            })
+            .map(
+                |(path, source_file, observation)| DirectJsonlInventoryLeaf {
+                    provider: self.provider,
+                    source_format: self.source_format,
+                    source_root: canonical_root.clone(),
+                    route_key: relative_route_key(&canonical_root, &path),
+                    path,
+                    source_file,
+                    observation,
+                },
+            )
             .collect::<Vec<_>>();
         let observation = inventory_observation(self, &canonical_root, false, &leaves, &failures)?;
         Ok(DirectJsonlSourceInventory {
@@ -209,7 +211,7 @@ impl DirectJsonlSourceAdapter {
         if leaf.provider != self.provider || leaf.source_format != self.source_format {
             return Err(DirectJsonlSourceBackedError::InvalidLocator);
         }
-        let reader = open_direct_jsonl_pages(
+        let reader = super::reader::open_direct_jsonl_pages_from_opened(
             self.provider,
             self.source_format,
             &leaf.path,
@@ -217,6 +219,7 @@ impl DirectJsonlSourceAdapter {
             imported_at,
             false,
             None,
+            leaf.source_file.clone(),
         )?;
         if reader.observation() != &leaf.observation
             || reader.source_change() != DirectJsonlSourceChange::Fresh
@@ -273,16 +276,25 @@ impl DirectJsonlSourceAdapter {
         let range_end = byte_offset
             .checked_add(*byte_length)
             .ok_or(DirectJsonlSourceBackedError::LocatorRangeTooLarge)?;
-        crate::common::io::ensure_regular_provider_transcript_file(&leaf.leaf.path)?;
-        let mut file = File::open(&leaf.leaf.path)?;
-        if file.metadata()?.len() < range_end {
+        if leaf.leaf.source_file.len() < range_end {
             return Err(DirectJsonlSourceBackedError::LocatorRangeMissing);
         }
-        file.seek(SeekFrom::Start(*byte_offset))?;
         let length = usize::try_from(*byte_length)
             .map_err(|_| DirectJsonlSourceBackedError::LocatorRangeTooLarge)?;
-        let mut bytes = vec![0_u8; length];
-        file.read_exact(&mut bytes)?;
+        let bytes = leaf
+            .leaf
+            .source_file
+            .read_exact_range(
+                *byte_offset,
+                length,
+                MAX_PROVIDER_JSONL_LINE_BYTES.saturating_add(2),
+            )
+            .map_err(|error| match error {
+                CaptureError::InvalidPayload(_) => {
+                    DirectJsonlSourceBackedError::LocatorRangeMissing
+                }
+                other => DirectJsonlSourceBackedError::Capture(other),
+            })?;
         let digest: [u8; 32] = Sha256::digest(&bytes).into();
         if &digest != locator.record_digest() {
             return Err(DirectJsonlSourceBackedError::LocatorDigestMismatch);
@@ -366,6 +378,7 @@ pub(crate) struct DirectJsonlInventoryLeaf {
     source_root: PathBuf,
     route_key: Vec<u8>,
     path: PathBuf,
+    source_file: Arc<OpenedProviderSourceFile>,
     observation: DirectJsonlFileObservation,
 }
 
@@ -524,7 +537,8 @@ impl DirectJsonlSourceReader {
             .checked_add(self.rejected_records)
             .and_then(|value| value.checked_add(self.ignored_records))
             .ok_or(DirectJsonlSourceBackedError::CountMismatch)?;
-        let closing = super::reader::observe_file(&self.leaf.path)?;
+        let closing = super::reader::observe_opened_file(&self.leaf.source_file)?;
+        self.leaf.source_file.revalidate()?;
         if closing != self.leaf.observation {
             return Err(CaptureError::SourceChangedDuringCapture.into());
         }
@@ -859,7 +873,7 @@ pub(super) fn assert_source_backed_fixture(
     );
     assert_eq!(
         certified.certificate().counts().certified_bytes,
-        fs::metadata(leaf.path()).unwrap().len()
+        leaf.source_file.len()
     );
     assert!(certified.certificate().frontier().is_some());
     let document = documents
@@ -938,4 +952,66 @@ fn collect_test_leaf(
         documents.extend(page.documents);
     }
     (documents, reader.finish().unwrap())
+}
+
+#[cfg(all(test, unix))]
+mod authority_swap_tests {
+    use std::fs;
+
+    use super::*;
+
+    fn discovered_leaf() -> (
+        tempfile::TempDir,
+        PathBuf,
+        PathBuf,
+        DirectJsonlInventoryLeaf,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let ancestor = temp.path().join("authority");
+        let root = ancestor.join("transcripts");
+        let leaf = root.join("session.jsonl");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&leaf, b"{\"type\":\"message\"}\n").unwrap();
+        let adapter = DirectJsonlSourceAdapter::new(
+            CaptureProvider::Windsurf,
+            "windsurf_hook_transcript_jsonl",
+            "windsurf-hook-jsonl-v1",
+        );
+        let inventory = adapter.discover(&root).unwrap();
+        assert_eq!(inventory.leaves.len(), 1);
+        let retained = inventory.leaves[0].clone();
+        (temp, ancestor, root, retained)
+    }
+
+    #[test]
+    fn shared_native_jsonl_rejects_root_swap_after_discovery() {
+        let (_temp, _ancestor, root, retained) = discovered_leaf();
+        let displaced = root.with_file_name("transcripts-displaced");
+        fs::rename(&root, &displaced).unwrap();
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("session.jsonl"), b"{\"replacement\":true}\n").unwrap();
+
+        assert!(retained.source_file.revalidate().is_err());
+    }
+
+    #[test]
+    fn shared_native_jsonl_rejects_ancestor_swap_after_discovery() {
+        let (temp, ancestor, root, retained) = discovered_leaf();
+        let displaced = temp.path().join("authority-displaced");
+        fs::rename(&ancestor, &displaced).unwrap();
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("session.jsonl"), b"{\"replacement\":true}\n").unwrap();
+
+        assert!(retained.source_file.revalidate().is_err());
+    }
+
+    #[test]
+    fn shared_native_jsonl_rejects_leaf_swap_after_discovery() {
+        let (_temp, _ancestor, root, retained) = discovered_leaf();
+        let leaf = root.join("session.jsonl");
+        fs::rename(&leaf, root.join("session-displaced.jsonl")).unwrap();
+        fs::write(&leaf, b"{\"replacement\":true}\n").unwrap();
+
+        assert!(retained.source_file.revalidate().is_err());
+    }
 }

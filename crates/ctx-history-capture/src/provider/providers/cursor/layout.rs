@@ -1,13 +1,15 @@
 use std::{
     collections::{BTreeSet, VecDeque},
     ffi::OsStr,
-    fs,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use crate::common::io::{
-    ensure_provider_path_parents_are_not_symlinks, provider_metadata_is_link_like,
+    open_provider_source_path, OpenedProviderSourceFile, OpenedProviderSourcePath,
+    ProviderSourceDirectory, ProviderSourceRoot,
 };
+use crate::CaptureError;
 
 const AGENT_TRANSCRIPTS: &str = "agent-transcripts";
 pub(super) const CURSOR_MAX_DIRECTORY_DEPTH: usize = 128;
@@ -16,16 +18,21 @@ pub(super) const CURSOR_MAX_TRAVERSAL_ENTRIES: usize = 4_096;
 pub(super) const CURSOR_MAX_DISCOVERY_ISSUE_SAMPLES: usize = 128;
 pub(super) const CURSOR_MAX_TRANSCRIPTS: usize = 128;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct CursorTranscriptPath {
     projects_root: PathBuf,
     project: PathBuf,
     session_id: String,
     path: PathBuf,
+    source_file: Arc<OpenedProviderSourceFile>,
 }
 
 impl CursorTranscriptPath {
-    pub(crate) fn parse(projects_root: &Path, path: &Path) -> Result<Self, &'static str> {
+    fn parse(
+        projects_root: &Path,
+        path: &Path,
+        source_file: Arc<OpenedProviderSourceFile>,
+    ) -> Result<Self, &'static str> {
         let relative = path
             .strip_prefix(projects_root)
             .map_err(|_| "Cursor transcript is outside the selected projects root")?;
@@ -57,6 +64,7 @@ impl CursorTranscriptPath {
             project: PathBuf::from(components[0]),
             session_id: session_id.to_owned(),
             path: path.to_path_buf(),
+            source_file,
         })
     }
 
@@ -75,7 +83,22 @@ impl CursorTranscriptPath {
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
+
+    pub(crate) fn source_file(&self) -> &Arc<OpenedProviderSourceFile> {
+        &self.source_file
+    }
 }
+
+impl PartialEq for CursorTranscriptPath {
+    fn eq(&self, other: &Self) -> bool {
+        self.projects_root == other.projects_root
+            && self.project == other.project
+            && self.session_id == other.session_id
+            && self.path == other.path
+    }
+}
+
+impl Eq for CursorTranscriptPath {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CursorDiscoveryIssueKind {
@@ -103,7 +126,7 @@ pub(crate) struct CursorDiscoveryStats {
     pub(crate) rejected_candidates: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct CursorRootInventory {
     pub(crate) input: PathBuf,
     pub(crate) projects_roots: Vec<PathBuf>,
@@ -111,6 +134,13 @@ pub(crate) struct CursorRootInventory {
     pub(crate) issues: Vec<CursorDiscoveryIssue>,
     pub(crate) completed: bool,
     pub(crate) stats: CursorDiscoveryStats,
+    authority: Option<CursorInventoryAuthority>,
+}
+
+#[derive(Debug, Clone)]
+enum CursorInventoryAuthority {
+    File(Arc<OpenedProviderSourceFile>),
+    Root(ProviderSourceRoot),
 }
 
 impl CursorRootInventory {
@@ -122,6 +152,7 @@ impl CursorRootInventory {
             issues: Vec::new(),
             completed: true,
             stats: CursorDiscoveryStats::default(),
+            authority: None,
         }
     }
 
@@ -158,64 +189,121 @@ impl CursorRootInventory {
             .collect::<BTreeSet<_>>();
         self.projects_roots = roots.into_iter().collect();
     }
+
+    pub(crate) fn revalidate(&self) -> crate::Result<()> {
+        match self.authority.as_ref() {
+            Some(CursorInventoryAuthority::File(file)) => file.revalidate(),
+            Some(CursorInventoryAuthority::Root(root)) => root.revalidate(),
+            None => Err(CaptureError::InvalidProviderTranscriptPath {
+                path: self.input.clone(),
+                reason: "Cursor discovery has no retained source authority",
+            }),
+        }
+    }
 }
+
+impl PartialEq for CursorRootInventory {
+    fn eq(&self, other: &Self) -> bool {
+        self.input == other.input
+            && self.projects_roots == other.projects_roots
+            && self.transcripts == other.transcripts
+            && self.issues == other.issues
+            && self.completed == other.completed
+            && self.stats == other.stats
+    }
+}
+
+impl Eq for CursorRootInventory {}
 
 pub(crate) fn discover_cursor_transcripts(input: &Path) -> CursorRootInventory {
     let mut inventory = CursorRootInventory::new(input);
-    if let Err(error) = ensure_provider_path_parents_are_not_symlinks(input) {
-        inventory.reject(
-            input.to_path_buf(),
-            CursorDiscoveryIssueKind::Symlink,
-            error.to_string(),
-            true,
-        );
-        return inventory;
-    }
-    let metadata = match fs::symlink_metadata(input) {
-        Ok(metadata) => metadata,
+    let opened = match open_provider_source_path(input) {
+        Ok(opened) => opened,
         Err(error) => {
-            let kind = if error.kind() == std::io::ErrorKind::NotFound {
-                CursorDiscoveryIssueKind::NotFound
-            } else {
-                CursorDiscoveryIssueKind::Io
+            let kind = match &error {
+                CaptureError::Io(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    CursorDiscoveryIssueKind::NotFound
+                }
+                CaptureError::InvalidProviderTranscriptPath { .. } => {
+                    CursorDiscoveryIssueKind::Symlink
+                }
+                _ => CursorDiscoveryIssueKind::Io,
             };
             inventory.reject(input.to_path_buf(), kind, error.to_string(), true);
             return inventory;
         }
     };
-    if provider_metadata_is_link_like(&metadata) {
-        inventory.reject(
-            input.to_path_buf(),
-            CursorDiscoveryIssueKind::Symlink,
-            "symlinked Cursor transcript roots are rejected",
-            true,
-        );
-        return inventory;
-    }
-    if metadata.file_type().is_file() {
-        inventory.stats.entries_visited = 1;
-        inventory.stats.regular_files_visited = 1;
-        inspect_file(input, input, &mut inventory, true);
-    } else if metadata.file_type().is_dir() {
-        visit_directories(input, &mut inventory);
-    } else {
-        inventory.reject(
-            input.to_path_buf(),
-            CursorDiscoveryIssueKind::UnsupportedFileType,
-            "Cursor discovery input must be a regular file or directory",
-            true,
-        );
+    match opened {
+        OpenedProviderSourcePath::File(file) => {
+            let file = Arc::new(file);
+            inventory.authority = Some(CursorInventoryAuthority::File(file.clone()));
+            inventory.stats.entries_visited = 1;
+            inventory.stats.regular_files_visited = 1;
+            inspect_file(input, input, file, &mut inventory, true);
+        }
+        OpenedProviderSourcePath::Directory(directory) => {
+            let authority = directory.authority_root();
+            inventory.authority = Some(CursorInventoryAuthority::Root(authority.clone()));
+            let (scan_path, scan_directory) =
+                select_projects_directory(input, directory, &mut inventory);
+            inventory.input = scan_path.clone();
+            visit_directories(&scan_path, scan_directory, authority, &mut inventory);
+        }
     }
     inventory.finish();
+    if inventory.completed {
+        if let Err(error) = inventory.revalidate() {
+            inventory.reject(
+                inventory.input.clone(),
+                CursorDiscoveryIssueKind::Io,
+                error.to_string(),
+                true,
+            );
+        }
+    }
     inventory
 }
 
-fn visit_directories(input: &Path, inventory: &mut CursorRootInventory) {
-    let mut pending = VecDeque::from([(input.to_path_buf(), 0_usize)]);
-    while let Some((directory, depth)) = pending.pop_front() {
+fn select_projects_directory(
+    input: &Path,
+    directory: ProviderSourceDirectory,
+    inventory: &mut CursorRootInventory,
+) -> (PathBuf, ProviderSourceDirectory) {
+    let names = match directory.entries(CURSOR_MAX_DIRECTORY_ENTRIES.saturating_add(1)) {
+        Ok(names) => names,
+        Err(error) => {
+            inventory.reject(
+                input.to_path_buf(),
+                CursorDiscoveryIssueKind::Io,
+                error.to_string(),
+                true,
+            );
+            return (input.to_path_buf(), directory);
+        }
+    };
+    if names.iter().any(|name| name == OsStr::new("projects")) {
+        if let Ok(OpenedProviderSourcePath::Directory(projects)) =
+            directory.open_child(OsStr::new("projects"))
+        {
+            return (input.join("projects"), projects);
+        }
+    }
+    (input.to_path_buf(), directory)
+}
+
+fn visit_directories(
+    input: &Path,
+    first_directory: ProviderSourceDirectory,
+    authority: ProviderSourceRoot,
+    inventory: &mut CursorRootInventory,
+) {
+    let first_relative = first_directory.relative_path().to_path_buf();
+    let mut pending = VecDeque::from([(input.to_path_buf(), first_relative, 0_usize)]);
+    drop(first_directory);
+    while let Some((directory_path, relative_path, depth)) = pending.pop_front() {
         if inventory.stats.entries_visited >= CURSOR_MAX_TRAVERSAL_ENTRIES {
             inventory.reject(
-                directory,
+                directory_path,
                 CursorDiscoveryIssueKind::LimitExceeded,
                 format!(
                     "Cursor discovery exceeds the {CURSOR_MAX_TRAVERSAL_ENTRIES}-entry traversal limit"
@@ -225,26 +313,25 @@ fn visit_directories(input: &Path, inventory: &mut CursorRootInventory) {
             break;
         }
         inventory.stats.directories_visited = inventory.stats.directories_visited.saturating_add(1);
-        let entries = read_directory_entries(&directory, inventory);
-        for entry in entries {
-            let path = entry.path();
-            let metadata = match fs::symlink_metadata(&path) {
-                Ok(metadata) => metadata,
-                Err(error) => {
-                    inventory.reject(path, CursorDiscoveryIssueKind::Io, error.to_string(), true);
-                    continue;
-                }
-            };
-            if provider_metadata_is_link_like(&metadata) {
+        let directory = match authority.open_directory(&relative_path) {
+            Ok(directory) => directory,
+            Err(error) => {
                 inventory.reject(
-                    path,
-                    CursorDiscoveryIssueKind::Symlink,
-                    "symlinked Cursor transcript entries are rejected",
+                    directory_path,
+                    CursorDiscoveryIssueKind::Io,
+                    error.to_string(),
                     true,
                 );
-            } else if metadata.file_type().is_dir() {
-                if depth >= CURSOR_MAX_DIRECTORY_DEPTH {
-                    inventory.reject(
+                continue;
+            }
+        };
+        let entries = read_directory_entries(&directory_path, &directory, inventory);
+        for name in entries {
+            let path = directory_path.join(&name);
+            match directory.open_child(&name) {
+                Ok(OpenedProviderSourcePath::Directory(child_directory)) => {
+                    if depth >= CURSOR_MAX_DIRECTORY_DEPTH {
+                        inventory.reject(
                         path,
                         CursorDiscoveryIssueKind::LimitExceeded,
                         format!(
@@ -252,27 +339,48 @@ fn visit_directories(input: &Path, inventory: &mut CursorRootInventory) {
                         ),
                         true,
                     );
-                } else {
-                    pending.push_back((path, depth.saturating_add(1)));
+                    } else {
+                        pending.push_back((
+                            path,
+                            child_directory.relative_path().to_path_buf(),
+                            depth.saturating_add(1),
+                        ));
+                    }
                 }
-            } else if metadata.file_type().is_file() {
-                inventory.stats.regular_files_visited =
-                    inventory.stats.regular_files_visited.saturating_add(1);
-                inspect_file(input, &path, inventory, false);
+                Ok(OpenedProviderSourcePath::File(file)) => {
+                    inventory.stats.regular_files_visited =
+                        inventory.stats.regular_files_visited.saturating_add(1);
+                    inspect_file(input, &path, Arc::new(file), inventory, false);
+                }
+                Err(error) => inventory.reject(
+                    path,
+                    CursorDiscoveryIssueKind::Symlink,
+                    error.to_string(),
+                    true,
+                ),
             }
+        }
+        if let Err(error) = directory.revalidate() {
+            inventory.reject(
+                directory_path,
+                CursorDiscoveryIssueKind::Io,
+                error.to_string(),
+                true,
+            );
         }
     }
 }
 
 fn read_directory_entries(
-    directory: &Path,
+    directory_path: &Path,
+    directory: &ProviderSourceDirectory,
     inventory: &mut CursorRootInventory,
-) -> Vec<fs::DirEntry> {
-    let reader = match fs::read_dir(directory) {
+) -> Vec<std::ffi::OsString> {
+    let reader = match directory.entries(CURSOR_MAX_DIRECTORY_ENTRIES.saturating_add(1)) {
         Ok(entries) => entries,
         Err(error) => {
             inventory.reject(
-                directory.to_path_buf(),
+                directory_path.to_path_buf(),
                 CursorDiscoveryIssueKind::Io,
                 error.to_string(),
                 true,
@@ -281,10 +389,10 @@ fn read_directory_entries(
         }
     };
     let mut entries = Vec::new();
-    for entry in reader {
+    for name in reader {
         if entries.len() >= CURSOR_MAX_DIRECTORY_ENTRIES {
             inventory.reject(
-                directory.to_path_buf(),
+                directory_path.to_path_buf(),
                 CursorDiscoveryIssueKind::LimitExceeded,
                 format!("Cursor directory exceeds the {CURSOR_MAX_DIRECTORY_ENTRIES}-entry limit"),
                 true,
@@ -294,7 +402,7 @@ fn read_directory_entries(
         }
         if inventory.stats.entries_visited >= CURSOR_MAX_TRAVERSAL_ENTRIES {
             inventory.reject(
-                directory.to_path_buf(),
+                directory_path.to_path_buf(),
                 CursorDiscoveryIssueKind::LimitExceeded,
                 format!(
                     "Cursor discovery exceeds the {CURSOR_MAX_TRAVERSAL_ENTRIES}-entry traversal limit"
@@ -304,30 +412,16 @@ fn read_directory_entries(
             entries.clear();
             break;
         }
-        match entry {
-            Ok(entry) => {
-                inventory.stats.entries_visited = inventory.stats.entries_visited.saturating_add(1);
-                entries.push(entry);
-            }
-            Err(error) => {
-                inventory.reject(
-                    directory.to_path_buf(),
-                    CursorDiscoveryIssueKind::Io,
-                    error.to_string(),
-                    true,
-                );
-                entries.clear();
-                break;
-            }
-        }
+        inventory.stats.entries_visited = inventory.stats.entries_visited.saturating_add(1);
+        entries.push(name);
     }
-    entries.sort_by_key(|entry| entry.file_name());
     entries
 }
 
 fn inspect_file(
     input: &Path,
     path: &Path,
+    source_file: Arc<OpenedProviderSourceFile>,
     inventory: &mut CursorRootInventory,
     explicit_file: bool,
 ) {
@@ -382,7 +476,7 @@ fn inspect_file(
         );
         return;
     }
-    match CursorTranscriptPath::parse(projects_root, path) {
+    match CursorTranscriptPath::parse(projects_root, path, source_file) {
         Ok(source) if inventory.transcripts.len() < CURSOR_MAX_TRANSCRIPTS => {
             inventory.transcripts.push(source);
         }

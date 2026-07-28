@@ -1,13 +1,15 @@
 use std::{
-    fs::{self, Metadata},
+    fs::Metadata,
     path::{Component, Path, PathBuf},
+    sync::Arc,
     time::UNIX_EPOCH,
 };
 
 use sha2::{Digest, Sha256};
 
 use crate::common::io::{
-    ensure_provider_path_parents_are_not_symlinks, provider_metadata_is_link_like,
+    open_provider_source_path, OpenedProviderSourceFile, OpenedProviderSourcePath,
+    ProviderSourceDirectory,
 };
 use crate::{CaptureError, Result};
 
@@ -83,19 +85,7 @@ impl DiscoveryBudget {
 }
 
 impl GeminiFileObservation {
-    pub(crate) fn read(path: &Path) -> Result<Self> {
-        let metadata = fs::symlink_metadata(path)?;
-        if provider_metadata_is_link_like(&metadata) || !metadata.file_type().is_file() {
-            return Err(CaptureError::InvalidProviderTranscriptPath {
-                path: path.to_path_buf(),
-                reason: "Gemini transcript paths must be ordinary regular files",
-            });
-        }
-        ensure_provider_path_parents_are_not_symlinks(path)?;
-        Self::from_metadata(&metadata)
-    }
-
-    pub(super) fn from_metadata(metadata: &Metadata) -> Result<Self> {
+    pub(crate) fn from_metadata(metadata: &Metadata) -> Result<Self> {
         #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
 
@@ -134,32 +124,43 @@ fn discover_gemini_transcripts_with_budget(
     root: &Path,
     mut budget: DiscoveryBudget,
 ) -> Result<GeminiDiscovery> {
-    let metadata = fs::symlink_metadata(root)?;
-    if provider_metadata_is_link_like(&metadata) {
-        return Err(CaptureError::InvalidProviderTranscriptPath {
-            path: root.to_path_buf(),
-            reason: "symlinked Gemini transcript roots are rejected",
-        });
+    let canonical_root = root.to_path_buf();
+    let opened_root = open_provider_source_path(root)?;
+    let root_is_file = matches!(opened_root, OpenedProviderSourcePath::File(_));
+    let layout_root = gemini_layout_root(&canonical_root, root_is_file);
+    let mut paths = Vec::<(PathBuf, Arc<OpenedProviderSourceFile>)>::new();
+    match opened_root {
+        OpenedProviderSourcePath::File(file) => {
+            budget.observe(&canonical_root)?;
+            if canonical_root
+                .extension()
+                .and_then(|extension| extension.to_str())
+                == Some("jsonl")
+            {
+                paths.push((canonical_root.clone(), Arc::new(file)));
+            } else {
+                file.revalidate()?;
+            }
+        }
+        OpenedProviderSourcePath::Directory(directory) => {
+            let authority = directory.authority_root();
+            if let Some((scan_path, scan_directory)) =
+                gemini_scan_directory(&canonical_root, directory)?
+            {
+                budget.observe(&scan_path)?;
+                collect_candidates(&scan_path, scan_directory, &mut paths, &mut budget, 0)?;
+            }
+            authority.revalidate()?;
+        }
     }
-    ensure_provider_path_parents_are_not_symlinks(root)?;
-    let canonical_root = fs::canonicalize(root)?;
-    let layout_root = gemini_layout_root(&canonical_root, &metadata);
-    let mut paths = Vec::new();
-    let scan_root = gemini_scan_root(&canonical_root, &metadata)?;
-    if let Some(scan_root) = scan_root {
-        budget.observe(&scan_root)?;
-        collect_candidates(&scan_root, &mut paths, &mut budget, 0)?;
-    }
-    paths.sort_unstable();
+    paths.sort_unstable_by(|left, right| left.0.cmp(&right.0));
 
     let mut transcripts = Vec::with_capacity(paths.len());
-    for path in paths {
-        let Some(layout) =
-            gemini_transcript_layout(&layout_root, &path, metadata.file_type().is_file())?
-        else {
+    for (path, source_file) in paths {
+        let Some(layout) = gemini_transcript_layout(&layout_root, &path, root_is_file)? else {
             continue;
         };
-        let relative_path = if metadata.file_type().is_file() {
+        let relative_path = if root_is_file {
             path.file_name().map(PathBuf::from).unwrap_or_default()
         } else {
             path.strip_prefix(&canonical_root)
@@ -167,10 +168,11 @@ fn discover_gemini_transcripts_with_budget(
                 .to_path_buf()
         };
         transcripts.push(GeminiTranscriptSource {
-            observation: GeminiFileObservation::read(&path)?,
+            observation: GeminiFileObservation::from_metadata(source_file.metadata())?,
             path,
             relative_path,
             layout,
+            source_file,
         });
     }
 
@@ -183,35 +185,33 @@ fn discover_gemini_transcripts_with_budget(
     })
 }
 
-fn gemini_scan_root(root: &Path, metadata: &Metadata) -> Result<Option<PathBuf>> {
-    if metadata.file_type().is_file() {
-        return Ok(Some(root.to_path_buf()));
-    }
+fn gemini_scan_directory(
+    root: &Path,
+    directory: ProviderSourceDirectory,
+) -> Result<Option<(PathBuf, ProviderSourceDirectory)>> {
     let tmp = root.join("tmp");
-    match fs::symlink_metadata(&tmp) {
-        Ok(metadata) if provider_metadata_is_link_like(&metadata) => {
-            Err(CaptureError::InvalidProviderTranscriptPath {
-                path: tmp,
-                reason: "linked Gemini transcript path components are rejected",
-            })
+    let names = directory.entries(MAX_GEMINI_DISCOVERY_ENTRIES)?;
+    if names.iter().any(|name| name == "tmp") {
+        match open_gemini_child(&directory, std::ffi::OsStr::new("tmp"), &tmp)? {
+            OpenedProviderSourcePath::Directory(tmp_directory) => {
+                directory.revalidate()?;
+                return Ok(Some((tmp, tmp_directory)));
+            }
+            OpenedProviderSourcePath::File(_) => {}
         }
-        Ok(metadata) if metadata.file_type().is_dir() => Ok(Some(tmp)),
-        Ok(_) if root.file_name().is_some_and(|name| name == ".gemini") => Ok(None),
-        Ok(_) => Ok(Some(root.to_path_buf())),
-        Err(error)
-            if error.kind() == std::io::ErrorKind::NotFound
-                && root.file_name().is_some_and(|name| name == ".gemini") =>
-        {
-            Ok(None)
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Some(root.to_path_buf())),
-        Err(error) => Err(error.into()),
+    }
+    if root.file_name().is_some_and(|name| name == ".gemini") {
+        directory.revalidate()?;
+        Ok(None)
+    } else {
+        Ok(Some((root.to_path_buf(), directory)))
     }
 }
 
 fn collect_candidates(
     path: &Path,
-    paths: &mut Vec<PathBuf>,
+    directory: ProviderSourceDirectory,
+    paths: &mut Vec<(PathBuf, Arc<OpenedProviderSourceFile>)>,
     budget: &mut DiscoveryBudget,
     depth: usize,
 ) -> Result<()> {
@@ -221,39 +221,49 @@ fn collect_candidates(
             reason: "Gemini transcript directory nesting exceeds the supported limit",
         });
     }
-    let metadata = fs::symlink_metadata(path)?;
-    if provider_metadata_is_link_like(&metadata) {
-        return Err(CaptureError::InvalidProviderTranscriptPath {
-            path: path.to_path_buf(),
-            reason: "linked Gemini transcript path components are rejected",
-        });
-    }
-    if metadata.file_type().is_file() {
-        if path.extension().and_then(|extension| extension.to_str()) == Some("jsonl") {
-            paths.push(path.to_path_buf());
-        }
-        return Ok(());
-    }
-    if !metadata.file_type().is_dir() {
-        return Ok(());
-    }
-
-    let mut children = Vec::new();
-    for entry in fs::read_dir(path)? {
-        let child = entry?.path();
+    let children = directory.entries(MAX_GEMINI_DISCOVERY_ENTRIES)?;
+    for name in children {
+        let child = path.join(&name);
         // Charge both bounds while consuming read_dir, before retaining a
         // PathBuf for deterministic sorting.
         budget.observe(&child)?;
-        children.push(child);
+        match open_gemini_child(&directory, &name, &child)? {
+            OpenedProviderSourcePath::Directory(child_directory) => collect_candidates(
+                &child,
+                child_directory,
+                paths,
+                budget,
+                depth.saturating_add(1),
+            )?,
+            OpenedProviderSourcePath::File(file)
+                if child.extension().and_then(|extension| extension.to_str()) == Some("jsonl") =>
+            {
+                paths.push((child, Arc::new(file)));
+            }
+            OpenedProviderSourcePath::File(file) => file.revalidate()?,
+        }
     }
-    children.sort_unstable();
-    for child in children {
-        collect_candidates(&child, paths, budget, depth.saturating_add(1))?;
-    }
+    directory.revalidate()?;
     Ok(())
 }
 
-fn gemini_layout_root(root: &Path, metadata: &Metadata) -> PathBuf {
+fn open_gemini_child(
+    directory: &ProviderSourceDirectory,
+    name: &std::ffi::OsStr,
+    path: &Path,
+) -> Result<OpenedProviderSourcePath> {
+    directory.open_child(name).map_err(|error| match error {
+        CaptureError::InvalidProviderTranscriptPath { .. } => {
+            CaptureError::InvalidProviderTranscriptPath {
+                path: path.to_path_buf(),
+                reason: "linked Gemini transcript path components are rejected",
+            }
+        }
+        error => error,
+    })
+}
+
+fn gemini_layout_root(root: &Path, root_is_file: bool) -> PathBuf {
     if let Some(layout_root) = root
         .ancestors()
         .find(|ancestor| ancestor.file_name().is_some_and(|name| name == ".gemini"))
@@ -277,7 +287,7 @@ fn gemini_layout_root(root: &Path, metadata: &Metadata) -> PathBuf {
             return candidate.to_path_buf();
         }
     }
-    if metadata.file_type().is_file() {
+    if root_is_file {
         root.parent().unwrap_or(root).to_path_buf()
     } else {
         root.to_path_buf()

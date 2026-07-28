@@ -260,18 +260,10 @@ pub(super) fn classify_source_change(
     }
 }
 
-pub(super) fn open_gemini_transcript(path: &Path) -> Result<File> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-
-        Ok(OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-            .open(path)?)
+pub(super) fn open_gemini_transcript(source: &GeminiTranscriptSource) -> Result<File> {
+    let file = source.source_file.file().try_clone()?;
+    if GeminiFileObservation::from_metadata(&file.metadata()?)? != source.observation {
+        return Err(CaptureError::SourceChangedDuringCapture);
     }
-    #[cfg(not(unix))]
-    {
-        Ok(OpenOptions::new().read(true).open(path)?)
-    }
+    Ok(file)
 }
