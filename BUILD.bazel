@@ -230,6 +230,7 @@ RUST_FORMAT_TARGETS = [
     "//crates/ctx-history-capture:structured_complete_content_tests",
     "//crates/ctx-history-capture:unit_tests",
     "//crates/ctx-history-core:unit_tests",
+    "//crates/ctx-history-index:source_backed_recovery_tests",
     "//crates/ctx-history-index:unit_tests",
     "//crates/ctx-history-search:unit_tests",
     "//crates/ctx-history-store:unit_tests",
@@ -784,6 +785,7 @@ NATIVE_RUST_TESTS = [
     "//crates/ctx-history-capture:structured_complete_content_tests",
     "//crates/ctx-history-capture:unit_tests",
     "//crates/ctx-history-core:unit_tests",
+    "//crates/ctx-history-index:source_backed_recovery_tests",
     "//crates/ctx-history-index:unit_tests",
     "//crates/ctx-history-search:determinism_tests",
     "//crates/ctx-history-search:unit_tests",
@@ -865,6 +867,18 @@ test_suite(
     ],
 )
 
+# Presubmit owns the safe, non-ignored recovery subset through native_rust.
 test_suite(name = "presubmit", tests = [":fast", ":native_rust"])
-test_suite(name = "ci", tests = [":presubmit", ":sdk_package_dry_run", ":package_audit_release"])
+
+# The process-local Linux fault shim runs only in the broader CI gate. Its leaf
+# tests are platform-incompatible elsewhere, so non-Linux callers skip them.
+test_suite(
+    name = "ci",
+    tests = [
+        ":presubmit",
+        ":sdk_package_dry_run",
+        ":package_audit_release",
+        "//scripts/source-backed-recovery:fault_qualification",
+    ],
+)
 test_suite(name = "smoke", tests = [":fast", ":fresh_home_e2e", ":provider_fixture_e2e"])
