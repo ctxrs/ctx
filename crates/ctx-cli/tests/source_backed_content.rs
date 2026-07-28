@@ -21,7 +21,6 @@ struct ImportedMessage {
 
 struct SourceIndexedMessage {
     temp: TempDir,
-    source: PathBuf,
     event_id: String,
     session_id: String,
     complete_text: String,
@@ -97,7 +96,6 @@ fn source_indexed_codex_message() -> SourceIndexedMessage {
 
     SourceIndexedMessage {
         temp,
-        source,
         event_id,
         session_id,
         complete_text,
@@ -275,7 +273,7 @@ fn source_generation_is_the_normal_core_search_and_show_route() {
         "--provider",
         "codex",
         "--source-format",
-        "codex_session_jsonl_tree",
+        "codex_session_jsonl",
         "--workspace",
         "SOURCE-INDEX",
         "--since",
@@ -287,10 +285,7 @@ fn source_generation_is_the_normal_core_search_and_show_route() {
     ]));
     assert_eq!(filtered["results"][0]["ctx_event_id"], fixture.event_id);
     assert_eq!(filtered["filters"]["provider"], "codex");
-    assert_eq!(
-        filtered["filters"]["source_format"],
-        "codex_session_jsonl_tree"
-    );
+    assert_eq!(filtered["filters"]["source_format"], "codex_session_jsonl");
     assert_eq!(filtered["filters"]["workspace"], "SOURCE-INDEX");
     assert_eq!(filtered["filters"]["event_type"], "message");
     assert_eq!(filtered["filters"]["primary_only"], true);
@@ -459,7 +454,7 @@ fn source_generation_routes_search_and_prefix_show_over_mcp() {
                     "arguments": {
                         "query": SOURCE_INDEX_QUERY,
                         "provider": "codex",
-                        "source_format": "codex_session_jsonl_tree",
+                        "source_format": "codex_session_jsonl",
                         "workspace": "SOURCE-INDEX",
                         "since": "2026-07-28T12:00:00Z",
                         "event_type": "message",

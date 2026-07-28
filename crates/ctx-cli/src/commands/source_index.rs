@@ -35,7 +35,8 @@ use crate::{
 };
 
 const INDEX_DIRECTORY: &str = "source-backed-lexical-v0";
-const CODEX_SESSION_SOURCE_FORMAT: &str = "codex_session_jsonl_tree";
+const CODEX_DISCOVERY_SOURCE_FORMAT: &str = "codex_session_jsonl_tree";
+const CODEX_LOCATOR_SOURCE_FORMAT: &str = "codex_session_jsonl";
 const MAX_SESSION_DIVERSITY_CANDIDATES: usize = 64 * 1024;
 const MIN_CANDIDATE_BATCH: usize = 256;
 const CANDIDATE_OVERSAMPLE: usize = 8;
@@ -901,7 +902,7 @@ impl ExactContentResolverRegistry {
         let mut needs_codex = false;
         for (provider, source_format) in routes {
             match (provider, source_format) {
-                ("codex", CODEX_SESSION_SOURCE_FORMAT) => needs_codex = true,
+                ("codex", CODEX_LOCATOR_SOURCE_FORMAT) => needs_codex = true,
                 _ => {
                     return Err(anyhow!(
                         "source-backed complete content is unsupported for provider {provider} and source format {source_format}; indexed previews remain available"
@@ -921,7 +922,7 @@ impl ExactContentResolverRegistry {
         let request = EventHydrationRequest::new(event.event_id, event.locator.clone())
             .with_context(|| format!("validate typed locator for event {}", event.event_id))?;
         match (event.provider.as_str(), event.source_format.as_str()) {
-            ("codex", CODEX_SESSION_SOURCE_FORMAT) => {
+            ("codex", CODEX_LOCATOR_SOURCE_FORMAT) => {
                 let resolver = self
                     .codex
                     .as_ref()
@@ -945,7 +946,7 @@ impl ExactContentResolverRegistry {
 
 fn exact_route_supported(event: &EventRecord) -> bool {
     event.provider == CaptureProvider::Codex.as_str()
-        && event.source_format == CODEX_SESSION_SOURCE_FORMAT
+        && event.source_format == CODEX_LOCATOR_SOURCE_FORMAT
 }
 
 fn write_show_value(
@@ -1206,7 +1207,7 @@ fn codex_session_roots() -> Result<Vec<PathBuf>> {
         .into_iter()
         .filter(|source| {
             source.exists
-                && source.source_format == CODEX_SESSION_SOURCE_FORMAT
+                && source.source_format == CODEX_DISCOVERY_SOURCE_FORMAT
                 && source.status == ctx_history_capture::ProviderSourceStatus::Available
         })
         .map(|source| source.path)
