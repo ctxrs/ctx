@@ -337,6 +337,7 @@ mod ingestion;
 mod outputs;
 mod publication;
 mod routes;
+pub(crate) mod source_backed;
 
 pub(crate) use ingestion::import_kimi_nativepath_tree;
 use ingestion::*;
