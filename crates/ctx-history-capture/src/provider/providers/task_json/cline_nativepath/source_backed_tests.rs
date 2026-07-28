@@ -111,6 +111,25 @@ fn lifecycle_case(provider: CaptureProvider) {
             && page.estimated_owned_bytes <= 4 * 1024 * 1024
             && page.documents.iter().all(|document| {
                 document.body.chars().count() <= 2_048
+                    && document.parent_session_id.is_none()
+                    && document.root_session_id == document.session_id
+                    && document.provider_session_id.is_some()
+                    && document.branch.is_none()
+                    && document.source_path.as_ref().is_some_and(|path| {
+                        matches!(
+                            path.as_str(),
+                            "api_conversation_history.json"
+                                | "ui_messages.json"
+                                | "claude_messages.json"
+                        )
+                    })
+                    && document.is_primary
+                    && document.agent_type
+                        == match provider {
+                            CaptureProvider::Cline => "cline",
+                            CaptureProvider::RooCode => "roo-code",
+                            _ => unreachable!(),
+                        }
                     && matches!(
                         document.locator.coordinate(),
                         NativeRecordCoordinate::TreeRecord { .. }
