@@ -142,6 +142,20 @@ pub(super) fn scan_warp_native_snapshot(
     }
 }
 
+/// Scans through a read transaction already pinned by the caller.
+///
+/// Root-bound source-backed readers use this entry point so their provider-wide
+/// compound guard, rather than a per-database wrapper, owns transaction finish.
+pub(super) fn scan_warp_native_pinned_snapshot(
+    conn: &Connection,
+    schema: &WarpSqliteSchema,
+    profile: WarpNativeProfile,
+    resume_frontier: Option<WarpNativeFrontier>,
+    sink: &mut dyn WarpNativeSink,
+) -> Result<WarpNativeQueryResult> {
+    scan_warp_native_snapshot_inner(conn, schema, profile, resume_frontier, sink)
+}
+
 fn scan_warp_native_snapshot_inner(
     conn: &Connection,
     schema: &WarpSqliteSchema,

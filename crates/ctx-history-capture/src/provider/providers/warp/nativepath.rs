@@ -34,7 +34,7 @@ pub(super) use publication::{
     WarpNativeRejectionKind, WarpNativeScanOutcome, WarpNativeSession, WarpNativeSink,
     WarpNativeSourceAuthority, WARP_NATIVE_PAGE_MAX_BYTES, WARP_NATIVE_PAGE_MAX_ROWS,
 };
-use query::scan_warp_native_snapshot;
+use query::{scan_warp_native_pinned_snapshot, scan_warp_native_snapshot};
 
 pub(in super::super) struct WarpNativeSourceBackedScan {
     pub(in super::super) source_integrity_digest: String,
@@ -50,8 +50,13 @@ pub(in super::super) fn scan_warp_source_backed_connection(
 ) -> Result<WarpNativeSourceBackedScan> {
     let schema = WarpSqliteSchema::detect(connection)?;
     validate_snapshot_cursor_compatibility(connection)?;
-    let result =
-        scan_warp_native_snapshot(connection, &schema, WarpNativeProfile::CoreOnly, None, sink)?;
+    let result = scan_warp_native_pinned_snapshot(
+        connection,
+        &schema,
+        WarpNativeProfile::CoreOnly,
+        None,
+        sink,
+    )?;
     Ok(WarpNativeSourceBackedScan {
         source_integrity_digest: result.source_integrity_digest,
         counters: result.counters,
