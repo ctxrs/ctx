@@ -310,6 +310,9 @@ impl ForgeCodeScanner {
             metrics_raw.as_deref(),
         )?;
         let row = ForgeCodeConversationRow {
+            rowid,
+            source_record_digest: complete_content.record_digest(),
+            canonical_record_bytes: complete_content.canonical_record_bytes(),
             conversation_id,
             title,
             workspace_id: hydrated.workspace_id,

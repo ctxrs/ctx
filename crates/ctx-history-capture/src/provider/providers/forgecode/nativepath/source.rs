@@ -214,6 +214,9 @@ pub(in crate::provider::providers::forgecode) struct ForgeCodeRetainedEvent {
 
 #[derive(Debug, Clone)]
 pub(in crate::provider::providers::forgecode) struct ForgeCodeConversationRow {
+    pub(in crate::provider::providers::forgecode) rowid: i64,
+    pub(in crate::provider::providers::forgecode) source_record_digest: [u8; 32],
+    pub(in crate::provider::providers::forgecode) canonical_record_bytes: u64,
     pub(in crate::provider::providers::forgecode) conversation_id: String,
     pub(in crate::provider::providers::forgecode) title: Option<String>,
     pub(in crate::provider::providers::forgecode) workspace_id: i64,
