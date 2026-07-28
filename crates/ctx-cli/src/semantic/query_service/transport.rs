@@ -9,6 +9,21 @@ pub(in crate::semantic) enum DaemonQueryEndpoint {
     Unsupported,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(in crate::semantic) enum DaemonIpcService {
+    SemanticQuery,
+    SourceRefresh,
+}
+
+impl DaemonIpcService {
+    fn endpoint_file(self) -> &'static str {
+        match self {
+            Self::SemanticQuery => DAEMON_QUERY_ENDPOINT_FILE,
+            Self::SourceRefresh => "source-refresh-endpoint.json",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(in crate::semantic) struct DaemonQueryEndpointIdentity {
     pub(in crate::semantic) endpoint: DaemonQueryEndpoint,
@@ -28,6 +43,17 @@ impl fmt::Display for DaemonQueryServiceUnavailable {
 
 impl std::error::Error for DaemonQueryServiceUnavailable {}
 
+#[derive(Debug)]
+pub(in crate::semantic) struct DaemonSourceRefreshServiceUnavailable;
+
+impl fmt::Display for DaemonSourceRefreshServiceUnavailable {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("daemon source refresh service is unavailable")
+    }
+}
+
+impl std::error::Error for DaemonSourceRefreshServiceUnavailable {}
+
 impl DaemonQueryEndpoint {
     pub(in crate::semantic) fn token(&self) -> &str {
         match self {
@@ -41,12 +67,29 @@ impl DaemonQueryEndpoint {
     }
 }
 
+#[cfg(test)]
 pub(in crate::semantic) fn daemon_query_endpoint_path(data_root: &Path) -> PathBuf {
-    daemon_root_path(data_root).join(DAEMON_QUERY_ENDPOINT_FILE)
+    daemon_service_endpoint_path(data_root, DaemonIpcService::SemanticQuery)
 }
 
+pub(in crate::semantic) fn daemon_service_endpoint_path(
+    data_root: &Path,
+    service: DaemonIpcService,
+) -> PathBuf {
+    daemon_root_path(data_root).join(service.endpoint_file())
+}
+
+#[cfg(test)]
 pub(in crate::semantic) fn write_daemon_query_endpoint(
     data_root: &Path,
+    endpoint: &DaemonQueryEndpoint,
+) -> Result<()> {
+    write_daemon_service_endpoint(data_root, DaemonIpcService::SemanticQuery, endpoint)
+}
+
+pub(in crate::semantic) fn write_daemon_service_endpoint(
+    data_root: &Path,
+    service: DaemonIpcService,
     endpoint: &DaemonQueryEndpoint,
 ) -> Result<()> {
     let value = match endpoint {
@@ -73,11 +116,14 @@ pub(in crate::semantic) fn write_daemon_query_endpoint(
             ));
         }
     };
-    write_private_json_file(&daemon_query_endpoint_path(data_root), &value)
+    write_private_json_file(&daemon_service_endpoint_path(data_root, service), &value)
 }
 
-pub(in crate::semantic) fn remove_daemon_query_endpoint(data_root: &Path) {
-    let _ = fs::remove_file(daemon_query_endpoint_path(data_root));
+pub(in crate::semantic) fn remove_daemon_service_endpoint(
+    data_root: &Path,
+    service: DaemonIpcService,
+) {
+    let _ = fs::remove_file(daemon_service_endpoint_path(data_root, service));
 }
 
 #[cfg(test)]
@@ -87,10 +133,18 @@ pub(in crate::semantic) fn read_daemon_query_endpoint(
     Ok(read_daemon_query_endpoint_identity(data_root)?.map(|identity| identity.endpoint))
 }
 
+#[cfg(test)]
 pub(in crate::semantic) fn read_daemon_query_endpoint_identity(
     data_root: &Path,
 ) -> Result<Option<DaemonQueryEndpointIdentity>> {
-    let path = daemon_query_endpoint_path(data_root);
+    read_daemon_service_endpoint_identity(data_root, DaemonIpcService::SemanticQuery)
+}
+
+pub(in crate::semantic) fn read_daemon_service_endpoint_identity(
+    data_root: &Path,
+    service: DaemonIpcService,
+) -> Result<Option<DaemonQueryEndpointIdentity>> {
+    let path = daemon_service_endpoint_path(data_root, service);
     let Some(parent) = path.parent() else {
         return Err(anyhow!("daemon query endpoint has no parent directory"));
     };
@@ -175,8 +229,17 @@ pub(in crate::semantic) fn read_daemon_query_endpoint_identity_value(
     }))
 }
 
+#[cfg(test)]
 pub(in crate::semantic) fn remove_daemon_query_endpoint_if_matches(
     data_root: &Path,
+    expected: &DaemonQueryEndpointIdentity,
+) {
+    remove_daemon_service_endpoint_if_matches(data_root, DaemonIpcService::SemanticQuery, expected);
+}
+
+pub(in crate::semantic) fn remove_daemon_service_endpoint_if_matches(
+    data_root: &Path,
+    service: DaemonIpcService,
     expected: &DaemonQueryEndpointIdentity,
 ) {
     // The daemon owns this guard for the endpoint lifetime. Acquiring it makes
@@ -191,22 +254,53 @@ pub(in crate::semantic) fn remove_daemon_query_endpoint_if_matches(
     let Ok(true) = try_lock_pid_file(&guard) else {
         return;
     };
-    let current = read_daemon_query_endpoint_identity(data_root)
+    let current = read_daemon_service_endpoint_identity(data_root, service)
         .ok()
         .flatten();
     if current.as_ref() == Some(expected) {
-        let _ = fs::remove_file(daemon_query_endpoint_path(data_root));
+        let _ = fs::remove_file(daemon_service_endpoint_path(data_root, service));
     }
     let _ = fs2::FileExt::unlock(&guard);
 }
 
 pub(in crate::semantic) fn daemon_query_request(
     data_root: &Path,
+    request: Value,
+    timeout: StdDuration,
+    max_response_bytes: u64,
+) -> Result<Option<Value>> {
+    daemon_service_request(
+        data_root,
+        DaemonIpcService::SemanticQuery,
+        request,
+        timeout,
+        max_response_bytes,
+    )
+}
+
+pub(in crate::semantic) fn daemon_source_refresh_request(
+    data_root: &Path,
+    request: Value,
+    timeout: StdDuration,
+    max_response_bytes: u64,
+) -> Result<Option<Value>> {
+    daemon_service_request(
+        data_root,
+        DaemonIpcService::SourceRefresh,
+        request,
+        timeout,
+        max_response_bytes,
+    )
+}
+
+pub(in crate::semantic) fn daemon_service_request(
+    data_root: &Path,
+    service: DaemonIpcService,
     mut request: Value,
     timeout: StdDuration,
     max_response_bytes: u64,
 ) -> Result<Option<Value>> {
-    let Some(identity) = read_daemon_query_endpoint_identity(data_root)? else {
+    let Some(identity) = read_daemon_service_endpoint_identity(data_root, service)? else {
         return Ok(None);
     };
     let endpoint = &identity.endpoint;
@@ -216,8 +310,13 @@ pub(in crate::semantic) fn daemon_query_request(
         match daemon_query_roundtrip(endpoint, request.as_bytes(), timeout, max_response_bytes) {
             Ok(body) => body,
             Err(error) if daemon_query_roundtrip_error_is_unavailable(endpoint, &error) => {
-                remove_daemon_query_endpoint_if_matches(data_root, &identity);
-                return Err(DaemonQueryServiceUnavailable.into());
+                remove_daemon_service_endpoint_if_matches(data_root, service, &identity);
+                return match service {
+                    DaemonIpcService::SemanticQuery => Err(DaemonQueryServiceUnavailable.into()),
+                    DaemonIpcService::SourceRefresh => {
+                        Err(DaemonSourceRefreshServiceUnavailable.into())
+                    }
+                };
             }
             Err(error) => return Err(error),
         };

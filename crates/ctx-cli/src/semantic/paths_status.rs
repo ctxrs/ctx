@@ -35,6 +35,10 @@ pub(super) fn daemon_history_refresh_job_path(data_root: &Path) -> PathBuf {
     daemon_jobs_path(data_root).join(DAEMON_HISTORY_REFRESH_JOB_FILE)
 }
 
+pub(super) fn daemon_source_backed_refresh_job_path(data_root: &Path) -> PathBuf {
+    daemon_jobs_path(data_root).join("source-backed-refresh.json")
+}
+
 pub(super) fn daemon_semantic_job_path(data_root: &Path) -> PathBuf {
     daemon_jobs_path(data_root).join(DAEMON_SEMANTIC_JOB_FILE)
 }
@@ -734,6 +738,10 @@ pub(super) fn daemon_report_with_disabled_status(
             data_root,
             disabled_overrides_lifecycle
         ),
+        "source_backed_refresh": daemon_source_backed_refresh_job_report(
+            data_root,
+            disabled_overrides_lifecycle
+        ),
         "semantic_index": daemon_semantic_job_report_observed(
             data_root,
             semantic_report,
@@ -812,6 +820,43 @@ pub(super) fn daemon_history_refresh_job_report(
             .and_then(|value| value.get("rejection_diagnostics")).cloned(),
         "budget_reasons": job
             .and_then(|value| value.get("budget_reasons").cloned()),
+        "last_error": job.and_then(|value| json_string(value, "last_error")),
+    }))
+}
+
+pub(super) fn daemon_source_backed_refresh_job_report(
+    data_root: &Path,
+    disabled_overrides_lifecycle: bool,
+) -> Value {
+    let daemon_enabled = daemon_enabled_for_status(data_root);
+    let status_value = read_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root));
+    let job = status_value.as_ref();
+    let disabled = !daemon_enabled && disabled_overrides_lifecycle;
+    compact_json(json!({
+        "status": if disabled {
+            "disabled"
+        } else {
+            job.and_then(|value| value.get("status"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+        },
+        "enabled": daemon_enabled,
+        "mode": job.and_then(|value| json_string(value, "mode")),
+        "owner": job.and_then(|value| json_string(value, "owner")),
+        "kind": job.and_then(|value| json_string(value, "kind")),
+        "request_id": job.and_then(|value| json_string(value, "request_id")),
+        "request_state": job.and_then(|value| json_string(value, "request_state")),
+        "last_run_at_ms": job.and_then(|value| json_i64(value, "last_run_at_ms")),
+        "source_count": job.and_then(|value| value.get("source_count").cloned()),
+        "previous_generation": job
+            .and_then(|value| json_string(value, "previous_generation")),
+        "published_generation": job
+            .and_then(|value| json_string(value, "published_generation")),
+        "generation_changed": job
+            .and_then(|value| value.get("generation_changed").cloned()),
+        "coalesced_requests": job
+            .and_then(|value| value.get("coalesced_requests").cloned()),
+        "progress": job.and_then(|value| value.get("progress").cloned()),
         "last_error": job.and_then(|value| json_string(value, "last_error")),
     }))
 }

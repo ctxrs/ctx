@@ -39,17 +39,20 @@ use super::{
     model_runtime::SharedSemanticRuntime,
     paths_status::{
         daemon_history_refresh_job_path, daemon_report, daemon_report_with_disabled_status,
-        daemon_semantic_job_path, lower_semantic_worker_priority, read_daemon_job_status,
-        read_daemon_status, write_daemon_status, DaemonLock,
+        daemon_semantic_job_path, daemon_source_backed_refresh_job_path,
+        lower_semantic_worker_priority, read_daemon_job_status, read_daemon_status,
+        write_daemon_status, DaemonLock,
     },
     query_service::{
-        daemon_can_begin_idle_shutdown, observe_daemon_query_activity,
-        semantic_query_service_supported, start_daemon_query_service, DaemonQueryService,
+        daemon_can_begin_idle_shutdown, daemon_query_service_transport_supported,
+        observe_daemon_query_activity, semantic_query_service_supported,
+        start_daemon_query_service, start_daemon_source_refresh_service, DaemonQueryService,
     },
     runtime_limits::{
         DAEMON_BACKGROUND_CHILD_ENV, DAEMON_IDLE_EXIT_SECONDS_DEFAULT,
         DAEMON_LOOP_INTERVAL_SECONDS_DEFAULT,
     },
+    source_backed_refresh_coordinator::SourceBackedRefreshCoordinator,
 };
 
 #[derive(Debug)]
@@ -410,6 +413,7 @@ fn reload_daemon_runtime_config(
     args: &DaemonRunArgs,
     runtime: &mut DaemonRuntime,
     query_service: &mut Option<DaemonQueryService>,
+    refresh_service: &mut Option<DaemonQueryService>,
     reload: &mut DaemonConfigReloadState,
 ) -> DaemonConfigReloadOutcome {
     let config = match AppConfig::load(data_root) {
@@ -424,6 +428,7 @@ fn reload_daemon_runtime_config(
 
     if !runtime.config.daemon.enabled && !args.force {
         drop(query_service.take());
+        drop(refresh_service.take());
         let _ = runtime.semantic_runtime.release_if_idle();
         reload.applied();
         return DaemonConfigReloadOutcome::StopDisabled;
@@ -431,6 +436,15 @@ fn reload_daemon_runtime_config(
 
     let semantic_runtime_requested =
         runtime.config.semantic_search_enabled() && semantic_query_service_supported();
+    if daemon_query_service_transport_supported() && refresh_service.is_none() {
+        match start_daemon_source_refresh_service(data_root, runtime.semantic_runtime.clone()) {
+            Ok(service) => *refresh_service = Some(service),
+            Err(error) => {
+                reload.activation_failed(error);
+                return DaemonConfigReloadOutcome::Continue;
+            }
+        }
+    }
     if semantic_runtime_requested && query_service.is_none() {
         match start_daemon_query_service(data_root, runtime.semantic_runtime.clone()) {
             Ok(service) => {
@@ -450,6 +464,15 @@ fn reload_daemon_runtime_config(
 
     reload.applied();
     DaemonConfigReloadOutcome::Continue
+}
+
+fn daemon_semantic_runtime_active(
+    runtime: &DaemonRuntime,
+    query_service: Option<&DaemonQueryService>,
+) -> bool {
+    query_service.is_some()
+        && runtime.config.semantic_search_enabled()
+        && semantic_query_service_supported()
 }
 
 #[cfg(all(test, ctx_sqlite_vec))]
@@ -748,6 +771,7 @@ pub(super) fn run_daemon_inner(
         };
         let mut config_reload = DaemonConfigReloadState::pending(config);
         let mut query_service = None;
+        let mut refresh_service = None;
         write_daemon_lifecycle_status_with_runtime(
             data_root,
             &args,
@@ -766,11 +790,12 @@ pub(super) fn run_daemon_inner(
             &args,
             &mut runtime,
             &mut query_service,
+            &mut refresh_service,
             &mut config_reload,
         ) == DaemonConfigReloadOutcome::StopDisabled;
         if config_reload.status == "activation_failed" {
             return Err(anyhow!(
-                "activate semantic daemon runtime: {}",
+                "activate daemon control service: {}",
                 config_reload
                     .last_error
                     .as_deref()
@@ -787,7 +812,7 @@ pub(super) fn run_daemon_inner(
             started_at_ms,
             None,
             None,
-            query_service.is_some(),
+            daemon_semantic_runtime_active(&runtime, query_service.as_ref()),
             &config_reload.to_json(),
         )?;
         // The daemon is ready only after every fallible lifecycle and runtime
@@ -809,6 +834,7 @@ pub(super) fn run_daemon_inner(
         }
         let mut idle_since: Option<Instant> = None;
         let mut observed_query_generation = 0;
+        let mut observed_refresh_generation = 0;
         loop {
             if stop_disabled {
                 break;
@@ -818,6 +844,7 @@ pub(super) fn run_daemon_inner(
                 &args,
                 &mut runtime,
                 &mut query_service,
+                &mut refresh_service,
                 &mut config_reload,
             ) == DaemonConfigReloadOutcome::StopDisabled
             {
@@ -840,7 +867,7 @@ pub(super) fn run_daemon_inner(
                 started_at_ms,
                 None,
                 None,
-                query_service.is_some(),
+                daemon_semantic_runtime_active(&runtime, query_service.as_ref()),
                 &config_reload.to_json(),
             )?;
             if prepared_auto_upgrade.is_none()
@@ -866,17 +893,33 @@ pub(super) fn run_daemon_inner(
                 &mut idle_since,
                 &mut observed_query_generation,
             );
+            observe_daemon_query_activity(
+                refresh_service
+                    .as_ref()
+                    .map(|service| service.activity.as_ref()),
+                &mut idle_since,
+                &mut observed_refresh_generation,
+            );
             if let Some(telemetry) = telemetry.as_mut() {
                 let events = telemetry.liveness_events(Instant::now());
                 send_daemon_events(data_root, &events);
             }
             let retry_due = history_retry_due(&runtime);
-            if idle_since.is_some_and(|idle| idle.elapsed() >= idle_exit) && !retry_due {
-                if daemon_can_begin_idle_shutdown(
-                    query_service
-                        .as_ref()
-                        .map(|service| service.activity.as_ref()),
+            let source_refresh_pending = refresh_service
+                .as_ref()
+                .is_some_and(|service| service.source_refresh.has_pending_request());
+            if source_refresh_pending {
+                idle_since = None;
+            }
+            if idle_since.is_some_and(|idle| idle.elapsed() >= idle_exit)
+                && !retry_due
+                && !source_refresh_pending
+            {
+                if daemon_services_can_begin_idle_shutdown(
+                    query_service.as_ref(),
                     observed_query_generation,
+                    refresh_service.as_ref(),
+                    observed_refresh_generation,
                 ) {
                     break;
                 }
@@ -887,18 +930,30 @@ pub(super) fn run_daemon_inner(
                     &mut idle_since,
                     &mut observed_query_generation,
                 );
+                observe_daemon_query_activity(
+                    refresh_service
+                        .as_ref()
+                        .map(|service| service.activity.as_ref()),
+                    &mut idle_since,
+                    &mut observed_refresh_generation,
+                );
                 continue;
             }
             let cycle_started = Instant::now();
+            let semantic_runtime_active =
+                daemon_semantic_runtime_active(&runtime, query_service.as_ref());
             let mut iteration = run_daemon_once_with_activity(
                 &args,
                 data_root,
                 &mut runtime,
                 None,
-                query_service.is_some(),
+                semantic_runtime_active,
                 query_service
                     .as_ref()
                     .map(|service| service.activity.as_ref()),
+                refresh_service
+                    .as_ref()
+                    .map(|service| service.source_refresh.as_ref()),
             )?;
             let cycle_duration = cycle_started.elapsed();
             let iteration_events =
@@ -911,7 +966,7 @@ pub(super) fn run_daemon_inner(
                 started_at_ms,
                 None,
                 None,
-                query_service.is_some(),
+                daemon_semantic_runtime_active(&runtime, query_service.as_ref()),
                 &config_reload.to_json(),
             )?;
             failed |= iteration.failed;
@@ -925,12 +980,25 @@ pub(super) fn run_daemon_inner(
                 &mut idle_since,
                 &mut observed_query_generation,
             );
+            observe_daemon_query_activity(
+                refresh_service
+                    .as_ref()
+                    .map(|service| service.activity.as_ref()),
+                &mut idle_since,
+                &mut observed_refresh_generation,
+            );
             if iteration.did_work {
                 idle_since = None;
             } else if idle_since.is_none() {
                 idle_since = Some(Instant::now());
             }
-            if daemon_wait_interrupted_by_upgrade(data_root, loop_interval) {
+            if daemon_wait_interrupted_by_upgrade(
+                data_root,
+                loop_interval,
+                refresh_service
+                    .as_ref()
+                    .map(|service| service.source_refresh.as_ref()),
+            ) {
                 break;
             }
         }
@@ -950,7 +1018,15 @@ pub(super) fn run_daemon_inner(
         let failure_message = failed.then(|| {
             let history = read_daemon_job_status(&daemon_history_refresh_job_path(data_root));
             let semantic = read_daemon_job_status(&daemon_semantic_job_path(data_root));
-            daemon_jobs_failure_message(history.as_ref(), semantic.as_ref())
+            let source_backed =
+                read_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root));
+            source_backed
+                .as_ref()
+                .and_then(|job| job.get("last_error"))
+                .and_then(Value::as_str)
+                .filter(|error| !error.is_empty())
+                .map(|error| format!("source-backed refresh failed: {error}"))
+                .or_else(|| daemon_jobs_failure_message(history.as_ref(), semantic.as_ref()))
                 .unwrap_or_else(|| "one or more daemon jobs failed".to_owned())
         });
         write_daemon_lifecycle_status_with_runtime(
@@ -960,13 +1036,14 @@ pub(super) fn run_daemon_inner(
             started_at_ms,
             Some(utc_now().timestamp_millis()),
             failure_message,
-            query_service.is_some(),
+            daemon_semantic_runtime_active(&runtime, query_service.as_ref()),
             &config_reload.to_json(),
         )?;
         // Keep daemon ownership until the query service has removed its endpoint
         // and joined its listener thread. Otherwise a replacement can publish a
         // new endpoint that this service's destructor then removes.
         drop(query_service);
+        drop(refresh_service);
         Ok(failed)
     })();
 
@@ -1034,12 +1111,41 @@ fn fail_daemon_before_ready_for_test(data_root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn daemon_wait_interrupted_by_upgrade(data_root: &Path, duration: StdDuration) -> bool {
+fn daemon_services_can_begin_idle_shutdown(
+    query_service: Option<&DaemonQueryService>,
+    observed_query_generation: u64,
+    refresh_service: Option<&DaemonQueryService>,
+    observed_refresh_generation: u64,
+) -> bool {
+    let refresh_activity = refresh_service.map(|service| service.activity.as_ref());
+    if !daemon_can_begin_idle_shutdown(refresh_activity, observed_refresh_generation) {
+        return false;
+    }
+    if daemon_can_begin_idle_shutdown(
+        query_service.map(|service| service.activity.as_ref()),
+        observed_query_generation,
+    ) {
+        return true;
+    }
+    if let Some(activity) = refresh_activity {
+        activity.resume_accepting();
+    }
+    false
+}
+
+fn daemon_wait_interrupted_by_upgrade(
+    data_root: &Path,
+    duration: StdDuration,
+    source_refresh: Option<&SourceBackedRefreshCoordinator>,
+) -> bool {
     const POLL_INTERVAL: StdDuration = StdDuration::from_millis(100);
     let deadline = Instant::now() + duration;
     loop {
         if daemon_upgrade_handoff_blocks_current_process(data_root) {
             return true;
+        }
+        if source_refresh.is_some_and(SourceBackedRefreshCoordinator::has_pending_request) {
+            return false;
         }
         let now = Instant::now();
         if installation_upgrade_blocks_current_process(data_root) {
