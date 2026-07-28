@@ -29,6 +29,10 @@ impl RovoDevFrozenFile {
     fn read(path: &Path) -> Result<Self> {
         ensure_regular_provider_transcript_file(path)?;
         let metadata = fs::symlink_metadata(path)?;
+        Self::from_metadata(path.to_path_buf(), &metadata)
+    }
+
+    fn from_metadata(path: PathBuf, metadata: &fs::Metadata) -> Result<Self> {
         #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
 
@@ -38,7 +42,7 @@ impl RovoDevFrozenFile {
         let (device, inode) = (None, None);
 
         Ok(Self {
-            path: path.to_path_buf(),
+            path,
             length: metadata.len(),
             modified: metadata.modified()?,
             readonly: metadata.permissions().readonly(),
@@ -76,6 +80,21 @@ pub(super) struct RovoDevSessionObservation {
 }
 
 impl RovoDevSessionObservation {
+    pub(super) fn from_admitted(
+        canonical_path: PathBuf,
+        context_path: PathBuf,
+        context_metadata: &fs::Metadata,
+        metadata: Option<(PathBuf, &fs::Metadata)>,
+    ) -> Result<Self> {
+        Ok(Self {
+            canonical_path,
+            context_file: RovoDevFrozenFile::from_metadata(context_path, context_metadata)?,
+            metadata_file: metadata
+                .map(|(path, metadata)| RovoDevFrozenFile::from_metadata(path, metadata))
+                .transpose()?,
+        })
+    }
+
     pub(super) fn read(source: &RovoDevSessionSource) -> Result<Self> {
         Ok(Self {
             canonical_path: fs::canonicalize(&source.context_path)?,

@@ -404,3 +404,67 @@ fn configured_root_wins_and_unsafe_replacement_suppresses_default_fallback() {
         RovoDevSourceBackedError::NonAuthoritativeRoot
     ));
 }
+
+#[test]
+fn compound_authority_rovodev_rejects_missing_auxiliary_and_sibling_swap() {
+    let temp = tempdir().unwrap();
+    let root = temp.path().join(".rovodev/sessions");
+    let context_path = write_session(
+        &root,
+        "session-a",
+        "session-a",
+        None,
+        &[json!({"id": "message-a", "role": "user", "content": "hello"})],
+    );
+    let metadata_path = context_path.parent().unwrap().join("metadata.json");
+    fs::remove_file(&metadata_path).unwrap();
+    let context = adapter_context(&root);
+    let inventory = discover_rovodev_source_backed(&root, context.clone()).unwrap();
+    fs::write(&metadata_path, br#"{"session_id":"session-a"}"#).unwrap();
+    assert!(inventory.certify().is_err());
+
+    let inventory = discover_rovodev_source_backed(&root, context.clone()).unwrap();
+    let leaf = &inventory.leaves()[0];
+    let mut reader = RovoDevSourceBackedReader::new(leaf, context, None).unwrap();
+    while reader.next_page().unwrap().is_some() {}
+    fs::write(
+        &metadata_path,
+        br#"{"session_id":"session-a","git_branch":"replacement"}"#,
+    )
+    .unwrap();
+    assert!(reader.finish().is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn compound_authority_rovodev_rejects_ancestor_swap_and_stale_locator() {
+    let temp = tempdir().unwrap();
+    let root = temp.path().join(".rovodev/sessions");
+    write_session(
+        &root,
+        "session-a",
+        "session-a",
+        None,
+        &[json!({"id": "message-a", "role": "user", "content": "hello"})],
+    );
+    let context = adapter_context(&root);
+    let inventory = discover_rovodev_source_backed(&root, context.clone()).unwrap();
+    let (_, documents, _) = collect_scan(&inventory.leaves()[0], context, None);
+
+    let retired = temp.path().join("retired-sessions");
+    fs::rename(&root, &retired).unwrap();
+    write_session(
+        &root,
+        "session-a",
+        "session-a",
+        None,
+        &[json!({"id": "message-a", "role": "user", "content": "hello"})],
+    );
+
+    assert!(hydrate_rovodev_source_record(
+        &inventory,
+        documents[0].event_id,
+        &documents[0].locator,
+    )
+    .is_err());
+}

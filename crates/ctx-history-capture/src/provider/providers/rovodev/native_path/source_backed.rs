@@ -6,14 +6,14 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    fs::{self, File},
-    io::Read,
+    fs,
+    io::{self, Read},
     path::{Path, PathBuf},
 };
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource,
-    CertifiedSourceInventory, ContentRef, EventIdentityInput, LocatorRevisionPolicy, NativeItemKey,
+    CertifiedSourceInventory, EventIdentityInput, LocatorRevisionPolicy, NativeItemKey,
     NativeRecordCoordinate, NativeSessionKey, ProjectionContractError, ScannedSourceCounts,
     SessionIdentityInput, SourceAnchor, SourceFrontier, SourceInventoryObservation, SourceKey,
     SourceObservation, SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
@@ -23,18 +23,11 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::{
-    discover_rovodev_session_sources, failure, prepare_document, prepare_page,
-    rovodev_structured_locator, RovoDevDiscovery, RovoDevFailure, RovoDevSessionObservation,
-    RovoDevSessionSource,
+    discover_rovodev_session_sources, failure, prepare_document, prepare_page, RovoDevDiscovery,
+    RovoDevFailure, RovoDevSessionObservation, RovoDevSessionSource,
 };
 use crate::{
-    complete_content::{
-        structured::{StructuredCompleteContentResolver, STRUCTURED_COMPLETE_CONTENT_LOCATOR_KIND},
-        verified_content_profile, AuthorizedSourceRoute, CompleteContentBodyDigest,
-        CompleteContentError, CompleteContentHashAuthority, CompleteContentResolver,
-        CompleteContentSourceFamily, CompleteContentSourceLocator, CompleteMessageRequest,
-        SourceAccessBroker, SourceSnapshot, VerifiedContentRole,
-    },
+    common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
     provider::normalization::{provider_block_text, provider_message_id, provider_string_field},
     CaptureError, ProviderAdapterContext, MAX_PROVIDER_JSONL_LINE_BYTES, ROVODEV_SOURCE_FORMAT,
 };
@@ -64,8 +57,6 @@ pub(crate) enum RovoDevSourceBackedError {
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]
     Resolver(#[from] SourceResolverContractError),
-    #[error(transparent)]
-    CompleteContent(#[from] CompleteContentError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("Rovo Dev source-backed discovery requires an authoritative sessions directory")]
@@ -100,9 +91,13 @@ struct FileSnapshot {
 }
 
 impl FileSnapshot {
-    fn read(path: &Path, byte_len: u64, retain_bytes: bool) -> RovoDevSourceBackedResult<Self> {
+    fn read(
+        source: &OpenedProviderSourceFile,
+        byte_len: u64,
+        retain_bytes: bool,
+    ) -> RovoDevSourceBackedResult<Self> {
         if retain_bytes {
-            let bytes = fs::read(path)?;
+            let bytes = source.read_all_bounded(MAX_PROVIDER_JSONL_LINE_BYTES)?;
             if u64::try_from(bytes.len()).ok() != Some(byte_len) {
                 return Err(CaptureError::SourceChangedDuringCapture.into());
             }
@@ -114,7 +109,7 @@ impl FileSnapshot {
             });
         }
 
-        let mut file = File::open(path)?;
+        let mut file = source.file().try_clone()?;
         let mut digest = Sha256::new();
         let mut observed = 0_u64;
         let mut buffer = [0_u8; FILE_HASH_BUFFER_BYTES];
@@ -149,34 +144,53 @@ struct RovoDevSnapshot {
     source_sha256: [u8; 32],
     certified_bytes: u64,
     document: std::result::Result<super::PreparedDocument, RovoDevFailure>,
+    context_file: OpenedProviderSourceFile,
+    metadata_file: Option<OpenedProviderSourceFile>,
 }
 
 impl RovoDevSnapshot {
     fn read(
         source: &RovoDevSessionSource,
         context: &ProviderAdapterContext,
+        authority: &ProviderSourceRoot,
+        session_relative_path: &Path,
+        context_relative_path: &Path,
+        expected_metadata: Option<&Path>,
     ) -> RovoDevSourceBackedResult<Self> {
-        let frozen = RovoDevSessionObservation::read(source)?;
+        let context_handle = authority.open_file(context_relative_path)?;
+        let metadata_relative_path = session_relative_path.join("metadata.json");
+        let metadata_handle = match authority.open_file(&metadata_relative_path) {
+            Ok(file) => Some(file),
+            Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        if metadata_handle.is_some() != expected_metadata.is_some() {
+            return Err(CaptureError::SourceChangedDuringCapture.into());
+        }
+        let frozen = RovoDevSessionObservation::from_admitted(
+            authority.named_path().join(context_relative_path),
+            source.context_path.clone(),
+            context_handle.metadata(),
+            metadata_handle
+                .as_ref()
+                .map(|metadata| (source.session_dir.join("metadata.json"), metadata.metadata())),
+        )?;
         let context_oversized = frozen.context_length() > MAX_PROVIDER_JSONL_LINE_BYTES as u64;
         let context_file = FileSnapshot::read(
-            &source.context_path,
+            &context_handle,
             frozen.context_length(),
             !context_oversized,
         )?;
         let metadata_oversized = frozen
             .metadata_length()
             .is_some_and(|length| length > MAX_PROVIDER_JSONL_LINE_BYTES as u64);
-        let metadata_file = match (source.metadata_path.as_deref(), frozen.metadata_length()) {
-            (Some(path), Some(length)) => {
-                Some(FileSnapshot::read(path, length, !metadata_oversized)?)
+        let metadata_file = match (metadata_handle.as_ref(), frozen.metadata_length()) {
+            (Some(file), Some(length)) => {
+                Some(FileSnapshot::read(file, length, !metadata_oversized)?)
             }
             (None, None) => None,
             _ => return Err(CaptureError::SourceChangedDuringCapture.into()),
         };
-        if !frozen.revalidate(source)? {
-            return Err(CaptureError::SourceChangedDuringCapture.into());
-        }
-
         let certified_bytes = metadata_file
             .as_ref()
             .map_or(Some(context_file.byte_len), |metadata| {
@@ -214,7 +228,18 @@ impl RovoDevSnapshot {
             source_sha256,
             certified_bytes,
             document,
+            context_file: context_handle,
+            metadata_file: metadata_handle,
         })
+    }
+
+    fn revalidate(&self, authority: &ProviderSourceRoot) -> RovoDevSourceBackedResult<()> {
+        self.context_file.revalidate()?;
+        if let Some(metadata) = &self.metadata_file {
+            metadata.revalidate()?;
+        }
+        authority.revalidate()?;
+        Ok(())
     }
 
     fn observation(&self, source_key: SourceKey) -> RovoDevSourceBackedResult<SourceObservation> {
@@ -253,7 +278,11 @@ fn compound_source_digest(context: &FileSnapshot, metadata: Option<&FileSnapshot
 
 #[derive(Debug)]
 pub(crate) struct RovoDevSourceBackedLeaf {
+    authority: ProviderSourceRoot,
     source: RovoDevSessionSource,
+    session_relative_path: PathBuf,
+    context_relative_path: PathBuf,
+    metadata_relative_path: Option<PathBuf>,
     source_key: SourceKey,
     session_id: StableEntityId,
     parent_session_id: Option<StableEntityId>,
@@ -283,8 +312,7 @@ impl RovoDevSourceBackedLeaf {
 
 #[derive(Debug)]
 pub(crate) struct RovoDevSourceBackedInventory {
-    root: PathBuf,
-    canonical_root: PathBuf,
+    authority: ProviderSourceRoot,
     context: ProviderAdapterContext,
     opening: SourceInventoryObservation,
     leaves: Vec<RovoDevSourceBackedLeaf>,
@@ -296,7 +324,15 @@ impl RovoDevSourceBackedInventory {
     }
 
     pub(crate) fn certify(&self) -> RovoDevSourceBackedResult<CertifiedSourceInventory> {
-        let closing = bind_inventory(&self.root, &self.context)?;
+        for leaf in &self.leaves {
+            leaf.snapshot.revalidate(&self.authority)?;
+        }
+        self.authority.revalidate()?;
+        let closing = bind_inventory(&self.authority, &self.context)?;
+        for leaf in &closing.leaves {
+            leaf.snapshot.revalidate(&self.authority)?;
+        }
+        self.authority.revalidate()?;
         Ok(CertifiedSourceInventory::certify(
             self.opening.clone(),
             closing.observation,
@@ -314,10 +350,12 @@ pub(crate) fn discover_rovodev_source_backed(
     sessions_root: &Path,
     context: ProviderAdapterContext,
 ) -> RovoDevSourceBackedResult<RovoDevSourceBackedInventory> {
-    let bound = bind_inventory(sessions_root, &context)?;
+    authoritative_discovery(sessions_root)?;
+    let canonical_root = fs::canonicalize(sessions_root)?;
+    let authority = ProviderSourceRoot::open(&canonical_root)?;
+    let bound = bind_inventory(&authority, &context)?;
     Ok(RovoDevSourceBackedInventory {
-        root: sessions_root.to_path_buf(),
-        canonical_root: bound.canonical_root,
+        authority,
         context,
         opening: bound.observation,
         leaves: bound.leaves,
@@ -331,15 +369,29 @@ struct BoundInventory {
 }
 
 fn bind_inventory(
-    sessions_root: &Path,
+    authority: &ProviderSourceRoot,
     context: &ProviderAdapterContext,
 ) -> RovoDevSourceBackedResult<BoundInventory> {
-    let discovery = authoritative_discovery(sessions_root)?;
-    let canonical_root = fs::canonicalize(sessions_root)?;
+    let discovery = authoritative_discovery(authority.named_path())?;
+    let canonical_root = authority.named_path().to_path_buf();
     let mut source_ids = HashSet::with_capacity(discovery.sources().len());
     let mut leaves = Vec::with_capacity(discovery.sources().len());
     for source in discovery.sources() {
-        let snapshot = RovoDevSnapshot::read(source, context)?;
+        let session_relative_path = relative_to_rovodev_authority(authority, &source.session_dir)?;
+        let context_relative_path = relative_to_rovodev_authority(authority, &source.context_path)?;
+        let metadata_relative_path = source
+            .metadata_path
+            .as_deref()
+            .map(|path| relative_to_rovodev_authority(authority, path))
+            .transpose()?;
+        let snapshot = RovoDevSnapshot::read(
+            source,
+            context,
+            authority,
+            &session_relative_path,
+            &context_relative_path,
+            metadata_relative_path.as_deref(),
+        )?;
         let provider_session_id = snapshot
             .document
             .as_ref()
@@ -355,7 +407,11 @@ fn bind_inventory(
         let session_id = rovodev_session_identity(&source_key, provider_session_id)?;
         let unique_message_ids = unique_message_ids(&snapshot);
         leaves.push(RovoDevSourceBackedLeaf {
+            authority: authority.clone(),
             source: source.clone(),
+            session_relative_path,
+            context_relative_path,
+            metadata_relative_path,
             source_key,
             session_id,
             parent_session_id: None,
@@ -392,6 +448,17 @@ fn authoritative_discovery(root: &Path) -> RovoDevSourceBackedResult<RovoDevDisc
         return Err(RovoDevSourceBackedError::NonAuthoritativeRoot);
     }
     Ok(discovery)
+}
+
+fn relative_to_rovodev_authority(
+    authority: &ProviderSourceRoot,
+    path: &Path,
+) -> RovoDevSourceBackedResult<PathBuf> {
+    let canonical = fs::canonicalize(path)?;
+    canonical
+        .strip_prefix(authority.named_path())
+        .map(Path::to_path_buf)
+        .map_err(|_| RovoDevSourceBackedError::NonAuthoritativeRoot)
 }
 
 fn rovodev_source_key(provider_session_id: &str) -> RovoDevSourceBackedResult<SourceKey> {
@@ -711,7 +778,16 @@ impl<'a> RovoDevSourceBackedReader<'a> {
                 return Err(RovoDevSourceBackedError::IncompleteScan);
             }
         }
-        let closing = RovoDevSnapshot::read(&self.leaf.source, &self.context)?;
+        self.leaf.snapshot.revalidate(&self.leaf.authority)?;
+        let closing = RovoDevSnapshot::read(
+            &self.leaf.source,
+            &self.context,
+            &self.leaf.authority,
+            &self.leaf.session_relative_path,
+            &self.leaf.context_relative_path,
+            self.leaf.metadata_relative_path.as_deref(),
+        )?;
+        closing.revalidate(&self.leaf.authority)?;
         let opening_observation = self
             .leaf
             .snapshot
@@ -931,7 +1007,7 @@ pub(crate) struct RovoDevHydratedSourceRecord {
 
 pub(crate) fn hydrate_rovodev_source_record(
     inventory: &RovoDevSourceBackedInventory,
-    event_id: StableEntityId,
+    _event_id: StableEntityId,
     locator: &SourceRecordLocator,
 ) -> RovoDevSourceBackedResult<RovoDevHydratedSourceRecord> {
     locator.validate_contract()?;
@@ -945,14 +1021,24 @@ pub(crate) fn hydrate_rovodev_source_record(
         || locator.source().schema_variant() != SOURCE_SCHEMA_VARIANT
         || locator.source().provider_identity_version() != 1
         || locator.revision_policy() != LocatorRevisionPolicy::ExactSourceRevision
-        || locator.certified_source_revision_digest() != Some(&leaf.snapshot.source_sha256)
-        || locator.record_digest() != &leaf.snapshot.context_sha256
+    {
+        return Err(RovoDevSourceBackedError::LocatorSourceChanged);
+    }
+    let current = RovoDevSnapshot::read(
+        &leaf.source,
+        &inventory.context,
+        &leaf.authority,
+        &leaf.session_relative_path,
+        &leaf.context_relative_path,
+        leaf.metadata_relative_path.as_deref(),
+    )?;
+    if locator.certified_source_revision_digest() != Some(&current.source_sha256)
+        || locator.record_digest() != &current.context_sha256
     {
         return Err(RovoDevSourceBackedError::LocatorSourceChanged);
     }
     let (message_index, expected_native_id) = decode_tree_coordinate(locator.coordinate())?;
-    let document = leaf
-        .snapshot
+    let document = current
         .document
         .as_ref()
         .map_err(|_| RovoDevSourceBackedError::LocatorObjectChanged)?;
@@ -967,24 +1053,28 @@ pub(crate) fn hydrate_rovodev_source_record(
     if observed_native_id != expected_native_id {
         return Err(RovoDevSourceBackedError::LocatorObjectChanged);
     }
-    let provider_bytes = leaf
-        .snapshot
+    let provider_bytes = current
         .context_bytes
         .clone()
         .ok_or(RovoDevSourceBackedError::LocatorObjectChanged)?;
     let decoded_display_text = provider_block_text(message)
         .filter(|text| !text.is_empty())
-        .map(|text| {
-            resolve_exact_message(
-                inventory,
-                leaf,
-                event_id,
-                message_index,
-                &observed_native_id,
-                &text,
-            )
-        })
-        .transpose()?;
+        .map(|text| text.to_owned());
+    current.revalidate(&leaf.authority)?;
+    let closing = RovoDevSnapshot::read(
+        &leaf.source,
+        &inventory.context,
+        &leaf.authority,
+        &leaf.session_relative_path,
+        &leaf.context_relative_path,
+        leaf.metadata_relative_path.as_deref(),
+    )?;
+    closing.revalidate(&leaf.authority)?;
+    if closing.source_sha256 != current.source_sha256
+        || closing.context_sha256 != current.context_sha256
+    {
+        return Err(RovoDevSourceBackedError::LocatorSourceChanged);
+    }
     Ok(RovoDevHydratedSourceRecord {
         provider_bytes,
         decoded_display_text,
@@ -1023,86 +1113,6 @@ fn decode_tree_coordinate(
             .map_err(|_| RovoDevSourceBackedError::CoordinateOverflow)?,
         native_id.clone(),
     ))
-}
-
-fn resolve_exact_message(
-    inventory: &RovoDevSourceBackedInventory,
-    leaf: &RovoDevSourceBackedLeaf,
-    event_id: StableEntityId,
-    message_index: usize,
-    native_record_id: &str,
-    complete_text: &str,
-) -> RovoDevSourceBackedResult<String> {
-    let subrecord =
-        u32::try_from(message_index).map_err(|_| RovoDevSourceBackedError::CoordinateOverflow)?;
-    let locator_value = rovodev_structured_locator(0, subrecord, native_record_id)?;
-    let source_locator =
-        CompleteContentSourceLocator::new(STRUCTURED_COMPLETE_CONTENT_LOCATOR_KIND, locator_value)
-            .ok_or(RovoDevSourceBackedError::InvalidLocator)?;
-    let content_profile = verified_content_profile(
-        CaptureProvider::RovoDev,
-        ROVODEV_SOURCE_FORMAT,
-        CompleteContentSourceFamily::Structured,
-        VerifiedContentRole::MessageBody,
-    )
-    .ok_or(RovoDevSourceBackedError::InvalidLocator)?;
-    let event_uuid = event_id.as_uuid();
-    let source_access = SourceAccessBroker::new().admit_for_source_locators(
-        AuthorizedSourceRoute {
-            source_id: leaf.source_key.identity().as_uuid(),
-            provider: CaptureProvider::RovoDev,
-            source_format: ROVODEV_SOURCE_FORMAT.to_owned(),
-            family: CompleteContentSourceFamily::Structured,
-            raw_source_path: leaf.source.context_path.clone(),
-            source_root: Some(inventory.canonical_root.clone()),
-            source_identity: Some(leaf.source_key.identity().to_string()),
-            source_snapshot: SourceSnapshot {
-                size_bytes: u64::try_from(leaf.snapshot.context_bytes.as_ref().map_or(0, Vec::len))
-                    .ok(),
-                modified_at_ms: None,
-                sha256: Some(hex_digest(&leaf.snapshot.context_sha256)),
-            },
-        },
-        std::slice::from_ref(&source_locator),
-        event_uuid,
-    )?;
-    let text_chars = complete_text.chars().count();
-    let indexed_limit_chars = text_chars.saturating_sub(1);
-    let indexed_text = complete_text
-        .chars()
-        .take(indexed_limit_chars)
-        .collect::<String>();
-    let request = CompleteMessageRequest {
-        event_id: event_uuid,
-        provider: CaptureProvider::RovoDev,
-        source_format: ROVODEV_SOURCE_FORMAT.to_owned(),
-        source_access,
-        source_family: Some(CompleteContentSourceFamily::Structured),
-        content_profile: content_profile.to_owned(),
-        source_locator: Some(source_locator),
-        provider_session_id: Some(leaf.provider_session_id().to_owned()),
-        source_record_ordinal: 0,
-        source_record_subrecord_index: subrecord,
-        expected_provider_event_hash: native_record_id.to_owned(),
-        expected_hash_authority: CompleteContentHashAuthority::ProviderSupplied,
-        expected_native_record_id: Some(native_record_id.to_owned()),
-        expected_record_digest: CompleteContentBodyDigest::parse(hex_digest(
-            &leaf.snapshot.context_sha256,
-        )),
-        expected_content_ref: ContentRef::from_bytes(complete_text.as_bytes()),
-        indexed_text,
-        indexed_limit_chars,
-    };
-    let resolved = StructuredCompleteContentResolver::new().resolve(&[request])?;
-    resolved
-        .into_iter()
-        .next()
-        .map(|message| message.text)
-        .ok_or(RovoDevSourceBackedError::LocatorObjectChanged)
-}
-
-fn hex_digest(digest: &[u8; 32]) -> String {
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[cfg(test)]
