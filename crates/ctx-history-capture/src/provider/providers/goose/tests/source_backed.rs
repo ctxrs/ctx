@@ -84,6 +84,15 @@ fn goose_source_backed_cold_scan_is_bounded_stable_and_exactly_selected() {
         documents[0].provider_session_id.as_deref(),
         Some("selected-session")
     );
+    assert_eq!(documents[0].parent_session_id, None);
+    assert_eq!(documents[0].root_session_id, documents[0].session_id);
+    assert_eq!(documents[0].branch, None);
+    assert_eq!(
+        documents[0].source_path.as_deref(),
+        selected_database.to_str()
+    );
+    assert_eq!(documents[0].agent_type, "goose");
+    assert!(documents[0].is_primary);
     assert_eq!(documents[0].cwd.as_deref(), Some("/workspace/goose"));
     assert_eq!(
         snapshot.selection().selected().selected_database(),

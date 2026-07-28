@@ -495,9 +495,20 @@ fn goose_lexical_document(
     Ok(LexicalDocument {
         event_id,
         session_id: session.session_id,
+        parent_session_id: None,
+        root_session_id: session.session_id,
         source: source.clone(),
         locator,
         provider_session_id: Some(event.session_identity),
+        branch: None,
+        source_path: Some(
+            selected_route
+                .selected_database()
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        agent_type: GOOSE_AGENT_TYPE.to_owned(),
+        is_primary: true,
         event_sequence,
         occurred_at_unix_ms,
         event_type,
