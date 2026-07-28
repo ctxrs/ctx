@@ -87,6 +87,7 @@ mod lifecycle;
 mod output;
 mod projection;
 mod publication;
+mod source_backed;
 
 use core::*;
 use cursor::*;
@@ -97,6 +98,10 @@ use publication::*;
 #[cfg(test)]
 use lifecycle::discover;
 pub(crate) use lifecycle::import_junie_nativepath;
+pub(crate) use source_backed::{
+    JunieLocatorResolverV0, JunieSourceBackedEmissionV0, JunieSourceBackedErrorV0,
+    JunieSourceBackedResultV0, JunieSourceBackedScannerV0,
+};
 
 #[cfg(test)]
 mod tests;

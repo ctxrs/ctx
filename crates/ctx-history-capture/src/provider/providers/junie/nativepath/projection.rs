@@ -85,6 +85,21 @@ impl RecordSetBinding {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum SourceBackedTarget {
+    UserPrompt,
+    AssistantMessage,
+    StepCall { step_order: u32 },
+    StepOutput { step_order: u32 },
+    FileChange { step_order: u32, change_index: u32 },
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct SourceBackedBinding {
+    pub(super) records: RecordSetBinding,
+    pub(super) target: SourceBackedTarget,
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct FileChangeDraft {
     pub(super) path: String,
@@ -106,6 +121,7 @@ pub(super) struct EventDraft {
     pub(super) source_ordinal: u64,
     pub(super) source_subrecord: u32,
     pub(super) binding: Option<(RecordSetBinding, VerifiedContentRole, u8, u32, String)>,
+    pub(super) source_backed_binding: SourceBackedBinding,
     pub(super) file_change: Option<FileChangeDraft>,
 }
 
@@ -327,12 +343,16 @@ pub(super) fn parse_turn(path: &Path, frontier: &Frontier) -> Result<ParsedTurn>
                         source_ordinal: current_ordinal,
                         source_subrecord: 0,
                         binding: Some((
-                            user_binding,
+                            user_binding.clone(),
                             VerifiedContentRole::MessageBody,
                             3,
                             0,
                             "user-prompt".to_owned(),
                         )),
+                        source_backed_binding: SourceBackedBinding {
+                            records: user_binding,
+                            target: SourceBackedTarget::UserPrompt,
+                        },
                         file_change: None,
                     });
                     event_index =
@@ -522,7 +542,13 @@ pub(super) fn flush_assistant(
                 "Junie buffered step ordering lost a step",
             ))?;
         if step.changes.is_empty() {
-            rows.push(step_event(*event_index, occurred_at, source_ordinal, step));
+            rows.push(step_event(
+                *event_index,
+                occurred_at,
+                source_ordinal,
+                step,
+                binding,
+            ));
             *event_index = event_index
                 .checked_add(1)
                 .ok_or(CaptureError::SystemInvariant(
@@ -544,6 +570,7 @@ pub(super) fn flush_assistant(
                         step,
                         projected.details,
                         projected.outcome,
+                        binding,
                     ));
                 } else if let Some((locator_payload, native_record_id)) = locator {
                     let first = binding
@@ -594,6 +621,7 @@ pub(super) fn flush_assistant(
                 step,
                 change_index,
                 change,
+                binding,
             ) {
                 rows.push(event);
                 *event_index = event_index
@@ -643,6 +671,10 @@ pub(super) fn flush_assistant(
                 0,
                 "message".to_owned(),
             )),
+            source_backed_binding: SourceBackedBinding {
+                records: binding.clone(),
+                target: SourceBackedTarget::AssistantMessage,
+            },
             file_change: None,
         });
         *event_index = event_index
@@ -659,6 +691,7 @@ pub(super) fn step_event(
     occurred_at: DateTime<Utc>,
     source_ordinal: u64,
     step: &JunieStepAgg,
+    binding: &RecordSetBinding,
 ) -> EventDraft {
     let (tool_name, text, body) = if let Some(command) = &step.command {
         (
@@ -713,6 +746,12 @@ pub(super) fn step_event(
         source_ordinal,
         source_subrecord: u32::try_from(step.order).unwrap_or(u32::MAX),
         binding: None,
+        source_backed_binding: SourceBackedBinding {
+            records: binding.clone(),
+            target: SourceBackedTarget::StepCall {
+                step_order: u32::try_from(step.order).unwrap_or(u32::MAX),
+            },
+        },
         file_change: None,
     }
 }
@@ -724,6 +763,7 @@ pub(super) fn output_failure_event(
     step: &JunieStepAgg,
     details: &str,
     outcome: JunieOutputOutcome,
+    binding: &RecordSetBinding,
 ) -> EventDraft {
     let timed_out = outcome == JunieOutputOutcome::Timeout;
     let tool_name = if step.command.is_some() {
@@ -765,6 +805,12 @@ pub(super) fn output_failure_event(
         source_ordinal,
         source_subrecord: u32::try_from(step.order.saturating_add(1)).unwrap_or(u32::MAX),
         binding: None,
+        source_backed_binding: SourceBackedBinding {
+            records: binding.clone(),
+            target: SourceBackedTarget::StepOutput {
+                step_order: u32::try_from(step.order).unwrap_or(u32::MAX),
+            },
+        },
         file_change: None,
     }
 }
@@ -776,6 +822,7 @@ pub(super) fn file_change_event(
     step: &JunieStepAgg,
     change_index: usize,
     change: &Value,
+    binding: &RecordSetBinding,
 ) -> Option<EventDraft> {
     let before_path = change.get("beforeRelativePath").and_then(Value::as_str);
     let after_path = change.get("afterRelativePath").and_then(Value::as_str);
@@ -814,6 +861,13 @@ pub(super) fn file_change_event(
         source_ordinal,
         source_subrecord: u32::try_from(change_index).unwrap_or(u32::MAX),
         binding: None,
+        source_backed_binding: SourceBackedBinding {
+            records: binding.clone(),
+            target: SourceBackedTarget::FileChange {
+                step_order: u32::try_from(step.order).unwrap_or(u32::MAX),
+                change_index: u32::try_from(change_index).unwrap_or(u32::MAX),
+            },
+        },
         file_change: Some(FileChangeDraft {
             path: path.to_owned(),
             old_path: before_path

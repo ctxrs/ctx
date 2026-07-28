@@ -7,6 +7,10 @@ pub(crate) use assistant::{
     junie_buffer_result_text, junie_merge_buffered_agent_event, JunieAssistantBuffer,
 };
 pub(crate) use nativepath::import_junie_nativepath;
+pub(crate) use nativepath::{
+    JunieLocatorResolverV0, JunieSourceBackedEmissionV0, JunieSourceBackedErrorV0,
+    JunieSourceBackedResultV0, JunieSourceBackedScannerV0,
+};
 
 const JUNIE_SOURCE_REVISION_SCHEMA: &str = "junie-session-events-v2";
 // Match the existing Junie discovery probe's physical index-entry budget.
