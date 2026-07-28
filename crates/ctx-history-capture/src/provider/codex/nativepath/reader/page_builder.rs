@@ -8,20 +8,33 @@ impl CodexNativeScanner {
         self.record_buffer = Vec::new();
     }
 
-    pub(super) fn new_core_page(&self) -> Result<CodexNativePage> {
+    pub(super) fn new_core_page(&mut self) -> Result<CodexNativePage> {
         let expected_frontier = self.frontier();
-        let owner_bytes = self
-            .owner
-            .as_ref()
-            .map(serialized_owner_bytes)
-            .transpose()?
-            .unwrap_or_default();
+        let owner_bytes = if self.profile.projection_mode() == CodexProjectionMode::Legacy {
+            let owner_bytes = self
+                .owner
+                .as_ref()
+                .map(serialized_owner_bytes)
+                .transpose()?
+                .unwrap_or_default();
+            if self.owner.is_some() {
+                self.counters.legacy_page_owner_json_serializations = self
+                    .counters
+                    .legacy_page_owner_json_serializations
+                    .saturating_add(1);
+            }
+            owner_bytes
+        } else {
+            0
+        };
         Ok(CodexNativePage {
             identity: CodexNativePageIdentity::default(),
             owner: self.owner.clone(),
+            projection_mode: self.profile.projection_mode(),
             next_safe_frontier: expected_frontier.clone(),
             expected_frontier,
             core_rows: Vec::new(),
+            source_backed_rows: Vec::new(),
             serialized_bytes: PAGE_FIXED_WIRE_BYTES.saturating_add(owner_bytes),
             physical_records: 0,
             terminal: false,
@@ -250,7 +263,16 @@ impl CodexNativeScanner {
         self.counters.emitted_pages = self.counters.emitted_pages.saturating_add(1);
         self.counters.peak_page_rows = self.counters.peak_page_rows.max(page.units());
         self.counters.peak_page_bytes = self.counters.peak_page_bytes.max(page.serialized_bytes);
-        page.identity = core_page_identity(&page)?;
+        let (identity, operations) = core_page_identity(&page)?;
+        page.identity = identity;
+        self.counters.legacy_page_identity_owner_json_serializations = self
+            .counters
+            .legacy_page_identity_owner_json_serializations
+            .saturating_add(operations.owner_json_serializations);
+        self.counters.legacy_page_identity_row_json_serializations = self
+            .counters
+            .legacy_page_identity_row_json_serializations
+            .saturating_add(operations.row_json_serializations);
         Ok(page)
     }
 }

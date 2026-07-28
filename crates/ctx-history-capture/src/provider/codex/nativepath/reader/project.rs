@@ -28,7 +28,16 @@ impl CodexNativeScanner {
                 self.counters.typed_json_parses = self.counters.typed_json_parses.saturating_add(1);
                 match parse_session_meta(record) {
                     Some(owner) if self.owner.is_none() => {
-                        let owner_bytes = serialized_owner_bytes(&owner)?;
+                        let owner_bytes =
+                            if self.profile.projection_mode() == CodexProjectionMode::Legacy {
+                                self.counters.legacy_page_owner_json_serializations = self
+                                    .counters
+                                    .legacy_page_owner_json_serializations
+                                    .saturating_add(1);
+                                serialized_owner_bytes(&owner)?
+                            } else {
+                                0
+                            };
                         if owner_bytes > MAX_CODEX_PAGE_BYTES.saturating_sub(PAGE_FIXED_WIRE_BYTES)
                         {
                             self.reject(
@@ -44,6 +53,7 @@ impl CodexNativeScanner {
                             core_row: None,
                             pro_output: None,
                             context_mutation: None,
+                            source_backed_units: 0,
                             core_serialized_bytes: owner_bytes,
                             pro_serialized_bytes: 0,
                         });
@@ -87,6 +97,83 @@ impl CodexNativeScanner {
                     );
                     return Ok(CodexRecordProjection::default());
                 };
+                if self.profile.projection_mode() == CodexProjectionMode::SourceBackedV0 {
+                    let mut built = match build_source_backed_event_row(
+                        self.raw_ordinal,
+                        kind,
+                        &retained,
+                        start_byte,
+                        end_byte,
+                        record_digest,
+                    )? {
+                        Ok(built) => built,
+                        Err(CodexRetainedNonMaterialized::ValidUnmaterializable) => {
+                            self.counters.ignored_records =
+                                self.counters.ignored_records.saturating_add(1);
+                            return Ok(CodexRecordProjection::default());
+                        }
+                        Err(CodexRetainedNonMaterialized::Malformed(reason)) => {
+                            self.reject(start_byte, end_byte, reason, false);
+                            return Ok(CodexRecordProjection::default());
+                        }
+                    };
+                    let touch_outcome = visit_provider_file_touch_drafts_with_limit(
+                        &retained.payload,
+                        event_type_supports_structured_file_touches(built.row.event_type),
+                        MAX_PROVIDER_FILE_TOUCHES_PER_EVENT,
+                        |(_, touch)| {
+                            built.row.touched_paths.push(touch.path);
+                            Ok::<(), CaptureError>(())
+                        },
+                    )?;
+                    if touch_outcome.limit_exceeded() {
+                        self.reject(
+                            start_byte,
+                            end_byte,
+                            PROVIDER_FILE_TOUCH_LIMIT_REJECTION,
+                            false,
+                        );
+                        return Ok(CodexRecordProjection::default());
+                    }
+                    let row_bytes = built.row.estimated_owned_bytes().unwrap_or(usize::MAX);
+                    if row_bytes > MAX_CODEX_PAGE_BYTES.saturating_sub(PAGE_FIXED_WIRE_BYTES) {
+                        self.reject(
+                            start_byte,
+                            end_byte,
+                            "Codex record projection exceeds the bounded NativePath Core page",
+                            false,
+                        );
+                        return Ok(CodexRecordProjection::default());
+                    }
+                    let lexical_bytes = built.row.lexical_body.len();
+                    self.counters.retained_records =
+                        self.counters.retained_records.saturating_add(1);
+                    self.counters.retained_body_bytes = self
+                        .counters
+                        .retained_body_bytes
+                        .saturating_add(u64::try_from(lexical_bytes).unwrap_or(u64::MAX));
+                    let insert_context = built.tool_context.map(|(call_id, context)| {
+                        let authority = CodexPendingToolAuthority::new(
+                            &call_id,
+                            start_byte,
+                            end_byte,
+                            self.raw_ordinal,
+                        );
+                        (call_id, context, authority)
+                    });
+                    return Ok(CodexRecordProjection {
+                        core_row: None,
+                        pro_output: None,
+                        context_mutation: Some(CodexContextMutation::SourceBackedRow {
+                            row: built.row,
+                            insert_context,
+                            remove_context: None,
+                        }),
+                        source_backed_units: 1,
+                        core_serialized_bytes: row_bytes,
+                        pro_serialized_bytes: 0,
+                    });
+                }
                 let mut row = match build_event_row(self.raw_ordinal, kind, &retained)? {
                     Ok(row) => row,
                     Err(CodexRetainedNonMaterialized::ValidUnmaterializable) => {
@@ -100,7 +187,14 @@ impl CodexNativeScanner {
                     }
                 };
                 row.bind_source_record(start_byte, end_byte, record_digest)?;
-                attach_complete_message_locator(&mut row, &retained, record, start_byte, end_byte)?;
+                if attach_complete_message_locator(
+                    &mut row, &retained, record, start_byte, end_byte,
+                )? {
+                    self.counters.legacy_complete_content_locators_created = self
+                        .counters
+                        .legacy_complete_content_locators_created
+                        .saturating_add(1);
+                }
                 let raw_source_path = self.source.source_path.display().to_string();
                 let line_number = usize::try_from(self.raw_ordinal)
                     .ok()
@@ -137,6 +231,10 @@ impl CodexNativeScanner {
                             source_format: crate::CODEX_SESSION_SOURCE_FORMAT.to_owned(),
                             metadata: touch.metadata,
                         });
+                        self.counters.legacy_file_touch_rows_created = self
+                            .counters
+                            .legacy_file_touch_rows_created
+                            .saturating_add(1);
                         Ok::<(), CaptureError>(())
                     },
                 )?;
@@ -184,6 +282,7 @@ impl CodexNativeScanner {
                     core_row: Some(row),
                     pro_output: None,
                     context_mutation,
+                    source_backed_units: 0,
                     core_serialized_bytes: row_bytes,
                     pro_serialized_bytes: 0,
                 })
@@ -253,7 +352,7 @@ impl CodexNativeScanner {
             .and_then(|call_id| self.tool_contexts.get(call_id))
             .cloned();
 
-        if self.profile == CodexNativeProfile::CoreOnly && !sparse_core_diagnostic {
+        if self.profile.is_core_only() && !sparse_core_diagnostic {
             // Structural admission is complete and successful/unknown output
             // bodies have no Core projection. Retire the context without
             // hydrating canonical output or allocating a removal key.
@@ -262,6 +361,60 @@ impl CodexNativeScanner {
                 self.tool_authorities.remove(call_id);
             }
             return Ok(CodexRecordProjection::default());
+        }
+
+        if self.profile.projection_mode() == CodexProjectionMode::SourceBackedV0 {
+            let core_row = build_source_backed_sparse_output_row(
+                self.raw_ordinal,
+                start_byte,
+                end_byte,
+                record_digest,
+                occurred_at,
+                result_kind,
+                context.as_ref(),
+                &structural.outcome,
+            )?;
+            let context_mutation = match core_row {
+                Some(row) => {
+                    let row_bytes = row.estimated_owned_bytes().unwrap_or(usize::MAX);
+                    if row_bytes > MAX_CODEX_PAGE_BYTES.saturating_sub(PAGE_FIXED_WIRE_BYTES) {
+                        self.reject(
+                            start_byte,
+                            end_byte,
+                            "Codex record projection exceeds the bounded NativePath Core page",
+                            false,
+                        );
+                        return Ok(CodexRecordProjection::default());
+                    }
+                    self.counters.retained_records =
+                        self.counters.retained_records.saturating_add(1);
+                    self.counters.retained_body_bytes = self
+                        .counters
+                        .retained_body_bytes
+                        .saturating_add(u64::try_from(row.lexical_body.len()).unwrap_or(u64::MAX));
+                    return Ok(CodexRecordProjection {
+                        core_row: None,
+                        pro_output: None,
+                        context_mutation: Some(CodexContextMutation::SourceBackedRow {
+                            row,
+                            insert_context: None,
+                            remove_context: call_id.map(str::to_owned),
+                        }),
+                        source_backed_units: 1,
+                        core_serialized_bytes: row_bytes,
+                        pro_serialized_bytes: 0,
+                    });
+                }
+                None => call_id.map(|call_id| CodexContextMutation::Remove(call_id.to_owned())),
+            };
+            return Ok(CodexRecordProjection {
+                core_row: None,
+                pro_output: None,
+                context_mutation,
+                source_backed_units: 0,
+                core_serialized_bytes: 0,
+                pro_serialized_bytes: 0,
+            });
         }
 
         let mut core_row = build_sparse_output_row(
@@ -311,10 +464,11 @@ impl CodexNativeScanner {
             core_row,
             pro_output: None,
             context_mutation,
+            source_backed_units: 0,
             core_serialized_bytes: core_bytes,
             pro_serialized_bytes: 0,
         };
-        if self.profile == CodexNativeProfile::CoreOnly {
+        if self.profile.is_core_only() {
             return Ok(projection);
         }
 
@@ -467,6 +621,34 @@ impl CodexNativeScanner {
             CodexContextMutation::Remove(call_id) => {
                 self.tool_contexts.remove(&call_id);
                 self.tool_authorities.remove(&call_id);
+            }
+            CodexContextMutation::SourceBackedRow {
+                row,
+                insert_context,
+                remove_context,
+            } => {
+                if let Some(call_id) = remove_context {
+                    self.tool_contexts.remove(&call_id);
+                    self.tool_authorities.remove(&call_id);
+                }
+                if let Some((call_id, mut context, authority)) = insert_context {
+                    if call_id.len() <= MAX_CODEX_TOOL_CALL_ID_BYTES {
+                        context = bound_tool_context(context);
+                        self.tool_authorities.insert(call_id.clone(), authority);
+                        self.tool_contexts.insert(call_id, context);
+                        while self.tool_contexts.len() > MAX_CODEX_TOOL_CONTEXTS {
+                            let Some(oldest) = self.tool_contexts.keys().next().cloned() else {
+                                break;
+                            };
+                            self.tool_contexts.remove(&oldest);
+                            self.tool_authorities.remove(&oldest);
+                        }
+                    }
+                }
+                debug_assert!(self.active_core_page.is_some());
+                if let Some(page) = self.active_core_page.as_mut() {
+                    page.source_backed_rows.push(row);
+                }
             }
         }
     }

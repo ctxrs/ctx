@@ -59,7 +59,18 @@ pub(super) fn new_pro_page(expected_frontier: CodexNativeFrontier) -> CodexNativ
     }
 }
 
-pub(super) fn core_page_identity(page: &CodexNativePage) -> Result<CodexNativePageIdentity> {
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct CodexLegacyPageIdentityOperations {
+    pub(super) owner_json_serializations: u64,
+    pub(super) row_json_serializations: u64,
+}
+
+pub(super) fn core_page_identity(
+    page: &CodexNativePage,
+) -> Result<(CodexNativePageIdentity, CodexLegacyPageIdentityOperations)> {
+    if page.projection_mode == CodexProjectionMode::SourceBackedV0 {
+        return source_backed_page_identity(page);
+    }
     let mut hasher = Sha256::new();
     hasher.update(CODEX_CORE_PAGE_IDENTITY_DOMAIN);
     hash_frontier(&mut hasher, &page.expected_frontier);
@@ -72,7 +83,45 @@ pub(super) fn core_page_identity(page: &CodexNativePage) -> Result<CodexNativePa
     hasher.update(page.physical_records.to_le_bytes());
     hash_usize(&mut hasher, page.serialized_bytes)?;
     hasher.update([u8::from(page.terminal)]);
-    Ok(CodexNativePageIdentity(hasher.finalize().into()))
+    Ok((
+        CodexNativePageIdentity(hasher.finalize().into()),
+        CodexLegacyPageIdentityOperations {
+            owner_json_serializations: u64::from(page.owner.is_some()),
+            row_json_serializations: u64::try_from(page.core_rows.len()).unwrap_or(u64::MAX),
+        },
+    ))
+}
+
+fn source_backed_page_identity(
+    page: &CodexNativePage,
+) -> Result<(CodexNativePageIdentity, CodexLegacyPageIdentityOperations)> {
+    let mut hasher = Sha256::new();
+    hasher.update(CODEX_SOURCE_BACKED_PAGE_IDENTITY_DOMAIN);
+    hash_frontier(&mut hasher, &page.expected_frontier);
+    hash_frontier(&mut hasher, &page.next_safe_frontier);
+    hash_usize(&mut hasher, page.source_backed_rows.len())?;
+    for row in &page.source_backed_rows {
+        hasher.update(row.raw_ordinal.to_le_bytes());
+        hasher.update(row.source_record.byte_offset.to_le_bytes());
+        hasher.update(row.source_record.byte_length.to_le_bytes());
+        hasher.update(row.source_record.record_digest);
+        hasher.update(row.occurred_at.timestamp().to_le_bytes());
+        hasher.update(row.occurred_at.timestamp_subsec_nanos().to_le_bytes());
+        hash_text(&mut hasher, row.event_type.as_str())?;
+        hash_optional_text(&mut hasher, row.role.map(|role| role.as_str()))?;
+        hash_text(&mut hasher, &row.lexical_body)?;
+        hash_usize(&mut hasher, row.touched_paths.len())?;
+        for path in &row.touched_paths {
+            hash_text(&mut hasher, path)?;
+        }
+    }
+    hasher.update(page.physical_records.to_le_bytes());
+    hash_usize(&mut hasher, page.serialized_bytes)?;
+    hasher.update([u8::from(page.terminal)]);
+    Ok((
+        CodexNativePageIdentity(hasher.finalize().into()),
+        CodexLegacyPageIdentityOperations::default(),
+    ))
 }
 
 pub(super) fn pro_page_identity(

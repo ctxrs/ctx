@@ -22,10 +22,10 @@ use thiserror::Error;
 
 use super::{
     reader::{CodexParseDisposition, CodexScanCounters},
-    rows::CodexEventRow,
+    rows::CodexSourceBackedRowV0,
     source::{CodexCatalogSource, CodexFileObservation, CodexSourceIdentity},
     CodexAppendProof, CodexCheckpointGeneration, CodexNativeCheckpoint, CodexNativeOwnedPage,
-    CodexNativeProfile, CodexNativeScanner, CodexSessionRow,
+    CodexNativeScanner, CodexSessionRow,
 };
 use crate::{
     provider::codex::{
@@ -87,6 +87,8 @@ pub enum CodexSourceBackedErrorV0 {
     CountOverflow,
     #[error("Codex Core-only scanner emitted a Pro page")]
     UnexpectedProPage,
+    #[error("Codex source-backed scanner emitted a legacy Core publication row")]
+    UnexpectedLegacyRow,
     #[error("locator is not a Codex NativePath JSONL record")]
     InvalidCodexLocator,
     #[error("Codex locator native session {0:?} was not found below the supplied session root")]
@@ -131,6 +133,13 @@ pub struct CodexSourceBackedCountersV0 {
     pub scanner_legacy_body_json_serializations: u64,
     pub scanner_legacy_row_json_serializations: u64,
     pub scanner_legacy_json_serialized_bytes: u64,
+    pub scanner_legacy_normalized_payload_hashes: u64,
+    pub scanner_legacy_file_touch_rows: u64,
+    pub scanner_legacy_complete_content_locators: u64,
+    pub scanner_legacy_duplicate_preview_allocations: u64,
+    pub scanner_legacy_page_owner_json_serializations: u64,
+    pub scanner_legacy_page_identity_owner_json_serializations: u64,
+    pub scanner_legacy_page_identity_row_json_serializations: u64,
 }
 
 impl CodexSourceBackedCountersV0 {
@@ -170,6 +179,24 @@ impl CodexSourceBackedCountersV0 {
         self.scanner_legacy_json_serialized_bytes = self
             .scanner_legacy_json_serialized_bytes
             .saturating_add(scan.legacy_json_serialized_bytes);
+        self.scanner_legacy_normalized_payload_hashes = self
+            .scanner_legacy_normalized_payload_hashes
+            .saturating_add(scan.retained_hashes_created);
+        self.scanner_legacy_file_touch_rows = self
+            .scanner_legacy_file_touch_rows
+            .saturating_add(scan.legacy_file_touch_rows_created);
+        self.scanner_legacy_complete_content_locators = self
+            .scanner_legacy_complete_content_locators
+            .saturating_add(scan.legacy_complete_content_locators_created);
+        self.scanner_legacy_page_owner_json_serializations = self
+            .scanner_legacy_page_owner_json_serializations
+            .saturating_add(scan.legacy_page_owner_json_serializations);
+        self.scanner_legacy_page_identity_owner_json_serializations = self
+            .scanner_legacy_page_identity_owner_json_serializations
+            .saturating_add(scan.legacy_page_identity_owner_json_serializations);
+        self.scanner_legacy_page_identity_row_json_serializations = self
+            .scanner_legacy_page_identity_row_json_serializations
+            .saturating_add(scan.legacy_page_identity_row_json_serializations);
     }
 }
 
@@ -338,25 +365,28 @@ pub fn ingest_codex_source_backed_v0(
         }
 
         let scan_started = Instant::now();
-        let mut scanner =
-            CodexNativeScanner::new(source.clone(), proof.as_ref(), CodexNativeProfile::CoreOnly)?;
+        let mut scanner = CodexNativeScanner::new_source_backed_v0(source.clone(), proof.as_ref())?;
         let session_id = codex_session_identity(&source_key, &native_session_id)?;
         let mut staged_for_source = 0_u64;
         while let Some(page) = scanner.next_page()? {
             let CodexNativeOwnedPage::Core(page) = page else {
                 return Err(CodexSourceBackedErrorV0::UnexpectedProPage);
             };
+            if !page.core_rows.is_empty() {
+                return Err(CodexSourceBackedErrorV0::UnexpectedLegacyRow);
+            }
             let owner = page
                 .owner
                 .as_ref()
                 .ok_or(CodexSourceBackedErrorV0::MissingPageOwner)?;
             validate_owner(owner, &native_session_id)?;
-            for row in page.core_rows {
+            let cwd = owner.cwd.clone();
+            for row in page.source_backed_rows {
                 writer.add_document(codex_lexical_document(
                     &source_key,
                     session_id,
                     &native_session_id,
-                    owner,
+                    cwd.as_deref(),
                     row,
                 )?)?;
                 staged_for_source = staged_for_source
@@ -555,15 +585,21 @@ fn codex_lexical_document(
     source: &SourceKey,
     session_id: StableEntityId,
     native_session_id: &str,
-    owner: &CodexSessionRow,
-    row: CodexEventRow,
+    cwd: Option<&str>,
+    row: CodexSourceBackedRowV0,
 ) -> CodexSourceBackedResultV0<LexicalDocument> {
-    let evidence = row
-        .source_record()
-        .ok_or(CodexSourceBackedErrorV0::MissingRecordEvidence)?;
+    let CodexSourceBackedRowV0 {
+        raw_ordinal,
+        source_record: evidence,
+        occurred_at,
+        event_type,
+        role,
+        lexical_body,
+        touched_paths,
+    } = row;
     let native_item_key = NativeItemKey::certified_position(
         CODEX_NATIVE_EVENT_POSITION_KIND,
-        TypedKey::U64(row.raw_ordinal),
+        TypedKey::U64(raw_ordinal),
         PositionStability::AppendStable,
     )?;
     let event_id = derive_event_id(EventIdentityInput {
@@ -578,35 +614,31 @@ fn codex_lexical_document(
         NativeRecordCoordinate::Jsonl {
             byte_offset: evidence.byte_offset,
             byte_length: evidence.byte_length,
-            physical_ordinal: row.raw_ordinal,
+            physical_ordinal: raw_ordinal,
             native_session_key: Some(TypedKey::utf8(native_session_id)?),
-            native_event_key: Some(TypedKey::U64(row.raw_ordinal)),
+            native_event_key: Some(TypedKey::U64(raw_ordinal)),
         },
         LocatorRevisionPolicy::StableRecordEvidence,
         None,
         evidence.record_digest,
     )?;
-    let body = row
-        .lexical_preview()
-        .ok_or(CodexSourceBackedErrorV0::MissingLexicalPreview)?;
+    if lexical_body.is_empty() {
+        return Err(CodexSourceBackedErrorV0::MissingLexicalPreview);
+    }
     Ok(LexicalDocument {
         event_id,
         session_id,
         source: source.clone(),
         locator,
         provider_session_id: Some(native_session_id.to_owned()),
-        event_sequence: row.raw_ordinal,
-        occurred_at_unix_ms: Some(row.provider_event.occurred_at.timestamp_millis()),
-        event_type: row.provider_event.event_type.as_str().to_owned(),
-        role: row.provider_event.role.map(|role| role.as_str().to_owned()),
-        body,
+        event_sequence: raw_ordinal,
+        occurred_at_unix_ms: Some(occurred_at.timestamp_millis()),
+        event_type: event_type.as_str().to_owned(),
+        role: role.map(|role| role.as_str().to_owned()),
+        body: lexical_body,
         workspace: None,
-        cwd: owner.cwd.clone(),
-        touched_files: row
-            .file_touches
-            .into_iter()
-            .map(|touch| touch.path)
-            .collect(),
+        cwd: cwd.map(str::to_owned),
+        touched_files: touched_paths,
     })
 }
 
@@ -842,7 +874,9 @@ mod tests {
         io::Write,
     };
 
-    use ctx_history_core::{LocatorRevisionPolicy, NativeRecordCoordinate, SourceRecordLocator};
+    use ctx_history_core::{
+        EventType, LocatorRevisionPolicy, NativeRecordCoordinate, SourceRecordLocator,
+    };
 
     use super::*;
 
@@ -863,11 +897,23 @@ mod tests {
         fs::write(&session_path, &cold_bytes).unwrap();
 
         let cold = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+        assert_no_legacy_operations(cold.counters);
         assert_eq!(cold.counters.cold_sources, 1);
         assert_eq!(cold.counters.staged_documents, 1);
         assert_eq!(cold.commit.indexed_documents, 1);
         let cold_index = VerifiedIndex::open(&index).unwrap();
         assert_eq!(cold_index.document_count(), 1);
+        let session_id = codex_session_identity(
+            &codex_source_key(native_session_id).unwrap(),
+            native_session_id,
+        )
+        .unwrap();
+        let cold_events = cold_index.events_for_session(session_id.as_uuid()).unwrap();
+        let cold_event_ids = cold_events
+            .iter()
+            .map(|event| event.event_id)
+            .collect::<Vec<_>>();
+        assert_eq!(cold_event_ids.len(), 1);
         let cold_counts = cold_index.manifest().sources[0].counts();
         assert_eq!(cold_counts.complete_records, 2);
         assert_eq!(cold_counts.retained_records, 1);
@@ -884,12 +930,29 @@ mod tests {
             .unwrap();
 
         let append = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+        assert_no_legacy_operations(append.counters);
         assert_eq!(append.counters.appended_sources, 1);
         assert_eq!(append.counters.staged_documents, 1);
         assert_eq!(append.counters.complete_records_scanned, 1);
         assert_eq!(append.commit.indexed_documents, 2);
         let appended_index = VerifiedIndex::open(&index).unwrap();
         assert_eq!(appended_index.document_count(), 2);
+        let appended_events = appended_index
+            .events_for_session(session_id.as_uuid())
+            .unwrap();
+        assert_eq!(
+            appended_events
+                .iter()
+                .map(|event| event.event_id)
+                .take(cold_event_ids.len())
+                .collect::<Vec<_>>(),
+            cold_event_ids
+        );
+        let appended_event_ids = appended_events
+            .iter()
+            .map(|event| event.event_id)
+            .collect::<Vec<_>>();
+        assert_eq!(appended_event_ids.len(), 2);
         let appended_counts = appended_index.manifest().sources[0].counts();
         assert_eq!(appended_counts.complete_records, 3);
         assert_eq!(appended_counts.retained_records, 2);
@@ -900,6 +963,7 @@ mod tests {
         );
 
         let replay = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+        assert_no_legacy_operations(replay.counters);
         assert_eq!(replay.counters.replayed_sources, 1);
         assert_eq!(replay.counters.staged_documents, 0);
         assert_eq!(replay.counters.scanner_bytes_read, 0);
@@ -908,6 +972,15 @@ mod tests {
         assert_eq!(replay.commit.indexed_documents, 2);
         let replayed_index = VerifiedIndex::open(&index).unwrap();
         assert_eq!(replayed_index.document_count(), 2);
+        assert_eq!(
+            replayed_index
+                .events_for_session(session_id.as_uuid())
+                .unwrap()
+                .into_iter()
+                .map(|event| event.event_id)
+                .collect::<Vec<_>>(),
+            appended_event_ids
+        );
         assert_eq!(
             replayed_index.manifest().sources[0].counts(),
             appended_counts
@@ -934,6 +1007,178 @@ mod tests {
             hydrated.decoded_display_text.as_deref(),
             Some("append sentinel")
         );
+    }
+
+    #[test]
+    fn source_backed_projection_matches_legacy_semantics_without_legacy_operations() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        let index = temp.path().join("global-index");
+        fs::create_dir_all(&sessions).unwrap();
+        let native_session_id = "019fa000-0000-7000-8000-000000000002";
+        let session_path = sessions.join(format!("rollout-{native_session_id}.jsonl"));
+        let long_message = format!(
+            "long-message-sentinel {} complete-message-tail",
+            "m".repeat(crate::PROVIDER_MAX_TEXT_CHARS + 512)
+        );
+        let tool_record = tool_call_with_patch("touch-call");
+        let failed_record = failed_tool_output("touch-call");
+        fs::write(
+            &session_path,
+            format!(
+                "{}\n{}\n{tool_record}\n{failed_record}\n",
+                session_meta(native_session_id),
+                message("assistant", &long_message)
+            ),
+        )
+        .unwrap();
+
+        let receipt = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+        assert_no_legacy_operations(receipt.counters);
+        assert_eq!(receipt.counters.complete_records_scanned, 4);
+        assert_eq!(receipt.counters.retained_records_scanned, 3);
+        assert_eq!(receipt.counters.staged_documents, 3);
+        assert_eq!(receipt.counters.structural_json_parses, 4);
+        assert_eq!(receipt.counters.typed_json_parses, 3);
+
+        let source_key = codex_source_key(native_session_id).unwrap();
+        let session_id = codex_session_identity(&source_key, native_session_id).unwrap();
+        let verified = VerifiedIndex::open(&index).unwrap();
+        let events = verified.events_for_session(session_id.as_uuid()).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.event_sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(events[0].event_type, EventType::Message.as_str());
+        assert!(events[0].preview.starts_with("long-message-sentinel"));
+        assert!(
+            events[0].preview.chars().count() <= super::super::rows::CODEX_LEXICAL_PREVIEW_CHARS
+        );
+        assert!(!events[0].preview.contains("complete-message-tail"));
+        assert_eq!(events[1].event_type, EventType::ToolCall.as_str());
+        assert_eq!(events[1].touched_files, vec!["src/source_backed.rs"]);
+        assert_eq!(events[2].event_type, EventType::ToolOutput.as_str());
+        assert_eq!(events[2].role.as_deref(), Some("tool"));
+        assert!(
+            events[2]
+                .preview
+                .starts_with("apply_patch output: exit_code=7"),
+            "{}",
+            events[2].preview
+        );
+        assert!(verified
+            .search_event_candidates("long message sentinel", 10)
+            .unwrap()
+            .iter()
+            .any(|candidate| candidate.event.event_id == events[0].event_id));
+        let hydrated = hydrate_codex_locator(&sessions, &events[0].locator).unwrap();
+        assert_eq!(
+            hydrated.decoded_display_text.as_deref(),
+            Some(long_message.as_str())
+        );
+
+        let (catalog_summary, catalog_sessions) =
+            discover_codex_session_catalog(&sessions).unwrap();
+        assert_eq!(catalog_summary.failed_sessions, 0);
+        let discovery = super::super::discover_codex_catalog_sources(&catalog_sessions);
+        assert!(discovery.rejections.is_empty());
+        let source = discovery.sources.into_iter().next().unwrap();
+        let mut scanner =
+            CodexNativeScanner::new(source, None, super::super::CodexNativeProfile::CoreOnly)
+                .unwrap();
+        let mut legacy_rows = Vec::new();
+        let mut legacy_counters = CodexSourceBackedCountersV0::default();
+        while let Some(page) = scanner.next_page().unwrap() {
+            let CodexNativeOwnedPage::Core(page) = page else {
+                panic!("legacy Core-only control emitted Pro output");
+            };
+            assert!(page.source_backed_rows.is_empty());
+            for row in page.core_rows {
+                legacy_lexical_preview_for_control(&row, &mut legacy_counters);
+                legacy_rows.push(row);
+            }
+        }
+        let legacy_scan = scanner.finish().unwrap();
+        legacy_counters.add_scan(legacy_scan.counters);
+        assert_eq!(
+            legacy_rows
+                .iter()
+                .map(|row| (
+                    row.raw_ordinal,
+                    row.provider_event.event_type.as_str(),
+                    row.provider_event.role.map(|role| role.as_str()),
+                    row.lexical_preview().unwrap(),
+                    row.file_touches
+                        .iter()
+                        .map(|touch| touch.path.as_str())
+                        .collect::<Vec<_>>(),
+                ))
+                .collect::<Vec<_>>(),
+            events
+                .iter()
+                .map(|event| (
+                    event.event_sequence,
+                    event.event_type.as_str(),
+                    event.role.as_deref(),
+                    event.preview.clone(),
+                    event
+                        .touched_files
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>(),
+                ))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(legacy_counters.scanner_legacy_body_json_serializations, 3);
+        assert_eq!(legacy_counters.scanner_legacy_row_json_serializations, 3);
+        assert_eq!(legacy_counters.scanner_legacy_normalized_payload_hashes, 3);
+        assert_eq!(legacy_counters.scanner_legacy_file_touch_rows, 1);
+        assert_eq!(legacy_counters.scanner_legacy_complete_content_locators, 1);
+        assert_eq!(
+            legacy_counters.scanner_legacy_duplicate_preview_allocations,
+            3
+        );
+        assert!(legacy_counters.scanner_legacy_page_owner_json_serializations > 0);
+        assert!(legacy_counters.scanner_legacy_page_identity_owner_json_serializations > 0);
+        assert_eq!(
+            legacy_counters.scanner_legacy_page_identity_row_json_serializations,
+            3
+        );
+    }
+
+    fn assert_no_legacy_operations(counters: CodexSourceBackedCountersV0) {
+        assert_eq!(counters.scanner_legacy_body_json_serializations, 0);
+        assert_eq!(counters.scanner_legacy_row_json_serializations, 0);
+        assert_eq!(counters.scanner_legacy_json_serialized_bytes, 0);
+        assert_eq!(counters.scanner_legacy_normalized_payload_hashes, 0);
+        assert_eq!(counters.scanner_legacy_file_touch_rows, 0);
+        assert_eq!(counters.scanner_legacy_complete_content_locators, 0);
+        assert_eq!(counters.scanner_legacy_duplicate_preview_allocations, 0);
+        assert_eq!(counters.scanner_legacy_page_owner_json_serializations, 0);
+        assert_eq!(
+            counters.scanner_legacy_page_identity_owner_json_serializations,
+            0
+        );
+        assert_eq!(
+            counters.scanner_legacy_page_identity_row_json_serializations,
+            0
+        );
+    }
+
+    fn legacy_lexical_preview_for_control(
+        row: &super::super::rows::CodexEventRow,
+        counters: &mut CodexSourceBackedCountersV0,
+    ) -> Option<String> {
+        let preview = row.lexical_preview();
+        if preview.is_some() {
+            counters.scanner_legacy_duplicate_preview_allocations = counters
+                .scanner_legacy_duplicate_preview_allocations
+                .saturating_add(1);
+        }
+        preview
     }
 
     fn session_meta(native_session_id: &str) -> String {
@@ -964,6 +1209,33 @@ mod tests {
                     "type": "input_text",
                     "text": text
                 }]
+            }
+        })
+        .to_string()
+    }
+
+    fn tool_call_with_patch(call_id: &str) -> String {
+        serde_json::json!({
+            "timestamp": "2026-07-28T12:00:02Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "apply_patch",
+                "call_id": call_id,
+                "input": "*** Begin Patch\n*** Update File: src/source_backed.rs\n@@\n-old\n+new\n*** End Patch\n"
+            }
+        })
+        .to_string()
+    }
+
+    fn failed_tool_output(call_id: &str) -> String {
+        serde_json::json!({
+            "timestamp": "2026-07-28T12:00:03Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": call_id,
+                "output": "Process exited with code 7\nfailure body stays source-backed"
             }
         })
         .to_string()

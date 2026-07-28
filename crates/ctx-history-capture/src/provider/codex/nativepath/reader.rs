@@ -21,8 +21,9 @@ use super::{
         CodexRecordProbe, CodexResultKind,
     },
     rows::{
-        attach_complete_message_locator, build_event_row, build_sparse_output_row,
-        tool_context_from_row, CodexEventRow, CodexRetainedNonMaterialized, CodexSessionRow,
+        attach_complete_message_locator, build_event_row, build_source_backed_event_row,
+        build_source_backed_sparse_output_row, build_sparse_output_row, tool_context_from_row,
+        CodexEventRow, CodexRetainedNonMaterialized, CodexSessionRow, CodexSourceBackedRowV0,
     },
     source::{CodexAppendProof, CodexCatalogSource, CodexFileObservation},
 };
@@ -54,6 +55,8 @@ pub(crate) const MAX_CODEX_RECORD_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const MAX_CODEX_PAGE_ROWS: usize = MAX_CODEX_PAGE_UNITS;
 pub(crate) const MAX_CODEX_PAGE_BYTES: usize = 8 * 1024 * 1024;
 const CODEX_CORE_PAGE_IDENTITY_DOMAIN: &[u8] = b"ctx/codex-nativepath/core-page/v1\0";
+const CODEX_SOURCE_BACKED_PAGE_IDENTITY_DOMAIN: &[u8] =
+    b"ctx/codex-nativepath/source-backed-page/v0\0";
 const CODEX_PRO_PAGE_IDENTITY_DOMAIN: &[u8] = b"ctx/codex-nativepath/pro-page/v1\0";
 // These stay wire-identical to provider_sources::ordinary_file so a catalog
 // observation can be certified against identity read from the scanner's handle.
@@ -62,9 +65,48 @@ const ORDINARY_FILE_FULL_FINGERPRINT_MAX_BYTES: u64 = 64 * 1024;
 const ORDINARY_FILE_SPARSE_SAMPLE_BYTES: u64 = 8 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CodexNativeProfile {
+enum CodexPublicationProfile {
     CoreOnly,
     CoreAndPro,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CodexProjectionMode {
+    Legacy,
+    SourceBackedV0,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CodexNativeProfile {
+    publication: CodexPublicationProfile,
+    projection: CodexProjectionMode,
+}
+
+#[allow(non_upper_case_globals)]
+impl CodexNativeProfile {
+    pub(crate) const CoreOnly: Self = Self {
+        publication: CodexPublicationProfile::CoreOnly,
+        projection: CodexProjectionMode::Legacy,
+    };
+    pub(crate) const CoreAndPro: Self = Self {
+        publication: CodexPublicationProfile::CoreAndPro,
+        projection: CodexProjectionMode::Legacy,
+    };
+
+    const fn source_backed_v0() -> Self {
+        Self {
+            publication: CodexPublicationProfile::CoreOnly,
+            projection: CodexProjectionMode::SourceBackedV0,
+        }
+    }
+
+    pub(super) const fn is_core_only(self) -> bool {
+        matches!(self.publication, CodexPublicationProfile::CoreOnly)
+    }
+
+    pub(super) const fn projection_mode(self) -> CodexProjectionMode {
+        self.projection
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +164,11 @@ pub(crate) struct CodexScanCounters {
     pub(crate) legacy_body_json_serializations: u64,
     pub(crate) legacy_row_json_serializations: u64,
     pub(crate) legacy_json_serialized_bytes: u64,
+    pub(crate) legacy_file_touch_rows_created: u64,
+    pub(crate) legacy_complete_content_locators_created: u64,
+    pub(crate) legacy_page_owner_json_serializations: u64,
+    pub(crate) legacy_page_identity_owner_json_serializations: u64,
+    pub(crate) legacy_page_identity_row_json_serializations: u64,
     pub(crate) emitted_pages: u64,
     pub(crate) peak_page_rows: usize,
     pub(crate) peak_page_bytes: usize,
@@ -154,9 +201,11 @@ pub(crate) struct CodexNativeFrontier {
 pub(crate) struct CodexNativePage {
     pub(crate) identity: CodexNativePageIdentity,
     pub(crate) owner: Option<CodexSessionRow>,
+    projection_mode: CodexProjectionMode,
     pub(crate) expected_frontier: CodexNativeFrontier,
     pub(crate) next_safe_frontier: CodexNativeFrontier,
     pub(crate) core_rows: Vec<CodexEventRow>,
+    pub(crate) source_backed_rows: Vec<CodexSourceBackedRowV0>,
     pub(crate) serialized_bytes: usize,
     pub(crate) physical_records: u64,
     pub(crate) terminal: bool,
@@ -167,7 +216,8 @@ impl CodexNativePage {
         self.core_rows
             .iter()
             .map(CodexEventRow::mutation_units)
-            .sum()
+            .sum::<usize>()
+            .saturating_add(self.source_backed_rows.len())
     }
 
     fn units(&self) -> usize {
@@ -183,13 +233,16 @@ impl CodexNativePage {
             identity: self.identity,
             expected_frontier: self.expected_frontier.clone(),
             committed_frontier: self.next_safe_frontier.clone(),
-            accepted_core_rows: self.core_rows.len(),
+            accepted_core_rows: self
+                .core_rows
+                .len()
+                .saturating_add(self.source_backed_rows.len()),
             accepted_physical_records: self.physical_records,
         }
     }
 
     pub(crate) fn recompute_identity(&mut self) -> Result<()> {
-        self.identity = core_page_identity(self)?;
+        self.identity = core_page_identity(self)?.0;
         Ok(())
     }
 
@@ -202,9 +255,11 @@ impl CodexNativePage {
             identity: CodexNativePageIdentity::default(),
             serialized_bytes: PAGE_FIXED_WIRE_BYTES.saturating_add(serialized_owner_bytes(&owner)?),
             owner: Some(owner),
+            projection_mode: CodexProjectionMode::Legacy,
             expected_frontier: frontier.clone(),
             next_safe_frontier: frontier,
             core_rows: Vec::new(),
+            source_backed_rows: Vec::new(),
             physical_records: 0,
             terminal,
         };
@@ -373,6 +428,15 @@ pub(crate) struct CodexNativeScanner {
     exhausted: bool,
 }
 
+impl CodexNativeScanner {
+    pub(crate) fn new_source_backed_v0(
+        source: CodexCatalogSource,
+        proof: Option<&CodexAppendProof>,
+    ) -> Result<Self> {
+        Self::new(source, proof, CodexNativeProfile::source_backed_v0())
+    }
+}
+
 struct ScannerPosition {
     offset: u64,
     raw_ordinal: u64,
@@ -388,6 +452,7 @@ struct CodexRecordProjection {
     core_row: Option<CodexEventRow>,
     pro_output: Option<ProOutputObservation>,
     context_mutation: Option<CodexContextMutation>,
+    source_backed_units: usize,
     core_serialized_bytes: usize,
     pro_serialized_bytes: usize,
 }
@@ -398,12 +463,18 @@ impl CodexRecordProjection {
             .as_ref()
             .map(CodexEventRow::mutation_units)
             .unwrap_or_default()
+            .saturating_add(self.source_backed_units)
     }
 }
 
 enum CodexContextMutation {
     Insert(String, CodexToolCallContext, CodexPendingToolAuthority),
     Remove(String),
+    SourceBackedRow {
+        row: CodexSourceBackedRowV0,
+        insert_context: Option<(String, CodexToolCallContext, CodexPendingToolAuthority)>,
+        remove_context: Option<String>,
+    },
 }
 
 mod checkpoint;
