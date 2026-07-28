@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
@@ -157,7 +157,7 @@ fn invalid_utf8_rows_are_rejected_between_healthy_siblings() {
         None,
     );
     drop(conn);
-    let mut store = Store::open(directory.path().join("ctx.sqlite")).unwrap();
+    let mut store = Store::open(test_store_path(directory.path())).unwrap();
 
     let summary = import_core(&source_path, &mut store).unwrap();
 
@@ -180,7 +180,7 @@ fn three_mib_success_output_is_counted_once_and_replayed_only_to_pro() {
         "conversation-three-mib",
         json!([success_output(&output), text_message("healthy-core")]),
     );
-    let mut store = Store::open(directory.path().join("ctx.sqlite")).unwrap();
+    let mut store = Store::open(test_store_path(directory.path())).unwrap();
 
     let summary = import_core(&source_path, &mut store).unwrap();
     assert_eq!(summary.imported_events, 1);
@@ -246,7 +246,7 @@ fn four_mib_output_boundary_is_accepted_and_larger_output_is_rejected() {
         None,
     );
     drop(conn);
-    let mut store = Store::open(directory.path().join("ctx.sqlite")).unwrap();
+    let mut store = Store::open(test_store_path(directory.path())).unwrap();
     let sink = Arc::new(RecordingSink::default());
     let options = ProviderImportOptions {
         import_profile: ImportProfile::CoreAndPro(sink.clone()),
@@ -291,7 +291,7 @@ fn oversized_singleton_message_is_rejected_and_later_row_survives() {
         None,
     );
     drop(conn);
-    let mut store = Store::open(directory.path().join("ctx.sqlite")).unwrap();
+    let mut store = Store::open(test_store_path(directory.path())).unwrap();
     let sink = Arc::new(RecordingSink::default());
     let options = ProviderImportOptions {
         import_profile: ImportProfile::CoreAndPro(sink.clone()),
@@ -320,7 +320,7 @@ fn core_replay_append_rewrite_and_disappearance_are_idempotent() {
         "conversation-mutations",
         json!([text_message("one")]),
     );
-    let store_path = directory.path().join("ctx.sqlite");
+    let store_path = test_store_path(directory.path());
     let mut store = Store::open(&store_path).unwrap();
 
     let first = import_core(&source_root, &mut store).unwrap();
@@ -369,7 +369,7 @@ fn restart_resumes_the_committed_message_frontier_without_duplicates() {
                 .collect(),
         ),
     );
-    let store_path = directory.path().join("ctx.sqlite");
+    let store_path = test_store_path(directory.path());
     let mut store = Store::open(&store_path).unwrap();
     let first = import_forgecode_nativepath(
         &source_path,
@@ -405,7 +405,7 @@ fn deleted_custom_sqlite_filenames_retire_exact_routes_after_restart() {
         directory.path().join("forge-history"),
         directory.path().join("FORGE-HISTORY.DB"),
     ];
-    let store_path = directory.path().join("ctx.sqlite");
+    let store_path = test_store_path(directory.path());
     let mut store = Store::open(&store_path).unwrap();
     for (index, source_path) in source_paths.iter().enumerate() {
         write_source(
@@ -455,7 +455,7 @@ fn released_policy_five_route_can_retire_before_nativepath_replay() {
     );
     let canonical_source_identity = "released-forgecode-canonical".to_owned();
     let imported_at = context(&source_path).imported_at;
-    let store_path = directory.path().join("ctx.sqlite");
+    let store_path = test_store_path(directory.path());
     let store = Store::open(&store_path).unwrap();
     store
         .reconcile_provider_source_locator(&ProviderSourceLocatorObservation {
@@ -526,7 +526,7 @@ fn output_failure_does_not_stop_later_core_pages() {
         "conversation-pro-failure",
         Value::Array(messages),
     );
-    let store_path = directory.path().join("ctx.sqlite");
+    let store_path = test_store_path(directory.path());
     let mut store = Store::open(&store_path).unwrap();
     let failing = Arc::new(FailingSink::default());
     let options = ProviderImportOptions {
@@ -582,7 +582,7 @@ fn pro_can_activate_after_core_and_replay_success_body() {
         "conversation-later-pro",
         json!([text_message("core"), success_output(SUCCESS_SENTINEL)]),
     );
-    let store_path = directory.path().join("ctx.sqlite");
+    let store_path = test_store_path(directory.path());
     let mut store = Store::open(&store_path).unwrap();
     import_core(&source_path, &mut store).unwrap();
     assert_eq!(event_count(&store), 1);
@@ -614,7 +614,7 @@ fn truncated_message_keeps_the_existing_verified_source_locator() {
         "conversation-complete-content",
         json!([text_message(&body)]),
     );
-    let mut store = Store::open(directory.path().join("ctx.sqlite")).unwrap();
+    let mut store = Store::open(test_store_path(directory.path())).unwrap();
     import_core(&source_path, &mut store).unwrap();
 
     let session = store.list_sessions().unwrap().pop().unwrap();
@@ -640,7 +640,7 @@ fn core_never_persists_result_body_content() {
             failed_output("forgecode-failed-output-body-must-stay-out-of-core")
         ]),
     );
-    let mut store = Store::open(directory.path().join("ctx.sqlite")).unwrap();
+    let mut store = Store::open(test_store_path(directory.path())).unwrap();
     let sink = Arc::new(RecordingSink::default());
     let options = ProviderImportOptions {
         import_profile: ImportProfile::CoreAndPro(sink.clone()),
@@ -874,6 +874,12 @@ fn insert_invalid_utf8_rows(conn: &Connection) {
              '2026-01-01T00:00:00Z', NULL, CAST(X'80' AS TEXT));",
     )
     .unwrap();
+}
+
+fn test_store_path(root: &Path) -> PathBuf {
+    let store_root = root.join("ctx-store");
+    fs::create_dir_all(&store_root).unwrap();
+    store_root.join("ctx.sqlite")
 }
 
 fn replace_messages(path: &Path, messages: Value) {

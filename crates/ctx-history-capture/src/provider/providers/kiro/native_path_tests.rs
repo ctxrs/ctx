@@ -13,7 +13,9 @@ const PRIVATE_DIFF: &str = "KIRO_PRIVATE_DIFF_MUST_NOT_ENTER_CORE";
 
 fn create_source() -> (TempDir, PathBuf) {
     let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("data.sqlite3");
+    let source_root = temp.path().join("source");
+    std::fs::create_dir(&source_root).unwrap();
+    let path = source_root.join("data.sqlite3");
     let connection = Connection::open(&path).unwrap();
     connection
         .execute_batch(
