@@ -3,6 +3,8 @@ use super::super::super::{
     specs::provider_source_spec, types::ProviderImportSupport,
 };
 use super::super::dedupe_report;
+use std::fs;
+
 use super::*;
 
 fn tempdir() -> tempfile::TempDir {

@@ -1,4 +1,6 @@
 use super::super::super::context::DiscoveryPlatformDirs;
+use std::fs;
+
 use super::*;
 use crate::provider_source_spec;
 use rusqlite::Connection;

@@ -3,6 +3,8 @@ use super::super::super::{
     discovery::{discover_provider_sources_for_provider_with_context, provider_source_for_path},
     types::ProviderSourceStatus,
 };
+use std::fs;
+
 use super::*;
 fn tempdir() -> tempfile::TempDir {
     crate::test_support_paths::tempdir().expect("resolver fixture tempdir")

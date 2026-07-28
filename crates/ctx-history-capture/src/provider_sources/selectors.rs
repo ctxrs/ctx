@@ -25,6 +25,14 @@ pub(super) const MAX_SOURCE_CANDIDATES_PER_PROVIDER: usize = 256;
 pub(super) const MAX_ENCODED_PATH_BYTES: usize = 16 * 1024;
 pub(super) const MAX_RENDERED_DIAGNOSTIC_BYTES: usize = 512;
 
+#[cfg(test)]
+thread_local! {
+    static SELECTOR_FILE_OPEN_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+    static DIRECT_ENTRIES_ROOT_OPEN_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SelectorFormat {
     Json,
@@ -224,6 +232,12 @@ impl SelectorReader {
 
 fn read_selector_text(path: &Path) -> Result<String, SelectorReadError> {
     let file = open_provider_source_file(path).map_err(selector_open_error)?;
+    #[cfg(test)]
+    SELECTOR_FILE_OPEN_HOOK.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook();
+        }
+    });
     if file.len() > MAX_SELECTOR_FILE_BYTES as u64 {
         return Err(SelectorReadError::FileTooLarge);
     }
@@ -513,6 +527,12 @@ pub(super) fn direct_entries(path: &Path) -> Result<Vec<PathBuf>, SelectorReadEr
         return Err(SelectorReadError::Unavailable);
     };
     let authority = directory.authority_root();
+    #[cfg(test)]
+    DIRECT_ENTRIES_ROOT_OPEN_HOOK.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook();
+        }
+    });
     let names = directory
         .entries(MAX_DIRECT_DIRECTORY_ENTRIES.saturating_add(1))
         .map_err(selector_open_error)?;
@@ -755,8 +775,60 @@ mod tests {
         symlink(target, &link).unwrap();
         assert_eq!(
             SelectorReader::default().read(&link, SelectorFormat::Json),
-            Err(SelectorReadError::Unavailable)
+            Err(SelectorReadError::UnsupportedRoot)
         );
+    }
+
+    #[test]
+    fn root_handle_discovery_selector_swap_fails_final_revalidation() {
+        let temp = tempdir();
+        let selector = temp.path().join("selector.json");
+        let moved = temp.path().join("opened-selector.json");
+        let replacement = temp.path().join("replacement.json");
+        fs::write(&selector, r#"{"root":"opened"}"#).unwrap();
+        fs::write(&replacement, r#"{"root":"replacement"}"#).unwrap();
+
+        let selector_for_hook = selector.clone();
+        let moved_for_hook = moved.clone();
+        SELECTOR_FILE_OPEN_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                fs::rename(&selector_for_hook, &moved_for_hook).unwrap();
+                fs::rename(&replacement, &selector_for_hook).unwrap();
+            }));
+        });
+
+        assert_eq!(
+            SelectorReader::default().read(&selector, SelectorFormat::Json),
+            Err(SelectorReadError::UnsupportedRoot)
+        );
+        assert_eq!(fs::read_to_string(moved).unwrap(), r#"{"root":"opened"}"#);
+    }
+
+    #[test]
+    fn root_handle_discovery_directory_swap_fails_final_revalidation() {
+        let temp = tempdir();
+        let root = temp.path().join("root");
+        let moved = temp.path().join("opened-root");
+        let replacement = temp.path().join("replacement");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&replacement).unwrap();
+        fs::write(root.join("opened.json"), "{}").unwrap();
+        fs::write(replacement.join("replacement.json"), "{}").unwrap();
+
+        let root_for_hook = root.clone();
+        let moved_for_hook = moved.clone();
+        DIRECT_ENTRIES_ROOT_OPEN_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                fs::rename(&root_for_hook, &moved_for_hook).unwrap();
+                fs::rename(&replacement, &root_for_hook).unwrap();
+            }));
+        });
+
+        assert_eq!(
+            direct_entries(&root),
+            Err(SelectorReadError::UnsupportedRoot)
+        );
+        assert!(moved.join("opened.json").is_file());
     }
 
     #[cfg(unix)]
@@ -777,11 +849,11 @@ mod tests {
 
         assert_eq!(
             direct_entries(&entries),
-            Err(SelectorReadError::Unavailable)
+            Err(SelectorReadError::UnsupportedRoot)
         );
         assert_eq!(
             direct_entries(&linked_root),
-            Err(SelectorReadError::Unavailable)
+            Err(SelectorReadError::UnsupportedRoot)
         );
     }
 
@@ -808,11 +880,11 @@ mod tests {
 
         assert_eq!(
             direct_entries(&entries),
-            Err(SelectorReadError::Unavailable)
+            Err(SelectorReadError::UnsupportedRoot)
         );
         assert_eq!(
             direct_entries(&linked_root),
-            Err(SelectorReadError::Unavailable)
+            Err(SelectorReadError::UnsupportedRoot)
         );
     }
 
