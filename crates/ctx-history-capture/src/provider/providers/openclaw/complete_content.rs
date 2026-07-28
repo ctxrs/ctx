@@ -1,7 +1,4 @@
-use std::{
-    fs::Metadata,
-    path::{Path, PathBuf},
-};
+use std::{fs::Metadata, path::Path};
 
 use ctx_history_core::{CaptureProvider, ContentRef, EventRole, EventType};
 use serde_json::Value;
@@ -14,15 +11,12 @@ use crate::{
         COMPLETE_CONTENT_MAX_BODY_BYTES,
     },
     provider::normalization::{
-        provider_capped_json, provider_explicit_result_value_text, provider_role,
-        provider_value_text,
+        provider_explicit_result_value_text, provider_role, provider_value_text,
     },
-    CaptureError, Result, OPENCLAW_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS,
-    PROVIDER_MAX_TEXT_CHARS,
+    CaptureError, Result, OPENCLAW_SOURCE_FORMAT, PROVIDER_MAX_TEXT_CHARS,
 };
 
 use super::{
-    openclaw_index_revision, openclaw_session_index_for_file, OpenClawFrozenFileMetadata,
     OpenClawSessionObservation,
 };
 
@@ -36,28 +30,11 @@ pub(crate) fn source_from_admitted(
     index: Option<(&Metadata, &[u8])>,
     path_identity: String,
 ) -> Result<(String, String)> {
-    let transcript = OpenClawFrozenFileMetadata::from_metadata(transcript_metadata)?;
-    let (index_file, index) = match index {
-        Some((metadata, bytes)) => {
-            let parsed = std::str::from_utf8(bytes)
-                .ok()
-                .and_then(|text| serde_json::from_str::<Value>(text).ok())
-                .map(|value| openclaw_session_index_for_file(path, &value))
-                .unwrap_or(Value::Null);
-            (
-                Some(OpenClawFrozenFileMetadata::from_metadata(metadata)?),
-                provider_capped_json(&parsed, PROVIDER_MAX_PREVIEW_CHARS),
-            )
-        }
-        None => (None, Value::Null),
-    };
-    let observation = OpenClawSessionObservation {
-        canonical_path: PathBuf::new(),
-        transcript,
-        index_file,
-        index_revision: openclaw_index_revision(&index)?,
+    let observation = OpenClawSessionObservation::from_admitted(
+        path.to_path_buf(),
+        transcript_metadata,
         index,
-    };
+    )?;
     Ok((observation.source_revision(), path_identity))
 }
 

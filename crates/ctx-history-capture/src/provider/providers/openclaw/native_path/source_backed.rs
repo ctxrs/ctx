@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::{Read, Seek, SeekFrom},
+    io,
     path::{Path, PathBuf},
 };
 
@@ -19,15 +19,15 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::{
-    complete_content, discover_inventory, open_pages, Checkpoint, CoreEvent, PageReader,
-    SourceChange, SourceObservation as LegacySourceObservation, OPENCLAW_SOURCE_FORMAT,
+    complete_content, discover_inventory, open_pages_from_admitted, Checkpoint, CoreEvent,
+    PageReader, SourceChange, SourceObservation as LegacySourceObservation,
+    OPENCLAW_SOURCE_FORMAT,
 };
 use crate::{
+    common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
     provider::normalization::provider_local_preview,
-    provider_sources::{
-        open_ordinary_file_without_following, provider_source_for_path, ProviderSourceStatus,
-    },
-    CaptureError, MAX_PROVIDER_JSONL_LINE_BYTES,
+    provider_sources::{provider_source_for_path, ProviderSourceStatus},
+    CaptureError, MAX_OPENCLAW_SESSION_INDEX_BYTES, MAX_PROVIDER_JSONL_LINE_BYTES,
 };
 
 const SOURCE_ANCHOR_NAMESPACE: &str = "openclaw.legacy-session";
@@ -110,10 +110,25 @@ impl OpenClawSourceBackedAdapterV0 {
         }
 
         let inventory = discover_inventory(selected_root)?;
+        let canonical_selected = std::fs::canonicalize(selected_root)?;
+        let authority_path = if std::fs::metadata(selected_root)?.is_file() {
+            canonical_selected
+                .parent()
+                .ok_or(OpenClawSourceBackedErrorV0::UnsupportedSelectedSource {
+                    path: canonical_selected.clone(),
+                    reason: "selected transcript has no parent authority directory",
+                })?
+                .to_path_buf()
+        } else {
+            canonical_selected
+        };
+        let authority = ProviderSourceRoot::open(&authority_path)?;
         inventory
             .paths
             .into_iter()
-            .map(OpenClawSourceBackedSourceV0::from_canonical_path)
+            .map(|path| {
+                OpenClawSourceBackedSourceV0::from_canonical_path(authority.clone(), path)
+            })
             .collect()
     }
 
@@ -137,17 +152,37 @@ impl OpenClawSourceBackedAdapterV0 {
 
 #[derive(Debug, Clone)]
 pub(crate) struct OpenClawSourceBackedSourceV0 {
+    authority: ProviderSourceRoot,
     path: PathBuf,
+    transcript_relative_path: PathBuf,
+    index_relative_path: PathBuf,
     source: SourceKey,
     native_session_id: String,
 }
 
 impl OpenClawSourceBackedSourceV0 {
-    fn from_canonical_path(path: PathBuf) -> OpenClawSourceBackedResultV0<Self> {
+    fn from_canonical_path(
+        authority: ProviderSourceRoot,
+        path: PathBuf,
+    ) -> OpenClawSourceBackedResultV0<Self> {
+        let transcript_relative_path = path
+            .strip_prefix(authority.named_path())
+            .map(Path::to_path_buf)
+            .map_err(|_| OpenClawSourceBackedErrorV0::UnsupportedSelectedSource {
+                path: path.clone(),
+                reason: "selected transcripts must share one authority root",
+            })?;
+        let index_relative_path = transcript_relative_path
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join("sessions.json");
         let native_session_id = native_session_id(&path);
         let source = source_key(&native_session_id)?;
         Ok(Self {
+            authority,
             path,
+            transcript_relative_path,
+            index_relative_path,
             source,
             native_session_id,
         })
@@ -163,6 +198,50 @@ impl OpenClawSourceBackedSourceV0 {
 
     pub(crate) fn native_session_id(&self) -> &str {
         &self.native_session_id
+    }
+
+    fn admit(&self) -> OpenClawSourceBackedResultV0<AdmittedOpenClawSource> {
+        let transcript = self.authority.open_file(&self.transcript_relative_path)?;
+        let index = match self.authority.open_file(&self.index_relative_path) {
+            Ok(index) => Some(index),
+            Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        let index_bytes = index
+            .as_ref()
+            .map(|index| index.read_all_bounded(MAX_OPENCLAW_SESSION_INDEX_BYTES))
+            .transpose()?;
+        let observation = super::OpenClawSessionObservation::from_admitted(
+            self.path.clone(),
+            transcript.metadata(),
+            index
+                .as_ref()
+                .zip(index_bytes.as_deref())
+                .map(|(index, bytes)| (index.metadata(), bytes)),
+        )?;
+        Ok(AdmittedOpenClawSource {
+            observation,
+            transcript,
+            index,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct AdmittedOpenClawSource {
+    observation: super::OpenClawSessionObservation,
+    transcript: OpenedProviderSourceFile,
+    index: Option<OpenedProviderSourceFile>,
+}
+
+impl AdmittedOpenClawSource {
+    fn revalidate(&self, authority: &ProviderSourceRoot) -> OpenClawSourceBackedResultV0<()> {
+        self.transcript.revalidate()?;
+        if let Some(index) = &self.index {
+            index.revalidate()?;
+        }
+        authority.revalidate()?;
+        Ok(())
     }
 }
 
@@ -199,6 +278,8 @@ pub(crate) struct OpenClawSourceBackedScanV0 {
 
 pub(crate) struct OpenClawSourceBackedReaderV0 {
     inner: PageReader,
+    selected: OpenClawSourceBackedSourceV0,
+    opening_index: Option<OpenedProviderSourceFile>,
     source: SourceKey,
     native_session_id: String,
     session_id: StableEntityId,
@@ -215,20 +296,20 @@ impl OpenClawSourceBackedReaderV0 {
         imported_at: DateTime<Utc>,
         previous: Option<&CertifiedSource>,
     ) -> OpenClawSourceBackedResultV0<Self> {
-        let current = OpenClawSourceBackedSourceV0::from_canonical_path(std::fs::canonicalize(
-            &source.path,
-        )?)?;
-        source.source.validate_exact_descriptor(&current.source)?;
+        let admitted = source.admit()?;
+        let opening_live = admitted.observation.clone();
         let previous_checkpoint = previous
             .map(|previous| decode_previous(previous, &source.source))
             .transpose()?;
-        let inner = open_pages(
-            &source.path,
+        let inner = open_pages_from_admitted(
+            source.path.clone(),
             imported_at,
             false,
             None,
             false,
             previous_checkpoint.as_ref(),
+            admitted.observation,
+            admitted.transcript,
         )?;
         let disposition = disposition(inner.source_change);
         let indexed_documents = match disposition {
@@ -250,7 +331,7 @@ impl OpenClawSourceBackedReaderV0 {
         } else {
             None
         };
-        let opening = projection_observation(&source.source, &inner.observation)?;
+        let opening = projection_observation(&source.source, &opening_live)?;
         let certified_revision_digest =
             complete_content::exact_source_revision_digest(&inner.source_revision);
         let session_key = NativeSessionKey::native_id(
@@ -264,6 +345,8 @@ impl OpenClawSourceBackedReaderV0 {
         })?;
         Ok(Self {
             inner,
+            selected: source.clone(),
+            opening_index: admitted.index,
             source: source.source.clone(),
             native_session_id: source.native_session_id.clone(),
             session_id,
@@ -345,8 +428,14 @@ impl OpenClawSourceBackedReaderV0 {
         if self.indexed_documents > checkpoint.accepted_events {
             return Err(OpenClawSourceBackedErrorV0::CountMismatch);
         }
-        let closing_live = super::OpenClawSessionObservation::read(&self.inner.path)?;
-        let closing = projection_observation(&self.source, &closing_live)?;
+        self.inner.revalidate_admitted_transcript()?;
+        if let Some(index) = &self.opening_index {
+            index.revalidate()?;
+        }
+        self.selected.authority.revalidate()?;
+        let closing_admitted = self.selected.admit()?;
+        closing_admitted.revalidate(&self.selected.authority)?;
+        let closing = projection_observation(&self.source, &closing_admitted.observation)?;
         let frontier = SourceFrontier::new(
             FRONTIER_KIND,
             TypedKey::bytes(serde_json::to_vec(checkpoint)?)?,
@@ -513,7 +602,8 @@ fn hydrate_locator(
 ) -> OpenClawSourceBackedResultV0<OpenClawHydratedRecordV0> {
     let (byte_offset, byte_length, physical_ordinal, native_event_key) =
         validate_locator(selected, locator)?;
-    let observation = super::OpenClawSessionObservation::read(&selected.path)?;
+    let admitted = selected.admit()?;
+    let observation = &admitted.observation;
     let expected_revision =
         complete_content::exact_source_revision_digest(&observation.source_revision());
     if locator.certified_source_revision_digest() != Some(&expected_revision) {
@@ -528,25 +618,21 @@ fn hydrate_locator(
     if range_end > observation.transcript.length {
         return Err(OpenClawSourceBackedErrorV0::LocatorRangeMissing);
     }
-    let mut file = open_ordinary_file_without_following(&observation.canonical_path)?;
-    if super::OpenClawFrozenFileMetadata::from_metadata(&file.metadata()?)?
-        != observation.transcript
-    {
-        return Err(OpenClawSourceBackedErrorV0::LocatorSourceRevisionMismatch);
-    }
     if byte_offset > 0 {
-        file.seek(SeekFrom::Start(byte_offset - 1))?;
-        let mut boundary = [0_u8; 1];
-        file.read_exact(&mut boundary)?;
-        if boundary[0] != b'\n' {
+        let boundary = admitted
+            .transcript
+            .read_exact_range(byte_offset - 1, 1, 1)?;
+        if boundary != b"\n" {
             return Err(OpenClawSourceBackedErrorV0::LocatorRangeMissing);
         }
     }
-    file.seek(SeekFrom::Start(byte_offset))?;
     let record_length = usize::try_from(byte_length)
         .map_err(|_| OpenClawSourceBackedErrorV0::LocatorRangeInvalid)?;
-    let mut provider_bytes = vec![0_u8; record_length];
-    file.read_exact(&mut provider_bytes)?;
+    let provider_bytes = admitted.transcript.read_exact_range(
+        byte_offset,
+        record_length,
+        MAX_HYDRATED_RECORD_BYTES as usize,
+    )?;
     let first_newline = provider_bytes.iter().position(|byte| *byte == b'\n');
     if first_newline.is_some_and(|position| position + 1 != provider_bytes.len())
         || (first_newline.is_none() && range_end != observation.transcript.length)
@@ -557,9 +643,6 @@ fn hydrate_locator(
     let observed_record_digest: [u8; 32] = Sha256::digest(record).into();
     if &observed_record_digest != locator.record_digest() {
         return Err(OpenClawSourceBackedErrorV0::LocatorDigestMismatch);
-    }
-    if !observation.revalidate(&selected.path)? {
-        return Err(OpenClawSourceBackedErrorV0::LocatorSourceRevisionMismatch);
     }
     let value: Value = serde_json::from_slice(record)?;
     let line_number = usize::try_from(physical_ordinal)
@@ -574,6 +657,14 @@ fn hydrate_locator(
         }
         (TypedKey::U64(expected), _) if *expected == physical_ordinal => {}
         _ => return Err(OpenClawSourceBackedErrorV0::InvalidLocator),
+    }
+    admitted.revalidate(&selected.authority)?;
+    let closing = selected.admit()?;
+    closing.revalidate(&selected.authority)?;
+    let closing_revision =
+        complete_content::exact_source_revision_digest(&closing.observation.source_revision());
+    if closing_revision != expected_revision {
+        return Err(OpenClawSourceBackedErrorV0::LocatorSourceRevisionMismatch);
     }
     Ok(OpenClawHydratedRecordV0 {
         provider_bytes,
@@ -899,6 +990,46 @@ mod tests {
             }
             other => panic!("unexpected error: {other}"),
         }
+    }
+
+    #[test]
+    fn compound_authority_openclaw_rejects_missing_auxiliary_appearing_before_publication() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("openclaw");
+        let transcript = transcript_path(&root);
+        let records = [header("session-1"), message("message-1", "user", "hello")];
+        write_fixture(&transcript, &records);
+        let index = transcript.parent().unwrap().join("sessions.json");
+        fs::remove_file(&index).unwrap();
+
+        let adapter = openclaw_source_backed_adapter_v0();
+        let source = adapter.discover_selected(&root).unwrap().remove(0);
+        let mut reader = adapter
+            .open_source(&source, "2026-07-28T12:00:00Z".parse().unwrap(), None)
+            .unwrap();
+        while reader.next_page().unwrap().is_some() {}
+        fs::write(&index, r#"{"session-1":{"sessionId":"session-1"}}"#).unwrap();
+
+        assert!(reader.finish().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compound_authority_openclaw_rejects_ancestor_swap_and_stale_locator() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("openclaw");
+        let transcript = transcript_path(&root);
+        let records = [header("session-1"), message("message-1", "user", "hello")];
+        write_fixture(&transcript, &records);
+
+        let adapter = openclaw_source_backed_adapter_v0();
+        let source = adapter.discover_selected(&root).unwrap().remove(0);
+        let (documents, _) = extract(&adapter, &source);
+        let retired = temp.path().join("retired-openclaw");
+        fs::rename(&root, &retired).unwrap();
+        write_fixture(&transcript, &records);
+
+        assert!(adapter.hydrate(&source, &documents[0].locator).is_err());
     }
 
     fn extract(
