@@ -1,18 +1,15 @@
 use std::{
-    fs::{self, Metadata},
+    fs::Metadata,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde_json::json;
 
-use crate::common::io::ensure_regular_provider_transcript_file;
 use crate::{fnv1a64, CaptureError, Result};
 
 use super::{
-    session_tree::{
-        bounded_junie_index_meta, junie_index_path_for_events, JunieIndexMeta, JunieSessionPath,
-    },
+    session_tree::{bounded_junie_index_meta, JunieIndexMeta, JunieSessionPath},
     JUNIE_SOURCE_REVISION_SCHEMA,
 };
 
@@ -26,28 +23,6 @@ pub(super) struct JunieFrozenFileMetadata {
 }
 
 impl JunieFrozenFileMetadata {
-    pub(super) fn read(path: &Path) -> Result<Self> {
-        ensure_regular_provider_transcript_file(path)?;
-        Self::from_metadata(&fs::symlink_metadata(path)?)
-    }
-
-    fn read_optional(path: &Path) -> Result<Option<Self>> {
-        match fs::symlink_metadata(path) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                Err(CaptureError::InvalidProviderTranscriptPath {
-                    path: path.to_path_buf(),
-                    reason: "symlinked provider transcript files are rejected",
-                })
-            }
-            Ok(metadata) if metadata.file_type().is_file() => {
-                Self::from_metadata(&metadata).map(Some)
-            }
-            Ok(_) => Ok(None),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error.into()),
-        }
-    }
-
     pub(super) fn from_metadata(metadata: &Metadata) -> Result<Self> {
         #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
@@ -96,14 +71,20 @@ pub(super) struct JunieSessionObservation {
 
 impl JunieSessionObservation {
     pub(super) fn read(session_path: &JunieSessionPath) -> Result<Self> {
-        let events_file = JunieFrozenFileMetadata::read(&session_path.events_path)?;
-        let canonical_path = fs::canonicalize(&session_path.events_path)?;
-        let index_path = junie_index_path_for_events(&session_path.events_path);
-        let index_file = match index_path {
-            Some(path) => JunieFrozenFileMetadata::read_optional(&path)?,
+        let events = session_path.open_events()?;
+        let events_file = JunieFrozenFileMetadata::from_metadata(events.metadata())?;
+        let canonical_path = session_path.events_path.clone();
+        let index = session_path.open_index()?;
+        let index_file = match index.as_ref() {
+            Some(index) => Some(JunieFrozenFileMetadata::from_metadata(index.metadata())?),
             None => None,
         };
         let auxiliary_revision = junie_index_meta_revision(&session_path.index_meta)?;
+        events.revalidate()?;
+        if let Some(index) = index {
+            index.revalidate()?;
+        }
+        session_path.revalidate_root()?;
         Ok(Self {
             canonical_path,
             events_file,

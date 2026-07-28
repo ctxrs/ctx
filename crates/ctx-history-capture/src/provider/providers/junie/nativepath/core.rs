@@ -50,7 +50,7 @@ pub(super) fn import_core_source(
         if !observation.revalidate(session_path)? {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
-        let parsed = parse_turn(&session_path.events_path, &plan.cursor.frontier)?;
+        let parsed = parse_session_turn(session_path, &plan.cursor.frontier)?;
         validate_pending_replay(&plan.cursor.frontier, &parsed)?;
         if parsed.next_event_index > GENERATION_EVENT_STRIDE {
             return Err(CaptureError::InvalidPayload(

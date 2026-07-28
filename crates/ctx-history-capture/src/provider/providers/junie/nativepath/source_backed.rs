@@ -1,8 +1,6 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    fs::File,
-    io::{Read, Seek, SeekFrom},
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 use chrono::{DateTime, Utc};
@@ -20,7 +18,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::{
-    parse_turn, strip_jsonl_ending, EventDraft, Frontier, RecordSetBinding, RuntimeState,
+    parse_session_turn, strip_jsonl_ending, EventDraft, Frontier, RecordSetBinding, RuntimeState,
     SourceBackedBinding, SourceBackedTarget, CORE_PAGE_MAX_ROWS, MAX_RECORD_SET_ENTRIES,
     RECORD_SET_DIGEST_DOMAIN,
 };
@@ -221,7 +219,7 @@ impl CurrentSource {
     }
 
     fn scan_turn(&mut self) -> JunieSourceBackedResultV0<()> {
-        let parsed = parse_turn(&self.session_path.events_path, &self.frontier)?;
+        let parsed = parse_session_turn(&self.session_path, &self.frontier)?;
         if parsed.incomplete {
             return Err(JunieSourceBackedErrorV0::IncompleteTrailingRecord);
         }
@@ -514,7 +512,7 @@ fn aggregate_digest(binding: &RecordSetBinding) -> [u8; 32] {
 
 #[derive(Debug)]
 struct ResolvedSource {
-    events_path: PathBuf,
+    session_path: JunieSessionPath,
     source: SourceKey,
     provider_session_id: String,
 }
@@ -535,7 +533,7 @@ impl JunieLocatorResolverV0 {
                 ))
             })?;
             let resolved = ResolvedSource {
-                events_path: session_path.events_path,
+                session_path,
                 source: source.clone(),
                 provider_session_id: provider_session_id.clone(),
             };
@@ -572,17 +570,22 @@ impl JunieLocatorResolverV0 {
         {
             return Err(hydration_failure(HydrationFailureKind::InvalidLocator));
         }
-        let mut file =
-            crate::provider_sources::open_ordinary_file_without_following(&resolved.events_path)
-                .map_err(|_| hydration_failure(HydrationFailureKind::TemporarilyUnavailable))?;
-        self.hydrate_from_file(request, resolved, &mut file)
+        let file = resolved
+            .session_path
+            .open_events()
+            .map_err(|_| hydration_failure(HydrationFailureKind::TemporarilyUnavailable))?;
+        let hydrated = self.hydrate_from_file(request, resolved, &file)?;
+        file.revalidate()
+            .and_then(|()| resolved.session_path.revalidate_root())
+            .map_err(|_| hydration_failure(HydrationFailureKind::TemporarilyUnavailable))?;
+        Ok(hydrated)
     }
 
     fn hydrate_from_file(
         &self,
         request: &EventHydrationRequest,
         resolved: &ResolvedSource,
-        file: &mut File,
+        file: &crate::common::io::OpenedProviderSourceFile,
     ) -> Result<HydratedProviderRecord, HydrationFailure> {
         validate_locator_source(request.locator(), resolved)?;
         let exact_text = match request.locator().coordinate() {
@@ -662,14 +665,19 @@ impl ContentSourceResolver for JunieLocatorResolverV0 {
             .sources
             .get(&first.locator().source().identity())
             .ok_or_else(|| hydration_failure(HydrationFailureKind::MissingRecord))?;
-        let mut file =
-            crate::provider_sources::open_ordinary_file_without_following(&resolved.events_path)
-                .map_err(|_| hydration_failure(HydrationFailureKind::TemporarilyUnavailable))?;
-        request
+        let file = resolved
+            .session_path
+            .open_events()
+            .map_err(|_| hydration_failure(HydrationFailureKind::TemporarilyUnavailable))?;
+        let records = request
             .events()
             .iter()
-            .map(|event| self.hydrate_from_file(event, resolved, &mut file))
-            .collect()
+            .map(|event| self.hydrate_from_file(event, resolved, &file))
+            .collect::<Result<Vec<_>, _>>()?;
+        file.revalidate()
+            .and_then(|()| resolved.session_path.revalidate_root())
+            .map_err(|_| hydration_failure(HydrationFailureKind::TemporarilyUnavailable))?;
+        Ok(records)
     }
 }
 
@@ -710,7 +718,7 @@ fn request_event_sequence(native_event_key: &Option<TypedKey>) -> Result<u64, Hy
 }
 
 fn read_payload(
-    file: &mut File,
+    file: &crate::common::io::OpenedProviderSourceFile,
     byte_offset: u64,
     byte_length: u64,
 ) -> Result<Vec<u8>, HydrationFailure> {
@@ -719,12 +727,10 @@ fn read_payload(
     }
     let length = usize::try_from(byte_length)
         .map_err(|_| hydration_failure(HydrationFailureKind::InvalidLocator))?;
-    file.seek(SeekFrom::Start(byte_offset))
-        .map_err(|_| hydration_failure(HydrationFailureKind::TemporarilyUnavailable))?;
-    let mut record = vec![0_u8; length];
-    file.read_exact(&mut record)
-        .map_err(|error| match error.kind() {
-            std::io::ErrorKind::UnexpectedEof => {
+    let record = file
+        .read_exact_range(byte_offset, length, MAX_JUNIE_TRANSIENT_TURN_BYTES)
+        .map_err(|error| match error {
+            CaptureError::InvalidPayload(_) => {
                 hydration_failure(HydrationFailureKind::MissingRecord)
             }
             _ => hydration_failure(HydrationFailureKind::TemporarilyUnavailable),
@@ -817,7 +823,7 @@ fn decode_target(target: &TypedKey) -> Result<SourceBackedTarget, HydrationFailu
 }
 
 fn read_record_set(
-    file: &mut File,
+    file: &crate::common::io::OpenedProviderSourceFile,
     entries: &[RecordSetEntry],
     expected_digest: &[u8; 32],
 ) -> Result<Vec<(u64, Value)>, HydrationFailure> {
