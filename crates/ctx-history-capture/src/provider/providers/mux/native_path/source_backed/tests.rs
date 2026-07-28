@@ -10,10 +10,10 @@ use serde_json::{json, Value};
 use super::*;
 use crate::{
     complete_content::{
-        verified_content_profile_for_locator, AuthorizedSourceRoute, CompleteContentErrorKind,
-        CompleteContentHashAuthority, CompleteContentResolverRegistry, CompleteContentSourceFamily,
-        CompleteMessageRequest, JsonlCompleteContentResolver, SourceAccessBroker, SourceSnapshot,
-        VerifiedContentRole,
+        jsonl::JsonlCompleteContentResolver, verified_content_profile_for_locator,
+        AuthorizedSourceRoute, CompleteContentErrorKind, CompleteContentHashAuthority,
+        CompleteContentResolverRegistry, CompleteContentSourceFamily, CompleteMessageRequest,
+        SourceAccessBroker, SourceSnapshot, VerifiedContentRole,
     },
     test_support_paths::tempdir,
 };
@@ -122,6 +122,7 @@ fn cold_append_and_rewrite_keep_stable_ids_and_bounded_projection() {
         MuxSourceBackedDisposition::Unchanged
     ));
     assert!(unchanged_records.is_empty());
+    assert!(revalidate_mux_source_backed(&candidate, &cold.certificate).unwrap());
 
     let appended = message("message-2", "assistant", 2, "appended");
     let mut chat = OpenOptions::new()
@@ -362,6 +363,30 @@ fn subagent_chat_is_supported_but_chat_archive_is_not() {
         .find(|candidate| candidate.provider_session_id() == "child")
         .unwrap();
     assert_eq!(child.parent_provider_session_id(), Some("parent"));
+    let (_, child_records, _) = collect_scan(child, None);
+    assert_eq!(
+        child_records[0].document.parent_session_id,
+        child.parent_session_id()
+    );
+    assert_eq!(
+        child_records[0].document.root_session_id,
+        child.root_session_id()
+    );
+    assert_eq!(
+        child_records[0].document.provider_session_id.as_deref(),
+        Some("child")
+    );
+    assert_eq!(child_records[0].document.branch, None);
+    assert_eq!(
+        child_records[0].document.source_path.as_deref(),
+        child
+            .source
+            .chat_path
+            .as_deref()
+            .map(|path| path.to_str().unwrap())
+    );
+    assert_eq!(child_records[0].document.agent_type, "subagent");
+    assert!(!child_records[0].document.is_primary);
     assert!(candidates
         .iter()
         .all(|candidate| candidate.provider_session_id() != "archive-only"));

@@ -95,6 +95,8 @@ pub(crate) struct MuxSourceBackedCandidate {
     metadata: MuxBoundedSessionMetadata,
     source_key: SourceKey,
     session_id: StableEntityId,
+    parent_session_id: Option<StableEntityId>,
+    root_session_id: StableEntityId,
     observed_at: DateTime<Utc>,
 }
 
@@ -105,6 +107,14 @@ impl MuxSourceBackedCandidate {
 
     pub(crate) fn session_id(&self) -> StableEntityId {
         self.session_id
+    }
+
+    pub(crate) fn parent_session_id(&self) -> Option<StableEntityId> {
+        self.parent_session_id
+    }
+
+    pub(crate) fn root_session_id(&self) -> StableEntityId {
+        self.root_session_id
     }
 
     pub(crate) fn provider_session_id(&self) -> &str {
@@ -285,12 +295,26 @@ pub(crate) fn discover_mux_source_backed_sources(
         )?;
         let source_key = mux_source_key(&metadata.provider_session_id)?;
         let session_id = mux_session_identity(&source_key, &metadata.provider_session_id)?;
+        let parent_session_id = metadata
+            .parent_provider_session_id
+            .as_deref()
+            .map(mux_related_session_identity)
+            .transpose()?;
+        let root_session_id = metadata
+            .root_provider_session_id
+            .as_deref()
+            .map(mux_related_session_identity)
+            .transpose()?
+            .or(parent_session_id)
+            .unwrap_or(session_id);
         candidates.push(MuxSourceBackedCandidate {
             configured_root: root.to_path_buf(),
             source,
             metadata,
             source_key,
             session_id,
+            parent_session_id,
+            root_session_id,
             observed_at,
         });
     }
@@ -503,6 +527,23 @@ pub(crate) fn scan_mux_source_backed(
         emitted_documents,
         emitted_unaddressable,
     })
+}
+
+pub(crate) fn revalidate_mux_source_backed(
+    candidate: &MuxSourceBackedCandidate,
+    certificate: &CertifiedSource,
+) -> MuxSourceBackedResult<bool> {
+    if !candidate
+        .source_key
+        .exact_descriptor_eq(certificate.observation().source())
+    {
+        return Ok(false);
+    }
+    let checkpoint = decode_checkpoint(certificate)?;
+    let observed = observe_mux_source(&candidate.source)?;
+    let observation = source_observation(&candidate.source_key, &observed.wire)?;
+    Ok(checkpoint.observation == observed.wire
+        && certificate.observation().revision() == observation.revision())
 }
 
 /// Translates the provider-native envelope back into the existing exact Mux
@@ -741,13 +782,9 @@ fn project_page(
     let mut records = Vec::with_capacity(rows.len());
     let mut unaddressable = Vec::new();
     for row in rows {
-        let native_item_key = NativeItemKey::composite(
+        let native_item_key = NativeItemKey::native_id(
             MUX_NATIVE_ITEM_NAMESPACE,
-            vec![
-                TypedKey::utf8(&row.native_record_id)?,
-                TypedKey::Bool(stream_kind.is_partial()),
-                TypedKey::U64(row.source_record_ordinal),
-            ],
+            TypedKey::utf8(&row.native_record_id)?,
         )?;
         let event_id = derive_event_id(EventIdentityInput {
             source: &candidate.source_key,
@@ -757,6 +794,10 @@ fn project_page(
             subrecord_selector: None,
         })?;
         if let Some(reason) = row.unaddressable_output {
+            let bounded_projection = row
+                .event
+                .as_ref()
+                .map(|event| bounded_projection(candidate, event, &row));
             unaddressable.push(MuxUnaddressableRecord {
                 event_id,
                 stream_kind,
@@ -766,10 +807,7 @@ fn project_page(
                     MuxUnaddressableOutput::Redacted => MuxUnaddressableReason::RedactedOutput,
                     MuxUnaddressableOutput::Missing => MuxUnaddressableReason::MissingOutput,
                 },
-                bounded_projection: row
-                    .event
-                    .as_ref()
-                    .map(|event| bounded_projection(candidate, event, &row)),
+                bounded_projection,
             });
             continue;
         }
@@ -794,9 +832,20 @@ fn project_page(
         let document = LexicalDocument {
             event_id,
             session_id: candidate.session_id,
+            parent_session_id: candidate.parent_session_id,
+            root_session_id: candidate.root_session_id,
             source: candidate.source_key.clone(),
             locator,
             provider_session_id: Some(candidate.metadata.provider_session_id.clone()),
+            branch: None,
+            source_path: mux_stream_path(candidate, stream_kind)
+                .map(|path| path.display().to_string()),
+            agent_type: if candidate.parent_session_id.is_some() {
+                "subagent".to_owned()
+            } else {
+                "primary".to_owned()
+            },
+            is_primary: candidate.parent_session_id.is_none(),
             event_sequence: projection.event_sequence,
             occurred_at_unix_ms: projection.occurred_at_unix_ms,
             event_type: projection.event_type,
@@ -990,6 +1039,21 @@ fn mux_session_identity(
         logical_session_kind: MUX_LOGICAL_SESSION_KIND,
         native_session_key: &native_session_key,
     })?)
+}
+
+fn mux_related_session_identity(native_session_id: &str) -> MuxSourceBackedResult<StableEntityId> {
+    let source = mux_source_key(native_session_id)?;
+    mux_session_identity(&source, native_session_id)
+}
+
+fn mux_stream_path(
+    candidate: &MuxSourceBackedCandidate,
+    stream_kind: MuxStreamKind,
+) -> Option<&Path> {
+    match stream_kind {
+        MuxStreamKind::Chat => candidate.source.chat_path.as_deref(),
+        MuxStreamKind::Partial => candidate.source.partial_path.as_deref(),
+    }
 }
 
 fn decode_checkpoint(base: &CertifiedSource) -> MuxSourceBackedResult<MuxSourceBackedCheckpoint> {
