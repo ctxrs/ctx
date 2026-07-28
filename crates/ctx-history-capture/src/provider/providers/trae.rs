@@ -11,7 +11,12 @@ mod json_stream;
 mod nativepath;
 mod workspace;
 
-pub(crate) use nativepath::import_trae_nativepath;
+#[allow(unused_imports)]
+pub(crate) use nativepath::{
+    hydrate_trae_source_backed_locator_v0, import_trae_nativepath,
+    scan_trae_source_backed_explicit_v0, TraeHydratedRecordV0, TraeSourceBackedErrorV0,
+    TraeSourceBackedPageV0, TraeSourceBackedScanV0,
+};
 
 pub(crate) const TRAE_STATE_VSCDB_SOURCE_FORMAT: &str = "trae_state_vscdb";
 pub(crate) const TRAE_CN_INPUT_HISTORY_KEY: &str = "icube-ai-agent-storage-input-history";
@@ -80,6 +85,7 @@ pub(crate) fn trae_complete_message(
             }
             json_stream::TraeStreamSession {
                 native_session_id: "trae-cn-input-history".to_owned(),
+                native_session_id_from_provider: true,
                 metadata_preview: json!({
                     "id": "trae-cn-input-history",
                     "title": "Trae CN input history",
