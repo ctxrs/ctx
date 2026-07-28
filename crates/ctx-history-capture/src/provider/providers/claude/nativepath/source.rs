@@ -1,8 +1,10 @@
 use std::{
+    collections::{BTreeMap, BTreeSet},
     ffi::OsStr,
-    fs::{self, File, Metadata, OpenOptions},
+    fs::{File, Metadata},
     io,
     path::{Path, PathBuf},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -10,8 +12,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::common::io::{
-    ensure_provider_path_parents_are_not_symlinks, ensure_regular_provider_transcript_file,
+use crate::{
+    common::io::{
+        open_provider_source_path, OpenedProviderSourceFile, OpenedProviderSourcePath,
+        ProviderSourceDirectory, ProviderSourceRoot,
+    },
+    CaptureError,
 };
 
 const CLAUDE_OBSERVATION_DOMAIN: &[u8] = b"ctx-claude-nativepath-observation-v1\0";
@@ -186,7 +192,7 @@ fn update_time(hasher: &mut Sha256, value: Option<SystemTime>) {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct DiscoveredClaudeSession {
     pub(crate) project_dir: PathBuf,
     pub(crate) path: PathBuf,
@@ -194,7 +200,21 @@ pub(crate) struct DiscoveredClaudeSession {
     pub(crate) key: ClaudeSessionKey,
     pub(crate) layout: SessionLayout,
     pub(crate) fingerprint: ClaudeFileFingerprint,
+    pub(crate) opened: Arc<OpenedProviderSourceFile>,
 }
+
+impl PartialEq for DiscoveredClaudeSession {
+    fn eq(&self, other: &Self) -> bool {
+        self.project_dir == other.project_dir
+            && self.path == other.path
+            && self.canonical_path == other.canonical_path
+            && self.key == other.key
+            && self.layout == other.layout
+            && self.fingerprint == other.fingerprint
+    }
+}
+
+impl Eq for DiscoveredClaudeSession {}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct ClaudeDiscoveryStats {
@@ -218,23 +238,49 @@ pub(crate) struct ClaudeInventoryCertificate {
     pub(crate) complete: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct ClaudeDiscovery {
     pub(crate) root: PathBuf,
     pub(crate) sessions: Vec<DiscoveredClaudeSession>,
     pub(crate) stats: ClaudeDiscoveryStats,
     pub(crate) inventory: ClaudeInventoryCertificate,
+    authority: ClaudeDiscoveryAuthority,
 }
+
+#[derive(Debug, Clone)]
+enum ClaudeDiscoveryAuthority {
+    Root(ProviderSourceRoot),
+    File(Arc<OpenedProviderSourceFile>),
+}
+
+impl PartialEq for ClaudeDiscovery {
+    fn eq(&self, other: &Self) -> bool {
+        self.root == other.root
+            && self.sessions == other.sessions
+            && self.stats == other.stats
+            && self.inventory == other.inventory
+    }
+}
+
+impl Eq for ClaudeDiscovery {}
 
 impl ClaudeDiscovery {
     pub(crate) fn revalidate_inventory(&self) -> Result<(), ClaudeNativePathError> {
-        let current = discover_projects(&self.root)?;
+        let current = self.rediscover()?;
         if current.inventory != self.inventory {
             return Err(ClaudeNativePathError::InventoryChanged {
                 path: self.root.clone(),
             });
         }
         Ok(())
+    }
+
+    pub(crate) fn rediscover(&self) -> Result<Self, ClaudeNativePathError> {
+        discover_from_authority(&self.root, self.authority.clone())
+    }
+
+    pub(crate) fn has_directory_authority(&self) -> bool {
+        matches!(self.authority, ClaudeDiscoveryAuthority::Root(_))
     }
 }
 
@@ -265,41 +311,34 @@ pub(crate) struct ClaudeDeletionCandidate {
 }
 
 #[derive(Debug, Default)]
-struct TraversalBudget {
-    scanned: usize,
-}
-
-impl TraversalBudget {
-    fn observe(&mut self, path: &Path) -> Result<(), ClaudeNativePathError> {
-        self.scanned = self
-            .scanned
-            .checked_add(1)
-            .ok_or(ClaudeNativePathError::PositionOverflow)?;
-        if self.scanned > CLAUDE_MAX_TRAVERSAL_ENTRIES {
-            return Err(ClaudeNativePathError::invalid(
-                path,
-                format!(
-                    "Claude discovery exceeds the {CLAUDE_MAX_TRAVERSAL_ENTRIES}-entry traversal limit"
-                ),
-            ));
-        }
-        Ok(())
-    }
+struct ClaudeOpenedTree {
+    directories: BTreeSet<PathBuf>,
+    files: BTreeMap<PathBuf, Arc<OpenedProviderSourceFile>>,
+    rejected_links: Vec<PathBuf>,
+    stats: ClaudeDiscoveryStats,
+    traversal_entries: usize,
 }
 
 pub(crate) fn discover_projects(root: &Path) -> Result<ClaudeDiscovery, ClaudeNativePathError> {
-    ensure_unlinked_path(root)?;
-    let metadata =
-        fs::symlink_metadata(root).map_err(|error| ClaudeNativePathError::io(root, error))?;
-    if metadata.file_type().is_symlink() {
-        return Err(ClaudeNativePathError::invalid(
-            root,
-            "symlinked roots are rejected",
-        ));
+    let root = std::path::absolute(root).map_err(|error| ClaudeNativePathError::io(root, error))?;
+    let opened =
+        open_provider_source_path(&root).map_err(|error| map_capture_error(&root, error))?;
+    match opened {
+        OpenedProviderSourcePath::File(file) => {
+            discover_from_authority(&root, ClaudeDiscoveryAuthority::File(Arc::new(file)))
+        }
+        OpenedProviderSourcePath::Directory(directory) => discover_from_authority(
+            &root,
+            ClaudeDiscoveryAuthority::Root(directory.authority_root()),
+        ),
     }
+}
 
-    let canonical_root =
-        fs::canonicalize(root).map_err(|error| ClaudeNativePathError::io(root, error))?;
+fn discover_from_authority(
+    root: &Path,
+    authority: ClaudeDiscoveryAuthority,
+) -> Result<ClaudeDiscovery, ClaudeNativePathError> {
+    let canonical_root = root.to_path_buf();
     let mut discovery = ClaudeDiscovery {
         root: root.to_path_buf(),
         sessions: Vec::new(),
@@ -311,48 +350,31 @@ pub(crate) fn discover_projects(root: &Path) -> Result<ClaudeDiscovery, ClaudeNa
             routes_sha256: Sha256::digest(CLAUDE_INVENTORY_DOMAIN).into(),
             complete: false,
         },
+        authority: authority.clone(),
     };
-    if metadata.is_file() {
-        discovery.sessions.push(discover_explicit_file(root)?);
-        discovery.stats.selected_sessions = 1;
-        finalize_inventory(&mut discovery)?;
-        return Ok(discovery);
-    }
-    if !metadata.is_dir() {
-        return Err(ClaudeNativePathError::invalid(
-            root,
-            "the import root is neither a directory nor a regular JSONL file",
-        ));
-    }
-
-    let projects_root = if root.file_name() == Some(OsStr::new(".claude")) {
-        let projects = root.join("projects");
-        ensure_directory(&projects)?;
-        projects
-    } else {
-        root.to_path_buf()
-    };
-    let mut budget = TraversalBudget::default();
-    if projects_root.file_name() == Some(OsStr::new("projects")) {
-        for project_dir in
-            sorted_directory_paths(&projects_root, &mut discovery.stats, &mut budget)?
-        {
-            let metadata = fs::symlink_metadata(&project_dir)
-                .map_err(|error| ClaudeNativePathError::io(&project_dir, error))?;
-            if metadata.file_type().is_symlink() {
-                return Err(ClaudeNativePathError::invalid(
-                    &project_dir,
-                    "symlinked project directories are rejected",
-                ));
-            }
-            if metadata.is_dir() {
-                discover_project(&project_dir, &mut discovery, &mut budget)?;
-            }
+    match authority {
+        ClaudeDiscoveryAuthority::File(opened) => {
+            opened
+                .revalidate()
+                .map_err(|error| map_capture_error(root, error))?;
+            discovery
+                .sessions
+                .push(discover_explicit_opened(root, opened)?);
+            discovery.stats.selected_sessions = 1;
         }
-    } else {
-        discover_project(&projects_root, &mut discovery, &mut budget)?;
+        ClaudeDiscoveryAuthority::Root(authority) => {
+            let mut tree = ClaudeOpenedTree::default();
+            let directory = authority
+                .directory()
+                .map_err(|error| map_capture_error(root, error))?;
+            inventory_claude_tree(root, directory, &mut tree)?;
+            authority
+                .revalidate()
+                .map_err(|error| map_capture_error(root, error))?;
+            discovery.stats = tree.stats;
+            bind_opened_tree(root, tree, &mut discovery)?;
+        }
     }
-
     discovery.sessions.sort_unstable_by(|left, right| {
         left.project_dir
             .cmp(&right.project_dir)
@@ -362,6 +384,346 @@ pub(crate) fn discover_projects(root: &Path) -> Result<ClaudeDiscovery, ClaudeNa
     discovery.stats.selected_sessions = discovery.sessions.len();
     finalize_inventory(&mut discovery)?;
     Ok(discovery)
+}
+
+fn inventory_claude_tree(
+    display_path: &Path,
+    directory: ProviderSourceDirectory,
+    tree: &mut ClaudeOpenedTree,
+) -> Result<(), ClaudeNativePathError> {
+    tree.directories.insert(display_path.to_path_buf());
+    let names = directory
+        .entries(CLAUDE_MAX_DIRECTORY_ENTRIES.saturating_add(1))
+        .map_err(|error| map_capture_error(display_path, error))?;
+    if names.len() > CLAUDE_MAX_DIRECTORY_ENTRIES {
+        return Err(ClaudeNativePathError::invalid(
+            display_path,
+            format!(
+                "directory exceeds the {CLAUDE_MAX_DIRECTORY_ENTRIES}-entry Claude discovery limit"
+            ),
+        ));
+    }
+    tree.stats.directory_entries = tree
+        .stats
+        .directory_entries
+        .checked_add(names.len())
+        .ok_or(ClaudeNativePathError::PositionOverflow)?;
+    tree.traversal_entries = tree
+        .traversal_entries
+        .checked_add(names.len())
+        .ok_or(ClaudeNativePathError::PositionOverflow)?;
+    if tree.traversal_entries > CLAUDE_MAX_TRAVERSAL_ENTRIES {
+        return Err(ClaudeNativePathError::invalid(
+            display_path,
+            format!(
+                "Claude discovery exceeds the {CLAUDE_MAX_TRAVERSAL_ENTRIES}-entry traversal limit"
+            ),
+        ));
+    }
+    for name in names {
+        let path = display_path.join(&name);
+        let opened = match directory.open_child(&name) {
+            Ok(opened) => opened,
+            Err(CaptureError::InvalidProviderTranscriptPath { .. }) => {
+                tree.rejected_links.push(path);
+                continue;
+            }
+            Err(error) => return Err(map_capture_error(&path, error)),
+        };
+        match opened {
+            OpenedProviderSourcePath::Directory(child) => {
+                inventory_claude_tree(&path, child, tree)?;
+            }
+            OpenedProviderSourcePath::File(file) => {
+                tree.files.insert(path, Arc::new(file));
+            }
+        }
+    }
+    directory
+        .revalidate()
+        .map_err(|error| map_capture_error(display_path, error))?;
+    Ok(())
+}
+
+fn bind_opened_tree(
+    root: &Path,
+    tree: ClaudeOpenedTree,
+    discovery: &mut ClaudeDiscovery,
+) -> Result<(), ClaudeNativePathError> {
+    let projects_root = if root.file_name() == Some(OsStr::new(".claude")) {
+        let projects = root.join("projects");
+        if !tree.directories.contains(&projects) {
+            return Err(ClaudeNativePathError::invalid(
+                &projects,
+                "expected an unlinked directory",
+            ));
+        }
+        projects
+    } else {
+        root.to_path_buf()
+    };
+    let projects_container = projects_root.file_name() == Some(OsStr::new("projects"));
+    for path in &tree.rejected_links {
+        let Ok(relative) = path.strip_prefix(&projects_root) else {
+            continue;
+        };
+        let components = relative
+            .components()
+            .map(|component| component.as_os_str())
+            .collect::<Vec<_>>();
+        let (_, layout, key) =
+            classify_claude_relative(&projects_root, projects_container, &components, path)?;
+        if layout.is_some() && key.is_some() {
+            let reason = match layout {
+                Some(SessionLayout::Primary) => "symlinked session files are rejected",
+                Some(SessionLayout::Subagent) => "symlinked subagent session files are rejected",
+                Some(SessionLayout::WorkflowSubagent) => {
+                    "symlinked workflow subagent files are rejected"
+                }
+                None => unreachable!(),
+            };
+            return Err(ClaudeNativePathError::invalid(path, reason));
+        }
+        let mut primary_name = path
+            .file_name()
+            .ok_or_else(|| ClaudeNativePathError::invalid(path, "layout name is missing"))?
+            .to_os_string();
+        primary_name.push(".jsonl");
+        if tree.files.contains_key(&path.with_file_name(primary_name)) {
+            return Err(ClaudeNativePathError::invalid(
+                path,
+                "symlinked session directories are rejected",
+            ));
+        }
+    }
+    let mut projects = BTreeSet::new();
+    for (path, opened) in tree.files {
+        let Ok(relative) = path.strip_prefix(&projects_root) else {
+            continue;
+        };
+        let components = relative
+            .components()
+            .map(|component| component.as_os_str())
+            .collect::<Vec<_>>();
+        let (project_dir, layout, key) =
+            classify_claude_relative(&projects_root, projects_container, &components, &path)?;
+        let Some((project_dir, layout, key)) = project_dir
+            .zip(layout)
+            .zip(key)
+            .map(|((project_dir, layout), key)| (project_dir, layout, key))
+        else {
+            continue;
+        };
+        projects.insert(project_dir.clone());
+        discovery.sessions.push(discover_file_from_opened(
+            project_dir,
+            path,
+            layout,
+            key,
+            opened,
+        )?);
+    }
+    discovery.stats.project_directories = projects.len();
+    Ok(())
+}
+
+fn classify_claude_relative(
+    projects_root: &Path,
+    projects_container: bool,
+    components: &[&OsStr],
+    path: &Path,
+) -> Result<
+    (
+        Option<PathBuf>,
+        Option<SessionLayout>,
+        Option<ClaudeSessionKey>,
+    ),
+    ClaudeNativePathError,
+> {
+    let (project_dir, inner) = if projects_container {
+        let Some(project) = components.first() else {
+            return Ok((None, None, None));
+        };
+        (projects_root.join(project), &components[1..])
+    } else {
+        (projects_root.to_path_buf(), components)
+    };
+    if inner.len() == 1 && is_jsonl(path) {
+        let root_session_id = utf8_file_stem(path)?.to_owned();
+        return Ok((
+            Some(project_dir),
+            Some(SessionLayout::Primary),
+            Some(ClaudeSessionKey {
+                root_session_id,
+                workflow_run_id: None,
+                agent_id: None,
+            }),
+        ));
+    }
+    if inner.len() == 3 && inner[1] == OsStr::new("subagents") && is_subagent_jsonl(path) {
+        return Ok((
+            Some(project_dir),
+            Some(SessionLayout::Subagent),
+            Some(ClaudeSessionKey {
+                root_session_id: inner[0]
+                    .to_str()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| {
+                        ClaudeNativePathError::invalid(path, "session directory is not valid UTF-8")
+                    })?
+                    .to_owned(),
+                workflow_run_id: None,
+                agent_id: Some(utf8_file_stem(path)?.to_owned()),
+            }),
+        ));
+    }
+    if inner.len() == 5
+        && inner[1] == OsStr::new("subagents")
+        && inner[2] == OsStr::new("workflows")
+        && is_subagent_jsonl(path)
+    {
+        return Ok((
+            Some(project_dir),
+            Some(SessionLayout::WorkflowSubagent),
+            Some(ClaudeSessionKey {
+                root_session_id: inner[0]
+                    .to_str()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| {
+                        ClaudeNativePathError::invalid(path, "session directory is not valid UTF-8")
+                    })?
+                    .to_owned(),
+                workflow_run_id: Some(
+                    inner[3]
+                        .to_str()
+                        .filter(|value| !value.trim().is_empty())
+                        .ok_or_else(|| {
+                            ClaudeNativePathError::invalid(
+                                path,
+                                "workflow directory is not valid UTF-8",
+                            )
+                        })?
+                        .to_owned(),
+                ),
+                agent_id: Some(utf8_file_stem(path)?.to_owned()),
+            }),
+        ));
+    }
+    Ok((None, None, None))
+}
+
+fn discover_explicit_opened(
+    path: &Path,
+    opened: Arc<OpenedProviderSourceFile>,
+) -> Result<DiscoveredClaudeSession, ClaudeNativePathError> {
+    let (project_dir, layout, key) = explicit_claude_layout(path)?;
+    discover_file_from_opened(project_dir, path.to_path_buf(), layout, key, opened)
+}
+
+fn discover_file_from_opened(
+    project_dir: PathBuf,
+    path: PathBuf,
+    layout: SessionLayout,
+    key: ClaudeSessionKey,
+    opened: Arc<OpenedProviderSourceFile>,
+) -> Result<DiscoveredClaudeSession, ClaudeNativePathError> {
+    if !is_jsonl(&path) {
+        return Err(ClaudeNativePathError::invalid(
+            &path,
+            "explicit Claude session files must use the .jsonl extension",
+        ));
+    }
+    let fingerprint = ClaudeFileFingerprint::from_metadata(opened.metadata());
+    opened
+        .revalidate()
+        .map_err(|error| map_capture_error(&path, error))?;
+    Ok(DiscoveredClaudeSession {
+        project_dir,
+        canonical_path: path.clone(),
+        path,
+        key,
+        layout,
+        fingerprint,
+        opened,
+    })
+}
+
+fn explicit_claude_layout(
+    path: &Path,
+) -> Result<(PathBuf, SessionLayout, ClaudeSessionKey), ClaudeNativePathError> {
+    if !is_jsonl(path) {
+        return Err(ClaudeNativePathError::invalid(
+            path,
+            "explicit Claude session files must use the .jsonl extension",
+        ));
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| ClaudeNativePathError::invalid(path, "session file has no parent"))?;
+    let file_stem = utf8_file_stem(path)?.to_owned();
+    if parent.file_name() == Some(OsStr::new("subagents")) {
+        let session_dir = parent
+            .parent()
+            .ok_or_else(|| ClaudeNativePathError::invalid(path, "incomplete subagent layout"))?;
+        let project_dir = session_dir
+            .parent()
+            .ok_or_else(|| ClaudeNativePathError::invalid(path, "incomplete subagent layout"))?;
+        return Ok((
+            project_dir.to_path_buf(),
+            SessionLayout::Subagent,
+            ClaudeSessionKey {
+                root_session_id: utf8_file_name(session_dir)?.to_owned(),
+                workflow_run_id: None,
+                agent_id: Some(file_stem),
+            },
+        ));
+    }
+    if parent
+        .parent()
+        .is_some_and(|value| value.file_name() == Some(OsStr::new("workflows")))
+        && parent
+            .parent()
+            .and_then(Path::parent)
+            .is_some_and(|value| value.file_name() == Some(OsStr::new("subagents")))
+    {
+        let workflows = parent
+            .parent()
+            .ok_or_else(|| ClaudeNativePathError::invalid(path, "incomplete workflow layout"))?;
+        let subagents = workflows
+            .parent()
+            .ok_or_else(|| ClaudeNativePathError::invalid(path, "incomplete workflow layout"))?;
+        let session_dir = subagents
+            .parent()
+            .ok_or_else(|| ClaudeNativePathError::invalid(path, "incomplete workflow layout"))?;
+        let project_dir = session_dir
+            .parent()
+            .ok_or_else(|| ClaudeNativePathError::invalid(path, "incomplete workflow layout"))?;
+        return Ok((
+            project_dir.to_path_buf(),
+            SessionLayout::WorkflowSubagent,
+            ClaudeSessionKey {
+                root_session_id: utf8_file_name(session_dir)?.to_owned(),
+                workflow_run_id: Some(utf8_file_name(parent)?.to_owned()),
+                agent_id: Some(file_stem),
+            },
+        ));
+    }
+    Ok((
+        parent.to_path_buf(),
+        SessionLayout::Primary,
+        ClaudeSessionKey {
+            root_session_id: file_stem,
+            workflow_run_id: None,
+            agent_id: None,
+        },
+    ))
+}
+
+fn map_capture_error(path: &Path, error: CaptureError) -> ClaudeNativePathError {
+    match error {
+        CaptureError::Io(source) => ClaudeNativePathError::io(path, source),
+        other => ClaudeNativePathError::invalid(path, other.to_string()),
+    }
 }
 
 fn finalize_inventory(discovery: &mut ClaudeDiscovery) -> Result<(), ClaudeNativePathError> {
@@ -402,293 +764,19 @@ fn update_inventory_field(hasher: &mut Sha256, bytes: &[u8]) -> Result<(), Claud
     Ok(())
 }
 
-fn discover_project(
-    project_dir: &Path,
-    discovery: &mut ClaudeDiscovery,
-    budget: &mut TraversalBudget,
-) -> Result<(), ClaudeNativePathError> {
-    ensure_directory(project_dir)?;
-    discovery.stats.project_directories += 1;
-    for path in sorted_directory_paths(project_dir, &mut discovery.stats, budget)? {
-        let metadata =
-            fs::symlink_metadata(&path).map_err(|error| ClaudeNativePathError::io(&path, error))?;
-        if metadata.file_type().is_symlink() {
-            if is_jsonl(&path) {
-                return Err(ClaudeNativePathError::invalid(
-                    &path,
-                    "symlinked session files are rejected",
-                ));
-            }
-            if has_primary_session_sibling(&path)? {
-                return Err(ClaudeNativePathError::invalid(
-                    &path,
-                    "symlinked session directories are rejected",
-                ));
-            }
-            continue;
-        }
-        if metadata.is_file() && is_jsonl(&path) {
-            let root_session_id = utf8_file_stem(&path)?.to_owned();
-            discovery.sessions.push(discover_file(
-                project_dir,
-                &path,
-                SessionLayout::Primary,
-                ClaudeSessionKey {
-                    root_session_id,
-                    workflow_run_id: None,
-                    agent_id: None,
-                },
-            )?);
-        } else if metadata.is_dir() {
-            discover_session_subagents(project_dir, &path, discovery, budget)?;
-        }
-    }
-    Ok(())
-}
-
-fn has_primary_session_sibling(path: &Path) -> Result<bool, ClaudeNativePathError> {
-    let Some(name) = path.file_name() else {
-        return Ok(false);
-    };
-    let mut primary_name = name.to_os_string();
-    primary_name.push(".jsonl");
-    let primary = path.with_file_name(primary_name);
-    match fs::symlink_metadata(&primary) {
-        Ok(metadata) => Ok(metadata.is_file() && !metadata.file_type().is_symlink()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(ClaudeNativePathError::io(&primary, error)),
-    }
-}
-
-fn discover_session_subagents(
-    project_dir: &Path,
-    session_dir: &Path,
-    discovery: &mut ClaudeDiscovery,
-    budget: &mut TraversalBudget,
-) -> Result<(), ClaudeNativePathError> {
-    let root_session_id = utf8_file_name(session_dir)?.to_owned();
-    let subagents = session_dir.join("subagents");
-    let Ok(metadata) = fs::symlink_metadata(&subagents) else {
-        return Ok(());
-    };
-    if metadata.file_type().is_symlink() {
-        return Err(ClaudeNativePathError::invalid(
-            &subagents,
-            "symlinked subagent directories are rejected",
-        ));
-    }
-    if !metadata.is_dir() {
-        return Ok(());
-    }
-
-    for candidate in sorted_directory_paths(&subagents, &mut discovery.stats, budget)? {
-        let metadata = fs::symlink_metadata(&candidate)
-            .map_err(|error| ClaudeNativePathError::io(&candidate, error))?;
-        if candidate.file_name() == Some(OsStr::new("workflows")) {
-            if metadata.file_type().is_symlink() {
-                return Err(ClaudeNativePathError::invalid(
-                    &candidate,
-                    "symlinked workflow directories are rejected",
-                ));
-            }
-            if metadata.is_dir() {
-                discover_workflow_subagents(
-                    project_dir,
-                    &candidate,
-                    &root_session_id,
-                    discovery,
-                    budget,
-                )?;
-            }
-        } else if metadata.file_type().is_symlink() && is_subagent_jsonl(&candidate) {
-            return Err(ClaudeNativePathError::invalid(
-                &candidate,
-                "symlinked subagent session files are rejected",
-            ));
-        } else if metadata.is_file() && is_subagent_jsonl(&candidate) {
-            let agent_id = utf8_file_stem(&candidate)?.to_owned();
-            discovery.sessions.push(discover_file(
-                project_dir,
-                &candidate,
-                SessionLayout::Subagent,
-                ClaudeSessionKey {
-                    root_session_id: root_session_id.clone(),
-                    workflow_run_id: None,
-                    agent_id: Some(agent_id),
-                },
-            )?);
-        }
-    }
-    Ok(())
-}
-
-fn discover_workflow_subagents(
-    project_dir: &Path,
-    workflows_dir: &Path,
-    root_session_id: &str,
-    discovery: &mut ClaudeDiscovery,
-    budget: &mut TraversalBudget,
-) -> Result<(), ClaudeNativePathError> {
-    for run_dir in sorted_directory_paths(workflows_dir, &mut discovery.stats, budget)? {
-        let metadata = fs::symlink_metadata(&run_dir)
-            .map_err(|error| ClaudeNativePathError::io(&run_dir, error))?;
-        if metadata.file_type().is_symlink() {
-            return Err(ClaudeNativePathError::invalid(
-                &run_dir,
-                "symlinked workflow run directories are rejected",
-            ));
-        }
-        if !metadata.is_dir() {
-            continue;
-        }
-        let run_id = utf8_file_name(&run_dir)?.to_owned();
-        for candidate in sorted_directory_paths(&run_dir, &mut discovery.stats, budget)? {
-            let metadata = fs::symlink_metadata(&candidate)
-                .map_err(|error| ClaudeNativePathError::io(&candidate, error))?;
-            if metadata.file_type().is_symlink() && is_subagent_jsonl(&candidate) {
-                return Err(ClaudeNativePathError::invalid(
-                    &candidate,
-                    "symlinked workflow subagent files are rejected",
-                ));
-            }
-            if metadata.is_file() && is_subagent_jsonl(&candidate) {
-                let agent_id = utf8_file_stem(&candidate)?.to_owned();
-                discovery.sessions.push(discover_file(
-                    project_dir,
-                    &candidate,
-                    SessionLayout::WorkflowSubagent,
-                    ClaudeSessionKey {
-                        root_session_id: root_session_id.to_owned(),
-                        workflow_run_id: Some(run_id.clone()),
-                        agent_id: Some(agent_id),
-                    },
-                )?);
-            }
-        }
-    }
-    Ok(())
-}
-
-fn discover_explicit_file(path: &Path) -> Result<DiscoveredClaudeSession, ClaudeNativePathError> {
-    if !is_jsonl(path) {
-        return Err(ClaudeNativePathError::invalid(
-            path,
-            "explicit Claude session files must use the .jsonl extension",
-        ));
-    }
-    let parent = path
-        .parent()
-        .ok_or_else(|| ClaudeNativePathError::invalid(path, "session file has no parent"))?;
-    let file_stem = utf8_file_stem(path)?.to_owned();
-    if parent.file_name() == Some(OsStr::new("subagents")) {
-        if !is_subagent_jsonl(path) {
-            return Err(ClaudeNativePathError::invalid(
-                path,
-                "subagent session filenames must match agent-*.jsonl",
-            ));
-        }
-        let session_dir = parent
-            .parent()
-            .ok_or_else(|| ClaudeNativePathError::invalid(path, "incomplete subagent layout"))?;
-        let project_dir = session_dir
-            .parent()
-            .ok_or_else(|| ClaudeNativePathError::invalid(path, "incomplete subagent layout"))?;
-        return discover_file(
-            project_dir,
-            path,
-            SessionLayout::Subagent,
-            ClaudeSessionKey {
-                root_session_id: utf8_file_name(session_dir)?.to_owned(),
-                workflow_run_id: None,
-                agent_id: Some(file_stem),
-            },
-        );
-    }
-
-    if parent
-        .parent()
-        .is_some_and(|value| value.file_name() == Some(OsStr::new("workflows")))
-        && parent
-            .parent()
-            .and_then(Path::parent)
-            .is_some_and(|value| value.file_name() == Some(OsStr::new("subagents")))
-    {
-        if !is_subagent_jsonl(path) {
-            return Err(ClaudeNativePathError::invalid(
-                path,
-                "workflow subagent filenames must match agent-*.jsonl",
-            ));
-        }
-        let workflows = parent
-            .parent()
-            .ok_or_else(|| ClaudeNativePathError::invalid(path, "incomplete workflow layout"))?;
-        let subagents = workflows
-            .parent()
-            .ok_or_else(|| ClaudeNativePathError::invalid(path, "incomplete workflow layout"))?;
-        let session_dir = subagents
-            .parent()
-            .ok_or_else(|| ClaudeNativePathError::invalid(path, "incomplete workflow layout"))?;
-        let project_dir = session_dir
-            .parent()
-            .ok_or_else(|| ClaudeNativePathError::invalid(path, "incomplete workflow layout"))?;
-        return discover_file(
-            project_dir,
-            path,
-            SessionLayout::WorkflowSubagent,
-            ClaudeSessionKey {
-                root_session_id: utf8_file_name(session_dir)?.to_owned(),
-                workflow_run_id: Some(utf8_file_name(parent)?.to_owned()),
-                agent_id: Some(file_stem),
-            },
-        );
-    }
-
-    discover_file(
-        parent,
-        path,
-        SessionLayout::Primary,
-        ClaudeSessionKey {
-            root_session_id: file_stem,
-            workflow_run_id: None,
-            agent_id: None,
-        },
-    )
-}
-
-fn discover_file(
-    project_dir: &Path,
-    path: &Path,
-    layout: SessionLayout,
-    key: ClaudeSessionKey,
-) -> Result<DiscoveredClaudeSession, ClaudeNativePathError> {
-    ensure_unlinked_file(path)?;
-    let metadata =
-        fs::symlink_metadata(path).map_err(|error| ClaudeNativePathError::io(path, error))?;
-    let canonical_path =
-        fs::canonicalize(path).map_err(|error| ClaudeNativePathError::io(path, error))?;
-    Ok(DiscoveredClaudeSession {
-        project_dir: project_dir.to_path_buf(),
-        path: path.to_path_buf(),
-        canonical_path,
-        key,
-        layout,
-        fingerprint: ClaudeFileFingerprint::from_metadata(&metadata),
-    })
-}
-
 pub(super) fn open_discovered_file(
     source: &DiscoveredClaudeSession,
 ) -> Result<File, ClaudeNativePathError> {
-    ensure_unlinked_file(&source.path)?;
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
-    }
-    let file = options
-        .open(&source.path)
+    source
+        .opened
+        .revalidate()
+        .map_err(|_| ClaudeNativePathError::StaleDiscovery {
+            path: source.path.clone(),
+        })?;
+    let file = source
+        .opened
+        .file()
+        .try_clone()
         .map_err(|error| ClaudeNativePathError::io(&source.path, error))?;
     let fingerprint = ClaudeFileFingerprint::from_metadata(
         &file
@@ -713,11 +801,7 @@ pub(super) fn revalidate_open_file(
             .metadata()
             .map_err(|error| ClaudeNativePathError::io(&source.path, error))?,
     );
-    let path_fingerprint = ClaudeFileFingerprint::from_metadata(
-        &fs::symlink_metadata(&source.path)
-            .map_err(|error| ClaudeNativePathError::io(&source.path, error))?,
-    );
-    if &open_fingerprint != expected || &path_fingerprint != expected {
+    if source.opened.revalidate().is_err() || &open_fingerprint != expected {
         return Err(ClaudeNativePathError::SourceChanged {
             path: source.path.clone(),
         });
@@ -728,58 +812,12 @@ pub(super) fn revalidate_open_file(
 pub(crate) fn revalidate_discovered_source(
     source: &DiscoveredClaudeSession,
 ) -> Result<(), ClaudeNativePathError> {
-    let file = open_discovered_file(source)?;
-    revalidate_open_file(source, &file, &source.fingerprint)
-}
-
-fn sorted_directory_paths(
-    directory: &Path,
-    stats: &mut ClaudeDiscoveryStats,
-    budget: &mut TraversalBudget,
-) -> Result<Vec<PathBuf>, ClaudeNativePathError> {
-    let entries =
-        fs::read_dir(directory).map_err(|error| ClaudeNativePathError::io(directory, error))?;
-    let mut paths = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|error| ClaudeNativePathError::io(directory, error))?;
-        let path = entry.path();
-        budget.observe(&path)?;
-        if paths.len() >= CLAUDE_MAX_DIRECTORY_ENTRIES {
-            return Err(ClaudeNativePathError::invalid(
-                directory,
-                format!(
-                    "directory exceeds the {CLAUDE_MAX_DIRECTORY_ENTRIES}-entry Claude discovery limit"
-                ),
-            ));
-        }
-        stats.directory_entries += 1;
-        paths.push(path);
-    }
-    paths.sort_unstable();
-    Ok(paths)
-}
-
-fn ensure_directory(path: &Path) -> Result<(), ClaudeNativePathError> {
-    ensure_unlinked_path(path)?;
-    let metadata =
-        fs::symlink_metadata(path).map_err(|error| ClaudeNativePathError::io(path, error))?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(ClaudeNativePathError::invalid(
-            path,
-            "expected an unlinked directory",
-        ));
-    }
-    Ok(())
-}
-
-fn ensure_unlinked_file(path: &Path) -> Result<(), ClaudeNativePathError> {
-    ensure_regular_provider_transcript_file(path)
-        .map_err(|error| ClaudeNativePathError::invalid(path, error.to_string()))
-}
-
-fn ensure_unlinked_path(path: &Path) -> Result<(), ClaudeNativePathError> {
-    ensure_provider_path_parents_are_not_symlinks(path)
-        .map_err(|error| ClaudeNativePathError::invalid(path, error.to_string()))
+    source
+        .opened
+        .revalidate()
+        .map_err(|_| ClaudeNativePathError::SourceChanged {
+            path: source.path.clone(),
+        })
 }
 
 fn utf8_file_stem(path: &Path) -> Result<&str, ClaudeNativePathError> {

@@ -1,8 +1,10 @@
 #[cfg(test)]
+use std::fs;
+#[cfg(test)]
 use std::sync::{atomic::AtomicUsize, Arc};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs, io,
+    io,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -113,10 +115,14 @@ pub(crate) fn import_claude_nativepath_projects(
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
     let known = known_routes(store, &options.machine_id, &configured_source_root)?;
-    let discovery = match fs::symlink_metadata(path) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error.into()),
-        Ok(_) => Some(discover_projects(path).map_err(map_native_error)?),
+    let discovery = match discover_projects(path) {
+        Ok(discovery) => Some(discovery),
+        Err(ClaudeNativePathError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            None
+        }
+        Err(error) => return Err(map_native_error(error)),
     };
 
     if options.import_profile.is_replay_only() {

@@ -105,3 +105,18 @@ fn discovery_has_deterministic_directory_and_total_traversal_bounds() {
     let error = discover_projects(&projects).unwrap_err();
     assert!(error.to_string().contains("directory exceeds"));
 }
+
+#[test]
+fn retained_discovery_rejects_same_path_root_replacement() {
+    let temp = tempdir().unwrap();
+    let projects = projects_root(temp.path());
+    let primary = session_path(&projects, "-project", "session");
+    write_lines(&primary, &[json!({})]);
+    let discovery = discover_projects(&projects).unwrap();
+
+    let displaced = temp.path().join("projects-displaced");
+    fs::rename(&projects, &displaced).unwrap();
+    write_lines(&primary, &[json!({})]);
+
+    assert!(discovery.rediscover().is_err());
+}
