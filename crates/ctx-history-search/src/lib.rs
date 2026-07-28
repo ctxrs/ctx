@@ -7,6 +7,7 @@ mod results;
 mod search;
 mod snippets;
 mod source;
+mod sql_compatibility;
 
 pub use packet::{
     SearchPacket, SearchPacketResult, SearchResultScope, SemanticEventHit,
@@ -18,6 +19,7 @@ pub use query::{
 };
 pub use search::{search_packet, search_packet_terms, semantic_event_search_packet};
 pub use snippets::{display_snippet, event_preview_text};
+pub use sql_compatibility::{sql_compatibility_path, SqlCompatibility, SqlCompatibilityResult};
 
 #[cfg(test)]
 mod tests;
