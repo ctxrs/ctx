@@ -64,3 +64,6 @@ use rusqlite::Connection;
 use uuid::Uuid;
 
 use super::reports::SemanticRetrievalDiagnostics;
+
+#[allow(dead_code)] // Activated by the source-backed feed/resolver integration lane.
+mod source_projection;
