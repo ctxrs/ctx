@@ -11,6 +11,7 @@ const DEFAULT_CONTROL_ENV_KEYS: &[&str] = &[
     "CTX_UPGRADE_OFF",
     "CTX_DISABLE_AUTO_UPGRADE",
     "CTX_DAEMON_ENABLED",
+    DAEMON_MODE_ENV,
     "CTX_DAEMON_OFF",
     "CTX_DISABLE_DAEMON",
     "CTX_SEARCH_SEMANTIC",
@@ -74,6 +75,7 @@ interval_hours = 1
 
 [daemon]
 enabled = false
+mode = "source-refresh-only"
 "#,
     )
     .unwrap();
@@ -94,6 +96,7 @@ enabled = false
     assert_eq!(config.upgrade.channel, "beta");
     assert_eq!(config.upgrade.interval, Duration::from_secs(60 * 60));
     assert!(!config.daemon.enabled);
+    assert_eq!(config.daemon.mode, DaemonMode::SourceRefreshOnly);
     assert_eq!(config.search.semantic, None);
 }
 
@@ -142,6 +145,7 @@ fn load_without_config_file_uses_defaults() {
     assert_eq!(config.upgrade.channel, "stable");
     assert_eq!(config.upgrade.interval, Duration::from_secs(24 * 60 * 60));
     assert!(config.daemon.enabled);
+    assert_eq!(config.daemon.mode, DaemonMode::Full);
     assert_eq!(config.search.semantic, None);
     assert!(!config.semantic_search_enabled());
 }
@@ -248,6 +252,51 @@ fn explicit_daemon_opt_out_wins_over_default_and_env_enable() {
     env_guard.set("CTX_DAEMON_ENABLED", "false");
     let environment_opt_out = AppConfig::load(temp.path()).unwrap();
     assert!(!environment_opt_out.daemon.enabled);
+}
+
+#[test]
+fn daemon_mode_has_documented_config_and_environment_contract() {
+    let env_guard = EnvGuard::new(&[DAEMON_MODE_ENV]);
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(
+        temp.path().join(CONFIG_FILE),
+        "[daemon]\nmode = \"source-refresh-only\"\n",
+    )
+    .unwrap();
+
+    assert_eq!(
+        AppConfig::load(temp.path()).unwrap().daemon.mode,
+        DaemonMode::SourceRefreshOnly
+    );
+
+    env_guard.set(DAEMON_MODE_ENV, "full");
+    assert_eq!(
+        AppConfig::load(temp.path()).unwrap().daemon.mode,
+        DaemonMode::Full
+    );
+}
+
+#[test]
+fn daemon_mode_rejects_unknown_config_and_environment_values() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(
+        temp.path().join(CONFIG_FILE),
+        "[daemon]\nmode = \"source-only-ish\"\n",
+    )
+    .unwrap();
+    let config_error = format!("{:#}", AppConfig::load(temp.path()).unwrap_err());
+    assert!(config_error.contains("daemon.mode"), "{config_error}");
+    assert!(
+        config_error.contains("source-refresh-only"),
+        "{config_error}"
+    );
+
+    let env_error = format!(
+        "{:#}",
+        parse_daemon_mode_text(DAEMON_MODE_ENV, "source-only-ish").unwrap_err()
+    );
+    assert!(env_error.contains(DAEMON_MODE_ENV), "{env_error}");
+    assert!(env_error.contains("source-refresh-only"), "{env_error}");
 }
 
 #[test]

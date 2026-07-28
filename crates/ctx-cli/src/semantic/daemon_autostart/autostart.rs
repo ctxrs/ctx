@@ -316,7 +316,7 @@ pub(super) fn configured_daemon_autostart_command(
     trigger: DaemonTriggerCommandArg,
     handoff_token: Option<&str>,
 ) -> Command {
-    daemon_autostart_command(
+    let mut command = daemon_autostart_command(
         exe,
         data_root,
         trigger,
@@ -331,7 +331,15 @@ pub(super) fn configured_daemon_autostart_command(
             3_600,
         ),
         handoff_token,
-    )
+    );
+    // Preserve an explicit process override across detached launch and
+    // replacement handoff. Config-selected mode remains reloadable because
+    // the child reads the same data root instead of freezing it into an env
+    // override.
+    if let Some(mode) = env::var_os(DAEMON_MODE_ENV) {
+        command.env(DAEMON_MODE_ENV, mode);
+    }
+    command
 }
 
 pub(super) fn daemon_restart_allowed(data_root: &Path) -> Result<bool> {

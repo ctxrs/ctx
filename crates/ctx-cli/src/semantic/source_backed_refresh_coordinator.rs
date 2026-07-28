@@ -3,7 +3,7 @@ use std::{
     fmt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::Duration as StdDuration,
+    time::{Duration as StdDuration, Instant},
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -20,12 +20,16 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{
-    compact_json, identity,
+    compact_json,
+    config::{AppConfig, DaemonMode},
+    identity,
     upgrade::data_migration::{self, MigrationPhase},
 };
 
 use super::{
-    paths_status::{daemon_source_backed_refresh_job_path, write_daemon_job_status},
+    paths_status::{
+        daemon_source_backed_refresh_job_path, read_daemon_status, write_daemon_job_status,
+    },
     query_service::{daemon_source_refresh_request, DaemonSourceRefreshServiceUnavailable},
 };
 
@@ -84,6 +88,18 @@ impl std::error::Error for SourceBackedRefreshDaemonUnavailable {}
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct SourceBackedRefreshPublication {
     pub(crate) generation_id: String,
+    pub(crate) scanned_routes: usize,
+    pub(crate) unsupported_routes: usize,
+    pub(crate) certified_source_count: usize,
+    pub(crate) certified_source_bytes: u64,
+    pub(crate) timings: SourceBackedRefreshTimings,
+}
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub(crate) struct SourceBackedRefreshTimings {
+    pub(crate) discovery_us: u64,
+    pub(crate) scan_stage_us: u64,
+    pub(crate) commit_us: u64,
 }
 
 struct SourceBackedRefreshProgressUpdate {
@@ -226,6 +242,14 @@ struct SourceBackedRefreshAttempt {
     published_generation: Option<String>,
     coalesced_requests: u64,
     progress: SourceBackedRefreshProgress,
+    scanned_routes: Option<usize>,
+    unsupported_routes: Option<usize>,
+    certified_source_count: Option<usize>,
+    certified_source_bytes: Option<u64>,
+    timings: Option<SourceBackedRefreshTimings>,
+    daemon_mode: DaemonMode,
+    trigger: &'static str,
+    trigger_provenance: &'static str,
     last_error: Option<String>,
 }
 
@@ -245,6 +269,14 @@ impl SourceBackedRefreshAttempt {
             "generation_changed": self.previous_generation != self.published_generation,
             "coalesced_requests": self.coalesced_requests,
             "progress": self.progress.to_json(),
+            "scanned_routes": self.scanned_routes,
+            "unsupported_routes": self.unsupported_routes,
+            "certified_source_count": self.certified_source_count,
+            "certified_source_bytes": self.certified_source_bytes,
+            "timings_us": self.timings.map(SourceBackedRefreshTimings::to_json),
+            "daemon_mode": self.daemon_mode.as_str(),
+            "trigger": self.trigger,
+            "trigger_provenance": self.trigger_provenance,
             "last_error": self.last_error,
         }))
     }
@@ -269,8 +301,26 @@ impl SourceBackedRefreshAttempt {
             "generation_changed": self.previous_generation != self.published_generation,
             "coalesced_requests": self.coalesced_requests,
             "progress": self.progress.to_json(),
+            "scanned_routes": self.scanned_routes,
+            "unsupported_routes": self.unsupported_routes,
+            "certified_source_count": self.certified_source_count,
+            "certified_source_bytes": self.certified_source_bytes,
+            "timings_us": self.timings.map(SourceBackedRefreshTimings::to_json),
+            "daemon_mode": self.daemon_mode.as_str(),
+            "trigger": self.trigger,
+            "trigger_provenance": self.trigger_provenance,
             "last_error": self.last_error,
         }))
+    }
+}
+
+impl SourceBackedRefreshTimings {
+    fn to_json(self) -> Value {
+        json!({
+            "discovery": self.discovery_us,
+            "scan_stage": self.scan_stage_us,
+            "commit": self.commit_us,
+        })
     }
 }
 
@@ -328,7 +378,10 @@ impl SourceBackedRefreshCoordinator {
                     return Err(anyhow!("invalid daemon source refresh mode `{mode}`"));
                 }
                 let previous_generation = published_generation_id(data_root)?;
-                let response = self.enqueue(previous_generation);
+                let response = self.enqueue_with_metadata(
+                    previous_generation,
+                    source_refresh_runtime_metadata(data_root),
+                );
                 let request_id = response
                     .get("request_id")
                     .and_then(Value::as_str)
@@ -368,7 +421,24 @@ impl SourceBackedRefreshCoordinator {
         )
     }
 
+    #[cfg(test)]
     fn enqueue(&self, observed_generation: Option<String>) -> Value {
+        self.enqueue_with_metadata(observed_generation, SourceRefreshRuntimeMetadata::default())
+    }
+
+    #[cfg(test)]
+    pub(in crate::semantic) fn enqueue_for_test(
+        &self,
+        observed_generation: Option<String>,
+    ) -> Value {
+        self.enqueue(observed_generation)
+    }
+
+    fn enqueue_with_metadata(
+        &self,
+        observed_generation: Option<String>,
+        metadata: SourceRefreshRuntimeMetadata,
+    ) -> Value {
         let mut state = self.lock_state();
         if let Some(active_request_id) = state.active_request_id.clone() {
             if let Some(active) = find_attempt_mut(&mut state, &active_request_id) {
@@ -389,6 +459,14 @@ impl SourceBackedRefreshCoordinator {
             published_generation: observed_generation,
             coalesced_requests: 0,
             progress: SourceBackedRefreshProgress::default(),
+            scanned_routes: None,
+            unsupported_routes: None,
+            certified_source_count: None,
+            certified_source_bytes: None,
+            timings: None,
+            daemon_mode: metadata.daemon_mode,
+            trigger: metadata.trigger,
+            trigger_provenance: metadata.trigger_provenance,
             last_error: None,
         };
         let response = attempt.to_json();
@@ -440,7 +518,7 @@ impl SourceBackedRefreshCoordinator {
         failed: Failed,
     ) -> Option<SourceBackedRefreshRun>
     where
-        Execute: FnOnce(&str, &Self) -> Result<String>,
+        Execute: FnOnce(&str, &Self) -> Result<SourceBackedRefreshPublication>,
         Probe: FnOnce() -> Result<Option<String>>,
         Published: FnOnce(&str) -> Result<()>,
         Failed: FnOnce(&str) -> Result<()>,
@@ -461,15 +539,17 @@ impl SourceBackedRefreshCoordinator {
         let execution = execute(&request_id, self);
         let observed_generation = probe();
         let (verified, observed_for_status) = match (execution, observed_generation) {
-            (Ok(expected), Ok(Some(observed))) if expected == observed => {
-                (Ok(observed.clone()), Some(observed))
+            (Ok(publication), Ok(Some(observed))) if publication.generation_id == observed => {
+                (Ok((observed.clone(), publication)), Some(observed))
             }
-            (Ok(expected), Ok(observed)) => (Err(format!(
-                "source-backed refresh returned generation {expected}, but the verified published generation is {observed:?}"
+            (Ok(publication), Ok(observed)) => (Err(format!(
+                "source-backed refresh returned generation {}, but the verified published generation is {observed:?}",
+                publication.generation_id
             )), observed),
-            (Ok(expected), Err(error)) => (
+            (Ok(publication), Err(error)) => (
                 Err(format!(
-                    "source-backed refresh returned generation {expected}, but publication verification failed: {error:#}"
+                    "source-backed refresh returned generation {}, but publication verification failed: {error:#}",
+                    publication.generation_id
                 )),
                 None,
             ),
@@ -479,8 +559,8 @@ impl SourceBackedRefreshCoordinator {
             )), None),
         };
         let verified = match verified {
-            Ok(observed) => match published(&observed) {
-                Ok(()) => Ok(observed),
+            Ok((observed, publication)) => match published(&observed) {
+                Ok(()) => Ok((observed, publication)),
                 Err(error) => {
                     let error = format!("record source-backed rebuild publication: {error:#}");
                     match failed(&error) {
@@ -508,11 +588,16 @@ impl SourceBackedRefreshCoordinator {
             }
 
             match verified {
-                Ok(observed) => {
+                Ok((observed, publication)) => {
                     attempt.state = SourceBackedRefreshState::Published;
                     attempt.published_generation = Some(observed.clone());
                     attempt.progress.phase = "published".to_owned();
                     attempt.progress.completed_sources = attempt.progress.total_sources;
+                    attempt.scanned_routes = Some(publication.scanned_routes);
+                    attempt.unsupported_routes = Some(publication.unsupported_routes);
+                    attempt.certified_source_count = Some(publication.certified_source_count);
+                    attempt.certified_source_bytes = Some(publication.certified_source_bytes);
+                    attempt.timings = Some(publication.timings);
                 }
                 Err(error) => {
                     attempt.state = SourceBackedRefreshState::Failed;
@@ -537,6 +622,55 @@ impl SourceBackedRefreshCoordinator {
 
     fn lock_state(&self) -> std::sync::MutexGuard<'_, SourceBackedRefreshCoordinatorState> {
         self.state.lock().unwrap_or_else(|error| error.into_inner())
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SourceRefreshRuntimeMetadata {
+    daemon_mode: DaemonMode,
+    trigger: &'static str,
+    trigger_provenance: &'static str,
+}
+
+impl Default for SourceRefreshRuntimeMetadata {
+    fn default() -> Self {
+        Self {
+            daemon_mode: DaemonMode::Full,
+            trigger: "search",
+            trigger_provenance: "manual",
+        }
+    }
+}
+
+fn source_refresh_runtime_metadata(data_root: &Path) -> SourceRefreshRuntimeMetadata {
+    let daemon_status = read_daemon_status(data_root);
+    let daemon_mode = AppConfig::load(data_root)
+        .map(|config| config.daemon.mode)
+        .ok()
+        .or_else(|| {
+            daemon_status
+                .as_ref()
+                .and_then(|status| status.get("config_reload"))
+                .and_then(|reload| reload.get("applied"))
+                .and_then(|applied| applied.get("daemon_mode"))
+                .and_then(Value::as_str)
+                .and_then(DaemonMode::parse)
+        })
+        .unwrap_or_default();
+    let trigger_provenance = if daemon_status
+        .as_ref()
+        .and_then(|status| status.get("start_mode"))
+        .and_then(Value::as_str)
+        == Some("auto")
+    {
+        "autostart"
+    } else {
+        "manual"
+    };
+    SourceRefreshRuntimeMetadata {
+        daemon_mode,
+        trigger: "search",
+        trigger_provenance,
     }
 }
 
@@ -629,7 +763,7 @@ fn execute_source_backed_refresh(
     data_root: &Path,
     request_id: &str,
     coordinator: &SourceBackedRefreshCoordinator,
-) -> Result<String> {
+) -> Result<SourceBackedRefreshPublication> {
     let index_root = source_backed_index_root(data_root);
     let report_progress = |update: SourceBackedRefreshProgressUpdate| {
         record_source_backed_refresh_progress(
@@ -642,14 +776,12 @@ fn execute_source_backed_refresh(
             update.current_source,
         )
     };
-    executor
-        .refresh(SourceBackedRefreshExecution {
-            data_root,
-            index_root: &index_root,
-            request_id,
-            report_progress: &report_progress,
-        })
-        .map(|publication| publication.generation_id)
+    executor.refresh(SourceBackedRefreshExecution {
+        data_root,
+        index_root: &index_root,
+        request_id,
+        report_progress: &report_progress,
+    })
 }
 
 fn execute_capture_owned_refresh(
@@ -669,7 +801,7 @@ where
         &DiscoveryContext,
         &Path,
         &mut dyn FnMut(CaptureSourceBackedRefreshProgress) -> SourceBackedRouteResult<()>,
-    ) -> Result<String>,
+    ) -> Result<SourceBackedRefreshPublication>,
 {
     execution.report_progress("discovering", 0, 0, None)?;
     let mut report_progress = |update: CaptureSourceBackedRefreshProgress| {
@@ -687,8 +819,7 @@ where
                 )
             })
     };
-    let generation_id = refresh_all(discovery, execution.index_root, &mut report_progress)?;
-    Ok(SourceBackedRefreshPublication { generation_id })
+    refresh_all(discovery, execution.index_root, &mut report_progress)
 }
 
 fn refresh_all_provider_sources(
@@ -697,15 +828,52 @@ fn refresh_all_provider_sources(
     report_progress: &mut dyn FnMut(
         CaptureSourceBackedRefreshProgress,
     ) -> SourceBackedRouteResult<()>,
-) -> Result<String> {
+) -> Result<SourceBackedRefreshPublication> {
+    let discovery_started = Instant::now();
     let build = build_automatic_source_backed_registry(discovery);
     let (registry, issues) = build.into_parts();
     reject_blocking_automatic_registry_issues(&issues)?;
+    let discovery_us = nonzero_elapsed_micros(discovery_started);
     let executor = CaptureSourceBackedRefreshExecutor::new(registry, WriterOptions::default());
-    let receipt = executor
-        .refresh(index_root, report_progress)
-        .context("run capture-owned all-provider source-backed refresh")?;
-    Ok(receipt.commit.generation_id)
+    let scan_stage_started = Instant::now();
+    let mut commit_started = None;
+    let receipt = {
+        let mut timed_progress = |progress: CaptureSourceBackedRefreshProgress| {
+            if progress.phase == "verifying" && commit_started.is_none() {
+                commit_started = Some(Instant::now());
+            }
+            report_progress(progress)
+        };
+        executor
+            .refresh(index_root, &mut timed_progress)
+            .context("run capture-owned all-provider source-backed refresh")?
+    };
+    let completed = Instant::now();
+    let commit_started = commit_started.unwrap_or(completed);
+    Ok(SourceBackedRefreshPublication {
+        generation_id: receipt.commit.generation_id,
+        scanned_routes: receipt.scanned_routes,
+        unsupported_routes: receipt.unsupported_routes.len(),
+        certified_source_count: receipt.commit.certified_sources,
+        certified_source_bytes: receipt.commit.certified_source_bytes,
+        timings: SourceBackedRefreshTimings {
+            discovery_us,
+            scan_stage_us: nonzero_duration_micros(
+                commit_started.saturating_duration_since(scan_stage_started),
+            ),
+            commit_us: nonzero_duration_micros(completed.saturating_duration_since(commit_started)),
+        },
+    })
+}
+
+fn nonzero_elapsed_micros(started: Instant) -> u64 {
+    nonzero_duration_micros(started.elapsed())
+}
+
+fn nonzero_duration_micros(duration: StdDuration) -> u64 {
+    u64::try_from(duration.as_micros())
+        .unwrap_or(u64::MAX)
+        .max(1)
 }
 
 fn source_backed_discovery_context() -> Result<DiscoveryContext> {
@@ -1090,9 +1258,22 @@ mod tests {
             }
             execution.report_progress("refreshing", 0, 1, Some("provider-neutral".to_owned()))?;
             execution.report_progress("verifying", 1, 1, None)?;
-            Ok(SourceBackedRefreshPublication {
-                generation_id: self.generation_id.clone(),
-            })
+            Ok(test_publication(self.generation_id.clone()))
+        }
+    }
+
+    fn test_publication(generation_id: impl Into<String>) -> SourceBackedRefreshPublication {
+        SourceBackedRefreshPublication {
+            generation_id: generation_id.into(),
+            scanned_routes: 1,
+            unsupported_routes: 0,
+            certified_source_count: 1,
+            certified_source_bytes: 128,
+            timings: SourceBackedRefreshTimings {
+                discovery_us: 11,
+                scan_stage_us: 22,
+                commit_us: 33,
+            },
         }
     }
 
@@ -1164,7 +1345,7 @@ mod tests {
                     total_sources: 2,
                     current_source: None,
                 })?;
-                Ok("all-provider-generation".to_owned())
+                Ok(test_publication("all-provider-generation"))
             },
         )
         .unwrap();
@@ -1262,7 +1443,7 @@ mod tests {
                         1,
                         Some("source-a".to_owned()),
                     );
-                    Ok("generation-2".to_owned())
+                    Ok(test_publication("generation-2"))
                 },
                 || Ok(Some("generation-2".to_owned())),
                 |_| Ok(()),
@@ -1282,6 +1463,11 @@ mod tests {
             status["coalesced_requests"].as_u64(),
             Some((REQUESTS - 1) as u64)
         );
+        assert_eq!(status["certified_source_count"], 1);
+        assert_eq!(status["certified_source_bytes"], 128);
+        assert_eq!(status["timings_us"]["discovery"], 11);
+        assert_eq!(status["timings_us"]["scan_stage"], 22);
+        assert_eq!(status["timings_us"]["commit"], 33);
         assert!(coordinator
             .run_next_with(
                 |_, _| panic!("duplicate writer launched"),
@@ -1290,6 +1476,52 @@ mod tests {
                 |_| Ok(()),
             )
             .is_none());
+    }
+
+    #[test]
+    fn ipc_job_records_source_refresh_only_search_autostart_provenance() {
+        let _env_lock = crate::config::TEST_LOCAL_USAGE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join(crate::config::CONFIG_FILE),
+            "[daemon]\nmode = \"source-refresh-only\"\n",
+        )
+        .unwrap();
+        crate::semantic::paths_status::write_daemon_status(
+            temp.path(),
+            &json!({
+                "schema_version": 1,
+                "status": "running",
+                "start_mode": "auto",
+                "trigger_command": "search",
+            }),
+        )
+        .unwrap();
+        let coordinator = SourceBackedRefreshCoordinator::new();
+
+        let response = coordinator
+            .handle_ipc_request(
+                temp.path(),
+                &json!({
+                    "op": SOURCE_REFRESH_REQUEST_OP,
+                    "mode": "background",
+                }),
+            )
+            .unwrap()
+            .expect("source refresh response");
+        let job = crate::semantic::paths_status::read_daemon_job_status(
+            &daemon_source_backed_refresh_job_path(temp.path()),
+        )
+        .expect("persisted source refresh job");
+
+        assert_eq!(response["daemon_mode"], "source-refresh-only");
+        assert_eq!(response["trigger"], "search");
+        assert_eq!(response["trigger_provenance"], "autostart");
+        assert_eq!(job["daemon_mode"], "source-refresh-only");
+        assert_eq!(job["trigger"], "search");
+        assert_eq!(job["trigger_provenance"], "autostart");
     }
 
     #[test]
@@ -1341,7 +1573,7 @@ mod tests {
 
         let run = coordinator
             .run_next_with(
-                |_, _| Ok("generation-2".to_owned()),
+                |_, _| Ok(test_publication("generation-2")),
                 || Ok(Some("generation-1".to_owned())),
                 |_| {
                     publication_records.fetch_add(1, Ordering::SeqCst);

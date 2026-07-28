@@ -28,6 +28,13 @@ pub(super) fn run_daemon_once_with_activity(
 ) -> Result<DaemonIteration> {
     let source_refresh_requested =
         source_refresh.is_some_and(SourceBackedRefreshCoordinator::has_pending_request);
+    if runtime.config.daemon.mode.runs_only_source_refresh() {
+        return Ok(
+            run_pending_source_backed_refresh(data_root, source_refresh)?.unwrap_or_else(|| {
+                DaemonIteration::new(false, false, DaemonCycleStateV1::unknown())
+            }),
+        );
+    }
     let query_generation = query_activity.map(|activity| activity.snapshot().1);
     if !source_refresh_requested
         && daemon_foreground_query_preempts(query_activity, query_generation)
@@ -76,24 +83,11 @@ pub(super) fn run_daemon_once_with_activity(
         return Ok(DaemonIteration::new(did_work, failed, state));
     }
     if source_refresh_requested {
-        let Some(run) = source_refresh.and_then(|coordinator| coordinator.run_next(data_root))
-        else {
-            return Ok(DaemonIteration::new(
-                false,
-                false,
-                DaemonCycleStateV1::unknown(),
-            ));
-        };
-        debug_assert_eq!(
-            run.failed,
-            run.job.get("status").and_then(Value::as_str) == Some("failed")
+        return Ok(
+            run_pending_source_backed_refresh(data_root, source_refresh)?.unwrap_or_else(|| {
+                DaemonIteration::new(false, false, DaemonCycleStateV1::unknown())
+            }),
         );
-        write_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root), &run.job)?;
-        return Ok(DaemonIteration::new(
-            run.did_work,
-            run.failed,
-            DaemonCycleStateV1::unknown(),
-        ));
     }
 
     let mut provider_refresh_events = Vec::new();
@@ -165,6 +159,25 @@ pub(super) fn run_daemon_once_with_activity(
     );
     Ok(DaemonIteration::new(did_work, failed, state)
         .with_provider_refresh_events(provider_refresh_events))
+}
+
+fn run_pending_source_backed_refresh(
+    data_root: &Path,
+    source_refresh: Option<&SourceBackedRefreshCoordinator>,
+) -> Result<Option<DaemonIteration>> {
+    let Some(run) = source_refresh.and_then(|coordinator| coordinator.run_next(data_root)) else {
+        return Ok(None);
+    };
+    debug_assert_eq!(
+        run.failed,
+        run.job.get("status").and_then(Value::as_str) == Some("failed")
+    );
+    write_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root), &run.job)?;
+    Ok(Some(DaemonIteration::new(
+        run.did_work,
+        run.failed,
+        DaemonCycleStateV1::unknown(),
+    )))
 }
 
 pub(super) fn daemon_cycle_state(

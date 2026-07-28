@@ -697,10 +697,28 @@ pub(super) fn daemon_report_with_disabled_status(
     semantic_report: &SemanticWorkerReport,
     disabled_overrides_lifecycle: bool,
 ) -> Value {
-    let enabled = daemon_enabled_for_status(data_root);
     let status_value = read_daemon_status(data_root);
+    let current_config = AppConfig::load(data_root).ok();
+    let enabled = current_config
+        .as_ref()
+        .map(|config| config.daemon.enabled)
+        .unwrap_or_else(|| AppConfig::default().daemon.enabled);
+    let daemon_mode = current_config
+        .as_ref()
+        .map(|config| config.daemon.mode)
+        .or_else(|| {
+            status_value
+                .as_ref()
+                .and_then(|status| status.get("config_reload"))
+                .and_then(|reload| reload.get("applied"))
+                .and_then(|applied| applied.get("daemon_mode"))
+                .and_then(Value::as_str)
+                .and_then(crate::config::DaemonMode::parse)
+        })
+        .unwrap_or_default();
     let lock_path = daemon_lock_path(data_root);
     let status_path = daemon_status_path(data_root);
+    let lock_value = read_pid_lock_json(&lock_path);
     let lock_pid = read_pid_lock_file(&lock_path);
     let mut status = status_value
         .as_ref()
@@ -733,27 +751,66 @@ pub(super) fn daemon_report_with_disabled_status(
             .and_then(|value| value.get("semantic_runtime_active"))
             .and_then(Value::as_bool)
             .unwrap_or(false);
+    let start_mode = status_value
+        .as_ref()
+        .and_then(|value| json_string(value, "start_mode"));
+    let trigger_command = status_value
+        .as_ref()
+        .and_then(|value| json_string(value, "trigger_command"));
+    let trigger_provenance = if start_mode.as_deref() == Some("auto") {
+        Some("autostart".to_owned())
+    } else {
+        trigger_command
+            .clone()
+            .or_else(|| Some("manual".to_owned()))
+    };
+    let suppressed_job = |kind: &str| {
+        compact_json(json!({
+            "status": "disabled",
+            "enabled": false,
+            "kind": kind,
+            "reason": "daemon_mode_source_refresh_only",
+            "daemon_mode": daemon_mode.as_str(),
+        }))
+    };
     let jobs = json!({
-        "history_refresh": daemon_history_refresh_job_report(
-            data_root,
-            disabled_overrides_lifecycle
-        ),
+        "history_refresh": if daemon_mode.runs_only_source_refresh() {
+            suppressed_job("history_refresh")
+        } else {
+            daemon_history_refresh_job_report(data_root, disabled_overrides_lifecycle)
+        },
         "source_backed_refresh": daemon_source_backed_refresh_job_report(
             data_root,
             disabled_overrides_lifecycle
         ),
-        "semantic_index": daemon_semantic_job_report_observed(
-            data_root,
-            semantic_report,
-            disabled_overrides_lifecycle,
-            running,
-            semantic_runtime_active,
-            &config_reload,
-        ),
+        "semantic_index": if daemon_mode.runs_only_source_refresh() {
+            suppressed_job("semantic_index")
+        } else {
+            daemon_semantic_job_report_observed(
+                data_root,
+                semantic_report,
+                disabled_overrides_lifecycle,
+                running,
+                semantic_runtime_active,
+                &config_reload,
+            )
+        },
     });
+    let lock_identity = compact_json(json!({
+        "path": lock_path,
+        "active": running,
+        "owner_id": lock_value
+            .as_ref()
+            .and_then(|value| json_string(value, "owner_id")),
+        "pid": lock_pid,
+        "protocol": lock_value
+            .as_ref()
+            .and_then(|value| json_string(value, "lock_protocol")),
+    }));
     compact_json(json!({
         "status": status,
         "enabled": enabled,
+        "mode": daemon_mode.as_str(),
         "running": running,
         "recoverable": stale_lock_overrides_lifecycle || stale_running_status,
         "reason": if stale_lock_overrides_lifecycle {
@@ -766,19 +823,19 @@ pub(super) fn daemon_report_with_disabled_status(
                 .and_then(|value| json_string(value, "reason"))
         },
         "pid": pid,
+        "live_pid": running.then_some(pid).flatten(),
         "started_at_ms": status_value.as_ref().and_then(|value| json_i64(value, "started_at_ms")),
         "heartbeat_at_ms": status_value.as_ref().and_then(|value| json_i64(value, "heartbeat_at_ms")),
         "finished_at_ms": status_value.as_ref().and_then(|value| json_i64(value, "finished_at_ms")),
-        "start_mode": status_value
-            .as_ref()
-            .and_then(|value| json_string(value, "start_mode")),
-        "trigger_command": status_value
-            .as_ref()
-            .and_then(|value| json_string(value, "trigger_command")),
+        "start_mode": start_mode,
+        "trigger_command": trigger_command,
+        "trigger_provenance": trigger_provenance,
         "last_error": status_value.as_ref().and_then(|value| json_string(value, "last_error")),
         "semantic_runtime_active": semantic_runtime_active,
         "config_reload": config_reload,
         "lock_path": lock_path,
+        "lock_identity": lock_identity,
+        "source_refresh_endpoint": daemon_source_refresh_endpoint_report(data_root),
         "status_path": status_path,
         "jobs": jobs,
     }))
@@ -857,7 +914,37 @@ pub(super) fn daemon_source_backed_refresh_job_report(
         "coalesced_requests": job
             .and_then(|value| value.get("coalesced_requests").cloned()),
         "progress": job.and_then(|value| value.get("progress").cloned()),
+        "daemon_mode": job.and_then(|value| json_string(value, "daemon_mode")),
+        "trigger": job.and_then(|value| json_string(value, "trigger")),
+        "trigger_provenance": job
+            .and_then(|value| json_string(value, "trigger_provenance")),
+        "scanned_routes": job.and_then(|value| value.get("scanned_routes").cloned()),
+        "unsupported_routes": job
+            .and_then(|value| value.get("unsupported_routes").cloned()),
+        "certified_source_count": job
+            .and_then(|value| value.get("certified_source_count").cloned()),
+        "certified_source_bytes": job
+            .and_then(|value| value.get("certified_source_bytes").cloned()),
+        "timings_us": job.and_then(|value| value.get("timings_us").cloned()),
         "last_error": job.and_then(|value| json_string(value, "last_error")),
+    }))
+}
+
+fn daemon_source_refresh_endpoint_report(data_root: &Path) -> Value {
+    let identity_path = daemon_root_path(data_root).join("source-refresh-endpoint.json");
+    let identity = fs::read_to_string(&identity_path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+    compact_json(json!({
+        "identity_path": identity_path,
+        "available": identity.is_some(),
+        "transport": identity
+            .as_ref()
+            .and_then(|value| json_string(value, "transport")),
+        "owner_pid": identity.as_ref().and_then(|value| json_u32(value, "pid")),
+        "address": identity.as_ref().and_then(|value| {
+            json_string(value, "path").or_else(|| json_string(value, "pipe_name"))
+        }),
     }))
 }
 
@@ -887,16 +974,24 @@ fn daemon_config_reload_report(
         .get("applied")
         .and_then(|value| value.get("daemon_enabled"))
         .and_then(Value::as_bool);
+    let applied_daemon_mode = persisted
+        .get("applied")
+        .and_then(|value| value.get("daemon_mode"))
+        .and_then(Value::as_str);
     let applied_semantic_enabled = persisted
         .get("applied")
         .and_then(|value| value.get("semantic_enabled"))
         .and_then(Value::as_bool);
     let requested_daemon_enabled = current_config.as_ref().map(|config| config.daemon.enabled);
+    let requested_daemon_mode = current_config
+        .as_ref()
+        .map(|config| config.daemon.mode.as_str());
     let requested_semantic_enabled = current_config
         .as_ref()
         .map(AppConfig::semantic_search_enabled);
     let out_of_sync = running
         && (requested_daemon_enabled != applied_daemon_enabled
+            || requested_daemon_mode != applied_daemon_mode
             || requested_semantic_enabled != applied_semantic_enabled);
     let persisted_status = persisted
         .get("status")
@@ -921,10 +1016,12 @@ fn daemon_config_reload_report(
         "last_applied_at_ms": persisted.get("last_applied_at_ms").cloned(),
         "requested": {
             "daemon_enabled": requested_daemon_enabled,
+            "daemon_mode": requested_daemon_mode,
             "semantic_enabled": requested_semantic_enabled,
         },
         "applied": {
             "daemon_enabled": applied_daemon_enabled,
+            "daemon_mode": applied_daemon_mode,
             "semantic_enabled": applied_semantic_enabled,
         },
         "last_error": persisted.get("last_error").cloned(),
