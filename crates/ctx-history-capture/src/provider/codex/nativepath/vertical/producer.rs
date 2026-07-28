@@ -180,22 +180,8 @@ impl CodexNativeProducerTask {
             );
         }
         if let Some(noop) = exact_metadata_noop(&self.source, self.committed.as_ref()) {
-            if let Some(observation) =
-                observe_ordinary_file_strong_metadata(&self.source.source_path)?
-            {
-                let observed = CodexFileObservation::from_parts(
-                    observation.len(),
-                    observation.modified_at(),
-                    *observation.token(),
-                );
-                if observed != self.source.catalog_observation {
-                    return Err(CaptureError::InvalidPayload(
-                        "Codex catalog observation changed before NativePath admission".to_owned(),
-                    )
-                    .into());
-                }
-                return Ok(self.open_prevalidated_noop(noop));
-            }
+            revalidate_codex_source_observation(&self.source, &self.source.catalog_observation)?;
+            return Ok(self.open_prevalidated_noop(noop));
         }
         let resume_proof = self
             .committed

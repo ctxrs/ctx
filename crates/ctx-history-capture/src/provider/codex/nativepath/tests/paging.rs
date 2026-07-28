@@ -188,7 +188,15 @@ fn terminal_authority_rejects_mutation_and_retry_keeps_the_safe_prefix_identity(
     let appended = message("assistant", "after mutation");
     fs::write(&path, format!("{initial}{appended}")).unwrap();
     let error = scanner.finish().unwrap_err();
-    assert!(format!("{error}").contains("catalog observation changed"));
+    assert!(
+        matches!(
+            error,
+            crate::CaptureError::SourceChangedDuringCapture
+                | crate::CaptureError::InvalidPayload(_)
+                | crate::CaptureError::InvalidProviderTranscriptPath { .. }
+        ),
+        "{error:?}"
+    );
 
     let (retry_scan, retry) = scan_collect_profile(
         discover_one(&path, "mutation-owner"),

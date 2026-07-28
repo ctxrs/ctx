@@ -160,7 +160,7 @@ impl CodexNativeScanner {
             ));
         }
         if let Some(mut replay) = self.replay.take() {
-            let after = observed_file(&replay.source)?;
+            let after = observed_opened_file(&replay.source, &self.opened)?;
             if after != replay.before_observation {
                 return Err(source_changed_during_scan());
             }
@@ -170,7 +170,7 @@ impl CodexNativeScanner {
 
         let full_revision_sha256 = self.full_hasher.finalize().into();
         let complete_prefix_sha256 = self.complete_hasher.finalize().into();
-        let after = observed_file(&self.source)?;
+        let after = observed_opened_file(&self.source, &self.opened)?;
         if after != self.before {
             return Err(source_changed_during_scan());
         }

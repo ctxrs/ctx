@@ -29,6 +29,7 @@ pub use qualification::{
     QualificationInputIdentity, QualificationProducerCounters, QualificationStoreCounters,
 };
 pub(crate) use reader::{
+    open_codex_source_capability, opened_codex_file_observation,
     revalidate_codex_source_observation, CodexNativeFrontier, CodexNativeOwnedPage,
     CodexNativePage, CodexNativeProOutputPage, CodexNativeProfile, CodexNativeScanner,
     CodexSourceScan,

@@ -18,7 +18,7 @@ pub(super) fn replay_no_outputs(
         ));
     }
     let digest = digest_source(
-        &authority.physical_path,
+        authority,
         None,
         options.inventory_observation_token.as_deref(),
     )?;

@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+};
 
 use ctx_history_core::CaptureProvider;
 use ctx_history_store::{EventSearchBulkGuard, ProviderSourceRouteRetirementReason, Store};
@@ -16,8 +19,10 @@ use super::{
     CodexOrderedProducerItem, CodexProducerConfig,
 };
 use crate::{
+    common::io::ProviderSourceRoot,
     provider::codex::catalog::{
-        catalog_codex_session_files, catalog_codex_session_tree, ensure_catalog_source_bound,
+        catalog_codex_session_files, catalog_codex_session_tree_retained,
+        ensure_catalog_source_bound,
     },
     summaries::MAX_RETAINED_PROVIDER_FAILURES,
     CaptureError, CatalogSummary, CodexSessionCatalogOptions, CodexSessionImportOptions,
@@ -51,11 +56,7 @@ pub(crate) fn import_codex_native_session_root_with_catalog(
     options: CodexSessionImportOptions,
 ) -> Result<(CatalogSummary, ProviderImportSummary)> {
     let source_root = options.source_path.as_deref().unwrap_or(root).to_path_buf();
-    if !root.exists() {
-        return retire_missing_root(&source_root, store, &options)
-            .map(|summary| (CatalogSummary::default(), summary));
-    }
-    let catalog = catalog_codex_session_tree(
+    let retained_catalog = match catalog_codex_session_tree_retained(
         root,
         store,
         CodexSessionCatalogOptions {
@@ -65,7 +66,15 @@ pub(crate) fn import_codex_native_session_root_with_catalog(
             max_total_bytes: options.max_total_bytes,
             ..CodexSessionCatalogOptions::default()
         },
-    )?;
+    ) {
+        Ok(catalog) => catalog,
+        Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            return retire_missing_root(&source_root, store, &options)
+                .map(|summary| (CatalogSummary::default(), summary));
+        }
+        Err(error) => return Err(error),
+    };
+    let catalog = retained_catalog.summary;
     let mut summary = ProviderImportSummary {
         skipped_sessions: catalog.skipped_sessions,
         skipped: catalog.skipped_sessions,
@@ -73,7 +82,14 @@ pub(crate) fn import_codex_native_session_root_with_catalog(
         failures: catalog.failures.clone(),
         ..ProviderImportSummary::default()
     };
-    import_cataloged_root(&source_root, store, &options, &mut summary)?;
+    import_cataloged_root(
+        &source_root,
+        store,
+        &options,
+        &mut summary,
+        &retained_catalog.live_paths,
+        Some((&retained_catalog.root, root)),
+    )?;
     Ok((catalog, summary))
 }
 
@@ -99,6 +115,10 @@ pub(crate) fn import_codex_native_session_files_with_catalog(
         .clone()
         .unwrap_or_else(|| common_root(&paths));
     options.source_path = Some(source_root.clone());
+    let live_paths = paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<BTreeSet<_>>();
     let catalog = catalog_codex_session_files(
         paths,
         &source_root,
@@ -118,7 +138,14 @@ pub(crate) fn import_codex_native_session_files_with_catalog(
         failures: catalog.failures.clone(),
         ..ProviderImportSummary::default()
     };
-    import_cataloged_root(&source_root, store, &options, &mut summary)?;
+    import_cataloged_root(
+        &source_root,
+        store,
+        &options,
+        &mut summary,
+        &live_paths,
+        None,
+    )?;
     Ok((catalog, summary))
 }
 
@@ -127,6 +154,8 @@ fn import_cataloged_root(
     store: &mut Store,
     options: &CodexSessionImportOptions,
     summary: &mut ProviderImportSummary,
+    live_paths: &BTreeSet<String>,
+    retained_root: Option<(&ProviderSourceRoot, &Path)>,
 ) -> Result<()> {
     let root = source_root.display().to_string();
     let sessions = store.list_catalog_sessions_for_source_bounded(
@@ -141,24 +170,32 @@ fn import_cataloged_root(
     let mut live_sources = discovery
         .sources
         .iter()
-        .filter(|source| source.source_path.is_file())
+        .filter(|source| live_paths.contains(&source.source_path.display().to_string()))
         .cloned()
         .collect::<Vec<_>>();
+    if let Some((authority, physical_root)) = retained_root {
+        for source in &mut live_sources {
+            let relative_path = source
+                .source_path
+                .strip_prefix(physical_root)
+                .map_err(|_| {
+                    CaptureError::SystemInvariant(
+                        "Codex catalog source escaped its retained root authority",
+                    )
+                })?;
+            source.authority_root = Some(authority.clone());
+            source.authority_relative_path = Some(relative_path.to_path_buf());
+        }
+    }
     parent_first(&mut live_sources);
     let total_files = live_sources.len();
     let total_bytes = live_sources.iter().fold(0_u64, |total, source| {
-        total.saturating_add(
-            source
-                .source_path
-                .metadata()
-                .map(|metadata| metadata.len())
-                .unwrap_or(0),
-        )
+        total.saturating_add(source.catalog_observation.len)
     });
     let missing_sources = discovery
         .sources
         .iter()
-        .filter(|source| !source.source_path.is_file())
+        .filter(|source| !live_paths.contains(&source.source_path.display().to_string()))
         .cloned()
         .collect::<Vec<_>>();
     summary.skipped = summary
@@ -656,11 +693,7 @@ fn flush_pending_codex_root_group(
 }
 
 fn source_bytes(source: &CodexCatalogSource) -> u64 {
-    source
-        .source_path
-        .metadata()
-        .map(|metadata| metadata.len())
-        .unwrap_or(0)
+    source.catalog_observation.len
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -134,6 +134,9 @@ mod tests {
             catalog_native_session_id: Some(format!("session-{index:05}")),
             catalog_parent_native_session_id: parent,
             catalog_root_native_session_id: None,
+            opened: None,
+            authority_root: None,
+            authority_relative_path: None,
         }
     }
 

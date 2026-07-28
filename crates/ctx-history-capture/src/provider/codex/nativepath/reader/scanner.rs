@@ -6,12 +6,23 @@ impl CodexNativeScanner {
         proof: Option<&CodexAppendProof>,
         profile: CodexNativeProfile,
     ) -> Result<Self> {
+        let opened = open_codex_source_capability(&source)?;
+        Self::new_retained(source, opened, proof, profile)
+    }
+
+    pub(crate) fn new_retained(
+        mut source: CodexCatalogSource,
+        opened: Arc<OpenedProviderSourceFile>,
+        proof: Option<&CodexAppendProof>,
+        profile: CodexNativeProfile,
+    ) -> Result<Self> {
+        source.opened = Some(Arc::clone(&opened));
         if let Some(proof) = proof {
             proof.validate_source(&source)?;
         }
 
-        let before = observed_file(&source)?;
-        let file = open_certified_codex_source(&source.source_path, &before)?;
+        let before = observed_opened_file(&source, &opened)?;
+        let file = opened.file().try_clone()?;
         let mut reader = BufReader::new(file);
         let validated = if let Some(proof) = proof {
             if before.len < proof.checkpoint.observation.len {
@@ -71,6 +82,7 @@ impl CodexNativeScanner {
             };
             return Ok(Self {
                 source,
+                opened,
                 before,
                 reader,
                 profile,
@@ -170,6 +182,7 @@ impl CodexNativeScanner {
         };
         Ok(Self {
             source,
+            opened,
             before,
             reader,
             profile,
@@ -409,7 +422,9 @@ impl CodexNativeScanner {
 }
 
 fn open_certified_codex_source(path: &Path, observation: &CodexFileObservation) -> Result<File> {
-    let file = open_ordinary_file_without_following(path)?;
+    let authority_path = std::path::absolute(path)?;
+    let opened = open_provider_source_file(&authority_path)?;
+    let file = opened.file().try_clone()?;
     validate_open_file_metadata(path, &file, observation)?;
     Ok(file)
 }
@@ -422,7 +437,9 @@ pub(super) fn open_certified_codex_source_with_hooks(
     after_open: impl FnOnce(),
 ) -> Result<File> {
     before_open();
-    let file = open_ordinary_file_without_following(path)?;
+    let authority_path = std::path::absolute(path)?;
+    let opened = open_provider_source_file(&authority_path)?;
+    let file = opened.file().try_clone()?;
     after_open();
     validate_open_file_metadata(path, &file, observation)?;
     Ok(file)
