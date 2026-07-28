@@ -272,6 +272,7 @@ fn exact_manifest_and_tantivy_swap_process_death_matrix() {
 fn retry_after_pre_meta_crash_reclaims_tantivy_candidate_files() {
     let shim = required_fault_shim();
     let fixture = RecoveryFixture::new();
+    let pinned_reader = VerifiedIndex::open(&fixture.root).unwrap();
     let case = FaultCase::stop(
         "rename",
         "meta_final",
@@ -281,6 +282,10 @@ fn retry_after_pre_meta_crash_reclaims_tantivy_candidate_files() {
     );
     let mut child = fixture.spawn_stopped_child("commit", Some((&shim, case)));
     fixture.kill_at_marker(&mut child);
+    assert!(
+        !atomic_temporary_files(&fixture.root).is_empty(),
+        "the pre-meta crash did not leave its expected atomic-write witness"
+    );
     assert_generation(
         &fixture.root,
         &fixture.baseline.generation_id,
@@ -297,6 +302,11 @@ fn retry_after_pre_meta_crash_reclaims_tantivy_candidate_files() {
         "candidate",
         "previous",
     );
+    assert!(
+        atomic_temporary_files(&fixture.root).is_empty(),
+        "retry left an abandoned root atomic-write file"
+    );
+    assert_reader_terms(&pinned_reader, "previous", "candidate");
 }
 
 #[test]
@@ -338,8 +348,8 @@ fn injected_enospc_and_write_sync_failures_preserve_previous_generation() {
 }
 
 #[test]
-#[ignore = "known blocker reproduction; requires the Linux fault shim"]
-fn reproduction_crash_orphan_survives_writer_reopen() {
+#[ignore = "requires scripts/source-backed-recovery/run-linux-fault-tests.sh"]
+fn writer_reopen_reclaims_abandoned_atomic_write_files() {
     let shim = required_fault_shim();
     let fixture = RecoveryFixture::new();
     let case = FaultCase::stop("sync", "manifest_temp", "after", None, Visibility::Old);
@@ -355,15 +365,21 @@ fn reproduction_crash_orphan_survives_writer_reopen() {
 
     drop(GenerationWriter::open(&fixture.root, writer_options()).unwrap());
     let after = atomic_temporary_files(&manifest_directory);
-    assert_eq!(
-        after, before,
-        "current writer-open unexpectedly reclaimed crash orphans; invert this reproduction"
+    assert!(
+        after.is_empty(),
+        "writer reopen left abandoned atomic-write files: {after:?}"
+    );
+    assert_generation(
+        &fixture.root,
+        &fixture.baseline.generation_id,
+        "previous",
+        "candidate",
     );
 }
 
 #[test]
-#[ignore = "known blocker reproduction; requires the Linux fault shim"]
-fn reproduction_reused_manifest_skips_directory_durability_fence() {
+#[ignore = "requires scripts/source-backed-recovery/run-linux-fault-tests.sh"]
+fn retry_resynchronizes_a_reused_manifest_before_meta_publication() {
     let shim = required_fault_shim();
     let fixture = RecoveryFixture::new();
     let first_crash = FaultCase::stop("rename", "manifest_final", "after", None, Visibility::Old);
@@ -376,15 +392,23 @@ fn reproduction_reused_manifest_skips_directory_durability_fence() {
         "candidate",
     );
 
-    let retry_fence = FaultCase::stop("sync", "manifest_dir", "after", None, Visibility::New);
+    let retry_fence = FaultCase::stop("sync", "manifest_dir", "after", None, Visibility::Old);
     let mut retry = fixture.spawn_stopped_child("commit", Some((&shim, retry_fence)));
-    let status = wait_for_exit_without_marker(&mut retry, &fixture.marker);
-    assert!(
-        status.success(),
-        "retry failed before demonstrating the missing manifest fence: {status}"
+    fixture.kill_at_marker(&mut retry);
+    assert_generation(
+        &fixture.root,
+        &fixture.baseline.generation_id,
+        "previous",
+        "candidate",
     );
-    let generation_id = fs::read_to_string(&fixture.result).unwrap();
-    assert_generation(&fixture.root, generation_id.trim(), "candidate", "previous");
+
+    let receipt = staged_replacement(&fixture.root).commit(|_| true).unwrap();
+    assert_generation(
+        &fixture.root,
+        &receipt.generation_id,
+        "candidate",
+        "previous",
+    );
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -664,6 +688,8 @@ fn document(source: &SourceKey, body: &str) -> LexicalDocument {
     LexicalDocument {
         event_id,
         session_id,
+        parent_session_id: None,
+        root_session_id: session_id,
         source: source.clone(),
         locator: SourceRecordLocator::new(
             source.clone(),
@@ -680,6 +706,10 @@ fn document(source: &SourceKey, body: &str) -> LexicalDocument {
         )
         .unwrap(),
         provider_session_id: Some("session".to_owned()),
+        branch: Some("main".to_owned()),
+        source_path: Some("/history/source-backed-recovery.jsonl".to_owned()),
+        agent_type: "primary".to_owned(),
+        is_primary: true,
         event_sequence: 1,
         occurred_at_unix_ms: Some(1_700_000_000_001),
         event_type: "message".to_owned(),
@@ -756,29 +786,6 @@ fn wait_for_marker(child: &mut Child, marker: &Path) {
         assert!(
             Instant::now() < deadline,
             "child did not reach {} within {CHILD_TIMEOUT:?}",
-            marker.display()
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
-}
-
-fn wait_for_exit_without_marker(child: &mut Child, marker: &Path) -> std::process::ExitStatus {
-    let deadline = Instant::now() + CHILD_TIMEOUT;
-    loop {
-        if marker.is_file() {
-            child.kill().unwrap();
-            let _ = child.wait();
-            panic!(
-                "retry synchronized the reused manifest directory; \
-                 invert this blocker reproduction"
-            );
-        }
-        if let Some(status) = child.try_wait().unwrap() {
-            return status;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "retry neither exited nor reached {} within {CHILD_TIMEOUT:?}",
             marker.display()
         );
         thread::sleep(Duration::from_millis(10));

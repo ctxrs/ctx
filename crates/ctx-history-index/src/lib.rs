@@ -38,7 +38,7 @@ use tantivy::{
 use thiserror::Error;
 use uuid::Uuid;
 
-use durable_directory::DurableMmapDirectory;
+use durable_directory::{reclaim_abandoned_atomic_writes, DurableMmapDirectory};
 
 pub const GENERATION_MANIFEST_VERSION: u32 = 1;
 pub const LEXICAL_SCHEMA_VERSION: u32 = 4;
@@ -527,6 +527,13 @@ impl GenerationWriter {
         } else {
             return Err(IndexError::UnboundIndexState);
         };
+        // No other writer can create candidates while this writer owns
+        // Tantivy's lock. Reclaim interrupted ctx atomic writes by their exact
+        // reserved names, then let Tantivy remove only managed files absent
+        // from its active/pinned segment inventory.
+        reclaim_abandoned_atomic_writes(&root)?;
+        reclaim_abandoned_atomic_writes(&root.join(MANIFEST_DIRECTORY))?;
+        let _ = writer.garbage_collect_files().wait()?;
         let mut source_identities = HashMap::new();
         if let Some(manifest) = &base_manifest {
             for source in &manifest.sources {
@@ -1251,6 +1258,9 @@ fn write_manifest(root: &Path, generation_id: &str, manifest: &GenerationManifes
     if path.is_file() {
         let existing = fs::read(&path)?;
         if existing == bytes {
+            // A prior process may have died after publishing this immutable
+            // filename but before synchronizing its directory entry.
+            sync_directory(&directory)?;
             return Ok(());
         }
         let quarantine = directory.join(format!(
