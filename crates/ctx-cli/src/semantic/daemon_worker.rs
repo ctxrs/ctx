@@ -6,10 +6,12 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
-use ctx_history_capture::{CodexLocatorResolverV0, CodexSourceBackedErrorV0};
+use ctx_history_capture::{
+    build_automatic_source_backed_registry, DiscoveryContext, SourceBackedResolverRegistry,
+};
 use ctx_history_core::{
-    database_path, utc_now, AgentType, CaptureProvider, EventHydrationRequest, EventRole,
-    EventType, HydrationFailure, HydrationFailureKind,
+    database_path, utc_now, AgentType, CaptureProvider, ContentSourceResolver,
+    EventHydrationRequest, EventRole, EventType, HydrationFailure, HydrationFailureKind,
 };
 use ctx_history_index::{EventRecord, VerifiedIndex};
 use ctx_history_store::{CanonicalSemanticProjectionVersion, EventEmbeddingDocument, Store};
@@ -53,9 +55,7 @@ use super::{
         SEMANTIC_SOURCE_MAX_CHARS, SEMANTIC_WORKER_BATCH_DEFAULT, SEMANTIC_WORKER_BATCH_MAX,
         SEMANTIC_WORKER_MAX_SECONDS_CAP, SEMANTIC_WORKER_MAX_SECONDS_DEFAULT,
     },
-    source_backed_refresh_coordinator::{
-        discovered_codex_source_roots, pin_published_generation, PinnedSourceBackedGeneration,
-    },
+    source_backed_refresh_coordinator::{pin_published_generation, PinnedSourceBackedGeneration},
     vector_store::{
         SemanticChunkDocument, SemanticSidecarStats, SemanticVectorStore,
         SourceBackedSemanticEmbedder, SourceBackedSemanticOutcome, SourceBackedSemanticResolver,
@@ -511,11 +511,14 @@ fn reconcile_source_backed_semantic_page(
     deadline: Option<Instant>,
 ) -> Result<(SourceBackedSemanticOutcome, usize)> {
     let index = generation.into_index();
-    let provider = CodexLocatorResolverV0::discover(discovered_codex_source_roots()?)
-        .context("discover source-backed Codex semantic resolver")?;
-    let mut resolver = CodexSourceSemanticResolver {
+    let home = crate::provider_sources::home_dir()
+        .ok_or_else(|| anyhow!("resolve home directory for source-backed semantic hydration"))?;
+    let discovery = DiscoveryContext::from_process(home);
+    let source_registry = build_automatic_source_backed_registry(&discovery).registry;
+    let sources: SourceBackedResolverRegistry = source_registry.resolver_registry();
+    let mut resolver = ProviderSourceSemanticResolver {
         index: &index,
-        provider,
+        sources,
     };
     let mut embedder = RuntimeSourceSemanticEmbedder {
         runtime,
@@ -562,32 +565,49 @@ impl SourceBackedSemanticEmbedder for RuntimeSourceSemanticEmbedder<'_> {
     }
 }
 
-struct CodexSourceSemanticResolver<'a> {
-    index: &'a VerifiedIndex,
-    provider: CodexLocatorResolverV0,
+trait SourceSemanticSessionReader {
+    fn events_for_semantic_session(
+        &self,
+        anchor: &EventRecord,
+    ) -> std::result::Result<Vec<EventRecord>, HydrationFailure>;
 }
 
-impl SourceBackedSemanticResolver for CodexSourceSemanticResolver<'_> {
+impl SourceSemanticSessionReader for VerifiedIndex {
+    fn events_for_semantic_session(
+        &self,
+        anchor: &EventRecord,
+    ) -> std::result::Result<Vec<EventRecord>, HydrationFailure> {
+        self.events_for_session(anchor.session_id.as_uuid())
+            .map_err(|error| {
+                source_hydration_failure(
+                    HydrationFailureKind::TemporarilyUnavailable,
+                    format!(
+                        "read source-backed session {} for semantic lite turn: {error}",
+                        anchor.session_id
+                    ),
+                )
+            })
+    }
+}
+
+struct ProviderSourceSemanticResolver<'a, Index, Sources> {
+    index: &'a Index,
+    sources: Sources,
+}
+
+impl<Index, Sources> SourceBackedSemanticResolver
+    for ProviderSourceSemanticResolver<'_, Index, Sources>
+where
+    Index: SourceSemanticSessionReader,
+    Sources: ContentSourceResolver,
+{
     fn resolve_document(
         &mut self,
         event: &EventRecord,
         request: &EventHydrationRequest,
     ) -> std::result::Result<EventEmbeddingDocument, HydrationFailure> {
-        if event.provider != CaptureProvider::Codex.as_str()
-            || event.source_format != "codex_session_jsonl"
-            || request.event_id() != event.event_id
-            || request.locator() != &event.locator
-        {
-            return Err(source_hydration_failure(
-                HydrationFailureKind::InvalidLocator,
-                format!(
-                    "unsupported or mismatched semantic locator for {}",
-                    event.event_id
-                ),
-            ));
-        }
-
-        let user_text = self.hydrate_text(request)?;
+        validate_source_semantic_request(event, request)?;
+        let user_text = hydrate_source_semantic_text(&self.sources, event, request)?;
         let assistant = self.paired_assistant(event)?;
         let mut sections = vec![format!("user:\n{}", user_text.trim())];
         let mut occurred_at_ms = event.occurred_at_unix_ms.unwrap_or_default();
@@ -616,7 +636,7 @@ impl SourceBackedSemanticResolver for CodexSourceSemanticResolver<'_> {
                 .map(parse_source_event_role)
                 .transpose()?,
             rank_bucket: "lite_turn".to_owned(),
-            provider: Some(CaptureProvider::Codex),
+            provider: Some(parse_source_provider(&event.provider)?),
             source_format: Some(event.source_format.clone()),
             agent_type: Some(parse_source_agent_type(&event.agent_type)?),
             session_is_primary: Some(event.is_primary),
@@ -630,42 +650,16 @@ impl SourceBackedSemanticResolver for CodexSourceSemanticResolver<'_> {
     }
 }
 
-impl CodexSourceSemanticResolver<'_> {
-    fn hydrate_text(
-        &self,
-        request: &EventHydrationRequest,
-    ) -> std::result::Result<String, HydrationFailure> {
-        let hydrated = self
-            .provider
-            .hydrate(request.locator())
-            .map_err(codex_hydration_failure)?;
-        hydrated.decoded_display_text.ok_or_else(|| {
-            source_hydration_failure(
-                HydrationFailureKind::MissingRecord,
-                format!(
-                    "provider resolver returned no display text for {}",
-                    request.event_id()
-                ),
-            )
-        })
-    }
-
+impl<Index, Sources> ProviderSourceSemanticResolver<'_, Index, Sources>
+where
+    Index: SourceSemanticSessionReader,
+    Sources: ContentSourceResolver,
+{
     fn paired_assistant(
         &self,
         anchor: &EventRecord,
     ) -> std::result::Result<Option<(String, i64)>, HydrationFailure> {
-        let events = self
-            .index
-            .events_for_session(anchor.session_id.as_uuid())
-            .map_err(|error| {
-                source_hydration_failure(
-                    HydrationFailureKind::TemporarilyUnavailable,
-                    format!(
-                        "read source-backed session {} for semantic lite turn: {error}",
-                        anchor.session_id
-                    ),
-                )
-            })?;
+        let events = self.index.events_for_semantic_session(anchor)?;
         let anchor_index = events
             .iter()
             .position(|event| event.event_id == anchor.event_id)
@@ -703,26 +697,69 @@ impl CodexSourceSemanticResolver<'_> {
                 )
             })?;
         Ok(Some((
-            self.hydrate_text(&request)?,
+            hydrate_source_semantic_text(&self.sources, assistant, &request)?,
             assistant.occurred_at_unix_ms.unwrap_or_default(),
         )))
     }
 }
 
-fn codex_hydration_failure(error: CodexSourceBackedErrorV0) -> HydrationFailure {
-    let kind = match &error {
-        CodexSourceBackedErrorV0::InvalidCodexLocator
-        | CodexSourceBackedErrorV0::LocatorRangeTooLarge
-        | CodexSourceBackedErrorV0::Resolver(_) => HydrationFailureKind::InvalidLocator,
-        CodexSourceBackedErrorV0::LocatorSourceNotFound(_)
-        | CodexSourceBackedErrorV0::LocatorRangeMissing => HydrationFailureKind::MissingRecord,
-        CodexSourceBackedErrorV0::LocatorDigestMismatch => {
-            HydrationFailureKind::StaleRecordEvidence
-        }
-        CodexSourceBackedErrorV0::Io(_) => HydrationFailureKind::TemporarilyUnavailable,
-        _ => HydrationFailureKind::TemporarilyUnavailable,
-    };
-    source_hydration_failure(kind, error.to_string())
+fn validate_source_semantic_request(
+    event: &EventRecord,
+    request: &EventHydrationRequest,
+) -> std::result::Result<(), HydrationFailure> {
+    let source = request.locator().source();
+    if request.event_id() != event.event_id
+        || request.locator() != &event.locator
+        || source.provider() != event.provider.as_str()
+        || source.source_format() != event.source_format.as_str()
+    {
+        return Err(source_hydration_failure(
+            HydrationFailureKind::InvalidLocator,
+            format!(
+                "mismatched source-backed semantic identity or locator for {}",
+                event.event_id
+            ),
+        ));
+    }
+    request.locator().validate_contract().map_err(|error| {
+        source_hydration_failure(
+            HydrationFailureKind::InvalidLocator,
+            format!(
+                "invalid typed source-backed semantic locator for {}: {error}",
+                event.event_id
+            ),
+        )
+    })
+}
+
+fn hydrate_source_semantic_text(
+    sources: &impl ContentSourceResolver,
+    event: &EventRecord,
+    request: &EventHydrationRequest,
+) -> std::result::Result<String, HydrationFailure> {
+    validate_source_semantic_request(event, request)?;
+    let hydrated = sources.hydrate_event(request)?;
+    if hydrated.event_id != request.event_id() {
+        return Err(source_hydration_failure(
+            HydrationFailureKind::InvalidLocator,
+            format!(
+                "provider resolver returned mismatched identity {} for {}",
+                hydrated.event_id,
+                request.event_id()
+            ),
+        ));
+    }
+    let text = String::from_utf8_lossy(&hydrated.provider_bytes).into_owned();
+    if text.trim().is_empty() {
+        return Err(source_hydration_failure(
+            HydrationFailureKind::MissingRecord,
+            format!(
+                "provider resolver returned no source content for {}",
+                request.event_id()
+            ),
+        ));
+    }
+    Ok(text)
 }
 
 fn source_hydration_failure(
@@ -749,6 +786,15 @@ fn parse_source_event_role(value: &str) -> std::result::Result<EventRole, Hydrat
         source_hydration_failure(
             HydrationFailureKind::InvalidLocator,
             format!("invalid source-backed event role {value:?}: {error}"),
+        )
+    })
+}
+
+fn parse_source_provider(value: &str) -> std::result::Result<CaptureProvider, HydrationFailure> {
+    value.parse().map_err(|error| {
+        source_hydration_failure(
+            HydrationFailureKind::InvalidLocator,
+            format!("invalid source-backed provider {value:?}: {error}"),
         )
     })
 }
@@ -1529,3 +1575,7 @@ pub(super) fn queue_recent_semantic_work(
         .collect::<Vec<_>>();
     vector_store.enqueue_dirty_documents(&docs, reason)
 }
+
+#[cfg(test)]
+#[path = "daemon_worker_tests.rs"]
+mod source_semantic_tests;
