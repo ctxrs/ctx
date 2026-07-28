@@ -31,10 +31,7 @@ pub(crate) fn import_custom_history_nativepath(
         }
         Err(error) => return Err(error),
     };
-    let bytes = fs::read(&stamp.canonical_path)?;
-    if !stamp.revalidate()? {
-        return Err(CaptureError::SourceChangedDuringCapture);
-    }
+    let bytes = stamp.read_all()?;
     let source_revision = source_revision(
         &bytes,
         Some(&stamp),
@@ -87,10 +84,7 @@ pub(crate) fn import_custom_history_nativepath_reader(
 
 pub(crate) fn validate_custom_history_nativepath(path: &Path) -> Result<ProviderImportSummary> {
     let stamp = CustomFileStamp::observe(path)?;
-    let bytes = fs::read(&stamp.canonical_path)?;
-    if !stamp.revalidate()? {
-        return Err(CaptureError::SourceChangedDuringCapture);
-    }
+    let bytes = stamp.read_all()?;
     let revision = source_revision(&bytes, Some(&stamp), None);
     Ok(parse_custom_history(Cursor::new(bytes), revision)?.summary)
 }
