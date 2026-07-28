@@ -154,21 +154,24 @@ pub(super) fn import_goose_nativepath(
         );
     }
 
-    let canonical_path = std::fs::canonicalize(path)?;
+    let authority_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
     let inventory_token = options
         .inventory_observation_token
         .clone()
         .filter(|token| !token.trim().is_empty())
-        .unwrap_or_else(|| goose_inventory_token(&canonical_path));
-    let selection = GooseNativeSourceSelection::exact(&canonical_path)
+        .unwrap_or_else(|| goose_inventory_token(&authority_path));
+    let selection = GooseNativeSourceSelection::exact(&authority_path)
         .with_inventory_observation_token(Some(inventory_token));
     let reader = GooseNativePathReader::acquire(selection)?;
     let source_revision = goose_source_revision(&reader);
-    let profile = if sink.is_some() {
-        GooseNativeProfile::CoreAndPro
-    } else {
-        GooseNativeProfile::CoreOnly
-    };
+    // Core publication and Pro replay use independent, fully finished source
+    // snapshots. The Core scanner never keeps a query-capable SQLite guard
+    // alive merely because a Pro sink is configured.
+    let profile = GooseNativeProfile::CoreOnly;
 
     if options.import_profile.is_replay_only() {
         replay_outputs_or_mark_behind(

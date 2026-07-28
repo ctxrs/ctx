@@ -623,23 +623,10 @@ fn goose_nativepath_snapshot_is_immutable_and_live_mutation_invalidates_its_fenc
     drop(writer);
     assert!(!reader.revalidate_live().unwrap());
 
-    let mut scanner = reader.scanner(GooseNativePageLimits::default()).unwrap();
-    let mut pages = Vec::new();
-    while let Some(page) = scanner.next_page().unwrap() {
-        pages.push(page);
-    }
-    let provisional = scanner.summary();
-    assert!(!provisional.complete);
     assert!(matches!(
-        scanner.finish_core(),
+        reader.scanner(GooseNativePageLimits::default()),
         Err(crate::CaptureError::SourceChangedDuringCapture)
     ));
-    let frozen_text = pages
-        .iter()
-        .flat_map(|page| page.events.iter())
-        .map(|event| event.searchable_text.as_str())
-        .collect::<Vec<_>>();
-    assert_eq!(frozen_text, ["before-live-mutation"]);
 
     let refreshed = native_reader(&path);
     let (pages, _) = collect_scan(&refreshed, GooseNativePageLimits::default());
@@ -652,10 +639,44 @@ fn goose_nativepath_snapshot_is_immutable_and_live_mutation_invalidates_its_fenc
 }
 
 #[test]
-fn goose_nativepath_reads_committed_wal_without_touching_provider_files_or_creating_shm() {
+fn goose_nativepath_revalidates_each_query_guard_before_returning_a_page() {
     let temp = crate::test_support_paths::tempdir().unwrap();
-    let build_path = temp.path().join("build.db");
-    let writer = Connection::open(&build_path).unwrap();
+    let path = temp.path().join("sessions.db");
+    let conn = create_native_database(&path);
+    insert_session(&conn, "page-fence");
+    insert_message(&conn, 1, "page-fence", "first generation");
+    drop(conn);
+
+    let reader = native_reader(&path);
+    let limits = GooseNativePageLimits::new(1, GOOSE_NATIVE_DEFAULT_PAGE_BYTES).unwrap();
+    let mut scanner = reader.scanner(limits).unwrap();
+    let first = scanner.next_page().unwrap().unwrap();
+    assert_eq!(first.sessions[0].native_identity, "page-fence");
+
+    let writer = Connection::open(&path).unwrap();
+    writer
+        .execute(
+            "update messages
+             set content_json = '[{\"type\":\"text\",\"text\":\"changed between pages\"}]'
+             where id = 1",
+            [],
+        )
+        .unwrap();
+    drop(writer);
+
+    assert!(matches!(
+        scanner.next_page(),
+        Err(crate::CaptureError::SourceChangedDuringCapture)
+    ));
+}
+
+#[test]
+fn goose_nativepath_active_wal_fails_closed_without_touching_provider_files() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let source_dir = temp.path().join("provider");
+    fs::create_dir(&source_dir).unwrap();
+    let source_path = source_dir.join("sessions.db");
+    let writer = Connection::open(&source_path).unwrap();
     writer.pragma_update(None, "journal_mode", "WAL").unwrap();
     writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
     create_goose_tables(&writer);
@@ -665,6 +686,7 @@ fn goose_nativepath_reads_committed_wal_without_touching_provider_files_or_creat
     writer
         .query_row("pragma wal_checkpoint(truncate)", [], |_row| Ok(()))
         .unwrap();
+    let checkpointed_database = fs::read(&source_path).unwrap();
     writer
         .execute(
             "update messages
@@ -674,33 +696,63 @@ fn goose_nativepath_reads_committed_wal_without_touching_provider_files_or_creat
         )
         .unwrap();
 
-    let source_dir = temp.path().join("provider");
-    fs::create_dir(&source_dir).unwrap();
-    let source_path = source_dir.join("sessions.db");
-    let build_wal = Path::new(&format!("{}-wal", build_path.display())).to_path_buf();
     let source_wal = Path::new(&format!("{}-wal", source_path.display())).to_path_buf();
-    fs::copy(&build_path, &source_path).unwrap();
-    fs::copy(&build_wal, &source_wal).unwrap();
     let source_shm = Path::new(&format!("{}-shm", source_path.display())).to_path_buf();
-    assert!(!source_shm.exists());
+    assert_eq!(fs::read(&source_path).unwrap(), checkpointed_database);
+    assert!(source_wal.metadata().unwrap().len() > 32);
     let database_before = fs::read(&source_path).unwrap();
     let wal_before = fs::read(&source_wal).unwrap();
+    let shm_before = source_shm.exists().then(|| fs::read(&source_shm).unwrap());
 
-    let reader = native_reader(&source_path);
-    assert_ne!(reader.snapshot_path(), source_path);
-    let (pages, summary) = collect_scan(&reader, GooseNativePageLimits::default());
-    assert!(summary.complete);
-    let text = pages
-        .iter()
-        .flat_map(|page| page.events.iter())
-        .map(|event| event.searchable_text.as_str())
-        .collect::<Vec<_>>();
-    assert_eq!(text, ["committed-wal-value"]);
-    assert!(reader.revalidate_live().unwrap());
+    let error =
+        match GooseNativePathReader::acquire(GooseNativeSourceSelection::exact(&source_path)) {
+            Ok(_) => panic!("stock-VFS Goose unexpectedly admitted an active WAL family"),
+            Err(error) => error,
+        };
+    assert!(error
+        .to_string()
+        .contains("SQLite WAL identity is unsupported"));
     assert_eq!(fs::read(&source_path).unwrap(), database_before);
     assert_eq!(fs::read(&source_wal).unwrap(), wal_before);
-    assert!(!source_shm.exists());
+    assert_eq!(
+        source_shm.exists().then(|| fs::read(&source_shm).unwrap()),
+        shm_before
+    );
     drop(writer);
+}
+
+#[test]
+fn goose_nativepath_leaf_swap_is_rejected_before_provider_rows_are_exposed() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let path = temp.path().join("sessions.db");
+    let original = create_native_database(&path);
+    insert_session(&original, "original-session");
+    insert_message(
+        &original,
+        1,
+        "original-session",
+        "opened original generation",
+    );
+    drop(original);
+
+    let reader = native_reader(&path);
+    assert_eq!(reader.snapshot_path(), path);
+    let displaced = temp.path().join("displaced.db");
+    fs::rename(&path, &displaced).unwrap();
+    let replacement = create_native_database(&path);
+    insert_session(&replacement, "replacement-session");
+    insert_message(
+        &replacement,
+        1,
+        "replacement-session",
+        "replacement must not be observed",
+    );
+    drop(replacement);
+
+    assert!(matches!(
+        reader.scanner(GooseNativePageLimits::default()),
+        Err(crate::CaptureError::SourceChangedDuringCapture)
+    ));
 }
 
 #[test]
@@ -910,6 +962,7 @@ fn goose_nativepath_core_and_pro_pages_retry_idempotently_from_expected_frontier
         .unwrap();
     let _session_page = first.next_page().unwrap().unwrap();
     let core_page = first.next_page().unwrap().unwrap();
+    drop(first);
     let mut core_retry = reader
         .scanner_with_profile(GooseNativeProfile::CoreAndPro, limits)
         .unwrap();
@@ -919,10 +972,15 @@ fn goose_nativepath_core_and_pro_pages_retry_idempotently_from_expected_frontier
     let repeated_core = core_retry.next_page().unwrap().unwrap();
     assert_eq!(repeated_core.identity, core_page.identity);
     assert_eq!(repeated_core.next_frontier, core_page.next_frontier);
+    drop(core_retry);
 
+    let mut first = reader
+        .scanner_with_profile(GooseNativeProfile::CoreAndPro, limits)
+        .unwrap();
     while first.next_page().unwrap().is_some() {}
     let _ = first.finish_core().unwrap();
     let pro_page = first.next_pro_output_page().unwrap().unwrap();
+    drop(first);
     let mut pro_retry = reader
         .scanner_with_profile(GooseNativeProfile::CoreAndPro, limits)
         .unwrap();
@@ -932,6 +990,7 @@ fn goose_nativepath_core_and_pro_pages_retry_idempotently_from_expected_frontier
     let repeated_pro = pro_retry.next_pro_output_page().unwrap().unwrap();
     assert_eq!(repeated_pro.identity, pro_page.identity);
     assert_eq!(repeated_pro.next_frontier, pro_page.next_frontier);
+    drop(pro_retry);
 
     let mut pro_resume = reader
         .scanner_with_profile(GooseNativeProfile::CoreAndPro, limits)
