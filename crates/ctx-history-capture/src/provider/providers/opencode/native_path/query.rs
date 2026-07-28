@@ -38,6 +38,9 @@ pub(super) use fetch::{
 };
 use prefix::compute_ordered_prefix_evidence;
 use sql::*;
+pub(super) use sql::{
+    decode_order, event_digest, native_record_identity, source_backed_event_source_sql,
+};
 use stage::{stage_events, stage_sessions};
 
 const JSON_HINT_BYTES: usize = 256;
