@@ -7,6 +7,7 @@
 
 use std::{
     collections::BTreeSet,
+    fs::File,
     path::{Path, PathBuf},
 };
 
@@ -26,15 +27,14 @@ use crate::{
     provider::{
         native_ingestion::{NATIVE_INGESTION_PAGE_MAX_BYTES, NATIVE_INGESTION_PAGE_MAX_UNITS},
         normalization::provider_required_timestamp_seconds,
-        sqlite::{
-            open_provider_sqlite_readonly, sqlite_schema_fingerprint, ProviderSqliteSourceSnapshot,
-        },
+        sqlite::{sqlite_schema_fingerprint, ProviderSqliteSourceSnapshot},
     },
     provider_sources::{
-        discover_provider_sources_for_provider_with_context, DiscoveryContext, DiscoveryIssue,
-        ProviderSource, ProviderSourceStatus,
+        discover_provider_sources_for_provider_with_context, open_ordinary_file_without_following,
+        open_sqlite_source_snapshot, DiscoveryContext, DiscoveryIssue, ProviderSource,
+        ProviderSourceStatus, SqliteSourceAccessError, SqliteSourceReadSnapshot,
     },
-    CaptureError, HERMES_SQLITE_SOURCE_FORMAT,
+    CaptureError, HERMES_SQLITE_SOURCE_FORMAT, MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
 
 use super::{
@@ -66,6 +66,8 @@ const HERMES_REJECTION_DIGEST_DOMAIN: &[u8] = b"ctx-hermes-source-backed-rejecti
 pub(crate) enum HermesSourceBackedError {
     #[error(transparent)]
     Capture(#[from] CaptureError),
+    #[error(transparent)]
+    SqliteSource(#[from] SqliteSourceAccessError),
     #[error(transparent)]
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]
@@ -274,8 +276,8 @@ pub(crate) fn scan_hermes_source_backed(
         .ok_or_else(|| HermesSourceBackedError::InvalidProfilePath(candidate.path.clone()))?
         .to_owned();
     let snapshot = hermes_snapshot(&candidate.path)?;
-    let conn = open_provider_sqlite_readonly(&candidate.path)?;
-    conn.execute_batch("BEGIN").map_err(CaptureError::from)?;
+    let (root_bound_database, sqlite_snapshot) = open_root_authorized_snapshot(&candidate.path)?;
+    let conn = sqlite_snapshot.connection()?;
     let sqlite_user_version = conn
         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
         .map_err(CaptureError::from)?;
@@ -289,7 +291,8 @@ pub(crate) fn scan_hermes_source_backed(
         revision,
     )?;
 
-    let mut reader = HermesRowReader::new(&conn, &schema)?;
+    let mut reader = HermesRowReader::new(conn, &schema)?;
+    let mut pending_pages = Vec::new();
     let operation: HermesSourceBackedResult<(ScannedSourceCounts, [u8; 32])> = (|| {
         let mut frontier = super::sqlite::HermesFrontier::initial();
         let mut digest = Sha256::new();
@@ -349,47 +352,52 @@ pub(crate) fn scan_hermes_source_backed(
                     || page_owned_bytes.saturating_add(owned_bytes)
                         > NATIVE_INGESTION_PAGE_MAX_BYTES)
             {
-                emit(HermesSourceBackedPage {
+                pending_pages.push(HermesSourceBackedPage {
                     records: std::mem::take(&mut page_records),
                     owned_bytes: page_owned_bytes,
-                })?;
+                });
                 page_owned_bytes = 0;
             }
             page_owned_bytes = page_owned_bytes.saturating_add(owned_bytes);
             page_records.push(record);
             if page_records.len() == NATIVE_INGESTION_PAGE_MAX_UNITS {
-                emit(HermesSourceBackedPage {
+                pending_pages.push(HermesSourceBackedPage {
                     records: std::mem::take(&mut page_records),
                     owned_bytes: page_owned_bytes,
-                })?;
+                });
                 page_owned_bytes = 0;
             }
         }
         if !page_records.is_empty() {
-            emit(HermesSourceBackedPage {
+            pending_pages.push(HermesSourceBackedPage {
                 records: page_records,
                 owned_bytes: page_owned_bytes,
-            })?;
+            });
         }
         Ok((counts, digest.finalize().into()))
     })();
     drop(reader);
 
+    let finish = sqlite_snapshot.finish();
     let stable = snapshot.revalidate(&candidate.path);
-    let rollback = conn.execute_batch("ROLLBACK").map_err(CaptureError::from);
     let (counts, content_digest) = operation?;
-    rollback?;
+    finish?;
     if !stable? {
         return Err(HermesSourceBackedError::SourceChanged);
     }
     let closing = opening.clone();
-    Ok(CertifiedSource::certify(
+    let certificate = CertifiedSource::certify(
         opening,
         closing,
         HERMES_SOURCE_PARSER_REVISION,
         content_digest,
         counts,
-    )?)
+    )?;
+    drop(root_bound_database);
+    for page in pending_pages {
+        emit(page)?;
+    }
+    Ok(certificate)
 }
 
 fn checked_add(left: u64, right: u64) -> HermesSourceBackedResult<u64> {
@@ -403,6 +411,29 @@ fn hermes_snapshot(path: &Path) -> Result<ProviderSqliteSourceSnapshot, CaptureE
         "Hermes source-backed SQLite source must be a regular non-symlink file",
         "Hermes source-backed SQLite sidecar must be a regular non-symlink file",
     )
+}
+
+fn open_root_authorized_snapshot(
+    path: &Path,
+) -> HermesSourceBackedResult<(File, SqliteSourceReadSnapshot)> {
+    open_root_authorized_snapshot_with_hook(path, || {})
+}
+
+fn open_root_authorized_snapshot_with_hook(
+    path: &Path,
+    after_authorize: impl FnOnce(),
+) -> HermesSourceBackedResult<(File, SqliteSourceReadSnapshot)> {
+    let root_bound_database = open_ordinary_file_without_following(path)?;
+    after_authorize();
+    let sqlite_snapshot = open_sqlite_source_snapshot(path, &root_bound_database)?;
+    let connection = sqlite_snapshot.connection()?;
+    let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
+        .map_err(|_| HermesSourceBackedError::CountOverflow)?;
+    connection.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, value_limit);
+    connection
+        .busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(CaptureError::from)?;
+    Ok((root_bound_database, sqlite_snapshot))
 }
 
 fn hermes_source_revision(
@@ -973,8 +1004,8 @@ pub(crate) fn hydrate_hermes_source_backed_message(
     }
     let (provider_session_id, message_id, rowid) = decode_message_coordinate(locator)?;
     let snapshot = hermes_snapshot(path)?;
-    let conn = open_provider_sqlite_readonly(path)?;
-    conn.execute_batch("BEGIN").map_err(CaptureError::from)?;
+    let (root_bound_database, sqlite_snapshot) = open_root_authorized_snapshot(path)?;
+    let conn = sqlite_snapshot.connection()?;
     let operation = (|| {
         let sqlite_user_version = conn
             .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
@@ -1012,13 +1043,14 @@ pub(crate) fn hydrate_hermes_source_backed_message(
             normalized_payload_hash,
         })
     })();
+    let finish = sqlite_snapshot.finish();
     let stable = snapshot.revalidate(path);
-    let rollback = conn.execute_batch("ROLLBACK").map_err(CaptureError::from);
     let hydrated = operation?;
-    rollback?;
+    finish?;
     if !stable? {
         return Err(HermesSourceBackedError::StaleSourceEvidence);
     }
+    drop(root_bound_database);
     Ok(hydrated)
 }
 

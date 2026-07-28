@@ -70,6 +70,28 @@ fn create_state_db(path: &Path, profile: &str, body: &str) {
     .unwrap();
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn source_backed_open_rejects_leaf_swap_after_authorization() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let attacker = temp.path().join("attacker.db");
+    let original = temp.path().join("original.db");
+    create_state_db(&path, "expected", "expected");
+    create_state_db(&attacker, "attacker", "attacker");
+
+    let result = open_root_authorized_snapshot_with_hook(&path, || {
+        fs::rename(&path, &original).unwrap();
+        fs::rename(&attacker, &path).unwrap();
+    });
+    assert!(matches!(
+        result,
+        Err(HermesSourceBackedError::SqliteSource(
+            SqliteSourceAccessError::ConnectionIdentityMismatch
+        ))
+    ));
+}
+
 fn scan_candidate(
     candidate: &HermesSourceCandidate,
 ) -> (CertifiedSource, Vec<HermesSourceBackedRecord>) {

@@ -6,7 +6,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    fs,
+    fs::{self, File},
     path::{Path, PathBuf},
 };
 
@@ -21,11 +21,13 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
-    provider::{
-        normalization::provider_local_preview,
-        sqlite::{open_provider_sqlite_readonly, sqlite_schema_fingerprint},
+    provider::{normalization::provider_local_preview, sqlite::sqlite_schema_fingerprint},
+    provider_sources::{
+        open_ordinary_file_without_following, open_sqlite_source_snapshot, SqliteSourceAccessError,
+        SqliteSourceReadSnapshot,
     },
-    CaptureError, ProviderAdapterContext, SHELLEY_SQLITE_SOURCE_FORMAT,
+    CaptureError, ProviderAdapterContext, MAX_PROVIDER_SQLITE_VALUE_BYTES,
+    SHELLEY_SQLITE_SOURCE_FORMAT,
 };
 
 use super::{
@@ -63,6 +65,8 @@ const SHELLEY_LINEAGE_LABEL_MAX_CHARS: usize = 256;
 pub(crate) enum ShelleySourceBackedError {
     #[error(transparent)]
     Capture(#[from] CaptureError),
+    #[error(transparent)]
+    SqliteSource(#[from] SqliteSourceAccessError),
     #[error(transparent)]
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]
@@ -108,7 +112,9 @@ impl ShelleySourceBackedAdapter {
 
     pub(crate) fn start_scan(&self) -> ShelleySourceBackedResult<ShelleySourceBackedScan> {
         let snapshot = shelley_source_snapshot(&self.database_path)?;
-        let conn = open_provider_sqlite_readonly(&self.database_path)?;
+        let (root_bound_database, sqlite_snapshot) =
+            open_root_authorized_snapshot(&self.database_path)?;
+        let conn = sqlite_snapshot.connection()?;
         if !snapshot.revalidate(&self.database_path)? {
             return Err(CaptureError::SourceChangedDuringCapture.into());
         }
@@ -116,11 +122,11 @@ impl ShelleySourceBackedAdapter {
         let sqlite_user_version = conn
             .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
             .map_err(CaptureError::from)?;
-        let schema_fingerprint = sqlite_schema_fingerprint(&conn)?;
-        let conversation_columns = shelley_conversation_columns(&conn)?;
-        let message_columns = shelley_message_columns(&conn)?;
+        let schema_fingerprint = sqlite_schema_fingerprint(conn)?;
+        let conversation_columns = shelley_conversation_columns(conn)?;
+        let message_columns = shelley_message_columns(conn)?;
         let has_message_sequence_id = message_columns.contains("sequence_id");
-        shelley_require_message_index(&conn, has_message_sequence_id)?;
+        shelley_require_message_index(conn, has_message_sequence_id)?;
         let conversation_select =
             shelley_conversation_select_expressions(&conversation_columns, "c");
         let message_select = shelley_message_select_expressions(&message_columns, "m");
@@ -143,7 +149,8 @@ impl ShelleySourceBackedAdapter {
             database_path: self.database_path.clone(),
             source: self.source.clone(),
             snapshot,
-            conn,
+            _root_bound_database: root_bound_database,
+            sqlite_snapshot: Some(sqlite_snapshot),
             opening_observation,
             conversation_select,
             message_select,
@@ -173,20 +180,22 @@ impl ShelleySourceBackedAdapter {
         let (parent_bearing, message_rowid, conversation_rowid) = decode_compound_locator(locator)?;
 
         let snapshot = shelley_source_snapshot(&self.database_path)?;
-        let conn = open_provider_sqlite_readonly(&self.database_path)?;
+        let (root_bound_database, sqlite_snapshot) =
+            open_root_authorized_snapshot(&self.database_path)?;
+        let conn = sqlite_snapshot.connection()?;
         if !snapshot.revalidate(&self.database_path)? {
             return Err(CaptureError::SourceChangedDuringCapture.into());
         }
-        let conversation_columns = shelley_conversation_columns(&conn)?;
-        let message_columns = shelley_message_columns(&conn)?;
+        let conversation_columns = shelley_conversation_columns(conn)?;
+        let message_columns = shelley_message_columns(conn)?;
         let has_message_sequence_id = message_columns.contains("sequence_id");
-        shelley_require_message_index(&conn, has_message_sequence_id)?;
+        shelley_require_message_index(conn, has_message_sequence_id)?;
         let conversation_select =
             shelley_conversation_select_expressions(&conversation_columns, "c");
         let message_select = shelley_message_select_expressions(&message_columns, "m");
         let after = message_rowid.checked_sub(1);
         let Some((unit, _)) = next_message_unit(
-            &conn,
+            conn,
             &message_select,
             &conversation_select,
             has_message_sequence_id,
@@ -214,9 +223,11 @@ impl ShelleySourceBackedAdapter {
         if &digest != locator.record_digest() {
             return Err(ShelleySourceBackedError::StaleRecordEvidence);
         }
+        sqlite_snapshot.finish()?;
         if !snapshot.revalidate(&self.database_path)? {
             return Err(CaptureError::SourceChangedDuringCapture.into());
         }
+        drop(root_bound_database);
         let text = shelley_message_complete_text(&value.message)
             .unwrap_or_else(|| format!("Shelley {} message", value.message.entry_type));
         Ok(ShelleyHydratedMessage {
@@ -269,7 +280,8 @@ pub(crate) struct ShelleySourceBackedScan {
     database_path: PathBuf,
     source: SourceKey,
     snapshot: crate::provider::sqlite::ProviderSqliteSourceSnapshot,
-    conn: crate::provider::sqlite::ReadOnlySqliteConnection,
+    _root_bound_database: File,
+    sqlite_snapshot: Option<SqliteSourceReadSnapshot>,
     opening_observation: SourceObservation,
     conversation_select: Vec<String>,
     message_select: Vec<String>,
@@ -307,7 +319,7 @@ impl ShelleySourceBackedScan {
         };
         while page.counts.complete_records < SHELLEY_PAGE_MAX_UNITS as u64 {
             let Some((unit, scanner_digest)) = next_message_unit(
-                &self.conn,
+                self.connection()?,
                 &self.message_select,
                 &self.conversation_select,
                 self.has_message_sequence_id,
@@ -506,7 +518,10 @@ impl ShelleySourceBackedScan {
              order by c.rowid limit 2",
             self.conversation_select[1], self.conversation_select[8],
         );
-        let mut statement = self.conn.prepare(&sql).map_err(CaptureError::from)?;
+        let mut statement = self
+            .connection()?
+            .prepare(&sql)
+            .map_err(CaptureError::from)?;
         let candidates = statement
             .query_map([provider_session_id], |row| {
                 Ok((
@@ -555,6 +570,11 @@ impl ShelleySourceBackedScan {
     }
 
     fn finalize(&mut self) -> ShelleySourceBackedResult<()> {
+        let sqlite_snapshot = self
+            .sqlite_snapshot
+            .take()
+            .ok_or(ShelleySourceBackedError::ScanIncomplete)?;
+        sqlite_snapshot.finish()?;
         if !self.snapshot.revalidate(&self.database_path)? {
             return Err(CaptureError::SourceChangedDuringCapture.into());
         }
@@ -572,6 +592,14 @@ impl ShelleySourceBackedScan {
             emitted_pages: self.emitted_pages,
         });
         Ok(())
+    }
+
+    fn connection(&self) -> ShelleySourceBackedResult<&rusqlite::Connection> {
+        self.sqlite_snapshot
+            .as_ref()
+            .ok_or(ShelleySourceBackedError::ScanIncomplete)?
+            .connection()
+            .map_err(Into::into)
     }
 }
 
@@ -632,6 +660,29 @@ fn shelley_session_identity(
         native_session_key: &native_session_key,
     })
     .map_err(Into::into)
+}
+
+fn open_root_authorized_snapshot(
+    path: &Path,
+) -> ShelleySourceBackedResult<(File, SqliteSourceReadSnapshot)> {
+    open_root_authorized_snapshot_with_hook(path, || {})
+}
+
+fn open_root_authorized_snapshot_with_hook(
+    path: &Path,
+    after_authorize: impl FnOnce(),
+) -> ShelleySourceBackedResult<(File, SqliteSourceReadSnapshot)> {
+    let root_bound_database = open_ordinary_file_without_following(path)?;
+    after_authorize();
+    let sqlite_snapshot = open_sqlite_source_snapshot(path, &root_bound_database)?;
+    let connection = sqlite_snapshot.connection()?;
+    let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
+        .map_err(|_| ShelleySourceBackedError::CountOverflow)?;
+    connection.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, value_limit);
+    connection
+        .busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(CaptureError::from)?;
+    Ok((root_bound_database, sqlite_snapshot))
 }
 
 fn shelley_lineage_label(provider_session_id: &str) -> String {
@@ -848,6 +899,26 @@ mod tests {
         database
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn source_backed_open_rejects_leaf_swap_after_authorization() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let path = create_fixture(&temp.path().join("live"), "expected");
+        let attacker = create_fixture(&temp.path().join("attacker"), "attacker");
+        let original = temp.path().join("original.db");
+
+        let result = open_root_authorized_snapshot_with_hook(&path, || {
+            fs::rename(&path, &original).unwrap();
+            fs::rename(&attacker, &path).unwrap();
+        });
+        assert!(matches!(
+            result,
+            Err(ShelleySourceBackedError::SqliteSource(
+                SqliteSourceAccessError::ConnectionIdentityMismatch
+            ))
+        ));
+    }
+
     fn drain(
         adapter: &ShelleySourceBackedAdapter,
     ) -> (Vec<LexicalDocument>, ShelleySourceBackedReceipt) {
@@ -1028,26 +1099,22 @@ mod tests {
     }
 
     #[test]
-    fn shelley_source_backed_snapshot_replacement_fails_terminal_certification() {
+    fn shelley_source_backed_leaf_replacement_fails_terminal_certification() {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let database = create_fixture(temp.path(), "before replacement");
+        let original = temp.path().join("original.db");
         let adapter = discover_shelley_source_backed_exact_cwd(temp.path())
             .unwrap()
             .unwrap();
         let mut scan = adapter.start_scan().unwrap();
         assert!(scan.next_page().unwrap().is_some());
 
-        Connection::open(database)
-            .unwrap()
-            .execute(
-                "update messages set user_data = 'after replacement' where rowid = 1",
-                [],
-            )
-            .unwrap();
+        fs::rename(&database, &original).unwrap();
+        create_fixture(temp.path(), "after replacement");
         assert!(matches!(
             scan.next_page(),
-            Err(ShelleySourceBackedError::Capture(
-                CaptureError::SourceChangedDuringCapture
+            Err(ShelleySourceBackedError::SqliteSource(
+                SqliteSourceAccessError::ConnectionIdentityMismatch
             ))
         ));
     }

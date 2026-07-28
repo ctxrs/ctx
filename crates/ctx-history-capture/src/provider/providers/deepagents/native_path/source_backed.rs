@@ -5,7 +5,7 @@
 //! publication, replacement, deletion, or retry policy.
 
 use std::{
-    fs,
+    fs::{self, File},
     path::{Path, PathBuf},
 };
 
@@ -37,12 +37,14 @@ use super::core_eligible;
 use crate::{
     provider::{
         normalization::capped_text,
-        sqlite::{
-            open_provider_sqlite_readonly, sqlite_schema_fingerprint, ProviderSqliteSourceSnapshot,
-            ReadOnlySqliteConnection,
-        },
+        sqlite::{sqlite_schema_fingerprint, ProviderSqliteSourceSnapshot},
+    },
+    provider_sources::{
+        open_ordinary_file_without_following, open_sqlite_source_snapshot, SqliteSourceAccessError,
+        SqliteSourceReadSnapshot,
     },
     CaptureError, ProviderAdapterContext, DEEPAGENTS_SQLITE_SOURCE_FORMAT,
+    MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
 
 const DEEPAGENTS_SOURCE_ANCHOR_NAMESPACE: &str = "deepagents.sessions";
@@ -65,6 +67,8 @@ const DEEPAGENTS_REJECTED_RECORD_DOMAIN: &[u8] = b"ctx-deepagents-rejected-recor
 pub(crate) enum DeepAgentsSourceBackedErrorV0 {
     #[error(transparent)]
     Capture(#[from] CaptureError),
+    #[error(transparent)]
+    SqliteSource(#[from] SqliteSourceAccessError),
     #[error(transparent)]
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]
@@ -184,7 +188,8 @@ pub(crate) struct DeepAgentsSourceBackedScanV0 {
 pub(crate) struct DeepAgentsSourceBackedScannerV0 {
     selection: DeepAgentsDatabaseSelectionV0,
     snapshot: ProviderSqliteSourceSnapshot,
-    conn: ReadOnlySqliteConnection,
+    root_bound_database: File,
+    sqlite_snapshot: SqliteSourceReadSnapshot,
     source: SourceKey,
     observation: SourceObservation,
     source_revision_digest: [u8; 32],
@@ -205,13 +210,14 @@ impl DeepAgentsSourceBackedScannerV0 {
         imported_at: DateTime<Utc>,
     ) -> DeepAgentsSourceBackedResultV0<Self> {
         let snapshot = deepagents_source_snapshot(selection.path())?;
-        let conn = open_provider_sqlite_readonly(selection.path())?;
-        conn.execute_batch("begin").map_err(CaptureError::from)?;
+        let (root_bound_database, sqlite_snapshot) =
+            open_root_authorized_snapshot(selection.path())?;
+        let conn = sqlite_snapshot.connection()?;
         if !snapshot.revalidate(selection.path())? {
             return Err(CaptureError::SourceChangedDuringCapture.into());
         }
-        deepagents_validate_schema(&conn, selection.path())?;
-        let schema_fingerprint = sqlite_schema_fingerprint(&conn)?;
+        deepagents_validate_schema(conn, selection.path())?;
+        let schema_fingerprint = sqlite_schema_fingerprint(conn)?;
         let source = deepagents_source_key()?;
         let revision = deepagents_snapshot_revision(&selection, &snapshot, &schema_fingerprint)?;
         let source_revision_digest = Sha256::digest(&revision).into();
@@ -232,7 +238,8 @@ impl DeepAgentsSourceBackedScannerV0 {
         Ok(Self {
             selection,
             snapshot,
-            conn,
+            root_bound_database,
+            sqlite_snapshot,
             source,
             observation,
             source_revision_digest,
@@ -321,12 +328,11 @@ impl DeepAgentsSourceBackedScannerV0 {
         if !self.exhausted || self.pending.is_some() {
             return Err(DeepAgentsSourceBackedErrorV0::ScannerNotExhausted);
         }
+        self.sqlite_snapshot.finish()?;
         if !self.snapshot.revalidate(self.selection.path())? {
             return Err(CaptureError::SourceChangedDuringCapture.into());
         }
-        self.conn
-            .execute_batch("rollback")
-            .map_err(CaptureError::from)?;
+        drop(self.root_bound_database);
         let content_digest = self.content_digest.finalize().into();
         let certificate = CertifiedSource::certify(
             self.observation.clone(),
@@ -345,7 +351,10 @@ impl DeepAgentsSourceBackedScannerV0 {
 
     fn prepare_next_write(&mut self) -> DeepAgentsSourceBackedResultV0<bool> {
         loop {
-            let Some(candidate) = deepagents_next_write_candidate(&self.conn, self.after_rowid)?
+            let Some(candidate) = deepagents_next_write_candidate(
+                self.sqlite_snapshot.connection()?,
+                self.after_rowid,
+            )?
             else {
                 return Ok(false);
             };
@@ -358,7 +367,7 @@ impl DeepAgentsSourceBackedScannerV0 {
             };
             self.refresh_thread(&key.thread_id)?;
             let Some(occurred_at) = deepagents_checkpoint_time(
-                &self.conn,
+                self.sqlite_snapshot.connection()?,
                 &self.context,
                 &key.thread_id,
                 &key.checkpoint_id,
@@ -368,7 +377,8 @@ impl DeepAgentsSourceBackedScannerV0 {
                 self.add_rejected_records(1)?;
                 continue;
             };
-            let (value_type, value) = deepagents_hydrate_write(&self.conn, candidate.rowid)?;
+            let (value_type, value) =
+                deepagents_hydrate_write(self.sqlite_snapshot.connection()?, candidate.rowid)?;
             let record_digest = digest_bytes(&deepagents_write_record_digest(
                 &key,
                 value_type.as_deref(),
@@ -433,8 +443,12 @@ impl DeepAgentsSourceBackedScannerV0 {
         {
             return Ok(());
         }
-        self.current_thread =
-            deepagents_thread_summary(&self.conn, &self.context, thread_id, None)?;
+        self.current_thread = deepagents_thread_summary(
+            self.sqlite_snapshot.connection()?,
+            &self.context,
+            thread_id,
+            None,
+        )?;
         self.next_event_sequence = 1;
         Ok(())
     }
@@ -513,35 +527,60 @@ impl DeepAgentsLocatorResolverV0 {
         }
 
         let snapshot = deepagents_source_snapshot(self.selection.path())?;
-        let conn = open_provider_sqlite_readonly(self.selection.path())?;
-        conn.execute_batch("begin").map_err(CaptureError::from)?;
+        let (root_bound_database, sqlite_snapshot) =
+            open_root_authorized_snapshot(self.selection.path())?;
+        let conn = sqlite_snapshot.connection()?;
         if !snapshot.revalidate(self.selection.path())? {
             return Err(DeepAgentsSourceBackedErrorV0::StaleSourceEvidence);
         }
-        validate_deepagents_content_schema(&conn)?;
-        let schema_fingerprint = sqlite_schema_fingerprint(&conn)?;
+        validate_deepagents_content_schema(conn)?;
+        let schema_fingerprint = sqlite_schema_fingerprint(conn)?;
         let revision =
             deepagents_snapshot_revision(&self.selection, &snapshot, &schema_fingerprint)?;
         let revision_digest: [u8; 32] = Sha256::digest(&revision).into();
         if locator.certified_source_revision_digest() != Some(&revision_digest) {
             return Err(DeepAgentsSourceBackedErrorV0::StaleSourceEvidence);
         }
-        let resolved = resolve_deepagents_content(&conn, &address)?
+        let resolved = resolve_deepagents_content(conn, &address)?
             .ok_or(DeepAgentsSourceBackedErrorV0::MissingRecord)?;
         let record_digest = digest_bytes(&resolved.record_digest)
             .ok_or(DeepAgentsSourceBackedErrorV0::StaleRecordEvidence)?;
         if record_digest != row_version {
             return Err(DeepAgentsSourceBackedErrorV0::StaleRecordEvidence);
         }
+        sqlite_snapshot.finish()?;
         if !snapshot.revalidate(self.selection.path())? {
             return Err(DeepAgentsSourceBackedErrorV0::StaleSourceEvidence);
         }
-        conn.execute_batch("rollback").map_err(CaptureError::from)?;
+        drop(root_bound_database);
         Ok(DeepAgentsHydratedMessageV0 {
             text: resolved.text,
             record_digest,
         })
     }
+}
+
+fn open_root_authorized_snapshot(
+    path: &Path,
+) -> DeepAgentsSourceBackedResultV0<(File, SqliteSourceReadSnapshot)> {
+    open_root_authorized_snapshot_with_hook(path, || {})
+}
+
+fn open_root_authorized_snapshot_with_hook(
+    path: &Path,
+    after_authorize: impl FnOnce(),
+) -> DeepAgentsSourceBackedResultV0<(File, SqliteSourceReadSnapshot)> {
+    let root_bound_database = open_ordinary_file_without_following(path)?;
+    after_authorize();
+    let sqlite_snapshot = open_sqlite_source_snapshot(path, &root_bound_database)?;
+    let connection = sqlite_snapshot.connection()?;
+    let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
+        .map_err(|_| DeepAgentsSourceBackedErrorV0::CountOverflow)?;
+    connection.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, value_limit);
+    connection
+        .busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(CaptureError::from)?;
+    Ok((root_bound_database, sqlite_snapshot))
 }
 
 fn deepagents_source_key() -> DeepAgentsSourceBackedResultV0<SourceKey> {
