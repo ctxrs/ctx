@@ -4,20 +4,45 @@ pub(super) fn event_source_sql(
     schema: &OpenCodeNativeSchema,
     profile: OpenCodeNativeProfile,
 ) -> String {
+    event_source_sql_with_data(schema, profile, false)
+}
+
+pub(super) fn source_backed_event_source_sql(
+    schema: &OpenCodeNativeSchema,
+    profile: OpenCodeNativeProfile,
+) -> String {
+    event_source_sql_with_data(schema, profile, true)
+}
+
+fn event_source_sql_with_data(
+    schema: &OpenCodeNativeSchema,
+    profile: OpenCodeNativeProfile,
+    include_source_data: bool,
+) -> String {
     match schema.family {
-        OpenCodeNativeSchemaFamily::SessionMessageSeq => {
-            row_event_source_sql(schema, "session_message", true, profile)
-        }
-        OpenCodeNativeSchemaFamily::SessionMessageSynthesizedSeq => {
-            row_event_source_sql(schema, "session_message", false, profile)
-        }
+        OpenCodeNativeSchemaFamily::SessionMessageSeq => row_event_source_sql(
+            schema,
+            "session_message",
+            true,
+            profile,
+            include_source_data,
+        ),
+        OpenCodeNativeSchemaFamily::SessionMessageSynthesizedSeq => row_event_source_sql(
+            schema,
+            "session_message",
+            false,
+            profile,
+            include_source_data,
+        ),
         OpenCodeNativeSchemaFamily::SessionEntry => {
-            row_event_source_sql(schema, "session_entry", false, profile)
+            row_event_source_sql(schema, "session_entry", false, profile, include_source_data)
         }
         OpenCodeNativeSchemaFamily::LegacyMessage => {
-            row_event_source_sql(schema, "message", false, profile)
+            row_event_source_sql(schema, "message", false, profile, include_source_data)
         }
-        OpenCodeNativeSchemaFamily::MessagePart => part_event_source_sql(schema, profile),
+        OpenCodeNativeSchemaFamily::MessagePart => {
+            part_event_source_sql(schema, profile, include_source_data)
+        }
     }
 }
 
@@ -26,6 +51,7 @@ pub(super) fn row_event_source_sql(
     table: &str,
     explicit_sequence: bool,
     profile: OpenCodeNativeProfile,
+    include_source_data: bool,
 ) -> String {
     let type_column = type_expression(schema.event_has_type, "x");
     let projection = projection_sql("x.data", &type_column, None, schema.family, "?1", profile);
@@ -35,6 +61,7 @@ pub(super) fn row_event_source_sql(
         "cast(x.time_created as integer)"
     };
     let order_tag = if explicit_sequence { 1 } else { 2 };
+    let source_data = if include_source_data { ", x.data" } else { "" };
     format!(
         "select cast(x.id as text), cast(x.id as text), cast(x.session_id as text),
                 {order_tag}, {order_a}, 0,
@@ -56,7 +83,7 @@ pub(super) fn row_event_source_sql(
                          and json_type(x.data, '$.time.created') is not null
                     then 1 else 0
                 end,
-                x.rowid
+                x.rowid{source_data}
          from {table} x
          left join session s on s.id = x.session_id",
         missing_session = hex_bytes(MISSING_SESSION_PROJECTION),
@@ -66,6 +93,7 @@ pub(super) fn row_event_source_sql(
 pub(super) fn part_event_source_sql(
     schema: &OpenCodeNativeSchema,
     profile: OpenCodeNativeProfile,
+    include_source_data: bool,
 ) -> String {
     let type_column = type_expression(schema.event_has_type, "p");
     let projection = projection_sql(
@@ -76,6 +104,7 @@ pub(super) fn part_event_source_sql(
         "?1",
         profile,
     );
+    let source_data = if include_source_data { ", p.data" } else { "" };
     format!(
         "select cast(p.id as text), cast(p.message_id as text),
                 cast(p.session_id as text), 3,
@@ -93,7 +122,7 @@ pub(super) fn part_event_source_sql(
                     else {projection}
                 end,
                 0,
-                p.rowid
+                p.rowid{source_data}
          from part p
          left join message m on m.id = p.message_id
          left join session s on s.id = p.session_id",

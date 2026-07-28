@@ -3,6 +3,7 @@ use super::*;
 mod page;
 
 use page::*;
+pub(super) use page::{retained_event_kind, retained_file_touches, retained_searchable_text};
 
 pub(in super::super) struct OpenCodeNativeScanner<'reader> {
     schema: &'reader OpenCodeNativeSchema,

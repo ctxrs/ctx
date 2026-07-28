@@ -18,6 +18,7 @@ mod query;
 mod scanner;
 mod schema;
 mod source;
+pub(super) mod source_backed;
 pub(super) mod vertical;
 
 #[cfg(test)]
