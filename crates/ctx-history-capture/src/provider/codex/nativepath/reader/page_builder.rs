@@ -259,7 +259,14 @@ impl CodexNativeScanner {
     pub(super) fn finish_page(&mut self, mut page: CodexNativePage) -> Result<CodexNativePage> {
         page.owner = self.owner.clone();
         page.next_safe_frontier = self.frontier();
-        debug_assert!(page.physical_records <= MAX_CODEX_PAGE_UNITS as u64);
+        debug_assert!(match page.projection_mode {
+            CodexProjectionMode::Legacy => {
+                page.physical_records <= MAX_CODEX_PAGE_UNITS as u64
+            }
+            CodexProjectionMode::SourceBackedV0 => {
+                page.physical_records <= MAX_CODEX_SOURCE_BACKED_PAGE_RECORDS
+            }
+        });
         debug_assert!(page.units() <= MAX_CODEX_PAGE_UNITS);
         debug_assert!(page.serialized_bytes <= MAX_CODEX_PAGE_BYTES);
         self.counters.emitted_pages = self.counters.emitted_pages.saturating_add(1);
