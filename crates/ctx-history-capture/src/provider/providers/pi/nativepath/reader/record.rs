@@ -72,6 +72,7 @@ impl PiNativeScanner {
                 line_number,
                 byte_start,
                 byte_end_exclusive,
+                bytes,
                 checkpoint,
             );
         }
@@ -131,6 +132,7 @@ impl PiNativeScanner {
         line_number: u64,
         byte_start: u64,
         byte_end_exclusive: u64,
+        record_bytes: &[u8],
         checkpoint: PiNativeCheckpoint,
     ) -> Result<PendingRecord, PiNativePathError> {
         self.stats.native_result_records = self.stats.native_result_records.saturating_add(1);
@@ -249,7 +251,7 @@ impl PiNativeScanner {
                 line_number,
                 byte_start,
                 byte_end_exclusive,
-                None,
+                Some(record_bytes),
                 Some((&outcome, result_body.as_deref())),
             ) {
                 Ok(units) => units,
@@ -401,6 +403,9 @@ impl PiNativeScanner {
             line_number,
             byte_start,
             byte_end_exclusive,
+            record_sha256: record_bytes
+                .map(|bytes| Sha256::digest(bytes).into())
+                .unwrap_or_else(|| Sha256::digest([]).into()),
         };
         let mut event_row = PiNativeEventRow {
             provider_session_id: header.id.clone(),
