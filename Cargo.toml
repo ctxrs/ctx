@@ -31,6 +31,7 @@ ed25519-dalek = "2.1"
 json5 = { version = "0.4", default-features = false }
 jsonc-parser = { version = "0.33", default-features = false, features = ["serde", "serde_json"] }
 libc = "0.2"
+memmap2 = "0.9"
 predicates = "3.1"
 proptest = "1"
 regex = "1.10"
@@ -60,11 +61,6 @@ zstd = "0.13"
 # while reporting a loader failure. This pin carries only those upstream fixes.
 # Drop the patch once a crates.io release includes both.
 ort = { git = "https://github.com/ctxrs/ort.git", rev = "f7994dc91b8f48c78afc506880b3f9f558957919" }
-
-# `sqlite-vec` 0.1.9 redeclares stdint types on Unix, which conflicts with the
-# FreeBSD headers. This fork is the stable crate plus the upstream three-typedef
-# removal from asg017/sqlite-vec#219. Drop it once a stable release includes it.
-sqlite-vec = { git = "https://github.com/ctxrs/sqlite-vec.git", rev = "c1762b6065bccdedf1f68a904096d46f91d3a486" }
 
 [profile.release]
 # Distributed binaries must omit local/static symbols and debug symbol data.
