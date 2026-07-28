@@ -7,13 +7,22 @@ use ctx_history_core::CaptureProvider;
 
 use super::super::{
     context::{DiscoveryContext, DiscoveryPlatform},
+    lingma::{
+        DiscoveredLingmaDatabase, LingmaDatabaseCatalogLineage, LingmaVscodeClient,
+        LingmaVscodeProfile,
+    },
     selectors::{
-        direct_entries, ordinary_directory, ordinary_file, SelectorDocument, SelectorFormat,
-        SelectorReadError, SelectorReader, MAX_SELECTOR_FILES_PER_PROVIDER,
+        direct_entries, encoded_path_within_limit, ordinary_directory, ordinary_file,
+        SelectorDocument, SelectorFormat, SelectorReadError, SelectorReader,
+        MAX_SELECTOR_FILES_PER_PROVIDER, MAX_SOURCE_CANDIDATES_PER_PROVIDER,
     },
     types::{
         DiscoveryIssueKind, DiscoveryReport, ProviderSource, ProviderSourceKind,
         ProviderSourceSpec, ProviderSourceStatus,
+    },
+    warp::{
+        installed_platform, DiscoveredWarpSource, WarpDiscoveryUnavailable, WarpInstalledPlatform,
+        WarpInstalledSurfaceKey, WarpReleaseChannel, WarpTerminalSurface,
     },
 };
 use super::{
@@ -120,9 +129,27 @@ fn resolve_kiro(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> Discov
 }
 
 fn resolve_warp(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> DiscoveryReport {
-    let mut report = DiscoveryReport::default();
-    match context.platform() {
-        DiscoveryPlatform::Linux => {
+    let sources = match resolve_warp_with_authority(context, spec) {
+        Ok(sources) => sources
+            .into_iter()
+            .map(|candidate| candidate.into_parts().0)
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    DiscoveryReport {
+        sources,
+        issues: Vec::new(),
+    }
+}
+
+pub(in crate::provider_sources) fn resolve_warp_with_authority(
+    context: &DiscoveryContext,
+    spec: &ProviderSourceSpec,
+) -> Result<Vec<DiscoveredWarpSource>, WarpDiscoveryUnavailable> {
+    let platform = installed_platform(context.platform())?;
+    let mut sources = Vec::new();
+    match platform {
+        WarpInstalledPlatform::Linux => {
             let state = absolute_xdg_or_default(
                 context.env("XDG_STATE_HOME"),
                 context
@@ -131,15 +158,22 @@ fn resolve_warp(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> Discov
                     .clone()
                     .unwrap_or_else(|| context.home().join(".local").join("state")),
             );
-            add_warp_channel(&mut report, spec, state.join("warp-terminal"), true);
             add_warp_channel(
-                &mut report,
+                &mut sources,
                 spec,
+                platform,
+                WarpReleaseChannel::Stable,
+                state.join("warp-terminal"),
+            )?;
+            add_warp_channel(
+                &mut sources,
+                spec,
+                platform,
+                WarpReleaseChannel::Preview,
                 state.join("warp-terminal-preview"),
-                false,
-            );
+            )?;
         }
-        DiscoveryPlatform::MacOS => {
+        WarpInstalledPlatform::MacOS => {
             let group = context
                 .home()
                 .join("Library")
@@ -154,7 +188,13 @@ fn resolve_warp(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> Discov
                 true,
             );
             if let Some(root) = stable {
-                add_warp_channel(&mut report, spec, root, true);
+                add_warp_channel(
+                    &mut sources,
+                    spec,
+                    platform,
+                    WarpReleaseChannel::Stable,
+                    root,
+                )?;
             }
             let preview = select_existing_precedence(
                 group.join("dev.warp.Warp-Preview"),
@@ -162,50 +202,87 @@ fn resolve_warp(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> Discov
                 false,
             );
             if let Some(root) = preview {
-                add_warp_channel(&mut report, spec, root, false);
-            }
-        }
-        DiscoveryPlatform::Windows => {
-            if let Some(local_data) = &context.platform_dirs().local_data {
-                let warp = local_data.join("warp");
-                add_warp_channel(&mut report, spec, warp.join("Warp").join("data"), true);
                 add_warp_channel(
-                    &mut report,
+                    &mut sources,
                     spec,
-                    warp.join("WarpPreview").join("data"),
-                    false,
-                );
+                    platform,
+                    WarpReleaseChannel::Preview,
+                    root,
+                )?;
             }
         }
-        DiscoveryPlatform::OtherUnix => {}
+        WarpInstalledPlatform::Windows => {
+            let local_data = context
+                .platform_dirs()
+                .local_data
+                .as_ref()
+                .ok_or(WarpDiscoveryUnavailable::WindowsLocalDataRootUnavailable)?;
+            let warp = local_data.join("warp");
+            add_warp_channel(
+                &mut sources,
+                spec,
+                platform,
+                WarpReleaseChannel::Stable,
+                warp.join("Warp").join("data"),
+            )?;
+            add_warp_channel(
+                &mut sources,
+                spec,
+                platform,
+                WarpReleaseChannel::Preview,
+                warp.join("WarpPreview").join("data"),
+            )?;
+        }
     }
-    report
+    Ok(sources)
 }
 
 fn add_warp_channel(
-    report: &mut DiscoveryReport,
+    sources: &mut Vec<DiscoveredWarpSource>,
     spec: &ProviderSourceSpec,
+    platform: WarpInstalledPlatform,
+    channel: WarpReleaseChannel,
     root: PathBuf,
-    primary: bool,
-) {
+) -> Result<(), WarpDiscoveryUnavailable> {
     let gui = root.join("warp.sqlite");
-    let installed = primary
+    let installed = channel == WarpReleaseChannel::Stable
         || path_presence(&root).suppresses_fallback()
         || path_presence(&gui).suppresses_fallback();
     if !installed {
-        return;
+        return Ok(());
     }
-    push_source_candidate(
-        &mut report.sources,
-        safe_native_source(spec, gui, WARP_FORMAT),
-    );
+    push_warp_source(
+        sources,
+        spec,
+        gui,
+        WarpInstalledSurfaceKey::new(platform, channel, WarpTerminalSurface::Gui),
+    )?;
     let tui = root.join("tui").join("warp.sqlite");
     if path_presence(&tui).suppresses_fallback() {
-        push_source_candidate(
-            &mut report.sources,
-            safe_native_source(spec, tui, WARP_FORMAT),
-        );
+        push_warp_source(
+            sources,
+            spec,
+            tui,
+            WarpInstalledSurfaceKey::new(platform, channel, WarpTerminalSurface::Tui),
+        )?;
     }
+    Ok(())
+}
+
+fn push_warp_source(
+    sources: &mut Vec<DiscoveredWarpSource>,
+    spec: &ProviderSourceSpec,
+    path: PathBuf,
+    surface_key: WarpInstalledSurfaceKey,
+) -> Result<(), WarpDiscoveryUnavailable> {
+    if sources.len() >= MAX_SOURCE_CANDIDATES_PER_PROVIDER || !encoded_path_within_limit(&path) {
+        return Err(WarpDiscoveryUnavailable::SourceCandidateRejected { surface_key });
+    }
+    sources.push(DiscoveredWarpSource::new(
+        safe_native_source(spec, path, WARP_FORMAT),
+        surface_key,
+    ));
+    Ok(())
 }
 
 fn resolve_codebuddy(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> DiscoveryReport {
@@ -264,14 +341,22 @@ enum LingmaRootChoice {
 }
 
 fn resolve_lingma(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> DiscoveryReport {
+    resolve_lingma_with_authority(context, spec).0
+}
+
+pub(in crate::provider_sources) fn resolve_lingma_with_authority(
+    context: &DiscoveryContext,
+    spec: &ProviderSourceSpec,
+) -> (DiscoveryReport, Vec<DiscoveredLingmaDatabase>) {
     if !supported_desktop_platform(context.platform()) {
-        return DiscoveryReport::default();
+        return (DiscoveryReport::default(), Vec::new());
     }
     let mut report = DiscoveryReport::default();
+    let mut discovered = Vec::new();
     let mut reader = SelectorReader::default();
-    resolve_lingma_vscode(context, spec, &mut reader, &mut report);
-    resolve_lingma_jetbrains(context, spec, &mut reader, &mut report);
-    report
+    resolve_lingma_vscode(context, spec, &mut reader, &mut report, &mut discovered);
+    resolve_lingma_jetbrains(context, spec, &mut reader, &mut report, &mut discovered);
+    (report, discovered)
 }
 
 fn resolve_lingma_vscode(
@@ -279,13 +364,14 @@ fn resolve_lingma_vscode(
     spec: &ProviderSourceSpec,
     reader: &mut SelectorReader,
     report: &mut DiscoveryReport,
+    discovered: &mut Vec<DiscoveredLingmaDatabase>,
 ) {
     let default_db = context
         .home()
         .join(".lingma/vscode/sharedClientCache/cache/db/local.db");
     let user_roots = vscode_user_roots(context);
     let mut installed_settings_found = false;
-    for user_root in user_roots {
+    for (client, user_root) in user_roots {
         if matches!(path_presence(&user_root), PathPresence::Missing) {
             continue;
         }
@@ -294,7 +380,15 @@ fn resolve_lingma_vscode(
             read_vscode_lingma_choice(reader, &base_settings, context.platform(), report, spec);
         installed_settings_found |= base.is_some() || !base_allows_absent_profile_fallback;
         if base.is_some() {
-            add_lingma_vscode_choice(report, spec, base.as_ref(), &default_db);
+            add_lingma_vscode_choice(
+                report,
+                discovered,
+                spec,
+                base.as_ref(),
+                &default_db,
+                client,
+                LingmaVscodeProfile::Base,
+            );
         }
         let profiles = user_root.join("profiles");
         let entries = match direct_entries(&profiles) {
@@ -331,24 +425,51 @@ fn resolve_lingma_vscode(
             else {
                 continue;
             };
-            let effective = match &profile_choice {
-                LingmaRootChoice::Absent if base_allows_absent_profile_fallback => base.as_ref(),
+            let (effective, profile_key) = match &profile_choice {
+                LingmaRootChoice::Absent if base_allows_absent_profile_fallback => {
+                    (base.as_ref(), LingmaVscodeProfile::Base)
+                }
                 LingmaRootChoice::Absent => continue,
-                selected => Some(selected),
+                selected => {
+                    let Some(name) = profile.file_name() else {
+                        report.issues.push(issue(
+                            spec.provider,
+                            Some(profile.clone()),
+                            DiscoveryIssueKind::SelectorUnreconstructible,
+                            SELECTOR_READ_REASON,
+                        ));
+                        continue;
+                    };
+                    (
+                        Some(selected),
+                        LingmaVscodeProfile::Named(name.as_encoded_bytes().to_vec()),
+                    )
+                }
             };
-            add_lingma_vscode_choice(report, spec, effective, &default_db);
+            add_lingma_vscode_choice(
+                report,
+                discovered,
+                spec,
+                effective,
+                &default_db,
+                client,
+                profile_key,
+            );
         }
     }
 
     if !installed_settings_found && path_presence(&default_db).suppresses_fallback() {
-        push_source_candidate(
-            &mut report.sources,
-            safe_native_source(spec, default_db, LINGMA_FORMAT),
+        push_lingma_source(
+            report,
+            discovered,
+            spec,
+            default_db,
+            LingmaDatabaseCatalogLineage::VscodeSharedDefault,
         );
     }
 }
 
-fn vscode_user_roots(context: &DiscoveryContext) -> Vec<PathBuf> {
+fn vscode_user_roots(context: &DiscoveryContext) -> Vec<(LingmaVscodeClient, PathBuf)> {
     let base = match context.platform() {
         DiscoveryPlatform::Linux => context
             .platform_dirs()
@@ -363,8 +484,11 @@ fn vscode_user_roots(context: &DiscoveryContext) -> Vec<PathBuf> {
         DiscoveryPlatform::OtherUnix => return Vec::new(),
     };
     vec![
-        base.join("Code").join("User"),
-        base.join("Code - Insiders").join("User"),
+        (LingmaVscodeClient::Stable, base.join("Code").join("User")),
+        (
+            LingmaVscodeClient::Insiders,
+            base.join("Code - Insiders").join("User"),
+        ),
     ]
 }
 
@@ -424,13 +548,22 @@ fn read_vscode_lingma_choice(
 
 fn add_lingma_vscode_choice(
     report: &mut DiscoveryReport,
+    discovered: &mut Vec<DiscoveredLingmaDatabase>,
     spec: &ProviderSourceSpec,
     choice: Option<&LingmaRootChoice>,
     default_db: &Path,
+    client: LingmaVscodeClient,
+    profile: LingmaVscodeProfile,
 ) {
-    let path = match choice.unwrap_or(&LingmaRootChoice::Default) {
-        LingmaRootChoice::Absent | LingmaRootChoice::Default => default_db.to_path_buf(),
-        LingmaRootChoice::Selected(root) => root.join("sharedClientCache/cache/db/local.db"),
+    let (path, lineage) = match choice.unwrap_or(&LingmaRootChoice::Default) {
+        LingmaRootChoice::Absent | LingmaRootChoice::Default => (
+            default_db.to_path_buf(),
+            LingmaDatabaseCatalogLineage::VscodeSharedDefault,
+        ),
+        LingmaRootChoice::Selected(root) => (
+            root.join("sharedClientCache/cache/db/local.db"),
+            LingmaDatabaseCatalogLineage::VscodeSelected { client, profile },
+        ),
         LingmaRootChoice::Unreconstructible(path) => {
             report.issues.push(issue(
                 spec.provider,
@@ -441,10 +574,7 @@ fn add_lingma_vscode_choice(
             return;
         }
     };
-    push_source_candidate(
-        &mut report.sources,
-        safe_native_source(spec, path, LINGMA_FORMAT),
-    );
+    push_lingma_source(report, discovered, spec, path, lineage);
 }
 
 fn resolve_lingma_jetbrains(
@@ -452,6 +582,7 @@ fn resolve_lingma_jetbrains(
     spec: &ProviderSourceSpec,
     reader: &mut SelectorReader,
     report: &mut DiscoveryReport,
+    discovered: &mut Vec<DiscoveredLingmaDatabase>,
 ) {
     let config_root = match context.platform() {
         DiscoveryPlatform::Linux | DiscoveryPlatform::Windows => context
@@ -507,10 +638,27 @@ fn resolve_lingma_jetbrains(
                     let Some(path) = jetbrains_lingma_db(context, Some(&choice)) else {
                         continue;
                     };
-                    push_source_candidate(
-                        &mut report.sources,
-                        safe_native_source(spec, path, LINGMA_FORMAT),
-                    );
+                    let lineage = match choice {
+                        LingmaRootChoice::Absent | LingmaRootChoice::Default => {
+                            LingmaDatabaseCatalogLineage::JetBrainsSharedDefault
+                        }
+                        LingmaRootChoice::Selected(_) => {
+                            let Some(product_name) = product.file_name() else {
+                                report.issues.push(issue(
+                                    spec.provider,
+                                    Some(product.clone()),
+                                    DiscoveryIssueKind::SelectorUnreconstructible,
+                                    SELECTOR_READ_REASON,
+                                ));
+                                continue;
+                            };
+                            LingmaDatabaseCatalogLineage::JetBrainsSelected {
+                                product: product_name.as_encoded_bytes().to_vec(),
+                            }
+                        }
+                        LingmaRootChoice::Unreconstructible(_) => continue,
+                    };
+                    push_lingma_source(report, discovered, spec, path, lineage);
                 }
             }
             Err(_) if path_presence(&config_root).suppresses_fallback() => {
@@ -537,11 +685,34 @@ fn resolve_lingma_jetbrains(
             None
         };
         if let Some(path) = selected {
-            push_source_candidate(
-                &mut report.sources,
-                safe_native_source(spec, path, LINGMA_FORMAT),
+            push_lingma_source(
+                report,
+                discovered,
+                spec,
+                path,
+                LingmaDatabaseCatalogLineage::JetBrainsSharedDefault,
             );
         }
+    }
+}
+
+fn push_lingma_source(
+    report: &mut DiscoveryReport,
+    discovered: &mut Vec<DiscoveredLingmaDatabase>,
+    spec: &ProviderSourceSpec,
+    path: PathBuf,
+    lineage: LingmaDatabaseCatalogLineage,
+) {
+    let source = safe_native_source(spec, path, LINGMA_FORMAT);
+    if push_source_candidate(&mut report.sources, source.clone()) {
+        discovered.push(DiscoveredLingmaDatabase::new(source, lineage));
+    } else {
+        report.issues.push(issue(
+            spec.provider,
+            None,
+            DiscoveryIssueKind::SelectorUnreconstructible,
+            SELECTOR_READ_REASON,
+        ));
     }
 }
 

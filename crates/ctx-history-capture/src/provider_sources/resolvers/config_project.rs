@@ -25,6 +25,11 @@ mod roo;
 mod rovo;
 mod vibe;
 
+pub(crate) use crush::{
+    CrushDiscoveredProjectDatabase, CrushDiscoveredProjectInventory, CrushProjectInventorySelector,
+    CrushProjectInventorySelectorError, CrushProjectSelectorKey,
+};
+
 const PI_FORMAT: &str = "pi_session_jsonl";
 const CRUSH_FORMAT: &str = "crush_sqlite";
 const QWEN_FORMAT: &str = "qwen_code_chat_jsonl_tree";

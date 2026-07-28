@@ -10,6 +10,7 @@ use std::{
     fmt,
     path::{Path, PathBuf},
     sync::Arc,
+    time::{Duration, Instant},
 };
 
 use chrono::{DateTime, Utc};
@@ -26,8 +27,8 @@ use thiserror::Error;
 
 use super::codex::nativepath::{
     codex_source_observation, codex_writer_base_sources, discover_codex_root_inventory_v0,
-    ingest_codex_sources_serial_v0, managed_codex_session_source, CodexLocatorResolverV0,
-    CodexSourceBackedCountersV0, CodexSourceBackedPhaseTimingsV0,
+    ingest_codex_sources_serial_v0, managed_codex_session_source, CodexHydratedRecordV0,
+    CodexLocatorResolverV0, CodexSourceBackedCountersV0, CodexSourceBackedPhaseTimingsV0,
 };
 use super::custom_history_jsonl::{
     observe_custom_history_source_backed_explicit, revalidate_custom_history_source_backed,
@@ -61,8 +62,9 @@ use super::providers::{
         bind_inventory as bind_crush_inventory, closing_observation as closing_crush_observation,
         exact_replay_matches as crush_exact_replay_matches,
         finish_opened_source as finish_crush_source, open_source as open_crush_source,
-        scan_source as scan_crush_source, CrushLocatorResolverV0, CRUSH_DISCOVERY_REVISION,
-        CRUSH_FRONTIER_KIND, CRUSH_PARSER_REVISION, CRUSH_SOURCE_SCHEMA_VARIANT,
+        scan_source as scan_crush_source, CrushLocatorResolverV0, CrushSourceBackedErrorV0,
+        CrushSourceBackedResultV0, CRUSH_DISCOVERY_REVISION, CRUSH_FRONTIER_KIND,
+        CRUSH_PARSER_REVISION, CRUSH_SOURCE_SCHEMA_VARIANT,
     },
     cursor::{
         extract_cursor_source_backed_cold, hydrate_cursor_source_backed_message,
@@ -72,6 +74,7 @@ use super::providers::{
     deepagents::native_path::source_backed::{
         DeepAgentsDatabaseSelectionV0, DeepAgentsLocatorResolverV0, DeepAgentsSourceBackedScannerV0,
     },
+    firebender::firebender_message_text,
     firebender::native_path::{
         hydrate_firebender_source_backed_row, prepare_firebender_source_backed,
         FirebenderSourceBackedPlan,
@@ -98,9 +101,10 @@ use super::providers::{
     },
     kimi::native_path::source_backed::{KimiSourceBackedCatalog, KimiSourceBackedResolver},
     kiro::native_path::{scan_kiro_source_backed_v0, KiroLocatorResolverV0},
-    lingma::{
+    lingma::native_path::{
         scan_lingma_source_backed_v0, LingmaDatabaseSourceV0, LingmaExactContentFailureKindV0,
-        LingmaSourceBackedResolverV0, LingmaSourceInventoryV0,
+        LingmaSourceBackedErrorV0, LingmaSourceBackedResolverV0, LingmaSourceBackedResultV0,
+        LingmaSourceInventoryV0,
     },
     mistral_vibe::native_path::source_backed::scan_mistral_vibe_source_backed,
     mux::native_path::{
@@ -147,11 +151,16 @@ use super::providers::{
         ZedSourceBackedSinkV0,
     },
 };
+use crate::provider_sources::{
+    resolve_warp_discovery_authority, CrushDiscoveredProjectInventory,
+    CrushProjectInventorySelector, CrushProjectInventorySelectorError, LingmaDiscoveryUnavailable,
+    LingmaInventorySelector, WarpDiscoveryUnavailable,
+};
 use crate::{
-    discover_provider_sources_with_context, CaptureError, DiscoveryContext, DiscoveryIssue,
-    DiscoveryPlatform, ProviderAdapterContext, ProviderImportSupport, ProviderSource,
-    ProviderSourceKind, ProviderSourceStatus, Result as CaptureResult,
-    CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT, GEMINI_CLI_SOURCE_FORMAT,
+    discover_provider_sources_with_context, provider_source_spec, CaptureError, DiscoveryContext,
+    DiscoveryIssue, DiscoveryPlatform, ProviderAdapterContext, ProviderImportSupport,
+    ProviderSource, ProviderSourceKind, ProviderSourceSpec, ProviderSourceStatus,
+    Result as CaptureResult, CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT, GEMINI_CLI_SOURCE_FORMAT,
 };
 
 pub type SourceBackedCoordinatorResult<T> = Result<T, SourceBackedCoordinatorError>;
@@ -1157,6 +1166,7 @@ pub enum SourceBackedAutomaticRegistryIssue {
 pub struct SourceBackedAutomaticRegistryBuild {
     pub registry: SourceBackedProviderRegistry,
     pub issues: Vec<SourceBackedAutomaticRegistryIssue>,
+    pub discovery_duration: Duration,
 }
 
 impl SourceBackedAutomaticRegistryBuild {
@@ -1176,6 +1186,23 @@ impl SourceBackedAutomaticRegistryBuild {
     ) {
         (self.registry, self.issues)
     }
+
+    pub fn into_refresh_executor(
+        self,
+        writer_options: WriterOptions,
+    ) -> (
+        SourceBackedRefreshExecutor,
+        Vec<SourceBackedAutomaticRegistryIssue>,
+    ) {
+        (
+            SourceBackedRefreshExecutor::with_discovery_duration(
+                self.registry,
+                writer_options,
+                self.discovery_duration,
+            ),
+            self.issues,
+        )
+    }
 }
 
 /// Discovers and registers every automatic source-backed route capture can
@@ -1188,8 +1215,15 @@ impl SourceBackedAutomaticRegistryBuild {
 pub fn build_automatic_source_backed_registry(
     discovery: &DiscoveryContext,
 ) -> SourceBackedAutomaticRegistryBuild {
+    let discovery_started = Instant::now();
     let report = discover_provider_sources_with_context(discovery);
-    build_automatic_source_backed_registry_from_report(discovery, report.sources, report.issues)
+    let mut build = build_automatic_source_backed_registry_from_report(
+        discovery,
+        report.sources,
+        report.issues,
+    );
+    build.discovery_duration = discovery_started.elapsed();
+    build
 }
 
 fn build_automatic_source_backed_registry_from_report(
@@ -1280,7 +1314,11 @@ fn build_automatic_source_backed_registry_from_report(
         }
     }
 
-    SourceBackedAutomaticRegistryBuild { registry, issues }
+    SourceBackedAutomaticRegistryBuild {
+        registry,
+        issues,
+        discovery_duration: Duration::ZERO,
+    }
 }
 
 fn retain_unsupported_automatic_format(
@@ -1314,17 +1352,20 @@ fn register_discovered_automatic_route(
     discovery: &DiscoveryContext,
     source: ProviderSource,
 ) -> Result<(), SourceBackedAutomaticUnavailableReason> {
-    const CRUSH_SELECTOR_GAP: &str = "Crush discovery exposes database paths but not the stable project keys and rereadable finite inventory required by CrushProjectInventorySourceV0";
-    const LINGMA_SELECTOR_GAP: &str = "Lingma discovery exposes selected databases but not the installed-client authority and per-database catalog lineages required by LingmaSourceInventoryV0";
-    const WARP_SELECTOR_GAP: &str = "Warp discovery exposes database paths but not the stable installed-surface key required by WarpSourceSelectionV0";
-
     let result = match source.provider {
         CaptureProvider::Warp => {
-            return Err(
-                SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable {
-                    detail: WARP_SELECTOR_GAP,
-                },
-            );
+            let selected =
+                resolve_warp_discovery_authority(discovery, &source).map_err(|error| {
+                    SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable {
+                        detail: warp_discovery_unavailable_detail(error),
+                    }
+                })?;
+            register_warp_source_backed_route(
+                registry,
+                source,
+                SourceBackedRouteSelection::Automatic,
+                selected.surface_key().as_str(),
+            )
         }
         CaptureProvider::Goose => {
             let platform_root = goose_platform_root(discovery, &source.path).ok_or(
@@ -1341,18 +1382,22 @@ fn register_discovered_automatic_route(
             )
         }
         CaptureProvider::Crush => {
-            return Err(
-                SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable {
-                    detail: CRUSH_SELECTOR_GAP,
-                },
-            );
+            let inventory_source = discovered_crush_inventory_source(discovery, &source)?;
+            register_crush_source_backed_route(
+                registry,
+                source,
+                SourceBackedRouteSelection::Automatic,
+                inventory_source,
+            )
         }
         CaptureProvider::Lingma => {
-            return Err(
-                SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable {
-                    detail: LINGMA_SELECTOR_GAP,
-                },
-            );
+            let inventory_source = discovered_lingma_inventory_source(discovery, &source)?;
+            register_lingma_inventory_source(
+                registry,
+                source,
+                SourceBackedRouteSelection::Automatic,
+                inventory_source,
+            )
         }
         CaptureProvider::AstrBot => register_astrbot_source_backed_route(
             registry,
@@ -1413,6 +1458,105 @@ fn goose_platform_root(discovery: &DiscoveryContext, database: &Path) -> Option<
         }
     };
     (database == root.join("sessions/sessions.db")).then_some(root)
+}
+
+const fn warp_discovery_unavailable_detail(error: WarpDiscoveryUnavailable) -> &'static str {
+    match error {
+        WarpDiscoveryUnavailable::UnsupportedPlatform { .. } => {
+            "Warp installed-surface authority is unavailable on this platform"
+        }
+        WarpDiscoveryUnavailable::WindowsLocalDataRootUnavailable => {
+            "Warp installed-surface authority has no Windows local-data root"
+        }
+        WarpDiscoveryUnavailable::ProviderSpecUnavailable => {
+            "Warp provider discovery specification is unavailable"
+        }
+        WarpDiscoveryUnavailable::SourceCandidateRejected { .. } => {
+            "Warp installed-surface discovery rejected the selected source within fixed bounds"
+        }
+        WarpDiscoveryUnavailable::SourceNotSelected => {
+            "Warp source is absent from authoritative installed-surface discovery"
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DiscoveredCrushInventorySource {
+    selector: CrushProjectInventorySelector,
+    spec: &'static ProviderSourceSpec,
+}
+
+impl CrushProjectInventorySourceV0 for DiscoveredCrushInventorySource {
+    fn observe(&self) -> CrushSourceBackedResultV0<CrushProjectInventoryObservationV0> {
+        self.selector
+            .observe(self.spec)
+            .map_err(crush_selector_adapter_error)
+            .and_then(crush_adapter_inventory)
+    }
+}
+
+fn discovered_crush_inventory_source(
+    discovery: &DiscoveryContext,
+    selected_source: &ProviderSource,
+) -> Result<Arc<DiscoveredCrushInventorySource>, SourceBackedAutomaticUnavailableReason> {
+    let spec = provider_source_spec(CaptureProvider::Crush).ok_or(
+        SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable {
+            detail: "Crush provider discovery specification is unavailable",
+        },
+    )?;
+    let source = Arc::new(DiscoveredCrushInventorySource {
+        selector: CrushProjectInventorySelector::new(discovery.clone()),
+        spec,
+    });
+    let opening = source.selector.observe(spec).map_err(|error| {
+        SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable {
+            detail: error.detail(),
+        }
+    })?;
+    if !opening
+        .databases()
+        .iter()
+        .any(|database| database.database_path() == selected_source.path)
+    {
+        return Err(
+            SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable {
+                detail:
+                    "Crush selected database is absent from its authoritative project inventory",
+            },
+        );
+    }
+    crush_adapter_inventory(opening).map_err(|error| {
+        SourceBackedAutomaticUnavailableReason::RegistrationRejected {
+            detail: error.to_string(),
+        }
+    })?;
+    Ok(source)
+}
+
+fn crush_adapter_inventory(
+    inventory: CrushDiscoveredProjectInventory,
+) -> CrushSourceBackedResultV0<CrushProjectInventoryObservationV0> {
+    let authority_key = inventory
+        .authority_key()
+        .map_err(crush_selector_adapter_error)?;
+    let databases = inventory
+        .databases()
+        .iter()
+        .map(|database| {
+            let project_key = database
+                .selector_key()
+                .typed_key()
+                .map_err(crush_selector_adapter_error)?;
+            CrushProjectDatabaseV0::new(project_key, database.database_path())
+        })
+        .collect::<CrushSourceBackedResultV0<Vec<_>>>()?;
+    CrushProjectInventoryObservationV0::new(authority_key, inventory.revision().to_vec(), databases)
+}
+
+fn crush_selector_adapter_error(
+    error: CrushProjectInventorySelectorError,
+) -> CrushSourceBackedErrorV0 {
+    CaptureError::InvalidPayload(error.to_string()).into()
 }
 
 #[derive(Debug, Clone)]
@@ -1486,6 +1630,14 @@ pub struct SourceBackedRefreshProgress {
     pub completed_sources: usize,
     pub total_sources: usize,
     pub current_source: Option<String>,
+    /// Time spent in the current phase when this event was emitted.
+    pub stage_duration: Duration,
+    /// Total measured discovery plus refresh time at this event.
+    pub elapsed: Duration,
+    /// Commit-derived source evidence, available only after publication.
+    pub certified_source_count: Option<usize>,
+    /// Commit-derived byte evidence, available only after publication.
+    pub certified_source_bytes: Option<u64>,
 }
 
 /// Capture-owned executor that can be installed behind the daemon's
@@ -1494,13 +1646,23 @@ pub struct SourceBackedRefreshProgress {
 pub struct SourceBackedRefreshExecutor {
     registry: SourceBackedProviderRegistry,
     writer_options: WriterOptions,
+    discovery_duration: Duration,
 }
 
 impl SourceBackedRefreshExecutor {
     pub fn new(registry: SourceBackedProviderRegistry, writer_options: WriterOptions) -> Self {
+        Self::with_discovery_duration(registry, writer_options, Duration::ZERO)
+    }
+
+    pub fn with_discovery_duration(
+        registry: SourceBackedProviderRegistry,
+        writer_options: WriterOptions,
+        discovery_duration: Duration,
+    ) -> Self {
         Self {
             registry,
             writer_options,
+            discovery_duration,
         }
     }
 
@@ -1513,10 +1675,11 @@ impl SourceBackedRefreshExecutor {
         index_root: impl AsRef<Path>,
         report_progress: impl FnMut(SourceBackedRefreshProgress) -> SourceBackedRouteResult<()>,
     ) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
-        refresh_source_backed_generation_with_progress(
+        refresh_source_backed_generation_with_progress_and_discovery_timing(
             index_root,
             &self.registry,
             self.writer_options.clone(),
+            self.discovery_duration,
             report_progress,
         )
     }
@@ -1527,6 +1690,11 @@ pub struct SourceBackedRefreshReceipt {
     pub commit: CommitReceipt,
     pub scanned_routes: usize,
     pub unsupported_routes: Vec<SourceBackedRouteMetadata>,
+    pub discovery_duration: Duration,
+    pub scan_stage_duration: Duration,
+    pub commit_duration: Duration,
+    pub certified_source_count: usize,
+    pub certified_source_bytes: u64,
 }
 
 /// Runs every executable route against one writer and publishes one atomic
@@ -1543,6 +1711,22 @@ pub fn refresh_source_backed_generation_with_progress(
     index_root: impl AsRef<Path>,
     registry: &SourceBackedProviderRegistry,
     writer_options: WriterOptions,
+    report_progress: impl FnMut(SourceBackedRefreshProgress) -> SourceBackedRouteResult<()>,
+) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
+    refresh_source_backed_generation_with_progress_and_discovery_timing(
+        index_root,
+        registry,
+        writer_options,
+        Duration::ZERO,
+        report_progress,
+    )
+}
+
+fn refresh_source_backed_generation_with_progress_and_discovery_timing(
+    index_root: impl AsRef<Path>,
+    registry: &SourceBackedProviderRegistry,
+    writer_options: WriterOptions,
+    discovery_duration: Duration,
     mut report_progress: impl FnMut(SourceBackedRefreshProgress) -> SourceBackedRouteResult<()>,
 ) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
     let scanned_routes = registry
@@ -1553,11 +1737,16 @@ pub fn refresh_source_backed_generation_with_progress(
     if scanned_routes == 0 {
         return Err(SourceBackedCoordinatorError::NoExecutableRoutes);
     }
+    let refresh_started = Instant::now();
     report_progress(SourceBackedRefreshProgress {
         phase: "discovering",
         completed_sources: 0,
         total_sources: scanned_routes,
         current_source: None,
+        stage_duration: discovery_duration,
+        elapsed: discovery_duration,
+        certified_source_count: None,
+        certified_source_bytes: None,
     })
     .map_err(SourceBackedCoordinatorError::Progress)?;
     let unsupported_routes = registry
@@ -1567,6 +1756,7 @@ pub fn refresh_source_backed_generation_with_progress(
         .map(|route| route.metadata.clone())
         .collect();
 
+    let scan_started = Instant::now();
     let mut writer = GenerationWriter::open(index_root, writer_options)?;
     let mut owners = HashMap::new();
     let mut completed_routes = 0;
@@ -1579,6 +1769,10 @@ pub fn refresh_source_backed_generation_with_progress(
             completed_sources: completed_routes,
             total_sources: scanned_routes,
             current_source: Some(route.metadata.source.path.display().to_string()),
+            stage_duration: scan_started.elapsed(),
+            elapsed: discovery_duration.saturating_add(refresh_started.elapsed()),
+            certified_source_count: None,
+            certified_source_bytes: None,
         })
         .map_err(SourceBackedCoordinatorError::Progress)?;
         let mut sink = SourceBackedGenerationSink {
@@ -1598,8 +1792,14 @@ pub fn refresh_source_backed_generation_with_progress(
         completed_sources: completed_routes,
         total_sources: scanned_routes,
         current_source: None,
+        stage_duration: scan_started.elapsed(),
+        elapsed: discovery_duration.saturating_add(refresh_started.elapsed()),
+        certified_source_count: None,
+        certified_source_bytes: None,
     })
     .map_err(SourceBackedCoordinatorError::Progress)?;
+    let scan_stage_duration = scan_started.elapsed();
+    let commit_started = Instant::now();
     let commit = writer.commit(|target| {
         let source = match target {
             RevalidationTarget::Source(source) => source.observation().source(),
@@ -1623,10 +1823,29 @@ pub fn refresh_source_backed_generation_with_progress(
             }
         }
     })?;
+    let commit_duration = commit_started.elapsed();
+    report_progress(SourceBackedRefreshProgress {
+        phase: "committed",
+        completed_sources: completed_routes,
+        total_sources: scanned_routes,
+        current_source: None,
+        stage_duration: commit_duration,
+        elapsed: discovery_duration.saturating_add(refresh_started.elapsed()),
+        certified_source_count: Some(commit.certified_sources),
+        certified_source_bytes: Some(commit.certified_source_bytes),
+    })
+    .map_err(SourceBackedCoordinatorError::Progress)?;
+    let certified_source_count = commit.certified_sources;
+    let certified_source_bytes = commit.certified_source_bytes;
     Ok(SourceBackedRefreshReceipt {
         commit,
         scanned_routes,
         unsupported_routes,
+        discovery_duration,
+        scan_stage_duration,
+        commit_duration,
+        certified_source_count,
+        certified_source_bytes,
     })
 }
 
@@ -1826,7 +2045,7 @@ fn register_codex_route(
                 })?;
             Ok(HydratedProviderRecord {
                 event_id: request.event_id(),
-                provider_bytes: hydrated.provider_bytes,
+                provider_bytes: codex_display_bytes(hydrated)?,
             })
         },
     );
@@ -1852,7 +2071,9 @@ fn register_zed_route(
         move |sink| {
             let source_key = zed_source_key().map_err(route_error)?;
             let mut snapshot = acquire_zed_snapshot(&capture_path).map_err(route_error)?;
-            let revision_digest = zed_snapshot_revision_digest(&snapshot.snapshot_revision);
+            let snapshot_revision = snapshot.snapshot_revision.clone();
+            let physical_locator = snapshot.physical_locator.clone();
+            let revision_digest = zed_snapshot_revision_digest(&snapshot_revision);
             sink.begin_source(source_key.clone())
                 .map_err(route_coordinator_error)?;
             let connection = snapshot.connection().map_err(route_error)?;
@@ -1866,8 +2087,8 @@ fn register_zed_route(
             .map_err(route_error)?;
             let scan = scan_zed_native_snapshot(
                 connection,
-                &snapshot.physical_locator,
-                &snapshot.snapshot_revision,
+                &physical_locator,
+                &snapshot_revision,
                 &mut zed_sink,
             )
             .map_err(route_error)?;
@@ -1901,8 +2122,8 @@ fn register_zed_route(
                 indexed_documents: staged_documents,
                 certified_bytes: scan.counters.certified_logical_bytes,
             };
-            let observation = zed_source_observation(&source_key, &snapshot.snapshot_revision)
-                .map_err(route_error)?;
+            let observation =
+                zed_source_observation(&source_key, &snapshot_revision).map_err(route_error)?;
             let certificate = CertifiedSource::certify(
                 observation.clone(),
                 observation,
@@ -1923,10 +2144,9 @@ fn register_zed_route(
                 let Ok(mut snapshot) = acquire_zed_snapshot(&revalidation_path) else {
                     return false;
                 };
-                let matches =
-                    zed_source_observation(&source_key, &snapshot.snapshot_revision)
-                        .is_ok_and(|observation| observation == *expected.observation());
-                matches && snapshot.finish().is_ok()
+                let observation = zed_source_observation(&source_key, &snapshot.snapshot_revision);
+                observation.is_ok_and(|observation| observation == *expected.observation())
+                    && snapshot.finish().is_ok()
             }
             SourceBackedRevalidationTarget::Deletion(_) => false,
         },
@@ -2537,12 +2757,56 @@ pub fn register_lingma_source_backed_route(
         .map_err(|error| invalid_route(source.provider, error.to_string()))?;
     let inventory = LingmaSourceInventoryV0::new(authority_key, databases)
         .map_err(|error| invalid_route(source.provider, error.to_string()))?;
-    let capture_inventory = inventory.clone();
-    let hydration_inventory = inventory;
+    register_lingma_inventory_source(
+        registry,
+        source,
+        selection,
+        Arc::new(FixedLingmaInventorySource { inventory }),
+    )
+}
+
+trait LingmaInventorySource: Send + Sync {
+    fn observe(&self) -> LingmaSourceBackedResultV0<LingmaSourceInventoryV0>;
+}
+
+#[derive(Debug, Clone)]
+struct FixedLingmaInventorySource {
+    inventory: LingmaSourceInventoryV0,
+}
+
+impl LingmaInventorySource for FixedLingmaInventorySource {
+    fn observe(&self) -> LingmaSourceBackedResultV0<LingmaSourceInventoryV0> {
+        Ok(self.inventory.clone())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DiscoveredLingmaInventorySource {
+    selector: LingmaInventorySelector,
+}
+
+impl LingmaInventorySource for DiscoveredLingmaInventorySource {
+    fn observe(&self) -> LingmaSourceBackedResultV0<LingmaSourceInventoryV0> {
+        self.selector
+            .observe()
+            .map_err(lingma_discovery_adapter_error)
+            .and_then(lingma_adapter_inventory)
+    }
+}
+
+fn register_lingma_inventory_source(
+    registry: &mut SourceBackedProviderRegistry,
+    source: ProviderSource,
+    selection: SourceBackedRouteSelection,
+    inventory_source: Arc<dyn LingmaInventorySource>,
+) -> SourceBackedCoordinatorResult<()> {
+    let capture_inventory = Arc::clone(&inventory_source);
+    let hydration_inventory = inventory_source;
     let driver = captured_route_driver(
         move |sink| {
-            let closing = capture_inventory.clone();
-            let scan = scan_lingma_source_backed_v0(capture_inventory.clone(), move || Ok(closing))
+            let opening = capture_inventory.observe().map_err(route_error)?;
+            let closing_inventory = Arc::clone(&capture_inventory);
+            let scan = scan_lingma_source_backed_v0(opening, move || closing_inventory.observe())
                 .map_err(route_error)?;
             for database in scan.databases() {
                 sink.begin(database.certificate().observation().source().clone())?;
@@ -2555,7 +2819,10 @@ pub fn register_lingma_source_backed_route(
         },
         provider_format_scope(CaptureProvider::Lingma, "lingma_sqlite"),
         move |request| {
-            let result = LingmaSourceBackedResolverV0::new(&hydration_inventory)
+            let inventory = hydration_inventory.observe().map_err(|error| {
+                hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
+            })?;
+            let result = LingmaSourceBackedResolverV0::new(&inventory)
                 .map_err(|error| {
                     hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
                 })?
@@ -2595,6 +2862,61 @@ pub fn register_lingma_source_backed_route(
         driver,
     )?);
     Ok(())
+}
+
+fn discovered_lingma_inventory_source(
+    discovery: &DiscoveryContext,
+    selected_source: &ProviderSource,
+) -> Result<Arc<dyn LingmaInventorySource>, SourceBackedAutomaticUnavailableReason> {
+    let source = DiscoveredLingmaInventorySource {
+        selector: LingmaInventorySelector::new(discovery.clone()),
+    };
+    let opening = source.selector.observe().map_err(|error| {
+        SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable {
+            detail: error.detail(),
+        }
+    })?;
+    if !opening
+        .databases()
+        .iter()
+        .any(|database| database.source() == selected_source)
+    {
+        return Err(
+            SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable {
+                detail: "Lingma selected database is absent from its installed-client inventory",
+            },
+        );
+    }
+    lingma_adapter_inventory(opening).map_err(|error| {
+        SourceBackedAutomaticUnavailableReason::RegistrationRejected {
+            detail: error.to_string(),
+        }
+    })?;
+    Ok(Arc::new(source))
+}
+
+fn lingma_adapter_inventory(
+    inventory: crate::provider_sources::LingmaDiscoveredInventory,
+) -> LingmaSourceBackedResultV0<LingmaSourceInventoryV0> {
+    let authority_key = inventory
+        .authority_key()
+        .map_err(lingma_discovery_adapter_error)?;
+    let databases = inventory
+        .databases()
+        .iter()
+        .map(|database| {
+            let lineage = database
+                .catalog_lineage()
+                .typed_key()
+                .map_err(lingma_discovery_adapter_error)?;
+            LingmaDatabaseSourceV0::new(database.path(), lineage)
+        })
+        .collect::<LingmaSourceBackedResultV0<Vec<_>>>()?;
+    LingmaSourceInventoryV0::new(authority_key, databases)
+}
+
+fn lingma_discovery_adapter_error(error: LingmaDiscoveryUnavailable) -> LingmaSourceBackedErrorV0 {
+    CaptureError::InvalidPayload(error.to_string()).into()
 }
 
 /// Registers Crush's selector-owned finite project inventory. The coordinator
@@ -3157,7 +3479,10 @@ fn register_firebender_route(
                 })?;
             Ok(HydratedProviderRecord {
                 event_id: request.event_id(),
-                provider_bytes: hydrated.messages_json().to_vec(),
+                provider_bytes: firebender_display_bytes(
+                    hydrated.messages_json(),
+                    hydrated.message_index(),
+                )?,
             })
         },
     );
@@ -4334,6 +4659,46 @@ fn capture_coordinator_error(error: SourceBackedCoordinatorError) -> CaptureErro
     CaptureError::InvalidPayload(error.to_string())
 }
 
+fn codex_display_bytes(hydrated: CodexHydratedRecordV0) -> Result<Vec<u8>, HydrationFailure> {
+    hydrated
+        .decoded_display_text
+        .map(String::into_bytes)
+        .ok_or_else(|| {
+            hydration_failure(
+                HydrationFailureKind::UnsupportedParserRevision,
+                "Codex record has no exact decoded display text",
+            )
+        })
+}
+
+fn firebender_display_bytes(
+    messages_json: &[u8],
+    message_index: u64,
+) -> Result<Vec<u8>, HydrationFailure> {
+    let messages = serde_json::from_slice::<Vec<serde_json::Value>>(messages_json)
+        .map_err(|error| hydration_failure(HydrationFailureKind::StaleRecordEvidence, error))?;
+    let index = usize::try_from(message_index).map_err(|_| {
+        hydration_failure(
+            HydrationFailureKind::InvalidLocator,
+            "Firebender message index exceeds platform limits",
+        )
+    })?;
+    let message = messages.get(index).ok_or_else(|| {
+        hydration_failure(
+            HydrationFailureKind::MissingRecord,
+            "Firebender message is absent from its verified source row",
+        )
+    })?;
+    firebender_message_text(message)
+        .map(String::into_bytes)
+        .ok_or_else(|| {
+            hydration_failure(
+                HydrationFailureKind::UnsupportedParserRevision,
+                "Firebender message has no exact decoded display text",
+            )
+        })
+}
+
 fn hydration_failure(kind: HydrationFailureKind, detail: impl fmt::Display) -> HydrationFailure {
     HydrationFailure {
         kind,
@@ -4387,18 +4752,35 @@ mod tests {
         registry.register(hermes.0);
 
         let temp = tempdir().unwrap();
-        let receipt = refresh_source_backed_generation(
+        let mut progress = Vec::new();
+        let receipt = refresh_source_backed_generation_with_progress(
             temp.path(),
             &registry,
             WriterOptions {
                 indexer_threads: 1,
                 memory_bytes: 15_000_000,
             },
+            |update| {
+                progress.push(update);
+                Ok(())
+            },
         )
         .unwrap();
         assert_eq!(receipt.scanned_routes, 2);
         assert_eq!(receipt.commit.indexed_documents, 2);
         assert_eq!(receipt.commit.certified_sources, 2);
+        assert_eq!(receipt.certified_source_count, 2);
+        assert_eq!(receipt.certified_source_bytes, 2);
+        assert!(receipt.scan_stage_duration > Duration::ZERO);
+        assert!(receipt.commit_duration > Duration::ZERO);
+        assert!(progress
+            .windows(2)
+            .all(|pair| pair[0].elapsed <= pair[1].elapsed));
+        let committed = progress.last().unwrap();
+        assert_eq!(committed.phase, "committed");
+        assert_eq!(committed.certified_source_count, Some(2));
+        assert_eq!(committed.certified_source_bytes, Some(2));
+        assert!(committed.stage_duration > Duration::ZERO);
 
         let resolver = registry.resolver_registry();
         assert_eq!(
@@ -4414,6 +4796,36 @@ mod tests {
                 .unwrap()
                 .provider_bytes,
             b"hermes"
+        );
+    }
+
+    #[test]
+    fn central_hydration_returns_decoded_event_text_not_serialized_containers() {
+        let codex = CodexHydratedRecordV0 {
+            provider_bytes: br#"{"type":"event_msg","payload":{"message":"raw"}}"#.to_vec(),
+            decoded_display_text: Some("decoded Codex text".to_owned()),
+        };
+        assert_eq!(
+            codex_display_bytes(codex).unwrap(),
+            b"decoded Codex text".to_vec()
+        );
+        let missing = codex_display_bytes(CodexHydratedRecordV0 {
+            provider_bytes: b"raw".to_vec(),
+            decoded_display_text: None,
+        })
+        .unwrap_err();
+        assert_eq!(
+            missing.kind,
+            HydrationFailureKind::UnsupportedParserRevision
+        );
+
+        let firebender = br#"[
+            {"role":"user","content":"first"},
+            {"role":"assistant","content":{"text":"decoded Firebender text"}}
+        ]"#;
+        assert_eq!(
+            firebender_display_bytes(firebender, 1).unwrap(),
+            b"decoded Firebender text".to_vec()
         );
     }
 
@@ -4659,13 +5071,36 @@ mod tests {
     }
 
     #[test]
-    fn automatic_builder_counts_routes_and_returns_typed_gaps() {
+    fn automatic_builder_executes_typed_warp_crush_and_lingma_authorities() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        let cwd = temp.path().join("work");
+        let state = temp.path().join("state");
+        let config = temp.path().join("config");
+        std::fs::create_dir_all(cwd.join(".git")).unwrap();
+        let warp = state.join("warp-terminal/warp.sqlite");
+        std::fs::create_dir_all(warp.parent().unwrap()).unwrap();
+        std::fs::write(&warp, b"sqlite").unwrap();
+        let crush = cwd.join(".crush/crush.db");
+        std::fs::create_dir_all(crush.parent().unwrap()).unwrap();
+        std::fs::write(&crush, b"sqlite").unwrap();
+        let lingma = home.join(".lingma/vscode/sharedClientCache/cache/db/local.db");
+        std::fs::create_dir_all(lingma.parent().unwrap()).unwrap();
+        rusqlite::Connection::open(&lingma)
+            .unwrap()
+            .execute_batch(
+                "create table chat_record (\
+                    session_id text, request_id text, chat_prompt text, summary text, \
+                    error_result text, gmt_create integer, extra text);",
+            )
+            .unwrap();
         let context = DiscoveryContext::new(
-            "/home/test",
-            "/work/test",
+            &home,
+            &cwd,
             DiscoveryPlatform::Linux,
             crate::DiscoveryPlatformDirs {
-                state: Some(PathBuf::from("/state")),
+                config: Some(config),
+                state: Some(state),
                 ..crate::DiscoveryPlatformDirs::default()
             },
         );
@@ -4686,13 +5121,13 @@ mod tests {
                 CaptureProvider::Warp,
                 "warp_sqlite",
                 ProviderImportSupport::Native,
-                "/state/warp-terminal/warp.sqlite",
+                &warp,
             ),
             fixture_provider_source_at(
                 CaptureProvider::Goose,
                 "goose_sessions_sqlite",
                 ProviderImportSupport::Native,
-                "/home/test/.local/share/goose/sessions/sessions.db",
+                home.join(".local/share/goose/sessions/sessions.db"),
             ),
             fixture_provider_source(
                 CaptureProvider::AstrBot,
@@ -4710,15 +5145,17 @@ mod tests {
                 "codex_history_jsonl",
                 ProviderImportSupport::Native,
             ),
-            fixture_provider_source(
+            fixture_provider_source_at(
                 CaptureProvider::Crush,
                 "crush_sqlite",
                 ProviderImportSupport::Native,
+                &crush,
             ),
-            fixture_provider_source(
+            fixture_provider_source_at(
                 CaptureProvider::Lingma,
                 "lingma_sqlite",
                 ProviderImportSupport::Native,
+                &lingma,
             ),
             fixture_provider_source(
                 CaptureProvider::Unknown,
@@ -4730,9 +5167,20 @@ mod tests {
 
         let build =
             build_automatic_source_backed_registry_from_report(&context, sources, Vec::new());
-        assert_eq!(build.executable_route_count(), 3);
-        assert_eq!(build.unsupported_route_count(), 5);
-        assert_eq!(build.issues.len(), 6);
+        assert_eq!(build.executable_route_count(), 6);
+        assert_eq!(build.unsupported_route_count(), 2);
+        assert_eq!(build.issues.len(), 3);
+        for provider in [
+            CaptureProvider::Warp,
+            CaptureProvider::Crush,
+            CaptureProvider::Lingma,
+        ] {
+            assert!(build.registry.routes().any(|route| {
+                route.source.provider == provider
+                    && route.selection == Some(SourceBackedRouteSelection::Automatic)
+                    && route.unsupported_reason.is_none()
+            }));
+        }
         assert!(build.issues.iter().any(|issue| matches!(
             issue,
             SourceBackedAutomaticRegistryIssue::Unavailable {
@@ -4742,16 +5190,15 @@ mod tests {
                 && source.source_format == "codex_history_jsonl"
                 && detail.contains("prompt-history")
         )));
-        assert!(build.issues.iter().any(|issue| matches!(
+        assert!(!build.issues.iter().any(|issue| matches!(
             issue,
             SourceBackedAutomaticRegistryIssue::Unavailable {
                 source,
-                reason:
-                    SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable {
-                        detail,
-                    },
-            } if source.provider == CaptureProvider::Crush
-                && detail.contains("stable project keys")
+                reason: SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable { .. },
+            } if matches!(
+                source.provider,
+                CaptureProvider::Warp | CaptureProvider::Crush | CaptureProvider::Lingma
+            )
         )));
         assert!(build.issues.iter().any(|issue| matches!(
             issue,

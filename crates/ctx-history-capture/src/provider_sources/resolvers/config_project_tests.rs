@@ -203,6 +203,58 @@ fn crush_registry_is_finite_sorted_and_rejects_relative_entries() {
 }
 
 #[test]
+fn crush_inventory_retains_official_project_keys_and_reobserves_revision() {
+    let temp = tempdir();
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("repo");
+    fs::create_dir_all(cwd.join(".git")).unwrap();
+    let first_project = temp.path().join("project-a");
+    let first_data = temp.path().join("data-a");
+    touch(&first_data.join("crush.db"));
+    write(
+        &home.join(".local/share/crush/projects.json"),
+        &format!(
+            r#"{{"projects":[{{"path":{},"data_dir":{}}}]}}"#,
+            serde_json::to_string(first_project.to_str().unwrap()).unwrap(),
+            serde_json::to_string(first_data.to_str().unwrap()).unwrap(),
+        ),
+    );
+    let context = context(&home, &cwd);
+    let selector = CrushProjectInventorySelector::new(context);
+    let provider = spec(CaptureProvider::Crush);
+    let opening = selector.observe(provider).unwrap();
+    assert_eq!(opening.databases().len(), 1);
+    assert_eq!(
+        opening.databases()[0].selector_key(),
+        &CrushProjectSelectorKey::RegisteredProject(first_project.clone())
+    );
+    assert_eq!(
+        opening.databases()[0].database_path(),
+        first_data.join("crush.db")
+    );
+
+    let second_project = temp.path().join("project-b");
+    let second_data = temp.path().join("data-b");
+    touch(&second_data.join("crush.db"));
+    write(
+        &home.join(".local/share/crush/projects.json"),
+        &format!(
+            r#"{{"projects":[
+                {{"path":{},"data_dir":{}}},
+                {{"path":{},"data_dir":{}}}
+            ]}}"#,
+            serde_json::to_string(first_project.to_str().unwrap()).unwrap(),
+            serde_json::to_string(first_data.to_str().unwrap()).unwrap(),
+            serde_json::to_string(second_project.to_str().unwrap()).unwrap(),
+            serde_json::to_string(second_data.to_str().unwrap()).unwrap(),
+        ),
+    );
+    let closing = selector.observe(provider).unwrap();
+    assert_eq!(closing.databases().len(), 2);
+    assert_ne!(opening.revision(), closing.revision());
+}
+
+#[test]
 fn qwen_code_official_root_policy_honors_runtime_winner() {
     let temp = tempdir();
     let home = temp.path().join("home");

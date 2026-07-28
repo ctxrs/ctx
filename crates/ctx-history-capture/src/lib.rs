@@ -6,16 +6,21 @@ pub use common::io::{
     PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES, PROVIDER_JSONL_INVENTORY_MAX_PATH_BYTES,
 };
 pub use provider_sources::{
-    discover_provider_sources, discover_provider_sources_for_provider,
-    discover_provider_sources_for_provider_report,
+    discover_lingma_inventory_with_authority, discover_provider_sources,
+    discover_provider_sources_for_provider, discover_provider_sources_for_provider_report,
     discover_provider_sources_for_provider_with_context,
     discover_provider_sources_for_provider_with_projects, discover_provider_sources_report,
     discover_provider_sources_with_context, discover_provider_sources_with_projects,
-    observe_ordinary_file, provider_source_for_path, provider_source_spec, provider_source_specs,
+    discover_warp_sources_with_authority, observe_ordinary_file, provider_source_for_path,
+    provider_source_spec, provider_source_specs, resolve_lingma_discovery_authority,
+    resolve_warp_discovery_authority, DiscoveredLingmaDatabase, DiscoveredWarpSource,
     DiscoveryContext, DiscoveryIssue, DiscoveryIssueKind, DiscoveryPlatform, DiscoveryPlatformDirs,
-    DiscoveryReport, OrdinaryFileObservation, ProviderCatalogSupport, ProviderDefaultLocation,
+    DiscoveryReport, LingmaDatabaseCatalogLineage, LingmaDiscoveredInventory,
+    LingmaDiscoveryUnavailable, LingmaInventorySelector, LingmaVscodeClient, LingmaVscodeProfile,
+    OrdinaryFileObservation, ProviderCatalogSupport, ProviderDefaultLocation,
     ProviderImportSupport, ProviderSource, ProviderSourceKind, ProviderSourceSpec,
-    ProviderSourceStatus, DISCOVERY_ENV_ALLOWLIST,
+    ProviderSourceStatus, WarpDiscoveryUnavailable, WarpInstalledPlatform, WarpInstalledSurfaceKey,
+    WarpReleaseChannel, WarpTerminalSurface, DISCOVERY_ENV_ALLOWLIST,
 };
 
 pub(crate) const MAX_PROVIDER_JSONL_LINE_BYTES: usize = 16 * 1024 * 1024;
