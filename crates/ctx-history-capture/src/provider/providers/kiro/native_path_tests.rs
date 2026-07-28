@@ -125,6 +125,15 @@ fn source_revision(path: &Path) -> String {
         .source_revision
 }
 
+fn next_scanner_page(
+    source: &KiroSource,
+    scanner: &mut KiroScanner<'_>,
+) -> Result<Option<KiroCorePage>> {
+    source.database.read(&source.canonical_path, |connection| {
+        scanner.next_page(connection)
+    })
+}
+
 #[test]
 fn cursor_round_trips_exact_source_and_frontier_authority() {
     let cursor = KiroStoreCursor {
@@ -190,16 +199,16 @@ fn scanner_pages_entries_and_keeps_output_bodies_out_of_core() {
         DateTime::<Utc>::UNIX_EPOCH,
     )
     .unwrap();
-    let first = scanner.next_page().unwrap().unwrap();
+    let first = next_scanner_page(&source, &mut scanner).unwrap().unwrap();
     assert!(!first.terminal);
     assert!(first.events.len() <= KIRO_PAGE_HISTORY_ITEMS * 2);
     assert!(first
         .events
         .iter()
         .all(|event| { !event.event.payload.to_string().contains("PRIVATE-OUTPUT") }));
-    let second = scanner.next_page().unwrap().unwrap();
+    let second = next_scanner_page(&source, &mut scanner).unwrap().unwrap();
     assert!(second.terminal);
-    assert!(scanner.next_page().unwrap().is_none());
+    assert!(next_scanner_page(&source, &mut scanner).unwrap().is_none());
 }
 
 #[test]
@@ -224,9 +233,9 @@ fn malformed_row_is_rejected_without_hiding_valid_sibling() {
         DateTime::<Utc>::UNIX_EPOCH,
     )
     .unwrap();
-    let rejected = scanner.next_page().unwrap().unwrap();
+    let rejected = next_scanner_page(&source, &mut scanner).unwrap().unwrap();
     assert_eq!(rejected.rejections.len(), 1);
-    let healthy = scanner.next_page().unwrap().unwrap();
+    let healthy = next_scanner_page(&source, &mut scanner).unwrap().unwrap();
     assert_eq!(healthy.events.len(), 1);
     assert!(healthy.terminal);
 }
@@ -371,7 +380,9 @@ fn scanner_enforces_exact_64_unit_boundary_and_rejects_oversized_entry() {
         DateTime::<Utc>::UNIX_EPOCH,
     )
     .unwrap();
-    let boundary = boundary_scanner.next_page().unwrap().unwrap();
+    let boundary = next_scanner_page(&boundary_source, &mut boundary_scanner)
+        .unwrap()
+        .unwrap();
     assert_eq!(boundary.events.len(), 1);
     assert_eq!(boundary.events[0].touches.len(), 62);
     assert!(boundary.rejections.is_empty());
@@ -388,7 +399,9 @@ fn scanner_enforces_exact_64_unit_boundary_and_rejects_oversized_entry() {
         DateTime::<Utc>::UNIX_EPOCH,
     )
     .unwrap();
-    let oversized = oversized_scanner.next_page().unwrap().unwrap();
+    let oversized = next_scanner_page(&oversized_source, &mut oversized_scanner)
+        .unwrap()
+        .unwrap();
     assert!(oversized.events.is_empty());
     assert_eq!(oversized.rejections.len(), 1);
     assert!(oversized.rejections[0].reason.contains("64-unit bound"));
@@ -645,7 +658,7 @@ fn released_cursor_and_positional_hash_migrate_exactly_in_place() {
         context.imported_at,
     )
     .unwrap();
-    let page = scanner.next_page().unwrap().unwrap();
+    let page = next_scanner_page(&source, &mut scanner).unwrap().unwrap();
     let fact = page.fact.as_ref().unwrap();
     let prepared = &page.events[0];
     let raw_source_path = source.canonical_path.display().to_string();

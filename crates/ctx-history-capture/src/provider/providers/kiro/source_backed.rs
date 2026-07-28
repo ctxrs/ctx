@@ -2,7 +2,7 @@ use std::{
     collections::HashSet,
     convert::Infallible,
     fs,
-    io::Read,
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 
@@ -21,16 +21,11 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
-    provider::{
-        file_touches::{
-            event_type_supports_structured_file_touches,
-            visit_provider_file_touch_drafts_with_limit, MAX_PROVIDER_FILE_TOUCHES_PER_EVENT,
-        },
-        sqlite::{
-            open_provider_sqlite_readonly, ProviderSqliteSourceSnapshot, ReadOnlySqliteConnection,
-        },
+    common::io::open_provider_source_file,
+    provider::file_touches::{
+        event_type_supports_structured_file_touches, visit_provider_file_touch_drafts_with_limit,
+        MAX_PROVIDER_FILE_TOUCHES_PER_EVENT,
     },
-    provider_sources::open_ordinary_file_without_following,
     CaptureError, KIRO_SQLITE_SOURCE_FORMAT, MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
 
@@ -39,8 +34,9 @@ use super::super::history::{
     kiro_session_started_at, KiroConversationRow,
 };
 use super::{
+    absolute_kiro_path,
     scan::{candidate_at, hydrate_row, next_candidate},
-    KiroPhase, KiroTables,
+    KiroPhase, KiroSqliteDatabase, KiroTables,
 };
 
 const KIRO_SOURCE_ANCHOR_NAMESPACE: &str = "kiro.legacy-sqlite";
@@ -119,14 +115,10 @@ impl KiroLocatorResolverV0 {
         source_path: impl AsRef<Path>,
         source_format: &str,
     ) -> KiroSourceBackedResultV0<Self> {
-        let source_path = source_path.as_ref();
-        let (snapshot, connection, _) = open_kiro_snapshot(source_path, source_format)?;
-        if !snapshot.revalidate(source_path)? {
-            return Err(CaptureError::SourceChangedDuringCapture.into());
-        }
-        drop(connection);
+        let source_path = absolute_kiro_path(source_path.as_ref())?;
+        let _ = open_kiro_database(&source_path, source_format)?;
         Ok(Self {
-            source_path: source_path.to_path_buf(),
+            source_path,
             source: kiro_source_key()?,
         })
     }
@@ -141,13 +133,12 @@ impl KiroLocatorResolverV0 {
     ) -> KiroSourceBackedResultV0<KiroHydratedRecordV0> {
         locator.validate_contract()?;
         let (phase, key, native_event_key) = validate_kiro_locator(&self.source, locator)?;
-        let (snapshot, connection, tables) =
-            open_kiro_snapshot(&self.source_path, KIRO_SQLITE_SOURCE_FORMAT)?;
+        let (database, tables) = open_kiro_database(&self.source_path, KIRO_SQLITE_SOURCE_FORMAT)?;
         if !phase_is_present(tables, phase) {
             return Err(KiroSourceBackedErrorV0::InvalidLocator);
         }
-        let row = with_kiro_read_snapshot(&connection, || {
-            load_exact_conversation_row(&connection, phase, &key)
+        let row = database.read(&self.source_path, |connection| {
+            load_exact_conversation_row(connection, phase, &key)
         })?;
         let (record_digest, _) = canonical_row_digest(&row)?;
         if &record_digest != locator.record_digest() {
@@ -160,9 +151,6 @@ impl KiroLocatorResolverV0 {
             .find(|decoded| decoded.event.cursor == native_event_key)
             .ok_or(KiroSourceBackedErrorV0::MissingConversationEvent)?;
         let decoded_display_text = decoded.complete_text();
-        if !snapshot.revalidate(&self.source_path)? {
-            return Err(CaptureError::SourceChangedDuringCapture.into());
-        }
         Ok(KiroHydratedRecordV0 {
             provider_bytes: row.value.into_bytes(),
             decoded_display_text,
@@ -174,23 +162,15 @@ pub(crate) fn scan_kiro_source_backed_v0(
     source_path: impl AsRef<Path>,
     source_format: &str,
 ) -> KiroSourceBackedResultV0<KiroSourceBackedScanV0> {
-    let source_path = source_path.as_ref();
+    let source_path = absolute_kiro_path(source_path.as_ref())?;
     let source = kiro_source_key()?;
-    let (opening_snapshot, connection, tables) = open_kiro_snapshot(source_path, source_format)?;
-    let opening = source_observation(&source, &opening_snapshot)?;
-    let indexed_source_path = fs::canonicalize(source_path)?.display().to_string();
+    let (database, tables) = open_kiro_database(&source_path, source_format)?;
+    let opening = source_observation(&source, database.evidence())?;
+    let indexed_source_path = source_path.display().to_string();
     let mut scan = KiroLogicalScan::new(source.clone(), tables, indexed_source_path)?;
-    with_kiro_read_snapshot(&connection, || scan.scan(&connection))?;
-    if !opening_snapshot.revalidate(source_path)? {
-        return Err(CaptureError::SourceChangedDuringCapture.into());
-    }
-    drop(connection);
-    let closing_snapshot = ProviderSqliteSourceSnapshot::read(
-        source_path,
-        "Kiro SQLite source must be a regular non-symlink file",
-        "Kiro SQLite sidecar must be a regular non-symlink file",
-    )?;
-    let closing = source_observation(&source, &closing_snapshot)?;
+    database.read(&source_path, |connection| scan.scan(connection))?;
+    database.revalidate()?;
+    let closing = source_observation(&source, database.evidence())?;
     let (documents, counts, content_digest) = scan.finish();
     let certificate = CertifiedSource::certify(
         opening,
@@ -206,26 +186,12 @@ pub(crate) fn scan_kiro_source_backed_v0(
     })
 }
 
-fn open_kiro_snapshot(
+fn open_kiro_database(
     source_path: &Path,
     source_format: &str,
-) -> KiroSourceBackedResultV0<(
-    ProviderSqliteSourceSnapshot,
-    ReadOnlySqliteConnection,
-    KiroTables,
-)> {
+) -> KiroSourceBackedResultV0<(KiroSqliteDatabase, KiroTables)> {
     require_legacy_sqlite_format(source_path, source_format)?;
-    let snapshot = ProviderSqliteSourceSnapshot::read(
-        source_path,
-        "Kiro SQLite source must be a regular non-symlink file",
-        "Kiro SQLite sidecar must be a regular non-symlink file",
-    )?;
-    let connection = open_provider_sqlite_readonly(source_path)?;
-    if !snapshot.revalidate(source_path)? {
-        return Err(CaptureError::SourceChangedDuringCapture.into());
-    }
-    let tables = KiroTables::probe(&connection)?;
-    Ok((snapshot, connection, tables))
+    KiroSqliteDatabase::open(source_path, KiroTables::probe).map_err(Into::into)
 }
 
 fn require_legacy_sqlite_format(
@@ -250,9 +216,12 @@ fn require_legacy_sqlite_format(
         }
         .into());
     }
-    let mut file = open_ordinary_file_without_following(source_path)?;
+    let opened = open_provider_source_file(source_path)?;
+    let mut file = opened.file().try_clone()?;
+    file.seek(SeekFrom::Start(0))?;
     let mut header = [0_u8; SQLITE_HEADER.len()];
     let read = file.read(&mut header)?;
+    opened.revalidate()?;
     if read != SQLITE_HEADER.len() || &header != SQLITE_HEADER {
         return Err(KiroSourceBackedErrorV0::UnsupportedFormat(
             "saved-chat JSON and non-SQLite Kiro files remain detection-only",
@@ -277,12 +246,18 @@ fn kiro_source_key() -> KiroSourceBackedResultV0<SourceKey> {
 
 fn source_observation(
     source: &SourceKey,
-    snapshot: &ProviderSqliteSourceSnapshot,
+    evidence: &crate::provider_sources::SqliteSourceEvidence,
 ) -> KiroSourceBackedResultV0<SourceObservation> {
     Ok(SourceObservation::new(
         source.clone(),
         KIRO_SOURCE_REVISION_KIND,
-        snapshot.revision_component().into_bytes(),
+        format!(
+            "identity={};length={};revision={}",
+            super::hex(evidence.identity()),
+            evidence.length(),
+            super::hex(evidence.revision()),
+        )
+        .into_bytes(),
     )?)
 }
 
@@ -472,20 +447,6 @@ impl KiroLogicalScan {
             self.counts,
             self.content_digest.finalize().into(),
         )
-    }
-}
-
-fn with_kiro_read_snapshot<T>(
-    connection: &Connection,
-    read: impl FnOnce() -> KiroSourceBackedResultV0<T>,
-) -> KiroSourceBackedResultV0<T> {
-    connection.execute_batch("begin")?;
-    let read_result = read();
-    let rollback_result = connection.execute_batch("rollback");
-    match (read_result, rollback_result) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Err(error), Ok(())) => Err(error),
-        (_, Err(error)) => Err(error.into()),
     }
 }
 
