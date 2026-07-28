@@ -39,6 +39,8 @@ use crate::{
 };
 
 const INDEX_DIRECTORY: &str = "source-backed-lexical-v0";
+const LEGACY_ACTIVE_SESSION_PROVIDER_ENV: &str = "CODEX_THREAD_ID";
+const LEGACY_ACTIVE_SESSION_PROVIDER: CaptureProvider = CaptureProvider::Codex;
 const MAX_SESSION_DIVERSITY_CANDIDATES: usize = 64 * 1024;
 const MIN_CANDIDATE_BATCH: usize = 256;
 const CANDIDATE_OVERSAMPLE: usize = 8;
@@ -125,13 +127,38 @@ pub(crate) fn index_is_available(data_root: &Path) -> bool {
 }
 
 pub(crate) fn should_run_search(args: &SearchArgs, data_root: &Path) -> bool {
-    index_is_available(data_root)
-        || (args
-            .provider
-            .is_some_and(|provider| provider.capture_provider() == CaptureProvider::Codex)
-            && (args.refresh == RefreshArg::Wait
-                || (args.refresh == RefreshArg::Off
-                    && args.backend == Some(SearchBackendArg::Lexical))))
+    should_route_source_backed_search(
+        index_is_available(data_root),
+        args.refresh,
+        args.provider.map(|provider| provider.capture_provider()),
+        args.source_format.as_deref(),
+    )
+}
+
+fn should_route_source_backed_search(
+    index_available: bool,
+    refresh: RefreshArg,
+    provider: Option<CaptureProvider>,
+    source_format: Option<&str>,
+) -> bool {
+    index_available
+        || (refresh != RefreshArg::Off
+            && automatic_source_backed_route_supported(provider, source_format))
+}
+
+fn automatic_source_backed_route_supported(
+    provider: Option<CaptureProvider>,
+    source_format: Option<&str>,
+) -> bool {
+    source_backed_route_inventory().iter().any(|route| {
+        route.automatic
+            && route.unsupported_reason.is_none()
+            && provider.is_none_or(|provider| route.provider == provider)
+            && source_format.is_none_or(|source_format| {
+                route.source_format == source_format
+                    || route.certified_source_format == source_format
+            })
+    })
 }
 
 pub(crate) fn run_search(
@@ -446,12 +473,12 @@ fn index_search_filters(
         .transpose()?
         .map(|since| since.timestamp_millis());
     let exclude_session_tree = (!request.include_current_session && session_id.is_none())
-        .then(|| std::env::var("CODEX_THREAD_ID").ok())
+        .then(|| std::env::var(LEGACY_ACTIVE_SESSION_PROVIDER_ENV).ok())
         .flatten()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
         .map(|provider_session_id| ExcludedSessionTree {
-            provider: CaptureProvider::Codex.as_str().to_owned(),
+            provider: LEGACY_ACTIVE_SESSION_PROVIDER.as_str().to_owned(),
             provider_session_id,
             session_id: None,
         });
@@ -1482,6 +1509,76 @@ mod tests {
             source_backed_refresh_mode(RefreshArg::Wait),
             SourceBackedRefreshMode::Wait
         );
+    }
+
+    #[test]
+    fn cold_search_routes_non_codex_automatic_provider() {
+        assert!(should_route_source_backed_search(
+            false,
+            RefreshArg::Background,
+            Some(CaptureProvider::Claude),
+            None,
+        ));
+        assert!(should_route_source_backed_search(
+            false,
+            RefreshArg::Wait,
+            Some(CaptureProvider::Warp),
+            Some("warp_sqlite"),
+        ));
+    }
+
+    #[test]
+    fn cold_search_without_provider_routes_all_automatic_providers() {
+        assert!(should_route_source_backed_search(
+            false,
+            RefreshArg::Background,
+            None,
+            None,
+        ));
+        assert!(should_route_source_backed_search(
+            false,
+            RefreshArg::Wait,
+            None,
+            Some("claude_projects_jsonl_tree"),
+        ));
+    }
+
+    #[test]
+    fn cold_search_rejects_manual_only_and_unsupported_routes() {
+        assert!(!should_route_source_backed_search(
+            false,
+            RefreshArg::Wait,
+            Some(CaptureProvider::Custom),
+            Some("ctx_history_jsonl_v1"),
+        ));
+        assert!(!should_route_source_backed_search(
+            false,
+            RefreshArg::Wait,
+            Some(CaptureProvider::Codex),
+            Some("codex_history_jsonl"),
+        ));
+    }
+
+    #[test]
+    fn refresh_off_only_routes_an_existing_source_backed_generation() {
+        assert!(!should_route_source_backed_search(
+            false,
+            RefreshArg::Off,
+            Some(CaptureProvider::Claude),
+            None,
+        ));
+        assert!(!should_route_source_backed_search(
+            false,
+            RefreshArg::Off,
+            None,
+            None,
+        ));
+        assert!(should_route_source_backed_search(
+            true,
+            RefreshArg::Off,
+            Some(CaptureProvider::Custom),
+            Some("ctx_history_jsonl_v1"),
+        ));
     }
 
     #[test]
