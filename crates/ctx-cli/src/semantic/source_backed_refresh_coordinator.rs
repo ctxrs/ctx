@@ -3,18 +3,19 @@ use std::{
     fmt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::{Duration as StdDuration, Instant},
+    time::Duration as StdDuration,
 };
 
 use anyhow::{anyhow, Context, Result};
 use ctx_history_capture::{
     build_automatic_source_backed_registry, DiscoveryContext, ProviderSourceStatus,
     SourceBackedAutomaticRegistryIssue, SourceBackedAutomaticUnavailableReason,
-    SourceBackedRefreshExecutor as CaptureSourceBackedRefreshExecutor,
     SourceBackedRefreshProgress as CaptureSourceBackedRefreshProgress, SourceBackedRouteError,
     SourceBackedRouteErrorKind, SourceBackedRouteResult,
 };
-use ctx_history_core::{utc_now, CaptureProvider};
+use ctx_history_core::utc_now;
+#[cfg(test)]
+use ctx_history_core::CaptureProvider;
 use ctx_history_index::{VerifiedIndex, WriterOptions};
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -829,45 +830,24 @@ fn refresh_all_provider_sources(
         CaptureSourceBackedRefreshProgress,
     ) -> SourceBackedRouteResult<()>,
 ) -> Result<SourceBackedRefreshPublication> {
-    let discovery_started = Instant::now();
     let build = build_automatic_source_backed_registry(discovery);
-    let (registry, issues) = build.into_parts();
+    let (executor, issues) = build.into_refresh_executor(WriterOptions::default());
     reject_blocking_automatic_registry_issues(&issues)?;
-    let discovery_us = nonzero_elapsed_micros(discovery_started);
-    let executor = CaptureSourceBackedRefreshExecutor::new(registry, WriterOptions::default());
-    let scan_stage_started = Instant::now();
-    let mut commit_started = None;
-    let receipt = {
-        let mut timed_progress = |progress: CaptureSourceBackedRefreshProgress| {
-            if progress.phase == "verifying" && commit_started.is_none() {
-                commit_started = Some(Instant::now());
-            }
-            report_progress(progress)
-        };
-        executor
-            .refresh(index_root, &mut timed_progress)
-            .context("run capture-owned all-provider source-backed refresh")?
-    };
-    let completed = Instant::now();
-    let commit_started = commit_started.unwrap_or(completed);
+    let receipt = executor
+        .refresh(index_root, report_progress)
+        .context("run capture-owned all-provider source-backed refresh")?;
     Ok(SourceBackedRefreshPublication {
         generation_id: receipt.commit.generation_id,
         scanned_routes: receipt.scanned_routes,
         unsupported_routes: receipt.unsupported_routes.len(),
-        certified_source_count: receipt.commit.certified_sources,
-        certified_source_bytes: receipt.commit.certified_source_bytes,
+        certified_source_count: receipt.certified_source_count,
+        certified_source_bytes: receipt.certified_source_bytes,
         timings: SourceBackedRefreshTimings {
-            discovery_us,
-            scan_stage_us: nonzero_duration_micros(
-                commit_started.saturating_duration_since(scan_stage_started),
-            ),
-            commit_us: nonzero_duration_micros(completed.saturating_duration_since(commit_started)),
+            discovery_us: nonzero_duration_micros(receipt.discovery_duration),
+            scan_stage_us: nonzero_duration_micros(receipt.scan_stage_duration),
+            commit_us: nonzero_duration_micros(receipt.commit_duration),
         },
     })
-}
-
-fn nonzero_elapsed_micros(started: Instant) -> u64 {
-    nonzero_duration_micros(started.elapsed())
 }
 
 fn nonzero_duration_micros(duration: StdDuration) -> u64 {
