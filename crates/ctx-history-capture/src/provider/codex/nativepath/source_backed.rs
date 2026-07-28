@@ -1,7 +1,14 @@
 use std::{
     collections::{HashMap, HashSet},
     io::{Read, Seek, SeekFrom},
+    panic::{catch_unwind, AssertUnwindSafe},
     path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering as AtomicOrdering},
+        mpsc::{self, Receiver, RecvTimeoutError, SyncSender},
+        Arc,
+    },
+    thread,
     time::{Duration, Instant},
 };
 
@@ -46,6 +53,8 @@ const CODEX_SOURCE_REVISION_KIND: &str = "codex-ordinary-file-observation-v0";
 const CODEX_FRONTIER_KIND: &str = "codex-nativepath-checkpoint-v4";
 const CODEX_PARSER_REVISION: &str = "codex-nativepath-source-backed-v0";
 const MAX_HYDRATED_CODEX_RECORD_BYTES: u64 = 16 * 1024 * 1024 + 1;
+const MAX_CODEX_SCANNER_WORKERS: usize = 16;
+const COLD_LANE_RECEIVE_TIMEOUT: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Error)]
 pub enum CodexSourceBackedErrorV0 {
@@ -85,6 +94,15 @@ pub enum CodexSourceBackedErrorV0 {
     ScanCountMismatch,
     #[error("Codex source count overflow")]
     CountOverflow,
+    #[error("Codex cold scanner lane {lane} disconnected before completing its sources")]
+    ColdLaneDisconnected { lane: usize },
+    #[error("Codex cold scanner lane {lane} panicked")]
+    ColdWorkerPanicked { lane: usize },
+    #[error("Codex cold scanner protocol mismatch: {0}")]
+    ColdProtocolMismatch(&'static str),
+    #[cfg(test)]
+    #[error("injected Codex cold scanner failure for source {source_index}")]
+    InjectedColdWorkerFailure { source_index: usize },
     #[error("Codex Core-only scanner emitted a Pro page")]
     UnexpectedProPage,
     #[error("Codex source-backed scanner emitted a legacy Core publication row")]
@@ -108,6 +126,8 @@ pub struct CodexSourceBackedPhaseTimingsV0 {
     pub discovery: Duration,
     pub writer_open: Duration,
     pub scan_and_stage: Duration,
+    pub scanner_worker_busy: Duration,
+    pub writer_add_document: Duration,
     pub certification: Duration,
     pub commit: Duration,
     pub total: Duration,
@@ -120,6 +140,7 @@ pub struct CodexSourceBackedCountersV0 {
     pub cold_sources: u64,
     pub appended_sources: u64,
     pub replayed_sources: u64,
+    pub scanner_workers: u64,
     pub staged_documents: u64,
     pub complete_records_scanned: u64,
     pub retained_records_scanned: u64,
@@ -207,6 +228,78 @@ pub struct CodexSourceBackedIngestReceiptV0 {
     pub counters: CodexSourceBackedCountersV0,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct ColdParallelOptionsV0 {
+    scanner_workers: Option<usize>,
+    #[cfg(test)]
+    fail_source_index: Option<usize>,
+}
+
+#[derive(Debug)]
+struct ColdSourcePlanV0 {
+    source_key: SourceKey,
+    native_session_id: String,
+    session_id: StableEntityId,
+}
+
+#[derive(Debug)]
+struct ColdSourceJobV0 {
+    source_index: usize,
+    source: CodexCatalogSource,
+    source_key: SourceKey,
+    native_session_id: String,
+    session_id: StableEntityId,
+}
+
+#[derive(Debug)]
+struct ColdPreparedPageV0 {
+    source_index: usize,
+    page_index: u64,
+    documents: Vec<LexicalDocument>,
+}
+
+#[derive(Debug)]
+struct ColdSourceCompleteV0 {
+    source_index: usize,
+    page_count: u64,
+    staged_documents: u64,
+    scan: super::CodexSourceScan,
+    worker_busy: Duration,
+}
+
+#[derive(Debug)]
+enum ColdLaneMessageV0 {
+    Page(ColdPreparedPageV0),
+    Complete(ColdSourceCompleteV0),
+}
+
+#[derive(Debug)]
+struct ColdWorkerFailureV0 {
+    error: CodexSourceBackedErrorV0,
+}
+
+#[derive(Debug)]
+struct ColdLaneStateV0 {
+    source_indices: Vec<usize>,
+    next_source: usize,
+    next_page: u64,
+    staged_documents: u64,
+    last_event_sequence: Option<u64>,
+}
+
+impl ColdLaneStateV0 {
+    fn expected_source(&self) -> Option<usize> {
+        self.source_indices.get(self.next_source).copied()
+    }
+
+    fn complete_source(&mut self) {
+        self.next_source = self.next_source.saturating_add(1);
+        self.next_page = 0;
+        self.staged_documents = 0;
+        self.last_event_sequence = None;
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexHydratedRecordV0 {
     pub provider_bytes: Vec<u8>,
@@ -284,9 +377,19 @@ pub fn ingest_codex_source_backed_v0(
     session_root: impl AsRef<Path>,
     global_index_root: impl AsRef<Path>,
 ) -> CodexSourceBackedResultV0<CodexSourceBackedIngestReceiptV0> {
+    ingest_codex_source_backed_inner_v0(
+        session_root.as_ref(),
+        global_index_root.as_ref(),
+        ColdParallelOptionsV0::default(),
+    )
+}
+
+fn ingest_codex_source_backed_inner_v0(
+    session_root: &Path,
+    global_index_root: &Path,
+    cold_options: ColdParallelOptionsV0,
+) -> CodexSourceBackedResultV0<CodexSourceBackedIngestReceiptV0> {
     let total_started = Instant::now();
-    let session_root = session_root.as_ref();
-    let global_index_root = global_index_root.as_ref();
     let mut timings = CodexSourceBackedPhaseTimingsV0::default();
     let mut counters = CodexSourceBackedCountersV0::default();
 
@@ -302,15 +405,76 @@ pub fn ingest_codex_source_backed_v0(
     counters.catalog_sources = u64::try_from(discovery.sources.len())
         .map_err(|_| CodexSourceBackedErrorV0::CountOverflow)?;
     counters.catalog_source_bytes = catalog_summary.source_bytes;
-    let sources = bind_source_keys(discovery.sources)?;
+    let mut sources = bind_source_keys(discovery.sources)?;
     let base_sources = load_base_sources(global_index_root)?;
+    let use_parallel_cold = sources.len() > 1
+        && sources
+            .iter()
+            .all(|(_, source_key, _)| !base_sources.contains_key(source_key));
+    if use_parallel_cold {
+        sources.sort_by_key(|(_, source_key, _)| source_key.identity().digest());
+    }
     timings.discovery = phase_started.elapsed();
 
+    let writer_options = WriterOptions::default();
     let phase_started = Instant::now();
-    let mut writer = GenerationWriter::open(global_index_root, WriterOptions::default())?;
+    let mut writer = GenerationWriter::open(global_index_root, writer_options.clone())?;
     timings.writer_open = phase_started.elapsed();
     let mut revalidation = HashMap::<SourceKey, (CodexCatalogSource, CodexFileObservation)>::new();
 
+    if use_parallel_cold {
+        let worker_count = cold_scanner_worker_count(
+            counters.catalog_sources,
+            writer_options.indexer_threads,
+            cold_options.scanner_workers,
+        )?;
+        ingest_codex_cold_parallel_v0(
+            sources,
+            &mut writer,
+            &mut revalidation,
+            &mut timings,
+            &mut counters,
+            worker_count,
+            cold_options,
+        )?;
+    } else {
+        ingest_codex_sources_serial_v0(
+            sources,
+            &base_sources,
+            &mut writer,
+            &mut revalidation,
+            &mut timings,
+            &mut counters,
+        )?;
+    }
+
+    let commit_started = Instant::now();
+    let commit = writer.commit(|target| match target {
+        RevalidationTarget::Source(certificate) => revalidation
+            .get_key_value(certificate.observation().source())
+            .is_some_and(|(source_key, (source, observation))| {
+                source_key.exact_descriptor_eq(certificate.observation().source())
+                    && revalidate_codex_source_observation(source, observation).is_ok()
+            }),
+        RevalidationTarget::Deletion(_) => false,
+    })?;
+    timings.commit = commit_started.elapsed();
+    timings.total = total_started.elapsed();
+    Ok(CodexSourceBackedIngestReceiptV0 {
+        commit,
+        timings,
+        counters,
+    })
+}
+
+fn ingest_codex_sources_serial_v0(
+    sources: Vec<(CodexCatalogSource, SourceKey, String)>,
+    base_sources: &HashMap<SourceKey, CertifiedSource>,
+    writer: &mut GenerationWriter,
+    revalidation: &mut HashMap<SourceKey, (CodexCatalogSource, CodexFileObservation)>,
+    timings: &mut CodexSourceBackedPhaseTimingsV0,
+    counters: &mut CodexSourceBackedCountersV0,
+) -> CodexSourceBackedResultV0<()> {
     for (source, source_key, native_session_id) in sources {
         let base = base_sources.get(&source_key).cloned();
         let proof = match base.as_ref() {
@@ -365,10 +529,19 @@ pub fn ingest_codex_source_backed_v0(
         }
 
         let scan_started = Instant::now();
+        counters.scanner_workers = 1;
+        let scanner_started = Instant::now();
         let mut scanner = CodexNativeScanner::new_source_backed_v0(source.clone(), proof.as_ref())?;
+        timings.scanner_worker_busy += scanner_started.elapsed();
         let session_id = codex_session_identity(&source_key, &native_session_id)?;
         let mut staged_for_source = 0_u64;
-        while let Some(page) = scanner.next_page()? {
+        loop {
+            let scanner_started = Instant::now();
+            let page = scanner.next_page()?;
+            timings.scanner_worker_busy += scanner_started.elapsed();
+            let Some(page) = page else {
+                break;
+            };
             let CodexNativeOwnedPage::Core(page) = page else {
                 return Err(CodexSourceBackedErrorV0::UnexpectedProPage);
             };
@@ -382,19 +555,27 @@ pub fn ingest_codex_source_backed_v0(
             validate_owner(owner, &native_session_id)?;
             let cwd = owner.cwd.clone();
             for row in page.source_backed_rows {
-                writer.add_document(codex_lexical_document(
+                let conversion_started = Instant::now();
+                let document = codex_lexical_document(
                     &source_key,
                     session_id,
                     &native_session_id,
                     cwd.as_deref(),
                     row,
-                )?)?;
+                )?;
+                timings.scanner_worker_busy += conversion_started.elapsed();
+                let add_started = Instant::now();
+                let add_result = writer.add_document(document);
+                timings.writer_add_document += add_started.elapsed();
+                add_result?;
                 staged_for_source = staged_for_source
                     .checked_add(1)
                     .ok_or(CodexSourceBackedErrorV0::CountOverflow)?;
             }
         }
+        let scanner_started = Instant::now();
         let scan = scanner.finish()?;
+        timings.scanner_worker_busy += scanner_started.elapsed();
         timings.scan_and_stage += scan_started.elapsed();
         let scan_counters = scan.counters;
         counters.add_scan(scan_counters);
@@ -456,24 +637,429 @@ pub fn ingest_codex_source_backed_v0(
         timings.certification += certification_started.elapsed();
         revalidation.insert(source_key, (source, scan.after_observation.clone()));
     }
+    Ok(())
+}
 
-    let commit_started = Instant::now();
-    let commit = writer.commit(|target| match target {
-        RevalidationTarget::Source(certificate) => revalidation
-            .get_key_value(certificate.observation().source())
-            .is_some_and(|(source_key, (source, observation))| {
-                source_key.exact_descriptor_eq(certificate.observation().source())
-                    && revalidate_codex_source_observation(source, observation).is_ok()
+fn cold_scanner_worker_count(
+    source_count: u64,
+    indexer_threads: usize,
+    override_workers: Option<usize>,
+) -> CodexSourceBackedResultV0<usize> {
+    let source_count =
+        usize::try_from(source_count).map_err(|_| CodexSourceBackedErrorV0::CountOverflow)?;
+    let available = thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1);
+    let reserved = indexer_threads.clamp(1, 8).saturating_add(2);
+    let automatic = available.saturating_sub(reserved).max(1);
+    Ok(override_workers
+        .unwrap_or(automatic)
+        .clamp(1, MAX_CODEX_SCANNER_WORKERS)
+        .min(source_count.max(1)))
+}
+
+fn ingest_codex_cold_parallel_v0(
+    sources: Vec<(CodexCatalogSource, SourceKey, String)>,
+    writer: &mut GenerationWriter,
+    revalidation: &mut HashMap<SourceKey, (CodexCatalogSource, CodexFileObservation)>,
+    timings: &mut CodexSourceBackedPhaseTimingsV0,
+    counters: &mut CodexSourceBackedCountersV0,
+    worker_count: usize,
+    cold_options: ColdParallelOptionsV0,
+) -> CodexSourceBackedResultV0<()> {
+    let mut plans = Vec::with_capacity(sources.len());
+    let mut lane_jobs = (0..worker_count).map(|_| Vec::new()).collect::<Vec<_>>();
+    let mut lane_source_indices = (0..worker_count).map(|_| Vec::new()).collect::<Vec<_>>();
+
+    for (source_index, (source, source_key, native_session_id)) in sources.into_iter().enumerate() {
+        writer.begin_source(source_key.clone())?;
+        let session_id = codex_session_identity(&source_key, &native_session_id)?;
+        plans.push(ColdSourcePlanV0 {
+            source_key: source_key.clone(),
+            native_session_id: native_session_id.clone(),
+            session_id,
+        });
+        let lane_index = source_index % worker_count;
+        lane_source_indices[lane_index].push(source_index);
+        lane_jobs[lane_index].push(ColdSourceJobV0 {
+            source_index,
+            source,
+            source_key,
+            native_session_id,
+            session_id,
+        });
+    }
+
+    counters.scanner_workers =
+        u64::try_from(worker_count).map_err(|_| CodexSourceBackedErrorV0::CountOverflow)?;
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let pipeline_started = Instant::now();
+    let pipeline_result = thread::scope(|scope| {
+        let (failure_sender, failure_receiver) = mpsc::channel::<ColdWorkerFailureV0>();
+        let mut receivers = Vec::with_capacity(worker_count);
+        let mut handles = Vec::with_capacity(worker_count);
+
+        for (lane_index, jobs) in lane_jobs.into_iter().enumerate() {
+            let (sender, receiver) = mpsc::sync_channel::<ColdLaneMessageV0>(0);
+            receivers.push(receiver);
+            let worker_cancellation = Arc::clone(&cancellation);
+            let worker_failure_sender = failure_sender.clone();
+            handles.push((
+                lane_index,
+                scope.spawn(move || {
+                    let outcome = catch_unwind(AssertUnwindSafe(|| {
+                        run_cold_scan_lane_v0(
+                            lane_index,
+                            jobs,
+                            &sender,
+                            &worker_cancellation,
+                            cold_options,
+                        )
+                    }));
+                    match outcome {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => {
+                            let _ = worker_failure_sender.send(ColdWorkerFailureV0 { error });
+                            worker_cancellation.store(true, AtomicOrdering::Release);
+                        }
+                        Err(_) => {
+                            let _ = worker_failure_sender.send(ColdWorkerFailureV0 {
+                                error: CodexSourceBackedErrorV0::ColdWorkerPanicked {
+                                    lane: lane_index,
+                                },
+                            });
+                            worker_cancellation.store(true, AtomicOrdering::Release);
+                        }
+                    }
+                }),
+            ));
+        }
+        drop(failure_sender);
+
+        let mut lane_states = lane_source_indices
+            .into_iter()
+            .map(|source_indices| ColdLaneStateV0 {
+                source_indices,
+                next_source: 0,
+                next_page: 0,
+                staged_documents: 0,
+                last_event_sequence: None,
+            })
+            .collect::<Vec<_>>();
+        let mut result = consume_cold_lanes_v0(
+            &receivers,
+            &failure_receiver,
+            &cancellation,
+            &mut lane_states,
+            &plans,
+            writer,
+            revalidation,
+            timings,
+            counters,
+        );
+        if result.is_err() {
+            cancellation.store(true, AtomicOrdering::Release);
+        }
+        drop(receivers);
+
+        let mut join_error = None;
+        for (lane_index, handle) in handles {
+            if handle.join().is_err() && join_error.is_none() {
+                join_error =
+                    Some(CodexSourceBackedErrorV0::ColdWorkerPanicked { lane: lane_index });
+            }
+        }
+        if result.is_ok() {
+            if let Ok(failure) = failure_receiver.try_recv() {
+                result = Err(failure.error);
+            } else if let Some(error) = join_error {
+                result = Err(error);
+            }
+        }
+        result
+    });
+    timings.scan_and_stage += pipeline_started.elapsed();
+    pipeline_result
+}
+
+fn run_cold_scan_lane_v0(
+    lane_index: usize,
+    jobs: Vec<ColdSourceJobV0>,
+    sender: &SyncSender<ColdLaneMessageV0>,
+    cancellation: &AtomicBool,
+    cold_options: ColdParallelOptionsV0,
+) -> CodexSourceBackedResultV0<()> {
+    for job in jobs {
+        if cancellation.load(AtomicOrdering::Acquire) {
+            return Ok(());
+        }
+        #[cfg(test)]
+        if cold_options.fail_source_index == Some(job.source_index) {
+            return Err(CodexSourceBackedErrorV0::InjectedColdWorkerFailure {
+                source_index: job.source_index,
+            });
+        }
+        #[cfg(not(test))]
+        let _ = cold_options;
+
+        let mut worker_busy = Duration::ZERO;
+        let busy_started = Instant::now();
+        let mut scanner = CodexNativeScanner::new_source_backed_v0(job.source.clone(), None)?;
+        worker_busy += busy_started.elapsed();
+        let mut page_index = 0_u64;
+        let mut staged_documents = 0_u64;
+
+        loop {
+            if cancellation.load(AtomicOrdering::Acquire) {
+                return Ok(());
+            }
+            let busy_started = Instant::now();
+            let page = scanner.next_page()?;
+            worker_busy += busy_started.elapsed();
+            let Some(page) = page else {
+                break;
+            };
+            let busy_started = Instant::now();
+            let CodexNativeOwnedPage::Core(page) = page else {
+                return Err(CodexSourceBackedErrorV0::UnexpectedProPage);
+            };
+            if !page.core_rows.is_empty() {
+                return Err(CodexSourceBackedErrorV0::UnexpectedLegacyRow);
+            }
+            let owner = page
+                .owner
+                .as_ref()
+                .ok_or(CodexSourceBackedErrorV0::MissingPageOwner)?;
+            validate_owner(owner, &job.native_session_id)?;
+            let cwd = owner.cwd.clone();
+            let mut documents = Vec::with_capacity(page.source_backed_rows.len());
+            for row in page.source_backed_rows {
+                documents.push(codex_lexical_document(
+                    &job.source_key,
+                    job.session_id,
+                    &job.native_session_id,
+                    cwd.as_deref(),
+                    row,
+                )?);
+                staged_documents = staged_documents
+                    .checked_add(1)
+                    .ok_or(CodexSourceBackedErrorV0::CountOverflow)?;
+            }
+            scanner.release_transient_record_buffer();
+            worker_busy += busy_started.elapsed();
+            if !send_cold_lane_message_v0(
+                sender,
+                ColdLaneMessageV0::Page(ColdPreparedPageV0 {
+                    source_index: job.source_index,
+                    page_index,
+                    documents,
+                }),
+                cancellation,
+                lane_index,
+            )? {
+                return Ok(());
+            }
+            page_index = page_index
+                .checked_add(1)
+                .ok_or(CodexSourceBackedErrorV0::CountOverflow)?;
+        }
+
+        if cancellation.load(AtomicOrdering::Acquire) {
+            return Ok(());
+        }
+        let busy_started = Instant::now();
+        let scan = scanner.finish()?;
+        worker_busy += busy_started.elapsed();
+        if !send_cold_lane_message_v0(
+            sender,
+            ColdLaneMessageV0::Complete(ColdSourceCompleteV0 {
+                source_index: job.source_index,
+                page_count: page_index,
+                staged_documents,
+                scan,
+                worker_busy,
             }),
-        RevalidationTarget::Deletion(_) => false,
-    })?;
-    timings.commit = commit_started.elapsed();
-    timings.total = total_started.elapsed();
-    Ok(CodexSourceBackedIngestReceiptV0 {
-        commit,
-        timings,
-        counters,
-    })
+            cancellation,
+            lane_index,
+        )? {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+fn send_cold_lane_message_v0(
+    sender: &SyncSender<ColdLaneMessageV0>,
+    message: ColdLaneMessageV0,
+    cancellation: &AtomicBool,
+    lane_index: usize,
+) -> CodexSourceBackedResultV0<bool> {
+    match sender.send(message) {
+        Ok(()) => Ok(true),
+        Err(_) if cancellation.load(AtomicOrdering::Acquire) => Ok(false),
+        Err(_) => Err(CodexSourceBackedErrorV0::ColdLaneDisconnected { lane: lane_index }),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn consume_cold_lanes_v0(
+    receivers: &[Receiver<ColdLaneMessageV0>],
+    failure_receiver: &Receiver<ColdWorkerFailureV0>,
+    cancellation: &AtomicBool,
+    lane_states: &mut [ColdLaneStateV0],
+    plans: &[ColdSourcePlanV0],
+    writer: &mut GenerationWriter,
+    revalidation: &mut HashMap<SourceKey, (CodexCatalogSource, CodexFileObservation)>,
+    timings: &mut CodexSourceBackedPhaseTimingsV0,
+    counters: &mut CodexSourceBackedCountersV0,
+) -> CodexSourceBackedResultV0<()> {
+    let mut completed_sources = 0_usize;
+    let mut next_lane = 0_usize;
+    while completed_sources < plans.len() {
+        if let Ok(failure) = failure_receiver.try_recv() {
+            return Err(failure.error);
+        }
+        if cancellation.load(AtomicOrdering::Acquire) {
+            return Err(wait_for_cold_worker_failure_v0(failure_receiver)?);
+        }
+
+        let lane_index = (0..lane_states.len())
+            .map(|offset| (next_lane + offset) % lane_states.len())
+            .find(|lane_index| lane_states[*lane_index].expected_source().is_some())
+            .ok_or(CodexSourceBackedErrorV0::ColdProtocolMismatch(
+                "no lane owns an incomplete source",
+            ))?;
+        next_lane = (lane_index + 1) % lane_states.len();
+        let message = match receivers[lane_index].recv_timeout(COLD_LANE_RECEIVE_TIMEOUT) {
+            Ok(message) => message,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => {
+                if let Ok(failure) = failure_receiver.recv_timeout(COLD_LANE_RECEIVE_TIMEOUT) {
+                    return Err(failure.error);
+                }
+                return Err(CodexSourceBackedErrorV0::ColdLaneDisconnected { lane: lane_index });
+            }
+        };
+
+        let lane_state = &mut lane_states[lane_index];
+        let expected_source =
+            lane_state
+                .expected_source()
+                .ok_or(CodexSourceBackedErrorV0::ColdProtocolMismatch(
+                    "lane emitted after completing all assigned sources",
+                ))?;
+        match message {
+            ColdLaneMessageV0::Page(page) => {
+                if page.source_index != expected_source || page.page_index != lane_state.next_page {
+                    return Err(CodexSourceBackedErrorV0::ColdProtocolMismatch(
+                        "source or page arrived out of order",
+                    ));
+                }
+                let plan = plans.get(page.source_index).ok_or(
+                    CodexSourceBackedErrorV0::ColdProtocolMismatch(
+                        "page references an unknown source",
+                    ),
+                )?;
+                for document in page.documents {
+                    if !document.source.exact_descriptor_eq(&plan.source_key)
+                        || document.session_id != plan.session_id
+                        || document.provider_session_id.as_deref()
+                            != Some(plan.native_session_id.as_str())
+                    {
+                        return Err(CodexSourceBackedErrorV0::ColdProtocolMismatch(
+                            "document identity does not match its assigned source",
+                        ));
+                    }
+                    let (_, _, _, physical_ordinal) = validate_codex_locator(&document.locator)?;
+                    if physical_ordinal != document.event_sequence
+                        || lane_state
+                            .last_event_sequence
+                            .is_some_and(|last| document.event_sequence <= last)
+                    {
+                        return Err(CodexSourceBackedErrorV0::ColdProtocolMismatch(
+                            "document event sequence is not strictly increasing",
+                        ));
+                    }
+                    let event_sequence = document.event_sequence;
+                    let add_started = Instant::now();
+                    let add_result = writer.add_document(document);
+                    timings.writer_add_document += add_started.elapsed();
+                    add_result?;
+                    lane_state.last_event_sequence = Some(event_sequence);
+                    lane_state.staged_documents = lane_state
+                        .staged_documents
+                        .checked_add(1)
+                        .ok_or(CodexSourceBackedErrorV0::CountOverflow)?;
+                }
+                lane_state.next_page = lane_state
+                    .next_page
+                    .checked_add(1)
+                    .ok_or(CodexSourceBackedErrorV0::CountOverflow)?;
+            }
+            ColdLaneMessageV0::Complete(complete) => {
+                if complete.source_index != expected_source
+                    || complete.page_count != lane_state.next_page
+                    || complete.staged_documents != lane_state.staged_documents
+                {
+                    return Err(CodexSourceBackedErrorV0::ColdProtocolMismatch(
+                        "source completion does not match accepted pages",
+                    ));
+                }
+                let plan = plans.get(complete.source_index).ok_or(
+                    CodexSourceBackedErrorV0::ColdProtocolMismatch(
+                        "completion references an unknown source",
+                    ),
+                )?;
+                if complete.scan.disposition != CodexParseDisposition::FullGeneration
+                    || complete.scan.source.catalog_native_session_id.as_deref()
+                        != Some(plan.native_session_id.as_str())
+                {
+                    return Err(CodexSourceBackedErrorV0::ColdProtocolMismatch(
+                        "cold scanner completed with the wrong source or disposition",
+                    ));
+                }
+                let scan_counters = complete.scan.counters;
+                let certification_started = Instant::now();
+                let current = certify_scan(
+                    &plan.source_key,
+                    &complete.scan,
+                    None,
+                    complete.staged_documents,
+                    scan_counters,
+                )?;
+                writer.certify_source(current)?;
+                timings.certification += certification_started.elapsed();
+                timings.scanner_worker_busy += complete.worker_busy;
+                counters.add_scan(scan_counters);
+                counters.staged_documents = counters
+                    .staged_documents
+                    .checked_add(complete.staged_documents)
+                    .ok_or(CodexSourceBackedErrorV0::CountOverflow)?;
+                counters.cold_sources = counters.cold_sources.saturating_add(1);
+                let after_observation = complete.scan.after_observation.clone();
+                revalidation.insert(
+                    plan.source_key.clone(),
+                    (complete.scan.source, after_observation),
+                );
+                lane_state.complete_source();
+                completed_sources = completed_sources
+                    .checked_add(1)
+                    .ok_or(CodexSourceBackedErrorV0::CountOverflow)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn wait_for_cold_worker_failure_v0(
+    failure_receiver: &Receiver<ColdWorkerFailureV0>,
+) -> CodexSourceBackedResultV0<CodexSourceBackedErrorV0> {
+    match failure_receiver.recv_timeout(COLD_LANE_RECEIVE_TIMEOUT) {
+        Ok(failure) => Ok(failure.error),
+        Err(_) => Err(CodexSourceBackedErrorV0::ColdProtocolMismatch(
+            "scanner cancellation was signaled without a worker failure",
+        )),
+    }
 }
 
 pub fn hydrate_codex_locator(
@@ -881,6 +1467,232 @@ mod tests {
     use super::*;
 
     #[test]
+    fn source_backed_cold_parallel_matches_single_lane_semantics() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        let single_index = temp.path().join("single-index");
+        let parallel_index = temp.path().join("parallel-index");
+        fs::create_dir_all(&sessions).unwrap();
+        let native_session_ids = [
+            "019fa000-0000-7000-8000-000000000011",
+            "019fa000-0000-7000-8000-000000000012",
+            "019fa000-0000-7000-8000-000000000013",
+            "019fa000-0000-7000-8000-000000000014",
+        ];
+        for (index, native_session_id) in native_session_ids.iter().enumerate() {
+            write_session(
+                &sessions,
+                native_session_id,
+                &[
+                    message(
+                        "user",
+                        &format!("parallel semantic sentinel source {index}"),
+                    ),
+                    message(
+                        "assistant",
+                        &format!("ordered locator sentinel source {index}"),
+                    ),
+                ],
+            );
+        }
+
+        let single = ingest_codex_source_backed_inner_v0(
+            &sessions,
+            &single_index,
+            ColdParallelOptionsV0 {
+                scanner_workers: Some(1),
+                ..ColdParallelOptionsV0::default()
+            },
+        )
+        .unwrap();
+        let parallel = ingest_codex_source_backed_inner_v0(
+            &sessions,
+            &parallel_index,
+            ColdParallelOptionsV0 {
+                scanner_workers: Some(4),
+                ..ColdParallelOptionsV0::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(single.counters.scanner_workers, 1);
+        assert_eq!(parallel.counters.scanner_workers, 4);
+        assert_eq!(single.commit.indexed_documents, 8);
+        assert_eq!(parallel.commit.indexed_documents, 8);
+        let mut single_counters = single.counters;
+        let mut parallel_counters = parallel.counters;
+        single_counters.scanner_workers = 0;
+        parallel_counters.scanner_workers = 0;
+        assert_eq!(single_counters, parallel_counters);
+
+        let single_verified = VerifiedIndex::open(&single_index).unwrap();
+        let parallel_verified = VerifiedIndex::open(&parallel_index).unwrap();
+        assert_eq!(
+            single_verified.manifest().sources,
+            parallel_verified.manifest().sources
+        );
+        assert_eq!(
+            single_verified.manifest().generation_id().unwrap(),
+            parallel_verified.manifest().generation_id().unwrap()
+        );
+        assert_eq!(
+            single_verified.document_count(),
+            parallel_verified.document_count()
+        );
+        for native_session_id in native_session_ids {
+            let source_key = codex_source_key(native_session_id).unwrap();
+            let session_id = codex_session_identity(&source_key, native_session_id).unwrap();
+            assert_eq!(
+                single_verified
+                    .events_for_session(session_id.as_uuid())
+                    .unwrap(),
+                parallel_verified
+                    .events_for_session(session_id.as_uuid())
+                    .unwrap()
+            );
+        }
+        assert_eq!(
+            search_event_ids(&single_verified, "parallel semantic sentinel"),
+            search_event_ids(&parallel_verified, "parallel semantic sentinel")
+        );
+        assert_eq!(
+            search_event_ids(&single_verified, "ordered locator sentinel"),
+            search_event_ids(&parallel_verified, "ordered locator sentinel")
+        );
+    }
+
+    #[test]
+    fn source_backed_incremental_mixed_run_stays_serial() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        let index = temp.path().join("global-index");
+        fs::create_dir_all(&sessions).unwrap();
+        let first_id = "019fa000-0000-7000-8000-000000000021";
+        let second_id = "019fa000-0000-7000-8000-000000000022";
+        let cold_id = "019fa000-0000-7000-8000-000000000023";
+        write_session(
+            &sessions,
+            first_id,
+            &[message("user", "first initial sentinel")],
+        );
+        write_session(
+            &sessions,
+            second_id,
+            &[message("user", "second initial sentinel")],
+        );
+        let initial = ingest_codex_source_backed_inner_v0(
+            &sessions,
+            &index,
+            ColdParallelOptionsV0 {
+                scanner_workers: Some(2),
+                ..ColdParallelOptionsV0::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(initial.counters.scanner_workers, 2);
+        assert_eq!(initial.counters.cold_sources, 2);
+
+        let first_path = session_path(&sessions, first_id);
+        OpenOptions::new()
+            .append(true)
+            .open(first_path)
+            .unwrap()
+            .write_all(format!("{}\n", message("assistant", "append sentinel")).as_bytes())
+            .unwrap();
+        write_session(&sessions, cold_id, &[message("user", "new cold sentinel")]);
+
+        let mixed = ingest_codex_source_backed_inner_v0(
+            &sessions,
+            &index,
+            ColdParallelOptionsV0 {
+                scanner_workers: Some(4),
+                ..ColdParallelOptionsV0::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(mixed.counters.scanner_workers, 1);
+        assert_eq!(mixed.counters.appended_sources, 1);
+        assert_eq!(mixed.counters.replayed_sources, 1);
+        assert_eq!(mixed.counters.cold_sources, 1);
+        assert_eq!(mixed.counters.staged_documents, 2);
+
+        let replay = ingest_codex_source_backed_inner_v0(
+            &sessions,
+            &index,
+            ColdParallelOptionsV0 {
+                scanner_workers: Some(4),
+                ..ColdParallelOptionsV0::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(replay.counters.scanner_workers, 0);
+        assert_eq!(replay.counters.replayed_sources, 3);
+        assert_eq!(replay.counters.staged_documents, 0);
+        assert_eq!(replay.timings.scan_and_stage, Duration::ZERO);
+        assert_eq!(VerifiedIndex::open(&index).unwrap().document_count(), 4);
+    }
+
+    #[test]
+    fn source_backed_worker_failure_does_not_publish_a_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let baseline_sessions = temp.path().join("baseline-sessions");
+        let failing_sessions = temp.path().join("failing-sessions");
+        let index = temp.path().join("global-index");
+        fs::create_dir_all(&baseline_sessions).unwrap();
+        fs::create_dir_all(&failing_sessions).unwrap();
+        let baseline_id = "019fa000-0000-7000-8000-000000000031";
+        write_session(
+            &baseline_sessions,
+            baseline_id,
+            &[message("user", "visible baseline sentinel")],
+        );
+        ingest_codex_source_backed_v0(&baseline_sessions, &index).unwrap();
+        let before = VerifiedIndex::open(&index).unwrap();
+        let before_generation = before.generation_id().to_owned();
+        let before_sources = before.manifest().sources.clone();
+        let before_events = search_event_ids(&before, "visible baseline sentinel");
+
+        for (native_session_id, sentinel) in [
+            (
+                "019fa000-0000-7000-8000-000000000032",
+                "uncommitted failure sentinel one",
+            ),
+            (
+                "019fa000-0000-7000-8000-000000000033",
+                "uncommitted failure sentinel two",
+            ),
+        ] {
+            write_session(
+                &failing_sessions,
+                native_session_id,
+                &[message("assistant", sentinel)],
+            );
+        }
+        let error = ingest_codex_source_backed_inner_v0(
+            &failing_sessions,
+            &index,
+            ColdParallelOptionsV0 {
+                scanner_workers: Some(2),
+                fail_source_index: Some(0),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            CodexSourceBackedErrorV0::InjectedColdWorkerFailure { source_index: 0 }
+        ));
+
+        let after = VerifiedIndex::open(&index).unwrap();
+        assert_eq!(after.generation_id(), before_generation);
+        assert_eq!(after.manifest().sources, before_sources);
+        assert_eq!(after.document_count(), 1);
+        assert_eq!(
+            search_event_ids(&after, "visible baseline sentinel"),
+            before_events
+        );
+        assert!(search_event_ids(&after, "uncommitted failure sentinel").is_empty());
+    }
+
+    #[test]
     fn source_backed_cold_append_and_replay_keep_cumulative_counts() {
         let temp = tempfile::tempdir().unwrap();
         let sessions = temp.path().join("sessions");
@@ -898,6 +1710,7 @@ mod tests {
 
         let cold = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
         assert_no_legacy_operations(cold.counters);
+        assert_eq!(cold.counters.scanner_workers, 1);
         assert_eq!(cold.counters.cold_sources, 1);
         assert_eq!(cold.counters.staged_documents, 1);
         assert_eq!(cold.commit.indexed_documents, 1);
@@ -931,6 +1744,7 @@ mod tests {
 
         let append = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
         assert_no_legacy_operations(append.counters);
+        assert_eq!(append.counters.scanner_workers, 1);
         assert_eq!(append.counters.appended_sources, 1);
         assert_eq!(append.counters.staged_documents, 1);
         assert_eq!(append.counters.complete_records_scanned, 1);
@@ -964,6 +1778,7 @@ mod tests {
 
         let replay = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
         assert_no_legacy_operations(replay.counters);
+        assert_eq!(replay.counters.scanner_workers, 0);
         assert_eq!(replay.counters.replayed_sources, 1);
         assert_eq!(replay.counters.staged_documents, 0);
         assert_eq!(replay.counters.scanner_bytes_read, 0);
@@ -1179,6 +1994,28 @@ mod tests {
                 .saturating_add(1);
         }
         preview
+    }
+
+    fn search_event_ids(index: &VerifiedIndex, query: &str) -> Vec<StableEntityId> {
+        index
+            .search_event_candidates(query, 32)
+            .unwrap()
+            .into_iter()
+            .map(|candidate| candidate.event.event_id)
+            .collect()
+    }
+
+    fn session_path(sessions: &Path, native_session_id: &str) -> PathBuf {
+        sessions.join(format!("rollout-{native_session_id}.jsonl"))
+    }
+
+    fn write_session(sessions: &Path, native_session_id: &str, events: &[String]) {
+        let mut contents = format!("{}\n", session_meta(native_session_id));
+        for event in events {
+            contents.push_str(event);
+            contents.push('\n');
+        }
+        fs::write(session_path(sessions, native_session_id), contents).unwrap();
     }
 
     fn session_meta(native_session_id: &str) -> String {
