@@ -1,0 +1,825 @@
+//! Source-backed Shelley projection over the exact invocation CWD.
+//!
+//! Shelley does not own a historical-root catalog. Automatic authority is the
+//! single `shelley.db` directly below the invocation CWD; callers must not feed
+//! remembered project roots or manual paths into this discovery entrypoint.
+
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+
+use ctx_history_core::{
+    derive_event_id, derive_session_id, CertifiedSource, EventIdentityInput, LocatorRevisionPolicy,
+    NativeItemKey, NativeRecordCoordinate, NativeSessionKey, ProjectionContractError,
+    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation,
+    SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
+};
+use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
+use sha2::{Digest, Sha256};
+use thiserror::Error;
+
+use crate::{
+    provider::{
+        normalization::provider_local_preview,
+        sqlite::{open_provider_sqlite_readonly, sqlite_schema_fingerprint},
+    },
+    CaptureError, ProviderAdapterContext, SHELLEY_SQLITE_SOURCE_FORMAT,
+};
+
+use super::{
+    super::{
+        normalization::{shelley_core_event, shelley_timestamp},
+        relationships::{
+            shelley_logical_record_digest, shelley_message_complete_text,
+            shelley_verified_record_values,
+        },
+        source::{
+            shelley_conversation_columns, shelley_conversation_select_expressions,
+            shelley_message_columns, shelley_message_select_expressions,
+            shelley_require_message_index, shelley_source_revision, shelley_source_snapshot,
+        },
+    },
+    scanner::next_message_unit,
+    ShelleyMessage, ShelleyUnit, SHELLEY_PAGE_MAX_BYTES, SHELLEY_PAGE_MAX_UNITS,
+};
+
+const SHELLEY_SOURCE_ANCHOR_NAMESPACE: &str = "shelley.exact-cwd-slot";
+const SHELLEY_SOURCE_ANCHOR_KEY: &str = "shelley.db";
+const SHELLEY_SOURCE_SCHEMA_VARIANT: &str = "shelley-exact-cwd-sqlite-v1";
+const SHELLEY_SOURCE_REVISION_KIND: &str = "shelley-sqlite-snapshot-v1";
+const SHELLEY_SOURCE_PARSER_REVISION: &str = "shelley-source-backed-v1";
+const SHELLEY_LOGICAL_SESSION_KIND: &str = "shelley-conversation";
+const SHELLEY_NATIVE_SESSION_NAMESPACE: &str = "shelley.conversation";
+const SHELLEY_LOGICAL_EVENT_KIND: &str = "shelley-message";
+const SHELLEY_NATIVE_MESSAGE_NAMESPACE: &str = "shelley.message";
+const SHELLEY_COMPOUND_LOCATOR_RELATION: &str = "shelley-compound-message-row-v1";
+const SHELLEY_CERTIFIED_STREAM_DOMAIN: &[u8] = b"ctx-shelley-source-backed-stream-v1\0";
+
+#[derive(Debug, Error)]
+pub(crate) enum ShelleySourceBackedError {
+    #[error(transparent)]
+    Capture(#[from] CaptureError),
+    #[error(transparent)]
+    Projection(#[from] ProjectionContractError),
+    #[error(transparent)]
+    Resolver(#[from] SourceResolverContractError),
+    #[error("Shelley source-backed scan was not drained to terminal certification")]
+    ScanIncomplete,
+    #[error("Shelley source-backed counts overflowed")]
+    CountOverflow,
+    #[error("Shelley source-backed locator does not address a compound message row")]
+    InvalidLocator,
+    #[error("Shelley source-backed locator no longer addresses a message row")]
+    MissingRecord,
+    #[error("Shelley source-backed locator record evidence is stale")]
+    StaleRecordEvidence,
+    #[error("Shelley source-backed projection produced no bounded lexical body")]
+    MissingLexicalBody,
+}
+
+pub(crate) type ShelleySourceBackedResult<T> = Result<T, ShelleySourceBackedError>;
+
+/// The one automatic Shelley source admitted for an invocation.
+#[derive(Debug, Clone)]
+pub(crate) struct ShelleySourceBackedAdapter {
+    exact_cwd: PathBuf,
+    database_path: PathBuf,
+    source: SourceKey,
+}
+
+impl ShelleySourceBackedAdapter {
+    pub(crate) fn exact_cwd(&self) -> &Path {
+        &self.exact_cwd
+    }
+
+    pub(crate) fn database_path(&self) -> &Path {
+        &self.database_path
+    }
+
+    pub(crate) fn source(&self) -> &SourceKey {
+        &self.source
+    }
+
+    pub(crate) fn start_scan(&self) -> ShelleySourceBackedResult<ShelleySourceBackedScan> {
+        let snapshot = shelley_source_snapshot(&self.database_path)?;
+        let conn = open_provider_sqlite_readonly(&self.database_path)?;
+        if !snapshot.revalidate(&self.database_path)? {
+            return Err(CaptureError::SourceChangedDuringCapture.into());
+        }
+
+        let sqlite_user_version =
+            conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?;
+        let schema_fingerprint = sqlite_schema_fingerprint(&conn)?;
+        let conversation_columns = shelley_conversation_columns(&conn)?;
+        let message_columns = shelley_message_columns(&conn)?;
+        let has_message_sequence_id = message_columns.contains("sequence_id");
+        shelley_require_message_index(&conn, has_message_sequence_id)?;
+        let conversation_select =
+            shelley_conversation_select_expressions(&conversation_columns, "c");
+        let message_select = shelley_message_select_expressions(&message_columns, "m");
+        let revision = shelley_source_revision(&snapshot, sqlite_user_version, &schema_fingerprint);
+        let opening_observation = SourceObservation::new(
+            self.source.clone(),
+            SHELLEY_SOURCE_REVISION_KIND,
+            revision.into_bytes(),
+        )?;
+        let context = ProviderAdapterContext {
+            machine_id: "shelley-source-backed".to_owned(),
+            source_path: Some(self.database_path.clone()),
+            source_root: Some(self.exact_cwd.clone()),
+            imported_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+        };
+        let mut content_digest = Sha256::new();
+        content_digest.update(SHELLEY_CERTIFIED_STREAM_DOMAIN);
+
+        Ok(ShelleySourceBackedScan {
+            database_path: self.database_path.clone(),
+            source: self.source.clone(),
+            snapshot,
+            conn,
+            opening_observation,
+            conversation_select,
+            message_select,
+            has_message_sequence_id,
+            context,
+            after_rowid: None,
+            source_exhausted: false,
+            content_digest,
+            counts: ScannedSourceCounts::default(),
+            emitted_pages: 0,
+            receipt: None,
+        })
+    }
+
+    /// Reopens and verifies one exact compound message/conversation row.
+    pub(crate) fn hydrate(
+        &self,
+        locator: &SourceRecordLocator,
+    ) -> ShelleySourceBackedResult<ShelleyHydratedMessage> {
+        locator.validate_contract()?;
+        if !self.source.exact_descriptor_eq(locator.source())
+            || locator.revision_policy() != LocatorRevisionPolicy::StableRecordEvidence
+        {
+            return Err(ShelleySourceBackedError::InvalidLocator);
+        }
+        let (parent_bearing, message_rowid, conversation_rowid) = decode_compound_locator(locator)?;
+
+        let snapshot = shelley_source_snapshot(&self.database_path)?;
+        let conn = open_provider_sqlite_readonly(&self.database_path)?;
+        if !snapshot.revalidate(&self.database_path)? {
+            return Err(CaptureError::SourceChangedDuringCapture.into());
+        }
+        let conversation_columns = shelley_conversation_columns(&conn)?;
+        let message_columns = shelley_message_columns(&conn)?;
+        let has_message_sequence_id = message_columns.contains("sequence_id");
+        shelley_require_message_index(&conn, has_message_sequence_id)?;
+        let conversation_select =
+            shelley_conversation_select_expressions(&conversation_columns, "c");
+        let message_select = shelley_message_select_expressions(&message_columns, "m");
+        let after = message_rowid.checked_sub(1);
+        let Some((unit, _)) = next_message_unit(
+            &conn,
+            &message_select,
+            &conversation_select,
+            has_message_sequence_id,
+            after,
+            Some(message_rowid),
+        )?
+        else {
+            return Err(ShelleySourceBackedError::MissingRecord);
+        };
+        let ShelleyUnit::Accepted { rowid, value, .. } = unit else {
+            return Err(ShelleySourceBackedError::MissingRecord);
+        };
+        if rowid != message_rowid
+            || value.conversation.rowid != conversation_rowid
+            || value.parent_bearing != parent_bearing
+        {
+            return Err(ShelleySourceBackedError::MissingRecord);
+        }
+        let values = shelley_verified_record_values(
+            &value.message,
+            &value.conversation,
+            value.parent_bearing,
+        );
+        let digest = shelley_logical_record_digest(&values);
+        if &digest != locator.record_digest() {
+            return Err(ShelleySourceBackedError::StaleRecordEvidence);
+        }
+        if !snapshot.revalidate(&self.database_path)? {
+            return Err(CaptureError::SourceChangedDuringCapture.into());
+        }
+        let text = shelley_message_complete_text(&value.message)
+            .unwrap_or_else(|| format!("Shelley {} message", value.message.entry_type));
+        Ok(ShelleyHydratedMessage {
+            text,
+            native_record_digest: digest,
+        })
+    }
+}
+
+/// Discovers exactly `<cwd>/shelley.db` and no remembered or recursive roots.
+pub(crate) fn discover_shelley_source_backed_exact_cwd(
+    cwd: &Path,
+) -> ShelleySourceBackedResult<Option<ShelleySourceBackedAdapter>> {
+    let exact_cwd = fs::canonicalize(cwd)?;
+    let cwd_metadata = fs::symlink_metadata(&exact_cwd)?;
+    if !cwd_metadata.file_type().is_dir() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: exact_cwd,
+            reason: "Shelley exact CWD must be a directory",
+        }
+        .into());
+    }
+    let database_path = exact_cwd.join(SHELLEY_SOURCE_ANCHOR_KEY);
+    match fs::symlink_metadata(&database_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(CaptureError::Io(error).into()),
+        Ok(_) => {}
+    }
+    // This preflight rejects symlinks and non-files before a source is admitted.
+    let _ = shelley_source_snapshot(&database_path)?;
+    let anchor = SourceAnchor::provider_native(
+        SHELLEY_SOURCE_ANCHOR_NAMESPACE,
+        TypedKey::utf8(SHELLEY_SOURCE_ANCHOR_KEY)?,
+    )?;
+    let source = SourceKey::derive(
+        ctx_history_core::CaptureProvider::Shelley.as_str(),
+        SHELLEY_SQLITE_SOURCE_FORMAT,
+        SHELLEY_SOURCE_SCHEMA_VARIANT,
+        1,
+        anchor,
+    )?;
+    Ok(Some(ShelleySourceBackedAdapter {
+        exact_cwd,
+        database_path,
+        source,
+    }))
+}
+
+pub(crate) struct ShelleySourceBackedScan {
+    database_path: PathBuf,
+    source: SourceKey,
+    snapshot: crate::provider::sqlite::ProviderSqliteSourceSnapshot,
+    conn: crate::provider::sqlite::ReadOnlySqliteConnection,
+    opening_observation: SourceObservation,
+    conversation_select: Vec<String>,
+    message_select: Vec<String>,
+    has_message_sequence_id: bool,
+    context: ProviderAdapterContext,
+    after_rowid: Option<i64>,
+    source_exhausted: bool,
+    content_digest: Sha256,
+    counts: ScannedSourceCounts,
+    emitted_pages: u64,
+    receipt: Option<ShelleySourceBackedReceipt>,
+}
+
+impl ShelleySourceBackedScan {
+    /// Emits at most 64 native records and one bounded lexical preview per
+    /// retained record. Certification is available only after this returns
+    /// `None`, which performs final source revalidation.
+    pub(crate) fn next_page(
+        &mut self,
+    ) -> ShelleySourceBackedResult<Option<ShelleySourceBackedPage>> {
+        if self.receipt.is_some() {
+            return Ok(None);
+        }
+        if self.source_exhausted {
+            self.finalize()?;
+            return Ok(None);
+        }
+
+        let mut page = ShelleySourceBackedPage {
+            documents: Vec::new(),
+            rejections: Vec::new(),
+            counts: ScannedSourceCounts::default(),
+            retained_bytes: 0,
+        };
+        while page.counts.complete_records < SHELLEY_PAGE_MAX_UNITS as u64 {
+            let Some((unit, scanner_digest)) = next_message_unit(
+                &self.conn,
+                &self.message_select,
+                &self.conversation_select,
+                self.has_message_sequence_id,
+                self.after_rowid,
+                None,
+            )?
+            else {
+                self.source_exhausted = true;
+                break;
+            };
+            let unit_bytes = unit.retained_bytes();
+            if page.counts.complete_records != 0
+                && page.retained_bytes.saturating_add(unit_bytes) > SHELLEY_PAGE_MAX_BYTES
+            {
+                break;
+            }
+            self.after_rowid = Some(unit.rowid());
+            page.retained_bytes = page.retained_bytes.saturating_add(unit_bytes);
+            checked_add_count(&mut page.counts.complete_records, 1)?;
+            checked_add_count(
+                &mut page.counts.certified_bytes,
+                u64::try_from(unit_bytes).map_err(|_| ShelleySourceBackedError::CountOverflow)?,
+            )?;
+
+            match unit {
+                ShelleyUnit::Rejected { rowid, reason, .. } => {
+                    self.hash_record(rowid, scanner_digest, None, RecordDisposition::Rejected);
+                    checked_add_count(&mut page.counts.rejected_records, 1)?;
+                    page.rejections
+                        .push(ShelleySourceBackedRejection { rowid, reason });
+                }
+                ShelleyUnit::Accepted { rowid, value, .. } => {
+                    let values = shelley_verified_record_values(
+                        &value.message,
+                        &value.conversation,
+                        value.parent_bearing,
+                    );
+                    let record_digest = shelley_logical_record_digest(&values);
+                    match build_document(&self.source, &self.context, &value, record_digest) {
+                        Ok(Some(document)) => {
+                            self.hash_record(
+                                rowid,
+                                scanner_digest,
+                                Some(record_digest),
+                                RecordDisposition::Retained,
+                            );
+                            checked_add_count(&mut page.counts.retained_records, 1)?;
+                            checked_add_count(&mut page.counts.indexed_documents, 1)?;
+                            page.documents.push(document);
+                        }
+                        Ok(None) => {
+                            self.hash_record(
+                                rowid,
+                                scanner_digest,
+                                Some(record_digest),
+                                RecordDisposition::Ignored,
+                            );
+                            checked_add_count(&mut page.counts.ignored_records, 1)?;
+                        }
+                        Err(
+                            error @ (ShelleySourceBackedError::Projection(_)
+                            | ShelleySourceBackedError::Resolver(_)
+                            | ShelleySourceBackedError::MissingLexicalBody),
+                        ) => {
+                            self.hash_record(
+                                rowid,
+                                scanner_digest,
+                                Some(record_digest),
+                                RecordDisposition::Rejected,
+                            );
+                            checked_add_count(&mut page.counts.rejected_records, 1)?;
+                            page.rejections.push(ShelleySourceBackedRejection {
+                                rowid,
+                                reason: error.to_string(),
+                            });
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
+        }
+
+        if page.counts.complete_records == 0 {
+            if self.source_exhausted {
+                self.finalize()?;
+            }
+            return Ok(None);
+        }
+        merge_counts(&mut self.counts, page.counts)?;
+        checked_add_count(&mut self.emitted_pages, 1)?;
+        Ok(Some(page))
+    }
+
+    pub(crate) fn finish(self) -> ShelleySourceBackedResult<ShelleySourceBackedReceipt> {
+        self.receipt.ok_or(ShelleySourceBackedError::ScanIncomplete)
+    }
+
+    fn hash_record(
+        &mut self,
+        rowid: i64,
+        scanner_digest: [u8; 32],
+        exact_digest: Option<[u8; 32]>,
+        disposition: RecordDisposition,
+    ) {
+        self.content_digest.update(rowid.to_be_bytes());
+        self.content_digest.update(scanner_digest);
+        self.content_digest.update([disposition as u8]);
+        match exact_digest {
+            Some(digest) => {
+                self.content_digest.update([1]);
+                self.content_digest.update(digest);
+            }
+            None => self.content_digest.update([0]),
+        }
+    }
+
+    fn finalize(&mut self) -> ShelleySourceBackedResult<()> {
+        if !self.snapshot.revalidate(&self.database_path)? {
+            return Err(CaptureError::SourceChangedDuringCapture.into());
+        }
+        let mut content_digest = self.content_digest.clone();
+        hash_counts(&mut content_digest, self.counts);
+        let certificate = CertifiedSource::certify(
+            self.opening_observation.clone(),
+            self.opening_observation.clone(),
+            SHELLEY_SOURCE_PARSER_REVISION,
+            content_digest.finalize().into(),
+            self.counts,
+        )?;
+        self.receipt = Some(ShelleySourceBackedReceipt {
+            certificate,
+            emitted_pages: self.emitted_pages,
+        });
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ShelleySourceBackedPage {
+    pub(crate) documents: Vec<LexicalDocument>,
+    pub(crate) rejections: Vec<ShelleySourceBackedRejection>,
+    pub(crate) counts: ScannedSourceCounts,
+    pub(crate) retained_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ShelleySourceBackedRejection {
+    pub(crate) rowid: i64,
+    pub(crate) reason: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ShelleySourceBackedReceipt {
+    pub(crate) certificate: CertifiedSource,
+    pub(crate) emitted_pages: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ShelleyHydratedMessage {
+    pub(crate) text: String,
+    pub(crate) native_record_digest: [u8; 32],
+}
+
+#[derive(Debug, Clone, Copy)]
+#[repr(u8)]
+enum RecordDisposition {
+    Retained = 1,
+    Rejected = 2,
+    Ignored = 3,
+}
+
+fn build_document(
+    source: &SourceKey,
+    context: &ProviderAdapterContext,
+    value: &ShelleyMessage,
+    record_digest: [u8; 32],
+) -> ShelleySourceBackedResult<Option<LexicalDocument>> {
+    let Some(event) = shelley_core_event(
+        &value.message,
+        &value.conversation,
+        context,
+        value.parent_bearing,
+    )?
+    else {
+        return Ok(None);
+    };
+    let native_session_key = NativeSessionKey::native_id(
+        SHELLEY_NATIVE_SESSION_NAMESPACE,
+        TypedKey::utf8(value.message.conversation_id.clone())?,
+    )?;
+    let session_id = derive_session_id(SessionIdentityInput {
+        source,
+        logical_session_kind: SHELLEY_LOGICAL_SESSION_KIND,
+        native_session_key: &native_session_key,
+    })?;
+    let native_item_key = NativeItemKey::composite(
+        SHELLEY_NATIVE_MESSAGE_NAMESPACE,
+        vec![
+            TypedKey::utf8(value.message.conversation_id.clone())?,
+            TypedKey::I64(value.message.sequence_id),
+            TypedKey::utf8(value.message.message_id.clone())?,
+        ],
+    )?;
+    let event_id = derive_event_id(EventIdentityInput {
+        source,
+        session_id,
+        logical_item_kind: SHELLEY_LOGICAL_EVENT_KIND,
+        native_item_key: &native_item_key,
+        subrecord_selector: None,
+    })?;
+    let primary_key = TypedKey::composite(vec![
+        TypedKey::Bool(value.parent_bearing),
+        TypedKey::I64(value.message.rowid),
+        TypedKey::I64(value.conversation.rowid),
+    ])?;
+    let locator = SourceRecordLocator::new(
+        source.clone(),
+        NativeRecordCoordinate::ProviderSqlite {
+            logical_relation: SHELLEY_COMPOUND_LOCATOR_RELATION.to_owned(),
+            primary_key,
+            row_version: None,
+        },
+        LocatorRevisionPolicy::StableRecordEvidence,
+        None,
+        record_digest,
+    )?;
+    let text = event
+        .payload
+        .pointer("/text")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let (body, _) = provider_local_preview(text, MAX_BODY_PREVIEW_CHARS);
+    if body.trim().is_empty() {
+        return Err(ShelleySourceBackedError::MissingLexicalBody);
+    }
+    let cwd = value.conversation.cwd.as_deref().map(|cwd| {
+        let (cwd, _) = provider_local_preview(cwd, crate::PROVIDER_MAX_PREVIEW_CHARS);
+        cwd
+    });
+    let started_at = shelley_timestamp(
+        value.conversation.created_at.as_deref(),
+        chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+    );
+    let occurred_at = shelley_timestamp(value.message.created_at.as_deref(), started_at);
+    Ok(Some(LexicalDocument {
+        event_id,
+        session_id,
+        source: source.clone(),
+        locator,
+        provider_session_id: Some(value.message.conversation_id.clone()),
+        event_sequence: value.provider_event_index,
+        occurred_at_unix_ms: Some(occurred_at.timestamp_millis()),
+        event_type: event.event_type.as_str().to_owned(),
+        role: event.role.map(|role| role.as_str().to_owned()),
+        body,
+        workspace: cwd.clone(),
+        cwd,
+        touched_files: Vec::new(),
+    }))
+}
+
+fn decode_compound_locator(
+    locator: &SourceRecordLocator,
+) -> ShelleySourceBackedResult<(bool, i64, i64)> {
+    let NativeRecordCoordinate::ProviderSqlite {
+        logical_relation,
+        primary_key,
+        row_version,
+    } = locator.coordinate()
+    else {
+        return Err(ShelleySourceBackedError::InvalidLocator);
+    };
+    if logical_relation != SHELLEY_COMPOUND_LOCATOR_RELATION || row_version.is_some() {
+        return Err(ShelleySourceBackedError::InvalidLocator);
+    }
+    let TypedKey::Composite(parts) = primary_key else {
+        return Err(ShelleySourceBackedError::InvalidLocator);
+    };
+    let [TypedKey::Bool(parent_bearing), TypedKey::I64(message_rowid), TypedKey::I64(conversation_rowid)] =
+        parts.as_slice()
+    else {
+        return Err(ShelleySourceBackedError::InvalidLocator);
+    };
+    Ok((*parent_bearing, *message_rowid, *conversation_rowid))
+}
+
+fn checked_add_count(target: &mut u64, value: u64) -> ShelleySourceBackedResult<()> {
+    *target = target
+        .checked_add(value)
+        .ok_or(ShelleySourceBackedError::CountOverflow)?;
+    Ok(())
+}
+
+fn merge_counts(
+    target: &mut ScannedSourceCounts,
+    page: ScannedSourceCounts,
+) -> ShelleySourceBackedResult<()> {
+    checked_add_count(&mut target.complete_records, page.complete_records)?;
+    checked_add_count(&mut target.retained_records, page.retained_records)?;
+    checked_add_count(&mut target.rejected_records, page.rejected_records)?;
+    checked_add_count(&mut target.ignored_records, page.ignored_records)?;
+    checked_add_count(&mut target.indexed_documents, page.indexed_documents)?;
+    checked_add_count(&mut target.certified_bytes, page.certified_bytes)
+}
+
+fn hash_counts(digest: &mut Sha256, counts: ScannedSourceCounts) {
+    digest.update(counts.complete_records.to_be_bytes());
+    digest.update(counts.retained_records.to_be_bytes());
+    digest.update(counts.rejected_records.to_be_bytes());
+    digest.update(counts.ignored_records.to_be_bytes());
+    digest.update(counts.indexed_documents.to_be_bytes());
+    digest.update(counts.certified_bytes.to_be_bytes());
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use ctx_history_core::{NativeRecordCoordinate, TypedKey};
+    use rusqlite::{params, Connection};
+
+    use super::*;
+
+    fn create_fixture(root: &Path, text: &str) -> PathBuf {
+        fs::create_dir_all(root).unwrap();
+        let database = root.join("shelley.db");
+        let conn = Connection::open(&database).unwrap();
+        conn.execute_batch(
+            "create table conversations (
+                 conversation_id text not null,
+                 created_at text,
+                 updated_at text,
+                 cwd text
+             );
+             create table messages (
+                 message_id text not null,
+                 conversation_id text not null,
+                 sequence_id integer not null,
+                 type text not null,
+                 user_data text,
+                 created_at text
+             );
+             create index messages_conversation_sequence
+                 on messages(conversation_id collate binary, sequence_id collate binary);",
+        )
+        .unwrap();
+        conn.execute(
+            "insert into conversations (
+                 conversation_id, created_at, updated_at, cwd
+             ) values (?1, ?2, ?3, ?4)",
+            params![
+                "conversation-1",
+                "2026-07-28T20:00:00Z",
+                "2026-07-28T20:01:00Z",
+                "/workspace/project"
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "insert into messages (
+                 message_id, conversation_id, sequence_id, type, user_data, created_at
+             ) values (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                "message-1",
+                "conversation-1",
+                7_i64,
+                "user",
+                text,
+                "2026-07-28T20:00:30Z"
+            ],
+        )
+        .unwrap();
+        database
+    }
+
+    fn drain(
+        adapter: &ShelleySourceBackedAdapter,
+    ) -> (Vec<LexicalDocument>, ShelleySourceBackedReceipt) {
+        let mut scan = adapter.start_scan().unwrap();
+        let mut documents = Vec::new();
+        while let Some(page) = scan.next_page().unwrap() {
+            assert!(page.documents.len() <= SHELLEY_PAGE_MAX_UNITS);
+            assert!(page
+                .documents
+                .iter()
+                .all(|document| document.body.chars().count() <= MAX_BODY_PREVIEW_CHARS));
+            documents.extend(page.documents);
+        }
+        let receipt = scan.finish().unwrap();
+        (documents, receipt)
+    }
+
+    #[test]
+    fn shelley_source_backed_cold_exact_and_replacement_keep_identity() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let original = "x".repeat(MAX_BODY_PREVIEW_CHARS + 1_000);
+        let database = create_fixture(temp.path(), &original);
+        let adapter = discover_shelley_source_backed_exact_cwd(temp.path())
+            .unwrap()
+            .unwrap();
+
+        let (cold_documents, cold_receipt) = drain(&adapter);
+        assert_eq!(cold_documents.len(), 1);
+        let cold = &cold_documents[0];
+        assert_eq!(cold.body.chars().count(), MAX_BODY_PREVIEW_CHARS);
+        assert_eq!(cold.provider_session_id.as_deref(), Some("conversation-1"));
+        assert_eq!(cold_receipt.emitted_pages, 1);
+        assert_eq!(
+            cold_receipt.certificate.counts(),
+            ScannedSourceCounts {
+                complete_records: 1,
+                retained_records: 1,
+                rejected_records: 0,
+                ignored_records: 0,
+                indexed_documents: 1,
+                certified_bytes: cold_receipt.certificate.counts().certified_bytes,
+            }
+        );
+        let NativeRecordCoordinate::ProviderSqlite {
+            logical_relation,
+            primary_key,
+            row_version,
+        } = cold.locator.coordinate()
+        else {
+            panic!("expected Shelley SQLite locator");
+        };
+        assert_eq!(logical_relation, SHELLEY_COMPOUND_LOCATOR_RELATION);
+        assert_eq!(
+            primary_key,
+            &TypedKey::Composite(vec![
+                TypedKey::Bool(true),
+                TypedKey::I64(1),
+                TypedKey::I64(1),
+            ])
+        );
+        assert!(row_version.is_none());
+
+        let exact = adapter.hydrate(&cold.locator).unwrap();
+        assert_eq!(exact.text, original);
+        assert_eq!(exact.native_record_digest, *cold.locator.record_digest());
+
+        let replacement = "replacement exact Shelley body";
+        Connection::open(&database)
+            .unwrap()
+            .execute(
+                "update messages set user_data = ?1 where rowid = 1",
+                [replacement],
+            )
+            .unwrap();
+        let (replacement_documents, replacement_receipt) = drain(&adapter);
+        assert_eq!(replacement_documents.len(), 1);
+        let replaced = &replacement_documents[0];
+        assert_eq!(cold.session_id, replaced.session_id);
+        assert_eq!(cold.event_id, replaced.event_id);
+        assert_ne!(
+            cold_receipt.certificate.content_digest(),
+            replacement_receipt.certificate.content_digest()
+        );
+        assert_ne!(
+            cold.locator.record_digest(),
+            replaced.locator.record_digest()
+        );
+        assert!(matches!(
+            adapter.hydrate(&cold.locator),
+            Err(ShelleySourceBackedError::StaleRecordEvidence)
+        ));
+        assert_eq!(
+            adapter.hydrate(&replaced.locator).unwrap().text,
+            replacement
+        );
+    }
+
+    #[test]
+    fn shelley_source_backed_snapshot_replacement_fails_terminal_certification() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let database = create_fixture(temp.path(), "before replacement");
+        let adapter = discover_shelley_source_backed_exact_cwd(temp.path())
+            .unwrap()
+            .unwrap();
+        let mut scan = adapter.start_scan().unwrap();
+        assert!(scan.next_page().unwrap().is_some());
+
+        Connection::open(database)
+            .unwrap()
+            .execute(
+                "update messages set user_data = 'after replacement' where rowid = 1",
+                [],
+            )
+            .unwrap();
+        assert!(matches!(
+            scan.next_page(),
+            Err(ShelleySourceBackedError::Capture(
+                CaptureError::SourceChangedDuringCapture
+            ))
+        ));
+    }
+
+    #[test]
+    fn shelley_source_backed_inventory_is_exact_cwd_only() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let active = temp.path().join("active");
+        let past = temp.path().join("past");
+        let manual = active.join("manual-root");
+        let parent = temp.path();
+        create_fixture(&past, "past");
+        create_fixture(&manual, "manual");
+        create_fixture(parent, "parent");
+        fs::create_dir_all(&active).unwrap();
+
+        assert!(discover_shelley_source_backed_exact_cwd(&active)
+            .unwrap()
+            .is_none());
+        let active_database = create_fixture(&active, "active");
+        let adapter = discover_shelley_source_backed_exact_cwd(&active)
+            .unwrap()
+            .unwrap();
+        assert_eq!(adapter.database_path(), active_database);
+        assert_eq!(adapter.exact_cwd(), fs::canonicalize(&active).unwrap());
+        assert_ne!(adapter.database_path(), past.join("shelley.db"));
+        assert_ne!(adapter.database_path(), manual.join("shelley.db"));
+        assert_ne!(adapter.database_path(), parent.join("shelley.db"));
+    }
+}
