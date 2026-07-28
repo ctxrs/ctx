@@ -373,6 +373,25 @@ pub(super) fn prepare_core_row(
     )
     .then(|| mux_output_projection(&value))
     .flatten();
+    let unaddressable_output = output_projection
+        .as_ref()
+        .filter(|projection| !projection.body_available)
+        .map(|_| {
+            let redacted = value
+                .get("parts")
+                .and_then(Value::as_array)
+                .is_some_and(|parts| {
+                    parts.iter().any(|part| {
+                        part.get("type").and_then(Value::as_str) == Some("dynamic-tool")
+                            && part.get("state").and_then(Value::as_str) == Some("output-redacted")
+                    })
+                });
+            if redacted {
+                MuxUnaddressableOutput::Redacted
+            } else {
+                MuxUnaddressableOutput::Missing
+            }
+        });
     let retain_core_output = output_projection.as_ref().is_some_and(|projection| {
         matches!(
             projection.outcome,
@@ -489,6 +508,7 @@ pub(super) fn prepare_core_row(
         source_record_digest,
         native_record_id,
         message_content_ref,
+        unaddressable_output,
         event,
         event_hash,
         file_touches,

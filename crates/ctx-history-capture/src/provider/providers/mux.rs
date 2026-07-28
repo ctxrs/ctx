@@ -3,7 +3,14 @@ mod native_path;
 mod normalization;
 mod source;
 
-pub(crate) use native_path::import_mux_native_path;
+pub(crate) use native_path::{
+    discover_mux_source_backed_sources, import_mux_native_path, mux_complete_content_locator,
+    mux_source_path_for_locator, scan_mux_source_backed, MuxBoundedProjection,
+    MuxReplacementEvidence, MuxReplacementReason, MuxSourceBackedCandidate,
+    MuxSourceBackedDisposition, MuxSourceBackedError, MuxSourceBackedPage, MuxSourceBackedRecord,
+    MuxSourceBackedResult, MuxSourceBackedScanReceipt, MuxUnaddressableReason,
+    MuxUnaddressableRecord,
+};
 pub(crate) use normalization::{mux_event_id, mux_event_text, mux_event_type};
 
 const MUX_CAPTURE_REVISION: u32 = 2;
