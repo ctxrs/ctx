@@ -61,7 +61,7 @@ fn accelerator_only_model_cache_is_available_and_reported() -> Result<()> {
 }
 
 #[test]
-fn semantic_cache_dir_override_beats_hf_home_without_sqlite_vec() -> Result<()> {
+fn semantic_cache_dir_override_beats_hf_home() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let data_root = temp.path().join("data");
     let explicit = temp.path().join("explicit");

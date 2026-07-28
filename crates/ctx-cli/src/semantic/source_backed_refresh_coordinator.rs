@@ -636,28 +636,7 @@ fn execute_codex_compatibility_refresh(
     execution: SourceBackedRefreshExecution<'_>,
 ) -> Result<SourceBackedRefreshPublication> {
     execution.report_progress("discovering", 0, 0, None)?;
-    let report = discovered_sources_for_provider_report(CaptureProvider::Codex);
-    let mut roots = report
-        .sources
-        .into_iter()
-        .filter(|source| {
-            source.exists
-                && source.source_format == CODEX_SESSION_SOURCE_FORMAT
-                && source.status == ProviderSourceStatus::Available
-        })
-        .map(|source| source.path)
-        .collect::<Vec<_>>();
-    roots.sort();
-    roots.dedup();
-
-    if roots.is_empty() {
-        let detail = report
-            .issues
-            .first()
-            .map(|issue| issue.reason)
-            .unwrap_or("no ordinary Codex rollout/session JSONL tree was discovered");
-        return Err(anyhow!("cannot discover Codex session sources: {detail}"));
-    }
+    let mut roots = discovered_codex_source_roots()?;
     if roots.len() != 1 {
         return Err(anyhow!(
             "source-backed daemon refresh discovered {} Codex roots; atomic multi-root publication requires the capture-owned grouped refresh hook",
@@ -675,6 +654,31 @@ fn execute_codex_compatibility_refresh(
     Ok(SourceBackedRefreshPublication {
         generation_id: receipt.commit.generation_id,
     })
+}
+
+pub(super) fn discovered_codex_source_roots() -> Result<Vec<PathBuf>> {
+    let report = discovered_sources_for_provider_report(CaptureProvider::Codex);
+    let mut roots = report
+        .sources
+        .into_iter()
+        .filter(|source| {
+            source.exists
+                && source.source_format == CODEX_SESSION_SOURCE_FORMAT
+                && source.status == ProviderSourceStatus::Available
+        })
+        .map(|source| source.path)
+        .collect::<Vec<_>>();
+    roots.sort();
+    roots.dedup();
+    if roots.is_empty() {
+        let detail = report
+            .issues
+            .first()
+            .map(|issue| issue.reason)
+            .unwrap_or("no ordinary Codex rollout/session JSONL tree was discovered");
+        return Err(anyhow!("cannot discover Codex session sources: {detail}"));
+    }
+    Ok(roots)
 }
 
 fn record_source_backed_refresh_progress(
@@ -706,6 +710,12 @@ impl PinnedSourceBackedGeneration {
     #[allow(dead_code)] // Available to callers that report the selected pin.
     pub(crate) fn generation_id(&self) -> &str {
         self.index.generation_id()
+    }
+
+    pub(super) fn semantic_eligible_event_count(&self) -> Result<u64> {
+        self.index
+            .semantic_eligible_event_count()
+            .map_err(anyhow::Error::new)
     }
 
     pub(crate) fn into_index(self) -> VerifiedIndex {
@@ -935,7 +945,9 @@ fn response_source_count(response: &Value) -> usize {
         .unwrap_or(0)
 }
 
-fn pin_published_generation(data_root: &Path) -> Result<Option<PinnedSourceBackedGeneration>> {
+pub(super) fn pin_published_generation(
+    data_root: &Path,
+) -> Result<Option<PinnedSourceBackedGeneration>> {
     let index_root = source_backed_index_root(data_root);
     if !index_root.join("meta.json").is_file() {
         return Ok(None);

@@ -1,5 +1,5 @@
 pub(super) fn semantic_vector_path(data_root: &Path) -> PathBuf {
-    data_root.join("vectors.sqlite")
+    data_root.join("semantic-vectors")
 }
 
 pub(super) fn semantic_worker_lock_path(data_root: &Path) -> PathBuf {

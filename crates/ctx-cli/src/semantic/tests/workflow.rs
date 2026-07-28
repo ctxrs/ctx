@@ -525,7 +525,7 @@ fn auto_coreml_load_failure_acquires_cpu_and_preserves_fallback_metadata() -> Re
 
 #[test]
 fn semantic_failure_classes_control_retry_backoff() {
-    let retryable = anyhow!("transient sqlite-vec registration failure");
+    let retryable = anyhow!("transient flat segment publication failure");
     assert_eq!(
         classify_semantic_failure(&retryable),
         SemanticFailureClass::Retryable
@@ -561,7 +561,7 @@ fn semantic_failure_classes_control_retry_backoff() {
     );
     assert_eq!(
         classify_semantic_failure(&anyhow::Error::new(SemanticVectorStoreError::unavailable(
-            "sqlite-vec temporarily unavailable"
+            "flat segment store temporarily unavailable"
         ))),
         SemanticFailureClass::Retryable
     );

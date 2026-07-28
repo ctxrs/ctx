@@ -20,9 +20,11 @@ use super::{
         semantic_vector_path, semantic_worker_report_best_effort, semantic_worker_report_cached,
     },
     reports::{semantic_status_from_worker, SemanticRetrievalReport, SemanticWorkerReport},
-    runtime_limits::{SEMANTIC_SEARCH_CANDIDATES, SEMANTIC_SOFT_FILTER_SEARCH_CANDIDATES},
+    runtime_limits::{
+        SEMANTIC_EXACT_TOP_K_MAX, SEMANTIC_SEARCH_CANDIDATES,
+        SEMANTIC_SOFT_FILTER_SEARCH_CANDIDATES,
+    },
     vector_store::SemanticVectorStore,
-    vector_store_schema::SEMANTIC_SQLITE_VEC0_MAX_K,
 };
 
 mod transport;
@@ -496,7 +498,7 @@ pub(super) fn semantic_candidate_limit(options: &ctx_history_search::PacketOptio
     } else {
         SEMANTIC_SEARCH_CANDIDATES.max(options.limit.saturating_mul(8))
     };
-    overfetch.min(SEMANTIC_SQLITE_VEC0_MAX_K)
+    overfetch.min(SEMANTIC_EXACT_TOP_K_MAX)
 }
 
 pub(super) fn warn_if(enabled: bool, message: &str) {

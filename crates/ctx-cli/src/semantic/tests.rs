@@ -3,6 +3,7 @@ use ctx_history_core::{
     new_id, AgentType, CaptureProvider, EntityTimestamps, Event, EventRole, EventType, Fidelity,
     Session, SessionStatus, SyncMetadata, SyncState, Visibility,
 };
+use sha2::{Digest, Sha256};
 
 fn reconcile_committed_semantic_work(
     data_root: &Path,
@@ -17,8 +18,11 @@ fn reconcile_committed_semantic_work(
 
 fn test_embedding(first: f32, second: f32) -> Vec<f32> {
     let mut embedding = vec![0.0; SEMANTIC_DIMENSIONS];
-    embedding[0] = first;
-    embedding[1] = second;
+    let norm = first.mul_add(first, second * second).sqrt();
+    if norm > 0.0 {
+        embedding[0] = first / norm;
+        embedding[1] = second / norm;
+    }
     embedding
 }
 
@@ -207,11 +211,20 @@ fn test_chunk_at(
     chunk_index: usize,
     _chunk_count: usize,
 ) -> SemanticChunkDocument {
+    let source_text_hash = if source_hash.len() == 64
+        && source_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        source_hash.to_owned()
+    } else {
+        format!("{:x}", Sha256::digest(source_hash.as_bytes()))
+    };
     SemanticChunkDocument {
         event_id,
         seq,
         chunk_index,
-        source_text_hash: source_hash.to_owned(),
+        source_text_hash,
         text: String::new(),
         start_char: chunk_index.saturating_mul(10),
         end_char: chunk_index.saturating_mul(10).saturating_add(12),

@@ -501,14 +501,6 @@ pub(super) fn semantic_text_hash(text: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-pub(super) fn serialize_f32_blob(values: &[f32]) -> Vec<u8> {
-    let mut blob = Vec::with_capacity(values.len() * 4);
-    for value in values {
-        blob.extend_from_slice(&value.to_le_bytes());
-    }
-    blob
-}
-
 pub(super) fn compare_semantic_hits_desc(
     left: &SemanticVectorHit,
     right: &SemanticVectorHit,

@@ -364,6 +364,10 @@ pub(super) fn daemon_semantic_job_did_work(value: &Value) -> bool {
         .get("indexed_chunks")
         .and_then(Value::as_u64)
         .is_some_and(|chunks| chunks > 0)
+        || value
+            .get("source_records_scanned")
+            .and_then(Value::as_u64)
+            .is_some_and(|records| records > 0)
 }
 
 pub(super) fn daemon_run_start_mode(args: &DaemonRunArgs) -> DaemonStartModeArg {

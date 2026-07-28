@@ -5,9 +5,12 @@ use ctx_history_core::{
     EventHydrationRequest, HydrationFailure, HydrationFailureKind, StableEntityId,
     StableEntityKind, IDENTITY_VERSION,
 };
-use ctx_history_index::{EventRecord, VerifiedIndex, LEXICAL_SCHEMA_VERSION};
+use ctx_history_index::{
+    EventRecord, SemanticEventCursor, VerifiedIndex, LEXICAL_SCHEMA_VERSION,
+    MAX_SEMANTIC_EVENT_PAGE_ITEMS,
+};
 use ctx_history_store::EventEmbeddingDocument;
-use rusqlite::{params, OptionalExtension, Transaction};
+use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -87,7 +90,7 @@ pub(super) struct SourceBackedSemanticPage {
     pub(super) terminal: bool,
 }
 
-pub(super) trait SourceBackedSemanticResolver {
+pub(in crate::semantic) trait SourceBackedSemanticResolver {
     /// Rereads and verifies exact provider content for one committed typed
     /// locator. The returned document may combine provider-native records
     /// according to the semantic document contract, but it must not come from
@@ -99,20 +102,20 @@ pub(super) trait SourceBackedSemanticResolver {
     ) -> std::result::Result<EventEmbeddingDocument, HydrationFailure>;
 }
 
-pub(super) trait SourceBackedSemanticEmbedder {
+pub(in crate::semantic) trait SourceBackedSemanticEmbedder {
     fn embed_chunks(&mut self, chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>>;
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(super) struct SourceBackedSemanticOutcome {
-    pub(super) records_scanned: usize,
-    pub(super) records_embedded: usize,
-    pub(super) records_reused: usize,
-    pub(super) invalidated_chunks: usize,
-    pub(super) deleted_chunks: usize,
-    pub(super) ready: bool,
-    pub(super) work_remaining: bool,
-    pub(super) unavailable: Option<HydrationFailureKind>,
+pub(in crate::semantic) struct SourceBackedSemanticOutcome {
+    pub(in crate::semantic) records_scanned: usize,
+    pub(in crate::semantic) records_embedded: usize,
+    pub(in crate::semantic) records_reused: usize,
+    pub(in crate::semantic) invalidated_chunks: usize,
+    pub(in crate::semantic) deleted_chunks: usize,
+    pub(in crate::semantic) ready: bool,
+    pub(in crate::semantic) work_remaining: bool,
+    pub(in crate::semantic) unavailable: Option<HydrationFailureKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,6 +148,52 @@ struct StoredSourceDocument {
 }
 
 impl SemanticVectorStore {
+    pub(in crate::semantic) fn reconcile_source_backed_index<R, E>(
+        &mut self,
+        index: &VerifiedIndex,
+        resolver: &mut R,
+        embedder: &mut E,
+    ) -> Result<SourceBackedSemanticOutcome>
+    where
+        R: SourceBackedSemanticResolver,
+        E: SourceBackedSemanticEmbedder,
+    {
+        semantic_owned_sidecar_result((|| {
+            let semantic_documents = index.semantic_eligible_event_count()?;
+            let generation =
+                SourceBackedSemanticGeneration::from_verified_index(index, semantic_documents)?;
+            let frontier = self.begin_or_resume_source_generation(&generation)?;
+            let after = frontier
+                .after_identity
+                .as_deref()
+                .map(StableEntityId::decode_canonical)
+                .transpose()?;
+            let cursor = after.map(|after| {
+                SemanticEventCursor::new(generation.core_generation_id.clone(), after)
+            });
+            let page = index.semantic_event_page(cursor.as_ref(), MAX_SEMANTIC_EVENT_PAGE_ITEMS)?;
+            if page.generation_id != generation.core_generation_id
+                || page.eligible_total != generation.semantic_documents
+            {
+                return Err(SemanticVectorStoreError::reset_required(
+                    "pinned semantic event page does not match its verified generation",
+                )
+                .into());
+            }
+            self.reconcile_source_backed_page(
+                &generation,
+                SourceBackedSemanticPage {
+                    core_generation_id: page.generation_id,
+                    after,
+                    records: page.items,
+                    terminal: page.terminal,
+                },
+                resolver,
+                embedder,
+            )
+        })())
+    }
+
     pub(super) fn reconcile_source_backed_page<R, E>(
         &mut self,
         generation: &SourceBackedSemanticGeneration,
@@ -280,7 +329,10 @@ impl SemanticVectorStore {
         })())
     }
 
-    pub(super) fn source_backed_generation_ready(&self, core_generation_id: &str) -> Result<bool> {
+    pub(in crate::semantic) fn source_backed_generation_ready(
+        &self,
+        core_generation_id: &str,
+    ) -> Result<bool> {
         semantic_owned_sidecar_result((|| {
             validate_generation_id(core_generation_id)?;
             let Some(acknowledgement) = self.source_acknowledgement()? else {
@@ -494,17 +546,40 @@ impl SemanticVectorStore {
     }
 
     fn invalidate_source_event(&mut self, event_id: Uuid) -> Result<usize> {
-        let transaction = self.conn.transaction()?;
-        let deleted = Self::delete_events_in_transaction(&transaction, &[event_id])?;
-        transaction.commit()?;
-        Ok(deleted)
+        self.delete_events(&[event_id])
     }
 
     fn finish_source_generation(&mut self, frontier: &SourceProjectionFrontier) -> Result<usize> {
+        let mut statement = self.conn.prepare(
+            "SELECT event_id FROM semantic_source_documents WHERE core_generation_id = ?1",
+        )?;
+        let rows = statement.query_map([&frontier.core_generation_id], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let current = rows
+            .map(|row| {
+                let value = row?;
+                Uuid::parse_str(&value).map_err(|_| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(SemanticVectorStoreError::reset_required(format!(
+                            "invalid source-backed semantic event id: {value}"
+                        ))),
+                    )
+                })
+            })
+            .collect::<std::result::Result<std::collections::HashSet<_>, _>>()?;
+        drop(statement);
+        let retired = self
+            .flat_active_events()?
+            .into_iter()
+            .map(|event| event.event_id)
+            .filter(|event_id| !current.contains(event_id))
+            .collect::<Vec<_>>();
+        let deleted = self.delete_events(&retired)?;
+
         let transaction = self.conn.transaction()?;
-        let retired =
-            source_generation_retired_event_ids(&transaction, &frontier.core_generation_id)?;
-        let deleted = Self::delete_events_in_transaction(&transaction, &retired)?;
         transaction.execute(
             "DELETE FROM semantic_source_documents WHERE core_generation_id != ?1",
             [&frontier.core_generation_id],
@@ -632,35 +707,6 @@ fn hydration_failure_name(kind: HydrationFailureKind) -> &'static str {
         HydrationFailureKind::UnsupportedParserRevision => "unsupported_parser_revision",
         HydrationFailureKind::InvalidLocator => "invalid_locator",
     }
-}
-
-fn source_generation_retired_event_ids(
-    transaction: &Transaction<'_>,
-    generation_id: &str,
-) -> Result<Vec<Uuid>> {
-    let mut statement = transaction.prepare(
-        "SELECT DISTINCT chunks.event_id
-         FROM event_embedding_chunks AS chunks
-         LEFT JOIN semantic_source_documents AS source
-           ON source.event_id = chunks.event_id
-          AND source.core_generation_id = ?1
-         WHERE source.event_id IS NULL",
-    )?;
-    let rows = statement.query_map([generation_id], |row| row.get::<_, String>(0))?;
-    rows.map(|row| {
-        let value = row?;
-        Uuid::parse_str(&value).map_err(|_| {
-            rusqlite::Error::FromSqlConversionFailure(
-                0,
-                rusqlite::types::Type::Text,
-                Box::new(SemanticVectorStoreError::reset_required(format!(
-                    "invalid source-backed semantic event id: {value}"
-                ))),
-            )
-        })
-    })
-    .collect::<std::result::Result<Vec<_>, _>>()
-    .map_err(Into::into)
 }
 
 fn source_contract_fingerprint() -> String {
@@ -816,7 +862,7 @@ mod tests {
                 native_session_key: &session_key,
             })?;
             Ok(Self {
-                path: temp.path().join("vectors.sqlite"),
+                path: temp.path().join("semantic-vectors"),
                 _temp: temp,
                 source,
                 session_id,

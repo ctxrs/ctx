@@ -7,36 +7,28 @@ CTX_CLI_RUSTC_FLAGS = [
     "--check-cfg=cfg(ctx_pro_qualification)",
     "--check-cfg=cfg(ctx_pro_test_helper)",
     "--check-cfg=cfg(ctx_semantic_fastembed)",
-    "--check-cfg=cfg(ctx_sqlite_vec)",
     "--check-cfg=cfg(test)",
 ] + select({
     "@rules_rust//rust/platform:aarch64-apple-darwin": [
         "--cfg=ctx_semantic_fastembed",
-        "--cfg=ctx_sqlite_vec",
     ],
     "@rules_rust//rust/platform:aarch64-unknown-linux-gnu": [
         "--cfg=ctx_semantic_fastembed",
-        "--cfg=ctx_sqlite_vec",
     ],
     "@rules_rust//rust/platform:x86_64-apple-darwin": [
         "--cfg=ctx_semantic_fastembed",
-        "--cfg=ctx_sqlite_vec",
     ],
     "@rules_rust//rust/platform:x86_64-pc-windows-msvc": [
         "--cfg=ctx_semantic_fastembed",
-        "--cfg=ctx_sqlite_vec",
     ],
     "@rules_rust//rust/platform:x86_64-unknown-freebsd": [
         "--cfg=ctx_semantic_fastembed",
-        "--cfg=ctx_sqlite_vec",
     ],
     "@rules_rust//rust/platform:x86_64-unknown-linux-gnu": [
         "--cfg=ctx_semantic_fastembed",
-        "--cfg=ctx_sqlite_vec",
     ],
     "@rules_rust//rust/platform:x86_64-unknown-nixos-gnu": [
         "--cfg=ctx_semantic_fastembed",
-        "--cfg=ctx_sqlite_vec",
     ],
     "//conditions:default": [],
 })
