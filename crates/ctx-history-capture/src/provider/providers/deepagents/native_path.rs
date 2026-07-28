@@ -78,6 +78,7 @@ mod model;
 mod output;
 mod projection;
 mod publication;
+pub(crate) mod source_backed;
 
 use core::*;
 use lifecycle::*;
