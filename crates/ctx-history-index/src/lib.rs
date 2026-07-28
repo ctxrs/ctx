@@ -10,13 +10,15 @@ mod query;
 
 pub use query::{
     AgentScope, EventRecord, EventSearchCandidate, EventSearchFilters, ExcludedSessionTree,
-    SessionRecord,
+    SemanticEligibility, SemanticEventCursor, SemanticEventPage, SessionRecord,
+    MAX_SEMANTIC_EVENT_PAGE_ITEMS,
 };
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs::{self, File},
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
 
 use ctx_history_core::{
@@ -149,6 +151,22 @@ pub enum IndexError {
         actual: usize,
         maximum: usize,
     },
+    #[error(
+        "semantic event page size must be between 1 and {maximum} items, requested {requested}"
+    )]
+    InvalidSemanticEventPageSize { requested: usize, maximum: usize },
+    #[error(
+        "semantic event cursor belongs to generation {cursor_generation}, \
+         not pinned generation {pinned_generation}"
+    )]
+    SemanticEventCursorGenerationMismatch {
+        cursor_generation: String,
+        pinned_generation: String,
+    },
+    #[error("semantic event cursor uses a different eligibility contract")]
+    SemanticEventCursorEligibilityMismatch,
+    #[error("semantic event cursor does not contain a valid event identity")]
+    InvalidSemanticEventCursorIdentity,
     #[error("lexical analyzer {0} is unavailable")]
     MissingAnalyzer(&'static str),
     #[error("document source does not have an active replacement")]
@@ -1037,6 +1055,7 @@ pub struct VerifiedIndex {
     searcher: Searcher,
     manifest: GenerationManifest,
     generation_id: String,
+    semantic_eligible_event_count: OnceLock<u64>,
 }
 
 impl VerifiedIndex {
@@ -1062,6 +1081,7 @@ impl VerifiedIndex {
             searcher,
             manifest,
             generation_id,
+            semantic_eligible_event_count: OnceLock::new(),
         })
     }
 
@@ -2026,6 +2046,252 @@ mod tests {
             index.sessions_by_id_prefix(session_prefix).unwrap(),
             vec![session]
         );
+    }
+
+    #[test]
+    fn semantic_event_pages_follow_full_identity_order_and_explicit_eligibility() {
+        let temp = tempdir().unwrap();
+        let source = source("semantic-pages.jsonl");
+        let first = document(&source, 1, "first eligible user message");
+        let mut assistant = document(&source, 2, "assistant message");
+        assistant.role = Some("assistant".to_owned());
+        let mut tool = document(&source, 3, "user-shaped tool call");
+        tool.event_type = "tool_call".to_owned();
+        let control = document(
+            &source,
+            4,
+            "  <environment_context>not a semantic turn</environment_context>  ",
+        );
+        let second = document(&source, 5, "second eligible user message");
+        let third = document(&source, 6, "third eligible user message");
+        let aborted = document(&source, 7, "<turn_aborted>interrupted</turn_aborted>");
+        let notification = document(
+            &source,
+            8,
+            "<subagent_notification>completed</subagent_notification>",
+        );
+        let warning = document(
+            &source,
+            9,
+            "Warning: The maximum number of unified exec processes has been reached",
+        );
+        let discussion = document(
+            &source,
+            10,
+            "How should an embedded <environment_context> marker be rendered?",
+        );
+
+        let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        writer.begin_source(source.clone()).unwrap();
+        for document in [
+            third.clone(),
+            assistant,
+            first.clone(),
+            control,
+            tool,
+            second.clone(),
+            aborted,
+            notification,
+            warning,
+            discussion.clone(),
+        ] {
+            writer.add_document(document).unwrap();
+        }
+        writer.certify_source(certificate(&source, 1, 10)).unwrap();
+        writer.commit(|_| true).unwrap();
+
+        let index = VerifiedIndex::open(temp.path()).unwrap();
+        let mut expected = vec![
+            first.event_id,
+            second.event_id,
+            third.event_id,
+            discussion.event_id,
+        ];
+        expected.sort_by_key(|identity| identity.encode_canonical().unwrap());
+
+        let first_page = index.semantic_event_page(None, 2).unwrap();
+        assert_eq!(first_page.generation_id, index.generation_id());
+        assert_eq!(
+            first_page.eligibility,
+            SemanticEligibility::LiteTurnUserMessageV1
+        );
+        assert_eq!(first_page.eligible_total, 4);
+        assert_eq!(first_page.eligible_count(), 2);
+        assert!(!first_page.terminal);
+        assert_eq!(
+            first_page
+                .items
+                .iter()
+                .map(|event| event.event_id)
+                .collect::<Vec<_>>(),
+            expected[..2]
+        );
+        assert_eq!(first_page.items[0].locator.source(), &source);
+        assert_eq!(
+            first_page.items[0].root_session_id,
+            first_page.items[0].session_id
+        );
+        assert!(first_page.items[0].preview.chars().count() <= MAX_BODY_PREVIEW_CHARS);
+
+        let cursor = first_page.next_cursor.unwrap();
+        assert_eq!(cursor.generation_id(), index.generation_id());
+        assert_eq!(cursor.eligibility(), SemanticEligibility::CURRENT);
+        assert_eq!(cursor.after(), expected[1]);
+
+        let final_page = index.semantic_event_page(Some(&cursor), 2).unwrap();
+        assert_eq!(final_page.eligible_total, 4);
+        assert_eq!(final_page.eligible_count(), 2);
+        assert_eq!(
+            final_page
+                .items
+                .iter()
+                .map(|event| event.event_id)
+                .collect::<Vec<_>>(),
+            expected[2..]
+        );
+        assert!(final_page.terminal);
+        assert!(final_page.next_cursor.is_none());
+        assert_eq!(index.semantic_eligible_event_count().unwrap(), 4);
+    }
+
+    #[test]
+    fn semantic_event_pages_handle_empty_final_and_generation_bound_cursors() {
+        let temp = tempdir().unwrap();
+        GenerationWriter::open(temp.path(), WriterOptions::default())
+            .unwrap()
+            .commit(|_| true)
+            .unwrap();
+        let empty = VerifiedIndex::open(temp.path()).unwrap();
+        let page = empty.semantic_event_page(None, 1).unwrap();
+        assert_eq!(page.eligible_total, 0);
+        assert!(page.items.is_empty());
+        assert!(page.terminal);
+        assert!(page.next_cursor.is_none());
+
+        let source = source("final-page.jsonl");
+        let expected = document(&source, 1, "only eligible event");
+        let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        writer.begin_source(source.clone()).unwrap();
+        writer.add_document(expected.clone()).unwrap();
+        writer.certify_source(certificate(&source, 1, 1)).unwrap();
+        writer.commit(|_| true).unwrap();
+        let index = VerifiedIndex::open(temp.path()).unwrap();
+
+        let final_page = index.semantic_event_page(None, 1).unwrap();
+        assert_eq!(final_page.items.len(), 1);
+        assert!(final_page.terminal);
+        assert!(final_page.next_cursor.is_none());
+
+        let after_last = SemanticEventCursor::new(index.generation_id(), expected.event_id);
+        let empty_final = index.semantic_event_page(Some(&after_last), 1).unwrap();
+        assert_eq!(empty_final.eligible_total, 1);
+        assert!(empty_final.items.is_empty());
+        assert!(empty_final.terminal);
+        assert!(empty_final.next_cursor.is_none());
+
+        let foreign = SemanticEventCursor::new("0".repeat(64), expected.event_id);
+        assert!(matches!(
+            index.semantic_event_page(Some(&foreign), 1),
+            Err(IndexError::SemanticEventCursorGenerationMismatch { .. })
+        ));
+        assert!(matches!(
+            index.semantic_event_page(None, 0),
+            Err(IndexError::InvalidSemanticEventPageSize { .. })
+        ));
+        assert!(matches!(
+            index.semantic_event_page(None, MAX_SEMANTIC_EVENT_PAGE_ITEMS + 1),
+            Err(IndexError::InvalidSemanticEventPageSize { .. })
+        ));
+    }
+
+    #[test]
+    fn semantic_event_pages_keep_old_pins_isolated_from_rewrite_and_deletion() {
+        fn page_all(index: &VerifiedIndex) -> Vec<EventRecord> {
+            let mut cursor = None;
+            let mut records = Vec::new();
+            loop {
+                let page = index.semantic_event_page(cursor.as_ref(), 1).unwrap();
+                records.extend(page.items);
+                if page.terminal {
+                    return records;
+                }
+                cursor = Some(page.next_cursor.unwrap());
+            }
+        }
+
+        let temp = tempdir().unwrap();
+        let source = source("rewrite-delete.jsonl");
+        let old_first = document(&source, 1, "old first event");
+        let old_second = document(&source, 2, "old second event");
+        let mut first_writer =
+            GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        first_writer.begin_source(source.clone()).unwrap();
+        first_writer.add_document(old_second.clone()).unwrap();
+        first_writer.add_document(old_first.clone()).unwrap();
+        first_writer
+            .certify_source(certificate(&source, 1, 2))
+            .unwrap();
+        first_writer.commit(|_| true).unwrap();
+        let old_pin = VerifiedIndex::open(temp.path()).unwrap();
+        let old_cursor = old_pin
+            .semantic_event_page(None, 1)
+            .unwrap()
+            .next_cursor
+            .unwrap();
+
+        let mut rewritten_first = document(&source, 1, "rewritten first event");
+        rewritten_first.workspace = Some("rewritten-workspace".to_owned());
+        let replacement = document(&source, 3, "replacement third event");
+        let mut replacement_writer =
+            GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        replacement_writer.begin_source(source.clone()).unwrap();
+        replacement_writer
+            .add_document(replacement.clone())
+            .unwrap();
+        replacement_writer
+            .add_document(rewritten_first.clone())
+            .unwrap();
+        replacement_writer
+            .certify_source(certificate(&source, 2, 2))
+            .unwrap();
+        replacement_writer.commit(|_| true).unwrap();
+        let rewritten_pin = VerifiedIndex::open(temp.path()).unwrap();
+
+        let old_records = page_all(&old_pin);
+        assert_eq!(old_records.len(), 2);
+        assert!(old_records
+            .iter()
+            .any(|event| event.preview == "old first event"));
+        assert!(old_records
+            .iter()
+            .any(|event| event.event_id == old_second.event_id));
+
+        let rewritten_records = page_all(&rewritten_pin);
+        assert_eq!(rewritten_records.len(), 2);
+        assert!(rewritten_records
+            .iter()
+            .any(|event| event.preview == "rewritten first event"));
+        assert!(rewritten_records
+            .iter()
+            .all(|event| event.event_id != old_second.event_id));
+        assert!(rewritten_records
+            .iter()
+            .any(|event| event.event_id == replacement.event_id));
+        assert_ne!(old_pin.generation_id(), rewritten_pin.generation_id());
+        assert!(matches!(
+            rewritten_pin.semantic_event_page(Some(&old_cursor), 1),
+            Err(IndexError::SemanticEventCursorGenerationMismatch { .. })
+        ));
+
+        let mut deletion_writer =
+            GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        deletion_writer.delete_source(deletion(&source, 3)).unwrap();
+        deletion_writer.commit(|_| true).unwrap();
+        let deleted_pin = VerifiedIndex::open(temp.path()).unwrap();
+
+        assert!(page_all(&deleted_pin).is_empty());
+        assert_eq!(page_all(&old_pin).len(), 2);
+        assert_eq!(page_all(&rewritten_pin).len(), 2);
     }
 
     #[test]
