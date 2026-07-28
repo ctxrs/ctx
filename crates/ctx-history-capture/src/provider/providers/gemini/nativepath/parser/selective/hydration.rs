@@ -7,6 +7,7 @@ pub(in super::super) fn hydrate_result_record(
     source: &GeminiTranscriptSource,
     session: &GeminiSession,
     raw_ordinal: u64,
+    source_record: GeminiSourceRecordEvidence,
     byte_start: u64,
     byte_end_exclusive: u64,
 ) -> std::result::Result<HydratedGeminiResult, String> {
@@ -85,6 +86,7 @@ pub(in super::super) fn hydrate_result_record(
                 occurred_at_unix_ms,
                 raw_ordinal,
                 sub_ordinal,
+                source_record,
                 &probed,
                 event_identity.clone(),
             )?;
@@ -124,6 +126,7 @@ fn hydrate_output_diagnostic(
     occurred_at_unix_ms: Option<i64>,
     raw_ordinal: u64,
     sub_ordinal: u32,
+    source_record: GeminiSourceRecordEvidence,
     output: &ProbedGeminiOutput,
     identity: GeminiEventIdentity,
 ) -> std::result::Result<HydratedGeminiEvent, String> {
@@ -183,6 +186,7 @@ fn hydrate_output_diagnostic(
                 raw_ordinal,
                 sub_ordinal,
             },
+            source_record,
             event_type: EventType::ToolOutput,
             role: EventRole::Tool,
             occurred_at: occurred_at_unix_ms.and_then(DateTime::<Utc>::from_timestamp_millis),
@@ -438,6 +442,7 @@ pub(in super::super) fn hydrate_retained_event(
     payload: &[u8],
     class: GeminiRecordClass,
     raw_ordinal: u64,
+    source_record: GeminiSourceRecordEvidence,
 ) -> std::result::Result<Option<HydratedGeminiEvent>, GeminiHydrationError> {
     let (id, occurred_at, event_type, role, body, searchable_text, safe_file_touches) = match class
     {
@@ -556,6 +561,7 @@ pub(in super::super) fn hydrate_retained_event(
                 raw_ordinal,
                 sub_ordinal: 0,
             },
+            source_record,
             event_type,
             role,
             occurred_at,

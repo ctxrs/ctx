@@ -65,6 +65,15 @@ pub(crate) struct GeminiNativeOrder {
     pub(crate) sub_ordinal: u32,
 }
 
+/// Exact raw JSONL record evidence retained only as bounded source-backed
+/// metadata. The digest covers the complete byte range, including its newline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) struct GeminiSourceRecordEvidence {
+    pub(crate) byte_offset: u64,
+    pub(crate) byte_length: u64,
+    pub(crate) record_digest: [u8; 32],
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum GeminiEventBody {
@@ -104,6 +113,7 @@ pub(crate) struct GeminiRetainedEvent {
     /// publisher. Kept transiently so upgrades can recognize only that shape.
     pub(crate) released_identity: String,
     pub(crate) native_order: GeminiNativeOrder,
+    pub(crate) source_record: GeminiSourceRecordEvidence,
     pub(crate) event_type: EventType,
     pub(crate) role: EventRole,
     pub(crate) occurred_at: Option<DateTime<Utc>>,

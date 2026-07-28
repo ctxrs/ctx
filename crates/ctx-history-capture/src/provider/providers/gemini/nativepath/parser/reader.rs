@@ -441,6 +441,11 @@ impl<'a> GeminiNativePageReader<'a> {
             }));
         }
 
+        let source_record = GeminiSourceRecordEvidence {
+            byte_offset: byte_start,
+            byte_length: byte_end_exclusive.saturating_sub(byte_start),
+            record_digest: Sha256::digest(&line).into(),
+        };
         let probe = match serde_json::from_slice::<GeminiRecordProbe>(payload) {
             Ok(probe) => probe,
             Err(error) => {
@@ -562,6 +567,7 @@ impl<'a> GeminiNativePageReader<'a> {
                     self.source,
                     session,
                     self.raw_ordinal,
+                    source_record,
                     byte_start,
                     byte_end_exclusive,
                 ) {
@@ -674,7 +680,7 @@ impl<'a> GeminiNativePageReader<'a> {
                             .to_owned(),
                     });
                 } else {
-                    match hydrate_retained_event(payload, class, self.raw_ordinal) {
+                    match hydrate_retained_event(payload, class, self.raw_ordinal, source_record) {
                         Ok(Some(mut hydrated)) => {
                             if hydrated.event.occurred_at.is_none() {
                                 hydrated.event.occurred_at = self
