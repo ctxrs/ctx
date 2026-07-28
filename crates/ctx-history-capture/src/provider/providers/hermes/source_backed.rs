@@ -290,7 +290,7 @@ pub(crate) fn scan_hermes_source_backed(
     )?;
 
     let mut reader = HermesRowReader::new(&conn, &schema)?;
-    let operation = (|| {
+    let operation: HermesSourceBackedResult<(ScannedSourceCounts, [u8; 32])> = (|| {
         let mut frontier = super::sqlite::HermesFrontier::initial();
         let mut digest = Sha256::new();
         digest.update(HERMES_SOURCE_DIGEST_DOMAIN);
