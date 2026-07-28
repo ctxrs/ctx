@@ -7,9 +7,8 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    fs::File,
-    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
+    sync::Arc,
     time::UNIX_EPOCH,
 };
 
@@ -35,13 +34,10 @@ use super::{
     reader::parse_custom_history,
 };
 use crate::{
+    common::io::{open_provider_source_file, OpenedProviderSourceFile},
     provider::{
         custom_history_jsonl::custom_history_internal_session_id,
         normalization::{provider_local_preview, provider_policy_event_text, provider_value_text},
-    },
-    provider_sources::{
-        observe_ordinary_file, observe_ordinary_file_strong_metadata,
-        open_ordinary_file_without_following, OrdinaryFileObservation,
     },
     CaptureError, ProviderImportSummary, MAX_PROVIDER_JSONL_LINE_BYTES,
 };
@@ -151,28 +147,69 @@ struct CustomHistoryFileObservationWire {
     strong_token: [u8; 32],
 }
 
-impl From<&OrdinaryFileObservation> for CustomHistoryFileObservationWire {
-    fn from(observation: &OrdinaryFileObservation) -> Self {
-        let (modified_after_epoch, duration) =
-            match observation.modified_at().duration_since(UNIX_EPOCH) {
-                Ok(duration) => (true, duration),
-                Err(error) => (false, error.duration()),
-            };
-        Self {
-            length: observation.len(),
+impl CustomHistoryFileObservationWire {
+    fn from_opened(opened: &OpenedProviderSourceFile) -> Result<Self, CaptureError> {
+        let metadata = opened.file().metadata()?;
+        let (modified_after_epoch, duration) = match metadata.modified()?.duration_since(UNIX_EPOCH)
+        {
+            Ok(duration) => (true, duration),
+            Err(error) => (false, error.duration()),
+        };
+        let mut token = Sha256::new();
+        token.update(b"ctx.custom-history-opened-file-observation-v1\0");
+        token.update(metadata.len().to_be_bytes());
+        token.update([u8::from(metadata.permissions().readonly())]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            token.update(metadata.dev().to_be_bytes());
+            token.update(metadata.ino().to_be_bytes());
+            token.update(metadata.ctime().to_be_bytes());
+            token.update(metadata.ctime_nsec().to_be_bytes());
+        }
+        #[cfg(not(unix))]
+        {
+            token.update([u8::from(modified_after_epoch)]);
+            token.update(duration.as_secs().to_be_bytes());
+            token.update(duration.subsec_nanos().to_be_bytes());
+        }
+        Ok(Self {
+            length: metadata.len(),
             modified_after_epoch,
             modified_seconds: duration.as_secs(),
             modified_nanos: duration.subsec_nanos(),
-            strong_token: *observation.token(),
+            strong_token: token.finalize().into(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+enum CustomHistoryInventoryState {
+    Present {
+        observation: CustomHistoryFileObservationWire,
+        opened: Arc<OpenedProviderSourceFile>,
+    },
+    Missing,
+}
+
+impl PartialEq for CustomHistoryInventoryState {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::Present {
+                    observation: left, ..
+                },
+                Self::Present {
+                    observation: right, ..
+                },
+            ) => left == right,
+            (Self::Missing, Self::Missing) => true,
+            _ => false,
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum CustomHistoryInventoryState {
-    Present(OrdinaryFileObservation),
-    Missing,
-}
+impl Eq for CustomHistoryInventoryState {}
 
 /// One finite observation of exactly the explicitly registered file.
 #[derive(Debug, Clone)]
@@ -211,7 +248,7 @@ impl CustomHistorySourceBackedInventory {
             return Err(CustomHistorySourceBackedError::InventoryChanged);
         }
         let sources = match &self.state {
-            CustomHistoryInventoryState::Present(_) => vec![self.source.clone()],
+            CustomHistoryInventoryState::Present { .. } => vec![self.source.clone()],
             CustomHistoryInventoryState::Missing => Vec::new(),
         };
         Ok(CertifiedSourceInventory::certify(
@@ -222,9 +259,16 @@ impl CustomHistorySourceBackedInventory {
         )?)
     }
 
-    fn ordinary(&self) -> Option<&OrdinaryFileObservation> {
+    fn ordinary(&self) -> Option<&CustomHistoryFileObservationWire> {
         match &self.state {
-            CustomHistoryInventoryState::Present(observation) => Some(observation),
+            CustomHistoryInventoryState::Present { observation, .. } => Some(observation),
+            CustomHistoryInventoryState::Missing => None,
+        }
+    }
+
+    fn opened(&self) -> Option<&Arc<OpenedProviderSourceFile>> {
+        match &self.state {
+            CustomHistoryInventoryState::Present { opened, .. } => Some(opened),
             CustomHistoryInventoryState::Missing => None,
         }
     }
@@ -263,6 +307,7 @@ pub(crate) enum CustomHistorySourceBackedDisposition {
 pub(crate) struct CustomHistorySourceBackedRoute {
     source: SourceKey,
     input: CustomHistorySourceBackedInput,
+    opened: Arc<OpenedProviderSourceFile>,
 }
 
 impl CustomHistorySourceBackedRoute {
@@ -336,8 +381,15 @@ pub(crate) fn observe_custom_history_source_backed_explicit(
     input: &CustomHistorySourceBackedInput,
 ) -> CustomHistorySourceBackedResult<CustomHistorySourceBackedInventory> {
     let source = input.source_key()?;
-    let state = match observe_explicit_ordinary_file(input.path()) {
-        Ok(observation) => CustomHistoryInventoryState::Present(observation),
+    let state = match open_explicit_source(input.path()) {
+        Ok(opened) => {
+            let observation = CustomHistoryFileObservationWire::from_opened(&opened)?;
+            opened.revalidate()?;
+            CustomHistoryInventoryState::Present {
+                observation,
+                opened,
+            }
+        }
         Err(CustomHistorySourceBackedError::Capture(CaptureError::Io(error)))
             if error.kind() == std::io::ErrorKind::NotFound =>
         {
@@ -348,11 +400,9 @@ pub(crate) fn observe_custom_history_source_backed_explicit(
     let mut digest = Sha256::new();
     digest.update(INVENTORY_DIGEST_DOMAIN);
     match &state {
-        CustomHistoryInventoryState::Present(observation) => {
+        CustomHistoryInventoryState::Present { observation, .. } => {
             digest.update(b"present\0");
-            digest.update(serde_json::to_vec(
-                &CustomHistoryFileObservationWire::from(observation),
-            )?);
+            digest.update(serde_json::to_vec(observation)?);
         }
         CustomHistoryInventoryState::Missing => digest.update(b"missing\0"),
     }
@@ -421,7 +471,15 @@ pub(crate) fn scan_custom_history_source_backed_explicit(
                 let inventory = opening_inventory.certify_against(&closing)?;
                 return Ok(CustomHistorySourceBackedOutcome::Present(
                     CustomHistorySourceBackedReceipt {
-                        route: route(input, source),
+                        route: route(
+                            input,
+                            source,
+                            Arc::clone(
+                                opening_inventory
+                                    .opened()
+                                    .ok_or(CustomHistorySourceBackedError::InventoryChanged)?,
+                            ),
+                        ),
                         inventory,
                         certificate: prior.clone(),
                         disposition: CustomHistorySourceBackedDisposition::Unchanged,
@@ -434,7 +492,12 @@ pub(crate) fn scan_custom_history_source_backed_explicit(
         }
     }
 
-    let bytes = read_explicit_source(input.path())?;
+    let opened = Arc::clone(
+        opening_inventory
+            .opened()
+            .ok_or(CustomHistorySourceBackedError::InventoryChanged)?,
+    );
+    let bytes = read_explicit_source(&opened)?;
     let closing_inventory = observe_custom_history_source_backed_explicit(input)?;
     let closing_ordinary = closing_inventory
         .ordinary()
@@ -466,7 +529,7 @@ pub(crate) fn scan_custom_history_source_backed_explicit(
     let summary = std::mem::take(&mut projection.parsed.summary);
     Ok(CustomHistorySourceBackedOutcome::Present(
         CustomHistorySourceBackedReceipt {
-            route: route(input, source),
+            route: route(input, source, opened),
             inventory,
             certificate,
             disposition,
@@ -498,45 +561,36 @@ pub(crate) fn revalidate_custom_history_source_backed(
 fn route(
     input: &CustomHistorySourceBackedInput,
     source: SourceKey,
+    opened: Arc<OpenedProviderSourceFile>,
 ) -> CustomHistorySourceBackedRoute {
     CustomHistorySourceBackedRoute {
         source,
         input: input.clone(),
+        opened,
     }
 }
 
-fn observe_explicit_ordinary_file(
+fn open_explicit_source(
     path: &Path,
-) -> CustomHistorySourceBackedResult<OrdinaryFileObservation> {
-    match observe_ordinary_file_strong_metadata(path)? {
-        Some(observation) => Ok(observation),
-        None => Ok(observe_ordinary_file(path)?),
-    }
+) -> CustomHistorySourceBackedResult<Arc<OpenedProviderSourceFile>> {
+    let path = std::path::absolute(path)?;
+    Ok(Arc::new(open_provider_source_file(&path)?))
 }
 
-/// Migration seam for the incoming authority-root-bound handle primitive.
-///
-/// Scanning and hydration intentionally share this one ordinary-file open
-/// helper today; neither path adds a second path-trust implementation.
-fn open_explicit_source(path: &Path) -> CustomHistorySourceBackedResult<File> {
-    Ok(open_ordinary_file_without_following(path)?)
-}
-
-fn read_explicit_source(path: &Path) -> CustomHistorySourceBackedResult<Vec<u8>> {
-    let mut file = open_explicit_source(path)?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
-    Ok(bytes)
+fn read_explicit_source(
+    source: &OpenedProviderSourceFile,
+) -> CustomHistorySourceBackedResult<Vec<u8>> {
+    Ok(source.read_all_bounded(usize::MAX)?)
 }
 
 fn source_observation(
     source: SourceKey,
-    observation: &OrdinaryFileObservation,
+    observation: &CustomHistoryFileObservationWire,
 ) -> CustomHistorySourceBackedResult<SourceObservation> {
     Ok(SourceObservation::new(
         source,
         CUSTOM_SOURCE_REVISION_KIND,
-        serde_json::to_vec(&CustomHistoryFileObservationWire::from(observation))?,
+        serde_json::to_vec(observation)?,
     )?)
 }
 
@@ -1180,8 +1234,7 @@ impl CustomHistorySourceBackedResolver {
         request: &EventHydrationRequest,
     ) -> CustomHistorySourceBackedResult<HydratedProviderRecord> {
         let route = self.route_for(request)?;
-        let mut file = open_explicit_source(route.path())?;
-        hydrate_from_file(&mut file, request)
+        hydrate_from_file(&route.opened, request)
     }
 }
 
@@ -1201,7 +1254,6 @@ impl ContentSourceResolver for CustomHistorySourceBackedResolver {
             return Ok(Vec::new());
         };
         let route = self.route_for(first).map_err(hydration_failure)?;
-        let mut file = open_explicit_source(route.path()).map_err(hydration_failure)?;
         request
             .events()
             .iter()
@@ -1216,7 +1268,7 @@ impl ContentSourceResolver for CustomHistorySourceBackedResolver {
                 }
                 validate_session_membership(request.session_id(), event)
                     .map_err(hydration_failure)?;
-                hydrate_from_file(&mut file, event).map_err(hydration_failure)
+                hydrate_from_file(&route.opened, event).map_err(hydration_failure)
             })
             .collect()
     }
@@ -1240,7 +1292,7 @@ fn validate_session_membership(
 }
 
 fn hydrate_from_file(
-    file: &mut File,
+    file: &OpenedProviderSourceFile,
     request: &EventHydrationRequest,
 ) -> CustomHistorySourceBackedResult<HydratedProviderRecord> {
     let locator = request.locator();
@@ -1252,28 +1304,23 @@ fn hydrate_from_file(
     let range_end = byte_offset
         .checked_add(byte_length)
         .ok_or(CustomHistorySourceBackedError::LocatorRangeTooLarge)?;
-    if file.metadata()?.len() < range_end {
+    if file.len() < range_end {
         return Err(CustomHistorySourceBackedError::LocatorRangeMissing);
     }
     if byte_offset != 0 {
-        file.seek(SeekFrom::Start(byte_offset.saturating_sub(1)))?;
-        let mut boundary = [0_u8; 1];
-        file.read_exact(&mut boundary)?;
+        let boundary = file.read_exact_range(byte_offset.saturating_sub(1), 1, 1)?;
         if boundary != [b'\n'] {
             return Err(CustomHistorySourceBackedError::InvalidLocator);
         }
     }
-    file.seek(SeekFrom::Start(byte_offset))?;
     let length = usize::try_from(byte_length)
         .map_err(|_| CustomHistorySourceBackedError::LocatorRangeTooLarge)?;
-    let mut provider_bytes = vec![0_u8; length];
-    file.read_exact(&mut provider_bytes)
-        .map_err(|error| match error.kind() {
-            std::io::ErrorKind::UnexpectedEof => {
-                CustomHistorySourceBackedError::LocatorRangeMissing
-            }
-            _ => error.into(),
-        })?;
+    let provider_bytes = file.read_exact_range(
+        byte_offset,
+        length,
+        usize::try_from(CUSTOM_MAX_HYDRATED_RECORD_BYTES)
+            .map_err(|_| CustomHistorySourceBackedError::LocatorRangeTooLarge)?,
+    )?;
     if !provider_bytes.ends_with(b"\n") {
         return Err(CustomHistorySourceBackedError::InvalidLocator);
     }
@@ -1359,9 +1406,11 @@ fn validate_locator(
 fn hydration_failure(error: CustomHistorySourceBackedError) -> HydrationFailure {
     let kind = match &error {
         CustomHistorySourceBackedError::LocatorDigestMismatch
-        | CustomHistorySourceBackedError::LocatorRecordMismatch => {
-            HydrationFailureKind::StaleRecordEvidence
-        }
+        | CustomHistorySourceBackedError::LocatorRecordMismatch
+        | CustomHistorySourceBackedError::Capture(
+            CaptureError::SourceChangedDuringCapture
+            | CaptureError::InvalidProviderTranscriptPath { .. },
+        ) => HydrationFailureKind::StaleRecordEvidence,
         CustomHistorySourceBackedError::LocatorRangeMissing => HydrationFailureKind::MissingRecord,
         CustomHistorySourceBackedError::InvalidLocator
         | CustomHistorySourceBackedError::Resolver(_)
@@ -1370,8 +1419,7 @@ fn hydration_failure(error: CustomHistorySourceBackedError) -> HydrationFailure 
         | CustomHistorySourceBackedError::DuplicateResolverSource => {
             HydrationFailureKind::InvalidLocator
         }
-        CustomHistorySourceBackedError::Capture(CaptureError::SourceChangedDuringCapture)
-        | CustomHistorySourceBackedError::InventoryChanged => {
+        CustomHistorySourceBackedError::InventoryChanged => {
             HydrationFailureKind::StaleSourceEvidence
         }
         _ => HydrationFailureKind::TemporarilyUnavailable,

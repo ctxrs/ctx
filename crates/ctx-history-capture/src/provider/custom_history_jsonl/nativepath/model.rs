@@ -13,7 +13,7 @@ pub(super) const CUSTOM_OUTPUTS_PER_PAGE: usize = 32;
 pub(super) const CUSTOM_OUTPUT_PAGE_BYTES: usize = 6 * 1024 * 1024;
 pub(super) const PAGE_ACCOUNTING_OVERHEAD_BYTES: usize = 256 * 1024;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(super) struct CustomFileStamp {
     pub(super) canonical_path: PathBuf,
     pub(super) len: u64,
@@ -21,12 +21,27 @@ pub(super) struct CustomFileStamp {
     pub(super) readonly: bool,
     pub(super) device: Option<u64>,
     pub(super) inode: Option<u64>,
+    pub(super) source: Arc<OpenedProviderSourceFile>,
 }
+
+impl PartialEq for CustomFileStamp {
+    fn eq(&self, other: &Self) -> bool {
+        self.canonical_path == other.canonical_path
+            && self.len == other.len
+            && self.modified == other.modified
+            && self.readonly == other.readonly
+            && self.device == other.device
+            && self.inode == other.inode
+    }
+}
+
+impl Eq for CustomFileStamp {}
 
 impl CustomFileStamp {
     pub(super) fn observe(path: &Path) -> Result<Self> {
-        ensure_regular_provider_transcript_file(path)?;
-        let metadata = fs::symlink_metadata(path)?;
+        let canonical_path = std::path::absolute(path)?;
+        let source = Arc::new(open_provider_source_file(&canonical_path)?);
+        let metadata = source.metadata();
         #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
 
@@ -36,22 +51,40 @@ impl CustomFileStamp {
         let (device, inode) = (None, None);
 
         Ok(Self {
-            canonical_path: fs::canonicalize(path)?,
+            canonical_path,
             len: metadata.len(),
             modified: metadata.modified()?,
             readonly: metadata.permissions().readonly(),
             device,
             inode,
+            source,
         })
     }
 
     pub(super) fn revalidate(&self) -> Result<bool> {
-        match Self::observe(&self.canonical_path) {
-            Ok(current) => Ok(current == *self),
-            Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-            Err(CaptureError::InvalidProviderTranscriptPath { .. }) => Ok(false),
-            Err(error) => Err(error),
+        if self.source.revalidate().is_err() {
+            return Ok(false);
         }
+        let metadata = self.source.file().metadata()?;
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        #[cfg(unix)]
+        let (device, inode) = (Some(metadata.dev()), Some(metadata.ino()));
+        #[cfg(not(unix))]
+        let (device, inode) = (None, None);
+        Ok(metadata.len() == self.len
+            && metadata.modified().ok() == Some(self.modified)
+            && metadata.permissions().readonly() == self.readonly
+            && device == self.device
+            && inode == self.inode)
+    }
+
+    pub(super) fn read_all(&self) -> Result<Vec<u8>> {
+        let bytes = self.source.read_all_bounded(usize::MAX)?;
+        if !self.revalidate()? {
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
+        Ok(bytes)
     }
 
     pub(super) fn revision_material(&self, digest: &mut Sha256) {

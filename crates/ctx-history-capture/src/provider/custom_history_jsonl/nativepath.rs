@@ -1,8 +1,8 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     io::{self, BufRead, Cursor},
     path::{Path, PathBuf},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -29,7 +29,8 @@ use uuid::Uuid;
 
 use crate::{
     common::io::{
-        ensure_regular_provider_transcript_file, read_provider_jsonl_record_or_skip_oversized,
+        open_provider_source_file, read_provider_jsonl_record_or_skip_oversized,
+        OpenedProviderSourceFile,
     },
     complete_content::{VerifiedContentLocatorsV1, VERIFIED_CONTENT_LOCATORS_METADATA_KEY},
     compute_payload_hash,
