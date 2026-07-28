@@ -51,6 +51,8 @@ pub(crate) enum MistralVibeSourceBackedError {
     EmptyRoot,
     #[error("Mistral Vibe source-backed root contains duplicate session IDs")]
     DuplicateSessionId,
+    #[error("Mistral Vibe session lineage contains a cycle at {0}")]
+    CyclicSessionLineage(String),
     #[error("Mistral Vibe source-backed count overflow")]
     CountOverflow,
 }
@@ -76,6 +78,13 @@ struct ResolvableSource {
     native: MistralVibeSessionSource,
     observation: reader::SourceObservation,
     revision_digest: [u8; 32],
+}
+
+#[derive(Debug, Clone)]
+struct SessionLineage {
+    provider_session_id: String,
+    parent_provider_session_id: Option<String>,
+    session_id: StableEntityId,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -104,10 +113,11 @@ pub(crate) fn scan_mistral_vibe_source_backed(
 
     let mut native_session_ids = HashSet::new();
     let mut leaves = Vec::with_capacity(discovered.len());
+    let mut lineages = Vec::with_capacity(discovered.len());
     let mut resolver = MistralVibeSourceResolver::default();
     for source in discovered {
-        let (leaf, resolvable, native_session_id) = scan_leaf(source, imported_at)?;
-        if !native_session_ids.insert(native_session_id) {
+        let (leaf, resolvable, lineage) = scan_leaf(source, imported_at)?;
+        if !native_session_ids.insert(lineage.provider_session_id.clone()) {
             return Err(MistralVibeSourceBackedError::DuplicateSessionId);
         }
         if resolver
@@ -118,6 +128,23 @@ pub(crate) fn scan_mistral_vibe_source_backed(
             return Err(MistralVibeSourceBackedError::DuplicateSessionId);
         }
         leaves.push(leaf);
+        lineages.push(lineage);
+    }
+    let lineage_by_provider_session = lineages
+        .iter()
+        .map(|lineage| (lineage.provider_session_id.as_str(), lineage))
+        .collect::<BTreeMap<_, _>>();
+    for (leaf, lineage) in leaves.iter_mut().zip(&lineages) {
+        let parent_session_id = lineage
+            .parent_provider_session_id
+            .as_deref()
+            .map(provider_session_identity)
+            .transpose()?;
+        let root_session_id = root_session_identity(lineage, &lineage_by_provider_session)?;
+        for document in &mut leaf.documents {
+            document.parent_session_id = parent_session_id;
+            document.root_session_id = root_session_id;
+        }
     }
     leaves.sort_by(|left, right| {
         left.source
@@ -131,12 +158,30 @@ pub(crate) fn scan_mistral_vibe_source_backed(
 fn scan_leaf(
     native: MistralVibeSessionSource,
     imported_at: DateTime<Utc>,
-) -> MistralVibeSourceBackedResult<(MistralVibeSourceBackedLeaf, ResolvableSource, String)> {
+) -> MistralVibeSourceBackedResult<(
+    MistralVibeSourceBackedLeaf,
+    ResolvableSource,
+    SessionLineage,
+)> {
     let opening = reader::SourceObservation::read(&native)?;
     let (session, _) = SessionFact::from_source(&native, imported_at)?;
     let native_session_id = session.provider_session_id.clone();
     let source = source_key(&native_session_id)?;
     let session_id = session_identity(&source, &native_session_id)?;
+    let parent_session_id = session
+        .parent_provider_session_id
+        .as_deref()
+        .map(provider_session_identity)
+        .transpose()?;
+    let provisional_root_session_id = parent_session_id.unwrap_or(session_id);
+    let branch = mistral_vibe_metadata_string(&session.metadata, "git_branch");
+    let source_path = opening.canonical_messages_path.display().to_string();
+    let agent_type = if session.is_primary() {
+        AgentType::Primary
+    } else {
+        AgentType::Subagent
+    };
+    let is_primary = session.is_primary();
     let opening_revision = projection_observation(&source, &opening)?;
     let revision_digest = source_revision_digest(opening_revision.revision());
 
@@ -184,7 +229,13 @@ fn scan_leaf(
                 match lexical_document(
                     &source,
                     session_id,
+                    parent_session_id,
+                    provisional_root_session_id,
                     &session,
+                    branch.as_deref(),
+                    &source_path,
+                    agent_type,
+                    is_primary,
                     ordinal,
                     start,
                     end,
@@ -247,13 +298,18 @@ fn scan_leaf(
         observation: closing,
         revision_digest,
     };
+    let lineage = SessionLineage {
+        provider_session_id: native_session_id,
+        parent_provider_session_id: session.parent_provider_session_id,
+        session_id,
+    };
     Ok((
         MistralVibeSourceBackedLeaf {
             source: certified,
             documents,
         },
         resolvable,
-        native_session_id,
+        lineage,
     ))
 }
 
@@ -267,7 +323,13 @@ enum RecordProjection {
 fn lexical_document(
     source: &SourceKey,
     session_id: StableEntityId,
+    parent_session_id: Option<StableEntityId>,
+    root_session_id: StableEntityId,
     session: &SessionFact,
+    branch: Option<&str>,
+    source_path: &str,
+    agent_type: AgentType,
+    is_primary: bool,
     ordinal: u64,
     byte_start: u64,
     byte_end_exclusive: u64,
@@ -360,9 +422,15 @@ fn lexical_document(
     Ok(RecordProjection::Retained(LexicalDocument {
         event_id,
         session_id,
+        parent_session_id,
+        root_session_id,
         source: source.clone(),
         locator,
         provider_session_id: Some(session.provider_session_id.clone()),
+        branch: branch.map(str::to_owned),
+        source_path: Some(source_path.to_owned()),
+        agent_type: agent_type.as_str().to_owned(),
+        is_primary,
         event_sequence: ordinal,
         occurred_at_unix_ms: Some(
             native_jsonl_timestamp(&value)
@@ -422,6 +490,37 @@ fn session_identity(
         logical_session_kind: LOGICAL_SESSION_KIND,
         native_session_key: &native_session_key,
     })?)
+}
+
+fn provider_session_identity(
+    native_session_id: &str,
+) -> MistralVibeSourceBackedResult<StableEntityId> {
+    let source = source_key(native_session_id)?;
+    session_identity(&source, native_session_id)
+}
+
+fn root_session_identity(
+    lineage: &SessionLineage,
+    lineages: &BTreeMap<&str, &SessionLineage>,
+) -> MistralVibeSourceBackedResult<StableEntityId> {
+    let mut current = lineage;
+    let mut root_session_id = lineage.session_id;
+    let mut visited = HashSet::new();
+    loop {
+        if !visited.insert(current.provider_session_id.as_str()) {
+            return Err(MistralVibeSourceBackedError::CyclicSessionLineage(
+                lineage.provider_session_id.clone(),
+            ));
+        }
+        let Some(parent_provider_session_id) = current.parent_provider_session_id.as_deref() else {
+            return Ok(root_session_id);
+        };
+        root_session_id = provider_session_identity(parent_provider_session_id)?;
+        let Some(parent) = lineages.get(parent_provider_session_id) else {
+            return Ok(root_session_id);
+        };
+        current = parent;
+    }
 }
 
 #[derive(Serialize)]
@@ -736,8 +835,12 @@ mod tests {
                 "session_id": "session-alpha",
                 "title": "metadata-only-sentinel-a",
                 "start_time": "2026-07-28T12:00:00Z",
+                "git_branch": "main",
                 "environment": {
                     "working_directory": "/workspace/project"
+                },
+                "agent_profile": {
+                    "name": "vibe"
                 }
             }))
             .unwrap(),
@@ -803,6 +906,19 @@ mod tests {
             leaf.documents[0].session_id,
             second.leaves[0].documents[0].session_id
         );
+        let expected_source_path = fs::canonicalize(root.join("session-alpha/messages.jsonl"))
+            .unwrap()
+            .display()
+            .to_string();
+        assert!(leaf.documents.iter().all(|document| {
+            document.parent_session_id.is_none()
+                && document.root_session_id == document.session_id
+                && document.provider_session_id.as_deref() == Some("session-alpha")
+                && document.branch.as_deref() == Some("main")
+                && document.source_path.as_deref() == Some(expected_source_path.as_str())
+                && document.agent_type == AgentType::Primary.as_str()
+                && document.is_primary
+        }));
         assert_eq!(
             leaf.documents[0].body.chars().count(),
             MAX_BODY_PREVIEW_CHARS
@@ -836,6 +952,67 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn lineage_and_filter_fields_follow_native_session_metadata() {
+        let (_temp, root, _) = fixture();
+        write_related_session(
+            &root,
+            "session-child",
+            Some("session-alpha"),
+            "feature/child",
+        );
+        write_related_session(
+            &root,
+            "session-grandchild",
+            Some("session-child"),
+            "feature/grandchild",
+        );
+
+        let scan = scan_mistral_vibe_source_backed(&root, imported_at()).unwrap();
+        assert_eq!(scan.leaves.len(), 3);
+        let document = |provider_session_id: &str| {
+            scan.leaves
+                .iter()
+                .flat_map(|leaf| &leaf.documents)
+                .find(|document| {
+                    document.provider_session_id.as_deref() == Some(provider_session_id)
+                })
+                .unwrap()
+        };
+        let root_document = document("session-alpha");
+        let child_document = document("session-child");
+        let grandchild_document = document("session-grandchild");
+
+        assert_eq!(
+            child_document.parent_session_id,
+            Some(root_document.session_id)
+        );
+        assert_eq!(child_document.root_session_id, root_document.session_id);
+        assert_eq!(
+            grandchild_document.parent_session_id,
+            Some(child_document.session_id)
+        );
+        assert_eq!(
+            grandchild_document.root_session_id,
+            root_document.session_id
+        );
+        for related in [child_document, grandchild_document] {
+            assert_eq!(related.agent_type, AgentType::Subagent.as_str());
+            assert!(!related.is_primary);
+            assert!(related.source_path.as_deref().is_some_and(|path| {
+                path.ends_with(&format!(
+                    "{}/messages.jsonl",
+                    related.provider_session_id.as_deref().unwrap()
+                ))
+            }));
+        }
+        assert_eq!(child_document.branch.as_deref(), Some("feature/child"));
+        assert_eq!(
+            grandchild_document.branch.as_deref(),
+            Some("feature/grandchild")
+        );
     }
 
     #[test]
@@ -877,5 +1054,39 @@ mod tests {
                 .locator
                 .certified_source_revision_digest()
         );
+    }
+
+    fn write_related_session(
+        root: &Path,
+        session_id: &str,
+        parent_session_id: Option<&str>,
+        git_branch: &str,
+    ) {
+        let session = root.join(session_id);
+        fs::create_dir_all(&session).unwrap();
+        fs::write(
+            session.join("meta.json"),
+            serde_json::to_vec(&json!({
+                "session_id": session_id,
+                "parent_session_id": parent_session_id,
+                "start_time": "2026-07-28T12:00:00Z",
+                "git_branch": git_branch,
+                "environment": {
+                    "working_directory": "/workspace/project"
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let record = serde_json::to_vec(&json!({
+            "role": "user",
+            "message_id": format!("{session_id}-message"),
+            "timestamp": "2026-07-28T12:00:01Z",
+            "content": format!("{session_id} body")
+        }))
+        .unwrap();
+        let mut messages = record;
+        messages.push(b'\n');
+        fs::write(session.join("messages.jsonl"), messages).unwrap();
     }
 }
