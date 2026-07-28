@@ -7,10 +7,10 @@ use ctx_history_core::{
     derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, CertifiedSourceInventory,
     ContentSourceResolver, EventHydrationRequest, EventIdentityInput, HydratedProviderRecord,
     HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy, NativeItemKey,
-    NativeRecordCoordinate, NativeSessionKey, PositionStability, ProjectionContractError,
-    ScannedSourceCounts, SessionHydrationRequest, SessionIdentityInput, SourceAnchor,
-    SourceInventoryObservation, SourceKey, SourceObservation, SourceRecordLocator,
-    SourceResolverContractError, StableEntityId, SubrecordSelector, TypedKey,
+    NativeRecordCoordinate, NativeSessionKey, ProjectionContractError, ScannedSourceCounts,
+    SessionHydrationRequest, SessionIdentityInput, SourceAnchor, SourceInventoryObservation,
+    SourceKey, SourceObservation, SourceRecordLocator, SourceResolverContractError, StableEntityId,
+    SubrecordSelector, TypedKey,
 };
 use ctx_history_index::LexicalDocument;
 use sha2::{Digest, Sha256};
@@ -573,9 +573,20 @@ fn project_event(
     Ok(LexicalDocument {
         event_id,
         session_id,
+        parent_session_id: None,
+        root_session_id: session_id,
         source: source.clone(),
         locator,
         provider_session_id: Some(provider_session_id.to_owned()),
+        branch: None,
+        source_path: Some(relative_file.to_owned()),
+        agent_type: match dialect.provider {
+            CaptureProvider::Cline => "cline",
+            CaptureProvider::RooCode => "roo-code",
+            _ => unreachable!(),
+        }
+        .to_owned(),
+        is_primary: true,
         event_sequence,
         occurred_at_unix_ms: event.occurred_at_millis,
         event_type: event_kind(event.kind).to_owned(),
