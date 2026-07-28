@@ -773,30 +773,6 @@ fn automatic_registry_issue_reason(reason: &SourceBackedAutomaticUnavailableReas
     }
 }
 
-/// Bounded compatibility for the Codex-only semantic hydration adapter in
-/// `daemon_worker`. Default source-backed refresh never calls this helper.
-pub(super) fn discovered_codex_source_roots() -> Result<Vec<PathBuf>> {
-    let discovery = source_backed_discovery_context()?;
-    let build = build_automatic_source_backed_registry(&discovery);
-    let mut roots = build
-        .registry
-        .routes()
-        .filter(|route| {
-            route.source.provider == CaptureProvider::Codex
-                && route.source.source_format == "codex_session_jsonl_tree"
-        })
-        .map(|route| route.source.path.clone())
-        .collect::<Vec<_>>();
-    roots.sort();
-    roots.dedup();
-    if roots.is_empty() {
-        return Err(anyhow!(
-            "the capture registry discovered no available Codex session tree for semantic compatibility hydration"
-        ));
-    }
-    Ok(roots)
-}
-
 fn record_source_backed_refresh_progress(
     data_root: &Path,
     coordinator: &SourceBackedRefreshCoordinator,
