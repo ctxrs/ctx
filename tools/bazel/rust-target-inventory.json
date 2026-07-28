@@ -30,6 +30,7 @@
         "test:pro_host": "//crates/ctx-cli:pro_host_tests",
         "test:pro_lifecycle": "//crates/ctx-cli:pro_lifecycle_tests",
         "test:pro_mcp": "//crates/ctx-cli:pro_mcp_tests",
+        "test:pro_qualification": "//crates/ctx-cli:pro_qualification_tests",
         "test:pro_release_helper": "//crates/ctx-cli:pro_release_helper_tests",
         "test:pro_test_support": "//crates/ctx-cli:pro_test_support_tests",
         "test:search_refresh": "//crates/ctx-cli:search_refresh_tests",
@@ -62,6 +63,11 @@
       "manifest": "crates/ctx-history-core/Cargo.toml",
       "targets": {"lib:ctx_history_core": "//crates/ctx-history-core:lib"},
       "native_unit": "//crates/ctx-history-core:unit_tests"
+    },
+    "ctx-history-index": {
+      "manifest": "crates/ctx-history-index/Cargo.toml",
+      "targets": {"lib:ctx_history_index": "//crates/ctx-history-index:lib"},
+      "native_unit": "//crates/ctx-history-index:unit_tests"
     },
     "ctx-history-store": {
       "manifest": "crates/ctx-history-store/Cargo.toml",

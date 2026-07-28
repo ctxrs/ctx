@@ -1,0 +1,22 @@
+[package]
+name = "ctx-history-index"
+version = "0.26.0"
+description = "Atomic source-backed lexical generations for ctx"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+ctx-history-core = { path = "../ctx-history-core" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tantivy.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

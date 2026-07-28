@@ -116,9 +116,11 @@ pub mod dtos;
 pub mod history_jsonl;
 pub mod paths;
 pub mod platform_security;
+pub mod projection;
 pub mod provider;
 mod result_compaction;
 pub mod source;
+pub mod source_resolver;
 pub mod sync;
 
 pub use archive::SessionHistoryArchive;
@@ -141,6 +143,14 @@ pub use paths::{
     blob_dir, config_path, database_path, default_data_root, device_path, history_dir, logs_dir,
     object_dir,
 };
+pub use projection::{
+    derive_event_id, derive_session_id, CertifiedSource, CertifiedSourceAppend,
+    CertifiedSourceDeletion, CertifiedSourceInventory, EventIdentityInput, NativeItemKey,
+    NativeLocator, NativeSessionKey, PositionStability, ProjectionContractError,
+    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceFrontier,
+    SourceInventoryObservation, SourceKey, SourceObservation, StableEntityId, StableEntityKind,
+    SubrecordSelector, TypedKey, IDENTITY_VERSION,
+};
 pub use provider::{
     provider_support_matrix_schema_version, ProviderArtifactDescriptor, ProviderCursorCheckpoint,
     ProviderCursorRange, ProviderFidelityClaims, ProviderId, ProviderPathKind, ProviderSourceTrust,
@@ -149,6 +159,11 @@ pub use provider::{
 };
 pub use result_compaction::compact_result_payload;
 pub use source::{CaptureProvider, CaptureSource, CaptureSourceDescriptor, CaptureSourceKind};
+pub use source_resolver::{
+    ContentSourceResolver, EventHydrationRequest, HydratedProviderRecord, HydrationFailure,
+    HydrationFailureKind, LocatorRevisionPolicy, NativeRecordCoordinate, SessionHydrationRequest,
+    SourceRecordLocator, SourceResolverContractError, NATIVE_LOCATOR_VERSION,
+};
 pub use sync::{
     AuditActorKind, AuditLogEntry, EntityTimestamps, Fidelity, RedactionState, SyncAlias,
     SyncBatch, SyncBatchStatus, SyncCursor, SyncDirection, SyncMetadata, SyncOutboxItem,

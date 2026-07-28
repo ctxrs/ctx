@@ -3,6 +3,7 @@ members = [
     "crates/ctx-cli",
     "crates/ctx-history-capture",
     "crates/ctx-history-core",
+    "crates/ctx-history-index",
     "crates/ctx-history-search",
     "crates/ctx-history-store",
     "crates/ctx-pro-host-protocol",
@@ -42,6 +43,7 @@ serde_json = { version = "1.0", features = ["raw_value"] }
 serde_yaml = { version = "0.9", default-features = false }
 semver = "1.0"
 sha2 = "0.10"
+tantivy = { version = "0.26.1", default-features = false, features = ["mmap", "lz4-compression", "columnar-zstd-compression"] }
 tempfile = "3.10"
 thiserror = "1.0"
 toml_edit = { version = "0.22", default-features = false, features = ["parse", "serde"] }
