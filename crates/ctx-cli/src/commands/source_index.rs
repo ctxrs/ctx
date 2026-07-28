@@ -11,7 +11,10 @@ use ctx_history_capture::{
     ingest_codex_source_backed_v0, CodexLocatorResolverV0, CodexSourceBackedIngestReceiptV0,
 };
 use ctx_history_core::{CaptureProvider, EventHydrationRequest, EventType};
-use ctx_history_index::{EventRecord, EventSearchCandidate, SessionRecord, VerifiedIndex};
+use ctx_history_index::{
+    AgentScope, EventRecord, EventSearchCandidate, EventSearchFilters, ExcludedSessionTree,
+    SessionRecord, VerifiedIndex,
+};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -33,7 +36,7 @@ use crate::{
 
 const INDEX_DIRECTORY: &str = "source-backed-lexical-v0";
 const CODEX_SESSION_SOURCE_FORMAT: &str = "codex_session_jsonl_tree";
-const MAX_FILTER_CANDIDATES: usize = 64 * 1024;
+const MAX_SESSION_DIVERSITY_CANDIDATES: usize = 64 * 1024;
 const MIN_CANDIDATE_BATCH: usize = 256;
 const CANDIDATE_OVERSAMPLE: usize = 8;
 
@@ -98,18 +101,6 @@ struct SearchHit {
     event: EventRecord,
     score: f32,
     more_matches_in_session: usize,
-}
-
-#[derive(Debug)]
-struct SearchFilter {
-    provider: Option<String>,
-    source_format: Option<String>,
-    workspace: Option<String>,
-    since_unix_ms: Option<i64>,
-    event_type: Option<String>,
-    file: Option<String>,
-    session_id: Option<Uuid>,
-    excluded_provider_session: Option<String>,
 }
 
 #[derive(Debug)]
@@ -365,14 +356,14 @@ fn search_existing_generation(
 ) -> Result<(Value, SearchCollection, VerifiedIndex)> {
     validate_search_request(request)?;
     let index = open_index(data_root)?;
-    let filter = search_filter(request, &index)?;
+    let filters = index_search_filters(request, &index)?;
     let query_started = Instant::now();
     let collection = collect_search_hits(
         &index,
         &request.query,
         request.limit,
         request.events,
-        &filter,
+        &filters,
     )?;
     let query_duration = query_started.elapsed();
     let value = search_json(request, &index, &collection, receipts, query_duration);
@@ -401,11 +392,6 @@ fn validate_search_request(request: &SourceSearchRequest) -> Result<()> {
             "custom history source identity filters are not yet exposed by the source-backed index query API"
         ));
     }
-    if request.primary_only || request.include_subagents {
-        return Err(anyhow!(
-            "agent topology filters are not yet exposed by the source-backed index query API"
-        ));
-    }
     if request.query.trim().is_empty() {
         if request.file.is_some() {
             return Err(anyhow!(
@@ -417,7 +403,10 @@ fn validate_search_request(request: &SourceSearchRequest) -> Result<()> {
     Ok(())
 }
 
-fn search_filter(request: &SourceSearchRequest, index: &VerifiedIndex) -> Result<SearchFilter> {
+fn index_search_filters(
+    request: &SourceSearchRequest,
+    index: &VerifiedIndex,
+) -> Result<EventSearchFilters> {
     let session_id = request
         .session
         .as_deref()
@@ -439,44 +428,33 @@ fn search_filter(request: &SourceSearchRequest, index: &VerifiedIndex) -> Result
         .map(parse_since_filter)
         .transpose()?
         .map(|since| since.timestamp_millis());
-    let excluded_provider_session = if request.include_current_session || session_id.is_some() {
-        None
-    } else {
-        std::env::var("CODEX_THREAD_ID")
-            .ok()
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty())
-    };
-    Ok(SearchFilter {
+    let exclude_session_tree = (!request.include_current_session && session_id.is_none())
+        .then(|| std::env::var("CODEX_THREAD_ID").ok())
+        .flatten()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .map(|provider_session_id| ExcludedSessionTree {
+            provider: CaptureProvider::Codex.as_str().to_owned(),
+            provider_session_id,
+            session_id: None,
+        });
+    Ok(EventSearchFilters {
+        session_id,
         provider: request
             .provider
             .map(|provider| provider.as_str().to_owned()),
-        source_format: request
-            .source_format
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned),
-        workspace: request
-            .workspace
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(|value| value.to_ascii_lowercase()),
+        source_format: request.source_format.clone(),
+        workspace: request.workspace.clone(),
         since_unix_ms,
         event_type,
-        file: request
-            .file
-            .as_deref()
-            .map(|path| {
-                path.display()
-                    .to_string()
-                    .replace('\\', "/")
-                    .to_ascii_lowercase()
-            })
-            .filter(|value| !value.trim().is_empty()),
-        session_id,
-        excluded_provider_session,
+        agent_scope: if request.primary_only || !request.include_subagents {
+            AgentScope::Primary
+        } else {
+            AgentScope::All
+        },
+        file: request.file.as_ref().map(|path| path.display().to_string()),
+        exclude_session_tree,
+        ..EventSearchFilters::default()
     })
 }
 
@@ -485,25 +463,20 @@ fn collect_search_hits(
     query: &str,
     limit: usize,
     event_results: bool,
-    filter: &SearchFilter,
+    filters: &EventSearchFilters,
 ) -> Result<SearchCollection> {
     let document_count = usize::try_from(index.document_count()).unwrap_or(usize::MAX);
-    let maximum = document_count.min(MAX_FILTER_CANDIDATES);
+    let maximum = document_count.min(MAX_SESSION_DIVERSITY_CANDIDATES);
     let mut candidate_limit = limit
         .saturating_mul(CANDIDATE_OVERSAMPLE)
         .max(MIN_CANDIDATE_BATCH)
         .min(maximum.max(1));
 
     loop {
-        let candidates = index.search_event_candidates(query.trim(), candidate_limit)?;
+        let candidates =
+            index.search_event_candidates_with_filters(query.trim(), filters, candidate_limit)?;
         let exhausted = candidates.len() < candidate_limit || candidate_limit >= document_count;
-        let hits = shape_search_hits(
-            candidates
-                .iter()
-                .filter(|candidate| filter.matches(&candidate.event)),
-            limit,
-            event_results,
-        );
+        let hits = shape_search_hits(candidates.iter(), limit, event_results);
         let enough = hits.len() >= limit;
         if enough || exhausted {
             return Ok(SearchCollection {
@@ -513,11 +486,6 @@ fn collect_search_hits(
             });
         }
         if candidate_limit >= maximum {
-            if filter.is_selective() {
-                return Err(anyhow!(
-                    "the source-backed index query filter seam exhausted {maximum} candidates before it could prove the requested filtered result set; native index filters are required"
-                ));
-            }
             return Ok(SearchCollection {
                 hits,
                 candidate_pool: candidates.len(),
@@ -528,72 +496,6 @@ fn collect_search_hits(
             .saturating_mul(2)
             .min(maximum)
             .max(candidate_limit.saturating_add(1));
-    }
-}
-
-impl SearchFilter {
-    fn matches(&self, event: &EventRecord) -> bool {
-        if self
-            .provider
-            .as_deref()
-            .is_some_and(|provider| event.provider != provider)
-            || self
-                .source_format
-                .as_deref()
-                .is_some_and(|source_format| event.source_format != source_format)
-            || self
-                .since_unix_ms
-                .is_some_and(|since| event.occurred_at_unix_ms.is_none_or(|time| time < since))
-            || self
-                .event_type
-                .as_deref()
-                .is_some_and(|event_type| event.event_type != event_type)
-            || self
-                .session_id
-                .is_some_and(|session_id| event.session_id.as_uuid() != session_id)
-        {
-            return false;
-        }
-        if self.excluded_provider_session.as_deref().is_some_and(|id| {
-            event.provider == CaptureProvider::Codex.as_str()
-                && event.provider_session_id.as_deref() == Some(id)
-        }) {
-            return false;
-        }
-        if let Some(workspace) = &self.workspace {
-            let matches_workspace = event
-                .workspace
-                .as_deref()
-                .is_some_and(|value| value.to_ascii_lowercase().contains(workspace))
-                || event
-                    .cwd
-                    .as_deref()
-                    .is_some_and(|value| value.to_ascii_lowercase().contains(workspace));
-            if !matches_workspace {
-                return false;
-            }
-        }
-        if let Some(file) = &self.file {
-            if !event
-                .touched_files
-                .iter()
-                .any(|path| path.replace('\\', "/").to_ascii_lowercase().contains(file))
-            {
-                return false;
-            }
-        }
-        true
-    }
-
-    fn is_selective(&self) -> bool {
-        self.provider.is_some()
-            || self.source_format.is_some()
-            || self.workspace.is_some()
-            || self.since_unix_ms.is_some()
-            || self.event_type.is_some()
-            || self.file.is_some()
-            || self.session_id.is_some()
-            || self.excluded_provider_session.is_some()
     }
 }
 
@@ -663,6 +565,8 @@ fn search_json(
             "event_type": request.event_type,
             "file": request.file.as_ref().map(|path| path.display().to_string()),
             "session": request.session,
+            "primary_only": request.primary_only.then_some(true),
+            "include_subagents": request.include_subagents.then_some(true),
             "include_current_session": request.include_current_session.then_some(true),
         },
         "freshness": {
@@ -730,6 +634,12 @@ fn search_result_json(hit: &SearchHit, result_scope: &str, query: &str) -> Value
         "provider": event.provider,
         "provider_session_id": event.provider_session_id,
         "source_format": event.source_format,
+        "source_path": event.source_path,
+        "parent_ctx_session_id": event.parent_session_id.map(|id| id.as_uuid()),
+        "root_ctx_session_id": event.root_session_id.as_uuid(),
+        "branch": event.branch,
+        "agent_type": event.agent_type,
+        "is_primary": event.is_primary,
         "timestamp": timestamp_json(event.occurred_at_unix_ms),
         "workspace": event.workspace,
         "cwd": event.cwd,
@@ -742,6 +652,7 @@ fn search_result_json(hit: &SearchHit, result_scope: &str, query: &str) -> Value
             "provider": event.provider,
             "session_id": session_id,
             "event_seq": event.event_sequence,
+            "source_path": event.source_path,
         }],
         "visibility": "local",
     }))
@@ -850,6 +761,12 @@ fn session_json(
             "provider": session.provider,
             "provider_session_id": session.provider_session_id,
             "source_format": session.source_format,
+            "source_path": session.source_path,
+            "parent_ctx_session_id": session.parent_session_id.map(|id| id.as_uuid()),
+            "root_ctx_session_id": session.root_session_id.as_uuid(),
+            "branch": session.branch,
+            "agent_type": session.agent_type,
+            "is_primary": session.is_primary,
             "workspace": session.workspace,
             "cwd": session.cwd,
         },
@@ -908,6 +825,12 @@ fn render_event_values(
                 "provider": event.provider,
                 "provider_session_id": event.provider_session_id,
                 "source_format": event.source_format,
+                "source_path": event.source_path,
+                "parent_ctx_session_id": event.parent_session_id.map(|id| id.as_uuid()),
+                "root_ctx_session_id": event.root_session_id.as_uuid(),
+                "branch": event.branch,
+                "agent_type": event.agent_type,
+                "is_primary": event.is_primary,
                 "sequence": event.event_sequence,
                 "event_type": event.event_type,
                 "role": event.role,
@@ -1327,6 +1250,11 @@ fn phase_attribution(receipts: &[CodexSourceBackedIngestReceiptV0], query: Durat
         "query_seconds": query.as_secs_f64(),
         "catalog_sources": receipts.iter().map(|receipt| receipt.counters.catalog_sources).sum::<u64>(),
         "catalog_source_bytes": receipts.iter().map(|receipt| receipt.counters.catalog_source_bytes).sum::<u64>(),
+        "cold_sources": receipts.iter().map(|receipt| receipt.counters.cold_sources).sum::<u64>(),
+        "appended_sources": receipts.iter().map(|receipt| receipt.counters.appended_sources).sum::<u64>(),
+        "replaced_sources": receipts.iter().map(|receipt| receipt.counters.replaced_sources).sum::<u64>(),
+        "replayed_sources": receipts.iter().map(|receipt| receipt.counters.replayed_sources).sum::<u64>(),
+        "deleted_sources": receipts.iter().map(|receipt| receipt.counters.deleted_sources).sum::<u64>(),
         "scanner_bytes_read": receipts.iter().map(|receipt| receipt.counters.scanner_bytes_read).sum::<u64>(),
         "checkpoint_validation_bytes": receipts.iter().map(|receipt| receipt.counters.checkpoint_validation_bytes).sum::<u64>(),
         "scanner_workers": receipts.iter().map(|receipt| receipt.counters.scanner_workers).max().unwrap_or(0),
