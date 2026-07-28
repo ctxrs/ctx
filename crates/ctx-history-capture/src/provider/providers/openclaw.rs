@@ -35,6 +35,12 @@ pub(crate) use complete_content::{
     source_from_admitted as openclaw_complete_content_source_from_admitted,
 };
 pub(crate) use native_path::import_openclaw_nativepath_tree;
+pub(crate) use native_path::{
+    openclaw_source_backed_adapter_v0, OpenClawHydratedRecordV0, OpenClawSourceBackedAdapterV0,
+    OpenClawSourceBackedDispositionV0, OpenClawSourceBackedErrorV0, OpenClawSourceBackedPageV0,
+    OpenClawSourceBackedReaderV0, OpenClawSourceBackedResultV0, OpenClawSourceBackedScanV0,
+    OpenClawSourceBackedSourceV0, OpenClawSourceBackedVerifiedPrefixV0,
+};
 pub(crate) use normalization::event as openclaw_event;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
