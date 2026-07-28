@@ -76,6 +76,7 @@ mod model;
 mod projection;
 mod publication;
 mod reader;
+pub(super) mod source_backed;
 #[cfg(test)]
 mod tests;
 
