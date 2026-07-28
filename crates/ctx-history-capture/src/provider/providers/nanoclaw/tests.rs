@@ -162,6 +162,33 @@ fn insert_outbound(path: &Path, id: &str, seq: i64, timestamp: i64, content: &st
         .unwrap();
 }
 
+fn sqlite_families_disk_state(
+    databases: &[&Path],
+) -> Vec<(PathBuf, Option<(Vec<u8>, u64, std::time::SystemTime)>)> {
+    let mut state = Vec::new();
+    for database in databases {
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let path = if suffix.is_empty() {
+                database.to_path_buf()
+            } else {
+                let mut value = database.as_os_str().to_os_string();
+                value.push(suffix);
+                PathBuf::from(value)
+            };
+            let contents = match fs::read(&path) {
+                Ok(contents) => {
+                    let metadata = fs::metadata(&path).unwrap();
+                    Some((contents, metadata.len(), metadata.modified().unwrap()))
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => panic!("failed to read {}: {error}", path.display()),
+            };
+            state.push((path, contents));
+        }
+    }
+    state
+}
+
 fn cursor_stream(root: &Path) -> String {
     let canonical_root = fs::canonicalize(root).unwrap();
     let identity = provider_path_identity(&canonical_root).unwrap();
@@ -1276,50 +1303,151 @@ fn source_backed_central_guard_rejects_root_swap_before_query() {
     })
     .unwrap_err();
 
-    assert!(
-        error.to_string().contains("identity does not match"),
-        "{error}"
-    );
+    assert!(error.to_string().contains("changed"), "{error}");
     assert_eq!(emitted, 0);
 }
 
 #[test]
-fn source_backed_wal_component_is_typed_fail_closed_without_copying() {
+fn source_backed_central_parent_swap_is_rejected_before_publication() {
     let temp = crate::test_support_paths::tempdir().unwrap();
-    let root = create_project(&temp, "wal-fail-closed", 1);
+    let root = create_project(&temp, "central-parent", 1);
     let (inbound, _) = create_message_stores(&root, "session-0000");
-    let writer = Connection::open(&inbound).unwrap();
-    let mode: String = writer
-        .query_row("pragma journal_mode=wal", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(mode, "wal");
-    writer
-        .execute(
-            "insert into messages_in values (
-                'wal-message', 1, 'chat', 1000, 'done', 'message', 'chat-1',
-                'telegram', 'thread', 'wal-only-content', null, 0
-            )",
-            [],
-        )
-        .unwrap();
-    writer
-        .set_db_config(
-            rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
-            true,
-        )
-        .unwrap();
-    drop(writer);
-    assert!(PathBuf::from(format!("{}-wal", inbound.display())).exists());
-    assert!(PathBuf::from(format!("{}-shm", inbound.display())).exists());
+    insert_inbound(&inbound, "inbound", 1, 1_000, "original-parent");
+    let replacement = create_project(&temp, "central-parent-replacement", 1);
+    let (replacement_inbound, _) = create_message_stores(&replacement, "session-0000");
+    insert_inbound(
+        &replacement_inbound,
+        "replacement",
+        1,
+        1_000,
+        "replacement-parent-must-not-emit",
+    );
+    let selected_data = root.join("data");
+    let held_data = temp.path().join("central-parent-held-data");
+    let replacement_data = replacement.join("data");
+    let _hook = set_before_central_guard_open_hook(move || {
+        fs::rename(&selected_data, &held_data).unwrap();
+        fs::rename(&replacement_data, &selected_data).unwrap();
+    });
     let mut emitted = 0;
 
-    let error = scan_nanoclaw_source_backed(&root, [0x34; 32], |_| {
+    let error = scan_nanoclaw_source_backed(&root, [0x36; 32], |_| {
         emitted += 1;
         Ok(())
     })
     .unwrap_err();
 
-    assert!(error.to_string().contains("WAL"), "{error}");
-    assert!(error.to_string().contains("root-handle VFS"), "{error}");
+    assert!(error.to_string().contains("changed"), "{error}");
     assert_eq!(emitted, 0);
+}
+
+#[test]
+fn source_backed_central_leaf_swap_is_rejected_before_publication() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = create_project(&temp, "central-leaf", 1);
+    let (inbound, _) = create_message_stores(&root, "session-0000");
+    insert_inbound(&inbound, "inbound", 1, 1_000, "original-leaf");
+    let central = root.join("data").join("v2.db");
+    let held = root.join("data").join("v2-original.db");
+    let replacement = root.join("data").join("v2-replacement.db");
+    fs::copy(&central, &replacement).unwrap();
+    Connection::open(&replacement)
+        .unwrap()
+        .execute(
+            "update sessions set thread_id = 'replacement-leaf-must-not-emit'",
+            [],
+        )
+        .unwrap();
+    let _hook = set_before_central_guard_open_hook({
+        let central = central.clone();
+        move || {
+            fs::rename(&central, held).unwrap();
+            fs::rename(replacement, central).unwrap();
+        }
+    });
+    let mut emitted = 0;
+
+    let error = scan_nanoclaw_source_backed(&root, [0x37; 32], |_| {
+        emitted += 1;
+        Ok(())
+    })
+    .unwrap_err();
+
+    assert!(error.to_string().contains("changed"), "{error}");
+    assert_eq!(emitted, 0);
+}
+
+#[test]
+fn source_backed_reads_consistent_central_and_project_wal_without_writes() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = create_project(&temp, "wal-consistency", 0);
+    let central_path = root.join("data").join("v2.db");
+    let (inbound, outbound) = create_message_stores(&root, "session-wal");
+    let central_writer = Connection::open(&central_path).unwrap();
+    let central_mode: String = central_writer
+        .query_row("pragma journal_mode=wal", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(central_mode, "wal");
+    central_writer
+        .execute(
+            "insert into sessions values (
+                'session-wal', 'ag-1', 'mg-1', 'thread-wal', 'codex',
+                'active', 'running', 1782259202000, 1782259200000
+            )",
+            [],
+        )
+        .unwrap();
+    central_writer
+        .set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+            true,
+        )
+        .unwrap();
+
+    let component_writer = Connection::open(&inbound).unwrap();
+    let component_mode: String = component_writer
+        .query_row("pragma journal_mode=wal", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(component_mode, "wal");
+    component_writer
+        .execute(
+            "insert into messages_in values (
+                'wal-message', 1, 'chat', 1000, 'done', 'message', 'chat-1',
+                'telegram', 'thread', 'central-project-wal-content', null, 0
+            )",
+            [],
+        )
+        .unwrap();
+    component_writer
+        .set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+            true,
+        )
+        .unwrap();
+    let before = sqlite_families_disk_state(&[&central_path, &inbound, &outbound]);
+    assert!(before.iter().any(|(path, state)| {
+        path.as_os_str().to_string_lossy().ends_with("v2.db-wal") && state.is_some()
+    }));
+    assert!(before.iter().any(|(path, state)| {
+        path.as_os_str()
+            .to_string_lossy()
+            .ends_with("inbound.db-wal")
+            && state.is_some()
+    }));
+    let mut documents = Vec::new();
+
+    let receipt = scan_nanoclaw_source_backed(&root, [0x34; 32], |page| {
+        documents.extend(page.documents);
+        Ok(())
+    })
+    .unwrap();
+
+    assert_eq!(documents.len(), 1);
+    assert!(documents[0].body.contains("central-project-wal-content"));
+    assert_eq!(receipt.source.counts().retained_records, 1);
+    let exact =
+        hydrate_nanoclaw_source_backed_exact(&root, [0x34; 32], &documents[0].locator).unwrap();
+    assert_eq!(exact.text, "central-project-wal-content");
+    let after = sqlite_families_disk_state(&[&central_path, &inbound, &outbound]);
+    assert_eq!(after, before);
 }
