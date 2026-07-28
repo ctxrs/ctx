@@ -42,8 +42,11 @@ pub(super) fn plan_read(
         (Some(previous), Some(current)) => previous == current,
         _ => same_route,
     };
-    let previous_route_exists =
-        !same_route && std::fs::symlink_metadata(&previous.canonical_route).is_ok();
+    let previous_route_exists = !same_route
+        && std::path::absolute(&previous.canonical_route)
+            .ok()
+            .and_then(|path| crate::common::io::open_provider_source_file(&path).ok())
+            .is_some();
     if same_route && !same_physical {
         return Ok(full_read_plan(ChangeSignal::Replacement));
     }

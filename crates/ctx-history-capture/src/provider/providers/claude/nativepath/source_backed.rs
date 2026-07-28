@@ -6,9 +6,8 @@
 
 use std::{
     collections::HashSet,
-    fs,
     io::{Read, Seek, SeekFrom},
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 use chrono::{DateTime, Utc};
@@ -114,7 +113,7 @@ impl ClaudeSourceBackedLeaf {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ClaudeSourceBackedInventory {
-    root: PathBuf,
+    discovery: ClaudeDiscovery,
     opening: SourceInventoryObservation,
     leaves: Vec<ClaudeSourceBackedLeaf>,
 }
@@ -128,7 +127,10 @@ impl ClaudeSourceBackedInventory {
     /// complete inventory. The shared coordinator may derive deletions from
     /// this proof; an explicit file import never reaches this API.
     pub(crate) fn certify(&self) -> ClaudeSourceBackedResult<CertifiedSourceInventory> {
-        let closing_discovery = authoritative_discovery(&self.root)?;
+        let closing_discovery = self.discovery.rediscover()?;
+        if !closing_discovery.has_directory_authority() || !closing_discovery.inventory.complete {
+            return Err(ClaudeSourceBackedError::NonAuthoritativeRoot);
+        }
         let (closing, closing_leaves) = bind_discovery(&closing_discovery)?;
         Ok(CertifiedSourceInventory::certify(
             self.opening.clone(),
@@ -148,19 +150,15 @@ pub(crate) fn discover_claude_source_backed(
     let discovery = authoritative_discovery(projects_root)?;
     let (opening, leaves) = bind_discovery(&discovery)?;
     Ok(ClaudeSourceBackedInventory {
-        root: projects_root.to_path_buf(),
+        discovery,
         opening,
         leaves,
     })
 }
 
 fn authoritative_discovery(root: &Path) -> ClaudeSourceBackedResult<ClaudeDiscovery> {
-    let metadata = fs::symlink_metadata(root)?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err(ClaudeSourceBackedError::NonAuthoritativeRoot);
-    }
     let discovery = super::discover_projects(root)?;
-    if !discovery.inventory.complete {
+    if !discovery.has_directory_authority() || !discovery.inventory.complete {
         return Err(ClaudeSourceBackedError::NonAuthoritativeRoot);
     }
     Ok(discovery)
