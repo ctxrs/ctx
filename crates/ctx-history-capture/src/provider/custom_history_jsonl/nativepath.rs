@@ -69,6 +69,7 @@ mod output;
 mod projection;
 mod publication;
 mod reader;
+mod source_backed;
 
 use self::{lifecycle::*, model::*, output::*, projection::*, publication::*};
 pub(super) use publication::decode_released_or_native_upstream_cursor;
@@ -76,3 +77,16 @@ pub(crate) use reader::{
     import_custom_history_nativepath, import_custom_history_nativepath_reader,
     validate_custom_history_nativepath, validate_custom_history_nativepath_reader,
 };
+pub(crate) use source_backed::{
+    observe_custom_history_source_backed_explicit, revalidate_custom_history_source_backed,
+    scan_custom_history_source_backed_explicit, CustomHistoryReplacementEvidence,
+    CustomHistoryReplacementReason, CustomHistorySourceBackedDisposition,
+    CustomHistorySourceBackedError, CustomHistorySourceBackedInput,
+    CustomHistorySourceBackedInventory, CustomHistorySourceBackedOutcome,
+    CustomHistorySourceBackedPage, CustomHistorySourceBackedReceipt,
+    CustomHistorySourceBackedResolver, CustomHistorySourceBackedResult,
+    CustomHistorySourceBackedRoute,
+};
+
+#[cfg(test)]
+mod source_backed_tests;
