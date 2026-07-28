@@ -7,7 +7,6 @@ impl ForgeCodeScanner {
         context: ProviderAdapterContext,
         wants_outputs: bool,
     ) -> Result<Self> {
-        let conn = open_provider_sqlite_readonly(&source.canonical_path)?;
         let source_root = context.source_root_display().or_else(|| {
             source
                 .canonical_path
@@ -16,7 +15,6 @@ impl ForgeCodeScanner {
         });
         Ok(Self {
             source,
-            conn,
             frontier,
             context,
             source_root,
@@ -28,18 +26,17 @@ impl ForgeCodeScanner {
     pub(in crate::provider::providers::forgecode) fn next_page(
         &mut self,
     ) -> Result<Option<ForgeCodePage>> {
+        let database = Arc::clone(&self.source.database);
+        let path = self.source.canonical_path.clone();
+        database.read(&path, |connection| self.next_page_guarded(connection))
+    }
+
+    fn next_page_guarded(&mut self, connection: &Connection) -> Result<Option<ForgeCodePage>> {
         if self.exhausted {
             return Ok(None);
         }
-        if !self
-            .source
-            .snapshot
-            .revalidate(&self.source.canonical_path)?
-        {
-            return Err(CaptureError::SourceChangedDuringCapture);
-        }
         let expected_frontier = self.frontier.clone();
-        let candidate = self.next_candidate()?;
+        let candidate = self.next_candidate(connection)?;
         let Some(candidate) = candidate else {
             self.exhausted = true;
             let page = ForgeCodePage {
@@ -56,44 +53,49 @@ impl ForgeCodeScanner {
             };
             return Ok(Some(page));
         };
-        let page = self.page_for_candidate(expected_frontier, candidate)?;
+        let page = self.page_for_candidate(connection, expected_frontier, candidate)?;
         self.frontier = page.next_frontier.clone();
         if page.terminal {
             self.exhausted = true;
         }
-        if !self
-            .source
-            .snapshot
-            .revalidate(&self.source.canonical_path)?
-        {
-            return Err(CaptureError::SourceChangedDuringCapture);
-        }
         Ok(Some(page))
     }
 
-    fn next_candidate(&self) -> Result<Option<ForgeCodeRowCandidate>> {
+    fn next_candidate(&self, connection: &Connection) -> Result<Option<ForgeCodeRowCandidate>> {
         if self.frontier.rowid.is_some() && !self.frontier.row_complete {
-            return self.candidate_at(self.frontier.rowid);
+            return self.candidate_at(connection, self.frontier.rowid);
         }
-        self.candidate_after(self.frontier.rowid)
+        self.candidate_after(connection, self.frontier.rowid)
     }
 
-    fn candidate_at(&self, rowid: Option<i64>) -> Result<Option<ForgeCodeRowCandidate>> {
+    fn candidate_at(
+        &self,
+        connection: &Connection,
+        rowid: Option<i64>,
+    ) -> Result<Option<ForgeCodeRowCandidate>> {
         let rowid = rowid.ok_or(CaptureError::SystemInvariant(
             "ForgeCode partial frontier has no rowid",
         ))?;
         let sql = self.candidate_sql("where rowid = ?1");
-        with_length_preflight(&self.conn, || {
-            self.conn.query_row(&sql, [rowid], row_candidate).optional()
+        with_length_preflight(connection, || {
+            connection
+                .query_row(&sql, [rowid], row_candidate)
+                .optional()
         })
     }
 
-    fn candidate_after(&self, rowid: Option<i64>) -> Result<Option<ForgeCodeRowCandidate>> {
+    fn candidate_after(
+        &self,
+        connection: &Connection,
+        rowid: Option<i64>,
+    ) -> Result<Option<ForgeCodeRowCandidate>> {
         let predicate = rowid.map_or("", |_| "where rowid > ?1");
         let sql = self.candidate_sql(predicate);
-        with_length_preflight(&self.conn, || match rowid {
-            Some(rowid) => self.conn.query_row(&sql, [rowid], row_candidate).optional(),
-            None => self.conn.query_row(&sql, [], row_candidate).optional(),
+        with_length_preflight(connection, || match rowid {
+            Some(rowid) => connection
+                .query_row(&sql, [rowid], row_candidate)
+                .optional(),
+            None => connection.query_row(&sql, [], row_candidate).optional(),
         })
     }
 
@@ -121,12 +123,14 @@ impl ForgeCodeScanner {
 
     fn page_for_candidate(
         &self,
+        connection: &Connection,
         expected_frontier: ForgeCodeFrontier,
         candidate: ForgeCodeRowCandidate,
     ) -> Result<ForgeCodePage> {
         let row_line = provider_line_from_index(candidate.rowid.max(0) as u64);
         if let Some(reason) = candidate.rejection_reason() {
             return self.rejected_row_page(
+                connection,
                 expected_frontier,
                 candidate.rowid,
                 row_line,
@@ -135,6 +139,7 @@ impl ForgeCodeScanner {
         }
         if candidate.observed_bytes()? > MAX_PROVIDER_SQLITE_VALUE_BYTES as u64 {
             return self.rejected_row_page(
+                connection,
                 expected_frontier,
                 candidate.rowid,
                 row_line,
@@ -144,10 +149,11 @@ impl ForgeCodeScanner {
                 ),
             );
         }
-        let hydrated = match self.hydrate(candidate.rowid) {
+        let hydrated = match self.hydrate(connection, candidate.rowid) {
             Ok(row) => row,
             Err(error) => {
                 return self.rejected_row_page(
+                    connection,
                     expected_frontier,
                     candidate.rowid,
                     row_line,
@@ -159,6 +165,7 @@ impl ForgeCodeScanner {
             Ok(row) => row,
             Err(error) => {
                 return self.rejected_row_page(
+                    connection,
                     expected_frontier,
                     candidate.rowid,
                     row_line,
@@ -166,11 +173,12 @@ impl ForgeCodeScanner {
                 )
             }
         };
-        self.project_row(expected_frontier, decoded)
+        self.project_row(connection, expected_frontier, decoded)
     }
 
     fn rejected_row_page(
         &self,
+        connection: &Connection,
         expected_frontier: ForgeCodeFrontier,
         rowid: i64,
         line: usize,
@@ -183,7 +191,7 @@ impl ForgeCodeScanner {
         };
         Ok(ForgeCodePage {
             expected_frontier,
-            terminal: !self.has_row_after(rowid)?,
+            terminal: !self.has_row_after(connection, rowid)?,
             next_frontier,
             row: None,
             events: Vec::new(),
@@ -195,7 +203,7 @@ impl ForgeCodeScanner {
         })
     }
 
-    fn hydrate(&self, rowid: i64) -> Result<ForgeCodeHydratedRow> {
+    fn hydrate(&self, connection: &Connection, rowid: i64) -> Result<ForgeCodeHydratedRow> {
         let title = optional_column_expr(&self.source.columns, "title", "NULL");
         let context = optional_column_expr(&self.source.columns, "context", "NULL");
         let updated_at = optional_column_expr(&self.source.columns, "updated_at", "NULL");
@@ -206,7 +214,7 @@ impl ForgeCodeScanner {
              cast({updated_at} as blob), cast({metrics} as blob) \
              from conversations where rowid = ?1"
         );
-        self.conn
+        connection
             .query_row(&sql, [rowid], |row| {
                 Ok(ForgeCodeHydratedRow {
                     rowid: row.get(0)?,
@@ -224,6 +232,7 @@ impl ForgeCodeScanner {
 
     fn project_row(
         &self,
+        connection: &Connection,
         expected_frontier: ForgeCodeFrontier,
         hydrated: ForgeCodeDecodedRow,
     ) -> Result<ForgeCodePage> {
@@ -336,6 +345,7 @@ impl ForgeCodeScanner {
         let mut retained_output_bytes = 0_usize;
         if retained_core_bytes > FORGECODE_NATIVE_PAGE_CONTENT_MAX_BYTES {
             return self.rejected_row_page(
+                connection,
                 expected_frontier,
                 rowid,
                 row_line,
@@ -611,7 +621,7 @@ impl ForgeCodeScanner {
         };
         Ok(ForgeCodePage {
             expected_frontier,
-            terminal: row_complete && !self.has_row_after(rowid)?,
+            terminal: row_complete && !self.has_row_after(connection, rowid)?,
             next_frontier,
             row: Some(row),
             events,
@@ -623,8 +633,8 @@ impl ForgeCodeScanner {
         })
     }
 
-    fn has_row_after(&self, rowid: i64) -> Result<bool> {
-        self.conn
+    fn has_row_after(&self, connection: &Connection, rowid: i64) -> Result<bool> {
+        connection
             .query_row(
                 "select exists(select 1 from conversations where rowid > ?1)",
                 [rowid],

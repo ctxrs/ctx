@@ -24,8 +24,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
-    provider::{normalization::provider_local_preview, sqlite::open_provider_sqlite_readonly},
-    CaptureError, ProviderAdapterContext, ProviderImportFailure, FORGECODE_SQLITE_SOURCE_FORMAT,
+    provider::normalization::provider_local_preview, CaptureError, ProviderAdapterContext,
+    ProviderImportFailure, FORGECODE_SQLITE_SOURCE_FORMAT,
 };
 
 use super::super::complete_content::{
@@ -489,7 +489,9 @@ fn source_observation(
 ) -> Result<SourceObservation, ProjectionContractError> {
     let mut digest = Sha256::new();
     digest.update(b"ctx.forgecode.sqlite-snapshot-v1\0");
-    digest.update(native.snapshot.revision_component().as_bytes());
+    digest.update(native.database.evidence().identity());
+    digest.update(native.database.evidence().length().to_be_bytes());
+    digest.update(native.database.evidence().revision());
     digest.update(native.schema_fingerprint.as_bytes());
     digest.update(native.user_version.to_be_bytes());
     SourceObservation::new(
@@ -565,11 +567,7 @@ impl ForgeCodeSourceBackedResolverV0 {
         let current_observation = source_observation(&route.source, &current)
             .map_err(|_| hydration_failure(HydrationFailureKind::InvalidLocator))?;
         let expected_revision = source_revision_digest(&current_observation);
-        let connection = open_provider_sqlite_readonly(&route.canonical_path)
-            .map_err(|_| hydration_failure(HydrationFailureKind::TemporarilyUnavailable))?;
-        let mut hydrated = Vec::with_capacity(requests.len());
-        let mut cached_row: Option<(i64, Vec<crate::native_source::NativeSqliteValue>, [u8; 32])> =
-            None;
+        let mut coordinates = Vec::with_capacity(requests.len());
         for request in requests {
             if !route.source.exact_descriptor_eq(request.locator().source()) {
                 return Err(hydration_failure(HydrationFailureKind::InvalidLocator));
@@ -577,23 +575,32 @@ impl ForgeCodeSourceBackedResolverV0 {
             if request.locator().certified_source_revision_digest() != Some(&expected_revision) {
                 return Err(hydration_failure(HydrationFailureKind::StaleSourceEvidence));
             }
-            let coordinate = decode_locator(request.locator())?;
-            if cached_row
-                .as_ref()
-                .is_none_or(|(rowid, _, _)| *rowid != coordinate.rowid)
-            {
-                let values = load_forgecode_conversation_values(&connection, coordinate.rowid)
-                    .map_err(|error| match error {
-                        CaptureError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => {
-                            hydration_failure(HydrationFailureKind::MissingRecord)
-                        }
-                        _ => hydration_failure(HydrationFailureKind::StaleRecordEvidence),
-                    })?;
-                let digest = forgecode_logical_record_digest(&values);
-                cached_row = Some((coordinate.rowid, values, digest));
-            }
-            let (_, values, digest) = cached_row
-                .as_ref()
+            coordinates.push(decode_locator(request.locator())?);
+        }
+        let cached_rows = current
+            .database
+            .read(&route.canonical_path, |connection| {
+                let mut rows = BTreeMap::new();
+                for coordinate in &coordinates {
+                    if rows.contains_key(&coordinate.rowid) {
+                        continue;
+                    }
+                    let values = load_forgecode_conversation_values(connection, coordinate.rowid)?;
+                    let digest = forgecode_logical_record_digest(&values);
+                    rows.insert(coordinate.rowid, (values, digest));
+                }
+                Ok(rows)
+            })
+            .map_err(|error| match error {
+                CaptureError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => {
+                    hydration_failure(HydrationFailureKind::MissingRecord)
+                }
+                _ => hydration_failure(HydrationFailureKind::StaleRecordEvidence),
+            })?;
+        let mut hydrated = Vec::with_capacity(requests.len());
+        for (request, coordinate) in requests.iter().zip(coordinates) {
+            let (values, digest) = cached_rows
+                .get(&coordinate.rowid)
                 .ok_or_else(|| hydration_failure(HydrationFailureKind::MissingRecord))?;
             if digest != request.locator().record_digest() || coordinate.row_version != *digest {
                 return Err(hydration_failure(HydrationFailureKind::StaleRecordEvidence));
@@ -620,13 +627,6 @@ impl ForgeCodeSourceBackedResolverV0 {
                 event_id,
                 provider_bytes: text.into_bytes(),
             });
-        }
-        if !current
-            .snapshot
-            .revalidate(&route.canonical_path)
-            .unwrap_or(false)
-        {
-            return Err(hydration_failure(HydrationFailureKind::StaleSourceEvidence));
         }
         Ok(hydrated)
     }

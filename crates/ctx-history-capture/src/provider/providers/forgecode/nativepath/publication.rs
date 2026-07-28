@@ -232,9 +232,7 @@ pub(super) fn publish_core_page(
     page: &ForgeCodePage,
     generation: u64,
 ) -> Result<ProviderImportSummary> {
-    if !source.snapshot.revalidate(&source.canonical_path)? {
-        return Err(CaptureError::SourceChangedDuringCapture);
-    }
+    source.database.revalidate()?;
     let raw_source_path = source.canonical_path.display().to_string();
     let proposed_source_identity =
         proposed_source_identity(source_root, &raw_source_path, &source.schema_fingerprint)?;
@@ -337,9 +335,7 @@ pub(super) fn publish_core_page(
         )?;
     }
 
-    if !source.snapshot.revalidate(&source.canonical_path)? {
-        return Err(CaptureError::SourceChangedDuringCapture);
-    }
+    source.database.revalidate()?;
     group.prepare_journal_checkpoint()?;
     group.publish_cursor_set()?;
     group.commit()?;
@@ -705,7 +701,7 @@ pub(in crate::provider::providers::forgecode) fn legacy_source_revision(
     format!(
         "forgecode-sqlite-snapshot-v1:capture={FORGECODE_RELEASED_CAPTURE_REVISION};policy={FORGECODE_RELEASED_POLICY_REVISION};schema={};{}",
         source.schema_fingerprint,
-        source.snapshot.revision_component(),
+        source.database.revision_component(),
     )
 }
 

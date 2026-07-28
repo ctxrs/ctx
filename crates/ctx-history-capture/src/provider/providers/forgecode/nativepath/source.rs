@@ -3,7 +3,8 @@ mod scanner;
 use std::{
     collections::BTreeSet,
     fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
+    sync::Arc,
 };
 
 use chrono::Duration;
@@ -13,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
+    common::io::{open_provider_source_file, OpenedProviderSourceFile},
     provider::{
         file_touches::{
             event_type_supports_structured_file_touches,
@@ -21,10 +23,12 @@ use crate::{
         },
         normalization::{provider_capped_json_value, provider_line_from_index},
         sqlite::{
-            ensure_sqlite_table_columns, open_provider_sqlite_readonly, optional_column_expr,
-            sqlite_schema_fingerprint, sqlite_table_columns, ProviderSqliteSourceSnapshot,
-            ReadOnlySqliteConnection, SqliteLengthPreflightGuard,
+            ensure_sqlite_table_columns, optional_column_expr, sqlite_schema_fingerprint,
+            sqlite_table_columns, SqliteLengthPreflightGuard,
         },
+    },
+    provider_sources::{
+        open_sqlite_source_snapshot, SqliteSourceAccessError, SqliteSourceEvidence,
     },
     CaptureError, OutputAssociations, OutputNativeCoordinate, OutputObservationKind, OutputOutcome,
     OutputOutcomeMetadata, OutputSourceLocator, ProOutputObservation, ProviderAdapterContext,
@@ -75,7 +79,7 @@ impl ForgeCodeFrontier {
 #[derive(Clone)]
 pub(in crate::provider::providers::forgecode) struct ForgeCodeSourceObservation {
     pub(super) canonical_path: PathBuf,
-    pub(super) snapshot: ProviderSqliteSourceSnapshot,
+    pub(super) database: Arc<ForgeCodeSqliteDatabase>,
     pub(super) source_revision: String,
     pub(super) schema_fingerprint: String,
     pub(super) user_version: i64,
@@ -139,34 +143,30 @@ pub(in crate::provider::providers::forgecode) fn discover_forgecode_source(
         }
         Ok(_) => {}
     }
-    let canonical_path = fs::canonicalize(&candidate)?;
-    let snapshot = ProviderSqliteSourceSnapshot::read(
-        &canonical_path,
-        "ForgeCode SQLite source must be a regular non-symlink file",
-        "ForgeCode SQLite sidecar must be a regular non-symlink file",
-    )?;
-    let conn = open_provider_sqlite_readonly(&canonical_path)?;
-    if !snapshot.revalidate(&canonical_path)? {
-        return Err(CaptureError::SourceChangedDuringCapture);
-    }
-    let columns = sqlite_table_columns(&conn, "conversations")?;
-    ensure_sqlite_table_columns(
-        &columns,
-        "ForgeCode conversations table",
-        &["conversation_id", "workspace_id", "created_at"],
-    )?;
-    let schema_fingerprint = sqlite_schema_fingerprint(&conn)?;
-    let user_version = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let canonical_path = absolute_path(&candidate)?;
+    let (database, (columns, schema_fingerprint, user_version)) =
+        ForgeCodeSqliteDatabase::open(&canonical_path, |conn| {
+            let columns = sqlite_table_columns(conn, "conversations")?;
+            ensure_sqlite_table_columns(
+                &columns,
+                "ForgeCode conversations table",
+                &["conversation_id", "workspace_id", "created_at"],
+            )?;
+            Ok((
+                columns,
+                sqlite_schema_fingerprint(conn)?,
+                conn.pragma_query_value(None, "user_version", |row| row.get(0))?,
+            ))
+        })?;
     let source_revision = format!(
-        "forgecode-nativepath-v1:parser={FORGECODE_NATIVE_PARSER_REVISION};policy={FORGECODE_NATIVE_POLICY_REVISION};schema={schema_fingerprint};{}",
-        snapshot.revision_component()
+        "forgecode-nativepath-v2:parser={FORGECODE_NATIVE_PARSER_REVISION};policy={FORGECODE_NATIVE_POLICY_REVISION};schema={schema_fingerprint};identity={};length={};revision={}",
+        hex(database.evidence().identity()),
+        database.evidence().length(),
+        hex(database.evidence().revision()),
     );
-    if !snapshot.revalidate(&canonical_path)? {
-        return Err(CaptureError::SourceChangedDuringCapture);
-    }
     Ok(ForgeCodeDiscovery::Live(ForgeCodeSourceObservation {
         canonical_path,
-        snapshot,
+        database: Arc::new(database),
         source_revision,
         schema_fingerprint,
         user_version,
@@ -175,16 +175,123 @@ pub(in crate::provider::providers::forgecode) fn discover_forgecode_source(
 }
 
 fn absolute_path(path: &Path) -> Result<PathBuf> {
-    if path.is_absolute() {
-        Ok(path.to_path_buf())
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
     } else {
-        Ok(std::env::current_dir()?.join(path))
+        std::env::current_dir()?.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
     }
+    Ok(normalized)
+}
+
+#[derive(Debug)]
+pub(super) struct ForgeCodeSqliteDatabase {
+    opened: OpenedProviderSourceFile,
+    evidence: SqliteSourceEvidence,
+}
+
+impl ForgeCodeSqliteDatabase {
+    fn open<T>(path: &Path, query: impl FnOnce(&Connection) -> Result<T>) -> Result<(Self, T)> {
+        let opened = open_provider_source_file(path)?;
+        let snapshot = open_sqlite_source_snapshot(path, opened.file())
+            .map_err(|error| forgecode_sqlite_source_error(path, error))?;
+        let evidence = snapshot.evidence().clone();
+        let result = snapshot
+            .connection()
+            .map_err(|error| forgecode_sqlite_source_error(path, error))
+            .and_then(query);
+        let finished = snapshot
+            .finish()
+            .map_err(|error| forgecode_sqlite_source_error(path, error))?;
+        opened.revalidate()?;
+        if finished != evidence {
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
+        Ok((Self { opened, evidence }, result?))
+    }
+
+    pub(super) fn read<T>(
+        &self,
+        path: &Path,
+        query: impl FnOnce(&Connection) -> Result<T>,
+    ) -> Result<T> {
+        self.revalidate()?;
+        let snapshot = open_sqlite_source_snapshot(path, self.opened.file())
+            .map_err(|error| forgecode_sqlite_source_error(path, error))?;
+        let result = if snapshot.evidence() == &self.evidence {
+            snapshot
+                .connection()
+                .map_err(|error| forgecode_sqlite_source_error(path, error))
+                .and_then(query)
+        } else {
+            Err(CaptureError::SourceChangedDuringCapture)
+        };
+        let finished = snapshot
+            .finish()
+            .map_err(|error| forgecode_sqlite_source_error(path, error))?;
+        self.revalidate()?;
+        if finished != self.evidence {
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
+        result
+    }
+
+    pub(super) fn revalidate(&self) -> Result<()> {
+        self.opened.revalidate()
+    }
+
+    pub(super) fn evidence(&self) -> &SqliteSourceEvidence {
+        &self.evidence
+    }
+
+    pub(super) fn revision_component(&self) -> String {
+        format!(
+            "identity={};length={};revision={}",
+            hex(self.evidence.identity()),
+            self.evidence.length(),
+            hex(self.evidence.revision()),
+        )
+    }
+}
+
+fn forgecode_sqlite_source_error(path: &Path, error: SqliteSourceAccessError) -> CaptureError {
+    match error {
+        SqliteSourceAccessError::SourceChanged
+        | SqliteSourceAccessError::ConnectionIdentityMismatch => {
+            CaptureError::SourceChangedDuringCapture
+        }
+        error => CaptureError::ProviderSource {
+            provider: ctx_history_core::CaptureProvider::ForgeCode.as_str(),
+            path: path.to_path_buf(),
+            kind: crate::ProviderSourceFailureKind::SourceDatabase,
+            detail: error.to_string(),
+        },
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }
 
 pub(in crate::provider::providers::forgecode) struct ForgeCodeScanner {
     source: ForgeCodeSourceObservation,
-    conn: ReadOnlySqliteConnection,
     frontier: ForgeCodeFrontier,
     context: ProviderAdapterContext,
     source_root: Option<String>,
