@@ -39,6 +39,24 @@ impl SessionFact {
         imported_at: DateTime<Utc>,
     ) -> Result<(Self, Option<String>)> {
         let (metadata, failure) = mistral_vibe_bounded_metadata(source, imported_at)?;
+        Self::from_bounded_metadata(metadata, failure, imported_at)
+    }
+
+    pub(super) fn from_admitted(
+        source: &MistralVibeSessionSource,
+        imported_at: DateTime<Utc>,
+        metadata_bytes: &[u8],
+    ) -> Result<(Self, Option<String>)> {
+        let (metadata, failure) =
+            mistral_vibe_bounded_metadata_from_bytes(source, imported_at, metadata_bytes)?;
+        Self::from_bounded_metadata(metadata, failure, imported_at)
+    }
+
+    fn from_bounded_metadata(
+        metadata: Value,
+        failure: Option<String>,
+        imported_at: DateTime<Utc>,
+    ) -> Result<(Self, Option<String>)> {
         let provider_session_id = mistral_vibe_metadata_string(&metadata, "session_id").ok_or(
             CaptureError::SystemInvariant("Mistral Vibe bounded metadata lost its session id"),
         )?;

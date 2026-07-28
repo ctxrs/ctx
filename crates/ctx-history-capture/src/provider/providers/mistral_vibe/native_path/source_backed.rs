@@ -1,7 +1,4 @@
-use std::{
-    collections::{BTreeMap, HashSet},
-    fmt::Write as _,
-};
+use std::collections::{BTreeMap, HashSet};
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, CertifiedSource, ContentSourceResolver,
@@ -16,11 +13,7 @@ use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
 use thiserror::Error;
 
 use super::*;
-use crate::complete_content::{
-    jsonl::ExactJsonlSourceBinding, AuthorizedSourceRoute, CompleteContentBodyDigest,
-    CompleteContentError, CompleteContentErrorKind, CompleteContentSourceFamily,
-    SourceAccessBroker, SourceSnapshot,
-};
+use crate::common::io::{OpenedProviderSourceFile, ProviderSourceRoot};
 
 const SOURCE_SCHEMA_VARIANT: &str = "meta-json-messages-jsonl-v1";
 const SOURCE_ANCHOR_NAMESPACE: &str = "mistral-vibe-session-id";
@@ -75,8 +68,8 @@ pub(crate) struct MistralVibeSourceBackedScan {
 #[derive(Debug, Clone)]
 struct ResolvableSource {
     source: SourceKey,
-    native: MistralVibeSessionSource,
-    observation: reader::SourceObservation,
+    metadata_relative_path: PathBuf,
+    messages_relative_path: PathBuf,
     revision_digest: [u8; 32],
 }
 
@@ -87,9 +80,26 @@ struct SessionLineage {
     session_id: StableEntityId,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(crate) struct MistralVibeSourceResolver {
+    authority: ProviderSourceRoot,
     sources: BTreeMap<SourceKey, ResolvableSource>,
+}
+
+#[derive(Debug)]
+struct AdmittedMistralVibeSource {
+    observation: reader::SourceObservation,
+    metadata_bytes: Vec<u8>,
+    metadata: OpenedProviderSourceFile,
+    messages: OpenedProviderSourceFile,
+}
+
+impl AdmittedMistralVibeSource {
+    fn revalidate(&self, authority: &ProviderSourceRoot) -> Result<()> {
+        self.metadata.revalidate()?;
+        self.messages.revalidate()?;
+        authority.revalidate()
+    }
 }
 
 /// Scans each complete Mistral Vibe session directory as one composite source.
@@ -110,13 +120,29 @@ pub(crate) fn scan_mistral_vibe_source_backed(
         return Err(MistralVibeSourceBackedError::EmptyRoot);
     }
     discovered.sort_by(|left, right| left.messages_path.cmp(&right.messages_path));
+    let selected = fs::canonicalize(root)?;
+    let authority_path = if fs::symlink_metadata(root)?.is_file() {
+        selected
+            .parent()
+            .ok_or(CaptureError::InvalidProviderTranscriptPath {
+                path: selected.clone(),
+                reason: "Mistral Vibe selected file has no authority directory",
+            })?
+            .to_path_buf()
+    } else {
+        selected
+    };
+    let authority = ProviderSourceRoot::open(&authority_path)?;
 
     let mut native_session_ids = HashSet::new();
     let mut leaves = Vec::with_capacity(discovered.len());
     let mut lineages = Vec::with_capacity(discovered.len());
-    let mut resolver = MistralVibeSourceResolver::default();
+    let mut resolver = MistralVibeSourceResolver {
+        authority: authority.clone(),
+        sources: BTreeMap::new(),
+    };
     for source in discovered {
-        let (leaf, resolvable, lineage) = scan_leaf(source, imported_at)?;
+        let (leaf, resolvable, lineage) = scan_leaf(&authority, source, imported_at)?;
         if !native_session_ids.insert(lineage.provider_session_id.clone()) {
             return Err(MistralVibeSourceBackedError::DuplicateSessionId);
         }
@@ -156,6 +182,7 @@ pub(crate) fn scan_mistral_vibe_source_backed(
 }
 
 fn scan_leaf(
+    authority: &ProviderSourceRoot,
     native: MistralVibeSessionSource,
     imported_at: DateTime<Utc>,
 ) -> MistralVibeSourceBackedResult<(
@@ -163,8 +190,15 @@ fn scan_leaf(
     ResolvableSource,
     SessionLineage,
 )> {
-    let opening = reader::SourceObservation::read(&native)?;
-    let (session, _) = SessionFact::from_source(&native, imported_at)?;
+    let metadata_relative_path = relative_to_authority(authority, &native.metadata_path)?;
+    let messages_relative_path = relative_to_authority(authority, &native.messages_path)?;
+    let opening = admit_mistral_vibe_source(
+        authority,
+        &metadata_relative_path,
+        &messages_relative_path,
+    )?;
+    let (session, _) =
+        SessionFact::from_admitted(&native, imported_at, &opening.metadata_bytes)?;
     let native_session_id = session.provider_session_id.clone();
     let source = source_key(&native_session_id)?;
     let session_id = session_identity(&source, &native_session_id)?;
@@ -175,22 +209,26 @@ fn scan_leaf(
         .transpose()?;
     let provisional_root_session_id = parent_session_id.unwrap_or(session_id);
     let branch = mistral_vibe_metadata_string(&session.metadata, "git_branch");
-    let source_path = opening.canonical_messages_path.display().to_string();
+    let source_path = opening
+        .observation
+        .canonical_messages_path
+        .display()
+        .to_string();
     let agent_type = if session.is_primary() {
         AgentType::Primary
     } else {
         AgentType::Subagent
     };
     let is_primary = session.is_primary();
-    let opening_revision = projection_observation(&source, &opening)?;
+    let opening_revision = projection_observation(&source, &opening.observation)?;
     let revision_digest = source_revision_digest(opening_revision.revision());
 
-    let file = File::open(&opening.canonical_messages_path)?;
+    let file = opening.messages.file().try_clone()?;
     let mut file_reader = BufReader::new(file);
     let mut content_hasher = Sha256::new();
     content_hasher.update(SOURCE_CONTENT_DIGEST_DOMAIN);
-    content_hasher.update(opening.metadata.length.to_be_bytes());
-    content_hasher.update(opening.metadata_sha256);
+    content_hasher.update(opening.observation.metadata.length.to_be_bytes());
+    content_hasher.update(opening.observation.metadata_sha256);
 
     let mut documents = Vec::new();
     let mut complete_records = 0_u64;
@@ -206,7 +244,7 @@ fn scan_leaf(
         let line = read_bounded_line(
             &mut file_reader,
             &mut content_hasher,
-            opening.messages.length,
+            opening.observation.messages.length,
             start,
         )?;
         match line {
@@ -257,10 +295,14 @@ fn scan_leaf(
         }
     }
 
-    let closing = reader::SourceObservation::read(&native)?;
-    let closing_revision = projection_observation(&source, &closing)?;
+    opening.revalidate(authority)?;
+    let closing =
+        admit_mistral_vibe_source(authority, &metadata_relative_path, &messages_relative_path)?;
+    closing.revalidate(authority)?;
+    let closing_revision = projection_observation(&source, &closing.observation)?;
     let content_digest: [u8; 32] = content_hasher.finalize().into();
     let certified_bytes = opening
+        .observation
         .metadata
         .length
         .checked_add(complete_prefix_end)
@@ -277,7 +319,7 @@ fn scan_leaf(
     let frontier = SourceFrontier::new(
         SOURCE_FRONTIER_KIND,
         TypedKey::composite(vec![
-            TypedKey::bytes(opening.metadata_sha256.to_vec())?,
+            TypedKey::bytes(opening.observation.metadata_sha256.to_vec())?,
             TypedKey::U64(complete_prefix_end),
             TypedKey::U64(next_ordinal),
         ])?,
@@ -294,8 +336,8 @@ fn scan_leaf(
     )?;
     let resolvable = ResolvableSource {
         source,
-        native,
-        observation: closing,
+        metadata_relative_path,
+        messages_relative_path,
         revision_digest,
     };
     let lineage = SessionLineage {
@@ -311,6 +353,59 @@ fn scan_leaf(
         resolvable,
         lineage,
     ))
+}
+
+fn relative_to_authority(
+    authority: &ProviderSourceRoot,
+    path: &Path,
+) -> MistralVibeSourceBackedResult<PathBuf> {
+    let canonical = fs::canonicalize(path)?;
+    canonical
+        .strip_prefix(authority.named_path())
+        .map(Path::to_path_buf)
+        .map_err(|_| {
+            CaptureError::InvalidProviderTranscriptPath {
+                path: canonical,
+                reason: "Mistral Vibe compound leaves must share one authority root",
+            }
+            .into()
+        })
+}
+
+fn admit_mistral_vibe_source(
+    authority: &ProviderSourceRoot,
+    metadata_relative_path: &Path,
+    messages_relative_path: &Path,
+) -> MistralVibeSourceBackedResult<AdmittedMistralVibeSource> {
+    let metadata = authority.open_file(metadata_relative_path)?;
+    let messages = authority.open_file(messages_relative_path)?;
+    if metadata.len() > MAX_PROVIDER_JSONL_LINE_BYTES as u64 {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: authority.named_path().join(metadata_relative_path),
+            reason: "Mistral Vibe meta.json exceeds the supported size",
+        }
+        .into());
+    }
+    let metadata_bytes = metadata.read_all_bounded(MAX_PROVIDER_JSONL_LINE_BYTES)?;
+    let metadata_sha256 = Sha256::digest(&metadata_bytes).into();
+    let observation = reader::SourceObservation {
+        canonical_metadata_path: authority.named_path().join(metadata_relative_path),
+        canonical_messages_path: authority.named_path().join(messages_relative_path),
+        metadata: FileStamp::from_metadata(metadata.metadata())?,
+        messages: FileStamp::from_metadata(messages.metadata())?,
+        metadata_sha256,
+        exact_content_revision:
+            super::super::source::mistral_vibe_complete_content_revision_from_admitted(
+                metadata.metadata(),
+                messages.metadata(),
+            )?,
+    };
+    Ok(AdmittedMistralVibeSource {
+        observation,
+        metadata_bytes,
+        metadata,
+        messages,
+    })
 }
 
 enum RecordProjection {
@@ -620,37 +715,17 @@ impl MistralVibeSourceResolver {
             }
         }
 
-        revalidate_revision(route, expected_revision)?;
-        let event_uuid = first.event_id().as_uuid();
-        let access = SourceAccessBroker::new()
-            .admit(
-                AuthorizedSourceRoute {
-                    source_id: route.source.identity().as_uuid(),
-                    provider: CaptureProvider::MistralVibe,
-                    source_format: MISTRAL_VIBE_SOURCE_FORMAT.to_owned(),
-                    family: CompleteContentSourceFamily::Jsonl,
-                    raw_source_path: route.native.messages_path.clone(),
-                    source_root: Some(route.native.session_dir.clone()),
-                    source_identity: Some(route.source.identity().to_string()),
-                    source_snapshot: SourceSnapshot {
-                        size_bytes: Some(route.observation.messages.length),
-                        modified_at_ms: None,
-                        sha256: None,
-                    },
-                },
-                event_uuid,
-            )
-            .map_err(map_complete_content_error)?;
-        let current_path_identity =
-            provider_path_identity(&route.observation.canonical_messages_path)
-                .map_err(|_| unavailable("Mistral Vibe path identity is unavailable"))?;
-        let expected_binding = ExactJsonlSourceBinding::new(
-            &route.observation.exact_content_revision,
-            &current_path_identity,
-        );
-        if access.exact_jsonl_binding() != Some(&expected_binding) {
+        let admitted = admit_mistral_vibe_source(
+            &self.authority,
+            &route.metadata_relative_path,
+            &route.messages_relative_path,
+        )
+        .map_err(|_| unavailable("Mistral Vibe compound source could not be admitted"))?;
+        let current = projection_observation(&route.source, &admitted.observation)
+            .map_err(|_| unavailable("Mistral Vibe source revision could not be encoded"))?;
+        if source_revision_digest(current.revision()) != expected_revision {
             return Err(stale_source(
-                "Mistral Vibe auxiliary source evidence changed during admission",
+                "Mistral Vibe meta.json or messages.jsonl changed",
             ));
         }
 
@@ -660,26 +735,74 @@ impl MistralVibeSourceResolver {
             let byte_end_exclusive = byte_offset
                 .checked_add(byte_length)
                 .ok_or_else(|| invalid_locator("Mistral Vibe locator range overflowed"))?;
-            let expected_digest =
-                CompleteContentBodyDigest::parse(lower_hex(request.locator().record_digest()))
-                    .ok_or_else(|| invalid_locator("Mistral Vibe locator digest is invalid"))?;
-            let provider_bytes = access
-                .read_jsonl_record(
+            if byte_length == 0
+                || byte_length > MAX_PROVIDER_JSONL_LINE_BYTES.saturating_add(2) as u64
+                || byte_end_exclusive > admitted.messages.len()
+            {
+                return Err(HydrationFailure {
+                    kind: HydrationFailureKind::MissingRecord,
+                    detail: "Mistral Vibe locator range is no longer present".to_owned(),
+                });
+            }
+            if byte_offset > 0 {
+                let boundary = admitted
+                    .messages
+                    .read_exact_range(byte_offset - 1, 1, 1)
+                    .map_err(|_| stale_source("Mistral Vibe record boundary changed"))?;
+                if boundary != b"\n" {
+                    return Err(stale_source("Mistral Vibe record boundary changed"));
+                }
+            }
+            let provider_bytes = admitted
+                .messages
+                .read_exact_range(
                     byte_offset,
-                    byte_end_exclusive,
-                    &expected_digest,
-                    request.event_id().as_uuid(),
+                    usize::try_from(byte_length)
+                        .map_err(|_| invalid_locator("Mistral Vibe locator range is too large"))?,
+                    MAX_PROVIDER_JSONL_LINE_BYTES.saturating_add(2),
                 )
-                .map_err(map_complete_content_error)?;
+                .map_err(|_| stale_source("Mistral Vibe record bytes changed"))?;
+            let first_newline = provider_bytes.iter().position(|byte| *byte == b'\n');
+            if first_newline.is_some_and(|position| position + 1 != provider_bytes.len())
+                || (first_newline.is_none() && byte_end_exclusive != admitted.messages.len())
+            {
+                return Err(stale_source("Mistral Vibe record boundary changed"));
+            }
+            let payload = provider_bytes
+                .strip_suffix(b"\n")
+                .unwrap_or(&provider_bytes)
+                .strip_suffix(b"\r")
+                .unwrap_or_else(|| provider_bytes.strip_suffix(b"\n").unwrap_or(&provider_bytes));
+            if Sha256::digest(payload).as_slice() != request.locator().record_digest() {
+                return Err(HydrationFailure {
+                    kind: HydrationFailureKind::StaleRecordEvidence,
+                    detail: "Mistral Vibe record digest changed".to_owned(),
+                });
+            }
             hydrated.push(HydratedProviderRecord {
                 event_id: request.event_id(),
                 provider_bytes,
             });
         }
-        access
-            .revalidate_jsonl(event_uuid)
-            .map_err(map_complete_content_error)?;
-        revalidate_revision(route, expected_revision)?;
+        admitted
+            .revalidate(&self.authority)
+            .map_err(|_| stale_source("Mistral Vibe compound authority changed"))?;
+        let closing = admit_mistral_vibe_source(
+            &self.authority,
+            &route.metadata_relative_path,
+            &route.messages_relative_path,
+        )
+        .map_err(|_| unavailable("Mistral Vibe compound source could not be revalidated"))?;
+        closing
+            .revalidate(&self.authority)
+            .map_err(|_| stale_source("Mistral Vibe compound authority changed"))?;
+        let closing = projection_observation(&route.source, &closing.observation)
+            .map_err(|_| unavailable("Mistral Vibe source revision could not be encoded"))?;
+        if source_revision_digest(closing.revision()) != expected_revision {
+            return Err(stale_source(
+                "Mistral Vibe meta.json or messages.jsonl changed",
+            ));
+        }
         Ok(hydrated)
     }
 }
@@ -745,52 +868,6 @@ fn locator_range(
         return Err(invalid_locator("Mistral Vibe locator is not a JSONL range"));
     };
     Ok((*byte_offset, *byte_length))
-}
-
-fn revalidate_revision(
-    route: &ResolvableSource,
-    expected: [u8; 32],
-) -> std::result::Result<(), HydrationFailure> {
-    let current = reader::SourceObservation::read(&route.native)
-        .map_err(|_| unavailable("Mistral Vibe source could not be observed"))?;
-    let current = projection_observation(&route.source, &current)
-        .map_err(|_| unavailable("Mistral Vibe source revision could not be encoded"))?;
-    if source_revision_digest(current.revision()) != expected {
-        return Err(stale_source(
-            "Mistral Vibe meta.json or messages.jsonl changed",
-        ));
-    }
-    Ok(())
-}
-
-fn map_complete_content_error(error: CompleteContentError) -> HydrationFailure {
-    let kind = match error.kind {
-        CompleteContentErrorKind::SourceRecordMissing => HydrationFailureKind::MissingRecord,
-        CompleteContentErrorKind::ContentVerificationFailed => {
-            HydrationFailureKind::StaleRecordEvidence
-        }
-        CompleteContentErrorKind::SourceChanged => HydrationFailureKind::StaleSourceEvidence,
-        CompleteContentErrorKind::HydrationUnsupported => HydrationFailureKind::InvalidLocator,
-        CompleteContentErrorKind::SourceMissing | CompleteContentErrorKind::SourceUnreadable => {
-            HydrationFailureKind::TemporarilyUnavailable
-        }
-        CompleteContentErrorKind::ContentTooLarge => HydrationFailureKind::InvalidLocator,
-    };
-    HydrationFailure {
-        kind,
-        detail: format!(
-            "Mistral Vibe exact hydration failed: {}",
-            error.kind.as_str()
-        ),
-    }
-}
-
-fn lower_hex(bytes: &[u8]) -> String {
-    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
-    for byte in bytes {
-        let _ = write!(&mut encoded, "{byte:02x}");
-    }
-    encoded
 }
 
 fn unavailable(detail: &'static str) -> HydrationFailure {
