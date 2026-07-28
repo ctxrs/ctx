@@ -36,6 +36,12 @@ mod platform;
 mod profile_project;
 mod simple;
 
+pub(crate) use config_project::{
+    CrushDiscoveredProjectInventory, CrushProjectInventorySelector,
+    CrushProjectInventorySelectorError,
+};
+pub(super) use platform::{resolve_lingma_with_authority, resolve_warp_with_authority};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ResolverGroup {
     Simple,
