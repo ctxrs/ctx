@@ -7,15 +7,16 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::{limits::Limit, Connection, OpenFlags};
+use rusqlite::{limits::Limit, Connection};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use tempfile::TempDir;
-use url::Url;
 
 use crate::common::io::ensure_regular_provider_transcript_file;
 use crate::compute_payload_hash;
-use crate::provider_sources::{observe_ordinary_file, OrdinaryFileObservation};
+use crate::provider_sources::{
+    observe_ordinary_file, open_ordinary_file_without_following, open_sqlite_source_snapshot,
+    OrdinaryFileObservation, SqliteSourceAccessError, SqliteSourceReadSnapshot,
+};
 
 use crate::{CaptureError, Result, MAX_PROVIDER_SQLITE_VALUE_BYTES};
 
@@ -406,15 +407,29 @@ fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
 }
 
 pub(crate) struct ReadOnlySqliteConnection {
-    conn: Connection,
-    _snapshot_dir: Option<TempDir>,
+    snapshot: Option<SqliteSourceReadSnapshot>,
+    _root_bound_database: File,
 }
 
 impl Deref for ReadOnlySqliteConnection {
     type Target = Connection;
 
     fn deref(&self) -> &Self::Target {
-        &self.conn
+        let Some(snapshot) = self.snapshot.as_ref() else {
+            inactive_readonly_sqlite_connection()
+        };
+        match snapshot.connection() {
+            Ok(connection) => connection,
+            Err(_) => inactive_readonly_sqlite_connection(),
+        }
+    }
+}
+
+impl Drop for ReadOnlySqliteConnection {
+    fn drop(&mut self) {
+        if let Some(snapshot) = self.snapshot.take() {
+            let _ = snapshot.finish();
+        }
     }
 }
 
@@ -433,51 +448,12 @@ pub(crate) fn open_provider_sqlite_readonly(path: &Path) -> Result<ReadOnlySqlit
 
 pub(crate) fn open_sqlite_readonly_source(path: &Path) -> Result<ReadOnlySqliteConnection> {
     ensure_regular_provider_transcript_file(path)?;
-    let sidecars = sqlite_existing_regular_sidecar_paths(path)?;
-    if sidecars.is_empty() {
-        let uri = sqlite_immutable_uri(path)?;
-        let conn = Connection::open_with_flags(
-            uri.as_str(),
-            OpenFlags::SQLITE_OPEN_READ_ONLY
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX
-                | OpenFlags::SQLITE_OPEN_URI,
-        )?;
-        return Ok(ReadOnlySqliteConnection {
-            conn,
-            _snapshot_dir: None,
-        });
-    }
-
-    // Read-only SQLite connections can still update live WAL shared-memory files.
-    // Copy the DB plus sidecars first so imports see committed WAL content without
-    // mutating provider-owned history.
-    let snapshot_dir = tempfile::Builder::new()
-        .prefix("ctx-provider-sqlite-")
-        .tempdir()?;
-    let snapshot_path = snapshot_dir.path().join(path.file_name().ok_or_else(|| {
-        CaptureError::InvalidProviderTranscriptPath {
-            path: path.to_path_buf(),
-            reason: "provider SQLite path has no file name",
-        }
-    })?);
-    fs::copy(path, &snapshot_path)?;
-    for sidecar in sidecars {
-        let sidecar_name =
-            sidecar
-                .file_name()
-                .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
-                    path: sidecar.clone(),
-                    reason: "provider SQLite sidecar path has no file name",
-                })?;
-        fs::copy(&sidecar, snapshot_dir.path().join(sidecar_name))?;
-    }
-    let conn = Connection::open_with_flags(
-        &snapshot_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
+    let root_bound_database = open_ordinary_file_without_following(path)?;
+    let snapshot = open_sqlite_source_snapshot(path, &root_bound_database)
+        .map_err(map_sqlite_source_access_error)?;
     Ok(ReadOnlySqliteConnection {
-        conn,
-        _snapshot_dir: Some(snapshot_dir),
+        snapshot: Some(snapshot),
+        _root_bound_database: root_bound_database,
     })
 }
 
@@ -485,6 +461,11 @@ pub(crate) fn with_sqlite_read_snapshot<T>(
     conn: &Connection,
     read: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
+    // Root-authorized connections already own the snapshot transaction pinned
+    // by `open_sqlite_source_snapshot`; never nest another transaction in it.
+    if !conn.is_autocommit() {
+        return read();
+    }
     // Keep provider snapshots scoped to one bounded read. Callers can release the
     // snapshot before writing to the ctx Store, even when they reuse the connection.
     conn.execute_batch("begin")?;
@@ -497,52 +478,28 @@ pub(crate) fn with_sqlite_read_snapshot<T>(
     }
 }
 
-fn sqlite_existing_regular_sidecar_paths(path: &Path) -> Result<Vec<PathBuf>> {
-    let mut sidecars = Vec::new();
-    for sidecar in sqlite_sidecar_paths(path) {
-        match sidecar.symlink_metadata() {
-            Ok(metadata) if metadata.file_type().is_file() => sidecars.push(sidecar),
-            Ok(_) => {
-                return Err(CaptureError::InvalidProviderTranscriptPath {
-                    path: sidecar,
-                    reason: "provider SQLite sidecar is not a regular file",
-                });
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(CaptureError::Io(error)),
+#[cold]
+fn inactive_readonly_sqlite_connection() -> ! {
+    std::process::abort()
+}
+
+fn map_sqlite_source_access_error(error: SqliteSourceAccessError) -> CaptureError {
+    match error {
+        SqliteSourceAccessError::Io { source, .. } => CaptureError::Io(source),
+        SqliteSourceAccessError::Sqlite { source, .. } => CaptureError::Sqlite(source),
+        SqliteSourceAccessError::UnsafeFile { path, reason } => {
+            CaptureError::InvalidProviderTranscriptPath { path, reason }
         }
+        SqliteSourceAccessError::ConnectionIdentityMismatch
+        | SqliteSourceAccessError::SourceChanged => CaptureError::SourceChangedDuringCapture,
+        SqliteSourceAccessError::SnapshotNotActive => {
+            CaptureError::SystemInvariant("provider SQLite source snapshot is inactive")
+        }
+        other => CaptureError::SystemIo {
+            operation: "opening a root-authorized provider SQLite snapshot",
+            source: std::io::Error::other(other),
+        },
     }
-    Ok(sidecars)
-}
-
-fn sqlite_sidecar_paths(path: &Path) -> Vec<PathBuf> {
-    ["-wal", "-shm", "-journal"]
-        .into_iter()
-        .map(|suffix| {
-            let mut sidecar = path.as_os_str().to_os_string();
-            sidecar.push(suffix);
-            PathBuf::from(sidecar)
-        })
-        .collect()
-}
-
-fn sqlite_immutable_uri(path: &Path) -> Result<String> {
-    let absolute_path =
-        path.canonicalize()
-            .map_err(|_| CaptureError::InvalidProviderTranscriptPath {
-                path: path.to_path_buf(),
-                reason: "failed to resolve provider SQLite path",
-            })?;
-    let mut url = Url::from_file_path(&absolute_path).map_err(|()| {
-        CaptureError::InvalidProviderTranscriptPath {
-            path: absolute_path,
-            reason: "provider SQLite path cannot be represented as a file URI",
-        }
-    })?;
-    url.query_pairs_mut()
-        .append_pair("mode", "ro")
-        .append_pair("immutable", "1");
-    Ok(url.to_string())
 }
 
 pub(crate) fn sqlite_schema_fingerprint(conn: &Connection) -> Result<String> {
@@ -568,8 +525,8 @@ mod tests {
     use rusqlite::{limits::Limit, params, types::Value as SqlValue, Connection};
 
     use super::{
-        optional_text_column_expr, optional_timestamp_millis_expr, BTreeSet,
-        ProviderSqliteSourceSnapshot, SqliteLengthPreflightGuard,
+        open_provider_sqlite_readonly, optional_text_column_expr, optional_timestamp_millis_expr,
+        BTreeSet, ProviderSqliteSourceSnapshot, SqliteLengthPreflightGuard,
     };
 
     const TEST_LENGTH_LIMIT: i32 = 16 * 1024;
@@ -650,6 +607,31 @@ mod tests {
 
         fs::write(&wal, b"wal-v2-with-more-bytes").unwrap();
         assert!(!snapshot.revalidate(&database).unwrap());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn provider_sqlite_opener_retains_the_root_bound_snapshot_guard() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let database = temp.path().join("provider.sqlite");
+        let writer = Connection::open(&database).unwrap();
+        writer
+            .execute("CREATE TABLE messages (body TEXT NOT NULL)", [])
+            .unwrap();
+        writer
+            .execute("INSERT INTO messages (body) VALUES ('guarded')", [])
+            .unwrap();
+        drop(writer);
+
+        let connection = open_provider_sqlite_readonly(&database).unwrap();
+        assert!(
+            !connection.is_autocommit(),
+            "the root-authorized guard must keep its read snapshot pinned"
+        );
+        let body: String = connection
+            .query_row("SELECT body FROM messages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(body, "guarded");
     }
 
     #[test]
