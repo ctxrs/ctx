@@ -2,7 +2,6 @@ use std::env;
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(ctx_semantic_fastembed)");
-    println!("cargo:rustc-check-cfg=cfg(ctx_sqlite_vec)");
 
     let os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
@@ -12,10 +11,6 @@ fn main() {
 
     if fastembed_supported {
         println!("cargo:rustc-cfg=ctx_semantic_fastembed");
-    }
-
-    if fastembed_supported {
-        println!("cargo:rustc-cfg=ctx_sqlite_vec");
     }
 }
 

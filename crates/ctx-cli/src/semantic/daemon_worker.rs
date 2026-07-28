@@ -6,8 +6,13 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
-use ctx_history_core::{database_path, utc_now};
-use ctx_history_store::{CanonicalSemanticProjectionVersion, Store};
+use ctx_history_capture::{CodexLocatorResolverV0, CodexSourceBackedErrorV0};
+use ctx_history_core::{
+    database_path, utc_now, AgentType, CaptureProvider, EventHydrationRequest, EventRole,
+    EventType, HydrationFailure, HydrationFailureKind,
+};
+use ctx_history_index::{EventRecord, VerifiedIndex};
+use ctx_history_store::{CanonicalSemanticProjectionVersion, EventEmbeddingDocument, Store};
 use serde_json::{json, Value};
 
 use crate::{store_util::open_existing_store_read_only, DaemonRunArgs, DaemonTriggerCommandArg};
@@ -45,13 +50,19 @@ use super::{
     runtime_limits::{
         DAEMON_MIN_REMAINING_FOR_JOB_SECS, DAEMON_SEMANTIC_RESERVE_GRACE_SECS,
         SEMANTIC_DIRTY_QUEUE_RECENT_LIMIT, SEMANTIC_MODEL_INIT_MIN_REMAINING_SECS,
-        SEMANTIC_WORKER_BATCH_DEFAULT, SEMANTIC_WORKER_BATCH_MAX, SEMANTIC_WORKER_MAX_SECONDS_CAP,
-        SEMANTIC_WORKER_MAX_SECONDS_DEFAULT,
+        SEMANTIC_SOURCE_MAX_CHARS, SEMANTIC_WORKER_BATCH_DEFAULT, SEMANTIC_WORKER_BATCH_MAX,
+        SEMANTIC_WORKER_MAX_SECONDS_CAP, SEMANTIC_WORKER_MAX_SECONDS_DEFAULT,
     },
-    vector_store::{SemanticSidecarStats, SemanticVectorStore},
+    source_backed_refresh_coordinator::{
+        discovered_codex_source_roots, pin_published_generation, PinnedSourceBackedGeneration,
+    },
+    vector_store::{
+        SemanticChunkDocument, SemanticSidecarStats, SemanticVectorStore,
+        SourceBackedSemanticEmbedder, SourceBackedSemanticOutcome, SourceBackedSemanticResolver,
+    },
 };
 
-#[cfg(all(test, ctx_sqlite_vec))]
+#[cfg(test)]
 use super::daemon::daemon_test_job;
 
 use crate::output::compact_json;
@@ -239,13 +250,14 @@ pub(super) fn run_daemon_semantic_job(
         ));
     }
 
-    #[cfg(all(test, ctx_sqlite_vec))]
+    #[cfg(test)]
     if let Some(value) = daemon_test_job("semantic_index") {
         return Ok(value);
     }
 
+    let source_generation = pin_published_generation(data_root)?;
     let db_path = database_path(data_root.to_path_buf());
-    if !db_path.exists() {
+    if source_generation.is_none() && !db_path.exists() {
         return Ok(daemon_semantic_job_json(
             "skipped",
             Some("store_missing"),
@@ -280,20 +292,49 @@ pub(super) fn run_daemon_semantic_job(
         ));
     }
 
-    let store = Store::open(&db_path).context("open ctx store for daemon semantic job")?;
-    refresh_semantic_document_count_cache(&store)?;
-    let _ = reconcile_committed_semantic_work_with_state(
-        data_root,
-        &store,
-        &mut runtime.semantic_reconciliation_sweep,
-    )?;
-    let mut before = semantic_worker_report(data_root, Some(&store))?;
-    if semantic_report_should_queue_recent_work(&before)
-        && queue_recent_semantic_work(data_root, &store, "daemon_recent")? > 0
-    {
-        before = semantic_worker_report(data_root, Some(&store))?;
+    let store = db_path
+        .exists()
+        .then(|| Store::open(&db_path).context("open ctx store for daemon semantic job"))
+        .transpose()?;
+    let vector_path = semantic_vector_path(data_root);
+    let mut source_vector_store = None;
+    let mut source_pending = false;
+    let mut source_eligible_events = 0_u64;
+    let mut before = if let Some(source_generation) = source_generation.as_ref() {
+        let vector_store = SemanticVectorStore::open(&vector_path)?;
+        source_pending =
+            !vector_store.source_backed_generation_ready(source_generation.generation_id())?;
+        source_eligible_events = source_generation.semantic_eligible_event_count()?;
+        source_vector_store = Some(vector_store);
+        semantic_worker_report(data_root, store.as_ref())?
+    } else {
+        let store = store
+            .as_ref()
+            .ok_or_else(|| anyhow!("legacy semantic projection has no canonical store"))?;
+        refresh_semantic_document_count_cache(store)?;
+        let _ = reconcile_committed_semantic_work_with_state(
+            data_root,
+            store,
+            &mut runtime.semantic_reconciliation_sweep,
+        )?;
+        let mut report = semantic_worker_report(data_root, Some(store))?;
+        if semantic_report_should_queue_recent_work(&report)
+            && queue_recent_semantic_work(data_root, store, "daemon_recent")? > 0
+        {
+            report = semantic_worker_report(data_root, Some(store))?;
+        }
+        report
+    };
+    if source_generation.is_some() && !source_pending {
+        return Ok(daemon_semantic_job_json(
+            "ready",
+            None,
+            last_run_at_ms,
+            None,
+            None,
+        ));
     }
-    if before.searchable_items == 0 {
+    if source_generation.is_none() && before.searchable_items == 0 {
         return Ok(daemon_semantic_job_json(
             "empty",
             Some("no_searchable_items"),
@@ -317,7 +358,11 @@ pub(super) fn run_daemon_semantic_job(
             None,
         ));
     }
-    if semantic_daemon_model_load_needed(&before, runtime.semantic_runtime.is_loaded()) {
+    let source_model_load_needed =
+        source_pending && source_eligible_events > 0 && !runtime.semantic_runtime.is_loaded();
+    if source_model_load_needed
+        || semantic_daemon_model_load_needed(&before, runtime.semantic_runtime.is_loaded())
+    {
         let cache_dir = semantic_worker_cache_dir(data_root);
         match run_daemon_semantic_model_startup_with(
             data_root,
@@ -339,10 +384,45 @@ pub(super) fn run_daemon_semantic_job(
             },
         )? {
             DaemonSemanticModelStartup::Loaded => {
-                before = semantic_worker_report(data_root, Some(&store))?;
+                before = semantic_worker_report(data_root, store.as_ref())?;
             }
             DaemonSemanticModelStartup::Finished(job) => return Ok(job),
         }
+    }
+    if let Some(source_generation) = source_generation {
+        let cache_dir = semantic_worker_cache_dir(data_root);
+        let vector_store = source_vector_store
+            .as_mut()
+            .ok_or_else(|| anyhow!("source-backed semantic generation has no flat vector store"))?;
+        let (outcome, indexed_chunks) = reconcile_source_backed_semantic_page(
+            source_generation,
+            vector_store,
+            &runtime.semantic_runtime,
+            &cache_dir,
+            deadline,
+        )?;
+        let (status, reason, last_error) = if let Some(unavailable) = outcome.unavailable {
+            (
+                "failed",
+                Some("source_hydration_unavailable"),
+                Some(format!(
+                    "source-backed semantic hydration failed: {unavailable:?}"
+                )),
+            )
+        } else if outcome.ready {
+            ("ready", None, None)
+        } else {
+            ("budget_exhausted", None, None)
+        };
+        let mut job = daemon_semantic_job_json(
+            status,
+            reason,
+            last_run_at_ms,
+            (indexed_chunks > 0).then_some(indexed_chunks),
+            last_error,
+        );
+        annotate_source_backed_semantic_progress(&mut job, &outcome);
+        return Ok(job);
     }
     if before.queued_items_estimate == 0 {
         return Ok(daemon_semantic_job_json(
@@ -421,6 +501,265 @@ pub(super) fn run_daemon_semantic_job(
         indexed_chunks,
         None,
     ))
+}
+
+fn reconcile_source_backed_semantic_page(
+    generation: PinnedSourceBackedGeneration,
+    vector_store: &mut SemanticVectorStore,
+    runtime: &SharedSemanticRuntime,
+    cache_dir: &Path,
+    deadline: Option<Instant>,
+) -> Result<(SourceBackedSemanticOutcome, usize)> {
+    let index = generation.into_index();
+    let provider = CodexLocatorResolverV0::discover(discovered_codex_source_roots()?)
+        .context("discover source-backed Codex semantic resolver")?;
+    let mut resolver = CodexSourceSemanticResolver {
+        index: &index,
+        provider,
+    };
+    let mut embedder = RuntimeSourceSemanticEmbedder {
+        runtime,
+        cache_dir,
+        deadline,
+        indexed_chunks: 0,
+    };
+    let outcome =
+        vector_store.reconcile_source_backed_index(&index, &mut resolver, &mut embedder)?;
+    Ok((outcome, embedder.indexed_chunks))
+}
+
+fn annotate_source_backed_semantic_progress(
+    job: &mut Value,
+    outcome: &SourceBackedSemanticOutcome,
+) {
+    job["source_records_scanned"] = json!(outcome.records_scanned);
+    job["source_records_embedded"] = json!(outcome.records_embedded);
+    job["source_records_reused"] = json!(outcome.records_reused);
+    job["source_invalidated_chunks"] = json!(outcome.invalidated_chunks);
+    job["source_deleted_chunks"] = json!(outcome.deleted_chunks);
+    job["source_generation_ready"] = json!(outcome.ready);
+    job["source_work_remaining"] = json!(outcome.work_remaining);
+}
+
+struct RuntimeSourceSemanticEmbedder<'a> {
+    runtime: &'a SharedSemanticRuntime,
+    cache_dir: &'a Path,
+    deadline: Option<Instant>,
+    indexed_chunks: usize,
+}
+
+impl SourceBackedSemanticEmbedder for RuntimeSourceSemanticEmbedder<'_> {
+    fn embed_chunks(&mut self, chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
+        let texts = chunks
+            .iter()
+            .map(|chunk| chunk.text.clone())
+            .collect::<Vec<_>>();
+        let (embeddings, _) = self
+            .runtime
+            .embed_documents(self.cache_dir, texts, self.deadline)?;
+        self.indexed_chunks = self.indexed_chunks.saturating_add(embeddings.len());
+        Ok(embeddings)
+    }
+}
+
+struct CodexSourceSemanticResolver<'a> {
+    index: &'a VerifiedIndex,
+    provider: CodexLocatorResolverV0,
+}
+
+impl SourceBackedSemanticResolver for CodexSourceSemanticResolver<'_> {
+    fn resolve_document(
+        &mut self,
+        event: &EventRecord,
+        request: &EventHydrationRequest,
+    ) -> std::result::Result<EventEmbeddingDocument, HydrationFailure> {
+        if event.provider != CaptureProvider::Codex.as_str()
+            || event.source_format != "codex_session_jsonl"
+            || request.event_id() != event.event_id
+            || request.locator() != &event.locator
+        {
+            return Err(source_hydration_failure(
+                HydrationFailureKind::InvalidLocator,
+                format!(
+                    "unsupported or mismatched semantic locator for {}",
+                    event.event_id
+                ),
+            ));
+        }
+
+        let user_text = self.hydrate_text(request)?;
+        let assistant = self.paired_assistant(event)?;
+        let mut sections = vec![format!("user:\n{}", user_text.trim())];
+        let mut occurred_at_ms = event.occurred_at_unix_ms.unwrap_or_default();
+        if let Some((assistant_text, assistant_at_ms)) = assistant {
+            if !assistant_text.trim().is_empty() {
+                sections.push(format!("assistant:\n{}", assistant_text.trim()));
+            }
+            occurred_at_ms = occurred_at_ms.max(assistant_at_ms);
+        }
+        let text = sections
+            .join("\n\n")
+            .chars()
+            .take(SEMANTIC_SOURCE_MAX_CHARS)
+            .collect::<String>();
+        Ok(EventEmbeddingDocument {
+            event_id: event.event_id.as_uuid(),
+            history_record_id: None,
+            session_id: Some(event.session_id.as_uuid()),
+            seq: event.event_sequence,
+            occurred_at_ms,
+            anchor_occurred_at_ms: event.occurred_at_unix_ms.unwrap_or_default(),
+            event_type: parse_source_event_type(&event.event_type)?,
+            role: event
+                .role
+                .as_deref()
+                .map(parse_source_event_role)
+                .transpose()?,
+            rank_bucket: "lite_turn".to_owned(),
+            provider: Some(CaptureProvider::Codex),
+            source_format: Some(event.source_format.clone()),
+            agent_type: Some(parse_source_agent_type(&event.agent_type)?),
+            session_is_primary: Some(event.is_primary),
+            cwd: event.cwd.clone(),
+            raw_source_path: event.source_path.clone(),
+            record_title: None,
+            record_kind: Some(event.event_type.clone()),
+            record_workspace: event.workspace.clone(),
+            text,
+        })
+    }
+}
+
+impl CodexSourceSemanticResolver<'_> {
+    fn hydrate_text(
+        &self,
+        request: &EventHydrationRequest,
+    ) -> std::result::Result<String, HydrationFailure> {
+        let hydrated = self
+            .provider
+            .hydrate(request.locator())
+            .map_err(codex_hydration_failure)?;
+        hydrated.decoded_display_text.ok_or_else(|| {
+            source_hydration_failure(
+                HydrationFailureKind::MissingRecord,
+                format!(
+                    "provider resolver returned no display text for {}",
+                    request.event_id()
+                ),
+            )
+        })
+    }
+
+    fn paired_assistant(
+        &self,
+        anchor: &EventRecord,
+    ) -> std::result::Result<Option<(String, i64)>, HydrationFailure> {
+        let events = self
+            .index
+            .events_for_session(anchor.session_id.as_uuid())
+            .map_err(|error| {
+                source_hydration_failure(
+                    HydrationFailureKind::TemporarilyUnavailable,
+                    format!(
+                        "read source-backed session {} for semantic lite turn: {error}",
+                        anchor.session_id
+                    ),
+                )
+            })?;
+        let anchor_index = events
+            .iter()
+            .position(|event| event.event_id == anchor.event_id)
+            .ok_or_else(|| {
+                source_hydration_failure(
+                    HydrationFailureKind::MissingRecord,
+                    format!(
+                        "semantic anchor {} is absent from its session",
+                        anchor.event_id
+                    ),
+                )
+            })?;
+        let assistant = events[anchor_index.saturating_add(1)..]
+            .iter()
+            .take_while(|event| {
+                !(event.event_type == EventType::Message.as_str()
+                    && event.role.as_deref() == Some(EventRole::User.as_str()))
+            })
+            .filter(|event| {
+                event.event_type == EventType::Message.as_str()
+                    && event.role.as_deref() == Some(EventRole::Assistant.as_str())
+            })
+            .last();
+        let Some(assistant) = assistant else {
+            return Ok(None);
+        };
+        let request = EventHydrationRequest::new(assistant.event_id, assistant.locator.clone())
+            .map_err(|error| {
+                source_hydration_failure(
+                    HydrationFailureKind::InvalidLocator,
+                    format!(
+                        "validate paired assistant locator {}: {error}",
+                        assistant.event_id
+                    ),
+                )
+            })?;
+        Ok(Some((
+            self.hydrate_text(&request)?,
+            assistant.occurred_at_unix_ms.unwrap_or_default(),
+        )))
+    }
+}
+
+fn codex_hydration_failure(error: CodexSourceBackedErrorV0) -> HydrationFailure {
+    let kind = match &error {
+        CodexSourceBackedErrorV0::InvalidCodexLocator
+        | CodexSourceBackedErrorV0::LocatorRangeTooLarge
+        | CodexSourceBackedErrorV0::Resolver(_) => HydrationFailureKind::InvalidLocator,
+        CodexSourceBackedErrorV0::LocatorSourceNotFound(_)
+        | CodexSourceBackedErrorV0::LocatorRangeMissing => HydrationFailureKind::MissingRecord,
+        CodexSourceBackedErrorV0::LocatorDigestMismatch => {
+            HydrationFailureKind::StaleRecordEvidence
+        }
+        CodexSourceBackedErrorV0::Io(_) => HydrationFailureKind::TemporarilyUnavailable,
+        _ => HydrationFailureKind::TemporarilyUnavailable,
+    };
+    source_hydration_failure(kind, error.to_string())
+}
+
+fn source_hydration_failure(
+    kind: HydrationFailureKind,
+    detail: impl Into<String>,
+) -> HydrationFailure {
+    HydrationFailure {
+        kind,
+        detail: detail.into(),
+    }
+}
+
+fn parse_source_event_type(value: &str) -> std::result::Result<EventType, HydrationFailure> {
+    value.parse().map_err(|error| {
+        source_hydration_failure(
+            HydrationFailureKind::InvalidLocator,
+            format!("invalid source-backed event type {value:?}: {error}"),
+        )
+    })
+}
+
+fn parse_source_event_role(value: &str) -> std::result::Result<EventRole, HydrationFailure> {
+    value.parse().map_err(|error| {
+        source_hydration_failure(
+            HydrationFailureKind::InvalidLocator,
+            format!("invalid source-backed event role {value:?}: {error}"),
+        )
+    })
+}
+
+fn parse_source_agent_type(value: &str) -> std::result::Result<AgentType, HydrationFailure> {
+    value.parse().map_err(|error| {
+        source_hydration_failure(
+            HydrationFailureKind::InvalidLocator,
+            format!("invalid source-backed agent type {value:?}: {error}"),
+        )
+    })
 }
 
 pub(super) fn reconcile_committed_semantic_work_with_state(

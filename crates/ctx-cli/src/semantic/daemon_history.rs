@@ -27,7 +27,7 @@ use super::{
 
 const DAEMON_REJECTION_DIAGNOSTIC_SOURCES_MAX: usize = 256;
 
-#[cfg(all(test, ctx_sqlite_vec))]
+#[cfg(test)]
 use super::daemon::daemon_test_job;
 
 pub(super) fn restore_daemon_history_runtime_state(runtime: &mut DaemonRuntime, data_root: &Path) {
@@ -230,7 +230,7 @@ pub(super) fn run_daemon_history_refresh_job(
     next_source_cursor: &mut usize,
     config: &AppConfig,
 ) -> Result<DaemonHistoryRefreshJob> {
-    #[cfg(all(test, ctx_sqlite_vec))]
+    #[cfg(test)]
     if let Some(value) = daemon_test_job("history_refresh") {
         return Ok(DaemonHistoryRefreshJob {
             job: value,

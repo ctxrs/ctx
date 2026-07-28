@@ -475,7 +475,7 @@ fn daemon_semantic_runtime_active(
         && semantic_query_service_supported()
 }
 
-#[cfg(all(test, ctx_sqlite_vec))]
+#[cfg(test)]
 #[derive(Clone)]
 pub(super) struct DaemonTestJobHooks {
     pub(super) calls: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>,
@@ -483,16 +483,16 @@ pub(super) struct DaemonTestJobHooks {
     pub(super) semantic_index: Option<Value>,
 }
 
-#[cfg(all(test, ctx_sqlite_vec))]
+#[cfg(test)]
 thread_local! {
     static DAEMON_TEST_JOB_HOOKS: std::cell::RefCell<Option<DaemonTestJobHooks>> =
         const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(all(test, ctx_sqlite_vec))]
+#[cfg(test)]
 pub(super) struct DaemonTestJobHookGuard;
 
-#[cfg(all(test, ctx_sqlite_vec))]
+#[cfg(test)]
 impl Drop for DaemonTestJobHookGuard {
     fn drop(&mut self) {
         DAEMON_TEST_JOB_HOOKS.with(|hooks| {
@@ -501,7 +501,7 @@ impl Drop for DaemonTestJobHookGuard {
     }
 }
 
-#[cfg(all(test, ctx_sqlite_vec))]
+#[cfg(test)]
 pub(super) fn install_daemon_test_job_hooks(hooks: DaemonTestJobHooks) -> DaemonTestJobHookGuard {
     DAEMON_TEST_JOB_HOOKS.with(|slot| {
         assert!(
@@ -513,7 +513,7 @@ pub(super) fn install_daemon_test_job_hooks(hooks: DaemonTestJobHooks) -> Daemon
     DaemonTestJobHookGuard
 }
 
-#[cfg(all(test, ctx_sqlite_vec))]
+#[cfg(test)]
 pub(super) fn daemon_test_job(job: &'static str) -> Option<Value> {
     DAEMON_TEST_JOB_HOOKS.with(|slot| {
         let hooks = slot.borrow();

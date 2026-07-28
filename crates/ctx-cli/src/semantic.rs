@@ -24,8 +24,6 @@ use anyhow::Context;
 #[cfg(test)]
 use anyhow::{anyhow, Result};
 #[cfg(test)]
-use rusqlite::Connection;
-#[cfg(test)]
 use serde_json::{json, Value};
 #[cfg(test)]
 use uuid::Uuid;
@@ -192,7 +190,7 @@ use indexing::*;
 mod fastembed_policy_tests;
 #[cfg(test)]
 mod query_service_transport_tests;
-#[cfg(all(test, ctx_sqlite_vec))]
+#[cfg(all(test, ctx_semantic_fastembed))]
 mod tests;
 #[cfg(all(test, not(ctx_semantic_fastembed)))]
 mod unsupported_platform_tests;

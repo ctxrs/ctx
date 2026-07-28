@@ -11,7 +11,7 @@ fi
 build_rs="${root}/crates/ctx-cli/build.rs"
 bazel_cfg="${root}/crates/ctx-cli/test_targets.bzl"
 
-for cfg in ctx_semantic_fastembed ctx_sqlite_vec; do
+for cfg in ctx_semantic_fastembed; do
   grep -F "cargo:rustc-check-cfg=cfg(${cfg})" "${build_rs}" >/dev/null
   grep -F -- "--check-cfg=cfg(${cfg})" "${bazel_cfg}" >/dev/null
   grep -F -- "--cfg=${cfg}" "${bazel_cfg}" >/dev/null
@@ -32,14 +32,11 @@ for triple in \
     active && index($0, "--cfg=ctx_semantic_fastembed") {
       fastembed = 1
     }
-    active && index($0, "--cfg=ctx_sqlite_vec") {
-      sqlite_vec = 1
-    }
     active && $0 == "    ]," {
       active = 0
     }
     END {
-      exit !(selected && fastembed && sqlite_vec)
+      exit !(selected && fastembed)
     }
   ' "${bazel_cfg}"
 done

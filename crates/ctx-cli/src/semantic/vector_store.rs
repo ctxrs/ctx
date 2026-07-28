@@ -37,10 +37,17 @@ pub(super) struct SemanticChunkDocument {
     pub(super) end_char: usize,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct SemanticSidecarStats {
     pub(super) embedded_items: usize,
     pub(super) embedded_chunks: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct SemanticStoredEvent {
+    pub(super) event_id: Uuid,
+    pub(super) source_text_hash: String,
+    pub(super) seq: u64,
 }
 
 #[derive(Debug, Default)]
@@ -59,11 +66,17 @@ pub(super) struct SemanticPruneOutcome {
 
 pub(super) struct SemanticVectorStore {
     pub(super) conn: Connection,
+    pub(super) flat: flat_segments::FlatSegmentStore,
 }
 use rusqlite::Connection;
 use uuid::Uuid;
 
 use super::reports::SemanticRetrievalDiagnostics;
 
-#[allow(dead_code)] // Activated by the source-backed feed/resolver integration lane.
 mod source_projection;
+pub(super) use source_projection::{
+    SourceBackedSemanticEmbedder, SourceBackedSemanticOutcome, SourceBackedSemanticResolver,
+};
+pub(super) mod control;
+pub(super) mod flat_scan;
+pub(super) mod flat_segments;

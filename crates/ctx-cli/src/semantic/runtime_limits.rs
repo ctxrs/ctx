@@ -1,5 +1,7 @@
 pub(super) const SEMANTIC_SEARCH_CANDIDATES: usize = 200;
 pub(super) const SEMANTIC_SOFT_FILTER_SEARCH_CANDIDATES: usize = 1_000;
+pub(super) const SEMANTIC_EXACT_TOP_K_MAX: usize = 4_096;
+pub(super) const SEMANTIC_EXACT_QUERY_CONCURRENCY: usize = 2;
 pub(super) const SEMANTIC_CHUNK_TARGET_CHARS: usize = 1_200;
 pub(crate) const SEMANTIC_CHUNK_OVERLAP_CHARS: usize = 200;
 pub(super) const SEMANTIC_SOURCE_MAX_CHARS: usize = 64 * 1024;
@@ -17,7 +19,6 @@ pub(crate) const SEMANTIC_WORKER_MAX_SECONDS_CAP: u64 = 86_400;
 pub(super) const SEMANTIC_MODEL_INIT_MIN_REMAINING_SECS: u64 = 15;
 pub(super) const SEMANTIC_VECTOR_BUSY_TIMEOUT_MS: u64 = 30_000;
 pub(super) const SEMANTIC_PRUNE_EVENTS_PER_PASS: usize = 256;
-pub(super) const SEMANTIC_PRUNE_EVENT_BATCH: usize = 1_000;
 pub(super) const SEMANTIC_DEADLINE_CHUNKS_PER_SECOND: usize = 3;
 pub(super) const SEMANTIC_DEADLINE_MIN_CHUNK_BATCH: usize = 16;
 pub(super) const DAEMON_DIR: &str = "daemon";
