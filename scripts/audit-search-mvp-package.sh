@@ -100,9 +100,30 @@ if grep_files 'work-[r]ecord-(publish|report|vcs)[[:space:]]*=' \
   crates/ctx-cli/Cargo.toml \
   crates/ctx-history-capture/Cargo.toml \
   crates/ctx-history-core/Cargo.toml \
+  crates/ctx-history-index/Cargo.toml \
   crates/ctx-history-search/Cargo.toml \
   crates/ctx-history-store/Cargo.toml >/dev/null 2>&1; then
   fail 'default crate manifests depend on publish/report/vcs crates'
+fi
+
+if ! grep -Fxq \
+  'tantivy = { version = "0.26.1", default-features = false, features = ["mmap", "lz4-compression", "columnar-zstd-compression"] }' \
+  Cargo.toml; then
+  fail 'workspace Tantivy dependency must keep the exact 0.26.1 release feature contract'
+fi
+
+if ! grep -Fxq 'tantivy.workspace = true' \
+  crates/ctx-history-index/Cargo.toml; then
+  fail 'ctx-history-index must consume the workspace Tantivy release contract'
+fi
+
+if ! grep -A2 -Fx 'name = "tantivy"' Cargo.lock \
+  | grep -Fxq 'version = "0.26.1"'; then
+  fail 'Cargo.lock must select Tantivy 0.26.1'
+fi
+
+if grep -Fxq 'name = "rust-stemmers"' Cargo.lock; then
+  fail 'Cargo.lock contains the disabled Tantivy stemming dependency'
 fi
 
 if ! bash scripts/check-release-source-surface.sh "${repo_root}"; then

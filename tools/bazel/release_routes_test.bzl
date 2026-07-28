@@ -97,6 +97,10 @@ def release_route_analysis_test_suite(name):
         name = "_release_route_test_inventory",
         tags = ["manual", "release-gate"],
     )
+    _plain_executable(
+        name = "_release_route_test_license_materials",
+        tags = ["manual", "release-gate"],
+    )
     route_specs = {
         "linux_x64": struct(
             constraints = ["@platforms//cpu:x86_64", "@platforms//os:linux"],
@@ -162,6 +166,7 @@ def release_route_analysis_test_suite(name):
         public_cli_release_route(
             name = route_name,
             artifact = probe_name,
+            license_materials = ":_release_route_test_license_materials",
             packager = ":_release_route_test_packager",
             rustc = probe_name,
             sbom_inventory = ":_release_route_test_inventory",

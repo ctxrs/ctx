@@ -3,8 +3,10 @@ FROM ${UBUNTU_IMAGE} AS common
 
 ARG UBUNTU_IMAGE
 ARG UBUNTU_SNAPSHOT="20260701T000000Z"
+ARG RELEASE_ARCH
 
 LABEL org.ctx.release.base-image="${UBUNTU_IMAGE}"
+LABEL org.ctx.release.arch="${RELEASE_ARCH}"
 LABEL org.ctx.release.ubuntu-snapshot="${UBUNTU_SNAPSHOT}"
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -30,7 +32,8 @@ ARG UBUNTU_IMAGE
 ARG UBUNTU_SNAPSHOT="20260701T000000Z"
 ARG GLIBC_BASELINE="2.35"
 ARG BAZEL_VERSION="7.4.1"
-ARG BAZEL_LINUX_X86_64_SHA256="c97f02133adce63f0c28678ac1f21d65fa8255c80429b588aeeba8a1fac6202b"
+ARG BAZEL_ARCH
+ARG BAZEL_SHA256
 ARG RUST_TOOLCHAIN="1.97.1"
 ARG RUST_COMMIT="8bab26f4f68e0e26f0bb7960be334d5b520ea452"
 
@@ -62,10 +65,12 @@ RUN apt-get update \
     xz-utils \
   && rm -rf /var/lib/apt/lists/* \
   && install -d -m 0755 /opt/ctx/bin \
+  && case "${BAZEL_ARCH}" in x86_64|arm64) ;; *) exit 1 ;; esac \
+  && test -n "${BAZEL_SHA256}" \
   && curl --proto '=https' --tlsv1.2 -fsSL \
-    "https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-linux-x86_64" \
+    "https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-linux-${BAZEL_ARCH}" \
     -o /opt/ctx/bin/bazel \
-  && printf '%s  %s\n' "${BAZEL_LINUX_X86_64_SHA256}" /opt/ctx/bin/bazel \
+  && printf '%s  %s\n' "${BAZEL_SHA256}" /opt/ctx/bin/bazel \
     | sha256sum --check --strict \
   && chmod 0755 /opt/ctx/bin/bazel \
   && test "$(getconf GNU_LIBC_VERSION)" = "glibc ${GLIBC_BASELINE}" \

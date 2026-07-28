@@ -22,27 +22,32 @@ mkdir -p \
   "${repo}/scripts/release" \
   "${repo}/contracts" \
   "${repo}/crates/ctx-cli" \
+  "${repo}/crates/ctx-history-index" \
   "${repo}/tests/fixtures/custom-history-jsonl" \
   "${repo}/bazel-out/k8-opt/bin/crates/ctx-cli" \
   "${repo}/inputs" \
   "${route_runfiles}"
 
 cp "${source_root}/contracts/release-targets-v1.json" "${repo}/contracts/"
+cp "${source_root}/contracts/release-candidate-manifest-v1.schema.json" \
+  "${repo}/contracts/"
 cp "${source_root}/scripts/check-release-target-matrix.py" "${repo}/scripts/"
 cp "${source_root}/scripts/public-cli-release-targets.py" "${repo}/scripts/"
 cp "${source_root}/scripts/write-public-cli-build-info.py" "${repo}/scripts/"
 cp "${source_root}/scripts/check-public-cli-build-info.py" "${repo}/scripts/"
 cp "${source_root}/scripts/install-public-cli-candidate.py" "${repo}/scripts/"
-cp "${source_root}/scripts/release-sbom.py" "${repo}/scripts/"
 cp "${source_root}/scripts/release/public-cli-bazel-build-info.py" \
   "${repo}/scripts/release/"
 cp "${source_root}/scripts/release/linux-bazel-release.Dockerfile" \
   "${repo}/scripts/release/"
 cp "${source_root}/.bazelversion" "${repo}/.bazelversion"
 cp "${source_root}/Cargo.lock" "${repo}/Cargo.lock"
+cp "${source_root}/Cargo.toml" "${repo}/Cargo.toml"
 cp "${source_root}/MODULE.bazel" "${repo}/MODULE.bazel"
 cp "${source_root}/MODULE.bazel.lock" "${repo}/MODULE.bazel.lock"
 cp "${source_root}/crates/ctx-cli/Cargo.toml" "${repo}/crates/ctx-cli/Cargo.toml"
+cp "${source_root}/crates/ctx-history-index/Cargo.toml" \
+  "${repo}/crates/ctx-history-index/Cargo.toml"
 cp "${source_root}/tests/fixtures/custom-history-jsonl/basic.jsonl" \
   "${repo}/tests/fixtures/custom-history-jsonl/basic.jsonl"
 
@@ -70,6 +75,46 @@ out-*/
 __pycache__/
 EOF
 printf 'tracked\n' >"${repo}/tracked.txt"
+
+cat >"${repo}/scripts/release-sbom.py" <<'PY'
+#!/usr/bin/env python3
+from pathlib import Path
+import sys
+
+
+def option(name: str) -> Path:
+    index = sys.argv.index(name)
+    return Path(sys.argv[index + 1])
+
+
+mode = sys.argv[1]
+if mode == "generate":
+    for flag, payload in (
+        ("--output", b'{"bomFormat":"CycloneDX"}\n'),
+        ("--notices-output", b"synthetic third-party notices\n"),
+        ("--size-report-output", b'{"size_bytes":1}\n'),
+        ("--candidate-manifest", b'{"kind":"ctx-public-cli-candidate"}\n'),
+    ):
+        option(flag).write_bytes(payload)
+elif mode == "verify":
+    for flag in ("--sbom", "--notices", "--size-report", "--candidate-manifest"):
+        if not option(flag).is_file():
+            raise SystemExit(f"missing {flag}")
+elif mode == "verify-bundle":
+    for flag in (
+        "--artifact",
+        "--build-info",
+        "--sbom",
+        "--notices",
+        "--size-report",
+        "--candidate-manifest",
+    ):
+        if not option(flag).is_file():
+            raise SystemExit(f"missing {flag}")
+else:
+    raise SystemExit(f"unexpected mode: {mode}")
+print("0" * 64)
+PY
 
 cat >"${repo}/scripts/check-public-cli-artifact.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -234,8 +279,15 @@ cat >"${repo}/inputs/sbom-inventory.txt" <<'EOF'
 //crates/ctx-cli:ctx
 @@rules_rust~~crate~crates__dependency-1.2.3//:dependency
 EOF
+cat >"${repo}/inputs/license-materials.txt" <<'EOF'
+main	_main/Cargo.toml
+main	_main/crates/ctx-cli/Cargo.toml
+main	_main/crates/ctx-history-index/Cargo.toml
+EOF
 ln -s "${repo}/inputs/sbom-inventory.txt" \
   "${route_runfiles}/sbom-inventory.txt"
+ln -s "${repo}/inputs/license-materials.txt" \
+  "${route_runfiles}/license-materials.txt"
 ln -s "${repo}/Cargo.lock" "${route_runfiles}/Cargo.lock"
 ln -s "${repo}/contracts/release-targets-v1.json" \
   "${route_runfiles}/release-targets-v1.json"
@@ -249,6 +301,8 @@ package() {
     --declared-rustc-runfile ctx_release_routes/linux-x64/rustc \
     --declared-sbom-inventory-runfile \
       ctx_release_routes/linux-x64/sbom-inventory.txt \
+    --declared-license-materials-runfile \
+      ctx_release_routes/linux-x64/license-materials.txt \
     --declared-cargo-lock-runfile ctx_release_routes/linux-x64/Cargo.lock \
     --declared-target-matrix-runfile \
       ctx_release_routes/linux-x64/release-targets-v1.json \
@@ -264,17 +318,16 @@ test -s "${repo}/out-success/ctx.sha256"
 test -s "${repo}/out-success/ctx.version"
 test -s "${repo}/out-success/ctx.build-info.json"
 test -s "${repo}/out-success/ctx.cdx.json"
-python3 -I "${repo}/scripts/release-sbom.py" verify \
-  --product core \
-  --version 0.26.0 \
-  --platform linux-x64 \
-  --artifact "${repo}/out-success/ctx" \
-  --build-info "${repo}/out-success/ctx.build-info.json" \
-  --cargo-lock "${repo}/Cargo.lock" \
-  --module-lock "${repo}/MODULE.bazel.lock" \
-  --module-file "${repo}/MODULE.bazel" \
-  --target-inventory "${repo}/inputs/sbom-inventory.txt" \
-  --sbom "${repo}/out-success/ctx.cdx.json" >/dev/null
+test -s "${repo}/out-success/ctx.cdx.json.sha256"
+test -s "${repo}/out-success/ctx.third-party-notices.txt"
+test -s "${repo}/out-success/ctx.third-party-notices.txt.sha256"
+test -s "${repo}/out-success/ctx.size.json"
+test -s "${repo}/out-success/ctx.candidate.json"
+test "$(sha256sum "${repo}/out-success/ctx.cdx.json" | awk '{print $1}')" \
+  = "$(cat "${repo}/out-success/ctx.cdx.json.sha256")"
+test "$(
+  sha256sum "${repo}/out-success/ctx.third-party-notices.txt" | awk '{print $1}'
+)" = "$(cat "${repo}/out-success/ctx.third-party-notices.txt.sha256")"
 test "$(sha256sum "${repo}/out-success/ctx" | awk '{print $1}')" \
   = "$(cat "${repo}/out-success/ctx.sha256")"
 
@@ -322,6 +375,18 @@ if package --output-dir out-duplicate-rustc \
 fi
 grep -Fq 'duplicate reserved argument: --declared-rustc-runfile' \
   "${test_root}/duplicate-rustc.stderr"
+
+if package --output-dir out-duplicate-license-materials \
+  --declared-license-materials-runfile \
+    ctx_release_routes/linux-x64/license-materials.txt \
+  >"${test_root}/duplicate-license.stdout" \
+  2>"${test_root}/duplicate-license.stderr"; then
+  echo "duplicate reserved license materials argument unexpectedly passed" >&2
+  exit 1
+fi
+grep -Fq \
+  'duplicate reserved argument: --declared-license-materials-runfile' \
+  "${test_root}/duplicate-license.stderr"
 
 if package --output-dir out-caller-artifact --artifact "${artifact}" \
   >"${test_root}/caller.stdout" 2>"${test_root}/caller.stderr"; then

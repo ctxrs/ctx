@@ -31,6 +31,14 @@ class ReleaseTargetMatrixTest(unittest.TestCase):
         self.assertEqual(windows["platform_signature"], "unsigned")
         self.assertEqual(windows["archive"], "zip")
         self.assertEqual(windows["runtime_authority"], "native-windows-x86_64")
+        self.assertEqual(
+            windows["public_construction_label"],
+            "//:ctx_release_windows_x64",
+        )
+        self.assertEqual(
+            windows["public_construction_authority"],
+            "bazel-release-route-v1",
+        )
         self.assertIsNone(windows["linux_build"])
         linux = next(
             target for target in value["targets"] if target["id"] == "linux-x64"
@@ -55,7 +63,13 @@ class ReleaseTargetMatrixTest(unittest.TestCase):
 
     def test_extra_target_is_rejected(self) -> None:
         value = matrix.load_and_validate()
-        value["targets"].append(dict(value["targets"][-1], id="windows-arm64"))
+        value["targets"].append(
+            dict(
+                value["targets"][-1],
+                id="windows-arm64",
+                public_construction_label="//:ctx_release_windows_arm64",
+            )
+        )
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "matrix.json"
             path.write_text(json.dumps(value), encoding="utf-8")
