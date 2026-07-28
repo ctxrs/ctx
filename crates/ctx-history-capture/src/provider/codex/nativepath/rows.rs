@@ -1,3 +1,5 @@
+use std::mem::size_of;
+
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
     compute_payload_hash, CaptureProvider, Confidence, ContentRef, EventRole, EventType,
@@ -22,7 +24,8 @@ use crate::{
     PROVIDER_MAX_PREVIEW_CHARS, PROVIDER_MAX_TEXT_CHARS,
 };
 
-const CODEX_LEXICAL_PREVIEW_CHARS: usize = 2_048;
+pub(super) const CODEX_LEXICAL_PREVIEW_CHARS: usize = 2_048;
+const OWNED_ALLOCATION_OVERHEAD_BYTES: usize = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -54,6 +57,41 @@ pub(crate) struct CodexRecordEvidence {
     pub(crate) byte_offset: u64,
     pub(crate) byte_length: u64,
     pub(crate) record_digest: [u8; 32],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CodexSourceBackedRowV0 {
+    pub(crate) raw_ordinal: u64,
+    pub(crate) source_record: CodexRecordEvidence,
+    pub(crate) occurred_at: DateTime<Utc>,
+    pub(crate) event_type: EventType,
+    pub(crate) role: Option<EventRole>,
+    pub(crate) lexical_body: String,
+    pub(crate) touched_paths: Vec<String>,
+}
+
+impl CodexSourceBackedRowV0 {
+    pub(crate) fn estimated_owned_bytes(&self) -> Option<usize> {
+        let path_slots = self
+            .touched_paths
+            .capacity()
+            .checked_mul(size_of::<String>())?;
+        let path_bytes = self
+            .touched_paths
+            .iter()
+            .try_fold(0_usize, |total, path| total.checked_add(path.capacity()))?;
+        let allocation_count = 2_usize.checked_add(self.touched_paths.len())?;
+        size_of::<Self>()
+            .checked_add(self.lexical_body.capacity())?
+            .checked_add(path_slots)?
+            .checked_add(path_bytes)?
+            .checked_add(allocation_count.checked_mul(OWNED_ALLOCATION_OVERHEAD_BYTES)?)
+    }
+}
+
+pub(super) struct CodexSourceBackedBuiltRowV0 {
+    pub(super) row: CodexSourceBackedRowV0,
+    pub(super) tool_context: Option<(String, CodexToolCallContext)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -142,10 +180,7 @@ impl CodexEventRow {
         Ok(())
     }
 
-    pub(crate) fn source_record(&self) -> Option<CodexRecordEvidence> {
-        self.source_record
-    }
-
+    #[cfg(test)]
     pub(crate) fn lexical_preview(&self) -> Option<String> {
         let direct = ["text", "preview", "summary", "command", "message"]
             .into_iter()
@@ -259,7 +294,7 @@ pub(super) fn attach_complete_message_locator(
     record_bytes: &[u8],
     byte_start: u64,
     byte_end_exclusive: u64,
-) -> CaptureResult<()> {
+) -> CaptureResult<bool> {
     if row.provider_event.event_type != EventType::Message
         || row
             .provider_event
@@ -268,7 +303,7 @@ pub(super) fn attach_complete_message_locator(
             .and_then(Value::as_bool)
             != Some(true)
     {
-        return Ok(());
+        return Ok(false);
     }
     let text = retained
         .payload
@@ -283,7 +318,7 @@ pub(super) fn attach_complete_message_locator(
         ));
     }
     if text.len() > COMPLETE_CONTENT_MAX_BODY_BYTES {
-        return Ok(());
+        return Ok(false);
     }
     if byte_start >= byte_end_exclusive {
         return Err(CaptureError::SystemInvariant(
@@ -326,6 +361,282 @@ pub(super) fn attach_complete_message_locator(
     ))?;
     attach_verified_content_locator(&mut row.provider_event.metadata, locator).ok_or(
         CaptureError::SystemInvariant("Codex verified-content locator collection is malformed"),
+    )?;
+    Ok(true)
+}
+
+pub(super) fn build_source_backed_event_row(
+    raw_ordinal: u64,
+    kind: CodexRetainedKind,
+    retained: &CodexDecodedRecord,
+    byte_offset: u64,
+    byte_end_exclusive: u64,
+    record_digest: [u8; 32],
+) -> CaptureResult<std::result::Result<CodexSourceBackedBuiltRowV0, CodexRetainedNonMaterialized>> {
+    let semantic = match source_backed_semantic_projection(kind, &retained.payload) {
+        SourceBackedSemanticProjection::Materialized(semantic) => semantic,
+        SourceBackedSemanticProjection::ValidUnmaterializable => {
+            return Ok(Err(CodexRetainedNonMaterialized::ValidUnmaterializable));
+        }
+        SourceBackedSemanticProjection::Malformed(reason) => {
+            return Ok(Err(CodexRetainedNonMaterialized::Malformed(reason)));
+        }
+    };
+    let source_record = source_record_evidence(byte_offset, byte_end_exclusive, record_digest)?;
+    Ok(Ok(CodexSourceBackedBuiltRowV0 {
+        row: CodexSourceBackedRowV0 {
+            raw_ordinal,
+            source_record,
+            occurred_at: retained.occurred_at,
+            event_type: semantic.event_type,
+            role: semantic.role,
+            lexical_body: semantic.lexical_body,
+            touched_paths: Vec::new(),
+        },
+        tool_context: semantic.tool_context,
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn build_source_backed_sparse_output_row(
+    raw_ordinal: u64,
+    byte_offset: u64,
+    byte_end_exclusive: u64,
+    record_digest: [u8; 32],
+    occurred_at: DateTime<Utc>,
+    result_kind: CodexResultKind,
+    context: Option<&CodexToolCallContext>,
+    outcome: &OutputOutcomeMetadata,
+) -> CaptureResult<Option<CodexSourceBackedRowV0>> {
+    if !matches!(
+        outcome.outcome,
+        crate::OutputOutcome::Failure | crate::OutputOutcome::Timeout
+    ) {
+        return Ok(None);
+    }
+    let item_type = result_kind.item_type();
+    let tool_name = context
+        .map(|context| context.tool_name.as_str())
+        .unwrap_or(item_type);
+    let event_type = if crate::provider::codex::events::codex_is_command_tool(tool_name) {
+        EventType::CommandOutput
+    } else {
+        EventType::ToolOutput
+    };
+    let status = outcome
+        .exit_code
+        .map(|code| format!("exit_code={code}"))
+        .unwrap_or_else(|| "exit_code=unknown".to_owned());
+    let duration = outcome
+        .duration_ms
+        .map(|ms| format!(", duration_ms={ms}"))
+        .unwrap_or_default();
+    let timeout = if outcome.outcome == crate::OutputOutcome::Timeout {
+        ", timed_out=true"
+    } else {
+        ""
+    };
+    let command = context
+        .and_then(|context| context.command_preview.as_deref())
+        .map(|command| format!(" for `{command}`"))
+        .unwrap_or_default();
+    let lexical_body = source_backed_lexical_body(
+        EventType::ToolOutput,
+        Some(EventRole::Tool),
+        &format!("{tool_name} output{command}: {status}{duration}{timeout}"),
+    );
+    Ok(Some(CodexSourceBackedRowV0 {
+        raw_ordinal,
+        source_record: source_record_evidence(byte_offset, byte_end_exclusive, record_digest)?,
+        occurred_at,
+        event_type,
+        role: Some(EventRole::Tool),
+        lexical_body,
+        touched_paths: Vec::new(),
+    }))
+}
+
+fn source_record_evidence(
+    byte_offset: u64,
+    byte_end_exclusive: u64,
+    record_digest: [u8; 32],
+) -> CaptureResult<CodexRecordEvidence> {
+    let byte_length =
+        byte_end_exclusive
+            .checked_sub(byte_offset)
+            .ok_or(CaptureError::SystemInvariant(
+                "Codex source record range is reversed",
+            ))?;
+    if byte_length == 0 {
+        return Err(CaptureError::SystemInvariant(
+            "Codex source record range is empty",
+        ));
+    }
+    Ok(CodexRecordEvidence {
+        byte_offset,
+        byte_length,
+        record_digest,
+    })
+}
+
+struct SourceBackedSemantic {
+    event_type: EventType,
+    role: Option<EventRole>,
+    lexical_body: String,
+    tool_context: Option<(String, CodexToolCallContext)>,
+}
+
+enum SourceBackedSemanticProjection {
+    Materialized(SourceBackedSemantic),
+    ValidUnmaterializable,
+    Malformed(&'static str),
+}
+
+fn source_backed_semantic_projection(
+    kind: CodexRetainedKind,
+    payload: &Value,
+) -> SourceBackedSemanticProjection {
+    match kind {
+        CodexRetainedKind::Message => source_backed_message(payload),
+        CodexRetainedKind::Reasoning => source_backed_reasoning(payload),
+        CodexRetainedKind::Compacted => source_backed_compacted(payload),
+        CodexRetainedKind::ToolCall => source_backed_tool_call(payload),
+    }
+}
+
+fn source_backed_message(payload: &Value) -> SourceBackedSemanticProjection {
+    let role_text = payload
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let role = match role_text {
+        "user" => EventRole::User,
+        "assistant" => EventRole::Assistant,
+        "developer" | "system" => EventRole::System,
+        _ => {
+            return SourceBackedSemanticProjection::Malformed("malformed retained Codex message");
+        }
+    };
+    let Some(text) = payload.get("content").and_then(codex_content_text) else {
+        return SourceBackedSemanticProjection::Malformed("malformed retained Codex message");
+    };
+    SourceBackedSemanticProjection::Materialized(SourceBackedSemantic {
+        event_type: EventType::Message,
+        role: Some(role),
+        lexical_body: source_backed_lexical_body(EventType::Message, Some(role), &text),
+        tool_context: None,
+    })
+}
+
+fn source_backed_reasoning(payload: &Value) -> SourceBackedSemanticProjection {
+    let summary = payload
+        .get("summary")
+        .and_then(codex_content_text)
+        .or_else(|| {
+            payload
+                .get("summary_text")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        });
+    let Some(summary) = summary else {
+        return if is_encrypted_reasoning_without_plaintext(payload) {
+            SourceBackedSemanticProjection::ValidUnmaterializable
+        } else {
+            SourceBackedSemanticProjection::Malformed("malformed retained Codex reasoning")
+        };
+    };
+    SourceBackedSemanticProjection::Materialized(SourceBackedSemantic {
+        event_type: EventType::Summary,
+        role: Some(EventRole::Assistant),
+        lexical_body: source_backed_lexical_body(
+            EventType::Summary,
+            Some(EventRole::Assistant),
+            &summary,
+        ),
+        tool_context: None,
+    })
+}
+
+fn source_backed_compacted(payload: &Value) -> SourceBackedSemanticProjection {
+    let Some(text) = codex_content_text(payload) else {
+        return if is_source_only_compacted(payload) {
+            SourceBackedSemanticProjection::ValidUnmaterializable
+        } else {
+            SourceBackedSemanticProjection::Malformed("malformed retained Codex compacted record")
+        };
+    };
+    SourceBackedSemanticProjection::Materialized(SourceBackedSemantic {
+        event_type: EventType::Summary,
+        role: Some(EventRole::System),
+        lexical_body: source_backed_lexical_body(
+            EventType::Summary,
+            Some(EventRole::System),
+            &text,
+        ),
+        tool_context: None,
+    })
+}
+
+fn source_backed_tool_call(payload: &Value) -> SourceBackedSemanticProjection {
+    let Some(item_type) = payload.get("type").and_then(Value::as_str) else {
+        return SourceBackedSemanticProjection::Malformed("malformed retained Codex tool call");
+    };
+    let tool_name = codex_tool_name(payload, item_type);
+    let call_id = payload.get("call_id").and_then(Value::as_str);
+    let arguments = payload
+        .get("arguments")
+        .or_else(|| payload.get("input"))
+        .or_else(|| payload.get("action"))
+        .or_else(|| payload.get("execution"));
+    let command_preview = codex_command_preview(&tool_name, arguments);
+    let (arguments_preview, _, _) = arguments
+        .map(codex_tool_arguments_preview)
+        .unwrap_or_else(|| (String::new(), false, false));
+    let text = command_preview
+        .as_deref()
+        .map(|command| format!("{tool_name}: {command}"))
+        .unwrap_or_else(|| {
+            if arguments_preview.is_empty() {
+                format!("{tool_name} tool call")
+            } else {
+                format!("{tool_name}: {arguments_preview}")
+            }
+        });
+    let tool_context = call_id.map(|call_id| {
+        (
+            call_id.to_owned(),
+            CodexToolCallContext {
+                tool_name: tool_name.clone(),
+                command_preview,
+                arguments_preview: Some(arguments_preview),
+            },
+        )
+    });
+    SourceBackedSemanticProjection::Materialized(SourceBackedSemantic {
+        event_type: EventType::ToolCall,
+        role: Some(EventRole::Assistant),
+        lexical_body: source_backed_lexical_body(
+            EventType::ToolCall,
+            Some(EventRole::Assistant),
+            &text,
+        ),
+        tool_context,
+    })
+}
+
+fn source_backed_lexical_body(
+    event_type: EventType,
+    role: Option<EventRole>,
+    text: &str,
+) -> String {
+    let text = text.trim();
+    if !text.is_empty() {
+        return codex_local_preview(text, CODEX_LEXICAL_PREVIEW_CHARS).0;
+    }
+    format!(
+        "{} {}",
+        event_type.as_str(),
+        role.map(|role| role.as_str()).unwrap_or("event")
     )
 }
 
