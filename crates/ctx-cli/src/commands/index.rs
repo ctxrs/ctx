@@ -14,6 +14,8 @@ use ctx_history_core::database_path;
 use crate::analytics::{count_bucket, IndexOperation, IndexState, IndexTelemetry, WaitOutcome};
 use crate::config::{self, CONFIG_FILE};
 use crate::output::{compact_json, print_json, JsonOutputFormat};
+use crate::progress::ProgressArg;
+use crate::provider_projection;
 use crate::semantic::{
     daemon_report, semantic_worker_report_cached, semantic_worker_report_configured_json,
 };
@@ -33,6 +35,7 @@ impl IndexArgs {
             IndexCommand::Status(args) => args.format.is_json(),
             IndexCommand::Watch(args) => args.format == IndexWatchFormat::Jsonl,
             IndexCommand::Wait(args) => args.format.is_json(),
+            IndexCommand::Rebuild(args) => args.format.is_json(),
         }
     }
 }
@@ -45,6 +48,25 @@ enum IndexCommand {
     Watch(IndexWatchArgs),
     #[command(about = "Wait until local indexing reaches a ready state")]
     Wait(IndexWaitArgs),
+    #[command(
+        about = "Re-derive the provider index from provider history",
+        long_about = "Re-derive the provider index from provider history. Needed once after \
+                      upgrading an index that an older ctx built, because that index identifies \
+                      provider sources in a way this version cannot address. The new index is \
+                      built alongside the current one and only replaces it once it is complete \
+                      and validated, so an interrupted rebuild leaves the current index in place. \
+                      Settings, local usage data, Pro state, and any other local ctx data are \
+                      kept."
+    )]
+    Rebuild(IndexRebuildArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct IndexRebuildArgs {
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    format: JsonOutputFormat,
+    #[arg(long, value_enum, default_value_t = ProgressArg::Auto)]
+    progress: ProgressArg,
 }
 
 #[derive(Debug, Args)]
@@ -88,6 +110,7 @@ pub(crate) fn run_index(
     data_root: PathBuf,
     quiet: bool,
     telemetry: &mut IndexTelemetry,
+    config: &config::AppConfig,
 ) -> Result<()> {
     match args.command {
         IndexCommand::Status(args) => {
@@ -102,7 +125,22 @@ pub(crate) fn run_index(
             telemetry.operation = Some(IndexOperation::Wait);
             run_index_wait(args, &data_root, quiet, telemetry)
         }
+        IndexCommand::Rebuild(args) => {
+            telemetry.operation = Some(IndexOperation::Rebuild);
+            run_index_rebuild(args, &data_root, quiet, config)
+        }
     }
+}
+
+fn run_index_rebuild(
+    args: IndexRebuildArgs,
+    data_root: &Path,
+    quiet: bool,
+    config: &config::AppConfig,
+) -> Result<()> {
+    let json = args.format.is_json();
+    let outcome = provider_projection::run_rebuild(data_root, config, args.progress, json, quiet)?;
+    provider_projection::rederive::print_report(&outcome, json, quiet)
 }
 
 fn run_index_status(

@@ -22,6 +22,7 @@ mod output;
 mod pro;
 mod progress;
 mod provider_args;
+mod provider_projection;
 mod provider_sources;
 mod release_build_identity;
 mod search_filters;

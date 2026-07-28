@@ -10,6 +10,7 @@ use crate::analytics::{count_bucket, StatusTelemetry};
 use crate::config::{self, CONFIG_FILE};
 use crate::local_usage;
 use crate::output::print_json;
+use crate::provider_projection;
 use crate::semantic::{
     daemon_report, semantic_worker_report_cached, semantic_worker_report_configured_json,
 };
@@ -162,6 +163,8 @@ pub(crate) fn run_status(
         );
     }
     let upgrade = upgrade_report(&config);
+    let provider_projection_state = provider_projection::observe(&data_root);
+    let provider_projection = provider_projection::status_json(&data_root);
     let local_usage = local_usage::read_report(
         &data_root,
         config.local_usage.enabled,
@@ -199,6 +202,7 @@ pub(crate) fn run_status(
             "semantic": semantic,
             "daemon": daemon,
             "upgrade": upgrade,
+            "provider_projection": provider_projection,
             "pro": pro,
             "local_usage": local_usage,
             "local_usage_action": Value::Null,
@@ -268,6 +272,13 @@ pub(crate) fn run_status(
                 .unwrap_or("unknown")
         );
         println!("upgrade_auto: {}", config.auto_upgrade_mode().as_str());
+        println!(
+            "provider_projection: {}",
+            provider_projection_state.as_str()
+        );
+        if let Some(notice) = provider_projection::pending_notice(provider_projection_state) {
+            println!("provider_projection_notice: {notice}");
+        }
         if let Some(reason) = daemon.get("reason").and_then(|value| value.as_str()) {
             println!("daemon_reason: {reason}");
         }

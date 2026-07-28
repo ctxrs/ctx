@@ -244,6 +244,7 @@ pub(crate) enum IndexOperation {
     Status,
     Watch,
     Wait,
+    Rebuild,
 }
 
 impl IndexOperation {
@@ -252,6 +253,7 @@ impl IndexOperation {
             Self::Status => "status",
             Self::Watch => "watch",
             Self::Wait => "wait",
+            Self::Rebuild => "rebuild",
         }
     }
 }

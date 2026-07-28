@@ -327,6 +327,10 @@ fn run_import_internal_with_pro_output(
         source,
     })?;
     let db_path = database_path(data_root.clone());
+    // Refuse before a single provider file is read: a superseded projection
+    // cannot absorb an import, and the user needs the reason, not a per-source
+    // failure buried in a report.
+    crate::provider_projection::ensure_native_provider_projection_at(&db_path)?;
     let automatic_pro_output = pro_output_selection.is_automatic();
     let (mut pro_output, require_complete_pro_output) = pro_output_selection.begin(&data_root);
     let prior_route_store =
