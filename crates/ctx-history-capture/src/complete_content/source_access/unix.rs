@@ -300,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_walk_rejects_leaf_and_ancestor_symlinks() {
+    fn source_root_safety_descriptor_walk_rejects_leaf_and_ancestor_symlinks() {
         use std::os::unix::fs::symlink;
 
         let temp = tempfile::tempdir().unwrap();

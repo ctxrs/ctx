@@ -308,3 +308,118 @@ fn symlink_schema_and_request_bounds_are_enforced_before_hydration() {
         CompleteContentErrorKind::ContentVerificationFailed,
     );
 }
+
+fn replace_sqlite_route_from_thread(named: PathBuf, moved: PathBuf, replacement: PathBuf) {
+    std::thread::spawn(move || {
+        fs::rename(&named, moved).unwrap();
+        fs::rename(replacement, named).unwrap();
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn source_root_safety_sqlite_snapshot_stays_exact_after_leaf_replacement() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let path = temp.path().join("source.db");
+    let moved = temp.path().join("moved-source.db");
+    let replacement = temp.path().join("replacement.db");
+    let body = long_body("inside SQLite leaf");
+    let outside = long_body("OUTSIDE_SQLITE_LEAF_MUST_NOT_ESCAPE");
+    let (values, event) = create_firebender_database(&path, &body);
+    let request = firebender_request(&path, &body, &values, &event);
+    create_firebender_database(&replacement, &outside);
+
+    std::thread::spawn({
+        let path = path.clone();
+        move || {
+            fs::rename(&path, moved).unwrap();
+            fs::rename(replacement, path).unwrap();
+        }
+    })
+    .join()
+    .unwrap();
+
+    let resolved = SqliteCompleteContentResolver::new()
+        .resolve(&[request])
+        .unwrap();
+    assert_eq!(resolved[0].text, body);
+    assert!(!resolved[0].text.contains("OUTSIDE_SQLITE_LEAF"));
+}
+
+#[test]
+fn source_root_safety_sqlite_snapshot_stays_exact_after_ancestor_replacement() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let parent = temp.path().join("parent");
+    let moved_parent = temp.path().join("moved-parent");
+    let root = parent.join("root");
+    let replacement_parent = temp.path().join("replacement-parent");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(replacement_parent.join("root")).unwrap();
+    let path = root.join("source.db");
+    let replacement_path = replacement_parent.join("root/source.db");
+    let body = long_body("inside SQLite ancestor");
+    let outside = long_body("OUTSIDE_SQLITE_ANCESTOR_MUST_NOT_ESCAPE");
+    let (values, event) = create_firebender_database(&path, &body);
+    let request = firebender_request(&path, &body, &values, &event);
+    create_firebender_database(&replacement_path, &outside);
+
+    replace_sqlite_route_from_thread(parent, moved_parent, replacement_parent);
+
+    let resolved = SqliteCompleteContentResolver::new()
+        .resolve(&[request])
+        .unwrap();
+    assert_eq!(resolved[0].text, body);
+    assert!(!resolved[0].text.contains("OUTSIDE_SQLITE_ANCESTOR"));
+}
+
+#[test]
+fn source_root_safety_sqlite_prepared_admission_rejects_root_swap() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("root");
+    let moved = temp.path().join("moved-root");
+    let replacement = temp.path().join("replacement-root");
+    fs::create_dir(&root).unwrap();
+    fs::create_dir(&replacement).unwrap();
+    let path = root.join("source.db");
+    let replacement_path = replacement.join("source.db");
+    let body = long_body("prepared inside");
+    create_firebender_database(&path, &body);
+    create_firebender_database(
+        &replacement_path,
+        &long_body("OUTSIDE_PREPARED_MUST_NOT_ESCAPE"),
+    );
+    let replacement_connection = Connection::open(&replacement_path).unwrap();
+    replacement_connection
+        .execute_batch(
+            "create table outside_padding (value blob);
+             insert into outside_padding values (zeroblob(65536));",
+        )
+        .unwrap();
+    drop(replacement_connection);
+    let event_id = Uuid::new_v4();
+    let broker = SourceAccessBroker::new();
+    let prepared = broker
+        .prepare(
+            AuthorizedSourceRoute {
+                source_id: Uuid::new_v4(),
+                provider: CaptureProvider::Firebender,
+                source_format: FIREBENDER_SQLITE_SOURCE_FORMAT.to_owned(),
+                family: CompleteContentSourceFamily::Sqlite,
+                raw_source_path: path,
+                source_root: Some(root.clone()),
+                source_identity: Some("prepared-root-swap".to_owned()),
+                source_snapshot: SourceSnapshot::default(),
+            },
+            event_id,
+        )
+        .unwrap();
+
+    replace_sqlite_route_from_thread(root, moved, replacement);
+
+    let error = broker
+        .admit_prepared_for_source_locators(prepared, &[])
+        .unwrap_err();
+    assert_eq!(error.kind, CompleteContentErrorKind::SourceChanged);
+    assert_eq!(error.event_id, event_id);
+}

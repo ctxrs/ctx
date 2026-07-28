@@ -1,5 +1,13 @@
 use std::fs;
 
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "windows"
+))]
+use std::io::Read;
+
 #[cfg(target_os = "windows")]
 use std::{
     io::ErrorKind,
@@ -9,8 +17,8 @@ use std::{
 
 use super::{
     collect_jsonl_paths_bounded, ensure_inventory_path_bound, inventory_provider_jsonl_paths,
-    inventory_provider_regular_paths, provider_regular_file_len, ProviderJsonlInventoryLimits,
-    PROVIDER_JSONL_INVENTORY_MAX_PATH_BYTES,
+    inventory_provider_regular_paths, open_provider_source_file, provider_regular_file_len,
+    ProviderJsonlInventoryLimits, ProviderSourceRoot, PROVIDER_JSONL_INVENTORY_MAX_PATH_BYTES,
 };
 use crate::{CaptureError, ProviderJsonlInventoryLimit};
 
@@ -334,7 +342,7 @@ fn windows_drive_relative_provider_path_is_rejected() {
 
 #[cfg(target_os = "windows")]
 #[test]
-fn windows_reparse_file_is_rejected() {
+fn source_root_safety_windows_reparse_file_is_rejected() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let target = temp.path().join("target.db");
     let link = temp.path().join("link.db");
@@ -355,7 +363,7 @@ fn windows_reparse_file_is_rejected() {
 
 #[cfg(target_os = "windows")]
 #[test]
-fn windows_reparse_parent_is_rejected() {
+fn source_root_safety_windows_reparse_parent_is_rejected() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let target = temp.path().join("target");
     let link = temp.path().join("link");
@@ -369,4 +377,255 @@ fn windows_reparse_parent_is_rejected() {
     }
 
     assert!(ensure_provider_path_parents_are_not_symlinks(&link.join("provider.db")).is_err());
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "windows"
+))]
+fn assert_retained_authority_changed(error: CaptureError) {
+    assert!(matches!(
+        error,
+        CaptureError::InvalidProviderTranscriptPath { reason, .. }
+            if reason.contains("changed while its authority handle was retained")
+    ));
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "windows"
+))]
+fn replace_directory_from_thread(
+    named: std::path::PathBuf,
+    moved: std::path::PathBuf,
+    replacement: std::path::PathBuf,
+) {
+    std::thread::spawn(move || {
+        fs::rename(&named, moved).unwrap();
+        fs::rename(replacement, named).unwrap();
+    })
+    .join()
+    .unwrap();
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "windows"
+))]
+#[test]
+fn source_root_safety_retained_root_reads_exact_original_after_named_root_swap() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("root");
+    let moved = temp.path().join("moved-root");
+    let replacement = temp.path().join("replacement-root");
+    fs::create_dir(&root).unwrap();
+    fs::create_dir(&replacement).unwrap();
+    fs::write(root.join("source.jsonl"), b"inside-root\n").unwrap();
+    fs::write(
+        replacement.join("source.jsonl"),
+        b"OUTSIDE_ROOT_MUST_NOT_ESCAPE\n",
+    )
+    .unwrap();
+    let authority = ProviderSourceRoot::open(&root).unwrap();
+
+    replace_directory_from_thread(root.clone(), moved, replacement);
+
+    let source = authority
+        .open_file(std::path::Path::new("source.jsonl"))
+        .unwrap();
+    let mut bytes = Vec::new();
+    source
+        .bounded_reader(64)
+        .unwrap()
+        .read_to_end(&mut bytes)
+        .unwrap();
+    assert_eq!(bytes, b"inside-root\n");
+    assert!(!bytes
+        .windows(b"OUTSIDE_ROOT_MUST_NOT_ESCAPE".len())
+        .any(|window| window == b"OUTSIDE_ROOT_MUST_NOT_ESCAPE"));
+    assert_retained_authority_changed(authority.revalidate().unwrap_err());
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "windows"
+))]
+#[test]
+fn source_root_safety_retained_root_reads_exact_original_after_ancestor_swap() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let parent = temp.path().join("parent");
+    let moved_parent = temp.path().join("moved-parent");
+    let root = parent.join("root");
+    let replacement_parent = temp.path().join("replacement-parent");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(replacement_parent.join("root")).unwrap();
+    fs::write(root.join("source.jsonl"), b"inside-ancestor\n").unwrap();
+    fs::write(
+        replacement_parent.join("root/source.jsonl"),
+        b"OUTSIDE_ANCESTOR_MUST_NOT_ESCAPE\n",
+    )
+    .unwrap();
+    let authority = ProviderSourceRoot::open(&root).unwrap();
+
+    replace_directory_from_thread(parent, moved_parent, replacement_parent);
+
+    let source = authority
+        .open_file(std::path::Path::new("source.jsonl"))
+        .unwrap();
+    let mut bytes = Vec::new();
+    source
+        .bounded_reader(64)
+        .unwrap()
+        .read_to_end(&mut bytes)
+        .unwrap();
+    assert_eq!(bytes, b"inside-ancestor\n");
+    assert_retained_authority_changed(authority.revalidate().unwrap_err());
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "windows"
+))]
+#[test]
+fn source_root_safety_retained_leaf_reads_exact_original_then_revalidation_fails() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let path = temp.path().join("source.jsonl");
+    let moved = temp.path().join("moved-source.jsonl");
+    let replacement = temp.path().join("replacement.jsonl");
+    fs::write(&path, b"inside-leaf\n").unwrap();
+    fs::write(&replacement, b"OUTSIDE_LEAF\n").unwrap();
+    let source = open_provider_source_file(&path).unwrap();
+
+    std::thread::spawn({
+        let path = path.clone();
+        move || {
+            fs::rename(&path, moved).unwrap();
+            fs::rename(replacement, path).unwrap();
+        }
+    })
+    .join()
+    .unwrap();
+
+    let mut bytes = Vec::new();
+    source
+        .bounded_reader(64)
+        .unwrap()
+        .read_to_end(&mut bytes)
+        .unwrap();
+    assert_eq!(bytes, b"inside-leaf\n");
+    assert_retained_authority_changed(source.revalidate().unwrap_err());
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+#[test]
+fn source_root_safety_concurrent_descendant_symlink_swap_cannot_read_outside_root() {
+    use std::os::unix::fs::symlink;
+
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let outside = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("root");
+    let nested = root.join("nested");
+    let moved = root.join("moved-nested");
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(nested.join("source.jsonl"), b"inside\n").unwrap();
+    fs::write(
+        outside.path().join("source.jsonl"),
+        b"OUTSIDE_SYMLINK_MUST_NOT_ESCAPE\n",
+    )
+    .unwrap();
+    let authority = ProviderSourceRoot::open(&root).unwrap();
+    let outside_path = outside.path().to_path_buf();
+
+    std::thread::spawn(move || {
+        fs::rename(nested, moved).unwrap();
+        symlink(outside_path, root.join("nested")).unwrap();
+    })
+    .join()
+    .unwrap();
+
+    assert!(matches!(
+        authority.open_file(std::path::Path::new("nested/source.jsonl")),
+        Err(CaptureError::InvalidProviderTranscriptPath { .. })
+    ));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn source_root_safety_linux_virtual_and_unqualified_roots_fail_closed() {
+    for path in [std::path::Path::new("/proc"), std::path::Path::new("/sys")] {
+        assert!(matches!(
+            ProviderSourceRoot::open(path),
+            Err(CaptureError::InvalidProviderTranscriptPath { .. })
+        ));
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn source_root_safety_windows_unc_network_and_device_roots_fail_closed() {
+    for path in [
+        Path::new(r"\\server\share"),
+        Path::new(r"\\?\UNC\server\share"),
+        Path::new(r"\\.\C:\provider"),
+    ] {
+        assert!(matches!(
+            ProviderSourceRoot::open(path),
+            Err(CaptureError::InvalidProviderTranscriptPath { .. })
+        ));
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn source_root_safety_windows_cloud_and_reparse_policy_remains_fail_closed() {
+    let policy = include_str!("io/root_handle/windows.rs");
+    for required in [
+        "FILE_ATTRIBUTE_OFFLINE",
+        "FILE_ATTRIBUTE_RECALL_ON_OPEN",
+        "FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS",
+        "CfGetSyncRootInfoByHandle",
+        "cloud-synchronized provider source roots are rejected",
+    ] {
+        assert!(
+            policy.contains(required),
+            "Windows authority policy lost {required}"
+        );
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+#[test]
+fn source_root_safety_bsd_family_local_authority_fixture_reads_exact_bytes() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let path = temp.path().join("source.jsonl");
+    fs::write(&path, b"local-authority\n").unwrap();
+
+    let source = open_provider_source_file(&path).unwrap();
+
+    assert_eq!(source.read_all_bounded(64).unwrap(), b"local-authority\n");
+    source.revalidate().unwrap();
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "windows"
+)))]
+#[test]
+fn source_root_safety_unsupported_platform_fails_closed() {
+    assert!(matches!(
+        ProviderSourceRoot::open(std::path::Path::new("/provider")),
+        Err(CaptureError::InvalidProviderTranscriptPath { .. })
+    ));
 }

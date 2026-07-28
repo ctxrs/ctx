@@ -627,7 +627,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rejects_unc_device_and_drive_relative_routes() {
+    fn source_root_safety_rejects_unc_device_and_drive_relative_routes() {
         let event_id = Uuid::new_v4();
         for path in [
             r"\\server\share\session.jsonl",
@@ -657,7 +657,7 @@ mod tests {
     }
 
     #[test]
-    fn admitted_file_uses_held_handle_after_named_path_is_replaced() {
+    fn source_root_safety_admitted_file_uses_held_handle_after_named_path_is_replaced() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("session.jsonl");
         fs::write(&path, b"original").unwrap();
@@ -739,7 +739,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_directory_identity_detects_named_root_replacement() {
+    fn source_root_safety_retained_directory_detects_named_root_replacement() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("root");
         let moved = temp.path().join("moved-root");
@@ -759,7 +759,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_parent_and_root_bind_child_final_handle() {
+    fn source_root_safety_retained_parent_and_root_bind_child_final_handle() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("root");
         fs::create_dir_all(&root).unwrap();
