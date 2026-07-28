@@ -67,8 +67,8 @@ pub(crate) fn run_show(
     data_root: PathBuf,
     telemetry: &mut ShowTelemetry,
 ) -> Result<()> {
-    if crate::commands::source_backed_codex::try_run_show(&args, &data_root, telemetry)? {
-        return Ok(());
+    if crate::commands::source_index::index_is_available(&data_root) {
+        return crate::commands::source_index::run_show(args, data_root, telemetry);
     }
     match args.target {
         ShowTarget::Session(args) => {

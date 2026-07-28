@@ -27,7 +27,7 @@ mod text;
 use arguments::{
     allowed_tool_arguments, duration_millis_u64, optional_bool, optional_f32, optional_provider,
     optional_search_backend, optional_string, optional_transcript_mode, optional_usize,
-    required_uuid, validate_argument_keys, validate_search_filter_arguments,
+    validate_argument_keys, validate_search_filter_arguments,
 };
 use input::{read_mcp_input_line, McpInputLine};
 use pro::{
@@ -649,6 +649,32 @@ fn tool_search(arguments: &Value, data_root: &Path) -> Result<Value> {
         file: file.as_deref(),
     }) {
         return Err(invalid_tool_request("search needs a query or file"));
+    }
+    if crate::commands::source_index::index_is_available(data_root) {
+        return crate::commands::source_index::mcp_search(
+            crate::commands::source_index::SourceSearchRequest {
+                query,
+                terms: Vec::new(),
+                limit,
+                provider: provider.map(ProviderArg::capture_provider),
+                history_source: source_identity.history_source,
+                provider_key: source_identity.provider_key,
+                source_id: source_identity.source_id,
+                source_format: source_identity.source_format,
+                workspace,
+                since,
+                primary_only,
+                include_subagents,
+                event_type,
+                file,
+                session,
+                events,
+                include_current_session,
+                backend,
+                refresh: RefreshArg::Off,
+            },
+            data_root,
+        );
     }
     let config = config::AppConfig::load(data_root)?;
     let backend = resolve_search_backend(backend, &config)?;
