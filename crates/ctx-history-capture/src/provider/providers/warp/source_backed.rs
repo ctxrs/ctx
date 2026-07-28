@@ -1,8 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
+    fs::{self, File},
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 use ctx_history_core::{
@@ -13,7 +12,7 @@ use ctx_history_core::{
     StableEntityId, TypedKey,
 };
 use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
-use rusqlite::{limits::Limit, Connection, OpenFlags, OptionalExtension};
+use rusqlite::{limits::Limit, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -27,9 +26,15 @@ use super::{
     warp_message_content_at,
 };
 use crate::{
-    complete_content::sqlite::sqlite_logical_record_digest, native_source::NativeSqliteValue,
-    provider::sqlite::ProviderSqliteSourceSnapshot, CaptureError, Result as CaptureResult,
-    MAX_PROVIDER_SQLITE_VALUE_BYTES, WARP_SQLITE_SOURCE_FORMAT,
+    complete_content::sqlite::sqlite_logical_record_digest,
+    native_source::NativeSqliteValue,
+    provider::sqlite::ProviderSqliteSourceSnapshot,
+    provider_sources::{
+        open_ordinary_file_without_following, open_sqlite_source_snapshot, SqliteSourceAccessError,
+        SqliteSourceEvidence, SqliteSourceReadSnapshot,
+    },
+    CaptureError, Result as CaptureResult, MAX_PROVIDER_SQLITE_VALUE_BYTES,
+    WARP_SQLITE_SOURCE_FORMAT,
 };
 
 const WARP_SOURCE_ANCHOR_NAMESPACE: &str = "warp.selected-surface";
@@ -57,6 +62,8 @@ pub(crate) enum WarpSourceBackedErrorV0 {
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[error(transparent)]
+    SqliteSourceAccess(#[from] SqliteSourceAccessError),
     #[error("Warp selected surface key is empty")]
     EmptySurfaceKey,
     #[error("Warp selected surface key {0:?} appears more than once")]
@@ -134,68 +141,198 @@ pub(crate) struct WarpHydratedRecordV0 {
     pub(crate) native_record_id: String,
 }
 
+struct OpenedWarpSource {
+    selection: WarpSourceSelectionV0,
+    source: SourceKey,
+    canonical_path: PathBuf,
+    family_snapshot: ProviderSqliteSourceSnapshot,
+    root_bound_database: File,
+    read_snapshot: SqliteSourceReadSnapshot,
+}
+
+struct ProjectedWarpSource {
+    certified_source: CertifiedSource,
+    documents: Vec<LexicalDocument>,
+}
+
+struct FinishedWarpSource {
+    selection: WarpSourceSelectionV0,
+    source: SourceKey,
+    canonical_path: PathBuf,
+    family_snapshot: ProviderSqliteSourceSnapshot,
+    _root_bound_database: File,
+    _root_evidence: SqliteSourceEvidence,
+}
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_COMPOUND_REVALIDATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn set_before_compound_revalidation(hook: Option<Box<dyn FnOnce()>>) {
+    BEFORE_COMPOUND_REVALIDATION.with(|slot| {
+        *slot.borrow_mut() = hook;
+    });
+}
+
+#[cfg(test)]
+fn before_compound_revalidation() {
+    BEFORE_COMPOUND_REVALIDATION.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn before_compound_revalidation() {}
+
 pub(crate) fn project_selected_warp_sources_v0(
     selections: &[WarpSourceSelectionV0],
 ) -> WarpSourceBackedResultV0<Vec<WarpSourceBackedSnapshotV0>> {
     let mut selected = BTreeSet::new();
-    let mut snapshots = Vec::with_capacity(selections.len());
+    let mut opened = Vec::with_capacity(selections.len());
     for selection in selections {
         if !selected.insert(selection.surface_key.clone()) {
             return Err(WarpSourceBackedErrorV0::DuplicateSurfaceKey(
                 selection.surface_key.clone(),
             ));
         }
-        snapshots.push(project_warp_source_backed_v0(selection.clone())?);
+        opened.push(open_warp_source(selection.clone())?);
     }
-    Ok(snapshots)
+
+    // All selected databases remain pinned while every source is projected.
+    // Nothing provider-wide is returned until every guard has finished and the
+    // complete DB/WAL/SHM/journal family has been revalidated as one set.
+    let projected = opened
+        .iter()
+        .map(project_opened_warp_source)
+        .collect::<WarpSourceBackedResultV0<Vec<_>>>()?;
+    let finished = opened
+        .into_iter()
+        .map(finish_warp_source)
+        .collect::<WarpSourceBackedResultV0<Vec<_>>>()?;
+
+    before_compound_revalidation();
+    if !finished
+        .iter()
+        .map(revalidate_finished_warp_source)
+        .collect::<WarpSourceBackedResultV0<Vec<_>>>()?
+        .into_iter()
+        .all(|current| current)
+    {
+        return Err(WarpSourceBackedErrorV0::SourceChanged);
+    }
+
+    Ok(finished
+        .into_iter()
+        .zip(projected)
+        .map(|(source, projected)| WarpSourceBackedSnapshotV0 {
+            selection: source.selection,
+            source: source.source,
+            certified_source: projected.certified_source,
+            documents: projected.documents,
+        })
+        .collect())
 }
 
 pub(crate) fn project_warp_source_backed_v0(
     selection: WarpSourceSelectionV0,
 ) -> WarpSourceBackedResultV0<WarpSourceBackedSnapshotV0> {
+    project_selected_warp_sources_v0(std::slice::from_ref(&selection))?
+        .pop()
+        .ok_or(WarpSourceBackedErrorV0::ScanCountMismatch)
+}
+
+fn open_warp_source(
+    selection: WarpSourceSelectionV0,
+) -> WarpSourceBackedResultV0<OpenedWarpSource> {
     let source = warp_source_key(&selection)?;
     let canonical_path = fs::canonicalize(selection.path())?;
-    let opening_snapshot = read_source_snapshot(&canonical_path)?;
-    let opening_revision = opening_snapshot.revision_component();
-    let revision_digest = source_revision_digest(&source, &opening_revision);
-    let connection = open_direct_read_only(&canonical_path)?;
-    let mut sink = WarpProjectionSink::new(
-        source.clone(),
-        revision_digest,
-        canonical_path.to_string_lossy().into_owned(),
-    );
-    let native_scan = scan_warp_source_backed_connection(&connection, &mut sink)?;
-    drop(connection);
-
-    let closing_snapshot = read_source_snapshot(&canonical_path)?;
-    if opening_snapshot != closing_snapshot || fs::canonicalize(selection.path())? != canonical_path
-    {
+    let root_bound_database = open_ordinary_file_without_following(&canonical_path)?;
+    let family_snapshot = read_source_snapshot(&canonical_path)?;
+    let read_snapshot = open_sqlite_source_snapshot(&canonical_path, &root_bound_database)?;
+    let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
+        .map_err(|_| WarpSourceBackedErrorV0::CountOverflow)?;
+    read_snapshot
+        .connection()?
+        .set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit);
+    read_snapshot
+        .connection()?
+        .busy_timeout(std::time::Duration::from_secs(5))?;
+    if read_source_snapshot(&canonical_path)? != family_snapshot {
         return Err(WarpSourceBackedErrorV0::SourceChanged);
     }
-    let closing_revision = closing_snapshot.revision_component();
+    Ok(OpenedWarpSource {
+        selection,
+        source,
+        canonical_path,
+        family_snapshot,
+        root_bound_database,
+        read_snapshot,
+    })
+}
+
+fn project_opened_warp_source(
+    opened: &OpenedWarpSource,
+) -> WarpSourceBackedResultV0<ProjectedWarpSource> {
+    let opening_revision = opened.family_snapshot.revision_component();
+    let revision_digest = source_revision_digest(&opened.source, &opening_revision);
+    let mut sink = WarpProjectionSink::new(
+        opened.source.clone(),
+        revision_digest,
+        opened.canonical_path.to_string_lossy().into_owned(),
+    );
+    let native_scan =
+        scan_warp_source_backed_connection(opened.read_snapshot.connection()?, &mut sink)?;
     let counts = scan_counts(&native_scan, &sink)?;
     let content_digest = parse_hex_digest(&native_scan.source_integrity_digest)?;
     let certified_source = CertifiedSource::certify(
         SourceObservation::new(
-            source.clone(),
+            opened.source.clone(),
             WARP_SOURCE_REVISION_KIND,
-            opening_revision.into_bytes(),
+            opening_revision.clone().into_bytes(),
         )?,
         SourceObservation::new(
-            source.clone(),
+            opened.source.clone(),
             WARP_SOURCE_REVISION_KIND,
-            closing_revision.into_bytes(),
+            opening_revision.into_bytes(),
         )?,
         WARP_SOURCE_BACKED_PARSER_REVISION,
         content_digest,
         counts,
     )?;
-    Ok(WarpSourceBackedSnapshotV0 {
-        selection,
-        source,
+    Ok(ProjectedWarpSource {
         certified_source,
         documents: sink.documents,
     })
+}
+
+fn finish_warp_source(opened: OpenedWarpSource) -> WarpSourceBackedResultV0<FinishedWarpSource> {
+    let OpenedWarpSource {
+        selection,
+        source,
+        canonical_path,
+        family_snapshot,
+        root_bound_database,
+        read_snapshot,
+    } = opened;
+    let root_evidence = read_snapshot.finish()?;
+    Ok(FinishedWarpSource {
+        selection,
+        source,
+        canonical_path,
+        family_snapshot,
+        _root_bound_database: root_bound_database,
+        _root_evidence: root_evidence,
+    })
+}
+
+fn revalidate_finished_warp_source(source: &FinishedWarpSource) -> WarpSourceBackedResultV0<bool> {
+    Ok(source.family_snapshot.revalidate(&source.canonical_path)?
+        && fs::canonicalize(source.selection.path())? == source.canonical_path)
 }
 
 pub(crate) fn resolve_warp_locator_v0(
@@ -213,18 +350,18 @@ pub(crate) fn resolve_warp_locator_v0(
     let expected_revision = locator
         .certified_source_revision_digest()
         .ok_or(WarpSourceBackedErrorV0::InvalidLocator)?;
-    let canonical_path = fs::canonicalize(selection.path())?;
-    let opening_snapshot = read_source_snapshot(&canonical_path)?;
-    if &source_revision_digest(&source, &opening_snapshot.revision_component()) != expected_revision
+    let opened = open_warp_source(selection.clone())?;
+    if &source_revision_digest(&source, &opened.family_snapshot.revision_component())
+        != expected_revision
     {
         return Err(WarpSourceBackedErrorV0::StaleSourceRevision);
     }
 
-    let connection = open_direct_read_only(&canonical_path)?;
-    WarpSqliteSchema::detect(&connection)?;
-    let resolved = with_read_transaction(&connection, || {
+    let connection = opened.read_snapshot.connection()?;
+    WarpSqliteSchema::detect(connection)?;
+    let resolved = (|| {
         let values =
-            load_task_values(&connection, rowid)?.ok_or(WarpSourceBackedErrorV0::MissingTaskRow)?;
+            load_task_values(connection, rowid)?.ok_or(WarpSourceBackedErrorV0::MissingTaskRow)?;
         let actual_digest = digest_bytes(sqlite_logical_record_digest(&values).as_str())?;
         if actual_digest != *locator.record_digest() {
             return Err(WarpSourceBackedErrorV0::StaleTaskRow);
@@ -247,12 +384,10 @@ pub(crate) fn resolve_warp_locator_v0(
             event_type: content.event_type.as_str().to_owned(),
             native_record_id: content.native_record_id,
         })
-    })?;
-    drop(connection);
+    })()?;
 
-    let closing_snapshot = read_source_snapshot(&canonical_path)?;
-    if opening_snapshot != closing_snapshot || fs::canonicalize(selection.path())? != canonical_path
-    {
+    let finished = finish_warp_source(opened)?;
+    if !revalidate_finished_warp_source(&finished)? {
         return Err(WarpSourceBackedErrorV0::SourceChanged);
     }
     Ok(resolved)
@@ -571,33 +706,6 @@ fn load_task_values(
         )
         .optional()
         .map_err(WarpSourceBackedErrorV0::from)
-}
-
-fn open_direct_read_only(path: &Path) -> WarpSourceBackedResultV0<Connection> {
-    let connection = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
-    let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
-        .map_err(|_| WarpSourceBackedErrorV0::CountOverflow)?;
-    connection.set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit);
-    connection.busy_timeout(Duration::from_secs(5))?;
-    connection.pragma_update(None, "query_only", true)?;
-    Ok(connection)
-}
-
-fn with_read_transaction<T>(
-    connection: &Connection,
-    read: impl FnOnce() -> WarpSourceBackedResultV0<T>,
-) -> WarpSourceBackedResultV0<T> {
-    connection.execute_batch("begin")?;
-    let result = read();
-    let rollback = connection.execute_batch("rollback");
-    match (result, rollback) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Err(error), Ok(())) => Err(error),
-        (_, Err(error)) => Err(error.into()),
-    }
 }
 
 fn read_source_snapshot(path: &Path) -> WarpSourceBackedResultV0<ProviderSqliteSourceSnapshot> {

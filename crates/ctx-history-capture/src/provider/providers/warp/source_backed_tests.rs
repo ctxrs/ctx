@@ -1,9 +1,12 @@
 use std::fs;
 
 use ctx_history_core::{LocatorRevisionPolicy, NativeRecordCoordinate, TypedKey};
-use rusqlite::{params, Connection};
+use rusqlite::{config::DbConfig, params, Connection};
 use tempfile::tempdir;
 
+use crate::provider_sources::{SqliteSourceAccessError, SqliteSourceComponent};
+
+use super::source_backed::set_before_compound_revalidation;
 use super::{
     project_selected_warp_sources_v0, project_warp_source_backed_v0, resolve_warp_locator_v0,
     WarpSourceBackedErrorV0, WarpSourceSelectionV0,
@@ -179,6 +182,104 @@ fn coexisting_selected_surfaces_project_cold_without_collapsing_lineage() {
             &snapshot.source
         );
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn compound_projection_rejects_database_replacement_before_provider_wide_revalidation() {
+    let directory = tempdir().unwrap();
+    let gui_path = directory.path().join("gui-warp.sqlite");
+    let tui_path = directory.path().join("tui-warp.sqlite");
+    let replacement = directory.path().join("replacement.sqlite");
+    create_source(
+        &gui_path,
+        "gui-conversation",
+        "gui-task",
+        "gui-message",
+        "original gui body",
+    );
+    create_source(
+        &tui_path,
+        "tui-conversation",
+        "tui-task",
+        "tui-message",
+        "tui body",
+    );
+    create_source(
+        &replacement,
+        "gui-conversation",
+        "gui-task",
+        "gui-message",
+        "replacement gui body",
+    );
+
+    let replaced_path = gui_path.clone();
+    set_before_compound_revalidation(Some(Box::new(move || {
+        fs::rename(&replacement, &replaced_path).unwrap();
+    })));
+    let result = project_selected_warp_sources_v0(&[
+        WarpSourceSelectionV0::new(&gui_path, "linux:stable:gui").unwrap(),
+        WarpSourceSelectionV0::new(&tui_path, "linux:stable:tui").unwrap(),
+    ]);
+
+    assert!(
+        matches!(result, Err(WarpSourceBackedErrorV0::SourceChanged)),
+        "{result:?}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn source_backed_wal_fixture_fails_closed_without_copying() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("warp-wal.sqlite");
+    create_source(
+        &path,
+        "conversation-wal",
+        "task-wal",
+        "message-wal",
+        "main database body",
+    );
+    let writer = Connection::open(&path).unwrap();
+    let mode: String = writer
+        .query_row("pragma journal_mode = wal", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    writer
+        .execute_batch("pragma wal_autocheckpoint = 0")
+        .unwrap();
+    writer
+        .execute(
+            "update agent_tasks set task = ?1 where task_id = 'task-wal'",
+            [text_task(
+                "task-wal",
+                "message-wal",
+                "committed content retained in WAL",
+            )],
+        )
+        .unwrap();
+    writer
+        .set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
+        .unwrap();
+    drop(writer);
+    assert!(path.with_file_name("warp-wal.sqlite-wal").exists());
+    assert!(path.with_file_name("warp-wal.sqlite-shm").exists());
+
+    let result = project_warp_source_backed_v0(
+        WarpSourceSelectionV0::new(&path, "linux:stable:gui").unwrap(),
+    );
+    assert!(
+        matches!(
+            &result,
+            Err(WarpSourceBackedErrorV0::SqliteSourceAccess(
+                SqliteSourceAccessError::UnsupportedSidecarIdentity {
+                    component: SqliteSourceComponent::Wal,
+                    ..
+                }
+            ))
+        ),
+        "{result:?}"
+    );
 }
 
 #[test]
