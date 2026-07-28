@@ -38,7 +38,7 @@ pub(super) fn parse_auggie_source(
         source_metadata: data.source_metadata.clone(),
         session_metadata: data.session_metadata.clone(),
     };
-    let events = parse_core_events(&data, &bytes)?;
+    let events = parse_core_events(&data, &root, &bytes)?;
     let outputs = if include_outputs {
         parse_outputs(&data)?
     } else {
@@ -47,17 +47,32 @@ pub(super) fn parse_auggie_source(
     Ok(ParsedAuggieSource {
         stamp: before,
         source_revision,
+        content_digest: Sha256::digest(&bytes).into(),
         session,
         events,
         outputs,
     })
 }
 
-fn parse_core_events(data: &AuggieSessionData<'_>, bytes: &[u8]) -> Result<Vec<ParsedAuggieEvent>> {
+fn parse_core_events(
+    data: &AuggieSessionData<'_>,
+    root: &Value,
+    bytes: &[u8],
+) -> Result<Vec<ParsedAuggieEvent>> {
     let mut events = Vec::new();
     let mut provider_event_index = 0_u64;
+    let chat_history_key = if root.get("chatHistory").is_some() {
+        "chatHistory"
+    } else {
+        "chat_history"
+    };
     for (chat_index, entry) in data.chat_history.iter().enumerate() {
         let exchange = entry.get("exchange").unwrap_or(entry);
+        let json_pointer = if entry.get("exchange").is_some() {
+            format!("/{chat_history_key}/{chat_index}/exchange")
+        } else {
+            format!("/{chat_history_key}/{chat_index}")
+        };
         let base_time = auggie_entry_time(entry, Some(exchange)).unwrap_or_else(|| {
             data.started_at + Duration::milliseconds(saturating_i64(chat_index).saturating_mul(2))
         });
@@ -79,6 +94,12 @@ fn parse_core_events(data: &AuggieSessionData<'_>, bytes: &[u8]) -> Result<Vec<P
                 continue;
             };
             let complete_text = text.clone();
+            let native_event_id = exchange
+                .get("request_id")
+                .or_else(|| exchange.get("requestId"))
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+                .map(|id| format!("{id}:{label}"));
             let mut event = auggie_event(AuggieEventInput {
                 provider_session_id: &data.provider_session_id,
                 provider_event_index,
@@ -109,6 +130,9 @@ fn parse_core_events(data: &AuggieSessionData<'_>, bytes: &[u8]) -> Result<Vec<P
                 event,
                 chat_index,
                 sub_index,
+                message_kind: label,
+                native_event_id,
+                json_pointer: json_pointer.clone(),
             });
             provider_event_index =
                 provider_event_index
