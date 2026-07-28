@@ -709,7 +709,7 @@ fn firebender_source_backed_cold_and_exact_are_bounded_and_hydratable() {
             }
         })
         .collect::<Vec<_>>();
-    create_test_database(
+    let database = create_test_database(
         &root,
         &[("stable-session", 10, &Value::Array(messages).to_string())],
     );
@@ -732,6 +732,21 @@ fn firebender_source_backed_cold_and_exact_are_bounded_and_hydratable() {
     }));
 
     let first = &documents[0];
+    assert_eq!(first.parent_session_id, None);
+    assert_eq!(first.root_session_id, first.session_id);
+    assert_eq!(first.provider_session_id.as_deref(), Some("stable-session"));
+    assert_eq!(first.branch, None);
+    assert_eq!(
+        first.source_path.as_deref().map(Path::new),
+        Some(database.canonicalize().unwrap().as_path())
+    );
+    assert_eq!(first.agent_type, "primary");
+    assert!(first.is_primary);
+    assert_eq!(
+        first.workspace.as_deref(),
+        Some(root.canonicalize().unwrap().to_str().unwrap())
+    );
+    assert_eq!(first.cwd, None);
     let ctx_history_core::NativeRecordCoordinate::ProviderSqlite {
         logical_relation,
         primary_key: ctx_history_core::TypedKey::I64(rowid),

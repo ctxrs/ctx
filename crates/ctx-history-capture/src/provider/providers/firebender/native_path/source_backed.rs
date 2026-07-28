@@ -2,10 +2,11 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CertifiedSource, EventIdentityInput, LocatorRevisionPolicy,
-    NativeItemKey, NativeRecordCoordinate, NativeSessionKey, PositionStability,
-    ProjectionContractError, ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey,
-    SourceObservation, SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, EventIdentityInput,
+    EventType, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
+    PositionStability, ProjectionContractError, ScannedSourceCounts, SessionIdentityInput,
+    SourceAnchor, SourceKey, SourceObservation, SourceRecordLocator, SourceResolverContractError,
+    StableEntityId, TypedKey,
 };
 use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
 use ctx_history_store::NATIVE_PATH_MAX_RETAINED_PAGE_BYTES;
@@ -13,10 +14,11 @@ use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use super::super::FirebenderOutputEvidence;
 use super::{
     build_page, core::firebender_raw_row_digest, firebender_path_identity,
     firebender_source_revision, firebender_source_snapshot, validate_schema, FirebenderFrontier,
-    FirebenderPage, FirebenderRow, FIREBENDER_NATIVE_PARSER_REVISION,
+    FirebenderPage, FirebenderRow,
 };
 use crate::{
     native_source::NativeSqliteValue,
@@ -28,8 +30,7 @@ use crate::{
             SqliteLengthPreflightGuard,
         },
     },
-    CaptureError, CaptureProvider, EventType, Result as CaptureResult,
-    FIREBENDER_SQLITE_SOURCE_FORMAT,
+    CaptureError, Result as CaptureResult, FIREBENDER_SQLITE_SOURCE_FORMAT,
 };
 
 const FIREBENDER_SOURCE_ANCHOR_NAMESPACE: &str = "firebender.explicit-chat-history";
@@ -123,6 +124,8 @@ impl FirebenderHydratedSourceRow {
 
 pub(crate) struct FirebenderSourceBackedScanner {
     database_path: PathBuf,
+    source_path: String,
+    workspace: Option<String>,
     source: SourceKey,
     opening: SourceObservation,
     opening_snapshot: ProviderSqliteSourceSnapshot,
@@ -145,6 +148,8 @@ pub(crate) fn prepare_firebender_source_backed(
     }
     Ok(FirebenderSourceBackedPlan::Replacement(
         FirebenderSourceBackedScanner {
+            source_path: opened.database_path.display().to_string(),
+            workspace: firebender_workspace(&opened.database_path),
             database_path: opened.database_path,
             source: opened.source,
             opening: opened.observation,
@@ -252,6 +257,8 @@ impl FirebenderSourceBackedScanner {
                 &self.source,
                 session_id,
                 source_revision_digest,
+                &self.source_path,
+                self.workspace.as_deref(),
                 row,
                 message_index,
                 message,
@@ -410,6 +417,8 @@ fn firebender_document(
     source: &SourceKey,
     session_id: StableEntityId,
     source_revision_digest: [u8; 32],
+    source_path: &str,
+    workspace: Option<&str>,
     row: &FirebenderRow,
     message_index: usize,
     message: &serde_json::Value,
@@ -472,18 +481,38 @@ fn firebender_document(
     Ok(Some(LexicalDocument {
         event_id,
         session_id,
+        parent_session_id: None,
+        root_session_id: session_id,
         source: source.clone(),
         locator,
         provider_session_id: Some(row.id.clone()),
+        branch: None,
+        source_path: Some(source_path.to_owned()),
+        agent_type: ctx_history_core::AgentType::Primary.as_str().to_owned(),
+        is_primary: true,
         event_sequence: message_index_u64,
         occurred_at_unix_ms: Some(native.occurred_at.timestamp_millis()),
         event_type: native.event_type.as_str().to_owned(),
         role: native.role.map(|role| role.as_str().to_owned()),
         body,
-        workspace: None,
+        workspace: workspace.map(str::to_owned),
         cwd: None,
         touched_files: Vec::new(),
     }))
+}
+
+fn firebender_workspace(database_path: &Path) -> Option<String> {
+    let firebender_dir = database_path.parent()?;
+    if firebender_dir.file_name().and_then(|name| name.to_str()) != Some("firebender") {
+        return None;
+    }
+    let idea_dir = firebender_dir.parent()?;
+    if idea_dir.file_name().and_then(|name| name.to_str()) != Some(".idea") {
+        return None;
+    }
+    idea_dir
+        .parent()
+        .map(|workspace| workspace.display().to_string())
 }
 
 fn message_native_key(
@@ -519,7 +548,7 @@ fn firebender_message_occurred_at(
     super::firebender_message_time(message, started_at + chrono::Duration::milliseconds(offset))
 }
 
-fn sparse_output_body(evidence: &super::FirebenderOutputEvidence) -> String {
+fn sparse_output_body(evidence: &FirebenderOutputEvidence) -> String {
     let outcome = if evidence.timeout {
         "timed out"
     } else {
