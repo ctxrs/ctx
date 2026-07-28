@@ -59,7 +59,8 @@ use super::providers::{
     },
     crush::native_path::source_backed::{
         bind_inventory as bind_crush_inventory, closing_observation as closing_crush_observation,
-        exact_replay_matches as crush_exact_replay_matches, open_source as open_crush_source,
+        exact_replay_matches as crush_exact_replay_matches,
+        finish_opened_source as finish_crush_source, open_source as open_crush_source,
         scan_source as scan_crush_source, CrushLocatorResolverV0, CRUSH_DISCOVERY_REVISION,
         CRUSH_FRONTIER_KIND, CRUSH_PARSER_REVISION, CRUSH_SOURCE_SCHEMA_VARIANT,
     },
@@ -2211,6 +2212,12 @@ where
                 let opened = open_crush_source(database.clone()).map_err(route_error)?;
                 let base = base_sources.get(&database.source_key);
                 if base.is_some_and(|base| crush_exact_replay_matches(base, &opened)) {
+                    if !finish_crush_source(opened).map_err(route_error)? {
+                        return Err(SourceBackedRouteError::new(
+                            SourceBackedRouteErrorKind::SourceChanged,
+                            "Crush source changed while its replay was staged",
+                        ));
+                    }
                     let base = base.ok_or_else(|| {
                         SourceBackedRouteError::new(
                             SourceBackedRouteErrorKind::Internal,
@@ -2247,16 +2254,23 @@ where
                         .map_err(route_coordinator_error)?;
                     let scan = scan_crush_source(&opened, sink.writer).map_err(route_error)?;
                     let closing = closing_crush_observation(&opened).map_err(route_error)?;
+                    let opening_observation = opened.observation.clone();
+                    if !finish_crush_source(opened).map_err(route_error)? {
+                        return Err(SourceBackedRouteError::new(
+                            SourceBackedRouteErrorKind::SourceChanged,
+                            "Crush source changed while its replacement was staged",
+                        ));
+                    }
                     let frontier = SourceFrontier::new(
                         CRUSH_FRONTIER_KIND,
-                        TypedKey::bytes(opened.observation.revision().to_vec())
+                        TypedKey::bytes(opening_observation.revision().to_vec())
                             .map_err(route_error)?,
                         scan.counts.certified_bytes,
                         scan.content_digest,
                     )
                     .map_err(route_error)?;
                     let certificate = CertifiedSource::certify_with_frontier(
-                        opened.observation.clone(),
+                        opening_observation,
                         closing,
                         CRUSH_PARSER_REVISION,
                         scan.content_digest,
@@ -2325,11 +2339,8 @@ where
                 let Ok(opened) = open_crush_source(database.clone()) else {
                     return false;
                 };
-                opened.observation == *expected.observation()
-                    && opened
-                        .snapshot
-                        .revalidate(&opened.database.canonical_path)
-                        .unwrap_or(false)
+                let observation_matches = opened.observation == *expected.observation();
+                observation_matches && finish_crush_source(opened).unwrap_or(false)
             }
             SourceBackedRevalidationTarget::Deletion(deletion) => {
                 let Ok(opening_observation) = revalidation_inventory.observe() else {
