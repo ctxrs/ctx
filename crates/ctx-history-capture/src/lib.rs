@@ -151,9 +151,9 @@ pub use provider::codex::{
     hydrate_codex_locator, import_codex_history_jsonl, import_codex_session_jsonl,
     import_codex_session_jsonl_tail, import_codex_session_paths, import_codex_session_tree,
     ingest_codex_source_backed_v0, CodexColdPromptHistoryOptions, CodexColdStoreOptions,
-    CodexColdStoreOutcome, CodexHydratedRecordV0, CodexSourceBackedCountersV0,
-    CodexSourceBackedErrorV0, CodexSourceBackedIngestReceiptV0, CodexSourceBackedPhaseTimingsV0,
-    CodexSourceBackedResultV0,
+    CodexColdStoreOutcome, CodexHydratedRecordV0, CodexLocatorResolverV0,
+    CodexSourceBackedCountersV0, CodexSourceBackedErrorV0, CodexSourceBackedIngestReceiptV0,
+    CodexSourceBackedPhaseTimingsV0, CodexSourceBackedResultV0,
 };
 pub use provider::custom_history_jsonl::{
     custom_history_jsonl_v1_cursor_stream, decode_custom_history_jsonl_v1_cursor,

@@ -67,6 +67,9 @@ pub(crate) fn run_show(
     data_root: PathBuf,
     telemetry: &mut ShowTelemetry,
 ) -> Result<()> {
+    if crate::commands::source_backed_codex::try_run_show(&args, &data_root, telemetry)? {
+        return Ok(());
+    }
     match args.target {
         ShowTarget::Session(args) => {
             let store = open_existing_store_read_only(&database_path(data_root), "ctx show")?;

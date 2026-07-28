@@ -186,6 +186,73 @@ pub struct CodexHydratedRecordV0 {
     pub decoded_display_text: Option<String>,
 }
 
+/// One-invocation resolver for locator-backed event and session rendering.
+///
+/// Discovery is intentionally paid once so rendering a session does not
+/// recatalog every provider tree for every event.
+#[derive(Debug)]
+pub struct CodexLocatorResolverV0 {
+    sources_by_native_session: HashMap<String, (CodexCatalogSource, SourceKey)>,
+}
+
+impl CodexLocatorResolverV0 {
+    pub fn discover<I, P>(session_roots: I) -> CodexSourceBackedResultV0<Self>
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        let mut sources_by_native_session = HashMap::new();
+        for session_root in session_roots {
+            let (catalog_summary, sessions) =
+                discover_codex_session_catalog(session_root.as_ref())?;
+            let discovery = super::discover_codex_catalog_sources(&sessions);
+            if catalog_summary.failed_sessions != 0 || !discovery.rejections.is_empty() {
+                return Err(CodexSourceBackedErrorV0::IncompleteCatalog {
+                    rejected: discovery.rejections.len(),
+                    failed: catalog_summary.failed_sessions,
+                });
+            }
+            for (source, source_key, native_session_id) in bind_source_keys(discovery.sources)? {
+                if sources_by_native_session
+                    .insert(native_session_id.clone(), (source, source_key))
+                    .is_some()
+                {
+                    return Err(CodexSourceBackedErrorV0::DuplicateNativeSessionId(
+                        native_session_id,
+                    ));
+                }
+            }
+        }
+        Ok(Self {
+            sources_by_native_session,
+        })
+    }
+
+    pub fn hydrate(
+        &self,
+        locator: &SourceRecordLocator,
+    ) -> CodexSourceBackedResultV0<CodexHydratedRecordV0> {
+        locator.validate_contract()?;
+        let (native_session_id, byte_offset, byte_length, physical_ordinal) =
+            validate_codex_locator(locator)?;
+        if byte_length > MAX_HYDRATED_CODEX_RECORD_BYTES {
+            return Err(CodexSourceBackedErrorV0::LocatorRangeTooLarge);
+        }
+
+        let (source, source_key) = self
+            .sources_by_native_session
+            .get(&native_session_id)
+            .ok_or_else(|| {
+                CodexSourceBackedErrorV0::LocatorSourceNotFound(native_session_id.clone())
+            })?;
+        if !source_key.exact_descriptor_eq(locator.source()) {
+            return Err(CodexSourceBackedErrorV0::InvalidCodexLocator);
+        }
+
+        hydrate_codex_source_record(source, locator, byte_offset, byte_length, physical_ordinal)
+    }
+}
+
 pub fn ingest_codex_source_backed_v0(
     session_root: impl AsRef<Path>,
     global_index_root: impl AsRef<Path>,
@@ -358,42 +425,16 @@ pub fn hydrate_codex_locator(
     session_root: impl AsRef<Path>,
     locator: &SourceRecordLocator,
 ) -> CodexSourceBackedResultV0<CodexHydratedRecordV0> {
-    locator.validate_contract()?;
-    let (native_session_id, byte_offset, byte_length, physical_ordinal) =
-        validate_codex_locator(locator)?;
-    if byte_length > MAX_HYDRATED_CODEX_RECORD_BYTES {
-        return Err(CodexSourceBackedErrorV0::LocatorRangeTooLarge);
-    }
+    CodexLocatorResolverV0::discover([session_root])?.hydrate(locator)
+}
 
-    let (catalog_summary, sessions) = discover_codex_session_catalog(session_root.as_ref())?;
-    let discovery = super::discover_codex_catalog_sources(&sessions);
-    if catalog_summary.failed_sessions != 0 || !discovery.rejections.is_empty() {
-        return Err(CodexSourceBackedErrorV0::IncompleteCatalog {
-            rejected: discovery.rejections.len(),
-            failed: catalog_summary.failed_sessions,
-        });
-    }
-    let mut matches = discovery.sources.into_iter().filter(|source| {
-        source.catalog_native_session_id.as_deref() == Some(native_session_id.as_str())
-    });
-    let source = matches.next().ok_or_else(|| {
-        CodexSourceBackedErrorV0::LocatorSourceNotFound(native_session_id.clone())
-    })?;
-    if matches.next().is_some() {
-        return Err(CodexSourceBackedErrorV0::DuplicateNativeSessionId(
-            native_session_id,
-        ));
-    }
-    let rediscovered_key =
-        codex_source_key(source.catalog_native_session_id.as_deref().ok_or_else(|| {
-            CodexSourceBackedErrorV0::MissingNativeSessionId {
-                path: source.source_path.clone(),
-            }
-        })?)?;
-    if !rediscovered_key.exact_descriptor_eq(locator.source()) {
-        return Err(CodexSourceBackedErrorV0::InvalidCodexLocator);
-    }
-
+fn hydrate_codex_source_record(
+    source: &CodexCatalogSource,
+    locator: &SourceRecordLocator,
+    byte_offset: u64,
+    byte_length: u64,
+    physical_ordinal: u64,
+) -> CodexSourceBackedResultV0<CodexHydratedRecordV0> {
     let range_end = byte_offset
         .checked_add(byte_length)
         .ok_or(CodexSourceBackedErrorV0::LocatorRangeTooLarge)?;

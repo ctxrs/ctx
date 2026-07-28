@@ -124,6 +124,9 @@ pub(crate) fn run_search(
     provider_refreshes: &mut ProviderRefreshCollector,
     config: &config::AppConfig,
 ) -> Result<()> {
+    if crate::commands::source_backed_codex::should_run_search(&args) {
+        return crate::commands::source_backed_codex::run_search(args, data_root, telemetry);
+    }
     if !search_has_intent(SearchIntentInput {
         query: args.query.as_deref(),
         terms: &args.term,
