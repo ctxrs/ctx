@@ -4,7 +4,9 @@ use std::{
 };
 
 use chrono::{TimeZone, Utc};
-use ctx_history_core::{CaptureProvider, Event, SyncCursor};
+use ctx_history_core::{
+    CaptureProvider, Event, LocatorRevisionPolicy, NativeRecordCoordinate, SyncCursor, TypedKey,
+};
 use ctx_history_store::{decode_native_path_committed_cursor, Store};
 use rusqlite::functions::FunctionFlags;
 use rusqlite::Connection;
@@ -12,6 +14,9 @@ use serde_json::json;
 use tempfile::TempDir;
 use uuid::Uuid;
 
+use super::native_path::source_backed::{
+    hydrate_nanoclaw_source_backed_exact, scan_nanoclaw_source_backed,
+};
 use super::position::{nanoclaw_message_locator, NanoClawMessageSource};
 use super::rows::NANOCLAW_NATIVE_MAX_RECORD_BYTES;
 use super::*;
@@ -867,4 +872,144 @@ fn core_projection_never_persists_or_indexes_the_complete_tail() {
         .unwrap()
         .text
         .ends_with(secret));
+}
+
+#[test]
+fn source_backed_cold_scan_has_stable_ids_compound_evidence_and_exact_locators() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = create_project(&temp, "source-backed", 1);
+    let (inbound, outbound) = create_message_stores(&root, "session-0000");
+    insert_inbound(&inbound, "inbound", 1, 1_000, "source-backed-inbound");
+    insert_outbound(&outbound, "outbound", 2, 2_000, "source-backed-outbound");
+    let lineage = [0x4a; 32];
+
+    let mut documents = Vec::new();
+    let receipt = scan_nanoclaw_source_backed(&root, lineage, |page| {
+        assert!(!page.documents.is_empty());
+        assert!(page.documents.len() <= 64);
+        documents.extend(page.documents);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(documents.len(), 2);
+    assert_eq!(receipt.emitted_pages, 1);
+    assert_eq!(
+        receipt.source.counts(),
+        ctx_history_core::ScannedSourceCounts {
+            complete_records: 3,
+            retained_records: 2,
+            rejected_records: 0,
+            ignored_records: 1,
+            indexed_documents: 2,
+            certified_bytes: receipt.source.counts().certified_bytes,
+        }
+    );
+    assert!(receipt.source.counts().certified_bytes > 0);
+    let evidence: serde_json::Value =
+        serde_json::from_slice(receipt.source.observation().revision()).unwrap();
+    assert_eq!(evidence["version"], json!(1));
+    assert_eq!(evidence["sessions"], json!(1));
+    assert_eq!(evidence["component_databases"], json!(2));
+    assert!(evidence["central_sha256"].as_str().unwrap().len() == 64);
+    assert!(evidence["session_inventory_sha256"].as_str().unwrap().len() == 64);
+
+    let canonical_root = fs::canonicalize(&root).unwrap().display().to_string();
+    for document in &documents {
+        assert_eq!(document.parent_session_id, None);
+        assert_eq!(document.root_session_id, document.session_id);
+        assert_eq!(document.provider_session_id.as_deref(), Some("thread-0000"));
+        assert_eq!(document.branch, None);
+        assert_eq!(
+            document.source_path.as_deref(),
+            Some(canonical_root.as_str())
+        );
+        assert_eq!(document.agent_type, "codex");
+        assert!(document.is_primary);
+        assert_eq!(
+            document.locator.revision_policy(),
+            LocatorRevisionPolicy::ExactSourceRevision
+        );
+        assert!(document
+            .locator
+            .certified_source_revision_digest()
+            .is_some());
+        let NativeRecordCoordinate::ProviderNative {
+            namespace,
+            coordinate,
+        } = document.locator.coordinate()
+        else {
+            panic!("NanoClaw source-backed locator was not provider-native");
+        };
+        assert_eq!(namespace, NANOCLAW_MESSAGE_LOCATOR_KIND);
+        assert!(matches!(coordinate, TypedKey::Bytes(value) if value.len() == 17));
+    }
+
+    let exact = documents
+        .iter()
+        .map(|document| {
+            hydrate_nanoclaw_source_backed_exact(&root, lineage, &document.locator)
+                .unwrap()
+                .text
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        exact,
+        vec!["source-backed-inbound", "source-backed-outbound"]
+    );
+
+    let mut repeated_documents = Vec::new();
+    let repeated = scan_nanoclaw_source_backed(&root, lineage, |page| {
+        repeated_documents.extend(page.documents);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(receipt.source, repeated.source);
+    assert_eq!(
+        documents
+            .iter()
+            .map(|document| (document.session_id, document.event_id))
+            .collect::<Vec<_>>(),
+        repeated_documents
+            .iter()
+            .map(|document| (document.session_id, document.event_id))
+            .collect::<Vec<_>>()
+    );
+
+    Connection::open(&inbound)
+        .unwrap()
+        .execute(
+            "update messages_in set content = 'changed' where id = 'inbound'",
+            [],
+        )
+        .unwrap();
+    assert!(hydrate_nanoclaw_source_backed_exact(&root, lineage, &documents[0].locator).is_err());
+}
+
+#[test]
+fn source_backed_partial_authority_and_unsupported_roots_fail_before_emitting() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = create_project(&temp, "partial-authority", 1);
+    let (_, outbound) = create_message_stores(&root, "session-0000");
+    let lineage = [0x73; 32];
+    let mut emitted = 0;
+
+    let unsupported = root.join("data").join("v2-sessions");
+    assert!(scan_nanoclaw_source_backed(&unsupported, lineage, |_| {
+        emitted += 1;
+        Ok(())
+    })
+    .is_err());
+    assert_eq!(emitted, 0);
+
+    Connection::open(outbound)
+        .unwrap()
+        .execute_batch("drop table messages_out; create table unrelated (id text);")
+        .unwrap();
+    let error = scan_nanoclaw_source_backed(&root, lineage, |_| {
+        emitted += 1;
+        Ok(())
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("messages_out"));
+    assert_eq!(emitted, 0);
 }

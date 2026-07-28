@@ -567,6 +567,13 @@ pub(super) fn attach_nanoclaw_complete_content_locator(
 pub(super) fn nanoclaw_logical_record_digest(
     values: &[NativeSqliteValue],
 ) -> Result<CompleteContentBodyDigest> {
+    let digest = nanoclaw_logical_record_digest_bytes(values);
+    CompleteContentBodyDigest::parse(hex(&digest)).ok_or(CaptureError::SystemInvariant(
+        "NanoClaw SHA-256 formatting produced an invalid digest",
+    ))
+}
+
+pub(super) fn nanoclaw_logical_record_digest_bytes(values: &[NativeSqliteValue]) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(b"ctx-complete-content-sqlite-logical-row-v1\0");
     digest.update((values.len() as u64).to_be_bytes());
@@ -593,9 +600,7 @@ pub(super) fn nanoclaw_logical_record_digest(
             }
         }
     }
-    CompleteContentBodyDigest::parse(format!("{:x}", digest.finalize())).ok_or(
-        CaptureError::SystemInvariant("NanoClaw SHA-256 formatting produced an invalid digest"),
-    )
+    digest.finalize().into()
 }
 
 pub(super) fn project_capture_source(

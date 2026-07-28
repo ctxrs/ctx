@@ -57,6 +57,7 @@ use super::{NANOCLAW_CAPTURE_REVISION, NANOCLAW_POLICY_REVISION};
 mod lifecycle;
 mod publication;
 mod scanner;
+pub(super) mod source_backed;
 
 use lifecycle::*;
 use scanner::*;
