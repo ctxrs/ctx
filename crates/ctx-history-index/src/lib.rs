@@ -8,7 +8,10 @@
 mod durable_directory;
 mod query;
 
-pub use query::{EventRecord, EventSearchCandidate, SessionRecord};
+pub use query::{
+    AgentScope, EventRecord, EventSearchCandidate, EventSearchFilters, ExcludedSessionTree,
+    SessionRecord,
+};
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -38,7 +41,7 @@ use uuid::Uuid;
 use durable_directory::DurableMmapDirectory;
 
 pub const GENERATION_MANIFEST_VERSION: u32 = 1;
-pub const LEXICAL_SCHEMA_VERSION: u32 = 3;
+pub const LEXICAL_SCHEMA_VERSION: u32 = 4;
 pub const LEXICAL_ANALYZER_VERSION: u32 = 1;
 pub const MAX_BODY_PREVIEW_CHARS: usize = 2_048;
 
@@ -138,6 +141,14 @@ pub enum IndexError {
     InvalidStoredDocumentField(&'static str),
     #[error("ID prefix must contain 1 to 32 hexadecimal digits, with optional hyphens")]
     InvalidIdPrefix,
+    #[error("query filter {field} is empty")]
+    EmptyQueryFilter { field: &'static str },
+    #[error("query filter {field} is too large: {actual} bytes, maximum {maximum}")]
+    QueryFilterTooLarge {
+        field: &'static str,
+        actual: usize,
+        maximum: usize,
+    },
     #[error("lexical analyzer {0} is unavailable")]
     MissingAnalyzer(&'static str),
     #[error("document source does not have an active replacement")]
@@ -201,9 +212,15 @@ impl Default for WriterOptions {
 pub struct LexicalDocument {
     pub event_id: StableEntityId,
     pub session_id: StableEntityId,
+    pub parent_session_id: Option<StableEntityId>,
+    pub root_session_id: StableEntityId,
     pub source: SourceKey,
     pub locator: SourceRecordLocator,
     pub provider_session_id: Option<String>,
+    pub branch: Option<String>,
+    pub source_path: Option<String>,
+    pub agent_type: String,
+    pub is_primary: bool,
     pub event_sequence: u64,
     pub occurred_at_unix_ms: Option<i64>,
     pub event_type: String,
@@ -246,6 +263,17 @@ impl LexicalDocument {
             self.provider_session_id.as_deref(),
             MAX_DOCUMENT_METADATA_BYTES,
         )?;
+        validate_optional_document_text(
+            "branch",
+            self.branch.as_deref(),
+            MAX_DOCUMENT_METADATA_BYTES,
+        )?;
+        validate_optional_document_text(
+            "source_path",
+            self.source_path.as_deref(),
+            MAX_DOCUMENT_METADATA_BYTES,
+        )?;
+        validate_document_text("agent_type", &self.agent_type, MAX_DOCUMENT_METADATA_BYTES)?;
         validate_optional_document_text("role", self.role.as_deref(), MAX_DOCUMENT_METADATA_BYTES)?;
         validate_optional_document_text(
             "workspace",
@@ -380,19 +408,29 @@ struct Fields {
     session_id: Field,
     session_identity_digest: Field,
     session_identity: Field,
+    parent_session_id: Field,
+    parent_session_identity: Field,
+    root_session_id: Field,
+    root_session_identity: Field,
     source_key: Field,
     native_locator: Field,
     provider: Field,
     source_format: Field,
     provider_session_id: Field,
+    branch: Field,
+    source_path: Field,
+    agent_type: Field,
+    is_primary: Field,
     event_sequence: Field,
     occurred_at_unix_ms: Field,
     event_type: Field,
     role: Field,
     body_preview: Field,
     workspace: Field,
+    workspace_filter: Field,
     cwd: Field,
     touched_file: Field,
+    touched_file_filter: Field,
 }
 
 struct PendingSource {
@@ -607,6 +645,11 @@ impl GenerationWriter {
         let locator_bytes = document.validate()?;
         let event_identity_bytes = document.event_id.encode_canonical()?;
         let session_identity_bytes = document.session_id.encode_canonical()?;
+        let root_session_identity_bytes = document.root_session_id.encode_canonical()?;
+        let parent_session_identity_bytes = document
+            .parent_session_id
+            .map(StableEntityId::encode_canonical)
+            .transpose()?;
         if document.event_id.entity_kind() != StableEntityKind::Event {
             return Err(IndexError::InvalidEventIdentityKind(
                 document.event_id.to_string(),
@@ -616,6 +659,17 @@ impl GenerationWriter {
             return Err(IndexError::InvalidSessionIdentityKind(
                 document.session_id.to_string(),
             ));
+        }
+        for related_session_id in document
+            .parent_session_id
+            .into_iter()
+            .chain(std::iter::once(document.root_session_id))
+        {
+            if related_session_id.entity_kind() != StableEntityKind::Session {
+                return Err(IndexError::InvalidSessionIdentityKind(
+                    related_session_id.to_string(),
+                ));
+            }
         }
         let source_digest = document.source.identity().digest();
         let source_descriptor_digest = document.source.exact_descriptor_digest();
@@ -656,10 +710,34 @@ impl GenerationWriter {
                     &token,
                 )?;
             }
+            for related_session_id in document
+                .parent_session_id
+                .into_iter()
+                .chain(std::iter::once(document.root_session_id))
+            {
+                if related_session_id != document.session_id
+                    && self
+                        .checked_base_sessions
+                        .insert(related_session_id.as_uuid())
+                {
+                    validate_referenced_session_identity_against_base(
+                        base_searcher,
+                        self.fields,
+                        related_session_id,
+                    )?;
+                }
+            }
         } else if is_append {
             return Err(IndexError::AppendBaseMismatch);
         }
         register_session_identity(&mut self.staged_session_identities, document.session_id)?;
+        if let Some(parent_session_id) = document.parent_session_id {
+            register_session_identity(&mut self.staged_session_identities, parent_session_id)?;
+        }
+        register_session_identity(
+            &mut self.staged_session_identities,
+            document.root_session_id,
+        )?;
         register_event_identity(&mut self.staged_event_identities, document.event_id)?;
         let mut target = TantivyDocument::default();
         target.add_text(self.fields.event_id, document.event_id.to_string());
@@ -677,6 +755,24 @@ impl GenerationWriter {
             hex(&document.session_id.digest()),
         );
         target.add_bytes(self.fields.session_identity, &session_identity_bytes);
+        if let (Some(parent_session_id), Some(parent_session_identity_bytes)) = (
+            document.parent_session_id,
+            parent_session_identity_bytes.as_ref(),
+        ) {
+            target.add_text(self.fields.parent_session_id, parent_session_id.to_string());
+            target.add_bytes(
+                self.fields.parent_session_identity,
+                parent_session_identity_bytes,
+            );
+        }
+        target.add_text(
+            self.fields.root_session_id,
+            document.root_session_id.to_string(),
+        );
+        target.add_bytes(
+            self.fields.root_session_identity,
+            &root_session_identity_bytes,
+        );
         target.add_text(self.fields.source_key, &token);
         target.add_bytes(self.fields.native_locator, &locator_bytes);
         target.add_text(self.fields.provider, document.source.provider());
@@ -684,6 +780,15 @@ impl GenerationWriter {
         if let Some(provider_session_id) = document.provider_session_id {
             target.add_text(self.fields.provider_session_id, provider_session_id);
         }
+        if let Some(branch) = document.branch {
+            target.add_text(self.fields.branch, branch);
+        }
+        if let Some(source_path) = document.source_path {
+            target.add_text(self.fields.workspace_filter, source_path.to_lowercase());
+            target.add_text(self.fields.source_path, source_path);
+        }
+        target.add_text(self.fields.agent_type, document.agent_type);
+        target.add_u64(self.fields.is_primary, u64::from(document.is_primary));
         target.add_u64(self.fields.event_sequence, document.event_sequence);
         if let Some(occurred_at_unix_ms) = document.occurred_at_unix_ms {
             target.add_i64(self.fields.occurred_at_unix_ms, occurred_at_unix_ms);
@@ -694,12 +799,15 @@ impl GenerationWriter {
         }
         target.add_text(self.fields.body_preview, document.body);
         if let Some(workspace) = document.workspace {
+            target.add_text(self.fields.workspace_filter, workspace.to_lowercase());
             target.add_text(self.fields.workspace, workspace);
         }
         if let Some(cwd) = document.cwd {
+            target.add_text(self.fields.workspace_filter, cwd.to_lowercase());
             target.add_text(self.fields.cwd, cwd);
         }
         for touched_file in document.touched_files {
+            target.add_text(self.fields.touched_file_filter, touched_file.to_lowercase());
             target.add_text(self.fields.touched_file, touched_file);
         }
         self.writer.add_document(target)?;
@@ -1232,11 +1340,19 @@ fn lexical_schema() -> Schema {
     builder.add_text_field("session_id", STRING | STORED);
     builder.add_text_field("session_identity_digest", STRING | STORED);
     builder.add_bytes_field("session_identity", STORED);
+    builder.add_text_field("parent_session_id", STRING | STORED);
+    builder.add_bytes_field("parent_session_identity", STORED);
+    builder.add_text_field("root_session_id", STRING | STORED);
+    builder.add_bytes_field("root_session_identity", STORED);
     builder.add_text_field("source_key", STRING | STORED);
     builder.add_bytes_field("native_locator", STORED);
     builder.add_text_field("provider", STRING | STORED);
     builder.add_text_field("source_format", STRING | STORED);
     builder.add_text_field("provider_session_id", STRING | STORED);
+    builder.add_text_field("branch", STRING | STORED);
+    builder.add_text_field("source_path", STORED);
+    builder.add_text_field("agent_type", STRING | STORED);
+    builder.add_u64_field("is_primary", STORED | INDEXED);
     builder.add_u64_field("event_sequence", FAST | STORED | INDEXED);
     builder.add_i64_field("occurred_at_unix_ms", FAST | STORED | INDEXED);
     builder.add_text_field("event_type", STRING | STORED);
@@ -1251,8 +1367,10 @@ fn lexical_schema() -> Schema {
             .set_stored(),
     );
     builder.add_text_field("workspace", STRING | STORED);
+    builder.add_text_field("workspace_filter", STRING);
     builder.add_text_field("cwd", STRING | STORED);
     builder.add_text_field("touched_file", STRING | STORED);
+    builder.add_text_field("touched_file_filter", STRING);
     builder.build()
 }
 
@@ -1266,19 +1384,29 @@ fn fields_from_schema(schema: &Schema) -> Result<Fields> {
         session_id: required_field(schema, "session_id")?,
         session_identity_digest: required_field(schema, "session_identity_digest")?,
         session_identity: required_field(schema, "session_identity")?,
+        parent_session_id: required_field(schema, "parent_session_id")?,
+        parent_session_identity: required_field(schema, "parent_session_identity")?,
+        root_session_id: required_field(schema, "root_session_id")?,
+        root_session_identity: required_field(schema, "root_session_identity")?,
         source_key: required_field(schema, "source_key")?,
         native_locator: required_field(schema, "native_locator")?,
         provider: required_field(schema, "provider")?,
         source_format: required_field(schema, "source_format")?,
         provider_session_id: required_field(schema, "provider_session_id")?,
+        branch: required_field(schema, "branch")?,
+        source_path: required_field(schema, "source_path")?,
+        agent_type: required_field(schema, "agent_type")?,
+        is_primary: required_field(schema, "is_primary")?,
         event_sequence: required_field(schema, "event_sequence")?,
         occurred_at_unix_ms: required_field(schema, "occurred_at_unix_ms")?,
         event_type: required_field(schema, "event_type")?,
         role: required_field(schema, "role")?,
         body_preview: required_field(schema, "body_preview")?,
         workspace: required_field(schema, "workspace")?,
+        workspace_filter: required_field(schema, "workspace_filter")?,
         cwd: required_field(schema, "cwd")?,
         touched_file: required_field(schema, "touched_file")?,
+        touched_file_filter: required_field(schema, "touched_file_filter")?,
     })
 }
 
@@ -1396,6 +1524,41 @@ fn validate_session_identity_against_base(
     Ok(())
 }
 
+fn validate_referenced_session_identity_against_base(
+    searcher: &Searcher,
+    fields: Fields,
+    identity: StableEntityId,
+) -> Result<()> {
+    use tantivy::{collector::TopDocs, query::TermQuery, schema::Value as TantivyValue};
+
+    let uuid = identity.as_uuid();
+    let term = Term::from_field_text(fields.session_id, &uuid.to_string());
+    if searcher.doc_freq(&term)? == 0 {
+        return Ok(());
+    }
+    let query = TermQuery::new(term, IndexRecordOption::Basic);
+    let hits = searcher.search(&query, &TopDocs::with_limit(2).order_by_score())?;
+    let new_digest = hex(&identity.digest());
+    for (_, address) in hits {
+        let document: TantivyDocument = searcher.doc(address)?;
+        let existing_digest = document
+            .get_first(fields.session_identity_digest)
+            .and_then(|value| value.as_str())
+            .ok_or(IndexError::EmptyDocumentField {
+                field: "session_identity_digest",
+            })?;
+        if existing_digest != new_digest {
+            return Err(IndexError::CompactIdentityCollision {
+                kind: "session",
+                uuid,
+                existing_digest: existing_digest.to_owned(),
+                new_digest,
+            });
+        }
+    }
+    Ok(())
+}
+
 fn register_event_identity(
     identities: &mut HashMap<Uuid, [u8; 32]>,
     identity: StableEntityId,
@@ -1509,9 +1672,13 @@ mod tests {
     use super::*;
 
     fn source(name: &str) -> SourceKey {
+        source_for_provider("codex", "codex_session_jsonl", name)
+    }
+
+    fn source_for_provider(provider: &str, source_format: &str, name: &str) -> SourceKey {
         SourceKey::derive(
-            "codex",
-            "codex_session_jsonl",
+            provider,
+            source_format,
             "session",
             1,
             SourceAnchor::provider_native("session-file", TypedKey::utf8(name).unwrap()).unwrap(),
@@ -1587,7 +1754,16 @@ mod tests {
     }
 
     fn document(source: &SourceKey, sequence: u64, body: &str) -> LexicalDocument {
-        let native_session_coordinate = TypedKey::utf8("session").unwrap();
+        document_for_session(source, "session", sequence, body)
+    }
+
+    fn document_for_session(
+        source: &SourceKey,
+        native_session_id: &str,
+        sequence: u64,
+        body: &str,
+    ) -> LexicalDocument {
+        let native_session_coordinate = TypedKey::utf8(native_session_id).unwrap();
         let session_key =
             NativeSessionKey::native_id("session", native_session_coordinate.clone()).unwrap();
         let session_id = derive_session_id(SessionIdentityInput {
@@ -1612,6 +1788,8 @@ mod tests {
         LexicalDocument {
             event_id,
             session_id,
+            parent_session_id: None,
+            root_session_id: session_id,
             source: source.clone(),
             locator: SourceRecordLocator::new(
                 source.clone(),
@@ -1627,7 +1805,11 @@ mod tests {
                 [sequence as u8; 32],
             )
             .unwrap(),
-            provider_session_id: Some("session".to_owned()),
+            provider_session_id: Some(native_session_id.to_owned()),
+            branch: Some("main".to_owned()),
+            source_path: Some(format!("/history/{native_session_id}.jsonl")),
+            agent_type: "primary".to_owned(),
+            is_primary: true,
             event_sequence: sequence,
             occurred_at_unix_ms: Some(1_700_000_000_000 + sequence as i64),
             event_type: "message".to_owned(),
@@ -1637,6 +1819,22 @@ mod tests {
             cwd: Some("/work/ctx".to_owned()),
             touched_files: vec!["src/lib.rs".to_owned()],
         }
+    }
+
+    fn filtered_session_ids(index: &VerifiedIndex, filters: EventSearchFilters) -> Vec<Uuid> {
+        sorted_uuids(
+            index
+                .search_event_candidates_with_filters("shared needle", &filters, 10)
+                .unwrap()
+                .into_iter()
+                .map(|candidate| candidate.event.session_id.as_uuid())
+                .collect(),
+        )
+    }
+
+    fn sorted_uuids(mut ids: Vec<Uuid>) -> Vec<Uuid> {
+        ids.sort();
+        ids
     }
 
     #[test]
@@ -1821,6 +2019,178 @@ mod tests {
     }
 
     #[test]
+    fn filtered_search_covers_relationship_and_public_metadata_contracts() {
+        let temp = tempdir().unwrap();
+        let codex_root = source("codex-root");
+        let codex_child = source("codex-child");
+        let claude = source_for_provider(
+            "claude_code",
+            "claude_projects_jsonl_tree",
+            "claude-sessions",
+        );
+
+        let mut root = document_for_session(&codex_root, "root-thread", 1, "shared needle");
+        root.workspace = Some("Ctx-Rich-Fixture".to_owned());
+        root.cwd = Some("/work/ctx-root".to_owned());
+        root.source_path = Some("/history/ctx[root].jsonl".to_owned());
+        root.occurred_at_unix_ms = Some(100);
+        let root_session_id = root.session_id;
+        root.root_session_id = root_session_id;
+
+        let mut child = document_for_session(&codex_child, "child-thread", 2, "shared needle");
+        child.parent_session_id = Some(root_session_id);
+        child.root_session_id = root_session_id;
+        child.branch = Some("feature/query-seam".to_owned());
+        child.workspace = Some("ChildSpace".to_owned());
+        child.cwd = Some("/work/child".to_owned());
+        child.source_path = Some("/history/child.jsonl".to_owned());
+        child.agent_type = "subagent".to_owned();
+        child.is_primary = false;
+        child.event_type = "tool_call".to_owned();
+        child.role = Some("assistant".to_owned());
+        child.occurred_at_unix_ms = Some(200);
+        child.touched_files = vec!["crates/Query.rs".to_owned()];
+        let child_session_id = child.session_id;
+
+        let mut other = document_for_session(&claude, "other-thread", 3, "shared needle");
+        other.workspace = Some("Elsewhere".to_owned());
+        other.branch = Some("release".to_owned());
+        other.occurred_at_unix_ms = Some(300);
+        let other_session_id = other.session_id;
+        other.root_session_id = other_session_id;
+
+        let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        writer.begin_source(codex_root.clone()).unwrap();
+        writer.add_document(root).unwrap();
+        writer
+            .certify_source(certificate(&codex_root, 1, 1))
+            .unwrap();
+        writer.begin_source(codex_child.clone()).unwrap();
+        writer.add_document(child).unwrap();
+        writer
+            .certify_source(certificate(&codex_child, 1, 1))
+            .unwrap();
+        writer.begin_source(claude.clone()).unwrap();
+        writer.add_document(other).unwrap();
+        writer.certify_source(certificate(&claude, 1, 1)).unwrap();
+        writer.commit(|_| true).unwrap();
+        let index = VerifiedIndex::open(temp.path()).unwrap();
+
+        let all = sorted_uuids(vec![
+            root_session_id.as_uuid(),
+            child_session_id.as_uuid(),
+            other_session_id.as_uuid(),
+        ]);
+        assert_eq!(
+            filtered_session_ids(&index, EventSearchFilters::default()),
+            all
+        );
+        assert_eq!(
+            filtered_session_ids(
+                &index,
+                EventSearchFilters {
+                    provider: Some("claude_code".to_owned()),
+                    ..EventSearchFilters::default()
+                }
+            ),
+            vec![other_session_id.as_uuid()]
+        );
+        assert_eq!(
+            filtered_session_ids(
+                &index,
+                EventSearchFilters {
+                    workspace: Some("CTX[ROOT]".to_owned()),
+                    ..EventSearchFilters::default()
+                }
+            ),
+            vec![root_session_id.as_uuid()]
+        );
+        assert_eq!(
+            filtered_session_ids(
+                &index,
+                EventSearchFilters {
+                    since_unix_ms: Some(250),
+                    ..EventSearchFilters::default()
+                }
+            ),
+            vec![other_session_id.as_uuid()]
+        );
+        assert_eq!(
+            filtered_session_ids(
+                &index,
+                EventSearchFilters {
+                    event_type: Some("tool_call".to_owned()),
+                    role: Some("assistant".to_owned()),
+                    agent_type: Some("subagent".to_owned()),
+                    ..EventSearchFilters::default()
+                }
+            ),
+            vec![child_session_id.as_uuid()]
+        );
+        assert_eq!(
+            filtered_session_ids(
+                &index,
+                EventSearchFilters {
+                    agent_scope: AgentScope::Primary,
+                    ..EventSearchFilters::default()
+                }
+            ),
+            sorted_uuids(vec![root_session_id.as_uuid(), other_session_id.as_uuid()])
+        );
+        assert_eq!(
+            filtered_session_ids(
+                &index,
+                EventSearchFilters {
+                    session_id: Some(child_session_id.as_uuid()),
+                    agent_scope: AgentScope::Primary,
+                    ..EventSearchFilters::default()
+                }
+            ),
+            vec![child_session_id.as_uuid()]
+        );
+        assert_eq!(
+            filtered_session_ids(
+                &index,
+                EventSearchFilters {
+                    parent_session_id: Some(root_session_id.as_uuid()),
+                    root_session_id: Some(root_session_id.as_uuid()),
+                    provider_session_id: Some("child-thread".to_owned()),
+                    branch: Some("feature/query-seam".to_owned()),
+                    file: Some("QUERY.RS".to_owned()),
+                    ..EventSearchFilters::default()
+                }
+            ),
+            vec![child_session_id.as_uuid()]
+        );
+        assert_eq!(
+            filtered_session_ids(
+                &index,
+                EventSearchFilters {
+                    exclude_session_tree: Some(ExcludedSessionTree {
+                        provider: "codex".to_owned(),
+                        provider_session_id: "root-thread".to_owned(),
+                        session_id: Some(root_session_id.as_uuid()),
+                    }),
+                    ..EventSearchFilters::default()
+                }
+            ),
+            vec![other_session_id.as_uuid()]
+        );
+
+        let child = index
+            .session_by_id(child_session_id.as_uuid())
+            .unwrap()
+            .unwrap();
+        assert_eq!(child.parent_session_id, Some(root_session_id));
+        assert_eq!(child.root_session_id, root_session_id);
+        assert_eq!(child.provider_session_id.as_deref(), Some("child-thread"));
+        assert_eq!(child.branch.as_deref(), Some("feature/query-seam"));
+        assert_eq!(child.source_path.as_deref(), Some("/history/child.jsonl"));
+        assert_eq!(child.agent_type, "subagent");
+        assert!(!child.is_primary);
+    }
+
+    #[test]
     fn maximum_length_preview_is_stored_and_returned() {
         let temp = tempdir().unwrap();
         let source = source("session.jsonl");
@@ -1854,6 +2224,17 @@ mod tests {
 
         assert!(index.search_event_candidates("", 10).unwrap().is_empty());
         assert!(index.search_event_candidates("body", 0).unwrap().is_empty());
+        assert!(matches!(
+            index.search_event_candidates_with_filters(
+                "body",
+                &EventSearchFilters {
+                    provider: Some("  ".to_owned()),
+                    ..EventSearchFilters::default()
+                },
+                10,
+            ),
+            Err(IndexError::EmptyQueryFilter { field: "provider" })
+        ));
         assert!(matches!(
             index.events_by_id_prefix("not-a-uuid"),
             Err(IndexError::InvalidIdPrefix)
@@ -2088,7 +2469,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_v2_manifest_fails_closed_at_generation_boundary() {
+    fn stale_v3_manifest_fails_closed_at_generation_boundary() {
         let temp = tempdir().unwrap();
         let source = source("session.jsonl");
         let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
@@ -2099,7 +2480,7 @@ mod tests {
 
         let index = VerifiedIndex::open(temp.path()).unwrap();
         let mut stale_manifest = index.manifest().clone();
-        stale_manifest.lexical_schema_version = 2;
+        stale_manifest.lexical_schema_version = 3;
         let stale_generation_id = stale_manifest.generation_id().unwrap();
         write_manifest(temp.path(), &stale_generation_id, &stale_manifest).unwrap();
         let mut stale_metas = index.searcher.index().load_metas().unwrap();
@@ -2116,7 +2497,7 @@ mod tests {
             error,
             IndexError::GenerationContractMismatch {
                 identity: IDENTITY_VERSION,
-                schema: 2,
+                schema: 3,
                 analyzer: LEXICAL_ANALYZER_VERSION,
             }
         ));
