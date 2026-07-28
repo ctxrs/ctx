@@ -35,6 +35,8 @@ const FORGECODE_LOCATOR_KIND: &str = "forgecode-conversation-row-v1";
 pub(super) struct ForgeCodeCompleteContentDigest {
     locator: NativeLocator,
     values: Vec<NativeSqliteValue>,
+    record_digest: [u8; 32],
+    canonical_record_bytes: u64,
 }
 
 impl ForgeCodeCompleteContentDigest {
@@ -51,19 +53,32 @@ impl ForgeCodeCompleteContentDigest {
     ) -> Result<Self> {
         let locator = NativeLocator::new(FORGECODE_LOCATOR_KIND, rowid.to_be_bytes().to_vec())
             .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+        let values = vec![
+            NativeSqliteValue::Integer(rowid),
+            NativeSqliteValue::Text(conversation_id.to_owned()),
+            native_text(title),
+            NativeSqliteValue::Integer(workspace_id),
+            native_text(context),
+            NativeSqliteValue::Text(created_at.to_owned()),
+            native_text(updated_at),
+            native_text(metrics),
+        ];
+        let record_digest = forgecode_logical_record_digest(&values);
+        let canonical_record_bytes = forgecode_logical_record_bytes(&values)?;
         Ok(Self {
             locator,
-            values: vec![
-                NativeSqliteValue::Integer(rowid),
-                NativeSqliteValue::Text(conversation_id.to_owned()),
-                native_text(title),
-                NativeSqliteValue::Integer(workspace_id),
-                native_text(context),
-                NativeSqliteValue::Text(created_at.to_owned()),
-                native_text(updated_at),
-                native_text(metrics),
-            ],
+            values,
+            record_digest,
+            canonical_record_bytes,
         })
+    }
+
+    pub(super) fn record_digest(&self) -> [u8; 32] {
+        self.record_digest
+    }
+
+    pub(super) fn canonical_record_bytes(&self) -> u64 {
+        self.canonical_record_bytes
     }
 
     pub(super) fn attach_message(
@@ -105,7 +120,7 @@ impl ForgeCodeCompleteContentDigest {
             self.locator.kind(),
             self.locator.value(),
             native_record_id,
-            forgecode_record_digest(&self.values),
+            complete_content_digest(self.record_digest)?,
         )
         .ok_or(CaptureError::SystemInvariant(
             "SQLite complete-content locator exceeds the bounded canonical schema",
@@ -117,7 +132,9 @@ impl ForgeCodeCompleteContentDigest {
     }
 }
 
-fn forgecode_record_digest(values: &[NativeSqliteValue]) -> CompleteContentBodyDigest {
+pub(in crate::provider::providers::forgecode) fn forgecode_logical_record_digest(
+    values: &[NativeSqliteValue],
+) -> [u8; 32] {
     const DOMAIN: &[u8] = b"ctx-complete-content-sqlite-logical-row-v1\0";
     let mut digest = Sha256::new();
     digest.update(DOMAIN);
@@ -145,8 +162,42 @@ fn forgecode_record_digest(values: &[NativeSqliteValue]) -> CompleteContentBodyD
             }
         }
     }
-    CompleteContentBodyDigest::parse(format!("{:x}", digest.finalize()))
-        .expect("SHA-256 formatter must return a valid digest")
+    digest.finalize().into()
+}
+
+fn complete_content_digest(digest: [u8; 32]) -> Result<CompleteContentBodyDigest> {
+    CompleteContentBodyDigest::parse(hex_digest(&digest)).ok_or(CaptureError::SystemInvariant(
+        "ForgeCode logical-row digest is not canonical SHA-256",
+    ))
+}
+
+fn hex_digest(digest: &[u8; 32]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn forgecode_logical_record_bytes(values: &[NativeSqliteValue]) -> Result<u64> {
+    values.iter().try_fold(8_u64, |total, value| {
+        let value_bytes = match value {
+            NativeSqliteValue::Null => 1,
+            NativeSqliteValue::Integer(_) | NativeSqliteValue::RealBits(_) => 9,
+            NativeSqliteValue::Text(value) => canonical_variable_value_bytes(value.len())?,
+            NativeSqliteValue::Blob(value) => canonical_variable_value_bytes(value.len())?,
+        };
+        total
+            .checked_add(value_bytes)
+            .ok_or(CaptureError::SystemInvariant(
+                "ForgeCode canonical logical-row length overflowed",
+            ))
+    })
+}
+
+fn canonical_variable_value_bytes(length: usize) -> Result<u64> {
+    u64::try_from(length)
+        .ok()
+        .and_then(|length| length.checked_add(9))
+        .ok_or(CaptureError::SystemInvariant(
+            "ForgeCode canonical logical-row value length overflowed",
+        ))
 }
 
 pub(crate) fn forgecode_complete_message(
