@@ -668,6 +668,22 @@ impl PiNativeScanner {
         self.core.as_ref().map(|lane| lane.lifecycle)
     }
 
+    pub(crate) fn provider_session_id(&self) -> Option<&str> {
+        self.header.as_ref().map(|header| header.id.as_str())
+    }
+
+    pub(crate) fn session_cwd(&self) -> Option<&str> {
+        self.header
+            .as_ref()
+            .and_then(|header| header.cwd.as_deref())
+    }
+
+    pub(crate) fn parent_provider_session_id(&self) -> Option<&str> {
+        self.header
+            .as_ref()
+            .and_then(|header| header.parent_session.as_deref())
+    }
+
     pub(crate) fn next_page(&mut self) -> Result<Option<PiNativeOwnedPage>, PiNativePathError> {
         loop {
             if self.ready_core.is_some() || self.ready_output.is_some() {

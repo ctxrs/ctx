@@ -30,6 +30,7 @@ pub(crate) struct PiNativePhysicalLocator {
     pub(crate) line_number: u64,
     pub(crate) byte_start: u64,
     pub(crate) byte_end_exclusive: u64,
+    pub(crate) record_sha256: [u8; 32],
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
