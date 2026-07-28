@@ -256,6 +256,140 @@ fn output_heavy_scan_never_constructs_result_bodies_hashes_or_previews() {
 }
 
 #[test]
+fn source_backed_projection_prefilters_with_legacy_equivalent_scan_accounting() {
+    let ignored = jsonl(json!({
+        "type": "event_msg",
+        "payload": {
+            "type": "token_count",
+            "info": {"total_token_usage": {"input_tokens": 42}}
+        }
+    }));
+    let ineligible_result = jsonl(json!({
+        "type": "event_msg",
+        "payload": {
+            "type": "patch_apply_end",
+            "success": true
+        }
+    }));
+    let retained = message("user", "source-backed retained body");
+    let contents = [
+        session_meta("source-backed-prefilter-owner"),
+        ignored,
+        ineligible_result.clone(),
+        retained.clone(),
+    ]
+    .concat();
+    let (_temp, path) = write_source(&contents);
+
+    let (legacy_scan, legacy) =
+        scan_collect(discover_one(&path, "source-backed-prefilter-owner"), None);
+    let mut scanner = CodexNativeScanner::new_source_backed_v0(
+        discover_one(&path, "source-backed-prefilter-owner"),
+        None,
+    )
+    .unwrap();
+    let mut source_backed_rows = Vec::new();
+    let mut source_backed_receipts = Vec::new();
+    while let Some(page) = scanner.next_page().unwrap() {
+        match page {
+            CodexNativeOwnedPage::Core(page) => {
+                assert!(page.core_rows.is_empty());
+                source_backed_receipts.push(page.receipt());
+                source_backed_rows.extend(page.source_backed_rows);
+            }
+            CodexNativeOwnedPage::Pro(_) => {
+                panic!("source-backed Core-only projection must not emit Pro pages")
+            }
+        }
+    }
+    let source_backed_scan = scanner.finish().unwrap();
+
+    assert_eq!(legacy.rows.len(), 1);
+    assert_eq!(source_backed_rows.len(), 1);
+    assert_eq!(source_backed_receipts.len(), 1);
+    assert_eq!(source_backed_receipts[0].accepted_core_rows, 1);
+    assert_eq!(
+        legacy_scan.full_revision_sha256,
+        source_backed_scan.full_revision_sha256
+    );
+    assert_eq!(
+        legacy_scan.complete_prefix_sha256,
+        source_backed_scan.complete_prefix_sha256
+    );
+    assert_eq!(
+        legacy_scan.complete_prefix_end,
+        source_backed_scan.complete_prefix_end
+    );
+    assert_eq!(
+        legacy_scan.next_raw_ordinal,
+        source_backed_scan.next_raw_ordinal
+    );
+    assert_eq!(legacy_scan.rejections, source_backed_scan.rejections);
+
+    for scan in [&legacy_scan, &source_backed_scan] {
+        assert_eq!(scan.counters.complete_records, 4);
+        assert_eq!(scan.counters.retained_records, 1);
+        assert_eq!(scan.counters.ignored_records, 1);
+        assert_eq!(scan.counters.rejected_complete_records, 0);
+        assert_eq!(scan.counters.native_result_records, 1);
+        assert_eq!(
+            scan.counters.native_result_record_bytes,
+            ineligible_result.len() as u64
+        );
+        assert_eq!(scan.counters.prefiltered_records, 2);
+        assert_eq!(scan.counters.structural_json_parses, 2);
+        assert_eq!(scan.counters.typed_json_parses, 2);
+        assert_eq!(scan.counters.retained_json_parses, 1);
+    }
+
+    let row = &source_backed_rows[0];
+    let retained_start = contents.len().saturating_sub(retained.len()) as u64;
+    assert_eq!(row.raw_ordinal, 3);
+    assert_eq!(row.lexical_body, "source-backed retained body");
+    assert_eq!(row.source_record.byte_offset, retained_start);
+    assert_eq!(row.source_record.byte_length, retained.len() as u64);
+    let retained_digest: [u8; 32] = Sha256::digest(retained.as_bytes()).into();
+    assert_eq!(row.source_record.record_digest, retained_digest);
+    assert_eq!(
+        source_backed_scan.counters.legacy_body_json_serializations,
+        0
+    );
+    assert_eq!(
+        source_backed_scan.counters.legacy_row_json_serializations,
+        0
+    );
+    assert_eq!(source_backed_scan.counters.legacy_json_serialized_bytes, 0);
+    assert_eq!(
+        source_backed_scan.counters.legacy_file_touch_rows_created,
+        0
+    );
+    assert_eq!(
+        source_backed_scan
+            .counters
+            .legacy_complete_content_locators_created,
+        0
+    );
+    assert_eq!(
+        source_backed_scan
+            .counters
+            .legacy_page_owner_json_serializations,
+        0
+    );
+    assert_eq!(
+        source_backed_scan
+            .counters
+            .legacy_page_identity_owner_json_serializations,
+        0
+    );
+    assert_eq!(
+        source_backed_scan
+            .counters
+            .legacy_page_identity_row_json_serializations,
+        0
+    );
+}
+
+#[test]
 fn core_and_pro_profiles_match_while_pro_receives_success_failure_timeout_and_unknown() {
     let success_marker = "SUCCESS_OUTPUT_ONLY_MARKER";
     let failure_marker = "FAILURE_BODY_MUST_NOT_SURVIVE";
