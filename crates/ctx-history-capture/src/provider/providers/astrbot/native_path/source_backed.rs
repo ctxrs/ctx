@@ -207,7 +207,9 @@ pub(super) fn scan_astrbot_source_backed_v0(
     let opening_snapshot = astrbot_source_snapshot(&source.path)?;
     let conn = open_provider_sqlite_readonly(&source.path)?;
     let sql = AstrBotSql::new(&conn)?;
-    let user_version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let user_version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(CaptureError::from)?;
     let schema_fingerprint = sqlite_schema_fingerprint(&conn)?;
     let opening = source_observation(
         &source.source_key,
