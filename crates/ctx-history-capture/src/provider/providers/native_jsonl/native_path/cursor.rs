@@ -5,6 +5,7 @@ use ctx_history_core::CaptureProvider;
 use ctx_history_store::{decode_native_path_committed_cursor, Store};
 use serde::{Deserialize, Serialize};
 
+use crate::common::io::{open_provider_source_file, OpenedProviderSourceFile};
 use crate::provider::importer::{
     provider_path_identity, provider_source_cursor_stream_for_path, CertifiedProviderCursor,
 };
@@ -12,7 +13,9 @@ use crate::released_jsonl_cursor::released_jsonl_position_offset;
 use crate::{CaptureError, Result};
 
 use super::{
-    reader::{direct_jsonl_prefix_sha256, direct_jsonl_source_revision, observe_file},
+    reader::{
+        direct_jsonl_prefix_sha256_opened, direct_jsonl_source_revision, observe_opened_file,
+    },
     DirectJsonlCheckpoint, DirectJsonlFileObservation, DirectJsonlSession,
     DIRECT_JSONL_NATIVEPATH_PARSER_REVISION, DIRECT_JSONL_NATIVEPATH_POLICY_REVISION,
 };
@@ -92,6 +95,27 @@ pub(crate) fn decode_direct_jsonl_cursor(
     path: &Path,
     observation: &DirectJsonlFileObservation,
 ) -> Result<DirectJsonlCursorDecode> {
+    let opened = open_provider_source_file(path)?;
+    let decoded = decode_direct_jsonl_cursor_from_opened(
+        encoded_store_cursor,
+        provider,
+        source_format,
+        path,
+        observation,
+        &opened,
+    )?;
+    opened.revalidate()?;
+    Ok(decoded)
+}
+
+pub(crate) fn decode_direct_jsonl_cursor_from_opened(
+    encoded_store_cursor: &str,
+    provider: CaptureProvider,
+    source_format: &str,
+    path: &Path,
+    observation: &DirectJsonlFileObservation,
+    opened: &OpenedProviderSourceFile,
+) -> Result<DirectJsonlCursorDecode> {
     let encoded = decode_native_path_committed_cursor(encoded_store_cursor)
         .map(|cursor| cursor.provider_cursor().to_owned())
         .unwrap_or_else(|_| encoded_store_cursor.to_owned());
@@ -104,7 +128,7 @@ pub(crate) fn decode_direct_jsonl_cursor(
         }
         return Ok(DirectJsonlCursorDecode::Reset);
     }
-    migrate_released_cursor(&encoded, provider, source_format, path, observation)
+    migrate_released_cursor(&encoded, provider, source_format, path, observation, opened)
 }
 
 pub(crate) fn decode_direct_jsonl_native_cursor(
@@ -129,7 +153,8 @@ pub(crate) fn committed_direct_jsonl_replay_authority(
     source_format: &str,
     path: &Path,
 ) -> Result<DirectJsonlCheckpoint> {
-    let canonical_path = std::fs::canonicalize(path)?;
+    let opened = open_provider_source_file(path)?;
+    let canonical_path = path.to_path_buf();
     let locator_identity = provider_path_identity(&canonical_path)?;
     let stream = provider_source_cursor_stream_for_path(provider, source_format, &locator_identity);
     let stored = store
@@ -154,7 +179,7 @@ pub(crate) fn committed_direct_jsonl_replay_authority(
                     provider.as_str()
                 ))
             })?;
-    let live_observation = observe_file(&canonical_path)?;
+    let live_observation = observe_opened_file(&opened)?;
     if !checkpoint.terminal
         || checkpoint.source_path != canonical_path
         || checkpoint.source_observation != live_observation
@@ -166,15 +191,14 @@ pub(crate) fn committed_direct_jsonl_replay_authority(
         )));
     }
     let live_prefix_sha256 =
-        direct_jsonl_prefix_sha256(&canonical_path, checkpoint.complete_prefix_end)?;
-    if live_prefix_sha256 != checkpoint.complete_prefix_sha256
-        || observe_file(&canonical_path)? != live_observation
-    {
+        direct_jsonl_prefix_sha256_opened(&opened, checkpoint.complete_prefix_end)?;
+    if live_prefix_sha256 != checkpoint.complete_prefix_sha256 {
         return Err(CaptureError::InvalidPayload(format!(
             "{} output replay content does not match committed terminal Core authority",
             provider.as_str()
         )));
     }
+    opened.revalidate()?;
     Ok(checkpoint)
 }
 
@@ -215,6 +239,7 @@ fn migrate_released_cursor(
     source_format: &str,
     path: &Path,
     observation: &DirectJsonlFileObservation,
+    opened: &OpenedProviderSourceFile,
 ) -> Result<DirectJsonlCursorDecode> {
     if matches!(
         provider,
@@ -266,7 +291,7 @@ fn migrate_released_cursor(
             ),
         }
     });
-    let canonical_path = std::fs::canonicalize(path)?;
+    let canonical_path = path.to_path_buf();
     let checkpoint = DirectJsonlCheckpoint {
         version: DirectJsonlCheckpoint::VERSION,
         parser_revision: DIRECT_JSONL_NATIVEPATH_PARSER_REVISION,
@@ -276,7 +301,7 @@ fn migrate_released_cursor(
         source_path: canonical_path,
         source_observation: observation.clone(),
         complete_prefix_end,
-        complete_prefix_sha256: direct_jsonl_prefix_sha256(path, complete_prefix_end)?,
+        complete_prefix_sha256: direct_jsonl_prefix_sha256_opened(opened, complete_prefix_end)?,
         next_raw_ordinal: released_checkpoint.next_ordinal,
         accepted_events: released_checkpoint.accepted_events,
         accepted_file_touches: released_checkpoint.accepted_file_touches,

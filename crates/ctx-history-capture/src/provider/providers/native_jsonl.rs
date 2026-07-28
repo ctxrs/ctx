@@ -29,11 +29,7 @@ pub(crate) fn visit_native_jsonl_files(
     provider: CaptureProvider,
     visit: &mut dyn FnMut(&Path) -> Result<()>,
 ) -> Result<usize> {
-    traversal::visit_jsonl_tree_files(
-        root,
-        &|path| dialect::native_jsonl_file_is_selected(provider, path),
-        visit,
-    )
+    traversal::visit_jsonl_tree_files(provider, root, &mut |source_file| visit(source_file.path()))
 }
 #[cfg(test)]
 mod tests;

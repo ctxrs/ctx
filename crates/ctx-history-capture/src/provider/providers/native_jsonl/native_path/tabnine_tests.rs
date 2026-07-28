@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::Write,
+    io::{self, Write},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,

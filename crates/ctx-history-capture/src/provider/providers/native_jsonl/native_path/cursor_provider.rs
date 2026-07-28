@@ -108,12 +108,7 @@ pub(crate) fn import_cursor_nativepath_tree(
         .clone()
         .or(request.source_path.clone())
         .unwrap_or_else(|| request.path.to_path_buf());
-    let discovery_input = if request.path.is_dir() && request.path.join("projects").is_dir() {
-        request.path.join("projects")
-    } else {
-        request.path.to_path_buf()
-    };
-    let inventory = discover_cursor_transcripts(&discovery_input);
+    let inventory = discover_cursor_transcripts(request.path);
     if !inventory.completed {
         return Err(CaptureError::InvalidProviderTranscriptPath {
             path: request.path.to_path_buf(),

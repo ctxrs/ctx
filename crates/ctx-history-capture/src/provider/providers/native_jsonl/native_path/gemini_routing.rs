@@ -1,18 +1,17 @@
 use super::*;
 
 pub(super) fn revalidate_gemini_source(pages: &[GeminiPendingPage], path: &Path) -> Result<()> {
-    let expected = &pages
+    let source = &pages
         .iter()
         .find(|pending| pending.source.path == path)
         .ok_or(CaptureError::SystemInvariant(
             "Gemini revalidation path has no pending source",
         ))?
-        .source
-        .observation;
-    if &GeminiFileObservation::read(path)? != expected {
+        .source;
+    if GeminiFileObservation::from_metadata(source.source_file.metadata())? != source.observation {
         return Err(CaptureError::SourceChangedDuringCapture);
     }
-    Ok(())
+    source.source_file.revalidate()
 }
 
 pub(super) fn gemini_source_revision(observation: &GeminiFileObservation) -> String {

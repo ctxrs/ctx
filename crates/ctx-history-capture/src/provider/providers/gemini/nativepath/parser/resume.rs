@@ -36,12 +36,12 @@ fn read_gemini_transcript_pages_from<'a>(
     profile: GeminiNativePathProfile,
     resume_frontier: Option<&GeminiPageFrontier>,
 ) -> GeminiScanResult<GeminiNativePageReader<'a>> {
-    let initial_observation = GeminiFileObservation::read(&source.path)?;
+    let initial_observation = GeminiFileObservation::from_metadata(source.source_file.metadata())?;
     if initial_observation != source.observation {
         return Err(CaptureError::SourceChangedDuringCapture.into());
     }
 
-    let mut file = open_gemini_transcript(&source.path)?;
+    let mut file = open_gemini_transcript(source)?;
     if GeminiFileObservation::from_metadata(&file.metadata()?)? != initial_observation {
         return Err(CaptureError::SourceChangedDuringCapture.into());
     }

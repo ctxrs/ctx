@@ -79,6 +79,55 @@ fn write_transcript(root: &Path, project: &str, session: &str, bytes: &[u8]) -> 
     path
 }
 
+#[cfg(unix)]
+fn cursor_authority_swap_fixture() -> (
+    TempDir,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    super::CursorTranscriptPath,
+) {
+    let temp = tempdir();
+    let ancestor = temp.path().join("authority");
+    let root = ancestor.join("projects");
+    let leaf = write_transcript(&root, "project", "session", b"{}\n");
+    let inventory = discover_cursor_transcripts(&root);
+    assert!(inventory.completed);
+    assert_eq!(inventory.transcripts.len(), 1);
+    let source = inventory.transcripts[0].clone();
+    (temp, ancestor, root, leaf, source)
+}
+
+#[cfg(unix)]
+#[test]
+fn cursor_discovery_rejects_root_swap_through_retained_source() {
+    let (_temp, _ancestor, root, _leaf, source) = cursor_authority_swap_fixture();
+    fs::rename(&root, root.with_file_name("projects-displaced")).unwrap();
+    write_transcript(&root, "project", "session", b"{\"replacement\":true}\n");
+
+    assert!(source.source_file().revalidate().is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn cursor_discovery_rejects_ancestor_swap_through_retained_source() {
+    let (temp, ancestor, root, _leaf, source) = cursor_authority_swap_fixture();
+    fs::rename(&ancestor, temp.path().join("authority-displaced")).unwrap();
+    write_transcript(&root, "project", "session", b"{\"replacement\":true}\n");
+
+    assert!(source.source_file().revalidate().is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn cursor_discovery_rejects_leaf_swap_through_retained_source() {
+    let (_temp, _ancestor, _root, leaf, source) = cursor_authority_swap_fixture();
+    fs::rename(&leaf, leaf.with_file_name("session-displaced.jsonl")).unwrap();
+    fs::write(&leaf, "{\"replacement\":true}\n").unwrap();
+
+    assert!(source.source_file().revalidate().is_err());
+}
+
 fn jsonl(rows: impl IntoIterator<Item = serde_json::Value>) -> Vec<u8> {
     let mut bytes = Vec::new();
     for row in rows {
@@ -1254,6 +1303,7 @@ fn source_scan_models_append_rewrite_and_truncation() {
         .write_all(&jsonl([assistant("append")]))
         .unwrap();
     drop(append_file);
+    let source = one_source(&root);
     let appended = generation(
         scan_cursor_source(
             &freeze_cursor_source(&source).unwrap(),
@@ -1281,6 +1331,7 @@ fn source_scan_models_append_rewrite_and_truncation() {
     let append_prior = prior(&appended, "source-key");
     let rewritten_bytes = jsonl([user("same!"), assistant("bytes!")]);
     fs::write(&path, &rewritten_bytes).unwrap();
+    let source = one_source(&root);
     let rewritten = generation(
         scan_cursor_source(&freeze_cursor_source(&source).unwrap(), Some(&append_prior)).unwrap(),
     );
@@ -1294,6 +1345,7 @@ fn source_scan_models_append_rewrite_and_truncation() {
         .unwrap()
         .set_len(jsonl([user("short")]).len() as u64)
         .unwrap();
+    let source = one_source(&root);
     let truncated = generation(
         scan_cursor_source(
             &freeze_cursor_source(&source).unwrap(),
@@ -1370,6 +1422,7 @@ fn strong_content_observation_detects_same_size_restored_mtime_rewrite() {
                 .set_modified(original_modified + std::time::Duration::from_secs(5)),
         )
         .unwrap();
+    let source = one_source(&root);
     assert!(matches!(
         scan_cursor_source(
             &freeze_cursor_source(&source).unwrap(),
@@ -1386,6 +1439,7 @@ fn strong_content_observation_detects_same_size_restored_mtime_rewrite() {
         .unwrap()
         .set_times(fs::FileTimes::new().set_modified(original_modified))
         .unwrap();
+    let source = one_source(&root);
     let rewritten = generation(
         scan_cursor_source(
             &freeze_cursor_source(&source).unwrap(),
@@ -1422,6 +1476,7 @@ fn zero_row_sources_still_produce_exact_observation_and_checkpoint_authority() {
     );
 
     fs::write(&empty.observation.path, b"{\"malformed\"\n").unwrap();
+    let source = one_source(&root);
     let malformed =
         generation(scan_cursor_source(&freeze_cursor_source(&source).unwrap(), None).unwrap());
     assert!(malformed.events.is_empty());
@@ -1438,6 +1493,7 @@ fn zero_row_sources_still_produce_exact_observation_and_checkpoint_authority() {
         serde_json::to_vec(&assistant("incomplete")).unwrap(),
     )
     .unwrap();
+    let source = one_source(&root);
     let incomplete =
         generation(scan_cursor_source(&freeze_cursor_source(&source).unwrap(), None).unwrap());
     assert!(incomplete.events.is_empty());

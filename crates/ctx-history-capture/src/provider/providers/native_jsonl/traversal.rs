@@ -3,107 +3,195 @@ use std::{
     fs::{self, File},
     io::{self, BufReader, BufWriter, Read, Write},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
+use ctx_history_core::CaptureProvider;
 use tempfile::TempDir;
 
 use crate::common::io::{
-    ensure_provider_path_parents_are_not_symlinks, ensure_regular_provider_transcript_file,
+    open_provider_source_path, OpenedProviderSourceFile, OpenedProviderSourcePath,
+    ProviderSourceDirectory,
 };
-use crate::{CaptureError, Result};
+use crate::{CaptureError, Result, PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES};
 
 const NATIVE_JSONL_MAX_DIRECTORY_DEPTH: usize = 128;
 const NATIVE_JSONL_DIRECTORY_RUN_ENTRIES: usize = 64;
 const NATIVE_JSONL_DIRECTORY_MERGE_FAN_IN: usize = 16;
 
+#[derive(Debug, Clone)]
+pub(super) struct NativeJsonlSourceFile {
+    path: PathBuf,
+    opened: Arc<OpenedProviderSourceFile>,
+}
+
+impl NativeJsonlSourceFile {
+    pub(super) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(super) fn opened(&self) -> &Arc<OpenedProviderSourceFile> {
+        &self.opened
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum NativeJsonlRootKind {
+    File,
+    Directory,
+}
+
+pub(super) fn native_jsonl_root_kind(root: &Path) -> Result<Option<NativeJsonlRootKind>> {
+    match open_provider_source_path(root) {
+        Ok(OpenedProviderSourcePath::File(file)) => {
+            file.revalidate()?;
+            Ok(Some(NativeJsonlRootKind::File))
+        }
+        Ok(OpenedProviderSourcePath::Directory(directory)) => {
+            let authority = directory.authority_root();
+            directory.revalidate()?;
+            authority.revalidate()?;
+            Ok(Some(NativeJsonlRootKind::Directory))
+        }
+        Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 pub(super) fn visit_jsonl_tree_files(
+    provider: CaptureProvider,
     root: &Path,
-    is_selected: &dyn Fn(&Path) -> bool,
-    visit: &mut dyn FnMut(&Path) -> Result<()>,
+    visit: &mut dyn FnMut(NativeJsonlSourceFile) -> Result<()>,
 ) -> Result<usize> {
-    visit_jsonl_tree_files_at_depth(root, is_selected, visit, &mut |_path, error| Err(error), 0)
+    visit_jsonl_tree_files_isolating_selected(provider, root, visit, &mut |_path, error| Err(error))
 }
 
 /// Visits a tree while containing admission/read failures for selected child
 /// files. Root and directory-enumeration failures remain fatal because no
 /// independent source boundary has been established for them.
 pub(super) fn visit_jsonl_tree_files_isolating_selected(
+    provider: CaptureProvider,
     root: &Path,
-    is_selected: &dyn Fn(&Path) -> bool,
-    visit: &mut dyn FnMut(&Path) -> Result<()>,
+    visit: &mut dyn FnMut(NativeJsonlSourceFile) -> Result<()>,
     selected_file_error: &mut dyn FnMut(&Path, CaptureError) -> Result<()>,
 ) -> Result<usize> {
-    visit_jsonl_tree_files_at_depth(root, is_selected, visit, selected_file_error, 0)
+    match open_provider_source_path(root) {
+        Ok(OpenedProviderSourcePath::File(file)) => {
+            if !super::dialect::native_jsonl_file_is_selected(provider, root, false) {
+                file.revalidate()?;
+                return Ok(0);
+            }
+            let file = NativeJsonlSourceFile {
+                path: root.to_path_buf(),
+                opened: Arc::new(file),
+            };
+            let result = visit(file.clone());
+            match result {
+                Ok(()) => {
+                    file.opened.revalidate()?;
+                    Ok(1)
+                }
+                Err(error) => {
+                    selected_file_error(root, error)?;
+                    Ok(0)
+                }
+            }
+        }
+        Ok(OpenedProviderSourcePath::Directory(directory)) => {
+            let authority = directory.authority_root();
+            let visited = visit_jsonl_tree_files_at_depth(
+                provider,
+                root,
+                directory,
+                visit,
+                selected_file_error,
+                0,
+            )?;
+            authority.revalidate()?;
+            Ok(visited)
+        }
+        Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+            Err(error.into())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn visit_jsonl_tree_files_at_depth(
-    root: &Path,
-    is_selected: &dyn Fn(&Path) -> bool,
-    visit: &mut dyn FnMut(&Path) -> Result<()>,
+    provider: CaptureProvider,
+    path: &Path,
+    directory: ProviderSourceDirectory,
+    visit: &mut dyn FnMut(NativeJsonlSourceFile) -> Result<()>,
     selected_file_error: &mut dyn FnMut(&Path, CaptureError) -> Result<()>,
     depth: usize,
 ) -> Result<usize> {
     if depth > NATIVE_JSONL_MAX_DIRECTORY_DEPTH {
         return Err(CaptureError::InvalidProviderTranscriptPath {
-            path: root.to_path_buf(),
+            path: path.to_path_buf(),
             reason: "provider transcript directory nesting exceeds the supported limit",
         });
     }
-    let metadata = fs::symlink_metadata(root)?;
-    let file_type = metadata.file_type();
-    if file_type.is_symlink() {
-        return Err(CaptureError::InvalidProviderTranscriptPath {
-            path: root.to_path_buf(),
-            reason: "symlinked provider transcript roots are rejected",
-        });
-    }
-    ensure_provider_path_parents_are_not_symlinks(root)?;
-    if file_type.is_file() {
-        if is_selected(root) {
-            ensure_regular_provider_transcript_file(root)?;
-            visit(root)?;
-            return Ok(1);
-        }
-        return Ok(0);
-    }
-    if !file_type.is_dir() {
-        return Ok(0);
-    }
 
     let mut visited = 0_usize;
-    visit_native_jsonl_directory_names(root, &mut |name| {
-        let path = root.join(name);
-        let file_type = match fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata.file_type(),
-            Err(error) if is_selected(&path) => {
-                selected_file_error(&path, error.into())?;
+    visit_native_jsonl_directory_names(&directory, &mut |name| {
+        let child_path = path.join(&name);
+        let selected = selected_file(provider, &directory, &child_path, &name);
+        let opened = match directory.open_child(&name) {
+            Ok(opened) => opened,
+            Err(error) if selected => {
+                selected_file_error(&child_path, error)?;
                 return Ok(());
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => return Err(error),
         };
-        if file_type.is_dir() {
+        if let OpenedProviderSourcePath::Directory(child_directory) = opened {
             visited = visited.saturating_add(visit_jsonl_tree_files_at_depth(
-                &path,
-                is_selected,
+                provider,
+                &child_path,
+                child_directory,
                 visit,
                 selected_file_error,
                 depth.saturating_add(1),
             )?);
-        } else if (file_type.is_file() || file_type.is_symlink()) && is_selected(&path) {
-            let outcome =
-                ensure_regular_provider_transcript_file(&path).and_then(|()| visit(&path));
+        } else if selected {
+            let OpenedProviderSourcePath::File(file) = opened else {
+                return Err(CaptureError::SystemInvariant(
+                    "native JSONL child classification is incomplete",
+                ));
+            };
+            let file = NativeJsonlSourceFile {
+                path: child_path.clone(),
+                opened: Arc::new(file),
+            };
+            let outcome = visit(file.clone()).and_then(|()| file.opened.revalidate());
             match outcome {
                 Ok(()) => visited = visited.saturating_add(1),
-                Err(error) => selected_file_error(&path, error)?,
+                Err(error) => selected_file_error(&child_path, error)?,
             }
         }
         Ok(())
     })?;
+    directory.revalidate()?;
     Ok(visited)
 }
 
+fn selected_file(
+    provider: CaptureProvider,
+    directory: &ProviderSourceDirectory,
+    path: &Path,
+    name: &OsStr,
+) -> bool {
+    let full_transcript_is_regular = provider == CaptureProvider::Antigravity
+        && name == OsStr::new("transcript.jsonl")
+        && matches!(
+            directory.open_child(OsStr::new("transcript_full.jsonl")),
+            Ok(OpenedProviderSourcePath::File(_))
+        );
+    super::dialect::native_jsonl_file_is_selected(provider, path, full_transcript_is_regular)
+}
+
 fn visit_native_jsonl_directory_names(
-    root: &Path,
+    directory: &ProviderSourceDirectory,
     visit: &mut dyn FnMut(OsString) -> Result<()>,
 ) -> Result<()> {
     // `ReadDir` order is not portable. Keep small directories in memory, then
@@ -112,14 +200,13 @@ fn visit_native_jsonl_directory_names(
     traversal_stats(|stats| stats.directory_read_passes += 1);
     let mut names = Vec::with_capacity(NATIVE_JSONL_DIRECTORY_RUN_ENTRIES);
     let mut spill = None;
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
+    for name in directory.entries(PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES)? {
         traversal_stats(|stats| stats.directory_entries_read += 1);
         if names.len() == NATIVE_JSONL_DIRECTORY_RUN_ENTRIES {
             let runs = spill.get_or_insert(NativeJsonlDirectoryRuns::new()?);
             runs.write_initial_run(&mut names)?;
         }
-        names.push(native_jsonl_filename_order_key(&entry.file_name()));
+        names.push(native_jsonl_filename_order_key(&name));
         traversal_stats(|stats| {
             stats.max_retained_names = stats.max_retained_names.max(names.len())
         });
@@ -405,10 +492,10 @@ mod tests {
         let mut visited = Vec::new();
         let mut failures = Vec::new();
         let count = visit_jsonl_tree_files_isolating_selected(
+            CaptureProvider::Pi,
             &root,
-            &|path| path.extension() == Some(OsStr::new("jsonl")),
-            &mut |path| {
-                visited.push(path.file_name().unwrap().to_owned());
+            &mut |source_file| {
+                visited.push(source_file.path().file_name().unwrap().to_owned());
                 Ok(())
             },
             &mut |path, _error| {
@@ -433,8 +520,8 @@ mod tests {
         let mut isolated = 0;
 
         let error = visit_jsonl_tree_files_isolating_selected(
+            CaptureProvider::Pi,
             &root,
-            &|_| true,
             &mut |_| Ok(()),
             &mut |_path, _error| {
                 isolated += 1;

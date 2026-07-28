@@ -302,10 +302,10 @@ impl<'a> GeminiNativePageReader<'a> {
     fn certify_source_range(&self) -> GeminiScanResult<()> {
         if GeminiFileObservation::from_metadata(&self.reader.get_ref().metadata()?)?
             != self.initial_observation
-            || GeminiFileObservation::read(&self.source.path)? != self.initial_observation
         {
             return Err(CaptureError::SourceChangedDuringCapture.into());
         }
+        self.source.source_file.revalidate()?;
         Ok(())
     }
 
@@ -792,7 +792,9 @@ impl<'a> GeminiNativePageReader<'a> {
 
     fn finish(&mut self) -> GeminiScanResult<()> {
         self.certify_source_range()?;
-        let final_observation = GeminiFileObservation::read(&self.source.path)?;
+        let final_observation =
+            GeminiFileObservation::from_metadata(&self.reader.get_ref().metadata()?)?;
+        self.source.source_file.revalidate()?;
         self.retained_event_count = self
             .retained_event_count
             .saturating_add(self.state.retained_rows_this_scan);

@@ -1,4 +1,4 @@
-use std::{fs, path::Path};
+use std::path::Path;
 
 use ctx_history_core::CaptureProvider;
 use serde_json::Value;
@@ -65,7 +65,11 @@ fn provider_jsonl_path_is_native(provider: CaptureProvider, path: &Path) -> bool
     }
 }
 
-pub(super) fn native_jsonl_file_is_selected(provider: CaptureProvider, path: &Path) -> bool {
+pub(super) fn native_jsonl_file_is_selected(
+    provider: CaptureProvider,
+    path: &Path,
+    antigravity_full_transcript_is_regular: bool,
+) -> bool {
     if provider == CaptureProvider::FactoryAiDroid {
         return super::native_path::factory_droid_file_is_selected(path);
     }
@@ -82,9 +86,7 @@ pub(super) fn native_jsonl_file_is_selected(provider: CaptureProvider, path: &Pa
     {
         return true;
     }
-    fs::symlink_metadata(path.with_file_name("transcript_full.jsonl"))
-        .map(|metadata| !metadata.file_type().is_file())
-        .unwrap_or(true)
+    !antigravity_full_transcript_is_regular
 }
 pub(super) fn native_jsonl_record_starts_session(provider: CaptureProvider, value: &Value) -> bool {
     matches!(

@@ -1,8 +1,9 @@
 use std::{
     collections::BTreeSet,
-    fs::{self, File, Metadata},
+    fs::{File, Metadata},
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use chrono::{DateTime, Utc};
@@ -17,6 +18,7 @@ use crate::provider::normalization::{
     provider_result_outcome_evidence,
 };
 use crate::{
+    common::io::{open_provider_source_file, OpenedProviderSourceFile},
     CaptureError, OutputOutcome, Result, MAX_PROVIDER_JSONL_LINE_BYTES, PROVIDER_MAX_PREVIEW_CHARS,
 };
 
@@ -65,11 +67,13 @@ pub(crate) use projection::direct_jsonl_complete_message_provider_event_hash;
 
 #[path = "reader_source.rs"]
 mod source;
-pub(crate) use source::{direct_jsonl_prefix_sha256, direct_jsonl_source_revision, observe_file};
+pub(crate) use source::{
+    direct_jsonl_prefix_sha256_opened, direct_jsonl_source_revision, observe_file,
+    observe_opened_file,
+};
 use source::{
     event_wire_bytes, hash_prefix, new_prefix_hasher, observe_metadata, output_wire_bytes,
-    prefix_digest, read_bounded_jsonl_line, rejection_wire_bytes, revalidate_file,
-    same_file_identity, DirectLine,
+    prefix_digest, read_bounded_jsonl_line, rejection_wire_bytes, same_file_identity, DirectLine,
 };
 
 pub(crate) struct DirectJsonlPageReader {
@@ -80,6 +84,7 @@ pub(crate) struct DirectJsonlPageReader {
     imported_at: DateTime<Utc>,
     collect_transient_outputs: bool,
     observation: DirectJsonlFileObservation,
+    source_file: Arc<OpenedProviderSourceFile>,
     reader: BufReader<File>,
     prefix_hasher: Sha256,
     complete_prefix_end: u64,
@@ -104,15 +109,38 @@ pub(crate) fn open_direct_jsonl_pages(
     collect_transient_outputs: bool,
     previous: Option<&DirectJsonlCheckpoint>,
 ) -> Result<DirectJsonlPageReader> {
+    let opened = Arc::new(open_provider_source_file(path)?);
+    open_direct_jsonl_pages_from_opened(
+        provider,
+        source_format,
+        path,
+        source_root,
+        imported_at,
+        collect_transient_outputs,
+        previous,
+        opened,
+    )
+}
+
+pub(crate) fn open_direct_jsonl_pages_from_opened(
+    provider: CaptureProvider,
+    source_format: &str,
+    path: &Path,
+    source_root: Option<PathBuf>,
+    imported_at: DateTime<Utc>,
+    collect_transient_outputs: bool,
+    previous: Option<&DirectJsonlCheckpoint>,
+    source_file: Arc<OpenedProviderSourceFile>,
+) -> Result<DirectJsonlPageReader> {
     validate_direct_native_jsonl_provider(provider)?;
     if provider == CaptureProvider::Gemini {
         return Err(CaptureError::SystemInvariant(
             "Gemini requires its bespoke NativePath reader",
         ));
     }
-    let canonical_path = fs::canonicalize(path)?;
-    let observation = observe_file(&canonical_path)?;
-    let mut file = File::open(&canonical_path)?;
+    let canonical_path = path.to_path_buf();
+    let observation = observe_metadata(source_file.metadata())?;
+    let mut file = source_file.file().try_clone()?;
     if observe_metadata(&file.metadata()?)? != observation {
         return Err(CaptureError::SourceChangedDuringCapture);
     }
@@ -177,6 +205,7 @@ pub(crate) fn open_direct_jsonl_pages(
         imported_at,
         collect_transient_outputs,
         observation,
+        source_file,
         reader: BufReader::new(file),
         prefix_hasher,
         complete_prefix_end,
@@ -393,7 +422,7 @@ impl DirectJsonlPageReader {
     }
 
     fn finish_terminal(&mut self) -> Result<()> {
-        revalidate_file(&self.path, &self.observation)?;
+        self.revalidate_source_file()?;
         let checkpoint = self.publication_checkpoint(true);
         let source_sha256 = prefix_digest(&self.prefix_hasher);
         self.outcome = Some(DirectJsonlScanOutcome {
@@ -409,7 +438,7 @@ impl DirectJsonlPageReader {
     }
 
     fn finish_nonterminal(&mut self) -> Result<()> {
-        revalidate_file(&self.path, &self.observation)?;
+        self.revalidate_source_file()?;
         let checkpoint = self.publication_checkpoint(false);
         let source_sha256 = prefix_digest(&self.prefix_hasher);
         self.outcome = Some(DirectJsonlScanOutcome {
@@ -422,5 +451,12 @@ impl DirectJsonlPageReader {
         });
         self.finished = true;
         Ok(())
+    }
+
+    fn revalidate_source_file(&self) -> Result<()> {
+        if observe_metadata(&self.reader.get_ref().metadata()?)? != self.observation {
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
+        self.source_file.revalidate()
     }
 }

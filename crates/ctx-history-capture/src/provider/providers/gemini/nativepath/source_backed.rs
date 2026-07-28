@@ -1,5 +1,3 @@
-use std::io::{Read, Seek, SeekFrom};
-
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource,
     EventIdentityInput, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
@@ -23,7 +21,6 @@ use crate::{
     provider::providers::native_jsonl::{
         native_jsonl_entry_type, native_jsonl_event_text, native_jsonl_event_type,
     },
-    provider_sources::open_ordinary_file_without_following,
     CaptureError, GEMINI_CLI_SOURCE_FORMAT, MAX_PROVIDER_JSONL_LINE_BYTES,
 };
 
@@ -334,26 +331,19 @@ pub(crate) fn hydrate_gemini_source_backed_record(
     let range_end = byte_offset
         .checked_add(byte_length)
         .ok_or(GeminiSourceBackedError::LocatorRangeTooLarge)?;
-    let opening = GeminiFileObservation::read(&source.path)?;
-    if opening != source.observation {
-        return Err(CaptureError::SourceChangedDuringCapture.into());
-    }
-    let mut file = open_ordinary_file_without_following(&source.path)?;
-    if GeminiFileObservation::from_metadata(&file.metadata()?)? != opening
-        || file.metadata()?.len() < range_end
-    {
+    if source.source_file.len() < range_end {
         return Err(GeminiSourceBackedError::LocatorRangeMissing);
     }
-    file.seek(SeekFrom::Start(byte_offset))?;
     let byte_length =
         usize::try_from(byte_length).map_err(|_| GeminiSourceBackedError::LocatorRangeTooLarge)?;
-    let mut provider_bytes = vec![0_u8; byte_length];
-    file.read_exact(&mut provider_bytes)?;
-    if GeminiFileObservation::from_metadata(&file.metadata()?)? != opening
-        || GeminiFileObservation::read(&source.path)? != opening
-    {
-        return Err(CaptureError::SourceChangedDuringCapture.into());
-    }
+    let provider_bytes = source
+        .source_file
+        .read_exact_range(
+            byte_offset,
+            byte_length,
+            MAX_PROVIDER_JSONL_LINE_BYTES.saturating_add(2),
+        )
+        .map_err(GeminiSourceBackedError::Capture)?;
     let actual_digest: [u8; 32] = Sha256::digest(&provider_bytes).into();
     if &actual_digest != locator.record_digest() {
         return Err(GeminiSourceBackedError::LocatorDigestMismatch);

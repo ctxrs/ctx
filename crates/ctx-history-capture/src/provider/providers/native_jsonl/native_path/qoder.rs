@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io,
     path::{Path, PathBuf},
 };
 
@@ -140,22 +139,18 @@ struct QoderInventory {
 }
 
 fn discover_live_transcripts(root: &Path) -> Result<QoderInventory> {
-    match std::fs::symlink_metadata(root) {
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(QoderInventory {
-                paths: BTreeSet::new(),
-                root_missing: true,
-            });
-        }
-        Err(error) => return Err(error.into()),
+    if super::super::traversal::native_jsonl_root_kind(root)?.is_none() {
+        return Ok(QoderInventory {
+            paths: BTreeSet::new(),
+            root_missing: true,
+        });
     }
     let mut paths = BTreeSet::new();
     super::super::traversal::visit_jsonl_tree_files(
+        CaptureProvider::Qoder,
         root,
-        &|path| super::super::dialect::native_jsonl_file_is_selected(CaptureProvider::Qoder, path),
-        &mut |path| {
-            paths.insert(std::fs::canonicalize(path)?);
+        &mut |source_file| {
+            paths.insert(source_file.path().to_path_buf());
             Ok(())
         },
     )?;
