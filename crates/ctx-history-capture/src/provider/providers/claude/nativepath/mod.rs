@@ -6,6 +6,11 @@ mod reader;
 mod record;
 mod rows;
 mod source;
+#[allow(
+    dead_code,
+    reason = "provider adapter awaits central source-backed registration"
+)]
+mod source_backed;
 mod vertical;
 
 pub(crate) use checkpoint::ParseCheckpoint;
