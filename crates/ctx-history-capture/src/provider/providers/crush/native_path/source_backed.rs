@@ -6,7 +6,7 @@
 //! certification, and atomic publication remain in the shared contracts.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     fs::File,
     path::{Path, PathBuf},
     sync::Arc,
@@ -15,16 +15,12 @@ use std::{
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource,
-    CertifiedSourceAppend, CertifiedSourceDeletion, CertifiedSourceInventory, EventIdentityInput,
-    LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
-    ProjectionContractError, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
-    SourceFrontier, SourceInventoryObservation, SourceKey, SourceObservation, SourceRecordLocator,
+    EventIdentityInput, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
+    NativeSessionKey, ProjectionContractError, ScannedSourceCounts, SessionIdentityInput,
+    SourceAnchor, SourceInventoryObservation, SourceKey, SourceObservation, SourceRecordLocator,
     SourceResolverContractError, StableEntityId, TypedKey,
 };
-use ctx_history_index::{
-    CommitReceipt, GenerationWriter, IndexError, LexicalDocument, RevalidationTarget,
-    VerifiedIndex, WriterOptions, MAX_BODY_PREVIEW_CHARS,
-};
+use ctx_history_index::{GenerationWriter, IndexError, LexicalDocument, MAX_BODY_PREVIEW_CHARS};
 use rusqlite::{limits::Limit, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -95,8 +91,6 @@ pub enum CrushSourceBackedErrorV0 {
         "Crush project inventory exceeds the finite {MAX_CRUSH_PROJECT_DATABASES}-database bound"
     )]
     InventoryTooLarge,
-    #[error("Crush project inventory changed while its generation was staged")]
-    InventoryChanged,
     #[error("Crush project inventory contains a relative database path: {0:?}")]
     RelativeDatabasePath(PathBuf),
     #[error("Crush project inventory contains the same source lineage more than once")]
@@ -109,8 +103,6 @@ pub enum CrushSourceBackedErrorV0 {
     NonUtf8DatabasePath(PathBuf),
     #[error("Crush source count overflow")]
     CountOverflow,
-    #[error("Crush source certificate does not support exact replay")]
-    InvalidReplayCertificate,
     #[error("Crush message scan produced an unexpected native row")]
     UnexpectedNativeRow,
     #[error("Crush session lineage contains a cycle at provider session {0}")]
@@ -224,26 +216,6 @@ pub trait CrushProjectInventorySourceV0 {
     fn observe(&self) -> CrushSourceBackedResultV0<CrushProjectInventoryObservationV0>;
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct CrushSourceBackedCountersV0 {
-    pub inventory_databases: u64,
-    pub scanned_sources: u64,
-    pub replayed_sources: u64,
-    pub replaced_sources: u64,
-    pub deleted_sources: u64,
-    pub complete_records: u64,
-    pub indexed_documents: u64,
-    pub rejected_records: u64,
-    pub ignored_records: u64,
-    pub certified_bytes: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct CrushSourceBackedIngestReceiptV0 {
-    pub commit: CommitReceipt,
-    pub counters: CrushSourceBackedCountersV0,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CrushHydratedRecordV0 {
     pub provider_session_id: String,
@@ -331,164 +303,6 @@ struct MessageAddress {
     native_record_id: String,
     parent_rowid: i64,
     provider_session_id: String,
-}
-
-/// Builds or refreshes Crush's lexical projection over the exact finite
-/// selected/registered project inventory.
-pub fn ingest_crush_source_backed_v0(
-    inventory_source: &dyn CrushProjectInventorySourceV0,
-    global_index_root: impl AsRef<Path>,
-) -> CrushSourceBackedResultV0<CrushSourceBackedIngestReceiptV0> {
-    let opening_inventory = bind_inventory(inventory_source.observe()?)?;
-    let mut counters = CrushSourceBackedCountersV0 {
-        inventory_databases: to_u64(opening_inventory.databases.len())?,
-        ..CrushSourceBackedCountersV0::default()
-    };
-    let mut writer = GenerationWriter::open(global_index_root, WriterOptions::default())?;
-    let base_sources = writer
-        .base_manifest()
-        .map(|manifest| {
-            manifest
-                .sources
-                .iter()
-                .cloned()
-                .map(|source| (source.observation().source().clone(), source))
-                .collect::<HashMap<_, _>>()
-        })
-        .unwrap_or_default();
-    // Pin every selected project database before scanning any one of them.
-    // This keeps the compound project inventory indivisible: staged documents
-    // cannot mix path-opened generations from separate per-database calls.
-    let opened_sources = opening_inventory
-        .databases
-        .iter()
-        .cloned()
-        .map(open_source)
-        .collect::<CrushSourceBackedResultV0<Vec<_>>>()?;
-
-    for source in &opened_sources {
-        let database = &source.database;
-        let base = base_sources.get(&database.source_key);
-        if base.is_some_and(|base| exact_replay_matches(base, &source)) {
-            let base = base.ok_or(CrushSourceBackedErrorV0::InvalidReplayCertificate)?;
-            let writer_base = writer.begin_source_append(database.source_key.clone())?;
-            if writer_base != base {
-                return Err(CrushSourceBackedErrorV0::InvalidReplayCertificate);
-            }
-            let frontier = base
-                .frontier()
-                .ok_or(CrushSourceBackedErrorV0::InvalidReplayCertificate)?;
-            let append = CertifiedSourceAppend::certify(
-                base,
-                base.clone(),
-                frontier.certified_prefix_bytes(),
-                *frontier.certified_prefix_digest(),
-            )?;
-            writer.certify_source_append(append)?;
-            counters.replayed_sources = checked_add(counters.replayed_sources, 1)?;
-        } else {
-            writer.begin_source(database.source_key.clone())?;
-            let scan = scan_source(&source, &mut writer)?;
-            let closing = closing_observation(&source)?;
-            let frontier = SourceFrontier::new(
-                CRUSH_FRONTIER_KIND,
-                TypedKey::bytes(source.observation.revision().to_vec())?,
-                scan.counts.certified_bytes,
-                scan.content_digest,
-            )?;
-            let certificate = CertifiedSource::certify_with_frontier(
-                source.observation.clone(),
-                closing,
-                CRUSH_PARSER_REVISION,
-                scan.content_digest,
-                scan.counts,
-                Some(frontier),
-            )?;
-            writer.certify_source(certificate)?;
-            counters.scanned_sources = checked_add(counters.scanned_sources, 1)?;
-            if base.is_some() {
-                counters.replaced_sources = checked_add(counters.replaced_sources, 1)?;
-            }
-            counters.complete_records =
-                checked_add(counters.complete_records, scan.counts.complete_records)?;
-            counters.indexed_documents =
-                checked_add(counters.indexed_documents, scan.counts.indexed_documents)?;
-            counters.rejected_records =
-                checked_add(counters.rejected_records, scan.counts.rejected_records)?;
-            counters.ignored_records =
-                checked_add(counters.ignored_records, scan.counts.ignored_records)?;
-            counters.certified_bytes =
-                checked_add(counters.certified_bytes, scan.counts.certified_bytes)?;
-        }
-    }
-
-    // Finish every pinned SQLite transaction before the provider-wide
-    // inventory certificate can become publishable.
-    let mut source_revalidation = HashMap::<SourceKey, SourceRevalidation>::new();
-    for source in opened_sources {
-        let source_key = source.database.source_key.clone();
-        source_revalidation.insert(source_key, finish_source(source)?);
-    }
-    if !compound_sources_current(&source_revalidation) {
-        return Err(CaptureError::SourceChangedDuringCapture.into());
-    }
-
-    let closing_inventory = bind_inventory(inventory_source.observe()?)?;
-    if opening_inventory.observation != closing_inventory.observation
-        || opening_inventory.databases.len() != closing_inventory.databases.len()
-        || opening_inventory
-            .databases
-            .iter()
-            .zip(&closing_inventory.databases)
-            .any(|(left, right)| {
-                !left.source_key.exact_descriptor_eq(&right.source_key)
-                    || left.canonical_path != right.canonical_path
-            })
-    {
-        return Err(CrushSourceBackedErrorV0::InventoryChanged);
-    }
-    let certified_inventory = CertifiedSourceInventory::certify(
-        opening_inventory.observation.clone(),
-        closing_inventory.observation,
-        CRUSH_DISCOVERY_REVISION,
-        opening_inventory.source_keys(),
-    )?;
-
-    for base in base_sources.values() {
-        let source = base.observation().source();
-        if source.provider() == CaptureProvider::Crush.as_str()
-            && source.source_format() == CRUSH_SQLITE_SOURCE_FORMAT
-            && source.schema_variant() == CRUSH_SOURCE_SCHEMA_VARIANT
-            && !opening_inventory.contains_exact_source(source)
-        {
-            writer.delete_source(CertifiedSourceDeletion::from_inventory(
-                source.clone(),
-                &certified_inventory,
-            )?)?;
-            counters.deleted_sources = checked_add(counters.deleted_sources, 1)?;
-        }
-    }
-
-    let mut provider_revalidated = None;
-    let commit = writer.commit(|target| {
-        let provider_is_current = *provider_revalidated.get_or_insert_with(|| {
-            let inventory_is_current = inventory_source
-                .observe()
-                .and_then(|observation| opening_inventory.matches(observation))
-                .unwrap_or(false);
-            inventory_is_current && compound_sources_current(&source_revalidation)
-        });
-        if !provider_is_current {
-            return false;
-        }
-        match target {
-            RevalidationTarget::Source(certificate) => {
-                source_revalidation.contains_key(certificate.observation().source())
-            }
-            RevalidationTarget::Deletion(deletion) => deletion.verifies(&certified_inventory),
-        }
-    })?;
-    Ok(CrushSourceBackedIngestReceiptV0 { commit, counters })
 }
 
 /// One-invocation exact resolver for source-backed Crush locators.
@@ -713,16 +527,6 @@ fn source_revalidation_is_current(evidence: &SourceRevalidation) -> bool {
         .family_snapshot
         .revalidate(&evidence.canonical_path)
         .unwrap_or(false)
-}
-
-fn compound_sources_current(source_revalidation: &HashMap<SourceKey, SourceRevalidation>) -> bool {
-    let mut all_current = true;
-    for evidence in source_revalidation.values() {
-        // Do not short-circuit: one provider-wide observation revalidates every
-        // retained DB/WAL/SHM/journal family before publication.
-        all_current &= source_revalidation_is_current(evidence);
-    }
-    all_current
 }
 
 pub(crate) fn exact_replay_matches(base: &CertifiedSource, source: &OpenedSource) -> bool {
@@ -1128,14 +932,8 @@ fn checked_add(left: u64, right: u64) -> CrushSourceBackedResultV0<u64> {
         .ok_or(CrushSourceBackedErrorV0::CountOverflow)
 }
 
-fn to_u64(value: usize) -> CrushSourceBackedResultV0<u64> {
-    u64::try_from(value).map_err(|_| CrushSourceBackedErrorV0::CountOverflow)
-}
-
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
-
     use rusqlite::Connection;
     use serde_json::json;
 
@@ -1143,29 +941,23 @@ mod tests {
 
     #[derive(Clone)]
     struct TestInventory {
-        observation: Arc<Mutex<CrushProjectInventoryObservationV0>>,
+        observation: CrushProjectInventoryObservationV0,
     }
 
     impl TestInventory {
         fn new(observation: CrushProjectInventoryObservationV0) -> Self {
-            Self {
-                observation: Arc::new(Mutex::new(observation)),
-            }
-        }
-
-        fn replace(&self, observation: CrushProjectInventoryObservationV0) {
-            *self.observation.lock().unwrap() = observation;
+            Self { observation }
         }
     }
 
     impl CrushProjectInventorySourceV0 for TestInventory {
         fn observe(&self) -> CrushSourceBackedResultV0<CrushProjectInventoryObservationV0> {
-            Ok(self.observation.lock().unwrap().clone())
+            Ok(self.observation.clone())
         }
     }
 
     #[test]
-    fn source_backed_multi_db_cold_replay_and_exact_hydration() {
+    fn source_backed_multi_db_root_guards_and_exact_hydration() {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let first = temp.path().join("first.db");
         let second = temp.path().join("second.db");
@@ -1179,16 +971,18 @@ mod tests {
                 database("project-b", &second),
             ],
         ));
-        let index_root = temp.path().join("index");
+        let frozen = bind_inventory(inventory.observe().unwrap()).unwrap();
+        assert_eq!(frozen.databases.len(), 2);
 
-        let cold = ingest_crush_source_backed_v0(&inventory, &index_root).unwrap();
-        assert_eq!(cold.commit.indexed_documents, 2);
-        assert_eq!(cold.commit.certified_sources, 2);
-        assert_eq!(cold.counters.scanned_sources, 2);
-        let index = VerifiedIndex::open(&index_root).unwrap();
-        let alpha = index.search_event_candidates("alpha exact", 10).unwrap();
-        assert_eq!(alpha.len(), 1);
-        let alpha_event = &alpha[0].event;
+        let first_path = std::fs::canonicalize(&first).unwrap();
+        let first_database = frozen
+            .databases
+            .iter()
+            .find(|database| database.canonical_path == first_path)
+            .unwrap()
+            .clone();
+        let first_source = open_source(first_database).unwrap();
+        let alpha_event = document_for_only_message(&first_source);
         assert_eq!(
             alpha_event.provider_session_id.as_deref(),
             Some("session-a")
@@ -1200,19 +994,26 @@ mod tests {
         );
         assert_ne!(alpha_event.root_session_id, alpha_event.session_id);
         assert_eq!(alpha_event.branch, None);
-        assert_eq!(
-            alpha_event.source_path.as_deref(),
-            std::fs::canonicalize(&first).unwrap().to_str()
-        );
+        assert_eq!(alpha_event.source_path.as_deref(), first_path.to_str());
         assert_eq!(alpha_event.agent_type, AgentType::Subagent.as_str());
         assert!(!alpha_event.is_primary);
-        let beta = index.search_event_candidates("beta exact", 10).unwrap();
-        assert_eq!(beta.len(), 1);
-        assert_eq!(beta[0].event.parent_session_id, None);
-        assert_eq!(beta[0].event.root_session_id, beta[0].event.session_id);
-        assert_eq!(beta[0].event.agent_type, AgentType::Primary.as_str());
-        assert!(beta[0].event.is_primary);
-        let event_id = alpha_event.event_id;
+        assert!(finish_opened_source(first_source).unwrap());
+
+        let second_path = std::fs::canonicalize(&second).unwrap();
+        let second_database = frozen
+            .databases
+            .iter()
+            .find(|database| database.canonical_path == second_path)
+            .unwrap()
+            .clone();
+        let second_source = open_source(second_database).unwrap();
+        let beta_event = document_for_only_message(&second_source);
+        assert_eq!(beta_event.parent_session_id, None);
+        assert_eq!(beta_event.root_session_id, beta_event.session_id);
+        assert_eq!(beta_event.agent_type, AgentType::Primary.as_str());
+        assert!(beta_event.is_primary);
+        assert!(finish_opened_source(second_source).unwrap());
+
         let locator = alpha_event.locator.clone();
         let hydrated = CrushLocatorResolverV0::discover(&inventory)
             .unwrap()
@@ -1224,16 +1025,6 @@ mod tests {
             hydrated.decoded_display_text.as_deref(),
             Some("alpha exact body")
         );
-
-        let replay = ingest_crush_source_backed_v0(&inventory, &index_root).unwrap();
-        assert_eq!(replay.counters.replayed_sources, 2);
-        assert_eq!(replay.counters.scanned_sources, 0);
-        assert_eq!(replay.commit.generation_id, cold.commit.generation_id);
-        let replayed = VerifiedIndex::open(&index_root)
-            .unwrap()
-            .search_event_candidates("alpha exact", 10)
-            .unwrap();
-        assert_eq!(replayed[0].event.event_id, event_id);
     }
 
     #[test]
@@ -1245,28 +1036,20 @@ mod tests {
             b"inventory-stable",
             vec![database("project", &path)],
         ));
-        let index_root = temp.path().join("index");
-        ingest_crush_source_backed_v0(&inventory, &index_root).unwrap();
-        let before = VerifiedIndex::open(&index_root)
-            .unwrap()
-            .search_event_candidates("before replacement", 10)
-            .unwrap()
-            .remove(0)
-            .event;
+        let opening = bind_inventory(inventory.observe().unwrap()).unwrap();
+        let source = open_source(opening.databases.into_iter().next().unwrap()).unwrap();
+        let before = document_for_only_message(&source);
+        assert!(finish_opened_source(source).unwrap());
 
         let replacement = temp.path().join("replacement.db");
         write_database(&replacement, "session", "message", "after replacement");
         std::fs::remove_file(&path).unwrap();
         std::fs::rename(&replacement, &path).unwrap();
 
-        let replaced = ingest_crush_source_backed_v0(&inventory, &index_root).unwrap();
-        assert_eq!(replaced.counters.replaced_sources, 1);
-        let after = VerifiedIndex::open(&index_root)
-            .unwrap()
-            .search_event_candidates("after replacement", 10)
-            .unwrap()
-            .remove(0)
-            .event;
+        let replacement = bind_inventory(inventory.observe().unwrap()).unwrap();
+        let source = open_source(replacement.databases.into_iter().next().unwrap()).unwrap();
+        let after = document_for_only_message(&source);
+        assert!(finish_opened_source(source).unwrap());
         assert_eq!(after.event_id, before.event_id);
         assert_ne!(after.locator, before.locator);
         assert!(matches!(
@@ -1286,46 +1069,52 @@ mod tests {
         );
     }
 
-    #[test]
-    fn source_backed_deregistration_retires_only_the_missing_project_source() {
-        let temp = crate::test_support_paths::tempdir().unwrap();
-        let first = temp.path().join("first.db");
-        let second = temp.path().join("second.db");
-        write_database(&first, "session-a", "message-a", "kept project");
-        write_database(&second, "session-b", "message-b", "retired project");
-        let inventory_source = TestInventory::new(inventory(
-            b"inventory-1",
-            vec![
-                database("project-a", &first),
-                database("project-b", &second),
-            ],
-        ));
-        let index_root = temp.path().join("index");
-        ingest_crush_source_backed_v0(&inventory_source, &index_root).unwrap();
-
-        inventory_source.replace(inventory(
-            b"inventory-2",
-            vec![database("project-a", &first)],
-        ));
-        let retired = ingest_crush_source_backed_v0(&inventory_source, &index_root).unwrap();
-        assert_eq!(retired.counters.replayed_sources, 1);
-        assert_eq!(retired.counters.deleted_sources, 1);
-        let index = VerifiedIndex::open(&index_root).unwrap();
-        assert_eq!(index.document_count(), 1);
-        assert_eq!(
-            index
-                .search_event_candidates("retired project", 10)
-                .unwrap()
-                .len(),
-            0
-        );
-        assert_eq!(
-            index
-                .search_event_candidates("kept project", 10)
-                .unwrap()
-                .len(),
-            1
-        );
+    fn document_for_only_message(source: &OpenedSource) -> LexicalDocument {
+        let frontier = CrushNativeFrontier {
+            phase: CrushNativePhase::Messages,
+            after_rowid: None,
+            next_ordinal: 0,
+        };
+        let candidate = next_candidate(source.connection().unwrap(), &source.schema, &frontier)
+            .unwrap()
+            .unwrap();
+        let CrushHydratedRow::Message {
+            row,
+            session: Some(session),
+            digest_values,
+            ..
+        } = hydrate_row_from_connection(
+            source.connection().unwrap(),
+            &source.schema,
+            CrushNativePhase::Messages,
+            candidate.rowid,
+            candidate.observed_bytes,
+        )
+        .unwrap()
+        else {
+            panic!("expected one parented Crush message row");
+        };
+        let projection = match project_message(
+            &row,
+            Some(&session),
+            &deterministic_context(&source.database.canonical_path),
+        )
+        .unwrap()
+        {
+            CrushRecordProjection::Message(projection) => projection,
+            CrushRecordProjection::Rejection { .. } => {
+                panic!("expected the test message to project")
+            }
+        };
+        lexical_document(
+            source,
+            &row,
+            &session,
+            &digest_values,
+            message_record_digest_bytes(&digest_values),
+            &projection,
+        )
+        .unwrap()
     }
 
     fn inventory(
