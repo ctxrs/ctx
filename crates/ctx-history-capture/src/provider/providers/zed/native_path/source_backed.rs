@@ -1,12 +1,12 @@
 use std::path::{Path, PathBuf};
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, ContentSourceResolver,
-    EventHydrationRequest, EventIdentityInput, HydratedProviderRecord, HydrationFailure,
-    HydrationFailureKind, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
-    NativeSessionKey, PositionStability, ProjectionContractError, ScannedSourceCounts,
-    SessionHydrationRequest, SessionIdentityInput, SourceAnchor, SourceObservation,
-    SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource,
+    ContentSourceResolver, EventHydrationRequest, EventIdentityInput, HydratedProviderRecord,
+    HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy, NativeItemKey,
+    NativeRecordCoordinate, NativeSessionKey, PositionStability, ProjectionContractError,
+    ScannedSourceCounts, SessionHydrationRequest, SessionIdentityInput, SourceAnchor,
+    SourceObservation, SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
 };
 use ctx_history_index::{
     CommitReceipt, GenerationWriter, IndexError, LexicalDocument, RevalidationTarget, WriterOptions,
@@ -19,7 +19,10 @@ use super::{
     dto::{
         ZedNativeEvent, ZedNativeMessageIdentity, ZedNativePage, ZedNativeSession, ZedNativeSink,
     },
-    query::{hydrate_zed_thread_row, scan_zed_native_snapshot},
+    query::{
+        hydrate_zed_thread_row, scan_zed_native_snapshot, ZedThreadLineage,
+        ZedThreadLineageResolver,
+    },
     revalidate_zed_snapshot_revision, ZedNativePathError, ZedNativeResult, ZedSnapshotAcquisition,
 };
 use crate::{
@@ -60,6 +63,8 @@ pub(crate) enum ZedSourceBackedErrorV0 {
     CountOverflow,
     #[error("Zed event {0:?} was emitted without its bounded session context")]
     MissingSessionContext(String),
+    #[error("Zed retained thread {0:?} disappeared while resolving its native lineage")]
+    MissingLineageThread(String),
     #[error("Zed source-backed parser emitted an empty lexical preview")]
     MissingLexicalPreview,
     #[error("Zed source-backed parser emitted an invalid SHA-256 digest")]
@@ -211,10 +216,17 @@ pub(crate) fn ingest_zed_source_backed_v0(
     let source = zed_source_key()?;
     let snapshot = acquire_snapshot(selected_database_path)?;
     let revision_digest = snapshot_revision_digest(&snapshot.snapshot_revision);
+    let selected_source_path = selected_database_path.to_string_lossy().into_owned();
 
     let mut writer = GenerationWriter::open(global_index_root, WriterOptions::default())?;
     writer.begin_source(source.clone())?;
-    let mut sink = ZedSourceBackedSinkV0::new(&mut writer, source.clone(), revision_digest);
+    let mut sink = ZedSourceBackedSinkV0::new(
+        &mut writer,
+        &snapshot.connection,
+        source.clone(),
+        revision_digest,
+        selected_source_path,
+    )?;
     let scan_result = scan_zed_native_snapshot(
         &snapshot.connection,
         &snapshot.physical_locator,
@@ -285,47 +297,91 @@ pub(crate) fn ingest_zed_source_backed_v0(
     })
 }
 
-struct ZedSourceBackedSinkV0<'a> {
-    writer: &'a mut GenerationWriter,
+struct ZedSourceBackedSinkV0<'writer, 'connection> {
+    writer: &'writer mut GenerationWriter,
+    lineage: ZedThreadLineageResolver<'connection>,
     source: ctx_history_core::SourceKey,
     revision_digest: [u8; 32],
-    last_session: Option<ZedNativeSession>,
+    source_path: String,
+    last_session: Option<ZedSessionProjectionContextV0>,
     staged_documents: u64,
     failure: Option<ZedSourceBackedErrorV0>,
 }
 
-impl<'a> ZedSourceBackedSinkV0<'a> {
+#[derive(Clone)]
+struct ZedSessionProjectionContextV0 {
+    session: ZedNativeSession,
+    session_id: StableEntityId,
+    parent_session_id: Option<StableEntityId>,
+    root_session_id: StableEntityId,
+}
+
+impl<'writer, 'connection> ZedSourceBackedSinkV0<'writer, 'connection> {
     fn new(
-        writer: &'a mut GenerationWriter,
+        writer: &'writer mut GenerationWriter,
+        connection: &'connection rusqlite::Connection,
         source: ctx_history_core::SourceKey,
         revision_digest: [u8; 32],
-    ) -> Self {
-        Self {
+        source_path: String,
+    ) -> ZedSourceBackedResultV0<Self> {
+        Ok(Self {
             writer,
+            lineage: ZedThreadLineageResolver::new(connection)?,
             source,
             revision_digest,
+            source_path,
             last_session: None,
             staged_documents: 0,
             failure: None,
-        }
+        })
+    }
+
+    fn project_session(
+        &mut self,
+        session: ZedNativeSession,
+    ) -> ZedSourceBackedResultV0<ZedSessionProjectionContextV0> {
+        let ZedThreadLineage {
+            parent_thread_id,
+            root_thread_id,
+        } = self.lineage.resolve(&session.thread_id)?.ok_or_else(|| {
+            ZedSourceBackedErrorV0::MissingLineageThread(session.thread_id.clone())
+        })?;
+        Ok(ZedSessionProjectionContextV0 {
+            session_id: zed_session_identity(&self.source, &session.thread_id)?,
+            parent_session_id: parent_thread_id
+                .as_deref()
+                .map(|thread_id| zed_session_identity(&self.source, thread_id))
+                .transpose()?,
+            root_session_id: zed_session_identity(&self.source, &root_thread_id)?,
+            session,
+        })
     }
 
     fn push_page_inner(&mut self, page: ZedNativePage) -> ZedSourceBackedResultV0<()> {
-        let sessions = page.sessions;
+        let sessions = page
+            .sessions
+            .into_iter()
+            .map(|session| self.project_session(session))
+            .collect::<ZedSourceBackedResultV0<Vec<_>>>()?;
         for event in page.events {
             let session = sessions
                 .iter()
-                .find(|session| session.thread_id == event.identity.thread_id)
+                .find(|context| context.session.thread_id == event.identity.thread_id)
                 .or_else(|| {
                     self.last_session
                         .as_ref()
-                        .filter(|session| session.thread_id == event.identity.thread_id)
+                        .filter(|context| context.session.thread_id == event.identity.thread_id)
                 })
                 .ok_or_else(|| {
                     ZedSourceBackedErrorV0::MissingSessionContext(event.identity.thread_id.clone())
                 })?;
-            let document =
-                zed_lexical_document(&self.source, self.revision_digest, session, event)?;
+            let document = zed_lexical_document(
+                &self.source,
+                self.revision_digest,
+                &self.source_path,
+                session,
+                event,
+            )?;
             self.writer.add_document(document)?;
             self.staged_documents = self
                 .staged_documents
@@ -339,7 +395,7 @@ impl<'a> ZedSourceBackedSinkV0<'a> {
     }
 }
 
-impl ZedNativeSink for ZedSourceBackedSinkV0<'_> {
+impl ZedNativeSink for ZedSourceBackedSinkV0<'_, '_> {
     fn push_page(&mut self, page: ZedNativePage) -> ZedNativeResult<()> {
         if let Err(error) = self.push_page_inner(page) {
             self.failure = Some(error);
@@ -381,13 +437,15 @@ fn zed_session_identity(
 fn zed_lexical_document(
     source: &ctx_history_core::SourceKey,
     revision_digest: [u8; 32],
-    session: &ZedNativeSession,
+    source_path: &str,
+    context: &ZedSessionProjectionContextV0,
     event: ZedNativeEvent,
 ) -> ZedSourceBackedResultV0<LexicalDocument> {
     if event.preview.is_empty() {
         return Err(ZedSourceBackedErrorV0::MissingLexicalPreview);
     }
-    let session_id = zed_session_identity(source, &session.thread_id)?;
+    let session = &context.session;
+    let session_id = context.session_id;
     let native_item_key = native_event_key(&event)?;
     let event_id = derive_event_id(EventIdentityInput {
         source,
@@ -423,9 +481,21 @@ fn zed_lexical_document(
     Ok(LexicalDocument {
         event_id,
         session_id,
+        parent_session_id: context.parent_session_id,
+        root_session_id: context.root_session_id,
         source: source.clone(),
         locator,
         provider_session_id: Some(session.thread_id.clone()),
+        branch: None,
+        source_path: Some(source_path.to_owned()),
+        agent_type: if context.parent_session_id.is_some() {
+            AgentType::Subagent
+        } else {
+            AgentType::Primary
+        }
+        .as_str()
+        .to_owned(),
+        is_primary: context.parent_session_id.is_none(),
         event_sequence,
         occurred_at_unix_ms: Some(event.occurred_at.timestamp_millis()),
         event_type: event.event_type.as_str().to_owned(),
@@ -446,7 +516,6 @@ fn native_event_key(event: &ZedNativeEvent) -> ZedSourceBackedResultV0<NativeIte
             vec![
                 TypedKey::utf8(&event.identity.thread_id)?,
                 TypedKey::utf8(value)?,
-                TypedKey::U64(message_ordinal),
                 TypedKey::U64(sub_ordinal),
             ],
         )?),
@@ -709,6 +778,16 @@ mod tests {
             .event;
         let cold_event_id = event.event_id;
         let cold_session_id = event.session_id;
+        assert_eq!(event.parent_session_id, None);
+        assert_eq!(event.root_session_id, event.session_id);
+        assert_eq!(event.provider_session_id.as_deref(), Some("thread-1"));
+        assert_eq!(event.branch, None);
+        assert_eq!(
+            event.source_path.as_deref(),
+            Some(database.to_string_lossy().as_ref())
+        );
+        assert_eq!(event.agent_type, "primary");
+        assert!(event.is_primary);
         assert!(matches!(
             event.locator.coordinate(),
             NativeRecordCoordinate::ProviderSqlite {
@@ -751,6 +830,44 @@ mod tests {
             hydrated.unwrap().decoded_display_text,
             "replacement exact sentinel"
         );
+    }
+
+    #[test]
+    fn source_backed_zed_indexes_native_thread_lineage_and_filters() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("threads.db");
+        let index = temp.path().join("index");
+        create_database(&database, "root lineage sentinel");
+        insert_child_thread(&database, "child lineage sentinel");
+
+        let receipt = ingest_zed_source_backed_v0(&database, &index).unwrap();
+        assert_eq!(receipt.commit.indexed_documents, 2);
+        let verified = VerifiedIndex::open(index).unwrap();
+        let root = verified
+            .search_event_candidates("root lineage sentinel", 10)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap()
+            .event;
+        let child = verified
+            .search_event_candidates("child lineage sentinel", 10)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap()
+            .event;
+
+        assert_eq!(child.parent_session_id, Some(root.session_id));
+        assert_eq!(child.root_session_id, root.session_id);
+        assert_eq!(child.provider_session_id.as_deref(), Some("a-child"));
+        assert_eq!(child.branch, None);
+        assert_eq!(
+            child.source_path.as_deref(),
+            Some(database.to_string_lossy().as_ref())
+        );
+        assert_eq!(child.agent_type, "subagent");
+        assert!(!child.is_primary);
     }
 
     #[test]
@@ -890,6 +1007,35 @@ mod tests {
                 "UPDATE threads
                  SET data = ?1, updated_at = '2026-07-28T12:00:11Z'
                  WHERE id = 'thread-1'",
+                params![payload],
+            )
+            .unwrap();
+    }
+
+    fn insert_child_thread(path: &Path, text: &str) {
+        let connection = Connection::open(path).unwrap();
+        let payload = serde_json::to_vec(&json!({
+            "version": "0.3.0",
+            "title": "Source-backed Zed child thread",
+            "updated_at": "2026-07-28T12:00:12Z",
+            "messages": [{
+                "User": {
+                    "id": "message-child",
+                    "content": [{"Text": text}]
+                }
+            }]
+        }))
+        .unwrap();
+        connection
+            .execute(
+                "INSERT INTO threads (
+                     id, summary, updated_at, data_type, data, parent_id,
+                     folder_paths, folder_paths_order, created_at
+                 ) VALUES (
+                     'a-child', 'source-backed child fixture', '2026-07-28T12:00:12Z',
+                     'json', ?1, 'thread-1', '/workspace/zed', '0',
+                     '2026-07-28T12:00:01Z'
+                 )",
                 params![payload],
             )
             .unwrap();
