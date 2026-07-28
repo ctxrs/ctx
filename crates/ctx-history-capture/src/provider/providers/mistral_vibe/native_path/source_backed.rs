@@ -1133,6 +1133,38 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn compound_authority_mistral_rejects_missing_sibling_and_ancestor_swaps() {
+        let (_temp, root, _) = fixture();
+        let scan = scan_mistral_vibe_source_backed(&root, imported_at()).unwrap();
+        let document = &scan.leaves[0].documents[0];
+        let request =
+            EventHydrationRequest::new(document.event_id, document.locator.clone()).unwrap();
+        let metadata = root.join("session-alpha/meta.json");
+        let bytes = fs::read(&metadata).unwrap();
+
+        fs::remove_file(&metadata).unwrap();
+        assert!(scan.resolver.hydrate_event(&request).is_err());
+        fs::write(&metadata, &bytes).unwrap();
+        assert!(scan.resolver.hydrate_event(&request).is_err());
+
+        let retired = root.with_extension("retired");
+        fs::rename(&root, &retired).unwrap();
+        fs::create_dir_all(root.join("session-alpha")).unwrap();
+        fs::copy(
+            retired.join("session-alpha/meta.json"),
+            root.join("session-alpha/meta.json"),
+        )
+        .unwrap();
+        fs::copy(
+            retired.join("session-alpha/messages.jsonl"),
+            root.join("session-alpha/messages.jsonl"),
+        )
+        .unwrap();
+        assert!(scan.resolver.hydrate_event(&request).is_err());
+    }
+
     fn write_related_session(
         root: &Path,
         session_id: &str,

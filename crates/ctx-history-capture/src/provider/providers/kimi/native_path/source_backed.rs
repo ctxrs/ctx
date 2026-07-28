@@ -1209,4 +1209,57 @@ mod tests {
             .hydrate_event(&refreshed_request)
             .is_ok());
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn compound_authority_kimi_rejects_missing_auxiliary_sibling_and_ancestor_swaps() {
+        let (_temp, root, _wire) = fixture();
+        let state = root.join("sessions/work/session-1/state.json");
+        fs::remove_file(&state).unwrap();
+        let missing = KimiSourceBackedCatalog::discover(&root).unwrap();
+        fs::write(&state, r#"{"title":"appeared"}"#).unwrap();
+        assert!(!missing.revalidate_inventory().unwrap());
+
+        let catalog = KimiSourceBackedCatalog::discover(&root).unwrap();
+        let source = catalog.source_keys().next().unwrap().clone();
+        let mut documents = Vec::new();
+        catalog
+            .scan_source(&source, |document| {
+                documents.push(document);
+                Ok(())
+            })
+            .unwrap();
+        let request =
+            EventHydrationRequest::new(documents[0].event_id, documents[0].locator.clone())
+                .unwrap();
+
+        let state_bytes = fs::read(&state).unwrap();
+        fs::rename(&state, state.with_extension("retired")).unwrap();
+        fs::write(&state, state_bytes).unwrap();
+        assert!(KimiSourceBackedResolver::new(catalog.clone())
+            .hydrate_event(&request)
+            .is_err());
+
+        let retired_root = root.with_extension("retired");
+        fs::rename(&root, &retired_root).unwrap();
+        fs::create_dir_all(root.join("sessions/work/session-1/agents/main")).unwrap();
+        fs::copy(
+            retired_root.join("session_index.jsonl"),
+            root.join("session_index.jsonl"),
+        )
+        .unwrap();
+        fs::copy(
+            retired_root.join("sessions/work/session-1/state.json"),
+            root.join("sessions/work/session-1/state.json"),
+        )
+        .unwrap();
+        fs::copy(
+            retired_root.join("sessions/work/session-1/agents/main/wire.jsonl"),
+            root.join("sessions/work/session-1/agents/main/wire.jsonl"),
+        )
+        .unwrap();
+        assert!(KimiSourceBackedResolver::new(catalog)
+            .hydrate_event(&request)
+            .is_err());
+    }
 }
