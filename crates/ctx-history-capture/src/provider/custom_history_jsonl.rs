@@ -13,9 +13,19 @@ use crate::{ProviderAdapterContext, ProviderImportFailure, ProviderImportSummary
 
 mod nativepath;
 
+// Registration is intentionally owned by the shared provider registry follow-up.
+#[allow(unused_imports)]
 pub(crate) use nativepath::{
     import_custom_history_nativepath, import_custom_history_nativepath_reader,
-    validate_custom_history_nativepath, validate_custom_history_nativepath_reader,
+    observe_custom_history_source_backed_explicit, revalidate_custom_history_source_backed,
+    scan_custom_history_source_backed_explicit, validate_custom_history_nativepath,
+    validate_custom_history_nativepath_reader, CustomHistoryReplacementEvidence,
+    CustomHistoryReplacementReason, CustomHistorySourceBackedDisposition,
+    CustomHistorySourceBackedError, CustomHistorySourceBackedInput,
+    CustomHistorySourceBackedInventory, CustomHistorySourceBackedOutcome,
+    CustomHistorySourceBackedPage, CustomHistorySourceBackedReceipt,
+    CustomHistorySourceBackedResolver, CustomHistorySourceBackedResult,
+    CustomHistorySourceBackedRoute,
 };
 
 pub fn decode_custom_history_jsonl_v1_cursor(encoded: &str) -> Result<String> {
