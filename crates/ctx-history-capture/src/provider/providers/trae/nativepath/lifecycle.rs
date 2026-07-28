@@ -163,7 +163,7 @@ pub(super) fn replay_source_outputs(
     store: &Store,
     sink: &dyn ProOutputSink,
 ) -> Result<()> {
-    let (authority, conn) = acquire_source(path, source_root, context.imported_at)?;
+    let authority = acquire_source(path, source_root, context.imported_at)?;
     let stored = load_source_cursor(store, &context.machine_id, &authority.cursor_stream)?;
     let StoredTraeCursor::Native { cursor, .. } = stored else {
         return Err(CaptureError::InvalidPayload(
@@ -195,11 +195,11 @@ pub(super) fn replay_source_outputs(
     if state.terminal_noop {
         return Ok(());
     }
-    let mut scanner = TraeScanner::new(&conn, &authority, start);
-    while let Some(page) = scanner.next_page(false, true)? {
-        if !authority.snapshot.revalidate(path)? {
-            return Err(CaptureError::SourceChangedDuringCapture);
-        }
+    let mut scanner = TraeScanner::new(&authority, start);
+    while let Some(page) = authority
+        .database
+        .read(path, |conn| scanner.next_page(conn, false, true))?
+    {
         let expected_frontier = output_frontier(page.expected)?;
         let next_frontier = output_frontier(page.next)?;
         let observations = page

@@ -89,16 +89,18 @@ pub(crate) fn scan_trae_source_backed_explicit_v0(
 ) -> TraeSourceBackedResultV0<TraeSourceBackedScanV0> {
     let canonical_path = explicit_trae_leaf(path)?;
     let source_root = canonical_path.parent().unwrap_or(canonical_path.as_path());
-    let (authority, conn) =
-        acquire_source(&canonical_path, source_root, DateTime::<Utc>::UNIX_EPOCH)?;
+    let authority = acquire_source(&canonical_path, source_root, DateTime::<Utc>::UNIX_EPOCH)?;
     let source = source_key(&authority)?;
     let opening = source_observation(&source, &authority.source_revision)?;
     let revision_digest = source_revision_digest(&authority.source_revision);
-    let mut scanner = TraeScanner::new(&conn, &authority, TraeFrontier::default());
+    let mut scanner = TraeScanner::new(&authority, TraeFrontier::default());
     let mut counts = ScannedSourceCounts::default();
     let mut emitted_pages = 0_u64;
 
-    while let Some(page) = scanner.next_page(true, false)? {
+    while let Some(page) = authority
+        .database
+        .read(&canonical_path, |conn| scanner.next_page(conn, true, false))?
+    {
         let complete_records = u64::try_from(page.logical_units)
             .map_err(|_| TraeSourceBackedErrorV0::CountMismatch)?;
         let rejected_records = u64::try_from(page.rejections.len())
@@ -137,9 +139,7 @@ pub(crate) fn scan_trae_source_backed_explicit_v0(
         })?;
     }
 
-    if !authority.snapshot.revalidate(&canonical_path)? {
-        return Err(CaptureError::SourceChangedDuringCapture.into());
-    }
+    authority.database.revalidate()?;
     counts.certified_bytes = scanner.certified_source_bytes();
     let closing = source_observation(&source, &authority.source_revision)?;
     let source = CertifiedSource::certify(
@@ -162,8 +162,7 @@ pub(crate) fn hydrate_trae_source_backed_locator_v0(
     locator.validate_contract()?;
     let canonical_path = explicit_trae_leaf(path)?;
     let source_root = canonical_path.parent().unwrap_or(canonical_path.as_path());
-    let (authority, conn) =
-        acquire_source(&canonical_path, source_root, DateTime::<Utc>::UNIX_EPOCH)?;
+    let authority = acquire_source(&canonical_path, source_root, DateTime::<Utc>::UNIX_EPOCH)?;
     let source = source_key(&authority)?;
     if !source.exact_descriptor_eq(locator.source()) {
         return Err(TraeSourceBackedErrorV0::LocatorSourceMismatch);
@@ -180,7 +179,11 @@ pub(crate) fn hydrate_trae_source_backed_locator_v0(
         .position(|candidate| *candidate == coordinate.chat_key)
         .and_then(|index| u16::try_from(index).ok())
         .ok_or(TraeSourceBackedErrorV0::InvalidLocator)?;
-    let value = super::super::trae_complete_value(&conn, key_index)?
+    let value = authority
+        .database
+        .read(&canonical_path, |conn| {
+            super::super::trae_complete_value(conn, key_index)
+        })?
         .ok_or(TraeSourceBackedErrorV0::LocatorValueMissing)?;
     let actual_digest: [u8; 32] = Sha256::digest(&value).into();
     if actual_digest != coordinate.value_digest || &actual_digest != locator.record_digest() {
@@ -194,9 +197,6 @@ pub(crate) fn hydrate_trae_source_backed_locator_v0(
         &coordinate.provider_session_id,
     )?
     .ok_or(TraeSourceBackedErrorV0::LocatorMessageMissing)?;
-    if !authority.snapshot.revalidate(&canonical_path)? {
-        return Err(CaptureError::SourceChangedDuringCapture.into());
-    }
     Ok(TraeHydratedRecordV0 { exact_text })
 }
 
@@ -351,7 +351,7 @@ fn explicit_trae_leaf(path: &Path) -> TraeSourceBackedResultV0<PathBuf> {
     {
         return Err(TraeSourceBackedErrorV0::ExplicitLeafRequired);
     }
-    Ok(fs::canonicalize(path).map_err(CaptureError::from)?)
+    Ok(absolute_trae_path(path)?)
 }
 
 fn bounded_body(text: &str) -> String {
@@ -576,7 +576,7 @@ mod tests {
 
     fn chat_value(user: &str, assistant: &str) -> Value {
         json!({
-            "sessions": [{
+            "list": [{
                 "id": "native-session-stable",
                 "title": "Source-backed Trae",
                 "messages": [

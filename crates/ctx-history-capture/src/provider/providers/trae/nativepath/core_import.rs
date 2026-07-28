@@ -9,7 +9,7 @@ pub(super) fn import_source_core(
     context: &ProviderAdapterContext,
     options: &ProviderImportOptions,
 ) -> Result<TraeCoreImport> {
-    let (authority, conn) = acquire_source(path, source_root, context.imported_at)?;
+    let authority = acquire_source(path, source_root, context.imported_at)?;
     let stored = load_source_cursor(store, &context.machine_id, &authority.cursor_stream)?;
     let (start, generation, rejected_records, expected_encoded, already_terminal) =
         plan_core_scan(&stored, &authority)?;
@@ -32,16 +32,16 @@ pub(super) fn import_source_core(
         });
     }
 
-    let mut scanner = TraeScanner::new(&conn, &authority, start);
+    let mut scanner = TraeScanner::new(&authority, start);
     let mut expected = expected_encoded;
     let mut rejected_total = rejected_records;
     let mut summary = ProviderImportSummary::default();
     let mut changed_groups = 0_usize;
     let mut last_route = None;
-    while let Some(page) = scanner.next_page(true, false)? {
-        if !authority.snapshot.revalidate(&authority.path)? {
-            return Err(CaptureError::SourceChangedDuringCapture);
-        }
+    while let Some(page) = authority
+        .database
+        .read(&authority.path, |conn| scanner.next_page(conn, true, false))?
+    {
         rejected_total =
             rejected_total.saturating_add(u64::try_from(page.rejections.len()).unwrap_or(u64::MAX));
         let next_cursor = TraeNativeCursor {
@@ -83,9 +83,7 @@ pub(super) fn import_source_core(
                         &mut summary,
                     )?;
                     last_route = Some(route);
-                    if !authority.snapshot.revalidate(&authority.path)? {
-                        return Err(CaptureError::SourceChangedDuringCapture);
-                    }
+                    authority.database.revalidate()?;
                     group.prepare_journal_checkpoint()?;
                     group.publish_cursor_set()?;
                     true
@@ -132,18 +130,11 @@ pub(super) fn acquire_source(
     path: &Path,
     source_root: &Path,
     observed_at: DateTime<Utc>,
-) -> Result<(TraeSourceAuthority, ReadOnlySqliteConnection)> {
-    let snapshot = ProviderSqliteSourceSnapshot::read(
-        path,
-        "Trae SQLite source must be a regular non-symlink file",
-        "Trae SQLite sidecar must be a regular non-symlink file",
-    )?;
-    let conn = open_provider_sqlite_readonly(path)?;
-    if !snapshot.revalidate(path)? {
-        return Err(CaptureError::SourceChangedDuringCapture);
-    }
-    validate_schema(&conn, path)?;
-    let schema = sqlite_schema_fingerprint(&conn)?;
+) -> Result<TraeSourceAuthority> {
+    let (database, schema) = TraeSqliteDatabase::open(path, |conn| {
+        validate_schema(conn, path)?;
+        sqlite_schema_fingerprint(conn)
+    })?;
     let locator_identity = provider_path_identity(path)?;
     let cursor_stream = provider_source_cursor_stream_for_path(
         CaptureProvider::Trae,
@@ -151,25 +142,24 @@ pub(super) fn acquire_source(
         &locator_identity,
     );
     let source_revision = format!(
-        "trae-nativepath-sqlite-v1;parser={TRAE_NATIVE_PARSER_REVISION};policy={TRAE_NATIVE_POLICY_REVISION};schema={schema};{}",
-        snapshot.revision_component()
+        "trae-nativepath-sqlite-v2;parser={TRAE_NATIVE_PARSER_REVISION};policy={TRAE_NATIVE_POLICY_REVISION};schema={schema};identity={};length={};revision={}",
+        hex(database.evidence().identity()),
+        database.evidence().length(),
+        hex(database.evidence().revision()),
     );
-    Ok((
-        TraeSourceAuthority {
-            path: path.to_path_buf(),
-            source_root: source_root.to_path_buf(),
-            raw_source_path: path.display().to_string(),
-            workspace_id: trae_workspace_id(path),
-            workspace_folder: trae_workspace_folder(path),
-            locator_identity: locator_identity.clone(),
-            cursor_stream,
-            proposed_source_identity: format!("trae-sqlite:{locator_identity}"),
-            source_revision,
-            observed_at,
-            snapshot,
-        },
-        conn,
-    ))
+    Ok(TraeSourceAuthority {
+        database,
+        path: path.to_path_buf(),
+        source_root: source_root.to_path_buf(),
+        raw_source_path: path.display().to_string(),
+        workspace_id: trae_workspace_id(path),
+        workspace_folder: trae_workspace_folder(path),
+        locator_identity: locator_identity.clone(),
+        cursor_stream,
+        proposed_source_identity: format!("trae-sqlite:{locator_identity}"),
+        source_revision,
+        observed_at,
+    })
 }
 
 pub(super) fn validate_schema(conn: &Connection, path: &Path) -> Result<()> {
@@ -277,13 +267,8 @@ pub(super) fn plan_core_scan(
 }
 
 impl<'a> TraeScanner<'a> {
-    pub(super) fn new(
-        conn: &'a Connection,
-        authority: &'a TraeSourceAuthority,
-        frontier: TraeFrontier,
-    ) -> Self {
+    pub(super) fn new(authority: &'a TraeSourceAuthority, frontier: TraeFrontier) -> Self {
         Self {
-            conn,
             authority,
             frontier,
             active: None,
@@ -294,6 +279,7 @@ impl<'a> TraeScanner<'a> {
 
     pub(super) fn next_page(
         &mut self,
+        conn: &Connection,
         collect_core: bool,
         collect_outputs: bool,
     ) -> Result<Option<TraeScanPage>> {
@@ -322,7 +308,7 @@ impl<'a> TraeScanner<'a> {
                 .is_none_or(|active| active.key_index != self.frontier.key_index)
             {
                 self.active = None;
-                match self.load_key(self.frontier.key_index)? {
+                match self.load_key(conn, self.frontier.key_index)? {
                     TraeLoadedKey::Missing => {
                         self.advance_key()?;
                         continue;
@@ -530,23 +516,19 @@ impl<'a> TraeScanner<'a> {
         Ok(Some(page))
     }
 
-    pub(super) fn load_key(&mut self, key_index: u16) -> Result<TraeLoadedKey> {
+    pub(super) fn load_key(&mut self, conn: &Connection, key_index: u16) -> Result<TraeLoadedKey> {
         let Some(chat_key) = TRAE_CHAT_KEYS.get(usize::from(key_index)).copied() else {
             return Ok(TraeLoadedKey::Missing);
         };
-        if !self.authority.snapshot.revalidate(&self.authority.path)? {
-            return Err(CaptureError::SourceChangedDuringCapture);
-        }
         let candidate = {
-            let _guard = SqliteLengthPreflightGuard::new(self.conn);
-            self.conn
-                .query_row(
-                    "select typeof(value), coalesce(octet_length(value), 0) \
+            let _guard = SqliteLengthPreflightGuard::new(conn);
+            conn.query_row(
+                "select typeof(value), coalesce(octet_length(value), 0) \
                      from ItemTable where [key] = ?1",
-                    [chat_key],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
-                )
-                .optional()?
+                [chat_key],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?
         };
         let Some((value_type, retained_bytes)) = candidate else {
             return Ok(TraeLoadedKey::Missing);
@@ -567,16 +549,13 @@ impl<'a> TraeScanner<'a> {
                 "Trae ItemTable key `{chat_key}` has unsupported SQLite type `{value_type}`"
             )));
         }
-        let bytes = with_sqlite_read_snapshot(self.conn, || {
-            self.conn
-                .query_row(
-                    "select cast(value as text) from ItemTable where [key] = ?1",
-                    [chat_key],
-                    |row| row.get::<_, String>(0),
-                )
-                .map(String::into_bytes)
-                .map_err(CaptureError::from)
-        })?;
+        let bytes = conn
+            .query_row(
+                "select cast(value as text) from ItemTable where [key] = ?1",
+                [chat_key],
+                |row| row.get::<_, String>(0),
+            )
+            .map(String::into_bytes)?;
         if bytes.len() != usize::try_from(retained_bytes).unwrap_or(usize::MAX) {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
@@ -642,9 +621,6 @@ impl<'a> TraeScanner<'a> {
                 )));
             }
         };
-        if !self.authority.snapshot.revalidate(&self.authority.path)? {
-            return Err(CaptureError::SourceChangedDuringCapture);
-        }
         let value_digest = Sha256::digest(&bytes);
         let mut value_digest_bytes = [0_u8; 32];
         value_digest_bytes.copy_from_slice(&value_digest);
