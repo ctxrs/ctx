@@ -8,7 +8,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt,
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
@@ -148,7 +148,8 @@ use super::providers::{
     },
 };
 use crate::{
-    CaptureError, DiscoveryContext, ProviderAdapterContext, ProviderImportSupport, ProviderSource,
+    discover_provider_sources_with_context, CaptureError, DiscoveryContext, DiscoveryIssue,
+    DiscoveryPlatform, ProviderAdapterContext, ProviderImportSupport, ProviderSource,
     ProviderSourceKind, ProviderSourceStatus, Result as CaptureResult,
     CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT, GEMINI_CLI_SOURCE_FORMAT,
 };
@@ -186,7 +187,10 @@ pub enum SourceBackedHydrationSupport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceBackedProviderRouteMetadata {
     pub provider: CaptureProvider,
+    /// Format carried by the discovered or explicitly selected root.
     pub source_format: &'static str,
+    /// Format carried by the `SourceKey`s certified by the adapter.
+    pub certified_source_format: &'static str,
     pub automatic: bool,
     pub explicit_manual: bool,
     pub selector_authority: SourceBackedSelectorAuthority,
@@ -197,12 +201,29 @@ pub struct SourceBackedProviderRouteMetadata {
 
 macro_rules! route {
     (
+        $provider:ident, $selected_format:literal => $certified_format:literal,
+        $automatic:literal, $explicit:literal, $authority:ident, $hydration:ident
+    ) => {
+        SourceBackedProviderRouteMetadata {
+            provider: CaptureProvider::$provider,
+            source_format: $selected_format,
+            certified_source_format: $certified_format,
+            automatic: $automatic,
+            explicit_manual: $explicit,
+            selector_authority: SourceBackedSelectorAuthority::$authority,
+            exact_hydration: SourceBackedHydrationSupport::$hydration,
+            hydration_limitation: None,
+            unsupported_reason: None,
+        }
+    };
+    (
         $provider:ident, $format:literal, $automatic:literal, $explicit:literal,
         $authority:ident, $hydration:ident
     ) => {
         SourceBackedProviderRouteMetadata {
             provider: CaptureProvider::$provider,
             source_format: $format,
+            certified_source_format: $format,
             automatic: $automatic,
             explicit_manual: $explicit,
             selector_authority: SourceBackedSelectorAuthority::$authority,
@@ -215,18 +236,54 @@ macro_rules! route {
 
 macro_rules! partial_route {
     (
-        $provider:ident, $format:literal, $automatic:literal, $explicit:literal,
-        $authority:ident, $reason:literal
+        $provider:ident, $selected_format:literal => $certified_format:literal,
+        $automatic:literal, $explicit:literal, $authority:ident, $reason:literal
     ) => {
         SourceBackedProviderRouteMetadata {
             provider: CaptureProvider::$provider,
-            source_format: $format,
+            source_format: $selected_format,
+            certified_source_format: $certified_format,
             automatic: $automatic,
             explicit_manual: $explicit,
             selector_authority: SourceBackedSelectorAuthority::$authority,
             exact_hydration: SourceBackedHydrationSupport::Partial,
             hydration_limitation: Some($reason),
             unsupported_reason: None,
+        }
+    };
+    (
+        $provider:ident, $format:literal, $automatic:literal, $explicit:literal,
+        $authority:ident, $reason:literal
+    ) => {
+        SourceBackedProviderRouteMetadata {
+            provider: CaptureProvider::$provider,
+            source_format: $format,
+            certified_source_format: $format,
+            automatic: $automatic,
+            explicit_manual: $explicit,
+            selector_authority: SourceBackedSelectorAuthority::$authority,
+            exact_hydration: SourceBackedHydrationSupport::Partial,
+            hydration_limitation: Some($reason),
+            unsupported_reason: None,
+        }
+    };
+}
+
+macro_rules! unsupported_format_route {
+    (
+        $provider:ident, $selected_format:literal => $certified_format:literal,
+        $automatic:literal, $explicit:literal, $authority:ident, $reason:literal
+    ) => {
+        SourceBackedProviderRouteMetadata {
+            provider: CaptureProvider::$provider,
+            source_format: $selected_format,
+            certified_source_format: $certified_format,
+            automatic: $automatic,
+            explicit_manual: $explicit,
+            selector_authority: SourceBackedSelectorAuthority::$authority,
+            exact_hydration: SourceBackedHydrationSupport::Unsupported,
+            hydration_limitation: None,
+            unsupported_reason: Some($reason),
         }
     };
 }
@@ -307,11 +364,27 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
     ),
     route!(
         Codex,
-        "codex_session_jsonl",
+        "codex_session_jsonl_tree" => "codex_session_jsonl",
         true,
         true,
         DiscoveredWinner,
         Full
+    ),
+    unsupported_format_route!(
+        Codex,
+        "codex_history_jsonl" => "codex_history_jsonl",
+        true,
+        true,
+        DiscoveredWinner,
+        "Codex prompt-history source-backed scan/certification and exact JSONL hydration are not exposed to the coordinator"
+    ),
+    unsupported_format_route!(
+        Codex,
+        "codex_session_jsonl" => "codex_session_jsonl",
+        false,
+        true,
+        ExplicitPath,
+        "single-file Codex rollout source-backed discovery is not exposed to the coordinator"
     ),
     route!(Claude, "claude_projects_jsonl_tree", true, true, DiscoveredWinner, Full),
     route!(Pi, "pi_session_jsonl", true, true, DiscoveredWinner, Full),
@@ -344,7 +417,23 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
     ),
     route!(
         Cursor,
-        "cursor_agent_transcript_jsonl_tree",
+        "cursor_agent_transcript_jsonl_tree" => "cursor_agent_transcript_jsonl_tree",
+        true,
+        true,
+        DiscoveredWinner,
+        Full
+    ),
+    route!(
+        Cursor,
+        "cursor_agent_transcript_jsonl" => "cursor_agent_transcript_jsonl_tree",
+        false,
+        true,
+        ExplicitPath,
+        Full
+    ),
+    route!(
+        Windsurf,
+        "windsurf_cascade_hook_transcript_jsonl_tree" => "windsurf_cascade_hook_transcript_jsonl",
         true,
         true,
         DiscoveredWinner,
@@ -352,10 +441,10 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
     ),
     route!(
         Windsurf,
-        "windsurf_cascade_hook_transcript_jsonl",
+        "windsurf_cascade_hook_transcript_jsonl" => "windsurf_cascade_hook_transcript_jsonl",
+        false,
         true,
-        true,
-        DiscoveredWinner,
+        ExplicitPath,
         Full
     ),
     route!(Zed, "zed_threads_sqlite", true, true, DiscoveredWinner, Full),
@@ -377,7 +466,23 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
     ),
     route!(
         QwenCode,
-        "qwen_code_chat_jsonl",
+        "qwen_code_chat_jsonl_tree" => "qwen_code_chat_jsonl",
+        true,
+        true,
+        DiscoveredWinner,
+        Full
+    ),
+    route!(
+        QwenCode,
+        "qwen_code_chat_jsonl" => "qwen_code_chat_jsonl",
+        false,
+        true,
+        ExplicitPath,
+        Full
+    ),
+    route!(
+        KimiCodeCli,
+        "kimi_code_cli_wire_jsonl_tree" => "kimi_code_cli_wire_jsonl",
         true,
         true,
         DiscoveredWinner,
@@ -385,19 +490,27 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
     ),
     route!(
         KimiCodeCli,
-        "kimi_code_cli_wire_jsonl",
+        "kimi_code_cli_wire_jsonl" => "kimi_code_cli_wire_jsonl",
+        false,
         true,
-        true,
-        DiscoveredWinner,
+        ExplicitPath,
         Full
     ),
     route!(Auggie, "auggie_session_json", true, true, DiscoveredWinner, Full),
     partial_route!(
         Junie,
-        "junie_session_events_jsonl_tree",
+        "junie_session_events_jsonl_tree" => "junie_session_events_jsonl_tree",
         true,
         true,
         DiscoveredWinner,
+        "Junie exact hydration is limited to message records with provider-owned JSONL addresses"
+    ),
+    partial_route!(
+        Junie,
+        "junie_session_events_jsonl" => "junie_session_events_jsonl_tree",
+        false,
+        true,
+        ExplicitPath,
         "Junie exact hydration is limited to message records with provider-owned JSONL addresses"
     ),
     route!(
@@ -426,18 +539,34 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
     ),
     route!(
         MistralVibe,
-        "mistral_vibe_session_jsonl",
+        "mistral_vibe_session_jsonl_tree" => "mistral_vibe_session_jsonl",
         true,
         true,
         DiscoveredWinner,
         Full
     ),
+    route!(
+        MistralVibe,
+        "mistral_vibe_session_jsonl" => "mistral_vibe_session_jsonl",
+        false,
+        true,
+        ExplicitPath,
+        Full
+    ),
     partial_route!(
         Mux,
-        "mux_session_jsonl",
+        "mux_session_jsonl_tree" => "mux_session_jsonl",
         true,
         true,
         DiscoveredWinner,
+        "Mux exact hydration requires the brokered compound-file content route"
+    ),
+    partial_route!(
+        Mux,
+        "mux_session_jsonl" => "mux_session_jsonl",
+        false,
+        true,
+        ExplicitPath,
         "Mux exact hydration requires the brokered compound-file content route"
     ),
     route!(
@@ -532,10 +661,18 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
     ),
     route!(
         Qoder,
-        "qoder_transcript_jsonl",
+        "qoder_transcript_jsonl_tree" => "qoder_transcript_jsonl",
         true,
         true,
         DiscoveredWinner,
+        Full
+    ),
+    route!(
+        Qoder,
+        "qoder_transcript_jsonl" => "qoder_transcript_jsonl",
+        false,
+        true,
+        ExplicitPath,
         Full
     ),
     route!(Warp, "warp_sqlite", true, true, NamedSurface, Full),
@@ -559,6 +696,7 @@ pub fn source_backed_route_inventory() -> &'static [SourceBackedProviderRouteMet
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceBackedRouteMetadata {
     pub source: ProviderSource,
+    pub certified_source_format: &'static str,
     pub selection: Option<SourceBackedRouteSelection>,
     pub selector_authority: SourceBackedSelectorAuthority,
     pub unsupported_reason: Option<String>,
@@ -900,7 +1038,7 @@ impl SourceBackedRoute {
         selector_authority: SourceBackedSelectorAuthority,
         driver: SourceBackedRouteDriver,
     ) -> SourceBackedCoordinatorResult<Self> {
-        validate_executable_route(
+        let known = validate_executable_route(
             &source,
             SourceBackedRouteSelection::Automatic,
             selector_authority,
@@ -908,6 +1046,7 @@ impl SourceBackedRoute {
         Ok(Self {
             metadata: SourceBackedRouteMetadata {
                 source,
+                certified_source_format: known.certified_source_format,
                 selection: Some(SourceBackedRouteSelection::Automatic),
                 selector_authority,
                 unsupported_reason: None,
@@ -921,7 +1060,7 @@ impl SourceBackedRoute {
         selector_authority: SourceBackedSelectorAuthority,
         driver: SourceBackedRouteDriver,
     ) -> SourceBackedCoordinatorResult<Self> {
-        validate_executable_route(
+        let known = validate_executable_route(
             &source,
             SourceBackedRouteSelection::ExplicitManual,
             selector_authority,
@@ -929,6 +1068,7 @@ impl SourceBackedRoute {
         Ok(Self {
             metadata: SourceBackedRouteMetadata {
                 source,
+                certified_source_format: known.certified_source_format,
                 selection: Some(SourceBackedRouteSelection::ExplicitManual),
                 selector_authority,
                 unsupported_reason: None,
@@ -938,9 +1078,12 @@ impl SourceBackedRoute {
     }
 
     pub fn unsupported(source: ProviderSource, reason: impl Into<String>) -> Self {
+        let certified_source_format = landed_format_route(source.provider, source.source_format)
+            .map_or(source.source_format, |route| route.certified_source_format);
         Self {
             metadata: SourceBackedRouteMetadata {
                 source,
+                certified_source_format,
                 selection: None,
                 selector_authority: SourceBackedSelectorAuthority::ExplicitPath,
                 unsupported_reason: Some(reason.into()),
@@ -977,6 +1120,299 @@ impl SourceBackedProviderRegistry {
             routes: self.routes.clone(),
         }
     }
+
+    pub fn executable_route_count(&self) -> usize {
+        self.routes
+            .iter()
+            .filter(|route| route.driver.is_some())
+            .count()
+    }
+
+    pub fn unsupported_route_count(&self) -> usize {
+        self.routes
+            .iter()
+            .filter(|route| route.driver.is_none())
+            .count()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceBackedAutomaticUnavailableReason {
+    SourceStatus(ProviderSourceStatus),
+    UnsupportedFormat { detail: &'static str },
+    SelectorAuthorityUnavailable { detail: &'static str },
+    RegistrationRejected { detail: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceBackedAutomaticRegistryIssue {
+    Discovery(DiscoveryIssue),
+    Unavailable {
+        source: ProviderSource,
+        reason: SourceBackedAutomaticUnavailableReason,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct SourceBackedAutomaticRegistryBuild {
+    pub registry: SourceBackedProviderRegistry,
+    pub issues: Vec<SourceBackedAutomaticRegistryIssue>,
+}
+
+impl SourceBackedAutomaticRegistryBuild {
+    pub fn executable_route_count(&self) -> usize {
+        self.registry.executable_route_count()
+    }
+
+    pub fn unsupported_route_count(&self) -> usize {
+        self.registry.unsupported_route_count()
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        SourceBackedProviderRegistry,
+        Vec<SourceBackedAutomaticRegistryIssue>,
+    ) {
+        (self.registry, self.issues)
+    }
+}
+
+/// Discovers and registers every automatic source-backed route capture can
+/// construct without daemon-side provider branching.
+///
+/// Normal provider absence and selector/discovery limitations are returned as
+/// typed issues. A detected format whose adapter seam is unavailable is also
+/// retained as a typed unsupported route, so refresh and hydration cannot
+/// silently claim it.
+pub fn build_automatic_source_backed_registry(
+    discovery: &DiscoveryContext,
+) -> SourceBackedAutomaticRegistryBuild {
+    let report = discover_provider_sources_with_context(discovery);
+    build_automatic_source_backed_registry_from_report(discovery, report.sources, report.issues)
+}
+
+fn build_automatic_source_backed_registry_from_report(
+    discovery: &DiscoveryContext,
+    sources: Vec<ProviderSource>,
+    discovery_issues: Vec<DiscoveryIssue>,
+) -> SourceBackedAutomaticRegistryBuild {
+    let mut registry = SourceBackedProviderRegistry::new();
+    let mut issues = discovery_issues
+        .into_iter()
+        .map(SourceBackedAutomaticRegistryIssue::Discovery)
+        .collect::<Vec<_>>();
+    let mut compound_provider_registered = HashSet::new();
+
+    for source in sources {
+        if source.import_support == ProviderImportSupport::Explicit {
+            continue;
+        }
+        if source.import_support == ProviderImportSupport::Unsupported
+            || source.source_kind == ProviderSourceKind::DetectionOnly
+            || source.status == ProviderSourceStatus::Unsupported
+            || source.unsupported_reason.is_some()
+        {
+            let detail = source
+                .unsupported_reason
+                .unwrap_or("the detected provider format is not supported for automatic refresh");
+            retain_unsupported_automatic_format(&mut registry, &mut issues, source, detail);
+            continue;
+        }
+        if !matches!(
+            source.status,
+            ProviderSourceStatus::Available | ProviderSourceStatus::Empty
+        ) {
+            issues.push(SourceBackedAutomaticRegistryIssue::Unavailable {
+                reason: SourceBackedAutomaticUnavailableReason::SourceStatus(source.status),
+                source,
+            });
+            continue;
+        }
+
+        let Some(format_route) = landed_format_route(source.provider, source.source_format) else {
+            retain_unsupported_automatic_format(
+                &mut registry,
+                &mut issues,
+                source,
+                "the discovered provider format has no landed source-backed route",
+            );
+            continue;
+        };
+        if !format_route.automatic {
+            retain_unsupported_automatic_format(
+                &mut registry,
+                &mut issues,
+                source,
+                "the discovered provider format is not registered for automatic refresh",
+            );
+            continue;
+        }
+        if let Some(reason) = format_route.unsupported_reason {
+            retain_unsupported_automatic_format(&mut registry, &mut issues, source, reason);
+            continue;
+        }
+
+        let compound_provider = matches!(
+            source.provider,
+            CaptureProvider::AstrBot | CaptureProvider::Crush | CaptureProvider::Lingma
+        );
+        if compound_provider && compound_provider_registered.contains(&source.provider) {
+            continue;
+        }
+
+        match register_discovered_automatic_route(&mut registry, discovery, source.clone()) {
+            Ok(()) => {
+                if compound_provider {
+                    compound_provider_registered.insert(source.provider);
+                }
+            }
+            Err(reason) => {
+                if compound_provider {
+                    compound_provider_registered.insert(source.provider);
+                }
+                registry.register(SourceBackedRoute::unsupported(
+                    source.clone(),
+                    automatic_unavailable_detail(&reason),
+                ));
+                issues.push(SourceBackedAutomaticRegistryIssue::Unavailable { source, reason });
+            }
+        }
+    }
+
+    SourceBackedAutomaticRegistryBuild { registry, issues }
+}
+
+fn retain_unsupported_automatic_format(
+    registry: &mut SourceBackedProviderRegistry,
+    issues: &mut Vec<SourceBackedAutomaticRegistryIssue>,
+    source: ProviderSource,
+    detail: &'static str,
+) {
+    registry.register(SourceBackedRoute::unsupported(source.clone(), detail));
+    issues.push(SourceBackedAutomaticRegistryIssue::Unavailable {
+        source,
+        reason: SourceBackedAutomaticUnavailableReason::UnsupportedFormat { detail },
+    });
+}
+
+fn automatic_unavailable_detail(reason: &SourceBackedAutomaticUnavailableReason) -> String {
+    match reason {
+        SourceBackedAutomaticUnavailableReason::SourceStatus(status) => {
+            format!("provider source status is {}", status.as_str())
+        }
+        SourceBackedAutomaticUnavailableReason::UnsupportedFormat { detail }
+        | SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable { detail } => {
+            (*detail).to_owned()
+        }
+        SourceBackedAutomaticUnavailableReason::RegistrationRejected { detail } => detail.clone(),
+    }
+}
+
+fn register_discovered_automatic_route(
+    registry: &mut SourceBackedProviderRegistry,
+    discovery: &DiscoveryContext,
+    source: ProviderSource,
+) -> Result<(), SourceBackedAutomaticUnavailableReason> {
+    const CRUSH_SELECTOR_GAP: &str = "Crush discovery exposes database paths but not the stable project keys and rereadable finite inventory required by CrushProjectInventorySourceV0";
+    const LINGMA_SELECTOR_GAP: &str = "Lingma discovery exposes selected databases but not the installed-client authority and per-database catalog lineages required by LingmaSourceInventoryV0";
+    const WARP_SELECTOR_GAP: &str = "Warp discovery exposes database paths but not the stable installed-surface key required by WarpSourceSelectionV0";
+
+    let result = match source.provider {
+        CaptureProvider::Warp => {
+            return Err(
+                SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable {
+                    detail: WARP_SELECTOR_GAP,
+                },
+            );
+        }
+        CaptureProvider::Goose => {
+            let platform_root = goose_platform_root(discovery, &source.path).ok_or(
+                SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable {
+                    detail: "Goose discovery selected a database without its exact platform root",
+                },
+            )?;
+            register_goose_source_backed_route(
+                registry,
+                source,
+                SourceBackedRouteSelection::Automatic,
+                platform_root,
+                Vec::new(),
+            )
+        }
+        CaptureProvider::Crush => {
+            return Err(
+                SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable {
+                    detail: CRUSH_SELECTOR_GAP,
+                },
+            );
+        }
+        CaptureProvider::Lingma => {
+            return Err(
+                SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable {
+                    detail: LINGMA_SELECTOR_GAP,
+                },
+            );
+        }
+        CaptureProvider::AstrBot => register_astrbot_source_backed_route(
+            registry,
+            source,
+            SourceBackedRouteSelection::Automatic,
+            discovery.clone(),
+        ),
+        CaptureProvider::Shelley => {
+            let exact_cwd = discovery.cwd().ok_or(
+                SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable {
+                    detail: "Shelley automatic registration requires the exact discovery CWD",
+                },
+            )?;
+            register_shelley_source_backed_route(registry, source, exact_cwd)
+        }
+        _ => register_landed_source_backed_route(
+            registry,
+            source,
+            SourceBackedRouteSelection::Automatic,
+        ),
+    };
+    result.map_err(
+        |error| SourceBackedAutomaticUnavailableReason::RegistrationRejected {
+            detail: error.to_string(),
+        },
+    )
+}
+
+fn goose_platform_root(discovery: &DiscoveryContext, database: &Path) -> Option<PathBuf> {
+    if let Some(root) = discovery
+        .env("GOOSE_PATH_ROOT")
+        .filter(|value| !value.is_empty())
+    {
+        let root = PathBuf::from(root);
+        if root.is_absolute() && database == root.join("data/sessions/sessions.db") {
+            return Some(root);
+        }
+    }
+    let root = match discovery.platform() {
+        DiscoveryPlatform::Linux | DiscoveryPlatform::MacOS => {
+            match discovery.env("XDG_DATA_HOME") {
+                Some(value) if !value.is_empty() && Path::new(value).is_absolute() => {
+                    PathBuf::from(value).join("goose")
+                }
+                _ => discovery.home().join(".local/share/goose"),
+            }
+        }
+        DiscoveryPlatform::Windows => discovery
+            .platform_dirs()
+            .data
+            .as_ref()?
+            .join("Block/goose/data"),
+        DiscoveryPlatform::OtherUnix => {
+            let value = discovery
+                .env("XDG_DATA_HOME")
+                .filter(|value| !value.is_empty() && Path::new(value).is_absolute())?;
+            PathBuf::from(value).join("goose")
+        }
+    };
+    (database == root.join("sessions/sessions.db")).then_some(root)
 }
 
 #[derive(Debug, Clone)]
@@ -992,7 +1428,7 @@ impl ContentSourceResolver for SourceBackedResolverRegistry {
         let source = request.locator().source();
         let mut matches = self.routes.iter().filter(|route| {
             route.metadata.source.provider.as_str() == source.provider()
-                && route.metadata.source.source_format == source.source_format()
+                && route.metadata.certified_source_format == source.source_format()
                 && route
                     .driver
                     .as_ref()
@@ -1001,7 +1437,7 @@ impl ContentSourceResolver for SourceBackedResolverRegistry {
         let Some(route) = matches.next() else {
             let unsupported = self.routes.iter().any(|route| {
                 route.metadata.source.provider.as_str() == source.provider()
-                    && route.metadata.source.source_format == source.source_format()
+                    && route.metadata.certified_source_format == source.source_format()
                     && route.driver.is_none()
             });
             return Err(hydration_failure(
@@ -3438,10 +3874,10 @@ fn register_direct_jsonl_route(
     let capture_root = root.clone();
     let hydration_root = root;
     let provider = source.provider;
-    let source_format = source.source_format;
+    let certified_source_format = adapter.source_format();
     let driver = captured_route_driver(
         move |sink| capture_direct_jsonl(adapter, &capture_root, sink),
-        provider_format_scope(provider, source_format),
+        provider_format_scope(provider, certified_source_format),
         move |request| hydrate_direct_jsonl(adapter, &hydration_root, request),
     );
     registry.register(executable_route(
@@ -3563,9 +3999,15 @@ fn executable_route(
         SourceBackedRouteSelection::Automatic => {
             SourceBackedRoute::automatic(source, authority, driver)
         }
-        SourceBackedRouteSelection::ExplicitManual => {
-            SourceBackedRoute::explicit_manual(source, authority, driver)
-        }
+        SourceBackedRouteSelection::ExplicitManual => SourceBackedRoute::explicit_manual(
+            source,
+            if authority == SourceBackedSelectorAuthority::DiscoveredWinner {
+                SourceBackedSelectorAuthority::ExplicitPath
+            } else {
+                authority
+            },
+            driver,
+        ),
     }
 }
 
@@ -3573,10 +4015,8 @@ fn validate_executable_route(
     source: &ProviderSource,
     selection: SourceBackedRouteSelection,
     selector_authority: SourceBackedSelectorAuthority,
-) -> SourceBackedCoordinatorResult<()> {
-    let known = LANDED_SOURCE_BACKED_ROUTES.iter().find(|route| {
-        route.provider == source.provider && route.source_format == source.source_format
-    });
+) -> SourceBackedCoordinatorResult<&'static SourceBackedProviderRouteMetadata> {
+    let known = landed_format_route(source.provider, source.source_format);
     let Some(known) = known else {
         return Err(invalid_route(
             source.provider,
@@ -3627,7 +4067,16 @@ fn validate_executable_route(
             "the route omitted or changed its provider selector authority",
         ));
     }
-    Ok(())
+    Ok(known)
+}
+
+fn landed_format_route(
+    provider: CaptureProvider,
+    selected_source_format: &str,
+) -> Option<&'static SourceBackedProviderRouteMetadata> {
+    LANDED_SOURCE_BACKED_ROUTES
+        .iter()
+        .find(|route| route.provider == provider && route.source_format == selected_source_format)
 }
 
 fn invalid_route(
@@ -4004,7 +4453,47 @@ mod tests {
     }
 
     #[test]
-    fn importable_provider_inventory_has_a_driver_constructor_and_hydration_contract() {
+    fn importable_provider_inventory_covers_default_and_explicit_formats() {
+        assert_eq!(LANDED_SOURCE_BACKED_ROUTES.len(), 52);
+        assert_eq!(
+            LANDED_SOURCE_BACKED_ROUTES
+                .iter()
+                .filter(|route| route.automatic)
+                .count(),
+            41
+        );
+        assert_eq!(
+            LANDED_SOURCE_BACKED_ROUTES
+                .iter()
+                .filter(|route| route.automatic && route.unsupported_reason.is_some())
+                .count(),
+            1
+        );
+        let mut formats = HashSet::new();
+        for route in LANDED_SOURCE_BACKED_ROUTES {
+            assert!(
+                formats.insert((route.provider, route.source_format)),
+                "{} {} is registered more than once",
+                route.provider.as_str(),
+                route.source_format
+            );
+            assert!(!route.source_format.is_empty());
+            assert!(!route.certified_source_format.is_empty());
+            match route.exact_hydration {
+                SourceBackedHydrationSupport::Full => {
+                    assert!(route.hydration_limitation.is_none());
+                    assert!(route.unsupported_reason.is_none());
+                }
+                SourceBackedHydrationSupport::Partial => {
+                    assert!(route.hydration_limitation.is_some());
+                    assert!(route.unsupported_reason.is_none());
+                }
+                SourceBackedHydrationSupport::Unsupported => {
+                    assert!(route.unsupported_reason.is_some());
+                }
+            }
+        }
+
         for spec in crate::provider_source_specs()
             .iter()
             .filter(|spec| spec.import_support.is_importable())
@@ -4013,22 +4502,9 @@ mod tests {
                 .iter()
                 .filter(|route| route.provider == spec.provider)
                 .collect::<Vec<_>>();
-            assert_eq!(
-                routes.len(),
-                1,
-                "{} must have exactly one central source-backed route",
-                spec.provider.as_str()
-            );
-            let route = routes[0];
             assert!(
-                route.unsupported_reason.is_none(),
-                "{} must not be accidentally registered as unsupported",
-                spec.provider.as_str()
-            );
-            assert_ne!(
-                route.exact_hydration,
-                SourceBackedHydrationSupport::Unsupported,
-                "{} must have an exact resolver or an approved partial limitation",
+                !routes.is_empty(),
+                "{} must have at least one central source-backed format route",
                 spec.provider.as_str()
             );
             assert!(
@@ -4036,33 +4512,297 @@ mod tests {
                 "{} must have a mechanical driver constructor",
                 spec.provider.as_str()
             );
-            match route.exact_hydration {
-                SourceBackedHydrationSupport::Full => {
-                    assert!(route.hydration_limitation.is_none());
-                }
-                SourceBackedHydrationSupport::Partial => {
+            for location in spec.default_locations {
+                let matching = routes
+                    .iter()
+                    .filter(|route| route.source_format == location.source_format)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    matching.len(),
+                    1,
+                    "{} default format {} must have exactly one central format route",
+                    spec.provider.as_str(),
+                    location.source_format
+                );
+                if spec.import_support == ProviderImportSupport::Native {
                     assert!(
-                        route.hydration_limitation.is_some(),
-                        "{} partial hydration must state its limitation",
-                        spec.provider.as_str()
+                        matching[0].automatic,
+                        "{} default format {} is not automatic",
+                        spec.provider.as_str(),
+                        location.source_format
                     );
                 }
-                SourceBackedHydrationSupport::Unsupported => unreachable!(),
-            }
-            match spec.import_support {
-                ProviderImportSupport::Native => assert!(
-                    route.automatic,
-                    "{} is automatically importable but has no automatic route",
-                    spec.provider.as_str()
-                ),
-                ProviderImportSupport::Explicit => assert!(
-                    route.explicit_manual,
-                    "{} is explicit-only but has no manual route",
-                    spec.provider.as_str()
-                ),
-                ProviderImportSupport::Unsupported => unreachable!(),
             }
         }
+
+        let root_leaf_variants = [
+            (
+                CaptureProvider::Codex,
+                "codex_session_jsonl_tree",
+                "codex_session_jsonl",
+                true,
+                true,
+            ),
+            (
+                CaptureProvider::Codex,
+                "codex_history_jsonl",
+                "codex_history_jsonl",
+                true,
+                true,
+            ),
+            (
+                CaptureProvider::Codex,
+                "codex_session_jsonl",
+                "codex_session_jsonl",
+                false,
+                true,
+            ),
+            (
+                CaptureProvider::Cursor,
+                "cursor_agent_transcript_jsonl_tree",
+                "cursor_agent_transcript_jsonl_tree",
+                true,
+                true,
+            ),
+            (
+                CaptureProvider::Cursor,
+                "cursor_agent_transcript_jsonl",
+                "cursor_agent_transcript_jsonl_tree",
+                false,
+                true,
+            ),
+            (
+                CaptureProvider::Windsurf,
+                "windsurf_cascade_hook_transcript_jsonl_tree",
+                "windsurf_cascade_hook_transcript_jsonl",
+                true,
+                true,
+            ),
+            (
+                CaptureProvider::Windsurf,
+                "windsurf_cascade_hook_transcript_jsonl",
+                "windsurf_cascade_hook_transcript_jsonl",
+                false,
+                true,
+            ),
+            (
+                CaptureProvider::QwenCode,
+                "qwen_code_chat_jsonl_tree",
+                "qwen_code_chat_jsonl",
+                true,
+                true,
+            ),
+            (
+                CaptureProvider::QwenCode,
+                "qwen_code_chat_jsonl",
+                "qwen_code_chat_jsonl",
+                false,
+                true,
+            ),
+            (
+                CaptureProvider::KimiCodeCli,
+                "kimi_code_cli_wire_jsonl_tree",
+                "kimi_code_cli_wire_jsonl",
+                true,
+                true,
+            ),
+            (
+                CaptureProvider::KimiCodeCli,
+                "kimi_code_cli_wire_jsonl",
+                "kimi_code_cli_wire_jsonl",
+                false,
+                true,
+            ),
+            (
+                CaptureProvider::MistralVibe,
+                "mistral_vibe_session_jsonl_tree",
+                "mistral_vibe_session_jsonl",
+                true,
+                true,
+            ),
+            (
+                CaptureProvider::MistralVibe,
+                "mistral_vibe_session_jsonl",
+                "mistral_vibe_session_jsonl",
+                false,
+                true,
+            ),
+            (
+                CaptureProvider::Mux,
+                "mux_session_jsonl_tree",
+                "mux_session_jsonl",
+                true,
+                true,
+            ),
+            (
+                CaptureProvider::Mux,
+                "mux_session_jsonl",
+                "mux_session_jsonl",
+                false,
+                true,
+            ),
+            (
+                CaptureProvider::Qoder,
+                "qoder_transcript_jsonl_tree",
+                "qoder_transcript_jsonl",
+                true,
+                true,
+            ),
+            (
+                CaptureProvider::Qoder,
+                "qoder_transcript_jsonl",
+                "qoder_transcript_jsonl",
+                false,
+                true,
+            ),
+            (
+                CaptureProvider::Junie,
+                "junie_session_events_jsonl",
+                "junie_session_events_jsonl_tree",
+                false,
+                true,
+            ),
+        ];
+        for (provider, selected, certified, automatic, explicit) in root_leaf_variants {
+            let route = landed_format_route(provider, selected).unwrap();
+            assert_eq!(route.certified_source_format, certified);
+            assert_eq!(route.automatic, automatic);
+            assert_eq!(route.explicit_manual, explicit);
+        }
+    }
+
+    #[test]
+    fn automatic_builder_counts_routes_and_returns_typed_gaps() {
+        let context = DiscoveryContext::new(
+            "/home/test",
+            "/work/test",
+            DiscoveryPlatform::Linux,
+            crate::DiscoveryPlatformDirs {
+                state: Some(PathBuf::from("/state")),
+                ..crate::DiscoveryPlatformDirs::default()
+            },
+        );
+        let mut missing_mux = fixture_provider_source(
+            CaptureProvider::Mux,
+            "mux_session_jsonl_tree",
+            ProviderImportSupport::Native,
+        );
+        missing_mux.exists = false;
+        missing_mux.status = ProviderSourceStatus::Missing;
+        let sources = vec![
+            fixture_provider_source(
+                CaptureProvider::Gemini,
+                GEMINI_CLI_SOURCE_FORMAT,
+                ProviderImportSupport::Native,
+            ),
+            fixture_provider_source_at(
+                CaptureProvider::Warp,
+                "warp_sqlite",
+                ProviderImportSupport::Native,
+                "/state/warp-terminal/warp.sqlite",
+            ),
+            fixture_provider_source_at(
+                CaptureProvider::Goose,
+                "goose_sessions_sqlite",
+                ProviderImportSupport::Native,
+                "/home/test/.local/share/goose/sessions/sessions.db",
+            ),
+            fixture_provider_source(
+                CaptureProvider::AstrBot,
+                "astrbot_data_v4_sqlite",
+                ProviderImportSupport::Native,
+            ),
+            fixture_provider_source_at(
+                CaptureProvider::AstrBot,
+                "astrbot_data_v4_sqlite",
+                ProviderImportSupport::Native,
+                "/home/test/.astrbot_launcher/instances/one/data/data_v4.db",
+            ),
+            fixture_provider_source(
+                CaptureProvider::Codex,
+                "codex_history_jsonl",
+                ProviderImportSupport::Native,
+            ),
+            fixture_provider_source(
+                CaptureProvider::Crush,
+                "crush_sqlite",
+                ProviderImportSupport::Native,
+            ),
+            fixture_provider_source(
+                CaptureProvider::Lingma,
+                "lingma_sqlite",
+                ProviderImportSupport::Native,
+            ),
+            fixture_provider_source(
+                CaptureProvider::Unknown,
+                "unknown_detected_format",
+                ProviderImportSupport::Unsupported,
+            ),
+            missing_mux,
+        ];
+
+        let build =
+            build_automatic_source_backed_registry_from_report(&context, sources, Vec::new());
+        assert_eq!(build.executable_route_count(), 3);
+        assert_eq!(build.unsupported_route_count(), 5);
+        assert_eq!(build.issues.len(), 6);
+        assert!(build.issues.iter().any(|issue| matches!(
+            issue,
+            SourceBackedAutomaticRegistryIssue::Unavailable {
+                source,
+                reason: SourceBackedAutomaticUnavailableReason::UnsupportedFormat { detail },
+            } if source.provider == CaptureProvider::Codex
+                && source.source_format == "codex_history_jsonl"
+                && detail.contains("prompt-history")
+        )));
+        assert!(build.issues.iter().any(|issue| matches!(
+            issue,
+            SourceBackedAutomaticRegistryIssue::Unavailable {
+                source,
+                reason:
+                    SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable {
+                        detail,
+                    },
+            } if source.provider == CaptureProvider::Crush
+                && detail.contains("stable project keys")
+        )));
+        assert!(build.issues.iter().any(|issue| matches!(
+            issue,
+            SourceBackedAutomaticRegistryIssue::Unavailable {
+                source,
+                reason: SourceBackedAutomaticUnavailableReason::UnsupportedFormat { .. },
+            } if source.provider == CaptureProvider::Unknown
+                && source.source_format == "unknown_detected_format"
+        )));
+    }
+
+    #[test]
+    fn resolver_routes_selected_tree_to_certified_leaf_format() {
+        let route = fixture_route_with_selected_format(
+            CaptureProvider::Qoder,
+            "qoder_transcript_jsonl_tree",
+            "qoder_transcript_jsonl",
+            8,
+            NativeRecordCoordinate::Jsonl {
+                byte_offset: 3,
+                byte_length: 5,
+                physical_ordinal: 1,
+                native_session_key: None,
+                native_event_key: None,
+            },
+            b"qoder".to_vec(),
+        );
+        let request = route.1.clone();
+        let mut registry = SourceBackedProviderRegistry::new();
+        registry.register(route.0);
+        assert_eq!(
+            registry
+                .resolver_registry()
+                .hydrate_event(&request)
+                .unwrap()
+                .provider_bytes,
+            b"qoder"
+        );
     }
 
     fn fixture_route(
@@ -4072,9 +4812,27 @@ mod tests {
         coordinate: NativeRecordCoordinate,
         provider_bytes: Vec<u8>,
     ) -> (SourceBackedRoute, EventHydrationRequest) {
+        fixture_route_with_selected_format(
+            provider,
+            source_format,
+            source_format,
+            lineage,
+            coordinate,
+            provider_bytes,
+        )
+    }
+
+    fn fixture_route_with_selected_format(
+        provider: CaptureProvider,
+        selected_source_format: &'static str,
+        certified_source_format: &'static str,
+        lineage: u8,
+        coordinate: NativeRecordCoordinate,
+        provider_bytes: Vec<u8>,
+    ) -> (SourceBackedRoute, EventHydrationRequest) {
         let source = SourceKey::derive(
             provider.as_str(),
-            source_format,
+            certified_source_format,
             "coordinator-test-v1",
             1,
             SourceAnchor::CatalogLineage([lineage; 32]),
@@ -4169,8 +4927,11 @@ mod tests {
                 })
             },
         );
-        let provider_source =
-            fixture_provider_source(provider, source_format, ProviderImportSupport::Native);
+        let provider_source = fixture_provider_source(
+            provider,
+            selected_source_format,
+            ProviderImportSupport::Native,
+        );
         (
             SourceBackedRoute::automatic(
                 provider_source,
@@ -4206,5 +4967,16 @@ mod tests {
             },
             unsupported_reason: None,
         }
+    }
+
+    fn fixture_provider_source_at(
+        provider: CaptureProvider,
+        source_format: &'static str,
+        import_support: ProviderImportSupport,
+        path: impl Into<PathBuf>,
+    ) -> ProviderSource {
+        let mut source = fixture_provider_source(provider, source_format, import_support);
+        source.path = path.into();
+        source
     }
 }
