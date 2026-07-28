@@ -35,7 +35,8 @@ use tantivy::{
         Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, FAST, INDEXED, STORED,
         STRING,
     },
-    Index, IndexMeta, IndexSettings, IndexWriter, ReloadPolicy, Searcher, TantivyDocument, Term,
+    DocAddress, Index, IndexMeta, IndexSettings, IndexWriter, ReloadPolicy, Searcher,
+    TantivyDocument, Term,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -1279,7 +1280,9 @@ fn write_manifest(root: &Path, generation_id: &str, manifest: &GenerationManifes
         let existing = fs::read(&path)?;
         if existing == bytes {
             // A prior process may have died after publishing this immutable
-            // filename but before synchronizing its directory entry.
+            // filename but before synchronizing either its contents or its
+            // directory entry. Re-fence both before meta.json can name it.
+            File::open(&path)?.sync_all()?;
             sync_directory(&directory)?;
             return Ok(());
         }
@@ -1323,7 +1326,82 @@ fn verify_searcher(searcher: &Searcher, manifest: &GenerationManifest) -> Result
             });
         }
     }
+    verify_generation_identities(searcher)?;
     Ok(())
+}
+
+fn verify_generation_identities(searcher: &Searcher) -> Result<()> {
+    let fields = fields_from_schema(searcher.schema())?;
+    let mut event_identities = HashMap::new();
+    let mut session_identities = HashMap::new();
+    for (segment_ord, segment) in searcher.segment_readers().iter().enumerate() {
+        for doc_id in 0..segment.max_doc() {
+            if segment.is_deleted(doc_id) {
+                continue;
+            }
+            let event = query::stored_event_record(
+                searcher,
+                DocAddress::new(segment_ord as u32, doc_id),
+                fields,
+            )?;
+            register_event_identity(&mut event_identities, event.event_id)?;
+            let owner = source_token(event.locator.source());
+            register_generation_session_identity(
+                &mut session_identities,
+                event.session_id,
+                Some(&owner),
+            )?;
+            if let Some(parent_session_id) = event.parent_session_id {
+                register_generation_session_identity(
+                    &mut session_identities,
+                    parent_session_id,
+                    None,
+                )?;
+            }
+            register_generation_session_identity(
+                &mut session_identities,
+                event.root_session_id,
+                None,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn register_generation_session_identity(
+    identities: &mut HashMap<Uuid, ([u8; 32], Option<String>)>,
+    identity: StableEntityId,
+    owner: Option<&str>,
+) -> Result<()> {
+    let uuid = identity.as_uuid();
+    let digest = identity.digest();
+    match identities.entry(uuid) {
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert((digest, owner.map(str::to_owned)));
+            Ok(())
+        }
+        std::collections::hash_map::Entry::Occupied(mut entry) if entry.get().0 == digest => {
+            let registered_owner = &mut entry.get_mut().1;
+            match (registered_owner.as_deref(), owner) {
+                (Some(existing), Some(candidate)) if existing != candidate => {
+                    Err(IndexError::DuplicateSessionIdentity(uuid.to_string()))
+                }
+                (None, Some(candidate)) => {
+                    *registered_owner = Some(candidate.to_owned());
+                    Ok(())
+                }
+                _ => Ok(()),
+            }
+        }
+        std::collections::hash_map::Entry::Occupied(entry) => {
+            Err(IndexError::CompactIdentityCollision {
+                kind: "session",
+                uuid,
+                existing_digest: hex(&entry.get().0),
+                new_digest: hex(&digest),
+            })
+        }
+    }
 }
 
 fn verify_total_document_count(searcher: &Searcher, expected: u64) -> Result<()> {
@@ -1867,6 +1945,38 @@ mod tests {
         ids
     }
 
+    fn publish_unchecked_generation(
+        root: &Path,
+        index: &Index,
+        manifest: GenerationManifest,
+        delete_sources: &[SourceKey],
+        documents: Vec<TantivyDocument>,
+    ) {
+        let mut writer = index
+            .writer_with_num_threads::<TantivyDocument>(1, INDEX_MEMORY_MIN_PER_THREAD)
+            .unwrap();
+        let source_key = required_field(&index.schema(), "source_key").unwrap();
+        for source in delete_sources {
+            writer.delete_term(Term::from_field_text(source_key, &source_token(source)));
+        }
+        for document in documents {
+            writer.add_document(document).unwrap();
+        }
+        let generation_id = manifest.generation_id().unwrap();
+        write_manifest(root, &generation_id, &manifest).unwrap();
+        let mut prepared = writer.prepare_commit().unwrap();
+        prepared.set_payload(
+            &serde_json::to_string(&CommitPayload {
+                version: COMMIT_PAYLOAD_VERSION,
+                generation_id,
+            })
+            .unwrap(),
+        );
+        prepared.commit().unwrap();
+        writer.wait_merging_threads().unwrap();
+        sync_directory(root).unwrap();
+    }
+
     #[test]
     fn commit_binds_manifest_and_searchable_documents() {
         let temp = tempdir().unwrap();
@@ -1914,6 +2024,31 @@ mod tests {
             writer.base_manifest().unwrap().generation_id().unwrap(),
             receipt.generation_id
         );
+    }
+
+    #[test]
+    fn writer_rejects_a_nonempty_payloadless_index() {
+        let temp = tempdir().unwrap();
+        let source = source("session.jsonl");
+        let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        first.begin_source(source.clone()).unwrap();
+        first.add_document(document(&source, 1, "body")).unwrap();
+        first.certify_source(certificate(&source, 1, 1)).unwrap();
+        first.commit(|_| true).unwrap();
+
+        let directory = DurableMmapDirectory::open(temp.path()).unwrap();
+        let index = Index::open(directory.clone()).unwrap();
+        let mut metas = index.load_metas().unwrap();
+        metas.payload = None;
+        directory
+            .atomic_write(Path::new("meta.json"), &serde_json::to_vec(&metas).unwrap())
+            .unwrap();
+
+        let error = match GenerationWriter::open(temp.path(), WriterOptions::default()) {
+            Ok(_) => panic!("nonempty payloadless index unexpectedly opened for writing"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, IndexError::UnboundIndexState));
     }
 
     #[test]
@@ -2805,6 +2940,85 @@ mod tests {
         writer.add_document(duplicate.clone()).unwrap();
         let error = writer.add_document(duplicate).unwrap_err();
         assert!(matches!(error, IndexError::DuplicateEventIdentity(_)));
+    }
+
+    #[test]
+    fn verified_generation_rejects_a_forged_duplicate_event_identity() {
+        let temp = tempdir().unwrap();
+        let source = source("session.jsonl");
+        let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        writer.begin_source(source.clone()).unwrap();
+        writer.add_document(document(&source, 1, "body")).unwrap();
+        writer.certify_source(certificate(&source, 1, 1)).unwrap();
+        writer.commit(|_| true).unwrap();
+
+        let pinned = VerifiedIndex::open(temp.path()).unwrap();
+        let addresses = pinned.searcher.search(&AllQuery, &DocSetCollector).unwrap();
+        let duplicate = pinned
+            .searcher
+            .doc(addresses.into_iter().next().unwrap())
+            .unwrap();
+        let index = pinned.searcher.index().clone();
+        publish_unchecked_generation(
+            temp.path(),
+            &index,
+            GenerationManifest::from_sources(vec![certificate(&source, 2, 2)]).unwrap(),
+            &[],
+            vec![duplicate],
+        );
+
+        let error = match VerifiedIndex::open(temp.path()) {
+            Ok(_) => panic!("duplicate event generation unexpectedly opened"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, IndexError::DuplicateEventIdentity(_)));
+    }
+
+    #[test]
+    fn verified_generation_rejects_forged_source_ownership() {
+        let temp = tempdir().unwrap();
+        let first = source("first.jsonl");
+        let second = source("second.jsonl");
+        let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        writer.begin_source(first.clone()).unwrap();
+        writer.add_document(document(&first, 1, "body")).unwrap();
+        writer.certify_source(certificate(&first, 1, 1)).unwrap();
+        writer.commit(|_| true).unwrap();
+
+        let pinned = VerifiedIndex::open(temp.path()).unwrap();
+        let fields = fields_from_schema(pinned.searcher.schema()).unwrap();
+        let address = pinned
+            .searcher
+            .search(&AllQuery, &DocSetCollector)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let document = pinned.searcher.doc::<TantivyDocument>(address).unwrap();
+        let mut forged = TantivyDocument::default();
+        for (field, value) in document.field_values() {
+            if field != fields.source_key {
+                forged.add_field_value(field, value);
+            }
+        }
+        forged.add_text(fields.source_key, source_token(&second));
+        let index = pinned.searcher.index().clone();
+        publish_unchecked_generation(
+            temp.path(),
+            &index,
+            GenerationManifest::from_sources(vec![certificate(&second, 2, 1)]).unwrap(),
+            std::slice::from_ref(&first),
+            vec![forged],
+        );
+
+        let error = match VerifiedIndex::open(temp.path()) {
+            Ok(_) => panic!("source ownership mismatch unexpectedly opened"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            IndexError::InvalidStoredDocumentField("native_locator")
+        ));
     }
 
     #[test]

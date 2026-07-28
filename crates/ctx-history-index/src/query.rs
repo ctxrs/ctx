@@ -16,7 +16,8 @@ use tantivy::{
 use uuid::Uuid;
 
 use super::{
-    fields_from_schema, hex, Fields, IndexError, Result, VerifiedIndex, MAX_BODY_PREVIEW_CHARS,
+    fields_from_schema, hex, source_token, Fields, IndexError, Result, VerifiedIndex,
+    MAX_BODY_PREVIEW_CHARS,
 };
 
 const ID_PREFIX_MATCH_LIMIT: usize = 2;
@@ -548,92 +549,101 @@ impl VerifiedIndex {
     }
 
     fn event_record(&self, address: DocAddress, fields: Fields) -> Result<EventRecord> {
-        let document: TantivyDocument = self.searcher.doc(address)?;
-        let event_id = stored_identity(
-            &document,
-            fields.event_identity,
-            fields.event_id,
-            fields.event_identity_digest,
-            StableEntityKind::Event,
-            "event_identity",
-        )?;
-        let session_id = stored_identity(
-            &document,
-            fields.session_identity,
-            fields.session_id,
-            fields.session_identity_digest,
-            StableEntityKind::Session,
-            "session_identity",
-        )?;
-        let locator: SourceRecordLocator = serde_json::from_slice(required_bytes(
-            &document,
-            fields.native_locator,
-            "native_locator",
-        )?)?;
-        locator.validate_contract()?;
-        if event_id.source_digest() != locator.source().identity().digest()
-            || session_id.source_digest() != locator.source().identity().digest()
-            || event_id.source_descriptor_digest() != locator.source().exact_descriptor_digest()
-            || session_id.source_descriptor_digest() != locator.source().exact_descriptor_digest()
-        {
-            return Err(IndexError::InvalidStoredDocumentField("native_locator"));
-        }
-
-        let provider = required_string(&document, fields.provider, "provider")?;
-        let source_format = required_string(&document, fields.source_format, "source_format")?;
-        if provider != locator.source().provider()
-            || source_format != locator.source().source_format()
-        {
-            return Err(IndexError::InvalidStoredDocumentField("provider"));
-        }
-        let preview = required_string(&document, fields.body_preview, "body_preview")?;
-        if preview.is_empty() || preview.chars().count() > MAX_BODY_PREVIEW_CHARS {
-            return Err(IndexError::InvalidStoredDocumentField("body_preview"));
-        }
-        let touched_files = document
-            .get_all(fields.touched_file)
-            .map(|value| {
-                value
-                    .as_str()
-                    .filter(|path| !path.is_empty())
-                    .map(str::to_owned)
-                    .ok_or(IndexError::InvalidStoredDocumentField("touched_file"))
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        Ok(EventRecord {
-            event_id,
-            session_id,
-            parent_session_id: optional_stored_identity(
-                &document,
-                fields.parent_session_identity,
-                fields.parent_session_id,
-                "parent_session_identity",
-            )?,
-            root_session_id: stored_identity_without_digest(
-                &document,
-                fields.root_session_identity,
-                fields.root_session_id,
-                "root_session_identity",
-            )?,
-            locator,
-            provider,
-            source_format,
-            provider_session_id: optional_string(&document, fields.provider_session_id)?,
-            branch: optional_string(&document, fields.branch)?,
-            source_path: optional_string(&document, fields.source_path)?,
-            agent_type: required_string(&document, fields.agent_type, "agent_type")?,
-            is_primary: required_bool(&document, fields.is_primary, "is_primary")?,
-            event_sequence: required_u64(&document, fields.event_sequence, "event_sequence")?,
-            occurred_at_unix_ms: optional_i64(&document, fields.occurred_at_unix_ms)?,
-            event_type: required_string(&document, fields.event_type, "event_type")?,
-            role: optional_string(&document, fields.role)?,
-            preview,
-            workspace: optional_string(&document, fields.workspace)?,
-            cwd: optional_string(&document, fields.cwd)?,
-            touched_files,
-        })
+        stored_event_record(&self.searcher, address, fields)
     }
+}
+
+pub(super) fn stored_event_record(
+    searcher: &tantivy::Searcher,
+    address: DocAddress,
+    fields: Fields,
+) -> Result<EventRecord> {
+    let document: TantivyDocument = searcher.doc(address)?;
+    let event_id = stored_identity(
+        &document,
+        fields.event_identity,
+        fields.event_id,
+        fields.event_identity_digest,
+        StableEntityKind::Event,
+        "event_identity",
+    )?;
+    let session_id = stored_identity(
+        &document,
+        fields.session_identity,
+        fields.session_id,
+        fields.session_identity_digest,
+        StableEntityKind::Session,
+        "session_identity",
+    )?;
+    let locator: SourceRecordLocator = serde_json::from_slice(required_bytes(
+        &document,
+        fields.native_locator,
+        "native_locator",
+    )?)?;
+    locator.validate_contract()?;
+    let stored_source = required_string(&document, fields.source_key, "source_key")?;
+    if stored_source != source_token(locator.source())
+        || event_id.source_digest() != locator.source().identity().digest()
+        || session_id.source_digest() != locator.source().identity().digest()
+        || event_id.source_descriptor_digest() != locator.source().exact_descriptor_digest()
+        || session_id.source_descriptor_digest() != locator.source().exact_descriptor_digest()
+    {
+        return Err(IndexError::InvalidStoredDocumentField("native_locator"));
+    }
+
+    let provider = required_string(&document, fields.provider, "provider")?;
+    let source_format = required_string(&document, fields.source_format, "source_format")?;
+    if provider != locator.source().provider() || source_format != locator.source().source_format()
+    {
+        return Err(IndexError::InvalidStoredDocumentField("provider"));
+    }
+    let preview = required_string(&document, fields.body_preview, "body_preview")?;
+    if preview.is_empty() || preview.chars().count() > MAX_BODY_PREVIEW_CHARS {
+        return Err(IndexError::InvalidStoredDocumentField("body_preview"));
+    }
+    let touched_files = document
+        .get_all(fields.touched_file)
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|path| !path.is_empty())
+                .map(str::to_owned)
+                .ok_or(IndexError::InvalidStoredDocumentField("touched_file"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(EventRecord {
+        event_id,
+        session_id,
+        parent_session_id: optional_stored_identity(
+            &document,
+            fields.parent_session_identity,
+            fields.parent_session_id,
+            "parent_session_identity",
+        )?,
+        root_session_id: stored_identity_without_digest(
+            &document,
+            fields.root_session_identity,
+            fields.root_session_id,
+            "root_session_identity",
+        )?,
+        locator,
+        provider,
+        source_format,
+        provider_session_id: optional_string(&document, fields.provider_session_id)?,
+        branch: optional_string(&document, fields.branch)?,
+        source_path: optional_string(&document, fields.source_path)?,
+        agent_type: required_string(&document, fields.agent_type, "agent_type")?,
+        is_primary: required_bool(&document, fields.is_primary, "is_primary")?,
+        event_sequence: required_u64(&document, fields.event_sequence, "event_sequence")?,
+        occurred_at_unix_ms: optional_i64(&document, fields.occurred_at_unix_ms)?,
+        event_type: required_string(&document, fields.event_type, "event_type")?,
+        role: optional_string(&document, fields.role)?,
+        preview,
+        workspace: optional_string(&document, fields.workspace)?,
+        cwd: optional_string(&document, fields.cwd)?,
+        touched_files,
+    })
 }
 
 struct SemanticEventCandidate {
