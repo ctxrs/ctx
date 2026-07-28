@@ -30,8 +30,9 @@ use super::dto::{
     GeminiPageFrontier, GeminiPageIdentity, GeminiParserMetrics, GeminiPreviousSource,
     GeminiPublicationShape, GeminiRejection, GeminiRejectionKind, GeminiRetainedEvent,
     GeminiScanError, GeminiScanOutcome, GeminiScanResult, GeminiSession, GeminiSourceChange,
-    GeminiSourceLocator, GeminiToolCall, GeminiTouchOverflow, GeminiTranscriptLayout,
-    GeminiTranscriptSource, GEMINI_NATIVEPATH_PARSER_REVISION, GEMINI_NATIVEPATH_POLICY_REVISION,
+    GeminiSourceLocator, GeminiSourceRecordEvidence, GeminiToolCall, GeminiTouchOverflow,
+    GeminiTranscriptLayout, GeminiTranscriptSource, GEMINI_NATIVEPATH_PARSER_REVISION,
+    GEMINI_NATIVEPATH_POLICY_REVISION,
 };
 
 #[cfg(test)]

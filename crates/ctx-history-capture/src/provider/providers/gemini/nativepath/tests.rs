@@ -23,6 +23,7 @@ use super::parser::{
     MAX_GEMINI_FILE_TOUCH_BYTES_PER_EVENT, MAX_GEMINI_NATIVE_PAGE_BYTES,
     MAX_GEMINI_NATIVE_PAGE_RECORDS,
 };
+use super::source_backed::{hydrate_gemini_source_backed_record, GeminiSourceBackedLeafReader};
 use crate::provider::providers::native_jsonl::result_content::{
     gemini_result_subrecord_oracle_for_tests, NativeJsonlResultExtractionError,
 };
@@ -99,3 +100,4 @@ mod paging;
 mod parsing;
 mod resume;
 mod retention;
+mod source_backed;
