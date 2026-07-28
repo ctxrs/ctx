@@ -11,6 +11,8 @@ mod identity;
 mod parity_tests;
 mod prepared;
 mod query;
+#[cfg(test)]
+mod ranking_oracle_tests;
 mod semantic_document;
 mod snapshot;
 mod storage;
