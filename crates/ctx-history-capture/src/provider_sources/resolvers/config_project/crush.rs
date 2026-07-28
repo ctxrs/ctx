@@ -2,7 +2,6 @@
 
 use std::{
     collections::HashSet,
-    fs,
     path::{Path, PathBuf},
 };
 
@@ -10,7 +9,10 @@ use serde_json::Value;
 
 use crate::provider_sources::{
     context::{DiscoveryContext, DiscoveryPlatform},
-    selectors::{sort_paths, SelectorFormat, SelectorReader, MAX_FINITE_SELECTOR_ENTRIES},
+    selectors::{
+        sort_paths, source_path_kind, SelectorFormat, SelectorReader, SourcePathKind,
+        MAX_FINITE_SELECTOR_ENTRIES,
+    },
     types::{DiscoveryReport, ProviderSourceSpec},
 };
 
@@ -180,10 +182,13 @@ fn default_crush_root(cwd: &Path, ancestors: &[PathBuf]) -> Result<PathBuf, ()> 
         match path_presence(&candidate) {
             PathPresence::Missing => {}
             PathPresence::Present if path_is_safe_for_automatic_read(&candidate) => {
-                let metadata = fs::symlink_metadata(&candidate).map_err(|_| ())?;
-                return metadata.file_type().is_dir().then_some(candidate).ok_or(());
+                return (source_path_kind(&candidate) == Ok(SourcePathKind::Directory))
+                    .then_some(candidate)
+                    .ok_or(());
             }
-            PathPresence::Present | PathPresence::Unknown(_) => return Err(()),
+            PathPresence::Present | PathPresence::Unsupported | PathPresence::Unknown(_) => {
+                return Err(())
+            }
         }
     }
     Ok(cwd.join(".crush"))

@@ -1,22 +1,18 @@
 use std::{
     collections::{BTreeSet, HashSet},
     ffi::OsStr,
-    fs,
-    io::Read,
     path::{Component, Path, PathBuf},
 };
 
 use ctx_history_core::CaptureProvider;
 use serde_json::{Map, Value};
 
-use crate::common::io::ensure_provider_path_parents_are_not_symlinks;
-
 use super::super::{
     context::{DiscoveryContext, DiscoveryPlatform},
-    open_ordinary_file_without_following,
     selectors::{
-        direct_entries, SelectorDocument, SelectorFormat, SelectorIncludeBudget, SelectorReadError,
-        SelectorReader, MAX_FINITE_SELECTOR_ENTRIES,
+        direct_entries, ordinary_directory, ordinary_file, ordinary_path, read_bounded_bytes,
+        SelectorDocument, SelectorFormat, SelectorIncludeBudget, SelectorReadError, SelectorReader,
+        MAX_FINITE_SELECTOR_ENTRIES,
     },
     types::{DiscoveryIssueKind, DiscoveryReport, ProviderSourceKind, ProviderSourceSpec},
 };
@@ -121,28 +117,11 @@ fn issue_limit(report: &mut DiscoveryReport, provider: CaptureProvider, path: Pa
 }
 
 fn safe_existing_path(path: &Path) -> bool {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            !metadata.file_type().is_symlink()
-                && (metadata.file_type().is_file() || metadata.file_type().is_dir())
-                && ensure_provider_path_parents_are_not_symlinks(path).is_ok()
-        }
-        Err(error) => {
-            error.kind() == std::io::ErrorKind::NotFound
-                && ensure_provider_path_parents_are_not_symlinks(path).is_ok()
-        }
+    match path_presence(path) {
+        PathPresence::Missing => true,
+        PathPresence::Present => ordinary_path(path),
+        PathPresence::Unsupported | PathPresence::Unknown(_) => false,
     }
-}
-
-fn ordinary_file(path: &Path) -> bool {
-    safe_existing_path(path)
-        && fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
-        && open_ordinary_file_without_following(path).is_ok()
-}
-
-fn ordinary_directory(path: &Path) -> bool {
-    safe_existing_path(path)
-        && fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir())
 }
 
 fn selected_path_is_safe(path: &Path, directory: bool) -> bool {
@@ -150,7 +129,7 @@ fn selected_path_is_safe(path: &Path, directory: bool) -> bool {
         PathPresence::Missing => safe_existing_path(path),
         PathPresence::Present if directory => ordinary_directory(path),
         PathPresence::Present => ordinary_file(path),
-        PathPresence::Unknown(_) => false,
+        PathPresence::Unsupported | PathPresence::Unknown(_) => false,
     }
 }
 
@@ -296,7 +275,7 @@ fn read_openclaw_agent_ids(path: &Path) -> Result<(Vec<String>, bool), OpenClawC
     };
     let config_root = path.parent().ok_or(OpenClawConfigError::Invalid)?;
     let mut budget = SelectorIncludeBudget::default();
-    let canonical_path = fs::canonicalize(path).map_err(|_| OpenClawConfigError::Invalid)?;
+    let canonical_path = lexical_normalize(path);
     let mut visited = HashSet::from([canonical_path]);
     let value = resolve_openclaw_includes(
         value,
@@ -387,6 +366,24 @@ fn normalize_openclaw_agent_id(value: &str) -> Result<String, OpenClawConfigErro
     })
 }
 
+fn lexical_normalize(path: impl AsRef<Path>) -> PathBuf {
+    let mut output = PathBuf::new();
+    for component in path.as_ref().components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !output.pop() {
+                    output.push(component.as_os_str());
+                }
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                output.push(component.as_os_str());
+            }
+        }
+    }
+    output
+}
+
 fn resolve_openclaw_includes(
     value: Value,
     current_path: &Path,
@@ -430,18 +427,16 @@ fn resolve_openclaw_includes(
                         .admit(depth.saturating_add(1))
                         .map_err(map_openclaw_error)?;
                     let parent = current_path.parent().ok_or(OpenClawConfigError::Invalid)?;
-                    let include_path = if Path::new(&include).is_absolute() {
+                    let include_path = lexical_normalize(if Path::new(&include).is_absolute() {
                         PathBuf::from(include)
                     } else {
                         parent.join(include)
-                    };
+                    });
                     if !ordinary_file(&include_path) {
                         return Err(OpenClawConfigError::Invalid);
                     }
-                    let canonical_root =
-                        fs::canonicalize(config_root).map_err(|_| OpenClawConfigError::Invalid)?;
-                    let canonical_include = fs::canonicalize(&include_path)
-                        .map_err(|_| OpenClawConfigError::Invalid)?;
+                    let canonical_root = lexical_normalize(config_root);
+                    let canonical_include = include_path;
                     if !canonical_include.starts_with(&canonical_root)
                         || !visited.insert(canonical_include.clone())
                     {
@@ -598,7 +593,9 @@ fn resolve_hermes(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> Disc
                 }
                 Err(_) => issue_selector(&mut report, spec.provider),
             },
-            PathPresence::Unknown(_) => issue_selector(&mut report, spec.provider),
+            PathPresence::Unsupported | PathPresence::Unknown(_) => {
+                issue_selector(&mut report, spec.provider)
+            }
             PathPresence::Missing => {}
         }
         return report;
@@ -646,7 +643,7 @@ fn hermes_multiplex_enabled(
     match path_presence(&path) {
         PathPresence::Missing => return Some(false),
         PathPresence::Present => {}
-        PathPresence::Unknown(_) => {
+        PathPresence::Unsupported | PathPresence::Unknown(_) => {
             issue_selector(report, provider);
             return None;
         }
@@ -677,23 +674,18 @@ fn hermes_sticky_profile(
     match path_presence(&path) {
         PathPresence::Missing => return Ok(None),
         PathPresence::Present => {}
-        PathPresence::Unknown(_) => {
+        PathPresence::Unsupported | PathPresence::Unknown(_) => {
             issue_selector(report, provider);
             return Err(());
         }
     }
-    let mut file = match open_ordinary_file_without_following(&path) {
-        Ok(file) => file,
+    let bytes = match read_bounded_bytes(&path, 1024) {
+        Ok(bytes) => bytes,
         Err(_) => {
             issue_selector(report, provider);
             return Err(());
         }
     };
-    let mut bytes = Vec::new();
-    if file.by_ref().take(1025).read_to_end(&mut bytes).is_err() || bytes.len() > 1024 {
-        issue_selector(report, provider);
-        return Err(());
-    }
     let Ok(name) = std::str::from_utf8(&bytes).map(str::trim) else {
         issue_selector(report, provider);
         return Err(());
@@ -796,7 +788,9 @@ fn resolve_astrbot(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> Dis
             }
             Err(_) => issue_selector(&mut report, spec.provider),
         },
-        PathPresence::Unknown(_) => issue_selector(&mut report, spec.provider),
+        PathPresence::Unsupported | PathPresence::Unknown(_) => {
+            issue_selector(&mut report, spec.provider)
+        }
         PathPresence::Missing => {}
     }
     report
@@ -949,6 +943,7 @@ fn openhands_cli_event_roots(root: &Path) -> Result<Vec<PathBuf>, SelectorReadEr
     match path_presence(root) {
         PathPresence::Missing => return Ok(Vec::new()),
         PathPresence::Present => {}
+        PathPresence::Unsupported => return Err(SelectorReadError::UnsupportedRoot),
         PathPresence::Unknown(_) => return Err(SelectorReadError::Unavailable),
     }
     if !ordinary_directory(root) {
@@ -967,6 +962,7 @@ fn openhands_cli_event_roots(root: &Path) -> Result<Vec<PathBuf>, SelectorReadEr
         match path_presence(&events) {
             PathPresence::Missing => continue,
             PathPresence::Present => {}
+            PathPresence::Unsupported => return Err(SelectorReadError::UnsupportedRoot),
             PathPresence::Unknown(_) => return Err(SelectorReadError::Unavailable),
         }
         if direct_entries(&events)?.into_iter().any(|path| {

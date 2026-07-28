@@ -1,21 +1,17 @@
 use std::{
     ffi::OsStr,
-    fs,
-    io::ErrorKind,
     path::{Component, Path, PathBuf},
 };
 
 use ctx_history_core::CaptureProvider;
 use serde_json::Value;
 
-use crate::common::io::ensure_provider_path_parents_are_not_symlinks;
-
 use super::{
     super::{
         context::{DiscoveryContext, DiscoveryPlatform},
         selectors::{
-            SelectorDocument, SelectorFormat, SelectorReadError, SelectorReader,
-            MAX_PROJECT_ANCESTORS,
+            ordinary_empty_file, SelectorDocument, SelectorFormat, SelectorReadError,
+            SelectorReader, MAX_PROJECT_ANCESTORS,
         },
         types::{DiscoveryIssueKind, DiscoveryReport, ProviderSourceKind, ProviderSourceSpec},
     },
@@ -98,13 +94,10 @@ fn add_manual_issue(report: &mut DiscoveryReport, provider: CaptureProvider, rea
 }
 
 fn path_is_safe_for_automatic_read(path: &Path) -> bool {
-    if ensure_provider_path_parents_are_not_symlinks(path).is_err() {
-        return false;
-    }
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => !metadata.file_type().is_symlink(),
-        Err(error) => error.kind() == ErrorKind::NotFound,
-    }
+    matches!(
+        path_presence(path),
+        PathPresence::Missing | PathPresence::Present
+    )
 }
 
 fn supported_desktop_platform(context: &DiscoveryContext) -> bool {
@@ -126,17 +119,12 @@ fn read_optional(
     match path_presence(path) {
         PathPresence::Missing => Ok(OptionalDocument::Missing),
         PathPresence::Unknown(_) => Err(SelectorReadError::Unavailable),
+        PathPresence::Unsupported => Err(SelectorReadError::UnsupportedRoot),
         PathPresence::Present => {
-            let metadata =
-                fs::symlink_metadata(path).map_err(|_| SelectorReadError::Unavailable)?;
-            if !(metadata.file_type().is_file() && metadata.len() == 0) {
+            if !ordinary_empty_file(path)? {
                 return reader.read(path, format).map(OptionalDocument::Present);
             }
-            if ensure_provider_path_parents_are_not_symlinks(path).is_err() {
-                Err(SelectorReadError::Unavailable)
-            } else {
-                Ok(OptionalDocument::Empty)
-            }
+            Ok(OptionalDocument::Empty)
         }
     }
 }
@@ -254,11 +242,7 @@ fn is_within(path: &Path, root: &Path) -> bool {
 }
 
 fn canonical_comparison_path(path: &Path) -> PathBuf {
-    if path_is_safe_for_automatic_read(path) {
-        fs::canonicalize(path).unwrap_or_else(|_| lexical_normalize(path))
-    } else {
-        lexical_normalize(path)
-    }
+    lexical_normalize(path)
 }
 
 fn git_bounded_ancestors(cwd: &Path) -> Vec<PathBuf> {
@@ -268,15 +252,8 @@ fn git_bounded_ancestors(cwd: &Path) -> Vec<PathBuf> {
         let marker = candidate.join(".git");
         match path_presence(&marker) {
             PathPresence::Missing => {}
-            PathPresence::Present => {
-                if fs::symlink_metadata(&marker)
-                    .is_ok_and(|metadata| !metadata.file_type().is_symlink())
-                {
-                    return walked;
-                }
-                return vec![cwd.to_path_buf()];
-            }
-            PathPresence::Unknown(_) => return vec![cwd.to_path_buf()],
+            PathPresence::Present => return walked,
+            PathPresence::Unsupported | PathPresence::Unknown(_) => return vec![cwd.to_path_buf()],
         }
     }
     vec![cwd.to_path_buf()]

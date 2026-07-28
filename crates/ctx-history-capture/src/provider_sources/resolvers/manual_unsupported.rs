@@ -1,19 +1,13 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use ctx_history_core::CaptureProvider;
 
-use crate::common::io::ensure_provider_path_parents_are_not_symlinks;
-
 use super::super::{
     context::{DiscoveryContext, DiscoveryPlatform},
-    open_ordinary_file_without_following,
     reasons::{empty_source_reason, probe_io_error_reason, unknown_source_reason},
     selectors::{
-        direct_entries, encoded_path_within_limit, MAX_DIRECT_DIRECTORY_ENTRIES,
-        MAX_FINITE_SELECTOR_ENTRIES,
+        direct_entries, encoded_path_within_limit, source_path_kind, SourcePathKind,
+        MAX_DIRECT_DIRECTORY_ENTRIES, MAX_FINITE_SELECTOR_ENTRIES,
     },
     types::{
         DiscoveryIssueKind, DiscoveryReport, ProviderSource, ProviderSourceKind,
@@ -113,29 +107,13 @@ enum SafePathKind {
 fn safe_path_kind(path: &Path) -> SafePathKind {
     match path_presence(path) {
         PathPresence::Missing => return SafePathKind::Missing,
-        PathPresence::Unknown(_) => return SafePathKind::Unsafe,
+        PathPresence::Unsupported | PathPresence::Unknown(_) => return SafePathKind::Unsafe,
         PathPresence::Present => {}
     }
-    if ensure_provider_path_parents_are_not_symlinks(path).is_err() {
-        return SafePathKind::Unsafe;
-    }
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(_) => return SafePathKind::Unsafe,
-    };
-    if metadata.file_type().is_symlink() {
-        return SafePathKind::Unsafe;
-    }
-    if metadata.file_type().is_file() {
-        if open_ordinary_file_without_following(path).is_ok() {
-            SafePathKind::File
-        } else {
-            SafePathKind::Unsafe
-        }
-    } else if metadata.file_type().is_dir() {
-        SafePathKind::Directory
-    } else {
-        SafePathKind::Unsafe
+    match source_path_kind(path) {
+        Ok(SourcePathKind::File) => SafePathKind::File,
+        Ok(SourcePathKind::Directory) => SafePathKind::Directory,
+        Err(_) => SafePathKind::Unsafe,
     }
 }
 

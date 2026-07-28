@@ -1,18 +1,15 @@
 use std::{
     ffi::OsStr,
-    fs,
     path::{Path, PathBuf},
 };
 
 use ctx_history_core::CaptureProvider;
 
-use crate::common::io::ensure_provider_path_parents_are_not_symlinks;
-
 use super::{
     super::{
         context::{DiscoveryContext, DiscoveryPlatform},
         reasons::path_presence_unknown_reason,
-        selectors::{direct_entries, encoded_path_within_limit},
+        selectors::{direct_entries, encoded_path_within_limit, source_path_kind, SourcePathKind},
         types::{DiscoveryIssueKind, DiscoveryReport, ProviderSourceKind, ProviderSourceSpec},
     },
     issue, path_presence, push_source_candidate, select_current_or_legacy, source_from_parts,
@@ -68,16 +65,14 @@ fn resolve_codex(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> Disco
             let Some(root) = resolve_from_cwd(context, PathBuf::from(value)) else {
                 return manual_report(spec, None, MANUAL_PATH_REASON);
             };
-            let Ok(metadata) = fs::symlink_metadata(&root) else {
-                return manual_report(spec, safe_issue_path(&root), CODEX_OVERRIDE_REASON);
-            };
-            if metadata.file_type().is_symlink()
-                || ensure_provider_path_parents_are_not_symlinks(&root).is_err()
-            {
-                return manual_report(spec, safe_issue_path(&root), SYMLINK_REASON);
-            }
-            if !metadata.file_type().is_dir() {
-                return manual_report(spec, safe_issue_path(&root), CODEX_OVERRIDE_REASON);
+            match source_path_kind(&root) {
+                Ok(SourcePathKind::Directory) => {}
+                Err(super::super::selectors::SourcePathError::Unsupported) => {
+                    return manual_report(spec, safe_issue_path(&root), SYMLINK_REASON);
+                }
+                Ok(SourcePathKind::File) | Err(_) => {
+                    return manual_report(spec, safe_issue_path(&root), CODEX_OVERRIDE_REASON);
+                }
             }
             root
         }
@@ -394,7 +389,7 @@ fn resolve_forgecode(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> D
     }
     let legacy = context.home().join("forge");
     let base = match path_presence(&legacy) {
-        PathPresence::Present | PathPresence::Unknown(_) => legacy,
+        PathPresence::Present | PathPresence::Unsupported | PathPresence::Unknown(_) => legacy,
         PathPresence::Missing => context.home().join(".forge"),
     };
     one_source(spec, base.join(".forge.db"), "forgecode_sqlite")
@@ -520,25 +515,28 @@ fn add_source(
         );
         return;
     }
-    if let PathPresence::Unknown(kind) = path_presence(&path) {
-        push_issue_once(
-            report,
-            spec,
-            safe_issue_path(&path),
-            DiscoveryIssueKind::SelectorUnreconstructible,
-            path_presence_unknown_reason(kind),
-        );
-        return;
-    }
-    if selected_path_uses_symlink(&path) {
-        push_issue_once(
-            report,
-            spec,
-            safe_issue_path(&path),
-            DiscoveryIssueKind::SelectorUnreconstructible,
-            SYMLINK_REASON,
-        );
-        return;
+    match path_presence(&path) {
+        PathPresence::Unknown(kind) => {
+            push_issue_once(
+                report,
+                spec,
+                safe_issue_path(&path),
+                DiscoveryIssueKind::SelectorUnreconstructible,
+                path_presence_unknown_reason(kind),
+            );
+            return;
+        }
+        PathPresence::Unsupported => {
+            push_issue_once(
+                report,
+                spec,
+                safe_issue_path(&path),
+                DiscoveryIssueKind::SelectorUnreconstructible,
+                SYMLINK_REASON,
+            );
+            return;
+        }
+        PathPresence::Missing | PathPresence::Present => {}
     }
     let source = source_from_parts(spec, path, source_format, ProviderSourceKind::NativeHistory);
     if !push_source_candidate(&mut report.sources, source) {
@@ -550,13 +548,6 @@ fn add_source(
             PATH_LIMIT_REASON,
         );
     }
-}
-
-fn selected_path_uses_symlink(path: &Path) -> bool {
-    if ensure_provider_path_parents_are_not_symlinks(path).is_err() {
-        return true;
-    }
-    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
 }
 
 fn safe_issue_path(path: &Path) -> Option<PathBuf> {
@@ -610,11 +601,12 @@ fn push_issue_once(
 }
 
 fn compressed_codex_rollouts(root: &Path) -> Result<Vec<PathBuf>, ()> {
-    match fs::symlink_metadata(root) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(_) => return Err(()),
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => return Err(()),
-        Ok(_) => {}
+    match path_presence(root) {
+        PathPresence::Missing => return Ok(Vec::new()),
+        PathPresence::Present if source_path_kind(root) == Ok(SourcePathKind::Directory) => {}
+        PathPresence::Present | PathPresence::Unsupported | PathPresence::Unknown(_) => {
+            return Err(())
+        }
     }
 
     let mut found = Vec::new();
@@ -627,16 +619,17 @@ fn compressed_codex_rollouts(root: &Path) -> Result<Vec<PathBuf>, ()> {
             return Err(());
         }
         for path in entries.into_iter().rev() {
-            let metadata = fs::symlink_metadata(&path).map_err(|_| ())?;
-            if metadata.is_dir() {
-                pending.push(path);
-            } else if metadata.is_file()
-                && path
-                    .file_name()
-                    .and_then(OsStr::to_str)
-                    .is_some_and(|name| name.ends_with(".jsonl.zst"))
-            {
-                found.push(path);
+            match source_path_kind(&path).map_err(|_| ())? {
+                SourcePathKind::Directory => pending.push(path),
+                SourcePathKind::File
+                    if path
+                        .file_name()
+                        .and_then(OsStr::to_str)
+                        .is_some_and(|name| name.ends_with(".jsonl.zst")) =>
+                {
+                    found.push(path);
+                }
+                SourcePathKind::File => {}
             }
         }
     }

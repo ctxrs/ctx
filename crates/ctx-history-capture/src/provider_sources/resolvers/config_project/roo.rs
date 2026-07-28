@@ -2,15 +2,14 @@
 
 use std::{
     collections::BTreeMap,
-    fs,
     path::{Path, PathBuf},
 };
 
 use crate::provider_sources::{
     context::{DiscoveryContext, DiscoveryPlatform},
     selectors::{
-        direct_entries, SelectorFormat, SelectorReadError, SelectorReader,
-        MAX_FINITE_SELECTOR_ENTRIES,
+        direct_entries, source_path_kind, SelectorFormat, SelectorReadError, SelectorReader,
+        SourcePathKind, MAX_FINITE_SELECTOR_ENTRIES,
     },
     types::{DiscoveryReport, ProviderSourceSpec},
 };
@@ -97,14 +96,12 @@ pub(super) fn resolve(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> 
         for profile in entries.into_iter().take(MAX_FINITE_SELECTOR_ENTRIES) {
             match path_presence(&profile) {
                 PathPresence::Missing => continue,
-                PathPresence::Unknown(_) => {
+                PathPresence::Unsupported | PathPresence::Unknown(_) => {
                     add_manual_issue(&mut report, spec.provider, UNSAFE_SELECTOR_REASON);
                     continue;
                 }
                 PathPresence::Present => {
-                    if !fs::symlink_metadata(&profile)
-                        .is_ok_and(|metadata| metadata.file_type().is_dir())
-                    {
+                    if source_path_kind(&profile) != Ok(SourcePathKind::Directory) {
                         add_manual_issue(&mut report, spec.provider, UNSAFE_SELECTOR_REASON);
                         continue;
                     }

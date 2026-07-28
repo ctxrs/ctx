@@ -1,27 +1,24 @@
 use std::{
     collections::HashSet,
-    fs,
     io::ErrorKind,
     path::{Path, PathBuf},
 };
 
-use ctx_history_core::CaptureProvider;
+#[cfg(test)]
+use std::fs;
 
-use crate::common::io::{
-    ensure_provider_path_parents_are_not_symlinks, provider_metadata_is_link_like,
-};
+use ctx_history_core::CaptureProvider;
 
 use super::{
     context::DiscoveryContext,
-    open_ordinary_file_without_following,
     probes::{default_location_import_probe, BoundedProbe},
     reasons::{
         empty_source_reason, path_presence_unknown_reason, probe_io_error_reason,
         unknown_source_reason,
     },
     selectors::{
-        encoded_path_within_limit, MAX_RENDERED_DIAGNOSTIC_BYTES,
-        MAX_SOURCE_CANDIDATES_PER_PROVIDER,
+        encoded_path_within_limit, source_path_kind, SourcePathError,
+        MAX_RENDERED_DIAGNOSTIC_BYTES, MAX_SOURCE_CANDIDATES_PER_PROVIDER,
     },
     types::{
         DiscoveryIssue, DiscoveryIssueKind, DiscoveryReport, ProviderCatalogSupport,
@@ -29,6 +26,9 @@ use super::{
         ProviderSourceSpec, ProviderSourceStatus,
     },
 };
+
+const UNSUPPORTED_SOURCE_ROOT_REASON: &str =
+    "the selected provider path uses an unsupported, non-local, or unsafe source root";
 
 mod config_project;
 mod manual_unsupported;
@@ -54,6 +54,7 @@ pub(super) enum ResolverGroup {
 pub(super) enum PathPresence {
     Missing,
     Present,
+    Unsupported,
     Unknown(ErrorKind),
 }
 
@@ -64,40 +65,19 @@ impl PathPresence {
 }
 
 pub(super) fn path_presence(path: &Path) -> PathPresence {
-    match fs::symlink_metadata(path) {
+    match source_path_kind(path) {
         Ok(_) => PathPresence::Present,
-        Err(error) if error.kind() == ErrorKind::NotFound => match link_like_parent(path) {
-            Ok(true) => PathPresence::Unknown(ErrorKind::NotFound),
-            Ok(false) => PathPresence::Missing,
-            Err(kind) => PathPresence::Unknown(kind),
-        },
-        Err(error) => PathPresence::Unknown(error.kind()),
+        Err(SourcePathError::Missing) => PathPresence::Missing,
+        Err(SourcePathError::Unsupported) => PathPresence::Unsupported,
+        Err(SourcePathError::Unavailable(kind)) => PathPresence::Unknown(kind),
     }
-}
-
-fn link_like_parent(path: &Path) -> Result<bool, ErrorKind> {
-    let parent_count = path.components().count().saturating_sub(1);
-    let mut current = PathBuf::new();
-    for component in path.components().take(parent_count) {
-        current.push(component.as_os_str());
-        if current.as_os_str().is_empty() {
-            continue;
-        }
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if provider_metadata_is_link_like(&metadata) => return Ok(true),
-            Ok(_) => {}
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => return Err(error.kind()),
-        }
-    }
-    Ok(false)
 }
 
 pub(super) fn select_current_or_legacy(current: PathBuf, legacy: PathBuf) -> PathBuf {
     match path_presence(&current) {
-        PathPresence::Present | PathPresence::Unknown(_) => current,
+        PathPresence::Present | PathPresence::Unsupported | PathPresence::Unknown(_) => current,
         PathPresence::Missing => match path_presence(&legacy) {
-            PathPresence::Present | PathPresence::Unknown(_) => legacy,
+            PathPresence::Present | PathPresence::Unsupported | PathPresence::Unknown(_) => legacy,
             PathPresence::Missing => current,
         },
     }
@@ -229,6 +209,10 @@ pub(super) fn source_from_location(
                     ProviderSourceStatus::Unknown,
                     Some(path_presence_unknown_reason(kind)),
                 ),
+                PathPresence::Unsupported => (
+                    ProviderSourceStatus::Unsupported,
+                    Some(UNSUPPORTED_SOURCE_ROOT_REASON),
+                ),
                 PathPresence::Present => {
                     match default_location_import_probe(spec.provider, location, &path) {
                         BoundedProbe::Found => {
@@ -295,17 +279,8 @@ pub(super) fn dedupe_report(mut report: DiscoveryReport) -> DiscoveryReport {
 }
 
 fn comparison_path(path: &Path) -> Option<PathBuf> {
-    let metadata = fs::symlink_metadata(path).ok()?;
-    if metadata.file_type().is_symlink() {
-        return None;
-    }
-    ensure_provider_path_parents_are_not_symlinks(path).ok()?;
-    if metadata.file_type().is_file() {
-        open_ordinary_file_without_following(path).ok()?;
-    } else if !metadata.file_type().is_dir() {
-        return None;
-    }
-    fs::canonicalize(path).ok()
+    source_path_kind(path).ok()?;
+    Some(path.to_path_buf())
 }
 
 #[cfg(test)]

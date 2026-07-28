@@ -1,21 +1,15 @@
 use std::{
     ffi::OsStr,
-    fs,
-    io::ErrorKind,
     path::{Path, PathBuf},
 };
 
 use ctx_history_core::CaptureProvider;
 
-use crate::common::io::{
-    ensure_provider_path_parents_are_not_symlinks, provider_metadata_is_link_like,
-};
-
 use super::super::{
     context::{DiscoveryContext, DiscoveryPlatform},
     selectors::{
-        direct_entries, SelectorDocument, SelectorFormat, SelectorReadError, SelectorReader,
-        MAX_SELECTOR_FILES_PER_PROVIDER,
+        direct_entries, ordinary_directory, ordinary_file, SelectorDocument, SelectorFormat,
+        SelectorReadError, SelectorReader, MAX_SELECTOR_FILES_PER_PROVIDER,
     },
     types::{
         DiscoveryIssueKind, DiscoveryReport, ProviderSource, ProviderSourceKind,
@@ -79,13 +73,7 @@ fn resolve_kiro(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> Discov
     let current_sessions = current_root.join("sessions");
     match path_presence(&current_sessions) {
         PathPresence::Present => {
-            let Ok(metadata) = fs::symlink_metadata(&current_sessions) else {
-                return selector_issue_report(spec, Some(current_sessions));
-            };
-            if !metadata.file_type().is_dir() {
-                return selector_issue_report(spec, Some(current_sessions));
-            }
-            if !safe_existing_path(&current_sessions) {
+            if !ordinary_directory(&current_sessions) {
                 return selector_issue_report(spec, Some(current_sessions));
             }
             return DiscoveryReport {
@@ -98,7 +86,9 @@ fn resolve_kiro(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> Discov
             };
         }
         PathPresence::Missing => {}
-        PathPresence::Unknown(_) => return selector_issue_report(spec, Some(current_sessions)),
+        PathPresence::Unsupported | PathPresence::Unknown(_) => {
+            return selector_issue_report(spec, Some(current_sessions))
+        }
     }
 
     let legacy = match context.platform() {
@@ -760,39 +750,28 @@ fn exact_tree_source(
     format: &'static str,
     tree: ExactTree,
 ) -> ProviderSource {
-    let (exists, status, reason) = match fs::symlink_metadata(&path) {
-        Err(error) if error.kind() == ErrorKind::NotFound => {
-            if ensure_provider_path_parents_are_not_symlinks(&path).is_ok() {
-                (
-                    false,
-                    ProviderSourceStatus::Missing,
-                    spec.unsupported_reason,
-                )
-            } else {
-                (
-                    false,
-                    ProviderSourceStatus::Unknown,
-                    Some(UNSAFE_SOURCE_REASON),
-                )
-            }
-        }
-        Err(_) => (
+    let (exists, status, reason) = match path_presence(&path) {
+        PathPresence::Missing => (
+            false,
+            ProviderSourceStatus::Missing,
+            spec.unsupported_reason,
+        ),
+        PathPresence::Unknown(_) => (
             true,
             ProviderSourceStatus::Unknown,
             Some("the fixed provider transcript root could not be inspected"),
         ),
-        Ok(metadata)
-            if provider_metadata_is_link_like(&metadata)
-                || !metadata.file_type().is_dir()
-                || ensure_provider_path_parents_are_not_symlinks(&path).is_err() =>
-        {
-            (
-                true,
-                ProviderSourceStatus::Unknown,
-                Some(UNSAFE_SOURCE_REASON),
-            )
-        }
-        Ok(_) => match exact_tree_has_history(&path, tree) {
+        PathPresence::Unsupported => (
+            true,
+            ProviderSourceStatus::Unsupported,
+            Some(UNSAFE_SOURCE_REASON),
+        ),
+        PathPresence::Present if !ordinary_directory(&path) => (
+            true,
+            ProviderSourceStatus::Unknown,
+            Some(UNSAFE_SOURCE_REASON),
+        ),
+        PathPresence::Present => match exact_tree_has_history(&path, tree) {
             Ok(true) => (
                 true,
                 ProviderSourceStatus::Available,
@@ -861,26 +840,29 @@ fn safe_native_source(
     path: PathBuf,
     format: &'static str,
 ) -> ProviderSource {
-    let (exists, safe) = match fs::symlink_metadata(&path) {
-        Ok(metadata) => (
-            true,
-            !provider_metadata_is_link_like(&metadata)
-                && (metadata.file_type().is_file() || metadata.file_type().is_dir())
-                && ensure_provider_path_parents_are_not_symlinks(&path).is_ok(),
-        ),
-        Err(error) if error.kind() == ErrorKind::NotFound => (
-            false,
-            ensure_provider_path_parents_are_not_symlinks(&path).is_ok(),
-        ),
-        Err(_) => (true, false),
-    };
-    if safe {
-        return source_from_parts(spec, path, format, ProviderSourceKind::NativeHistory);
+    match path_presence(&path) {
+        PathPresence::Missing | PathPresence::Present => {
+            return source_from_parts(spec, path, format, ProviderSourceKind::NativeHistory);
+        }
+        PathPresence::Unsupported => {
+            return ProviderSource {
+                provider: spec.provider,
+                path,
+                exists: true,
+                source_format: format,
+                source_kind: ProviderSourceKind::NativeHistory,
+                import_support: spec.import_support,
+                catalog_support: spec.catalog_support,
+                status: ProviderSourceStatus::Unsupported,
+                unsupported_reason: Some(UNSAFE_SOURCE_REASON),
+            };
+        }
+        PathPresence::Unknown(_) => {}
     }
     ProviderSource {
         provider: spec.provider,
         path,
-        exists,
+        exists: true,
         source_format: format,
         source_kind: ProviderSourceKind::NativeHistory,
         import_support: spec.import_support,
@@ -888,24 +870,6 @@ fn safe_native_source(
         status: ProviderSourceStatus::Unknown,
         unsupported_reason: Some(UNSAFE_SOURCE_REASON),
     }
-}
-
-fn safe_existing_path(path: &Path) -> bool {
-    let Ok(metadata) = fs::symlink_metadata(path) else {
-        return false;
-    };
-    !provider_metadata_is_link_like(&metadata)
-        && (metadata.file_type().is_file() || metadata.file_type().is_dir())
-        && ensure_provider_path_parents_are_not_symlinks(path).is_ok()
-}
-
-fn ordinary_file(path: &Path) -> bool {
-    let Ok(metadata) = fs::symlink_metadata(path) else {
-        return false;
-    };
-    metadata.file_type().is_file()
-        && !provider_metadata_is_link_like(&metadata)
-        && ensure_provider_path_parents_are_not_symlinks(path).is_ok()
 }
 
 fn absolute_xdg_or_default(value: Option<&OsStr>, default: PathBuf) -> PathBuf {
@@ -933,9 +897,13 @@ fn select_existing_precedence(
     include_missing_preferred: bool,
 ) -> Option<PathBuf> {
     match path_presence(&preferred) {
-        PathPresence::Present | PathPresence::Unknown(_) => Some(preferred),
+        PathPresence::Present | PathPresence::Unsupported | PathPresence::Unknown(_) => {
+            Some(preferred)
+        }
         PathPresence::Missing => match path_presence(&fallback) {
-            PathPresence::Present | PathPresence::Unknown(_) => Some(fallback),
+            PathPresence::Present | PathPresence::Unsupported | PathPresence::Unknown(_) => {
+                Some(fallback)
+            }
             PathPresence::Missing if include_missing_preferred => Some(preferred),
             PathPresence::Missing => None,
         },
