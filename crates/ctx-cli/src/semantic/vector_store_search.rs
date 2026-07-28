@@ -115,7 +115,7 @@ impl SemanticVectorStore {
         }
         if final_rows < k && k <= stats.embedded_chunks && best.len() < limit {
             return Err(SemanticVectorStoreError::reset_required(
-                "semantic vec0 rows no longer match v6 metadata; manual rebuild required",
+                "semantic vec0 rows no longer match v7 metadata; manual rebuild required",
             )
             .into());
         }

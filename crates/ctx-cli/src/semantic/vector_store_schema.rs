@@ -17,7 +17,7 @@ use super::{
     vector_store::SemanticVectorStore,
 };
 
-pub(super) const SEMANTIC_VECTOR_SCHEMA_VERSION: i64 = 6;
+pub(super) const SEMANTIC_VECTOR_SCHEMA_VERSION: i64 = 7;
 pub(super) const SEMANTIC_VECTOR_APPLICATION_ID: i64 = 0x4354_5856; // "CTXV"
 pub(super) const SEMANTIC_VECTOR_MODEL_KEY_STATE: &str = "projection_model_key";
 pub(super) const SEMANTIC_SQLITE_VEC0_MAX_K: usize = 4_096;
@@ -154,16 +154,19 @@ impl SemanticVectorStore {
             semantic_vector_application_id(&store.conn).map_err(semantic_inspection_error)?;
         let user_version =
             semantic_vector_user_version(&store.conn).map_err(semantic_inspection_error)?;
-        if application_id == 0
+        if (application_id == 0
             && matches!(user_version, 3 | 5)
-            && recognized_legacy_schema(&store.conn, user_version)?
+            && recognized_legacy_schema(&store.conn, user_version)?)
+            || (application_id == SEMANTIC_VECTOR_APPLICATION_ID
+                && user_version == 6
+                && validate_v6_objects(&store.conn).is_ok())
         {
             return Err(SemanticVectorStoreError::reset_required(format!(
-                "recognized legacy semantic vector store v{user_version} requires a writable v6 rebuild"
+                "recognized legacy semantic vector store v{user_version} requires a writable v7 rebuild"
             ))
             .into());
         }
-        store.validate_v6_schema(application_id, user_version)?;
+        store.validate_v7_schema(application_id, user_version)?;
         require_same_file(path, &identity)?;
         Ok(Some(store))
     }
@@ -174,7 +177,14 @@ impl SemanticVectorStore {
         let user_version =
             semantic_vector_user_version(&self.conn).map_err(semantic_inspection_error)?;
         if application_id == SEMANTIC_VECTOR_APPLICATION_ID {
-            self.validate_v6_schema(application_id, user_version)?;
+            if user_version == 6 && validate_v6_objects(&self.conn).is_ok() {
+                reset_owned_v6_to_v7(&mut self.conn, path, identity)?;
+                return self.validate_v7_schema(
+                    SEMANTIC_VECTOR_APPLICATION_ID,
+                    SEMANTIC_VECTOR_SCHEMA_VERSION,
+                );
+            }
+            self.validate_v7_schema(application_id, user_version)?;
             return Ok(());
         }
         if application_id == 0
@@ -183,8 +193,8 @@ impl SemanticVectorStore {
         {
             require_same_file(path, identity)?;
             self.conn.execute_batch("PRAGMA secure_delete = ON;")?;
-            reset_legacy_to_v6(&mut self.conn, path, identity, user_version)?;
-            return self.validate_v6_schema(
+            reset_legacy_to_v7(&mut self.conn, path, identity, user_version)?;
+            return self.validate_v7_schema(
                 SEMANTIC_VECTOR_APPLICATION_ID,
                 SEMANTIC_VECTOR_SCHEMA_VERSION,
             );
@@ -201,13 +211,13 @@ impl SemanticVectorStore {
                 || sqlite_user_table_count(&transaction)? != 0
             {
                 return Err(SemanticVectorStoreError::storage_conflict(
-                    "semantic vector store changed before v6 creation",
+                    "semantic vector store changed before v7 creation",
                 )
                 .into());
             }
-            create_v6_schema(&transaction)?;
+            create_v7_schema(&transaction)?;
             transaction.commit()?;
-            return self.validate_v6_schema(
+            return self.validate_v7_schema(
                 SEMANTIC_VECTOR_APPLICATION_ID,
                 SEMANTIC_VECTOR_SCHEMA_VERSION,
             );
@@ -218,7 +228,7 @@ impl SemanticVectorStore {
         .into())
     }
 
-    fn validate_v6_schema(&self, application_id: i64, user_version: i64) -> Result<()> {
+    fn validate_v7_schema(&self, application_id: i64, user_version: i64) -> Result<()> {
         if application_id != SEMANTIC_VECTOR_APPLICATION_ID {
             return Err(SemanticVectorStoreError::storage_conflict(
                 "unrecognized SQLite application id at the semantic sidecar path",
@@ -230,12 +240,12 @@ impl SemanticVectorStore {
         }
         if user_version != SEMANTIC_VECTOR_SCHEMA_VERSION {
             return Err(SemanticVectorStoreError::reset_required(format!(
-                "semantic vector store has schema version {user_version}; manual v6 rebuild required"
+                "semantic vector store has schema version {user_version}; manual v7 rebuild required"
             ))
             .into());
         }
         ensure_sqlite_vec_runtime(&self.conn)?;
-        semantic_schema_inspection_result(validate_v6_objects(&self.conn))?;
+        semantic_schema_inspection_result(validate_v7_objects(&self.conn))?;
         let model_key = self
             .conn
             .query_row(
@@ -270,7 +280,7 @@ impl SemanticVectorStore {
         if !matches!(counts, Some((items, chunks, dirty)) if items >= 0 && chunks >= items && dirty >= 0)
         {
             return Err(SemanticVectorStoreError::reset_required(
-                "semantic vector store has invalid v6 cached counts; manual rebuild required",
+                "semantic vector store has invalid v7 cached counts; manual rebuild required",
             )
             .into());
         }
@@ -278,7 +288,7 @@ impl SemanticVectorStore {
     }
 }
 
-fn create_v6_schema(transaction: &Transaction<'_>) -> Result<()> {
+fn create_v7_schema(transaction: &Transaction<'_>) -> Result<()> {
     transaction
         .execute_batch(&format!(
             r#"
@@ -318,9 +328,19 @@ fn create_v6_schema(transaction: &Transaction<'_>) -> Result<()> {
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+            CREATE TABLE semantic_source_documents (
+                event_id TEXT PRIMARY KEY,
+                stable_event_identity BLOB NOT NULL UNIQUE,
+                locator_json BLOB NOT NULL,
+                source_text_sha256 TEXT NOT NULL,
+                core_generation_id TEXT NOT NULL,
+                consumer_build_id TEXT NOT NULL
+            );
+            CREATE INDEX idx_semantic_source_documents_generation
+                ON semantic_source_documents(core_generation_id, event_id);
             "#
         ))
-        .map_err(|error| semantic_vec_error("create v6 sqlite-vec schema", error))?;
+        .map_err(|error| semantic_vec_error("create v7 sqlite-vec schema", error))?;
     transaction.execute(
         "INSERT INTO semantic_maintenance_state(key, value) VALUES (?1, ?2)",
         params![SEMANTIC_VECTOR_MODEL_KEY_STATE, semantic_model_key()],
@@ -335,7 +355,7 @@ fn create_v6_schema(transaction: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
-fn reset_legacy_to_v6(
+fn reset_legacy_to_v7(
     connection: &mut Connection,
     path: &Path,
     identity: &FileIdentity,
@@ -348,7 +368,7 @@ fn reset_legacy_to_v6(
         || !recognized_legacy_schema(&transaction, expected_version)?
     {
         return Err(SemanticVectorStoreError::storage_conflict(
-            "legacy semantic sidecar changed before its v6 reset",
+            "legacy semantic sidecar changed before its v7 reset",
         )
         .into());
     }
@@ -364,13 +384,43 @@ fn reset_legacy_to_v6(
         DROP TABLE embedding_models;
         "#,
     )?;
-    create_v6_schema(&transaction)?;
+    create_v7_schema(&transaction)?;
     transaction.commit()?;
     Ok(())
 }
 
-fn validate_v6_objects(connection: &Connection) -> Result<()> {
-    let expected_tables = names(&[
+fn reset_owned_v6_to_v7(
+    connection: &mut Connection,
+    path: &Path,
+    identity: &FileIdentity,
+) -> Result<()> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Exclusive)?;
+    require_same_file(path, identity)?;
+    if semantic_vector_application_id(&transaction)? != SEMANTIC_VECTOR_APPLICATION_ID
+        || semantic_vector_user_version(&transaction)? != 6
+        || validate_v6_objects(&transaction).is_err()
+    {
+        return Err(SemanticVectorStoreError::storage_conflict(
+            "semantic vector sidecar changed before its v7 rebuild",
+        )
+        .into());
+    }
+    transaction.execute_batch(
+        r#"
+        DROP TABLE event_embedding_vec0;
+        DROP TABLE semantic_maintenance_state;
+        DROP TABLE semantic_dirty_events;
+        DROP TABLE semantic_index_stats;
+        DROP TABLE event_embedding_chunks;
+        "#,
+    )?;
+    create_v7_schema(&transaction)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn vector_schema_tables(include_source_documents: bool) -> HashSet<String> {
+    let mut tables = names(&[
         "event_embedding_chunks",
         "event_embedding_vec0",
         "event_embedding_vec0_info",
@@ -383,6 +433,26 @@ fn validate_v6_objects(connection: &Connection) -> Result<()> {
     ])
     .into_iter()
     .collect::<HashSet<_>>();
+    if include_source_documents {
+        tables.insert("semantic_source_documents".to_owned());
+    }
+    tables
+}
+
+fn validate_v6_objects(connection: &Connection) -> Result<()> {
+    validate_vector_objects(connection, false, 6)
+}
+
+fn validate_v7_objects(connection: &Connection) -> Result<()> {
+    validate_vector_objects(connection, true, 7)
+}
+
+fn validate_vector_objects(
+    connection: &Connection,
+    include_source_documents: bool,
+    schema_version: i64,
+) -> Result<()> {
+    let expected_tables = vector_schema_tables(include_source_documents);
     let actual_tables = sqlite_user_tables(connection)?
         .into_iter()
         .collect::<HashSet<_>>();
@@ -411,12 +481,24 @@ fn validate_v6_objects(connection: &Connection) -> Result<()> {
                 "attempts",
             ])
         && table_columns(connection, "semantic_maintenance_state")? == names(&["key", "value"])
+        && (!include_source_documents
+            || table_columns(connection, "semantic_source_documents")?
+                == names(&[
+                    "event_id",
+                    "stable_event_identity",
+                    "locator_json",
+                    "source_text_sha256",
+                    "core_generation_id",
+                    "consumer_build_id",
+                ]))
         && schema_sql_matches(connection, "table", "event_embedding_vec0", &vec_sql)?;
     if valid {
         Ok(())
     } else {
         Err(SemanticVectorStoreError::reset_required(
-            "semantic vector store does not exactly match v6; manual rebuild required",
+            format!(
+                "semantic vector store does not exactly match v{schema_version}; manual rebuild required"
+            ),
         )
         .into())
     }

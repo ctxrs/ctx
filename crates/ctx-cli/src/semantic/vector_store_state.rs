@@ -41,12 +41,12 @@ impl SemanticVectorStore {
             .optional()?
             .ok_or_else(|| {
                 SemanticVectorStoreError::reset_required(
-                    "semantic vector store is missing its v6 cached counts",
+                    "semantic vector store is missing its v7 cached counts",
                 )
             })?;
         if counts.0 < 0 || counts.1 < counts.0 || counts.2 < 0 {
             return Err(SemanticVectorStoreError::reset_required(
-                "semantic vector store has invalid v6 cached counts",
+                "semantic vector store has invalid v7 cached counts",
             )
             .into());
         }
@@ -125,7 +125,7 @@ impl SemanticVectorStore {
         )?;
         if updated != 1 {
             return Err(SemanticVectorStoreError::reset_required(
-                "semantic vector store lost its v6 cached-count row",
+                "semantic vector store lost its v7 cached-count row",
             )
             .into());
         }
@@ -554,7 +554,7 @@ impl SemanticVectorStore {
         })())
     }
 
-    fn delete_events_in_transaction(
+    pub(super) fn delete_events_in_transaction(
         transaction: &rusqlite::Transaction<'_>,
         event_ids: &[Uuid],
     ) -> Result<usize> {
@@ -569,9 +569,12 @@ impl SemanticVectorStore {
             )?;
             let mut delete_metadata =
                 transaction.prepare("DELETE FROM event_embedding_chunks WHERE event_id = ?1")?;
+            let mut delete_source_metadata =
+                transaction.prepare("DELETE FROM semantic_source_documents WHERE event_id = ?1")?;
             for event_id in ids {
                 delete_vectors.execute([event_id.to_string()])?;
                 deleted += delete_metadata.execute([event_id.to_string()])?;
+                delete_source_metadata.execute([event_id.to_string()])?;
             }
         }
         if deleted != removed.embedded_chunks {
