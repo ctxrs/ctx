@@ -1,6 +1,6 @@
 use std::{
-    fs::{self, File},
-    io::{BufRead, Read},
+    fs,
+    io::BufRead,
     path::{Path, PathBuf},
 };
 
@@ -9,6 +9,16 @@ use serde_json::Value;
 use crate::{
     CaptureError, ProviderImportSummary, ProviderJsonlInventoryLimit, Result,
     MAX_PROVIDER_JSONL_LINE_BYTES,
+};
+
+mod root_handle;
+#[allow(
+    unused_imports,
+    reason = "provider adapters migrate to these capability types in follow-up slices"
+)]
+pub(crate) use root_handle::{
+    open_provider_source_file, open_provider_source_path, OpenedProviderSourceFile,
+    OpenedProviderSourcePath, ProviderSourceDirectory, ProviderSourceRoot,
 };
 
 /// Maximum directories admitted by one provider JSONL inventory.
@@ -78,7 +88,7 @@ impl ProviderJsonlInventory {
 
 #[derive(Debug)]
 struct PendingJsonlDirectory {
-    path: PathBuf,
+    relative_path: PathBuf,
     depth: usize,
 }
 
@@ -211,77 +221,58 @@ fn inventory_provider_paths(
     let mut state = ProviderJsonlInventoryState::new(limits);
     state.admit_metadata_entry()?;
     ensure_inventory_path_bound(root)?;
-    let metadata = fs::symlink_metadata(root)?;
-    let file_type = metadata.file_type();
-    if provider_metadata_is_link_like(&metadata) {
-        return Err(CaptureError::InvalidProviderTranscriptPath {
-            path: root.to_path_buf(),
-            reason: "symlinked provider transcript roots are rejected",
-        });
-    }
-    ensure_provider_path_parents_are_not_symlinks(root)?;
-    if file_type.is_file() {
+    let opened_root = open_provider_source_path(root)?;
+    if let OpenedProviderSourcePath::File(file) = opened_root {
         if is_eligible(root) {
             state.admit_eligible_path(root.to_path_buf())?;
         }
+        file.revalidate()?;
         return Ok(state.finish());
     }
-    if !file_type.is_dir() {
-        if is_eligible(root) {
-            return Err(CaptureError::InvalidProviderTranscriptPath {
-                path: root.to_path_buf(),
-                reason: "provider transcript paths must be regular files",
-            });
-        }
-        return Ok(state.finish());
-    }
+    let OpenedProviderSourcePath::Directory(root_directory) = opened_root else {
+        return Err(CaptureError::SystemInvariant(
+            "provider source root classification is incomplete",
+        ));
+    };
+    let authority = root_directory.authority_root();
 
     state.admit_directory(0)?;
     let mut stack = vec![PendingJsonlDirectory {
-        path: root.to_path_buf(),
+        relative_path: PathBuf::new(),
         depth: 0,
     }];
-    while let Some(directory) = stack.pop() {
-        let mut children = Vec::new();
-        for entry in fs::read_dir(&directory.path)? {
-            let entry = entry?;
-            state.admit_metadata_entry()?;
-            children.push(entry.path());
-        }
-        children.sort();
+    while let Some(pending) = stack.pop() {
+        let directory = authority.open_directory(&pending.relative_path)?;
+        let maximum_entries = state.limits.max_metadata_entries.saturating_add(1);
+        let children = directory.entries(maximum_entries)?;
 
-        let child_depth = directory.depth.saturating_add(1);
+        let child_depth = pending.depth.saturating_add(1);
         let mut child_directories = Vec::new();
-        for path in children {
+        for name in children {
+            state.admit_metadata_entry()?;
+            let relative_path = pending.relative_path.join(&name);
+            let path = root.join(&relative_path);
             ensure_inventory_path_bound(&path)?;
-            let metadata = fs::symlink_metadata(&path)?;
-            if provider_metadata_is_link_like(&metadata) {
-                return Err(CaptureError::InvalidProviderTranscriptPath {
-                    path,
-                    reason: "linked provider transcript path components are rejected",
-                });
-            }
-            let file_type = metadata.file_type();
-            if file_type.is_dir() {
-                state.admit_directory(child_depth)?;
-                child_directories.push(PendingJsonlDirectory {
-                    path,
-                    depth: child_depth,
-                });
-            } else if is_eligible(&path) {
-                if !file_type.is_file() {
-                    return Err(CaptureError::InvalidProviderTranscriptPath {
-                        path,
-                        reason: "provider transcript paths must be regular files",
+            match directory.open_child(&name)? {
+                OpenedProviderSourcePath::Directory(_) => {
+                    state.admit_directory(child_depth)?;
+                    child_directories.push(PendingJsonlDirectory {
+                        relative_path,
+                        depth: child_depth,
                     });
                 }
-                state.admit_eligible_path(path)?;
+                OpenedProviderSourcePath::File(_) if is_eligible(&path) => {
+                    state.admit_eligible_path(path)?;
+                }
+                OpenedProviderSourcePath::File(_) => {}
             }
         }
+        directory.revalidate()?;
         for child in child_directories.into_iter().rev() {
             stack.push(child);
         }
     }
+    authority.revalidate()?;
     Ok(state.finish())
 }
 
@@ -308,22 +299,10 @@ pub(crate) fn collect_jsonl_paths_bounded(
 /// contribute to source totals without becoming revision authority or
 /// introducing read-time mutation failures.
 pub fn provider_regular_file_len(path: &Path) -> Result<u64> {
-    let metadata = fs::symlink_metadata(path)?;
-    let file_type = metadata.file_type();
-    if provider_metadata_is_link_like(&metadata) {
-        return Err(CaptureError::InvalidProviderTranscriptPath {
-            path: path.to_path_buf(),
-            reason: "symlinked provider transcript files are rejected",
-        });
-    }
-    if !file_type.is_file() {
-        return Err(CaptureError::InvalidProviderTranscriptPath {
-            path: path.to_path_buf(),
-            reason: "provider transcript paths must be regular files",
-        });
-    }
-    ensure_provider_path_parents_are_not_symlinks(path)?;
-    Ok(metadata.len())
+    let file = open_provider_source_file(path)?;
+    let length = file.len();
+    file.revalidate()?;
+    Ok(length)
 }
 
 pub(crate) fn ensure_regular_provider_transcript_file(path: &Path) -> Result<()> {
@@ -339,13 +318,11 @@ fn ensure_supported_windows_provider_path_prefix(path: &Path) -> Result<()> {
     let Some(Component::Prefix(prefix)) = components.next() else {
         return Ok(());
     };
-    if !matches!(
-        prefix.kind(),
-        Prefix::Disk(_) | Prefix::VerbatimDisk(_) | Prefix::UNC(_, _) | Prefix::VerbatimUNC(_, _)
-    ) {
+    if !matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)) {
         return Err(CaptureError::InvalidProviderTranscriptPath {
             path: path.to_path_buf(),
-            reason: "unsupported Windows provider transcript path prefixes are rejected",
+            reason:
+                "network, UNC, device, and other unsupported Windows provider roots are rejected",
         });
     }
     if !matches!(components.next(), Some(Component::RootDir)) {
@@ -408,15 +385,14 @@ pub(crate) fn provider_metadata_is_link_like(metadata: &fs::Metadata) -> bool {
 }
 
 pub(crate) fn read_text_file_limited(path: &Path, max_bytes: usize, label: &str) -> Result<String> {
-    let file = File::open(path)?;
-    let mut reader = file.take((max_bytes as u64).saturating_add(1));
-    let mut bytes = Vec::new();
-    reader.read_to_end(&mut bytes)?;
-    if bytes.len() > max_bytes {
-        return Err(CaptureError::InvalidPayload(format!(
-            "{label} exceeds max bytes ({max_bytes})"
-        )));
-    }
+    let file = open_provider_source_file(path)?;
+    let bytes = file.read_all_bounded(max_bytes).map_err(|error| {
+        if matches!(error, CaptureError::InvalidPayload(_)) {
+            CaptureError::InvalidPayload(format!("{label} exceeds max bytes ({max_bytes})"))
+        } else {
+            error
+        }
+    })?;
     String::from_utf8(bytes)
         .map_err(|err| CaptureError::InvalidPayload(format!("{label} is not valid UTF-8: {err}")))
 }
