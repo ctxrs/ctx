@@ -21,7 +21,10 @@ use super::position::{nanoclaw_message_locator, NanoClawMessageSource};
 use super::rows::NANOCLAW_NATIVE_MAX_RECORD_BYTES;
 use super::*;
 use crate::complete_content::{
-    sqlite::CompleteContentSqliteQueryBudget, VERIFIED_CONTENT_LOCATORS_METADATA_KEY,
+    source_access::set_nanoclaw_before_source_set_revalidation,
+    sqlite::CompleteContentSqliteQueryBudget, AuthorizedSourceRoute, CompleteContentErrorKind,
+    CompleteContentSourceFamily, CompleteContentSourceLocator, SourceAccessBroker, SourceSnapshot,
+    VERIFIED_CONTENT_LOCATORS_METADATA_KEY,
 };
 use crate::native_source::NativePosition;
 use crate::provider::importer::{
@@ -1012,4 +1015,141 @@ fn source_backed_partial_authority_and_unsupported_roots_fail_before_emitting() 
     .unwrap_err();
     assert!(error.to_string().contains("messages_out"));
     assert_eq!(emitted, 0);
+}
+
+fn nanoclaw_broker_route(root: &Path) -> AuthorizedSourceRoute {
+    AuthorizedSourceRoute {
+        source_id: Uuid::new_v4(),
+        provider: CaptureProvider::NanoClaw,
+        source_format: NANOCLAW_SOURCE_FORMAT.to_owned(),
+        family: CompleteContentSourceFamily::Sqlite,
+        raw_source_path: root.to_path_buf(),
+        source_root: root.parent().map(Path::to_path_buf),
+        source_identity: Some("nanoclaw-root-safety".to_owned()),
+        source_snapshot: SourceSnapshot::default(),
+    }
+}
+
+fn complete_content_locator(
+    locator: &crate::native_source::NativeLocator,
+) -> CompleteContentSourceLocator {
+    CompleteContentSourceLocator::new(locator.kind(), locator.value().to_vec()).unwrap()
+}
+
+#[cfg(any(unix, target_os = "windows"))]
+#[test]
+fn source_root_safety_nanoclaw_snapshot_stays_exact_after_live_leaf_rewrite() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = create_project(&temp, "broker-exact", 1);
+    let (inbound, _) = create_message_stores(&root, "session-0000");
+    insert_inbound(&inbound, "inbound", 1, 1_000, "inside-nanoclaw-snapshot");
+    let locator = nanoclaw_message_locator(1, NanoClawMessageSource::Inbound, 1).unwrap();
+    let source_locator = complete_content_locator(&locator);
+    let event_id = Uuid::new_v4();
+    let access = SourceAccessBroker::new()
+        .admit_for_source_locators(
+            nanoclaw_broker_route(&root),
+            std::slice::from_ref(&source_locator),
+            event_id,
+        )
+        .unwrap();
+
+    Connection::open(&inbound)
+        .unwrap()
+        .execute(
+            "update messages_in set content = 'OUTSIDE_NANOCLAW_MUST_NOT_ESCAPE' where rowid = 1",
+            [],
+        )
+        .unwrap();
+
+    let project = access
+        .open_nanoclaw_project(
+            std::slice::from_ref(&locator),
+            CompleteContentSqliteQueryBudget::new(),
+            event_id,
+        )
+        .unwrap();
+    let resolved = project.resolve(&locator).unwrap().unwrap();
+    assert_eq!(resolved.text, "inside-nanoclaw-snapshot");
+    assert!(!resolved.text.contains("OUTSIDE_NANOCLAW"));
+}
+
+#[cfg(any(unix, target_os = "windows"))]
+#[test]
+fn source_root_safety_nanoclaw_broker_rejects_concurrent_root_swap() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = create_project(&temp, "broker-root", 1);
+    let moved = temp.path().join("moved-broker-root");
+    let replacement = create_project(&temp, "replacement-broker-root", 1);
+    let (inbound, _) = create_message_stores(&root, "session-0000");
+    insert_inbound(&inbound, "inbound", 1, 1_000, "inside-nanoclaw-root");
+    let (replacement_inbound, _) = create_message_stores(&replacement, "session-0000");
+    insert_inbound(
+        &replacement_inbound,
+        "inbound",
+        1,
+        1_000,
+        "OUTSIDE_NANOCLAW_ROOT_MUST_NOT_ESCAPE",
+    );
+    let locator = nanoclaw_message_locator(1, NanoClawMessageSource::Inbound, 1).unwrap();
+    let source_locator = complete_content_locator(&locator);
+    let event_id = Uuid::new_v4();
+    let route = nanoclaw_broker_route(&root);
+    let _hook = set_nanoclaw_before_source_set_revalidation({
+        let root = root.clone();
+        move || {
+            std::thread::spawn(move || {
+                fs::rename(&root, moved).unwrap();
+                fs::rename(replacement, root).unwrap();
+            })
+            .join()
+            .unwrap();
+        }
+    });
+
+    let error = SourceAccessBroker::new()
+        .admit_for_source_locators(route, &[source_locator], event_id)
+        .unwrap_err();
+    assert_eq!(error.kind, CompleteContentErrorKind::SourceChanged);
+    assert_eq!(error.event_id, event_id);
+}
+
+#[cfg(any(unix, target_os = "windows"))]
+#[test]
+fn source_root_safety_nanoclaw_broker_rejects_concurrent_leaf_swap() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = create_project(&temp, "broker-leaf", 1);
+    let (inbound, _) = create_message_stores(&root, "session-0000");
+    insert_inbound(&inbound, "inbound", 1, 1_000, "inside-nanoclaw-leaf");
+    let moved = inbound.with_extension("moved");
+    let replacement = inbound.with_extension("replacement");
+    fs::copy(&inbound, &replacement).unwrap();
+    Connection::open(&replacement)
+        .unwrap()
+        .execute(
+            "update messages_in set content = 'OUTSIDE_NANOCLAW_LEAF_MUST_NOT_ESCAPE' where rowid = 1",
+            [],
+        )
+        .unwrap();
+    let locator = nanoclaw_message_locator(1, NanoClawMessageSource::Inbound, 1).unwrap();
+    let source_locator = complete_content_locator(&locator);
+    let event_id = Uuid::new_v4();
+    let route = nanoclaw_broker_route(&root);
+    let _hook = set_nanoclaw_before_source_set_revalidation({
+        let inbound = inbound.clone();
+        move || {
+            std::thread::spawn(move || {
+                fs::rename(&inbound, moved).unwrap();
+                fs::rename(replacement, inbound).unwrap();
+            })
+            .join()
+            .unwrap();
+        }
+    });
+
+    let error = SourceAccessBroker::new()
+        .admit_for_source_locators(route, &[source_locator], event_id)
+        .unwrap_err();
+    assert_eq!(error.kind, CompleteContentErrorKind::SourceChanged);
+    assert_eq!(error.event_id, event_id);
 }

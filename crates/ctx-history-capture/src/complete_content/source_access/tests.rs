@@ -1,5 +1,8 @@
 use std::{cell::Cell, fs, path::PathBuf};
 
+#[cfg(target_os = "windows")]
+use std::path::Path;
+
 use ctx_history_core::CaptureProvider;
 use serde_json::json;
 use uuid::Uuid;
@@ -9,7 +12,8 @@ use super::{jsonl::finish_jsonl_read, AuthorizedSourceRoute, SourceAccessBroker}
 use crate::KIMI_CODE_CLI_SOURCE_FORMAT;
 use crate::{
     complete_content::{
-        CompleteContentError, CompleteContentErrorKind, CompleteContentSourceFamily, SourceSnapshot,
+        CompleteContentBodyDigest, CompleteContentError, CompleteContentErrorKind,
+        CompleteContentSourceFamily, SourceSnapshot,
     },
     CODEX_SESSION_SOURCE_FORMAT, MISTRAL_VIBE_SOURCE_FORMAT, OPENCLAW_SOURCE_FORMAT,
 };
@@ -339,7 +343,7 @@ fn exact_jsonl_auxiliary_replace_delete_and_append_fail_closed() {
 
 #[cfg(unix)]
 #[test]
-fn exact_jsonl_auxiliary_symlink_is_rejected_at_admission_and_revalidation() {
+fn source_root_safety_exact_jsonl_auxiliary_symlink_is_rejected() {
     use std::os::unix::fs::symlink;
 
     let temp = tempfile::tempdir().unwrap();
@@ -392,7 +396,7 @@ fn exact_jsonl_auxiliary_symlink_is_rejected_at_admission_and_revalidation() {
 
 #[cfg(unix)]
 #[test]
-fn kimi_auxiliary_symlink_replacement_fails_closed() {
+fn source_root_safety_kimi_auxiliary_symlink_replacement_fails_closed() {
     use std::os::unix::fs::symlink;
 
     let temp = tempfile::tempdir().unwrap();
@@ -438,4 +442,212 @@ fn ordinary_jsonl_routes_do_not_gain_auxiliary_requirements() {
     );
     assert!(access.exact_jsonl_binding().is_none());
     access.revalidate_jsonl(event_id).unwrap();
+}
+
+fn replace_tree_from_thread(named: PathBuf, moved: PathBuf, replacement: PathBuf) {
+    std::thread::spawn(move || {
+        fs::rename(&named, moved).unwrap();
+        fs::rename(replacement, named).unwrap();
+    })
+    .join()
+    .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn source_root_safety_ordinary_jsonl_retains_exact_bytes_but_rejects_leaf_swap() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("session.jsonl");
+    let moved = temp.path().join("moved-session.jsonl");
+    let replacement = temp.path().join("replacement.jsonl");
+    let record = br#"{"content":"inside-leaf"}"#;
+    let mut line = record.to_vec();
+    line.push(b'\n');
+    fs::write(&path, &line).unwrap();
+    fs::write(
+        &replacement,
+        b"{\"content\":\"OUTSIDE_LEAF_MUST_NOT_ESCAPE\"}\n",
+    )
+    .unwrap();
+    let (event_id, access) = admit_jsonl(
+        CaptureProvider::Codex,
+        CODEX_SESSION_SOURCE_FORMAT,
+        &path,
+        temp.path(),
+    );
+
+    std::thread::spawn({
+        let path = path.clone();
+        move || {
+            fs::rename(&path, moved).unwrap();
+            fs::rename(replacement, path).unwrap();
+        }
+    })
+    .join()
+    .unwrap();
+
+    let retained = access
+        .read_jsonl_record(
+            0,
+            u64::try_from(line.len()).unwrap(),
+            &CompleteContentBodyDigest::from_bytes(record),
+            event_id,
+        )
+        .unwrap();
+    assert_eq!(retained, line);
+    assert!(!retained
+        .windows(b"OUTSIDE_LEAF_MUST_NOT_ESCAPE".len())
+        .any(|window| window == b"OUTSIDE_LEAF_MUST_NOT_ESCAPE"));
+    assert_eq!(
+        access.revalidate_jsonl(event_id).unwrap_err().kind,
+        CompleteContentErrorKind::SourceChanged
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn source_root_safety_ordinary_jsonl_retains_exact_bytes_but_rejects_ancestor_swap() {
+    let temp = tempfile::tempdir().unwrap();
+    let parent = temp.path().join("parent");
+    let moved_parent = temp.path().join("moved-parent");
+    let root = parent.join("root");
+    let replacement_parent = temp.path().join("replacement-parent");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(replacement_parent.join("root")).unwrap();
+    let path = root.join("session.jsonl");
+    let record = br#"{"content":"inside-ancestor"}"#;
+    let mut line = record.to_vec();
+    line.push(b'\n');
+    fs::write(&path, &line).unwrap();
+    fs::write(
+        replacement_parent.join("root/session.jsonl"),
+        b"{\"content\":\"OUTSIDE_ANCESTOR_MUST_NOT_ESCAPE\"}\n",
+    )
+    .unwrap();
+    let (event_id, access) = admit_jsonl(
+        CaptureProvider::Codex,
+        CODEX_SESSION_SOURCE_FORMAT,
+        &path,
+        &root,
+    );
+
+    replace_tree_from_thread(parent, moved_parent, replacement_parent);
+
+    let retained = access
+        .read_jsonl_record(
+            0,
+            u64::try_from(line.len()).unwrap(),
+            &CompleteContentBodyDigest::from_bytes(record),
+            event_id,
+        )
+        .unwrap();
+    assert_eq!(retained, line);
+    assert!(!retained
+        .windows(b"OUTSIDE_ANCESTOR_MUST_NOT_ESCAPE".len())
+        .any(|window| window == b"OUTSIDE_ANCESTOR_MUST_NOT_ESCAPE"));
+    assert_eq!(
+        access.revalidate_jsonl(event_id).unwrap_err().kind,
+        CompleteContentErrorKind::SourceChanged
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn source_root_safety_compound_auxiliary_ancestor_swap_fails_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("mistral");
+    let moved = temp.path().join("moved-mistral");
+    let replacement = temp.path().join("replacement-mistral");
+    let session = root.join("session");
+    fs::create_dir_all(&session).unwrap();
+    fs::create_dir_all(replacement.join("session")).unwrap();
+    let messages = session.join("messages.jsonl");
+    let metadata = session.join("meta.json");
+    let record = br#"{"content":"inside-compound"}"#;
+    let mut line = record.to_vec();
+    line.push(b'\n');
+    fs::write(&messages, &line).unwrap();
+    fs::write(&metadata, b"{}").unwrap();
+    fs::write(
+        replacement.join("session/messages.jsonl"),
+        b"{\"content\":\"OUTSIDE_AUXILIARY_MUST_NOT_ESCAPE\"}\n",
+    )
+    .unwrap();
+    fs::write(replacement.join("session/meta.json"), b"{}").unwrap();
+    let (event_id, access) = admit_jsonl(
+        CaptureProvider::MistralVibe,
+        MISTRAL_VIBE_SOURCE_FORMAT,
+        &messages,
+        temp.path(),
+    );
+
+    replace_tree_from_thread(root, moved, replacement);
+
+    let retained = access
+        .read_jsonl_record(
+            0,
+            u64::try_from(line.len()).unwrap(),
+            &CompleteContentBodyDigest::from_bytes(record),
+            event_id,
+        )
+        .unwrap();
+    assert_eq!(retained, line);
+    assert!(!retained
+        .windows(b"OUTSIDE_AUXILIARY_MUST_NOT_ESCAPE".len())
+        .any(|window| window == b"OUTSIDE_AUXILIARY_MUST_NOT_ESCAPE"));
+    assert_eq!(
+        access.revalidate_jsonl(event_id).unwrap_err().kind,
+        CompleteContentErrorKind::SourceChanged
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn source_root_safety_complete_content_rejects_unc_network_routes() {
+    for path in [
+        Path::new(r"\\server\share\session.jsonl"),
+        Path::new(r"\\?\UNC\server\share\session.jsonl"),
+    ] {
+        let event_id = Uuid::new_v4();
+        let error = SourceAccessBroker::new()
+            .admit(
+                AuthorizedSourceRoute {
+                    source_id: Uuid::new_v4(),
+                    provider: CaptureProvider::Codex,
+                    source_format: CODEX_SESSION_SOURCE_FORMAT.to_owned(),
+                    family: CompleteContentSourceFamily::Jsonl,
+                    raw_source_path: path.to_path_buf(),
+                    source_root: None,
+                    source_identity: Some("unc-source".to_owned()),
+                    source_snapshot: SourceSnapshot::default(),
+                },
+                event_id,
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, CompleteContentErrorKind::SourceUnreadable);
+        assert_eq!(error.event_id, event_id);
+    }
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
+#[test]
+fn source_root_safety_complete_content_unsupported_platform_is_typed() {
+    let event_id = Uuid::new_v4();
+    let error = SourceAccessBroker::new()
+        .admit(
+            AuthorizedSourceRoute {
+                source_id: Uuid::new_v4(),
+                provider: CaptureProvider::Codex,
+                source_format: CODEX_SESSION_SOURCE_FORMAT.to_owned(),
+                family: CompleteContentSourceFamily::Jsonl,
+                raw_source_path: PathBuf::from("/provider/session.jsonl"),
+                source_root: Some(PathBuf::from("/provider")),
+                source_identity: Some("unsupported-source".to_owned()),
+                source_snapshot: SourceSnapshot::default(),
+            },
+            event_id,
+        )
+        .unwrap_err();
+    assert_eq!(error.kind, CompleteContentErrorKind::HydrationUnsupported);
+    assert_eq!(error.event_id, event_id);
 }

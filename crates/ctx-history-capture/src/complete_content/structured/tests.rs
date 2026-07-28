@@ -1254,7 +1254,7 @@ fn enforces_file_depth_entry_and_deadline_bounds() {
 
 #[cfg(unix)]
 #[test]
-fn rejects_symlinks_and_parent_traversal() {
+fn source_root_safety_structured_rejects_symlinks_and_parent_traversal() {
     use std::os::unix::fs::symlink;
 
     let directory = TempDir::new().unwrap();
@@ -1320,8 +1320,13 @@ fn install_structured_admission_hook(
 }
 
 #[cfg(unix)]
+fn run_structured_swap_from_thread(operation: impl FnOnce() + Send + 'static) {
+    std::thread::spawn(operation).join().unwrap();
+}
+
+#[cfg(unix)]
 #[test]
-fn rejects_root_replacement_after_capability_admission() {
+fn source_root_safety_structured_rejects_root_replacement_after_capability_admission() {
     let directory = TempDir::new().unwrap();
     let root = directory.path().join("root");
     let moved = directory.path().join("moved-root");
@@ -1342,8 +1347,15 @@ fn rejects_root_replacement_after_capability_admission() {
     let mut fired = false;
     let _reset = install_structured_admission_hook(move |path, stage| {
         if !fired && stage == StructuredAdmissionTestStage::RootOpened && path == root_for_hook {
-            fs::rename(&root_for_hook, &moved_for_hook).unwrap();
-            fs::rename(&replacement_for_hook, &root_for_hook).unwrap();
+            run_structured_swap_from_thread({
+                let root = root_for_hook.clone();
+                let moved = moved_for_hook.clone();
+                let replacement = replacement_for_hook.clone();
+                move || {
+                    fs::rename(&root, moved).unwrap();
+                    fs::rename(replacement, root).unwrap();
+                }
+            });
             fired = true;
         }
     });
@@ -1364,7 +1376,7 @@ fn rejects_root_replacement_after_capability_admission() {
 
 #[cfg(unix)]
 #[test]
-fn rejects_ancestor_replacement_after_root_capability_admission() {
+fn source_root_safety_structured_rejects_ancestor_replacement_after_root_admission() {
     let directory = TempDir::new().unwrap();
     let parent = directory.path().join("parent");
     let moved_parent = directory.path().join("moved-parent");
@@ -1381,11 +1393,17 @@ fn rejects_ancestor_replacement_after_root_capability_admission() {
     let mut fired = false;
     let _reset = install_structured_admission_hook(move |path, stage| {
         if !fired && stage == StructuredAdmissionTestStage::RootOpened && path == root_for_hook {
-            fs::rename(&parent_for_hook, &moved_for_hook).unwrap();
-            write(
-                &parent_for_hook.join("root/session.json"),
-                br#"{"history":[{"id":"ancestor-race","message":{"role":"user","content":"replacement"}}]}"#,
-            );
+            run_structured_swap_from_thread({
+                let parent = parent_for_hook.clone();
+                let moved = moved_for_hook.clone();
+                move || {
+                    fs::rename(&parent, moved).unwrap();
+                    write(
+                        &parent.join("root/session.json"),
+                        br#"{"history":[{"id":"ancestor-race","message":{"role":"user","content":"OUTSIDE_ANCESTOR_MUST_NOT_ESCAPE"}}]}"#,
+                    );
+                }
+            });
             fired = true;
         }
     });
@@ -1406,7 +1424,7 @@ fn rejects_ancestor_replacement_after_root_capability_admission() {
 
 #[cfg(unix)]
 #[test]
-fn rejects_child_replacement_after_descriptor_relative_open() {
+fn source_root_safety_structured_rejects_leaf_replacement_after_relative_open() {
     let directory = TempDir::new().unwrap();
     let root = directory.path().join("root");
     let target = root.join("session.json");
@@ -1428,8 +1446,15 @@ fn rejects_child_replacement_after_descriptor_relative_open() {
     let mut fired = false;
     let _reset = install_structured_admission_hook(move |path, stage| {
         if !fired && stage == StructuredAdmissionTestStage::ChildOpened && path == target_for_hook {
-            fs::rename(&target_for_hook, &moved_for_hook).unwrap();
-            fs::rename(&replacement_for_hook, &target_for_hook).unwrap();
+            run_structured_swap_from_thread({
+                let target = target_for_hook.clone();
+                let moved = moved_for_hook.clone();
+                let replacement = replacement_for_hook.clone();
+                move || {
+                    fs::rename(&target, moved).unwrap();
+                    fs::rename(replacement, target).unwrap();
+                }
+            });
             fired = true;
         }
     });
