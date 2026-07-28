@@ -697,6 +697,17 @@ fn finish_source(source: OpenedSource) -> CrushSourceBackedResultV0<SourceRevali
     })
 }
 
+/// Closes the guarded SQLite read transaction, validates its retained
+/// DB/WAL/SHM evidence, and then revalidates the admitted family snapshot.
+///
+/// The shared coordinator consumes this boundary before it certifies a Crush
+/// source so central publication cannot accidentally bypass the provider's
+/// root-bound closing proof.
+pub(crate) fn finish_opened_source(source: OpenedSource) -> CrushSourceBackedResultV0<bool> {
+    let evidence = finish_source(source)?;
+    Ok(source_revalidation_is_current(&evidence))
+}
+
 fn source_revalidation_is_current(evidence: &SourceRevalidation) -> bool {
     evidence
         .family_snapshot
