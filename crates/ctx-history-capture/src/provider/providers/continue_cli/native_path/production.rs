@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs, io,
+    io,
     path::{Path, PathBuf},
 };
 
@@ -131,9 +131,12 @@ pub(crate) fn import_continue_nativepath_history(
         .unwrap_or_else(|| path.to_path_buf());
     let known_routes = known_continue_routes(store, &context.machine_id, &configured_source_root)?;
 
-    match fs::symlink_metadata(path) {
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+    let discovery = match discover_continue_root(path) {
+        Ok(discovery) => discovery,
+        Err(ContinueNativePathError::SourceIo {
+            kind: std::io::ErrorKind::NotFound,
+            ..
+        }) => {
             if known_routes.is_empty() {
                 return Err(CaptureError::InvalidProviderTranscriptPath {
                     path: path.to_path_buf(),
@@ -152,10 +155,8 @@ pub(crate) fn import_continue_nativepath_history(
                 options.capture_work_limit,
             );
         }
-        Err(error) => return Err(error.into()),
-    }
-
-    let discovery = discover_continue_root(path).map_err(map_native_error)?;
+        Err(error) => return Err(map_native_error(error)),
+    };
     let live_paths = discovery
         .paths()
         .map_err(map_native_error)?

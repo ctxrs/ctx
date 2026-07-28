@@ -4,7 +4,7 @@ use super::{
         parse_continue_source_with_profile, ContinueIncompleteSource, ContinueOutputExclusionStats,
         ContinueParseOutcome, ContinueSourceFailure, ContinueSourcePageStream,
     },
-    source::{ContinueDiscovery, ContinuePathIter, ContinueRootAuthority, ContinueSourceSnapshot},
+    source::{ContinueDiscovery, ContinuePathIter, ContinueRootAuthority},
     ContinueNativePathError,
 };
 
@@ -132,7 +132,7 @@ impl Iterator for ContinuePreparationStream<'_> {
                     return Some(Err(error));
                 }
             };
-            let snapshot = match ContinueSourceSnapshot::read(&path) {
+            let snapshot = match self.discovery.open_source(&path) {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
                     self.stats.failed_sources = self.stats.failed_sources.saturating_add(1);
