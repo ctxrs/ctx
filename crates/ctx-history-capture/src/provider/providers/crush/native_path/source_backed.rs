@@ -288,7 +288,6 @@ impl FrozenInventory {
     }
 }
 
-#[derive(Debug, Clone)]
 struct SourceRevalidation {
     canonical_path: PathBuf,
     snapshot: crate::provider::sqlite::ProviderSqliteSourceSnapshot,
@@ -692,87 +691,95 @@ fn scan_source(
     source: &OpenedSource,
     writer: &mut GenerationWriter,
 ) -> CrushSourceBackedResultV0<SourceScan> {
-    with_sqlite_read_snapshot(&source.connection, || {
-        let context = deterministic_context(&source.database.canonical_path);
-        let mut frontier = CrushNativeFrontier {
-            phase: CrushNativePhase::Messages,
-            after_rowid: None,
-            next_ordinal: 0,
-        };
-        let mut digest = Sha256::new();
-        digest.update(CRUSH_MESSAGE_DIGEST_DOMAIN);
-        let mut counts = ScannedSourceCounts::default();
-        while let Some(candidate) = next_candidate(&source.connection, &source.schema, &frontier)? {
-            frontier.after_rowid = Some(candidate.rowid);
-            frontier.next_ordinal = checked_add(frontier.next_ordinal, 1)?;
-            counts.complete_records = checked_add(counts.complete_records, 1)?;
-            counts.certified_bytes = checked_add(counts.certified_bytes, candidate.observed_bytes)?;
-            if candidate.observed_bytes > CRUSH_NATIVE_MAX_ROW_BYTES {
+    let scan = with_sqlite_read_snapshot(&source.connection, || {
+        Ok(scan_source_in_snapshot(source, writer))
+    })?;
+    scan
+}
+
+fn scan_source_in_snapshot(
+    source: &OpenedSource,
+    writer: &mut GenerationWriter,
+) -> CrushSourceBackedResultV0<SourceScan> {
+    let context = deterministic_context(&source.database.canonical_path);
+    let mut frontier = CrushNativeFrontier {
+        phase: CrushNativePhase::Messages,
+        after_rowid: None,
+        next_ordinal: 0,
+    };
+    let mut digest = Sha256::new();
+    digest.update(CRUSH_MESSAGE_DIGEST_DOMAIN);
+    let mut counts = ScannedSourceCounts::default();
+    while let Some(candidate) = next_candidate(&source.connection, &source.schema, &frontier)? {
+        frontier.after_rowid = Some(candidate.rowid);
+        frontier.next_ordinal = checked_add(frontier.next_ordinal, 1)?;
+        counts.complete_records = checked_add(counts.complete_records, 1)?;
+        counts.certified_bytes = checked_add(counts.certified_bytes, candidate.observed_bytes)?;
+        if candidate.observed_bytes > CRUSH_NATIVE_MAX_ROW_BYTES {
+            counts.rejected_records = checked_add(counts.rejected_records, 1)?;
+            hash_rejected_candidate(&mut digest, &candidate, b"oversized");
+            continue;
+        }
+
+        let row = hydrate_row_from_connection(
+            &source.connection,
+            &source.schema,
+            CrushNativePhase::Messages,
+            candidate.rowid,
+            candidate.observed_bytes,
+        );
+        let (row, session, digest_values) = match row {
+            Ok(CrushHydratedRow::Message {
+                row,
+                session,
+                digest_values,
+                ..
+            }) => (row, session, digest_values),
+            Ok(_) => {
+                return Err(CaptureError::SystemInvariant(
+                    "Crush message scan hydrated a non-message row",
+                )
+                .into())
+            }
+            Err(error) if row_decode_error_is_local(&error) => {
                 counts.rejected_records = checked_add(counts.rejected_records, 1)?;
-                hash_rejected_candidate(&mut digest, &candidate, b"oversized");
+                hash_rejected_candidate(&mut digest, &candidate, error.to_string().as_bytes());
                 continue;
             }
+            Err(error) => return Err(error.into()),
+        };
+        let record_digest = message_record_digest_bytes(&digest_values);
+        super::hash_field(&mut digest, &candidate.rowid.to_be_bytes());
+        super::hash_field(&mut digest, &record_digest);
 
-            let row = hydrate_row_from_connection(
-                &source.connection,
-                &source.schema,
-                CrushNativePhase::Messages,
-                candidate.rowid,
-                candidate.observed_bytes,
-            );
-            let (row, session, digest_values) = match row {
-                Ok(CrushHydratedRow::Message {
-                    row,
+        match project_message(&row, session.as_ref(), &context)? {
+            CrushRecordProjection::Rejection { .. } => {
+                counts.rejected_records = checked_add(counts.rejected_records, 1)?;
+            }
+            CrushRecordProjection::Message(projection) if projection.event.is_some() => {
+                let session = session
+                    .as_ref()
+                    .ok_or(CrushSourceBackedErrorV0::UnexpectedNativeRow)?;
+                writer.add_document(lexical_document(
+                    source,
+                    &row,
                     session,
-                    digest_values,
-                    ..
-                }) => (row, session, digest_values),
-                Ok(_) => {
-                    return Err(CaptureError::SystemInvariant(
-                        "Crush message scan hydrated a non-message row",
-                    ))
-                }
-                Err(error) if row_decode_error_is_local(&error) => {
-                    counts.rejected_records = checked_add(counts.rejected_records, 1)?;
-                    hash_rejected_candidate(&mut digest, &candidate, error.to_string().as_bytes());
-                    continue;
-                }
-                Err(error) => return Err(error),
-            };
-            let record_digest = message_record_digest_bytes(&digest_values);
-            super::hash_field(&mut digest, &candidate.rowid.to_be_bytes());
-            super::hash_field(&mut digest, &record_digest);
-
-            match project_message(&row, session.as_ref(), &context)? {
-                CrushRecordProjection::Rejection { .. } => {
-                    counts.rejected_records = checked_add(counts.rejected_records, 1)?;
-                }
-                CrushRecordProjection::Message(projection) if projection.event.is_some() => {
-                    let session = session
-                        .as_ref()
-                        .ok_or(CrushSourceBackedErrorV0::UnexpectedNativeRow)?;
-                    writer.add_document(lexical_document(
-                        source,
-                        &row,
-                        session,
-                        &digest_values,
-                        record_digest,
-                        &projection,
-                    )?)?;
-                    counts.retained_records = checked_add(counts.retained_records, 1)?;
-                    counts.indexed_documents = checked_add(counts.indexed_documents, 1)?;
-                }
-                CrushRecordProjection::Message(_) => {
-                    counts.ignored_records = checked_add(counts.ignored_records, 1)?;
-                }
+                    &digest_values,
+                    record_digest,
+                    &projection,
+                )?)?;
+                counts.retained_records = checked_add(counts.retained_records, 1)?;
+                counts.indexed_documents = checked_add(counts.indexed_documents, 1)?;
+            }
+            CrushRecordProjection::Message(_) => {
+                counts.ignored_records = checked_add(counts.ignored_records, 1)?;
             }
         }
-        Ok(SourceScan {
-            content_digest: digest.finalize().into(),
-            counts,
-        })
+    }
+    Ok(SourceScan {
+        content_digest: digest.finalize().into(),
+        counts,
     })
-    .map_err(Into::into)
 }
 
 fn lexical_document(
@@ -1226,7 +1233,7 @@ mod tests {
         let second = temp.path().join("second.db");
         write_database(&first, "session-a", "message-a", "kept project");
         write_database(&second, "session-b", "message-b", "retired project");
-        let inventory = TestInventory::new(inventory(
+        let inventory_source = TestInventory::new(inventory(
             b"inventory-1",
             vec![
                 database("project-a", &first),
@@ -1234,13 +1241,13 @@ mod tests {
             ],
         ));
         let index_root = temp.path().join("index");
-        ingest_crush_source_backed_v0(&inventory, &index_root).unwrap();
+        ingest_crush_source_backed_v0(&inventory_source, &index_root).unwrap();
 
-        inventory.replace(inventory(
+        inventory_source.replace(inventory(
             b"inventory-2",
             vec![database("project-a", &first)],
         ));
-        let retired = ingest_crush_source_backed_v0(&inventory, &index_root).unwrap();
+        let retired = ingest_crush_source_backed_v0(&inventory_source, &index_root).unwrap();
         assert_eq!(retired.counters.replayed_sources, 1);
         assert_eq!(retired.counters.deleted_sources, 1);
         let index = VerifiedIndex::open(&index_root).unwrap();
