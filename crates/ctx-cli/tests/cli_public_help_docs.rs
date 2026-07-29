@@ -833,7 +833,7 @@ fn docs_commands_expose_embedded_docs_and_man_pages() {
         .clone();
     let stats_man = String::from_utf8(stats_man).unwrap();
     assert!(stats_man.contains(".TH ctx-stats"));
-    assert!(stats_man.contains("--detail"));
+    assert!(stats_man.contains(r"\-\-detail"));
 }
 
 #[test]
