@@ -28,8 +28,12 @@ use thiserror::Error;
 
 use super::codex::nativepath::{
     codex_source_observation, codex_writer_base_sources, discover_codex_root_inventory_v0,
-    ingest_codex_sources_serial_v0, managed_codex_session_source, CodexHydratedRecordV0,
-    CodexLocatorResolverV0, CodexSourceBackedCountersV0, CodexSourceBackedPhaseTimingsV0,
+    ingest_codex_sources_serial_v0, managed_codex_session_source,
+    observe_codex_prompt_history_source_backed_explicit_v0,
+    scan_codex_prompt_history_source_backed_v0, CodexHydratedRecordV0, CodexLocatorResolverV0,
+    CodexPromptHistorySourceBackedDispositionV0, CodexPromptHistorySourceBackedInputV0,
+    CodexPromptHistorySourceBackedResolverV0, CodexSourceBackedCountersV0,
+    CodexSourceBackedPhaseTimingsV0,
 };
 use super::custom_history_jsonl::{
     observe_custom_history_source_backed_explicit, revalidate_custom_history_source_backed,
@@ -380,13 +384,13 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         DiscoveredWinner,
         Full
     ),
-    unsupported_format_route!(
+    route!(
         Codex,
         "codex_history_jsonl" => "codex_history_jsonl",
         true,
         true,
         DiscoveredWinner,
-        "Codex prompt-history source-backed scan/certification and exact JSONL hydration are not exposed to the coordinator"
+        Full
     ),
     unsupported_format_route!(
         Codex,
@@ -1959,7 +1963,16 @@ pub fn register_landed_source_backed_route(
     selection: SourceBackedRouteSelection,
 ) -> SourceBackedCoordinatorResult<()> {
     match source.provider {
-        CaptureProvider::Codex => register_codex_route(registry, source, selection),
+        CaptureProvider::Codex if source.source_format == "codex_history_jsonl" => {
+            register_codex_prompt_history_source_backed_route(registry, source, selection)
+        }
+        CaptureProvider::Codex if source.source_format == "codex_session_jsonl_tree" => {
+            register_codex_session_tree_route(registry, source, selection)
+        }
+        CaptureProvider::Codex => Err(invalid_route(
+            source.provider,
+            "single-file Codex session source-backed discovery is not exposed to the coordinator",
+        )),
         CaptureProvider::Zed => register_zed_route(registry, source, selection),
         CaptureProvider::Gemini => register_gemini_source_backed_route(registry, source, selection),
         CaptureProvider::Cursor => register_cursor_source_backed_route(registry, source, selection),
@@ -2003,7 +2016,7 @@ pub fn register_landed_source_backed_route(
     }
 }
 
-fn register_codex_route(
+fn register_codex_session_tree_route(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
@@ -2081,6 +2094,132 @@ fn register_codex_route(
                 provider_bytes: codex_display_bytes(hydrated)?,
             })
         },
+    );
+    registry.register(executable_route(
+        source,
+        selection,
+        SourceBackedSelectorAuthority::DiscoveredWinner,
+        driver,
+    )?);
+    Ok(())
+}
+
+// SHA-256("ctx.codex.prompt-history.default-catalog-lineage.v0"). This is
+// catalog-route identity, not a digest of the user-specific source path.
+const CODEX_PROMPT_HISTORY_DEFAULT_CATALOG_LINEAGE_V0: [u8; 32] = [
+    0x2d, 0x2e, 0xb3, 0x41, 0xde, 0xe9, 0x7a, 0xd3, 0x15, 0xec, 0xfa, 0xb3, 0x33, 0x20, 0x7c, 0x44,
+    0x53, 0x18, 0xb9, 0x32, 0x1c, 0xc1, 0x6b, 0xf2, 0x2c, 0xdb, 0x09, 0x68, 0xe0, 0xf1, 0xf5, 0x0a,
+];
+
+/// Registers Codex's one default prompt-history catalog route while retaining
+/// the opened ordinary-file authority for scanning, revalidation, and exact
+/// hydration. The selected path never participates in public source identity.
+pub fn register_codex_prompt_history_source_backed_route(
+    registry: &mut SourceBackedProviderRegistry,
+    source: ProviderSource,
+    selection: SourceBackedRouteSelection,
+) -> SourceBackedCoordinatorResult<()> {
+    let input = CodexPromptHistorySourceBackedInputV0::explicit(
+        source.path.clone(),
+        CODEX_PROMPT_HISTORY_DEFAULT_CATALOG_LINEAGE_V0,
+    );
+    let retained = observe_codex_prompt_history_source_backed_explicit_v0(&input)
+        .map_err(|error| invalid_route(source.provider, error.to_string()))?;
+    let owned_source = retained.source().clone();
+    let capture_source = retained.clone();
+    let revalidation_source = retained.clone();
+    let hydration_resolver = Arc::new(
+        CodexPromptHistorySourceBackedResolverV0::new([retained])
+            .map_err(|error| invalid_route(source.provider, error.to_string()))?,
+    );
+    let scan_owned_source = owned_source.clone();
+    let claimed_source = owned_source.clone();
+    let driver = SourceBackedRouteDriver::new(
+        move |sink| {
+            sink.begin_source(claimed_source.clone())
+                .map_err(route_coordinator_error)?;
+            let mut emitted_documents = 0_u64;
+            let mut retained_page_bytes = 0_u64;
+            // v0.26 starts a fresh history epoch. Do not seed this scan from
+            // legacy Store/NativePath rows, cursors, or complete bodies.
+            let scan =
+                scan_codex_prompt_history_source_backed_v0(capture_source.clone(), None, |page| {
+                    if !page.source.exact_descriptor_eq(&claimed_source) {
+                        return Err(CaptureError::InvalidPayload(
+                            "Codex prompt-history page changed its source descriptor".to_owned(),
+                        )
+                        .into());
+                    }
+                    emitted_documents = emitted_documents
+                        .checked_add(u64::try_from(page.documents.len()).map_err(|_| {
+                            CaptureError::InvalidPayload(
+                                "Codex prompt-history page count exceeds platform limits"
+                                    .to_owned(),
+                            )
+                        })?)
+                        .ok_or_else(|| {
+                            CaptureError::InvalidPayload(
+                                "Codex prompt-history document count overflowed".to_owned(),
+                            )
+                        })?;
+                    retained_page_bytes = retained_page_bytes
+                        .checked_add(u64::try_from(page.retained_bytes).map_err(|_| {
+                            CaptureError::InvalidPayload(
+                                "Codex prompt-history page bytes exceed platform limits".to_owned(),
+                            )
+                        })?)
+                        .ok_or_else(|| {
+                            CaptureError::InvalidPayload(
+                                "Codex prompt-history retained page bytes overflowed".to_owned(),
+                            )
+                        })?;
+                    for document in page.documents {
+                        sink.add_document(document)
+                            .map_err(capture_coordinator_error)?;
+                    }
+                    Ok(())
+                })
+                .map_err(route_error)?;
+            if !matches!(
+                scan.disposition,
+                CodexPromptHistorySourceBackedDispositionV0::Cold
+            ) || !scan.source.source().exact_descriptor_eq(&claimed_source)
+                || scan.emitted_documents != emitted_documents
+                || scan.certificate.counts().indexed_documents != emitted_documents
+                || (emitted_documents != 0 && retained_page_bytes == 0)
+            {
+                return Err(SourceBackedRouteError::new(
+                    SourceBackedRouteErrorKind::Internal,
+                    "Codex prompt-history scan counts or source authority did not reconcile",
+                ));
+            }
+            sink.certify_source(scan.certificate)
+                .map_err(route_coordinator_error)
+        },
+        move |candidate| candidate.exact_descriptor_eq(&owned_source),
+        move |target| match target {
+            SourceBackedRevalidationTarget::Source(expected)
+                if expected
+                    .observation()
+                    .source()
+                    .exact_descriptor_eq(&scan_owned_source) =>
+            {
+                scan_codex_prompt_history_source_backed_v0(
+                    revalidation_source.clone(),
+                    Some(expected),
+                    |_| Ok(()),
+                )
+                .is_ok_and(|scan| {
+                    matches!(
+                        scan.disposition,
+                        CodexPromptHistorySourceBackedDispositionV0::Unchanged
+                    ) && scan.certificate == *expected
+                })
+            }
+            SourceBackedRevalidationTarget::Source(_)
+            | SourceBackedRevalidationTarget::Deletion(_) => false,
+        },
+        move |request| hydration_resolver.hydrate_event(request),
     );
     registry.register(executable_route(
         source,
@@ -4746,13 +4885,15 @@ fn hydration_failure(kind: HydrationFailureKind, detail: impl fmt::Display) -> H
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{fs, path::PathBuf};
 
     use ctx_history_core::{
         derive_event_id, derive_session_id, EventIdentityInput, LocatorRevisionPolicy,
         NativeItemKey, NativeRecordCoordinate, NativeSessionKey, ScannedSourceCounts,
-        SessionIdentityInput, SourceAnchor, SourceObservation, SourceRecordLocator, TypedKey,
+        SessionHydrationRequest, SessionIdentityInput, SourceAnchor, SourceObservation,
+        SourceRecordLocator, TypedKey,
     };
+    use ctx_history_index::{VerifiedIndex, MAX_BODY_PREVIEW_CHARS};
     use tempfile::tempdir;
 
     use super::*;
@@ -4906,8 +5047,24 @@ mod tests {
                 .iter()
                 .filter(|route| route.automatic && route.unsupported_reason.is_some())
                 .count(),
-            1
+            0
         );
+        assert_eq!(
+            LANDED_SOURCE_BACKED_ROUTES
+                .iter()
+                .filter(|route| route.automatic && route.unsupported_reason.is_none())
+                .count(),
+            41
+        );
+        let unsupported = LANDED_SOURCE_BACKED_ROUTES
+            .iter()
+            .filter(|route| route.unsupported_reason.is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(unsupported.len(), 1);
+        assert_eq!(unsupported[0].provider, CaptureProvider::Codex);
+        assert_eq!(unsupported[0].source_format, "codex_session_jsonl");
+        assert!(!unsupported[0].automatic);
+        assert!(unsupported[0].explicit_manual);
         let mut formats = HashSet::new();
         for route in LANDED_SOURCE_BACKED_ROUTES {
             assert!(
@@ -5134,6 +5291,13 @@ mod tests {
                     error_result text, gmt_create integer, extra text);",
             )
             .unwrap();
+        let codex_history = home.join(".codex/history.jsonl");
+        std::fs::create_dir_all(codex_history.parent().unwrap()).unwrap();
+        std::fs::write(
+            &codex_history,
+            b"{\"session_id\":\"session-a\",\"ts\":1785139200,\"text\":\"automatic prompt\"}\n",
+        )
+        .unwrap();
         let context = DiscoveryContext::new(
             &home,
             &cwd,
@@ -5180,10 +5344,11 @@ mod tests {
                 ProviderImportSupport::Native,
                 "/home/test/.astrbot_launcher/instances/one/data/data_v4.db",
             ),
-            fixture_provider_source(
+            fixture_provider_source_at(
                 CaptureProvider::Codex,
                 "codex_history_jsonl",
                 ProviderImportSupport::Native,
+                &codex_history,
             ),
             fixture_provider_source_at(
                 CaptureProvider::Crush,
@@ -5207,10 +5372,11 @@ mod tests {
 
         let build =
             build_automatic_source_backed_registry_from_report(&context, sources, Vec::new());
-        assert_eq!(build.executable_route_count(), 6);
-        assert_eq!(build.unsupported_route_count(), 2);
-        assert_eq!(build.issues.len(), 3);
+        assert_eq!(build.executable_route_count(), 7);
+        assert_eq!(build.unsupported_route_count(), 1);
+        assert_eq!(build.issues.len(), 2);
         for provider in [
+            CaptureProvider::Codex,
             CaptureProvider::Warp,
             CaptureProvider::Crush,
             CaptureProvider::Lingma,
@@ -5221,14 +5387,10 @@ mod tests {
                     && route.unsupported_reason.is_none()
             }));
         }
-        assert!(build.issues.iter().any(|issue| matches!(
+        assert!(!build.issues.iter().any(|issue| matches!(
             issue,
-            SourceBackedAutomaticRegistryIssue::Unavailable {
-                source,
-                reason: SourceBackedAutomaticUnavailableReason::UnsupportedFormat { detail },
-            } if source.provider == CaptureProvider::Codex
-                && source.source_format == "codex_history_jsonl"
-                && detail.contains("prompt-history")
+            SourceBackedAutomaticRegistryIssue::Unavailable { source, .. }
+                if source.provider == CaptureProvider::Codex
         )));
         assert!(!build.issues.iter().any(|issue| matches!(
             issue,
@@ -5248,6 +5410,197 @@ mod tests {
             } if source.provider == CaptureProvider::Unknown
                 && source.source_format == "unknown_detected_format"
         )));
+    }
+
+    #[test]
+    fn codex_history_and_sessions_publish_one_fresh_generation_and_hydrate_exactly() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        let sessions = home.join(".codex/sessions");
+        let history = home.join(".codex/history.jsonl");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let native_session_id = "019faadb-b9f2-7413-9fab-edf59fd787a6";
+        let session_meta = serde_json::json!({
+            "timestamp": "2026-07-28T12:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": native_session_id,
+                "timestamp": "2026-07-28T12:00:00Z",
+                "cwd": "/tmp/source-backed",
+                "originator": "codex_cli_rs",
+                "cli_version": "0.1.0",
+                "source": "cli",
+                "model_provider": "openai"
+            }
+        });
+        let session_message = serde_json::json!({
+            "timestamp": "2026-07-28T12:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "ordinary Codex session remains present"
+                }]
+            }
+        });
+        let session_bytes = format!("{session_meta}\n{session_message}\n").into_bytes();
+        fs::write(
+            sessions.join(format!("rollout-{native_session_id}.jsonl")),
+            &session_bytes,
+        )
+        .unwrap();
+
+        let prompt_text = format!(
+            "fresh v0.26 prompt {}",
+            "x".repeat(MAX_BODY_PREVIEW_CHARS.saturating_add(128))
+        );
+        let mut prompt_bytes = serde_json::to_vec(&serde_json::json!({
+            "session_id": native_session_id,
+            "ts": 1_785_139_200,
+            "text": prompt_text,
+        }))
+        .unwrap();
+        prompt_bytes.push(b'\n');
+        fs::write(&history, &prompt_bytes).unwrap();
+
+        let context = DiscoveryContext::new(
+            &home,
+            temp.path().join("cwd"),
+            DiscoveryPlatform::Linux,
+            crate::DiscoveryPlatformDirs::default(),
+        );
+        let sources = vec![
+            fixture_provider_source_at(
+                CaptureProvider::Codex,
+                "codex_session_jsonl_tree",
+                ProviderImportSupport::Native,
+                &sessions,
+            ),
+            fixture_provider_source_at(
+                CaptureProvider::Codex,
+                "codex_history_jsonl",
+                ProviderImportSupport::Native,
+                &history,
+            ),
+        ];
+        let build =
+            build_automatic_source_backed_registry_from_report(&context, sources, Vec::new());
+        assert_eq!(build.executable_route_count(), 2);
+        assert_eq!(build.unsupported_route_count(), 0);
+        assert!(build.issues.is_empty());
+
+        let prompt_input = CodexPromptHistorySourceBackedInputV0::explicit(
+            &history,
+            CODEX_PROMPT_HISTORY_DEFAULT_CATALOG_LINEAGE_V0,
+        );
+        let prompt_source =
+            observe_codex_prompt_history_source_backed_explicit_v0(&prompt_input).unwrap();
+        let mut prompt_documents = Vec::new();
+        scan_codex_prompt_history_source_backed_v0(prompt_source, None, |page| {
+            prompt_documents.extend(page.documents);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(prompt_documents.len(), 1);
+        assert_eq!(
+            prompt_documents[0].body.chars().count(),
+            MAX_BODY_PREVIEW_CHARS
+        );
+        let event_request = EventHydrationRequest::new(
+            prompt_documents[0].event_id,
+            prompt_documents[0].locator.clone(),
+        )
+        .unwrap();
+        let session_request = SessionHydrationRequest::new(
+            prompt_documents[0].session_id,
+            vec![event_request.clone()],
+        )
+        .unwrap();
+        let resolver = build.registry.resolver_registry();
+        assert_eq!(
+            resolver
+                .hydrate_event(&event_request)
+                .unwrap()
+                .provider_bytes,
+            prompt_bytes
+        );
+        assert_eq!(
+            resolver
+                .hydrate_session(&session_request)
+                .unwrap()
+                .into_iter()
+                .map(|record| record.provider_bytes)
+                .collect::<Vec<_>>(),
+            vec![prompt_bytes.clone()]
+        );
+
+        let index = temp.path().join("index");
+        let mut progress = Vec::new();
+        let receipt = refresh_source_backed_generation_with_progress(
+            &index,
+            &build.registry,
+            WriterOptions {
+                indexer_threads: 1,
+                memory_bytes: 15_000_000,
+            },
+            |update| {
+                progress.push(update);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(receipt.scanned_routes, 2);
+        assert!(receipt.unsupported_routes.is_empty());
+        assert_eq!(receipt.certified_source_count, 2);
+        assert_eq!(
+            receipt.certified_source_count,
+            receipt.commit.certified_sources
+        );
+        assert_eq!(
+            receipt.certified_source_bytes,
+            receipt.commit.certified_source_bytes
+        );
+        assert!(receipt.scan_stage_duration > Duration::ZERO);
+        assert!(receipt.commit_duration > Duration::ZERO);
+        let committed = progress.last().unwrap();
+        assert_eq!(
+            committed.certified_source_count,
+            Some(receipt.certified_source_count)
+        );
+        assert_eq!(
+            committed.certified_source_bytes,
+            Some(receipt.certified_source_bytes)
+        );
+
+        let verified = VerifiedIndex::open(&index).unwrap();
+        let sources = &verified.manifest().sources;
+        assert_eq!(sources.len(), 2);
+        let source_formats = sources
+            .iter()
+            .map(|source| source.observation().source().source_format())
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            source_formats,
+            HashSet::from(["codex_history_jsonl", "codex_session_jsonl"])
+        );
+        let history_certificate = sources
+            .iter()
+            .find(|source| source.observation().source().source_format() == "codex_history_jsonl")
+            .unwrap();
+        assert_eq!(
+            history_certificate.counts().certified_bytes,
+            u64::try_from(prompt_bytes.len()).unwrap()
+        );
+        assert_eq!(
+            receipt.certified_source_bytes,
+            sources
+                .iter()
+                .map(|source| source.counts().certified_bytes)
+                .sum::<u64>()
+        );
     }
 
     #[test]

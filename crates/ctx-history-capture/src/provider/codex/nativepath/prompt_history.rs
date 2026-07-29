@@ -742,11 +742,6 @@ use page::*;
 use rows::*;
 pub(crate) use source_backed::{
     observe_codex_prompt_history_source_backed_explicit_v0,
-    revalidate_codex_prompt_history_source_backed_v0,
-    scan_codex_prompt_history_source_backed_explicit_v0,
     scan_codex_prompt_history_source_backed_v0, CodexPromptHistorySourceBackedDispositionV0,
-    CodexPromptHistorySourceBackedErrorV0, CodexPromptHistorySourceBackedInputV0,
-    CodexPromptHistorySourceBackedPageV0, CodexPromptHistorySourceBackedResolverV0,
-    CodexPromptHistorySourceBackedResultV0, CodexPromptHistorySourceBackedScanV0,
-    CodexPromptHistorySourceBackedSourceV0,
+    CodexPromptHistorySourceBackedInputV0, CodexPromptHistorySourceBackedResolverV0,
 };
