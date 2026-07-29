@@ -18,7 +18,7 @@ fn digest(path: &std::path::Path) -> String {
     format!("{:x}", Sha256::digest(fs::read(path).unwrap()))
 }
 
-fn qualification_command(
+fn configured_qualification_command(
     root: &std::path::Path,
     helper: &std::path::Path,
     helper_digest: &str,
@@ -31,14 +31,18 @@ fn qualification_command(
         .env(PATH_ENV, helper)
         .env(SHA256_ENV, helper_digest)
         .env(CHANNEL_ENV, helper_channel)
-        .args([
-            "--data-root",
-            root.to_str().unwrap(),
-            "blame",
-            "commit",
-            "0123456789abcdef",
-            "--format=json",
-        ]);
+        .args(["--data-root", root.to_str().unwrap()]);
+    command
+}
+
+fn qualification_command(
+    root: &std::path::Path,
+    helper: &std::path::Path,
+    helper_digest: &str,
+    helper_channel: &str,
+) -> Command {
+    let mut command = configured_qualification_command(root, helper, helper_digest, helper_channel);
+    command.args(["blame", "commit", "0123456789abcdef", "--format=json"]);
     command
 }
 
@@ -49,10 +53,13 @@ fn exact_local_helper_is_selected_by_the_qualification_binary() {
     let helper = root.path().join("ctx-pro-qualification");
     write_blame_helper(&helper);
 
-    qualification_command(root.path(), &helper, &digest(&helper), "stable")
+    configured_qualification_command(root.path(), &helper, &digest(&helper), "stable")
+        .args(["status", "--format=json"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"kind\": \"commit\""));
+        .stdout(predicate::str::contains(
+            "\"helper_version\": \"fake-blame-v1\"",
+        ));
 }
 
 #[test]
