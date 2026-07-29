@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "scanner": {
+    "name": "osv-scanner",
+    "version": "2.4.0",
+    "sha256": "15314940c10d26af9c6649f150b8a47c1262e8fc7e17b1d1029b0e479e8ed8a0",
+    "max_database_age_hours": 48
+  },
+  "lockfiles": [
+    {
+      "path": "Cargo.lock",
+      "ecosystem": "crates.io",
+      "disposition": "scan",
+      "closure": "bazel-release-inventory",
+      "role": "target-configured public CLI Rust release dependency closure"
+    },
+    {
+      "path": "sdks/typescript/package-lock.json",
+      "ecosystem": "npm",
+      "disposition": "exclude",
+      "role": "private experimental TypeScript SDK development",
+      "rationale": "The package is marked private and neither ships in nor constructs or operates a public CLI release."
+    }
+  ]
+}

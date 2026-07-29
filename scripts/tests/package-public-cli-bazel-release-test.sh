@@ -20,6 +20,7 @@ route_runfiles="${runfiles}/_main/ctx_release_routes/linux-x64"
 mkdir -p \
   "${repo}/scripts" \
   "${repo}/scripts/release" \
+  "${repo}/security" \
   "${repo}/contracts" \
   "${repo}/crates/ctx-cli" \
   "${repo}/crates/ctx-history-index" \
@@ -36,6 +37,7 @@ cp "${source_root}/scripts/public-cli-release-targets.py" "${repo}/scripts/"
 cp "${source_root}/scripts/write-public-cli-build-info.py" "${repo}/scripts/"
 cp "${source_root}/scripts/check-public-cli-build-info.py" "${repo}/scripts/"
 cp "${source_root}/scripts/install-public-cli-candidate.py" "${repo}/scripts/"
+cp "${source_root}/scripts/dependency-advisory-gate.py" "${repo}/scripts/"
 cp "${source_root}/scripts/release/public-cli-bazel-build-info.py" \
   "${repo}/scripts/release/"
 cp "${source_root}/scripts/release/linux-bazel-release.Dockerfile" \
@@ -50,6 +52,30 @@ cp "${source_root}/crates/ctx-history-index/Cargo.toml" \
   "${repo}/crates/ctx-history-index/Cargo.toml"
 cp "${source_root}/tests/fixtures/custom-history-jsonl/basic.jsonl" \
   "${repo}/tests/fixtures/custom-history-jsonl/basic.jsonl"
+
+cat >"${repo}/security/release-advisory-policy-v1.json" <<'EOF'
+{
+  "schema_version": 1,
+  "scanner": {
+    "name": "osv-scanner",
+    "version": "2.4.0",
+    "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "max_database_age_hours": 48
+  },
+  "lockfiles": [
+    {
+      "path": "Cargo.lock",
+      "ecosystem": "crates.io",
+      "disposition": "scan",
+      "closure": "bazel-release-inventory",
+      "role": "fixture public CLI release closure"
+    }
+  ]
+}
+EOF
+cat >"${repo}/security/release-advisory-exceptions-v1.json" <<'EOF'
+{"schema_version":1,"exceptions":[]}
+EOF
 
 cat >"${repo}/Cargo.lock" <<'EOF'
 version = 4
@@ -114,6 +140,32 @@ elif mode == "verify-bundle":
 else:
     raise SystemExit(f"unexpected mode: {mode}")
 print("0" * 64)
+PY
+
+cat >"${repo}/scripts/fake-osv-scanner.py" <<'PY'
+#!/usr/bin/env python3
+import json
+from pathlib import Path
+import sys
+
+if sys.argv[1:] == ["--version"]:
+    print("osv-scanner version: 2.4.0")
+    raise SystemExit(0)
+lockfiles = [
+    str(Path(sys.argv[index + 1]).resolve())
+    for index, value in enumerate(sys.argv)
+    if value == "-L"
+]
+if len(lockfiles) != 1:
+    raise SystemExit(64)
+print(json.dumps({"results": [{
+    "source": {"path": lockfiles[0], "type": "lockfile"},
+    "packages": [{"package": {
+        "ecosystem": "crates.io",
+        "name": "dependency",
+        "version": "1.2.3"
+    }}]
+}]}))
 PY
 
 cat >"${repo}/scripts/check-public-cli-artifact.sh" <<'EOF'
@@ -190,9 +242,53 @@ printf 'rustc 1.97.1 (8bab26f4f 2026-07-10)\n'
 EOF
 
 chmod 0755 \
+  "${repo}/scripts/fake-osv-scanner.py" \
   "${repo}/scripts/"*.sh \
   "${repo}/bazel-out/k8-opt/bin/crates/ctx-cli/ctx" \
   "${repo}/inputs/rustc"
+
+python3 - \
+  "${repo}/security/release-advisory-policy-v1.json" \
+  "${repo}/scripts/fake-osv-scanner.py" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+policy_path = Path(sys.argv[1])
+scanner_path = Path(sys.argv[2])
+policy = json.loads(policy_path.read_text(encoding="utf-8"))
+policy["scanner"]["sha256"] = hashlib.sha256(scanner_path.read_bytes()).hexdigest()
+policy_path.write_text(json.dumps(policy), encoding="utf-8")
+PY
+
+mkdir -p "${repo}/inputs/osv-db/osv-scanner/crates.io"
+printf 'fixture advisory database\n' \
+  >"${repo}/inputs/osv-db/osv-scanner/crates.io/all.zip"
+python3 - "${repo}/inputs/osv-db" "${repo}/inputs/osv-db-metadata.json" <<'PY'
+import hashlib
+import json
+from datetime import UTC, datetime
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+output = Path(sys.argv[2])
+database = root / "osv-scanner/crates.io/all.zip"
+now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+output.write_text(json.dumps({
+    "schema_version": 1,
+    "fetched_at": now,
+    "databases": [{
+        "ecosystem": "crates.io",
+        "path": "osv-scanner/crates.io/all.zip",
+        "sha256": hashlib.sha256(database.read_bytes()).hexdigest(),
+        "size": database.stat().st_size,
+        "source_generation": "fixture",
+        "source_last_modified": now
+    }]
+}), encoding="utf-8")
+PY
 
 git -C "${repo}" init -q
 git -C "${repo}" config user.email ctx-release-test@example.invalid
@@ -293,6 +389,9 @@ ln -s "${repo}/contracts/release-targets-v1.json" \
   "${route_runfiles}/release-targets-v1.json"
 
 package() {
+  CTX_OSV_SCANNER="${repo}/scripts/fake-osv-scanner.py" \
+  CTX_OSV_DATABASE_DIR="${repo}/inputs/osv-db" \
+  CTX_OSV_DATABASE_METADATA="${repo}/inputs/osv-db-metadata.json" \
   RUNFILES_DIR="${runfiles}" \
   TEST_WORKSPACE="_main" \
   BUILD_WORKSPACE_DIRECTORY="${repo}" \
@@ -323,6 +422,9 @@ test -s "${repo}/out-success/ctx.third-party-notices.txt"
 test -s "${repo}/out-success/ctx.third-party-notices.txt.sha256"
 test -s "${repo}/out-success/ctx.size.json"
 test -s "${repo}/out-success/ctx.candidate.json"
+test -s "${repo}/out-success/ctx.dependency-advisory.json"
+grep -Fq '"status": "clean"' \
+  "${repo}/out-success/ctx.dependency-advisory.json"
 test "$(sha256sum "${repo}/out-success/ctx.cdx.json" | awk '{print $1}')" \
   = "$(cat "${repo}/out-success/ctx.cdx.json.sha256")"
 test "$(
