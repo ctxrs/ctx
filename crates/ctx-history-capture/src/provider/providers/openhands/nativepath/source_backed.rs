@@ -18,7 +18,6 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
-    common::io::{open_provider_source_path, OpenedProviderSourcePath, ProviderSourceDirectory},
     provider::file_touches::{
         event_type_supports_structured_file_touches, visit_provider_file_touch_drafts_with_limit,
         MAX_PROVIDER_FILE_TOUCHES_PER_EVENT,
@@ -30,10 +29,14 @@ use crate::{
 use crate::provider::providers::openhands::{
     event::{decode_openhands_event, OpenHandsDecodedEvent},
     source::{
-        discover_openhands_event_paths, normalized_openhands_authority_path,
-        OpenHandsFileObservation, OpenHandsInventory, OpenHandsObservedFile,
+        discover_openhands_event_paths, OpenHandsFileObservation, OpenHandsInventory,
+        OpenHandsObservedFile,
     },
 };
+
+mod detection;
+
+use detection::detects_current_cli_format;
 
 const OPENHANDS_SOURCE_ANCHOR_NAMESPACE: &str = "openhands.v1-conversation";
 const OPENHANDS_NATIVE_SESSION_NAMESPACE: &str = "openhands.v1-conversation";
@@ -46,8 +49,6 @@ const OPENHANDS_INVENTORY_AUTHORITY_NAMESPACE: &str = "openhands.v1-selected-tre
 const OPENHANDS_INVENTORY_REVISION_KIND: &str = "openhands-v1-event-file-inventory-v1";
 const OPENHANDS_PARSER_REVISION: &str = "openhands-source-backed-v1";
 const OPENHANDS_OBJECT_COORDINATE_KIND: &str = "openhands-event-object-v1";
-const OPENHANDS_CURRENT_CLI_MAX_ENTRIES: usize = 16_384;
-
 const OPENHANDS_LEAF_REVISION_DOMAIN: &[u8] = b"ctx.openhands.leaf-revision.v1\0";
 const OPENHANDS_CONVERSATION_REVISION_DOMAIN: &[u8] = b"ctx.openhands.conversation-revision.v1\0";
 const OPENHANDS_CONVERSATION_CONTENT_DOMAIN: &[u8] = b"ctx.openhands.conversation-content.v1\0";
@@ -945,96 +946,6 @@ fn bounded_reason(mut reason: String) -> String {
     }
     reason.truncate(end);
     reason
-}
-
-fn detects_current_cli_format(path: &Path) -> OpenHandsSourceBackedResultV1<bool> {
-    let path = normalized_openhands_authority_path(path)?;
-    let opened = match open_provider_source_path(&path) {
-        Ok(opened) => opened,
-        Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(false)
-        }
-        Err(error) => return Err(error.into()),
-    };
-    if let OpenedProviderSourcePath::File(file) = opened {
-        let detected = current_cli_event_file(&path)
-            && path
-                .parent()
-                .and_then(Path::file_name)
-                .is_some_and(|name| name == "events");
-        file.revalidate()?;
-        return Ok(detected);
-    }
-    let OpenedProviderSourcePath::Directory(directory) = opened else {
-        return Err(CaptureError::SystemInvariant(
-            "OpenHands CLI format root classification is incomplete",
-        )
-        .into());
-    };
-    if path.file_name().is_some_and(|name| name == "events")
-        && directory_has_current_cli_event(&directory)?
-    {
-        return Ok(true);
-    }
-    let entries = directory.entries(OPENHANDS_CURRENT_CLI_MAX_ENTRIES.saturating_add(1))?;
-    for name in &entries {
-        if name == "events" {
-            if let OpenedProviderSourcePath::Directory(events) = directory.open_child(name)? {
-                if directory_has_current_cli_event(&events)? {
-                    return Ok(true);
-                }
-            }
-        }
-    }
-    for name in entries {
-        let OpenedProviderSourcePath::Directory(child) = directory.open_child(&name)? else {
-            continue;
-        };
-        match child.open_child(std::ffi::OsStr::new("events")) {
-            Ok(OpenedProviderSourcePath::Directory(events))
-                if directory_has_current_cli_event(&events)? =>
-            {
-                return Ok(true);
-            }
-            Ok(_) => {}
-            Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-        child.revalidate()?;
-    }
-    directory.revalidate()?;
-    Ok(false)
-}
-
-fn directory_has_current_cli_event(
-    directory: &ProviderSourceDirectory,
-) -> OpenHandsSourceBackedResultV1<bool> {
-    let names = directory.entries(OPENHANDS_CURRENT_CLI_MAX_ENTRIES.saturating_add(1))?;
-    if names.len() > OPENHANDS_CURRENT_CLI_MAX_ENTRIES {
-        return Err(CaptureError::InvalidProviderTranscriptPath {
-            path: directory.relative_path().to_path_buf(),
-            reason: "OpenHands CLI history selector exceeds its bounded entry limit",
-        }
-        .into());
-    }
-    for name in names {
-        if !current_cli_event_file(Path::new(&name)) {
-            continue;
-        }
-        if let OpenedProviderSourcePath::File(file) = directory.open_child(&name)? {
-            file.revalidate()?;
-            directory.revalidate()?;
-            return Ok(true);
-        }
-    }
-    directory.revalidate()?;
-    Ok(false)
-}
-
-fn current_cli_event_file(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.starts_with("event-") && name.ends_with(".json"))
 }
 
 pub(super) fn hydration_failure(error: OpenHandsSourceBackedErrorV1) -> HydrationFailure {
