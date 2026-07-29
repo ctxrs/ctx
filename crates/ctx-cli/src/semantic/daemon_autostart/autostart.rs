@@ -58,7 +58,7 @@ pub(crate) fn autostart_daemon_and_wait(
             {
                 DaemonHandoffObservation::Pending
             } else {
-                daemon_handoff_observation(data_root, expected_failure_pid)
+                daemon_handoff_observation(data_root, expected_failure_pid, config)
             }
         },
         || {
@@ -150,6 +150,7 @@ pub(super) fn request_daemon_autostart(
 fn daemon_handoff_observation(
     data_root: &Path,
     expected_failure_pid: Option<u32>,
+    expected_config: &AppConfig,
 ) -> DaemonHandoffObservation {
     let status = read_daemon_status(data_root);
     let lock_pid = super::super::paths_status::read_pid_lock_file(&daemon_lock_path(data_root));
@@ -159,6 +160,7 @@ fn daemon_handoff_observation(
         lock_pid,
         lock_active,
         expected_failure_pid,
+        Some(expected_config),
         utc_now().timestamp_millis(),
     )
 }
@@ -168,6 +170,7 @@ pub(super) fn daemon_handoff_observation_from(
     lock_pid: Option<u32>,
     lock_active: bool,
     expected_failure_pid: Option<u32>,
+    expected_config: Option<&AppConfig>,
     now_ms: i64,
 ) -> DaemonHandoffObservation {
     let Some(status) = status else {
@@ -230,7 +233,15 @@ pub(super) fn daemon_handoff_observation_from(
             return DaemonHandoffObservation::Failed(error);
         }
         Some("pending") => return DaemonHandoffObservation::Pending,
-        Some("applied") | None => {}
+        Some("applied") => {
+            if expected_config.is_some_and(|expected| {
+                !daemon_applied_config_matches(status, expected)
+            }) {
+                return DaemonHandoffObservation::Pending;
+            }
+        }
+        None if expected_config.is_none() => {}
+        None => return DaemonHandoffObservation::Pending,
         Some(_) => return DaemonHandoffObservation::Pending,
     }
     let Some(heartbeat_at_ms) = status
@@ -244,6 +255,20 @@ pub(super) fn daemon_handoff_observation_from(
         pid: status_pid.unwrap_or_default(),
         heartbeat_at_ms,
     })
+}
+
+fn daemon_applied_config_matches(status: &Value, expected: &AppConfig) -> bool {
+    let Some(applied) = status
+        .get("config_reload")
+        .and_then(|reload| reload.get("applied"))
+    else {
+        return false;
+    };
+    applied.get("daemon_enabled").and_then(Value::as_bool) == Some(expected.daemon.enabled)
+        && applied.get("daemon_mode").and_then(Value::as_str)
+            == Some(expected.daemon.mode.as_str())
+        && applied.get("semantic_enabled").and_then(Value::as_bool)
+            == Some(expected.semantic_search_enabled())
 }
 
 pub(super) fn wait_for_daemon_handoff_with(
