@@ -4,13 +4,12 @@ use std::{
     sync::OnceLock,
 };
 
-use tantivy::{collector::Count, schema::IndexRecordOption, Index, ReloadPolicy, Searcher, Term};
+use tantivy::{Index, ReloadPolicy, Searcher};
 use uuid::Uuid;
 
 use crate::{
     durable_directory::DurableMmapDirectory, load_manifest_for_metas, meta_generation,
-    required_field, searcher_generation, validate_schema, verify_searcher, GenerationManifest,
-    IndexError, Result,
+    searcher_generation, validate_schema, verify_searcher, GenerationManifest, IndexError, Result,
 };
 
 /// A verified reader pinned to one immutable lexical generation.
@@ -68,9 +67,9 @@ impl VerifiedIndex {
 
     #[cfg(test)]
     pub(crate) fn count_term(&self, term_text: &str) -> Result<usize> {
-        use tantivy::query::TermQuery;
+        use tantivy::{collector::Count, query::TermQuery, schema::IndexRecordOption, Term};
 
-        let body = required_field(self.searcher.schema(), "body_search")?;
+        let body = crate::required_field(self.searcher.schema(), "body_search")?;
         let query = TermQuery::new(
             Term::from_field_text(body, term_text),
             IndexRecordOption::Basic,
