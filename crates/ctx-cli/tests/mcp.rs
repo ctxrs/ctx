@@ -510,6 +510,21 @@ fn mcp_search_returns_structured_json_without_refresh() {
                     }
                 }
             }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": "result-window",
+                "method": "tools/call",
+                "params": {
+                    "name": "search",
+                    "arguments": {
+                        "query": "search",
+                        "provider": "codex",
+                        "include_subagents": true,
+                        "limit": 1,
+                        "backend": "lexical"
+                    }
+                }
+            }),
         ],
     );
     let search = &search_responses[1]["result"]["structuredContent"];
@@ -531,6 +546,15 @@ fn mcp_search_returns_structured_json_without_refresh() {
         search["retrieval"]["semantic_fallback"],
         "local semantic retrieval is disabled"
     );
+    assert_eq!(
+        search["result_window"],
+        json!({
+            "limit": 5,
+            "returned": 1,
+            "more_available": false,
+        })
+    );
+    assert!(search.get("pagination").is_none(), "{search:#}");
     assert_useful_mcp_text(
         &search_responses[1]["result"],
         &[
@@ -554,6 +578,24 @@ fn mcp_search_returns_structured_json_without_refresh() {
     assert!(first_result["result_type"].is_string());
     assert!(first_result["ctx_session_id"].is_string());
     assert!(first_result["ctx_event_id"].is_string());
+    assert!(!mcp_content_text(&search_responses[1]["result"]).contains("More results available."));
+
+    let result_window = &search_responses[2]["result"]["structuredContent"];
+    assert_eq!(result_window["results"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        result_window["result_window"],
+        json!({
+            "limit": 1,
+            "returned": 1,
+            "more_available": true,
+        })
+    );
+    assert!(
+        result_window.get("pagination").is_none(),
+        "{result_window:#}"
+    );
+    assert!(result_window["truncation"]["candidate_pool"].is_number());
+    assert!(mcp_content_text(&search_responses[2]["result"]).ends_with("More results available.\n"));
 }
 
 #[test]

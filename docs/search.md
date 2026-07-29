@@ -187,7 +187,15 @@ the same result metadata and citations plus:
 - `freshness`, describing refresh mode and outcome;
 - `retrieval`, describing requested/effective backend, lexical generation,
   semantic status/fallback, coverage, and timing/scan diagnostics;
-- pagination and candidate-pool truncation metadata.
+- `result_window`, with `limit`, `returned`, and `more_available`;
+- independent candidate-pool truncation metadata.
+
+`more_available` is true only when the bounded search pass finds one additional
+fully shaped result beyond the requested limit: a distinct session by default,
+or an event with `--events`. Search does not run a second count scan or expose a
+cursor. Text output ends with exactly `More results available.` only when that
+shaped sentinel exists. Candidate-pool truncation remains separate and does not
+by itself set `more_available`.
 
 Raw output can contain queries, absolute paths, hydrated snippets, provider
 metadata, and transcript-derived content. Treat it as private local data and

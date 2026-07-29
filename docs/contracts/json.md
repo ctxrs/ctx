@@ -483,8 +483,21 @@ Returns:
 - `retrieval`;
 - `generated_at`;
 - `results[]`;
-- `pagination`;
+- `result_window`;
 - `truncation`.
+
+`result_window` has exactly `limit`, `returned`, and `more_available`.
+`returned` is at most `limit`. `more_available` is `true` only when the same
+bounded search pass finds one additional fully shaped result: an event for
+event-scoped search, or a distinct session for the default session-scoped
+search. Search does not expose a cursor, run a second count scan, or claim an
+exact omitted-result total. Text output ends with exactly
+`More results available.` only when `more_available` is `true`.
+
+`truncation` independently describes backend candidate-pool limits with
+`candidate_pool` and `candidate_pool_truncated`. Candidate-pool truncation does
+not by itself make `more_available` true; that flag requires an additional
+shaped result.
 
 Each result can include:
 

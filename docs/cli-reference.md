@@ -725,9 +725,12 @@ including `provider_session_id` is included when known. Results also include
 title, snippet, rank, result scope, match reasons, source-path/cursor data,
 citations, `suggested_next_commands`, a JSON `freshness` object, a JSON
 `retrieval` object with backend, semantic coverage, worker status, and semantic
-timing/scan diagnostics when vector retrieval runs, and pagination/truncation
-fields in JSON. Default text output is compact and optimized for agent reading;
-use `--verbose` for expanded text diagnostics.
+timing/scan diagnostics when vector retrieval runs, a JSON `result_window`
+object with `limit`, `returned`, and shaped-sentinel `more_available`, and
+separate backend candidate-pool `truncation` fields. Search does not expose a
+cursor or run a second count scan. Default text output is compact and optimized
+for agent reading; it ends with exactly `More results available.` only when one
+additional shaped result exists. Use `--verbose` for expanded text diagnostics.
 
 Filters:
 

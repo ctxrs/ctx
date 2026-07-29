@@ -138,6 +138,107 @@ fn assert_source_backed_search(search: &Value, provider: &str, query: &str) {
     );
 }
 
+#[test]
+fn search_result_window_is_truthful_in_json_and_human_output() {
+    let temp = tempdir();
+    let fixture = provider_history_fixture("codex-sessions");
+    let (_daemon, imported) = import_codex_fixture_through_daemon(&temp, &fixture);
+    assert!(imported["sources"][0]["published_generation"].is_string());
+
+    let limited = json_output(ctx(&temp).args([
+        "search",
+        "search",
+        "--provider",
+        "codex",
+        "--include-subagents",
+        "--limit",
+        "1",
+        "--refresh",
+        "off",
+        "--format=json",
+    ]));
+    assert_eq!(limited["results"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        limited["result_window"],
+        json!({
+            "limit": 1,
+            "returned": 1,
+            "more_available": true,
+        })
+    );
+    assert!(limited.get("pagination").is_none(), "{limited:#}");
+    assert!(limited["truncation"]["candidate_pool"].is_number());
+    assert!(limited["truncation"]["candidate_pool_truncated"].is_boolean());
+    assert!(limited["result_window"].get("candidate_pool").is_none());
+
+    let limited_human = ctx(&temp)
+        .args([
+            "search",
+            "search",
+            "--provider",
+            "codex",
+            "--include-subagents",
+            "--limit",
+            "1",
+            "--refresh",
+            "off",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let limited_human = String::from_utf8(limited_human).unwrap();
+    assert_eq!(limited_human.matches("More results available.").count(), 1);
+    assert!(
+        limited_human.ends_with("More results available.\n"),
+        "{limited_human}"
+    );
+
+    let complete = json_output(ctx(&temp).args([
+        "search",
+        "search",
+        "--provider",
+        "codex",
+        "--include-subagents",
+        "--limit",
+        "200",
+        "--refresh",
+        "off",
+        "--format=json",
+    ]));
+    let returned = complete["results"].as_array().map(Vec::len).unwrap();
+    assert!(returned > 1, "{complete:#}");
+    assert_eq!(
+        complete["result_window"],
+        json!({
+            "limit": 200,
+            "returned": returned,
+            "more_available": false,
+        })
+    );
+
+    let complete_human = ctx(&temp)
+        .args([
+            "search",
+            "search",
+            "--provider",
+            "codex",
+            "--include-subagents",
+            "--limit",
+            "200",
+            "--refresh",
+            "off",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let complete_human = String::from_utf8(complete_human).unwrap();
+    assert!(!complete_human.contains("More results available."));
+}
+
 #[path = "support/search_show_locate_sql/import_paths.rs"]
 mod import_paths;
 

@@ -193,6 +193,7 @@ fn render_search_text(value: &Value) -> String {
     push_filter_summary(&mut out, value.get("filters"));
     out.push_str(&format!("results: {}\n", results.len()));
     if results.is_empty() {
+        push_more_results_footer(&mut out, value);
         return out;
     }
 
@@ -232,7 +233,18 @@ fn render_search_text(value: &Value) -> String {
         MCP_TEXT_MAX_SEARCH_RESULTS,
         "results",
     );
+    push_more_results_footer(&mut out, value);
     out
+}
+
+fn push_more_results_footer(out: &mut String, value: &Value) {
+    if value
+        .pointer("/result_window/more_available")
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        out.push_str("More results available.\n");
+    }
 }
 
 fn push_status_semantic_summary(out: &mut String, semantic: Option<&Value>) {
@@ -738,6 +750,45 @@ mod tests {
             render_tool_text(&value),
             "ctx search\nquery: journal replay\nresults: 1\n\n1. Replay decision\n   ctx_session_id: session-1\n   ctx_event_id: event-2\n   provider: codex\n   timestamp: 2026-07-22T12:00:00Z\n   snippet: Use the canonical journal checkpoint.\n   next: ctx show event event-2\n"
         );
+    }
+
+    #[test]
+    fn search_text_reports_only_a_truthful_additional_result() {
+        let available = json!({
+            "payload_type": "search_results",
+            "query": "journal replay",
+            "results": [{
+                "title": "Replay decision",
+                "ctx_session_id": "session-1",
+                "ctx_event_id": "event-2"
+            }],
+            "result_window": {
+                "limit": 1,
+                "returned": 1,
+                "more_available": true
+            }
+        });
+        assert!(
+            render_tool_text(&available).ends_with("More results available.\n"),
+            "{}",
+            render_tool_text(&available)
+        );
+
+        let complete = json!({
+            "payload_type": "search_results",
+            "query": "journal replay",
+            "results": [{
+                "title": "Replay decision",
+                "ctx_session_id": "session-1",
+                "ctx_event_id": "event-2"
+            }],
+            "result_window": {
+                "limit": 1,
+                "returned": 1,
+                "more_available": false
+            }
+        });
+        assert!(!render_tool_text(&complete).contains("More results available."));
     }
 
     #[test]
