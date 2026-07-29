@@ -35,6 +35,7 @@
         "test:pro_test_support": "//crates/ctx-cli:pro_test_support_tests",
         "test:search_refresh": "//crates/ctx-cli:search_refresh_tests",
         "test:search_show_locate_sql": "//crates/ctx-cli:search_show_locate_sql_tests",
+        "test:search_source_identity_filters": "//crates/ctx-cli:search_source_identity_filters_tests",
         "test:setup_sources_import": "//crates/ctx-cli:setup_sources_import_tests",
         "test:skill": "//crates/ctx-cli:skill_tests",
         "test:slash_command_e2e": "//crates/ctx-cli:slash_command_e2e_tests",
@@ -50,11 +51,7 @@
       "manifest": "crates/ctx-history-capture/Cargo.toml",
       "targets": {
         "lib:ctx_history_capture": "//crates/ctx-history-capture:lib",
-        "test:codex_tail_nativepath": "//crates/ctx-history-capture:codex_tail_nativepath_tests",
-        "test:complete_content_sqlite": "//crates/ctx-history-capture:complete_content_sqlite_tests",
-        "test:crush_identity_storage": "//crates/ctx-history-capture:crush_identity_storage_tests",
-        "test:opencode_nativepath_release_blockers": "//crates/ctx-history-capture:opencode_nativepath_release_blockers_tests",
-        "test:cursor_native": "//crates/ctx-history-capture:cursor_native_tests"
+        "test:complete_content_sqlite": "//crates/ctx-history-capture:complete_content_sqlite_tests"
       },
       "native_unit": "//crates/ctx-history-capture:unit_tests"
     },
