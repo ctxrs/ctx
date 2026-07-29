@@ -479,17 +479,8 @@ fn mcp_sql_fresh_root_initializes_only_relational_projection() {
 fn mcp_search_returns_structured_json_without_refresh() {
     let temp = tempdir();
     let fixture = provider_history_fixture("codex-sessions");
-    let imported = json_output(ctx(&temp).args([
-        "import",
-        "--provider",
-        "codex",
-        "--path",
-        &fixture,
-        "--format=json",
-        "--progress",
-        "none",
-    ]));
-    assert!(imported["totals"]["imported_events"].as_u64().unwrap() > 0);
+    let (_daemon, imported) = import_codex_fixture_through_daemon(&temp, &fixture);
+    assert!(imported["sources"][0]["published_generation"].is_string());
 
     let search_responses = mcp_roundtrip(
         &temp,
@@ -526,24 +517,31 @@ fn mcp_search_returns_structured_json_without_refresh() {
     assert_eq!(search["payload_type"], "search_results");
     assert_eq!(search["query"], "onboarding");
     assert_eq!(search["freshness"]["mode"], "off");
-    assert_eq!(search["freshness"]["status"], "skipped");
+    assert_eq!(search["freshness"]["status"], "existing_generation");
     assert_eq!(search["retrieval"]["requested_mode"], "hybrid");
     assert_eq!(search["retrieval"]["effective_mode"], "lexical");
-    assert_eq!(search["retrieval"]["semantic_weight"], 0.0);
+    let semantic_weight = search["retrieval"]["semantic_weight"].as_f64().unwrap();
+    assert!((semantic_weight - 0.4).abs() < 1e-6, "{search:#}");
     assert_eq!(
         search["retrieval"]["semantic_fallback_code"],
         "semantic_disabled"
+    );
+    assert_eq!(search["retrieval"]["semantic_status"], "disabled");
+    assert_eq!(
+        search["retrieval"]["semantic_fallback"],
+        "local semantic retrieval is disabled"
     );
     assert_useful_mcp_text(
         &search_responses[1]["result"],
         &[
             "ctx search",
             "query: onboarding",
-            "freshness: off/skipped",
+            "freshness: off/existing_generation",
             "retrieval: requested=hybrid, effective=lexical",
-            "semantic_weight=0",
+            "semantic_weight=0.4",
+            "semantic_status=disabled",
             "semantic_fallback: semantic_disabled",
-            "semantic_coverage:",
+            "semantic_fallback_detail: local semantic retrieval is disabled",
             "filters: provider=codex",
             "results: 1",
             "ctx_session_id:",
@@ -640,8 +638,9 @@ fn mcp_search_validates_inputs_and_reports_uninitialized_source_index() {
     assert!(alias_result["structuredContent"]["error"]
         .as_str()
         .unwrap()
-        .contains("source-backed Core index is not initialized"));
-    assert!(mcp_content_text(alias_result).contains("source-backed Core index is not initialized"));
+        .contains("the source-backed index does not exist; retry with daemon refresh enabled"));
+    assert!(mcp_content_text(alias_result)
+        .contains("the source-backed index does not exist; retry with daemon refresh enabled"));
     assert!(
         !temp.path().join("search/lexical").exists(),
         "MCP search must not create an uninitialized source-backed index"
@@ -791,9 +790,7 @@ fn mcp_sources_reports_plugins_without_exposing_a_legacy_ingestion_path() {
             "ctx sources",
             "sources:",
             "importable:",
-            "custom",
-            "unsupported",
-            "hermes/default",
+            "more sources omitted from text",
         ],
     );
 }
@@ -802,16 +799,7 @@ fn mcp_sources_reports_plugins_without_exposing_a_legacy_ingestion_path() {
 fn mcp_search_excludes_active_codex_session_by_default_when_available() {
     let temp = tempdir();
     let fixture = provider_history_fixture("codex-sessions");
-    json_output(ctx(&temp).args([
-        "import",
-        "--provider",
-        "codex",
-        "--path",
-        &fixture,
-        "--format=json",
-        "--progress",
-        "none",
-    ]));
+    let (_daemon, _) = import_codex_fixture_through_daemon(&temp, &fixture);
 
     let excluded = mcp_roundtrip_with_env(
         &temp,
@@ -844,10 +832,7 @@ fn mcp_search_excludes_active_codex_session_by_default_when_available() {
     );
     let excluded_search = &excluded[1]["result"]["structuredContent"];
     assert_eq!(excluded_search["results"].as_array().unwrap().len(), 0);
-    assert_eq!(
-        excluded_search["filters"]["exclude_provider_session"]["provider"],
-        "codex"
-    );
+    assert!(excluded_search["filters"]["include_current_session"].is_null());
 
     let included = mcp_roundtrip_with_env(
         &temp,
@@ -880,8 +865,20 @@ fn mcp_search_excludes_active_codex_session_by_default_when_available() {
         &[("CODEX_THREAD_ID", "codex-session-root")],
     );
     let included_search = &included[1]["result"]["structuredContent"];
-    assert_eq!(included_search["results"].as_array().unwrap().len(), 1);
-    assert!(included_search["filters"]["exclude_provider_session"].is_null());
+    let included_results = included_search["results"].as_array().unwrap();
+    assert_eq!(included_results.len(), 1, "{included_search:#}");
+    assert_eq!(
+        included_results[0]["provider"], "codex",
+        "{included_search:#}"
+    );
+    assert_eq!(
+        included_results[0]["provider_session_id"], "codex-session-root",
+        "{included_search:#}"
+    );
+    assert_eq!(
+        included_search["filters"]["include_current_session"], true,
+        "{included_search:#}"
+    );
 }
 
 #[test]
@@ -1060,11 +1057,11 @@ fn mcp_tool_input_validation_returns_stable_invalid_request_and_server_recovers(
     assert!(index_failure["structuredContent"]["error"]
         .as_str()
         .unwrap()
-        .contains("source-backed Core index is not initialized"));
+        .contains("the source-backed index does not exist; retry with daemon refresh enabled"));
 
     let recovered = &responses[cases.len() + 2]["result"];
     assert!(recovered["isError"].is_null());
-    assert_eq!(recovered["structuredContent"]["schema_version"], 1);
+    assert_eq!(recovered["structuredContent"]["schema_version"], 2);
     assert_eq!(recovered["structuredContent"]["read_only"], true);
 }
 

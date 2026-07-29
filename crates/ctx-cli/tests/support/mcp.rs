@@ -1,7 +1,137 @@
+use std::{
+    io::Read,
+    process::{Child, Command as StdCommand, Stdio},
+    time::{Duration, Instant},
+};
+
 use serde_json::Value;
 use tempfile::TempDir;
 
-use super::ctx;
+use super::{copied_ctx_binary, ctx, ctx_from_binary, json_output};
+
+pub(crate) struct McpSourceRefreshDaemon {
+    child: Option<Child>,
+}
+
+impl Drop for McpSourceRefreshDaemon {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn start_mcp_source_refresh_daemon(temp: &TempDir) -> McpSourceRefreshDaemon {
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[daemon]\nenabled = true\nmode = \"source-refresh-only\"\n\n[search]\nsemantic = false\n",
+    )
+    .unwrap();
+    let binary = copied_ctx_binary(temp);
+    let prepared = ctx_from_binary(temp, &binary);
+    let mut command = StdCommand::new(prepared.get_program());
+    for (name, value) in prepared.get_envs() {
+        match value {
+            Some(value) => {
+                command.env(name, value);
+            }
+            None => {
+                command.env_remove(name);
+            }
+        }
+    }
+    command
+        .args([
+            "daemon",
+            "run",
+            "--force",
+            "--idle-exit-seconds",
+            "600",
+            "--loop-interval-seconds",
+            "600",
+        ])
+        .env("CTX_DAEMON_MODE", "source-refresh-only")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let spawn_deadline = Instant::now() + Duration::from_secs(1);
+    let child = loop {
+        match command.spawn() {
+            Ok(child) => break child,
+            Err(error) if error.raw_os_error() == Some(26) && Instant::now() < spawn_deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("start isolated MCP source-refresh daemon: {error}"),
+        }
+    };
+    let mut daemon = McpSourceRefreshDaemon { child: Some(child) };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(exit) = daemon.child.as_mut().unwrap().try_wait().unwrap() {
+            let mut stderr = String::new();
+            daemon
+                .child
+                .as_mut()
+                .unwrap()
+                .stderr
+                .as_mut()
+                .unwrap()
+                .read_to_string(&mut stderr)
+                .unwrap();
+            panic!("MCP source-refresh daemon exited before becoming ready ({exit}): {stderr}");
+        }
+        let status = ctx(temp)
+            .args(["daemon", "status", "--format=json"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok());
+        if status.as_ref().is_some_and(|status| {
+            status["daemon"]["running"] == true
+                && status["daemon"]["source_refresh_endpoint"]["available"] == true
+        }) {
+            return daemon;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for MCP source-refresh daemon readiness: {status:#?}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+pub(crate) fn import_codex_fixture_through_daemon(
+    temp: &TempDir,
+    fixture: &str,
+) -> (McpSourceRefreshDaemon, Value) {
+    let daemon = start_mcp_source_refresh_daemon(temp);
+    let imported = json_output(ctx(temp).args([
+        "import",
+        "--provider",
+        "codex",
+        "--path",
+        fixture,
+        "--no-daemon",
+        "--format=json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(imported["outcome"], "success", "{imported:#}");
+    assert_eq!(imported["totals"]["imported_sources"], 1, "{imported:#}");
+    assert!(
+        imported["sources"][0]["published_generation"].is_string(),
+        "{imported:#}"
+    );
+    assert_eq!(
+        imported["sources"][0]["daemon_request_metadata"]["owner"], "daemon",
+        "{imported:#}"
+    );
+    assert!(
+        !temp.path().join("work.sqlite").exists(),
+        "MCP fixtures must publish through the source-backed daemon without a Store fallback"
+    );
+    (daemon, imported)
+}
 
 pub(crate) fn mcp_roundtrip(temp: &TempDir, messages: &[Value]) -> Vec<Value> {
     mcp_roundtrip_with_env(temp, messages, &[])
