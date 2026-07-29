@@ -356,7 +356,8 @@ impl NanoClawRootBoundDatabase {
         }
         let directory = root.open_directory(parent_path)?;
         let authority_handle = directory.try_clone_authority_handle()?;
-        let sqlite = retain_sqlite_source_directory_authority(&authority_handle)
+        let approved_parent = root.named_path().join(parent_path);
+        let sqlite = retain_sqlite_source_directory_authority(&authority_handle, &approved_parent)
             .map_err(|error| nanoclaw_sqlite_access_error(&display_path, error))?;
         directory.revalidate()?;
         root.revalidate()?;

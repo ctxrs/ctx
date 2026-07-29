@@ -111,7 +111,9 @@ pub(in crate::tests) fn sqlite_file_snapshot(
 
 fn sqlite_file_snapshot_paths(source_file: &Path) -> Vec<PathBuf> {
     let mut paths = vec![source_file.to_path_buf()];
-    for suffix in ["-wal", "-shm", "-journal"] {
+    // Stock read-only WAL readers may update SHM reader marks. DB, WAL, and
+    // rollback-journal bytes are the persistent provider state protected here.
+    for suffix in ["-wal", "-journal"] {
         let mut sidecar = source_file.as_os_str().to_os_string();
         sidecar.push(suffix);
         paths.push(PathBuf::from(sidecar));

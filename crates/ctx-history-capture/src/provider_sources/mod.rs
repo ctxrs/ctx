@@ -5,7 +5,6 @@ mod ordinary_file;
 mod probes;
 mod reasons;
 mod resolvers;
-mod root_handle_sqlite_vfs;
 mod selectors;
 mod specs;
 mod sqlite_source;
@@ -40,9 +39,9 @@ pub(crate) use resolvers::{
 };
 pub use specs::{provider_source_spec, provider_source_specs};
 pub(crate) use sqlite_source::{
-    open_root_handle_sqlite_source_snapshot, open_sqlite_source_snapshot,
-    retain_sqlite_source_directory_authority, SqliteSourceAccessError, SqliteSourceComponent,
-    SqliteSourceDirectoryAuthority, SqliteSourceEvidence, SqliteSourceReadSnapshot,
+    open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
+    SqliteSourceAccessError, SqliteSourceDirectoryAuthority, SqliteSourceEvidence,
+    SqliteSourceReadSnapshot,
 };
 pub use types::{
     DiscoveryIssue, DiscoveryIssueKind, DiscoveryReport, ProviderCatalogSupport,

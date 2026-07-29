@@ -162,12 +162,13 @@ fn insert_outbound(path: &Path, id: &str, seq: i64, timestamp: i64, content: &st
         .unwrap();
 }
 
-fn sqlite_families_disk_state(
+fn sqlite_persistent_disk_state(
     databases: &[&Path],
 ) -> Vec<(PathBuf, Option<(Vec<u8>, u64, std::time::SystemTime)>)> {
     let mut state = Vec::new();
     for database in databases {
-        for suffix in ["", "-wal", "-shm", "-journal"] {
+        // Stock WAL readers may update volatile SHM reader marks.
+        for suffix in ["", "-wal", "-journal"] {
             let path = if suffix.is_empty() {
                 database.to_path_buf()
             } else {
@@ -1378,7 +1379,7 @@ fn source_backed_central_leaf_swap_is_rejected_before_publication() {
 }
 
 #[test]
-fn source_backed_reads_consistent_central_and_project_wal_without_writes() {
+fn source_backed_reads_consistent_central_and_project_wal_without_persistent_writes() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = create_project(&temp, "wal-consistency", 0);
     let central_path = root.join("data").join("v2.db");
@@ -1424,7 +1425,7 @@ fn source_backed_reads_consistent_central_and_project_wal_without_writes() {
             true,
         )
         .unwrap();
-    let before = sqlite_families_disk_state(&[&central_path, &inbound, &outbound]);
+    let before = sqlite_persistent_disk_state(&[&central_path, &inbound, &outbound]);
     assert!(before.iter().any(|(path, state)| {
         path.as_os_str().to_string_lossy().ends_with("v2.db-wal") && state.is_some()
     }));
@@ -1448,6 +1449,6 @@ fn source_backed_reads_consistent_central_and_project_wal_without_writes() {
     let exact =
         hydrate_nanoclaw_source_backed_exact(&root, [0x34; 32], &documents[0].locator).unwrap();
     assert_eq!(exact.text, "central-project-wal-content");
-    let after = sqlite_families_disk_state(&[&central_path, &inbound, &outbound]);
+    let after = sqlite_persistent_disk_state(&[&central_path, &inbound, &outbound]);
     assert_eq!(after, before);
 }

@@ -645,7 +645,7 @@ fn open_root_authorized_snapshot_with_hook(
     let parent_handle = source_directory
         .try_clone_authority_handle()
         .map_err(CaptureError::from)?;
-    let sqlite_authority = retain_sqlite_source_directory_authority(&parent_handle)?;
+    let sqlite_authority = retain_sqlite_source_directory_authority(&parent_handle, parent)?;
     let sqlite_snapshot =
         open_root_handle_sqlite_source_snapshot(&sqlite_authority, database_leaf)?;
     after_authorize();
@@ -1203,38 +1203,18 @@ mod tests {
             fs::rename(&path, &original).unwrap();
             fs::rename(&attacker, &path).unwrap();
         });
-        match result {
-            Ok((source_root, sqlite_snapshot)) => {
-                let content: String = sqlite_snapshot
-                    .connection()
-                    .unwrap()
-                    .query_row(
-                        "select content from conversations where id = 1",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .unwrap();
-                assert!(content.contains("expected"));
-                assert!(!content.contains("attacker"));
-                match sqlite_snapshot.finish() {
-                    Ok(_) => source_root.revalidate().unwrap(),
-                    Err(SqliteSourceAccessError::RootHandleVfs(_)) => {}
-                    Err(error) => panic!("unexpected finish result after source swap: {error:?}"),
-                }
-            }
+        assert!(matches!(
+            result,
             Err(AstrBotSourceBackedErrorV0::Capture(
                 CaptureError::InvalidProviderTranscriptPath { .. },
+            )) | Err(AstrBotSourceBackedErrorV0::SqliteSource(
+                SqliteSourceAccessError::SourceChanged,
             ))
-            | Err(AstrBotSourceBackedErrorV0::SqliteSource(
-                SqliteSourceAccessError::RootHandleVfs(_),
-            )) => {}
-            Err(error) => panic!("unexpected source-swap result: {error:?}"),
-        }
+        ));
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
-    fn active_wal_scan_reads_latest_rows_without_writing_source_files() {
+    fn active_wal_scan_reads_latest_rows_without_persistent_source_writes() {
         let temp = tempdir().unwrap();
         let path = temp.path().join("data_v4.db");
         create_database(&path, "wal-session", "before WAL");
@@ -1255,7 +1235,7 @@ mod tests {
                 .to_string()],
             )
             .unwrap();
-        let before = sqlite_family_bytes(&path);
+        let before = sqlite_persistent_bytes(&path);
         let identity = AstrBotSourceIdentityV0::SelectedCore;
         let source = AstrBotSourceBackedSourceV0 {
             path: path.clone(),
@@ -1271,7 +1251,7 @@ mod tests {
         assert!(documents
             .iter()
             .any(|document| document.body.contains("AstrBot active WAL sentinel")));
-        assert_eq!(sqlite_family_bytes(&path), before);
+        assert_eq!(sqlite_persistent_bytes(&path), before);
         drop(writer);
     }
 
@@ -1293,9 +1273,9 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "linux")]
-    fn sqlite_family_bytes(path: &Path) -> Vec<Vec<u8>> {
-        ["", "-wal", "-shm"]
+    fn sqlite_persistent_bytes(path: &Path) -> Vec<Vec<u8>> {
+        // Stock WAL readers may update volatile SHM reader marks.
+        ["", "-wal"]
             .into_iter()
             .map(|suffix| {
                 let mut component = path.as_os_str().to_os_string();

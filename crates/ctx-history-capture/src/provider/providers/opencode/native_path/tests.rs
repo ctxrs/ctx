@@ -1248,7 +1248,7 @@ fn opencode_nativepath_snapshot_is_immutable_and_live_mutation_invalidates_finis
 }
 
 #[test]
-fn opencode_nativepath_reads_committed_wal_without_touching_provider_files() {
+fn opencode_nativepath_reads_committed_wal_without_persistent_source_writes() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let build_path = temp.path().join("build.db");
     let writer = Connection::open(&build_path).unwrap();
@@ -1296,13 +1296,14 @@ fn opencode_nativepath_reads_committed_wal_without_touching_provider_files() {
     fs::create_dir(&source_dir).unwrap();
     let source_path = source_dir.join("opencode.db");
     let build_wal = PathBuf::from(format!("{}-wal", build_path.display()));
+    let build_shm = PathBuf::from(format!("{}-shm", build_path.display()));
     let source_wal = PathBuf::from(format!("{}-wal", source_path.display()));
+    let source_shm = PathBuf::from(format!("{}-shm", source_path.display()));
     fs::copy(&build_path, &source_path).unwrap();
     fs::copy(&build_wal, &source_wal).unwrap();
-    let source_shm = PathBuf::from(format!("{}-shm", source_path.display()));
+    fs::copy(&build_shm, &source_shm).unwrap();
     let database_before = fs::read(&source_path).unwrap();
     let wal_before = fs::read(&source_wal).unwrap();
-    assert!(!source_shm.exists());
 
     let reader =
         OpenCodeNativePathReader::acquire(OpenCodeNativeSourceSelection::exact(&source_path))
@@ -1318,7 +1319,7 @@ fn opencode_nativepath_reads_committed_wal_without_touching_provider_files() {
     assert!(summary.complete);
     assert_eq!(fs::read(&source_path).unwrap(), database_before);
     assert_eq!(fs::read(&source_wal).unwrap(), wal_before);
-    assert!(!source_shm.exists());
+    assert!(source_shm.is_file());
     drop(writer);
 }
 

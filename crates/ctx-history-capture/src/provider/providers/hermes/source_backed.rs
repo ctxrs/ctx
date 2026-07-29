@@ -433,7 +433,7 @@ fn open_root_authorized_snapshot_with_hook(
     let parent_handle = source_directory
         .try_clone_authority_handle()
         .map_err(CaptureError::from)?;
-    let sqlite_authority = retain_sqlite_source_directory_authority(&parent_handle)?;
+    let sqlite_authority = retain_sqlite_source_directory_authority(&parent_handle, parent)?;
     let sqlite_snapshot =
         open_root_handle_sqlite_source_snapshot(&sqlite_authority, database_leaf)?;
     after_authorize();

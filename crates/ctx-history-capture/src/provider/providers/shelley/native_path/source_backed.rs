@@ -701,7 +701,7 @@ fn open_root_authorized_snapshot_with_hook(
     let parent_handle = source_directory
         .try_clone_authority_handle()
         .map_err(CaptureError::from)?;
-    let sqlite_authority = retain_sqlite_source_directory_authority(&parent_handle)?;
+    let sqlite_authority = retain_sqlite_source_directory_authority(&parent_handle, parent)?;
     let sqlite_snapshot =
         open_root_handle_sqlite_source_snapshot(&sqlite_authority, database_leaf)?;
     after_authorize();
@@ -965,37 +965,18 @@ mod tests {
             fs::rename(&path, &original).unwrap();
             fs::rename(&attacker, &path).unwrap();
         });
-        match result {
-            Ok((source_root, sqlite_snapshot)) => {
-                let user_data: String = sqlite_snapshot
-                    .connection()
-                    .unwrap()
-                    .query_row(
-                        "select user_data from messages where message_id = 'message-1'",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .unwrap();
-                assert_eq!(user_data, "expected");
-                match sqlite_snapshot.finish() {
-                    Ok(_) => source_root.revalidate().unwrap(),
-                    Err(SqliteSourceAccessError::RootHandleVfs(_)) => {}
-                    Err(error) => panic!("unexpected finish result after source swap: {error:?}"),
-                }
-            }
+        assert!(matches!(
+            result,
             Err(ShelleySourceBackedError::Capture(
                 CaptureError::InvalidProviderTranscriptPath { .. },
+            )) | Err(ShelleySourceBackedError::SqliteSource(
+                SqliteSourceAccessError::SourceChanged,
             ))
-            | Err(ShelleySourceBackedError::SqliteSource(
-                SqliteSourceAccessError::RootHandleVfs(_),
-            )) => {}
-            Err(error) => panic!("unexpected source-swap result: {error:?}"),
-        }
+        ));
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
-    fn active_wal_scan_reads_latest_rows_without_writing_source_files() {
+    fn active_wal_scan_reads_latest_rows_without_persistent_source_writes() {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let path = create_fixture(temp.path(), "before WAL");
         let writer = Connection::open(&path).unwrap();
@@ -1010,7 +991,7 @@ mod tests {
                 ["Shelley active WAL sentinel"],
             )
             .unwrap();
-        let before = sqlite_family_bytes(&path);
+        let before = sqlite_persistent_bytes(&path);
         let adapter = discover_shelley_source_backed_exact_cwd(temp.path())
             .unwrap()
             .unwrap();
@@ -1018,7 +999,7 @@ mod tests {
         assert!(documents
             .iter()
             .any(|document| document.body.contains("Shelley active WAL sentinel")));
-        assert_eq!(sqlite_family_bytes(&path), before);
+        assert_eq!(sqlite_persistent_bytes(&path), before);
         drop(writer);
     }
 
@@ -1039,9 +1020,9 @@ mod tests {
         (documents, receipt)
     }
 
-    #[cfg(target_os = "linux")]
-    fn sqlite_family_bytes(path: &Path) -> Vec<Vec<u8>> {
-        ["", "-wal", "-shm"]
+    fn sqlite_persistent_bytes(path: &Path) -> Vec<Vec<u8>> {
+        // Stock WAL readers may update volatile SHM reader marks.
+        ["", "-wal"]
             .into_iter()
             .map(|suffix| {
                 let mut component = path.as_os_str().to_os_string();

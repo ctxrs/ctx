@@ -225,7 +225,7 @@ impl TraeSqliteDatabase {
             .to_os_string();
         let parent = ProviderSourceRoot::open(parent_path)?.directory()?;
         let authority_handle = parent.try_clone_authority_handle()?;
-        let authority = retain_sqlite_source_directory_authority(&authority_handle)
+        let authority = retain_sqlite_source_directory_authority(&authority_handle, parent_path)
             .map_err(|error| trae_sqlite_source_error(path, error))?;
         let snapshot = open_root_handle_sqlite_source_snapshot(&authority, &database_name)
             .map_err(|error| trae_sqlite_source_error(path, error))?;
@@ -634,8 +634,8 @@ pub(crate) use source_backed::{
     TraeHydratedRecordV0, TraeSourceBackedErrorV0, TraeSourceBackedPageV0, TraeSourceBackedScanV0,
 };
 
-#[cfg(all(test, target_os = "linux"))]
-mod sqlite_vfs_tests {
+#[cfg(test)]
+mod stock_sqlite_snapshot_tests {
     use std::{cell::Cell, ffi::OsString, fs, path::Path};
 
     use rusqlite::{config::DbConfig, params, Connection};
@@ -643,7 +643,7 @@ mod sqlite_vfs_tests {
     use super::TraeSqliteDatabase;
 
     #[test]
-    fn root_handle_reader_queries_active_wal_without_writes_and_rejects_swap() {
+    fn stock_snapshot_queries_active_wal_without_persistent_writes_and_rejects_swap() {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let source = temp.path().join("trae.sqlite");
         let attacker = temp.path().join("attacker.sqlite");
@@ -651,18 +651,18 @@ mod sqlite_vfs_tests {
         create_database(&source, "main");
         create_database(&attacker, "attacker");
         persist_wal_row(&source, "from-wal");
-        let before_read = directory_snapshot(temp.path());
+        let before_read = persistent_directory_snapshot(temp.path());
 
         let (database, opened_value) = TraeSqliteDatabase::open(&source, read_latest).unwrap();
         assert_eq!(opened_value, "from-wal");
         assert!(database.evidence().wal_length().is_some());
         assert!(database.evidence().shared_memory_length().is_some());
         assert_eq!(database.read(&source, read_latest).unwrap(), "from-wal");
-        assert_eq!(directory_snapshot(temp.path()), before_read);
+        assert_eq!(persistent_directory_snapshot(temp.path()), before_read);
 
         fs::rename(&source, &admitted).unwrap();
         fs::rename(&attacker, &source).unwrap();
-        let before_rejected_read = directory_snapshot(temp.path());
+        let before_rejected_read = persistent_directory_snapshot(temp.path());
         let queried = Cell::new(false);
         let result = database.read(&source, |_| -> crate::Result<()> {
             queried.set(true);
@@ -670,7 +670,10 @@ mod sqlite_vfs_tests {
         });
         assert!(result.is_err());
         assert!(!queried.get());
-        assert_eq!(directory_snapshot(temp.path()), before_rejected_read);
+        assert_eq!(
+            persistent_directory_snapshot(temp.path()),
+            before_rejected_read
+        );
     }
 
     fn create_database(path: &Path, value: &str) {
@@ -708,10 +711,17 @@ mod sqlite_vfs_tests {
         )?)
     }
 
-    fn directory_snapshot(directory: &Path) -> Vec<(OsString, Vec<u8>)> {
+    fn persistent_directory_snapshot(directory: &Path) -> Vec<(OsString, Vec<u8>)> {
         let mut paths = fs::read_dir(directory)
             .unwrap()
             .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                !path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .ends_with("-shm")
+            })
             .collect::<Vec<_>>();
         paths.sort();
         paths

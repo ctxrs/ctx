@@ -554,7 +554,8 @@ impl ZedAdmittedSqliteFamily {
 
     fn connection(&self) -> ZedNativeResult<SqliteSourceReadSnapshot> {
         let directory = self.directory.try_clone_authority_handle()?;
-        let authority = retain_sqlite_source_directory_authority(&directory)?;
+        let authority =
+            retain_sqlite_source_directory_authority(&directory, self.root.named_path())?;
         match open_root_handle_sqlite_source_snapshot(&authority, &self.database_name) {
             Ok(snapshot) => Ok(snapshot),
             Err(

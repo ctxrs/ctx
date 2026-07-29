@@ -670,9 +670,8 @@ fn goose_nativepath_revalidates_each_query_guard_before_returning_a_page() {
     ));
 }
 
-#[cfg(target_os = "linux")]
 #[test]
-fn goose_nativepath_reads_latest_active_wal_rows_without_touching_provider_files() {
+fn goose_nativepath_reads_latest_active_wal_rows_without_persistent_writes() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let source_dir = temp.path().join("provider");
     fs::create_dir(&source_dir).unwrap();
@@ -698,12 +697,10 @@ fn goose_nativepath_reads_latest_active_wal_rows_without_touching_provider_files
         .unwrap();
 
     let source_wal = Path::new(&format!("{}-wal", source_path.display())).to_path_buf();
-    let source_shm = Path::new(&format!("{}-shm", source_path.display())).to_path_buf();
     assert_eq!(fs::read(&source_path).unwrap(), checkpointed_database);
     assert!(source_wal.metadata().unwrap().len() > 32);
     let database_before = fs::read(&source_path).unwrap();
     let wal_before = fs::read(&source_wal).unwrap();
-    let shm_before = source_shm.exists().then(|| fs::read(&source_shm).unwrap());
 
     let reader =
         GooseNativePathReader::acquire(GooseNativeSourceSelection::exact(&source_path)).unwrap();
@@ -719,10 +716,6 @@ fn goose_nativepath_reads_latest_active_wal_rows_without_touching_provider_files
     );
     assert_eq!(fs::read(&source_path).unwrap(), database_before);
     assert_eq!(fs::read(&source_wal).unwrap(), wal_before);
-    assert_eq!(
-        source_shm.exists().then(|| fs::read(&source_shm).unwrap()),
-        shm_before
-    );
     drop(writer);
 }
 
