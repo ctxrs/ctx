@@ -55,16 +55,10 @@ def expect_source_backed_status(
     ):
         raise HarnessError(f"status has an unexpected source epoch: {history_epoch}")
     lexical_path = data_root / "search" / "lexical"
-    lexical_state = (lexical.get("status"), lexical.get("reason")) if isinstance(
-        lexical, dict
-    ) else None
     if (
         not isinstance(lexical, dict)
-        or lexical_state
-        not in {
-            ("ready", None),
-            ("stale", "epoch_generation_mismatch"),
-        }
+        or lexical.get("status") != "ready"
+        or lexical.get("reason") is not None
         or lexical.get("path") != str(lexical_path)
         or int(lexical.get("indexed_documents", -1)) != expected_events
         or not lexical_path.is_dir()

@@ -144,11 +144,27 @@ fn assert_source_generation_ready(temp: &TempDir, expected_generation: &str) -> 
         status["lexical"]["generation_id"], expected_generation,
         "{status:#}"
     );
+    assert_eq!(
+        status["lexical"]["request_state"], "published",
+        "{status:#}"
+    );
+    assert_eq!(
+        status["lexical"]["published_generation"], expected_generation,
+        "{status:#}"
+    );
+    assert_eq!(status["lexical"]["generation_matches"], true, "{status:#}");
     assert_eq!(status["refresh"]["status"], "ready", "{status:#}");
     assert_eq!(
         status["refresh"]["published_generation"], expected_generation,
         "{status:#}"
     );
+    assert_eq!(status["refresh"]["generation_matches"], true, "{status:#}");
+    assert_eq!(status["resolver"]["status"], "ready", "{status:#}");
+    assert_eq!(
+        status["resolver"]["generation_id"], expected_generation,
+        "{status:#}"
+    );
+    assert_eq!(status["resolver"]["generation_matches"], true, "{status:#}");
     assert_eq!(
         status["indexed_events"], status["lexical"]["indexed_documents"],
         "{status:#}"
@@ -157,8 +173,8 @@ fn assert_source_generation_ready(temp: &TempDir, expected_generation: &str) -> 
         status["indexed_sources"], status["lexical"]["certified_sources"],
         "{status:#}"
     );
-    assert_eq!(status["legacy_history"]["present"], false, "{status:#}");
-    assert_eq!(status["legacy_history"]["opened"], false, "{status:#}");
+    assert_eq!(status["prior_epoch"]["present"], false, "{status:#}");
+    assert_eq!(status["prior_epoch"]["opened"], false, "{status:#}");
     assert!(
         !temp.path().join("work.sqlite").exists(),
         "source-backed search/status must not create the previous-epoch Store"
@@ -516,7 +532,7 @@ fn assert_daemon_refresh_failure(
             .is_some_and(|error| !error.is_empty()),
         "{status:#}"
     );
-    assert_eq!(status["legacy_history"]["opened"], false, "{status:#}");
+    assert_eq!(status["prior_epoch"]["opened"], false, "{status:#}");
     assert!(
         !temp.path().join("work.sqlite").exists(),
         "failed source-backed refresh must not create the previous-epoch Store"
@@ -1007,7 +1023,11 @@ fn search_refresh_invalid_source_failure_retains_last_published_generation() {
 
     let failed = assert_daemon_refresh_failure(&temp, 2, Some(&initial_generation));
     assert_eq!(failed["history_epoch"]["status"], "ready", "{failed:#}");
-    assert_eq!(failed["lexical"]["status"], "ready", "{failed:#}");
+    assert_eq!(failed["lexical"]["status"], "unavailable", "{failed:#}");
+    assert_eq!(
+        failed["lexical"]["reason"], "source_refresh_failed",
+        "{failed:#}"
+    );
     assert_eq!(
         failed["lexical"]["generation_id"], initial_generation,
         "{failed:#}"
@@ -1141,7 +1161,11 @@ fn search_refresh_codex_generation_covers_full_source_lifecycle() {
     assert_source_backed_search_show_oracle(&temp, &cold, "codex", cold_query, 1, "message");
     let cold_generation = assert_published_generation(&cold, "wait");
     assert_eq!(cold["retrieval"]["indexed_documents"], 2, "{cold:#}");
-    assert_daemon_publication(&temp, &cold_generation, 1, &["codex", "codex"]);
+    let cold_status = assert_daemon_publication(&temp, &cold_generation, 1, &["codex", "codex"]);
+    assert_eq!(
+        cold_status["history_epoch"]["lexical_generation_id"], cold_generation,
+        "{cold_status:#}"
+    );
     let (cold_manifest, _) = generation_manifest(&temp, &cold_generation);
     assert_eq!(cold_manifest.sources.len(), 2);
     assert!(cold_manifest.removals.is_empty());
@@ -1187,7 +1211,12 @@ fn search_refresh_codex_generation_covers_full_source_lifecycle() {
         appended["retrieval"]["indexed_documents"], 3,
         "{appended:#}"
     );
-    assert_daemon_publication(&temp, &append_generation, 1, &["codex", "codex"]);
+    let append_status =
+        assert_daemon_publication(&temp, &append_generation, 1, &["codex", "codex"]);
+    assert_eq!(
+        append_status["history_epoch"]["lexical_generation_id"], cold_generation,
+        "{append_status:#}"
+    );
     let (append_manifest, _) = generation_manifest(&temp, &append_generation);
     assert_eq!(append_manifest.sources.len(), 2);
     let append_source = append_manifest
@@ -1241,7 +1270,12 @@ fn search_refresh_codex_generation_covers_full_source_lifecycle() {
         rewritten["retrieval"]["indexed_documents"], 3,
         "{rewritten:#}"
     );
-    assert_daemon_publication(&temp, &rewrite_generation, 1, &["codex", "codex"]);
+    let rewrite_status =
+        assert_daemon_publication(&temp, &rewrite_generation, 1, &["codex", "codex"]);
+    assert_eq!(
+        rewrite_status["history_epoch"]["lexical_generation_id"], cold_generation,
+        "{rewrite_status:#}"
+    );
     let (rewrite_manifest, _) = generation_manifest(&temp, &rewrite_generation);
     let rewrite_source = rewrite_manifest
         .sources
@@ -1304,7 +1338,12 @@ fn search_refresh_codex_generation_covers_full_source_lifecycle() {
         truncated["retrieval"]["indexed_documents"], 2,
         "{truncated:#}"
     );
-    assert_daemon_publication(&temp, &truncate_generation, 1, &["codex", "codex"]);
+    let truncate_status =
+        assert_daemon_publication(&temp, &truncate_generation, 1, &["codex", "codex"]);
+    assert_eq!(
+        truncate_status["history_epoch"]["lexical_generation_id"], cold_generation,
+        "{truncate_status:#}"
+    );
     let (truncate_manifest, _) = generation_manifest(&temp, &truncate_generation);
     let truncate_source = truncate_manifest
         .sources
@@ -1339,6 +1378,14 @@ fn search_refresh_codex_generation_covers_full_source_lifecycle() {
     let unavailable_status = assert_daemon_refresh_failure(&temp, 0, Some(&truncate_generation));
     assert_eq!(
         unavailable_status["lexical"]["generation_id"], truncate_generation,
+        "{unavailable_status:#}"
+    );
+    assert_eq!(
+        unavailable_status["lexical"]["status"], "unavailable",
+        "{unavailable_status:#}"
+    );
+    assert_eq!(
+        unavailable_status["lexical"]["reason"], "source_refresh_failed",
         "{unavailable_status:#}"
     );
     let (retained_manifest, _) = generation_manifest(&temp, &truncate_generation);
@@ -1399,7 +1446,11 @@ fn search_refresh_codex_generation_covers_full_source_lifecycle() {
         deleted["results"].as_array().unwrap().is_empty(),
         "{deleted:#}"
     );
-    assert_daemon_publication(&temp, &deletion_generation, 1, &["codex"]);
+    let deletion_status = assert_daemon_publication(&temp, &deletion_generation, 1, &["codex"]);
+    assert_eq!(
+        deletion_status["history_epoch"]["lexical_generation_id"], cold_generation,
+        "{deletion_status:#}"
+    );
     let (deletion_manifest, _) = generation_manifest(&temp, &deletion_generation);
     assert_eq!(deletion_manifest.sources.len(), 1);
     assert_eq!(deletion_manifest.removals.len(), 1);
