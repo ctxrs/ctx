@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeSet,
     fs::{File, Metadata},
     io::{BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
@@ -9,37 +8,17 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{
-    provider::{
-        provider_path_identity,
-        native_ingestion::{
-            process_pro_replay_only, NativePageAccounting, NativeProOutputPage,
-            NativeProReplayPage, NativeSafeFrontier, NativeSourceIdentity,
-        },
-    },
-    CaptureError, OutputAssociations, OutputNativeCoordinate, OutputObservationKind,
-    OutputSourceIdentity, OutputSourceLocator, ProOutputObservation, ProOutputProgress,
-    ProOutputSink, ProOutputSourceDisposition, Result,
-};
+use crate::{provider::provider_path_identity, CaptureError, Result};
 
 use super::{
-    checkpoint::{CursorCheckpoint, CursorCheckpointDisposition},
-    layout::{CursorRootInventory, CursorTranscriptPath},
+    checkpoint::CursorCheckpoint,
+    layout::CursorTranscriptPath,
     parser::{
-        scan_cursor_output_pages, scan_cursor_reader, CursorOutputFact, CursorOutputPage,
-        CursorOutputScanOutcome, CursorParserOutcome, CursorParserPlan, CursorParserStats,
-        CursorRecordRejection, CursorRejectionKind, CursorRejectionSummary,
+        scan_cursor_reader, CursorParserStats, CursorRecordRejection, CursorRejectionKind,
+        CursorRejectionSummary,
     },
-    projection::{CursorNativeSession, CursorPublicationSink},
+    projection::{CursorNativeEvent, CursorNativeSession},
 };
-
-mod output;
-
-const CURSOR_OUTPUT_FRONTIER_VERSION: u32 = 1;
-const CURSOR_OUTPUT_PARSER_REVISION: &str = "cursor-nativepath-output-v1";
-
-#[cfg(test)]
-use super::projection::{CursorNativeEvent, CursorPublicationPage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CursorObservedTime {
@@ -320,42 +299,6 @@ fn unix_changed_time(metadata: &Metadata) -> Option<CursorObservedTime> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CursorPriorObservation {
-    pub(crate) canonical_source_key: String,
-    pub(crate) observation: CursorSourceObservation,
-    pub(crate) checkpoint: CursorCheckpoint,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum CursorSourceMutation {
-    NewPathScopedSource,
-    ExactReplay,
-    AppendCandidate,
-    Rewrite,
-    Truncation,
-}
-
-pub(super) fn cursor_source_mutation(
-    current: &CursorSourceObservation,
-    prior: Option<&CursorPriorObservation>,
-) -> CursorSourceMutation {
-    let Some(prior) = prior.filter(|prior| {
-        prior.observation.locator_identity == current.locator_identity
-            && prior.observation.native_session_id == current.native_session_id
-    }) else {
-        return CursorSourceMutation::NewPathScopedSource;
-    };
-    if prior.observation.same_strong_snapshot(current) {
-        return CursorSourceMutation::ExactReplay;
-    }
-    match current.length.cmp(&prior.observation.length) {
-        std::cmp::Ordering::Less => CursorSourceMutation::Truncation,
-        std::cmp::Ordering::Greater => CursorSourceMutation::AppendCandidate,
-        std::cmp::Ordering::Equal => CursorSourceMutation::Rewrite,
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CursorSourceRejection {
     pub(crate) physical_line: u64,
     pub(crate) kind: CursorRejectionKind,
@@ -387,211 +330,23 @@ impl From<CursorRejectionSummary> for CursorSourceRejections {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct CursorGenerationStats {
-    pub(crate) source_opens: u64,
-    pub(crate) source_revalidations: u64,
-    pub(crate) full_rescans_after_prefix_mismatch: u64,
-    pub(crate) bytes_read: u64,
-    pub(crate) verification_bytes_read: u64,
-    pub(crate) projected_bytes_read: u64,
-    pub(crate) complete_records: u64,
-    pub(crate) malformed_records: u64,
-    pub(crate) oversized_records: u64,
-    pub(crate) incomplete_tail_records: u64,
-    pub(crate) native_result_records: u64,
-    pub(crate) native_result_bytes: u64,
-    pub(crate) result_body_bytes_decoded_or_allocated: u64,
-    pub(crate) result_hashes_created: u64,
-    pub(crate) result_previews_created: u64,
-    pub(crate) result_touches_created: u64,
-    pub(crate) result_fts_created: u64,
-    pub(crate) result_handoffs_created: u64,
-    pub(crate) retained_messages: u64,
-    pub(crate) retained_summaries: u64,
-    pub(crate) retained_notices: u64,
-    pub(crate) retained_tool_calls: u64,
-    pub(crate) retained_body_bytes: u64,
-    pub(crate) max_line_buffer_bytes: usize,
-    pub(crate) publication_pages: u64,
-    pub(crate) nativepath_publication_rows: u64,
-    pub(crate) publication_serialized_bytes: u64,
-    pub(crate) max_publication_page_rows: usize,
-    pub(crate) max_publication_page_bytes: usize,
-}
-
-impl CursorGenerationStats {
-    fn from_parser(parser: CursorParserStats) -> Self {
-        Self {
-            source_opens: 1,
-            source_revalidations: 1,
-            full_rescans_after_prefix_mismatch: 0,
-            bytes_read: parser.bytes_read,
-            verification_bytes_read: parser.verification_bytes_read,
-            projected_bytes_read: parser.projected_bytes_read,
-            complete_records: parser.complete_records,
-            malformed_records: parser.malformed_records,
-            oversized_records: parser.oversized_records,
-            incomplete_tail_records: parser.incomplete_tail_records,
-            native_result_records: parser.native_result_records,
-            native_result_bytes: parser.native_result_bytes,
-            result_body_bytes_decoded_or_allocated: parser.result_body_bytes_decoded_or_allocated,
-            result_hashes_created: parser.result_hashes_created,
-            result_previews_created: parser.result_previews_created,
-            result_touches_created: parser.result_touches_created,
-            result_fts_created: parser.result_fts_created,
-            result_handoffs_created: parser.result_handoffs_created,
-            retained_messages: parser.retained_messages,
-            retained_summaries: parser.retained_summaries,
-            retained_notices: parser.retained_notices,
-            retained_tool_calls: parser.retained_tool_calls,
-            retained_body_bytes: parser.retained_body_bytes,
-            max_line_buffer_bytes: parser.max_line_buffer_bytes,
-            publication_pages: parser.publication_pages,
-            nativepath_publication_rows: parser.nativepath_publication_rows,
-            publication_serialized_bytes: parser.publication_serialized_bytes,
-            max_publication_page_rows: parser.max_publication_page_rows,
-            max_publication_page_bytes: parser.max_publication_page_bytes,
-        }
-    }
-
-    fn merge_retry(&mut self, retry: CursorParserStats) {
-        self.source_opens = self.source_opens.saturating_add(1);
-        self.full_rescans_after_prefix_mismatch =
-            self.full_rescans_after_prefix_mismatch.saturating_add(1);
-        self.bytes_read = self.bytes_read.saturating_add(retry.bytes_read);
-        self.verification_bytes_read = self
-            .verification_bytes_read
-            .saturating_add(retry.verification_bytes_read);
-        self.projected_bytes_read = retry.projected_bytes_read;
-        self.complete_records = retry.complete_records;
-        self.malformed_records = retry.malformed_records;
-        self.oversized_records = retry.oversized_records;
-        self.incomplete_tail_records = retry.incomplete_tail_records;
-        self.native_result_records = retry.native_result_records;
-        self.native_result_bytes = retry.native_result_bytes;
-        self.retained_messages = retry.retained_messages;
-        self.retained_summaries = retry.retained_summaries;
-        self.retained_notices = retry.retained_notices;
-        self.retained_tool_calls = retry.retained_tool_calls;
-        self.retained_body_bytes = retry.retained_body_bytes;
-        self.max_line_buffer_bytes = self.max_line_buffer_bytes.max(retry.max_line_buffer_bytes);
-        self.publication_pages = retry.publication_pages;
-        self.nativepath_publication_rows = retry.nativepath_publication_rows;
-        self.publication_serialized_bytes = retry.publication_serialized_bytes;
-        self.max_publication_page_rows = retry.max_publication_page_rows;
-        self.max_publication_page_bytes = retry.max_publication_page_bytes;
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CursorSourceGeneration {
     pub(crate) observation: CursorSourceObservation,
     pub(crate) session: Option<CursorNativeSession>,
-    pub(crate) mutation: CursorSourceMutation,
-    #[cfg(test)]
-    pub(crate) events: Vec<CursorNativeEvent>,
     pub(crate) rejections: CursorSourceRejections,
     pub(crate) checkpoint: CursorCheckpoint,
-    pub(crate) stats: CursorGenerationStats,
+    pub(crate) stats: CursorParserStats,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CursorUnchangedSource {
-    pub(crate) observation: CursorSourceObservation,
-    pub(crate) checkpoint: CursorCheckpoint,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CursorReadOutcome {
-    Unchanged(Box<CursorUnchangedSource>),
-    Generation(Box<CursorSourceGeneration>),
-}
-
-pub(crate) fn scan_cursor_source_into(
+pub(crate) fn scan_cursor_source(
     frozen: &CursorFrozenSource,
-    prior: Option<&CursorPriorObservation>,
-    sink: &mut dyn CursorPublicationSink,
-) -> Result<CursorReadOutcome> {
-    sink.begin_cursor_publication()?;
-    let result = scan_cursor_source_into_transaction(frozen, prior, sink);
-    match result {
-        Ok(outcome) => match sink.commit_cursor_publication() {
-            Ok(()) => Ok(outcome),
-            Err(error) => {
-                sink.abort_cursor_publication();
-                Err(error)
-            }
-        },
-        Err(error) => {
-            sink.abort_cursor_publication();
-            Err(error)
-        }
-    }
-}
-
-fn scan_cursor_source_into_transaction(
-    frozen: &CursorFrozenSource,
-    prior: Option<&CursorPriorObservation>,
-    sink: &mut dyn CursorPublicationSink,
-) -> Result<CursorReadOutcome> {
-    let mutation = cursor_source_mutation(frozen.observation(), prior);
-    if mutation == CursorSourceMutation::ExactReplay {
-        if let Some(prior) =
-            prior.filter(|prior| prior.checkpoint.is_supported() && prior.checkpoint.terminal)
-        {
-            return Ok(CursorReadOutcome::Unchanged(Box::new(
-                CursorUnchangedSource {
-                    observation: frozen.observation.clone(),
-                    checkpoint: prior.checkpoint.clone(),
-                },
-            )));
-        }
-    }
-    let resume_checkpoint = prior
-        .filter(|_| {
-            mutation == CursorSourceMutation::AppendCandidate
-                || mutation == CursorSourceMutation::ExactReplay
-        })
-        .map(|prior| &prior.checkpoint)
-        .filter(|checkpoint| {
-            checkpoint.is_supported()
-                && checkpoint.disposition == CursorCheckpointDisposition::Publish
-        });
+    emit: &mut dyn FnMut(CursorNativeEvent) -> Result<()>,
+) -> Result<CursorSourceGeneration> {
     let file = frozen.open()?;
     let mut reader = BufReader::new(file);
-    let plan = resume_checkpoint.map_or(CursorParserPlan::FullSnapshot, |checkpoint| {
-        CursorParserPlan::VerifyPrefixAndResume(checkpoint)
-    });
-    let first = scan_cursor_reader(&mut reader, plan, sink)?;
-    let (parsed, mut stats, resumed) = match first {
-        CursorParserOutcome::Parsed(parsed) => {
-            let parsed = *parsed;
-            let stats = CursorGenerationStats::from_parser(parsed.stats.clone());
-            let resumed = parsed.resumed;
-            (parsed, stats, resumed)
-        }
-        CursorParserOutcome::PrefixMismatch(first_stats) => {
-            let first_stats = *first_stats;
-            let file = frozen.open()?;
-            let mut reader = BufReader::new(file);
-            let CursorParserOutcome::Parsed(parsed) =
-                scan_cursor_reader(&mut reader, CursorParserPlan::FullSnapshot, sink)?
-            else {
-                return Err(CaptureError::SystemInvariant(
-                    "Cursor full snapshot unexpectedly reported a prefix mismatch",
-                ));
-            };
-            let parsed = *parsed;
-            let mut stats = CursorGenerationStats::from_parser(first_stats);
-            stats.merge_retry(parsed.stats.clone());
-            (parsed, stats, false)
-        }
-    };
+    let parsed = scan_cursor_reader(&mut reader, emit)?;
     frozen.revalidate()?;
-    if !resumed && mutation == CursorSourceMutation::AppendCandidate {
-        stats.full_rescans_after_prefix_mismatch = stats.full_rescans_after_prefix_mismatch.max(1);
-    }
     let has_retained_events = parsed.stats.retained_messages > 0
         || parsed.stats.retained_summaries > 0
         || parsed.stats.retained_notices > 0
@@ -606,156 +361,11 @@ fn scan_cursor_source_into_transaction(
         ended_at: parsed.checkpoint.session.ended_at,
         title: parsed.checkpoint.session.title.clone(),
     });
-    Ok(CursorReadOutcome::Generation(Box::new(
-        CursorSourceGeneration {
-            observation: frozen.observation.clone(),
-            session,
-            mutation: if !resumed && mutation == CursorSourceMutation::AppendCandidate {
-                CursorSourceMutation::Rewrite
-            } else {
-                mutation
-            },
-            #[cfg(test)]
-            events: parsed.events,
-            rejections: parsed.rejections.into(),
-            checkpoint: parsed.checkpoint,
-            stats,
-        },
-    )))
-}
-
-#[cfg(test)]
-struct CursorCollectingPublicationSink {
-    events: Vec<CursorNativeEvent>,
-}
-
-#[cfg(test)]
-impl CursorPublicationSink for CursorCollectingPublicationSink {
-    fn begin_cursor_publication(&mut self) -> Result<()> {
-        self.events.clear();
-        Ok(())
-    }
-
-    fn stage_cursor_page(&mut self, page: CursorPublicationPage) -> Result<()> {
-        self.events.extend(page.events);
-        Ok(())
-    }
-
-    fn abort_cursor_publication(&mut self) {
-        self.events.clear();
-    }
-
-    fn commit_cursor_publication(&mut self) -> Result<()> {
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn scan_cursor_source(
-    frozen: &CursorFrozenSource,
-    prior: Option<&CursorPriorObservation>,
-) -> Result<CursorReadOutcome> {
-    let mut sink = CursorCollectingPublicationSink { events: Vec::new() };
-    let outcome = scan_cursor_source_into(frozen, prior, &mut sink)?;
-    match outcome {
-        CursorReadOutcome::Generation(mut generation) => {
-            // Preserve the historical test helper contract. The production
-            // source path hands pages directly to its sink instead.
-            generation.events = sink.events;
-            Ok(CursorReadOutcome::Generation(generation))
-        }
-        unchanged => Ok(unchanged),
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CursorKnownSource {
-    pub(crate) canonical_source_key: String,
-    pub(crate) locator_identity: String,
-    pub(crate) native_session_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CursorCompletedExactInventory {
-    live_sources: BTreeSet<(String, String)>,
-}
-
-impl CursorCompletedExactInventory {
-    pub(crate) fn from_discovery(
-        inventory: &CursorRootInventory,
-        observations: &[CursorSourceObservation],
-    ) -> Option<Self> {
-        if !inventory.completed
-            || inventory.input.file_name() != Some(std::ffi::OsStr::new("projects"))
-            || inventory.revalidate().is_err()
-            || inventory
-                .transcripts
-                .iter()
-                .any(|transcript| transcript.projects_root() != inventory.input)
-            || inventory.transcripts.len() != observations.len()
-        {
-            return None;
-        }
-        let mut expected = BTreeSet::new();
-        for transcript in &inventory.transcripts {
-            transcript.source_file().revalidate().ok()?;
-            let locator_identity = provider_path_identity(transcript.path()).ok()?;
-            expected.insert((locator_identity, transcript.native_session_id().to_owned()));
-        }
-        let observed = observations
-            .iter()
-            .map(|observation| {
-                (
-                    observation.locator_identity.clone(),
-                    observation.native_session_id.clone(),
-                )
-            })
-            .collect::<BTreeSet<_>>();
-        (expected == observed && observed.len() == observations.len()).then_some(Self {
-            live_sources: observed,
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CursorMissingSourceDisposition {
-    RetainWithoutCompletedInventory {
-        canonical_source_key: String,
-    },
-    Present {
-        canonical_source_key: String,
-    },
-    RouteUnavailableCandidate {
-        canonical_source_key: String,
-        locator_identity: String,
-    },
-}
-
-pub(crate) fn resolve_cursor_missing_sources(
-    known: &[CursorKnownSource],
-    inventory: Option<&CursorCompletedExactInventory>,
-) -> Vec<CursorMissingSourceDisposition> {
-    known
-        .iter()
-        .map(|source| {
-            let Some(inventory) = inventory else {
-                return CursorMissingSourceDisposition::RetainWithoutCompletedInventory {
-                    canonical_source_key: source.canonical_source_key.clone(),
-                };
-            };
-            if inventory.live_sources.contains(&(
-                source.locator_identity.clone(),
-                source.native_session_id.clone(),
-            )) {
-                CursorMissingSourceDisposition::Present {
-                    canonical_source_key: source.canonical_source_key.clone(),
-                }
-            } else {
-                CursorMissingSourceDisposition::RouteUnavailableCandidate {
-                    canonical_source_key: source.canonical_source_key.clone(),
-                    locator_identity: source.locator_identity.clone(),
-                }
-            }
-        })
-        .collect()
+    Ok(CursorSourceGeneration {
+        observation: frozen.observation.clone(),
+        session,
+        rejections: parsed.rejections.into(),
+        checkpoint: parsed.checkpoint,
+        stats: parsed.stats,
+    })
 }

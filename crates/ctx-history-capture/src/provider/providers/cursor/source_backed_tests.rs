@@ -1,5 +1,6 @@
 use std::{
-    fs,
+    fs::{self, OpenOptions},
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -7,11 +8,12 @@ use ctx_history_core::{EventType, LocatorRevisionPolicy, NativeRecordCoordinate,
 use serde_json::json;
 use tempfile::TempDir;
 
+use super::source_backed::CursorSourceBackedSummary;
 use super::{
     extract_cursor_source_backed_cold, hydrate_cursor_source_backed_message,
     CursorSourceBackedPage, CursorSourceBackedRecord, CursorSourceBackedSink,
-    CursorSourceBackedSourcePlan, CursorSourceBackedSummary, CursorSourceBackedTerminal,
-    CURSOR_PUBLICATION_PAGE_MAX_BYTES, CURSOR_PUBLICATION_PAGE_MAX_ROWS,
+    CursorSourceBackedSourcePlan, CursorSourceBackedTerminal, CURSOR_SOURCE_BACKED_PAGE_MAX_BYTES,
+    CURSOR_SOURCE_BACKED_PAGE_MAX_ROWS,
 };
 use crate::{CaptureError, Result, PROVIDER_MAX_TEXT_CHARS};
 
@@ -75,6 +77,21 @@ fn multipart() -> serde_json::Value {
                 },
                 {"type": "text", "text": "second"}
             ]
+        }
+    })
+}
+
+fn tool_result(text: &str) -> serde_json::Value {
+    json!({
+        "timestamp": "2026-07-24T12:00:02Z",
+        "role": "user",
+        "message": {
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": "call-1",
+                "content": text
+            }]
         }
     })
 }
@@ -165,10 +182,9 @@ fn cursor_source_backed_cold_extraction_preserves_winning_root_ids_and_bounds() 
         3
     );
     assert_eq!(first.aborted, 0);
-    assert!(first.pages.iter().all(
-        |page| page.records.len() <= CURSOR_PUBLICATION_PAGE_MAX_ROWS
-            && page.estimated_bytes <= CURSOR_PUBLICATION_PAGE_MAX_BYTES
-    ));
+    assert!(first.pages.iter().all(|page| page.records.len()
+        <= CURSOR_SOURCE_BACKED_PAGE_MAX_ROWS
+        && page.estimated_bytes <= CURSOR_SOURCE_BACKED_PAGE_MAX_BYTES));
     assert!(first.records().all(|record| {
         record.locator.revision_policy() == LocatorRevisionPolicy::ExactSourceRevision
             && record.locator.certified_source_revision_digest().is_some()
@@ -215,6 +231,103 @@ fn cursor_source_backed_cold_extraction_preserves_winning_root_ids_and_bounds() 
         .plans
         .iter()
         .all(|plan| plan.native_session_id != "decoy-session"));
+}
+
+#[test]
+fn cursor_source_backed_parser_excludes_output_bodies_without_replay() {
+    let temp = tempdir();
+    let data_dir = temp.path().join("cursor-data");
+    let projects = data_dir.join("projects");
+    let sentinel = "CURSOR_OUTPUT_BODY_MUST_NOT_ENTER_SOURCE_BACKED_CORE";
+    write_transcript(
+        &projects,
+        "project",
+        "output-session",
+        [
+            user("searchable message"),
+            tool_result(&sentinel.repeat(512)),
+        ],
+    );
+
+    let mut sink = CollectingSink::default();
+    let summary = extract_cursor_source_backed_cold(&data_dir, &mut sink).unwrap();
+
+    assert_eq!(summary.projected_records, 1);
+    assert_eq!(summary.indexed_documents, 1);
+    assert_eq!(sink.terminals[0].physical_records, 2);
+    assert_eq!(sink.terminals[0].projected_records, 1);
+    assert_eq!(
+        sink.records()
+            .next()
+            .and_then(CursorSourceBackedRecord::lexical_document)
+            .map(|document| document.body),
+        Some("searchable message".to_owned())
+    );
+    assert!(sink.records().all(|record| !record
+        .lexical_body
+        .as_deref()
+        .is_some_and(|body| body.contains(sentinel))));
+}
+
+struct MutatingSink {
+    transcript: PathBuf,
+    inner: CollectingSink,
+    mutated: bool,
+}
+
+impl CursorSourceBackedSink for MutatingSink {
+    fn begin_cursor_source(&mut self, plan: &CursorSourceBackedSourcePlan) -> Result<()> {
+        self.inner.begin_cursor_source(plan)
+    }
+
+    fn stage_cursor_source_page(&mut self, page: CursorSourceBackedPage) -> Result<()> {
+        self.inner.stage_cursor_source_page(page)?;
+        if !self.mutated {
+            let mut transcript = OpenOptions::new()
+                .append(true)
+                .open(&self.transcript)
+                .unwrap();
+            serde_json::to_writer(&mut transcript, &user("late mutation")).unwrap();
+            transcript.write_all(b"\n").unwrap();
+            transcript.flush().unwrap();
+            self.mutated = true;
+        }
+        Ok(())
+    }
+
+    fn finish_cursor_source(&mut self, terminal: CursorSourceBackedTerminal) -> Result<()> {
+        self.inner.finish_cursor_source(terminal)
+    }
+
+    fn abort_cursor_source(&mut self) {
+        self.inner.abort_cursor_source();
+    }
+}
+
+#[test]
+fn cursor_source_backed_extraction_aborts_when_source_changes_during_projection() {
+    let temp = tempdir();
+    let data_dir = temp.path().join("cursor-data");
+    let projects = data_dir.join("projects");
+    let transcript = write_transcript(
+        &projects,
+        "project",
+        "mutable-session",
+        (0..=CURSOR_SOURCE_BACKED_PAGE_MAX_ROWS).map(|index| user(&format!("message-{index}"))),
+    );
+    let mut sink = MutatingSink {
+        transcript,
+        inner: CollectingSink::default(),
+        mutated: false,
+    };
+
+    assert!(matches!(
+        extract_cursor_source_backed_cold(&data_dir, &mut sink),
+        Err(CaptureError::SourceChangedDuringCapture)
+    ));
+    assert!(sink.mutated);
+    assert_eq!(sink.inner.aborted, 1);
+    assert!(sink.inner.terminals.is_empty());
 }
 
 #[test]

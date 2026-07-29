@@ -1,8 +1,5 @@
 use std::fmt;
 
-#[cfg(test)]
-use std::io;
-
 use ctx_history_core::{ContentRef, EventRole, EventType};
 use serde::{
     de::{self, DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor},
@@ -12,11 +9,6 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::provider::normalization::provider_policy_event_text;
-
-#[cfg(test)]
-use super::checkpoint::CursorCheckpoint;
-#[cfg(test)]
-use crate::Result;
 
 const MAX_CURSOR_ATOM_CHARS: usize = 512;
 const MAX_CURSOR_PATH_CHARS: usize = 4_096;
@@ -73,8 +65,6 @@ pub(super) enum CursorSafePart {
         role: EventRole,
         text: String,
         #[serde(skip)]
-        text_retention: Value,
-        #[serde(skip)]
         complete_content_ref: Option<ContentRef>,
     },
     ToolUse {
@@ -106,22 +96,13 @@ pub(super) struct CursorSanitizedRecord {
 }
 
 mod classification;
-mod output;
 mod stream;
 
 use classification::{
     classify_cursor_line, CursorBlockKind, CursorContentLocation, CursorLineClassification,
     CursorRecordAdmission,
 };
-pub(crate) use output::{
-    scan_cursor_output_pages, CursorOutputFact, CursorOutputPage, CursorOutputScanOutcome,
-};
-
-#[cfg(test)]
-pub(super) use stream::CursorParsedGeneration;
-pub(super) use stream::{
-    scan_cursor_reader, CursorParserOutcome, CursorParserPlan, CursorParserStats,
-};
+pub(super) use stream::{scan_cursor_reader, CursorParserStats};
 
 fn decode_sanitized_record(
     bytes: &[u8],
@@ -420,7 +401,6 @@ impl<'de> Visitor<'de> for CursorTextBlockVisitor<'_> {
             event_type,
             role: cursor_role(self.classification.role.as_deref()),
             text: retained.text,
-            text_retention: retained.retention,
             complete_content_ref: retained.complete_content_ref,
         }))
     }
@@ -478,19 +458,16 @@ impl Visitor<'_> for CursorMessageTextVisitor {
 
 struct CursorRetainedMessageText {
     text: String,
-    retention: Value,
     complete_content_ref: Option<ContentRef>,
 }
 
 fn retained_cursor_message_text(event_type: EventType, value: &str) -> CursorRetainedMessageText {
     let retained = provider_policy_event_text(event_type, value, &json!({}));
-    let retention = retained.retention.as_json();
     let complete_content_ref = (event_type == EventType::Message)
         .then(|| ContentRef::from_bytes(value.as_bytes()))
         .flatten();
     CursorRetainedMessageText {
         text: retained.text,
-        retention,
         complete_content_ref,
     }
 }
@@ -755,77 +732,4 @@ impl Visitor<'_> for BoundedStringVisitor {
             Ok(value.chars().take(self.max_chars).collect())
         }
     }
-}
-
-#[cfg(test)]
-struct CursorCollectingPublicationSink {
-    events: Vec<super::projection::CursorNativeEvent>,
-}
-
-#[cfg(test)]
-impl super::projection::CursorPublicationSink for CursorCollectingPublicationSink {
-    fn begin_cursor_publication(&mut self) -> Result<()> {
-        self.events.clear();
-        Ok(())
-    }
-
-    fn stage_cursor_page(&mut self, page: super::projection::CursorPublicationPage) -> Result<()> {
-        self.events.extend(page.events);
-        Ok(())
-    }
-
-    fn abort_cursor_publication(&mut self) {
-        self.events.clear();
-    }
-
-    fn commit_cursor_publication(&mut self) -> Result<()> {
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-pub(super) fn scan_cursor_bytes_into_sink(
-    bytes: &[u8],
-    checkpoint: Option<&CursorCheckpoint>,
-    max_line_bytes: usize,
-    sink: &mut dyn super::projection::CursorPublicationSink,
-) -> Result<CursorParserOutcome> {
-    sink.begin_cursor_publication()?;
-    let mut reader = io::BufReader::new(bytes);
-    let plan = checkpoint.map_or(CursorParserPlan::FullSnapshot, |checkpoint| {
-        CursorParserPlan::VerifyPrefixAndResume(checkpoint)
-    });
-    let result = stream::scan_cursor_reader_with_limit(&mut reader, plan, sink, max_line_bytes);
-    match result {
-        Ok(outcome) => match sink.commit_cursor_publication() {
-            Ok(()) => Ok(outcome),
-            Err(error) => {
-                sink.abort_cursor_publication();
-                Err(error)
-            }
-        },
-        Err(error) => {
-            sink.abort_cursor_publication();
-            Err(error)
-        }
-    }
-}
-
-#[cfg(test)]
-pub(super) fn scan_cursor_bytes_with_limit(
-    bytes: &[u8],
-    checkpoint: Option<&CursorCheckpoint>,
-    max_line_bytes: usize,
-) -> Result<CursorParserOutcome> {
-    let mut sink = CursorCollectingPublicationSink { events: Vec::new() };
-    let outcome = scan_cursor_bytes_into_sink(bytes, checkpoint, max_line_bytes, &mut sink)?;
-    Ok(match outcome {
-        CursorParserOutcome::Parsed(mut parsed) => {
-            // Preserve the historical test helper contract. The production
-            // reader never owns this vector; only this collecting wrapper does.
-            parsed.events = sink.events;
-            CursorParserOutcome::Parsed(parsed)
-        }
-        CursorParserOutcome::PrefixMismatch(stats) => CursorParserOutcome::PrefixMismatch(stats),
-    })
 }

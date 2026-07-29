@@ -9,7 +9,7 @@ use super::super::{
     checkpoint::{CursorCheckpoint, CursorPrefixBuilder, CursorSessionCheckpoint},
     projection::{
         project_cursor_record, retained_body_bytes, update_cursor_session_checkpoint,
-        CursorNativeEvent, CursorPageBuffer, CursorPublicationSink,
+        CursorNativeEvent,
     },
 };
 use super::{
@@ -20,8 +20,6 @@ use super::{
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct CursorParserStats {
     pub(crate) bytes_read: u64,
-    pub(crate) verification_bytes_read: u64,
-    pub(crate) projected_bytes_read: u64,
     pub(crate) complete_records: u64,
     pub(crate) blank_records: u64,
     pub(crate) malformed_records: u64,
@@ -41,74 +39,33 @@ pub(crate) struct CursorParserStats {
     pub(crate) retained_tool_calls: u64,
     pub(crate) retained_body_bytes: u64,
     pub(crate) max_line_buffer_bytes: usize,
-    pub(crate) publication_pages: u64,
-    pub(crate) nativepath_publication_rows: u64,
-    pub(crate) publication_serialized_bytes: u64,
-    pub(crate) max_publication_page_rows: usize,
-    pub(crate) max_publication_page_bytes: usize,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum CursorParserPlan<'a> {
-    FullSnapshot,
-    VerifyPrefixAndResume(&'a CursorCheckpoint),
-}
-
-#[derive(Debug)]
-pub(crate) enum CursorParserOutcome {
-    Parsed(Box<CursorParsedGeneration>),
-    PrefixMismatch(Box<CursorParserStats>),
+    pub(crate) projected_records: u64,
 }
 
 #[derive(Debug)]
 pub(crate) struct CursorParsedGeneration {
-    #[cfg(test)]
-    pub(crate) events: Vec<super::super::projection::CursorNativeEvent>,
     pub(crate) rejections: CursorRejectionSummary,
     pub(crate) checkpoint: CursorCheckpoint,
     pub(crate) stats: CursorParserStats,
-    pub(crate) resumed: bool,
 }
 
 pub(crate) fn scan_cursor_reader(
     reader: &mut impl BufRead,
-    plan: CursorParserPlan<'_>,
-    sink: &mut dyn CursorPublicationSink,
-) -> Result<CursorParserOutcome> {
-    scan_cursor_reader_with_limit(reader, plan, sink, MAX_PROVIDER_JSONL_LINE_BYTES)
+    emit: &mut dyn FnMut(CursorNativeEvent) -> Result<()>,
+) -> Result<CursorParsedGeneration> {
+    scan_cursor_reader_with_limit(reader, emit, MAX_PROVIDER_JSONL_LINE_BYTES)
 }
 
 pub(super) fn scan_cursor_reader_with_limit(
     reader: &mut impl BufRead,
-    plan: CursorParserPlan<'_>,
-    sink: &mut dyn CursorPublicationSink,
+    emit: &mut dyn FnMut(CursorNativeEvent) -> Result<()>,
     max_line_bytes: usize,
-) -> Result<CursorParserOutcome> {
-    let resume = match plan {
-        CursorParserPlan::FullSnapshot => None,
-        CursorParserPlan::VerifyPrefixAndResume(checkpoint) if checkpoint.is_supported() => {
-            Some(checkpoint)
-        }
-        CursorParserPlan::VerifyPrefixAndResume(_) => {
-            return Ok(CursorParserOutcome::PrefixMismatch(Box::default()));
-        }
-    };
-    let verification_offset = resume.map_or(0, |checkpoint| checkpoint.next_byte_offset);
+) -> Result<CursorParsedGeneration> {
     let mut prefix = CursorPrefixBuilder::new();
     let mut rejections = CursorRejectionSummary::default();
     let mut stats = CursorParserStats::default();
     let mut session = CursorSessionCheckpoint::default();
-    let initial_page_checkpoint = resume
-        .cloned()
-        .unwrap_or_else(|| CursorCheckpoint::new(prefix.proof(), session.clone(), false, false));
-    let mut pages = CursorPageBuffer::new(sink, initial_page_checkpoint);
     let mut saw_incomplete = false;
-    let mut verified_prefix = resume.is_none() || verification_offset == 0;
-    if let Some(checkpoint) = resume.filter(|_| verification_offset == 0) {
-        if prefix.proof() != checkpoint.prefix || session != checkpoint.session {
-            return Ok(CursorParserOutcome::PrefixMismatch(Box::new(stats)));
-        }
-    }
 
     loop {
         let line = read_bounded_line(reader, max_line_bytes)?;
@@ -122,75 +79,30 @@ pub(super) fn scan_cursor_reader_with_limit(
             saw_incomplete = true;
             break;
         }
-        let next_offset = prefix.complete_bytes().saturating_add(line.consumed_bytes);
-        if resume.is_some() && !verified_prefix && next_offset > verification_offset {
-            return Ok(CursorParserOutcome::PrefixMismatch(Box::new(stats)));
-        }
-        let verifying = resume.is_some() && next_offset <= verification_offset;
-        if verifying {
-            stats.verification_bytes_read = stats
-                .verification_bytes_read
-                .saturating_add(line.consumed_bytes);
-        } else {
-            stats.projected_bytes_read = stats
-                .projected_bytes_read
-                .saturating_add(line.consumed_bytes);
-        }
         process_complete_line(
             &line,
-            verifying,
             &mut prefix,
-            &mut pages,
+            emit,
             &mut rejections,
             &mut stats,
             &mut session,
         )?;
-        if let Some(checkpoint) =
-            resume.filter(|_| !verified_prefix && next_offset == verification_offset)
-        {
-            if prefix.proof() != checkpoint.prefix || session != checkpoint.session {
-                return Ok(CursorParserOutcome::PrefixMismatch(Box::new(stats)));
-            }
-            verified_prefix = true;
-        }
     }
 
-    if let Some(checkpoint) = resume {
-        if !verified_prefix || prefix.proof().complete_bytes < checkpoint.next_byte_offset {
-            return Ok(CursorParserOutcome::PrefixMismatch(Box::new(stats)));
-        }
-    }
     let proof = prefix.finish();
-    let checkpoint = CursorCheckpoint::new(proof, session, !saw_incomplete, rejections.total > 0);
-    let page_stats = pages.finish(
-        checkpoint.clone(),
-        retained_event_count(&stats),
-        rejections.total,
-        &rejections.samples,
-    )?;
-    stats.publication_pages = page_stats.pages;
-    stats.nativepath_publication_rows = page_stats.rows;
-    stats.publication_serialized_bytes = page_stats.serialized_bytes;
-    stats.max_publication_page_rows = page_stats.max_page_rows;
-    stats.max_publication_page_bytes = page_stats.max_page_bytes;
-    Ok(CursorParserOutcome::Parsed(Box::new(
-        CursorParsedGeneration {
-            #[cfg(test)]
-            events: Vec::new(),
-            rejections,
-            checkpoint,
-            stats,
-            resumed: resume.is_some(),
-        },
-    )))
+    let checkpoint = CursorCheckpoint::new(proof, session, !saw_incomplete);
+    Ok(CursorParsedGeneration {
+        rejections,
+        checkpoint,
+        stats,
+    })
 }
 
 #[cfg_attr(test, allow(clippy::too_many_arguments))]
 fn process_complete_line(
     line: &BoundedLine,
-    verifying: bool,
     prefix: &mut CursorPrefixBuilder,
-    pages: &mut CursorPageBuffer<'_>,
+    emit: &mut dyn FnMut(CursorNativeEvent) -> Result<()>,
     rejections: &mut CursorRejectionSummary,
     stats: &mut CursorParserStats,
     session: &mut CursorSessionCheckpoint,
@@ -261,42 +173,17 @@ fn process_complete_line(
         stats.native_result_records = stats.native_result_records.saturating_add(1);
         stats.native_result_bytes = stats.native_result_bytes.saturating_add(line.payload_bytes);
     }
-    let pre_record_checkpoint =
-        CursorCheckpoint::new(prefix.proof(), session.clone(), false, rejections.total > 0);
-    let pre_record_retained_event_count = retained_event_count(stats);
     prefix.record_semantic(line.consumed_bytes, line.content_sha256, &sanitized)?;
     let projected = project_cursor_record(&sanitized)?;
     update_cursor_session_checkpoint(session, &projected);
     update_retained_stats(stats, &projected);
-    if !verifying {
-        let post_record_checkpoint =
-            CursorCheckpoint::new(prefix.proof(), session.clone(), false, rejections.total > 0);
-        let post_record_retained_event_count = retained_event_count(stats);
-        let final_part = projected.len().saturating_sub(1);
-        for (part, event) in projected.into_iter().enumerate() {
-            let (checkpoint, retained_event_count) = if part == final_part {
-                (&post_record_checkpoint, post_record_retained_event_count)
-            } else {
-                (&pre_record_checkpoint, pre_record_retained_event_count)
-            };
-            pages.push(
-                event,
-                checkpoint,
-                retained_event_count,
-                rejections.total,
-                &rejections.samples,
-            )?;
-        }
+    stats.projected_records = stats
+        .projected_records
+        .saturating_add(projected.len() as u64);
+    for event in projected {
+        emit(event)?;
     }
     Ok(())
-}
-
-fn retained_event_count(stats: &CursorParserStats) -> u64 {
-    stats
-        .retained_messages
-        .saturating_add(stats.retained_summaries)
-        .saturating_add(stats.retained_notices)
-        .saturating_add(stats.retained_tool_calls)
 }
 
 fn update_retained_stats(stats: &mut CursorParserStats, events: &[CursorNativeEvent]) {
