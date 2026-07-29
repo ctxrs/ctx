@@ -46,6 +46,7 @@ pub(in crate::semantic) use transport::{
     daemon_query_request, daemon_source_hydration_request, daemon_source_refresh_request,
     DaemonSourceRefreshServiceUnavailable,
 };
+mod hydration_budget;
 mod server;
 #[cfg(test)]
 pub(in crate::semantic) use server::*;
