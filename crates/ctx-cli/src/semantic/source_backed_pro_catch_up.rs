@@ -15,7 +15,7 @@ use thiserror::Error;
 
 use crate::{
     compact_json,
-    pro::{stable_error_code, ProOutputImport},
+    pro::{stable_error_code, sync_source_manifest_materialization},
 };
 
 use super::{
@@ -137,7 +137,7 @@ impl SourceBackedProCatchUpError {
     fn projection(error: anyhow::Error) -> Self {
         Self::Projection {
             code: stable_error_code(&error)
-                .unwrap_or("pro_output_unavailable")
+                .unwrap_or("pro_source_materialization_unavailable")
                 .to_owned(),
             message: error.to_string(),
         }
@@ -186,12 +186,7 @@ pub(super) fn run_after_core_publication(
         manifest,
         authority.resolver(),
         |data_root, manifest, index, resolver| {
-            ProOutputImport::sync_committed_source_manifest(
-                data_root,
-                manifest.clone(),
-                index,
-                resolver,
-            )
+            sync_source_manifest_materialization(data_root, manifest.clone(), index, resolver)
         },
     )
 }
@@ -603,7 +598,7 @@ mod tests {
             );
         }
         assert!(source.contains("VerifiedIndex::open"));
-        assert!(source.contains("ProOutputImport::sync_committed_source_manifest"));
+        assert!(source.contains("sync_source_manifest_materialization"));
         assert!(source.contains("authority.source_manifest()"));
         assert!(source.contains("authority.resolver()"));
     }

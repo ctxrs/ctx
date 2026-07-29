@@ -1,218 +1,31 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
-    sync::{Arc, Mutex},
 };
 
 use anyhow::{anyhow, bail, Result};
-use base64::{engine::general_purpose::STANDARD, Engine as _};
-use ctx_history_capture::{
-    ImportProfile, OutputAssociations as CaptureOutputAssociations,
-    OutputCommandContext as CaptureOutputCommandContext,
-    OutputNativeCoordinate as CaptureOutputNativeCoordinate,
-    OutputNativeCursor as CaptureOutputNativeCursor,
-    OutputObservationKind as CaptureOutputObservationKind, OutputOutcome as CaptureOutputOutcome,
-    OutputOutcomeMetadata as CaptureOutputOutcomeMetadata,
-    OutputRepositoryContext as CaptureOutputRepositoryContext,
-    OutputSourceIdentity as CaptureOutputSourceIdentity,
-    OutputSourceLocator as CaptureOutputSourceLocator,
-    ProOutputMaterializationPage as CaptureOutputPage,
-    ProOutputObservation as CaptureOutputObservation, ProOutputPageResult, ProOutputProgress,
-    ProOutputSink, ProOutputSinkError, ProOutputSourceDisposition,
-};
 use ctx_history_core::{CertifiedSource, SourceFrontier, SourceKey};
-use ctx_pro_host_protocol::{
-    BeginOutputInventoryRequest, Capability, FinishOutputInventoryRequest, HelperMessage,
-    HostMessage, ObserveOutputSourceRequest, OutputAssociations, OutputCommandContext,
-    OutputInventoryFinished, OutputNativeCoordinate, OutputNativeCursor, OutputObservationKind,
-    OutputOutcome, OutputOutcomeMetadata, OutputProgressRequest, OutputProgressResult,
-    OutputRepositoryContext, OutputSourceAvailability, OutputSourceDisposition,
-    OutputSourceIdentity, OutputSourceLocator, ProOutputMaterializationPage, ProOutputObservation,
-    TransientOutputContent, OUTPUT_MATERIALIZATION_CONTRACT_VERSION,
-};
+use ctx_pro_host_protocol::{Capability, HelperMessage, HostMessage};
 
-use super::{protocol_error, stable_error_code, ProClient, BATCH_TIMEOUT};
+use super::{protocol_error, ProClient, BATCH_TIMEOUT};
 
-#[allow(dead_code)]
 #[path = "source_backed_pro_provider.rs"]
 mod source_backed_pro_provider;
 
-struct SharedProClient {
-    client: Mutex<ProClient>,
-}
-
-impl SharedProClient {
-    fn new(client: ProClient) -> Self {
-        Self {
-            client: Mutex::new(client),
-        }
-    }
-
-    fn exchange(
-        &self,
-        message: HostMessage,
-        timeout: std::time::Duration,
-    ) -> Result<HelperMessage> {
-        // Each lane holds the client only for one request/response exchange.
-        // The coordinator invokes canonical and output sequentially, so no
-        // adapter callback can re-enter this mutex while it is locked.
-        self.client
-            .lock()
-            .map_err(|_| anyhow!("helper_crashed: Pro client lock was poisoned"))?
-            .exchange(message, timeout)
-    }
-}
-
-/// One helper connection and one immutable import profile selected before provider parsing.
+/// Synchronizes Pro from one already-published, generation-pinned Core source manifest.
 ///
-/// The caller passes `profile()` through the public profiled import entrypoint and calls
-/// `finish()` only after the complete source inventory succeeds.
-pub(crate) struct ProOutputImport {
-    profile: ImportProfile,
-    sink: Arc<ClientProOutputSink>,
-    finished: bool,
-}
-
-impl ProOutputImport {
-    /// Selects CoreAndPro only when a helper negotiates the complete output capability.
-    ///
-    /// Import remains a Core operation when Pro is absent, disabled, unlicensed, or
-    /// temporarily unavailable; later sink failures likewise never unwind Core commits.
-    pub(crate) fn begin_if_available(data_root: &Path) -> Option<Self> {
-        Self::begin(data_root).ok()
-    }
-
-    fn begin(data_root: &Path) -> Result<Self> {
-        let required = BTreeSet::from([Capability::OutputMaterialization]);
-        let client = ProClient::connect(data_root, &required)?;
-        Self::begin_with_shared_client(Arc::new(SharedProClient::new(client)))
-    }
-
-    /// Compatibility entrypoint for the legacy materialization command.
-    ///
-    /// The second argument is deliberately generic and ignored: a Store
-    /// projection checkpoint is not authority for output inventory or the
-    /// source-backed canonical feed.
-    pub(super) fn begin_with_client<LegacyFrontier>(
-        client: ProClient,
-        _legacy_frontier: Option<LegacyFrontier>,
-    ) -> Result<Self> {
-        Self::begin_with_shared_client(Arc::new(SharedProClient::new(client)))
-    }
-
-    fn begin_with_shared_client(client: Arc<SharedProClient>) -> Result<Self> {
-        let progress = client.exchange(
-            HostMessage::GetOutputProgress(OutputProgressRequest {
-                sources: Vec::new(),
-            }),
-            BATCH_TIMEOUT,
-        )?;
-        let generation = output_inventory_generation(progress)?;
-        let began = match client.exchange(
-            HostMessage::BeginOutputInventory(BeginOutputInventoryRequest { generation }),
-            BATCH_TIMEOUT,
-        )? {
-            HelperMessage::OutputInventoryBegan(began) => began,
-            HelperMessage::Error(error) => return Err(protocol_error(error)),
-            _ => bail!("invalid_response: helper returned a non-output-inventory response"),
-        };
-        began
-            .validate()
-            .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
-        if began.generation != generation {
-            bail!("invalid_response: helper began the wrong output inventory generation");
-        }
-        let sink = Arc::new(ClientProOutputSink {
-            client,
-            inventory_generation: generation,
-            materializer_revision: began.materializer_revision,
-            behind: Arc::new(Mutex::new(None)),
-        });
-        let sink_trait: Arc<dyn ProOutputSink> = sink.clone();
-        let profile = ImportProfile::CoreAndPro(sink_trait);
-        Ok(Self {
-            profile,
-            sink,
-            finished: false,
-        })
-    }
-
-    pub(crate) fn profile(&self) -> &ImportProfile {
-        &self.profile
-    }
-
-    pub(crate) fn replay_only_profile(&self) -> ImportProfile {
-        let sink: Arc<dyn ProOutputSink> = self.sink.clone();
-        ImportProfile::ProReplayOnly(sink)
-    }
-
-    pub(crate) fn mark_output_replay_behind(&self, error: &anyhow::Error) {
-        self.sink.mark_behind(ProOutputSinkError::new(
-            "nativepath_output_replay",
-            error.to_string(),
-        ));
-    }
-
-    /// Legacy call-site compatibility.
-    ///
-    /// Source-backed canonical catch-up consumes a committed source manifest
-    /// independently through `sync_source_backed_pro_feed`; it is not advanced
-    /// by a Core Store commit callback.
-    pub(crate) fn note_core_source_committed(&mut self) {
-        // Intentionally empty.
-    }
-
-    pub(crate) fn finish(mut self) -> Result<OutputInventoryFinished> {
-        if let Some(error) = self
-            .sink
-            .behind
-            .lock()
-            .map_err(|_| anyhow!("helper_crashed: Pro output sink lock was poisoned"))?
-            .clone()
-        {
-            bail!("{}: {}", error.code, error.message);
-        }
-        let response = self.sink.exchange(HostMessage::FinishOutputInventory(
-            FinishOutputInventoryRequest {
-                generation: self.sink.inventory_generation,
-            },
-        ))?;
-        let finished = match response {
-            HelperMessage::OutputInventoryFinished(finished) => finished,
-            HelperMessage::Error(error) => return Err(protocol_error(error)),
-            _ => bail!("invalid_response: helper returned a non-output-inventory response"),
-        };
-        if finished.generation != self.sink.inventory_generation {
-            bail!("invalid_response: helper finished the wrong output inventory generation");
-        }
-        self.finished = true;
-        Ok(finished)
-    }
-
-    pub(crate) fn finish_warning(error: &anyhow::Error) -> String {
-        let code = stable_error_code(error).unwrap_or("pro_output_unavailable");
-        format!(
-            "Core history update succeeded, but Pro output catch-up remains incomplete ({code}); a later import or refresh will retry it"
-        )
-    }
-
-    /// Reconciles Pro from one already-published, pinned Core source manifest.
-    ///
-    /// This opens no Store or body projection. Exact canonical content is
-    /// hydrated through the supplied source resolver, and any failure leaves
-    /// Core intact while Pro remains independently retryable.
-    #[allow(dead_code)]
-    pub(crate) fn sync_committed_source_manifest(
-        data_root: &Path,
-        manifest: ctx_pro_host_protocol::SourceManifest,
-        index: &ctx_history_index::VerifiedIndex,
-        resolver: &ctx_history_capture::SourceBackedResolverRegistry,
-    ) -> Result<ctx_pro_host_protocol::SourceManifestReceipt> {
-        source_backed_pro_provider::sync_committed_source_manifest(
-            data_root, manifest, index, resolver,
-        )
-        .map(|report| report.receipt)
-    }
+/// Exact canonical content is hydrated through the supplied source resolver.
+/// Any helper or hydration failure leaves Core intact and Pro independently retryable.
+pub(crate) fn sync_source_manifest_materialization(
+    data_root: &Path,
+    manifest: ctx_pro_host_protocol::SourceManifest,
+    index: &ctx_history_index::VerifiedIndex,
+    resolver: &ctx_history_capture::SourceBackedResolverRegistry,
+) -> Result<ctx_pro_host_protocol::SourceManifestReceipt> {
+    source_backed_pro_provider::sync_generation_pinned_source_manifest(
+        data_root, manifest, index, resolver,
+    )
+    .map(|report| report.receipt)
 }
 
 /// Deferred Pro catch-up over the authoritative source-backed wire contract.
@@ -220,13 +33,12 @@ impl ProOutputImport {
 /// Core is already published before this coordinator runs. Any helper or
 /// hydration failure therefore leaves Core intact and Pro retryable from its
 /// independently committed per-source progress.
-#[allow(dead_code)]
-pub(crate) mod source_backed_feed {
+mod source_backed_feed {
     use super::*;
     use anyhow::Context as _;
     use ctx_pro_host_protocol::{
         certified_source_revision_sha256, AdmitSourceManifestPageRequest,
-        BeginSourceManifestAdmissionRequest, BeginSourceManifestRequest, DeleteSourceRequest,
+        BeginSourceManifestAdmissionRequest, DeleteSourceRequest,
         FinishAdmittedSourceManifestRequest, FinishSourceManifestAdmissionRequest,
         FinishSourceManifestRequest, MaterializeSourcePageRequest, PrepareSourceRequest,
         SourceDeleted, SourceDisposition, SourceManifest, SourceManifestAdmissionBegan,
@@ -239,31 +51,31 @@ pub(crate) mod source_backed_feed {
 
     const MAX_CANONICAL_SOURCE_PAGES: u64 = 1_000_000;
 
-    pub(crate) type SourceBackedProManifest = SourceManifest;
-    pub(crate) type SourceBackedProRemoval = SourceRemoval;
-    pub(crate) type SourceBackedProProgress = SourceProgress;
-    pub(crate) type SourceBackedProRecord = SourceRecord;
-    pub(crate) type SourceBackedProReceipt = SourceManifestReceipt;
-    pub(crate) type SourceBackedProDisposition = SourceDisposition;
+    pub(super) type SourceBackedProManifest = SourceManifest;
+    pub(super) type SourceBackedProRemoval = SourceRemoval;
+    pub(super) type SourceBackedProProgress = SourceProgress;
+    pub(super) type SourceBackedProRecord = SourceRecord;
+    pub(super) type SourceBackedProReceipt = SourceManifestReceipt;
+    pub(super) type SourceBackedProDisposition = SourceDisposition;
 
     /// Provider-owned page produced by rereading an exact certified source.
     #[derive(Debug, Clone)]
-    pub(crate) struct SourceBackedProviderPage {
-        pub(crate) source: SourceKey,
-        pub(crate) expected_prior_frontier: Option<SourceFrontier>,
-        pub(crate) next_frontier: Option<SourceFrontier>,
-        pub(crate) terminal: bool,
-        pub(crate) records: Vec<SourceBackedProRecord>,
+    pub(super) struct SourceBackedProviderPage {
+        pub(super) source: SourceKey,
+        pub(super) expected_prior_frontier: Option<SourceFrontier>,
+        pub(super) next_frontier: Option<SourceFrontier>,
+        pub(super) terminal: bool,
+        pub(super) records: Vec<SourceBackedProRecord>,
     }
 
     #[derive(Debug, Clone)]
-    pub(crate) struct SourceBackedProSyncReport {
-        pub(crate) receipt: SourceBackedProReceipt,
-        pub(crate) prepared_sources: u64,
-        pub(crate) rewritten_sources: u64,
-        pub(crate) deleted_sources: u64,
-        pub(crate) reread_pages: u64,
-        pub(crate) reread_records: u64,
+    pub(super) struct SourceBackedProSyncReport {
+        pub(super) receipt: SourceBackedProReceipt,
+        pub(super) prepared_sources: u64,
+        pub(super) rewritten_sources: u64,
+        pub(super) deleted_sources: u64,
+        pub(super) reread_pages: u64,
+        pub(super) reread_records: u64,
     }
 
     /// Provider adapter boundary for canonical Pro catch-up.
@@ -272,7 +84,7 @@ pub(crate) mod source_backed_feed {
     /// reread native records from the supplied source frontier. They must hydrate
     /// every returned record from its `SourceRecordLocator`; canonical Store bytes
     /// are not an input to this interface.
-    pub(crate) trait SourceBackedProProvider {
+    pub(super) trait SourceBackedProProvider {
         fn reread_source_page(
             &mut self,
             source: &CertifiedSource,
@@ -280,13 +92,7 @@ pub(crate) mod source_backed_feed {
         ) -> Result<SourceBackedProviderPage>;
     }
 
-    /// Public-side protocol adapter implemented by the Pro helper session.
-    pub(crate) trait SourceBackedProConsumer {
-        fn begin_source_manifest(
-            &mut self,
-            manifest: &SourceBackedProManifest,
-        ) -> Result<SourceManifestBegan>;
-
+    pub(super) trait SourceBackedProPageConsumer {
         fn prepare_source(&mut self, request: &PrepareSourceRequest) -> Result<SourcePrepared>;
 
         fn materialize_source_page(
@@ -295,6 +101,18 @@ pub(crate) mod source_backed_feed {
         ) -> Result<SourcePageMaterialized>;
 
         fn delete_source(&mut self, request: &DeleteSourceRequest) -> Result<SourceDeleted>;
+    }
+
+    /// State boundary used by the source reconciliation engine.
+    ///
+    /// The production transport implements the paged admission trait instead;
+    /// `AdmittedSourceBackedConsumer` supplies this state boundary only after
+    /// the exact generation manifest has been admitted.
+    pub(super) trait SourceBackedProConsumer: SourceBackedProPageConsumer {
+        fn begin_source_manifest(
+            &mut self,
+            manifest: &SourceBackedProManifest,
+        ) -> Result<SourceManifestBegan>;
 
         fn finish_source_manifest(
             &mut self,
@@ -302,7 +120,7 @@ pub(crate) mod source_backed_feed {
         ) -> Result<SourceManifestFinished>;
     }
 
-    pub(crate) trait SourceBackedProAdmissionConsumer {
+    pub(super) trait SourceBackedProAdmissionConsumer: SourceBackedProPageConsumer {
         fn begin_source_manifest_admission(
             &mut self,
             header: &SourceManifestHeader,
@@ -325,34 +143,16 @@ pub(crate) mod source_backed_feed {
     }
 
     struct ProtocolSourceBackedProConsumer {
-        client: Arc<SharedProClient>,
+        client: ProClient,
     }
 
     impl ProtocolSourceBackedProConsumer {
-        fn exchange(&self, message: HostMessage) -> Result<HelperMessage> {
+        fn exchange(&mut self, message: HostMessage) -> Result<HelperMessage> {
             self.client.exchange(message, BATCH_TIMEOUT)
         }
     }
 
-    impl SourceBackedProConsumer for ProtocolSourceBackedProConsumer {
-        fn begin_source_manifest(
-            &mut self,
-            manifest: &SourceBackedProManifest,
-        ) -> Result<SourceManifestBegan> {
-            let request = BeginSourceManifestRequest {
-                manifest: manifest.clone(),
-            };
-            validate_request(&request)?;
-            match self.exchange(HostMessage::BeginSourceManifest(request))? {
-                HelperMessage::SourceManifestBegan(result) => {
-                    validate_response(&result)?;
-                    Ok(result)
-                }
-                HelperMessage::Error(error) => Err(protocol_error(error)),
-                _ => bail!("invalid_response: helper returned a non-source-manifest response"),
-            }
-        }
-
+    impl SourceBackedProPageConsumer for ProtocolSourceBackedProConsumer {
         fn prepare_source(&mut self, request: &PrepareSourceRequest) -> Result<SourcePrepared> {
             validate_request(request)?;
             match self.exchange(HostMessage::PrepareSource(request.clone()))? {
@@ -391,23 +191,6 @@ pub(crate) mod source_backed_feed {
                 }
                 HelperMessage::Error(error) => Err(protocol_error(error)),
                 _ => bail!("invalid_response: helper returned a non-source-deleted response"),
-            }
-        }
-
-        fn finish_source_manifest(
-            &mut self,
-            request: &FinishSourceManifestRequest,
-        ) -> Result<SourceManifestFinished> {
-            validate_request(request)?;
-            match self.exchange(HostMessage::FinishSourceManifest(request.clone()))? {
-                HelperMessage::SourceManifestFinished(result) => {
-                    validate_response(&result)?;
-                    Ok(result)
-                }
-                HelperMessage::Error(error) => Err(protocol_error(error)),
-                _ => {
-                    bail!("invalid_response: helper returned a non-source-finished response")
-                }
             }
         }
     }
@@ -506,9 +289,29 @@ pub(crate) mod source_backed_feed {
         progress: Vec<SourceProgress>,
     }
 
+    impl<C> SourceBackedProPageConsumer for AdmittedSourceBackedConsumer<'_, C>
+    where
+        C: SourceBackedProAdmissionConsumer,
+    {
+        fn prepare_source(&mut self, request: &PrepareSourceRequest) -> Result<SourcePrepared> {
+            SourceBackedProPageConsumer::prepare_source(self.inner, request)
+        }
+
+        fn materialize_source_page(
+            &mut self,
+            request: &MaterializeSourcePageRequest,
+        ) -> Result<SourcePageMaterialized> {
+            SourceBackedProPageConsumer::materialize_source_page(self.inner, request)
+        }
+
+        fn delete_source(&mut self, request: &DeleteSourceRequest) -> Result<SourceDeleted> {
+            SourceBackedProPageConsumer::delete_source(self.inner, request)
+        }
+    }
+
     impl<C> SourceBackedProConsumer for AdmittedSourceBackedConsumer<'_, C>
     where
-        C: SourceBackedProConsumer + SourceBackedProAdmissionConsumer,
+        C: SourceBackedProAdmissionConsumer,
     {
         fn begin_source_manifest(
             &mut self,
@@ -523,21 +326,6 @@ pub(crate) mod source_backed_feed {
                 progress: self.progress.clone(),
                 replayed: true,
             })
-        }
-
-        fn prepare_source(&mut self, request: &PrepareSourceRequest) -> Result<SourcePrepared> {
-            SourceBackedProConsumer::prepare_source(self.inner, request)
-        }
-
-        fn materialize_source_page(
-            &mut self,
-            request: &MaterializeSourcePageRequest,
-        ) -> Result<SourcePageMaterialized> {
-            SourceBackedProConsumer::materialize_source_page(self.inner, request)
-        }
-
-        fn delete_source(&mut self, request: &DeleteSourceRequest) -> Result<SourceDeleted> {
-            SourceBackedProConsumer::delete_source(self.inner, request)
         }
 
         fn finish_source_manifest(
@@ -557,7 +345,7 @@ pub(crate) mod source_backed_feed {
         }
     }
 
-    pub(crate) fn sync_source_backed_pro_feed_paged<P, C>(
+    pub(super) fn sync_source_backed_pro_feed_paged<P, C>(
         manifest: SourceBackedProManifest,
         generation_manifest: &ctx_history_index::GenerationManifest,
         provider: &mut P,
@@ -565,7 +353,7 @@ pub(crate) mod source_backed_feed {
     ) -> Result<SourceBackedProSyncReport>
     where
         P: SourceBackedProProvider,
-        C: SourceBackedProConsumer + SourceBackedProAdmissionConsumer,
+        C: SourceBackedProAdmissionConsumer,
     {
         manifest
             .validate()
@@ -712,7 +500,7 @@ pub(crate) mod source_backed_feed {
         }
     }
 
-    pub(crate) fn cursor_after_page(
+    pub(super) fn cursor_after_page(
         header: &SourceManifestHeader,
         cursor: &ctx_pro_host_protocol::SourceManifestAdmissionCursor,
         page: &SourceManifestPage,
@@ -756,7 +544,7 @@ pub(crate) mod source_backed_feed {
     /// Core publication is neither prepared nor committed here. An unavailable
     /// helper or provider reread leaves only Pro behind; a later or newly installed
     /// Pro instance resumes from its own per-source epoch/frontier.
-    pub(crate) fn sync_source_backed_pro_feed<P, C>(
+    pub(super) fn sync_source_backed_pro_feed<P, C>(
         manifest: SourceBackedProManifest,
         provider: &mut P,
         consumer: &mut C,
@@ -1053,23 +841,7 @@ pub(crate) mod source_backed_feed {
         left.exact_eq(right)
     }
 
-    pub(crate) fn sync_source_backed_pro_feed_deferred<P>(
-        data_root: &Path,
-        manifest: SourceBackedProManifest,
-        provider: &mut P,
-    ) -> Result<SourceBackedProSyncReport>
-    where
-        P: SourceBackedProProvider,
-    {
-        let required = source_materialization_capabilities();
-        let client = ProClient::connect(data_root, &required)?;
-        let mut consumer = ProtocolSourceBackedProConsumer {
-            client: Arc::new(SharedProClient::new(client)),
-        };
-        sync_source_backed_pro_feed(manifest, provider, &mut consumer)
-    }
-
-    pub(crate) fn sync_source_backed_pro_feed_deferred_paged<P>(
+    pub(super) fn sync_source_backed_pro_feed_deferred_paged<P>(
         data_root: &Path,
         manifest: SourceBackedProManifest,
         generation_manifest: &ctx_history_index::GenerationManifest,
@@ -1080,9 +852,7 @@ pub(crate) mod source_backed_feed {
     {
         let required = source_materialization_capabilities();
         let client = ProClient::connect(data_root, &required)?;
-        let mut consumer = ProtocolSourceBackedProConsumer {
-            client: Arc::new(SharedProClient::new(client)),
-        };
+        let mut consumer = ProtocolSourceBackedProConsumer { client };
         sync_source_backed_pro_feed_paged(manifest, generation_manifest, provider, &mut consumer)
     }
 
@@ -1115,14 +885,6 @@ pub(crate) mod source_backed_feed {
     trait SourceRequestValidation {
         fn validate_request(&self)
             -> std::result::Result<(), ctx_pro_host_protocol::ProtocolError>;
-    }
-
-    impl SourceRequestValidation for BeginSourceManifestRequest {
-        fn validate_request(
-            &self,
-        ) -> std::result::Result<(), ctx_pro_host_protocol::ProtocolError> {
-            self.validate()
-        }
     }
 
     impl SourceRequestValidation for PrepareSourceRequest {
@@ -1186,331 +948,6 @@ pub(crate) mod source_backed_feed {
     );
 }
 
-impl Drop for ProOutputImport {
-    fn drop(&mut self) {
-        // An unfinished inventory deliberately remains incomplete. The helper uses that state to
-        // invalidate missing-source conclusions after a failed or interrupted Core import.
-        let _ = self.finished;
-    }
-}
-
-fn output_inventory_generation(response: HelperMessage) -> Result<u64> {
-    match response {
-        HelperMessage::OutputProgress(progress) => next_output_inventory_generation(progress),
-        HelperMessage::Error(error)
-            if error.class == ctx_pro_host_protocol::ErrorClass::NotMaterialized =>
-        {
-            Ok(1)
-        }
-        HelperMessage::Error(error) => Err(protocol_error(error)),
-        _ => bail!("invalid_response: helper returned a non-output-progress response"),
-    }
-}
-
-fn next_output_inventory_generation(progress: OutputProgressResult) -> Result<u64> {
-    if progress.inventory_generation == 0 {
-        return Ok(1);
-    }
-    if progress.inventory_complete {
-        progress.inventory_generation.checked_add(1).ok_or_else(|| {
-            anyhow!("invalid_response: helper output inventory generation is exhausted")
-        })
-    } else {
-        Ok(progress.inventory_generation)
-    }
-}
-
-struct ClientProOutputSink {
-    client: Arc<SharedProClient>,
-    inventory_generation: u64,
-    materializer_revision: String,
-    behind: Arc<Mutex<Option<ProOutputSinkError>>>,
-}
-
-impl ClientProOutputSink {
-    fn exchange(&self, message: HostMessage) -> Result<HelperMessage> {
-        self.client.exchange(message, BATCH_TIMEOUT)
-    }
-
-    fn sink_error(error: anyhow::Error) -> ProOutputSinkError {
-        ProOutputSinkError::new(
-            stable_error_code(&error).unwrap_or("pro_output_unavailable"),
-            error.to_string(),
-        )
-    }
-}
-
-impl ProOutputSink for ClientProOutputSink {
-    fn inventory_generation(&self) -> u64 {
-        self.inventory_generation
-    }
-
-    fn materializer_revision(&self) -> &str {
-        &self.materializer_revision
-    }
-
-    fn observe_source(
-        &self,
-        source: &CaptureOutputSourceIdentity,
-    ) -> std::result::Result<Option<ProOutputProgress>, ProOutputSinkError> {
-        let source = protocol_source(source);
-        let observed = self
-            .exchange(HostMessage::ObserveOutputSource(
-                ObserveOutputSourceRequest {
-                    generation: self.inventory_generation,
-                    source: source.clone(),
-                    availability: OutputSourceAvailability::Available,
-                },
-            ))
-            .map_err(Self::sink_error)?;
-        match observed {
-            HelperMessage::OutputSourceObserved(observed)
-                if observed.generation == self.inventory_generation
-                    && observed.source == source
-                    && observed.availability == OutputSourceAvailability::Available => {}
-            HelperMessage::Error(error) => return Err(Self::sink_error(protocol_error(error))),
-            _ => {
-                return Err(ProOutputSinkError::new(
-                    "invalid_response",
-                    "helper returned an invalid output-source acknowledgement",
-                ));
-            }
-        }
-        let progress = self
-            .exchange(HostMessage::GetOutputProgress(OutputProgressRequest {
-                sources: vec![source.clone()],
-            }))
-            .map_err(Self::sink_error)?;
-        match progress {
-            HelperMessage::OutputProgress(progress) => {
-                if progress.inventory_generation != self.inventory_generation
-                    || progress.sources.len() > 1
-                    || progress
-                        .sources
-                        .first()
-                        .is_some_and(|value| value.source != source)
-                {
-                    return Err(ProOutputSinkError::new(
-                        "invalid_response",
-                        "helper returned invalid output progress",
-                    ));
-                }
-                progress
-                    .sources
-                    .into_iter()
-                    .next()
-                    .map(capture_progress)
-                    .transpose()
-            }
-            HelperMessage::Error(error) => Err(Self::sink_error(protocol_error(error))),
-            _ => Err(ProOutputSinkError::new(
-                "invalid_response",
-                "helper returned a non-output-progress response",
-            )),
-        }
-    }
-
-    fn materialize_page(
-        &self,
-        page: CaptureOutputPage,
-    ) -> std::result::Result<ProOutputPageResult, ProOutputSinkError> {
-        let response = self
-            .exchange(HostMessage::MaterializeOutputPage(protocol_page(page)?))
-            .map_err(Self::sink_error)?;
-        match response {
-            HelperMessage::OutputPageMaterialized(result) => Ok(ProOutputPageResult {
-                source_epoch: result.source_epoch,
-                committed_cursor: capture_cursor(result.committed_cursor)?,
-                accepted_outputs: result.accepted_outputs,
-                materialized_facts: result.materialized_facts,
-                replayed: result.replayed,
-            }),
-            HelperMessage::Error(error) => Err(Self::sink_error(protocol_error(error))),
-            _ => Err(ProOutputSinkError::new(
-                "invalid_response",
-                "helper returned a non-output-page response",
-            )),
-        }
-    }
-
-    fn mark_behind(&self, error: ProOutputSinkError) {
-        if let Ok(mut behind) = self.behind.lock() {
-            behind.get_or_insert(error);
-        }
-    }
-}
-
-fn protocol_source(source: &CaptureOutputSourceIdentity) -> OutputSourceIdentity {
-    OutputSourceIdentity {
-        provider: source.provider.clone(),
-        namespace_id: source.namespace_id.clone(),
-        source_id: source.source_id.clone(),
-    }
-}
-
-fn protocol_cursor(cursor: CaptureOutputNativeCursor) -> OutputNativeCursor {
-    OutputNativeCursor {
-        version: cursor.version,
-        payload_base64: STANDARD.encode(cursor.payload),
-    }
-}
-
-fn capture_cursor(
-    cursor: OutputNativeCursor,
-) -> std::result::Result<CaptureOutputNativeCursor, ProOutputSinkError> {
-    cursor.validate().map_err(|error| {
-        ProOutputSinkError::new(
-            "invalid_response",
-            format!("invalid output cursor: {}", error.message),
-        )
-    })?;
-    let payload = STANDARD.decode(cursor.payload_base64).map_err(|_| {
-        ProOutputSinkError::new(
-            "invalid_response",
-            "helper returned invalid output cursor base64",
-        )
-    })?;
-    Ok(CaptureOutputNativeCursor {
-        version: cursor.version,
-        payload,
-    })
-}
-
-fn capture_progress(
-    progress: ctx_pro_host_protocol::OutputSourceProgress,
-) -> std::result::Result<ProOutputProgress, ProOutputSinkError> {
-    Ok(ProOutputProgress {
-        source_epoch: progress.source_epoch,
-        observed_revision: progress.observed_revision,
-        cursor: progress.cursor.map(capture_cursor).transpose()?,
-        parser_revision: progress.parser_revision,
-        materializer_revision: progress.materializer_revision,
-        terminal: progress.terminal,
-    })
-}
-
-fn protocol_page(
-    page: CaptureOutputPage,
-) -> std::result::Result<ProOutputMaterializationPage, ProOutputSinkError> {
-    let observations = page
-        .observations
-        .into_iter()
-        .map(protocol_observation)
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let page = ProOutputMaterializationPage {
-        contract_version: OUTPUT_MATERIALIZATION_CONTRACT_VERSION,
-        inventory_generation: page.inventory_generation,
-        source: protocol_source(&page.source),
-        source_epoch: page.source_epoch,
-        observed_revision: page.observed_revision,
-        parser_revision: page.parser_revision,
-        materializer_revision: page.materializer_revision,
-        disposition: match page.disposition {
-            ProOutputSourceDisposition::AppendOrResume => OutputSourceDisposition::AppendOrResume,
-            ProOutputSourceDisposition::NewSource => OutputSourceDisposition::NewSource,
-            ProOutputSourceDisposition::Rewrite => OutputSourceDisposition::Rewrite,
-        },
-        expected_prior_source_epoch: page.expected_prior_source_epoch,
-        expected_prior_cursor: page.expected_prior_cursor.map(protocol_cursor),
-        next_safe_cursor: protocol_cursor(page.next_safe_cursor),
-        terminal: page.terminal,
-        observations,
-    };
-    page.validate().map_err(|error| {
-        ProOutputSinkError::new(
-            "invalid_request",
-            format!("invalid transient output page: {}", error.message),
-        )
-    })?;
-    Ok(page)
-}
-
-fn protocol_observation(
-    observation: CaptureOutputObservation,
-) -> std::result::Result<ProOutputObservation, ProOutputSinkError> {
-    let content = TransientOutputContent::from_bytes(&observation.content).ok_or_else(|| {
-        ProOutputSinkError::new(
-            "pro_output_record_too_large",
-            "transient output exceeds the accepted 16 MiB record bound",
-        )
-    })?;
-    Ok(ProOutputObservation {
-        kind: match observation.kind {
-            CaptureOutputObservationKind::Command => OutputObservationKind::Command,
-            CaptureOutputObservationKind::Tool => OutputObservationKind::Tool,
-        },
-        coordinate: protocol_coordinate(observation.coordinate),
-        occurred_at_unix_ms: observation.occurred_at_unix_ms,
-        associations: protocol_associations(observation.associations),
-        call_id: observation.call_id,
-        command: observation.command.map(protocol_command),
-        outcome: protocol_outcome(observation.outcome),
-        locator: protocol_locator(observation.locator),
-        content,
-    })
-}
-
-fn protocol_coordinate(value: CaptureOutputNativeCoordinate) -> OutputNativeCoordinate {
-    OutputNativeCoordinate {
-        unit_key: value.unit_key,
-        native_sequence: value.native_sequence,
-        native_record_id: value.native_record_id,
-        source_record_ordinal: value.source_record_ordinal,
-        source_record_subrecord_index: value.source_record_subrecord_index,
-        byte_start: value.byte_start,
-        byte_end_exclusive: value.byte_end_exclusive,
-    }
-}
-
-fn protocol_associations(value: CaptureOutputAssociations) -> OutputAssociations {
-    OutputAssociations {
-        direct_session_id: value.direct_session_id,
-        root_session_id: value.root_session_id,
-        parent_session_id: value.parent_session_id,
-        provider_session_id: value.provider_session_id,
-        agent_id: value.agent_id,
-        repository: value.repository.map(protocol_repository),
-    }
-}
-
-fn protocol_repository(value: CaptureOutputRepositoryContext) -> OutputRepositoryContext {
-    OutputRepositoryContext {
-        repository_id: value.repository_id,
-        checkout_id: value.checkout_id,
-        worktree_id: value.worktree_id,
-        object_format: value.object_format,
-    }
-}
-
-fn protocol_command(value: CaptureOutputCommandContext) -> OutputCommandContext {
-    OutputCommandContext {
-        tool_name: value.tool_name,
-        command: value.command,
-        working_directory: value.working_directory,
-    }
-}
-
-fn protocol_outcome(value: CaptureOutputOutcomeMetadata) -> OutputOutcomeMetadata {
-    OutputOutcomeMetadata {
-        outcome: match value.outcome {
-            CaptureOutputOutcome::Success => OutputOutcome::Success,
-            CaptureOutputOutcome::Failure => OutputOutcome::Failure,
-            CaptureOutputOutcome::Timeout => OutputOutcome::Timeout,
-            CaptureOutputOutcome::Unknown => OutputOutcome::Unknown,
-        },
-        exit_code: value.exit_code,
-        duration_ms: value.duration_ms,
-    }
-}
-
-fn protocol_locator(value: CaptureOutputSourceLocator) -> OutputSourceLocator {
-    OutputSourceLocator {
-        version: value.version,
-        kind: value.kind,
-        payload_base64: STANDARD.encode(value.payload),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::source_backed_feed::*;
@@ -1524,10 +961,9 @@ mod tests {
     };
     use ctx_history_index::VerifiedIndex;
     use ctx_pro_host_protocol::{
-        certified_source_revision_sha256, DeleteSourceRequest, ErrorClass,
-        FinishAdmittedSourceManifestRequest, FinishSourceManifestRequest,
-        MaterializeSourcePageRequest, PrepareSourceRequest, ProtocolError, SourceDeleted,
-        SourceManifestAdmissionBegan, SourceManifestAdmitted, SourceManifestBegan,
+        certified_source_revision_sha256, DeleteSourceRequest, FinishAdmittedSourceManifestRequest,
+        FinishSourceManifestRequest, MaterializeSourcePageRequest, PrepareSourceRequest,
+        SourceDeleted, SourceManifestAdmissionBegan, SourceManifestAdmitted, SourceManifestBegan,
         SourceManifestFinished, SourceManifestHeader, SourceManifestPage,
         SourceManifestPageAdmitted, SourceMessageFact, SourcePageMaterialized, SourcePrepared,
         SourceRecordMetadata, SourceSessionRelationships, TransientSourceContent,
@@ -1621,6 +1057,7 @@ mod tests {
         corrupt_page_ack: bool,
         admission_header: Option<SourceManifestHeader>,
         admission_cursor: Option<ctx_pro_host_protocol::SourceManifestAdmissionCursor>,
+        admission_replayed: Vec<bool>,
     }
 
     impl FixtureConsumer {
@@ -1639,6 +1076,7 @@ mod tests {
                 corrupt_page_ack: false,
                 admission_header: None,
                 admission_cursor: None,
+                admission_replayed: Vec::new(),
             }
         }
 
@@ -1650,19 +1088,7 @@ mod tests {
         }
     }
 
-    impl SourceBackedProConsumer for FixtureConsumer {
-        fn begin_source_manifest(
-            &mut self,
-            manifest: &SourceBackedProManifest,
-        ) -> Result<SourceManifestBegan> {
-            Ok(SourceManifestBegan {
-                core_generation_id: manifest.core_generation_id.clone(),
-                materializer_revision: self.materializer_revision.clone(),
-                progress: self.progress.values().cloned().collect(),
-                replayed: false,
-            })
-        }
-
+    impl SourceBackedProPageConsumer for FixtureConsumer {
         fn prepare_source(&mut self, request: &PrepareSourceRequest) -> Result<SourcePrepared> {
             assert_eq!(request.materializer_revision, self.materializer_revision);
             self.dispositions.push(request.disposition);
@@ -1741,6 +1167,20 @@ mod tests {
                 replayed: false,
             })
         }
+    }
+
+    impl SourceBackedProConsumer for FixtureConsumer {
+        fn begin_source_manifest(
+            &mut self,
+            manifest: &SourceBackedProManifest,
+        ) -> Result<SourceManifestBegan> {
+            Ok(SourceManifestBegan {
+                core_generation_id: manifest.core_generation_id.clone(),
+                materializer_revision: self.materializer_revision.clone(),
+                progress: self.progress.values().cloned().collect(),
+                replayed: false,
+            })
+        }
 
         fn finish_source_manifest(
             &mut self,
@@ -1776,6 +1216,7 @@ mod tests {
                 self.admission_cursor =
                     Some(ctx_pro_host_protocol::SourceManifestAdmissionCursor::initial(header));
             }
+            self.admission_replayed.push(replayed);
             Ok(SourceManifestAdmissionBegan {
                 cursor: self
                     .admission_cursor
@@ -1850,62 +1291,44 @@ mod tests {
     }
 
     #[test]
-    fn first_activation_starts_inventory_when_output_progress_is_absent() {
-        let generation = output_inventory_generation(HelperMessage::Error(ProtocolError::new(
-            ErrorClass::NotMaterialized,
-            "graph does not exist",
-        )))
-        .expect("first activation generation");
-
-        assert_eq!(generation, 1);
-    }
-
-    #[test]
-    fn inventory_generation_resumes_incomplete_and_advances_complete_runs() {
-        assert_eq!(
-            next_output_inventory_generation(OutputProgressResult {
-                inventory_generation: 7,
-                inventory_complete: false,
-                sources: Vec::new(),
-            })
-            .unwrap(),
-            7
-        );
-        assert_eq!(
-            next_output_inventory_generation(OutputProgressResult {
-                inventory_generation: 7,
-                inventory_complete: true,
-                sources: Vec::new(),
-            })
-            .unwrap(),
-            8
-        );
-        assert_eq!(
-            next_output_inventory_generation(OutputProgressResult {
-                inventory_generation: 0,
-                inventory_complete: false,
-                sources: Vec::new(),
-            })
-            .unwrap(),
-            1
-        );
-    }
-
-    #[test]
-    fn finish_failure_warning_is_explicit_and_nonfatal() {
-        let warning = ProOutputImport::finish_warning(&anyhow!("helper_timeout"));
-
-        assert!(warning.contains("Core history update succeeded"));
-        assert!(warning.contains("Pro output catch-up remains incomplete"));
-        assert!(warning.contains("helper_timeout"));
-    }
-
-    #[test]
     fn source_backed_helper_negotiates_source_materialization_capability() {
         assert_eq!(
             source_backed_feed::source_materialization_capabilities(),
             BTreeSet::from([Capability::SourceMaterialization])
         );
+    }
+
+    #[test]
+    fn public_transport_exposes_only_the_paged_source_manifest_path() {
+        let source = include_str!("client_output.rs");
+        for forbidden in [
+            ["Pro", "OutputImport"].concat(),
+            ["ClientPro", "OutputSink"].concat(),
+            ["Import", "Profile"].concat(),
+            ["BeginOutput", "Inventory"].concat(),
+            ["MaterializeOutput", "Page"].concat(),
+            ["ProReplay", "Only"].concat(),
+            ["sync_source_backed_pro_feed_", "deferred("].concat(),
+            ["HostMessage::BeginSource", "Manifest("].concat(),
+            ["HostMessage::FinishSource", "Manifest("].concat(),
+        ] {
+            assert!(
+                !source.contains(&forbidden),
+                "public Pro transport contains retired path {forbidden}"
+            );
+        }
+        for required in [
+            "sync_source_manifest_materialization",
+            "BeginSourceManifestAdmission",
+            "AdmitSourceManifestPage",
+            "FinishSourceManifestAdmission",
+            "FinishAdmittedSourceManifest",
+        ] {
+            assert!(
+                source.contains(required),
+                "public Pro transport is missing {required}"
+            );
+        }
     }
 
     #[test]
@@ -1939,6 +1362,36 @@ mod tests {
                 .next_source_index,
             1
         );
+    }
+
+    #[test]
+    fn paged_manifest_restart_replays_admission_and_reuses_terminal_source_progress() {
+        let fixture = public_codex_fixture();
+        let mut consumer = FixtureConsumer::new(Vec::new());
+        let mut first_provider = fixture.provider();
+        let first = sync_source_backed_pro_feed_paged(
+            fixture.manifest(),
+            &fixture.generation_manifest,
+            &mut first_provider,
+            &mut consumer,
+        )
+        .expect("initial paged source sync");
+        let first_receipt = first.receipt;
+
+        let mut restarted_provider = fixture.provider();
+        let restarted = sync_source_backed_pro_feed_paged(
+            fixture.manifest(),
+            &fixture.generation_manifest,
+            &mut restarted_provider,
+            &mut consumer,
+        )
+        .expect("restarted paged source sync");
+
+        assert_eq!(consumer.admission_replayed, [false, true]);
+        assert_eq!(restarted.reread_pages, 0);
+        assert_eq!(restarted.reread_records, 0);
+        assert!(restarted_provider.requests.is_empty());
+        assert_eq!(restarted.receipt, first_receipt);
     }
 
     #[test]

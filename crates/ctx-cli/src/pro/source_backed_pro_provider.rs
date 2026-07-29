@@ -288,7 +288,7 @@ impl SourceBackedProProviderContract for SourceBackedProProvider<'_> {
     }
 }
 
-pub(super) fn sync_committed_source_manifest(
+pub(super) fn sync_generation_pinned_source_manifest(
     data_root: &Path,
     manifest: SourceManifest,
     index: &VerifiedIndex,

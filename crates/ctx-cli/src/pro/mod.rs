@@ -21,8 +21,7 @@ mod request_identity;
 mod setup_validation;
 mod verified_executable;
 mod workos_device;
-pub(crate) use client::ProOutputImport;
-pub(crate) use client::{blame, stable_error_code};
+pub(crate) use client::{blame, stable_error_code, sync_source_manifest_materialization};
 pub(crate) use lifecycle::{lifecycle_status_json, run_lifecycle, ProArgs};
 pub(crate) use pending_materialization::run_if_pending as run_pending_materialization;
 #[cfg(test)]
