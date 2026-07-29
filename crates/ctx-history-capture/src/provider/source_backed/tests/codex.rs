@@ -182,6 +182,75 @@ fn codex_history_and_sessions_publish_one_fresh_generation_and_hydrate_exactly()
             .map(|source| source.counts().certified_bytes)
             .sum::<u64>()
     );
+
+    let before_generation = verified.generation_id().to_owned();
+    let before_opstamp = receipt.commit.opstamp;
+    let before_meta = fs::read(index.join("meta.json")).unwrap();
+    let before_segments = verified.validate_checksums().unwrap();
+    drop(verified);
+    let replay = refresh_source_backed_generation(
+        &index,
+        &build.registry,
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 15_000_000,
+        },
+    )
+    .unwrap();
+    let replay_index = VerifiedIndex::open(&index).unwrap();
+    assert_eq!(replay.commit.generation_id, before_generation);
+    assert_eq!(replay.commit.opstamp, before_opstamp);
+    assert_eq!(fs::read(index.join("meta.json")).unwrap(), before_meta);
+    assert_eq!(replay_index.validate_checksums().unwrap(), before_segments);
+
+    let appended_prompt = "Codex prompt history append-only registration sentinel";
+    let mut appended_line = serde_json::to_vec(&serde_json::json!({
+        "session_id": native_session_id,
+        "ts": 1_785_139_201,
+        "text": appended_prompt,
+    }))
+    .unwrap();
+    appended_line.push(b'\n');
+    prompt_bytes.extend(appended_line);
+    fs::write(&history, &prompt_bytes).unwrap();
+    let appended_build = build_automatic_source_backed_registry_from_report(
+        &context,
+        vec![
+            fixture_provider_source_at(
+                CaptureProvider::Codex,
+                "codex_session_jsonl_tree",
+                ProviderImportSupport::Native,
+                &sessions,
+            ),
+            fixture_provider_source_at(
+                CaptureProvider::Codex,
+                "codex_history_jsonl",
+                ProviderImportSupport::Native,
+                &history,
+            ),
+        ],
+        Vec::new(),
+    );
+    assert!(appended_build.issues.is_empty());
+    let appended = refresh_source_backed_generation(
+        &index,
+        &appended_build.registry,
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 15_000_000,
+        },
+    )
+    .unwrap();
+    assert!(appended.commit.opstamp > before_opstamp);
+    let appended_index = VerifiedIndex::open(&index).unwrap();
+    assert_eq!(
+        appended_index
+            .search_event_candidates("registration sentinel", 10)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(appended_index.document_count(), 3);
 }
 
 #[test]
