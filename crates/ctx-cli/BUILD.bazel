@@ -486,7 +486,7 @@ ctx_cli_integration_test(
     src = "tests/pro_qualification.rs",
     binary = ":ctx_pro_qualification",
     extra_crates = ["sha2"],
-    tags = ["qualification", "security"],
+    tags = ["qualification", "release-gate", "security"],
     test_support = [
         "base",
         "fixtures",
