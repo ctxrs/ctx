@@ -160,9 +160,10 @@ pub use provider::{
 pub use result_compaction::compact_result_payload;
 pub use source::{CaptureProvider, CaptureSource, CaptureSourceDescriptor, CaptureSourceKind};
 pub use source_resolver::{
-    ContentSourceResolver, EventHydrationRequest, HydratedProviderRecord, HydrationFailure,
-    HydrationFailureKind, LocatorRevisionPolicy, NativeRecordCoordinate, SessionHydrationRequest,
-    SourceRecordLocator, SourceResolverContractError, NATIVE_LOCATOR_VERSION,
+    BatchHydrationRequest, BatchHydrationResult, ContentSourceResolver, EventHydrationRequest,
+    HydratedProviderRecord, HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy,
+    NativeRecordCoordinate, SessionHydrationRequest, SourceRecordLocator,
+    SourceResolverContractError, MAX_BATCH_HYDRATION_EVENTS, NATIVE_LOCATOR_VERSION,
 };
 pub use sync::{
     AuditActorKind, AuditLogEntry, EntityTimestamps, Fidelity, RedactionState, SyncAlias,
