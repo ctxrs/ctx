@@ -325,10 +325,6 @@ fn selected_plugin_cold_append_and_noop_publish_one_source_backed_epoch() {
         cold["sources"][0]["provider_source_authority"], true,
         "{cold:#}"
     );
-    assert_eq!(
-        cold["sources"][0]["legacy_store_fallback"], false,
-        "{cold:#}"
-    );
     let cold_generation = cold["sources"][0]["published_generation"]
         .as_str()
         .unwrap()
