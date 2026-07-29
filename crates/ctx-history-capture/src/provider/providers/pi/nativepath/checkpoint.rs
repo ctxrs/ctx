@@ -53,23 +53,6 @@ impl PiNativeCheckpoint {
             && self.policy_revision == PI_NATIVEPATH_POLICY_REVISION
     }
 
-    pub(super) fn decode_frontier(
-        frontier: &NativeSafeFrontier,
-    ) -> Result<Self, super::source::PiNativePathError> {
-        if frontier.version != PI_NATIVEPATH_FRONTIER_VERSION {
-            return Err(super::source::PiNativePathError::Page(
-                "Pi NativePath frontier version is unsupported".to_owned(),
-            ));
-        }
-        let checkpoint: Self = serde_json::from_slice(&frontier.bytes)?;
-        if !checkpoint.revisions_match() {
-            return Err(super::source::PiNativePathError::Page(
-                "Pi NativePath frontier revisions are unsupported".to_owned(),
-            ));
-        }
-        Ok(checkpoint)
-    }
-
     pub(super) fn safe_frontier(&self) -> Result<NativeSafeFrontier, NativeIngestionPageError> {
         let bytes = serde_json::to_vec(self)
             .map_err(|_| NativeIngestionPageError::FrontierTooLarge { bytes: usize::MAX })?;

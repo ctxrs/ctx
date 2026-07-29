@@ -28,7 +28,7 @@ use super::{
     checkpoint::PiNativeCheckpoint,
     reader::{
         open_pi_native_session, open_pi_native_session_retained, PiNativeOpenOutcome,
-        PiNativeOwnedPage, PiNativeProfile, PiNativeScanOptions, PiSourceLifecycle,
+        PiNativeScanOptions, PiSourceLifecycle,
     },
     rows::{PiNativeCoreUnit, PiNativeEventRow, PiNativeFileTouchRow, PiNativeSessionRow},
     source::{discover_pi_sessions, PiFrozenSource, PiNativePathError},
@@ -91,8 +91,6 @@ pub(crate) enum PiSourceBackedError {
     InvalidCheckpoint,
     #[error("Pi source-backed scanner has not been fully drained")]
     ProjectionNotDrained,
-    #[error("Pi Core-only source-backed scanner emitted a Pro page")]
-    UnexpectedProPage,
     #[error("Pi source-backed scan counters do not reconcile")]
     ScanCountMismatch,
     #[error("Pi source-backed scan count overflow")]
@@ -225,7 +223,7 @@ impl PiSourceBackedScanner {
         let path = path.as_ref().to_path_buf();
         let source_path = provider_path_identity(&path)?;
         context.source_path = Some(path.clone());
-        let mut options = PiNativeScanOptions::new(context, PiNativeProfile::CoreOnly);
+        let mut options = PiNativeScanOptions::new(context);
         if let Some(previous) = previous.as_ref() {
             options.resume.core = Some(decode_checkpoint(previous)?);
         }
@@ -244,7 +242,7 @@ impl PiSourceBackedScanner {
         let path = path.to_path_buf();
         let source_path = provider_path_identity(&path)?;
         context.source_path = Some(path.clone());
-        let mut options = PiNativeScanOptions::new(context, PiNativeProfile::CoreOnly);
+        let mut options = PiNativeScanOptions::new(context);
         if let Some(previous) = previous.as_ref() {
             options.resume.core = Some(decode_checkpoint(previous)?);
         }
@@ -297,9 +295,6 @@ impl PiSourceBackedScanner {
         loop {
             let Some(page) = self.scanner.next_page()? else {
                 return Ok(None);
-            };
-            let PiNativeOwnedPage::Core(page) = page else {
-                return Err(PiSourceBackedError::UnexpectedProPage);
             };
             let documents = self.project_core_units(page.core.units)?;
             if documents.is_empty() {

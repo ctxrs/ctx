@@ -13,8 +13,6 @@ impl PiNativeScanner {
             return Ok(PendingRecord {
                 core_units: Vec::new(),
                 core_encoded_bytes: 0,
-                output: None,
-                output_estimated_bytes: 0,
                 checkpoint,
             });
         }
@@ -65,7 +63,7 @@ impl PiNativeScanner {
 
         let event_type = pi_native_event_type(entry_type, value.get("message"));
         if matches!(event_type, EventType::ToolOutput | EventType::CommandOutput) {
-            return self.output_pending(
+            return self.result_pending(
                 &value,
                 event_type,
                 ordinal,
@@ -124,7 +122,7 @@ impl PiNativeScanner {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn output_pending(
+    pub(super) fn result_pending(
         &mut self,
         entry: &Value,
         event_type: EventType,
@@ -147,8 +145,8 @@ impl PiNativeScanner {
                 checkpoint,
             );
         };
-        let outcome = pi_output_outcome(entry, event_type);
-        let occurred_at = match entry
+        let outcome = pi_result_outcome(entry, event_type);
+        let _occurred_at = match entry
             .get("timestamp")
             .and_then(Value::as_str)
             .ok_or_else(|| "pi session event missing timestamp".to_owned())
@@ -171,77 +169,37 @@ impl PiNativeScanner {
             }
         };
         match outcome.outcome {
-            OutputOutcome::Success => {
+            PiResultOutcome::Success => {
                 self.stats.native_result_success =
                     self.stats.native_result_success.saturating_add(1)
             }
-            OutputOutcome::Failure => {
+            PiResultOutcome::Failure => {
                 self.stats.native_result_failure =
                     self.stats.native_result_failure.saturating_add(1)
             }
-            OutputOutcome::Timeout => {
+            PiResultOutcome::Timeout => {
                 self.stats.native_result_timeout =
                     self.stats.native_result_timeout.saturating_add(1)
             }
-            OutputOutcome::Unknown => {
+            PiResultOutcome::Unknown => {
                 self.stats.native_result_unknown =
                     self.stats.native_result_unknown.saturating_add(1)
             }
         }
         let explicit_failure = matches!(
             outcome.outcome,
-            OutputOutcome::Failure | OutputOutcome::Timeout
+            PiResultOutcome::Failure | PiResultOutcome::Timeout
         );
-        let command = pi_output_command_context(entry, header);
-        let retained_failure =
-            explicit_failure && (event_type != EventType::CommandOutput || command.is_some());
-        let wants_output = self.output.as_ref().is_some_and(|lane| lane.active);
+        let retained_failure = explicit_failure
+            && (event_type != EventType::CommandOutput || pi_command_output_is_supported(entry));
         let wants_core = self.core_is_active();
-        let result_body = (wants_output || retained_failure)
+        let result_body = retained_failure
             .then(|| {
                 self.stats.result_body_extractions =
                     self.stats.result_body_extractions.saturating_add(1);
                 pi_result_content(entry)
             })
             .flatten();
-        let mut output = None;
-        let mut output_estimated_bytes = 0;
-        if wants_output {
-            if let Some(content) = result_body.as_ref() {
-                if content.len() <= PI_OUTPUT_BODY_MAX_BYTES {
-                    let observation = output_observation(
-                        header,
-                        entry,
-                        event_type,
-                        ordinal,
-                        line_number,
-                        byte_start,
-                        byte_end_exclusive,
-                        &self.locator_source_item,
-                        occurred_at,
-                        command.clone(),
-                        outcome.clone(),
-                        content,
-                    )?;
-                    output_estimated_bytes = output_estimated_bytes_for(&observation);
-                    if PI_OUTPUT_PAGE_ENCODING_RESERVE.saturating_add(output_estimated_bytes)
-                        <= PI_NATIVE_PAGE_MAX_BYTES
-                    {
-                        self.stats.pro_result_body_bytes = self
-                            .stats
-                            .pro_result_body_bytes
-                            .saturating_add(u64::try_from(content.len()).unwrap_or(u64::MAX));
-                        output = Some(observation);
-                    } else {
-                        self.stats.oversized_records =
-                            self.stats.oversized_records.saturating_add(1);
-                        output_estimated_bytes = 0;
-                    }
-                } else {
-                    self.stats.oversized_records = self.stats.oversized_records.saturating_add(1);
-                }
-            }
-        }
 
         let mut core_units = if wants_core && retained_failure {
             match self.event_and_touches(
@@ -270,14 +228,7 @@ impl PiNativeScanner {
         } else {
             Vec::new()
         };
-        if !retained_failure {
-            debug_assert!(core_units.is_empty());
-            debug_assert_eq!(self.stats.successful_or_unknown_core_bodies, 0);
-            debug_assert_eq!(self.stats.successful_or_unknown_core_hashes, 0);
-            debug_assert_eq!(self.stats.successful_or_unknown_core_previews, 0);
-            debug_assert_eq!(self.stats.successful_or_unknown_core_touches, 0);
-            debug_assert_eq!(self.stats.successful_or_unknown_core_fts_documents, 0);
-        }
+        debug_assert!(retained_failure || core_units.is_empty());
         let core_encoded_bytes = self.bound_core_units_encoded(
             &mut core_units,
             ordinal,
@@ -288,8 +239,6 @@ impl PiNativeScanner {
         Ok(PendingRecord {
             core_units,
             core_encoded_bytes,
-            output,
-            output_estimated_bytes,
             checkpoint,
         })
     }
@@ -335,10 +284,7 @@ impl PiNativeScanner {
         byte_start: u64,
         byte_end_exclusive: u64,
         record_bytes: Option<&[u8]>,
-        failure: Option<(
-            &crate::provider::importer::OutputOutcomeMetadata,
-            Option<&str>,
-        )>,
+        failure: Option<(&PiResultOutcomeMetadata, Option<&str>)>,
     ) -> Result<Vec<PiNativeCoreUnit>, PiNativePathError> {
         let line_number_usize =
             usize::try_from(line_number).map_err(|_| PiNativePathError::PositionOverflow)?;
@@ -366,7 +312,7 @@ impl PiNativeScanner {
             })?;
         let event_type = pi_native_event_type(entry_type, message);
         let role = message_role.map(pi_event_role);
-        let lexical_text = pi_entry_text(entry, message).unwrap_or_default();
+        let mut lexical_text = pi_entry_text(entry, message).unwrap_or_default();
         let mut payload = pi_native_event_payload(entry, event_type);
         if let Some((outcome, content)) = failure {
             let payload = payload.as_object_mut().ok_or_else(|| {
@@ -377,7 +323,7 @@ impl PiNativeScanner {
             payload.insert("result_outcome".to_owned(), json!("failure"));
             payload.insert(
                 "timed_out".to_owned(),
-                json!(outcome.outcome == OutputOutcome::Timeout),
+                json!(outcome.outcome == PiResultOutcome::Timeout),
             );
             if let Some(exit_code) = outcome.exit_code {
                 payload.insert("exit_code".to_owned(), json!(exit_code));
@@ -387,13 +333,7 @@ impl PiNativeScanner {
             }
             if let Some(content) = content {
                 payload.insert("output_bytes".to_owned(), json!(content.len()));
-                let (preview, _) = crate::provider::normalization::provider_local_preview(
-                    content,
-                    PROVIDER_MAX_PREVIEW_CHARS,
-                );
-                if !preview.trim().is_empty() {
-                    payload.insert("output_preview".to_owned(), Value::String(preview));
-                }
+                lexical_text = content.to_owned();
             }
         }
         let provider_event_identity_index =
