@@ -5,7 +5,7 @@ use ctx_history_capture::ProviderImportWorkResult;
 use serde_json::json;
 
 use crate::{
-    analytics::{ImportTelemetry, ProviderRefreshTrigger},
+    analytics::ProviderRefreshTrigger,
     compact_json,
     progress::ProgressReporter,
     semantic::{
@@ -19,7 +19,6 @@ use super::{ImportReport, ImportRunOptions, ImportTotals, ProviderRefreshCollect
 pub(super) struct AutomaticSourceRefreshImportContext<'a> {
     pub(super) args: &'a ImportArgs,
     pub(super) data_root: PathBuf,
-    pub(super) telemetry: &'a mut ImportTelemetry,
     pub(super) provider_refreshes: &'a mut ProviderRefreshCollector,
     pub(super) config: &'a crate::config::AppConfig,
     pub(super) options: ImportRunOptions,

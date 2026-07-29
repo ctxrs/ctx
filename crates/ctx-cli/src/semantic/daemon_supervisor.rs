@@ -13,9 +13,7 @@ use serde_json::{json, Value};
 use crate::{compact_json, identity};
 
 use super::{
-    paths_status::{
-        daemon_lock_is_active, daemon_root_path, pid_from_lock_json, read_pid_lock_json,
-    },
+    paths_status::{daemon_lock_is_active, pid_from_lock_json, read_pid_lock_json},
     query_service::daemon_source_refresh_request,
 };
 
