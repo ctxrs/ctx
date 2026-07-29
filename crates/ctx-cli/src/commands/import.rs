@@ -24,6 +24,7 @@ mod catalog;
 mod cold;
 mod entry;
 mod explicit;
+mod explicit_source_catalog;
 mod inventory;
 mod manifest;
 mod native;
@@ -39,7 +40,14 @@ pub(crate) use entry::{
     import_report_analytics_outcome, import_report_failure_type, insert_import_error_analytics,
     insert_import_report_analytics, run_import,
 };
-use explicit::{large_import_notice, run_explicit_format_import, ExplicitFormatImportContext};
+use explicit::{
+    large_import_notice, run_explicit_source_catalog_import, ExplicitSourceCatalogImportContext,
+};
+pub(crate) use explicit_source_catalog::{
+    explicit_source_for_import, load_explicit_source_catalog_authority,
+    register_explicit_source_catalog_routes, upsert_explicit_source,
+    ExplicitSourceCatalogAuthority, ExplicitSourceCatalogUpsert,
+};
 pub(crate) use inventory::{
     inventory_available_sources, inventory_import_sources, ImportInventory,
 };
@@ -320,12 +328,22 @@ fn run_import_internal_with_pro_output(
     options: ImportRunOptions,
     pro_output_selection: ProOutputSelection,
 ) -> Result<ImportReport> {
-    let _ = config;
     validate_import_args(args)?;
     fs::create_dir_all(&data_root).map_err(|source| CaptureError::SystemIo {
         operation: "initialize ctx data root",
         source,
     })?;
+    if args.path.is_some() {
+        return run_explicit_source_catalog_import(ExplicitSourceCatalogImportContext {
+            args,
+            data_root,
+            telemetry,
+            provider_refreshes,
+            refresh_trigger,
+            config,
+            options,
+        });
+    }
     let db_path = database_path(data_root.clone());
     let automatic_pro_output = pro_output_selection.is_automatic();
     let (mut pro_output, require_complete_pro_output) = pro_output_selection.begin(&data_root);
@@ -335,36 +353,13 @@ fn run_import_internal_with_pro_output(
         } else {
             None
         };
-    let mut requests = if args.input_format.is_none() {
-        import_requests(args, prior_route_store.as_ref())?
-    } else {
-        Vec::new()
-    };
+    let mut requests = import_requests(args, prior_route_store.as_ref())?;
     drop(prior_route_store);
-    let plugin_requests = if args.input_format.is_none() {
-        history_source_plugin_import_requests(
-            args,
-            &data_root,
-            options.include_history_source_plugins,
-        )?
-    } else {
-        Vec::new()
-    };
-
-    if let Some(format) = args.input_format {
-        let store = Store::open(&db_path)?;
-        return run_explicit_format_import(ExplicitFormatImportContext {
-            args,
-            format,
-            db_path,
-            store,
-            telemetry,
-            provider_refreshes,
-            refresh_trigger,
-            options,
-            pro_output,
-        });
-    }
+    let plugin_requests = history_source_plugin_import_requests(
+        args,
+        &data_root,
+        options.include_history_source_plugins,
+    )?;
 
     let cold_seed = try_codex_cold_cli_import(
         args,

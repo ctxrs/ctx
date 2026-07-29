@@ -32,9 +32,19 @@ use crate::provider_sources::{
 use crate::{ImportArgs, MAX_HISTORY_SOURCE_PLUGIN_JSONL_LINE_BYTES};
 
 pub(crate) fn validate_import_args(args: &ImportArgs) -> Result<()> {
+    if args.input_format.is_some() && args.path.is_none() {
+        return Err(anyhow!(
+            "ctx import --input-format requires --path for a source-backed catalog entry"
+        ));
+    }
     if args.path.is_some() && args.input_format.is_none() && args.provider.is_none() {
         return Err(anyhow!(
             "ctx import --path requires --provider for native provider history; use `ctx import --provider codex --path <path>` or `ctx import --input-format ctx-history-jsonl-v1 --path <file>`"
+        ));
+    }
+    if args.history_source.is_some() || !args.history_source_manifest.is_empty() {
+        return Err(anyhow!(
+            "history source plugin imports have no source-backed adapter; no legacy import fallback was used"
         ));
     }
     Ok(())
@@ -221,22 +231,43 @@ pub(crate) fn history_source_plugin_import_requests(
                 "history source plugin selector `{selector}` matched multiple sources ({labels}); use plugin/source or provider_key/source_id"
             ));
         }
-        return Ok(matches);
+        return reject_history_source_plugin_fallback(matches);
     }
     if args.all {
-        return Ok(sources
-            .into_iter()
-            .filter(|source| source.enabled)
-            .collect());
+        return reject_history_source_plugin_fallback(
+            sources
+                .into_iter()
+                .filter(|source| source.enabled)
+                .collect(),
+        );
     }
-    Ok(sources
-        .into_iter()
-        .filter(|source| {
-            args.history_source_manifest
-                .iter()
-                .any(|path| manifest_arg_matches_source(path, &source.manifest_path))
-        })
-        .collect())
+    reject_history_source_plugin_fallback(
+        sources
+            .into_iter()
+            .filter(|source| {
+                args.history_source_manifest
+                    .iter()
+                    .any(|path| manifest_arg_matches_source(path, &source.manifest_path))
+            })
+            .collect(),
+    )
+}
+
+fn reject_history_source_plugin_fallback(
+    sources: Vec<HistorySourcePluginSource>,
+) -> Result<Vec<HistorySourcePluginSource>> {
+    if sources.is_empty() {
+        return Ok(sources);
+    }
+    let labels = sources
+        .iter()
+        .take(3)
+        .map(HistorySourcePluginSource::label)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(anyhow!(
+        "history source plugin format(s) have no source-backed adapter ({labels}); no legacy import fallback was used"
+    ))
 }
 
 pub(crate) fn manifest_arg_matches_source(arg: &Path, manifest_path: &Path) -> bool {
