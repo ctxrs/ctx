@@ -21,7 +21,7 @@ assert_reaches_gate() {
   }
 }
 
-assert_reaches_gate crates/ctx-history-capture/src/provider/importer.rs
+assert_reaches_gate crates/ctx-history-capture/src/provider/source_backed/driver.rs
 assert_reaches_gate tools/bazel/release_routes_test.bzl
 
 printf 'LOC Bazel input contract passed (Rust and nested Starlark runfiles present).\n'
