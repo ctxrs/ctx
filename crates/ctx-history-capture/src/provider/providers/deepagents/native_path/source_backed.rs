@@ -27,23 +27,24 @@ use super::super::{
         deepagents_write_record_digest, resolve_deepagents_content,
         validate_deepagents_content_schema, DeepAgentsContentAddress,
     },
-    message::{deepagents_messages_from_blob, DeepAgentsMessage},
+    message::{
+        core_eligible, deepagents_event_type, deepagents_messages_from_blob, DeepAgentsMessage,
+    },
     source::{
         deepagents_checkpoint_time, deepagents_hydrate_write, deepagents_next_write_candidate,
         deepagents_thread_summary, deepagents_validate_schema, DeepAgentsThreadSummary,
         DeepAgentsWriteCandidate, DeepAgentsWriteKey,
     },
 };
-use super::core_eligible;
 use crate::{
     common::io::ProviderSourceRoot,
-    provider::{normalization::provider_local_preview, sqlite::sqlite_schema_fingerprint},
+    provider::sqlite::sqlite_schema_fingerprint,
     provider_sources::{
         open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
         SqliteSourceAccessError, SqliteSourceEvidence, SqliteSourceReadSnapshot,
     },
     CaptureError, ProviderAdapterContext, DEEPAGENTS_SQLITE_SOURCE_FORMAT,
-    MAX_PROVIDER_SQLITE_VALUE_BYTES, PROVIDER_MAX_TEXT_CHARS,
+    MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
 
 const DEEPAGENTS_SOURCE_ANCHOR_NAMESPACE: &str = "deepagents.sessions";
@@ -752,12 +753,8 @@ fn deepagents_lexical_document(
         Some(source_revision_digest),
         record_digest,
     )?;
-    let body = provider_local_preview(&message.text, PROVIDER_MAX_TEXT_CHARS).0;
-    let event_type = if message.role == ctx_history_core::EventRole::Tool {
-        ctx_history_core::EventType::ToolOutput
-    } else {
-        ctx_history_core::EventType::Message
-    };
+    let body = message.text.clone();
+    let event_type = deepagents_event_type(message);
     Ok(LexicalDocument {
         event_id,
         session_id,
