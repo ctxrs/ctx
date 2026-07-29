@@ -274,14 +274,21 @@ struct RootAuthorizedProviderSqliteSnapshot {
 impl RootAuthorizedProviderSqliteSnapshot {
     fn open(path: &Path) -> Result<Self> {
         let (parent_path, database_name) = sqlite_parent_and_leaf(path)?;
-        let authority_root = ProviderSourceRoot::open(parent_path)?;
-        let parent = authority_root.directory()?;
+        let admission_root = ProviderSourceRoot::open(parent_path)?;
+        let parent = admission_root.directory()?;
         let parent_handle = parent.try_clone_authority_handle()?;
         let sqlite_authority =
             retain_sqlite_source_directory_authority(&parent_handle, parent_path)
                 .map_err(map_sqlite_source_access_error)?;
         let snapshot = open_root_handle_sqlite_source_snapshot(&sqlite_authority, database_name)
             .map_err(map_sqlite_source_access_error)?;
+        snapshot
+            .revalidate()
+            .map_err(map_sqlite_source_access_error)?;
+        // The first stock WAL read may create empty WAL/SHM sidecars. The
+        // SQLite snapshot retains the admission authority and fences that
+        // transition; baseline the outer route only after it completes.
+        let authority_root = ProviderSourceRoot::open(parent_path)?;
         Ok(Self {
             snapshot: Some(snapshot),
             authority_root,
@@ -636,6 +643,35 @@ mod tests {
             .unwrap();
         assert_eq!(body, "guarded");
         connection.finish().unwrap();
+    }
+
+    #[test]
+    fn provider_sqlite_initial_snapshot_succeeds_with_idle_wal_writer() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let database = temp.path().join("provider.sqlite");
+        let writer = Connection::open(&database).unwrap();
+        writer
+            .execute("CREATE TABLE messages (body TEXT NOT NULL)", [])
+            .unwrap();
+        writer
+            .execute("INSERT INTO messages (body) VALUES ('idle-wal')", [])
+            .unwrap();
+        let mode: String = writer
+            .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        writer.execute_batch("PRAGMA wal_autocheckpoint=0").unwrap();
+        assert!(
+            !database.with_file_name("provider.sqlite-wal").exists(),
+            "the idle writer must not have materialized a WAL pathname"
+        );
+
+        let (body, evidence) = read_provider_body_with_finish(&database, || {}).unwrap();
+
+        assert_eq!(body, "idle-wal");
+        assert_eq!(evidence.wal_length(), Some(0));
+        assert!(evidence.shared_memory_length().is_some());
+        drop(writer);
     }
 
     #[test]

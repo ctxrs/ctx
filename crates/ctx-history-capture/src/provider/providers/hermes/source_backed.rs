@@ -427,16 +427,23 @@ fn open_root_authorized_snapshot_with_hook(
                 path: path.to_path_buf(),
                 reason: SQLITE_SOURCE_INVALID_REASON,
             })?;
-    let source_root = ProviderSourceRoot::open(parent)?;
-    let source_directory = source_root.directory()?;
-    let parent_handle = source_directory
+    let admission_root = ProviderSourceRoot::open(parent)?;
+    let admission_directory = admission_root.directory()?;
+    let parent_handle = admission_directory
         .try_clone_authority_handle()
         .map_err(CaptureError::from)?;
     let sqlite_authority = retain_sqlite_source_directory_authority(&parent_handle, parent)?;
+    admission_directory.revalidate()?;
+    admission_root.revalidate()?;
     let sqlite_snapshot =
         open_root_handle_sqlite_source_snapshot(&sqlite_authority, database_leaf)?;
     after_authorize();
-    source_directory.revalidate()?;
+    sqlite_snapshot.revalidate()?;
+    // Stock SQLite may create an empty WAL and SHM while pinning the first WAL
+    // read. The SQLite guard retains and revalidates the admission authority;
+    // establish the outer directory stamp after that legitimate transition so
+    // final provider-root revalidation still catches later mutation.
+    let source_root = ProviderSourceRoot::open(parent)?;
     source_root.revalidate()?;
     let connection = sqlite_snapshot.connection()?;
     let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
