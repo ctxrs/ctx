@@ -57,7 +57,7 @@ mod resolver;
 use projection::{classify_scan, scan_counts, scan_leaf};
 pub(crate) use resolver::MuxSourceBackedResolverV0;
 #[cfg(test)]
-use resolver::{decode_mux_coordinate, encode_mux_coordinate};
+use resolver::decode_mux_coordinate;
 use resolver::{
     decode_mux_legacy_range, mux_exact_logical_content, read_mux_payload,
     MuxLogicalRecordCoordinate,
