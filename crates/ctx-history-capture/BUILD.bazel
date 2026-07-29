@@ -53,27 +53,6 @@ rust_library(
     rustc_env = COMMON_RUSTC_ENV,
 )
 
-rust_library(
-    name = "qualification_lib",
-    srcs = PROD_SRCS,
-    crate_name = "ctx_history_capture",
-    crate_root = "src/lib.rs",
-    edition = crate_edition(),
-    aliases = aliases(),
-    deps = all_crate_deps(normal = True) + CTX_HISTORY_CAPTURE_DEPS,
-    proc_macro_deps = all_crate_deps(proc_macro = True),
-    rustc_env = COMMON_RUSTC_ENV,
-    rustc_env_files = ["qualification-stamp.env"],
-    rustc_flags = ["--cfg=codex_nativepath_qualification"],
-    stamp = 1,
-    tags = [
-        "local",
-        "manual",
-        "qualification",
-    ],
-    visibility = ["//visibility:private"],
-)
-
 ctx_rust_binary(
     name = "codex_nativepath_qualification",
     srcs = ["qualification/codex_nativepath.rs"],
@@ -82,7 +61,7 @@ ctx_rust_binary(
     edition = crate_edition(),
     aliases = aliases(),
     deps = all_crate_deps(normal = True) + [
-        ":qualification_lib",
+        ":lib",
     ],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     tags = [
@@ -107,7 +86,7 @@ ctx_rust_test(
         normal = True,
         normal_dev = True,
     ) + [
-        ":qualification_lib",
+        ":lib",
     ],
     proc_macro_deps = all_crate_deps(
         proc_macro = True,
