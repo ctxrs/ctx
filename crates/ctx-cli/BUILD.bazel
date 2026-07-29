@@ -85,7 +85,6 @@ CTX_CLI_COMPILE_DATA = [
 CTX_CLI_TEST_COMPILE_DATA = CTX_CLI_COMPILE_DATA + glob(["testdata/**"]) + [
     "//:release_contracts",
     "//:telemetry_contract_fixtures",
-    "//crates/ctx-pro-host-protocol:testdata/v1/public-journal-page.json",
 ]
 
 RUST_SRCS = glob(["src/**/*.rs"])
