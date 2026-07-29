@@ -50,45 +50,6 @@ pub(super) fn finalize_core_page(
     Ok(())
 }
 
-pub(super) fn finalize_pro_page(
-    page: &mut GooseNativeProOutputPage,
-    generation_digest: &[u8],
-    limits: GooseNativePageLimits,
-) -> Result<()> {
-    let logical_units = page
-        .observations
-        .len()
-        .saturating_add(page.rejections.len());
-    let conservative_serialized_bytes = goose_pro_page_encoded_bytes(page);
-    validate_goose_page_bounds(logical_units, conservative_serialized_bytes, limits, "Pro")?;
-    let mut hasher = Sha256::new();
-    hasher.update(GOOSE_PRO_PAGE_IDENTITY_DOMAIN);
-    goose_hash_bytes(&mut hasher, generation_digest);
-    goose_hash_pro_frontier(&mut hasher, page.expected_frontier);
-    goose_hash_pro_frontier(&mut hasher, page.next_frontier);
-    hasher.update([u8::from(page.terminal)]);
-    for output in &page.observations {
-        hasher.update(b"output");
-        goose_hash_str(&mut hasher, &output.coordinate.unit_key);
-        goose_hash_bytes(&mut hasher, &output.content);
-        goose_hash_str(&mut hasher, &output.locator.kind);
-        goose_hash_bytes(&mut hasher, &output.locator.payload);
-        hasher.update([goose_output_outcome_code(output.outcome.outcome) as u8]);
-    }
-    for rejection in &page.rejections {
-        hasher.update(b"rejection");
-        goose_hash_i64(&mut hasher, rejection.sqlite_rowid);
-        goose_hash_str(&mut hasher, &rejection.native_identity);
-        goose_hash_str(&mut hasher, &rejection.reason);
-    }
-    page.identity = GooseNativeProPageIdentity(hasher.finalize().into());
-    page.accounting = GooseNativePageAccounting {
-        logical_units,
-        conservative_serialized_bytes,
-    };
-    Ok(())
-}
-
 pub(super) fn validate_goose_page_bounds(
     logical_units: usize,
     bytes: usize,
@@ -174,32 +135,6 @@ pub(super) fn goose_core_page_encoded_bytes(page: &GooseNativePage) -> usize {
     counter.bytes
 }
 
-pub(super) fn goose_pro_page_encoded_bytes(page: &GooseNativeProOutputPage) -> usize {
-    let mut counter = GooseEncodedByteCounter {
-        bytes: GOOSE_PAGE_FIXED_BYTES,
-    };
-    for output in &page.observations {
-        counter.fixed(8 * 5 + 4 * 3);
-        counter.string(&output.coordinate.unit_key);
-        counter.optional_string(output.coordinate.native_record_id.as_deref());
-        counter.string(&output.associations.direct_session_id);
-        counter.string(&output.associations.root_session_id);
-        counter.optional_string(output.associations.provider_session_id.as_deref());
-        counter.optional_string(output.call_id.as_deref());
-        counter.string(&output.locator.kind);
-        counter.bytes(&output.locator.payload);
-        counter.bytes(&output.content);
-    }
-    for rejection in &page.rejections {
-        counter.fixed(8 + 4);
-        counter.string(&rejection.native_identity);
-        counter.string(&rejection.reason);
-        counter.string(&rejection.locator.kind);
-        counter.bytes(&rejection.locator.payload);
-    }
-    counter.bytes
-}
-
 pub(super) fn goose_hash_position(hasher: &mut Sha256, position: GooseNativeScanPosition) {
     hasher.update([match position.phase {
         GooseNativeScanPhase::Sessions => 1,
@@ -214,12 +149,6 @@ pub(super) fn goose_hash_position(hasher: &mut Sha256, position: GooseNativeScan
         }
     }
     hasher.update(position.native_rows_seen.to_le_bytes());
-}
-
-pub(super) fn goose_hash_pro_frontier(hasher: &mut Sha256, frontier: GooseNativeProFrontier) {
-    goose_hash_optional_i64(hasher, frontier.last_output_rowid);
-    hasher.update(frontier.output_rows_seen.to_le_bytes());
-    hasher.update([u8::from(frontier.terminal)]);
 }
 
 pub(super) fn goose_hash_session_row(hasher: &mut Sha256, row: &GooseSessionRow) {
