@@ -32,7 +32,7 @@ use uuid::Uuid;
 use ctx_history_core::utc_now;
 
 #[cfg(test)]
-use crate::config::{AppConfig, CONFIG_FILE};
+use crate::config::CONFIG_FILE;
 #[cfg(test)]
 use crate::output::compact_json;
 #[cfg(test)]
@@ -49,17 +49,10 @@ pub(crate) use model_contract::{
     semantic_required_model_file_matches, SemanticOrtModelVariant,
 };
 mod runtime_limits;
-#[cfg(test)]
-use runtime_limits::*;
 #[allow(unused_imports)]
 pub(crate) use runtime_limits::{
     DAEMON_IDLE_EXIT_SECONDS_CAP, SEMANTIC_CHUNK_OVERLAP_CHARS, SEMANTIC_WORKER_BATCH_MAX,
-    SEMANTIC_WORKER_MAX_SECONDS_CAP,
 };
-mod reports;
-pub(crate) use reports::semantic_worker_report_configured_json;
-#[cfg(test)]
-use reports::*;
 mod document;
 pub(in crate::semantic) use document::SemanticEventDocument;
 mod vector_store;
@@ -88,19 +81,14 @@ pub(crate) use model_runtime::{
     SemanticNativeAcceleratorTarget,
 };
 mod paths_status;
+#[cfg(test)]
+use paths_status::*;
 mod vector_store_schema;
 #[cfg(test)]
 use vector_store_schema::{SemanticVectorStoreError, SEMANTIC_VECTOR_SCHEMA_VERSION};
+mod daemon;
 mod vector_store_search;
 mod vector_store_state;
-#[cfg(test)]
-use paths_status::*;
-#[allow(unused_imports)]
-pub(crate) use paths_status::{
-    daemon_report, semantic_worker_report, semantic_worker_report_best_effort,
-    semantic_worker_report_cached,
-};
-mod daemon;
 pub(crate) use daemon::run_daemon_command;
 #[cfg(test)]
 use daemon::*;
@@ -137,7 +125,6 @@ pub(crate) use daemon_autostart::{
     DaemonHandoff, DaemonUpgradeHandoff,
 };
 mod health_search;
-pub(crate) use health_search::semantic_health_findings;
 pub(crate) use health_search::semantic_worker_cache_dir;
 #[cfg(test)]
 use health_search::*;

@@ -944,6 +944,13 @@ mod tests {
 
     use super::*;
 
+    fn active_counts(store: &SemanticVectorStore) -> Result<(usize, usize)> {
+        let pinned = store
+            .flat_pin_generation()?
+            .expect("fixture must publish a flat generation");
+        Ok((pinned.stats().active_events, pinned.stats().active_chunks))
+    }
+
     struct FakeResolver {
         texts: HashMap<Uuid, String>,
         failures: HashMap<Uuid, HydrationFailureKind>,
@@ -1173,7 +1180,7 @@ mod tests {
         assert!(outcome.ready);
         assert!(!outcome.work_remaining);
         assert!(store.source_backed_generation_ready(&target.core_generation_id)?);
-        assert_eq!(store.cached_or_exact_stats()?.embedded_items, 2);
+        assert_eq!(active_counts(&store)?.0, 2);
         assert_eq!(
             store
                 .source_backed_hashes_for_generation(
@@ -1293,7 +1300,7 @@ mod tests {
             Some(&original_hash)
         );
         assert!(!hashes.contains_key(&deleted.event_id.as_uuid()));
-        assert_eq!(store.cached_or_exact_stats()?.embedded_items, 1);
+        assert_eq!(active_counts(&store)?.0, 1);
         Ok(())
     }
 
@@ -1356,7 +1363,7 @@ mod tests {
             )?
             .is_empty());
         assert!(!store.source_backed_generation_ready(&initial.core_generation_id)?);
-        assert_eq!(store.cached_or_exact_stats()?.embedded_items, 1);
+        assert_eq!(active_counts(&store)?.0, 1);
         Ok(())
     }
 
@@ -1398,9 +1405,7 @@ mod tests {
             &mut embedder,
         )?;
         assert_eq!(outcome.invalidated_chunks, 1);
-        let stats = store.cached_or_exact_stats()?;
-        assert_eq!(stats.embedded_items, 0);
-        assert_eq!(stats.embedded_chunks, 0);
+        assert_eq!(active_counts(&store)?, (0, 0));
         assert!(!store.source_backed_generation_ready(&target.core_generation_id)?);
         Ok(())
     }

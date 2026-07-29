@@ -12,10 +12,7 @@ use crate::output::compact_json;
 
 use super::{
     cache_paths,
-    health_search::{
-        semantic_embed_policy_for, semantic_embedder_policy_status_json,
-        semantic_embedder_runtime_status_json, SemanticEmbedPolicy,
-    },
+    health_search::semantic_embed_policy_for,
     indexing::{semantic_e5_passage_text, semantic_e5_query_text_value},
     model_contract::{
         semantic_model_key, SemanticBackendKind, SemanticCpuModelCacheMissing,
@@ -150,16 +147,6 @@ impl SharedSemanticRuntime {
         Ok(Some(started.elapsed().as_millis() as u64))
     }
 
-    pub(super) fn policy_status_json(&self) -> Result<Value> {
-        let embedder = self.lock()?;
-        Ok(semantic_embedder_policy_status_json(&embedder))
-    }
-
-    pub(super) fn runtime_status_json(&self) -> Result<Option<Value>> {
-        let embedder = self.lock()?;
-        Ok(semantic_embedder_runtime_status_json(&embedder))
-    }
-
     pub(super) fn try_runtime_status_json(&self) -> Result<(Option<Value>, bool)> {
         match self.embedder.try_lock() {
             Ok(embedder) => {
@@ -176,23 +163,6 @@ impl SharedSemanticRuntime {
                 Err(anyhow!("semantic embedder lock is poisoned"))
             }
         }
-    }
-
-    #[cfg(ctx_semantic_fastembed)]
-    pub(super) fn loaded_batch_size(&self) -> Result<Option<usize>> {
-        Ok(self.lock()?.as_ref().map(|embedder| embedder.batch_size))
-    }
-
-    #[cfg(ctx_semantic_fastembed)]
-    pub(super) fn active_batch_size(&self) -> Result<usize> {
-        let embedder = self.lock()?;
-        let embedder = embedder
-            .as_ref()
-            .ok_or_else(|| anyhow!("semantic embedder was not initialized"))?;
-        Ok(embedder
-            .batch_size
-            .min(embedder.quiet_policy().batch_size)
-            .max(1))
     }
 
     #[cfg(ctx_semantic_fastembed)]
@@ -612,7 +582,6 @@ impl SemanticEmbeddingBackend {
 pub(super) struct SemanticEmbedder {
     backend: SemanticEmbeddingBackend,
     pub(super) batch_size: usize,
-    pub(super) policy: SemanticEmbedPolicy,
     preference: BackendPreference,
     acquisition_source: &'static str,
     acquisition_fallback: Option<&'static str>,

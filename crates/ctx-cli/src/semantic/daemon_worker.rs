@@ -17,23 +17,14 @@ use super::{
     daemon::DaemonRuntime,
     daemon_retry::{
         annotate_semantic_failure, classify_semantic_failure, DaemonRetryBackoff,
-        SemanticFailureClass,
     },
     daemon_scheduler::{daemon_deadline_has_min_budget, daemon_run_start_mode},
-    health_search::{
-        semantic_embed_policy_status_json, semantic_model_acquisition_integrity_error,
-        semantic_model_acquisition_status_json, semantic_model_cache_available,
-        semantic_worker_cache_dir,
-    },
+    health_search::{semantic_model_acquisition_integrity_error, semantic_worker_cache_dir},
     model_contract::{semantic_model_key, SemanticModelLoadDeferred},
     model_runtime::{
         SemanticDaemonCpuFallbackRequired, SemanticDaemonModelAcquisition, SharedSemanticRuntime,
     },
-    paths_status::{
-        semantic_worker_lock_path, semantic_worker_status_path, write_daemon_status,
-        write_semantic_worker_status,
-    },
-    reports::SemanticWorkerReport,
+    paths_status::write_daemon_status,
     resource_policy::{
         semantic_background_resource_deferred, semantic_resource_deferral_releases_runtime,
         SemanticBackgroundOperation, SemanticResourceDeferred,
@@ -52,14 +43,7 @@ use super::{
 };
 
 #[cfg(test)]
-use super::{
-    daemon::daemon_test_job,
-    indexing::{semantic_document_hash, semantic_source_text},
-    model_contract::SEMANTIC_MODEL_ID,
-    paths_status::{
-        read_semantic_worker_status, semantic_status_file_model_matches, SemanticWorkerLock,
-    },
-};
+use super::daemon::daemon_test_job;
 
 use crate::output::compact_json;
 
@@ -70,12 +54,10 @@ pub(super) enum DaemonSemanticModelStartup {
 }
 
 fn daemon_semantic_model_acquisition_error(
-    data_root: &Path,
     last_run_at_ms: i64,
     error: anyhow::Error,
 ) -> DaemonSemanticModelStartup {
     if let Some(deferred) = error.downcast_ref::<SemanticModelLoadDeferred>() {
-        let _ = write_semantic_model_load_deferred_status(data_root, deferred);
         return DaemonSemanticModelStartup::Finished(daemon_semantic_model_load_deferred_job(
             last_run_at_ms,
             deferred,
@@ -89,12 +71,6 @@ fn daemon_semantic_model_acquisition_error(
     } else {
         "model_acquisition_failed"
     };
-    let _ = write_semantic_model_acquisition_status(
-        data_root,
-        failure_code,
-        Some(message.clone()),
-        Some(failure_class),
-    );
     DaemonSemanticModelStartup::Finished(annotate_semantic_failure(
         daemon_semantic_job_json(
             "skipped",
@@ -108,7 +84,6 @@ fn daemon_semantic_model_acquisition_error(
 }
 
 pub(super) fn run_daemon_semantic_model_startup_with<Acquire, AcquireCpuFallback, Load>(
-    data_root: &Path,
     last_run_at_ms: i64,
     acquire: Acquire,
     acquire_cpu_fallback: AcquireCpuFallback,
@@ -117,14 +92,12 @@ pub(super) fn run_daemon_semantic_model_startup_with<Acquire, AcquireCpuFallback
 where
     Acquire: FnOnce() -> Result<SemanticDaemonModelAcquisition>,
     AcquireCpuFallback: FnOnce(&'static str) -> Result<SemanticDaemonModelAcquisition>,
-    Load: FnMut(SemanticDaemonModelAcquisition) -> Result<(Option<Value>, Value)>,
+    Load: FnMut(SemanticDaemonModelAcquisition) -> Result<()>,
 {
-    let _ = write_semantic_model_acquisition_status(data_root, "acquiring_model", None, None);
     let mut acquisition = match acquire() {
         Ok(acquisition) => acquisition,
         Err(error) => {
             return Ok(daemon_semantic_model_acquisition_error(
-                data_root,
                 last_run_at_ms,
                 error,
             ))
@@ -133,13 +106,8 @@ where
     let mut acquire_cpu_fallback = Some(acquire_cpu_fallback);
 
     loop {
-        let _ = write_semantic_model_load_status(data_root, "loading_model", None, None);
         match load(acquisition) {
-            Ok((embedding_runtime, embed_policy)) => {
-                let _ =
-                    write_semantic_model_loaded_status(data_root, embedding_runtime, embed_policy);
-                return Ok(DaemonSemanticModelStartup::Loaded);
-            }
+            Ok(()) => return Ok(DaemonSemanticModelStartup::Loaded),
             Err(error)
                 if error
                     .downcast_ref::<SemanticDaemonCpuFallbackRequired>()
@@ -152,17 +120,10 @@ where
                 let Some(acquire_cpu_fallback) = acquire_cpu_fallback.take() else {
                     return Err(error.context("daemon CPU fallback was requested twice"));
                 };
-                let _ = write_semantic_model_acquisition_status(
-                    data_root,
-                    "acquiring_model",
-                    None,
-                    None,
-                );
                 acquisition = match acquire_cpu_fallback(reason) {
                     Ok(acquisition) => acquisition,
                     Err(error) => {
                         return Ok(daemon_semantic_model_acquisition_error(
-                            data_root,
                             last_run_at_ms,
                             error,
                         ))
@@ -173,7 +134,6 @@ where
                 let deferred = error
                     .downcast_ref::<SemanticModelLoadDeferred>()
                     .expect("matched semantic model load deferral");
-                let _ = write_semantic_model_load_deferred_status(data_root, deferred);
                 return Ok(DaemonSemanticModelStartup::Finished(
                     daemon_semantic_model_load_deferred_job(last_run_at_ms, deferred),
                 ));
@@ -182,12 +142,6 @@ where
                 let message = format!("{error:#}");
                 let failure_class = classify_semantic_failure(&error);
                 let failure_code = "model_load_failed";
-                let _ = write_semantic_model_load_status(
-                    data_root,
-                    failure_code,
-                    Some(message.clone()),
-                    Some(failure_class),
-                );
                 return Ok(DaemonSemanticModelStartup::Finished(
                     annotate_semantic_failure(
                         daemon_semantic_job_json(
@@ -256,7 +210,6 @@ pub(super) fn run_daemon_semantic_job(
         if semantic_resource_deferral_releases_runtime(deferred.reason) {
             let _ = runtime.semantic_runtime.release_if_idle();
         }
-        let _ = write_semantic_resource_deferred_status(data_root, deferred);
         return Ok(daemon_semantic_resource_deferred_job(
             last_run_at_ms,
             deferred,
@@ -299,7 +252,6 @@ pub(super) fn run_daemon_semantic_job(
     if source_model_load_needed {
         let cache_dir = semantic_worker_cache_dir(data_root);
         match run_daemon_semantic_model_startup_with(
-            data_root,
             last_run_at_ms,
             || runtime.semantic_runtime.acquire_for_daemon(&cache_dir),
             |fallback| {
@@ -311,10 +263,7 @@ pub(super) fn run_daemon_semantic_job(
                 runtime
                     .semantic_runtime
                     .ensure_loaded_after_daemon_acquisition(&cache_dir, acquisition)?;
-                Ok((
-                    runtime.semantic_runtime.runtime_status_json()?,
-                    runtime.semantic_runtime.policy_status_json()?,
-                ))
+                Ok(())
             },
         )? {
             DaemonSemanticModelStartup::Loaded => {}
@@ -806,25 +755,6 @@ fn parse_source_agent_type(value: &str) -> std::result::Result<AgentType, Hydrat
     })
 }
 
-#[cfg(test)]
-pub(super) fn semantic_daemon_model_load_needed(
-    report: &SemanticWorkerReport,
-    runtime_loaded: bool,
-) -> bool {
-    report.searchable_items > 0 && !runtime_loaded
-}
-
-pub(super) fn daemon_semantic_deadline_skipped_job(data_root: &Path) -> Value {
-    let _ = data_root;
-    daemon_semantic_job_json(
-        "skipped",
-        Some("daemon_deadline"),
-        utc_now().timestamp_millis(),
-        None,
-        None,
-    )
-}
-
 pub(super) fn daemon_semantic_skipped_job(
     data_root: &Path,
     semantic_enabled: bool,
@@ -998,249 +928,6 @@ fn write_daemon_lifecycle_status_observed(
             "semantic_runtime_active": semantic_runtime_active,
             "config_reload": config_reload,
         })),
-    )
-}
-
-pub(super) fn semantic_worker_report_for_daemon(data_root: &Path) -> SemanticWorkerReport {
-    let source_vector_path = source_backed_semantic_vector_path(data_root);
-    let report = (|| -> Result<SemanticWorkerReport> {
-        let source_generation = pin_published_generation(data_root)?;
-        let (searchable_items, searchable_items_known, embedded_items, embedded_chunks, ready) =
-            if let Some(source_generation) = source_generation {
-                let semantic_documents = source_generation.semantic_eligible_event_count()?;
-                let searchable_items = usize::try_from(semantic_documents).unwrap_or(usize::MAX);
-                let vector_store = SemanticVectorStore::open_read_only(&source_vector_path)?;
-                let stats = vector_store
-                    .as_ref()
-                    .map(SemanticVectorStore::cached_or_exact_stats)
-                    .transpose()?
-                    .unwrap_or_default();
-                let ready = vector_store
-                    .as_ref()
-                    .map(|store| {
-                        store.source_backed_generation_ready_exact(
-                            source_generation.generation_id(),
-                            semantic_documents,
-                        )
-                    })
-                    .transpose()?
-                    .unwrap_or(false);
-                (
-                    searchable_items,
-                    true,
-                    stats.embedded_items,
-                    stats.embedded_chunks,
-                    ready,
-                )
-            } else {
-                (0, false, 0, 0, false)
-            };
-        Ok(SemanticWorkerReport {
-            status: if ready {
-                "ready".to_owned()
-            } else if searchable_items_known {
-                "pending".to_owned()
-            } else {
-                "waiting_for_source_generation".to_owned()
-            },
-            running: false,
-            pid: None,
-            started_at_ms: None,
-            heartbeat_at_ms: None,
-            finished_at_ms: None,
-            indexed_chunks: None,
-            model_init_ms: None,
-            last_error: None,
-            searchable_items,
-            searchable_items_known,
-            embedded_items,
-            embedded_chunks,
-            dirty_items: 0,
-            queued_items_estimate: searchable_items.saturating_sub(embedded_items),
-            model_cache_available: semantic_model_cache_available(&semantic_worker_cache_dir(
-                data_root,
-            )),
-            model_acquisition: semantic_model_acquisition_status_json(&semantic_worker_cache_dir(
-                data_root,
-            )),
-            embed_policy: Some(semantic_embed_policy_status_json()),
-            embedding_runtime: None,
-            failure_class: None,
-            resource_deferral: None,
-            vector_path: source_vector_path.clone(),
-            lock_path: semantic_worker_lock_path(data_root),
-            status_path: semantic_worker_status_path(data_root),
-        })
-    })();
-    report.unwrap_or_else(|error| {
-        let mut report = SemanticWorkerReport::unavailable(data_root, format!("{error:#}"));
-        report.vector_path = source_vector_path;
-        report
-    })
-}
-
-#[cfg(test)]
-pub(super) fn write_semantic_worker_failure_status(
-    data_root: &Path,
-    message: String,
-) -> Result<()> {
-    let now = utc_now().timestamp_millis();
-    write_semantic_worker_status(
-        data_root,
-        &json!({
-            "schema_version": 1,
-            "status": "failed",
-            "model_key": semantic_model_key(),
-            "pid": process::id(),
-            "heartbeat_at_ms": now,
-            "finished_at_ms": now,
-            "last_error": message,
-            "model_acquisition": semantic_model_acquisition_status_json(
-                &semantic_worker_cache_dir(data_root),
-            ),
-            "embed_policy": semantic_embed_policy_status_json(),
-        }),
-    )
-}
-
-pub(super) fn write_semantic_model_acquisition_status(
-    data_root: &Path,
-    status: &str,
-    message: Option<String>,
-    failure_class: Option<SemanticFailureClass>,
-) -> Result<()> {
-    let now = utc_now().timestamp_millis();
-    write_semantic_worker_status(
-        data_root,
-        &json!({
-            "schema_version": 1,
-            "status": status,
-            "model_key": semantic_model_key(),
-            "pid": process::id(),
-            "heartbeat_at_ms": now,
-            "finished_at_ms": matches!(
-                status,
-                "model_acquisition_failed" | "model_integrity_failed"
-            )
-            .then_some(now),
-            "last_error": message,
-            "failure_class": failure_class.map(SemanticFailureClass::as_str),
-            "retryable": failure_class.map(|class| matches!(
-                class,
-                SemanticFailureClass::Retryable | SemanticFailureClass::ResourcePressure
-            )),
-            "model_acquisition": semantic_model_acquisition_status_json(
-                &semantic_worker_cache_dir(data_root),
-            ),
-            "embed_policy": semantic_embed_policy_status_json(),
-        }),
-    )
-}
-
-pub(super) fn write_semantic_model_load_status(
-    data_root: &Path,
-    status: &str,
-    message: Option<String>,
-    failure_class: Option<SemanticFailureClass>,
-) -> Result<()> {
-    let now = utc_now().timestamp_millis();
-    write_semantic_worker_status(
-        data_root,
-        &json!({
-            "schema_version": 1,
-            "status": status,
-            "model_key": semantic_model_key(),
-            "pid": process::id(),
-            "heartbeat_at_ms": now,
-            "finished_at_ms": (status == "model_load_failed").then_some(now),
-            "last_error": message,
-            "failure_class": failure_class.map(SemanticFailureClass::as_str),
-            "retryable": failure_class.map(|class| matches!(
-                class,
-                SemanticFailureClass::Retryable | SemanticFailureClass::ResourcePressure
-            )),
-            "model_acquisition": semantic_model_acquisition_status_json(
-                &semantic_worker_cache_dir(data_root),
-            ),
-            "embed_policy": semantic_embed_policy_status_json(),
-        }),
-    )
-}
-
-pub(super) fn write_semantic_model_load_deferred_status(
-    data_root: &Path,
-    deferred: &SemanticModelLoadDeferred,
-) -> Result<()> {
-    let now = utc_now().timestamp_millis();
-    write_semantic_worker_status(
-        data_root,
-        &compact_json(json!({
-            "schema_version": 1,
-            "status": "model_load_deferred",
-            "model_key": semantic_model_key(),
-            "pid": process::id(),
-            "heartbeat_at_ms": now,
-            "finished_at_ms": now,
-            "last_error": null,
-            "failure_class": "resource_pressure",
-            "retryable": true,
-            "available_memory_bytes": deferred.available_memory_bytes,
-            "required_available_memory_bytes": deferred.required_available_memory_bytes,
-            "model_acquisition": semantic_model_acquisition_status_json(
-                &semantic_worker_cache_dir(data_root),
-            ),
-            "embed_policy": semantic_embed_policy_status_json(),
-        })),
-    )
-}
-
-pub(super) fn write_semantic_resource_deferred_status(
-    data_root: &Path,
-    deferred: SemanticResourceDeferred,
-) -> Result<()> {
-    let now = utc_now().timestamp_millis();
-    write_semantic_worker_status(
-        data_root,
-        &compact_json(json!({
-            "schema_version": 1,
-            "status": "resource_deferred",
-            "model_key": semantic_model_key(),
-            "pid": process::id(),
-            "heartbeat_at_ms": now,
-            "finished_at_ms": now,
-            "last_error": null,
-            "failure_class": "resource_pressure",
-            "retryable": true,
-            "resource_deferral": deferred.to_json(),
-            "model_acquisition": semantic_model_acquisition_status_json(
-                &semantic_worker_cache_dir(data_root),
-            ),
-            "embed_policy": semantic_embed_policy_status_json(),
-        })),
-    )
-}
-
-pub(super) fn write_semantic_model_loaded_status(
-    data_root: &Path,
-    embedding_runtime: Option<Value>,
-    embed_policy: Value,
-) -> Result<()> {
-    let now = utc_now().timestamp_millis();
-    write_semantic_worker_status(
-        data_root,
-        &json!({
-            "schema_version": 1,
-            "status": "model_loaded",
-            "model_key": semantic_model_key(),
-            "pid": process::id(),
-            "heartbeat_at_ms": now,
-            "finished_at_ms": now,
-            "model_acquisition": semantic_model_acquisition_status_json(
-                &semantic_worker_cache_dir(data_root),
-            ),
-            "embedding_runtime": embedding_runtime,
-            "embed_policy": embed_policy,
-        }),
     )
 }
 

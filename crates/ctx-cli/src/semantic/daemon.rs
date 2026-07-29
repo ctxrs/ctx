@@ -45,7 +45,6 @@ use super::{
         observe_daemon_query_activity, semantic_query_service_supported,
         start_daemon_query_service, start_daemon_source_refresh_service, DaemonQueryService,
     },
-    reports::SemanticWorkerReport,
     runtime_limits::{
         DAEMON_BACKGROUND_CHILD_ENV, DAEMON_IDLE_EXIT_SECONDS_DEFAULT,
         DAEMON_LOOP_INTERVAL_SECONDS_DEFAULT,
@@ -615,8 +614,7 @@ fn daemon_iteration_events(
 }
 
 pub(super) fn run_daemon_status(args: FormatArgs, data_root: PathBuf) -> Result<()> {
-    let semantic_report = source_epoch_semantic_report(&data_root);
-    let daemon = daemon_report(&data_root, &semantic_report);
+    let daemon = daemon_report(&data_root);
     let pro = crate::pro::lifecycle_status_json(&data_root);
     if args.format.is_json() {
         print_json(json!({
@@ -714,20 +712,16 @@ pub(super) fn run_daemon_inner(
     config: &AppConfig,
 ) -> Result<Value> {
     if !config.daemon.enabled && !args.force {
-        let semantic_report = source_epoch_semantic_report(data_root);
-        return Ok(daemon_report(data_root, &semantic_report));
+        return Ok(daemon_report(data_root));
     }
     if installation_upgrade_blocks_current_process(data_root) {
-        let semantic_report = source_epoch_semantic_report(data_root);
-        return Ok(daemon_report(data_root, &semantic_report));
+        return Ok(daemon_report(data_root));
     }
     if daemon_upgrade_handoff_blocks_current_process(data_root) {
-        let semantic_report = source_epoch_semantic_report(data_root);
-        return Ok(daemon_report(data_root, &semantic_report));
+        return Ok(daemon_report(data_root));
     }
     let Some(lock) = DaemonLock::acquire(data_root)? else {
-        let semantic_report = source_epoch_semantic_report(data_root);
-        return Ok(daemon_report(data_root, &semantic_report));
+        return Ok(daemon_report(data_root));
     };
     // Close the check/acquire race with an upgrader that fenced daemon starts
     // after the first observation but before this process acquired ownership.
@@ -735,8 +729,7 @@ pub(super) fn run_daemon_inner(
         || installation_upgrade_blocks_current_process(data_root)
     {
         drop(lock);
-        let semantic_report = source_epoch_semantic_report(data_root);
-        return Ok(daemon_report(data_root, &semantic_report));
+        return Ok(daemon_report(data_root));
     }
     let run_once = args.once;
     let run_started = Instant::now();
@@ -765,8 +758,7 @@ pub(super) fn run_daemon_inner(
     )?
     else {
         drop(lock);
-        let semantic_report = source_epoch_semantic_report(data_root);
-        return Ok(daemon_report(data_root, &semantic_report));
+        return Ok(daemon_report(data_root));
     };
     let mut prepared_auto_upgrade = None;
     let mut auto_upgrade_handoff = None;
@@ -1122,19 +1114,7 @@ pub(super) fn run_daemon_inner(
             auto_upgrade_handoff,
         )?;
     }
-    let semantic_report = source_epoch_semantic_report(data_root);
-    Ok(daemon_report_with_disabled_status(
-        data_root,
-        &semantic_report,
-        !args.force,
-    ))
-}
-
-fn source_epoch_semantic_report(data_root: &Path) -> SemanticWorkerReport {
-    SemanticWorkerReport::unavailable(
-        data_root,
-        "source-backed semantic materialization is not integrated",
-    )
+    Ok(daemon_report_with_disabled_status(data_root, !args.force))
 }
 
 fn daemon_should_schedule_auto_upgrade(

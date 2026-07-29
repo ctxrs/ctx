@@ -7,53 +7,6 @@ pub(super) fn semantic_env_flag(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub(crate) fn semantic_health_findings(data_root: &Path) -> Vec<String> {
-    let mut findings = Vec::new();
-    let semantic_lock = semantic_worker_lock_path(data_root);
-    if semantic_lock.exists() && pid_lock_file_is_orphaned(&semantic_lock) {
-        findings.push(format!(
-            "semantic worker lock is stale: {}",
-            semantic_lock.display()
-        ));
-    }
-    let daemon_lock = daemon_lock_path(data_root);
-    if daemon_lock.exists() && pid_lock_file_is_orphaned(&daemon_lock) {
-        findings.push(format!("daemon lock is stale: {}", daemon_lock.display()));
-    }
-    if let Some(status) = read_semantic_worker_status(data_root) {
-        if status.get("status").and_then(Value::as_str) == Some("failed") {
-            let error = json_string(&status, "last_error").unwrap_or_else(|| "unknown".to_owned());
-            findings.push(format!("semantic worker last failed: {error}"));
-        }
-    }
-    if let Some(status) = read_daemon_status(data_root) {
-        if status.get("status").and_then(Value::as_str) == Some("failed") {
-            let error = json_string(&status, "last_error").unwrap_or_else(|| "unknown".to_owned());
-            findings.push(format!("daemon last failed: {error}"));
-        }
-    }
-    let vector_path = source_backed_semantic_vector_path(data_root);
-    if vector_path.exists() {
-        match SemanticVectorStore::open_read_only(&vector_path) {
-            Ok(Some(vector_store)) => match vector_store.plaintext_value_count() {
-                Ok(0) => {}
-                Ok(count) => findings.push(format!(
-                    "semantic vector sidecar contains {count} plaintext value(s); run daemon maintenance to scrub it"
-                )),
-                Err(error) => findings.push(format!(
-                    "semantic vector sidecar plaintext check failed: {error:#}"
-                )),
-            },
-            Ok(None) => {}
-            Err(error) => findings.push(format!(
-                "semantic vector sidecar is unreadable at {}: {error:#}",
-                vector_path.display()
-            )),
-        }
-    }
-    findings
-}
-
 pub(super) fn json_string(value: &Value, key: &str) -> Option<String> {
     value
         .get(key)
@@ -70,13 +23,6 @@ pub(super) fn json_u32(value: &Value, key: &str) -> Option<u32> {
         .get(key)
         .and_then(|value| value.as_u64())
         .and_then(|value| u32::try_from(value).ok())
-}
-
-pub(super) fn json_usize(value: &Value, key: &str) -> Option<usize> {
-    value
-        .get(key)
-        .and_then(|value| value.as_u64())
-        .and_then(|value| usize::try_from(value).ok())
 }
 
 pub(super) fn create_private_dir_all(path: &Path) -> Result<()> {
@@ -173,43 +119,6 @@ pub(super) fn secure_semantic_vector_permissions(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn semantic_query_text(query: &str, terms: &[String]) -> String {
-    let mut parts = Vec::new();
-    if !query.trim().is_empty() {
-        parts.push(query.trim().to_owned());
-    }
-    parts.extend(
-        terms
-            .iter()
-            .map(|term| term.trim())
-            .filter(|term| !term.is_empty())
-            .map(str::to_owned),
-    );
-    parts.join(" ")
-}
-
-pub(super) fn semantic_hybrid_coverage_ready(
-    embedded_items: usize,
-    searchable_items: usize,
-    dirty_items: usize,
-) -> bool {
-    if searchable_items == 0 {
-        return true;
-    }
-    embedded_items >= searchable_items && dirty_items == 0
-}
-
-pub(super) fn semantic_status_needs_exact_sidecar_stats(
-    searchable_items: usize,
-    dirty_items: usize,
-    stats: SemanticSidecarStats,
-) -> bool {
-    if searchable_items == 0 || dirty_items > 0 {
-        return false;
-    }
-    stats.embedded_items >= searchable_items
-}
-
 pub(super) fn daemon_query_embedding(
     data_root: &Path,
     semantic_text: &str,
@@ -273,36 +182,7 @@ pub(super) fn daemon_query_embedding(
 pub(super) struct SemanticEmbedPolicy {
     pub(super) threads: usize,
     pub(super) batch_size: usize,
-    pub(super) memory_budget_bytes: u64,
-    pub(super) total_memory_bytes: Option<u64>,
     pub(super) available_memory_bytes: Option<u64>,
-    pub(super) active_percent: u8,
-    pub(super) compute_class: SemanticComputeClass,
-    pub(super) source: &'static str,
-}
-
-#[cfg(ctx_semantic_fastembed)]
-impl SemanticEmbedPolicy {
-    pub(super) fn status_json(&self) -> Value {
-        compact_json(json!({
-            "source": self.source,
-            "threads": self.threads,
-            "batch_size": self.batch_size,
-            "memory_budget_bytes": self.memory_budget_bytes,
-            "total_memory_bytes": self.total_memory_bytes,
-            "available_memory_bytes": self.available_memory_bytes,
-            "active_percent": self.active_percent,
-            "compute_class": match self.compute_class {
-                SemanticComputeClass::Cpu => "cpu",
-                SemanticComputeClass::Accelerator => "accelerator",
-            },
-        }))
-    }
-}
-
-#[cfg(ctx_semantic_fastembed)]
-pub(super) fn semantic_embed_policy() -> SemanticEmbedPolicy {
-    semantic_embed_policy_for(SemanticComputeClass::Cpu)
 }
 
 #[cfg(ctx_semantic_fastembed)]
@@ -310,47 +190,6 @@ pub(super) fn semantic_embed_policy_for(
     compute_class: SemanticComputeClass,
 ) -> SemanticEmbedPolicy {
     semantic_embed_policy_from_env_and_resources(compute_class, SemanticSystemResources::current())
-}
-
-#[cfg(ctx_semantic_fastembed)]
-pub(super) fn semantic_embed_policy_status_json() -> Value {
-    semantic_embed_policy().status_json()
-}
-
-#[cfg(not(ctx_semantic_fastembed))]
-pub(super) fn semantic_embed_policy_status_json() -> Value {
-    compact_json(json!({
-        "source": "unsupported",
-    }))
-}
-
-#[cfg(ctx_semantic_fastembed)]
-pub(super) fn semantic_embedder_policy_status_json(embedder: &Option<SemanticEmbedder>) -> Value {
-    embedder
-        .as_ref()
-        .map(|embedder| embedder.policy.status_json())
-        .unwrap_or_else(semantic_embed_policy_status_json)
-}
-
-#[cfg(not(ctx_semantic_fastembed))]
-pub(super) fn semantic_embedder_policy_status_json(_embedder: &Option<SemanticEmbedder>) -> Value {
-    semantic_embed_policy_status_json()
-}
-
-#[cfg(ctx_semantic_fastembed)]
-pub(super) fn semantic_embedder_runtime_status_json(
-    embedder: &Option<SemanticEmbedder>,
-) -> Option<Value> {
-    embedder
-        .as_ref()
-        .map(|embedder| embedder.runtime_info().to_json())
-}
-
-#[cfg(not(ctx_semantic_fastembed))]
-pub(super) fn semantic_embedder_runtime_status_json(
-    _embedder: &Option<SemanticEmbedder>,
-) -> Option<Value> {
-    None
 }
 
 #[cfg(ctx_semantic_fastembed)]
@@ -362,23 +201,14 @@ pub(super) fn semantic_embed_policy_from_env_and_resources(
     let mut policy = SemanticEmbedPolicy {
         threads: quiet.threads,
         batch_size: quiet.batch_size,
-        memory_budget_bytes: quiet.memory_budget_bytes,
-        total_memory_bytes: resources.total_memory_bytes,
         available_memory_bytes: resources.available_memory_bytes,
-        active_percent: quiet.active_percent,
-        compute_class,
-        source: "dynamic_quiet",
     };
-    let mut source = "dynamic_quiet";
     if let Some(threads) = env_usize("CTX_SEMANTIC_THREADS") {
         policy.threads = threads.min(SEMANTIC_EMBED_THREADS_MAX);
-        source = "env_override";
     }
     if let Some(batch_size) = env_usize("CTX_SEMANTIC_EMBED_BATCH") {
         policy.batch_size = batch_size.min(SEMANTIC_EMBED_BATCH_MAX);
-        source = "env_override";
     }
-    policy.source = source;
     policy
 }
 
@@ -491,34 +321,6 @@ pub(super) fn semantic_coreml_model_cache_available(_cache_dir: &Path) -> bool {
     false
 }
 
-pub(super) fn semantic_model_acquisition_status_json(cache_dir: &Path) -> Value {
-    let cpu_available = semantic_model_cache_snapshot_dir(cache_dir).is_some();
-    let accelerator_available = semantic_accelerator_model_cache_available(cache_dir);
-    #[cfg(any(target_os = "macos", test))]
-    let coreml = coreml_acquisition_status_json(cache_dir);
-    #[cfg(not(any(target_os = "macos", test)))]
-    let coreml = json!({
-        "cache_status": "unsupported",
-        "descriptor_provisioned": false,
-        "network_scope": "daemon_only",
-    });
-    compact_json(json!({
-        "network_scope": "daemon_only",
-        "cpu": {
-            "cache_status": if cpu_available { "present" } else { "missing" },
-            "verification": "sha256_on_load",
-            "source_revision": SEMANTIC_MODEL_REVISION,
-        },
-        "accelerator": {
-            "cache_status": if accelerator_available { "present" } else { "missing" },
-            "model_variant": SemanticOrtModelVariant::AcceleratorO4Fp16.as_str(),
-            "verification": "sha256_on_load",
-            "source_revision": SEMANTIC_MODEL_REVISION,
-        },
-        "coreml": coreml,
-    }))
-}
-
 pub(super) fn semantic_model_acquisition_integrity_error(error: &anyhow::Error) -> bool {
     if error
         .downcast_ref::<SemanticCpuModelIntegrityError>()
@@ -611,19 +413,10 @@ use super::{
         semantic_model_key, SemanticCpuModelIntegrityError, SemanticOrtModelVariant,
         SEMANTIC_DIMENSIONS, SEMANTIC_MODEL_REVISION,
     },
-    model_runtime::SemanticEmbedder,
-    paths_status::{
-        daemon_lock_path, pid_lock_file_is_orphaned, read_daemon_status,
-        read_semantic_worker_status, semantic_worker_lock_path,
-    },
     query_service::daemon_query_request,
     resource_policy::{semantic_quiet_policy, SemanticComputeClass, SemanticSystemResources},
     runtime_limits::{SEMANTIC_EMBED_BATCH_MAX, SEMANTIC_EMBED_THREADS_MAX},
-    vector_store::{source_backed_semantic_vector_path, SemanticSidecarStats, SemanticVectorStore},
 };
 
 #[cfg(any(target_os = "macos", test))]
-use super::model_acquisition::{
-    coreml_acquisition_status_json, coreml_bundle_cache_available,
-    model_acquisition_integrity_error,
-};
+use super::model_acquisition::{coreml_bundle_cache_available, model_acquisition_integrity_error};

@@ -21,7 +21,6 @@ use super::{
         daemon_jobs_path, daemon_report_with_disabled_status,
         daemon_source_backed_refresh_job_path, read_daemon_job_status,
     },
-    reports::SemanticWorkerReport,
     vector_store::{source_backed_semantic_vector_path, SemanticVectorStore},
 };
 
@@ -61,11 +60,7 @@ pub(crate) fn source_epoch_status_report(
         serde_json::to_value(&current_policy)?,
     );
     let generation_id = index.as_ref().map(|index| index.generation_id().to_owned());
-    let placeholder = SemanticWorkerReport::unavailable(
-        data_root,
-        "source-backed semantic status is reported separately",
-    );
-    let daemon = source_daemon_report(data_root, &placeholder);
+    let daemon = source_daemon_report(data_root);
     let catalog = catalog_report(
         data_root,
         generation_id.as_deref(),
@@ -117,8 +112,8 @@ pub(crate) fn source_epoch_status_report(
     })
 }
 
-fn source_daemon_report(data_root: &Path, placeholder: &SemanticWorkerReport) -> Value {
-    let mut daemon = daemon_report_with_disabled_status(data_root, placeholder, true);
+fn source_daemon_report(data_root: &Path) -> Value {
+    let mut daemon = daemon_report_with_disabled_status(data_root, true);
     if let Some(jobs) = daemon.get_mut("jobs").and_then(Value::as_object_mut) {
         jobs.retain(|name, _| name == "source_backed_refresh");
     }

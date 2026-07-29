@@ -229,24 +229,6 @@ impl PinnedSourceBackedGeneration {
         })
     }
 
-    pub(crate) fn semantic_candidates_for_source_generation(
-        index: &VerifiedIndex,
-        data_root: &Path,
-        query: &str,
-        filters: &EventSearchFilters,
-        candidate_limit: usize,
-    ) -> Result<(Vec<EventSearchCandidate>, Value)> {
-        let pin = Self::pin_semantic_query_for_source_generation(index, data_root)?;
-        Self::semantic_candidates_for_pinned_source_generation(
-            index,
-            data_root,
-            query,
-            filters,
-            candidate_limit,
-            &pin,
-        )
-    }
-
     pub(crate) fn semantic_candidates_for_pinned_source_generation(
         index: &VerifiedIndex,
         data_root: &Path,
