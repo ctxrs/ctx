@@ -88,72 +88,29 @@ fn native_crush_fixture_imports_searches_and_reimports() {
 }
 
 #[test]
-fn native_goose_fixture_imports_searches_and_reimports() {
+fn native_goose_store_import_is_a_typed_source_backed_rejection() {
     let temp = tempdir();
     let fixture = provider_history_fixture("goose/v14/sessions.db");
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
 
-    let first = import_goose_sessions_sqlite(
+    let error = import_goose_sessions_sqlite(
         &fixture,
         &mut store,
         GooseSessionsSqliteImportOptions {
-            machine_id: "test-machine".into(),
-            source_path: Some(fixture.clone()),
-            imported_at: DateTime::parse_from_rfc3339("2026-06-24T12:00:00Z")
-                .unwrap()
-                .with_timezone(&Utc),
             ..GooseSessionsSqliteImportOptions::default()
         },
     )
-    .unwrap();
+    .unwrap_err();
 
-    assert_eq!(first.failed, 0, "{:?}", first.failures);
-    assert_eq!(first.imported_sessions, 1);
-    assert_eq!(first.imported_events, 2);
-    let session_id = stored_provider_session_id(&store, CaptureProvider::Goose, "goose-root");
-    store.get_session(session_id).unwrap();
-    let source = store
-        .capture_source_by_external_session(CaptureProvider::Goose, "goose-root")
-        .unwrap()
-        .unwrap();
-    assert_eq!(source.descriptor.cwd.as_deref(), Some("/workspace/goose"));
-    assert_eq!(
-        source.sync.metadata["source_trust"].as_str(),
-        Some("provider_native")
+    assert!(
+        matches!(
+            &error,
+            crate::CaptureError::InvalidPayload(message)
+                if message
+                    == "Goose Store ingestion was removed; use source-backed ingestion"
+        ),
+        "unexpected Goose Store rejection: {error}"
     );
-    let source_revision = source.sync.metadata["source_revision"]
-        .as_str()
-        .expect("Goose NativePath source revision");
-    assert_eq!(source_revision.len(), 64);
-    assert!(source_revision.bytes().all(|byte| byte.is_ascii_hexdigit()));
-    let events = store.events_for_session(session_id).unwrap();
-    assert!(events
-        .iter()
-        .any(|event| event.event_type == EventType::ToolCall));
-    assert!(!events
-        .iter()
-        .any(|event| event.event_type == EventType::ToolOutput));
-    assert!(store
-        .search_event_hits("goose oracle", 10)
-        .unwrap()
-        .iter()
-        .any(|hit| hit.provider == Some(CaptureProvider::Goose)));
-
-    let second = import_goose_sessions_sqlite(
-        &fixture,
-        &mut store,
-        GooseSessionsSqliteImportOptions {
-            machine_id: "test-machine".into(),
-            source_path: Some(fixture.clone()),
-            ..GooseSessionsSqliteImportOptions::default()
-        },
-    )
-    .unwrap();
-    assert_eq!(second.failed, 0, "{:?}", second.failures);
-    assert_eq!(second.imported_sessions, 0);
-    assert_eq!(second.imported_events, 0);
-    assert_eq!(second.skipped_sessions, 1);
-    assert_eq!(second.skipped_events, 2);
 }
 
 #[test]
