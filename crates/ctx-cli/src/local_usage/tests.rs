@@ -4,8 +4,8 @@ use clap::Parser as _;
 use ctx_history_core::platform_security::restrict_private_directory;
 
 use super::{
-    read_report, CliUsage, CompletedOperation, ContextCoverage, Outcome, ProOutcome,
-    ResultObservationAction, SearchContextObservation, Surface, TargetType, ValueClass,
+    read_report, CliUsage, CompletedOperation, ContextCoverage, ResultObservationAction,
+    SearchContextObservation, ValueClass,
 };
 
 mod mcp_tests;
@@ -21,33 +21,6 @@ pub(super) fn private_tempdir() -> tempfile::TempDir {
 
 pub(super) fn operation(name: &'static str) -> CompletedOperation {
     CompletedOperation::cli(name, true, Duration::from_millis(4))
-}
-
-pub(super) fn mcp_operation(
-    name: &'static str,
-    success: bool,
-    value_class: ValueClass,
-    result_count: u64,
-) -> CompletedOperation {
-    CompletedOperation {
-        surface: Surface::Mcp,
-        operation: name,
-        outcome: if success {
-            Outcome::Success
-        } else {
-            Outcome::Failure
-        },
-        value_class,
-        duration: super::DurationBucket::Under10Ms,
-        target_type: TargetType::NotApplicable,
-        pro_outcome: ProOutcome::NotApplicable,
-        context_coverage: ContextCoverage::NotApplicable,
-        result_count,
-        citation_count: 0,
-        delivered_output_bytes: 100,
-        delivered_context_bytes: 0,
-        matched_normalized_session_bytes: 0,
-    }
 }
 
 #[test]

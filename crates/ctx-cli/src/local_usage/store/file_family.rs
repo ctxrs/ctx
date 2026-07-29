@@ -13,8 +13,6 @@ use ctx_history_core::platform_security::{
 };
 use rusqlite::{serialize::OwnedData, Connection, DatabaseName, OpenFlags};
 
-#[cfg(test)]
-use super::usage_path;
 use super::{verify_supported_schema, UsageStoreError, MAX_DATABASE_BYTES, PAGE_SIZE_BYTES};
 
 const MAX_FAMILY_BYTES: u64 = 8 * 1024 * 1024;
@@ -273,21 +271,6 @@ pub(super) fn deserialize_read_only(image: Vec<u8>) -> Result<Connection, UsageS
     conn.deserialize(DatabaseName::Main, data, false)?;
     verify_supported_schema(&conn)?;
     Ok(conn)
-}
-
-#[cfg(test)]
-pub(in crate::local_usage) fn capture_with_between_reads_for_test(
-    data_root: &Path,
-    between_reads: impl FnOnce(),
-) -> Result<(), UsageStoreError> {
-    let path = usage_path(data_root);
-    let guard = preflight_existing_family(&path, true)?;
-    if guard.has_nonempty_auxiliary()? {
-        return Err(UsageStoreError::UnsafeReadState);
-    }
-    let image = capture_checkpointed_image(&path, &guard, between_reads)?;
-    drop(deserialize_read_only(image)?);
-    guard.recheck_unchanged(&path)
 }
 
 fn protect_sqlite_member(path: &Path) -> Result<(), UsageStoreError> {

@@ -269,10 +269,15 @@ fn response_flush_precedes_one_local_blame_increment_and_remote_submissions() {
     drop(trace);
 
     let report = crate::local_usage::read_report(temp.path(), true, true);
-    let summary = report.summary.unwrap();
+    let definitions = report.definitions.unwrap();
+    let current = definitions
+        .iter()
+        .find(|definition| definition.definition_version == crate::local_usage::DEFINITION_VERSION)
+        .unwrap();
+    let summary = &current.summary;
     assert_eq!(summary.calls, 1);
     assert_eq!(summary.pro_blame.requests, 1);
-    let detail = &report.details.unwrap().by_operation[0];
+    let detail = &current.by_operation[0];
     assert_eq!(detail.surface, "mcp");
     assert_eq!(detail.operation, "blame");
     assert_eq!(detail.calls, 1);

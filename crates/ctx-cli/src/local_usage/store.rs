@@ -21,8 +21,6 @@ mod file_family;
 mod migration;
 mod write;
 
-#[cfg(test)]
-pub(super) use file_family::capture_with_between_reads_for_test;
 #[cfg(all(test, windows))]
 pub(super) use file_family::{assert_single_link_for_test, verify_same_file_for_test};
 use file_family::{
@@ -153,95 +151,8 @@ pub(super) fn record_at_for_test(
 }
 
 #[cfg(test)]
-pub(super) fn growth_policy_for_test(
-    data_root: &Path,
-) -> Result<(i64, i64, i64, i64), UsageStoreError> {
-    let path = usage_path(data_root);
-    let opened =
-        open_writable(&path, true, BUSY_TIMEOUT)?.ok_or(UsageStoreError::SchemaIdentity)?;
-    let conn = &opened.conn;
-    Ok((
-        conn.pragma_query_value(None, "page_size", |row| row.get(0))?,
-        conn.pragma_query_value(None, "max_page_count", |row| row.get(0))?,
-        conn.pragma_query_value(None, "wal_autocheckpoint", |row| row.get(0))?,
-        conn.pragma_query_value(None, "journal_size_limit", |row| row.get(0))?,
-    ))
-}
-
-#[cfg(test)]
-pub(super) fn fill_to_capacity_for_test(data_root: &Path) -> Result<String, UsageStoreError> {
-    let path = usage_path(data_root);
-    let WritableStore { mut conn, .. } =
-        open_writable(&path, true, BUSY_TIMEOUT)?.ok_or(UsageStoreError::SchemaIdentity)?;
-    let day = utc_day(SystemTime::now());
-    let sql = r#"
-        INSERT INTO daily_usage (
-            day_utc, definition_version, ctx_version, surface, operation,
-            outcome, value_class, duration_bucket, target_type, pro_outcome,
-            context_coverage, calls, result_count, citation_count,
-            delivered_output_bytes, delivered_context_bytes,
-            matched_normalized_session_bytes
-        ) VALUES (
-            ?1, 2, ?2, 'cli', 'doctor', 'success',
-            'not_applicable', 'under_10_ms', 'not_applicable',
-            'not_applicable', 'not_applicable', 1, 0, 0, 0, 0, 0
-        )
-    "#;
-    let mut next = 0_u64;
-    loop {
-        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut full = None;
-        for _ in 0..256 {
-            let version = format!("0.26.0-cap-{next:08}");
-            next += 1;
-            if let Err(error) = transaction.execute(sql, params![day, version]) {
-                if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DiskFull) {
-                    full = Some(version);
-                    break;
-                }
-                return Err(error.into());
-            }
-        }
-        if let Some(mut version) = full {
-            // SQLITE_FULL may have already rolled the transaction back.
-            drop(transaction);
-            loop {
-                match conn.execute(sql, params![day, version]) {
-                    Ok(_) => {
-                        version = format!("0.26.0-cap-{next:08}");
-                        next += 1;
-                    }
-                    Err(error)
-                        if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DiskFull) =>
-                    {
-                        return Ok(version);
-                    }
-                    Err(error) => return Err(error.into()),
-                }
-            }
-        }
-        transaction.commit()?;
-    }
-}
-
-#[cfg(test)]
-pub(super) fn record_with_ctx_version_for_test(
-    data_root: &Path,
-    operation: CompletedOperation,
-    ctx_version: &str,
-) -> Result<(), UsageStoreError> {
-    record_at_with_ctx_version(
-        data_root,
-        operation,
-        SystemTime::now(),
-        BUSY_TIMEOUT,
-        ctx_version,
-    )
-}
-
-#[cfg(test)]
 pub(super) fn create_mixed_v1_fixture_for_test(data_root: &Path) -> Result<(), UsageStoreError> {
-    create_v1_fixture_for_test(data_root, DAILY_USAGE_SCHEMA_V1, "none", false)
+    create_v1_fixture_for_test(data_root, DAILY_USAGE_SCHEMA_V1, "none")
 }
 
 #[cfg(test)]
@@ -249,15 +160,7 @@ pub(super) fn create_legacy_impossible_blame_v1_fixture_for_test(
     data_root: &Path,
 ) -> Result<(), UsageStoreError> {
     let legacy_schema = legacy_daily_usage_schema_v1();
-    create_v1_fixture_for_test(data_root, &legacy_schema, "possible", false)
-}
-
-#[cfg(test)]
-pub(super) fn create_legacy_colliding_blame_v1_fixture_for_test(
-    data_root: &Path,
-) -> Result<(), UsageStoreError> {
-    let legacy_schema = legacy_daily_usage_schema_v1();
-    create_v1_fixture_for_test(data_root, &legacy_schema, "possible", true)
+    create_v1_fixture_for_test(data_root, &legacy_schema, "possible")
 }
 
 #[cfg(test)]
@@ -265,7 +168,6 @@ fn create_v1_fixture_for_test(
     data_root: &Path,
     daily_schema: &str,
     empty_blame_outcome: &str,
-    add_normalized_collision: bool,
 ) -> Result<(), UsageStoreError> {
     create_private_directory_all(data_root)?;
     verify_private_directory_and_owner(data_root)?;
@@ -378,25 +280,6 @@ fn create_v1_fixture_for_test(
             insert,
             params![
                 day, row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10
-            ],
-        )?;
-    }
-    if add_normalized_collision {
-        transaction.execute(
-            insert,
-            params![
-                day,
-                "mcp",
-                "blame",
-                "success",
-                "empty",
-                "250_to_999_ms",
-                "file",
-                "none",
-                1_i64,
-                0_i64,
-                0_i64,
-                200_i64,
             ],
         )?;
     }
@@ -513,14 +396,6 @@ fn reset_with_post_commit<T>(
     });
     let _ = protect_sqlite_files(&path);
     Ok(true)
-}
-
-#[cfg(test)]
-pub(super) fn reset_with_post_commit_for_test<T>(
-    data_root: &Path,
-    after_commit: impl FnOnce(&Path) -> T,
-) -> Result<bool, UsageStoreError> {
-    reset_with_post_commit(data_root, after_commit)
 }
 
 enum PreparedFile {
