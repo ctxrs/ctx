@@ -183,7 +183,6 @@ pub(super) fn decode_source_event_row(
         content_bytes,
         projection,
         projection_bytes,
-        source_rowid: row.get(11)?,
         source_data: SqliteSourceValue::from_ref(row.get_ref(12)?),
     })
 }
@@ -200,29 +199,21 @@ pub(super) fn retained_projection(
     }
 }
 
-pub(super) fn projection_is_rejected(bytes: &[u8]) -> OpenCodeSourceBackedResult<bool> {
-    Ok(matches!(
-        decode_projection(bytes)?,
-        OpenCodeJsonProjection::Rejected(_) | OpenCodeJsonProjection::RejectedWithReason(_, _)
-    ))
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(super) fn lexical_document(
     source: &SourceKey,
     family: OpenCodeNativeSchemaFamily,
-    source_revision_digest: [u8; 32],
     source_path: &Path,
     session: &SourceSession,
     event: SourceEventRow,
     retained: OpenCodeRetainedJson,
     next_sequence: &mut u64,
 ) -> OpenCodeSourceBackedResult<LexicalDocument> {
-    let raw_record = event
+    event
         .source_data
         .exact_text()
         .ok_or(OpenCodeSourceBackedError::MissingExactText)?;
-    let record_digest: [u8; 32] = Sha256::digest(raw_record).into();
+    let record_digest = source_event_row_digest(&event);
     let normalized_time = retained
         .body
         .pointer("/time/created")
@@ -273,8 +264,8 @@ pub(super) fn lexical_document(
             primary_key: TypedKey::utf8(event.native_identity.clone())?,
             row_version: Some(row_version),
         },
-        LocatorRevisionPolicy::ExactSourceRevision,
-        Some(source_revision_digest),
+        LocatorRevisionPolicy::StableRecordEvidence,
+        None,
         record_digest,
     )?;
 

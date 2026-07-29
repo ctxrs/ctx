@@ -14,7 +14,7 @@ use ctx_history_core::{
     EventHydrationRequest, EventIdentityInput, HydratedProviderRecord, HydrationFailure,
     HydrationFailureKind, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
     NativeSessionKey, ProjectionContractError, ScannedSourceCounts, SessionHydrationRequest,
-    SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation, SourceRecordLocator,
+    SessionIdentityInput, SourceAnchor, SourceKey, SourceRecordLocator,
     SourceResolverContractError, StableEntityId, TypedKey,
 };
 use ctx_history_index::LexicalDocument;
@@ -32,7 +32,7 @@ use super::{
         source_backed_decode_order, source_backed_event_digest, source_backed_event_sql,
         source_backed_native_record_identity,
     },
-    schema::{hex_digest, OpenCodeNativeSchema},
+    schema::OpenCodeNativeSchema,
 };
 use crate::{
     common::io::ProviderSourceRoot,
@@ -43,16 +43,15 @@ use crate::{
     provider_sources::{
         discover_provider_sources_for_provider_with_context,
         open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
-        DiscoveryContext, DiscoveryReport, SqliteSourceAccessError, SqliteSourceEvidence,
-        SqliteSourceReadSnapshot,
+        DiscoveryContext, DiscoveryReport, SqliteLogicalSnapshot, SqliteSourceAccessError,
+        SqliteSourceEvidence, SqliteSourceReadSnapshot,
     },
     CaptureError, MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
 
 const SOURCE_ANCHOR_KEY: &str = "active-database";
 const SOURCE_IDENTITY_VERSION: u32 = 1;
-const SOURCE_REVISION_KIND: &str = "provider-sqlite-snapshot-v1";
-const PARSER_REVISION: &str = "opencode-family-source-backed-v1";
+const PARSER_REVISION: &str = "opencode-family-source-backed-v2";
 const LOGICAL_SESSION_KIND: &str = "opencode-family-session";
 const LOGICAL_EVENT_KIND: &str = "opencode-family-event";
 const NATIVE_SESSION_NAMESPACE: &str = "opencode-family.session-id";
@@ -86,7 +85,7 @@ pub(crate) type OpenCodeSourceBackedResult<T> = Result<T, OpenCodeSourceBackedEr
 mod projection;
 
 use projection::{
-    decode_source_event_row, lexical_document, projection_is_rejected, retained_projection,
+    decode_source_event_row, lexical_document, retained_projection,
     source_backed_retained_event_kind, source_backed_retained_searchable_text,
 };
 
@@ -124,6 +123,25 @@ impl OpenCodeSourceBackedRegistration {
         scan_source(path, self.dialect, emit)
     }
 
+    /// Cheap commit-time fence over acquisition evidence only.
+    ///
+    /// The evidence is transient runtime state and is never part of the
+    /// logical certificate or locator revision.
+    #[allow(dead_code, reason = "narrow seam for the pending coordinator hookup")]
+    pub(crate) fn terminal_fence(
+        self,
+        path: &Path,
+        expected: &OpenCodeSourceTerminalFence,
+    ) -> OpenCodeSourceBackedResult<bool> {
+        if expected.provider != self.provider() {
+            return Ok(false);
+        }
+        let (source_root, sqlite_snapshot) = open_root_authorized_snapshot(path)?;
+        let current = sqlite_snapshot.finish()?;
+        source_root.revalidate()?;
+        Ok(current == expected.physical_evidence)
+    }
+
     pub(crate) fn exact_resolver(
         self,
         path: impl Into<PathBuf>,
@@ -134,10 +152,11 @@ impl OpenCodeSourceBackedRegistration {
         }
     }
 
-    // Replacement-only mutation policy is explicit release lifecycle evidence.
+    // No append frontier is asserted: a matching logical snapshot is unchanged
+    // and every other accepted snapshot is a full replacement.
     #[allow(dead_code)]
     pub(crate) const fn mutation_policy(self) -> OpenCodeSourceMutationPolicy {
-        OpenCodeSourceMutationPolicy::Replace
+        OpenCodeSourceMutationPolicy::UnchangedOrReplace
     }
 }
 
@@ -167,19 +186,33 @@ pub(crate) const fn opencode_family_source_backed_registrations(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
 pub(crate) enum OpenCodeSourceMutationPolicy {
-    /// No append frontier is asserted. Any observed mutation replaces the source.
-    Replace,
+    UnchangedOrReplace,
 }
 
 #[derive(Debug)]
 pub(crate) struct OpenCodeSourceBackedScan {
     pub(crate) source: SourceKey,
     pub(crate) certificate: CertifiedSource,
+    #[allow(dead_code, reason = "narrow seam for the pending coordinator hookup")]
+    pub(crate) terminal_fence: OpenCodeSourceTerminalFence,
     // Schema and page-count evidence remain attached to release scan receipts.
     #[allow(dead_code)]
     pub(crate) schema_family: &'static str,
     #[allow(dead_code)]
     pub(crate) emitted_pages: u64,
+    #[allow(dead_code)]
+    pub(crate) row_decode_passes: u64,
+    #[allow(dead_code)]
+    pub(crate) decoded_rows: u64,
+    #[allow(dead_code)]
+    pub(crate) peak_buffered_rows: u64,
+}
+
+#[derive(Clone, Debug)]
+#[allow(dead_code, reason = "narrow seam for the pending coordinator hookup")]
+pub(crate) struct OpenCodeSourceTerminalFence {
+    provider: CaptureProvider,
+    physical_evidence: SqliteSourceEvidence,
 }
 
 #[derive(Clone, Debug)]
@@ -206,11 +239,12 @@ type RawSession = (
 #[derive(Debug)]
 struct WorkingScan {
     source: SourceKey,
-    opening: SourceObservation,
+    logical_snapshot: SqliteLogicalSnapshot,
     schema_family: &'static str,
-    counts: ScannedSourceCounts,
-    content_digest: [u8; 32],
     emitted_pages: u64,
+    row_decode_passes: u64,
+    decoded_rows: u64,
+    peak_buffered_rows: u64,
 }
 
 #[derive(Debug)]
@@ -224,8 +258,14 @@ struct SourceEventRow {
     content_bytes: u64,
     projection: OpenCodeJsonProjection,
     projection_bytes: Vec<u8>,
-    source_rowid: i64,
     source_data: SqliteSourceValue,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProjectionDisposition {
+    Retained,
+    Rejected,
+    Ignored,
 }
 
 #[derive(Debug)]
@@ -284,105 +324,110 @@ fn scan_source(
     emit: &mut dyn FnMut(Vec<LexicalDocument>) -> OpenCodeSourceBackedResult<()>,
 ) -> OpenCodeSourceBackedResult<OpenCodeSourceBackedScan> {
     let (source_root, sqlite_snapshot) = open_root_authorized_snapshot(path)?;
-    let opening_evidence = sqlite_snapshot.evidence().clone();
-    let mut pending_pages = Vec::new();
     let working = {
         let connection = sqlite_snapshot.connection()?;
         register_projection_function(connection, dialect)?;
         let schema = OpenCodeNativeSchema::probe(connection, dialect)?;
         let source = source_key(dialect, schema.family).map_err(source_backed_as_capture)?;
-        let opening =
-            source_observation(&source, &opening_evidence).map_err(source_backed_as_capture)?;
-        let sessions =
-            load_sessions(connection, &schema, &source).map_err(source_backed_as_capture)?;
-        let (counts, content_digest, emitted_pages) = stream_events(
-            connection,
-            &schema,
-            dialect,
-            path,
-            &source,
-            &opening,
-            &sessions,
-            &mut |page| {
-                pending_pages.push(page);
-                Ok(())
-            },
-        )
-        .map_err(source_backed_as_capture)?;
+        let sessions = load_sessions(connection, &schema, &source)?;
+        let streamed =
+            stream_logical_rows(connection, &schema, dialect, path, &source, &sessions, emit)?;
+        let schema_evidence = relevant_schema_evidence(&schema);
+        let logical_snapshot = SqliteLogicalSnapshot::new(
+            PARSER_REVISION,
+            &schema_evidence,
+            streamed.content_digest,
+            streamed.counts,
+        );
         WorkingScan {
             source,
-            opening,
+            logical_snapshot,
             schema_family: schema.family.label(),
-            counts,
-            content_digest,
-            emitted_pages,
+            emitted_pages: streamed.emitted_pages,
+            row_decode_passes: 1,
+            decoded_rows: streamed.decoded_rows,
+            peak_buffered_rows: streamed.peak_buffered_rows,
         }
     };
-    let closing_evidence = sqlite_snapshot.finish()?;
+    let physical_evidence = sqlite_snapshot.finish()?;
     source_root.revalidate()?;
-    let closing = source_observation(&working.source, &closing_evidence)?;
-    let certificate = CertifiedSource::certify(
-        working.opening,
-        closing,
-        PARSER_REVISION,
-        working.content_digest,
-        working.counts,
-    )
-    .map_err(map_certification_error)?;
-    for page in pending_pages {
-        emit(page)?;
-    }
+    let certificate = working
+        .logical_snapshot
+        .certify(working.source.clone())
+        .map_err(map_certification_error)?;
     Ok(OpenCodeSourceBackedScan {
         source: working.source,
         certificate,
+        terminal_fence: OpenCodeSourceTerminalFence {
+            provider: dialect.provider,
+            physical_evidence,
+        },
         schema_family: working.schema_family,
         emitted_pages: working.emitted_pages,
+        row_decode_passes: working.row_decode_passes,
+        decoded_rows: working.decoded_rows,
+        peak_buffered_rows: working.peak_buffered_rows,
     })
 }
 
-// These eight parameters are the explicit schema, authority, session, and sink
-// inputs for one streaming scan; a one-use context bundle adds no reuse.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct StreamedLogicalRows {
+    counts: ScannedSourceCounts,
+    content_digest: [u8; 32],
+    emitted_pages: u64,
+    decoded_rows: u64,
+    peak_buffered_rows: u64,
+}
+
+// These seven inputs keep one ordered SQL decode pass explicit; a one-use
+// context bundle would not add reuse.
 #[allow(clippy::too_many_arguments)]
-fn stream_events(
+fn stream_logical_rows(
     connection: &Connection,
     schema: &OpenCodeNativeSchema,
     dialect: &OpenCodeSqliteDialect,
     path: &Path,
     source: &SourceKey,
-    opening: &SourceObservation,
     sessions: &BTreeMap<String, SourceSession>,
     emit: &mut dyn FnMut(Vec<LexicalDocument>) -> OpenCodeSourceBackedResult<()>,
-) -> OpenCodeSourceBackedResult<(ScannedSourceCounts, [u8; 32], u64)> {
+) -> OpenCodeSourceBackedResult<StreamedLogicalRows> {
     let mut hasher = Sha256::new();
-    hasher.update(b"ctx-opencode-family-source-backed-content-v1\0");
-    hash_str(&mut hasher, schema.family.label());
-    hash_str(&mut hasher, &schema.capability_digest);
+    hasher.update(b"ctx-opencode-family-logical-content-v2\0");
     hash_sessions(&mut hasher, sessions);
-
     let mut sql = source_backed_event_sql(schema);
-    sql.push_str(" order by 3, 4, 5, 6, 2, 1, 12");
+    sql.push_str(" order by 3, 4, 5, 6, 2, 1");
     let max_json_bytes = i64::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
         .map_err(|_| OpenCodeSourceBackedError::CountOverflow)?;
     let mut statement = connection.prepare(&sql)?;
     let mut rows = statement.query([max_json_bytes])?;
-    let revision_digest = source_revision_digest(opening);
     let mut counts = ScannedSourceCounts::default();
-    let mut page = Vec::with_capacity(SOURCE_BACKED_PAGE_ROWS);
     let mut emitted_pages = 0_u64;
+    let mut decoded_rows = 0_u64;
+    let mut peak_buffered_rows = 0_u64;
+    let mut page = Vec::with_capacity(SOURCE_BACKED_PAGE_ROWS);
     let mut session_sequences = HashMap::<String, u64>::new();
 
     while let Some(row) = rows.next()? {
         let event = decode_source_event_row(row, schema, dialect)?;
+        decoded_rows = checked_add(decoded_rows, 1)?;
         hash_source_event(&mut hasher, &event);
         counts.complete_records = checked_add(counts.complete_records, 1)?;
         counts.certified_bytes = checked_add(counts.certified_bytes, event.content_bytes)?;
-
-        let Some(retained) = retained_projection(&event.projection) else {
-            if projection_is_rejected(&event.projection_bytes)? {
+        let disposition = projection_disposition(&event.projection);
+        let retained = retained_projection(&event.projection);
+        match disposition {
+            ProjectionDisposition::Retained => {
+                counts.retained_records = checked_add(counts.retained_records, 1)?;
+                counts.indexed_documents = checked_add(counts.indexed_documents, 1)?;
+            }
+            ProjectionDisposition::Rejected => {
                 counts.rejected_records = checked_add(counts.rejected_records, 1)?;
-            } else {
+            }
+            ProjectionDisposition::Ignored => {
                 counts.ignored_records = checked_add(counts.ignored_records, 1)?;
             }
+        }
+        let Some(retained) = retained else {
             continue;
         };
         let session = sessions.get(&event.session_identity).ok_or_else(|| {
@@ -391,7 +436,6 @@ fn stream_events(
         let document = lexical_document(
             source,
             schema.family,
-            revision_digest,
             path,
             session,
             event,
@@ -400,9 +444,9 @@ fn stream_events(
                 .entry(session.native_identity.clone())
                 .or_default(),
         )?;
-        counts.retained_records = checked_add(counts.retained_records, 1)?;
-        counts.indexed_documents = checked_add(counts.indexed_documents, 1)?;
         page.push(document);
+        peak_buffered_rows = peak_buffered_rows
+            .max(u64::try_from(page.len()).map_err(|_| OpenCodeSourceBackedError::CountOverflow)?);
         if page.len() == SOURCE_BACKED_PAGE_ROWS {
             emit(std::mem::take(&mut page))?;
             page = Vec::with_capacity(SOURCE_BACKED_PAGE_ROWS);
@@ -413,7 +457,13 @@ fn stream_events(
         emit(page)?;
         emitted_pages = checked_add(emitted_pages, 1)?;
     }
-    Ok((counts, hasher.finalize().into(), emitted_pages))
+    Ok(StreamedLogicalRows {
+        counts,
+        content_digest: hasher.finalize().into(),
+        emitted_pages,
+        decoded_rows,
+        peak_buffered_rows,
+    })
 }
 
 fn load_sessions(
@@ -565,29 +615,147 @@ fn open_root_authorized_snapshot_with_hook(
     Ok((source_root, sqlite_snapshot))
 }
 
-fn source_observation(
-    source: &SourceKey,
-    evidence: &SqliteSourceEvidence,
-) -> OpenCodeSourceBackedResult<SourceObservation> {
-    Ok(SourceObservation::new(
-        source.clone(),
-        SOURCE_REVISION_KIND,
-        format!(
-            "identity={};length={};revision={}",
-            hex_digest(*evidence.identity()),
-            evidence.length(),
-            hex_digest(*evidence.revision()),
-        )
-        .into_bytes(),
-    )?)
+fn relevant_schema_evidence(schema: &OpenCodeNativeSchema) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"ctx-opencode-family-relevant-schema-v1\0");
+    hash_str(&mut hasher, schema.family.label());
+    hasher.update(schema.user_version.to_le_bytes());
+    hasher.update([u8::from(schema.event_has_type)]);
+    for column in ["parent_id", "directory", "branch", "agent"] {
+        hash_str(&mut hasher, column);
+        hasher.update([u8::from(schema.session_columns.contains(column))]);
+    }
+    hasher.finalize().to_vec()
 }
 
-fn source_revision_digest(observation: &SourceObservation) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(b"ctx-source-revision-evidence-v1\0");
-    hash_str(&mut hasher, observation.revision_kind());
-    hash_bytes(&mut hasher, observation.revision());
-    hasher.finalize().into()
+#[derive(Debug)]
+struct HydrationColumnCapability {
+    declared_type: String,
+    primary_key_ordinal: i64,
+}
+
+/// Selects and structurally validates the current schema family without
+/// scanning provider rows. Exact hydration validates only the addressed row;
+/// the generation scan remains responsible for corpus-wide admission.
+fn probe_hydration_schema(
+    connection: &Connection,
+    family: OpenCodeNativeSchemaFamily,
+) -> OpenCodeSourceBackedResult<OpenCodeNativeSchema> {
+    let session_columns = hydration_table_capabilities(connection, "session")?;
+    validate_hydration_identity_column(&session_columns, "session", "id")?;
+    validate_hydration_column(&session_columns, "session", "time_created", "INTEGER")?;
+    validate_hydration_column(&session_columns, "session", "time_updated", "INTEGER")?;
+    let event_columns = hydration_table_capabilities(connection, family.event_table())?;
+    let event_has_type = event_columns.contains_key("type");
+    validate_hydration_identity_column(&event_columns, family.event_table(), "id")?;
+    validate_hydration_column(&event_columns, family.event_table(), "session_id", "TEXT")?;
+    validate_hydration_column(
+        &event_columns,
+        family.event_table(),
+        "time_created",
+        "INTEGER",
+    )?;
+    validate_hydration_column(
+        &event_columns,
+        family.event_table(),
+        "time_updated",
+        "INTEGER",
+    )?;
+    validate_hydration_column(&event_columns, family.event_table(), "data", "TEXT")?;
+    if family == OpenCodeNativeSchemaFamily::SessionMessageSeq {
+        validate_hydration_column(&event_columns, "session_message", "seq", "INTEGER")?;
+    }
+    if family == OpenCodeNativeSchemaFamily::MessagePart {
+        validate_hydration_column(&event_columns, "part", "message_id", "TEXT")?;
+        let message_columns = hydration_table_capabilities(connection, "message")?;
+        validate_hydration_identity_column(&message_columns, "message", "id")?;
+        validate_hydration_column(&message_columns, "message", "session_id", "TEXT")?;
+        validate_hydration_column(&message_columns, "message", "time_created", "INTEGER")?;
+        validate_hydration_column(&message_columns, "message", "time_updated", "INTEGER")?;
+        validate_hydration_column(&message_columns, "message", "data", "TEXT")?;
+    }
+
+    let user_version = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let schema_version = connection.pragma_query_value(None, "schema_version", |row| row.get(0))?;
+    Ok(OpenCodeNativeSchema {
+        family,
+        capability_digest: String::new(),
+        user_version,
+        schema_version,
+        session_columns: session_columns.keys().cloned().collect(),
+        event_has_type,
+    })
+}
+
+fn locator_schema_family(
+    dialect: &OpenCodeSqliteDialect,
+    source: &SourceKey,
+) -> Option<OpenCodeNativeSchemaFamily> {
+    [
+        OpenCodeNativeSchemaFamily::SessionMessageSeq,
+        OpenCodeNativeSchemaFamily::SessionMessageSynthesizedSeq,
+        OpenCodeNativeSchemaFamily::SessionEntry,
+        OpenCodeNativeSchemaFamily::LegacyMessage,
+        OpenCodeNativeSchemaFamily::MessagePart,
+    ]
+    .into_iter()
+    .find(|family| {
+        source_key(dialect, *family).is_ok_and(|candidate| candidate.exact_descriptor_eq(source))
+    })
+}
+
+fn hydration_table_capabilities(
+    connection: &Connection,
+    table: &str,
+) -> OpenCodeSourceBackedResult<BTreeMap<String, HydrationColumnCapability>> {
+    let sql = format!("pragma table_info(\"{}\")", table.replace('"', "\"\""));
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(1)?,
+            HydrationColumnCapability {
+                declared_type: row.get::<_, String>(2)?.trim().to_ascii_uppercase(),
+                primary_key_ordinal: row.get(5)?,
+            },
+        ))
+    })?;
+    rows.collect::<std::result::Result<BTreeMap<_, _>, _>>()
+        .map_err(OpenCodeSourceBackedError::from)
+}
+
+fn validate_hydration_identity_column(
+    columns: &BTreeMap<String, HydrationColumnCapability>,
+    table: &str,
+    column: &str,
+) -> OpenCodeSourceBackedResult<()> {
+    let capability = validate_hydration_column(columns, table, column, "TEXT")?;
+    if capability.primary_key_ordinal != 1 {
+        return Err(CaptureError::InvalidPayload(format!(
+            "OpenCode NativePath {table}.{column} is no longer the primary identity"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+fn validate_hydration_column<'a>(
+    columns: &'a BTreeMap<String, HydrationColumnCapability>,
+    table: &str,
+    column: &str,
+    declared_type: &str,
+) -> OpenCodeSourceBackedResult<&'a HydrationColumnCapability> {
+    let capability = columns.get(column).ok_or_else(|| {
+        CaptureError::InvalidPayload(format!(
+            "OpenCode NativePath {table} is missing required column {column}"
+        ))
+    })?;
+    if capability.declared_type != declared_type {
+        return Err(CaptureError::InvalidPayload(format!(
+            "OpenCode NativePath {table}.{column} changed type from {declared_type}"
+        ))
+        .into());
+    }
+    Ok(capability)
 }
 
 fn hash_sessions(hasher: &mut Sha256, sessions: &BTreeMap<String, SourceSession>) {
@@ -607,11 +775,78 @@ fn hash_source_event(hasher: &mut Sha256, event: &SourceEventRow) {
     hash_str(hasher, &event.native_identity);
     hash_str(hasher, &event.message_identity);
     hash_str(hasher, &event.session_identity);
+    hash_native_order(hasher, &event.native_order);
     hasher.update(event.time_created.to_le_bytes());
     hasher.update(event.time_updated.to_le_bytes());
-    hasher.update(event.source_rowid.to_le_bytes());
+    hasher.update(event.content_bytes.to_le_bytes());
+    hasher.update([match projection_disposition(&event.projection) {
+        ProjectionDisposition::Retained => 1,
+        ProjectionDisposition::Rejected => 2,
+        ProjectionDisposition::Ignored => 3,
+    }]);
     hash_bytes(hasher, &event.projection_bytes);
     event.source_data.hash_into(hasher);
+}
+
+fn source_event_row_digest(event: &SourceEventRow) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"ctx-opencode-family-logical-row-v1\0");
+    hash_source_event(&mut hasher, event);
+    hasher.finalize().into()
+}
+
+fn hash_native_order(hasher: &mut Sha256, order: &super::model::OpenCodeNativeOrder) {
+    match order {
+        super::model::OpenCodeNativeOrder::ExplicitSequence {
+            session_id,
+            sequence,
+            message_id,
+        } => {
+            hasher.update([1]);
+            hash_str(hasher, session_id);
+            hasher.update(sequence.to_le_bytes());
+            hash_str(hasher, message_id);
+        }
+        super::model::OpenCodeNativeOrder::SynthesizedSequence {
+            session_id,
+            time_created,
+            message_id,
+        } => {
+            hasher.update([2]);
+            hash_str(hasher, session_id);
+            hasher.update(time_created.to_le_bytes());
+            hash_str(hasher, message_id);
+        }
+        super::model::OpenCodeNativeOrder::MessagePart {
+            session_id,
+            message_time_created,
+            message_id,
+            part_time_created,
+            part_id,
+        } => {
+            hasher.update([3]);
+            hash_str(hasher, session_id);
+            hasher.update(message_time_created.to_le_bytes());
+            hash_str(hasher, message_id);
+            hasher.update(part_time_created.to_le_bytes());
+            hash_str(hasher, part_id);
+        }
+    }
+}
+
+fn projection_disposition(projection: &OpenCodeJsonProjection) -> ProjectionDisposition {
+    match projection {
+        OpenCodeJsonProjection::Retained(_) => ProjectionDisposition::Retained,
+        OpenCodeJsonProjection::Output(output) if output.diagnostic.is_some() => {
+            ProjectionDisposition::Retained
+        }
+        OpenCodeJsonProjection::Rejected(_) | OpenCodeJsonProjection::RejectedWithReason(_, _) => {
+            ProjectionDisposition::Rejected
+        }
+        OpenCodeJsonProjection::Output(_) | OpenCodeJsonProjection::ExcludedOutput => {
+            ProjectionDisposition::Ignored
+        }
+    }
 }
 
 fn hash_optional_str(hasher: &mut Sha256, value: Option<&str>) {
@@ -703,11 +938,21 @@ impl ContentSourceResolver for OpenCodeSourceBackedExactResolver {
         &self,
         request: &SessionHydrationRequest,
     ) -> std::result::Result<Vec<HydratedProviderRecord>, HydrationFailure> {
-        request
+        let locators = request
             .events()
             .iter()
-            .map(|event| self.hydrate_event(event))
-            .collect()
+            .map(EventHydrationRequest::locator)
+            .collect::<Vec<_>>();
+        let provider_bytes = self.hydrate_locators(&locators)?;
+        Ok(request
+            .events()
+            .iter()
+            .zip(provider_bytes)
+            .map(|(event, provider_bytes)| HydratedProviderRecord {
+                event_id: event.event_id(),
+                provider_bytes,
+            })
+            .collect())
     }
 }
 
@@ -716,76 +961,103 @@ impl OpenCodeSourceBackedExactResolver {
         &self,
         locator: &SourceRecordLocator,
     ) -> std::result::Result<Vec<u8>, HydrationFailure> {
+        self.hydrate_locators(&[locator])?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                hydration_failure(
+                    HydrationFailureKind::InvalidLocator,
+                    "OpenCode-family hydration request contained no locator",
+                )
+            })
+    }
+
+    fn hydrate_locators(
+        &self,
+        locators: &[&SourceRecordLocator],
+    ) -> std::result::Result<Vec<Vec<u8>>, HydrationFailure> {
+        if locators.is_empty() {
+            return Ok(Vec::new());
+        }
+        for locator in locators {
+            self.validate_locator(locator)?;
+        }
+        let family = locator_schema_family(self.registration.dialect, locators[0].source())
+            .ok_or_else(|| {
+                hydration_failure(
+                    HydrationFailureKind::InvalidLocator,
+                    "locator has an unsupported OpenCode-family schema descriptor",
+                )
+            })?;
+        let (source_root, sqlite_snapshot) =
+            open_root_authorized_snapshot(&self.path).map_err(temporary_hydration_failure)?;
+        let resolved = (|| {
+            let connection = sqlite_snapshot
+                .connection()
+                .map_err(temporary_hydration_failure)?;
+            register_projection_function(connection, self.registration.dialect)
+                .map_err(temporary_hydration_failure)?;
+            let schema = probe_hydration_schema(connection, family).map_err(|error| {
+                hydration_failure(
+                    HydrationFailureKind::UnsupportedParserRevision,
+                    error.to_string(),
+                )
+            })?;
+            let current_source =
+                source_key(self.registration.dialect, schema.family).map_err(|error| {
+                    hydration_failure(HydrationFailureKind::InvalidLocator, error.to_string())
+                })?;
+            if locators
+                .iter()
+                .any(|locator| !current_source.exact_descriptor_eq(locator.source()))
+            {
+                return Err(hydration_failure(
+                    HydrationFailureKind::StaleSourceEvidence,
+                    "provider SQLite schema family no longer matches the certified source",
+                ));
+            }
+            locators
+                .iter()
+                .map(|locator| {
+                    hydrate_exact_row(connection, self.registration.dialect, &schema, locator)
+                })
+                .collect()
+        })();
+        let snapshot_finish = sqlite_snapshot.finish();
+        let root_finish = source_root.revalidate();
+        snapshot_finish.map_err(temporary_hydration_failure)?;
+        root_finish.map_err(temporary_hydration_failure)?;
+        resolved
+    }
+
+    fn validate_locator(
+        &self,
+        locator: &SourceRecordLocator,
+    ) -> std::result::Result<(), HydrationFailure> {
         locator.validate_contract().map_err(|error| {
             hydration_failure(HydrationFailureKind::InvalidLocator, error.to_string())
         })?;
         if locator.source().provider() != self.registration.provider().as_str()
             || locator.source().source_format() != self.registration.source_format()
-            || locator.revision_policy() != LocatorRevisionPolicy::ExactSourceRevision
+            || locator.revision_policy() != LocatorRevisionPolicy::StableRecordEvidence
+            || locator.certified_source_revision_digest().is_some()
+            || locator_schema_family(self.registration.dialect, locator.source()).is_none()
         {
             return Err(hydration_failure(
                 HydrationFailureKind::InvalidLocator,
                 "locator does not belong to this OpenCode-family registration",
             ));
         }
-        let (source_root, sqlite_snapshot) =
-            open_root_authorized_snapshot(&self.path).map_err(temporary_hydration_failure)?;
-        let observation = source_observation(locator.source(), sqlite_snapshot.evidence())
-            .map_err(|error| {
-                hydration_failure(HydrationFailureKind::InvalidLocator, error.to_string())
-            })?;
-        if locator.certified_source_revision_digest() != Some(&source_revision_digest(&observation))
-        {
-            return Err(hydration_failure(
-                HydrationFailureKind::StaleSourceEvidence,
-                "provider SQLite snapshot no longer matches the certified source revision",
-            ));
-        }
-
-        let connection = sqlite_snapshot
-            .connection()
-            .map_err(temporary_hydration_failure)?;
-        register_projection_function(connection, self.registration.dialect)
-            .map_err(temporary_hydration_failure)?;
-        let provider_bytes = hydrate_exact_row(connection, self.registration.dialect, locator)
-            .map_err(|failure| {
-                CaptureError::InvalidPayload(format!(
-                    "{}: {}",
-                    hydration_kind_label(failure.kind),
-                    failure.detail
-                ))
-            })
-            .map_err(decode_hydration_capture_error)?;
-        sqlite_snapshot
-            .finish()
-            .map_err(temporary_hydration_failure)?;
-        source_root
-            .revalidate()
-            .map_err(temporary_hydration_failure)?;
-        Ok(provider_bytes)
+        Ok(())
     }
 }
 
 fn hydrate_exact_row(
     connection: &Connection,
     dialect: &OpenCodeSqliteDialect,
+    schema: &OpenCodeNativeSchema,
     locator: &SourceRecordLocator,
 ) -> std::result::Result<Vec<u8>, HydrationFailure> {
-    let schema = OpenCodeNativeSchema::probe(connection, dialect).map_err(|error| {
-        hydration_failure(
-            HydrationFailureKind::UnsupportedParserRevision,
-            error.to_string(),
-        )
-    })?;
-    let current_source = source_key(dialect, schema.family).map_err(|error| {
-        hydration_failure(HydrationFailureKind::InvalidLocator, error.to_string())
-    })?;
-    if !current_source.exact_descriptor_eq(locator.source()) {
-        return Err(hydration_failure(
-            HydrationFailureKind::StaleSourceEvidence,
-            "provider SQLite schema family no longer matches the certified source",
-        ));
-    }
     let NativeRecordCoordinate::ProviderSqlite {
         logical_relation,
         primary_key,
@@ -810,13 +1082,13 @@ fn hydrate_exact_row(
         ));
     }
 
-    let mut sql = source_backed_event_sql(&schema);
+    let mut sql = source_backed_event_sql(schema);
     let alias = if schema.family == OpenCodeNativeSchemaFamily::MessagePart {
         "p"
     } else {
         "x"
     };
-    sql.push_str(&format!(" where {alias}.id = ?2 order by 12 limit 2"));
+    sql.push_str(&format!(" where {alias}.id = ?2 limit 2"));
     let max_json_bytes = i64::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES).map_err(|_| {
         hydration_failure(
             HydrationFailureKind::UnsupportedParserRevision,
@@ -838,32 +1110,34 @@ fn hydrate_exact_row(
                 "provider SQLite row no longer exists",
             )
         })?;
-    let event = decode_source_event_row(row, &schema, dialect).map_err(|error| {
+    let event = decode_source_event_row(row, schema, dialect).map_err(|error| {
         hydration_failure(HydrationFailureKind::StaleRecordEvidence, error.to_string())
     })?;
+    if &event.native_identity != native_identity {
+        return Err(hydration_failure(
+            HydrationFailureKind::StaleRecordEvidence,
+            "provider SQLite native row key no longer matches",
+        ));
+    }
+    let record_digest = source_event_row_digest(&event);
+    if &record_digest != locator.record_digest() {
+        return Err(hydration_failure(
+            HydrationFailureKind::StaleRecordEvidence,
+            "provider SQLite exact row digest no longer matches",
+        ));
+    }
     let retained = retained_projection(&event.projection).ok_or_else(|| {
         hydration_failure(
             HydrationFailureKind::StaleRecordEvidence,
             "provider SQLite row is no longer a retained lexical event",
         )
     })?;
-    let provider_bytes = event
-        .source_data
-        .exact_text()
-        .ok_or_else(|| {
-            hydration_failure(
-                HydrationFailureKind::StaleRecordEvidence,
-                "provider SQLite row is no longer stored as text",
-            )
-        })?
-        .to_vec();
-    let record_digest: [u8; 32] = Sha256::digest(&provider_bytes).into();
-    if &record_digest != locator.record_digest() {
-        return Err(hydration_failure(
+    event.source_data.exact_text().ok_or_else(|| {
+        hydration_failure(
             HydrationFailureKind::StaleRecordEvidence,
-            "provider SQLite row digest no longer matches",
-        ));
-    }
+            "provider SQLite row is no longer stored as text",
+        )
+    })?;
     let normalized_time = retained
         .body
         .pointer("/time/created")
@@ -916,43 +1190,6 @@ fn temporary_hydration_failure(error: impl std::fmt::Display) -> HydrationFailur
         HydrationFailureKind::TemporarilyUnavailable,
         error.to_string(),
     )
-}
-
-fn hydration_kind_label(kind: HydrationFailureKind) -> &'static str {
-    match kind {
-        HydrationFailureKind::TemporarilyUnavailable => "temporarily_unavailable",
-        HydrationFailureKind::ConfirmedDeleted => "confirmed_deleted",
-        HydrationFailureKind::StaleSourceEvidence => "stale_source_evidence",
-        HydrationFailureKind::StaleRecordEvidence => "stale_record_evidence",
-        HydrationFailureKind::MissingRecord => "missing_record",
-        HydrationFailureKind::UnsupportedParserRevision => "unsupported_parser_revision",
-        HydrationFailureKind::InvalidLocator => "invalid_locator",
-    }
-}
-
-fn decode_hydration_capture_error(error: CaptureError) -> HydrationFailure {
-    let detail = error.to_string();
-    for (label, kind) in [
-        (
-            "stale_source_evidence",
-            HydrationFailureKind::StaleSourceEvidence,
-        ),
-        (
-            "stale_record_evidence",
-            HydrationFailureKind::StaleRecordEvidence,
-        ),
-        ("missing_record", HydrationFailureKind::MissingRecord),
-        (
-            "unsupported_parser_revision",
-            HydrationFailureKind::UnsupportedParserRevision,
-        ),
-        ("invalid_locator", HydrationFailureKind::InvalidLocator),
-    ] {
-        if detail.contains(label) {
-            return hydration_failure(kind, detail);
-        }
-    }
-    temporary_hydration_failure(error)
 }
 
 #[cfg(test)]
