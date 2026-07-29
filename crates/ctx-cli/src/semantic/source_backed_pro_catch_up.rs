@@ -1,4 +1,8 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    thread,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result};
 use ctx_history_capture::SourceBackedResolverRegistry;
@@ -23,6 +27,8 @@ use super::{
 
 const SOURCE_BACKED_PRO_CATCH_UP_STATUS_FILE: &str = "source-backed-pro-catch-up.json";
 const SOURCE_BACKED_PRO_CATCH_UP_SCHEMA_VERSION: u16 = 1;
+const SOURCE_BACKED_PRO_CATCH_UP_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const SOURCE_BACKED_PRO_CATCH_UP_WAIT_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -334,6 +340,59 @@ fn persist_status(data_root: &Path, status: &SourceBackedProCatchUpStatus) -> Re
     write_daemon_job_status(&status_path(data_root), &status.to_json()?)
 }
 
+/// Waits for the daemon-owned Pro projection of one exact Core generation.
+///
+/// This is deliberately a status-only seam. The CLI must never rebuild a
+/// resolver registry, reread provider sources, or open the legacy Store in
+/// order to make Pro ready; those operations remain owned by the daemon tick
+/// that retained the generation-bound source authority.
+pub(crate) fn wait_for_completed_generation(
+    data_root: &Path,
+    core_generation_id: &str,
+) -> Result<()> {
+    wait_for_completed_generation_with(
+        data_root,
+        core_generation_id,
+        SOURCE_BACKED_PRO_CATCH_UP_WAIT_TIMEOUT,
+        || thread::sleep(SOURCE_BACKED_PRO_CATCH_UP_POLL_INTERVAL),
+    )
+}
+
+fn wait_for_completed_generation_with(
+    data_root: &Path,
+    core_generation_id: &str,
+    timeout: Duration,
+    mut wait: impl FnMut(),
+) -> Result<()> {
+    let started = Instant::now();
+    loop {
+        if let Some(status) = read_status(data_root) {
+            if status.is_completed_for(core_generation_id) {
+                return Ok(());
+            }
+            if status.core_generation_id == core_generation_id
+                && status.status == SourceBackedProCatchUpState::Error
+            {
+                let code = status
+                    .error_code
+                    .as_deref()
+                    .unwrap_or("not_materialized");
+                let detail = status
+                    .last_error
+                    .as_deref()
+                    .unwrap_or("daemon source-backed Pro catch-up failed");
+                anyhow::bail!("{code}: {detail}");
+            }
+        }
+        if started.elapsed() >= timeout {
+            anyhow::bail!(
+                "not_materialized: timed out waiting for daemon source-backed Pro generation {core_generation_id}"
+            );
+        }
+        wait();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{
@@ -481,6 +540,50 @@ mod tests {
         assert_eq!(run.status["error_code"], "source_pro_generation_mismatch");
         assert_eq!(run.status["core_generation_id"], generation);
         assert!(run.status["receipt_core_generation_id"].is_null());
+    }
+
+    #[test]
+    fn cli_wait_is_generation_exact_and_fails_closed_on_projection_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let generation = "a".repeat(64);
+        let completed =
+            SourceBackedProCatchUpStatus::pending(&generation, 1).completed(generation.clone());
+        persist_status(temp.path(), &completed).unwrap();
+        wait_for_completed_generation_with(
+            temp.path(),
+            &generation,
+            Duration::ZERO,
+            || panic!("completed status must not sleep"),
+        )
+        .unwrap();
+
+        let failed = SourceBackedProCatchUpStatus::pending(&generation, 2).error(
+            SourceBackedProCatchUpError::Projection {
+                code: "helper_crashed".to_owned(),
+                message: "boom".to_owned(),
+            },
+        );
+        persist_status(temp.path(), &failed).unwrap();
+        let error = wait_for_completed_generation_with(
+            temp.path(),
+            &generation,
+            Duration::ZERO,
+            || panic!("failed status must not sleep"),
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").starts_with("helper_crashed:"));
+
+        let stale =
+            SourceBackedProCatchUpStatus::pending(&"b".repeat(64), 1).completed("b".repeat(64));
+        persist_status(temp.path(), &stale).unwrap();
+        let error = wait_for_completed_generation_with(
+            temp.path(),
+            &generation,
+            Duration::ZERO,
+            || panic!("zero timeout must not sleep"),
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").starts_with("not_materialized:"));
     }
 
     #[test]

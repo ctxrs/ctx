@@ -4,12 +4,9 @@ use std::{
 };
 
 use anyhow::{anyhow, bail, Context, Result};
-use ctx_history_core::database_path;
-use ctx_history_store::Store;
 use ctx_pro_host_protocol::{
-    BlameRequest, BlameTarget, JournalCheckpoint, JournalPosition, MaterializationAuthority,
-    ProFilesystemLayout, QuerySnapshotExpectation, SourceManifestReceiptIdentity, StatusResult,
-    PROTOCOL_FINGERPRINT,
+    BlameRequest, BlameTarget, MaterializationAuthority, ProFilesystemLayout,
+    QuerySnapshotExpectation, SourceManifestReceiptIdentity, StatusResult,
 };
 
 use crate::pro::verified_executable::VerifiedHelperExecutable;
@@ -26,66 +23,32 @@ pub(super) fn error_code(error: &anyhow::Error) -> String {
 }
 
 pub(super) fn current_blame_request(
-    data_root: &Path,
     target: BlameTarget,
     limit: u32,
     cursor: Option<String>,
     status: &StatusResult,
 ) -> Result<BlameRequest> {
+    if status.authority != MaterializationAuthority::Source {
+        bail!(
+            "not_materialized: Pro helper has no v0.26 source-manifest authority; rebuild it from provider sources"
+        );
+    }
     status
         .validate()
         .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
-    if status.authority == MaterializationAuthority::Source {
-        let receipt = status.source_receipt.as_ref().ok_or_else(|| {
-            anyhow!(
-                "source_unavailable: source-backed Pro graph is not ready ({})",
-                graph_state_name(status.state)
-            )
-        })?;
-        return Ok(BlameRequest {
-            target,
-            limit,
-            cursor,
-            expected_snapshot: QuerySnapshotExpectation::Source {
-                receipt: SourceManifestReceiptIdentity::from_receipt(receipt)
-                    .map_err(|error| anyhow!("invalid_response: {}", error.message))?,
-            },
-        });
-    }
-
-    let db_path = database_path(data_root.to_path_buf());
-    if !db_path.exists() {
-        bail!(
-            "source_unavailable: ctx store is not initialized at {}; run `ctx setup` or `ctx import` first",
-            db_path.display()
-        );
-    }
-    let store = Store::open_read_only(&db_path).with_context(|| {
-        format!(
-            "source_unavailable: open canonical ctx store {}",
-            db_path.display()
+    let receipt = status.source_receipt.as_ref().ok_or_else(|| {
+        anyhow!(
+            "source_unavailable: source-backed Pro graph is not ready ({})",
+            graph_state_name(status.state)
         )
     })?;
-    let snapshot = store
-        .projection_journal_snapshot(None)
-        .context("not_materialized: canonical projection journal is not active")?;
-    if snapshot.frozen_through.contract_fingerprint != PROTOCOL_FINGERPRINT {
-        bail!("protocol_mismatch: canonical projection journal uses a different contract");
-    }
     Ok(BlameRequest {
         target,
         limit,
         cursor,
-        expected_snapshot: QuerySnapshotExpectation::Journal {
-            checkpoint: JournalCheckpoint {
-                position: JournalPosition {
-                    generation: snapshot.frozen_through.position.generation,
-                    sequence: snapshot.frozen_through.position.sequence,
-                },
-                contract_fingerprint: snapshot.frozen_through.contract_fingerprint,
-                cumulative_digest: snapshot.frozen_through.cumulative_digest,
-            },
-            projection_pending: false,
+        expected_snapshot: QuerySnapshotExpectation::Source {
+            receipt: SourceManifestReceiptIdentity::from_receipt(receipt)
+                .map_err(|error| anyhow!("invalid_response: {}", error.message))?,
         },
     })
 }

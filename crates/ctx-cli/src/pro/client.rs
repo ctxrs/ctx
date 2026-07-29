@@ -12,26 +12,12 @@ use std::{
 };
 
 use anyhow::{anyhow, bail, Context, Result};
-use ctx_history_core::database_path;
-use ctx_history_store::{
-    JournalCheckpoint as StoreJournalCheckpoint, JournalEntityKind as StoreJournalEntityKind,
-    JournalEvidenceIdentity as StoreJournalEvidenceIdentity,
-    JournalOperation as StoreJournalOperation, JournalPosition as StoreJournalPosition,
-    JournalProvenanceIdentity as StoreJournalProvenanceIdentity, ProjectionJournalRecord,
-    ProjectionJournalSnapshot, Store,
-};
-#[cfg(test)]
-use ctx_pro_host_protocol::MAX_JOURNAL_RECORDS_PER_BATCH;
 use ctx_pro_host_protocol::{
-    decode_base64url, initial_journal_digest, journal_sync_envelope_bytes, read_frame, write_frame,
-    BlameResult, BlameTarget, Capability, ConfirmGraphKeyDeletionRequest, EntitlementAccessState,
-    GraphKeyDeletionPrepared, GraphState, HelloRequest, HelperEnvelope, HelperMessage,
-    HostEnvelope, HostMessage, JournalCheckpoint, JournalContextWindow, JournalEntityKind,
-    JournalEvidenceIdentity, JournalOperation, JournalPosition, JournalProvenanceIdentity,
-    JournalRecord, JournalSyncMode, JournalSyncRequest, JournalSyncResult,
-    PrepareGraphKeyDeletionRequest, StatusRequest, StatusResult,
-    GRAPH_KEY_DELETION_CHALLENGE_BYTES, MAX_JOURNAL_SYNC_ENVELOPE_BYTES, PROTOCOL_FINGERPRINT,
-    PROTOCOL_VERSION,
+    decode_base64url, read_frame, write_frame, BlameResult, BlameTarget, Capability,
+    ConfirmGraphKeyDeletionRequest, EntitlementAccessState, GraphKeyDeletionPrepared, HelloRequest,
+    HelperEnvelope, HelperMessage, HostEnvelope, HostMessage,
+    PrepareGraphKeyDeletionRequest, StatusRequest, StatusResult, GRAPH_KEY_DELETION_CHALLENGE_BYTES,
+    PROTOCOL_FINGERPRINT, PROTOCOL_VERSION,
 };
 use serde::Serialize;
 use uuid::Uuid;
@@ -63,8 +49,6 @@ pub(crate) use output::ProOutputImport;
 
 #[path = "client_status.rs"]
 mod client_status;
-#[cfg(all(test, unix))]
-use client_status::smoke_helper_at_path_with_authorization;
 #[cfg(ctx_pro_qualification)]
 pub(crate) use client_status::smoke_qualification_helper;
 #[cfg(test)]
@@ -87,7 +71,8 @@ const STDERR_MAX_BYTES: usize = 256 * 1024;
 pub(crate) struct MaterializeReport {
     pub(crate) schema_version: u32,
     pub(crate) payload_type: &'static str,
-    pub(crate) frontier: u64,
+    pub(crate) core_generation_id: String,
+    pub(crate) source_count: u64,
     pub(crate) batches: u64,
     pub(crate) observations: u64,
     pub(crate) replayed_batches: u64,

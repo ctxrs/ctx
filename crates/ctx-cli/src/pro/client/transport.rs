@@ -124,7 +124,6 @@ impl ProClient {
             Capability::EntitlementAuthorization,
             Capability::GraphKeyDeletion,
             Capability::Status,
-            Capability::JournalSync,
             Capability::OutputMaterialization,
             Capability::SourceMaterialization,
             Capability::Query,
@@ -224,14 +223,6 @@ impl ProClient {
             request_id,
             message,
         };
-        if matches!(&request.message, HostMessage::SyncJournal(_))
-            && serde_json::to_vec(&request)
-                .context("invalid_request: encode journal request")?
-                .len()
-                > MAX_JOURNAL_SYNC_ENVELOPE_BYTES
-        {
-            bail!("invalid_request: journal request exceeds the Protocol V1 envelope bound");
-        }
         let timed_out = Arc::new(AtomicBool::new(false));
         let (stop_tx, stop_rx) = mpsc::channel();
         let watchdog_child = Arc::clone(&self.child);
