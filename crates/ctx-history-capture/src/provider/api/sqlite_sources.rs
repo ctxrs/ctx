@@ -2,7 +2,6 @@ use std::path::Path;
 
 use ctx_history_store::Store;
 
-use crate::provider::providers::astrbot::import_astrbot_nativepath;
 use crate::provider::providers::continue_cli::import_continue_cli_nativepath;
 use crate::provider::providers::deepagents::import_deepagents_nativepath;
 use crate::provider::providers::firebender::firebender_source_root;
@@ -17,7 +16,7 @@ use crate::provider::providers::opencode::{
 use crate::provider::providers::openhands::import_openhands_nativepath;
 use crate::provider::providers::shelley::import_shelley_nativepath;
 use crate::{
-    AstrBotSqliteImportOptions, ContinueCliImportOptions, DeepAgentsSqliteImportOptions,
+    ContinueCliImportOptions, DeepAgentsSqliteImportOptions,
     FirebenderSqliteImportOptions, ForgeCodeSqliteImportOptions, KiloSqliteImportOptions,
     KiroSqliteImportOptions, MiMoCodeSqliteImportOptions, NanoClawImportOptions,
     OpenCodeSqliteImportOptions, OpenHandsImportOptions, ProviderAdapterContext,
@@ -206,34 +205,6 @@ pub fn import_kiro_sqlite(
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
     import_kiro_nativepath(
-        path,
-        store,
-        ProviderAdapterContext {
-            machine_id: options.machine_id,
-            source_path: Some(source_path),
-            source_root: None,
-            imported_at: options.imported_at,
-        },
-        ProviderImportOptions {
-            history_record_id: options.history_record_id,
-            capture_work_limit: options.capture_work_limit,
-            inventory_observation_token: options.inventory_observation_token.clone(),
-            import_profile: options.import_profile.clone(),
-        },
-    )
-}
-
-pub fn import_astrbot_sqlite(
-    path: impl AsRef<Path>,
-    store: &mut Store,
-    options: AstrBotSqliteImportOptions,
-) -> Result<ProviderImportSummary> {
-    let path = path.as_ref();
-    let source_path = options
-        .source_path
-        .clone()
-        .unwrap_or_else(|| path.to_path_buf());
-    import_astrbot_nativepath(
         path,
         store,
         ProviderAdapterContext {

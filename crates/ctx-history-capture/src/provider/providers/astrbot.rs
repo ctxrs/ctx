@@ -6,15 +6,10 @@ mod source;
 #[cfg(test)]
 mod tests;
 
-use std::path::Path;
-
-use ctx_history_store::Store;
 use rusqlite::Connection;
 
 use crate::native_source::{NativeLocator, NativeSqliteValue};
-use crate::{
-    CaptureError, ProviderAdapterContext, ProviderImportOptions, ProviderImportSummary, Result,
-};
+use crate::{CaptureError, Result};
 
 pub(super) const ASTRBOT_CAPTURE_REVISION: u32 = 4;
 pub(super) const ASTRBOT_POLICY_REVISION: u32 = 7;
@@ -56,15 +51,4 @@ pub(crate) fn astrbot_complete_conversation_message(
     item_index: u32,
 ) -> Result<Option<model::AstrBotCompleteMessage>> {
     model::complete_conversation_message(values, item_index)
-}
-
-/// The public registration keeps this historical symbol while its only
-/// implementation is the provider-owned NativePath vertical.
-pub(crate) fn import_astrbot_nativepath(
-    path: &Path,
-    store: &mut Store,
-    context: ProviderAdapterContext,
-    import_options: ProviderImportOptions,
-) -> Result<ProviderImportSummary> {
-    native_path::import_astrbot_native_path(path, store, context, import_options)
 }

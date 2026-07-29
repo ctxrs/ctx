@@ -11,7 +11,7 @@ use crate::tests::support::source_snapshot::{
     assert_provider_source_unchanged, assert_sqlite_source_file_unchanged,
 };
 use crate::{
-    import_antigravity_cli_history, import_astrbot_sqlite, import_auggie_history,
+    import_antigravity_cli_history, import_auggie_history,
     import_claude_projects_jsonl_tree, import_cline_task_json_history, import_codebuddy_history,
     import_codex_history_jsonl, import_codex_session_tree, import_continue_cli_sessions,
     import_copilot_cli_session_events, import_crush_sqlite, import_cursor_native_history,
@@ -24,7 +24,7 @@ use crate::{
     import_roo_task_json_history, import_rovodev_history, import_shelley_sqlite,
     import_tabnine_cli_history, import_trae_history, import_warp_sqlite,
     import_windsurf_cascade_hook_transcripts, import_zed_threads_sqlite,
-    AntigravityCliImportOptions, AstrBotSqliteImportOptions, AuggieImportOptions,
+    AntigravityCliImportOptions, AuggieImportOptions,
     ClaudeProjectsImportOptions, ClineTaskJsonImportOptions, CodeBuddyImportOptions,
     CodexHistoryImportOptions, CodexSessionImportOptions, ContinueCliImportOptions,
     CopilotCliImportOptions, CrushSqliteImportOptions, CursorNativeImportOptions,
@@ -582,18 +582,6 @@ fn native_sqlite_imports_do_not_mutate_provider_databases() {
             store,
             HermesSqliteImportOptions {
                 ..HermesSqliteImportOptions::default()
-            },
-        )
-        .unwrap()
-    });
-
-    let astrbot = provider_history_fixture("astrbot/v1/data/data_v4.db");
-    assert_sqlite_clean_import_preserves_file("AstrBot", &astrbot, |store| {
-        import_astrbot_sqlite(
-            &astrbot,
-            store,
-            AstrBotSqliteImportOptions {
-                ..AstrBotSqliteImportOptions::default()
             },
         )
         .unwrap()
