@@ -249,7 +249,7 @@ pub(super) fn complete_conversation_message(
     }))
 }
 
-fn decode_conversation(values: &[NativeSqliteValue]) -> Result<ConversationRow> {
+pub(super) fn decode_conversation(values: &[NativeSqliteValue]) -> Result<ConversationRow> {
     if values.len() != CONVERSATION_VALUE_COUNT {
         return Err(CaptureError::InvalidPayload(
             "AstrBot conversation logical row has an unexpected value count".to_owned(),

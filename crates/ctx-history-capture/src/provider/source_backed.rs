@@ -107,9 +107,8 @@ use super::providers::{
     kimi::native_path::source_backed::{KimiSourceBackedCatalog, KimiSourceBackedResolver},
     kiro::native_path::{scan_kiro_source_backed_v0, KiroLocatorResolverV0},
     lingma::native_path::{
-        scan_lingma_source_backed_v0, LingmaDatabaseSourceV0, LingmaExactContentFailureKindV0,
-        LingmaSourceBackedErrorV0, LingmaSourceBackedResolverV0, LingmaSourceBackedResultV0,
-        LingmaSourceInventoryV0,
+        scan_lingma_source_backed_v0, LingmaDatabaseSourceV0, LingmaSourceBackedErrorV0,
+        LingmaSourceBackedResolverV0, LingmaSourceBackedResultV0, LingmaSourceInventoryV0,
     },
     mistral_vibe::native_path::source_backed::scan_mistral_vibe_source_backed,
     mux::native_path::{
@@ -666,13 +665,13 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         SelectedWithRetainedExplicit,
         Full
     ),
-    partial_route!(
+    route!(
         Lingma,
         "lingma_sqlite",
         true,
         true,
         DiscoveredWinner,
-        "Lingma exact hydration is available for row-local user prompts; assistant records remain preview-only"
+        Full
     ),
     route!(
         Qoder,
@@ -3137,7 +3136,8 @@ fn register_lingma_inventory_source(
     inventory_source: Arc<dyn LingmaInventorySource>,
 ) -> SourceBackedCoordinatorResult<()> {
     let capture_inventory = Arc::clone(&inventory_source);
-    let hydration_inventory = inventory_source;
+    let hydration_inventory = Arc::clone(&inventory_source);
+    let batch_hydration_inventory = inventory_source;
     let driver = captured_route_driver(
         move |sink| {
             let opening = capture_inventory.observe().map_err(route_error)?;
@@ -3158,39 +3158,23 @@ fn register_lingma_inventory_source(
             let inventory = hydration_inventory.observe().map_err(|error| {
                 hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
             })?;
-            let result = LingmaSourceBackedResolverV0::new(&inventory)
+            LingmaSourceBackedResolverV0::new(&inventory)
                 .map_err(|error| {
                     hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
                 })?
-                .hydrate(request.event_id(), request.locator());
-            match result {
-                Ok(content) => Ok(HydratedProviderRecord {
-                    event_id: request.event_id(),
-                    provider_bytes: content.text.into_bytes(),
-                }),
-                Err(error) => Err(hydration_failure(
-                    match error.kind {
-                        LingmaExactContentFailureKindV0::ExactContentUnavailable => {
-                            HydrationFailureKind::UnsupportedParserRevision
-                        }
-                        LingmaExactContentFailureKindV0::InvalidLocator => {
-                            HydrationFailureKind::InvalidLocator
-                        }
-                        LingmaExactContentFailureKindV0::SourceUnavailable => {
-                            HydrationFailureKind::TemporarilyUnavailable
-                        }
-                        LingmaExactContentFailureKindV0::RecordMissing => {
-                            HydrationFailureKind::MissingRecord
-                        }
-                        LingmaExactContentFailureKindV0::StaleRecordEvidence => {
-                            HydrationFailureKind::StaleRecordEvidence
-                        }
-                    },
-                    error,
-                )),
-            }
+                .hydrate_event(request)
         },
-    );
+    )
+    .with_batch_hydration(move |request| {
+        let inventory = batch_hydration_inventory.observe().map_err(|error| {
+            hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
+        })?;
+        LingmaSourceBackedResolverV0::new(&inventory)
+            .map_err(|error| {
+                hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
+            })?
+            .hydrate_batch_request(request)
+    });
     registry.register(executable_route(
         source,
         selection,
@@ -3492,7 +3476,8 @@ pub fn register_astrbot_source_backed_route(
     discovery: DiscoveryContext,
 ) -> SourceBackedCoordinatorResult<()> {
     let capture_discovery = discovery.clone();
-    let hydration_discovery = discovery;
+    let hydration_discovery = discovery.clone();
+    let batch_hydration_discovery = discovery;
     let driver = captured_route_driver(
         move |sink| {
             let opening = AstrBotSourceBackedInventoryV0::discover(&capture_discovery)
@@ -3525,7 +3510,16 @@ pub fn register_astrbot_source_backed_route(
                 .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error))?
                 .hydrate_event(request)
         },
-    );
+    )
+    .with_batch_hydration(move |request| {
+        let inventory = AstrBotSourceBackedInventoryV0::discover(&batch_hydration_discovery)
+            .map_err(|error| {
+                hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
+            })?;
+        AstrBotSourceBackedResolverV0::from_inventory(&inventory)
+            .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error))?
+            .hydrate_batch_request(request)
+    });
     registry.register(executable_route(
         source,
         selection,

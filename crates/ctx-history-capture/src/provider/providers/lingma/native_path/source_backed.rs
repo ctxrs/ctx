@@ -6,13 +6,15 @@ use std::{
 
 use chrono::{DateTime, Duration, Utc};
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, CertifiedSourceInventory,
-    EventHydrationRequest, EventIdentityInput, LocatorRevisionPolicy, NativeItemKey,
-    NativeRecordCoordinate, NativeSessionKey, ProjectionContractError, ScannedSourceCounts,
+    derive_event_id, derive_session_id, BatchHydrationRequest, BatchHydrationResult,
+    CaptureProvider, CertifiedSource, CertifiedSourceInventory, ContentSourceResolver,
+    EventHydrationRequest, EventIdentityInput, HydratedProviderRecord, HydrationFailure,
+    HydrationFailureKind, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
+    NativeSessionKey, ProjectionContractError, ScannedSourceCounts, SessionHydrationRequest,
     SessionIdentityInput, SourceAnchor, SourceInventoryObservation, SourceKey, SourceObservation,
     SourceRecordLocator, SourceResolverContractError, StableEntityId, SubrecordSelector, TypedKey,
 };
-use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
+use ctx_history_index::LexicalDocument;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -21,7 +23,7 @@ use super::{
     publication::{provider_event, EventDraft},
     records::{
         assistant_text, event_base_index, lingma_logical_record_sha256, lingma_timestamp,
-        native_values,
+        native_values, row_from_native_values,
     },
     LingmaRow, SqliteEncoding,
 };
@@ -79,8 +81,8 @@ pub(crate) enum LingmaSourceBackedErrorV0 {
     SourceChangedDuringScan,
     #[error("Lingma source-backed count overflow")]
     CountOverflow,
-    #[error("Lingma source-backed projection emitted an empty lexical preview")]
-    EmptyLexicalPreview,
+    #[error("Lingma source-backed projection emitted an empty lexical body")]
+    EmptyLexicalBody,
 }
 
 pub(crate) type LingmaSourceBackedResultV0<T> = Result<T, LingmaSourceBackedErrorV0>;
@@ -254,31 +256,14 @@ impl LingmaSourceInventoryV0 {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LingmaExactContentCapabilityV0 {
-    RowLocalUserPrompt,
-    AssistantPreviewOnly,
-}
-
-impl LingmaExactContentCapabilityV0 {
-    pub(crate) const fn can_reopen_exactly(self) -> bool {
-        matches!(self, Self::RowLocalUserPrompt)
-    }
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct LingmaSourceBackedRecordV0 {
     document: LexicalDocument,
-    exact_content: LingmaExactContentCapabilityV0,
 }
 
 impl LingmaSourceBackedRecordV0 {
     pub(crate) fn document(&self) -> &LexicalDocument {
         &self.document
-    }
-
-    pub(crate) const fn exact_content(&self) -> LingmaExactContentCapabilityV0 {
-        self.exact_content
     }
 }
 
@@ -407,9 +392,17 @@ fn scan_database(
         &schema_fingerprint,
         encoding,
     )?;
+    let source_revision_digest = source_revision_digest(&opening);
     let revision_scope = TypedKey::bytes(opening.revision().to_vec())?;
     let source_path = database.path.display().to_string();
-    let parsed = scan_rows(connection, encoding, &source, &revision_scope, &source_path)?;
+    let parsed = scan_rows(
+        connection,
+        encoding,
+        &source,
+        &source_revision_digest,
+        &revision_scope,
+        &source_path,
+    )?;
     sqlite_snapshot.finish()?;
     root_authority.source_root.revalidate()?;
 
@@ -475,6 +468,7 @@ fn scan_rows(
     connection: &rusqlite::Connection,
     encoding: SqliteEncoding,
     source: &SourceKey,
+    source_revision_digest: &[u8; 32],
     revision_scope: &TypedKey,
     source_path: &str,
 ) -> Result<ParsedScan, CaptureError> {
@@ -544,6 +538,7 @@ fn scan_rows(
     for parsed in rows {
         project_row(
             source,
+            source_revision_digest,
             revision_scope,
             source_path,
             &request_counts,
@@ -583,6 +578,7 @@ fn request_identity_counts(rows: &[ParsedRow]) -> BTreeMap<(String, String), usi
 
 fn project_row(
     source: &SourceKey,
+    source_revision_digest: &[u8; 32],
     revision_scope: &TypedKey,
     source_path: &str,
     request_counts: &BTreeMap<(String, String), usize>,
@@ -598,7 +594,7 @@ fn project_row(
         logical_session_kind: LOGICAL_SESSION_KIND,
         native_session_key: &session_key,
     })?;
-    let item_key = native_item_key(&parsed, request_counts, revision_scope)?;
+    let native_identity = native_item_identity(&parsed, request_counts, revision_scope)?;
     let user_sequence = parsed.ordinal.saturating_mul(2);
     let user_event = provider_event(
         &parsed.row,
@@ -617,16 +613,18 @@ fn project_row(
         source,
         session_id,
         &parsed.row,
-        &item_key,
+        &native_identity,
+        source_revision_digest,
         parsed.record_digest,
         user_sequence,
         USER_PROMPT_COORDINATE,
         source_path,
+        &parsed.row.chat_prompt,
         user_event,
-        LingmaExactContentCapabilityV0::RowLocalUserPrompt,
     )?);
 
     if let Some((text, body_kind, event_type)) = assistant_text(&parsed.row) {
+        let logical_text = text.clone();
         let coordinate = if body_kind == "summary" {
             ASSISTANT_SUMMARY_COORDINATE
         } else {
@@ -654,23 +652,29 @@ fn project_row(
             source,
             session_id,
             &parsed.row,
-            &item_key,
+            &native_identity,
+            source_revision_digest,
             parsed.record_digest,
             user_sequence.saturating_add(1),
             coordinate,
             source_path,
+            &logical_text,
             assistant_event,
-            LingmaExactContentCapabilityV0::AssistantPreviewOnly,
         )?);
     }
     Ok(())
 }
 
-fn native_item_key(
+struct LingmaNativeItemIdentity {
+    item_key: NativeItemKey,
+    coordinate: TypedKey,
+}
+
+fn native_item_identity(
     parsed: &ParsedRow,
     request_counts: &BTreeMap<(String, String), usize>,
     revision_scope: &TypedKey,
-) -> Result<NativeItemKey, ProjectionContractError> {
+) -> Result<LingmaNativeItemIdentity, ProjectionContractError> {
     if let Some(request_id) = parsed
         .row
         .request_id
@@ -680,19 +684,28 @@ fn native_item_key(
             request_counts.get(&(parsed.row.session_id.clone(), (*request_id).clone())) == Some(&1)
         })
     {
-        return NativeItemKey::composite(
-            NATIVE_REQUEST_NAMESPACE,
-            vec![
-                TypedKey::utf8(parsed.row.session_id.clone())?,
-                TypedKey::utf8(request_id.clone())?,
-            ],
-        );
+        let session = TypedKey::utf8(parsed.row.session_id.clone())?;
+        let request = TypedKey::utf8(request_id.clone())?;
+        return Ok(LingmaNativeItemIdentity {
+            item_key: NativeItemKey::composite(
+                NATIVE_REQUEST_NAMESPACE,
+                vec![session.clone(), request.clone()],
+            )?,
+            coordinate: TypedKey::composite(vec![TypedKey::utf8("request")?, session, request])?,
+        });
     }
-    NativeItemKey::revision_scoped_position(
-        NATIVE_POSITION_KIND,
-        TypedKey::U64(parsed.ordinal),
-        revision_scope.clone(),
-    )
+    Ok(LingmaNativeItemIdentity {
+        item_key: NativeItemKey::revision_scoped_position(
+            NATIVE_POSITION_KIND,
+            TypedKey::U64(parsed.ordinal),
+            revision_scope.clone(),
+        )?,
+        coordinate: TypedKey::composite(vec![
+            TypedKey::utf8("position")?,
+            TypedKey::U64(parsed.ordinal),
+            revision_scope.clone(),
+        ])?,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -700,13 +713,14 @@ fn project_event(
     source: &SourceKey,
     session_id: StableEntityId,
     row: &LingmaRow,
-    item_key: &NativeItemKey,
+    native_identity: &LingmaNativeItemIdentity,
+    source_revision_digest: &[u8; 32],
     record_digest: [u8; 32],
     event_sequence: u64,
     coordinate_kind: &'static str,
     source_path: &str,
+    logical_text: &str,
     event: super::LingmaCoreEvent,
-    exact_content: LingmaExactContentCapabilityV0,
 ) -> LingmaSourceBackedResultV0<LingmaSourceBackedRecordV0> {
     let subrecord =
         SubrecordSelector::native_id(NATIVE_SUBRECORD_NAMESPACE, TypedKey::utf8(coordinate_kind)?)?;
@@ -714,7 +728,7 @@ fn project_event(
         source,
         session_id,
         logical_item_kind: LOGICAL_EVENT_KIND,
-        native_item_key: item_key,
+        native_item_key: &native_identity.item_key,
         subrecord_selector: Some(&subrecord),
     })?;
     let locator = SourceRecordLocator::new(
@@ -724,21 +738,16 @@ fn project_event(
             primary_key: TypedKey::composite(vec![
                 TypedKey::I64(row.rowid),
                 TypedKey::utf8(coordinate_kind)?,
+                native_identity.coordinate.clone(),
             ])?,
-            row_version: None,
+            row_version: Some(TypedKey::bytes(record_digest.to_vec())?),
         },
-        LocatorRevisionPolicy::StableRecordEvidence,
-        None,
-        record_digest,
+        LocatorRevisionPolicy::ExactSourceRevision,
+        Some(*source_revision_digest),
+        Sha256::digest(logical_text.as_bytes()).into(),
     )?;
-    let text = event
-        .payload
-        .get("text")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    let body = bounded_preview(text);
-    if body.is_empty() {
-        return Err(LingmaSourceBackedErrorV0::EmptyLexicalPreview);
+    if logical_text.is_empty() {
+        return Err(LingmaSourceBackedErrorV0::EmptyLexicalBody);
     }
     Ok(LingmaSourceBackedRecordV0 {
         document: LexicalDocument {
@@ -757,17 +766,12 @@ fn project_event(
             occurred_at_unix_ms: Some(event.occurred_at.timestamp_millis()),
             event_type: event.event_type.as_str().to_owned(),
             role: event.role.map(|role| role.as_str().to_owned()),
-            body,
+            body: logical_text.to_owned(),
             workspace: None,
             cwd: None,
             touched_files: Vec::new(),
         },
-        exact_content,
     })
-}
-
-fn bounded_preview(text: &str) -> String {
-    text.chars().take(MAX_BODY_PREVIEW_CHARS).collect()
 }
 
 fn source_observation(
@@ -793,6 +797,14 @@ fn source_observation(
         SOURCE_REVISION_KIND,
         revision.finalize().to_vec(),
     )?)
+}
+
+fn source_revision_digest(observation: &SourceObservation) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"ctx-source-revision-evidence-v1\0");
+    hash_revision_field(&mut digest, observation.revision_kind().as_bytes());
+    hash_revision_field(&mut digest, observation.revision());
+    digest.finalize().into()
 }
 
 fn sqlite_evidence_revision_component(evidence: &SqliteSourceEvidence) -> String {
@@ -825,37 +837,360 @@ fn hash_revision_field(digest: &mut Sha256, bytes: &[u8]) {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LingmaExactContentFailureKindV0 {
-    ExactContentUnavailable,
-    InvalidLocator,
-    SourceUnavailable,
-    RecordMissing,
-    StaleRecordEvidence,
+enum LingmaBodyKind {
+    UserPrompt,
+    AssistantSummary,
+    AssistantError,
 }
 
-#[derive(Debug, Error)]
-#[error("Lingma exact content failed for {event_id}: {kind:?}")]
-pub(crate) struct LingmaExactContentFailureV0 {
-    pub(crate) event_id: StableEntityId,
-    pub(crate) kind: LingmaExactContentFailureKindV0,
+impl LingmaBodyKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::UserPrompt => USER_PROMPT_COORDINATE,
+            Self::AssistantSummary => ASSISTANT_SUMMARY_COORDINATE,
+            Self::AssistantError => ASSISTANT_ERROR_COORDINATE,
+        }
+    }
+
+    fn logical_text(self, row: &LingmaRow) -> Result<String, HydrationFailure> {
+        match self {
+            Self::UserPrompt if !row.chat_prompt.trim().is_empty() => Ok(row.chat_prompt.clone()),
+            Self::UserPrompt => Err(hydration_failure(
+                HydrationFailureKind::MissingRecord,
+                "Lingma user-prompt subrecord has no meaningful text",
+            )),
+            Self::AssistantSummary | Self::AssistantError => {
+                let expected = if self == Self::AssistantSummary {
+                    "summary"
+                } else {
+                    "error_result"
+                };
+                assistant_text(row)
+                    .filter(|(_, body_kind, _)| *body_kind == expected)
+                    .map(|(text, _, _)| text)
+                    .ok_or_else(|| {
+                        hydration_failure(
+                            HydrationFailureKind::MissingRecord,
+                            "Lingma assistant subrecord is missing",
+                        )
+                    })
+            }
+        }
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LingmaHydratedContentV0 {
-    pub(crate) event_id: StableEntityId,
-    pub(crate) text: String,
+#[derive(Debug, Clone)]
+enum LingmaNativeIdentityCoordinate {
+    Request {
+        session_id: String,
+        request_id: String,
+    },
+    Position {
+        ordinal: u64,
+        revision_scope: TypedKey,
+    },
+}
+
+impl LingmaNativeIdentityCoordinate {
+    fn validate_and_build(
+        &self,
+        connection: &rusqlite::Connection,
+        row: &LingmaRow,
+        current_revision_scope: &TypedKey,
+    ) -> Result<NativeItemKey, HydrationFailure> {
+        match self {
+            Self::Request {
+                session_id,
+                request_id,
+            } => {
+                if &row.session_id != session_id
+                    || row.request_id.as_deref() != Some(request_id.as_str())
+                    || request_id.trim().is_empty()
+                {
+                    return Err(hydration_failure(
+                        HydrationFailureKind::InvalidLocator,
+                        "Lingma request-native key does not match the reopened row",
+                    ));
+                }
+                let matching_rows: i64 = connection
+                    .query_row(
+                        "select count(*)
+                           from chat_record
+                          where cast(session_id as text) = ?1
+                            and cast(request_id as text) = ?2",
+                        rusqlite::params![session_id, request_id],
+                        |result| result.get(0),
+                    )
+                    .map_err(CaptureError::from)
+                    .map_err(map_capture_hydration)?;
+                if matching_rows != 1 {
+                    return Err(hydration_failure(
+                        HydrationFailureKind::InvalidLocator,
+                        "Lingma request-native key is not unique in the reopened source",
+                    ));
+                }
+                NativeItemKey::composite(
+                    NATIVE_REQUEST_NAMESPACE,
+                    vec![
+                        TypedKey::utf8(session_id.clone()).map_err(invalid_locator)?,
+                        TypedKey::utf8(request_id.clone()).map_err(invalid_locator)?,
+                    ],
+                )
+                .map_err(invalid_locator)
+            }
+            Self::Position {
+                ordinal,
+                revision_scope,
+            } => {
+                if revision_scope != current_revision_scope {
+                    return Err(hydration_failure(
+                        HydrationFailureKind::InvalidLocator,
+                        "Lingma position-native key has the wrong source revision scope",
+                    ));
+                }
+                let observed_ordinal: i64 = connection
+                    .query_row(
+                        "select count(*) from chat_record where rowid < ?1",
+                        [row.rowid],
+                        |result| result.get(0),
+                    )
+                    .map_err(CaptureError::from)
+                    .map_err(map_capture_hydration)?;
+                if u64::try_from(observed_ordinal).ok() != Some(*ordinal) {
+                    return Err(hydration_failure(
+                        HydrationFailureKind::InvalidLocator,
+                        "Lingma position-native key does not match the row ordinal",
+                    ));
+                }
+                NativeItemKey::revision_scoped_position(
+                    NATIVE_POSITION_KIND,
+                    TypedKey::U64(*ordinal),
+                    revision_scope.clone(),
+                )
+                .map_err(invalid_locator)
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LingmaCoordinate {
+    rowid: i64,
+    body_kind: LingmaBodyKind,
+    row_digest: [u8; 32],
+    native_identity: LingmaNativeIdentityCoordinate,
+}
+
+fn decode_lingma_locator(
+    locator: &SourceRecordLocator,
+) -> Result<LingmaCoordinate, HydrationFailure> {
+    if locator.revision_policy() != LocatorRevisionPolicy::ExactSourceRevision {
+        return Err(hydration_failure(
+            HydrationFailureKind::InvalidLocator,
+            "Lingma locator is not exact-revision scoped",
+        ));
+    }
+    let NativeRecordCoordinate::ProviderSqlite {
+        logical_relation,
+        primary_key,
+        row_version,
+    } = locator.coordinate()
+    else {
+        return Err(hydration_failure(
+            HydrationFailureKind::InvalidLocator,
+            "Lingma locator is not a provider SQLite coordinate",
+        ));
+    };
+    if logical_relation != LOGICAL_RELATION {
+        return Err(hydration_failure(
+            HydrationFailureKind::InvalidLocator,
+            "Lingma locator has an unsupported logical relation",
+        ));
+    }
+    let Some(TypedKey::Bytes(row_digest)) = row_version else {
+        return Err(hydration_failure(
+            HydrationFailureKind::InvalidLocator,
+            "Lingma locator has no typed row version",
+        ));
+    };
+    let row_digest: [u8; 32] = row_digest.as_slice().try_into().map_err(|_| {
+        hydration_failure(
+            HydrationFailureKind::InvalidLocator,
+            "Lingma locator row version has an invalid length",
+        )
+    })?;
+    let TypedKey::Composite(parts) = primary_key else {
+        return Err(hydration_failure(
+            HydrationFailureKind::InvalidLocator,
+            "Lingma locator primary key is not composite",
+        ));
+    };
+    let [TypedKey::I64(rowid), TypedKey::Utf8(body_kind), TypedKey::Composite(native)] =
+        parts.as_slice()
+    else {
+        return Err(hydration_failure(
+            HydrationFailureKind::InvalidLocator,
+            "Lingma locator primary key has an invalid shape",
+        ));
+    };
+    let body_kind = match body_kind.as_str() {
+        USER_PROMPT_COORDINATE => LingmaBodyKind::UserPrompt,
+        ASSISTANT_SUMMARY_COORDINATE => LingmaBodyKind::AssistantSummary,
+        ASSISTANT_ERROR_COORDINATE => LingmaBodyKind::AssistantError,
+        _ => {
+            return Err(hydration_failure(
+                HydrationFailureKind::InvalidLocator,
+                "Lingma locator addresses an unsupported logical body",
+            ));
+        }
+    };
+    let native_identity = match native.as_slice() {
+        [TypedKey::Utf8(kind), TypedKey::Utf8(session_id), TypedKey::Utf8(request_id)]
+            if kind == "request" =>
+        {
+            LingmaNativeIdentityCoordinate::Request {
+                session_id: session_id.clone(),
+                request_id: request_id.clone(),
+            }
+        }
+        [TypedKey::Utf8(kind), TypedKey::U64(ordinal), revision_scope] if kind == "position" => {
+            LingmaNativeIdentityCoordinate::Position {
+                ordinal: *ordinal,
+                revision_scope: revision_scope.clone(),
+            }
+        }
+        _ => {
+            return Err(hydration_failure(
+                HydrationFailureKind::InvalidLocator,
+                "Lingma locator native key has an invalid shape",
+            ));
+        }
+    };
+    Ok(LingmaCoordinate {
+        rowid: *rowid,
+        body_kind,
+        row_digest,
+        native_identity,
+    })
+}
+
+fn verify_record_digest(
+    locator: &SourceRecordLocator,
+    provider_bytes: &[u8],
+) -> Result<(), HydrationFailure> {
+    let digest: [u8; 32] = Sha256::digest(provider_bytes).into();
+    if &digest == locator.record_digest() {
+        Ok(())
+    } else {
+        Err(hydration_failure(
+            HydrationFailureKind::StaleRecordEvidence,
+            "Lingma logical text digest no longer matches",
+        ))
+    }
+}
+
+fn invalid_locator(error: impl std::fmt::Display) -> HydrationFailure {
+    hydration_failure(HydrationFailureKind::InvalidLocator, error.to_string())
+}
+
+fn hydration_failure(kind: HydrationFailureKind, detail: impl Into<String>) -> HydrationFailure {
+    HydrationFailure {
+        kind,
+        detail: detail.into(),
+    }
+}
+
+fn map_capture_hydration(error: CaptureError) -> HydrationFailure {
+    match error {
+        CaptureError::SourceChangedDuringCapture => hydration_failure(
+            HydrationFailureKind::StaleSourceEvidence,
+            "Lingma source changed during reopening",
+        ),
+        CaptureError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => hydration_failure(
+            HydrationFailureKind::MissingRecord,
+            "Lingma source record is missing",
+        ),
+        CaptureError::UnsupportedSchema(_) | CaptureError::UnsupportedSchemaVersion(_) => {
+            hydration_failure(
+                HydrationFailureKind::UnsupportedParserRevision,
+                "Lingma SQLite schema is unsupported",
+            )
+        }
+        CaptureError::InvalidPayload(_)
+        | CaptureError::Json(_)
+        | CaptureError::Sqlite(
+            rusqlite::Error::FromSqlConversionFailure(..)
+            | rusqlite::Error::IntegralValueOutOfRange(..)
+            | rusqlite::Error::InvalidColumnType(..),
+        ) => hydration_failure(
+            HydrationFailureKind::StaleRecordEvidence,
+            "Lingma SQLite row is malformed for the certified parser",
+        ),
+        _ => hydration_failure(
+            HydrationFailureKind::TemporarilyUnavailable,
+            "Lingma source could not be reopened",
+        ),
+    }
+}
+
+fn map_parser_hydration(error: CaptureError) -> HydrationFailure {
+    match error {
+        CaptureError::InvalidPayload(_)
+        | CaptureError::UnsupportedSchema(_)
+        | CaptureError::UnsupportedSchemaVersion(_) => hydration_failure(
+            HydrationFailureKind::UnsupportedParserRevision,
+            "Lingma SQLite schema is unsupported",
+        ),
+        error => map_capture_hydration(error),
+    }
+}
+
+fn map_sqlite_hydration(error: SqliteSourceAccessError) -> HydrationFailure {
+    match error {
+        SqliteSourceAccessError::SourceChanged
+        | SqliteSourceAccessError::ConnectionIdentityMismatch => hydration_failure(
+            HydrationFailureKind::StaleSourceEvidence,
+            "Lingma SQLite source changed during reopening",
+        ),
+        SqliteSourceAccessError::Io { source, .. }
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            hydration_failure(
+                HydrationFailureKind::ConfirmedDeleted,
+                "Lingma database leaf is absent beneath the admitted source root",
+            )
+        }
+        error => hydration_failure(
+            HydrationFailureKind::TemporarilyUnavailable,
+            error.to_string(),
+        ),
+    }
+}
+
+fn map_lingma_source_hydration(error: LingmaSourceBackedErrorV0) -> HydrationFailure {
+    match error {
+        LingmaSourceBackedErrorV0::Capture(error) => map_capture_hydration(error),
+        LingmaSourceBackedErrorV0::SqliteSource(error) => map_sqlite_hydration(error),
+        LingmaSourceBackedErrorV0::Projection(error) => invalid_locator(error),
+        LingmaSourceBackedErrorV0::Resolver(error) => invalid_locator(error),
+        error => hydration_failure(
+            HydrationFailureKind::TemporarilyUnavailable,
+            error.to_string(),
+        ),
+    }
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct LingmaSourceBackedResolverV0 {
-    sources: Vec<(SourceKey, PathBuf)>,
+    sources: BTreeMap<[u8; 32], (SourceKey, PathBuf)>,
 }
 
 impl LingmaSourceBackedResolverV0 {
     pub(crate) fn new(inventory: &LingmaSourceInventoryV0) -> LingmaSourceBackedResultV0<Self> {
-        let mut sources = Vec::with_capacity(inventory.databases.len());
+        let mut sources = BTreeMap::new();
         for database in &inventory.databases {
-            sources.push((database.source_key()?, database.path.clone()));
+            let source = database.source_key()?;
+            sources.insert(source.identity().digest(), (source, database.path.clone()));
         }
         Ok(Self { sources })
     }
@@ -863,113 +1198,213 @@ impl LingmaSourceBackedResolverV0 {
     pub(crate) fn hydrate_record(
         &self,
         record: &LingmaSourceBackedRecordV0,
-    ) -> Result<LingmaHydratedContentV0, LingmaExactContentFailureV0> {
-        self.hydrate(record.document.event_id, &record.document.locator)
+    ) -> Result<HydratedProviderRecord, HydrationFailure> {
+        let request =
+            EventHydrationRequest::new(record.document.event_id, record.document.locator.clone())
+                .map_err(invalid_locator)?;
+        self.hydrate_event(&request)
     }
 
-    pub(crate) fn hydrate(
+    pub(crate) fn hydrate_requests(
         &self,
-        event_id: StableEntityId,
-        locator: &SourceRecordLocator,
-    ) -> Result<LingmaHydratedContentV0, LingmaExactContentFailureV0> {
-        let invalid = || LingmaExactContentFailureV0 {
-            event_id,
-            kind: LingmaExactContentFailureKindV0::InvalidLocator,
-        };
-        if EventHydrationRequest::new(event_id, locator.clone()).is_err() {
-            return Err(invalid());
+        requests: &[EventHydrationRequest],
+    ) -> Result<Vec<HydratedProviderRecord>, HydrationFailure> {
+        if requests.is_empty() {
+            return Ok(Vec::new());
         }
-        let NativeRecordCoordinate::ProviderSqlite {
-            logical_relation,
-            primary_key,
-            row_version,
-        } = locator.coordinate()
-        else {
-            return Err(invalid());
-        };
-        let TypedKey::Composite(parts) = primary_key else {
-            return Err(invalid());
-        };
-        let [TypedKey::I64(rowid), TypedKey::Utf8(coordinate_kind)] = parts.as_slice() else {
-            return Err(invalid());
-        };
-        if logical_relation != LOGICAL_RELATION || row_version.is_some() {
-            return Err(invalid());
-        }
-        if coordinate_kind != USER_PROMPT_COORDINATE {
-            return Err(LingmaExactContentFailureV0 {
-                event_id,
-                kind: LingmaExactContentFailureKindV0::ExactContentUnavailable,
-            });
-        }
-        let Some((_, path)) = self.sources.iter().find(|(source, _)| {
-            source.identity() == locator.source().identity()
-                && source.exact_descriptor_eq(locator.source())
-        }) else {
-            return Err(LingmaExactContentFailureV0 {
-                event_id,
-                kind: LingmaExactContentFailureKindV0::SourceUnavailable,
-            });
-        };
-        let root_authority =
-            LingmaRootAuthorizedSource::retain(path).map_err(|_| LingmaExactContentFailureV0 {
-                event_id,
-                kind: LingmaExactContentFailureKindV0::SourceUnavailable,
-            })?;
-        let sqlite_snapshot =
-            root_authority
-                .open_snapshot()
-                .map_err(|_| LingmaExactContentFailureV0 {
-                    event_id,
-                    kind: LingmaExactContentFailureKindV0::SourceUnavailable,
-                })?;
-        let source_evidence = sqlite_snapshot.evidence().clone();
-        let connection = sqlite_snapshot
-            .connection()
-            .map_err(|_| LingmaExactContentFailureV0 {
-                event_id,
-                kind: LingmaExactContentFailureKindV0::SourceUnavailable,
-            })?;
-        let values = super::records::lingma_complete_values(connection, *rowid)
-            .map_err(|_| LingmaExactContentFailureV0 {
-                event_id,
-                kind: LingmaExactContentFailureKindV0::SourceUnavailable,
-            })?
-            .ok_or(LingmaExactContentFailureV0 {
-                event_id,
-                kind: LingmaExactContentFailureKindV0::RecordMissing,
-            })?;
-        sqlite_snapshot
-            .finish()
-            .map_err(|_| LingmaExactContentFailureV0 {
-                event_id,
-                kind: LingmaExactContentFailureKindV0::SourceUnavailable,
-            })?;
-        if !root_authority
-            .evidence_is_current(&source_evidence)
-            .map_err(|_| LingmaExactContentFailureV0 {
-                event_id,
-                kind: LingmaExactContentFailureKindV0::SourceUnavailable,
-            })?
+        let coordinates = requests
+            .iter()
+            .map(|request| decode_lingma_locator(request.locator()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let source_key = requests[0].locator().source();
+        if requests
+            .iter()
+            .any(|request| !request.locator().source().exact_descriptor_eq(source_key))
         {
-            return Err(LingmaExactContentFailureV0 {
-                event_id,
-                kind: LingmaExactContentFailureKindV0::SourceUnavailable,
-            });
+            return Err(hydration_failure(
+                HydrationFailureKind::InvalidLocator,
+                "Lingma hydration batch spans multiple source descriptors",
+            ));
         }
-        if &lingma_logical_record_sha256(&values) != locator.record_digest() {
-            return Err(LingmaExactContentFailureV0 {
-                event_id,
-                kind: LingmaExactContentFailureKindV0::StaleRecordEvidence,
-            });
+        let (source, path) = self
+            .sources
+            .get(&source_key.identity().digest())
+            .ok_or_else(|| {
+                hydration_failure(
+                    HydrationFailureKind::ConfirmedDeleted,
+                    "Lingma source is absent from the complete admitted inventory",
+                )
+            })?;
+        if !source.exact_descriptor_eq(source_key) {
+            return Err(hydration_failure(
+                HydrationFailureKind::InvalidLocator,
+                "Lingma source descriptor does not match the admitted source identity",
+            ));
         }
-        let (_, text) = super::records::lingma_complete_user_message(&values).map_err(|_| {
-            LingmaExactContentFailureV0 {
-                event_id,
-                kind: LingmaExactContentFailureKindV0::StaleRecordEvidence,
+
+        let root_authority =
+            LingmaRootAuthorizedSource::retain(path).map_err(map_lingma_source_hydration)?;
+        let sqlite_snapshot = root_authority
+            .open_snapshot()
+            .map_err(map_lingma_source_hydration)?;
+        let hydration = (|| {
+            let connection = sqlite_snapshot.connection().map_err(map_sqlite_hydration)?;
+            let encoding = detect_schema(connection).map_err(map_parser_hydration)?;
+            let user_version = connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .map_err(CaptureError::from)
+                .map_err(map_capture_hydration)?;
+            let schema_fingerprint =
+                sqlite_schema_fingerprint(connection).map_err(map_capture_hydration)?;
+            let observation = source_observation(
+                source.clone(),
+                sqlite_snapshot.evidence(),
+                user_version,
+                &schema_fingerprint,
+                encoding,
+            )
+            .map_err(invalid_locator)?;
+            let current_revision_digest = source_revision_digest(&observation);
+            if requests.iter().any(|request| {
+                request.locator().certified_source_revision_digest()
+                    != Some(&current_revision_digest)
+            }) {
+                return Err(hydration_failure(
+                    HydrationFailureKind::StaleSourceEvidence,
+                    "Lingma SQLite snapshot no longer matches the certified revision",
+                ));
             }
-        })?;
-        Ok(LingmaHydratedContentV0 { event_id, text })
+
+            let current_revision_scope =
+                TypedKey::bytes(observation.revision().to_vec()).map_err(invalid_locator)?;
+            let mut values_by_row = BTreeMap::new();
+            let mut hydrated = Vec::with_capacity(requests.len());
+            for (request, coordinate) in requests.iter().zip(coordinates) {
+                if !values_by_row.contains_key(&coordinate.rowid) {
+                    let values =
+                        super::records::lingma_complete_values(connection, coordinate.rowid)
+                            .map_err(map_capture_hydration)?
+                            .ok_or_else(|| {
+                                hydration_failure(
+                                    HydrationFailureKind::MissingRecord,
+                                    "Lingma chat_record row is missing",
+                                )
+                            })?;
+                    values_by_row.insert(coordinate.rowid, values);
+                }
+                let values = values_by_row.get(&coordinate.rowid).ok_or_else(|| {
+                    hydration_failure(
+                        HydrationFailureKind::MissingRecord,
+                        "Lingma chat_record row is missing",
+                    )
+                })?;
+                if lingma_logical_record_sha256(values) != coordinate.row_digest {
+                    return Err(hydration_failure(
+                        HydrationFailureKind::StaleRecordEvidence,
+                        "Lingma logical row version no longer matches",
+                    ));
+                }
+                let row = row_from_native_values(values).map_err(map_capture_hydration)?;
+                let native_item_key = coordinate.native_identity.validate_and_build(
+                    connection,
+                    &row,
+                    &current_revision_scope,
+                )?;
+                let session_key = NativeSessionKey::native_id(
+                    NATIVE_SESSION_NAMESPACE,
+                    TypedKey::utf8(row.session_id.clone()).map_err(invalid_locator)?,
+                )
+                .map_err(invalid_locator)?;
+                let session_id = derive_session_id(SessionIdentityInput {
+                    source,
+                    logical_session_kind: LOGICAL_SESSION_KIND,
+                    native_session_key: &session_key,
+                })
+                .map_err(invalid_locator)?;
+                let body_kind = coordinate.body_kind.as_str();
+                let subrecord = SubrecordSelector::native_id(
+                    NATIVE_SUBRECORD_NAMESPACE,
+                    TypedKey::utf8(body_kind).map_err(invalid_locator)?,
+                )
+                .map_err(invalid_locator)?;
+                let expected_event_id = derive_event_id(EventIdentityInput {
+                    source,
+                    session_id,
+                    logical_item_kind: LOGICAL_EVENT_KIND,
+                    native_item_key: &native_item_key,
+                    subrecord_selector: Some(&subrecord),
+                })
+                .map_err(invalid_locator)?;
+                if expected_event_id != request.event_id() {
+                    return Err(hydration_failure(
+                        HydrationFailureKind::InvalidLocator,
+                        "Lingma native key does not derive the requested event identity",
+                    ));
+                }
+                let text = coordinate.body_kind.logical_text(&row)?;
+                verify_record_digest(request.locator(), text.as_bytes())?;
+                hydrated.push(HydratedProviderRecord {
+                    event_id: request.event_id(),
+                    provider_bytes: text.into_bytes(),
+                });
+            }
+            Ok(hydrated)
+        })();
+        let finished = sqlite_snapshot.finish().map_err(map_sqlite_hydration);
+        let root_current = root_authority
+            .source_root
+            .revalidate()
+            .map_err(map_capture_hydration);
+        finished?;
+        root_current?;
+        hydration
+    }
+
+    pub(crate) fn hydrate_batch_request(
+        &self,
+        request: &BatchHydrationRequest,
+    ) -> Result<BatchHydrationResult, HydrationFailure> {
+        let result = BatchHydrationResult::new(self.hydrate_requests(request.events())?).map_err(
+            |error| {
+                hydration_failure(
+                    HydrationFailureKind::InvalidLocator,
+                    format!("invalid Lingma batch hydration result: {error}"),
+                )
+            },
+        )?;
+        result.validate_for_request(request)?;
+        Ok(result)
+    }
+}
+
+impl ContentSourceResolver for LingmaSourceBackedResolverV0 {
+    fn hydrate_event(
+        &self,
+        request: &EventHydrationRequest,
+    ) -> Result<HydratedProviderRecord, HydrationFailure> {
+        self.hydrate_requests(std::slice::from_ref(request))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                hydration_failure(
+                    HydrationFailureKind::MissingRecord,
+                    "Lingma hydration returned no record",
+                )
+            })
+    }
+
+    fn hydrate_batch(
+        &self,
+        request: &BatchHydrationRequest,
+    ) -> Result<BatchHydrationResult, HydrationFailure> {
+        self.hydrate_batch_request(request)
+    }
+
+    fn hydrate_session(
+        &self,
+        request: &SessionHydrationRequest,
+    ) -> Result<Vec<HydratedProviderRecord>, HydrationFailure> {
+        self.hydrate_requests(request.events())
     }
 }
 
@@ -1047,17 +1482,65 @@ mod tests {
             .collect()
     }
 
+    fn event_request(record: &LingmaSourceBackedRecordV0) -> EventHydrationRequest {
+        EventHydrationRequest::new(record.document.event_id, record.document.locator.clone())
+            .unwrap()
+    }
+
+    fn current_source_revision(source: &LingmaDatabaseSourceV0) -> [u8; 32] {
+        let authority = LingmaRootAuthorizedSource::retain(&source.path).unwrap();
+        let snapshot = authority.open_snapshot().unwrap();
+        let digest = {
+            let connection = snapshot.connection().unwrap();
+            let encoding = detect_schema(connection).unwrap();
+            let user_version = connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap();
+            let schema_fingerprint = sqlite_schema_fingerprint(connection).unwrap();
+            let observation = source_observation(
+                source.source_key().unwrap(),
+                snapshot.evidence(),
+                user_version,
+                &schema_fingerprint,
+                encoding,
+            )
+            .unwrap();
+            source_revision_digest(&observation)
+        };
+        snapshot.finish().unwrap();
+        authority.source_root.revalidate().unwrap();
+        digest
+    }
+
+    fn request_with_locator_evidence(
+        record: &LingmaSourceBackedRecordV0,
+        source_revision: [u8; 32],
+        coordinate: NativeRecordCoordinate,
+        record_digest: [u8; 32],
+    ) -> EventHydrationRequest {
+        let locator = SourceRecordLocator::new(
+            record.document.source.clone(),
+            coordinate,
+            LocatorRevisionPolicy::ExactSourceRevision,
+            Some(source_revision),
+            record_digest,
+        )
+        .unwrap();
+        EventHydrationRequest::new(record.document.event_id, locator).unwrap()
+    }
+
     #[test]
-    fn source_backed_cold_scan_certifies_multiple_databases_with_stable_bounded_records() {
+    fn source_backed_cold_scan_certifies_stable_full_meaningful_bodies() {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let first_path = temp.path().join("vscode-local.db");
         let second_path = temp.path().join("jetbrains-local.db");
+        let long_prompt = format!("vscode prompt {} lingma-full-body-tail", "v".repeat(4_096));
         let first = create_database(&first_path);
         insert_row(
             &first,
             "vscode-session",
             "vscode-request",
-            &format!("vscode prompt {}", "v".repeat(MAX_BODY_PREVIEW_CHARS + 32)),
+            &long_prompt,
             Some("vscode summary"),
         );
         drop(first);
@@ -1080,9 +1563,15 @@ mod tests {
         assert_eq!(scan.inventory.observed_sources(), 2);
         assert_eq!(scan.databases.len(), 2);
         assert_eq!(all_records(&scan).len(), 4);
-        assert!(all_records(&scan)
-            .iter()
-            .all(|record| record.document.body.chars().count() <= MAX_BODY_PREVIEW_CHARS));
+        let long_user = all_records(&scan)
+            .into_iter()
+            .find(|record| {
+                record.document.provider_session_id.as_deref() == Some("vscode-session")
+                    && record.document.role.as_deref() == Some("user")
+            })
+            .unwrap();
+        assert_eq!(long_user.document.body, long_prompt);
+        assert!(long_user.document.body.ends_with("lingma-full-body-tail"));
         assert!(all_records(&scan).iter().all(|record| {
             record.document.parent_session_id.is_none()
                 && record.document.root_session_id == record.document.session_id
@@ -1150,6 +1639,7 @@ mod tests {
         assert!(path.with_file_name("local.db-shm").exists());
 
         let opening = inventory(vec![database(&path, "vscode:stable:wal")]);
+        let admitted = opening.clone();
         let closing = opening.clone();
         let scan = scan_lingma_source_backed_v0(opening, || Ok(closing)).unwrap();
         let user = all_records(&scan)
@@ -1157,6 +1647,11 @@ mod tests {
             .find(|record| record.document.role.as_deref() == Some("user"))
             .unwrap();
         assert_eq!(user.document.body, "committed Lingma WAL prompt");
+        let hydrated = LingmaSourceBackedResolverV0::new(&admitted)
+            .unwrap()
+            .hydrate_record(user)
+            .unwrap();
+        assert_eq!(hydrated.provider_bytes, b"committed Lingma WAL prompt");
     }
 
     #[cfg(target_os = "linux")]
@@ -1193,12 +1688,16 @@ mod tests {
     }
 
     #[test]
-    fn source_backed_user_prompt_locator_reopens_exact_row_local_content() {
+    fn source_backed_exact_hydration_and_native_batch_preserve_order_and_full_text() {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let path = temp.path().join("local.db");
         let prompt = format!(
-            "exact row-local Lingma prompt {}",
-            "x".repeat(MAX_BODY_PREVIEW_CHARS + 64)
+            "exact row-local Lingma prompt {} lingma-user-tail",
+            "x".repeat(4_096)
+        );
+        let summary = format!(
+            "exact Lingma assistant summary {} lingma-summary-tail",
+            "s".repeat(4_096)
         );
         let connection = create_database(&path);
         insert_row(
@@ -1206,81 +1705,475 @@ mod tests {
             "exact-session",
             "exact-request",
             &prompt,
-            Some("preview-only summary"),
+            Some(&summary),
         );
+        insert_row(
+            &connection,
+            "error-session",
+            "error-request",
+            "error prompt",
+            None,
+        );
+        connection
+            .execute(
+                "update chat_record
+                    set error_result = ?1
+                  where request_id = 'error-request'",
+                [format!(
+                    "provider failure {} lingma-error-tail",
+                    "e".repeat(4_096)
+                )],
+            )
+            .unwrap();
         drop(connection);
         let inventory = inventory(vec![database(&path, "vscode:profile:exact")]);
         let closing = inventory.clone();
         let scan = scan_lingma_source_backed_v0(inventory.clone(), || Ok(closing)).unwrap();
-        let user = all_records(&scan)
-            .into_iter()
-            .find(|record| record.document.role.as_deref() == Some("user"))
+        let records = all_records(&scan);
+        let user = records
+            .iter()
+            .copied()
+            .find(|record| record.document.body.ends_with("lingma-user-tail"))
             .unwrap();
-        assert_eq!(
-            user.exact_content,
-            LingmaExactContentCapabilityV0::RowLocalUserPrompt
-        );
-        assert!(user.exact_content.can_reopen_exactly());
-        assert!(user.document.body.chars().count() < prompt.chars().count());
+        let assistant = records
+            .iter()
+            .copied()
+            .find(|record| record.document.body.ends_with("lingma-summary-tail"))
+            .unwrap();
+        let error = records
+            .iter()
+            .copied()
+            .find(|record| record.document.body.ends_with("lingma-error-tail"))
+            .unwrap();
+        assert_eq!(user.document.body, prompt);
+        assert_eq!(assistant.document.body, summary);
+        assert!(error.document.body.starts_with("Lingma error result: "));
         assert!(matches!(
             user.document.locator.coordinate(),
             NativeRecordCoordinate::ProviderSqlite {
                 logical_relation,
                 primary_key: TypedKey::Composite(parts),
-                row_version: None,
+                row_version: Some(TypedKey::Bytes(version)),
             } if logical_relation == LOGICAL_RELATION
                 && matches!(
                     parts.as_slice(),
-                    [TypedKey::I64(1), TypedKey::Utf8(kind)]
+                    [
+                        TypedKey::I64(1),
+                        TypedKey::Utf8(kind),
+                        TypedKey::Composite(_)
+                    ]
                         if kind == USER_PROMPT_COORDINATE
                 )
+                && version.len() == 32
         ));
+        assert_eq!(
+            user.document.locator.revision_policy(),
+            LocatorRevisionPolicy::ExactSourceRevision
+        );
+        assert!(user
+            .document
+            .locator
+            .certified_source_revision_digest()
+            .is_some());
 
-        let hydrated = LingmaSourceBackedResolverV0::new(&inventory)
+        let resolver = LingmaSourceBackedResolverV0::new(&inventory).unwrap();
+        assert_eq!(
+            resolver.hydrate_record(user).unwrap().provider_bytes,
+            prompt.as_bytes()
+        );
+        assert_eq!(
+            resolver.hydrate_record(assistant).unwrap().provider_bytes,
+            summary.as_bytes()
+        );
+        assert!(resolver
+            .hydrate_record(error)
             .unwrap()
-            .hydrate_record(user)
-            .unwrap();
-        assert_eq!(hydrated.text, prompt);
+            .provider_bytes
+            .ends_with(b"lingma-error-tail"));
+
+        let requested = vec![
+            event_request(error),
+            event_request(user),
+            event_request(assistant),
+        ];
+        let batch = BatchHydrationRequest::new(requested.clone()).unwrap();
+        let hydrated = resolver.hydrate_batch_request(&batch).unwrap();
+        assert_eq!(
+            hydrated
+                .records()
+                .iter()
+                .map(|record| record.event_id)
+                .collect::<Vec<_>>(),
+            requested
+                .iter()
+                .map(EventHydrationRequest::event_id)
+                .collect::<Vec<_>>()
+        );
+        assert!(hydrated.records()[0]
+            .provider_bytes
+            .ends_with(b"lingma-error-tail"));
+        assert_eq!(hydrated.records()[1].provider_bytes, prompt.as_bytes());
+        assert_eq!(hydrated.records()[2].provider_bytes, summary.as_bytes());
     }
 
     #[test]
-    fn source_backed_assistant_summary_typed_fails_instead_of_returning_preview_as_exact() {
+    fn source_backed_hydration_types_stale_source_and_record_digest() {
         let temp = crate::test_support_paths::tempdir().unwrap();
-        let path = temp.path().join("local.db");
-        let summary = format!(
-            "assistant summary preview {}",
-            "s".repeat(MAX_BODY_PREVIEW_CHARS + 64)
-        );
-        let connection = create_database(&path);
+        let stale_path = temp.path().join("stale.db");
+        let connection = create_database(&stale_path);
         insert_row(
             &connection,
-            "summary-session",
-            "summary-request",
-            "user prompt",
-            Some(&summary),
+            "stale-session",
+            "stale-request",
+            "original prompt",
+            None,
         );
         drop(connection);
-        let inventory = inventory(vec![database(&path, "jetbrains:idea:summary")]);
-        let closing = inventory.clone();
-        let scan = scan_lingma_source_backed_v0(inventory.clone(), || Ok(closing)).unwrap();
-        let assistant = all_records(&scan)
+        let stale_inventory = inventory(vec![database(&stale_path, "jetbrains:idea:stale-source")]);
+        let scan =
+            scan_lingma_source_backed_v0(stale_inventory.clone(), || Ok(stale_inventory.clone()))
+                .unwrap();
+        let stale_record = all_records(&scan)
             .into_iter()
-            .find(|record| record.document.role.as_deref() == Some("assistant"))
+            .find(|record| record.document.role.as_deref() == Some("user"))
             .unwrap();
-        assert_eq!(
-            assistant.exact_content,
-            LingmaExactContentCapabilityV0::AssistantPreviewOnly
-        );
-        assert!(!assistant.exact_content.can_reopen_exactly());
-        assert!(summary.starts_with(&assistant.document.body));
-
-        let failure = LingmaSourceBackedResolverV0::new(&inventory)
+        Connection::open(&stale_path)
             .unwrap()
-            .hydrate_record(assistant)
+            .execute(
+                "update chat_record set chat_prompt = 'rewritten prompt'",
+                [],
+            )
+            .unwrap();
+        let failure = LingmaSourceBackedResolverV0::new(&stale_inventory)
+            .unwrap()
+            .hydrate_record(stale_record)
+            .unwrap_err();
+        assert_eq!(failure.kind, HydrationFailureKind::StaleSourceEvidence);
+
+        let digest_path = temp.path().join("digest.db");
+        let connection = create_database(&digest_path);
+        insert_row(
+            &connection,
+            "digest-session",
+            "digest-request",
+            "digest prompt",
+            None,
+        );
+        drop(connection);
+        let digest_inventory = inventory(vec![database(&digest_path, "vscode:stable:bad-digest")]);
+        let scan =
+            scan_lingma_source_backed_v0(digest_inventory.clone(), || Ok(digest_inventory.clone()))
+                .unwrap();
+        let digest_record = all_records(&scan)
+            .into_iter()
+            .find(|record| record.document.role.as_deref() == Some("user"))
+            .unwrap();
+        let NativeRecordCoordinate::ProviderSqlite {
+            logical_relation,
+            primary_key,
+            ..
+        } = digest_record.document.locator.coordinate()
+        else {
+            panic!("expected provider SQLite locator");
+        };
+        let coordinate = NativeRecordCoordinate::ProviderSqlite {
+            logical_relation: logical_relation.clone(),
+            primary_key: primary_key.clone(),
+            row_version: Some(TypedKey::bytes(vec![0x5a; 32]).unwrap()),
+        };
+        let request = request_with_locator_evidence(
+            digest_record,
+            *digest_record
+                .document
+                .locator
+                .certified_source_revision_digest()
+                .unwrap(),
+            coordinate,
+            *digest_record.document.locator.record_digest(),
+        );
+        let failure = LingmaSourceBackedResolverV0::new(&digest_inventory)
+            .unwrap()
+            .hydrate_event(&request)
+            .unwrap_err();
+        assert_eq!(failure.kind, HydrationFailureKind::StaleRecordEvidence);
+        let request = request_with_locator_evidence(
+            digest_record,
+            *digest_record
+                .document
+                .locator
+                .certified_source_revision_digest()
+                .unwrap(),
+            digest_record.document.locator.coordinate().clone(),
+            [0xa5; 32],
+        );
+        let failure = LingmaSourceBackedResolverV0::new(&digest_inventory)
+            .unwrap()
+            .hydrate_event(&request)
+            .unwrap_err();
+        assert_eq!(failure.kind, HydrationFailureKind::StaleRecordEvidence);
+
+        let native_path = temp.path().join("native-key.db");
+        let connection = create_database(&native_path);
+        insert_row(
+            &connection,
+            "native-session",
+            "native-request",
+            "native prompt",
+            None,
+        );
+        drop(connection);
+        let native_source = database(&native_path, "vscode:stable:native-key");
+        let native_inventory = inventory(vec![native_source.clone()]);
+        let scan =
+            scan_lingma_source_backed_v0(native_inventory.clone(), || Ok(native_inventory.clone()))
+                .unwrap();
+        let native_record = all_records(&scan)[0];
+        let connection = Connection::open(&native_path).unwrap();
+        insert_row(
+            &connection,
+            "native-session",
+            "native-request",
+            "duplicate native prompt",
+            None,
+        );
+        drop(connection);
+        let request = request_with_locator_evidence(
+            native_record,
+            current_source_revision(&native_source),
+            native_record.document.locator.coordinate().clone(),
+            *native_record.document.locator.record_digest(),
+        );
+        let failure = LingmaSourceBackedResolverV0::new(&native_inventory)
+            .unwrap()
+            .hydrate_event(&request)
+            .unwrap_err();
+        assert_eq!(failure.kind, HydrationFailureKind::InvalidLocator);
+    }
+
+    #[test]
+    fn source_backed_hydration_distinguishes_missing_row_deletion_and_unavailable_root() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let missing_path = temp.path().join("missing-row.db");
+        let connection = create_database(&missing_path);
+        insert_row(
+            &connection,
+            "missing-session",
+            "missing-request",
+            "missing prompt",
+            None,
+        );
+        drop(connection);
+        let missing_source = database(&missing_path, "vscode:stable:missing-row");
+        let missing_inventory = inventory(vec![missing_source.clone()]);
+        let scan = scan_lingma_source_backed_v0(missing_inventory.clone(), || {
+            Ok(missing_inventory.clone())
+        })
+        .unwrap();
+        let record = all_records(&scan)
+            .into_iter()
+            .find(|record| record.document.role.as_deref() == Some("user"))
+            .unwrap();
+        Connection::open(&missing_path)
+            .unwrap()
+            .execute("delete from chat_record", [])
+            .unwrap();
+        let request = request_with_locator_evidence(
+            record,
+            current_source_revision(&missing_source),
+            record.document.locator.coordinate().clone(),
+            *record.document.locator.record_digest(),
+        );
+        let failure = LingmaSourceBackedResolverV0::new(&missing_inventory)
+            .unwrap()
+            .hydrate_event(&request)
+            .unwrap_err();
+        assert_eq!(failure.kind, HydrationFailureKind::MissingRecord);
+
+        let deleted_path = temp.path().join("deleted.db");
+        let connection = create_database(&deleted_path);
+        insert_row(
+            &connection,
+            "deleted-session",
+            "deleted-request",
+            "deleted prompt",
+            None,
+        );
+        drop(connection);
+        let deleted_inventory = inventory(vec![database(&deleted_path, "vscode:stable:deleted")]);
+        let scan = scan_lingma_source_backed_v0(deleted_inventory.clone(), || {
+            Ok(deleted_inventory.clone())
+        })
+        .unwrap();
+        let request = event_request(all_records(&scan)[0]);
+        std::fs::remove_file(&deleted_path).unwrap();
+        let failure = LingmaSourceBackedResolverV0::new(&deleted_inventory)
+            .unwrap()
+            .hydrate_event(&request)
+            .unwrap_err();
+        assert_eq!(failure.kind, HydrationFailureKind::ConfirmedDeleted);
+
+        let available_root = temp.path().join("available-root");
+        std::fs::create_dir(&available_root).unwrap();
+        let unavailable_path = available_root.join("local.db");
+        let connection = create_database(&unavailable_path);
+        insert_row(
+            &connection,
+            "offline-session",
+            "offline-request",
+            "offline prompt",
+            None,
+        );
+        drop(connection);
+        let unavailable_inventory = inventory(vec![database(
+            &unavailable_path,
+            "jetbrains:idea:unavailable-root",
+        )]);
+        let scan = scan_lingma_source_backed_v0(unavailable_inventory.clone(), || {
+            Ok(unavailable_inventory.clone())
+        })
+        .unwrap();
+        let request = event_request(all_records(&scan)[0]);
+        std::fs::rename(&available_root, temp.path().join("offline-root")).unwrap();
+        let failure = LingmaSourceBackedResolverV0::new(&unavailable_inventory)
+            .unwrap()
+            .hydrate_event(&request)
+            .unwrap_err();
+        assert_eq!(failure.kind, HydrationFailureKind::TemporarilyUnavailable);
+    }
+
+    #[test]
+    fn source_backed_hydration_types_malformed_row_and_unsupported_schema() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let malformed_path = temp.path().join("malformed.db");
+        let connection = create_database(&malformed_path);
+        insert_row(
+            &connection,
+            "malformed-session",
+            "malformed-request",
+            "valid prompt",
+            None,
+        );
+        drop(connection);
+        let malformed_source = database(&malformed_path, "vscode:stable:malformed");
+        let malformed_inventory = inventory(vec![malformed_source.clone()]);
+        let scan = scan_lingma_source_backed_v0(malformed_inventory.clone(), || {
+            Ok(malformed_inventory.clone())
+        })
+        .unwrap();
+        let record = all_records(&scan)[0];
+        Connection::open(&malformed_path)
+            .unwrap()
+            .execute(
+                "update chat_record set chat_prompt = cast(x'80' as text)",
+                [],
+            )
+            .unwrap();
+        let request = request_with_locator_evidence(
+            record,
+            current_source_revision(&malformed_source),
+            record.document.locator.coordinate().clone(),
+            *record.document.locator.record_digest(),
+        );
+        let failure = LingmaSourceBackedResolverV0::new(&malformed_inventory)
+            .unwrap()
+            .hydrate_event(&request)
+            .unwrap_err();
+        assert_eq!(failure.kind, HydrationFailureKind::StaleRecordEvidence);
+
+        let unsupported_path = temp.path().join("unsupported.db");
+        let connection = create_database(&unsupported_path);
+        insert_row(
+            &connection,
+            "unsupported-session",
+            "unsupported-request",
+            "valid prompt",
+            None,
+        );
+        drop(connection);
+        let unsupported_inventory = inventory(vec![database(
+            &unsupported_path,
+            "jetbrains:idea:unsupported",
+        )]);
+        let scan = scan_lingma_source_backed_v0(unsupported_inventory.clone(), || {
+            Ok(unsupported_inventory.clone())
+        })
+        .unwrap();
+        let request = event_request(all_records(&scan)[0]);
+        Connection::open(&unsupported_path)
+            .unwrap()
+            .execute_batch("drop table chat_record;")
+            .unwrap();
+        let failure = LingmaSourceBackedResolverV0::new(&unsupported_inventory)
+            .unwrap()
+            .hydrate_event(&request)
             .unwrap_err();
         assert_eq!(
             failure.kind,
-            LingmaExactContentFailureKindV0::ExactContentUnavailable
+            HydrationFailureKind::UnsupportedParserRevision
         );
+    }
+
+    #[test]
+    fn source_backed_hydration_rejects_malformed_coordinate_and_forbidden_fallbacks() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let path = temp.path().join("local.db");
+        let connection = create_database(&path);
+        insert_row(
+            &connection,
+            "invalid-session",
+            "invalid-request",
+            "invalid prompt",
+            None,
+        );
+        drop(connection);
+        let inventory = inventory(vec![database(&path, "vscode:stable:invalid")]);
+        let scan =
+            scan_lingma_source_backed_v0(inventory.clone(), || Ok(inventory.clone())).unwrap();
+        let record = all_records(&scan)[0];
+        let malformed_coordinate = NativeRecordCoordinate::ProviderSqlite {
+            logical_relation: LOGICAL_RELATION.to_owned(),
+            primary_key: TypedKey::I64(1),
+            row_version: Some(TypedKey::bytes(vec![0; 32]).unwrap()),
+        };
+        let request = request_with_locator_evidence(
+            record,
+            *record
+                .document
+                .locator
+                .certified_source_revision_digest()
+                .unwrap(),
+            malformed_coordinate,
+            *record.document.locator.record_digest(),
+        );
+        let failure = LingmaSourceBackedResolverV0::new(&inventory)
+            .unwrap()
+            .hydrate_event(&request)
+            .unwrap_err();
+        assert_eq!(failure.kind, HydrationFailureKind::InvalidLocator);
+
+        let provider_source = include_str!("source_backed.rs");
+        for forbidden in [
+            ["work", ".sqlite"].concat(),
+            ["ctx_history_", "store"].concat(),
+            ["MAX_BODY_", "PREVIEW_CHARS"].concat(),
+            ["provider_local_", "preview"].concat(),
+        ] {
+            assert!(
+                !provider_source.contains(&forbidden),
+                "Lingma source-backed path contains forbidden fallback {forbidden}"
+            );
+        }
+        let route_source = include_str!("../../../source_backed.rs");
+        let route = route_source
+            .split_once("pub fn register_lingma_source_backed_route")
+            .unwrap()
+            .1
+            .split_once("fn discovered_lingma_inventory_source")
+            .unwrap()
+            .0;
+        assert!(route.contains("with_batch_hydration"));
+        assert!(route.contains("LingmaSourceBackedResolverV0"));
+        assert!(!route.contains(&["work", ".sqlite"].concat()));
+        assert!(!route.contains(&["ctx_history_", "store"].concat()));
     }
 }
