@@ -7,9 +7,8 @@ use uuid::Uuid;
 
 use crate::StoreError;
 
-pub const RELATIONAL_PROJECTION_SCHEMA_VERSION: u32 = 1;
-pub const RELATIONAL_PROJECTION_CONTRACT_VERSION: u32 = 1;
-pub const RELATIONAL_EVENT_PREVIEW_MAX_CHARS: usize = 2_048;
+pub const RELATIONAL_PROJECTION_SCHEMA_VERSION: u32 = 2;
+pub const RELATIONAL_PROJECTION_CONTRACT_VERSION: u32 = 2;
 
 pub type Result<T> = std::result::Result<T, RelationalProjectionError>;
 
@@ -26,12 +25,18 @@ pub enum RelationalProjectionError {
     #[error("source-backed relational projection schema is missing")]
     MissingSchema,
     #[error(
-        "unsupported source-backed relational schema {schema_version}, contract {contract_version}"
+        "unsupported source-backed relational schema {schema_version}, contract {contract_version}; \
+         delete and rebuild the disposable relational projection"
     )]
     UnsupportedSchema {
         schema_version: i64,
         contract_version: i64,
     },
+    #[error(
+        "source-backed relational projection state is incompatible: {0}; \
+         delete and rebuild the disposable relational projection"
+    )]
+    IncompatibleState(String),
     #[error("source-backed relational projection is missing stable view {0}")]
     MissingStableView(String),
     #[error(
@@ -120,8 +125,6 @@ pub struct RelationalEventMetadata {
     pub role: Option<EventRole>,
     pub occurred_at_unix_ms: Option<i64>,
     pub fidelity: Fidelity,
-    /// A redacted, explicitly bounded excerpt. This is never body authority.
-    pub bounded_preview: Option<String>,
     pub locator: SourceRecordLocator,
 }
 
@@ -160,6 +163,9 @@ pub enum RelationalProjectionStatus {
 pub struct RelationalProjectionMetadata {
     pub build_generation: u64,
     pub active_core_generation_id: Option<String>,
+    pub active_manifest_version: Option<u32>,
+    pub active_lexical_schema_version: Option<u32>,
+    pub active_policy_schema_hash: Option<String>,
     pub target_core_generation_id: Option<String>,
     pub status: RelationalProjectionStatus,
     pub source_count: u64,

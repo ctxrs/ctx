@@ -79,7 +79,7 @@ pub use source_backed_relational::{
     CommittedCoreGeneration, RelationalEventMetadata, RelationalFileTouchMetadata,
     RelationalProjectionError, RelationalProjectionMetadata, RelationalProjectionReceipt,
     RelationalProjectionRecord, RelationalProjectionStatus, RelationalSessionMetadata,
-    RelationalSourceMetadata, SourceBackedRelationalProjection, RELATIONAL_EVENT_PREVIEW_MAX_CHARS,
+    RelationalSourceMetadata, SourceBackedRelationalProjection,
     RELATIONAL_PROJECTION_CONTRACT_VERSION, RELATIONAL_PROJECTION_SCHEMA_VERSION,
 };
 pub use source_generations::{
