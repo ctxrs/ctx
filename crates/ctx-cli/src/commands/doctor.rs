@@ -3,13 +3,10 @@ use std::path::PathBuf;
 use anyhow::Result;
 use serde_json::json;
 
-use ctx_history_core::database_path;
-
 use crate::analytics::{count_bucket, DoctorTelemetry};
 use crate::config::AppConfig;
 use crate::output::print_json;
-use crate::semantic::{daemon_report, semantic_health_findings, semantic_worker_report};
-use crate::store_util::open_existing_store_read_only;
+use crate::semantic::source_epoch_status_report;
 use crate::DoctorArgs;
 
 pub(crate) fn run_doctor(
@@ -18,30 +15,38 @@ pub(crate) fn run_doctor(
     telemetry: &mut DoctorTelemetry,
 ) -> Result<()> {
     let json_output = args.format.is_json();
-    let db_path = database_path(data_root.clone());
     let mut findings = Vec::new();
     if !data_root.exists() {
         findings.push(format!("data root does not exist: {}", data_root.display()));
     }
-    if !db_path.exists() {
-        findings.push(format!(
-            "ctx store is not initialized at {}; run `ctx setup` or `ctx import` first",
-            db_path.display()
-        ));
-    } else {
-        let store = open_existing_store_read_only(&db_path, "ctx doctor")?;
-        findings.extend(store.validate()?);
-    }
-    findings.extend(semantic_health_findings(&data_root));
-    let semantic_report = if db_path.exists() {
-        let store = open_existing_store_read_only(&db_path, "ctx doctor semantic status")?;
-        semantic_worker_report(&data_root, Some(&store))?
-    } else {
-        semantic_worker_report(&data_root, None)?
-    };
-    let daemon = daemon_report(&data_root, &semantic_report);
-    let pro = crate::pro::lifecycle_status_json(&data_root);
     let config = AppConfig::load(&data_root)?;
+    let source = source_epoch_status_report(&data_root, &config)?;
+    for (name, required) in [
+        ("history_epoch", true),
+        ("lexical", true),
+        ("catalog", true),
+        ("resolver", true),
+        ("relational", true),
+        ("semantic", config.semantic_search_enabled()),
+    ] {
+        if !required {
+            continue;
+        }
+        let component = &source.report[name];
+        let status = component
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unavailable");
+        if !matches!(status, "ready" | "disabled") {
+            let reason = component
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            findings.push(format!("{name} is {status} ({reason})"));
+        }
+    }
+    let daemon = source.report["daemon"].clone();
+    let pro = crate::pro::lifecycle_status_json(&data_root);
     let upgrade_diagnostics = crate::upgrade::upgrade_diagnostics(&config);
     findings.extend(upgrade_diagnostics.findings);
     let upgrade = upgrade_diagnostics.report;
@@ -72,6 +77,7 @@ pub(crate) fn run_doctor(
             "schema_version": 1,
             "ok": findings.is_empty(),
             "findings": findings,
+            "source_epoch": source.report,
             "daemon": daemon,
             "upgrade": upgrade,
             "pro": pro,
