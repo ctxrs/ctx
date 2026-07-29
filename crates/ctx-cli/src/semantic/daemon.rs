@@ -33,8 +33,8 @@ use super::{
     },
     daemon_retry::DaemonRetryBackoff,
     daemon_scheduler::{
-        daemon_run_start_mode, restore_daemon_source_refresh_retry, run_daemon_once_with_activity,
-        source_refresh_retry_due,
+        daemon_retry_due, daemon_run_start_mode, restore_daemon_consumer_retries,
+        restore_daemon_source_refresh_retry, run_daemon_once_with_activity,
     },
     daemon_status::{daemon_report_failure_message, print_daemon_status_human},
     daemon_wakeup::{write_degraded_wakeup_receipt, DaemonFileWatcher, DaemonWakeup},
@@ -331,6 +331,7 @@ fn reload_daemon_analytics_config(data_root: &Path) -> Option<AppConfig> {
 pub(super) struct DaemonRuntime {
     pub(super) semantic_runtime: SharedSemanticRuntime,
     pub(super) history_retry: DaemonRetryBackoff,
+    pub(super) pro_retry: DaemonRetryBackoff,
     pub(super) semantic_retry: DaemonRetryBackoff,
     pub(super) semantic_blocked_job: Option<Value>,
     pub(super) config: AppConfig,
@@ -871,6 +872,7 @@ pub(super) fn run_daemon_inner(
         )?;
         if !runtime.config.daemon.mode.runs_only_source_refresh() {
             restore_daemon_source_refresh_retry(&mut runtime, data_root);
+            restore_daemon_consumer_retries(&mut runtime, data_root);
         }
         let stop_disabled = reload_daemon_runtime_config(
             data_root,
@@ -1038,7 +1040,7 @@ pub(super) fn run_daemon_inner(
                 send_daemon_events(data_root, &events);
             }
             let retry_due = !runtime.config.daemon.mode.runs_only_source_refresh()
-                && source_refresh_retry_due(&runtime);
+                && daemon_retry_due(&runtime);
             let source_refresh_pending = refresh_service
                 .as_ref()
                 .is_some_and(|service| service.source_refresh.has_pending_request());
@@ -1133,6 +1135,9 @@ pub(super) fn run_daemon_inner(
                 wait_for = wait_for.min(StdDuration::from_millis(retry_after_ms));
             }
             if let Some(retry_after_ms) = runtime.semantic_retry.retry_after_ms() {
+                wait_for = wait_for.min(StdDuration::from_millis(retry_after_ms));
+            }
+            if let Some(retry_after_ms) = runtime.pro_retry.retry_after_ms() {
                 wait_for = wait_for.min(StdDuration::from_millis(retry_after_ms));
             }
             if let (Some(idle), Some(limit)) = (idle_since, idle_exit) {

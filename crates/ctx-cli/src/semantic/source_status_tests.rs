@@ -145,11 +145,24 @@ fn pro_source_manifest_receipt_is_generation_bound() {
         "receipt_core_generation_id": "generation-0",
         "attempts": 1,
     });
+    let retry_job = json!({
+        "status": "error",
+        "error_code": "helper_crashed",
+        "core_generation_id": "generation-1",
+        "receipt_core_generation_id": null,
+        "attempts": 2,
+        "retryable": true,
+        "consecutive_failures": 2,
+        "retry_after_ms": 250,
+        "retry_not_before_at_ms": 1234,
+    });
 
     let ready =
         pro_projection_report_from_job(Some("generation-1"), &ready_job, "pro-catch-up.json");
     let stale =
         pro_projection_report_from_job(Some("generation-1"), &stale_job, "pro-catch-up.json");
+    let retry =
+        pro_projection_report_from_job(Some("generation-1"), &retry_job, "pro-catch-up.json");
 
     assert_eq!(ready["authority"], "source_manifest");
     assert_eq!(ready["receipt"]["status"], "ready");
@@ -157,4 +170,9 @@ fn pro_source_manifest_receipt_is_generation_bound() {
     assert_eq!(stale["status"], "stale");
     assert_eq!(stale["receipt"]["status"], "stale");
     assert_eq!(stale["receipt"]["generation_matches"], false);
+    assert_eq!(retry["status"], "unavailable");
+    assert_eq!(retry["reason"], "helper_crashed");
+    assert_eq!(retry["consecutive_failures"], 2);
+    assert_eq!(retry["retry_after_ms"], 250);
+    assert_eq!(retry["retry_not_before_at_ms"], 1234);
 }
