@@ -1,5 +1,8 @@
 use std::{collections::BTreeSet, io::Cursor};
 
+use ctx_history_core::{
+    LocatorRevisionPolicy, NativeRecordCoordinate, SourceAnchor, SourceKey, TypedKey,
+};
 use proptest::prelude::*;
 
 use super::*;
@@ -49,6 +52,7 @@ fn citation() -> EvidenceCitation {
         session_id: Some(Uuid::from_u128(2)),
         event_id: Some(Uuid::from_u128(1)),
         event_seq: Some(1),
+        source_locator: None,
         source_path: Some("fixture/session.jsonl".to_owned()),
         fixture_line: Some(1),
         source_record_ordinal: Some(0),
@@ -128,6 +132,131 @@ fn source_citations_are_typed_bounded_and_strict() {
         .as_object_mut()
         .unwrap()
         .insert("provider_legacy".to_owned(), serde_json::json!({}));
+    assert!(serde_json::from_value::<EvidenceCitation>(unknown).is_err());
+}
+
+fn source_locator(coordinate: NativeRecordCoordinate) -> SourceRecordLocator {
+    SourceRecordLocator::new(
+        SourceKey::derive(
+            "fixture",
+            "fixture_native",
+            "fixture-v1",
+            1,
+            SourceAnchor::CatalogLineage([3; 32]),
+        )
+        .unwrap(),
+        coordinate,
+        LocatorRevisionPolicy::ExactSourceRevision,
+        Some([4; 32]),
+        [5; 32],
+    )
+    .unwrap()
+}
+
+fn exact_source_citation(locator: SourceRecordLocator) -> EvidenceCitation {
+    let (source_record_ordinal, byte_range) = match locator.coordinate() {
+        NativeRecordCoordinate::Jsonl {
+            byte_offset,
+            byte_length,
+            physical_ordinal,
+            ..
+        } => (
+            Some(*physical_ordinal),
+            Some(ByteRange {
+                start: *byte_offset,
+                end_exclusive: byte_offset.checked_add(*byte_length).unwrap(),
+            }),
+        ),
+        _ => (None, None),
+    };
+    EvidenceCitation {
+        observation_id: None,
+        observation_seq: None,
+        observation_kind: None,
+        session_id: None,
+        event_id: None,
+        event_seq: None,
+        source_sha256: Some(lower_hex(locator.record_digest())),
+        source_locator: Some(locator),
+        source_path: None,
+        fixture_line: None,
+        source_record_ordinal,
+        source_record_subrecord_index: None,
+        byte_range,
+    }
+}
+
+#[test]
+fn exact_source_locator_citations_round_trip_jsonl_and_provider_native_coordinates() {
+    let coordinates = vec![
+        NativeRecordCoordinate::Jsonl {
+            byte_offset: 91,
+            byte_length: 17,
+            physical_ordinal: 8,
+            native_session_key: Some(TypedKey::Utf8("session-1".to_owned())),
+            native_event_key: Some(TypedKey::U64(9)),
+        },
+        NativeRecordCoordinate::ProviderSqlite {
+            logical_relation: "messages".to_owned(),
+            primary_key: TypedKey::U64(10),
+            row_version: Some(TypedKey::I64(11)),
+        },
+        NativeRecordCoordinate::Document {
+            object_key: TypedKey::Utf8("document-1".to_owned()),
+            json_pointer: Some("/messages/0".to_owned()),
+        },
+        NativeRecordCoordinate::TreeRecord {
+            relative_file_key: TypedKey::Utf8("sessions/a.jsonl".to_owned()),
+            record_coordinate: TypedKey::U64(12),
+        },
+        NativeRecordCoordinate::ProviderNative {
+            namespace: "provider.record".to_owned(),
+            coordinate: TypedKey::Composite(vec![
+                TypedKey::Utf8("thread-1".to_owned()),
+                TypedKey::U64(13),
+            ]),
+        },
+    ];
+
+    for coordinate in coordinates {
+        let citation = exact_source_citation(source_locator(coordinate));
+        assert!(citation.is_usable());
+        let encoded = serde_json::to_vec(&citation).unwrap();
+        let decoded: EvidenceCitation = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, citation);
+        assert!(decoded.is_usable());
+        assert_eq!(
+            serde_json::to_value(&decoded).unwrap()["source_path"],
+            serde_json::Value::Null
+        );
+    }
+}
+
+#[test]
+fn malformed_stale_or_inconsistent_source_locators_fail_closed() {
+    let valid = exact_source_citation(source_locator(NativeRecordCoordinate::Jsonl {
+        byte_offset: 91,
+        byte_length: 17,
+        physical_ordinal: 8,
+        native_session_key: None,
+        native_event_key: Some(TypedKey::U64(9)),
+    }));
+
+    let mut stale = serde_json::to_value(&valid).unwrap();
+    stale["source_locator"]["locator_version"] = serde_json::json!(2);
+    let stale: EvidenceCitation = serde_json::from_value(stale).unwrap();
+    assert!(!stale.is_usable());
+
+    let mut wrong_digest = valid.clone();
+    wrong_digest.source_sha256 = Some("6".repeat(64));
+    assert!(!wrong_digest.is_usable());
+
+    let mut wrong_range = valid.clone();
+    wrong_range.byte_range.as_mut().unwrap().end_exclusive += 1;
+    assert!(!wrong_range.is_usable());
+
+    let mut unknown = serde_json::to_value(valid).unwrap();
+    unknown["source_locator"]["legacy_path"] = serde_json::json!("invented.jsonl");
     assert!(serde_json::from_value::<EvidenceCitation>(unknown).is_err());
 }
 

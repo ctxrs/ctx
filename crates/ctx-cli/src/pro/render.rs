@@ -515,6 +515,7 @@ mod tests {
                 session_id: None,
                 event_id: Some(Uuid::from_u128(u128::from(number))),
                 event_seq: Some(u64::from(number)),
+                source_locator: None,
                 source_path: None,
                 fixture_line: None,
                 source_record_ordinal: None,
