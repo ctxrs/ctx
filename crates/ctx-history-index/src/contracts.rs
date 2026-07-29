@@ -11,7 +11,7 @@ use crate::{
         current_source_generation_policy_hash, LexicalIndexedBodyLimit, LEXICAL_INDEXED_BODY_LIMIT,
         LEXICAL_SCHEMA_REVISION, LEXICAL_TOKENIZER_REVISION,
     },
-    sha256_hex, source_sort_key, validate_document_text, validate_optional_document_text,
+    sha256_hex, source_sort_key,
 };
 
 pub const GENERATION_MANIFEST_VERSION: u32 = 3;
@@ -541,4 +541,29 @@ pub struct CommitReceipt {
 pub enum RevalidationTarget<'a> {
     Source(&'a CertifiedSource),
     Deletion(&'a CertifiedSourceDeletion),
+}
+
+fn validate_document_text(field: &'static str, value: &str, maximum: usize) -> Result<()> {
+    if value.is_empty() {
+        return Err(IndexError::EmptyDocumentField { field });
+    }
+    if value.len() > maximum {
+        return Err(IndexError::DocumentFieldTooLarge {
+            field,
+            actual: value.len(),
+            maximum,
+        });
+    }
+    Ok(())
+}
+
+fn validate_optional_document_text(
+    field: &'static str,
+    value: Option<&str>,
+    maximum: usize,
+) -> Result<()> {
+    if let Some(value) = value {
+        validate_document_text(field, value, maximum)?;
+    }
+    Ok(())
 }
