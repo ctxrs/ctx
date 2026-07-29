@@ -124,7 +124,6 @@ impl ProClient {
             Capability::EntitlementAuthorization,
             Capability::GraphKeyDeletion,
             Capability::Status,
-            Capability::OutputMaterialization,
             Capability::SourceMaterialization,
             Capability::Query,
             Capability::GitRead,
