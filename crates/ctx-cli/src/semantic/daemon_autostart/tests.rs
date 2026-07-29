@@ -637,7 +637,7 @@ fn setup_handoff_wait_accepts_authoritative_running_observation_without_sleep() 
     });
     let mut observations = std::collections::VecDeque::from([
         DaemonHandoffObservation::Pending,
-        daemon_handoff_observation_from(Some(&status), Some(41), true, Some(41), 1234),
+        daemon_handoff_observation_from(Some(&status), Some(41), true, Some(41), None, 1234),
     ]);
     let pauses = std::cell::Cell::new(0);
 
@@ -664,6 +664,63 @@ fn setup_handoff_wait_accepts_authoritative_running_observation_without_sleep() 
 }
 
 #[test]
+fn setup_handoff_waits_for_requested_config_instead_of_previous_applied_mode() {
+    let expected = AppConfig::default();
+    let previous = json!({
+        "status": "running",
+        "pid": 41,
+        "heartbeat_at_ms": 1234,
+        "config_reload": {
+            "status": "applied",
+            "applied": {
+                "daemon_enabled": expected.daemon.enabled,
+                "daemon_mode": "source-refresh-only",
+                "semantic_enabled": expected.semantic_search_enabled(),
+            },
+        },
+    });
+    assert_eq!(
+        daemon_handoff_observation_from(
+            Some(&previous),
+            Some(41),
+            true,
+            None,
+            Some(&expected),
+            1234,
+        ),
+        DaemonHandoffObservation::Pending
+    );
+
+    let current = json!({
+        "status": "running",
+        "pid": 42,
+        "heartbeat_at_ms": 1235,
+        "config_reload": {
+            "status": "applied",
+            "applied": {
+                "daemon_enabled": expected.daemon.enabled,
+                "daemon_mode": expected.daemon.mode.as_str(),
+                "semantic_enabled": expected.semantic_search_enabled(),
+            },
+        },
+    });
+    assert_eq!(
+        daemon_handoff_observation_from(
+            Some(&current),
+            Some(42),
+            true,
+            None,
+            Some(&expected),
+            1235,
+        ),
+        DaemonHandoffObservation::Running(DaemonHandoff {
+            pid: 42,
+            heartbeat_at_ms: 1235,
+        })
+    );
+}
+
+#[test]
 fn setup_handoff_wait_surfaces_daemon_failure_without_sleep() {
     let status = json!({
         "status": "failed",
@@ -675,7 +732,7 @@ fn setup_handoff_wait_surfaces_daemon_failure_without_sleep() {
 
     let error = wait_for_daemon_handoff_with(
         3,
-        || daemon_handoff_observation_from(Some(&status), None, false, Some(42), 1235),
+        || daemon_handoff_observation_from(Some(&status), None, false, Some(42), None, 1235),
         || Ok(None),
         || pauses.set(pauses.get() + 1),
     )
@@ -708,7 +765,16 @@ fn setup_handoff_wait_ignores_stale_or_unowned_existing_failure_without_sleep() 
         let pauses = std::cell::Cell::new(0);
         let error = wait_for_daemon_handoff_with(
             2,
-            || daemon_handoff_observation_from(Some(status), lock_pid, lock_active, None, 35_000),
+            || {
+                daemon_handoff_observation_from(
+                    Some(status),
+                    lock_pid,
+                    lock_active,
+                    None,
+                    None,
+                    35_000,
+                )
+            },
             || Ok(None),
             || pauses.set(pauses.get() + 1),
         )
@@ -731,7 +797,7 @@ fn setup_handoff_wait_surfaces_fresh_owned_existing_failure_without_sleep() {
 
     let error = wait_for_daemon_handoff_with(
         2,
-        || daemon_handoff_observation_from(Some(&status), Some(42), true, None, 35_000),
+        || daemon_handoff_observation_from(Some(&status), Some(42), true, None, None, 35_000),
         || Ok(None),
         || pauses.set(pauses.get() + 1),
     )
@@ -753,7 +819,16 @@ fn setup_handoff_wait_times_out_on_status_lock_identity_race_without_sleep() {
 
     let error = wait_for_daemon_handoff_with(
         3,
-        || daemon_handoff_observation_from(Some(&status), Some(44), true, Some(43), 1236),
+        || {
+            daemon_handoff_observation_from(
+                Some(&status),
+                Some(44),
+                true,
+                Some(43),
+                None,
+                1236,
+            )
+        },
         || Ok(None),
         || pauses.set(pauses.get() + 1),
     )
@@ -776,7 +851,16 @@ fn setup_handoff_wait_rejects_stale_or_future_heartbeat_without_sleep() {
 
         let error = wait_for_daemon_handoff_with(
             2,
-            || daemon_handoff_observation_from(Some(&status), Some(45), true, Some(45), 35_000),
+            || {
+                daemon_handoff_observation_from(
+                    Some(&status),
+                    Some(45),
+                    true,
+                    Some(45),
+                    None,
+                    35_000,
+                )
+            },
             || Ok(None),
             || pauses.set(pauses.get() + 1),
         )
@@ -803,7 +887,7 @@ fn setup_handoff_wait_ignores_stale_nested_config_failure_without_sleep() {
 
     let error = wait_for_daemon_handoff_with(
         2,
-        || daemon_handoff_observation_from(Some(&status), Some(45), true, None, 35_000),
+        || daemon_handoff_observation_from(Some(&status), Some(45), true, None, None, 35_000),
         || Ok(None),
         || pauses.set(pauses.get() + 1),
     )
