@@ -4,16 +4,30 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use super::{
     ErrorClass, EvidenceCitation, JournalCheckpoint, ProtocolError, ResourceKind, ResourceRef,
-    MAX_BLAME_ATTRIBUTIONS_PER_MATCH, MAX_BLAME_CURSOR_BYTES, MAX_BLAME_EVIDENCE,
-    MAX_BLAME_RESULTS, MAX_BLAME_TARGET_BYTES, MAX_CITATIONS_PER_FACT,
+    SourceManifestReceiptIdentity, MAX_BLAME_ATTRIBUTIONS_PER_MATCH, MAX_BLAME_CURSOR_BYTES,
+    MAX_BLAME_EVIDENCE, MAX_BLAME_RESULTS, MAX_BLAME_TARGET_BYTES, MAX_CITATIONS_PER_FACT,
 };
 
-/// Exact journal checkpoint that a cited blame request requires the derived graph to match.
+/// Exact completed authority that a cited blame request requires the derived graph to match.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct QuerySnapshotExpectation {
-    pub checkpoint: JournalCheckpoint,
-    pub projection_pending: bool,
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum QuerySnapshotExpectation {
+    Journal {
+        checkpoint: JournalCheckpoint,
+        projection_pending: bool,
+    },
+    Source {
+        receipt: SourceManifestReceiptIdentity,
+    },
+}
+
+impl QuerySnapshotExpectation {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        match self {
+            Self::Journal { checkpoint, .. } => checkpoint.validate(),
+            Self::Source { receipt } => receipt.validate(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,7 +129,7 @@ pub struct BlameRequest {
 
 impl BlameRequest {
     pub fn validate(&self) -> Result<(), ProtocolError> {
-        self.expected_snapshot.checkpoint.validate()?;
+        self.expected_snapshot.validate()?;
         if self.limit == 0 || self.limit > MAX_BLAME_RESULTS {
             return Err(ProtocolError::new(
                 ErrorClass::Bounds,

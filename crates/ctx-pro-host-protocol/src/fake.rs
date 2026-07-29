@@ -9,9 +9,9 @@ use crate::lifecycle::{
 };
 use crate::message::{
     Capability, GraphState, HelloRequest, HelloResult, HelperEnvelope, HelperMessage, HostEnvelope,
-    HostMessage, StatusResult,
+    HostMessage, MaterializationAuthority, StatusResult,
 };
-use crate::query::{BlameRequest, BlameTarget, ResolvedBlameTarget};
+use crate::query::{BlameRequest, BlameTarget, QuerySnapshotExpectation, ResolvedBlameTarget};
 use crate::{
     BeginOutputInventoryRequest, BlameResult, FinishOutputInventoryRequest, GitSnapshot,
     ObserveOutputSourceRequest, OutputInventoryBegan, OutputInventoryFinished,
@@ -144,7 +144,9 @@ impl FakeHelper {
                         .checkpoint
                         .as_ref()
                         .map_or(GraphState::NotMaterialized, |_| GraphState::Ready),
+                    authority: MaterializationAuthority::Journal,
                     checkpoint: self.checkpoint.clone(),
+                    source_receipt: None,
                 })
             }
             HostMessage::SyncJournal(request) if self.selected(Capability::JournalSync) => {
@@ -521,7 +523,11 @@ impl FakeHelper {
         if let Err(error) = request.validate() {
             return HelperMessage::Error(error);
         }
-        if self.checkpoint.as_ref() != Some(&request.expected_snapshot.checkpoint) {
+        let expected_checkpoint = match &request.expected_snapshot {
+            QuerySnapshotExpectation::Journal { checkpoint, .. } => Some(checkpoint),
+            QuerySnapshotExpectation::Source { .. } => None,
+        };
+        if self.checkpoint.as_ref() != expected_checkpoint {
             return HelperMessage::Error(ProtocolError::new(
                 ErrorClass::StaleFact,
                 "blame checkpoint does not match durable graph state",

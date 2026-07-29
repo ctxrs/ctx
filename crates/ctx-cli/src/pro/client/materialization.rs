@@ -538,7 +538,7 @@ pub(super) fn fit_journal_sync_request(
 }
 
 pub(super) fn required_blame_capabilities(target: &BlameTarget) -> BTreeSet<Capability> {
-    let mut capabilities = BTreeSet::from([Capability::Query]);
+    let mut capabilities = BTreeSet::from([Capability::Status, Capability::Query]);
     if target.requires_git_read() {
         capabilities.insert(Capability::GitRead);
     }
@@ -569,7 +569,12 @@ pub(super) fn helper_status_with(
     exchange: &mut impl FnMut(HostMessage, Duration) -> Result<HelperMessage>,
 ) -> Result<StatusResult> {
     match exchange(HostMessage::Status(StatusRequest {}), HANDSHAKE_TIMEOUT)? {
-        HelperMessage::Status(status) => Ok(status),
+        HelperMessage::Status(status) => {
+            status
+                .validate()
+                .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
+            Ok(status)
+        }
         HelperMessage::Error(error) => Err(protocol_error(error)),
         _ => bail!("invalid_response: helper returned a non-status response"),
     }

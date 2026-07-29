@@ -27,13 +27,14 @@ pub(super) fn blame_once(
     limit: u32,
     cursor: Option<String>,
 ) -> Result<BlameResult> {
-    let request = support::current_blame_request(data_root, target, limit, cursor)?;
+    let capabilities = required_blame_capabilities(&target);
+    let mut client = ProClient::connect(data_root, &capabilities)?;
+    let status = helper_status(&mut client)?;
+    let request = support::current_blame_request(data_root, target, limit, cursor, &status)?;
     request
         .validate()
         .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
-    let capabilities = required_blame_capabilities(&request.target);
     let request_context = request.clone();
-    let mut client = ProClient::connect(data_root, &capabilities)?;
     match client.exchange(HostMessage::Blame(request), BLAME_TIMEOUT)? {
         HelperMessage::Blame(result) => {
             validate_blame_response(&request_context, &result)?;

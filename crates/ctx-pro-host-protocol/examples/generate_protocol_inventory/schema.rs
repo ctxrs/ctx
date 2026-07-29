@@ -134,6 +134,7 @@ pub(super) fn inventory() -> Value {
             "journal_entity_kind": ["event", "file_touch", "vcs_change"],
             "journal_operation": ["upsert", "delete"],
             "journal_sync_mode": ["full_baseline", "incremental"],
+            "materialization_authority": ["journal", "source"],
             "observation_kind": ["event", "file_touch", "vcs_change"],
             "output_observation_kind": ["command", "tool"],
             "output_outcome": ["success", "failure", "timeout", "unknown"],
@@ -156,6 +157,7 @@ pub(super) fn inventory() -> Value {
             ],
             "pull_request_commit_relationship": ["contains_commit", "merged_as"],
             "pull_request_relationship_kind": ["activity", "commit"],
+            "query_snapshot_expectation_kind": ["journal", "source"],
             "resource_kind": ResourceKind::ALL.map(ResourceKind::wire_name),
             "worktree_status": ["clean", "differs"]
         },
@@ -300,7 +302,9 @@ pub(super) fn inventory() -> Value {
             "PullRequestBlameMatch": fields(&["pull_request", "relationship"], &[]),
             "PullRequestCommit": fields(
                 &["fact_id", "relationship", "commit", "production", "evidence_numbers"], &[]),
-            "QuerySnapshotExpectation": fields(&["checkpoint", "projection_pending"], &[]),
+            "QuerySnapshotExpectation.journal": fields(
+                &["kind", "checkpoint", "projection_pending"], &[]),
+            "QuerySnapshotExpectation.source": fields(&["kind", "receipt"], &[]),
             "ResourceRef": fields(&["id", "kind", "display"], &[]),
             "ResolvedBlameTarget.commit": fields(&["kind", "commit", "repository"], &[]),
             "ResolvedBlameTarget.file": fields(
@@ -338,6 +342,9 @@ pub(super) fn inventory() -> Value {
             "SourceManifestReceipt": fields(&[
                 "core_generation_id", "materializer_revision", "progress"
             ], &[]),
+            "SourceManifestReceiptIdentity": fields(&[
+                "core_generation_id", "materializer_revision", "receipt_sha256"
+            ], &[]),
             "SourceMessageFact": fields(&["content"], &[]),
             "SourceObservation": fields(&["source", "revision_kind", "revision"], &[]),
             "SourcePageMaterialized": fields(&[
@@ -373,7 +380,8 @@ pub(super) fn inventory() -> Value {
                 "source_descriptor_digest", "uuid"
             ], &[]),
             "StatusRequest": fields(&[], &[]),
-            "StatusResult": fields(&["state"], &["checkpoint"]),
+            "StatusResult": fields(
+                &["state", "authority"], &["checkpoint", "source_receipt"]),
             "PrepareSourceRequest": fields(
                 &[
                     "core_generation_id", "source", "certified_revision_sha256",
