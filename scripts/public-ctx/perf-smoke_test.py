@@ -27,7 +27,7 @@ HELPERS = (
 )
 REPO_ROOT = SCRIPT.parents[2]
 FROZEN_PYTHON_SOURCE_SHA256 = (
-    "aa29a040f9e1ec113a85c9c53b3938d5e96d9b6cd0b7953d2ce9298d587b39bb"
+    "c1454956576446fd5f3958fb64c37fc4502cdaf13a00f326f58676ed605e64ab"
 )
 PHASES = (
     "initial_source_refresh",
@@ -616,8 +616,12 @@ class PerfSmokeEndToEndTests(unittest.TestCase):
                     "generation_changed"
                 ]
             )
-            initial = run["profiles"]["status"]["initial"]
-            self.assertEqual(initial["lexical"]["status"], "ready")
+            status_profile = run["profiles"]["status"]
+            for status_phase in ("initial", "final"):
+                lexical = status_profile[status_phase]["lexical"]
+                self.assertEqual(lexical["status"], "ready")
+                self.assertIsNone(lexical["reason"])
+            initial = status_profile["initial"]
             self.assertEqual(initial["catalog"]["status"], "ready")
             self.assertEqual(initial["semantic"]["status"], "disabled")
             self.assertEqual(initial["relational"]["status"], "ready")

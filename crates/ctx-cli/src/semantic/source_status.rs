@@ -41,7 +41,6 @@ struct EpochObservation {
     initialized: bool,
     valid: bool,
     phase: Option<MigrationPhase>,
-    active_generation_id: Option<String>,
     report: Value,
 }
 
@@ -53,14 +52,15 @@ pub(crate) fn source_epoch_status_report(
     let current_policy_hash = current_source_generation_policy_hash()?;
     let prior_epoch = prior_epoch_report(data_root);
     let epoch = epoch_report(data_root);
+    let refresh_job = read_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root));
     let (lexical, index) = lexical_report(
         data_root,
         &epoch,
+        refresh_job.as_ref(),
         &current_policy_hash,
         serde_json::to_value(&current_policy)?,
     );
     let generation_id = index.as_ref().map(|index| index.generation_id().to_owned());
-    let refresh_job = read_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root));
     let placeholder = SemanticWorkerReport::unavailable(
         data_root,
         "source-backed semantic status is reported separately",
@@ -175,7 +175,6 @@ fn epoch_report(data_root: &Path) -> EpochObservation {
             initialized: false,
             valid: true,
             phase: None,
-            active_generation_id: None,
             report: compact_json(json!({
                 "name": "v0.26_source_backed",
                 "status": "unavailable",
@@ -202,7 +201,6 @@ fn epoch_report(data_root: &Path) -> EpochObservation {
                 initialized: true,
                 valid: true,
                 phase: Some(marker.phase),
-                active_generation_id: marker.lexical_generation_id.clone(),
                 report: compact_json(json!({
                     "name": "v0.26_source_backed",
                     "status": status,
@@ -224,7 +222,6 @@ fn epoch_report(data_root: &Path) -> EpochObservation {
             initialized: true,
             valid: false,
             phase: None,
-            active_generation_id: None,
             report: compact_json(json!({
                 "name": "v0.26_source_backed",
                 "status": "unavailable",
@@ -236,7 +233,6 @@ fn epoch_report(data_root: &Path) -> EpochObservation {
             initialized: true,
             valid: false,
             phase: None,
-            active_generation_id: None,
             report: compact_json(json!({
                 "name": "v0.26_source_backed",
                 "status": "unavailable",
@@ -251,10 +247,17 @@ fn epoch_report(data_root: &Path) -> EpochObservation {
 fn lexical_report(
     data_root: &Path,
     epoch: &EpochObservation,
+    refresh_job: Option<&Value>,
     current_policy_hash: &str,
     current_policy: Value,
 ) -> (Value, Option<VerifiedIndex>) {
     let path = data_migration::lexical_projection_path(data_root);
+    let request_state = refresh_job
+        .and_then(|job| job.get("request_state"))
+        .and_then(Value::as_str);
+    let published_generation = refresh_job
+        .and_then(|job| job.get("published_generation"))
+        .and_then(Value::as_str);
     if !path.join("meta.json").is_file() {
         let (status, reason) = match epoch.phase {
             Some(MigrationPhase::SourceRebuildFailed) => ("unavailable", "source_rebuild_failed"),
@@ -271,8 +274,9 @@ fn lexical_report(
                 "reason": reason,
                 "path": path,
                 "generation_id": Value::Null,
-                "epoch_generation_id": epoch.active_generation_id.as_deref(),
-                "epoch_generation_matches": Value::Null,
+                "request_state": request_state,
+                "published_generation": published_generation,
+                "generation_matches": Value::Null,
                 "policy": {
                     "current_hash": current_policy_hash,
                     "current": current_policy,
@@ -288,18 +292,18 @@ fn lexical_report(
         Ok(index) => {
             let manifest = index.manifest();
             let policy_matches = manifest.policy_schema_hash == current_policy_hash;
-            let epoch_generation_matches = epoch
-                .active_generation_id
-                .as_deref()
-                .is_some_and(|generation| generation == index.generation_id());
-            let (status, reason) = lexical_state(epoch, policy_matches, epoch_generation_matches);
+            let generation_matches =
+                published_generation.map(|generation| generation == index.generation_id());
+            let (status, reason) =
+                lexical_state(epoch, policy_matches, request_state, generation_matches);
             let value = compact_json(json!({
                 "status": status,
                 "reason": reason,
                 "path": path,
                 "generation_id": index.generation_id(),
-                "epoch_generation_id": epoch.active_generation_id.as_deref(),
-                "epoch_generation_matches": epoch_generation_matches,
+                "request_state": request_state,
+                "published_generation": published_generation,
+                "generation_matches": generation_matches,
                 "indexed_documents": index.document_count(),
                 "certified_sources": manifest.sources.len(),
                 "certified_source_bytes": manifest.certified_source_bytes,
@@ -322,8 +326,9 @@ fn lexical_report(
                 "reason": "generation_verification_failed",
                 "path": path,
                 "generation_id": Value::Null,
-                "epoch_generation_id": epoch.active_generation_id.as_deref(),
-                "epoch_generation_matches": Value::Null,
+                "request_state": request_state,
+                "published_generation": published_generation,
+                "generation_matches": Value::Null,
                 "policy": {
                     "current_hash": current_policy_hash,
                     "current": current_policy,
@@ -340,7 +345,8 @@ fn lexical_report(
 fn lexical_state(
     epoch: &EpochObservation,
     policy_matches: bool,
-    epoch_generation_matches: bool,
+    request_state: Option<&str>,
+    generation_matches: Option<bool>,
 ) -> (&'static str, Option<&'static str>) {
     if !epoch.valid {
         return ("unavailable", Some("epoch_marker_invalid"));
@@ -349,12 +355,21 @@ fn lexical_state(
         return ("stale", Some("generation_policy_mismatch"));
     }
     match epoch.phase {
-        Some(MigrationPhase::Ready) if epoch_generation_matches => ("ready", None),
-        Some(MigrationPhase::Ready) => ("stale", Some("epoch_generation_mismatch")),
         Some(MigrationPhase::Detected | MigrationPhase::RebuildPending) => {
             ("pending", Some("epoch_activation_pending"))
         }
         Some(MigrationPhase::SourceRebuildFailed) => ("unavailable", Some("source_rebuild_failed")),
+        Some(MigrationPhase::Ready) => match request_state {
+            Some("published") if generation_matches == Some(true) => ("ready", None),
+            Some("published") if generation_matches == Some(false) => {
+                ("stale", Some("published_generation_mismatch"))
+            }
+            Some("published") => ("unavailable", Some("published_generation_missing")),
+            Some("queued" | "running") => ("pending", Some("source_refresh_pending")),
+            Some("failed") => ("unavailable", Some("source_refresh_failed")),
+            Some(_) => ("unavailable", Some("refresh_state_unrecognized")),
+            None => ("unavailable", Some("refresh_state_missing")),
+        },
         None => ("unavailable", Some("epoch_not_initialized")),
     }
 }
@@ -932,23 +947,41 @@ mod tests {
     }
 
     #[test]
-    fn lexical_state_rejects_stale_epoch_and_policy_identity() {
+    fn lexical_state_requires_exact_current_publication_and_policy_identity() {
         let ready = EpochObservation {
             initialized: true,
             valid: true,
             phase: Some(MigrationPhase::Ready),
-            active_generation_id: Some("generation-1".to_owned()),
             report: Value::Null,
         };
 
-        assert_eq!(lexical_state(&ready, true, true), ("ready", None));
         assert_eq!(
-            lexical_state(&ready, true, false),
-            ("stale", Some("epoch_generation_mismatch"))
+            lexical_state(&ready, true, Some("published"), Some(true)),
+            ("ready", None)
         );
         assert_eq!(
-            lexical_state(&ready, false, true),
+            lexical_state(&ready, true, Some("published"), Some(false)),
+            ("stale", Some("published_generation_mismatch"))
+        );
+        assert_eq!(
+            lexical_state(&ready, false, Some("published"), Some(true)),
             ("stale", Some("generation_policy_mismatch"))
+        );
+        assert_eq!(
+            lexical_state(&ready, true, Some("running"), None),
+            ("pending", Some("source_refresh_pending"))
+        );
+        assert_eq!(
+            lexical_state(&ready, true, Some("failed"), None),
+            ("unavailable", Some("source_refresh_failed"))
+        );
+        assert_eq!(
+            lexical_state(&ready, true, Some("published"), None),
+            ("unavailable", Some("published_generation_missing"))
+        );
+        assert_eq!(
+            lexical_state(&ready, true, None, None),
+            ("unavailable", Some("refresh_state_missing"))
         );
     }
 
