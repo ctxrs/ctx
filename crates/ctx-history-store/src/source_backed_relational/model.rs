@@ -5,8 +5,6 @@ use ctx_history_core::{
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::StoreError;
-
 pub const RELATIONAL_PROJECTION_SCHEMA_VERSION: u32 = 2;
 pub const RELATIONAL_PROJECTION_CONTRACT_VERSION: u32 = 2;
 
@@ -20,8 +18,6 @@ pub enum RelationalProjectionError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
-    #[error(transparent)]
-    Store(#[from] StoreError),
     #[error("source-backed relational projection schema is missing")]
     MissingSchema,
     #[error(

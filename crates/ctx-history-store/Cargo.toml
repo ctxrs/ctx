@@ -1,7 +1,7 @@
 [package]
 name = "ctx-history-store"
 version = "0.26.0"
-description = "Internal SQLite storage layer for ctx local agent history"
+description = "Disposable relational projection for source-backed ctx history"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -10,22 +10,13 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-base64.workspace = true
-chrono.workspace = true
-fs2 = "0.4.3"
-regex.workspace = true
 rusqlite.workspace = true
-same-file = "1.0.6"
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
-zstd.workspace = true
 ctx-history-core = { path = "../ctx-history-core" }
-
-[target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 tempfile.workspace = true
