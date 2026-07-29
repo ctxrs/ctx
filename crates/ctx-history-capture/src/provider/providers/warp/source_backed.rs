@@ -742,7 +742,7 @@ fn retain_warp_sqlite_authority(
     let source_root = ProviderSourceRoot::open(parent)?;
     let directory = source_root.directory()?;
     let authority_handle = directory.try_clone_authority_handle()?;
-    let sqlite_authority = retain_sqlite_source_directory_authority(&authority_handle)?;
+    let sqlite_authority = retain_sqlite_source_directory_authority(&authority_handle, parent)?;
     source_root.revalidate()?;
     Ok((source_root, sqlite_authority, database_name))
 }

@@ -1036,9 +1036,8 @@ fn oversized_unknown_encoding_diagnostic_is_bounded_and_siblings_survive() {
         .contains(&oversized_encoding_bytes.to_string()));
 }
 
-#[cfg(target_os = "linux")]
 #[test]
-fn active_wal_generation_reads_latest_rows_without_mutating_provider_db_family() {
+fn active_wal_generation_reads_latest_rows_without_mutating_persistent_source_bytes() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("threads.db");
     let connection = Connection::open(&path).unwrap();
@@ -1067,12 +1066,10 @@ fn active_wal_generation_reads_latest_rows_without_mutating_provider_db_family()
         &thread(vec![user("after", "committed only in wal")]),
     );
     let wal_path = PathBuf::from(format!("{}-wal", path.display()));
-    let shm_path = PathBuf::from(format!("{}-shm", path.display()));
     assert_eq!(fs::read(&path).unwrap(), checkpointed_database);
     assert!(wal_path.metadata().unwrap().len() > 32);
     let database_before = fs::read(&path).unwrap();
     let wal_before = fs::read(&wal_path).unwrap();
-    let shm_before = shm_path.exists().then(|| fs::read(&shm_path).unwrap());
 
     let mut sink = CollectingSink::default();
     let authority =
@@ -1087,10 +1084,6 @@ fn active_wal_generation_reads_latest_rows_without_mutating_provider_db_family()
     );
     assert_eq!(fs::read(&path).unwrap(), database_before);
     assert_eq!(fs::read(&wal_path).unwrap(), wal_before);
-    assert_eq!(
-        shm_path.exists().then(|| fs::read(&shm_path).unwrap()),
-        shm_before
-    );
     drop(connection);
 }
 

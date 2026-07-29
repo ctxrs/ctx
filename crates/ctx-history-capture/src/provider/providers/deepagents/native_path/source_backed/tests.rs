@@ -53,33 +53,18 @@ fn source_backed_open_does_not_follow_leaf_swap_after_authorization() {
         fs::rename(&path, &original).unwrap();
         fs::rename(&attacker, &path).unwrap();
     });
-    match result {
-        Ok((source_root, sqlite_snapshot)) => {
-            let user_version: i64 = sqlite_snapshot
-                .connection()
-                .unwrap()
-                .pragma_query_value(None, "user_version", |row| row.get(0))
-                .unwrap();
-            assert_eq!(user_version, 41);
-            match sqlite_snapshot.finish() {
-                Ok(_) => source_root.revalidate().unwrap(),
-                Err(SqliteSourceAccessError::RootHandleVfs(_)) => {}
-                Err(error) => panic!("unexpected finish result after source swap: {error:?}"),
-            }
-        }
+    assert!(matches!(
+        result,
         Err(DeepAgentsSourceBackedErrorV0::Capture(
             CaptureError::InvalidProviderTranscriptPath { .. },
+        )) | Err(DeepAgentsSourceBackedErrorV0::SqliteSource(
+            SqliteSourceAccessError::SourceChanged,
         ))
-        | Err(DeepAgentsSourceBackedErrorV0::SqliteSource(
-            SqliteSourceAccessError::RootHandleVfs(_),
-        )) => {}
-        Err(error) => panic!("unexpected source-swap result: {error:?}"),
-    }
+    ));
 }
 
-#[cfg(target_os = "linux")]
 #[test]
-fn active_wal_scan_reads_latest_rows_without_writing_source_files() {
+fn active_wal_scan_reads_latest_rows_without_persistent_source_writes() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let path = temp.path().join("sessions.db");
     let writer = create_database(&path);
@@ -101,12 +86,12 @@ fn active_wal_scan_reads_latest_rows_without_writing_source_files() {
             "message-wal",
         )]),
     );
-    let before = sqlite_family_bytes(&path);
+    let before = sqlite_persistent_bytes(&path);
     let (documents, _, _) = scan(DeepAgentsDatabaseSelectionV0::explicit(&path));
     assert!(documents
         .iter()
         .any(|document| document.body.contains("DeepAgents active WAL sentinel")));
-    assert_eq!(sqlite_family_bytes(&path), before);
+    assert_eq!(sqlite_persistent_bytes(&path), before);
     drop(writer);
 }
 
@@ -177,9 +162,9 @@ fn replace_messages(conn: &Connection, messages: Vec<MsgpackValue>) {
     .unwrap();
 }
 
-#[cfg(target_os = "linux")]
-fn sqlite_family_bytes(path: &Path) -> Vec<Vec<u8>> {
-    ["", "-wal", "-shm"]
+fn sqlite_persistent_bytes(path: &Path) -> Vec<Vec<u8>> {
+    // Stock WAL readers may update volatile SHM reader marks.
+    ["", "-wal"]
         .into_iter()
         .map(|suffix| {
             let mut component = path.as_os_str().to_os_string();

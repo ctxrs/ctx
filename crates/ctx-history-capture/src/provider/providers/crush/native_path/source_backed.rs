@@ -590,7 +590,7 @@ fn retain_crush_sqlite_authority(
     let source_root = ProviderSourceRoot::open(parent)?;
     let directory = source_root.directory()?;
     let authority_handle = directory.try_clone_authority_handle()?;
-    let sqlite_authority = retain_sqlite_source_directory_authority(&authority_handle)?;
+    let sqlite_authority = retain_sqlite_source_directory_authority(&authority_handle, parent)?;
     source_root.revalidate()?;
     Ok((source_root, sqlite_authority, database_name))
 }
@@ -1198,9 +1198,8 @@ mod tests {
         .unwrap()
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
-    fn root_handle_vfs_scan_sees_committed_content_retained_in_active_wal() {
+    fn stock_sqlite_snapshot_scan_sees_committed_content_retained_in_active_wal() {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let path = temp.path().join("wal-project.db");
         write_database(&path, "wal-session", "wal-message", "main database body");
@@ -1240,7 +1239,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn root_handle_vfs_finish_precedes_publication_revalidation() {
+    fn stock_sqlite_snapshot_finish_precedes_publication_revalidation() {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let path = temp.path().join("project.db");
         let replacement = temp.path().join("replacement.db");

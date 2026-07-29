@@ -84,34 +84,18 @@ fn source_backed_open_does_not_follow_leaf_swap_after_authorization() {
         fs::rename(&path, &original).unwrap();
         fs::rename(&attacker, &path).unwrap();
     });
-    match result {
-        Ok((source_root, sqlite_snapshot)) => {
-            let content: String = sqlite_snapshot
-                .connection()
-                .unwrap()
-                .query_row("select content from messages where id = 7", [], |row| {
-                    row.get(0)
-                })
-                .unwrap();
-            assert_eq!(content, "expected");
-            match sqlite_snapshot.finish() {
-                Ok(_) => source_root.revalidate().unwrap(),
-                Err(SqliteSourceAccessError::RootHandleVfs(_)) => {}
-                Err(error) => panic!("unexpected finish result after source swap: {error:?}"),
-            }
-        }
-        Err(HermesSourceBackedError::Capture(CaptureError::InvalidProviderTranscriptPath {
-            ..
-        }))
-        | Err(HermesSourceBackedError::SqliteSource(SqliteSourceAccessError::RootHandleVfs(_))) => {
-        }
-        Err(error) => panic!("unexpected source-swap result: {error:?}"),
-    }
+    assert!(matches!(
+        result,
+        Err(HermesSourceBackedError::Capture(
+            CaptureError::InvalidProviderTranscriptPath { .. }
+        )) | Err(HermesSourceBackedError::SqliteSource(
+            SqliteSourceAccessError::SourceChanged
+        ))
+    ));
 }
 
-#[cfg(target_os = "linux")]
 #[test]
-fn active_wal_scan_reads_latest_rows_without_writing_source_files() {
+fn active_wal_scan_reads_latest_rows_without_persistent_source_writes() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state.db");
     create_state_db(&path, "wal", "before WAL");
@@ -127,7 +111,7 @@ fn active_wal_scan_reads_latest_rows_without_writing_source_files() {
             ["Hermes active WAL sentinel"],
         )
         .unwrap();
-    let before = sqlite_family_bytes(&path);
+    let before = sqlite_persistent_bytes(&path);
     let candidate = hermes_source_backed_explicit(
         &path,
         SourceAnchor::provider_native(
@@ -139,13 +123,13 @@ fn active_wal_scan_reads_latest_rows_without_writing_source_files() {
     .unwrap();
     let (_, records) = scan_candidate(&candidate);
     assert!(event(&records).body.contains("Hermes active WAL sentinel"));
-    assert_eq!(sqlite_family_bytes(&path), before);
+    assert_eq!(sqlite_persistent_bytes(&path), before);
     drop(writer);
 }
 
-#[cfg(target_os = "linux")]
-fn sqlite_family_bytes(path: &Path) -> Vec<Vec<u8>> {
-    ["", "-wal", "-shm"]
+fn sqlite_persistent_bytes(path: &Path) -> Vec<Vec<u8>> {
+    // Stock WAL readers may update volatile SHM reader marks.
+    ["", "-wal"]
         .into_iter()
         .map(|suffix| {
             let mut component = path.as_os_str().to_os_string();

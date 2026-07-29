@@ -708,7 +708,7 @@ fn open_root_authorized_snapshot_with_hook(
     let parent_handle = source_directory
         .try_clone_authority_handle()
         .map_err(CaptureError::from)?;
-    let sqlite_authority = retain_sqlite_source_directory_authority(&parent_handle)?;
+    let sqlite_authority = retain_sqlite_source_directory_authority(&parent_handle, parent)?;
     let sqlite_snapshot =
         open_root_handle_sqlite_source_snapshot(&sqlite_authority, database_leaf)?;
     after_authorize();
@@ -1147,33 +1147,14 @@ mod tests {
             fs::rename(&path, &original).unwrap();
             fs::rename(&attacker, &path).unwrap();
         });
-        match result {
-            Ok((source_root, sqlite_snapshot)) => {
-                let data: String = sqlite_snapshot
-                    .connection()
-                    .unwrap()
-                    .query_row(
-                        "select data from session_message where id = 'message-0'",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .unwrap();
-                assert!(data.contains("expected retained message"));
-                assert!(!data.contains("attacker retained message"));
-                match sqlite_snapshot.finish() {
-                    Ok(_) => source_root.revalidate().unwrap(),
-                    Err(SqliteSourceAccessError::RootHandleVfs(_)) => {}
-                    Err(error) => panic!("unexpected finish result after source swap: {error:?}"),
-                }
-            }
+        assert!(matches!(
+            result,
             Err(OpenCodeSourceBackedError::Capture(
                 CaptureError::InvalidProviderTranscriptPath { .. },
+            )) | Err(OpenCodeSourceBackedError::SqliteSource(
+                SqliteSourceAccessError::SourceChanged,
             ))
-            | Err(OpenCodeSourceBackedError::SqliteSource(
-                SqliteSourceAccessError::RootHandleVfs(_),
-            )) => {}
-            Err(error) => panic!("unexpected source-swap result: {error:?}"),
-        }
+        ));
     }
 
     #[test]
@@ -1264,9 +1245,8 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
-    fn active_wal_scan_reads_latest_rows_without_writing_source_files() {
+    fn active_wal_scan_reads_latest_rows_without_persistent_source_writes() {
         let registration = opencode_source_backed_registration();
         let temp = crate::test_support_paths::tempdir().unwrap();
         let path = temp.path().join("opencode.sqlite");
@@ -1286,7 +1266,7 @@ mod tests {
                 [wal_body],
             )
             .unwrap();
-        let before = sqlite_family_bytes(&path);
+        let before = sqlite_persistent_bytes(&path);
 
         let mut documents = Vec::new();
         registration
@@ -1299,7 +1279,7 @@ mod tests {
         assert!(documents
             .iter()
             .any(|document| document.body.contains("OpenCode active WAL sentinel")));
-        assert_eq!(sqlite_family_bytes(&path), before);
+        assert_eq!(sqlite_persistent_bytes(&path), before);
         drop(writer);
     }
 
@@ -1417,9 +1397,9 @@ mod tests {
         expected
     }
 
-    #[cfg(target_os = "linux")]
-    fn sqlite_family_bytes(path: &Path) -> Vec<Vec<u8>> {
-        ["", "-wal", "-shm"]
+    fn sqlite_persistent_bytes(path: &Path) -> Vec<Vec<u8>> {
+        // Stock WAL readers may update volatile SHM reader marks.
+        ["", "-wal"]
             .into_iter()
             .map(|suffix| {
                 let mut component = path.as_os_str().to_os_string();

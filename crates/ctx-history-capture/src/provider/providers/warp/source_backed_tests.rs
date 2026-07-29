@@ -184,7 +184,7 @@ fn coexisting_selected_surfaces_project_cold_without_collapsing_lineage() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn root_handle_vfs_finishes_before_provider_wide_publication_revalidation() {
+fn stock_sqlite_snapshot_finishes_before_provider_wide_publication_revalidation() {
     let directory = tempdir().unwrap();
     let gui_path = directory.path().join("gui-warp.sqlite");
     let tui_path = directory.path().join("tui-warp.sqlite");
@@ -229,9 +229,8 @@ fn root_handle_vfs_finishes_before_provider_wide_publication_revalidation() {
     );
 }
 
-#[cfg(target_os = "linux")]
 #[test]
-fn root_handle_vfs_projects_committed_content_retained_in_active_wal() {
+fn stock_sqlite_snapshot_projects_committed_content_retained_in_active_wal() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("warp-wal.sqlite");
     create_source(

@@ -104,7 +104,7 @@ impl LingmaRootAuthorizedSource {
         let authority_handle = directory
             .try_clone_authority_handle()
             .map_err(CaptureError::from)?;
-        let sqlite_authority = retain_sqlite_source_directory_authority(&authority_handle)?;
+        let sqlite_authority = retain_sqlite_source_directory_authority(&authority_handle, parent)?;
         source_root.revalidate()?;
         Ok(Self {
             source_root,
@@ -1020,7 +1020,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn root_handle_vfs_finish_rejects_leaf_swap_after_snapshot_open() {
+    fn stock_sqlite_snapshot_finish_rejects_leaf_swap_after_open() {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let path = temp.path().join("local.db");
         let attacker = temp.path().join("attacker.db");
@@ -1115,9 +1115,8 @@ mod tests {
         assert_eq!(first_ids, replay_ids);
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
-    fn root_handle_vfs_scan_sees_committed_content_retained_in_active_wal() {
+    fn stock_sqlite_snapshot_scan_sees_committed_content_retained_in_active_wal() {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let path = temp.path().join("local.db");
         let writer = create_database(&path);
@@ -1162,7 +1161,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn root_handle_vfs_database_finish_precedes_source_certification() {
+    fn stock_sqlite_snapshot_finish_precedes_source_certification() {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let path = temp.path().join("local.db");
         let replacement = temp.path().join("replacement.db");

@@ -277,8 +277,9 @@ impl RootAuthorizedProviderSqliteSnapshot {
         let authority_root = ProviderSourceRoot::open(parent_path)?;
         let parent = authority_root.directory()?;
         let parent_handle = parent.try_clone_authority_handle()?;
-        let sqlite_authority = retain_sqlite_source_directory_authority(&parent_handle)
-            .map_err(map_sqlite_source_access_error)?;
+        let sqlite_authority =
+            retain_sqlite_source_directory_authority(&parent_handle, parent_path)
+                .map_err(map_sqlite_source_access_error)?;
         let snapshot = open_root_handle_sqlite_source_snapshot(&sqlite_authority, database_name)
             .map_err(map_sqlite_source_access_error)?;
         Ok(Self {
@@ -637,17 +638,14 @@ mod tests {
         connection.finish().unwrap();
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn provider_sqlite_opener_reads_active_wal_without_provider_writes() {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let database = temp.path().join("provider.sqlite");
         let wal = temp.path().join("provider.sqlite-wal");
-        let shared_memory = temp.path().join("provider.sqlite-shm");
         create_persistent_wal(&database);
         let before_database = fs::read(&database).unwrap();
         let before_wal = fs::read(&wal).unwrap();
-        let before_shared_memory = fs::read(&shared_memory).unwrap();
 
         let source_snapshot = ProviderSqliteSourceSnapshot::read(
             &database,
@@ -663,7 +661,6 @@ mod tests {
         assert!(evidence.shared_memory_length().is_some());
         assert_eq!(fs::read(&database).unwrap(), before_database);
         assert_eq!(fs::read(&wal).unwrap(), before_wal);
-        assert_eq!(fs::read(&shared_memory).unwrap(), before_shared_memory);
     }
 
     #[cfg(target_os = "linux")]
