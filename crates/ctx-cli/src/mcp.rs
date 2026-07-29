@@ -224,6 +224,8 @@ fn serve_stdio_loop(
             let duration = request_started.elapsed();
             if let Some(invocation) = usage_invocation {
                 let serialized_response_bytes = encoded.len().saturating_add(1);
+                // Usage-v2 owns bounded, process-local search-to-show correlation inside
+                // this delivery boundary; MCP never sends target IDs to storage or logs.
                 usage_recorder.record_delivered(
                     invocation,
                     &response,
@@ -420,8 +422,7 @@ fn handle_tools_call(
             None,
         );
     };
-    let mut invocation =
-        McpInvocation::recognized(name).expect("allowed MCP tools have local usage operations");
+    let mut usage_invocation = McpInvocation::recognized(name);
     let arguments = params
         .get("arguments")
         .cloned()
@@ -433,15 +434,25 @@ fn handle_tools_call(
                 "Invalid params",
                 Some(json!({ "error": "tools/call params.arguments must be an object" })),
             )),
-            Some(invocation),
+            usage_invocation,
         );
     }
 
     if let Err(error) = validate_argument_keys(&arguments, allowed_arguments) {
         return (
             Ok(McpHandled::plain(tool_error_result(error))),
-            Some(invocation),
+            usage_invocation,
         );
+    }
+    let context_target = match name {
+        "show_session" => arguments.get("ctx_session_id"),
+        "show_event" => arguments.get("ctx_event_id"),
+        _ => None,
+    };
+    if let Some(stable_result_id) = context_target.and_then(Value::as_str) {
+        if let Some(invocation) = usage_invocation.as_mut() {
+            invocation.bind_context_target(stable_result_id.to_owned());
+        }
     }
 
     let handled = match name {
@@ -455,7 +466,9 @@ fn handle_tools_call(
         "blame" => {
             let parsed_target = required_blame_target(&arguments);
             if let Ok(target) = &parsed_target {
-                invocation.bind_blame_target(target);
+                if let Some(invocation) = usage_invocation.as_mut() {
+                    invocation.bind_blame_target(target);
+                }
             }
             tool_pro_blame(&arguments, data_root, parsed_target)
         }
@@ -470,7 +483,7 @@ fn handle_tools_call(
             },
             pro_event: handled.pro_event,
         }),
-        Some(invocation),
+        usage_invocation,
     )
 }
 
@@ -723,4 +736,158 @@ fn event_type_names() -> Vec<&'static str> {
         EventType::Summary.as_str(),
         EventType::Notice.as_str(),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        env,
+        ffi::OsString,
+        io::{Cursor, Error, ErrorKind},
+        sync::{Arc, Mutex, MutexGuard},
+    };
+
+    use ctx_history_core::platform_security::restrict_private_directory;
+
+    use super::*;
+
+    #[derive(Clone, Copy)]
+    enum OutputFailure {
+        None,
+        Write,
+        Flush,
+    }
+
+    struct TracedWriter {
+        failure: OutputFailure,
+        trace: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl Write for TracedWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if matches!(self.failure, OutputFailure::Write) {
+                self.trace.lock().unwrap().push("write_failed");
+                return Err(Error::new(ErrorKind::BrokenPipe, "test write failure"));
+            }
+            self.trace.lock().unwrap().push("write");
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            if matches!(self.failure, OutputFailure::Flush) {
+                self.trace.lock().unwrap().push("flush_failed");
+                return Err(Error::new(ErrorKind::BrokenPipe, "test flush failure"));
+            }
+            self.trace.lock().unwrap().push("flush");
+            Ok(())
+        }
+    }
+
+    struct LocalUsageEnvGuard {
+        _lock: MutexGuard<'static, ()>,
+        saved: Option<OsString>,
+    }
+
+    impl LocalUsageEnvGuard {
+        fn unset() -> Self {
+            let lock = crate::config::TEST_LOCAL_USAGE_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let saved = env::var_os("CTX_LOCAL_USAGE_ENABLED");
+            env::remove_var("CTX_LOCAL_USAGE_ENABLED");
+            Self { _lock: lock, saved }
+        }
+    }
+
+    impl Drop for LocalUsageEnvGuard {
+        fn drop(&mut self) {
+            match &self.saved {
+                Some(value) => env::set_var("CTX_LOCAL_USAGE_ENABLED", value),
+                None => env::remove_var("CTX_LOCAL_USAGE_ENABLED"),
+            }
+        }
+    }
+
+    fn run_one_status_response(
+        failure: OutputFailure,
+    ) -> (
+        std::result::Result<(), McpServeFailure>,
+        Vec<&'static str>,
+        bool,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        restrict_private_directory(root.path()).unwrap();
+        std::fs::write(
+            root.path().join("config.toml"),
+            "[analytics]\nenabled = false\n[local_usage]\nenabled = true\n",
+        )
+        .unwrap();
+        let request = serde_json::to_vec(&json!({
+            "jsonrpc": "2.0",
+            "id": "status",
+            "method": "tools/call",
+            "params": {"name": "status", "arguments": {}}
+        }))
+        .unwrap();
+        let mut input = Cursor::new([request, vec![b'\n']].concat());
+        let trace = Arc::new(Mutex::new(Vec::new()));
+        let mut output = TracedWriter {
+            failure,
+            trace: trace.clone(),
+        };
+        let mut initialized = true;
+        let mut telemetry = McpTelemetry::start(root.path().to_path_buf());
+        let mut usage = McpUsageRecorder::start(root.path().to_path_buf());
+        usage.set_test_trace(trace.clone());
+
+        let result = serve_stdio_loop(
+            root.path(),
+            &mut input,
+            &mut output,
+            &mut initialized,
+            &mut telemetry,
+            &mut usage,
+        );
+        let recorded = root.path().join("usage.sqlite").exists();
+        let trace = trace.lock().unwrap().clone();
+        (result, trace, recorded)
+    }
+
+    #[test]
+    fn local_usage_commit_occurs_once_after_flush_and_never_after_output_failure() {
+        let _env = LocalUsageEnvGuard::unset();
+
+        let (delivered, trace, recorded) = run_one_status_response(OutputFailure::None);
+        assert!(delivered.is_ok());
+        assert!(recorded);
+        assert_eq!(
+            trace
+                .iter()
+                .filter(|entry| **entry == "local_usage")
+                .count(),
+            1
+        );
+        let flushed_at = trace.iter().position(|entry| *entry == "flush").unwrap();
+        let recorded_at = trace
+            .iter()
+            .position(|entry| *entry == "local_usage")
+            .unwrap();
+        assert!(flushed_at < recorded_at, "{trace:?}");
+
+        let (write_failed, trace, recorded) = run_one_status_response(OutputFailure::Write);
+        assert!(matches!(
+            write_failed.unwrap_err().reason,
+            McpStopReasonV1::StdoutWriteError
+        ));
+        assert!(!recorded);
+        assert!(!trace.contains(&"local_usage"));
+
+        let (flush_failed, trace, recorded) = run_one_status_response(OutputFailure::Flush);
+        assert!(matches!(
+            flush_failed.unwrap_err().reason,
+            McpStopReasonV1::StdoutFlushError
+        ));
+        assert!(!recorded);
+        assert!(!trace.contains(&"local_usage"));
+    }
 }

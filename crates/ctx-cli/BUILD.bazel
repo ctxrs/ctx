@@ -316,6 +316,12 @@ ctx_cli_integration_test(
 )
 
 ctx_cli_integration_test(
+    name = "mcp_local_usage_v2_tests",
+    src = "tests/mcp_local_usage_v2.rs",
+    tags = ["privacy"],
+)
+
+ctx_cli_integration_test(
     name = "mcp_tests",
     src = "tests/mcp.rs",
 )
