@@ -22,7 +22,16 @@ pub use cold_store::{CodexColdPromptHistoryOptions, CodexColdStoreOptions, Codex
 pub(crate) use producer::{
     run_codex_bounded_producers, CodexOrderedProducerItem, CodexProducerConfig,
 };
-pub(crate) use prompt_history::import_codex_native_prompt_history;
+pub(crate) use prompt_history::{
+    import_codex_native_prompt_history, observe_codex_prompt_history_source_backed_explicit_v0,
+    revalidate_codex_prompt_history_source_backed_v0,
+    scan_codex_prompt_history_source_backed_explicit_v0,
+    scan_codex_prompt_history_source_backed_v0, CodexPromptHistorySourceBackedDispositionV0,
+    CodexPromptHistorySourceBackedErrorV0, CodexPromptHistorySourceBackedInputV0,
+    CodexPromptHistorySourceBackedPageV0, CodexPromptHistorySourceBackedResolverV0,
+    CodexPromptHistorySourceBackedResultV0, CodexPromptHistorySourceBackedScanV0,
+    CodexPromptHistorySourceBackedSourceV0,
+};
 #[cfg(codex_nativepath_qualification)]
 pub use qualification::{
     qualify_codex_native_session_root, CodexNativePathQualificationEvidence,
