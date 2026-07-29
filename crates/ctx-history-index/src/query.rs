@@ -481,8 +481,8 @@ impl VerifiedIndex {
                 (score, Reverse((high, low)))
             }
         });
-        let hits: Vec<((Score, Reverse<(u64, u64)>), DocAddress)> =
-            self.searcher.search(query.as_ref(), &collector)?;
+        type ScoredDocAddress = ((Score, Reverse<(u64, u64)>), DocAddress);
+        let hits: Vec<ScoredDocAddress> = self.searcher.search(query.as_ref(), &collector)?;
         let mut candidates = Vec::with_capacity(hits.len());
         for ((score, _), address) in hits {
             candidates.push(EventSearchCandidate {
@@ -811,7 +811,7 @@ impl VerifiedIndex {
         }
 
         let mut candidates = candidates.into_vec();
-        candidates.sort_by(|left, right| left.identity.cmp(&right.identity));
+        candidates.sort_by_key(|candidate| candidate.identity);
         Ok(candidates
             .into_iter()
             .map(|candidate| candidate.event)
@@ -871,7 +871,7 @@ impl VerifiedIndex {
         }
 
         let mut candidates = candidates.into_vec();
-        candidates.sort_by(|left, right| left.identity.cmp(&right.identity));
+        candidates.sort_by_key(|candidate| candidate.identity);
         Ok(candidates
             .into_iter()
             .map(|candidate| candidate.event)
