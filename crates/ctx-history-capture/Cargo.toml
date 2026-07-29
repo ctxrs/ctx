@@ -9,9 +9,6 @@ homepage.workspace = true
 rust-version.workspace = true
 publish = false
 
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(codex_nativepath_qualification)"] }
-
 [dependencies]
 base64.workspace = true
 chrono.workspace = true
