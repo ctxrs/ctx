@@ -13,6 +13,7 @@ mod helper_command;
 mod lifecycle;
 mod local_deletion;
 mod pending_materialization;
+mod pricing;
 #[cfg(any(test, ctx_pro_qualification))]
 mod qualification_helper;
 mod referral;
@@ -23,6 +24,7 @@ mod verified_executable;
 mod workos_device;
 pub(crate) use client::{blame, stable_error_code, sync_source_manifest_materialization};
 pub(crate) use lifecycle::{lifecycle_status_json, run_lifecycle, ProArgs};
+pub(crate) use pricing::PRO_MONTHLY_PRICE_DISPLAY;
 #[cfg(test)]
 pub(crate) use referral::parse_referral_codename;
 pub(crate) use referral::{run as run_referral, show_cta_once, ReferralArgs};

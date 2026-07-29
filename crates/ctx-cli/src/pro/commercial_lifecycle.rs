@@ -28,6 +28,7 @@ use super::{
     },
     lifecycle::{ProLifecycleService, ProManagePlan, ProSetupPlan},
     workos_device::{WorkOsDeviceClient, WorkOsTokens},
+    PRO_MONTHLY_PRICE_DISPLAY,
 };
 
 pub(super) struct CommercialLifecycleService {
@@ -43,7 +44,6 @@ const CHECKOUT_POLL_INITIAL_SECONDS: u64 = 3;
 const CHECKOUT_POLL_MAX_INTERVAL_SECONDS: u64 = 15;
 const CHECKOUT_POLL_PROGRESS_SECONDS: u64 = 60;
 const CHECKOUT_POLL_MAX_SECONDS: u64 = 30 * 60;
-const PAID_CHECKOUT_HEADING: &str = "Start ctx Pro for $20/month at:";
 
 impl CommercialLifecycleService {
     pub(super) fn production(data_root: &Path) -> Result<Self> {
@@ -825,7 +825,7 @@ pub(super) fn unix_time() -> Result<i64> {
 }
 
 fn render_paid_checkout_prompt(url: &str) -> String {
-    format!("{PAID_CHECKOUT_HEADING}\n  {url}")
+    format!("Start ctx Pro for {PRO_MONTHLY_PRICE_DISPLAY} at:\n  {url}")
 }
 
 #[cfg(test)]
