@@ -670,8 +670,9 @@ fn goose_nativepath_revalidates_each_query_guard_before_returning_a_page() {
     ));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
-fn goose_nativepath_active_wal_fails_closed_without_touching_provider_files() {
+fn goose_nativepath_reads_latest_active_wal_rows_without_touching_provider_files() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let source_dir = temp.path().join("provider");
     fs::create_dir(&source_dir).unwrap();
@@ -704,14 +705,18 @@ fn goose_nativepath_active_wal_fails_closed_without_touching_provider_files() {
     let wal_before = fs::read(&source_wal).unwrap();
     let shm_before = source_shm.exists().then(|| fs::read(&source_shm).unwrap());
 
-    let error =
-        match GooseNativePathReader::acquire(GooseNativeSourceSelection::exact(&source_path)) {
-            Ok(_) => panic!("stock-VFS Goose unexpectedly admitted an active WAL family"),
-            Err(error) => error,
-        };
-    assert!(error
-        .to_string()
-        .contains("SQLite WAL identity is unsupported"));
+    let reader =
+        GooseNativePathReader::acquire(GooseNativeSourceSelection::exact(&source_path)).unwrap();
+    let (pages, summary) = collect_scan(&reader, GooseNativePageLimits::default());
+    assert_eq!(summary.metrics.retained_events, 1);
+    assert_eq!(
+        pages
+            .iter()
+            .flat_map(|page| page.events.iter())
+            .map(|event| event.searchable_text.as_str())
+            .collect::<Vec<_>>(),
+        ["committed-wal-value"]
+    );
     assert_eq!(fs::read(&source_path).unwrap(), database_before);
     assert_eq!(fs::read(&source_wal).unwrap(), wal_before);
     assert_eq!(
