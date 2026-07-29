@@ -1,12 +1,13 @@
 # SQL
 
-`ctx sql` runs read-only SQL against the existing local ctx SQLite index. Use it
-when normal `ctx search` does not express the question: counts, audits, joins,
-file/session metadata lookups, or scripts that need structured output.
+`ctx sql` runs read-only SQL against the existing local ctx SQLite metadata
+projection. Use it when normal `ctx search` does not express the question:
+counts, audits, joins, file/session metadata lookups, or scripts that need
+structured output.
 
 `ctx sql` does not refresh provider history, import files, initialize storage, or
-migrate schemas. Run a writable command such as `ctx setup` or `ctx import` first
-if the local store needs to be created or migrated.
+rebuild projections. Run a writable command such as `ctx setup` or `ctx import`
+first if the local metadata projection needs to be created or rebuilt.
 
 ## Examples
 
@@ -19,9 +20,10 @@ ctx sql --format csv --file query.sql
 ctx sql - --format raw < query.sql
 ```
 
-Use normal `ctx search` for transcript text search. Avoid broad scans over
-`payload_json`; event payloads can be large and normal search is optimized for
-finding text.
+Use normal `ctx search` for transcript text search. The relational projection
+does not store or expose event payloads, and `ctx sql` does not hydrate provider
+source files. Use `ctx show` or `ctx locate` when you need source-backed event
+content or its provider location.
 
 ## Stable Views
 
@@ -60,7 +62,6 @@ are implementation details and can change between versions.
 | `event_type` | `message`, `tool_call`, `tool_output`, `command_started`, `command_output`, `command_finished`, `file_touched`, `vcs_change`, `artifact`, `summary`, or `notice`. |
 | `role` | Event role such as `user`, `assistant`, or `tool`, when known. |
 | `occurred_at_ms` | Unix epoch milliseconds. |
-| `payload_json` | Local private event payload. |
 | `fidelity` | Import fidelity. |
 | `cwd`, `source_path` | Captured source context, when known. |
 
@@ -148,5 +149,5 @@ Increase limits only when scripting needs them:
 ctx sql "SELECT * FROM ctx_events LIMIT 500" --max-rows 500 --timeout 30s
 ```
 
-Keep SQL output local unless you have reviewed it. Payloads, paths, prompts,
-tool output, and repository names can contain private data.
+Keep SQL output local unless you have reviewed it. Paths, provider identifiers,
+workspace metadata, and repository names can contain private data.

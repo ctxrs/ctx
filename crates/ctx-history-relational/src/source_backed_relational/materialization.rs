@@ -5,7 +5,6 @@ use ctx_history_core::{
     StableEntityId, StableEntityKind,
 };
 use rusqlite::{params, Connection};
-use serde::Serialize;
 
 use super::{
     hex,
@@ -120,11 +119,6 @@ struct OpenSource {
     received_events: u64,
 }
 
-#[derive(Debug, Serialize)]
-struct CompatibilityPayload {
-    content_authority: &'static str,
-}
-
 pub(super) struct ProjectionCounts {
     pub(super) sources: i64,
     pub(super) sessions: i64,
@@ -232,15 +226,11 @@ fn insert_session(
 }
 
 fn insert_event(conn: &Connection, source_id: &str, event: &RelationalEventMetadata) -> Result<()> {
-    let payload = serde_json::to_string(&CompatibilityPayload {
-        content_authority: "provider_source",
-    })?;
     conn.execute(
         "INSERT INTO source_backed_events (
             ctx_event_id, event_identity, source_id, ctx_session_id, session_identity, event_seq,
-            event_type, role, occurred_at_ms, payload_json, fidelity,
-            native_locator_json, record_digest
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            event_type, role, occurred_at_ms, fidelity, native_locator_json, record_digest
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             event.event_id.as_uuid().to_string(),
             event
@@ -259,7 +249,6 @@ fn insert_event(conn: &Connection, source_id: &str, event: &RelationalEventMetad
             event.event_type.as_str(),
             event.role.map(EventRole::as_str),
             event.occurred_at_unix_ms,
-            payload,
             event.fidelity.as_str(),
             serde_json::to_vec(&event.locator)?,
             event.locator.record_digest().as_slice(),

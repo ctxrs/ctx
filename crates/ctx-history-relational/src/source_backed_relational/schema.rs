@@ -82,7 +82,6 @@ CREATE TABLE IF NOT EXISTS source_backed_events (
     event_type TEXT NOT NULL,
     role TEXT,
     occurred_at_ms INTEGER,
-    payload_json TEXT NOT NULL,
     fidelity TEXT NOT NULL,
     native_locator_json BLOB NOT NULL,
     record_digest BLOB NOT NULL
@@ -155,7 +154,6 @@ SELECT
     e.event_type AS event_type,
     e.role AS role,
     e.occurred_at_ms AS occurred_at_ms,
-    e.payload_json AS payload_json,
     e.fidelity AS fidelity,
     COALESCE(s.cwd, src.cwd) AS cwd,
     COALESCE(s.source_path, src.source_path) AS source_path,
