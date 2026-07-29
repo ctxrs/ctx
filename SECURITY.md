@@ -11,7 +11,9 @@ Security review for the current product covers:
 
 - the `ctx` CLI commands documented in `docs/cli-reference.md`;
 - the default data root `${CTX_DATA_ROOT:-~/.ctx}`;
-- SQLite metadata and searchable text in `work.sqlite`;
+- the disposable Tantivy lexical index in `search/lexical`, the optional flat
+  F32 semantic projection in `search/semantic`, and metadata-only
+  `relational.sqlite`;
 - local `config.toml` and diagnostic logs when present;
 - read-only discovery of known provider history paths;
 - explicit imports for supported local transcript formats, including Codex,
@@ -49,17 +51,19 @@ Treat the ctx data root and command output as sensitive. They may contain source
 code, prompts, local paths, tool-call arguments, private repository names, and
 typed identifiers extracted from provider transcripts.
 
-Raw provider transcript files remain in provider-owned locations. ctx imports
-the searchable text and metadata it needs into SQLite, so deleting or moving the
-raw transcript does not necessarily remove indexed text from ctx. Delete the ctx
-data root or rebuild the index when local retention requirements change.
+Raw provider transcript files remain the sole content authority in
+provider-owned locations. ctx stores searchable terms and source locators in
+disposable derived projections, but does not store transcript bodies or
+previews. Confirmed source deletion retires its lexical, semantic, relational,
+and Pro projections; an unavailable or temporarily inaccessible source fails
+closed without being treated as confirmed deletion.
 
 ## Local Output Limits
 
 Search, show, SQL, MCP, and JSON output are local/private by default and may
-preserve local paths, token-shaped strings, command output, and other transcript
-text when that text exists in indexed payloads. Review copied output before
-sharing it outside the machine.
+contain hydrated provider text, local paths, token-shaped strings, command
+output, and other transcript data. Review copied output before sharing it
+outside the machine.
 
 Before adding a new provider importer or expanding stored fields, the change
 needs tests for malformed input, source-path handling, local payload handling,
