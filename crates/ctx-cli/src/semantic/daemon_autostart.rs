@@ -11,7 +11,7 @@ use std::os::unix::process::CommandExt as _;
 use std::os::windows::process::CommandExt as _;
 
 use anyhow::{anyhow, Context, Result};
-use ctx_history_core::{database_path, utc_now};
+use ctx_history_core::utc_now;
 use serde_json::{json, Value};
 use uuid::Uuid;
 

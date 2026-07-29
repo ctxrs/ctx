@@ -1,6 +1,7 @@
 use super::*;
 use crate::config::CONFIG_FILE;
 use crate::semantic::paths_status::DaemonLock;
+use ctx_history_core::database_path;
 use std::sync::{Arc, Barrier};
 
 fn write_installation_registration(
@@ -165,6 +166,34 @@ fn autostart_child_inherits_effective_analytics_policy() {
     assert!(env
         .iter()
         .all(|(key, _)| key != std::ffi::OsStr::new("CTX_ANALYTICS_ENABLED")));
+}
+
+#[test]
+fn fresh_v026_root_allows_daemon_autostart_without_legacy_store() {
+    struct RestoreAutostartEnv(Option<std::ffi::OsString>);
+    impl Drop for RestoreAutostartEnv {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => env::set_var(DAEMON_AUTOSTART_OFF_ENV, value),
+                None => env::remove_var(DAEMON_AUTOSTART_OFF_ENV),
+            }
+        }
+    }
+
+    let _env_lock = crate::config::TEST_LOCAL_USAGE_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _restore = RestoreAutostartEnv(env::var_os(DAEMON_AUTOSTART_OFF_ENV));
+    env::remove_var(DAEMON_AUTOSTART_OFF_ENV);
+    let temp = tempfile::tempdir().unwrap();
+    let config = AppConfig::default();
+
+    assert!(!database_path(temp.path().to_path_buf()).exists());
+    assert!(daemon_autostart_allowed(temp.path(), &config));
+    assert!(
+        fs::read_dir(temp.path()).unwrap().next().is_none(),
+        "eligibility inspection must not create v0.26 state"
+    );
 }
 
 #[test]

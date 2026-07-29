@@ -353,10 +353,8 @@ pub(super) fn daemon_restart_allowed(data_root: &Path) -> Result<bool> {
     ))
 }
 
-pub(super) fn daemon_autostart_allowed(data_root: &Path, config: &AppConfig) -> bool {
-    config.daemon.enabled
-        && database_path(data_root.to_path_buf()).exists()
-        && !semantic_env_flag(DAEMON_AUTOSTART_OFF_ENV)
+pub(super) fn daemon_autostart_allowed(_data_root: &Path, config: &AppConfig) -> bool {
+    config.daemon.enabled && !semantic_env_flag(DAEMON_AUTOSTART_OFF_ENV)
 }
 
 pub(super) fn daemon_restart_trigger(data_root: &Path) -> Option<DaemonTriggerCommandArg> {
