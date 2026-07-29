@@ -1030,15 +1030,19 @@ mod tests {
 
         let rows = query(
             temp.path(),
-            "SELECT provider, provider_session_id, agent_type, branch, workspace, cwd,
-                    source_path, event_type, role, event_seq, payload_json,
-                    native_locator_json
-             FROM ctx_events",
+            "SELECT e.provider, e.provider_session_id, s.agent_type, e.branch, e.workspace, e.cwd,
+                    e.source_path, e.event_type, e.role, e.event_seq, e.payload_json
+             FROM ctx_events e
+             JOIN ctx_sessions s ON s.ctx_session_id = e.ctx_session_id",
         );
         assert_eq!(rows.len(), 1);
         assert!(matches!(
             &rows[0][0],
             RawSqlValue::Text { value, .. } if value == "codex"
+        ));
+        assert!(matches!(
+            &rows[0][2],
+            RawSqlValue::Text { value, .. } if value == "primary"
         ));
         assert!(matches!(
             &rows[0][8],
@@ -1049,9 +1053,14 @@ mod tests {
             &rows[0][10],
             RawSqlValue::Text { value, .. } if value == r#"{"content_authority":"provider_source"}"#
         ));
+        let locator_rows = query(
+            temp.path(),
+            "SELECT native_locator_json FROM source_backed_events",
+        );
+        assert_eq!(locator_rows.len(), 1);
         assert!(matches!(
-            &rows[0][11],
-            RawSqlValue::Blob { bytes, truncated: false, .. } if *bytes > 0
+            &locator_rows[0][0],
+            RawSqlValue::Blob { bytes, .. } if *bytes > 0
         ));
         let bytes = projection_bytes(temp.path());
         assert!(!contains_bytes(&bytes, PROVIDER_TEXT));
