@@ -26,11 +26,7 @@ pub(super) fn mux_capture_source(
         .started_at
         .parse::<DateTime<Utc>>()
         .map_err(|_| CaptureError::InvalidPayload("Mux start time is invalid".to_owned()))?;
-    let source_root = if plan.is_legacy_primary_source() {
-        plan.path.display().to_string()
-    } else {
-        configured_root.display().to_string()
-    };
+    let source_root = configured_root.display().to_string();
     Ok(CaptureSource {
         id: source_id,
         descriptor: CaptureSourceDescriptor {
@@ -67,14 +63,8 @@ pub(super) fn mux_session(
     context: &ProviderAdapterContext,
     history_record_id: Option<Uuid>,
     metadata: &MuxBoundedSessionMetadata,
-    plan: &MuxSourcePlan,
 ) -> Result<Session> {
-    let namespace = plan
-        .legacy_bridge
-        .as_ref()
-        .map(|bridge| bridge.primary_source_identity.clone())
-        .map(Ok)
-        .unwrap_or_else(|| mux_root_namespace(configured_root))?;
+    let namespace = mux_root_namespace(configured_root)?;
     let id = provider_source_session_uuid(&namespace, &metadata.provider_session_id);
     let parent_session_id = metadata
         .parent_provider_session_id
@@ -172,36 +162,4 @@ pub(super) fn mux_parent_edge(
             }),
         ),
     }
-}
-
-pub(super) fn verify_terminal_core(
-    store: &Store,
-    machine_id: &str,
-    plan: &MuxSourcePlan,
-) -> Result<()> {
-    let stored = store
-        .get_sync_cursor(None, machine_id, &plan.cursor_stream)?
-        .ok_or_else(|| {
-            CaptureError::InvalidPayload(
-                "Mux output replay requires committed NativePath Core".to_owned(),
-            )
-        })?;
-    let committed = decode_native_path_committed_cursor(&stored.cursor)?;
-    let wire: MuxCursorWire = serde_json::from_str(committed.provider_cursor())
-        .map_err(|_| CaptureError::InvalidPayload("Mux NativePath cursor is corrupt".to_owned()))?;
-    if wire.version != MUX_CURSOR_VERSION
-        || wire.capture_revision != MUX_CAPTURE_REVISION
-        || wire.policy_revision != MUX_POLICY_REVISION
-        || wire.kind != plan.kind
-        || wire.canonical_path != plan.observation.canonical_path
-        || wire.source_revision != plan.source_revision
-        || wire.metadata_revision != plan.metadata_revision
-        || !wire.terminal
-        || wire.retired
-    {
-        return Err(CaptureError::InvalidPayload(
-            "Mux output replay source no longer matches committed Core authority".to_owned(),
-        ));
-    }
-    revalidate_source(plan)
 }

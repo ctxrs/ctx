@@ -1418,6 +1418,8 @@ mod tests {
     #[test]
     fn junie_source_backed_has_no_preview_complete_or_legacy_store_fallback() {
         let provider_source = include_str!("source_backed.rs");
+        let nativepath_source = include_str!("../nativepath.rs");
+        let cursor_source = include_str!("cursor.rs");
         let registry_source = include_str!("../../../source_backed.rs");
         for forbidden in [
             ["ctx_history_", "store"].concat(),
@@ -1434,6 +1436,9 @@ mod tests {
         assert!(provider_source.contains("exact_junie_lexical_body"));
         assert!(provider_source.contains("fn hydrate_batch("));
         assert!(provider_source.contains("self.hydrate_requests(request.events())"));
+        assert!(!nativepath_source.contains("mod output;"));
+        assert!(!cursor_source.contains("CertifiedProviderCursor"));
+        assert!(!cursor_source.contains("ReleasedJunie"));
         assert!(registry_source.contains("JunieLocatorResolverV0::discover_for_hydration"));
         assert!(registry_source.contains(".with_batch_hydration(move |request|"));
     }

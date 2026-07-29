@@ -11,7 +11,7 @@ pub(super) fn import_core_source(
     if plan
         .prior
         .as_ref()
-        .and_then(|prior| prior.wire.as_ref())
+        .map(|prior| &prior.wire)
         .is_some_and(|wire| {
             wire.terminal
                 && !wire.retired
@@ -25,21 +25,18 @@ pub(super) fn import_core_source(
         {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
-        let wire = plan
-            .prior
-            .as_ref()
-            .and_then(|prior| prior.wire.as_ref())
-            .ok_or(CaptureError::SystemInvariant(
-                "Mux replay lost its committed cursor",
-            ))?;
+        let wire =
+            plan.prior
+                .as_ref()
+                .map(|prior| &prior.wire)
+                .ok_or(CaptureError::SystemInvariant(
+                    "Mux replay lost its committed cursor",
+                ))?;
         return Ok(replay_summary(wire, plan.counts_session_projection()));
     }
 
     let mut session =
         mux_bounded_session_metadata(&plan.source, &plan.metadata_revision, context.imported_at)?;
-    if let Some(bridge) = plan.legacy_bridge.as_ref() {
-        session.provider_session_id = bridge.provider_session_id.clone();
-    }
     let mut summary = ProviderImportSummary::default();
     let (mut reader, mut hasher) = open_reader_at_frontier(&plan.path, &plan.initial_frontier)?;
     let mut frontier = plan.initial_frontier.clone();
@@ -67,7 +64,7 @@ pub(super) fn import_core_source(
             && plan
                 .prior
                 .as_ref()
-                .and_then(|prior| prior.wire.as_ref())
+                .map(|prior| &prior.wire)
                 .is_some_and(|wire| {
                     !wire.terminal
                         && !wire.retired

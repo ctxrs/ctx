@@ -1431,7 +1431,6 @@ fn source_plan(
         accepted_events: 0,
         rejected_records: 0,
         first_failure: None,
-        legacy_bridge: None,
     }
 }
 

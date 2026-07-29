@@ -310,6 +310,8 @@ fn digest_matching_malformed_native_record_reports_unsupported_parser_revision()
 #[test]
 fn source_backed_mux_has_no_preview_complete_or_legacy_store_publication_fallback() {
     let provider_source = include_str!("../source_backed.rs");
+    let native_path_source = include_str!("../../native_path.rs");
+    let native_source = include_str!("../source.rs");
     let registry_source = include_str!("../../../../source_backed.rs");
     for forbidden in [
         ["ctx_history_", "store"].concat(),
@@ -325,10 +327,13 @@ fn source_backed_mux_has_no_preview_complete_or_legacy_store_publication_fallbac
             "Mux source-backed route contains forbidden architecture token {forbidden:?}"
         );
     }
-    assert!(provider_source.contains("legacy_bridge: None"));
+    assert!(!provider_source.contains("legacy_bridge"));
     assert!(provider_source.contains("exact_mux_lexical_body"));
     assert!(provider_source.contains("fn hydrate_batch("));
     assert!(provider_source.contains("self.hydrate_requests(request.events())"));
+    assert!(!native_path_source.contains("mod output;"));
+    assert!(!native_source.contains("CertifiedProviderCursor"));
+    assert!(!native_source.contains("mux_legacy_bridge"));
     assert!(registry_source.contains("MuxSourceBackedResolverV0::discover_for_hydration"));
     assert!(registry_source.contains(".with_batch_hydration(move |request|"));
     let unsupported_fallback = ["Mux exact content requires", "brokered compound-file"].concat();

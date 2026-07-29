@@ -125,28 +125,8 @@ pub(super) struct EventDraft {
     pub(super) file_change: Option<FileChangeDraft>,
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct OutputDraft {
-    pub(super) event_index: u64,
-    pub(super) source_ordinal: u64,
-    pub(super) source_subrecord: u32,
-    pub(super) byte_start: u64,
-    pub(super) byte_end_exclusive: u64,
-    pub(super) occurred_at: DateTime<Utc>,
-    pub(super) call_id: String,
-    pub(super) tool_name: String,
-    pub(super) command: Option<String>,
-    pub(super) outcome: OutputOutcome,
-    pub(super) exit_code: Option<i32>,
-    pub(super) duration_ms: Option<u64>,
-    pub(super) locator_payload: Vec<u8>,
-    pub(super) native_record_id: String,
-    pub(super) content: Vec<u8>,
-}
-
 pub(super) struct ParsedTurn {
     pub(super) rows: Vec<EventDraft>,
-    pub(super) outputs: Vec<OutputDraft>,
     pub(super) start_offset: u64,
     pub(super) end_offset: u64,
     pub(super) start_ordinal: u64,
@@ -182,7 +162,6 @@ pub(super) fn parse_session_turn(
     let mut buffer = JunieAssistantBuffer::default();
     let mut binding = RecordSetBinding::default();
     let mut rows = Vec::new();
-    let mut outputs = Vec::new();
     let mut failures = Vec::new();
     let mut rejection_count = 0_u64;
     let mut retained_turn_bytes = 0_usize;
@@ -201,7 +180,6 @@ pub(super) fn parse_session_turn(
                     ordinal.saturating_sub(1),
                     &mut event_index,
                     &mut rows,
-                    &mut outputs,
                 )?;
                 break;
             }
@@ -214,7 +192,6 @@ pub(super) fn parse_session_turn(
             && byte_end.saturating_sub(start_offset) > MAX_JUNIE_TRANSIENT_TURN_BYTES as u64
         {
             rows.clear();
-            outputs.clear();
             record_rejection(
                 &mut failures,
                 &mut rejection_count,
@@ -240,7 +217,6 @@ pub(super) fn parse_session_turn(
                     ordinal.saturating_sub(1),
                     &mut event_index,
                     &mut rows,
-                    &mut outputs,
                 )?;
                 break;
             }
@@ -271,11 +247,9 @@ pub(super) fn parse_session_turn(
                 failure(ordinal, "incomplete trailing Junie JSONL record".to_owned()),
             );
             rows.clear();
-            outputs.clear();
             opened.revalidate()?;
             return Ok(ParsedTurn {
                 rows,
-                outputs,
                 start_offset,
                 end_offset: start_offset,
                 start_ordinal,
@@ -322,7 +296,6 @@ pub(super) fn parse_session_turn(
                     current_ordinal.saturating_sub(1),
                     &mut event_index,
                     &mut rows,
-                    &mut outputs,
                 )?;
                 let prompt = value.get("prompt").and_then(Value::as_str).unwrap_or("");
                 if !prompt.trim().is_empty() {
@@ -447,7 +420,6 @@ pub(super) fn parse_session_turn(
     opened.revalidate()?;
     Ok(ParsedTurn {
         rows,
-        outputs,
         start_offset,
         end_offset,
         start_ordinal,
@@ -544,7 +516,6 @@ pub(super) fn flush_assistant(
     source_ordinal: u64,
     event_index: &mut u64,
     rows: &mut Vec<EventDraft>,
-    outputs: &mut Vec<OutputDraft>,
 ) -> Result<()> {
     if !buffer.open {
         return Ok(());
@@ -576,9 +547,6 @@ pub(super) fn flush_assistant(
                     projected.outcome,
                     JunieOutputOutcome::Failure | JunieOutputOutcome::Timeout
                 );
-                let locator = binding
-                    .encoded(2, u32::try_from(step.order).unwrap_or(u32::MAX))
-                    .zip(binding.native_record_id(&format!("step-output-{}", step.order)));
                 if retained {
                     rows.push(output_failure_event(
                         *event_index,
@@ -589,38 +557,6 @@ pub(super) fn flush_assistant(
                         projected.outcome,
                         binding,
                     ));
-                } else if let Some((locator_payload, native_record_id)) = locator {
-                    let first = binding
-                        .entries
-                        .first()
-                        .ok_or(CaptureError::SystemInvariant(
-                            "Junie output binding lost its first source record",
-                        ))?;
-                    let last = binding.entries.last().ok_or(CaptureError::SystemInvariant(
-                        "Junie output binding lost its last source record",
-                    ))?;
-                    outputs.push(OutputDraft {
-                        event_index: *event_index,
-                        source_ordinal: first.ordinal,
-                        source_subrecord: u32::try_from(step.order).unwrap_or(u32::MAX),
-                        byte_start: first.byte_start,
-                        byte_end_exclusive: last.byte_end_exclusive,
-                        occurred_at,
-                        call_id: projected.call_id,
-                        tool_name: projected.tool_name.to_owned(),
-                        command: projected.command.map(str::to_owned),
-                        outcome: match projected.outcome {
-                            JunieOutputOutcome::Success => OutputOutcome::Success,
-                            JunieOutputOutcome::Failure => OutputOutcome::Failure,
-                            JunieOutputOutcome::Timeout => OutputOutcome::Timeout,
-                            JunieOutputOutcome::Unknown => OutputOutcome::Unknown,
-                        },
-                        exit_code: projected.exit_code,
-                        duration_ms: projected.duration_ms,
-                        locator_payload,
-                        native_record_id,
-                        content: projected.details.as_bytes().to_vec(),
-                    });
                 }
                 *event_index = event_index
                     .checked_add(1)

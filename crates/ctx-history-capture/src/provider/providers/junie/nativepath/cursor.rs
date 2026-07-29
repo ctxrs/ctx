@@ -119,70 +119,11 @@ impl JunieStoreCursor {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ReleasedJunieCheckpointFailure {
-    #[serde(rename = "line")]
-    pub(super) _line: usize,
-    pub(super) error: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ReleasedJunieMetadataAnchor {
-    pub(super) start: u64,
-    pub(super) end: u64,
-    pub(super) sha256: [u8; 32],
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ReleasedJunieParserCheckpoint {
-    pub(super) next_ordinal: u64,
-    #[serde(rename = "next_line_number")]
-    pub(super) _next_line_number: u64,
-    pub(super) provider_event_index: u64,
-    pub(super) started_at: DateTime<Utc>,
-    pub(super) last_ts: DateTime<Utc>,
-    pub(super) ended_at: Option<DateTime<Utc>>,
-    pub(super) title_anchor: Option<ReleasedJunieMetadataAnchor>,
-    pub(super) cwd_anchor: Option<ReleasedJunieMetadataAnchor>,
-    pub(super) saw_supported_event: bool,
-    #[serde(rename = "metadata_dirty")]
-    pub(super) _metadata_dirty: bool,
-    pub(super) source_ended: bool,
-    #[serde(rename = "auxiliary_revision")]
-    pub(super) _auxiliary_revision: u64,
-    #[serde(rename = "accepted_captures")]
-    pub(super) _accepted_captures: u64,
-    pub(super) accepted_events: u64,
-    #[serde(rename = "accepted_file_touches")]
-    pub(super) _accepted_file_touches: u64,
-    pub(super) structural_rejections: u64,
-    pub(super) rejected_records: u64,
-    pub(super) failures: Vec<ReleasedJunieCheckpointFailure>,
-}
-
-#[derive(Clone)]
-pub(super) struct ReleasedJunieCursor {
-    pub(super) source_revision: String,
-    pub(super) native_position: crate::native_source::NativePosition,
-    pub(super) checkpoint: ReleasedJunieParserCheckpoint,
-    pub(super) rejected_records: u64,
-}
-
-// Keep the decoded native cursor inline with its stored sync cursor: this short-lived
-// planning value mirrors the persisted cursor variants and is consumed immediately.
-#[allow(clippy::large_enum_variant)]
 pub(super) enum CursorOrigin {
     Fresh,
     Native {
         stored: SyncCursor,
         cursor: JunieStoreCursor,
-    },
-    Legacy {
-        stored: SyncCursor,
-        cursor: ReleasedJunieCursor,
     },
 }
 
@@ -195,66 +136,17 @@ pub(super) fn load_cursor(
     let Some(stored) = store.get_sync_cursor(None, machine_id, stream)? else {
         return Ok(CursorOrigin::Fresh);
     };
-    match decode_native_path_committed_cursor(&stored.cursor) {
-        Ok(committed) => {
-            let cursor = JunieStoreCursor::decode(committed.provider_cursor()).map_err(|_| {
-                CaptureError::SystemInvariant("Junie persisted NativePath cursor is corrupt")
-            })?;
-            if cursor.source_identity != source_identity {
-                return Err(CaptureError::SystemInvariant(
-                    "Junie persisted NativePath cursor belongs to another source",
-                ));
-            }
-            return Ok(CursorOrigin::Native { stored, cursor });
-        }
-        Err(error) if looks_like_native_path_cursor(&stored.cursor) => {
-            return Err(CaptureError::Store(error));
-        }
-        Err(_) => {}
-    }
-    let legacy = CertifiedProviderCursor::decode_if_certified(&stored.cursor)
-        .map_err(|_| CaptureError::SystemInvariant("Junie persisted released cursor is corrupt"))?
-        .ok_or(CaptureError::SystemInvariant(
-            "Junie persisted cursor has an unknown encoding",
-        ))?;
-    if legacy.parser_revision() != 2 || legacy.policy_revision() != 5 {
+    let committed =
+        decode_native_path_committed_cursor(&stored.cursor).map_err(CaptureError::Store)?;
+    let cursor = JunieStoreCursor::decode(committed.provider_cursor()).map_err(|_| {
+        CaptureError::SystemInvariant("Junie persisted NativePath cursor is corrupt")
+    })?;
+    if cursor.source_identity != source_identity {
         return Err(CaptureError::SystemInvariant(
-            "Junie persisted released cursor has unsupported revisions",
+            "Junie persisted NativePath cursor belongs to another source",
         ));
     }
-    if !valid_junie_source_revision(legacy.source_revision()) {
-        return Err(CaptureError::SystemInvariant(
-            "Junie persisted released cursor has an invalid source revision",
-        ));
-    }
-    let checkpoint = legacy
-        .parser_checkpoint()
-        .deserialize::<ReleasedJunieParserCheckpoint>()
-        .map_err(|_| {
-            CaptureError::SystemInvariant("Junie persisted released cursor checkpoint is corrupt")
-        })?;
-    let offset = released_jsonl_position_offset(legacy.native_position()).ok_or(
-        CaptureError::SystemInvariant("Junie persisted released cursor position is corrupt"),
-    )?;
-    validate_released_checkpoint(&checkpoint, offset)?;
-    Ok(CursorOrigin::Legacy {
-        stored,
-        cursor: ReleasedJunieCursor {
-            source_revision: legacy.source_revision().to_owned(),
-            native_position: legacy.native_position().clone(),
-            rejected_records: legacy.rejected_records(),
-            checkpoint,
-        },
-    })
-}
-
-pub(super) fn looks_like_native_path_cursor(encoded: &str) -> bool {
-    serde_json::from_str::<Value>(encoded)
-        .ok()
-        .and_then(|value| value.as_object().cloned())
-        .is_some_and(|object| {
-            object.contains_key("publication_id") || object.contains_key("provider_cursor")
-        })
+    Ok(CursorOrigin::Native { stored, cursor })
 }
 
 pub(super) fn valid_junie_source_revision(revision: &str) -> bool {
@@ -270,190 +162,9 @@ pub(super) fn valid_junie_source_revision(revision: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-pub(super) fn released_jsonl_position_offset(
-    position: &crate::native_source::NativePosition,
-) -> Option<u64> {
-    // Exact released `jsonl-byte-boundary-v1` wire layout: fixed header,
-    // offset, canonical suffix-proof length, and SHA-256 boundary proof.
-    let value = position.value();
-    if position.kind() != "jsonl-byte-boundary-v1"
-        || value.len() != 56
-        || value.get(..8) != Some(b"CTXJLBP\0")
-        || value.get(8..12) != Some(&[1, 1, 0, 0])
-    {
-        return None;
-    }
-    let offset = u64::from_be_bytes(value.get(12..20)?.try_into().ok()?);
-    let proof_len = u32::from_be_bytes(value.get(20..24)?.try_into().ok()?);
-    (u64::from(proof_len) == offset.min(64 * 1024)).then_some(offset)
-}
-
-pub(super) fn released_jsonl_prefix_is_proven(
-    session_path: &JunieSessionPath,
-    position: &crate::native_source::NativePosition,
-) -> Result<bool> {
-    let Some(offset) = released_jsonl_position_offset(position) else {
-        return Err(CaptureError::SystemInvariant(
-            "Junie persisted released cursor position is corrupt",
-        ));
-    };
-    let proof_len = offset.min(64 * 1024);
-    let opened = session_path.open_events()?;
-    if opened.len() < offset {
-        opened.revalidate()?;
-        return Ok(false);
-    }
-    let proof_len_usize = usize::try_from(proof_len)
-        .map_err(|_| CaptureError::SystemInvariant("Junie released cursor proof exceeds usize"))?;
-    let proof =
-        opened.read_exact_range(offset.saturating_sub(proof_len), proof_len_usize, 64 * 1024)?;
-    let mut digest = Sha256::new();
-    digest.update(b"ctx-jsonl-append-boundary-sha256-v1\0");
-    digest.update(offset.to_be_bytes());
-    let proof_len = u32::try_from(proof_len).map_err(|_| {
-        CaptureError::SystemInvariant("Junie released cursor proof length exceeds u32")
-    })?;
-    digest.update(proof_len.to_be_bytes());
-    digest.update(&proof);
-    let expected: [u8; 32] = digest.finalize().into();
-    Ok(position.value().get(24..56) == Some(expected.as_slice()))
-}
-
-pub(super) fn validate_released_checkpoint(
-    checkpoint: &ReleasedJunieParserCheckpoint,
-    offset: u64,
-) -> Result<()> {
-    let anchors_valid = [&checkpoint.title_anchor, &checkpoint.cwd_anchor]
-        .into_iter()
-        .flatten()
-        .all(|anchor| {
-            anchor.start < anchor.end
-                && anchor.end <= offset
-                && anchor.end.saturating_sub(anchor.start)
-                    <= crate::MAX_PROVIDER_JSONL_LINE_BYTES.saturating_add(2) as u64
-        });
-    let bounded_failures = checkpoint.failures.len() <= MAX_JUNIE_FAILURES
-        && checkpoint
-            .failures
-            .iter()
-            .all(|failure| failure.error.len() <= MAX_JUNIE_FAILURE_BYTES)
-        && u64::try_from(checkpoint.failures.len()).unwrap_or(u64::MAX)
-            <= checkpoint.rejected_records;
-    let counters_valid = checkpoint.provider_event_index <= GENERATION_EVENT_STRIDE
-        && checkpoint.accepted_events <= checkpoint.provider_event_index
-        && checkpoint.structural_rejections <= checkpoint.rejected_records;
-    if !anchors_valid || !bounded_failures || !counters_valid {
-        return Err(CaptureError::SystemInvariant(
-            "Junie persisted released cursor checkpoint violates bounded state",
-        ));
-    }
-    Ok(())
-}
-
-pub(super) fn released_cursor_for_retirement(
-    source_identity: &str,
-    legacy: CertifiedProviderCursor,
-) -> Result<JunieStoreCursor> {
-    if legacy.parser_revision() != 2 || legacy.policy_revision() != 5 {
-        return Err(CaptureError::SystemInvariant(
-            "Junie persisted released cursor has unsupported revisions",
-        ));
-    }
-    if !valid_junie_source_revision(legacy.source_revision()) {
-        return Err(CaptureError::SystemInvariant(
-            "Junie persisted released cursor has an invalid source revision",
-        ));
-    }
-    let checkpoint = legacy
-        .parser_checkpoint()
-        .deserialize::<ReleasedJunieParserCheckpoint>()
-        .map_err(|_| {
-            CaptureError::SystemInvariant("Junie persisted released cursor checkpoint is corrupt")
-        })?;
-    let offset = released_jsonl_position_offset(legacy.native_position()).ok_or(
-        CaptureError::SystemInvariant("Junie persisted released cursor position is corrupt"),
-    )?;
-    validate_released_checkpoint(&checkpoint, offset)?;
-    Ok(JunieStoreCursor {
-        version: CURSOR_VERSION,
-        provider: CaptureProvider::Junie.as_str().to_owned(),
-        source_identity: source_identity.to_owned(),
-        source_revision: legacy.source_revision().to_owned(),
-        observed_length: offset,
-        device: None,
-        inode: None,
-        generation: 0,
-        terminal: true,
-        retired: false,
-        rejected_records: legacy.rejected_records().max(checkpoint.rejected_records),
-        frontier: Frontier {
-            offset,
-            next_ordinal: checkpoint.next_ordinal,
-            next_event_index: checkpoint.provider_event_index,
-            prefix_sha256: Sha256::digest([]).into(),
-            state: RuntimeState {
-                started_at_ms: checkpoint.started_at.timestamp_millis(),
-                last_ts_ms: checkpoint.last_ts.timestamp_millis(),
-                ended_at_ms: checkpoint.ended_at.map(|value| value.timestamp_millis()),
-                title: None,
-                cwd: None,
-                saw_supported_event: checkpoint.saw_supported_event,
-            },
-            pending: None,
-        },
-    })
-}
-
-pub(super) fn released_anchor_value(
-    session_path: &JunieSessionPath,
-    anchor: Option<&ReleasedJunieMetadataAnchor>,
-    expected_kind: &'static str,
-    field: &'static str,
-) -> Result<Option<String>> {
-    let Some(anchor) = anchor else {
-        return Ok(None);
-    };
-    let length = usize::try_from(anchor.end.saturating_sub(anchor.start)).map_err(|_| {
-        CaptureError::SystemInvariant("Junie released metadata anchor exceeds usize")
-    })?;
-    let opened = session_path.open_events()?;
-    let mut bytes = opened.read_exact_range(
-        anchor.start,
-        length,
-        crate::MAX_PROVIDER_JSONL_LINE_BYTES + 2,
-    )?;
-    if bytes.last() == Some(&b'\n') {
-        bytes.pop();
-        if bytes.last() == Some(&b'\r') {
-            bytes.pop();
-        }
-    }
-    if <[u8; 32]>::from(Sha256::digest(&bytes)) != anchor.sha256 {
-        return Ok(None);
-    }
-    let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
-        return Ok(None);
-    };
-    let Some(agent_event) = value
-        .get("event")
-        .and_then(|event| event.get("agentEvent"))
-        .filter(|event| event.get("kind").and_then(Value::as_str) == Some(expected_kind))
-    else {
-        return Ok(None);
-    };
-    Ok(agent_event
-        .get(field)
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .map(str::to_owned))
-}
-
 pub(super) struct CursorPlan {
     pub(super) expected: Option<String>,
     pub(super) cursor: JunieStoreCursor,
-    // Even a terminal released cursor must cross the Store-owned publication
-    // boundary once so the durable cursor is upgraded to its native envelope.
-    pub(super) force_publication: bool,
 }
 
 pub(super) fn plan_cursor(
@@ -488,89 +199,7 @@ pub(super) fn plan_cursor(
         CursorOrigin::Fresh => Ok(CursorPlan {
             expected: None,
             cursor: fresh(),
-            force_publication: false,
         }),
-        CursorOrigin::Legacy { stored, cursor } => {
-            let offset = released_jsonl_position_offset(&cursor.native_position).ok_or(
-                CaptureError::SystemInvariant(
-                    "Junie persisted released cursor position is corrupt",
-                ),
-            )?;
-            let revision_matches = cursor.source_revision == observation.source_revision();
-            let prefix_is_proven = released_jsonl_prefix_is_proven(path, &cursor.native_position)?;
-            // The empty boundary proves no consumed bytes. A changed source
-            // revision therefore needs a replacement generation.
-            if !prefix_is_proven || (offset == 0 && !revision_matches) {
-                let mut reset = fresh();
-                reset.generation = 1;
-                return Ok(CursorPlan {
-                    expected: Some(stored.cursor),
-                    cursor: reset,
-                    force_publication: false,
-                });
-            }
-            let meta = bounded_junie_index_meta(&path.index_meta);
-            let checkpoint = cursor.checkpoint;
-            let title = match checkpoint.title_anchor.as_ref() {
-                Some(anchor) => {
-                    released_anchor_value(path, Some(anchor), "AgentTaskNameUpdatedEvent", "name")?
-                }
-                None => meta.task_name,
-            };
-            let cwd = match checkpoint.cwd_anchor.as_ref() {
-                Some(anchor) => released_anchor_value(
-                    path,
-                    Some(anchor),
-                    "CurrentDirectoryUpdatedEvent",
-                    "currentDirectory",
-                )?,
-                None => meta.project_dir,
-            };
-            if (checkpoint.title_anchor.is_some() && title.is_none())
-                || (checkpoint.cwd_anchor.is_some() && cwd.is_none())
-            {
-                let mut reset = fresh();
-                reset.generation = 1;
-                return Ok(CursorPlan {
-                    expected: Some(stored.cursor),
-                    cursor: reset,
-                    force_publication: false,
-                });
-            }
-            let terminal = checkpoint.source_ended && offset == observation.events_file.length;
-            Ok(CursorPlan {
-                expected: Some(stored.cursor),
-                cursor: JunieStoreCursor {
-                    version: CURSOR_VERSION,
-                    provider: CaptureProvider::Junie.as_str().to_owned(),
-                    source_identity: source_identity.to_owned(),
-                    source_revision: observation.source_revision(),
-                    observed_length: observation.events_file.length,
-                    device: observation.events_file.device,
-                    inode: observation.events_file.inode,
-                    generation: 0,
-                    terminal,
-                    retired: false,
-                    rejected_records: cursor.rejected_records.max(checkpoint.rejected_records),
-                    frontier: Frontier {
-                        offset,
-                        next_ordinal: checkpoint.next_ordinal,
-                        next_event_index: checkpoint.provider_event_index,
-                        prefix_sha256: hash_prefix(path, offset)?,
-                        state: RuntimeState {
-                            started_at_ms: checkpoint.started_at.timestamp_millis(),
-                            last_ts_ms: checkpoint.last_ts.timestamp_millis(),
-                            ended_at_ms: checkpoint.ended_at.map(|value| value.timestamp_millis()),
-                            title,
-                            cwd,
-                            saw_supported_event: checkpoint.saw_supported_event,
-                        },
-                        pending: None,
-                    },
-                },
-                force_publication: true,
-            })
-        }
         CursorOrigin::Native { stored, mut cursor } => {
             let same_physical = cursor.device == observation.events_file.device
                 && cursor.inode == observation.events_file.inode;
@@ -593,7 +222,6 @@ pub(super) fn plan_cursor(
                 return Ok(CursorPlan {
                     expected: Some(stored.cursor),
                     cursor: reset,
-                    force_publication: false,
                 });
             }
             cursor.retired = false;
@@ -607,7 +235,6 @@ pub(super) fn plan_cursor(
             Ok(CursorPlan {
                 expected: Some(stored.cursor),
                 cursor,
-                force_publication: false,
             })
         }
     }
