@@ -116,25 +116,6 @@ fn assert_source_backed_search(search: &Value, provider: &str, query: &str) {
     );
 }
 
-fn source_backed_sql(temp: &TempDir, sql: &str) -> Value {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let output = ctx(temp)
-            .args(["sql", sql, "--format=json"])
-            .output()
-            .unwrap();
-        if output.status.success() {
-            return serde_json::from_slice(&output.stdout).unwrap();
-        }
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("source-backed SQL projection") && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(25));
-            continue;
-        }
-        panic!("source-backed SQL failed: {stderr}");
-    }
-}
-
 #[test]
 fn codebuddy_cli_jsonl_imports_and_searches_through_public_cli() {
     let temp = tempdir();
@@ -254,15 +235,9 @@ fn nanoclaw_import_preserves_text_timestamp_millis_and_integer_trigger() {
         "{imported:#}"
     );
 
-    let projection = source_backed_sql(
-        &temp,
-        "select occurred_at_ms from ctx_events \
-         where provider = 'nanoclaw' and role = 'user'",
-    );
-    assert_eq!(projection["rows"], json!([[1_783_653_514_491_i64]]));
     assert!(
         !temp.path().join("work.sqlite").exists(),
-        "NanoClaw acceptance must use its provider-owned databases and source-backed projection"
+        "NanoClaw acceptance must use its provider-owned databases and source-backed index"
     );
 
     let search = json_output(ctx(&temp).args([
@@ -275,4 +250,8 @@ fn nanoclaw_import_preserves_text_timestamp_millis_and_integer_trigger() {
         "--format=json",
     ]));
     assert_source_backed_search(&search, "nanoclaw", query);
+    assert_eq!(
+        search["results"][0]["timestamp"], "2026-07-10T03:18:34.491Z",
+        "{search:#}"
+    );
 }
