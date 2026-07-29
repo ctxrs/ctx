@@ -84,14 +84,17 @@ fn source_backed_open_does_not_follow_leaf_swap_after_authorization() {
         fs::rename(&path, &original).unwrap();
         fs::rename(&attacker, &path).unwrap();
     });
-    assert!(matches!(
-        result,
-        Err(HermesSourceBackedError::Capture(
-            CaptureError::InvalidProviderTranscriptPath { .. }
-        )) | Err(HermesSourceBackedError::SqliteSource(
-            SqliteSourceAccessError::SourceChanged
-        ))
-    ));
+    assert!(
+        matches!(
+            result,
+            Err(HermesSourceBackedError::Capture(
+                CaptureError::InvalidProviderTranscriptPath { .. }
+            )) | Err(HermesSourceBackedError::SqliteSource(
+                SqliteSourceAccessError::SourceChanged
+            ))
+        ),
+        "{result:?}"
+    );
 }
 
 #[test]
@@ -124,6 +127,74 @@ fn active_wal_scan_reads_latest_rows_without_persistent_source_writes() {
     let (_, records) = scan_candidate(&candidate);
     assert!(event(&records).body.contains("Hermes active WAL sentinel"));
     assert_eq!(sqlite_persistent_bytes(&path), before);
+    drop(writer);
+}
+
+#[test]
+fn idle_wal_writer_first_scan_succeeds_and_append_changes_revision() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    create_state_db(&path, "idle-wal", "before idle WAL");
+    let writer = Connection::open(&path).unwrap();
+    let mode: String = writer
+        .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    writer.execute_batch("PRAGMA wal_autocheckpoint=0").unwrap();
+    assert!(
+        !path.with_file_name("state.db-wal").exists(),
+        "the idle writer must not have materialized a WAL pathname"
+    );
+    let candidate = hermes_source_backed_explicit(
+        &path,
+        SourceAnchor::provider_native(
+            HERMES_SOURCE_ANCHOR_NAMESPACE,
+            TypedKey::utf8("idle-wal").unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    let (before_certificate, before_records) = scan_candidate(&candidate);
+    assert!(before_records.iter().any(|record| matches!(
+        record,
+        HermesSourceBackedRecord::Event(event) if event.body == "before idle WAL"
+    )));
+    let (unchanged_certificate, _) = scan_candidate(&candidate);
+    assert_eq!(
+        before_certificate.observation().revision(),
+        unchanged_certificate.observation().revision()
+    );
+    assert_eq!(
+        before_certificate.content_digest(),
+        unchanged_certificate.content_digest()
+    );
+    let database_before_append = fs::read(&path).unwrap();
+    writer
+        .execute(
+            "insert into messages
+                 (id, session_id, role, content, timestamp, active, compacted)
+             values (8, ?1, 'user', ?2, 3.5, 1, 0)",
+            rusqlite::params!["idle-wal-child", "Hermes committed WAL append sentinel"],
+        )
+        .unwrap();
+    assert_eq!(fs::read(&path).unwrap(), database_before_append);
+
+    let (after_certificate, after_records) = scan_candidate(&candidate);
+    assert!(after_records.iter().any(|record| matches!(
+        record,
+        HermesSourceBackedRecord::Event(event)
+            if event.body == "Hermes committed WAL append sentinel"
+    )));
+    assert_ne!(
+        before_certificate.observation().revision(),
+        after_certificate.observation().revision()
+    );
+    assert_ne!(
+        before_certificate.content_digest(),
+        after_certificate.content_digest()
+    );
+
     drop(writer);
 }
 
