@@ -1,5 +1,4 @@
 pub(crate) mod adapter;
-pub mod api;
 pub(crate) mod codex;
 pub(crate) mod custom_history_jsonl;
 pub(crate) mod file_touches;
