@@ -165,11 +165,11 @@ pub(crate) fn plugin_sources_json(sources: &[HistorySourcePluginSource]) -> Vec<
                 "manifest_path": source.manifest_path,
                 "enabled": source.enabled,
                 "refresh": history_source_plugin_refresh_json(source.refresh),
-                "status": "available",
+                "status": "unsupported",
                 "import_support": "history_source_plugin",
                 "native_import": false,
-                "importable": true,
-                "unsupported_reason": null,
+                "importable": false,
+                "unsupported_reason": "history source plugin has no v0.26 source-backed adapter",
             })
         })
         .collect()

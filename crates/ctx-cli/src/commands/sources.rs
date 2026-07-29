@@ -106,7 +106,7 @@ pub(crate) fn run_sources(
         }
         for source in plugin_sources {
             println!(
-                "custom {} available (history-source-plugin:{})",
+                "custom {} unsupported (history-source-plugin:{}): no v0.26 source-backed adapter",
                 source.label(),
                 source.source_format
             );
