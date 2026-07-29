@@ -2,14 +2,129 @@ use super::{
     assert_daemon_process_running, assert_no_daemon_autostart_mutation, support::*,
     wait_for_daemon_status, write_active_daemon_upgrade_handoff, write_codex_setup_session,
 };
+use rusqlite::OpenFlags;
 
 use std::{
+    io::Read,
+    process::{Child, Command as StdCommand, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Barrier,
     },
     thread,
 };
+
+struct SourceRefreshDaemon {
+    child: Option<Child>,
+}
+
+impl Drop for SourceRefreshDaemon {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn start_full_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
+    fs::write(
+        temp.path().join("config.toml"),
+        "[daemon]\nenabled = true\nmode = \"full\"\n\n[search]\nsemantic = false\n",
+    )
+    .unwrap();
+    let binary = copied_ctx_binary(temp);
+    let prepared = ctx_from_binary(temp, &binary);
+    let mut command = StdCommand::new(prepared.get_program());
+    for (name, value) in prepared.get_envs() {
+        match value {
+            Some(value) => {
+                command.env(name, value);
+            }
+            None => {
+                command.env_remove(name);
+            }
+        }
+    }
+    command
+        .args([
+            "daemon",
+            "run",
+            "--force",
+            "--idle-exit-seconds",
+            "600",
+            "--loop-interval-seconds",
+            "600",
+        ])
+        .env("CTX_DAEMON_MODE", "full")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let spawn_deadline = Instant::now() + Duration::from_secs(1);
+    let child = loop {
+        match command.spawn() {
+            Ok(child) => break child,
+            Err(error) if error.raw_os_error() == Some(26) && Instant::now() < spawn_deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("start isolated source-refresh daemon: {error}"),
+        }
+    };
+    let mut daemon = SourceRefreshDaemon { child: Some(child) };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(exit) = daemon.child.as_mut().unwrap().try_wait().unwrap() {
+            let mut stderr = String::new();
+            daemon
+                .child
+                .as_mut()
+                .unwrap()
+                .stderr
+                .as_mut()
+                .unwrap()
+                .read_to_string(&mut stderr)
+                .unwrap();
+            panic!("source-refresh daemon exited before becoming ready ({exit}): {stderr}");
+        }
+        let status = ctx(temp)
+            .args(["daemon", "status", "--format=json"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok());
+        if status.as_ref().is_some_and(|status| {
+            status["daemon"]["running"] == true
+                && status["daemon"]["source_refresh_endpoint"]["available"] == true
+        }) {
+            return daemon;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for source-refresh daemon readiness: {status:#?}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn wait_for_relational_projection(temp: &TempDir, generation: &str) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = json_output(ctx(temp).args(["status", "--format=json"]));
+        if status["relational"]["status"] == "ready"
+            && status["relational"]["active_core_generation_id"] == generation
+        {
+            return status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for relational projection at generation {generation}: {status:#}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn ready_setup(temp: &TempDir) -> Value {
+    json_output(ctx(temp).args(["setup", "--wait", "--format=json", "--progress", "none"]))
+}
 
 #[test]
 fn setup_does_not_migrate_legacy_shim_directory() {
@@ -102,7 +217,7 @@ fn setup_semantic_persists_opt_in_and_machine_output_does_not_autostart() {
 }
 
 #[test]
-fn setup_semantic_rejects_disabled_daemon_without_mutating_config_or_store() {
+fn setup_semantic_rejects_disabled_daemon_without_mutating_source_epoch() {
     let temp = tempdir();
     let config_path = temp.path().join("config.toml");
     let original = "[daemon]\nenabled = false\n";
@@ -117,7 +232,9 @@ fn setup_semantic_rejects_disabled_daemon_without_mutating_config_or_store() {
     ]));
     assert!(stderr.contains("requires daemon maintenance"), "{stderr}");
     assert_eq!(fs::read_to_string(config_path).unwrap(), original);
-    assert!(!temp.path().join("work.sqlite").exists());
+    assert!(!temp.path().join("search").exists());
+    assert!(!temp.path().join("relational.sqlite").exists());
+    assert!(!temp.path().join("catalogs").exists());
     assert_no_daemon_autostart_mutation(&temp);
 
     let explicit_opt_out = tempdir();
@@ -131,7 +248,9 @@ fn setup_semantic_rejects_disabled_daemon_without_mutating_config_or_store() {
     ]));
     assert!(stderr.contains("requires daemon maintenance"), "{stderr}");
     assert!(!explicit_opt_out.path().join("config.toml").exists());
-    assert!(!explicit_opt_out.path().join("work.sqlite").exists());
+    assert!(!explicit_opt_out.path().join("search").exists());
+    assert!(!explicit_opt_out.path().join("relational.sqlite").exists());
+    assert!(!explicit_opt_out.path().join("catalogs").exists());
     assert_no_daemon_autostart_mutation(&explicit_opt_out);
 }
 
@@ -158,46 +277,60 @@ fn setup_semantic_clean_cache_queues_daemon_without_foreground_download() {
 }
 
 #[test]
-fn status_reads_committed_wal_content_from_an_active_store() {
+fn setup_wait_indexes_committed_provider_sqlite_wal_content() {
     let temp = tempdir();
-    write_codex_setup_session(&temp);
-    ctx(&temp)
-        .args(["setup", "--wait", "--progress", "none"])
-        .assert()
-        .success();
-
-    let db_path = temp.path().join("work.sqlite");
-    let writer = Connection::open(&db_path).unwrap();
-    writer
-        .create_scalar_function(
-            "ctx_projection_writer_authorized_v1",
-            0,
-            rusqlite::functions::FunctionFlags::SQLITE_UTF8
-                | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC
-                | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
-            |_| Ok(1_i64),
-        )
+    install_default_hermes_fixture(&temp, "provider sqlite canonical content");
+    let provider_db = temp.path().join(".hermes/state.db");
+    let writer = Connection::open(&provider_db).unwrap();
+    let journal_mode: String = writer
+        .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
         .unwrap();
+    assert_eq!(journal_mode, "wal");
     writer
-        .execute_batch("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;")
+        .execute_batch("PRAGMA wal_autocheckpoint = 0")
         .unwrap();
+    let main_before = fs::metadata(&provider_db).unwrap();
     writer
         .execute(
-            r#"
-            INSERT INTO sessions
-            (id, provider, external_session_id, agent_type, is_primary, status, fidelity,
-             started_at_ms, created_at_ms, updated_at_ms)
-            VALUES
-            ('00000000-0000-0000-0000-000000000001', 'codex', 'wal-only-session',
-             'primary', 1, 'imported', 'imported', 1, 1, 1)
-            "#,
-            [],
+            "INSERT INTO messages (session_id, role, content, timestamp)
+             VALUES ('hermes-cli-native', 'user', ?1, 1782259203.0)",
+            ["provider sqlite committed wal lifecycle oracle"],
         )
         .unwrap();
-    assert!(temp.path().join("work.sqlite-wal").exists());
+    assert!(provider_db.with_extension("db-wal").is_file());
+    let main_after = fs::metadata(&provider_db).unwrap();
+    assert_eq!(main_after.len(), main_before.len());
+    assert_eq!(
+        main_after.modified().unwrap(),
+        main_before.modified().unwrap()
+    );
 
-    let status = json_output(ctx(&temp).args(["status", "--format=json"]));
-    assert_eq!(status["indexed_sessions"], 2, "{status:#}");
+    let _daemon = start_full_source_refresh_daemon(&temp);
+    let setup = ready_setup(&temp);
+    assert_eq!(setup["schema_version"], 2, "{setup:#}");
+    assert_eq!(setup["mode"], "ready", "{setup:#}");
+    let generation = setup["lexical"]["generation_id"].as_str().unwrap();
+    let status = wait_for_relational_projection(&temp, generation);
+    assert_eq!(status["relational"]["source_count"], 1, "{status:#}");
+    assert!(
+        status["relational"]["event_count"]
+            .as_u64()
+            .is_some_and(|count| count >= 3),
+        "{status:#}"
+    );
+
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "provider sqlite committed wal lifecycle oracle",
+        "--provider",
+        "hermes",
+        "--refresh",
+        "off",
+        "--format=json",
+    ]));
+    assert_eq!(search["retrieval"]["index"], "source_backed", "{search:#}");
+    assert_eq!(search["retrieval"]["generation_id"], generation);
+    assert_eq!(search["results"].as_array().unwrap().len(), 1, "{search:#}");
     drop(writer);
 }
 
@@ -225,8 +358,16 @@ fn malformed_present_config_fails_before_setup_and_analytics_side_effects() {
         );
 
     assert!(
-        !temp.path().join("work.sqlite").exists(),
-        "setup must not create the store after config load fails"
+        !temp.path().join("search").exists(),
+        "setup must not create search projections after config load fails"
+    );
+    assert!(
+        !temp.path().join("relational.sqlite").exists(),
+        "setup must not create the relational projection after config load fails"
+    );
+    assert!(
+        !temp.path().join("catalogs").exists(),
+        "setup must not create source catalogs after config load fails"
     );
     assert!(
         !events_path.exists(),
@@ -243,7 +384,7 @@ fn malformed_present_config_fails_before_setup_and_analytics_side_effects() {
 }
 
 #[test]
-fn status_missing_store_is_read_only_and_does_not_initialize_files() {
+fn status_missing_source_epoch_is_read_only_and_does_not_initialize_files() {
     let temp = tempdir();
     let data_root = temp.path().join("ctx-data");
 
@@ -252,13 +393,23 @@ fn status_missing_store_is_read_only_and_does_not_initialize_files() {
             .args(["status", "--format=json"])
             .env("CTX_DATA_ROOT", &data_root),
     );
-    assert_eq!(status["schema_version"], 1);
+    assert_eq!(status["schema_version"], 2);
     assert_eq!(status["initialized"], false);
     assert_eq!(status["local_only"], true);
     assert_eq!(status["read_only"], true);
-    assert_eq!(status["indexed_items"], 0);
-    assert_eq!(status["indexed_sources"], 0);
-    assert_eq!(status["cataloged_sessions"], 0);
+    assert_eq!(status["history_epoch"]["status"], "unavailable");
+    assert_eq!(status["history_epoch"]["reason"], "epoch_not_initialized");
+    assert!(status["indexed_items"].is_null());
+    assert!(status["indexed_sources"].is_null());
+    assert_eq!(
+        status["lexical"]["path"],
+        json!(data_root.join("search/lexical"))
+    );
+    assert_eq!(
+        status["relational"]["path"],
+        json!(data_root.join("relational.sqlite"))
+    );
+    assert_eq!(status["prior_epoch"]["status"], "absent");
 
     let output = ctx(&temp)
         .arg("status")
@@ -272,105 +423,117 @@ fn status_missing_store_is_read_only_and_does_not_initialize_files() {
     assert!(output.contains("initialized: false"), "{output}");
     assert!(output.contains("local_only: true"), "{output}");
     assert!(output.contains("read_only: true"), "{output}");
+    assert!(
+        output.contains("history_epoch_status: unavailable"),
+        "{output}"
+    );
 
     assert!(
         !data_root.exists(),
         "status must not create the missing data root"
     );
-    assert!(!data_root.join("work.sqlite").exists());
     assert!(!data_root.join("config.toml").exists());
-    assert!(!data_root.join("objects").exists());
-    assert!(!data_root.join("spool").exists());
+    assert!(!data_root.join("search").exists());
+    assert!(!data_root.join("relational.sqlite").exists());
+    assert!(!data_root.join("catalogs").exists());
 }
 
 #[test]
-fn status_existing_wal_mode_store_does_not_mutate_canonical_database() {
+fn status_existing_relational_projection_does_not_mutate_database() {
     let temp = tempdir();
-    ctx(&temp).args(["setup", "--no-daemon"]).assert().success();
-    let db_path = temp.path().join("work.sqlite");
-    assert!(db_path.exists());
-    let canonical_before = fs::read(&db_path).unwrap();
+    write_codex_setup_session(&temp);
+    let generation = {
+        let _daemon = start_full_source_refresh_daemon(&temp);
+        let setup = ready_setup(&temp);
+        let generation = setup["lexical"]["generation_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        wait_for_relational_projection(&temp, &generation);
+        generation
+    };
+    let relational_path = temp.path().join("relational.sqlite");
+    let relational_before = fs::read(&relational_path).unwrap();
 
     let status = json_output(ctx(&temp).args(["status", "--format=json"]));
 
     assert_eq!(status["initialized"], true);
     assert_eq!(status["read_only"], true);
+    assert_eq!(status["relational"]["status"], "ready", "{status:#}");
     assert_eq!(
-        fs::read(&db_path).unwrap(),
-        canonical_before,
-        "status must not mutate canonical database pages"
+        status["relational"]["active_core_generation_id"], generation,
+        "{status:#}"
+    );
+    assert_eq!(
+        fs::read(&relational_path).unwrap(),
+        relational_before,
+        "status must not mutate relational projection pages"
     );
 }
 
 #[test]
-fn status_rejects_unsupported_schema_without_migrating_or_creating_side_dirs() {
+fn status_reports_unsupported_relational_schema_without_migrating_it() {
     let temp = tempdir();
-    let db_path = temp.path().join("work.sqlite");
+    let db_path = temp.path().join("relational.sqlite");
     let conn = Connection::open(&db_path).unwrap();
     conn.pragma_update(None, "user_version", 1).unwrap();
     drop(conn);
+    let before = fs::read(&db_path).unwrap();
 
-    let stderr = failure_stderr(ctx(&temp).args(["status", "--format=json"]));
-    assert!(stderr.contains("schema version 1"), "{stderr}");
-    assert!(stderr.contains("writable command"), "{stderr}");
-    assert!(stderr.contains("ctx status"), "{stderr}");
+    let status = json_output(ctx(&temp).args(["status", "--format=json"]));
+    assert_eq!(status["relational"]["status"], "unavailable", "{status:#}");
+    assert_eq!(
+        status["relational"]["reason"], "projection_open_failed",
+        "{status:#}"
+    );
+    assert!(
+        status["relational"]["last_error"]
+            .as_str()
+            .is_some_and(|error| !error.is_empty()),
+        "{status:#}"
+    );
 
-    let conn = Connection::open(&db_path).unwrap();
+    let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
     let user_version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
     assert_eq!(user_version, 1);
+    drop(conn);
+    assert_eq!(fs::read(&db_path).unwrap(), before);
     assert!(!temp.path().join("config.toml").exists());
-    assert!(!temp.path().join("objects").exists());
-    assert!(!temp.path().join("spool").exists());
+    assert!(!temp.path().join("search").exists());
+    assert!(!temp.path().join("catalogs").exists());
 }
 
 #[test]
-fn status_does_not_repair_empty_search_projection() {
+fn status_does_not_repair_missing_tantivy_publication_pointer() {
     let temp = tempdir();
-    let fixture = custom_history_fixture("basic.jsonl");
-
-    let imported = json_output(ctx(&temp).args([
-        "import",
-        "--format",
-        "ctx-history-jsonl-v1",
-        "--path",
-        &fixture,
-        "--format=json",
-        "--progress",
-        "none",
-    ]));
-    assert!(imported["totals"]["imported_events"].as_u64().unwrap() > 0);
-
-    let db_path = temp.path().join("work.sqlite");
-    let conn = Connection::open(&db_path).unwrap();
-    assert!(
-        sqlite_count(&conn, "SELECT COUNT(*) FROM event_search") > 0,
-        "fixture import should create searchable event projections"
-    );
-    conn.execute_batch(
-        "DELETE FROM ctx_history_search;\
-         DELETE FROM event_search;\
-         DELETE FROM artifact_search;",
-    )
-    .unwrap();
-    drop(conn);
+    write_codex_setup_session(&temp);
+    let generation = {
+        let _daemon = start_full_source_refresh_daemon(&temp);
+        let setup = ready_setup(&temp);
+        let generation = setup["lexical"]["generation_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        wait_for_relational_projection(&temp, &generation);
+        generation
+    };
+    let lexical_root = temp.path().join("search/lexical");
+    let publication_pointer = lexical_root.join("meta.json");
+    assert!(publication_pointer.is_file());
+    let manifest_path = lexical_root
+        .join("ctx-generations")
+        .join(format!("{generation}.json"));
+    let manifest_before = fs::read(&manifest_path).unwrap();
+    fs::remove_file(&publication_pointer).unwrap();
 
     let status = json_output(ctx(&temp).args(["status", "--format=json"]));
     assert_eq!(status["initialized"], true);
     assert_eq!(status["read_only"], true);
-    assert!(status["indexed_items"].as_u64().unwrap() > 0);
-
-    let conn = Connection::open(&db_path).unwrap();
-    assert_eq!(
-        sqlite_count(&conn, "SELECT COUNT(*) FROM ctx_history_search"),
-        0
-    );
-    assert_eq!(sqlite_count(&conn, "SELECT COUNT(*) FROM event_search"), 0);
-    assert_eq!(
-        sqlite_count(&conn, "SELECT COUNT(*) FROM artifact_search"),
-        0
-    );
+    assert_eq!(status["lexical"]["status"], "unavailable", "{status:#}");
+    assert!(!publication_pointer.exists());
+    assert_eq!(fs::read(manifest_path).unwrap(), manifest_before);
 }
 
 #[test]
@@ -1284,12 +1447,13 @@ fn setup_inventories_whole_source_sqlite_providers() {
 }
 
 #[test]
-fn clean_multisource_setup_with_hermes_bounds_wal_through_final_maintenance() {
+fn clean_multisource_setup_bounds_relational_wal_and_preserves_projection_identity() {
     let temp = tempdir();
     write_large_codex_setup_sessions(&temp, 40, 4, 4 * 1024);
     write_large_hermes_setup_db(&temp, 130, 8 * 1024);
-    let db_path = temp.path().join("work.sqlite");
-    let wal_path = temp.path().join("work.sqlite-wal");
+    let _daemon = start_full_source_refresh_daemon(&temp);
+    let db_path = temp.path().join("relational.sqlite");
+    let wal_path = temp.path().join("relational.sqlite-wal");
 
     let running = Arc::new(AtomicBool::new(true));
     let peak_wal_bytes = Arc::new(AtomicU64::new(0));
@@ -1312,66 +1476,88 @@ fn clean_multisource_setup_with_hermes_bounds_wal_through_final_maintenance() {
         })
     };
     sampler_ready.wait();
-    let mut setup_command = ctx(&temp);
-    setup_command.args(["setup", "--wait", "--format=json", "--progress", "none"]);
-    let setup_output = setup_command.output().unwrap();
+    let setup = ready_setup(&temp);
+    let generation = setup["lexical"]["generation_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let status = wait_for_relational_projection(&temp, &generation);
     running.store(false, Ordering::Release);
     sampler.join().unwrap();
 
-    assert!(
-        setup_output.status.success(),
-        "setup failed: {}",
-        String::from_utf8_lossy(&setup_output.stderr)
-    );
-    let setup: Value = serde_json::from_slice(&setup_output.stdout).unwrap();
-    assert_eq!(setup["import"]["totals"]["failed_sources"], 0);
+    assert_eq!(setup["schema_version"], 2, "{setup:#}");
+    assert_eq!(setup["mode"], "ready", "{setup:#}");
+    assert_eq!(status["relational"]["status"], "ready", "{status:#}");
+    assert_eq!(status["relational"]["source_count"], 41, "{status:#}");
     assert!(
         peak_wal_bytes.load(Ordering::Acquire) <= 32 * 1024 * 1024,
-        "clean multi-source setup grew WAL to {} bytes",
+        "clean multi-source setup grew relational WAL to {} bytes",
         peak_wal_bytes.load(Ordering::Acquire)
     );
     assert!(
-        fs::metadata(temp.path().join("work.sqlite-wal"))
+        fs::metadata(temp.path().join("relational.sqlite-wal"))
             .map(|metadata| metadata.len())
             .unwrap_or(0)
             <= 4 * 1024 * 1024,
-        "setup left a large final WAL"
+        "setup left a large final relational WAL"
     );
 
-    let conn = Connection::open(&db_path).unwrap();
+    let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
     assert_eq!(
         conn.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
             .unwrap(),
         "ok"
     );
-    assert_eq!(
-        sqlite_count(
-            &conn,
-            "SELECT COUNT(*) FROM search_projection_stats WHERE key LIKE 'event_search_bulk_mode_v1%'"
-        ),
-        0
-    );
     assert!(
         sqlite_count(
             &conn,
-            "SELECT COUNT(*) FROM event_search WHERE event_search MATCH 'codex AND setup AND history'"
+            "SELECT COUNT(*) FROM source_backed_events
+             WHERE source_id IN (
+                 SELECT source_id FROM source_backed_sources WHERE provider = 'codex'
+             )"
         ) > 0
     );
     assert!(
         sqlite_count(
             &conn,
-            "SELECT COUNT(*) FROM event_search WHERE event_search MATCH 'hermes AND setup AND current'"
+            "SELECT COUNT(*) FROM source_backed_events
+             WHERE source_id IN (
+                 SELECT source_id FROM source_backed_sources WHERE provider = 'hermes'
+             )"
         ) > 0
     );
-    let event_count = sqlite_count(&conn, "SELECT COUNT(*) FROM events");
+    let event_count = sqlite_count(&conn, "SELECT COUNT(*) FROM source_backed_events");
     drop(conn);
 
-    let replay =
-        json_output(ctx(&temp).args(["setup", "--wait", "--format=json", "--progress", "none"]));
-    assert_eq!(replay["import"]["totals"]["failed_sources"], 0);
-    let conn = Connection::open(&db_path).unwrap();
+    let codex_search = json_output(ctx(&temp).args([
+        "search",
+        "codex setup history",
+        "--provider",
+        "codex",
+        "--refresh",
+        "off",
+        "--format=json",
+    ]));
+    assert_eq!(codex_search["retrieval"]["generation_id"], generation);
+    assert!(!codex_search["results"].as_array().unwrap().is_empty());
+    let hermes_search = json_output(ctx(&temp).args([
+        "search",
+        "hermes setup current",
+        "--provider",
+        "hermes",
+        "--refresh",
+        "off",
+        "--format=json",
+    ]));
+    assert_eq!(hermes_search["retrieval"]["generation_id"], generation);
+    assert!(!hermes_search["results"].as_array().unwrap().is_empty());
+
+    let replay = ready_setup(&temp);
+    assert_eq!(replay["lexical"]["generation_id"], generation, "{replay:#}");
+    wait_for_relational_projection(&temp, &generation);
+    let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
     assert_eq!(
-        sqlite_count(&conn, "SELECT COUNT(*) FROM events"),
+        sqlite_count(&conn, "SELECT COUNT(*) FROM source_backed_events"),
         event_count
     );
 }
@@ -1384,9 +1570,8 @@ fn write_large_codex_setup_sessions(
 ) {
     let sessions_dir = temp.path().join(".codex/sessions/2026/07/12");
     fs::create_dir_all(&sessions_dir).unwrap();
-    let payload = "database migration checkpoint bounded wal search index ".repeat(
-        payload_bytes / "database migration checkpoint bounded wal search index ".len() + 1,
-    );
+    let payload = "provider source checkpoint bounded lexical generation "
+        .repeat(payload_bytes / "provider source checkpoint bounded lexical generation ".len() + 1);
     for session_index in 0..sessions {
         let session_id = format!("codex-setup-history-{session_index}");
         let path = sessions_dir.join(format!("rollout-{session_id}.jsonl"));
@@ -1455,8 +1640,9 @@ fn write_large_hermes_setup_db(temp: &TempDir, messages: usize, payload_bytes: u
         INSERT INTO sessions VALUES ('hermes-setup-current', 'acp', 1782259200.0);",
     )
     .unwrap();
-    let payload = "provider import fts merge recovery bounded checkpoint "
-        .repeat(payload_bytes / "provider import fts merge recovery bounded checkpoint ".len() + 1);
+    let payload = "provider import relational recovery bounded checkpoint ".repeat(
+        payload_bytes / "provider import relational recovery bounded checkpoint ".len() + 1,
+    );
     let transaction = conn.transaction().unwrap();
     for index in 0..messages {
         transaction

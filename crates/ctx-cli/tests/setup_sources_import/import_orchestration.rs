@@ -2,6 +2,126 @@ use super::{
     assert_daemon_process_running, assert_no_daemon_autostart_mutation, support::*,
     wait_for_daemon_status, write_active_daemon_upgrade_handoff, write_codex_setup_session,
 };
+use rusqlite::OpenFlags;
+use std::{
+    io::Read,
+    process::{Child, Command as StdCommand, Stdio},
+};
+
+struct SourceRefreshDaemon {
+    child: Option<Child>,
+}
+
+impl Drop for SourceRefreshDaemon {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn start_full_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
+    fs::write(
+        temp.path().join("config.toml"),
+        "[daemon]\nenabled = true\nmode = \"full\"\n\n[search]\nsemantic = false\n",
+    )
+    .unwrap();
+    let binary = copied_ctx_binary(temp);
+    let prepared = ctx_from_binary(temp, &binary);
+    let mut command = StdCommand::new(prepared.get_program());
+    for (name, value) in prepared.get_envs() {
+        match value {
+            Some(value) => {
+                command.env(name, value);
+            }
+            None => {
+                command.env_remove(name);
+            }
+        }
+    }
+    command
+        .args([
+            "daemon",
+            "run",
+            "--force",
+            "--idle-exit-seconds",
+            "600",
+            "--loop-interval-seconds",
+            "600",
+        ])
+        .env("CTX_DAEMON_MODE", "full")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let spawn_deadline = Instant::now() + Duration::from_secs(1);
+    let child = loop {
+        match command.spawn() {
+            Ok(child) => break child,
+            Err(error) if error.raw_os_error() == Some(26) && Instant::now() < spawn_deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("start isolated source-refresh daemon: {error}"),
+        }
+    };
+    let mut daemon = SourceRefreshDaemon { child: Some(child) };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(exit) = daemon.child.as_mut().unwrap().try_wait().unwrap() {
+            let mut stderr = String::new();
+            daemon
+                .child
+                .as_mut()
+                .unwrap()
+                .stderr
+                .as_mut()
+                .unwrap()
+                .read_to_string(&mut stderr)
+                .unwrap();
+            panic!("source-refresh daemon exited before becoming ready ({exit}): {stderr}");
+        }
+        let status = ctx(temp)
+            .args(["daemon", "status", "--format=json"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok());
+        if status.as_ref().is_some_and(|status| {
+            status["daemon"]["running"] == true
+                && status["daemon"]["source_refresh_endpoint"]["available"] == true
+        }) {
+            return daemon;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for source-refresh daemon readiness: {status:#?}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn wait_for_relational_projection(temp: &TempDir, generation: &str) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = json_output(ctx(temp).args(["status", "--format=json"]));
+        if status["relational"]["status"] == "ready"
+            && status["relational"]["active_core_generation_id"] == generation
+        {
+            return status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for relational projection at generation {generation}: {status:#}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn published_generation(report: &Value) -> String {
+    report["sources"][0]["published_generation"]
+        .as_str()
+        .expect("import report should identify its published generation")
+        .to_owned()
+}
 
 #[test]
 fn import_accepts_deprecated_partial_as_a_compatibility_noop() {
@@ -207,8 +327,9 @@ fn import_custom_history_jsonl_format_is_searchable_and_idempotent() {
 }
 
 #[test]
-fn one_event_native_and_explicit_imports_defer_full_fts_merge() {
+fn one_event_native_and_explicit_imports_publish_tantivy_and_relational_projections() {
     let native = tempdir();
+    let _native_daemon = start_full_source_refresh_daemon(&native);
     let source_root = native.path().join("openhands-user");
     let conversation = source_root
         .join("v1_conversations")
@@ -222,7 +343,7 @@ fn one_event_native_and_explicit_imports_defer_full_fts_merge() {
             "source": "user",
             "llm_message": {
                 "role": "user",
-                "content": "one event must stay searchable without a full merge"
+                "content": "one event must publish through a Tantivy generation"
             }
         })
         .to_string(),
@@ -234,14 +355,40 @@ fn one_event_native_and_explicit_imports_defer_full_fts_merge() {
         "openhands",
         "--path",
         source_root.to_str().unwrap(),
+        "--no-daemon",
         "--format=json",
         "--progress",
         "none",
     ]));
-    assert_eq!(native_import["totals"]["imported_events"], 1);
-    assert_deferred_search_maintenance(&native);
+    let native_generation = published_generation(&native_import);
+    assert_eq!(native_import["sources"][0]["status"], "published");
+    assert_eq!(
+        native_import["sources"][0]["daemon_request_metadata"]["owner"],
+        "daemon"
+    );
+    let native_status = wait_for_relational_projection(&native, &native_generation);
+    assert_eq!(native_status["lexical"]["indexed_documents"], 1);
+    assert_eq!(native_status["relational"]["event_count"], 1);
+    assert!(native.path().join("search/lexical/meta.json").is_file());
+    assert!(native.path().join("relational.sqlite").is_file());
+    let native_search = json_output(ctx(&native).args([
+        "search",
+        "one event must publish",
+        "--provider",
+        "openhands",
+        "--refresh",
+        "off",
+        "--format=json",
+    ]));
+    assert_eq!(native_search["retrieval"]["index"], "source_backed");
+    assert_eq!(
+        native_search["retrieval"]["generation_id"],
+        native_generation
+    );
+    assert_eq!(native_search["results"].as_array().unwrap().len(), 1);
 
     let explicit = tempdir();
+    let _explicit_daemon = start_full_source_refresh_daemon(&explicit);
     let fixture = explicit.path().join("one-event.jsonl");
     let records = [
         json!({
@@ -277,8 +424,8 @@ fn one_event_native_and_explicit_imports_defer_full_fts_merge() {
             "event_type": "message",
             "role": "user",
             "occurred_at": "2026-07-26T12:00:01Z",
-            "payload": {"text": "explicit one event without a full merge"},
-            "preview": "explicit one event without a full merge"
+            "payload": {"text": "explicit one event in a Tantivy generation"},
+            "preview": "explicit one event in a Tantivy generation"
         }),
     ];
     fs::write(
@@ -293,41 +440,42 @@ fn one_event_native_and_explicit_imports_defer_full_fts_merge() {
     .unwrap();
     let explicit_import = json_output(ctx(&explicit).args([
         "import",
-        "--format",
+        "--input-format",
         "ctx-history-jsonl-v1",
         "--path",
         fixture.to_str().unwrap(),
+        "--no-daemon",
         "--format=json",
         "--progress",
         "none",
     ]));
-    assert_eq!(explicit_import["totals"]["imported_events"], 1);
-    assert_deferred_search_maintenance(&explicit);
-}
-
-fn assert_deferred_search_maintenance(temp: &TempDir) {
-    let connection = Connection::open(temp.path().join("work.sqlite")).unwrap();
-    let pending: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM search_projection_stats
-             WHERE key = 'event_search_maintenance_v1' AND value = 1",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let explicit_generation = published_generation(&explicit_import);
+    assert_eq!(explicit_import["sources"][0]["status"], "published");
+    assert_eq!(explicit_import["sources"][0]["catalog_changed"], true);
     assert_eq!(
-        pending, 1,
-        "bounded bulk finish must leave maintenance debt instead of running a full merge"
+        explicit_import["sources"][0]["daemon_request_metadata"]["owner"],
+        "daemon"
     );
-    let active_bulk: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM search_projection_stats
-             WHERE key LIKE 'event_search_bulk_mode_v1%'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(active_bulk, 0, "outer bulk guard must finish cleanly");
+    let explicit_status = wait_for_relational_projection(&explicit, &explicit_generation);
+    assert_eq!(explicit_status["lexical"]["indexed_documents"], 1);
+    assert_eq!(explicit_status["relational"]["event_count"], 1);
+    assert!(explicit.path().join("search/lexical/meta.json").is_file());
+    assert!(explicit.path().join("relational.sqlite").is_file());
+    let explicit_search = json_output(ctx(&explicit).args([
+        "search",
+        "explicit one event",
+        "--provider",
+        "custom",
+        "--refresh",
+        "off",
+        "--format=json",
+    ]));
+    assert_eq!(explicit_search["retrieval"]["index"], "source_backed");
+    assert_eq!(
+        explicit_search["retrieval"]["generation_id"],
+        explicit_generation
+    );
+    assert_eq!(explicit_search["results"].as_array().unwrap().len(), 1);
 }
 
 #[test]
@@ -366,63 +514,75 @@ fn import_custom_history_jsonl_format_imports_valid_rows_and_reports_rejections(
 }
 
 #[test]
-fn all_invalid_custom_import_cleans_up_and_retries_after_source_is_fixed() {
+fn all_invalid_custom_source_publishes_empty_then_refreshes_after_fix() {
     let temp = tempdir();
+    let _daemon = start_full_source_refresh_daemon(&temp);
     let fixture = temp.path().join("custom-retry.jsonl");
     let records = |event_index: &str| {
         r#"{"record_type":"manifest","schema_version":"ctx-history-jsonl-v1"}
 {"record_type":"source","source_id":"retry-source","provider_key":"retry-agent","source_format":"retry-jsonl","cursor":{"after":{"stream":"retry-agent:retry-source","cursor":"1","observed_at":"2026-07-13T12:00:00Z"}}}
-{"record_type":"session","source_id":"retry-source","session_id":"retry-session","started_at":"2026-07-13T12:00:00Z"}
-{"record_type":"event","source_id":"retry-source","session_id":"retry-session","event_index":EVENT_INDEX,"event_type":"message","role":"user","occurred_at":"2026-07-13T12:00:01Z","payload":{"text":"retry oracle"}}
+{"record_type":"session","source_id":"retry-source","session_id":"retry-session","started_at":"2026-07-13T12:00:00Z","agent_type":"primary","is_primary":true,"status":"completed"}
+{"record_type":"event","source_id":"retry-source","session_id":"retry-session","event_index":EVENT_INDEX,"event_id":"retry-event","event_type":"message","role":"user","occurred_at":"2026-07-13T12:00:01Z","payload":{"text":"retry oracle"},"preview":"retry oracle"}
 "#
         .replace("EVENT_INDEX", event_index)
     };
     fs::write(&fixture, records(r#""invalid""#)).unwrap();
 
-    let failed = ctx(&temp)
-        .args([
-            "import",
-            "--format",
-            "ctx-history-jsonl-v1",
-            "--path",
-            fixture.to_str().unwrap(),
-            "--format=json",
-            "--progress",
-            "none",
-        ])
-        .assert()
-        .failure()
-        .get_output()
-        .clone();
-    let report: Value = serde_json::from_slice(&failed.stdout).unwrap();
-    assert_eq!(report["outcome"], "failure", "{report:#}");
-    assert_eq!(report["totals"]["imported_sessions"], 0, "{report:#}");
-    assert_eq!(report["totals"]["imported_events"], 0, "{report:#}");
-    assert_eq!(report["totals"]["rejected_records"], 1, "{report:#}");
-    assert_eq!(report["totals"]["failed_sources"], 1, "{report:#}");
-    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
-    for table in ["history_records", "sessions", "events", "sync_cursors"] {
-        assert_eq!(
-            sqlite_count(&conn, &format!("SELECT COUNT(*) FROM {table}")),
-            0,
-            "unexpected rejection-only rows in {table}: {report:#}"
-        );
-    }
-    drop(conn);
+    let empty = json_output(ctx(&temp).args([
+        "import",
+        "--input-format",
+        "ctx-history-jsonl-v1",
+        "--path",
+        fixture.to_str().unwrap(),
+        "--no-daemon",
+        "--format=json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(empty["outcome"], "success", "{empty:#}");
+    assert_eq!(empty["sources"][0]["catalog_changed"], true, "{empty:#}");
+    assert_eq!(empty["sources"][0]["imported_events"], 0, "{empty:#}");
+    let empty_generation = published_generation(&empty);
+    let empty_status = wait_for_relational_projection(&temp, &empty_generation);
+    assert_eq!(
+        empty_status["lexical"]["indexed_documents"], 0,
+        "{empty_status:#}"
+    );
+    assert_eq!(
+        empty_status["relational"]["event_count"], 0,
+        "{empty_status:#}"
+    );
 
     fs::write(&fixture, records("0")).unwrap();
     let retry = json_output(ctx(&temp).args([
         "import",
-        "--format",
+        "--input-format",
         "ctx-history-jsonl-v1",
         "--path",
         fixture.to_str().unwrap(),
+        "--no-daemon",
         "--format=json",
         "--progress",
         "none",
     ]));
     assert_eq!(retry["outcome"], "success", "{retry:#}");
-    assert_eq!(retry["totals"]["imported_events"], 1, "{retry:#}");
+    assert_eq!(retry["sources"][0]["catalog_changed"], false, "{retry:#}");
+    let generation = published_generation(&retry);
+    assert_ne!(generation, empty_generation);
+    let status = wait_for_relational_projection(&temp, &generation);
+    assert_eq!(status["lexical"]["indexed_documents"], 1, "{status:#}");
+    assert_eq!(status["relational"]["event_count"], 1, "{status:#}");
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "retry oracle",
+        "--provider",
+        "custom",
+        "--refresh",
+        "off",
+        "--format=json",
+    ]));
+    assert_eq!(search["retrieval"]["generation_id"], generation);
+    assert_eq!(search["results"].as_array().unwrap().len(), 1, "{search:#}");
 }
 
 #[test]
@@ -603,16 +763,14 @@ fn failed_import_attempt_does_not_count_as_indexed_history() {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct ProviderAuthoritySnapshot {
+struct ProviderProjectionSnapshot {
+    generation: String,
     sessions: Vec<String>,
     events: Vec<String>,
-    capture_sources: Vec<String>,
-    source_routes: Vec<String>,
-    cursors: Vec<String>,
-    history_records: Vec<String>,
+    sources: Vec<String>,
 }
 
-fn authority_rows(conn: &Connection, sql: &str, selector: &str) -> Vec<String> {
+fn relational_rows(conn: &Connection, sql: &str, selector: &str) -> Vec<String> {
     conn.prepare(sql)
         .unwrap()
         .query_map(params![selector], |row| row.get::<_, String>(0))
@@ -621,83 +779,72 @@ fn authority_rows(conn: &Connection, sql: &str, selector: &str) -> Vec<String> {
         .unwrap()
 }
 
-fn provider_authority_snapshot(temp: &TempDir, provider: &str) -> ProviderAuthoritySnapshot {
-    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
-    ProviderAuthoritySnapshot {
-        sessions: authority_rows(
+fn provider_projection_snapshot(temp: &TempDir, provider: &str) -> ProviderProjectionSnapshot {
+    let status = json_output(ctx(temp).args(["status", "--format=json"]));
+    let generation = status["lexical"]["generation_id"]
+        .as_str()
+        .expect("source-backed lexical generation")
+        .to_owned();
+    let status = wait_for_relational_projection(temp, &generation);
+    assert_eq!(
+        status["relational"]["active_core_generation_id"],
+        generation
+    );
+    let relational_path = temp.path().join("relational.sqlite");
+    let conn =
+        Connection::open_with_flags(&relational_path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    ProviderProjectionSnapshot {
+        generation,
+        sessions: relational_rows(
             &conn,
-            "SELECT id || ':' || COALESCE(external_session_id, '')
-             FROM sessions WHERE provider = ?1 ORDER BY id",
+            "SELECT ctx_session_id || ':' || COALESCE(provider_session_id, '')
+             FROM ctx_sessions WHERE provider = ?1 ORDER BY ctx_session_id",
             provider,
         ),
-        events: authority_rows(
+        events: relational_rows(
             &conn,
-            "SELECT e.id || ':' || COALESCE(e.session_id, '') || ':' || e.event_type
-             FROM events e
-             JOIN sessions s ON s.id = e.session_id
-             WHERE s.provider = ?1
-             ORDER BY e.id",
+            "SELECT ctx_event_id || ':' || ctx_session_id || ':' || event_type
+             FROM ctx_events WHERE provider = ?1 ORDER BY ctx_event_id",
             provider,
         ),
-        capture_sources: authority_rows(
+        sources: relational_rows(
             &conn,
-            "SELECT id || ':' || source_format || ':' || COALESCE(external_session_id, '')
-             FROM capture_sources WHERE provider = ?1 ORDER BY id",
-            provider,
-        ),
-        source_routes: authority_rows(
-            &conn,
-            "SELECT capture_source_id || ':' || source_format || ':' || alias_group_identity
-             FROM capture_source_provider_routes
+            "SELECT source_id || ':' || source_format || ':' || content_digest_hex
+             FROM source_backed_sources
              WHERE provider = ?1
-             ORDER BY capture_source_id",
-            provider,
-        ),
-        cursors: authority_rows(
-            &conn,
-            "SELECT stream || ':' || cursor
-             FROM sync_cursors
-             WHERE stream LIKE ?1
-             ORDER BY stream",
-            &format!("provider:{provider}:%"),
-        ),
-        history_records: authority_rows(
-            &conn,
-            "SELECT DISTINCT h.id || ':' || h.kind
-             FROM history_records h
-             JOIN sessions s ON s.history_record_id = h.id
-             WHERE s.provider = ?1
-             ORDER BY h.id",
+             ORDER BY source_id",
             provider,
         ),
     }
 }
 
-fn foreground_setup(temp: &TempDir) -> Value {
-    json_output(ctx(temp).args([
-        "setup",
-        "--wait",
-        "--no-daemon",
-        "--format=json",
-        "--progress",
-        "none",
-    ]))
+fn ready_setup(temp: &TempDir) -> Value {
+    json_output(ctx(temp).args(["setup", "--wait", "--format=json", "--progress", "none"]))
 }
 
-fn setup_source_report<'a>(setup: &'a Value, provider: &str) -> &'a Value {
-    let sources = setup["import"]["sources"].as_array().unwrap();
-    assert_eq!(
-        sources
-            .iter()
-            .filter(|source| source["provider"] == provider)
-            .count(),
-        1,
-        "{provider} must appear exactly once in {setup:#}"
-    );
-    sources
-        .iter()
-        .find(|source| source["provider"] == provider)
+fn generation_manifest(temp: &TempDir, generation: &str) -> Value {
+    let path = temp
+        .path()
+        .join("search/lexical/ctx-generations")
+        .join(format!("{generation}.json"));
+    serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+}
+
+fn manifest_providers(temp: &TempDir, generation: &str) -> Vec<String> {
+    let manifest = generation_manifest(temp, generation);
+    let mut providers = manifest["sources"]
+        .as_array()
         .unwrap()
+        .iter()
+        .map(|source| {
+            source["observation"]["source"]["provider"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    providers.sort();
+    providers
 }
 
 fn assert_searchable_and_showable(temp: &TempDir, provider: &str, query: &str) -> (String, String) {
@@ -710,8 +857,17 @@ fn assert_searchable_and_showable(temp: &TempDir, provider: &str, query: &str) -
         "off",
         "--format=json",
     ]));
-    assert_search_provider_oracle(&search, provider, query, 1, "message");
+    assert_eq!(search["retrieval"]["index"], "source_backed", "{search:#}");
+    assert_eq!(search["filters"]["provider"], provider, "{search:#}");
+    assert_eq!(search["results"].as_array().unwrap().len(), 1, "{search:#}");
     let result = &search["results"][0];
+    assert_eq!(result["provider"], provider, "{result:#}");
+    assert!(
+        result["snippet"]
+            .as_str()
+            .is_some_and(|snippet| snippet.contains(query)),
+        "{result:#}"
+    );
     let event_id = result["ctx_event_id"].as_str().unwrap().to_owned();
     let session_id = result["ctx_session_id"].as_str().unwrap().to_owned();
 
@@ -719,168 +875,154 @@ fn assert_searchable_and_showable(temp: &TempDir, provider: &str, query: &str) -
         "show", "event", &event_id, "--window", "1", "--format", "json",
     ]));
     assert_eq!(shown_event["payload_type"], "event_window");
-    assert_eq!(shown_event["event"]["ctx_event_id"], event_id);
-    assert_eq!(shown_event["event"]["ctx_session_id"], session_id);
+    assert_eq!(shown_event["ctx_event_id"], event_id);
+    assert_eq!(shown_event["ctx_session_id"], session_id);
+    assert_eq!(shown_event["event"]["content"]["origin"], "provider_source");
+    assert_eq!(shown_event["event"]["content"]["source_verified"], true);
 
     let shown_session =
         json_output(ctx(temp).args(["show", "session", &session_id, "--format", "json"]));
     assert_eq!(shown_session["payload_type"], "session_transcript");
-    assert_eq!(shown_session["session"]["item_id"], session_id);
+    assert_eq!(shown_session["ctx_session_id"], session_id);
+    assert_eq!(shown_session["provider"], provider);
     (session_id, event_id)
 }
 
 #[test]
-fn cold_cutover_fresh_foreground_setup_is_canonical_searchable_and_showable() {
+fn fresh_setup_publishes_provider_sources_to_tantivy_and_relational() {
     let temp = tempdir();
     write_codex_setup_session(&temp);
-    let db_path = temp.path().join("work.sqlite");
-    assert!(!db_path.exists());
+    let _daemon = start_full_source_refresh_daemon(&temp);
 
-    let setup = foreground_setup(&temp);
+    let setup = ready_setup(&temp);
 
-    assert!(db_path.exists());
+    assert_eq!(setup["schema_version"], 2, "{setup:#}");
     assert_eq!(setup["mode"], "ready", "{setup:#}");
-    assert_eq!(setup["import"]["ran"], true, "{setup:#}");
-    assert_eq!(setup["import"]["totals"]["failed_sources"], 0, "{setup:#}");
+    assert_eq!(setup["history_epoch"]["status"], "ready", "{setup:#}");
+    assert_eq!(setup["lexical"]["status"], "ready", "{setup:#}");
+    assert_eq!(setup["refresh_request"]["status"], "published", "{setup:#}");
+    assert_eq!(setup["refresh_request"]["source_count"], 1, "{setup:#}");
+    let generation = setup["lexical"]["generation_id"].as_str().unwrap();
     assert_eq!(
-        setup["import"]["totals"]["imported_sources"], 1,
-        "{setup:#}"
+        manifest_providers(&temp, generation),
+        vec!["codex".to_owned()]
     );
-    assert_eq!(
-        setup["import"]["totals"]["imported_sessions"], 1,
-        "{setup:#}"
-    );
-    assert_eq!(
-        setup_source_report(&setup, "codex")["change"],
-        "changed",
-        "{setup:#}"
-    );
+    let status = wait_for_relational_projection(&temp, generation);
+    assert_eq!(status["relational"]["source_count"], 1, "{status:#}");
+    assert_eq!(status["relational"]["session_count"], 1, "{status:#}");
+    assert_eq!(status["relational"]["event_count"], 1, "{status:#}");
+    assert!(temp.path().join("search/lexical/meta.json").is_file());
+    assert!(temp.path().join("relational.sqlite").is_file());
 
-    let authority = provider_authority_snapshot(&temp, "codex");
-    assert_eq!(authority.sessions.len(), 1, "{authority:#?}");
-    assert_eq!(
-        authority.events.len() as u64,
-        setup["import"]["totals"]["imported_events"]
-            .as_u64()
-            .unwrap(),
-        "{authority:#?}"
-    );
-    assert_eq!(authority.capture_sources.len(), 1, "{authority:#?}");
-    assert_eq!(authority.source_routes.len(), 1, "{authority:#?}");
-    assert_eq!(authority.cursors.len(), 1, "{authority:#?}");
-    assert_eq!(authority.history_records.len(), 1, "{authority:#?}");
+    let projection = provider_projection_snapshot(&temp, "codex");
+    assert_eq!(projection.generation, generation);
+    assert_eq!(projection.sessions.len(), 1, "{projection:#?}");
+    assert_eq!(projection.events.len(), 1, "{projection:#?}");
+    assert_eq!(projection.sources.len(), 1, "{projection:#?}");
     assert_searchable_and_showable(&temp, "codex", "setup should import");
 }
 
 #[test]
-fn cold_cutover_mixed_setup_seeds_codex_once_and_imports_claude_nativepath() {
+fn mixed_setup_publishes_each_provider_once() {
     let temp = tempdir();
     write_codex_setup_session(&temp);
-    let claude_query = "mixed setup claude nativepath authority";
+    let claude_query = "mixed setup claude source authority";
     install_default_claude_fixture(&temp, claude_query);
-    assert!(!temp.path().join("work.sqlite").exists());
+    let _daemon = start_full_source_refresh_daemon(&temp);
 
-    let setup = foreground_setup(&temp);
+    let setup = ready_setup(&temp);
+    assert_eq!(setup["schema_version"], 2, "{setup:#}");
+    assert_eq!(setup["mode"], "ready", "{setup:#}");
+    assert_eq!(setup["refresh_request"]["status"], "published", "{setup:#}");
+    assert_eq!(setup["refresh_request"]["source_count"], 2, "{setup:#}");
+    let generation = setup["lexical"]["generation_id"].as_str().unwrap();
+    assert_eq!(
+        manifest_providers(&temp, generation),
+        vec!["claude".to_owned(), "codex".to_owned()]
+    );
+    let status = wait_for_relational_projection(&temp, generation);
+    assert_eq!(status["relational"]["source_count"], 2, "{status:#}");
 
-    assert_eq!(setup["import"]["totals"]["failed_sources"], 0, "{setup:#}");
-    assert_eq!(
-        setup["import"]["totals"]["imported_sources"], 2,
-        "{setup:#}"
-    );
-    assert_eq!(
-        setup["import"]["totals"]["imported_sessions"], 2,
-        "{setup:#}"
-    );
-    assert_eq!(
-        setup["import"]["sources"].as_array().unwrap().len(),
-        2,
-        "{setup:#}"
-    );
-    assert_eq!(setup_source_report(&setup, "codex")["change"], "changed");
-    assert_eq!(setup_source_report(&setup, "claude")["change"], "changed");
-
-    let codex = provider_authority_snapshot(&temp, "codex");
-    let claude = provider_authority_snapshot(&temp, "claude");
+    let codex = provider_projection_snapshot(&temp, "codex");
+    let claude = provider_projection_snapshot(&temp, "claude");
     assert_eq!(codex.sessions.len(), 1, "{codex:#?}");
     assert_eq!(claude.sessions.len(), 1, "{claude:#?}");
-    assert_eq!(codex.capture_sources.len(), 1, "{codex:#?}");
-    assert_eq!(claude.capture_sources.len(), 1, "{claude:#?}");
-    assert_eq!(codex.source_routes.len(), 1, "{codex:#?}");
-    assert_eq!(claude.source_routes.len(), 1, "{claude:#?}");
-    assert_eq!(codex.cursors.len(), 1, "{codex:#?}");
-    assert_eq!(claude.cursors.len(), 1, "{claude:#?}");
-    assert_eq!(codex.history_records.len(), 1, "{codex:#?}");
-    assert_eq!(claude.history_records.len(), 1, "{claude:#?}");
-    assert_eq!(
-        (codex.events.len() + claude.events.len()) as u64,
-        setup["import"]["totals"]["imported_events"]
-            .as_u64()
-            .unwrap(),
-        "combined report must equal committed provider authority"
-    );
+    assert_eq!(codex.sources.len(), 1, "{codex:#?}");
+    assert_eq!(claude.sources.len(), 1, "{claude:#?}");
+    assert_eq!(codex.generation, claude.generation);
+    assert_eq!(codex.generation, generation);
 
     assert_searchable_and_showable(&temp, "codex", "setup should import");
     assert_searchable_and_showable(&temp, "claude", claude_query);
 }
 
 #[test]
-fn cold_cutover_existing_store_setup_preserves_prior_provider_authority() {
+fn setup_preserves_opaque_prior_epoch_while_rebuilding_from_provider_sources() {
     let temp = tempdir();
-    let pi_query = "existing store pi authority survives setup";
+    let prior_epoch_path = temp.path().join("work.sqlite");
+    let prior_epoch_bytes = b"opaque v0.25 rollback sentinel\n";
+    fs::write(&prior_epoch_path, prior_epoch_bytes).unwrap();
+
+    let pi_query = "prior epoch pi authority rebuilt from source";
     install_default_pi_fixture(&temp, pi_query);
-    let initial = json_output(ctx(&temp).args([
-        "import",
-        "--all",
-        "--no-daemon",
-        "--format=json",
-        "--progress",
-        "none",
-    ]));
-    assert_eq!(initial["totals"]["failed_sources"], 0, "{initial:#}");
-    assert_eq!(initial["totals"]["imported_sources"], 1, "{initial:#}");
-    let pi_before = provider_authority_snapshot(&temp, "pi");
+    let _daemon = start_full_source_refresh_daemon(&temp);
+    let initial = ready_setup(&temp);
+    assert_eq!(initial["prior_epoch"]["status"], "preserved", "{initial:#}");
+    assert_eq!(initial["prior_epoch"]["opened"], false, "{initial:#}");
+    let pi_before = provider_projection_snapshot(&temp, "pi");
     let pi_ids_before = assert_searchable_and_showable(&temp, "pi", pi_query);
+    assert_eq!(fs::read(&prior_epoch_path).unwrap(), prior_epoch_bytes);
 
     write_codex_setup_session(&temp);
-    let setup = foreground_setup(&temp);
-
-    assert_eq!(setup["import"]["totals"]["failed_sources"], 0, "{setup:#}");
-    assert_eq!(setup_source_report(&setup, "codex")["change"], "changed");
-    assert_eq!(setup_source_report(&setup, "pi")["change"], "no_op");
-    assert_eq!(provider_authority_snapshot(&temp, "pi"), pi_before);
+    let setup = ready_setup(&temp);
+    let generation = setup["lexical"]["generation_id"].as_str().unwrap();
+    assert_eq!(
+        manifest_providers(&temp, generation),
+        vec!["codex".to_owned(), "pi".to_owned()]
+    );
+    let pi_after = provider_projection_snapshot(&temp, "pi");
+    assert_ne!(pi_after.generation, pi_before.generation);
+    assert_eq!(pi_after.sessions, pi_before.sessions);
+    assert_eq!(pi_after.events, pi_before.events);
+    assert_eq!(pi_after.sources, pi_before.sources);
     assert_eq!(
         assert_searchable_and_showable(&temp, "pi", pi_query),
         pi_ids_before
     );
     assert_searchable_and_showable(&temp, "codex", "setup should import");
+    assert_eq!(fs::read(&prior_epoch_path).unwrap(), prior_epoch_bytes);
+    for suffix in ["-wal", "-shm", "-journal"] {
+        assert!(
+            !PathBuf::from(format!("{}{suffix}", prior_epoch_path.display())).exists(),
+            "setup opened the opaque prior epoch and created {suffix}"
+        );
+    }
 }
 
 #[test]
-fn cold_cutover_repeated_setup_and_import_are_authority_level_noops() {
+fn repeated_setup_and_import_preserve_generation_and_source_backed_ids() {
     let temp = tempdir();
     write_codex_setup_session(&temp);
+    let _daemon = start_full_source_refresh_daemon(&temp);
 
-    let first = foreground_setup(&temp);
-    assert_eq!(setup_source_report(&first, "codex")["change"], "changed");
-    let authority = provider_authority_snapshot(&temp, "codex");
+    let first = ready_setup(&temp);
+    let first_generation = first["lexical"]["generation_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let projection = provider_projection_snapshot(&temp, "codex");
     let ids = assert_searchable_and_showable(&temp, "codex", "setup should import");
 
-    let second = foreground_setup(&temp);
-    assert_eq!(second["import"]["totals"]["change"], "no_op", "{second:#}");
+    let second = ready_setup(&temp);
     assert_eq!(
-        second["import"]["totals"]["imported_sessions"], 0,
+        second["lexical"]["generation_id"], first_generation,
         "{second:#}"
     );
     assert_eq!(
-        second["import"]["totals"]["imported_events"], 0,
+        second["refresh_request"]["published_generation"], first_generation,
         "{second:#}"
     );
-    assert_eq!(
-        setup_source_report(&second, "codex")["change"],
-        "no_op",
-        "{second:#}"
-    );
-    assert_eq!(provider_authority_snapshot(&temp, "codex"), authority);
+    assert_eq!(provider_projection_snapshot(&temp, "codex"), projection);
 
     let imported = json_output(ctx(&temp).args([
         "import",
@@ -890,13 +1032,16 @@ fn cold_cutover_repeated_setup_and_import_are_authority_level_noops() {
         "--progress",
         "none",
     ]));
-    assert_eq!(imported["totals"]["change"], "no_op", "{imported:#}");
-    assert_eq!(imported["totals"]["imported_sessions"], 0, "{imported:#}");
-    assert_eq!(imported["totals"]["imported_events"], 0, "{imported:#}");
     assert_eq!(imported["sources"].as_array().unwrap().len(), 1);
-    assert_eq!(imported["sources"][0]["provider"], "codex");
-    assert_eq!(imported["sources"][0]["change"], "no_op");
-    assert_eq!(provider_authority_snapshot(&temp, "codex"), authority);
+    assert_eq!(
+        imported["sources"][0]["source_format"],
+        "provider_authoritative_all"
+    );
+    assert_eq!(
+        imported["sources"][0]["published_generation"],
+        first_generation
+    );
+    assert_eq!(provider_projection_snapshot(&temp, "codex"), projection);
     assert_eq!(
         assert_searchable_and_showable(&temp, "codex", "setup should import"),
         ids

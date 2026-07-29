@@ -149,7 +149,7 @@ fn import_rejects_nonexistent_explicit_format_path() {
 }
 
 #[test]
-fn import_path_requires_provider_before_opening_store() {
+fn import_path_requires_provider_before_initializing_source_epoch() {
     let temp = tempdir();
     let path = temp.path().join("missing-codex-history");
     let path = path.to_str().unwrap();
@@ -162,8 +162,16 @@ fn import_path_requires_provider_before_opening_store() {
             "ctx import --path requires --provider",
         ));
     assert!(
-        !temp.path().join("work.sqlite").exists(),
-        "native path import without provider should fail before opening the store"
+        !temp.path().join("search").exists(),
+        "native path import without provider should not initialize lexical state"
+    );
+    assert!(
+        !temp.path().join("relational.sqlite").exists(),
+        "native path import without provider should not initialize relational state"
+    );
+    assert!(
+        !temp.path().join("catalogs").exists(),
+        "native path import without provider should not initialize source catalogs"
     );
 }
 
