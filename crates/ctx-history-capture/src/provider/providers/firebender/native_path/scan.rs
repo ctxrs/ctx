@@ -1,14 +1,16 @@
+use rusqlite::{params, OptionalExtension};
+
+use crate::provider::sqlite::SqliteLengthPreflightGuard;
+
 use super::*;
 
 pub(super) fn build_page(
     conn: &Connection,
     expected: &FirebenderFrontier,
-    output_lane: bool,
 ) -> Result<FirebenderPage> {
     expected.validate()?;
     if expected.terminal {
         return Ok(FirebenderPage {
-            expected: expected.clone(),
             next: expected.clone(),
             row: None,
             message_start: 0,
@@ -21,7 +23,6 @@ pub(super) fn build_page(
         let mut next = expected.clone();
         next.terminal = true;
         return Ok(FirebenderPage {
-            expected: expected.clone(),
             next,
             row: None,
             message_start: 0,
@@ -47,7 +48,6 @@ pub(super) fn build_page(
             &oversize_authority,
         )?;
         return Ok(FirebenderPage {
-            expected: expected.clone(),
             next,
             row: None,
             message_start: 0,
@@ -103,29 +103,25 @@ pub(super) fn build_page(
     } else {
         if expected.rowid != candidate.rowid || expected.updated_at != candidate.updated_at {
             return Err(CaptureError::InvalidPayload(
-                "Firebender NativePath cursor no longer addresses its active row".to_owned(),
+                "Firebender source-backed frontier no longer addresses its active row".to_owned(),
             ));
         }
         usize::try_from(expected.next_message_index).map_err(|_| {
             CaptureError::InvalidPayload(
-                "Firebender NativePath message cursor exceeds platform limits".to_owned(),
+                "Firebender source-backed message frontier exceeds platform limits".to_owned(),
             )
         })?
     };
     if start > messages.len() {
         return Err(CaptureError::InvalidPayload(
-            "Firebender NativePath message cursor exceeds its source row".to_owned(),
+            "Firebender source-backed message frontier exceeds its source row".to_owned(),
         ));
     }
-    let page_messages = if output_lane {
-        FIREBENDER_MAX_OUTPUTS_PER_PAGE
-    } else {
-        FIREBENDER_MAX_MESSAGES_PER_CORE_PAGE
-    };
-    let end = start.saturating_add(page_messages).min(messages.len());
+    let end = start
+        .saturating_add(FIREBENDER_SOURCE_BACKED_PAGE_MAX_MESSAGES)
+        .min(messages.len());
     let row = FirebenderRow {
         rowid: candidate.rowid,
-        row_ordinal: expected.row_ordinal,
         id,
         name,
         created_at,
@@ -146,7 +142,6 @@ pub(super) fn build_page(
         active_row_frontier(expected, &row, end)?
     };
     Ok(FirebenderPage {
-        expected: expected.clone(),
         next,
         row: Some(row),
         message_start: start,
@@ -276,68 +271,4 @@ fn hash_processed_messages(hasher: &mut Sha256, row: &FirebenderRow, prior_index
             hasher.update(bytes);
         }
     }
-}
-
-pub(super) fn decode_core_cursor_for_migration(
-    stored: Option<&SyncCursor>,
-) -> Result<Option<FirebenderNativeCursor>> {
-    let Some(stored) = stored else {
-        return Ok(None);
-    };
-    match decode_native_path_committed_cursor(&stored.cursor) {
-        Ok(committed) => FirebenderNativeCursor::decode(committed.provider_cursor()).map(Some),
-        Err(_) => {
-            // Released pre-NativePath cursors are decoded only to distinguish a
-            // valid migration reset from corrupt JSON. Their position is never
-            // used as NativePath authority.
-            match CertifiedProviderCursor::decode_if_certified(&stored.cursor)? {
-                Some(_) | None => Ok(None),
-            }
-        }
-    }
-}
-
-pub(super) fn next_generation(
-    prior: Option<&FirebenderNativeCursor>,
-    route_identity: &str,
-    source_revision: &str,
-) -> Result<u64> {
-    let Some(prior) = prior else {
-        return Ok(0);
-    };
-    if prior.route_identity == route_identity && prior.source_revision == source_revision {
-        return Ok(prior.generation);
-    }
-    prior
-        .generation
-        .checked_add(1)
-        .ok_or(CaptureError::InvalidPayload(
-            "Firebender NativePath generation is exhausted".to_owned(),
-        ))
-}
-
-pub(super) fn require_complete_matching_core(
-    store: &Store,
-    authority: &FirebenderSourceAuthority,
-    context: &ProviderAdapterContext,
-) -> Result<()> {
-    let stored = store
-        .get_sync_cursor(None, &context.machine_id, &authority.cursor_stream)?
-        .ok_or_else(|| {
-            CaptureError::InvalidPayload(
-                "Firebender Pro replay requires committed NativePath Core".to_owned(),
-            )
-        })?;
-    let committed = decode_native_path_committed_cursor(&stored.cursor)?;
-    let cursor = FirebenderNativeCursor::decode(committed.provider_cursor())?;
-    if cursor.route_identity != authority.route_identity
-        || cursor.source_revision != authority.source_revision
-        || cursor.schema_fingerprint != authority.schema_fingerprint
-        || !(cursor.scan_terminal || cursor.frontier.terminal)
-    {
-        return Err(CaptureError::InvalidPayload(
-            "Firebender Pro replay source no longer matches committed Core authority".to_owned(),
-        ));
-    }
-    Ok(())
 }

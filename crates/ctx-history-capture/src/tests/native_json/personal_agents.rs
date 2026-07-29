@@ -13,12 +13,12 @@ use crate::{
     provider_source_for_path, AuggieImportOptions, FirebenderSqliteImportOptions,
     LingmaSqliteImportOptions, OpenClawImportOptions, ProviderImportSupport, ProviderSourceStatus,
     RovoDevImportOptions, TraeImportOptions, AUGGIE_SESSION_JSON_SOURCE_FORMAT,
-    FIREBENDER_SQLITE_SOURCE_FORMAT, LINGMA_SQLITE_SOURCE_FORMAT,
+    LINGMA_SQLITE_SOURCE_FORMAT,
 };
 use chrono::{DateTime, Utc};
 use ctx_history_core::{CaptureProvider, EventRole, EventType, Fidelity};
 use ctx_history_store::Store;
-use serde_json::{json, Value};
+use serde_json::json;
 use std::fs;
 
 #[test]
@@ -610,58 +610,12 @@ fn native_rovodev_non_array_message_history_rejects_no_real_message() {
 }
 
 #[test]
-fn native_firebender_fixture_imports_project_root_db_and_reimports() {
+fn native_firebender_store_import_rejects_after_source_backed_cutover() {
     let temp = tempdir();
-    let source_project = provider_history_fixture("firebender/v1");
     let project_root = temp.path().join("firebender-project");
-    let fixture = project_root
-        .join(".idea")
-        .join("firebender")
-        .join("chat_history.db");
-    fs::create_dir_all(fixture.parent().unwrap()).unwrap();
-    fs::copy(
-        source_project
-            .join(".idea")
-            .join("firebender")
-            .join("chat_history.db"),
-        &fixture,
-    )
-    .unwrap();
-    {
-        let conn = rusqlite::Connection::open(&fixture).unwrap();
-        let messages_json: String = conn
-            .query_row(
-                "select messages_json from chat_sessions where id = 'firebender-fixture-session'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let mut messages: Vec<Value> = serde_json::from_str(&messages_json).unwrap();
-        messages.push(json!({
-            "id": "firebender-tool-result",
-            "role": "tool",
-            "tool_call_id": "call-firebender-1",
-            "content": {
-                "type": "text",
-                "text": "FIREBENDER_RAW_TOOL_OUTPUT_SHOULD_NOT_SEARCH"
-            }
-        }));
-        conn.execute(
-            "update chat_sessions set messages_json = ?1 where id = 'firebender-fixture-session'",
-            [serde_json::to_string(&messages).unwrap()],
-        )
-        .unwrap();
-    }
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
 
-    let root_source = provider_source_for_path(CaptureProvider::Firebender, project_root.clone());
-    assert_eq!(root_source.source_format, FIREBENDER_SQLITE_SOURCE_FORMAT);
-    assert_eq!(root_source.status, ProviderSourceStatus::Available);
-    let db_source = provider_source_for_path(CaptureProvider::Firebender, fixture.clone());
-    assert_eq!(db_source.source_format, FIREBENDER_SQLITE_SOURCE_FORMAT);
-    assert_eq!(db_source.status, ProviderSourceStatus::Available);
-
-    let first = import_firebender_sqlite(
+    let error = import_firebender_sqlite(
         &project_root,
         &mut store,
         FirebenderSqliteImportOptions {
@@ -673,65 +627,14 @@ fn native_firebender_fixture_imports_project_root_db_and_reimports() {
             ..FirebenderSqliteImportOptions::default()
         },
     )
-    .unwrap();
+    .unwrap_err();
 
-    assert_eq!(first.failed, 0, "{:?}", first.failures);
-    assert_eq!(first.imported_sessions, 1);
-    assert_eq!(first.imported_events, 3);
-    let session_id = stored_provider_session_id(
-        &store,
-        CaptureProvider::Firebender,
-        "firebender-fixture-session",
-    );
-    let events = store.events_for_session(session_id).unwrap();
-    assert_eq!(events.len(), 3);
-    assert!(events
-        .iter()
-        .any(|event| event.role == Some(EventRole::User)));
-    assert!(events
-        .iter()
-        .any(|event| event.role == Some(EventRole::Assistant)));
-    assert_event_type_count(&events, EventType::ToolCall, 1);
-    assert_event_type_count(&events, EventType::ToolOutput, 0);
-    assert_events_have_provider_citations(&store, &events);
-    let rendered = serde_json::to_string(&events).unwrap();
-    assert!(rendered.contains("firebender fixture oracle prompt"));
-    assert!(rendered.contains("Firebender fixture oracle response"));
-    assert!(!rendered.contains("FIREBENDER_RAW_TOOL_OUTPUT_SHOULD_NOT_SEARCH"));
-    assert!(store
-        .search_event_hits("firebender fixture oracle", 10)
-        .unwrap()
-        .iter()
-        .any(|hit| hit.provider == Some(CaptureProvider::Firebender)));
-    assert_search_misses(&store, "FIREBENDER_RAW_TOOL_OUTPUT_SHOULD_NOT_SEARCH");
-    assert!(store.runs_for_session(session_id).unwrap().is_empty());
-
-    let source = store
-        .capture_source_by_external_session(
-            CaptureProvider::Firebender,
-            "firebender-fixture-session",
-        )
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        source.sync.metadata["source_metadata"]["storage"].as_str(),
-        Some(".idea/firebender/chat_history.db")
-    );
-
-    let second = import_firebender_sqlite(
-        &fixture,
-        &mut store,
-        FirebenderSqliteImportOptions {
-            source_path: Some(fixture.clone()),
-            ..FirebenderSqliteImportOptions::default()
-        },
-    )
-    .unwrap();
-    assert_eq!(second.failed, 0, "{:?}", second.failures);
-    assert_eq!(second.imported_sessions, 0);
-    assert_eq!(second.imported_events, 0);
-    assert_eq!(second.skipped_sessions, 1);
-    assert_eq!(second.skipped_events, 3);
+    assert!(matches!(
+        error,
+        crate::CaptureError::UnsupportedSchema(reason)
+            if reason == "Firebender Store ingestion was removed; use source-backed ingestion"
+    ));
+    assert!(store.list_sessions().unwrap().is_empty());
 }
 #[test]
 fn provider_sources_discovers_auggie_default_sessions() {
