@@ -1164,10 +1164,19 @@ mod tests {
         assert_eq!(failed.status["core_generation_id"], appended_generation);
         assert_eq!(failed.status["projection_status"], "behind");
 
-        let prior = SqlCompatibility::open_for_data_root(temp.path())
-            .unwrap()
-            .metadata()
-            .unwrap();
+        let compatibility_error = SqlCompatibility::open_for_data_root(temp.path())
+            .err()
+            .expect("SQL compatibility must fail closed while projection is behind");
+        assert!(
+            compatibility_error
+                .to_string()
+                .contains("wait for daemon catch-up"),
+            "{compatibility_error}"
+        );
+        let prior_projection =
+            SourceBackedRelationalProjection::open_read_only(sql_compatibility_path(temp.path()))
+                .unwrap();
+        let prior = prior_projection.metadata().unwrap();
         assert_eq!(
             prior.active_core_generation_id.as_deref(),
             Some(first_generation.as_str())
@@ -1177,9 +1186,6 @@ mod tests {
             Some(appended_generation.clone())
         );
         assert_eq!(prior.status, RelationalProjectionStatus::Behind);
-        let prior_projection =
-            SourceBackedRelationalProjection::open_read_only(sql_compatibility_path(temp.path()))
-                .unwrap();
         assert_eq!(
             prior_projection
                 .raw_sql_query("SELECT COUNT(*) FROM ctx_events", RawSqlOptions::default())
