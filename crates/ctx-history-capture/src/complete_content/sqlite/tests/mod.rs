@@ -113,16 +113,17 @@ fn collect_opencode_documents(
     documents
 }
 
-fn sqlite_persistent_bytes(path: &Path) -> Vec<(PathBuf, Vec<u8>)> {
-    ["", "-wal"]
-        .into_iter()
-        .filter_map(|suffix| {
-            let mut component = path.as_os_str().to_os_string();
-            component.push(suffix);
-            let component = PathBuf::from(component);
-            fs::read(&component).ok().map(|bytes| (component, bytes))
+fn sqlite_provider_directory_bytes(path: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let parent = path.parent().unwrap();
+    let mut files: Vec<_> = fs::read_dir(parent)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            (entry.path(), fs::read(entry.path()).unwrap())
         })
-        .collect()
+        .collect();
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    files
 }
 
 fn create_astrbot_database(path: &Path, session: &str, body: &str) {

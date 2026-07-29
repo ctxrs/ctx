@@ -287,9 +287,8 @@ impl RootAuthorizedProviderSqliteSnapshot {
         snapshot
             .revalidate()
             .map_err(map_sqlite_source_access_error)?;
-        // The first stock WAL read may create empty WAL/SHM sidecars. The
-        // SQLite snapshot retains the admission authority and fences that
-        // transition; baseline the outer route only after it completes.
+        // Retain a second route authority around the already-open snapshot so
+        // ancestor replacement is fenced independently from DB-family checks.
         let authority_root = ProviderSourceRoot::open(parent_path)?;
         Ok(Self {
             snapshot: Some(snapshot),
@@ -305,6 +304,15 @@ impl RootAuthorizedProviderSqliteSnapshot {
             ))?
             .connection()
             .map_err(map_sqlite_source_access_error)
+    }
+
+    fn evidence(&self) -> Result<&SqliteSourceEvidence> {
+        self.snapshot
+            .as_ref()
+            .ok_or(CaptureError::SystemInvariant(
+                "provider SQLite source snapshot is inactive",
+            ))
+            .map(SqliteSourceReadSnapshot::evidence)
     }
 
     fn finish(mut self) -> Result<SqliteSourceEvidence> {
@@ -367,6 +375,15 @@ impl ReadOnlySqliteConnection {
             .connection()
     }
 
+    pub(crate) fn evidence(&self) -> Result<&SqliteSourceEvidence> {
+        self.snapshot
+            .as_ref()
+            .ok_or(CaptureError::SystemInvariant(
+                "provider SQLite source snapshot is inactive",
+            ))?
+            .evidence()
+    }
+
     #[allow(
         dead_code,
         reason = "named provider adapters adopt explicit finish in their separately owned migrations"
@@ -426,7 +443,7 @@ fn inactive_readonly_sqlite_connection() -> ! {
     std::process::abort()
 }
 
-fn map_sqlite_source_access_error(error: SqliteSourceAccessError) -> CaptureError {
+pub(crate) fn map_sqlite_source_access_error(error: SqliteSourceAccessError) -> CaptureError {
     match error {
         SqliteSourceAccessError::Io { source, .. } => CaptureError::Io(source),
         SqliteSourceAccessError::Sqlite { source, .. } => CaptureError::Sqlite(source),
@@ -461,6 +478,8 @@ pub(crate) fn sqlite_schema_fingerprint(conn: &Connection) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::BTreeMap,
+        ffi::OsString,
         fs,
         panic::{catch_unwind, AssertUnwindSafe},
         path::Path,
@@ -478,6 +497,16 @@ mod tests {
     use crate::Result;
 
     const TEST_LENGTH_LIMIT: i32 = 16 * 1024;
+
+    fn directory_file_bytes(path: &Path) -> BTreeMap<OsString, Vec<u8>> {
+        fs::read_dir(path)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (entry.file_name(), fs::read(entry.path()).unwrap())
+            })
+            .collect()
+    }
 
     fn connection_with_test_length_limit() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -646,12 +675,14 @@ mod tests {
             !database.with_file_name("provider.sqlite-wal").exists(),
             "the idle writer must not have materialized a WAL pathname"
         );
+        let before = directory_file_bytes(temp.path());
 
         let (body, evidence) = read_provider_body_with_finish(&database, || {}).unwrap();
 
         assert_eq!(body, "idle-wal");
-        assert_eq!(evidence.wal_length(), Some(0));
-        assert!(evidence.shared_memory_length().is_some());
+        assert_eq!(evidence.wal_length(), None);
+        assert_eq!(evidence.shared_memory_length(), None);
+        assert_eq!(directory_file_bytes(temp.path()), before);
         drop(writer);
     }
 
@@ -660,9 +691,12 @@ mod tests {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let database = temp.path().join("provider.sqlite");
         let wal = temp.path().join("provider.sqlite-wal");
+        let shared_memory = temp.path().join("provider.sqlite-shm");
         create_persistent_wal(&database);
         let before_database = fs::read(&database).unwrap();
         let before_wal = fs::read(&wal).unwrap();
+        let before_shared_memory = fs::read(&shared_memory).unwrap();
+        let before_directory = directory_file_bytes(temp.path());
 
         let source_snapshot = ProviderSqliteSourceSnapshot::read(
             &database,
@@ -678,6 +712,8 @@ mod tests {
         assert!(evidence.shared_memory_length().is_some());
         assert_eq!(fs::read(&database).unwrap(), before_database);
         assert_eq!(fs::read(&wal).unwrap(), before_wal);
+        assert_eq!(fs::read(&shared_memory).unwrap(), before_shared_memory);
+        assert_eq!(directory_file_bytes(temp.path()), before_directory);
     }
 
     #[cfg(target_os = "linux")]

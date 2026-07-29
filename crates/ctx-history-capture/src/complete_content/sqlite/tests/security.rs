@@ -1,6 +1,30 @@
 use super::*;
 
 #[test]
+fn sidecar_free_scan_and_hydration_leave_missing_sidecars_and_directory_unchanged() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let path = temp.path().join("sidecar-free.sqlite");
+    let body = long_body("sidecar-free immutable body");
+    create_opencode_session_message_database(&path, &[&body]);
+    let before = sqlite_provider_directory_bytes(&path);
+    assert!(!path.with_file_name("sidecar-free.sqlite-wal").exists());
+    assert!(!path.with_file_name("sidecar-free.sqlite-shm").exists());
+
+    let registration = opencode::opencode_source_backed_registration();
+    let documents = collect_opencode_documents(registration, &path);
+    assert_eq!(documents[0].body, body);
+    let hydrated = registration
+        .exact_resolver(&path)
+        .hydrate_event(&event_request(&documents[0]))
+        .unwrap();
+
+    assert_eq!(hydrated.provider_bytes, body.as_bytes());
+    assert!(!path.with_file_name("sidecar-free.sqlite-wal").exists());
+    assert!(!path.with_file_name("sidecar-free.sqlite-shm").exists());
+    assert_eq!(sqlite_provider_directory_bytes(&path), before);
+}
+
+#[test]
 fn active_wal_scan_and_hydration_are_read_only_and_recover_committed_content() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let path = temp.path().join("active-wal.sqlite");
@@ -21,7 +45,7 @@ fn active_wal_scan_and_hydration_are_read_only_and_recover_committed_content() {
             [json!({"role": "user", "text": body}).to_string()],
         )
         .unwrap();
-    let before = sqlite_persistent_bytes(&path);
+    let before = sqlite_provider_directory_bytes(&path);
     assert!(before
         .iter()
         .any(|(path, _)| path.to_string_lossy().ends_with("-wal")));
@@ -34,7 +58,7 @@ fn active_wal_scan_and_hydration_are_read_only_and_recover_committed_content() {
         .hydrate_event(&event_request(&documents[0]))
         .unwrap();
     assert_eq!(hydrated.provider_bytes, body.as_bytes());
-    assert_eq!(sqlite_persistent_bytes(&path), before);
+    assert_eq!(sqlite_provider_directory_bytes(&path), before);
     drop(writer);
 }
 

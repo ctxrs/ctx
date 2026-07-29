@@ -6,6 +6,7 @@
 
 use std::{
     fmt, fs, io,
+    ops::Deref,
     path::{Component, Path, PathBuf},
     sync::Arc,
 };
@@ -13,7 +14,8 @@ use std::{
 #[cfg(not(target_os = "windows"))]
 use std::fs::File;
 
-use ctx_history_core::CaptureProvider;
+use ctx_history_core::{default_data_root, CaptureProvider};
+use rusqlite::Connection;
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -25,7 +27,12 @@ use crate::{
     native_source::NativeLocator,
     provider::{
         providers::nanoclaw,
-        sqlite::{open_provider_sqlite_readonly, ReadOnlySqliteConnection},
+        sqlite::{
+            map_sqlite_source_access_error, open_provider_sqlite_readonly, ReadOnlySqliteConnection,
+        },
+    },
+    provider_sources::{
+        open_ctx_owned_sqlite_read_snapshot, CtxOwnedSqliteReadSnapshot, SqliteSourceEvidence,
     },
     CaptureError, NANOCLAW_SOURCE_FORMAT,
 };
@@ -356,15 +363,28 @@ impl BrokeredSourceAccess {
     pub(crate) fn open_sqlite_snapshot(
         &self,
         event_id: Uuid,
-    ) -> Result<ReadOnlySqliteConnection, CompleteContentError> {
+    ) -> Result<BrokeredSqliteReadSnapshot, CompleteContentError> {
         let BrokeredSource::Sqlite(source) = self.inner.as_ref() else {
             return Err(CompleteContentError::new(
                 CompleteContentErrorKind::HydrationUnsupported,
                 event_id,
             ));
         };
-        open_provider_sqlite_readonly(&source.path)
-            .map_err(|cause| map_capture_error(event_id, cause))
+        source.open(event_id)
+    }
+
+    pub(crate) fn finish_sqlite_snapshot(
+        &self,
+        snapshot: BrokeredSqliteReadSnapshot,
+        event_id: Uuid,
+    ) -> Result<(), CompleteContentError> {
+        let BrokeredSource::Sqlite(_) = self.inner.as_ref() else {
+            return Err(CompleteContentError::new(
+                CompleteContentErrorKind::HydrationUnsupported,
+                event_id,
+            ));
+        };
+        snapshot.finish(event_id)
     }
 
     pub(crate) fn open_nanoclaw_project(
@@ -427,9 +447,90 @@ enum BrokeredSource {
     Fixture,
 }
 
-struct BrokeredSqliteSource {
-    _dir: TempDir,
-    path: PathBuf,
+enum BrokeredSqliteSource {
+    Provider {
+        path: PathBuf,
+        evidence: SqliteSourceEvidence,
+    },
+    CtxOwned {
+        _dir: TempDir,
+        path: PathBuf,
+    },
+}
+
+pub(crate) enum BrokeredSqliteReadSnapshot {
+    Provider {
+        connection: Box<ReadOnlySqliteConnection>,
+        expected: SqliteSourceEvidence,
+    },
+    CtxOwned(CtxOwnedSqliteReadSnapshot),
+}
+
+impl BrokeredSqliteSource {
+    fn open(&self, event_id: Uuid) -> Result<BrokeredSqliteReadSnapshot, CompleteContentError> {
+        match self {
+            Self::Provider { path, evidence } => {
+                let connection = open_provider_sqlite_readonly(path)
+                    .map_err(|cause| map_capture_error(event_id, cause))?;
+                if connection
+                    .evidence()
+                    .map_err(|cause| map_capture_error(event_id, cause))?
+                    != evidence
+                {
+                    return Err(CompleteContentError::new(
+                        CompleteContentErrorKind::SourceChanged,
+                        event_id,
+                    ));
+                }
+                Ok(BrokeredSqliteReadSnapshot::Provider {
+                    connection: Box::new(connection),
+                    expected: evidence.clone(),
+                })
+            }
+            Self::CtxOwned { path, .. } => open_ctx_owned_sqlite_read_snapshot(path)
+                .map(BrokeredSqliteReadSnapshot::CtxOwned)
+                .map_err(map_sqlite_source_access_error)
+                .map_err(|cause| map_capture_error(event_id, cause)),
+        }
+    }
+}
+
+impl BrokeredSqliteReadSnapshot {
+    fn finish(self, event_id: Uuid) -> Result<(), CompleteContentError> {
+        match self {
+            Self::Provider {
+                connection,
+                expected,
+            } => {
+                let evidence = (*connection)
+                    .finish()
+                    .map_err(|cause| map_capture_error(event_id, cause))?;
+                if evidence == expected {
+                    Ok(())
+                } else {
+                    Err(CompleteContentError::new(
+                        CompleteContentErrorKind::SourceChanged,
+                        event_id,
+                    ))
+                }
+            }
+            Self::CtxOwned(snapshot) => snapshot
+                .finish()
+                .map_err(map_sqlite_source_access_error)
+                .map_err(|cause| map_capture_error(event_id, cause)),
+        }
+    }
+}
+
+impl Deref for BrokeredSqliteReadSnapshot {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Provider { connection, .. } => connection,
+            Self::CtxOwned(snapshot) => snapshot,
+        }
+    }
 }
 
 struct BrokeredNanoClawSource(nanoclaw_snapshot::BrokeredNanoClawSnapshot);
@@ -507,6 +608,17 @@ fn admit_nanoclaw(
         .map(BrokeredNanoClawSource)
 }
 
+fn ctx_sqlite_snapshot_tempdir(event_id: Uuid) -> Result<TempDir, CompleteContentError> {
+    let data_root = default_data_root().map_err(|_| {
+        CompleteContentError::new(CompleteContentErrorKind::SourceUnreadable, event_id)
+    })?;
+    fs::create_dir_all(&data_root).map_err(|cause| map_io_error(event_id, cause))?;
+    tempfile::Builder::new()
+        .prefix("complete-content-sqlite-")
+        .tempdir_in(&data_root)
+        .map_err(|cause| map_io_error(event_id, cause))
+}
+
 #[cfg(not(any(unix, target_os = "windows")))]
 fn admit_platform(
     _route: AuthorizedSourceRoute,
@@ -569,13 +681,67 @@ fn admit_sqlite(
         }
     }
     validate_observed_snapshot_reservation(reserved_snapshot_bytes, snapshot_bytes, event_id)?;
-    let dir = tempfile::Builder::new()
-        .prefix("ctx-complete-content-sqlite-")
-        .tempdir()
-        .map_err(|cause| map_io_error(event_id, cause))?;
+    if sidecars
+        .iter()
+        .any(|(suffix, _, _, _)| *suffix == "-journal")
+    {
+        return Err(CompleteContentError::new(
+            CompleteContentErrorKind::SourceUnreadable,
+            event_id,
+        ));
+    }
+    if sidecars.is_empty() {
+        if !revalidate_opened_file(selected_path, &main, &main_frozen) {
+            return Err(CompleteContentError::new(
+                CompleteContentErrorKind::SourceChanged,
+                event_id,
+            ));
+        }
+        for suffix in ["-wal", "-shm", "-journal"] {
+            match open_brokered_file(&sqlite_sidecar_path(selected_path, suffix)) {
+                Err(cause) if cause.kind() == io::ErrorKind::NotFound => {}
+                Ok(_) => {
+                    return Err(CompleteContentError::new(
+                        CompleteContentErrorKind::SourceChanged,
+                        event_id,
+                    ));
+                }
+                Err(cause) => return Err(map_io_error(event_id, cause)),
+            }
+        }
+        let evidence = open_provider_sqlite_readonly(selected_path)
+            .and_then(ReadOnlySqliteConnection::finish)
+            .map_err(|cause| map_capture_error(event_id, cause))?;
+        if !revalidate_opened_file(selected_path, &main, &main_frozen) {
+            return Err(CompleteContentError::new(
+                CompleteContentErrorKind::SourceChanged,
+                event_id,
+            ));
+        }
+        for suffix in ["-wal", "-shm", "-journal"] {
+            match open_brokered_file(&sqlite_sidecar_path(selected_path, suffix)) {
+                Err(cause) if cause.kind() == io::ErrorKind::NotFound => {}
+                Ok(_) => {
+                    return Err(CompleteContentError::new(
+                        CompleteContentErrorKind::SourceChanged,
+                        event_id,
+                    ));
+                }
+                Err(cause) => return Err(map_io_error(event_id, cause)),
+            }
+        }
+        return Ok(BrokeredSqliteSource::Provider {
+            path: selected_path.to_path_buf(),
+            evidence,
+        });
+    }
+    let dir = ctx_sqlite_snapshot_tempdir(event_id)?;
     let path = dir.path().join("source.sqlite");
     copy_bounded_handle(&main, &path, main_frozen.length, event_id)?;
     for (suffix, _, file, frozen) in &sidecars {
+        if *suffix == "-shm" {
+            continue;
+        }
         copy_bounded_handle(
             file,
             &sqlite_sidecar_path(&path, suffix),
@@ -622,11 +788,12 @@ fn admit_sqlite(
         }
     }
     // Opening now proves that the copied DB/WAL set is coherent. Resolvers open
-    // their own bounded read-only connection against the same immutable snapshot.
-    open_provider_sqlite_readonly(&path)
-        .and_then(ReadOnlySqliteConnection::finish)
+    // their own bounded read-only connection against the same ctx-owned snapshot.
+    open_ctx_owned_sqlite_read_snapshot(&path)
+        .and_then(CtxOwnedSqliteReadSnapshot::finish)
+        .map_err(map_sqlite_source_access_error)
         .map_err(|cause| map_capture_error(event_id, cause))?;
-    Ok(BrokeredSqliteSource { _dir: dir, path })
+    Ok(BrokeredSqliteSource::CtxOwned { _dir: dir, path })
 }
 
 #[cfg(target_os = "windows")]
@@ -661,11 +828,51 @@ fn admit_sqlite(
             })?;
     }
     validate_observed_snapshot_reservation(reserved_snapshot_bytes, snapshot_bytes, event_id)?;
+    if sidecars[2].is_some() {
+        return Err(CompleteContentError::new(
+            CompleteContentErrorKind::SourceUnreadable,
+            event_id,
+        ));
+    }
+    if sidecars.iter().all(Option::is_none) {
+        windows::verify_named_file_still_matches(
+            selected_path,
+            route.source_root.as_deref(),
+            &database.identity,
+            event_id,
+        )?;
+        for (source_path, admitted) in sidecar_paths.iter().zip(&sidecars) {
+            windows::verify_optional_named_file_still_matches(
+                source_path,
+                route.source_root.as_deref(),
+                admitted.as_ref().map(|file| &file.identity),
+                event_id,
+            )?;
+        }
+        let evidence = open_provider_sqlite_readonly(selected_path)
+            .and_then(ReadOnlySqliteConnection::finish)
+            .map_err(|cause| map_capture_error(event_id, cause))?;
+        windows::verify_named_file_still_matches(
+            selected_path,
+            route.source_root.as_deref(),
+            &database.identity,
+            event_id,
+        )?;
+        for (source_path, admitted) in sidecar_paths.iter().zip(&sidecars) {
+            windows::verify_optional_named_file_still_matches(
+                source_path,
+                route.source_root.as_deref(),
+                admitted.as_ref().map(|file| &file.identity),
+                event_id,
+            )?;
+        }
+        return Ok(BrokeredSqliteSource::Provider {
+            path: selected_path.to_path_buf(),
+            evidence,
+        });
+    }
 
-    let dir = tempfile::Builder::new()
-        .prefix("ctx-complete-content-sqlite-")
-        .tempdir()
-        .map_err(|cause| map_io_error(event_id, cause))?;
+    let dir = ctx_sqlite_snapshot_tempdir(event_id)?;
     let path = dir.path().join("source.sqlite");
     windows::copy_bounded_handle(&database, &path, database.metadata.len(), event_id)?;
     for ((suffix, admitted), _source_path) in ["-wal", "-shm", "-journal"]
@@ -673,7 +880,10 @@ fn admit_sqlite(
         .zip(sidecars.iter())
         .zip(sidecar_paths.iter())
     {
-        if let Some(admitted) = admitted {
+        if suffix != "-shm" {
+            let Some(admitted) = admitted else {
+                continue;
+            };
             let destination = sqlite_sidecar_path(&path, suffix);
             windows::copy_bounded_handle(
                 admitted,
@@ -698,10 +908,11 @@ fn admit_sqlite(
             event_id,
         )?;
     }
-    open_provider_sqlite_readonly(&path)
-        .and_then(ReadOnlySqliteConnection::finish)
+    open_ctx_owned_sqlite_read_snapshot(&path)
+        .and_then(CtxOwnedSqliteReadSnapshot::finish)
+        .map_err(map_sqlite_source_access_error)
         .map_err(|cause| map_capture_error(event_id, cause))?;
-    Ok(BrokeredSqliteSource { _dir: dir, path })
+    Ok(BrokeredSqliteSource::CtxOwned { _dir: dir, path })
 }
 
 fn selected_source_path(
