@@ -4,12 +4,16 @@ use std::{
     ops::Bound,
 };
 
-use ctx_history_core::{SourceKey, SourceRecordLocator, StableEntityId, StableEntityKind};
+use ctx_history_core::{
+    NativeRecordCoordinate, SourceKey, SourceRecordLocator, StableEntityId, StableEntityKind,
+    TypedKey,
+};
 use serde::{Deserialize, Serialize};
 use tantivy::{
     collector::{DocSetCollector, TopDocs},
     query::{
-        AllQuery, BooleanQuery, ConstScoreQuery, Occur, Query, RangeQuery, RegexQuery, TermQuery,
+        AllQuery, BooleanQuery, ConstScoreQuery, EmptyQuery, Occur, Query, RangeQuery, RegexQuery,
+        TermQuery, TermSetQuery,
     },
     schema::{IndexRecordOption, Value as TantivyValue},
     tokenizer::TokenStream,
@@ -166,6 +170,9 @@ pub struct EventSearchFilters {
     pub parent_session_id: Option<Uuid>,
     pub root_session_id: Option<Uuid>,
     pub provider: Option<String>,
+    pub history_source: Option<String>,
+    pub provider_key: Option<String>,
+    pub source_id: Option<String>,
     pub source_format: Option<String>,
     pub provider_session_id: Option<String>,
     pub branch: Option<String>,
@@ -177,6 +184,34 @@ pub struct EventSearchFilters {
     pub agent_scope: AgentScope,
     pub file: Option<String>,
     pub exclude_session_tree: Option<ExcludedSessionTree>,
+}
+
+impl EventSearchFilters {
+    pub fn matches_source_identity(&self, event: &EventRecord) -> bool {
+        if !self.has_source_identity_filter() {
+            return true;
+        }
+        custom_source_identity(event).is_some_and(|(provider_key, source_id)| {
+            source_identity_values_match(self, provider_key, source_id)
+        })
+    }
+
+    fn has_source_identity_filter(&self) -> bool {
+        self.history_source.is_some() || self.provider_key.is_some() || self.source_id.is_some()
+    }
+
+    fn validate_source_identity_filters(&self) -> Result<()> {
+        for (field, value) in [
+            ("history_source", self.history_source.as_deref()),
+            ("provider_key", self.provider_key.as_deref()),
+            ("source_id", self.source_id.as_deref()),
+        ] {
+            if let Some(value) = value {
+                validated_filter_text(field, value)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -424,7 +459,8 @@ impl VerifiedIndex {
         fields: Fields,
     ) -> Result<Vec<EventSearchCandidate>> {
         validate_event_sort_fast_fields(&self.searcher)?;
-        let query = filtered_event_query(body_query, filters, fields)?;
+        let source_identity_query = self.source_identity_query(filters, fields)?;
+        let query = filtered_event_query(body_query, source_identity_query, filters, fields)?;
         let collector = TopDocs::with_limit(limit).tweak_score(|segment_reader| {
             // These readers were checked above. The fallbacks keep this
             // infallible collector closure panic-free if Tantivy ever changes
@@ -463,6 +499,56 @@ impl VerifiedIndex {
             })
         });
         Ok(candidates)
+    }
+
+    fn source_identity_query(
+        &self,
+        filters: &EventSearchFilters,
+        fields: Fields,
+    ) -> Result<Option<Box<dyn Query>>> {
+        if !filters.has_source_identity_filter() {
+            return Ok(None);
+        }
+        filters.validate_source_identity_filters()?;
+        let identities = self.custom_source_identity_events(fields)?;
+        let terms = identities
+            .iter()
+            .filter(|(_, provider_key, source_id)| {
+                source_identity_values_match(filters, provider_key, source_id)
+            })
+            .map(|(event_id, _, _)| Term::from_field_text(fields.event_id, &event_id.to_string()))
+            .collect::<Vec<_>>();
+        if terms.is_empty() {
+            return Ok(Some(Box::new(EmptyQuery)));
+        }
+        Ok(Some(Box::new(TermSetQuery::new(terms))))
+    }
+
+    fn custom_source_identity_events(
+        &self,
+        fields: Fields,
+    ) -> Result<&Vec<(Uuid, String, String)>> {
+        if self.custom_source_identity_events.get().is_none() {
+            let query = TermQuery::new(
+                Term::from_field_text(fields.provider, "custom"),
+                IndexRecordOption::Basic,
+            );
+            let identities = self
+                .event_records_for_query(&query, fields)?
+                .into_iter()
+                .filter_map(|event| {
+                    let event_id = event.event_id.as_uuid();
+                    custom_source_identity(&event).map(|(provider_key, source_id)| {
+                        (event_id, provider_key.to_owned(), source_id.to_owned())
+                    })
+                })
+                .collect();
+            let _ = self.custom_source_identity_events.set(identities);
+        }
+        Ok(self
+            .custom_source_identity_events
+            .get()
+            .expect("custom source identity cache was initialized"))
     }
 
     pub fn event_by_id(&self, event_id: Uuid) -> Result<Option<EventRecord>> {
@@ -993,10 +1079,14 @@ impl From<&EventRecord> for SessionRecord {
 
 fn filtered_event_query(
     body_query: Box<dyn Query>,
+    source_identity_query: Option<Box<dyn Query>>,
     filters: &EventSearchFilters,
     fields: Fields,
 ) -> Result<Box<dyn Query>> {
     let mut clauses = vec![(Occur::Must, body_query)];
+    if let Some(query) = source_identity_query {
+        add_filter_clause(&mut clauses, query);
+    }
     add_optional_text_filter(
         &mut clauses,
         fields.provider,
@@ -1099,6 +1189,51 @@ fn filtered_event_query(
         ));
     }
     Ok(Box::new(BooleanQuery::new(clauses)))
+}
+
+fn custom_source_identity(event: &EventRecord) -> Option<(&str, &str)> {
+    if event.provider != "custom" {
+        return None;
+    }
+    let NativeRecordCoordinate::Jsonl {
+        native_session_key: Some(TypedKey::Composite(values)),
+        ..
+    } = event.locator.coordinate()
+    else {
+        return None;
+    };
+    let [TypedKey::Utf8(provider_key), TypedKey::Utf8(source_id), TypedKey::Utf8(_)] =
+        values.as_slice()
+    else {
+        return None;
+    };
+    Some((provider_key, source_id))
+}
+
+fn source_identity_values_match(
+    filters: &EventSearchFilters,
+    provider_key: &str,
+    source_id: &str,
+) -> bool {
+    if filters.history_source.as_deref().is_some_and(|selector| {
+        selector
+            .trim()
+            .split_once('/')
+            .is_none_or(|(provider, source)| provider != provider_key || source != source_id)
+    }) {
+        return false;
+    }
+    if filters
+        .provider_key
+        .as_deref()
+        .is_some_and(|expected| expected.trim() != provider_key)
+    {
+        return false;
+    }
+    !filters
+        .source_id
+        .as_deref()
+        .is_some_and(|expected| expected.trim() != source_id)
 }
 
 fn add_optional_text_filter(

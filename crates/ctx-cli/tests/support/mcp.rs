@@ -7,7 +7,7 @@ use std::{
 use serde_json::Value;
 use tempfile::TempDir;
 
-use super::{copied_ctx_binary, ctx, ctx_from_binary, json_output};
+use super::{copied_ctx_binary, ctx, ctx_from_binary, custom_history_fixture, json_output};
 
 pub(crate) struct McpSourceRefreshDaemon {
     child: Option<Child>,
@@ -129,6 +129,37 @@ pub(crate) fn import_codex_fixture_through_daemon(
     assert!(
         !temp.path().join("work.sqlite").exists(),
         "MCP fixtures must publish through the source-backed daemon without a Store fallback"
+    );
+    (daemon, imported)
+}
+
+pub(crate) fn import_custom_history_fixture_source_backed(
+    temp: &TempDir,
+    fixture_name: &str,
+) -> (McpSourceRefreshDaemon, Value) {
+    let daemon = start_mcp_source_refresh_daemon(temp);
+    let source = temp.path().join(fixture_name);
+    std::fs::copy(custom_history_fixture(fixture_name), &source).unwrap();
+    let imported = json_output(ctx(temp).args([
+        "import",
+        "--input-format",
+        "ctx-history-jsonl-v1",
+        "--path",
+        source.to_str().unwrap(),
+        "--no-daemon",
+        "--format=json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(imported["outcome"], "success", "{imported:#}");
+    assert_eq!(imported["sources"][0]["provider"], "custom", "{imported:#}");
+    assert!(
+        imported["sources"][0]["published_generation"].is_string(),
+        "{imported:#}"
+    );
+    assert!(
+        !temp.path().join("work.sqlite").exists(),
+        "custom fixture import must not create previous-epoch storage"
     );
     (daemon, imported)
 }

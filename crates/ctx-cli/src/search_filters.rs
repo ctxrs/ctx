@@ -15,10 +15,10 @@ pub(crate) struct SourceIdentityFilterArgs {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SourceIdentityFilters {
-    history_source: Option<String>,
-    provider_key: Option<String>,
-    source_id: Option<String>,
-    source_format: Option<String>,
+    pub(crate) history_source: Option<String>,
+    pub(crate) provider_key: Option<String>,
+    pub(crate) source_id: Option<String>,
+    pub(crate) source_format: Option<String>,
 }
 
 impl SourceIdentityFilters {

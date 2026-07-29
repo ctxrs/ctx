@@ -1213,6 +1213,7 @@ pub struct VerifiedIndex {
     manifest: GenerationManifest,
     generation_id: String,
     semantic_eligible_event_count: OnceLock<u64>,
+    custom_source_identity_events: OnceLock<Vec<(Uuid, String, String)>>,
 }
 
 impl VerifiedIndex {
@@ -1239,6 +1240,7 @@ impl VerifiedIndex {
             manifest,
             generation_id,
             semantic_eligible_event_count: OnceLock::new(),
+            custom_source_identity_events: OnceLock::new(),
         })
     }
 
