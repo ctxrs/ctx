@@ -365,6 +365,69 @@ fn cursor_source_backed_short_message_is_searchable_and_exactly_hydratable() {
 }
 
 #[test]
+fn cursor_source_backed_all_admitted_route_shapes_index_and_complete_show_exactly() {
+    let temp = tempdir();
+    let data_dir = temp.path().join("cursor-data");
+    let projects = data_dir.join("projects");
+    let complete_text = format!(
+        "{}cursor-complete-show-tail{}",
+        "prefix-".repeat(1_024),
+        "suffix-".repeat(PROVIDER_MAX_TEXT_CHARS)
+    );
+    let transcript = write_transcript(
+        &projects,
+        "project",
+        "route-session",
+        [user(&complete_text)],
+    );
+    let session_dir = transcript.parent().unwrap().to_path_buf();
+    let agent_transcripts = session_dir.parent().unwrap().to_path_buf();
+    let project = agent_transcripts.parent().unwrap().to_path_buf();
+    let admitted_roots = [
+        data_dir,
+        projects,
+        project,
+        agent_transcripts,
+        session_dir,
+        transcript,
+    ];
+    let mut expected_event_id = None;
+    let mut expected_locator = None;
+
+    for selected_root in admitted_roots {
+        let mut sink = CollectingSink::default();
+        let summary = extract_cursor_source_backed_cold(&selected_root, &mut sink).unwrap();
+        assert_eq!(summary.discovered_sources, 1);
+        assert_eq!(summary.indexed_documents, 1);
+        let record = sink.records().next().unwrap();
+        let document = record
+            .lexical_document()
+            .expect("every admitted Cursor message must have exact indexed content");
+        assert_eq!(
+            document.body.as_str(),
+            record.verified_content_indexed_text.as_deref().unwrap()
+        );
+        assert!(
+            document.body.len() < complete_text.len(),
+            "the index must retain policy text, not a complete-body fallback"
+        );
+        assert_eq!(
+            hydrate_cursor_source_backed_message(&selected_root, record).unwrap(),
+            complete_text,
+            "complete show must reopen the exact source for every admitted route shape"
+        );
+
+        if let Some(expected) = expected_event_id {
+            assert_eq!(record.event_id, expected);
+            assert_eq!(&record.locator, expected_locator.as_ref().unwrap());
+        } else {
+            expected_event_id = Some(record.event_id);
+            expected_locator = Some(record.locator.clone());
+        }
+    }
+}
+
+#[test]
 fn cursor_source_backed_exact_locator_hydrates_and_rejects_root_or_source_mutation() {
     let temp = tempdir();
     let data_dir = temp.path().join("cursor-data");
