@@ -9,19 +9,11 @@ use serde_json::{json, Value};
 use crate::common::time::parse_rfc3339_utc;
 use crate::provider::sqlite::{
     ensure_sqlite_table_columns, sqlite_table_columns, sqlite_table_exists,
-    ProviderSqliteSourceSnapshot, SqliteLengthPreflightGuard,
+    SqliteLengthPreflightGuard,
 };
 use crate::{CaptureError, ProviderAdapterContext, Result};
 
 const DEEPAGENTS_SQLITE_VALUE_OVERHEAD_BYTES: u64 = 32 * 16;
-
-pub(super) fn deepagents_source_snapshot(path: &Path) -> Result<ProviderSqliteSourceSnapshot> {
-    ProviderSqliteSourceSnapshot::read(
-        path,
-        "Deep Agents SQLite source must be a regular non-symlink file",
-        "Deep Agents SQLite sidecar must be a regular non-symlink file",
-    )
-}
 
 #[derive(Clone, Debug)]
 pub(super) struct DeepAgentsThread {
@@ -77,12 +69,6 @@ pub(super) fn deepagents_oversize_limit() -> Result<u64> {
         .saturating_sub(256 * 1024);
     u64::try_from(bounded)
         .map_err(|_| CaptureError::SystemInvariant("Deep Agents byte limit exceeds u64"))
-}
-
-pub(super) struct DeepAgentsThreadCandidate {
-    pub(super) rowid: i64,
-    pub(super) thread_id: Option<String>,
-    pub(super) rejection_reason: Option<String>,
 }
 
 pub(super) fn with_deepagents_length_preflight<T>(
@@ -146,34 +132,6 @@ pub(super) fn deepagents_next_write_candidate_scoped(
             order by candidate.thread_id, candidate.checkpoint_id, \
                       candidate.task_id, candidate.idx limit 1",
             rusqlite::params![has_after, prior_rowid, thread_id],
-            deepagents_write_preflight_from_row,
-        )
-        .optional()
-    })?;
-    preflight
-        .map(|preflight| deepagents_candidate_from_preflight(conn, preflight))
-        .transpose()
-}
-
-pub(super) fn deepagents_write_candidate_at(
-    conn: &Connection,
-    rowid: i64,
-) -> Result<Option<DeepAgentsWriteCandidate>> {
-    let preflight = with_deepagents_length_preflight(conn, || {
-        conn.query_row(
-            "select candidate.rowid, \
-                    coalesce(octet_length(candidate.thread_id), 0), \
-                    coalesce(octet_length(candidate.checkpoint_id), 0), \
-                    coalesce(octet_length(candidate.task_id), 0), \
-                    coalesce(octet_length(candidate.type), 0), \
-                    coalesce(length(candidate.value), 0), \
-                    typeof(candidate.thread_id), typeof(candidate.checkpoint_id), \
-                    typeof(candidate.task_id), typeof(candidate.idx), typeof(candidate.type), \
-                    typeof(candidate.value) \
-             from writes as candidate \
-             where candidate.rowid = ?1 \
-               and candidate.checkpoint_ns = '' and candidate.channel = 'messages'",
-            [rowid],
             deepagents_write_preflight_from_row,
         )
         .optional()
@@ -274,82 +232,6 @@ pub(super) fn deepagents_hydrate_write(
         |row| Ok((row.get(0)?, row.get(1)?)),
     )
     .map_err(CaptureError::from)
-}
-
-pub(super) fn deepagents_next_thread_candidate(
-    conn: &Connection,
-    after_rowid: Option<i64>,
-) -> Result<Option<DeepAgentsThreadCandidate>> {
-    if let Some(rowid) = after_rowid {
-        let prior_exists = conn.query_row(
-            "select exists(select 1 from checkpoints \
-             where rowid = ?1 and checkpoint_ns = '')",
-            [rowid],
-            |row| row.get::<_, i64>(0),
-        )? != 0;
-        if !prior_exists {
-            return Err(CaptureError::SourceChangedDuringCapture);
-        }
-    }
-    let has_after = i64::from(after_rowid.is_some());
-    let prior_rowid = after_rowid.unwrap_or(0);
-    let preflight = with_deepagents_length_preflight(conn, || {
-        conn.query_row(
-            "select min(candidate.rowid), coalesce(octet_length(candidate.thread_id), 0), \
-                    typeof(candidate.thread_id) \
-             from checkpoints as candidate where candidate.checkpoint_ns = '' \
-               and (?1 = 0 or exists( \
-                   select 1 from checkpoints as prior where prior.rowid = ?2 \
-                     and candidate.thread_id > prior.thread_id \
-               )) \
-             group by candidate.thread_id order by candidate.thread_id limit 1",
-            rusqlite::params![has_after, prior_rowid],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            },
-        )
-        .optional()
-    })?;
-    let Some((rowid, thread_id_bytes, thread_id_type)) = preflight else {
-        return Ok(None);
-    };
-    let thread_id_bytes = u64::try_from(thread_id_bytes).map_err(|_| {
-        CaptureError::InvalidPayload(
-            "Deep Agents thread identifier length must be nonnegative".to_owned(),
-        )
-    })?;
-    let observed_bytes = DEEPAGENTS_SQLITE_VALUE_OVERHEAD_BYTES
-        .checked_add(thread_id_bytes)
-        .ok_or(CaptureError::SystemInvariant(
-            "Deep Agents thread retained byte count overflowed",
-        ))?;
-    let rejection_reason = if thread_id_type != "text" {
-        Some("Deep Agents thread identifier has an unsupported SQLite storage class".to_owned())
-    } else if observed_bytes > deepagents_oversize_limit()? {
-        Some(format!(
-            "Deep Agents thread identifier exceeds the bounded record limit ({observed_bytes} bytes)"
-        ))
-    } else {
-        None
-    };
-    let thread_id = if rejection_reason.is_some() {
-        None
-    } else {
-        Some(conn.query_row(
-            "select thread_id from checkpoints where rowid = ?1 and checkpoint_ns = ''",
-            [rowid],
-            |row| row.get(0),
-        )?)
-    };
-    Ok(Some(DeepAgentsThreadCandidate {
-        rowid,
-        thread_id,
-        rejection_reason,
-    }))
 }
 
 pub(super) fn deepagents_thread_summary(

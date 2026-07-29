@@ -193,14 +193,6 @@ impl KiroTables {
         }
         Ok(Self { v2, legacy })
     }
-
-    fn initial_phase(self) -> KiroPhase {
-        if self.v2 {
-            KiroPhase::V2
-        } else {
-            KiroPhase::Legacy
-        }
-    }
 }
 
 fn ensure_kiro_table_columns(

@@ -70,41 +70,6 @@ impl JunieSessionPath {
     }
 }
 
-#[cfg(test)]
-pub(super) fn junie_test_session_path(path: &Path) -> Result<JunieSessionPath> {
-    let events_path = normalized_junie_authority_path(path)?;
-    let parent =
-        events_path
-            .parent()
-            .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
-                path: events_path.clone(),
-                reason: "Junie test events path has no parent authority",
-            })?;
-    let name =
-        events_path
-            .file_name()
-            .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
-                path: events_path.clone(),
-                reason: "Junie test events path has no file name",
-            })?;
-    let authority = ProviderSourceRoot::open(parent)?;
-    let events_relative = PathBuf::from(name);
-    authority.open_file(&events_relative)?.revalidate()?;
-    let session_id = junie_session_id_from_events_path(&events_path)?;
-    Ok(JunieSessionPath {
-        events_path,
-        index_meta: JunieIndexMeta {
-            session_id,
-            ..JunieIndexMeta::default()
-        },
-        require_supported_events: true,
-        authority,
-        events_relative,
-        index_authority: None,
-        index_relative: None,
-    })
-}
-
 struct JunieIndex {
     ordered_metas: Vec<JunieIndexMeta>,
     session_ids: HashSet<String>,

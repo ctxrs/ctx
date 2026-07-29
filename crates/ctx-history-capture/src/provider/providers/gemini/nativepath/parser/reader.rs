@@ -54,12 +54,6 @@ struct ScannedGeminiRecord {
 }
 
 impl<'a> GeminiNativePageReader<'a> {
-    /// True when the selected provider checkpoint was certified and the scan
-    /// continues from it.
-    pub(crate) fn resumed_from_previous(&self) -> bool {
-        self.resumed_prefix
-    }
-
     /// Returns the next bounded page. The caller must drain through `None` to
     /// obtain the final source revalidation and scanner outcome.
     pub(crate) fn next_page(&mut self) -> GeminiScanResult<Option<GeminiNativePage>> {

@@ -21,12 +21,6 @@ pub(super) struct RawResultClassification {
     pub(super) top_level_result: bool,
 }
 
-impl RawResultClassification {
-    pub(super) fn is_result(self) -> bool {
-        self.tagged_command_output || self.result_block || self.result_like_shape
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RawRecordPreflight {
     pub(super) result: RawResultClassification,
@@ -71,11 +65,6 @@ impl RawOutputDescriptor {
         })
         .ok()?;
         Some(decoded)
-    }
-
-    pub(super) fn value(self, bytes: &[u8]) -> Option<&[u8]> {
-        let range = self.value?;
-        bytes.get(range.start..range.end)
     }
 }
 
@@ -124,10 +113,6 @@ pub(super) fn is_native_command_output_tag(value: &str) -> bool {
 
 pub(super) fn is_result_label(value: &str) -> bool {
     is_result_label_bytes(value.as_bytes())
-}
-
-pub(super) fn is_result_shape_label(value: &str) -> bool {
-    is_result_shape_label_bytes(value.as_bytes())
 }
 
 fn is_result_shape_label_bytes(value: &[u8]) -> bool {

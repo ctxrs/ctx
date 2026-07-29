@@ -1,8 +1,5 @@
-use std::path::Path;
-
 use chrono::{DateTime, Utc};
-use ctx_history_core::{EventRole, EventType, Fidelity};
-use serde::Serialize;
+use ctx_history_core::{EventRole, EventType};
 use serde_json::{json, Value};
 
 use crate::common::time::parse_rfc3339_utc;
@@ -13,56 +10,6 @@ use crate::provider::normalization::{
     provider_value_text,
 };
 use crate::{KIMI_CODE_CLI_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS};
-
-#[derive(Clone, Debug, Serialize)]
-pub(super) struct KimiCoreEvent {
-    pub(super) provider_event_index: u64,
-    pub(super) legacy_provider_event_hash: String,
-    pub(super) cursor: String,
-    pub(super) event_type: EventType,
-    pub(super) role: Option<EventRole>,
-    pub(super) occurred_at: DateTime<Utc>,
-    pub(super) fidelity: Fidelity,
-    pub(super) payload: Value,
-    pub(super) metadata: Value,
-}
-
-pub(crate) fn kimi_event(
-    line_number: usize,
-    value: &Value,
-    occurred_at: DateTime<Utc>,
-    path: &Path,
-) -> KimiCoreEvent {
-    let record_type = value
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-    let event_type = kimi_event_type(record_type, value);
-    let role = kimi_event_role(record_type, value, event_type);
-    let payload = kimi_normalized_event_payload(record_type, value, event_type);
-    KimiCoreEvent {
-        provider_event_index: (line_number - 1) as u64,
-        legacy_provider_event_hash: kimi_legacy_provider_event_hash(
-            record_type,
-            value,
-            line_number,
-        ),
-        cursor: format!("{}:line:{line_number}", path.display()),
-        event_type,
-        role: Some(role),
-        occurred_at,
-        fidelity: Fidelity::Imported,
-        payload,
-        metadata: json!({
-            "source": "kimi_code_cli_wire_jsonl",
-            "source_format": KIMI_CODE_CLI_SOURCE_FORMAT,
-            "line": line_number,
-            "record_type": record_type,
-            "model": value.get("model").cloned(),
-            "usage": value.get("usage").cloned(),
-        }),
-    }
-}
 
 pub(super) fn kimi_legacy_provider_event_hash(
     record_type: &str,

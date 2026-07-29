@@ -1,13 +1,8 @@
 use std::path::Path;
 
-use ctx_history_core::EventType;
-use serde_json::{json, Value};
+use serde_json::Value;
 
-use crate::provider::normalization::{
-    provider_capped_json, provider_policy_body, provider_policy_event_text,
-    provider_result_identifier_evidence, provider_result_outcome_evidence, provider_value_text,
-};
-use crate::{CONTINUE_CLI_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS};
+use crate::provider::normalization::provider_value_text;
 
 mod message_text;
 pub(crate) mod native_path;
@@ -17,36 +12,6 @@ pub(crate) use message_text::continue_history_item_text;
 pub(crate) fn continue_session_json_path(path: &Path) -> bool {
     path.extension().and_then(|ext| ext.to_str()) == Some("json")
         && path.file_name().and_then(|name| name.to_str()) != Some("sessions.json")
-}
-
-// This narrow projection reconstructs the canonical payload hash authority for
-// complete-content locators emitted by released Continue imports. NativePath
-// production never emits those locators or routes successful output bodies
-// through Core.
-pub(crate) fn continue_history_item_canonical_payload(item: &Value) -> (EventType, Value) {
-    let has_tool_calls = item
-        .get("toolCallStates")
-        .and_then(Value::as_array)
-        .is_some_and(|states| !states.is_empty());
-    let event_type = if has_tool_calls {
-        EventType::ToolCall
-    } else {
-        EventType::Message
-    };
-    let text = continue_history_item_text(item).unwrap_or_default();
-    let retained_text = provider_policy_event_text(event_type, &text, item);
-    let body = provider_policy_body(event_type, item);
-    (
-        event_type,
-        json!({
-            "text": retained_text.text,
-            "text_retention": retained_text.retention.as_json(),
-            "result_evidence": provider_result_identifier_evidence(event_type, &text, item),
-            "result_outcome": provider_result_outcome_evidence(event_type, item),
-            "source_format": CONTINUE_CLI_SOURCE_FORMAT,
-            "body": provider_capped_json(&body, PROVIDER_MAX_PREVIEW_CHARS),
-        }),
-    )
 }
 
 pub(crate) fn continue_context_items_text(value: &Value) -> Option<String> {

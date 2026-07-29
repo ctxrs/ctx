@@ -106,7 +106,6 @@ pub(crate) enum CursorDiscoveryIssueKind {
     InvalidLayout,
     NotFound,
     Symlink,
-    UnsupportedFileType,
     LimitExceeded,
 }
 

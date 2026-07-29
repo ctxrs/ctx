@@ -25,7 +25,6 @@ mod value_hydration;
 use value_hydration::sparse_output_rows;
 
 const CLAUDE_BODY_HASH_DOMAIN: &[u8] = b"ctx-claude-nativepath-body-v1\0";
-const MAX_CLASSIFICATION_METADATA_BYTES: usize = 4 * 1024;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct ResultClassification {
