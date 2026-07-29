@@ -33,7 +33,6 @@ Writes local storage and returns schema version 2:
 - `semantic`;
 - `relational`;
 - `pro_projection`;
-- `prior_epoch`;
 - `daemon`;
 - `daemon_autostart`;
 - `deprecated_catalog_only_ignored`;

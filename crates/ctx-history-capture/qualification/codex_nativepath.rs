@@ -51,7 +51,6 @@ fn qualification_json(receipt: &CodexSourceBackedIngestReceiptV0) -> Result<Stri
         "schema_version": 1,
         "source_epoch": "v0.26",
         "authority": "provider_sources",
-        "legacy_store_fallback": false,
         "work_result": if changed_sources == 0 { "no_op" } else { "changed" },
         "input": {
             "catalog_sources": counters.catalog_sources,
@@ -198,10 +197,6 @@ mod tests {
         let source = write_changed_fixture(&source_root);
         let first_root = temp.path().join("first");
         let second_root = temp.path().join("second");
-        fs::create_dir_all(&first_root).unwrap();
-        let legacy_path = first_root.join("work.sqlite");
-        let legacy_bytes = b"opaque v0.25 prior-epoch rollback sentinel\n";
-        fs::write(&legacy_path, legacy_bytes).unwrap();
 
         let first = qualify(&source_root, &first_root.join("search/lexical"));
         let second = qualify(&source_root, &second_root.join("search/lexical"));
@@ -210,7 +205,6 @@ mod tests {
         assert_eq!(first["schema_version"], 1);
         assert_eq!(first["source_epoch"], "v0.26");
         assert_eq!(first["authority"], "provider_sources");
-        assert_eq!(first["legacy_store_fallback"], false);
         assert_eq!(first["work_result"], "changed");
         assert_eq!(first["input"]["catalog_sources"], 1);
         assert_eq!(
@@ -233,7 +227,6 @@ mod tests {
             first["generation"]["generation_id"].as_str().unwrap().len(),
             64
         );
-        assert_eq!(fs::read(&legacy_path).unwrap(), legacy_bytes);
     }
 
     #[test]

@@ -9,7 +9,6 @@ def run_status_snapshot(
     sampling_interval_ms: int,
     expected_sessions: int,
     expected_events: int,
-    prior_epoch_sha256: str,
 ) -> tuple[dict[str, object], dict[str, object]]:
     result = run_ctx(
         ctx_bin,
@@ -24,7 +23,6 @@ def run_status_snapshot(
         data_root,
         expected_sessions,
         expected_events,
-        prior_epoch_sha256,
     )
     return packet, result
 
@@ -291,7 +289,6 @@ def run_one(
     temp_root.mkdir(parents=True, exist_ok=True)
 
     env = command_env(home, data_root, temp_root)
-    prior_epoch_sha256 = install_prior_epoch_sentinel(data_root)
 
     generation_started = time.perf_counter()
     source_bytes, generated_events = generate_corpus(
@@ -322,7 +319,6 @@ def run_one(
         sampling_interval_ms,
         expected_sessions,
         expected_events,
-        prior_epoch_sha256,
     )
     current_generation = expect_generation_transition(
         "initial source refresh",
@@ -344,7 +340,6 @@ def run_one(
         sample_home.mkdir(parents=True)
         sample_data_root.mkdir(parents=True)
         sample_temp_root.mkdir(parents=True)
-        sample_prior_sha256 = install_prior_epoch_sentinel(sample_data_root)
         sample_source_bytes, sample_generated_events = generate_corpus(
             sample_corpus_root,
             sessions,
@@ -368,7 +363,6 @@ def run_one(
             sampling_interval_ms,
             sessions,
             generated_events,
-            sample_prior_sha256,
         )
         expect_generation_transition(
             f"initial source refresh repeat {sample}",
@@ -398,7 +392,6 @@ def run_one(
             data_root,
             expected_sessions,
             expected_events,
-            prior_epoch_sha256,
         ),
     )
 
@@ -419,7 +412,6 @@ def run_one(
         sampling_interval_ms,
         expected_sessions,
         expected_events,
-        prior_epoch_sha256,
     )
     expect_generation_transition(
         "no-op source refresh",
@@ -458,7 +450,6 @@ def run_one(
             sampling_interval_ms,
             expected_sessions,
             expected_events,
-            prior_epoch_sha256,
         )
         current_generation = expect_generation_transition(
             f"append source refresh sample {sample}",
@@ -513,7 +504,6 @@ def run_one(
             sampling_interval_ms,
             expected_sessions,
             expected_events,
-            prior_epoch_sha256,
         )
         current_generation = expect_generation_transition(
             f"replacement source refresh sample {sample}",
@@ -568,7 +558,6 @@ def run_one(
             sampling_interval_ms,
             expected_sessions,
             expected_events,
-            prior_epoch_sha256,
         )
         current_generation = expect_generation_transition(
             f"delete source refresh sample {sample}",
@@ -603,7 +592,6 @@ def run_one(
         sampling_interval_ms,
         expected_sessions,
         expected_events,
-        prior_epoch_sha256,
     )
     if final_status["lexical"]["generation_id"] != current_generation:
         raise HarnessError("final status changed generation without a source mutation")
@@ -642,7 +630,6 @@ def run_one(
                 "catalog": status_last.get("catalog"),
                 "semantic": status_last.get("semantic"),
                 "relational": status_last.get("relational"),
-                "prior_epoch": status_last.get("prior_epoch"),
             },
             "final": {
                 "indexed_items": final_status.get("indexed_items"),
@@ -652,7 +639,6 @@ def run_one(
                 "catalog": final_status.get("catalog"),
                 "semantic": final_status.get("semantic"),
                 "relational": final_status.get("relational"),
-                "prior_epoch": final_status.get("prior_epoch"),
             },
         },
         "search_refresh_off": {
@@ -768,13 +754,6 @@ def run_one(
             "changed_files_per_sample": changed_files,
             "query": QUERY,
             "source_path": str(corpus_root),
-        },
-        "prior_epoch_negative_assertion": {
-            "path": str(data_root / "work.sqlite"),
-            "sha256": prior_epoch_sha256,
-            "authority": "non_authoritative",
-            "opened": False,
-            "untouched": True,
         },
         "profiles": profiles,
         "storage": {

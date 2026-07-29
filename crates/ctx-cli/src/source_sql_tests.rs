@@ -69,25 +69,3 @@ fn committed_source_generation_without_relational_projection_fails_closed() {
     assert!(!database_path(temp.path().to_path_buf()).exists());
     assert!(!sql_compatibility_path(temp.path()).exists());
 }
-
-#[test]
-fn old_store_is_left_untouched_and_runtime_inactive() {
-    let temp = tempfile::tempdir().unwrap();
-    let legacy_path = database_path(temp.path().to_path_buf());
-    let legacy_bytes = b"old Store must remain unopened";
-    std::fs::write(&legacy_path, legacy_bytes).unwrap();
-
-    let reader = SqlCompatibility::open_for_data_root(temp.path()).unwrap();
-    assert!(sql_compatibility_path(temp.path()).is_file());
-    assert_eq!(
-        reader
-            .query(
-                "SELECT COUNT(*) AS sessions FROM ctx_sessions",
-                RawSqlOptions::default(),
-            )
-            .unwrap()
-            .rows[0][0],
-        RawSqlValue::Integer(0)
-    );
-    assert_eq!(std::fs::read(legacy_path).unwrap(), legacy_bytes);
-}

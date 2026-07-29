@@ -36,21 +36,19 @@ def expect_source_backed_status(
     data_root: Path,
     expected_sessions: int,
     expected_events: int,
-    prior_epoch_sha256: str,
 ) -> None:
     history_epoch = packet.get("history_epoch")
     lexical = packet.get("lexical")
     catalog = packet.get("catalog")
     semantic = packet.get("semantic")
     relational = packet.get("relational")
-    prior_epoch = packet.get("prior_epoch")
     if packet.get("schema_version") != 2 or packet.get("initialized") is not True:
         raise HarnessError(f"status is not a ready v0.26 source epoch: {packet}")
     if (
         not isinstance(history_epoch, dict)
         or history_epoch.get("name") != "v0.26_source_backed"
         or history_epoch.get("status") != "ready"
-        or history_epoch.get("origin") != "prior_epoch_preserved"
+        or history_epoch.get("origin") != "fresh"
         or history_epoch.get("phase") != "ready"
     ):
         raise HarnessError(f"status has an unexpected source epoch: {history_epoch}")
@@ -99,16 +97,6 @@ def expect_source_backed_status(
         or not relational_path.is_file()
     ):
         raise HarnessError(f"status has an unexpected relational projection path: {relational}")
-    if (
-        not isinstance(prior_epoch, dict)
-        or prior_epoch.get("status") != "preserved"
-        or prior_epoch.get("authority") != "non_authoritative"
-        or prior_epoch.get("preserved") is not True
-        or prior_epoch.get("active") is not False
-        or prior_epoch.get("opened") is not False
-    ):
-        raise HarnessError(f"source-backed run activated prior-epoch storage: {prior_epoch}")
-    assert_prior_epoch_sentinel(data_root, prior_epoch_sha256)
 
 
 def effective_role(role: str, version: str) -> str:
