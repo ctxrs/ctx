@@ -388,17 +388,6 @@ pub(super) fn daemon_job_should_backoff(job: &Value) -> bool {
                     && job.get("last_error").and_then(Value::as_str).is_some())))
 }
 
-pub(super) fn semantic_report_should_queue_recent_work(report: &SemanticWorkerReport) -> bool {
-    report.searchable_items > 0
-        && report.embedded_items >= report.searchable_items
-        && report.dirty_items == 0
-}
-
-pub(super) fn refresh_semantic_document_count_cache(store: &Store) -> Result<()> {
-    store.refresh_event_embedding_document_count_cache()?;
-    Ok(())
-}
-
 pub(super) fn daemon_run_start_mode(args: &DaemonRunArgs) -> DaemonStartModeArg {
     args.start_mode.unwrap_or(DaemonStartModeArg::Manual)
 }
@@ -445,7 +434,6 @@ use std::{
 
 use anyhow::Result;
 use ctx_history_core::utc_now;
-use ctx_history_store::Store;
 use serde_json::{json, Value};
 
 use crate::{
@@ -467,7 +455,6 @@ use super::{
         write_daemon_job_status,
     },
     query_service::DaemonQueryActivity,
-    reports::SemanticWorkerReport,
     runtime_limits::DAEMON_MIN_REMAINING_FOR_JOB_SECS,
     source_backed_pro_catch_up::run_after_core_publication,
     source_backed_refresh_coordinator::SourceBackedRefreshCoordinator,
