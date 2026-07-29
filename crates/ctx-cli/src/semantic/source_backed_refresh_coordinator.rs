@@ -1312,18 +1312,30 @@ mod tests {
                     completed_sources: 0,
                     total_sources: 2,
                     current_source: None,
+                    stage_duration: StdDuration::ZERO,
+                    elapsed: StdDuration::ZERO,
+                    certified_source_count: None,
+                    certified_source_bytes: None,
                 })?;
                 progress(CaptureSourceBackedRefreshProgress {
                     phase: "refreshing",
                     completed_sources: 1,
                     total_sources: 2,
                     current_source: Some("provider-wide-route".to_owned()),
+                    stage_duration: StdDuration::ZERO,
+                    elapsed: StdDuration::ZERO,
+                    certified_source_count: None,
+                    certified_source_bytes: None,
                 })?;
                 progress(CaptureSourceBackedRefreshProgress {
                     phase: "verifying",
                     completed_sources: 2,
                     total_sources: 2,
                     current_source: None,
+                    stage_duration: StdDuration::ZERO,
+                    elapsed: StdDuration::ZERO,
+                    certified_source_count: None,
+                    certified_source_bytes: None,
                 })?;
                 Ok(test_publication("all-provider-generation"))
             },
