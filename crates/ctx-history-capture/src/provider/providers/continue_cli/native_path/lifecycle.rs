@@ -1,7 +1,7 @@
 use super::{
-    normalize::{ContinueNativeProfile, ContinuePreparedPage},
+    normalize::ContinuePreparedPage,
     parse::{
-        parse_continue_source_with_profile, ContinueIncompleteSource, ContinueOutputExclusionStats,
+        parse_continue_source, ContinueIncompleteSource, ContinueOutputExclusionStats,
         ContinueParseOutcome, ContinueSourceFailure, ContinueSourcePageStream,
     },
     source::{ContinueDiscovery, ContinuePathIter, ContinueRootAuthority},
@@ -38,7 +38,6 @@ pub(crate) struct ContinuePreparationStream<'a> {
     discovery: &'a ContinueDiscovery,
     paths: ContinuePathIter,
     active_source: Option<Box<ContinueSourcePageStream>>,
-    profile: ContinueNativeProfile,
     stats: ContinuePreparationStats,
     done: bool,
 }
@@ -54,22 +53,13 @@ impl<'a> ContinuePreparationStream<'a> {
     }
 }
 
-#[cfg(test)]
 pub(crate) fn prepare_continue_discovery(
     discovery: &ContinueDiscovery,
-) -> Result<ContinuePreparationStream<'_>, ContinueNativePathError> {
-    prepare_continue_discovery_with_profile(discovery, ContinueNativeProfile::CoreOnly)
-}
-
-pub(crate) fn prepare_continue_discovery_with_profile(
-    discovery: &ContinueDiscovery,
-    profile: ContinueNativeProfile,
 ) -> Result<ContinuePreparationStream<'_>, ContinueNativePathError> {
     Ok(ContinuePreparationStream {
         discovery,
         paths: discovery.paths()?,
         active_source: None,
-        profile,
         stats: ContinuePreparationStats::default(),
         done: false,
     })
@@ -147,13 +137,8 @@ impl Iterator for ContinuePreparationStream<'_> {
             self.stats.maximum_resident_source_documents =
                 self.stats.maximum_resident_source_documents.max(1);
 
-            match parse_continue_source_with_profile(snapshot, self.discovery.index(), self.profile)
-            {
+            match parse_continue_source(snapshot, self.discovery.index()) {
                 Ok(ContinueParseOutcome::Complete(source)) => {
-                    // Cross-source identity aliases and conflicts deliberately remain Store-owned.
-                    // Both accepted NativePath Store contracts resolve the native session identity
-                    // inside their rollback boundary; retaining a root-wide provider HashMap here
-                    // would make preparation memory proportional to the corpus.
                     self.active_source = Some(source);
                 }
                 Ok(ContinueParseOutcome::Incomplete(source)) => {
@@ -195,25 +180,4 @@ fn add_output_stats(
     aggregate.retained_decode_string_bytes = aggregate
         .retained_decode_string_bytes
         .saturating_add(source.retained_decode_string_bytes);
-    aggregate.result_string_allocations = aggregate
-        .result_string_allocations
-        .saturating_add(source.result_string_allocations);
-    aggregate.result_body_bytes_decoded = aggregate
-        .result_body_bytes_decoded
-        .saturating_add(source.result_body_bytes_decoded);
-    aggregate.result_hashes_created = aggregate
-        .result_hashes_created
-        .saturating_add(source.result_hashes_created);
-    aggregate.result_previews_created = aggregate
-        .result_previews_created
-        .saturating_add(source.result_previews_created);
-    aggregate.result_touches_created = aggregate
-        .result_touches_created
-        .saturating_add(source.result_touches_created);
-    aggregate.result_fts_documents_created = aggregate
-        .result_fts_documents_created
-        .saturating_add(source.result_fts_documents_created);
-    aggregate.result_handoffs_created = aggregate
-        .result_handoffs_created
-        .saturating_add(source.result_handoffs_created);
 }

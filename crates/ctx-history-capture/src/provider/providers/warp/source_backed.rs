@@ -20,8 +20,7 @@ use thiserror::Error;
 use super::{
     nativepath::{
         scan_warp_source_backed_connection, WarpNativeEvent, WarpNativeMessageIdentity,
-        WarpNativePage, WarpNativeProOutputPage, WarpNativeProOutputPageReceipt, WarpNativeSession,
-        WarpNativeSink, WarpNativeSourceBackedScan,
+        WarpNativePage, WarpNativeSession, WarpNativeSink, WarpNativeSourceBackedScan,
     },
     schema::WarpSqliteSchema,
     warp_message_content_at,
@@ -498,13 +497,6 @@ impl WarpNativeSink for WarpProjectionSink {
             self.documents.push(document);
         }
         Ok(())
-    }
-
-    fn push_pro_output_page(
-        &mut self,
-        page: WarpNativeProOutputPage,
-    ) -> WarpNativeProOutputPageReceipt {
-        page.receipt()
     }
 }
 

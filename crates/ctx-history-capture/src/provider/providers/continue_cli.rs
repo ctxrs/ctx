@@ -1,34 +1,18 @@
 use std::path::Path;
 
 use ctx_history_core::EventType;
-use ctx_history_store::Store;
 use serde_json::{json, Value};
 
 use crate::provider::normalization::{
     provider_capped_json, provider_policy_body, provider_policy_event_text,
     provider_result_identifier_evidence, provider_result_outcome_evidence, provider_value_text,
 };
-use crate::{
-    ProviderAdapterContext, ProviderImportOptions, ProviderImportSummary, Result,
-    CONTINUE_CLI_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS,
-};
+use crate::{CONTINUE_CLI_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS};
 
 mod message_text;
 pub(crate) mod native_path;
 
 pub(crate) use message_text::continue_history_item_text;
-
-/// Production entrypoint retained under its released crate-private name until
-/// the shared provider API registration is renamed. The implementation is
-/// NativePath-only.
-pub(crate) fn import_continue_cli_nativepath(
-    path: &Path,
-    store: &mut Store,
-    context: ProviderAdapterContext,
-    import_options: ProviderImportOptions,
-) -> Result<ProviderImportSummary> {
-    native_path::import_continue_nativepath_history(path, store, context, import_options)
-}
 
 pub(crate) fn continue_session_json_path(path: &Path) -> bool {
     path.extension().and_then(|ext| ext.to_str()) == Some("json")

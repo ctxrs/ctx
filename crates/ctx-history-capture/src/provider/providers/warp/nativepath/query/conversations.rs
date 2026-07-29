@@ -3,7 +3,6 @@ use super::*;
 pub(super) fn scan_conversations(
     conn: &Connection,
     counters: &mut WarpNativeCounters,
-    resume: &WarpNativeFrontier,
 ) -> Result<(
     BTreeMap<String, WarpHierarchyNode>,
     Vec<WarpConversationEmission>,
@@ -11,16 +10,7 @@ pub(super) fn scan_conversations(
     let _guard = SqliteLengthPreflightGuard::new(conn);
     let mut statement = prepare_conversation_candidates(conn)?;
     let limit = conversation_hydration_limit()?;
-    let after_rowid = if resume.phase == WarpNativeFrontierPhase::Conversations {
-        resume.last_conversation_rowid.ok_or_else(|| {
-            CaptureError::InvalidPayload(
-                "Warp conversation resume frontier omitted its rowid".to_owned(),
-            )
-        })?
-    } else {
-        0
-    };
-    let mut rows = statement.query(rusqlite::params![limit, after_rowid])?;
+    let mut rows = statement.query(rusqlite::params![limit, 0])?;
     let mut hierarchy = BTreeMap::new();
     let mut emissions = Vec::new();
     while let Some(row) = rows.next()? {
@@ -29,7 +19,6 @@ pub(super) fn scan_conversations(
         if let Some(rejection) = reject_conversation_candidate(&candidate)? {
             emissions.push(WarpConversationEmission::Rejection {
                 rejection,
-                rowid: candidate.rowid,
                 source_digest: rejected_conversation_candidate_digest(&candidate)?,
             });
             continue;
@@ -85,7 +74,6 @@ pub(super) fn scan_conversations(
         }
         emissions.push(WarpConversationEmission::Session {
             conversation_id,
-            rowid: candidate.rowid,
             source_digest: evidence_digest,
         });
     }
@@ -97,64 +85,6 @@ pub(super) fn scan_conversations(
     load_hierarchy_closure(conn, pending, &mut hierarchy, counters)?;
     resolve_hierarchy(&mut hierarchy)?;
     Ok((hierarchy, emissions))
-}
-
-pub(super) fn load_task_hierarchy(
-    conn: &Connection,
-    schema: &WarpSqliteSchema,
-    resume: &WarpNativeFrontier,
-    mut hierarchy: BTreeMap<String, WarpHierarchyNode>,
-    counters: &mut WarpNativeCounters,
-) -> Result<BTreeMap<String, WarpHierarchyNode>> {
-    let task_resume = resume.phase == WarpNativeFrontierPhase::Tasks;
-    let comparison = if !task_resume {
-        "1 = 1"
-    } else if resume.next_message_ordinal == 0 {
-        "t.task_id collate binary > (
-             select previous.task_id from agent_tasks previous
-             where previous.rowid = ?1
-         )"
-    } else {
-        "t.rowid = ?1 or t.task_id collate binary > (
-             select previous.task_id from agent_tasks previous
-             where previous.rowid = ?1
-         )"
-    };
-    let index = warp_quote_identifier(&schema.task_keyset_index);
-    let mut task_conversations = conn.prepare(&format!(
-        "select distinct t.conversation_id
-         from agent_tasks t indexed by {index}
-         where typeof(t.conversation_id) = 'text'
-           and ({comparison})
-         order by t.conversation_id collate binary"
-    ))?;
-    let mut pending = Vec::new();
-    {
-        let _guard = SqliteLengthPreflightGuard::new(conn);
-        let mut rows = if task_resume {
-            let last_task_rowid = resume.last_task_rowid.ok_or_else(|| {
-                CaptureError::InvalidPayload(
-                    "Warp task resume frontier omitted its rowid".to_owned(),
-                )
-            })?;
-            task_conversations.query([last_task_rowid])?
-        } else {
-            task_conversations.query([])?
-        };
-        while let Some(row) = rows.next()? {
-            pending.push(row.get::<_, String>(0)?);
-        }
-    }
-    load_hierarchy_closure(conn, pending, &mut hierarchy, counters)?;
-    resolve_hierarchy(&mut hierarchy)?;
-    counters.hierarchy_nodes_retained = u64::try_from(hierarchy.len()).unwrap_or(u64::MAX);
-    counters.hierarchy_edges = hierarchy
-        .values()
-        .filter(|node| node.parent_conversation_id.is_some())
-        .count()
-        .try_into()
-        .unwrap_or(u64::MAX);
-    Ok(hierarchy)
 }
 
 fn load_hierarchy_closure(
@@ -219,7 +149,7 @@ fn load_hierarchy_closure(
             candidate.hydrated_last_modified_at,
         ) else {
             return Err(CaptureError::SystemInvariant(
-                "Warp resume conversation passed preflight without bounded values",
+                "Warp conversation passed preflight without bounded values",
             ));
         };
         counters.conversation_rows_hydrated = counters.conversation_rows_hydrated.saturating_add(1);
@@ -339,16 +269,12 @@ pub(super) fn emit_sessions_and_hierarchy(
     emissions: Vec<WarpConversationEmission>,
     builder: &mut WarpNativePageEmitter<'_>,
     counters: &mut WarpNativeCounters,
-    resume: &WarpNativeFrontier,
 ) -> Result<()> {
-    let mut completed_conversations = resume.completed_conversation_rows;
-    let mut completed_edges = resume.completed_hierarchy_edges;
     for emission in emissions {
         let mut unit = WarpNativeUnit::progress();
-        let (native_key, rowid, source_digest) = match emission {
+        let (native_key, source_digest) = match emission {
             WarpConversationEmission::Session {
                 conversation_id,
-                rowid,
                 source_digest,
             } => {
                 let node = hierarchy.get(&conversation_id).ok_or_else(|| {
@@ -374,29 +300,21 @@ pub(super) fn emit_sessions_and_hierarchy(
                         parent_conversation_id: parent.clone(),
                         parent_present: node.parent_present,
                     })?;
-                    completed_edges = completed_edges.saturating_add(1);
                 }
                 counters.sessions_retained = counters.sessions_retained.saturating_add(1);
-                (conversation_id, rowid, source_digest)
+                (conversation_id, source_digest)
             }
             WarpConversationEmission::Rejection {
                 rejection,
-                rowid,
                 source_digest,
             } => {
                 let native_key = rejection.native_key.clone();
                 unit.push_rejection(rejection)?;
-                (native_key, rowid, source_digest)
+                (native_key, source_digest)
             }
         };
         builder.record_source(b"conversation\0", source_digest)?;
-        completed_conversations = completed_conversations.saturating_add(1);
-        builder.push(
-            unit,
-            WarpNativeFrontier::after_conversation(completed_conversations, completed_edges, rowid),
-            native_key,
-            counters,
-        )?;
+        builder.push(unit, native_key, counters)?;
     }
     Ok(())
 }

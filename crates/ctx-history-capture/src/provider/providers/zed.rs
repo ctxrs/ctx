@@ -1,13 +1,7 @@
-use std::path::Path;
-
 use ctx_history_core::EventType;
-use ctx_history_store::Store;
 use serde_json::Value;
 
-use crate::{
-    complete_content::CompleteContentBodyDigest, ProviderAdapterContext, ProviderImportOptions,
-    ProviderImportSummary, Result,
-};
+use crate::{complete_content::CompleteContentBodyDigest, Result};
 
 mod event;
 pub(crate) mod native_path;
@@ -109,13 +103,4 @@ pub(crate) fn decode_zed_nativepath_complete_message(
 ) -> Result<Option<ZedNativePathCompleteMessage>> {
     native_path::decode_complete_message(row, message_ordinal, record_digest)
         .map_err(native_path::into_capture_error)
-}
-
-pub(crate) fn import_zed_nativepath(
-    path: &Path,
-    store: &mut Store,
-    context: ProviderAdapterContext,
-    import_options: ProviderImportOptions,
-) -> Result<ProviderImportSummary> {
-    native_path::import_zed_nativepath(path, store, context, import_options)
 }

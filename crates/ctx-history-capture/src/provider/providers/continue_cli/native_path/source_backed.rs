@@ -14,12 +14,10 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::{
-    lifecycle::{
-        prepare_continue_discovery_with_profile, ContinuePreparationStream, ContinueSourceOutcome,
-    },
+    lifecycle::{prepare_continue_discovery, ContinuePreparationStream, ContinueSourceOutcome},
     normalize::{
-        ContinueNativeProfile, ContinuePreparedPage, ContinuePreparedSource,
-        ContinueSourceCompleteness, CONTINUE_NATIVE_MAX_PAGE_BYTES, CONTINUE_NATIVE_MAX_PAGE_ROWS,
+        ContinuePreparedPage, ContinuePreparedSource, ContinueSourceCompleteness,
+        CONTINUE_NATIVE_MAX_PAGE_BYTES, CONTINUE_NATIVE_MAX_PAGE_ROWS,
     },
     parse::{
         locate_continue_exact_history_item, ContinueExactHistoryLookup, ContinueIncompleteSource,
@@ -64,8 +62,6 @@ pub(crate) enum ContinueSourceBackedError {
     OverlappingSource,
     #[error("Continue source-backed page stream ended before terminal source authority")]
     UnterminatedSource,
-    #[error("Continue Core-only source-backed parsing emitted transient Pro output")]
-    UnexpectedOutput,
     #[error("Continue source-backed terminal counts do not reconcile")]
     CountMismatch,
     #[error("Continue source-backed count or ordinal overflowed")]
@@ -144,10 +140,7 @@ pub(crate) struct ContinueSourceBackedReader<'a> {
 impl<'a> ContinueSourceBackedReader<'a> {
     pub(crate) fn new(discovery: &'a ContinueDiscovery) -> ContinueSourceBackedResult<Self> {
         Ok(Self {
-            native: prepare_continue_discovery_with_profile(
-                discovery,
-                ContinueNativeProfile::CoreOnly,
-            )?,
+            native: prepare_continue_discovery(discovery)?,
             active: None,
         })
     }
@@ -189,9 +182,6 @@ impl<'a> ContinueSourceBackedReader<'a> {
         &mut self,
         mut page: ContinuePreparedPage,
     ) -> ContinueSourceBackedResult<ContinueSourceBackedPage> {
-        if page.transient_output.is_some() {
-            return Err(ContinueSourceBackedError::UnexpectedOutput);
-        }
         if let Some(prepared) = page.source.take() {
             if self.active.is_some() {
                 return Err(ContinueSourceBackedError::OverlappingSource);
@@ -839,8 +829,7 @@ mod tests {
         assert_eq!(first.leaf().certificate.counts().complete_records, 2);
         assert_eq!(first.leaf().certificate.counts().indexed_documents, 2);
         assert_eq!(first.leaf().output_exclusion.native_results_observed, 1);
-        assert_eq!(first.leaf().output_exclusion.result_string_allocations, 0);
-        assert_eq!(first.leaf().output_exclusion.result_hashes_created, 0);
+        assert!(first.leaf().output_exclusion.result_payload_bytes_skipped > 0);
 
         let NativeRecordCoordinate::Document {
             object_key,

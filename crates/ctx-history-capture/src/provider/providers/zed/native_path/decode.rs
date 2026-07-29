@@ -16,8 +16,8 @@ use serde_json::Value;
 use crate::{common::time::parse_rfc3339_utc, MAX_PROVIDER_SQLITE_VALUE_BYTES};
 
 use super::{
-    dto::{ZedNativeEncoding, ZedNativeOutputCounters, ZedNativeRejectionKind},
-    publication::ZedDecodedCoreEvent,
+    dto::{ZedNativeEncoding, ZedNativeRejectionKind},
+    model::ZedDecodedCoreEvent,
     ZedNativeResult,
 };
 
@@ -131,19 +131,17 @@ impl ZedDecodedPayload<'_> {
         &self,
         thread_ordinal: u64,
         emit: &mut dyn FnMut(ZedDecodedCoreEvent) -> ZedNativeResult<()>,
-    ) -> ZedNativeResult<ZedNativeOutputCounters> {
+    ) -> ZedNativeResult<()> {
         let occurred_at = self.updated_at.ok_or_else(|| {
             super::ZedNativePathError::UnsupportedSchema(
                 "validated Zed payload is missing its normalized timestamp".to_owned(),
             )
         })?;
-        let mut output = ZedNativeOutputCounters::default();
         let mut emit_error = None;
         let parse_result = {
             let mut stream = ZedEventStream {
                 thread_ordinal,
                 occurred_at,
-                output: &mut output,
                 emit,
                 emit_error: &mut emit_error,
             };
@@ -162,7 +160,7 @@ impl ZedDecodedPayload<'_> {
                 "validated Zed payload could not be streamed: {error}"
             ))
         })?;
-        Ok(output)
+        Ok(())
     }
 }
 
@@ -178,7 +176,6 @@ fn encoding_diagnostic(encoding: &str) -> String {
 struct ZedEventStream<'a> {
     thread_ordinal: u64,
     occurred_at: DateTime<Utc>,
-    output: &'a mut ZedNativeOutputCounters,
     emit: &'a mut dyn FnMut(ZedDecodedCoreEvent) -> ZedNativeResult<()>,
     emit_error: &'a mut Option<super::ZedNativePathError>,
 }
@@ -275,7 +272,6 @@ impl<'de> Visitor<'de> for ZedMessagesVisitor<'_, '_> {
                 message_ordinal,
                 message,
                 self.stream.occurred_at,
-                self.stream.output,
             ) {
                 if let Err(error) = (self.stream.emit)(event) {
                     *self.stream.emit_error = Some(error);
@@ -324,11 +320,10 @@ fn decode_message(
     message_ordinal: u64,
     message: ZedMessageWire,
     occurred_at: DateTime<Utc>,
-    output: &mut ZedNativeOutputCounters,
 ) -> Option<ZedDecodedCoreEvent> {
     match message {
         ZedMessageWire::User(user) => {
-            let body = retained_content_text(&user.content, output);
+            let body = retained_content_text(&user.content);
             body.map(|body| ZedDecodedCoreEvent {
                 provider_message_id: nonempty_owned(user.id),
                 thread_ordinal,
@@ -343,7 +338,6 @@ fn decode_message(
             })
         }
         ZedMessageWire::Agent(agent) => {
-            classify_result_map(&agent.tool_results, output);
             let mut parts = Vec::new();
             let mut call_ids = Vec::new();
             let mut touches = BTreeSet::new();
@@ -378,7 +372,7 @@ fn decode_message(
                             collect_safe_touches(input, &mut touches);
                         }
                     }
-                    ZedContentWire::ToolResult(result) => classify_result(&result, output),
+                    ZedContentWire::ToolResult(_) => {}
                     ZedContentWire::Mention(content) => {
                         if let Some(content) = content {
                             push_nonempty(&mut parts, content);
@@ -456,10 +450,7 @@ fn decode_message(
     }
 }
 
-fn retained_content_text(
-    content: &[ZedContentWire],
-    output: &mut ZedNativeOutputCounters,
-) -> Option<String> {
+fn retained_content_text(content: &[ZedContentWire]) -> Option<String> {
     let mut parts = Vec::new();
     for item in content {
         match item {
@@ -470,7 +461,7 @@ fn retained_content_text(
             ZedContentWire::RedactedThinking => {
                 parts.push("<redacted_thinking />".to_owned());
             }
-            ZedContentWire::ToolResult(result) => classify_result(result, output),
+            ZedContentWire::ToolResult(_) => {}
             ZedContentWire::Mention(Some(content)) => {
                 push_nonempty(&mut parts, content.clone());
             }
@@ -480,35 +471,4 @@ fn retained_content_text(
         }
     }
     (!parts.is_empty()).then(|| parts.join("\n"))
-}
-
-fn classify_result_map(results: &ZedToolResultsWire, output: &mut ZedNativeOutputCounters) {
-    for result in results.results.values() {
-        classify_result(result, output);
-    }
-}
-
-fn classify_result(result: &ZedResultWire, output: &mut ZedNativeOutputCounters) {
-    output.native_results_observed = output.native_results_observed.saturating_add(1);
-    let body_bytes = result.content.string_bytes;
-    output.result_body_bytes_observed =
-        output.result_body_bytes_observed.saturating_add(body_bytes);
-    let classification = result.shape_is_unambiguous.then_some((
-        result.is_error,
-        result
-            .output
-            .as_ref()
-            .and_then(|metadata| metadata.status.as_deref()),
-    ));
-    match classification {
-        Some((Some(false), Some("ok"))) => {
-            output.native_results_success = output.native_results_success.saturating_add(1);
-        }
-        Some((Some(true), _)) => {
-            output.native_results_failure = output.native_results_failure.saturating_add(1);
-        }
-        _ => {
-            output.native_results_unknown = output.native_results_unknown.saturating_add(1);
-        }
-    }
 }

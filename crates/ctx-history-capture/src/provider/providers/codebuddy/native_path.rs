@@ -1,10 +1,9 @@
-//! Production CodeBuddy NativePath ingestion.
+//! Production source-backed CodeBuddy discovery, parsing, and hydration.
 //!
 //! CodeBuddy owns two unrelated persisted products: extension session
 //! directories made of whole-JSON message files, and CLI project JSONL
-//! transcripts.  They intentionally share only normalization and Store
-//! publication policy.  Discovery, source revision, cursors, parsing, and
-//! output replay remain shape-specific.
+//! transcripts. They share bounded normalization while retaining independent
+//! source authority, typed locators, and exact hydration.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -15,68 +14,31 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use ctx_history_core::{
-    AgentType, CaptureProvider, CaptureSource, CaptureSourceDescriptor, CaptureSourceKind,
-    ContentRef, Event, EventRole, EventType, Fidelity, Session, SessionStatus, SyncCursor,
-};
-use ctx_history_store::{
-    decode_native_path_committed_cursor, EventSearchBulkGuard, NativePathCursorSetClassification,
-    NativePathCursorTransition, NativePathGroupAccounting, ProviderEventHashAuthority,
-    ProviderSourceLocatorObservation, ProviderSourceRouteRetirement,
-    ProviderSourceRouteRetirementDisposition, ProviderSourceRouteRetirementReason, Store,
-};
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use ctx_history_core::{AgentType, CaptureProvider, EventRole, EventType};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
-use uuid::Uuid;
 
 use crate::{
     common::io::{
         ensure_provider_path_parents_are_not_symlinks, ensure_regular_provider_transcript_file,
         OpenedProviderSourceFile, ProviderSourceDirectory, ProviderSourceRoot,
     },
-    complete_content::{
-        attach_verified_content_locator, jsonl::EXACT_JSONL_COMPLETE_CONTENT_LOCATOR_KIND,
-        structured::STRUCTURED_COMPLETE_CONTENT_LOCATOR_KIND, verified_content_address_supported,
-        verified_content_profile, CompleteContentBodyDigest, CompleteContentSourceFamily,
-        VerifiedContentLocatorV1, VerifiedContentLocatorsV1, VerifiedContentRole,
-        COMPLETE_CONTENT_MAX_BODY_BYTES, VERIFIED_CONTENT_LOCATORS_METADATA_KEY,
-    },
-    compute_payload_hash,
     provider::{
-        importer::{
-            compact_provider_result_payload,
-            provider_event_import_identity_with_exact_legacy_source, provider_import_session_uuid,
-            provider_path_identity, provider_scoped_source_identity_key,
-            provider_scoped_source_uuid, provider_session_uuid,
-            provider_source_cursor_stream_for_path, provider_source_identity,
-            provider_sync_metadata, timestamps, CertifiedProviderCursor,
-        },
-        native_ingestion::{
-            process_pro_replay_only, NativePageAccounting, NativeProOutputPage,
-            NativeProReplayPage, NativeSafeFrontier, NativeSourceIdentity,
-        },
         normalization::{provider_role, provider_value_text},
         providers::task_json::task_json_time_field,
     },
-    CaptureError, CaptureWorkLimit, ImportProfile, OutputAssociations, OutputNativeCoordinate,
-    OutputObservationKind, OutputOutcome, OutputOutcomeMetadata, OutputSourceIdentity,
-    OutputSourceLocator, ProOutputObservation, ProOutputSink, ProOutputSinkError,
-    ProOutputSourceDisposition, ProviderAdapterContext, ProviderImportFailure,
-    ProviderImportOptions, ProviderImportSummary, ProviderImportWorkResult, Result,
-    CODEBUDDY_SOURCE_FORMAT, MAX_PROVIDER_JSONL_LINE_BYTES, PROVIDER_MAX_TEXT_CHARS,
+    CaptureError, ImportProfile, ProviderAdapterContext, ProviderImportOptions, Result,
+    CODEBUDDY_SOURCE_FORMAT, MAX_PROVIDER_JSONL_LINE_BYTES,
 };
 
 use super::{
     normalization::{
         codebuddy_clean_content, codebuddy_decoded_message, codebuddy_message_text,
-        codebuddy_normalized_rows, codebuddy_session_draft, codebuddy_title_from_text,
-        CodeBuddyEventDraft, CodeBuddyEventInput, CodeBuddyNativeShape, CodeBuddySessionDraft,
-        CodeBuddySessionInput,
+        codebuddy_normalized_rows, codebuddy_title_from_text, CodeBuddyEventDraft,
+        CodeBuddyEventInput, CodeBuddySessionDraft, CodeBuddySessionInput,
     },
     source::{CodeBuddyFrozenFile, CodeBuddyRevisionHasher},
-    CODEBUDDY_CLI_POLICY_REVISION, CODEBUDDY_MAX_CHECKPOINT_FAILURES, CODEBUDDY_MAX_FAILURE_BYTES,
-    CODEBUDDY_NATIVE_CURSOR_VERSION,
+    CODEBUDDY_CLI_POLICY_REVISION, CODEBUDDY_MAX_FAILURE_BYTES, CODEBUDDY_MAX_SCAN_REJECTIONS,
 };
 
 #[path = "extension/discovery.rs"]
@@ -88,33 +50,23 @@ use extension_source::{
     codebuddy_extension_line_number, codebuddy_extension_message_file,
     codebuddy_extension_metadata, codebuddy_extension_metadata_from_admitted,
     codebuddy_extension_metadata_text, codebuddy_message_time, CodeBuddyExtensionMessageError,
-    CodeBuddyExtensionMetadata, CodeBuddyExtensionObservation,
+    CodeBuddyExtensionMetadata, CodeBuddyExtensionObservation, CodeBuddyExtensionRejection,
 };
 
 const CODEBUDDY_NATIVE_PAGE_MAX_UNITS: usize = 64;
 const CODEBUDDY_NATIVE_PAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
 const CODEBUDDY_NATIVE_RECORD_MAX_BYTES: usize = CODEBUDDY_NATIVE_PAGE_MAX_BYTES - (64 * 1024);
 const CODEBUDDY_MAX_NATIVE_ID_BYTES: usize = 1_024;
-const CODEBUDDY_OUTPUT_FRONTIER_VERSION: u32 = 1;
-const CODEBUDDY_OUTPUT_PARSER_REVISION: &str = "codebuddy-nativepath-output-v1";
-const CODEBUDDY_NATIVE_PUBLICATION_REVISION: &str = "codebuddy-nativepath-store-v1";
-const CODEBUDDY_PUBLICATION_DOMAIN: &[u8] = b"ctx-codebuddy-nativepath-publication-v1\0";
-const CODEBUDDY_RETIREMENT_DOMAIN: &[u8] = b"ctx-codebuddy-nativepath-retirement-v1\0";
 const CODEBUDDY_INVENTORY_REVISION_DOMAIN: &[u8] = b"ctx-inventory-observed-source-revision-v1\0";
-const CODEBUDDY_EXACT_SOURCE_REVISION_DIGEST_DOMAIN: &[u8] =
-    b"ctx-complete-content-source-revision-v1\0";
-const CODEBUDDY_EXACT_PATH_IDENTITY_DIGEST_DOMAIN: &[u8] =
-    b"ctx-complete-content-path-identity-v1\0";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CodeBuddySourceShape {
     Extension,
     Cli,
 }
 
 impl CodeBuddySourceShape {
-    fn cursor_tag(self) -> &'static str {
+    fn shape_tag(self) -> &'static str {
         match self {
             Self::Extension => "extension",
             Self::Cli => "cli",
@@ -122,9 +74,8 @@ impl CodeBuddySourceShape {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CodeBuddySessionCheckpoint {
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct CodeBuddySessionState {
     native_session_id: String,
     project_hash: String,
     cwd: Option<String>,
@@ -134,8 +85,7 @@ struct CodeBuddySessionCheckpoint {
     row_count: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "shape", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum CodeBuddyGeneratedTitleAnchor {
     Cli {
         native_ordinal: u64,
@@ -148,114 +98,83 @@ enum CodeBuddyGeneratedTitleAnchor {
     },
 }
 
-impl CodeBuddySessionCheckpoint {
+impl CodeBuddySessionState {
     fn started_at(&self) -> Result<Option<DateTime<Utc>>> {
-        checkpoint_time(self.started_at.as_deref(), "start time")
+        scan_time(self.started_at.as_deref(), "start time")
     }
 
     fn ended_at(&self) -> Result<Option<DateTime<Utc>>> {
-        checkpoint_time(self.ended_at.as_deref(), "end time")
+        scan_time(self.ended_at.as_deref(), "end time")
     }
 
     fn provider_session_id(&self) -> String {
         format!("{}/{}", self.project_hash, self.native_session_id)
     }
+
+    fn estimated_bytes(&self) -> usize {
+        256_usize
+            .saturating_add(self.native_session_id.len())
+            .saturating_add(self.project_hash.len())
+            .saturating_add(self.cwd.as_ref().map_or(0, String::len))
+            .saturating_add(self.started_at.as_ref().map_or(0, String::len))
+            .saturating_add(self.ended_at.as_ref().map_or(0, String::len))
+            .saturating_add(
+                self.generated_title_anchor
+                    .as_ref()
+                    .map_or(0, |anchor| match anchor {
+                        CodeBuddyGeneratedTitleAnchor::Cli { payload_sha256, .. } => {
+                            64_usize.saturating_add(payload_sha256.len())
+                        }
+                        CodeBuddyGeneratedTitleAnchor::Extension { .. } => 32,
+                    }),
+            )
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CodeBuddyNativeCursor {
-    version: u32,
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodeBuddyScanState {
     shape: CodeBuddySourceShape,
-    canonical_path: PathBuf,
     source_revision: String,
-    source_identity: String,
-    generation: u64,
     next_native_offset: u64,
     next_native_ordinal: u64,
     certified_prefix_sha256: String,
     file_identity: Option<String>,
     terminal: bool,
     accepted_events: u64,
-    #[serde(default)]
     skipped_metadata: u64,
     rejected_records: u64,
-    failures: Vec<CodeBuddyCursorFailure>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    incomplete_tail: Option<CodeBuddyCursorFailure>,
-    session: CodeBuddySessionCheckpoint,
+    failures: Vec<CodeBuddyScanRejection>,
+    incomplete_tail: Option<CodeBuddyScanRejection>,
+    session: CodeBuddySessionState,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CodeBuddyCursorFailure {
+impl CodeBuddyScanState {
+    fn estimated_bytes(&self) -> usize {
+        self.failures.iter().fold(
+            512_usize
+                .saturating_add(self.source_revision.len())
+                .saturating_add(self.certified_prefix_sha256.len())
+                .saturating_add(self.file_identity.as_ref().map_or(0, String::len))
+                .saturating_add(self.session.estimated_bytes())
+                .saturating_add(
+                    self.incomplete_tail
+                        .as_ref()
+                        .map_or(0, CodeBuddyScanRejection::estimated_bytes),
+                ),
+            |bytes, rejection| bytes.saturating_add(rejection.estimated_bytes()),
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodeBuddyScanRejection {
     line: usize,
     error: String,
 }
 
-impl CodeBuddyNativeCursor {
-    fn encode(&self) -> Result<String> {
-        serde_json::to_string(self).map_err(CaptureError::Json)
-    }
-
-    fn decode(value: &str) -> Result<Self> {
-        let cursor: Self = serde_json::from_str(value)
-            .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
-        if cursor.version != CODEBUDDY_NATIVE_CURSOR_VERSION
-            || cursor.source_identity.is_empty()
-            || cursor.source_revision.is_empty()
-            || cursor.certified_prefix_sha256.len() != 64
-            || cursor.failures.len() > CODEBUDDY_MAX_CHECKPOINT_FAILURES
-        {
-            return Err(CaptureError::InvalidPayload(
-                "CodeBuddy NativePath cursor is malformed".to_owned(),
-            ));
-        }
-        Ok(cursor)
-    }
-
-    fn replay_summary(&self) -> Result<ProviderImportSummary> {
-        let accepted = usize::try_from(self.accepted_events).map_err(|_| {
-            CaptureError::SystemInvariant("CodeBuddy accepted event count exceeds platform limits")
-        })?;
-        let rejected = usize::try_from(self.rejected_records).map_err(|_| {
-            CaptureError::SystemInvariant("CodeBuddy rejection count exceeds platform limits")
-        })?;
-        let skipped_metadata = usize::try_from(self.skipped_metadata).map_err(|_| {
-            CaptureError::SystemInvariant(
-                "CodeBuddy skipped metadata count exceeds platform limits",
-            )
-        })?;
-        let failed = rejected.saturating_add(usize::from(self.incomplete_tail.is_some()));
-        let skipped_sessions = usize::from(accepted != 0);
-        let mut summary = ProviderImportSummary {
-            skipped: accepted
-                .saturating_add(skipped_metadata)
-                .saturating_add(skipped_sessions),
-            failed,
-            skipped_sessions,
-            skipped_events: accepted,
-            accepted_content_records: accepted,
-            failures: self
-                .failures
-                .iter()
-                .map(|failure| ProviderImportFailure {
-                    line: failure.line,
-                    error: failure.error.clone(),
-                })
-                .chain(
-                    self.incomplete_tail
-                        .iter()
-                        .map(|failure| ProviderImportFailure {
-                            line: failure.line,
-                            error: failure.error.clone(),
-                        }),
-                )
-                .collect(),
-            ..ProviderImportSummary::default()
-        };
-        summary.set_work_result(ProviderImportWorkResult::NoOp);
-        Ok(summary)
+impl CodeBuddyScanRejection {
+    fn estimated_bytes(&self) -> usize {
+        32_usize.saturating_add(self.error.len())
     }
 }
 
@@ -264,10 +183,6 @@ struct CodeBuddySource {
     shape: CodeBuddySourceShape,
     path: PathBuf,
     canonical_path: PathBuf,
-    configured_root: PathBuf,
-    locator_identity: String,
-    cursor_stream: String,
-    proposed_source_identity: String,
     base_source_revision: String,
     source_revision: String,
     inventory_observation_token: Option<String>,
@@ -313,82 +228,10 @@ impl CodeBuddyCapabilitySource {
     }
 }
 
-impl CodeBuddySource {
-    fn output_identity(&self) -> OutputSourceIdentity {
-        OutputSourceIdentity {
-            provider: CaptureProvider::CodeBuddy.as_str().to_owned(),
-            namespace_id: self.configured_root.display().to_string(),
-            source_id: self.locator_identity.clone(),
-        }
-    }
-
-    fn revalidate(&self) -> Result<bool> {
-        if let Some(capability) = &self.capability {
-            return Ok(capability.revalidate().is_ok());
-        }
-        match self.shape {
-            CodeBuddySourceShape::Cli => self
-                .frozen
-                .as_ref()
-                .ok_or(CaptureError::SystemInvariant(
-                    "CodeBuddy CLI source lost its frozen observation",
-                ))?
-                .revalidate(&self.path),
-            CodeBuddySourceShape::Extension => {
-                let (metadata, _) = codebuddy_extension_metadata(&self.path, self.session_ordinal)?;
-                let Some(metadata) = metadata else {
-                    return Ok(false);
-                };
-                let mut ignored = ProviderImportSummary::default();
-                let current = CodeBuddyExtensionObservation::read(
-                    &metadata,
-                    self.session_ordinal,
-                    &mut ignored,
-                )?;
-                Ok(current.canonical_session_dir == self.canonical_path
-                    && effective_source_revision(
-                        &current.source_revision,
-                        self.inventory_observation_token.as_deref(),
-                    ) == self.source_revision)
-            }
-        }
-    }
-}
-
 #[derive(Debug)]
 struct CodeBuddyInventory {
     sources: Vec<CodeBuddySource>,
     root_missing: bool,
-}
-
-#[derive(Debug)]
-// The native cursor is consumed immediately after classification; preserving
-// the explicit wire variants is clearer than allocating the common path.
-#[allow(clippy::large_enum_variant)]
-enum StoredCursor {
-    None,
-    Native {
-        stored: SyncCursor,
-        cursor: CodeBuddyNativeCursor,
-    },
-    ReleasedLegacy {
-        stored: SyncCursor,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CodeBuddySourceChange {
-    Fresh,
-    Resume,
-    Append,
-    Rewrite,
-    LegacyMigration,
-}
-
-struct CodeBuddySourcePlan {
-    change: CodeBuddySourceChange,
-    expected_store_cursor: Option<String>,
-    cursor: CodeBuddyNativeCursor,
 }
 
 #[derive(Debug)]
@@ -399,7 +242,6 @@ struct CodeBuddyRecord {
     byte_end_exclusive: Option<u64>,
     native_bytes: Vec<u8>,
     classification: CodeBuddyRecordClassification,
-    output: Option<CodeBuddyOutputDraft>,
 }
 
 #[derive(Debug)]
@@ -412,15 +254,6 @@ enum CodeBuddyRecordClassification {
     RejectedRecord,
 }
 
-impl CodeBuddyRecordClassification {
-    fn core(&self) -> Option<&CodeBuddyCoreRow> {
-        match self {
-            Self::AcceptedMessage(core) => Some(core),
-            Self::SkippedMetadata | Self::RejectedRecord => None,
-        }
-    }
-}
-
 #[derive(Debug)]
 struct CodeBuddyCoreRow {
     session: CodeBuddySessionDraft,
@@ -428,47 +261,21 @@ struct CodeBuddyCoreRow {
 }
 
 #[derive(Debug)]
-struct CodeBuddyOutputDraft {
-    native_record_id: String,
-    content: Vec<u8>,
-    occurred_at_unix_ms: i64,
-    outcome: OutputOutcomeMetadata,
-    kind: OutputObservationKind,
-    call_id: Option<String>,
-}
-
-#[derive(Debug)]
 struct CodeBuddyPage {
     records: Vec<CodeBuddyRecord>,
-    expected_cursor: CodeBuddyNativeCursor,
-    next_cursor: CodeBuddyNativeCursor,
-    retained_bytes: usize,
-}
-
-impl CodeBuddyPage {
-    fn logical_units(&self) -> usize {
-        self.records.len().max(1)
-    }
+    next_state: CodeBuddyScanState,
 }
 
 mod discovery;
-mod ingestion;
-mod lifecycle;
-mod outputs;
 mod parsing;
 mod projection;
 mod source_backed;
 
 use discovery::*;
-pub(crate) use ingestion::import_codebuddy_nativepath;
-use lifecycle::*;
-use outputs::*;
-pub(crate) use outputs::{
-    codebuddy_cli_complete_content_record, codebuddy_cli_complete_content_source_from_admitted,
-};
 use parsing::*;
 use projection::*;
 pub(crate) use source_backed::{
+    codebuddy_cli_complete_content_record, codebuddy_cli_complete_content_source_from_admitted,
     hydrate_codebuddy_source_backed_record, scan_codebuddy_source_backed_root,
     CodeBuddyHydratedSourceRecord, CodeBuddySourceBackedPage, CodeBuddySourceBackedRejection,
     CodeBuddySourceBackedScan,

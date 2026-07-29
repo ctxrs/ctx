@@ -2,29 +2,29 @@ use super::*;
 
 pub(super) fn next_source_page(
     source: &CodeBuddySource,
-    cursor: &CodeBuddyNativeCursor,
+    state: &CodeBuddyScanState,
     context: &ProviderAdapterContext,
 ) -> Result<Option<CodeBuddyPage>> {
-    if cursor.terminal {
+    if state.terminal {
         return Ok(None);
     }
     match source.shape {
-        CodeBuddySourceShape::Cli => next_cli_page(source, cursor, context).map(Some),
-        CodeBuddySourceShape::Extension => next_extension_page(source, cursor, context).map(Some),
+        CodeBuddySourceShape::Cli => next_cli_page(source, state, context).map(Some),
+        CodeBuddySourceShape::Extension => next_extension_page(source, state, context).map(Some),
     }
 }
 
 pub(super) fn next_cli_page(
     source: &CodeBuddySource,
-    cursor: &CodeBuddyNativeCursor,
+    state: &CodeBuddyScanState,
     context: &ProviderAdapterContext,
 ) -> Result<CodeBuddyPage> {
     let frozen = source.frozen.as_ref().ok_or(CaptureError::SystemInvariant(
         "CodeBuddy CLI page has no frozen source",
     ))?;
-    if cursor.next_native_offset > frozen.length {
+    if state.next_native_offset > frozen.length {
         return Err(CaptureError::InvalidPayload(
-            "CodeBuddy CLI cursor exceeds its source".to_owned(),
+            "CodeBuddy CLI state exceeds its source".to_owned(),
         ));
     }
     let file = match source
@@ -39,14 +39,14 @@ pub(super) fn next_cli_page(
         return Err(CaptureError::SourceChangedDuringCapture);
     }
     let mut reader = BufReader::new(file);
-    reader.seek(SeekFrom::Start(cursor.next_native_offset))?;
-    let mut next = cursor.clone();
+    reader.seek(SeekFrom::Start(state.next_native_offset))?;
+    let mut next = state.clone();
     next.source_revision.clone_from(&source.source_revision);
     next.file_identity = Some(frozen.identity_token());
     next.terminal = false;
     let mut records = Vec::new();
     let mut retained_bytes = 0_usize;
-    let mut offset = cursor.next_native_offset;
+    let mut offset = state.next_native_offset;
     let mut reached_eof = false;
     let mut session_title = codebuddy_session_title(source, &next.session)?;
 
@@ -95,7 +95,7 @@ pub(super) fn next_cli_page(
                     "CodeBuddy CLI ordinal overflowed",
                 ))?;
         if record.oversized {
-            record_cursor_failure(
+            record_scan_rejection(
                 &mut next,
                 physical_line,
                 format!(
@@ -110,7 +110,6 @@ pub(super) fn next_cli_page(
                 byte_end_exclusive: Some(offset),
                 native_bytes: Vec::new(),
                 classification: CodeBuddyRecordClassification::RejectedRecord,
-                output: None,
             });
             retained_bytes = retained_bytes.saturating_add(256);
             continue;
@@ -129,7 +128,6 @@ pub(super) fn next_cli_page(
                 byte_end_exclusive: Some(offset),
                 native_bytes: record_bytes,
                 classification: CodeBuddyRecordClassification::SkippedMetadata,
-                output: None,
             });
             retained_bytes = retained_bytes.saturating_add(record_bound);
             continue;
@@ -139,7 +137,7 @@ pub(super) fn next_cli_page(
             Err(_) if !record.newline_terminated => {
                 next.next_native_offset = start;
                 next.next_native_ordinal = ordinal;
-                next.incomplete_tail = Some(CodeBuddyCursorFailure {
+                next.incomplete_tail = Some(CodeBuddyScanRejection {
                     line: physical_line,
                     error: bounded_failure(format!(
                         "{}: incomplete trailing JSONL record",
@@ -150,7 +148,7 @@ pub(super) fn next_cli_page(
                 break;
             }
             Err(error) => {
-                record_cursor_failure(
+                record_scan_rejection(
                     &mut next,
                     physical_line,
                     format!("{}: malformed JSONL: {error}", source.path.display()),
@@ -162,7 +160,6 @@ pub(super) fn next_cli_page(
                     byte_end_exclusive: Some(offset),
                     native_bytes: record_bytes,
                     classification: CodeBuddyRecordClassification::RejectedRecord,
-                    output: None,
                 });
                 retained_bytes = retained_bytes.saturating_add(record_bound);
                 continue;
@@ -176,8 +173,7 @@ pub(super) fn next_cli_page(
                     "CodeBuddy CLI row count overflowed",
                 ))?;
         update_cli_session(&mut next.session, &value, context.imported_at);
-        let (classification, output) = cli_core_row(
-            source,
+        let classification = cli_core_row(
             context,
             &mut next.session,
             &mut session_title,
@@ -214,7 +210,6 @@ pub(super) fn next_cli_page(
             byte_end_exclusive: Some(offset),
             native_bytes: record_bytes,
             classification,
-            output,
         });
         retained_bytes = retained_bytes.saturating_add(record_bound);
     }
@@ -224,15 +219,11 @@ pub(super) fn next_cli_page(
     }
     next.terminal = reached_eof;
     next.certified_prefix_sha256 = source_prefix_sha256(source, next.next_native_offset)?;
-    retained_bytes = retained_bytes
-        .saturating_add(serde_json::to_vec(&next)?.len())
-        .saturating_add(serde_json::to_vec(cursor)?.len());
+    retained_bytes = retained_bytes.saturating_add(next.estimated_bytes());
     validate_page_bounds(records.len().max(1), retained_bytes)?;
     Ok(CodeBuddyPage {
         records,
-        expected_cursor: cursor.clone(),
-        next_cursor: next,
-        retained_bytes,
+        next_state: next,
     })
 }
 
@@ -290,7 +281,7 @@ pub(super) fn read_bounded_jsonl_record(
 
 pub(super) fn codebuddy_session_title(
     source: &CodeBuddySource,
-    session: &CodeBuddySessionCheckpoint,
+    session: &CodeBuddySessionState,
 ) -> Result<Option<String>> {
     if source.shape == CodeBuddySourceShape::Extension {
         let admitted = source
@@ -301,9 +292,7 @@ pub(super) fn codebuddy_session_title(
         let metadata = if let Some(admitted) = admitted {
             &admitted.metadata
         } else {
-            let (metadata, _) =
-                codebuddy_extension_metadata(&source.path, source.session_ordinal)?;
-            owned = metadata.ok_or(CaptureError::SourceChangedDuringCapture)?;
+            owned = codebuddy_extension_metadata(&source.path, source.session_ordinal)?;
             &owned
         };
         if let Some(title) = codebuddy_extension_metadata_text(metadata, &["name", "title"]) {
@@ -378,8 +367,7 @@ pub(super) fn codebuddy_session_title(
                     "CodeBuddy extension title anchor exceeds platform limits".to_owned(),
                 )
             })?;
-            let (metadata, _) = codebuddy_extension_metadata(&source.path, source.session_ordinal)?;
-            let metadata = metadata.ok_or(CaptureError::SourceChangedDuringCapture)?;
+            let metadata = codebuddy_extension_metadata(&source.path, source.session_ordinal)?;
             let message_ref = metadata
                 .messages()
                 .get(message_index)
@@ -426,7 +414,7 @@ pub(super) fn codebuddy_session_title(
 
 pub(super) fn next_extension_page(
     source: &CodeBuddySource,
-    cursor: &CodeBuddyNativeCursor,
+    state: &CodeBuddyScanState,
     context: &ProviderAdapterContext,
 ) -> Result<CodeBuddyPage> {
     let admitted = source
@@ -436,19 +424,16 @@ pub(super) fn next_extension_page(
     let owned_metadata;
     let metadata_summary;
     let metadata = if let Some(admitted) = admitted {
-        metadata_summary = ProviderImportSummary::default();
+        metadata_summary = Vec::<CodeBuddyExtensionRejection>::new();
         &admitted.metadata
     } else {
-        let (metadata, summary) =
-            codebuddy_extension_metadata(&source.path, source.session_ordinal)?;
-        metadata_summary = summary;
-        owned_metadata = metadata.ok_or(CaptureError::InvalidProviderTranscriptPath {
-            path: source.path.clone(),
-            reason: "CodeBuddy extension session index is unreadable",
-        })?;
+        owned_metadata = codebuddy_extension_metadata(&source.path, source.session_ordinal)?;
+        let (_, rejections) =
+            CodeBuddyExtensionObservation::read(&owned_metadata, source.session_ordinal)?;
+        metadata_summary = rejections;
         &owned_metadata
     };
-    let mut next = cursor.clone();
+    let mut next = state.clone();
     next.source_revision.clone_from(&source.source_revision);
     next.terminal = false;
     let mut records = Vec::new();
@@ -457,9 +442,9 @@ pub(super) fn next_extension_page(
     let mut reached_end = true;
     let mut session_title = codebuddy_session_title(source, &next.session)?;
 
-    if cursor.next_native_ordinal == 0 {
-        for failure in metadata_summary.failures {
-            record_cursor_failure(&mut next, failure.line, failure.error)?;
+    if state.next_native_ordinal == 0 {
+        for failure in metadata_summary {
+            record_scan_rejection(&mut next, failure.line, failure.error)?;
         }
     }
 
@@ -470,21 +455,21 @@ pub(super) fn next_extension_page(
             .and_then(|message_id| admitted.and_then(|admitted| admitted.messages.get(message_id)));
         let (message_path, frozen) = match admitted_message {
             Some(file) => (
-                metadata
-                    .session_dir
-                    .join("messages")
-                    .join(format!(
-                        "{}.json",
-                        message_ref.get("id").and_then(Value::as_str).unwrap_or_default()
-                    )),
+                metadata.session_dir.join("messages").join(format!(
+                    "{}.json",
+                    message_ref
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                )),
                 CodeBuddyFrozenFile::from_metadata(file.metadata())?,
             ),
             None => match codebuddy_extension_message_file(&metadata.session_dir, message_ref) {
                 Ok(value) => value,
                 Err(error) => {
                     let error = error.rejected()?;
-                    if cursor.next_native_ordinal == 0 {
-                        record_cursor_failure(
+                    if state.next_native_ordinal == 0 {
+                        record_scan_rejection(
                             &mut next,
                             codebuddy_extension_line_number(source.session_ordinal, message_index),
                             error,
@@ -500,7 +485,7 @@ pub(super) fn next_extension_page(
             .ok_or(CaptureError::SystemInvariant(
                 "CodeBuddy extension ordinal overflowed",
             ))?;
-        if ordinal < cursor.next_native_ordinal {
+        if ordinal < state.next_native_ordinal {
             continue;
         }
         if records.len() >= CODEBUDDY_NATIVE_PAGE_MAX_UNITS {
@@ -531,7 +516,7 @@ pub(super) fn next_extension_page(
                     "CodeBuddy extension row count overflowed",
                 ))?;
         if frozen.length > CODEBUDDY_NATIVE_RECORD_MAX_BYTES as u64 {
-            record_cursor_failure(
+            record_scan_rejection(
                 &mut next,
                 physical_line,
                 format!(
@@ -546,7 +531,6 @@ pub(super) fn next_extension_page(
                 byte_end_exclusive: None,
                 native_bytes: Vec::new(),
                 classification: CodeBuddyRecordClassification::RejectedRecord,
-                output: None,
             });
             retained_bytes = retained_bytes.saturating_add(256);
             continue;
@@ -564,7 +548,7 @@ pub(super) fn next_extension_page(
         let raw_message = match serde_json::from_slice::<Value>(&record_bytes) {
             Ok(value) => value,
             Err(error) => {
-                record_cursor_failure(
+                record_scan_rejection(
                     &mut next,
                     physical_line,
                     format!("{}: json error: {error}", message_path.display()),
@@ -576,13 +560,12 @@ pub(super) fn next_extension_page(
                     byte_end_exclusive: None,
                     native_bytes: record_bytes,
                     classification: CodeBuddyRecordClassification::RejectedRecord,
-                    output: None,
                 });
                 retained_bytes = retained_bytes.saturating_add(record_bound);
                 continue;
             }
         };
-        let (classification, output) = extension_core_row(
+        let classification = extension_core_row(
             context,
             &metadata,
             &mut next.session,
@@ -620,7 +603,6 @@ pub(super) fn next_extension_page(
             byte_end_exclusive: None,
             native_bytes: record_bytes,
             classification,
-            output,
         });
         retained_bytes = retained_bytes.saturating_add(record_bound);
     }
@@ -630,14 +612,10 @@ pub(super) fn next_extension_page(
     }
     next.terminal = reached_end;
     next.certified_prefix_sha256 = sha256_hex(source.source_revision.as_bytes());
-    retained_bytes = retained_bytes
-        .saturating_add(serde_json::to_vec(&next)?.len())
-        .saturating_add(serde_json::to_vec(cursor)?.len());
+    retained_bytes = retained_bytes.saturating_add(next.estimated_bytes());
     validate_page_bounds(records.len().max(1), retained_bytes)?;
     Ok(CodeBuddyPage {
         records,
-        expected_cursor: cursor.clone(),
-        next_cursor: next,
-        retained_bytes,
+        next_state: next,
     })
 }

@@ -5,9 +5,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    provider::{file_touches::visit_provider_file_touch_drafts_with_limit, tool_input},
-    OutputAssociations, OutputCommandContext, OutputNativeCoordinate, OutputObservationKind,
-    OutputOutcome, OutputOutcomeMetadata, OutputSourceLocator, ProOutputObservation,
+    provider::file_touches::visit_provider_file_touch_drafts_with_limit,
     MAX_PROVIDER_JSONL_LINE_BYTES,
 };
 
@@ -18,11 +16,9 @@ use super::{
     },
     normalize::{
         normalize_continue_document, normalize_event, ContinueEventRow, ContinueFileTouch,
-        ContinueGenerationAuthority, ContinueNativeProfile, ContinuePreparedPage,
-        ContinuePreparedSource, ContinueProExtractionFailure, ContinueSessionIdentity,
-        ContinueSourceCompleteness, ContinueTransientOutputPayload, NormalizeEventError,
-        CONTINUE_NATIVE_MAX_FILE_TOUCHES_PER_EVENT, CONTINUE_NATIVE_MAX_OUTPUT_PAGE_BYTES,
-        CONTINUE_NATIVE_MAX_OUTPUT_PAGE_UNITS, CONTINUE_NATIVE_MAX_PAGE_BYTES,
+        ContinueGenerationAuthority, ContinuePreparedPage, ContinuePreparedSource,
+        ContinueSessionIdentity, ContinueSourceCompleteness, NormalizeEventError,
+        CONTINUE_NATIVE_MAX_FILE_TOUCHES_PER_EVENT, CONTINUE_NATIVE_MAX_PAGE_BYTES,
         CONTINUE_NATIVE_MAX_PAGE_ROWS,
     },
     source::{
@@ -52,13 +48,6 @@ pub(crate) struct ContinueOutputExclusionStats {
     pub(crate) call_body_bytes_skipped: u64,
     pub(crate) retained_decode_string_allocations: usize,
     pub(crate) retained_decode_string_bytes: u64,
-    pub(crate) result_string_allocations: usize,
-    pub(crate) result_body_bytes_decoded: usize,
-    pub(crate) result_hashes_created: usize,
-    pub(crate) result_previews_created: usize,
-    pub(crate) result_touches_created: usize,
-    pub(crate) result_fts_documents_created: usize,
-    pub(crate) result_handoffs_created: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,10 +95,9 @@ impl ContinueSourceFailure {
     }
 }
 
-pub(crate) fn parse_continue_source_with_profile(
+pub(crate) fn parse_continue_source(
     snapshot: ContinueSourceSnapshot,
     index: &ContinueIndexSnapshot,
-    profile: ContinueNativeProfile,
 ) -> Result<ContinueParseOutcome, ContinueSourceFailure> {
     let root = match validate_and_root(&snapshot.bytes) {
         Ok(root) => root,
@@ -181,7 +169,7 @@ pub(crate) fn parse_continue_source_with_profile(
         .transpose()?;
     let output_exclusion = document.output_exclusion;
     let source = normalize_continue_document(&snapshot, index, document, session_id)?;
-    ContinueSourcePageStream::preflight(snapshot, source, history_range, output_exclusion, profile)
+    ContinueSourcePageStream::preflight(snapshot, source, history_range, output_exclusion)
         .map(|stream| ContinueParseOutcome::Complete(Box::new(stream)))
 }
 
@@ -283,16 +271,12 @@ pub(crate) struct ContinueSourcePageStream {
     pending_event: Option<ContinueRetainedEvent>,
     authority: ContinueGenerationAuthority,
     output_exclusion: ContinueOutputExclusionStats,
-    profile: ContinueNativeProfile,
-    output_failure: Option<ContinueProExtractionFailure>,
     done: bool,
 }
 
 #[derive(Debug)]
 struct ContinueRetainedEvent {
     event: ContinueEventRow,
-    outputs: Vec<ProOutputObservation>,
-    output_bytes: usize,
 }
 
 impl ContinueSourcePageStream {
@@ -301,7 +285,6 @@ impl ContinueSourcePageStream {
         source: ContinuePreparedSource,
         history_range: Option<Range<usize>>,
         mut output_exclusion: ContinueOutputExclusionStats,
-        profile: ContinueNativeProfile,
     ) -> Result<Self, ContinueSourceFailure> {
         let identity = source.session.identity.clone();
         let source_bytes = ContinuePreparedPage::base_estimated_bytes(&identity)
@@ -409,8 +392,6 @@ impl ContinueSourcePageStream {
                 rejected_items: rejected,
             },
             output_exclusion,
-            profile,
-            output_failure: None,
             done: false,
         })
     }
@@ -427,11 +408,9 @@ impl ContinueSourcePageStream {
             ContinuePreparedPage::base_estimated_bytes(&self.session_identity)
                 .saturating_add(source.as_ref().map_or(0, |source| source.estimated_bytes()));
         let mut events = Vec::new();
-        let mut outputs = Vec::new();
-        let mut output_bytes = 0_usize;
 
         while self.emitted_events.saturating_add(events.len()) < self.authority.retained_events {
-            let mut retained = match self.pending_event.take() {
+            let retained = match self.pending_event.take() {
                 Some(event) => event,
                 None => self.next_retained_event()?.ok_or_else(|| {
                     ContinueSourceFailure::from_snapshot(
@@ -441,32 +420,6 @@ impl ContinueSourcePageStream {
                     )
                 })?,
             };
-            if self.output_failure.is_none()
-                && (retained.outputs.len() > CONTINUE_NATIVE_MAX_OUTPUT_PAGE_UNITS
-                    || retained.output_bytes > CONTINUE_NATIVE_MAX_OUTPUT_PAGE_BYTES)
-            {
-                self.output_failure = Some(ContinueProExtractionFailure {
-                    history_ordinal: retained.event.identity.history_ordinal,
-                    observed_outputs: retained.outputs.len(),
-                    observed_bytes: retained.output_bytes,
-                    message: "one Continue history item exceeds the bounded NativePath output page"
-                        .into(),
-                });
-                retained.outputs.clear();
-                retained.output_bytes = 0;
-                outputs.clear();
-                output_bytes = 0;
-            }
-            let next_output_units = outputs.len().saturating_add(retained.outputs.len());
-            let next_output_bytes = output_bytes.saturating_add(retained.output_bytes);
-            if self.output_failure.is_none()
-                && !events.is_empty()
-                && (next_output_units > CONTINUE_NATIVE_MAX_OUTPUT_PAGE_UNITS
-                    || next_output_bytes > CONTINUE_NATIVE_MAX_OUTPUT_PAGE_BYTES)
-            {
-                self.pending_event = Some(retained);
-                break;
-            }
             let event_bytes = retained.event.estimated_bytes();
             let next_rows = row_count.saturating_add(retained.event.logical_units());
             let next_bytes = estimated_bytes.saturating_add(event_bytes);
@@ -485,10 +438,6 @@ impl ContinueSourcePageStream {
                     ContinueSourceFailureKind::RetainedItemTooLarge,
                     "Continue retained event cannot fit an empty bounded page".to_owned(),
                 ));
-            }
-            if self.output_failure.is_none() {
-                output_bytes = next_output_bytes;
-                outputs.append(&mut retained.outputs);
             }
             events.push(retained.event);
             row_count = next_rows;
@@ -511,12 +460,6 @@ impl ContinueSourcePageStream {
             terminal,
             authority: terminal.then(|| self.authority.clone()),
             output_exclusion: terminal.then_some(self.output_exclusion),
-            transient_output: self.profile.wants_outputs().then_some(
-                ContinueTransientOutputPayload {
-                    observations: outputs,
-                    failure: terminal.then(|| self.output_failure.clone()).flatten(),
-                },
-            ),
             row_count,
             estimated_bytes,
         }))
@@ -557,10 +500,9 @@ impl ContinueSourcePageStream {
                     )
                 })?;
             let mut second_pass_stats = ContinueOutputExclusionStats::default();
-            let item_span = item;
-            let source_record_digest = Sha256::digest(item_span.raw()).into();
+            let source_record_digest = Sha256::digest(item.raw()).into();
             let Some(item) =
-                parse_history_item(item_span, &mut second_pass_stats).map_err(|message| {
+                parse_history_item(item, &mut second_pass_stats).map_err(|message| {
                     ContinueSourceFailure::from_snapshot(
                         &self.snapshot,
                         ContinueSourceFailureKind::MalformedDocument,
@@ -573,26 +515,7 @@ impl ContinueSourcePageStream {
             let event =
                 normalize_event(&self.session_identity, ordinal, &item, source_record_digest)
                     .map_err(|error| normalization_failure(&self.snapshot, ordinal, error))?;
-            let outputs = if self.profile.wants_outputs() {
-                extract_continue_outputs(
-                    item_span,
-                    &self.snapshot,
-                    ordinal,
-                    event.occurred_at.map(|value| value.timestamp_millis()),
-                    &self.session_identity,
-                    &mut self.output_exclusion,
-                )?
-            } else {
-                Vec::new()
-            };
-            let output_bytes = outputs.iter().fold(0_usize, |bytes, output| {
-                bytes.saturating_add(super::normalize::estimated_output_bytes(output))
-            });
-            return Ok(Some(ContinueRetainedEvent {
-                event,
-                outputs,
-                output_bytes,
-            }));
+            return Ok(Some(ContinueRetainedEvent { event }));
         }
     }
 }
@@ -652,372 +575,6 @@ pub(super) fn locate_continue_exact_history_item<'a>(
     Ok(ContinueExactHistoryLookup::MissingItem)
 }
 
-fn extract_continue_outputs(
-    item: JsonSpan<'_>,
-    snapshot: &ContinueSourceSnapshot,
-    history_ordinal: u64,
-    occurred_at_unix_ms: Option<i64>,
-    session: &ContinueSessionIdentity,
-    stats: &mut ContinueOutputExclusionStats,
-) -> Result<Vec<ProOutputObservation>, ContinueSourceFailure> {
-    let history_item_index = u32::try_from(history_ordinal).map_err(|_| {
-        ContinueSourceFailure::from_snapshot(
-            snapshot,
-            ContinueSourceFailureKind::Normalization,
-            "Continue history ordinal exceeds stable output identity bounds".to_owned(),
-        )
-    })?;
-    let mut native_item_id = None;
-    let mut states = None;
-    for field in item.as_object().map_err(|error| {
-        ContinueSourceFailure::from_snapshot(
-            snapshot,
-            ContinueSourceFailureKind::MalformedDocument,
-            scan_error(error),
-        )
-    })? {
-        let (key, value) = field.map_err(|error| {
-            ContinueSourceFailure::from_snapshot(
-                snapshot,
-                ContinueSourceFailureKind::MalformedDocument,
-                scan_error(error),
-            )
-        })?;
-        if key.is("id") {
-            native_item_id = decode_string(value, MAX_NATIVE_ITEM_ID_BYTES)
-                .map_err(|error| {
-                    ContinueSourceFailure::from_snapshot(
-                        snapshot,
-                        ContinueSourceFailureKind::MalformedDocument,
-                        error.to_string(),
-                    )
-                })?
-                .filter(|value| valid_continue_native_id_part(value));
-        } else if key.is("toolCallStates") && value.kind() == JsonKind::Array {
-            states = Some(value);
-        }
-    }
-    let Some(states) = states else {
-        return Ok(Vec::new());
-    };
-    let mut observations = Vec::new();
-    for (state_ordinal, state) in states
-        .as_array()
-        .map_err(|error| {
-            ContinueSourceFailure::from_snapshot(
-                snapshot,
-                ContinueSourceFailureKind::MalformedDocument,
-                scan_error(error),
-            )
-        })?
-        .enumerate()
-    {
-        let state = state.map_err(|error| {
-            ContinueSourceFailure::from_snapshot(
-                snapshot,
-                ContinueSourceFailureKind::MalformedDocument,
-                scan_error(error),
-            )
-        })?;
-        if state.kind() != JsonKind::Object {
-            continue;
-        }
-        let mut output_span = None;
-        for field in state.as_object().map_err(|error| {
-            ContinueSourceFailure::from_snapshot(
-                snapshot,
-                ContinueSourceFailureKind::MalformedDocument,
-                scan_error(error),
-            )
-        })? {
-            let (key, value) = field.map_err(|error| {
-                ContinueSourceFailure::from_snapshot(
-                    snapshot,
-                    ContinueSourceFailureKind::MalformedDocument,
-                    scan_error(error),
-                )
-            })?;
-            if key.is("output") && output_span.replace(value).is_some() {
-                return Err(ContinueSourceFailure::from_snapshot(
-                    snapshot,
-                    ContinueSourceFailureKind::MalformedDocument,
-                    "Continue tool state has duplicate output fields".to_owned(),
-                ));
-            }
-        }
-        let Some(output_span) = output_span.filter(|span| span.kind() != JsonKind::Null) else {
-            continue;
-        };
-        let state_value = serde_json::from_slice::<Value>(state.raw()).map_err(|error| {
-            ContinueSourceFailure::from_snapshot(
-                snapshot,
-                ContinueSourceFailureKind::MalformedDocument,
-                format!("invalid Continue tool state: {error}"),
-            )
-        })?;
-        let content = decode_continue_output(output_span).map_err(|message| {
-            ContinueSourceFailure::from_snapshot(
-                snapshot,
-                ContinueSourceFailureKind::MalformedDocument,
-                message,
-            )
-        })?;
-        stats.result_string_allocations = stats.result_string_allocations.saturating_add(1);
-        stats.result_body_bytes_decoded = stats
-            .result_body_bytes_decoded
-            .saturating_add(content.len());
-        let tool_state_index = u32::try_from(state_ordinal).map_err(|_| {
-            ContinueSourceFailure::from_snapshot(
-                snapshot,
-                ContinueSourceFailureKind::Normalization,
-                "Continue tool-state index exceeds stable output identity bounds".to_owned(),
-            )
-        })?;
-        let call_id = continue_result_call_id(&state_value);
-        let tool_name = continue_result_tool_name(&state_value);
-        let native_record_id = continue_tool_result_native_id(
-            native_item_id.as_deref(),
-            history_item_index,
-            call_id.as_deref(),
-            tool_state_index,
-        );
-        let native_sequence =
-            continue_result_provider_event_index(history_item_index, tool_state_index).ok_or_else(
-                || {
-                    ContinueSourceFailure::from_snapshot(
-                        snapshot,
-                        ContinueSourceFailureKind::Normalization,
-                        "Continue output identity exceeds stable bounds".to_owned(),
-                    )
-                },
-            )?;
-        let range = output_span.range_within(&snapshot.bytes).ok_or_else(|| {
-            ContinueSourceFailure::from_snapshot(
-                snapshot,
-                ContinueSourceFailureKind::Normalization,
-                "Continue output span is outside its certified source".to_owned(),
-            )
-        })?;
-        let command = continue_output_is_command(&tool_name)
-            .then(|| continue_output_command_context(&state_value, &tool_name))
-            .flatten();
-        let kind = if command.is_some() || continue_output_is_command(&tool_name) {
-            OutputObservationKind::Command
-        } else {
-            OutputObservationKind::Tool
-        };
-        observations.push(ProOutputObservation {
-            kind,
-            coordinate: OutputNativeCoordinate {
-                unit_key: native_record_id.clone(),
-                native_sequence,
-                native_record_id: Some(native_record_id.clone()),
-                source_record_ordinal: Some(history_ordinal),
-                source_record_subrecord_index: Some(tool_state_index),
-                byte_start: u64::try_from(range.start).ok(),
-                byte_end_exclusive: u64::try_from(range.end).ok(),
-            },
-            occurred_at_unix_ms,
-            associations: OutputAssociations {
-                direct_session_id: session.0.clone(),
-                root_session_id: session.0.clone(),
-                parent_session_id: None,
-                provider_session_id: Some(session.0.clone()),
-                agent_id: None,
-                repository: None,
-            },
-            call_id,
-            command,
-            outcome: continue_output_outcome(&state_value),
-            locator: OutputSourceLocator {
-                version: 1,
-                kind: "continue_native_tool_state_range".to_owned(),
-                payload: encode_continue_output_locator(
-                    history_item_index,
-                    tool_state_index,
-                    range,
-                    &native_record_id,
-                ),
-            },
-            content,
-        });
-    }
-    Ok(observations)
-}
-
-fn decode_continue_output(output: JsonSpan<'_>) -> Result<Vec<u8>, String> {
-    match output.kind() {
-        JsonKind::String => serde_json::from_slice::<String>(output.raw())
-            .map(String::into_bytes)
-            .map_err(|error| format!("invalid Continue output string: {error}")),
-        JsonKind::Null => Ok(Vec::new()),
-        JsonKind::Bool | JsonKind::Number | JsonKind::Array | JsonKind::Object => {
-            let value = serde_json::from_slice::<Value>(output.raw())
-                .map_err(|error| format!("invalid Continue output value: {error}"))?;
-            serde_json::to_vec(&value)
-                .map_err(|error| format!("failed to encode Continue output value: {error}"))
-        }
-    }
-}
-
-fn continue_tool_result_native_id(
-    item_id: Option<&str>,
-    history_item_index: u32,
-    tool_call_id: Option<&str>,
-    tool_state_index: u32,
-) -> String {
-    match (item_id, tool_call_id) {
-        (Some(item_id), Some(tool_call_id)) => {
-            format!("{item_id}:tool:{tool_call_id}:result")
-        }
-        (Some(item_id), None) => format!("{item_id}:tool-state:{tool_state_index}:result"),
-        (None, Some(tool_call_id)) => {
-            format!("history:{history_item_index}:tool:{tool_call_id}:result")
-        }
-        (None, None) => {
-            format!("history:{history_item_index}:tool-state:{tool_state_index}:result")
-        }
-    }
-}
-
-fn valid_continue_native_id_part(value: &str) -> bool {
-    !value.is_empty() && value.len() <= 384 && !value.chars().any(char::is_control)
-}
-
-fn continue_result_call_id(state: &Value) -> Option<String> {
-    state
-        .get("toolCallId")
-        .or_else(|| state.pointer("/toolCall/id"))
-        .and_then(Value::as_str)
-        .filter(|value| valid_continue_native_id_part(value))
-        .map(str::to_owned)
-}
-
-fn continue_result_tool_name(state: &Value) -> String {
-    state
-        .pointer("/toolCall/function/name")
-        .or_else(|| state.pointer("/toolCall/name"))
-        .and_then(Value::as_str)
-        .filter(|value| {
-            !value.is_empty() && value.len() <= MAX_TOOL_NAME_BYTES && !value.contains('\0')
-        })
-        .unwrap_or("tool")
-        .to_owned()
-}
-
-fn continue_output_is_command(tool_name: &str) -> bool {
-    let normalized = tool_name
-        .chars()
-        .filter(|character| character.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect::<String>();
-    matches!(
-        normalized.as_str(),
-        "bash"
-            | "shell"
-            | "terminal"
-            | "command"
-            | "executecommand"
-            | "runcommand"
-            | "runterminalcommand"
-    )
-}
-
-fn continue_output_outcome(state: &Value) -> OutputOutcomeMetadata {
-    let exit_code = state
-        .get("exitCode")
-        .or_else(|| state.get("exit_code"))
-        .and_then(Value::as_i64)
-        .and_then(|value| i32::try_from(value).ok());
-    let duration_ms = state
-        .get("durationMs")
-        .or_else(|| state.get("duration_ms"))
-        .and_then(Value::as_u64);
-    let status = state
-        .get("status")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .map(str::to_ascii_lowercase);
-    let timed_out = ["timedOut", "timed_out", "timeout"]
-        .into_iter()
-        .any(|key| state.get(key).and_then(Value::as_bool).unwrap_or(false))
-        || status
-            .as_deref()
-            .is_some_and(|status| matches!(status, "timeout" | "timed_out" | "timedout"));
-    let outcome = if timed_out {
-        OutputOutcome::Timeout
-    } else if exit_code.is_some_and(|exit_code| exit_code != 0)
-        || status.as_deref().is_some_and(|status| {
-            matches!(
-                status,
-                "failed" | "failure" | "error" | "errored" | "cancelled" | "canceled"
-            )
-        })
-    {
-        OutputOutcome::Failure
-    } else if exit_code == Some(0)
-        || status.as_deref().is_some_and(|status| {
-            matches!(
-                status,
-                "done" | "success" | "succeeded" | "complete" | "completed" | "ok" | "passed"
-            )
-        })
-    {
-        OutputOutcome::Success
-    } else {
-        OutputOutcome::Unknown
-    };
-    OutputOutcomeMetadata {
-        outcome,
-        exit_code,
-        duration_ms,
-    }
-}
-
-fn continue_output_command_context(state: &Value, tool_name: &str) -> Option<OutputCommandContext> {
-    let input = state
-        .pointer("/toolCall/function/arguments")
-        .or_else(|| state.pointer("/toolCall/arguments"))
-        .or_else(|| state.get("arguments"))?;
-    Some(OutputCommandContext {
-        tool_name: tool_name.to_owned(),
-        command: tool_input::command(input)?,
-        working_directory: tool_input::working_directory(input),
-    })
-}
-
-fn continue_result_provider_event_index(
-    history_item_index: u32,
-    tool_state_index: u32,
-) -> Option<u64> {
-    const RESULT_EVENT_NAMESPACE: u64 = 1_u64 << 63;
-    const TOOL_STATE_BITS: u32 = 31;
-    const MAX_TOOL_STATE_INDEX: u32 = (1_u32 << TOOL_STATE_BITS) - 1;
-    (tool_state_index <= MAX_TOOL_STATE_INDEX).then(|| {
-        RESULT_EVENT_NAMESPACE
-            | (u64::from(history_item_index) << TOOL_STATE_BITS)
-            | u64::from(tool_state_index)
-    })
-}
-
-fn encode_continue_output_locator(
-    history_item_index: u32,
-    tool_state_index: u32,
-    range: Range<usize>,
-    native_record_id: &str,
-) -> Vec<u8> {
-    let native_id = native_record_id.as_bytes();
-    let native_id_len = u16::try_from(native_id.len()).unwrap_or(u16::MAX);
-    let mut locator = Vec::with_capacity(26_usize.saturating_add(native_id.len()));
-    locator.extend_from_slice(&history_item_index.to_be_bytes());
-    locator.extend_from_slice(&tool_state_index.to_be_bytes());
-    locator.extend_from_slice(&u64::try_from(range.start).unwrap_or(u64::MAX).to_be_bytes());
-    locator.extend_from_slice(&u64::try_from(range.end).unwrap_or(u64::MAX).to_be_bytes());
-    locator.extend_from_slice(&native_id_len.to_be_bytes());
-    locator.extend_from_slice(native_id);
-    locator
-}
-
 fn normalization_failure(
     snapshot: &ContinueSourceSnapshot,
     history_ordinal: u64,
@@ -1027,8 +584,8 @@ fn normalization_failure(
         NormalizeEventError::RetainedItemTooLarge { observed } => (
             ContinueSourceFailureKind::RetainedItemTooLarge,
             format!(
-                "Continue history item {history_ordinal} serializes to {observed} bytes, exceeding \
-                 the {MAX_PROVIDER_JSONL_LINE_BYTES} byte product bound"
+                "Continue history item {history_ordinal} retains {observed} lexical bytes, \
+                 exceeding the {MAX_PROVIDER_JSONL_LINE_BYTES} byte product bound"
             ),
         ),
         NormalizeEventError::FileTouchLimitExceeded => (
@@ -1038,9 +595,6 @@ fn normalization_failure(
                  unique file-touch transaction bound"
             ),
         ),
-        NormalizeEventError::Serialization(message) => {
-            (ContinueSourceFailureKind::Normalization, message)
-        }
     };
     ContinueSourceFailure::from_snapshot(snapshot, kind, message)
 }

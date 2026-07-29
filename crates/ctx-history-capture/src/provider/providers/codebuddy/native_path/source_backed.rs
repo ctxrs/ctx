@@ -62,6 +62,34 @@ pub(crate) struct CodeBuddyHydratedSourceRecord {
     pub(crate) decoded_display_text: String,
 }
 
+pub(crate) fn codebuddy_cli_complete_content_record(
+    value: &Value,
+    physical_line: usize,
+) -> Option<(String, String)> {
+    let text = cli_message_text(value);
+    if !codebuddy_is_message_record(
+        value.get("role").and_then(Value::as_str),
+        value.get("type").and_then(Value::as_str),
+    ) || text.trim().is_empty()
+    {
+        return None;
+    }
+    let native_record_id = codebuddy_cli_explicit_native_message_id(value)
+        .unwrap_or_else(|| format!("line-{physical_line}"));
+    Some((text, native_record_id))
+}
+
+pub(crate) fn codebuddy_cli_complete_content_source_from_admitted(
+    metadata: &Metadata,
+    path_identity: String,
+) -> Result<(String, String)> {
+    let frozen = CodeBuddyFrozenFile::from_metadata(metadata)?;
+    Ok((
+        frozen.source_revision_with_policy("cli-jsonl", CODEBUDDY_CLI_POLICY_REVISION),
+        path_identity,
+    ))
+}
+
 /// Discovers and scans every CodeBuddy source below one configured store root.
 ///
 /// CLI JSONL files and IDE extension session directories remain separate
@@ -78,7 +106,6 @@ pub(crate) fn scan_codebuddy_source_backed_root(
         imported_at,
     };
     let mut inventory = discover_sources(
-        root,
         root,
         &ProviderImportOptions {
             import_profile: ImportProfile::CoreOnly,
@@ -106,14 +133,14 @@ pub(crate) fn hydrate_codebuddy_source_backed_record(
     locator: &SourceRecordLocator,
 ) -> Result<CodeBuddyHydratedSourceRecord> {
     contract(locator.validate_contract(), "locator")?;
-    let mut inventory = discover_sources(root, root, &ProviderImportOptions::default())?;
+    let mut inventory = discover_sources(root, &ProviderImportOptions::default())?;
     let authority = codebuddy_authority(root)?;
     for source in &mut inventory.sources {
         bind_codebuddy_capability(source, &authority)?;
     }
     let mut matched = None;
     for source in &inventory.sources {
-        let cursor = initial_cursor(
+        let state = initial_state(
             source,
             &ProviderAdapterContext {
                 machine_id: "source-backed-codebuddy-hydration".to_owned(),
@@ -124,21 +151,21 @@ pub(crate) fn hydrate_codebuddy_source_backed_record(
                 )?,
             },
         )?;
-        let source_key = codebuddy_source_key(source, &cursor.session)?;
+        let source_key = codebuddy_source_key(source, &state.session)?;
         if source_key.exact_descriptor_eq(locator.source()) {
-            if matched.replace((source, cursor)).is_some() {
+            if matched.replace((source, state)).is_some() {
                 return Err(invalid_source_backed(
                     "locator source identity matched multiple installed CodeBuddy stores",
                 ));
             }
         }
     }
-    let (source, cursor) = matched.ok_or_else(|| {
+    let (source, state) = matched.ok_or_else(|| {
         invalid_source_backed("locator source is not present in the configured CodeBuddy stores")
     })?;
     let hydrated = match source.shape {
-        CodeBuddySourceShape::Cli => hydrate_cli(source, &cursor.session, locator),
-        CodeBuddySourceShape::Extension => hydrate_extension(source, &cursor.session, locator),
+        CodeBuddySourceShape::Cli => hydrate_cli(source, &state.session, locator),
+        CodeBuddySourceShape::Extension => hydrate_extension(source, &state.session, locator),
     }?;
     revalidate_codebuddy_capability(source)?;
     Ok(hydrated)
@@ -148,8 +175,8 @@ fn scan_source(
     source: &CodeBuddySource,
     context: &ProviderAdapterContext,
 ) -> Result<CodeBuddySourceBackedScan> {
-    let mut cursor = initial_cursor(source, context)?;
-    let source_key = codebuddy_source_key(source, &cursor.session)?;
+    let mut state = initial_state(source, context)?;
+    let source_key = codebuddy_source_key(source, &state.session)?;
     let opening = source_observation(source, source_key.clone())?;
     let certified_revision_digest = source_revision_digest(source);
     let mut pages = Vec::new();
@@ -163,12 +190,7 @@ fn scan_source(
             .map_err(|_| CaptureError::SystemInvariant("CodeBuddy source revision exceeds u64"))?;
     }
 
-    while let Some(page) = next_source_page(source, &cursor, context)? {
-        if page.expected_cursor != cursor {
-            return Err(CaptureError::SystemInvariant(
-                "CodeBuddy source-backed parser returned a noncontiguous page",
-            ));
-        }
+    while let Some(page) = next_source_page(source, &state, context)? {
         let mut projected = CodeBuddySourceBackedPage {
             documents: Vec::new(),
             complete_records: 0,
@@ -222,10 +244,10 @@ fn scan_source(
         }
         merge_page_counts(&mut counts, &projected)?;
         pages.push(projected);
-        cursor = page.next_cursor;
+        state = page.next_state;
     }
 
-    if !cursor.terminal {
+    if !state.terminal {
         return Err(CaptureError::SystemInvariant(
             "CodeBuddy source-backed scan stopped before the terminal frontier",
         ));
@@ -234,23 +256,23 @@ fn scan_source(
 
     let (content_digest, certified_bytes, frontier) = match source.shape {
         CodeBuddySourceShape::Cli => {
-            let digest = decode_sha256(&cursor.certified_prefix_sha256)?;
+            let digest = decode_sha256(&state.certified_prefix_sha256)?;
             let frontier = contract(
                 SourceFrontier::new(
                     CODEBUDDY_CLI_FRONTIER_KIND,
                     contract(
                         TypedKey::composite(vec![
-                            TypedKey::U64(cursor.next_native_offset),
-                            TypedKey::U64(cursor.next_native_ordinal),
+                            TypedKey::U64(state.next_native_offset),
+                            TypedKey::U64(state.next_native_ordinal),
                         ]),
                         "CLI frontier key",
                     )?,
-                    cursor.next_native_offset,
+                    state.next_native_offset,
                     digest,
                 ),
                 "CLI frontier",
             )?;
-            (digest, cursor.next_native_offset, Some(frontier))
+            (digest, state.next_native_offset, Some(frontier))
         }
         CodeBuddySourceShape::Extension => {
             (structured_digest.finalize().into(), structured_bytes, None)
@@ -269,10 +291,10 @@ fn scan_source(
         ),
         "source certification",
     )?;
-    let rejections = cursor
+    let rejections = state
         .failures
         .iter()
-        .chain(cursor.incomplete_tail.iter())
+        .chain(state.incomplete_tail.iter())
         .map(|failure| CodeBuddySourceBackedRejection {
             line: failure.line,
             detail: failure.error.clone(),
@@ -441,7 +463,7 @@ fn revalidate_codebuddy_capability(source: &CodeBuddySource) -> Result<()> {
 
 fn codebuddy_source_key(
     source: &CodeBuddySource,
-    session: &CodeBuddySessionCheckpoint,
+    session: &CodeBuddySessionState,
 ) -> Result<SourceKey> {
     let (shape, schema_variant) = match source.shape {
         CodeBuddySourceShape::Cli => ("cli", CODEBUDDY_CLI_SCHEMA_VARIANT),
@@ -481,7 +503,7 @@ fn source_observation(source: &CodeBuddySource, key: SourceKey) -> Result<Source
     contract(
         SourceObservation::new(
             key,
-            format!("codebuddy-{}-observation-v1", source.shape.cursor_tag()),
+            format!("codebuddy-{}-observation-v1", source.shape.shape_tag()),
             source.source_revision.as_bytes().to_vec(),
         ),
         "source observation",
@@ -555,21 +577,18 @@ fn codebuddy_lexical_document(
         }),
         "session identity",
     )?;
-    let native_message_id = core
-        .event
-        .metadata
-        .get("native_message_id")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or(CaptureError::SystemInvariant(
+    let native_message_id = core.event.native_message_id.as_str();
+    if native_message_id.is_empty() {
+        return Err(CaptureError::SystemInvariant(
             "CodeBuddy normalized event lost its native message identity",
-        ))?;
+        ));
+    }
     let item_key = contract(
         NativeItemKey::native_id(
             CODEBUDDY_EVENT_KEY_NAMESPACE,
             contract(
                 TypedKey::composite(vec![
-                    contract(TypedKey::utf8(source.shape.cursor_tag()), "event shape key")?,
+                    contract(TypedKey::utf8(source.shape.shape_tag()), "event shape key")?,
                     contract(TypedKey::utf8(native_message_id), "native message key")?,
                 ]),
                 "native event key",
@@ -723,27 +742,16 @@ fn extension_locator(
 }
 
 fn lexical_body(event: &CodeBuddyEventDraft) -> Result<String> {
-    let text = event
-        .payload
-        .get("text")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .map(str::to_owned)
-        .or_else(|| {
-            event
-                .payload
-                .get("body")
-                .filter(|value| !value.is_null())
-                .and_then(|value| serde_json::to_string(value).ok())
-        })
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| event.event_type.as_str().to_owned());
-    Ok(text)
+    Ok(if event.text.trim().is_empty() {
+        event.event_type.as_str().to_owned()
+    } else {
+        event.text.clone()
+    })
 }
 
 fn hydrate_cli(
     source: &CodeBuddySource,
-    session: &CodeBuddySessionCheckpoint,
+    session: &CodeBuddySessionState,
     locator: &SourceRecordLocator,
 ) -> Result<CodeBuddyHydratedSourceRecord> {
     if locator.revision_policy() != LocatorRevisionPolicy::StableRecordEvidence
@@ -827,7 +835,7 @@ fn hydrate_cli(
 
 fn hydrate_extension(
     source: &CodeBuddySource,
-    session: &CodeBuddySessionCheckpoint,
+    session: &CodeBuddySessionState,
     locator: &SourceRecordLocator,
 ) -> Result<CodeBuddyHydratedSourceRecord> {
     if locator.revision_policy() != LocatorRevisionPolicy::ExactSourceRevision
@@ -1235,8 +1243,7 @@ mod tests {
         write_dual_store(&root, "cli", "extension");
         let project_index = root.join("history/shared-project/index.json");
         fs::remove_file(&project_index).unwrap();
-        let mut inventory =
-            discover_sources(&root, &root, &ProviderImportOptions::default()).unwrap();
+        let mut inventory = discover_sources(&root, &ProviderImportOptions::default()).unwrap();
         let authority = codebuddy_authority(&root).unwrap();
         let extension = inventory
             .sources
@@ -1250,8 +1257,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let root = temp.path().join("codebuddy");
         write_dual_store(&root, "cli", "extension");
-        let mut inventory =
-            discover_sources(&root, &root, &ProviderImportOptions::default()).unwrap();
+        let mut inventory = discover_sources(&root, &ProviderImportOptions::default()).unwrap();
         let authority = codebuddy_authority(&root).unwrap();
         let extension = inventory
             .sources
@@ -1278,8 +1284,7 @@ mod tests {
             .locator
             .clone();
 
-        let mut inventory =
-            discover_sources(&root, &root, &ProviderImportOptions::default()).unwrap();
+        let mut inventory = discover_sources(&root, &ProviderImportOptions::default()).unwrap();
         let authority = codebuddy_authority(&root).unwrap();
         for source in &mut inventory.sources {
             bind_codebuddy_capability(source, &authority).unwrap();

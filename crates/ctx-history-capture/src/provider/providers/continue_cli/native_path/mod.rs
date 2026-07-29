@@ -1,46 +1,24 @@
 //! Provider-owned Continue NativePath discovery and normalization.
 //!
-//! Provider-private DTOs retain Continue's schema authority. The Store adapter
-//! converts only certified page/frontier mechanics into canonical Store rows.
+//! Provider-private DTOs retain Continue's schema authority while the
+//! source-backed reader projects bounded lexical pages and exact locators.
 
 mod decode;
 mod lifecycle;
 mod normalize;
 mod parse;
-mod production;
 mod source;
 mod source_backed;
-mod store_adapter;
 
-#[cfg(test)]
-mod tests;
-
-#[cfg(test)]
-pub(crate) use lifecycle::{prepare_continue_discovery, ContinuePreparationStats};
-pub(crate) use lifecycle::{prepare_continue_discovery_with_profile, ContinueSourceOutcome};
 pub(crate) use normalize::{
     ContinueEventKind, ContinueEventRole, ContinueEventRow, ContinueGenerationAuthority,
-    ContinueNativeProfile, ContinuePreparedPage, ContinuePreparedSource, ContinueSessionIdentity,
-    ContinueSessionRow, ContinueTransientOutputPayload,
+    ContinueSessionRow,
 };
-#[cfg(test)]
-pub(crate) use normalize::{
-    ContinueSourceCompleteness, CONTINUE_NATIVE_MAX_PAGE_BYTES, CONTINUE_NATIVE_MAX_PAGE_ROWS,
-};
-#[cfg(test)]
-pub(crate) use parse::{ContinueOutputExclusionStats, ContinueSourceFailureKind};
-pub(crate) use production::import_continue_nativepath_history;
 pub(crate) use source::{
-    discover_continue_root, ContinueIndexObservation, ContinueIndexSnapshot,
-    ContinueSourceObservation,
+    discover_continue_root, ContinueIndexObservation, ContinueSourceObservation,
 };
-#[cfg(test)]
-pub(crate) use source::{observe_continue_pending_paths, ContinueDiscovery, ContinueIndexState};
 pub(crate) use source_backed::{
     hydrate_continue_source_backed_record, ContinueSourceBackedOutcome, ContinueSourceBackedReader,
-};
-pub(crate) use store_adapter::{
-    ContinueNativePageAdapter, ContinueNativeStoreCursor, ContinuePageFrontier,
 };
 
 use std::{io, path::PathBuf};
