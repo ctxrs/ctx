@@ -629,7 +629,7 @@ fn tool_sql(arguments: &Value, data_root: &Path) -> Result<Value> {
         })
         .transpose()?
         .unwrap_or_else(|| duration_millis_u64(RAW_SQL_DEFAULT_TIMEOUT));
-    let compatibility = SqlCompatibility::open_for_data_root(data_root)?;
+    let compatibility = SqlCompatibility::open_existing_for_data_root(data_root)?;
     let result = compatibility.query(
         &sql,
         RawSqlOptions {
@@ -835,6 +835,53 @@ mod tests {
                 None => env::remove_var("CTX_LOCAL_USAGE_ENABLED"),
             }
         }
+    }
+
+    #[test]
+    fn sql_tool_leaves_a_pristine_data_root_empty() {
+        let temp = tempfile::tempdir().unwrap();
+        let (handled, _) = handle_tools_call(
+            json!({
+                "name": "sql",
+                "arguments": {"sql": "SELECT 1 AS one"},
+            }),
+            temp.path(),
+        );
+        let result = handled.unwrap().value;
+
+        assert_eq!(result["isError"], true);
+        assert!(result["structuredContent"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("source-backed SQL projection is missing"));
+        assert!(
+            std::fs::read_dir(temp.path()).unwrap().next().is_none(),
+            "MCP SQL must leave a pristine data root empty"
+        );
+    }
+
+    #[test]
+    fn sql_tool_queries_an_existing_projection() {
+        let temp = tempfile::tempdir().unwrap();
+        let projection = ctx_history_relational::SourceBackedRelationalProjection::open(
+            temp.path().join("relational.sqlite"),
+        )
+        .unwrap();
+        drop(projection);
+
+        let (handled, _) = handle_tools_call(
+            json!({
+                "name": "sql",
+                "arguments": {"sql": "SELECT COUNT(*) AS sessions FROM ctx_sessions"},
+            }),
+            temp.path(),
+        );
+        let result = handled.unwrap().value;
+
+        assert!(result["isError"].is_null());
+        assert_eq!(result["structuredContent"]["payload_type"], "sql_result");
+        assert_eq!(result["structuredContent"]["read_only"], true);
+        assert_eq!(result["structuredContent"]["rows"], json!([[0]]));
     }
 
     fn run_one_status_response(
