@@ -293,6 +293,14 @@ esac
             'task_root="$(mktemp -d "${task_prefix}XXXXXX")"',
             builder,
         )
+        self.assertIn(
+            'cache_root="${CTX_LINUX_RELEASE_CACHE_ROOT:-}"',
+            builder,
+        )
+        self.assertIn(
+            'docker_run_args+=(-v "${cache_root}:/build/cache:rw")',
+            builder,
+        )
         self.assertNotIn(
             'mktemp -d "/tmp/ctx-public-${platform}-bazel-release.',
             builder,

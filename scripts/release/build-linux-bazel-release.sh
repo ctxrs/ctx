@@ -242,8 +242,25 @@ done
 lock_file="/tmp/ctx-public-${platform}-bazel-release.lock"
 exec 9>"${lock_file}"
 flock -x 9
+cache_root="${CTX_LINUX_RELEASE_CACHE_ROOT:-}"
+if [[ -n "${cache_root}" ]]; then
+  [[ "${cache_root}" == /* ]] || {
+    echo "error: CTX_LINUX_RELEASE_CACHE_ROOT must be an absolute path" >&2
+    exit 1
+  }
+  [[ -d "${cache_root}" && ! -L "${cache_root}" && -w "${cache_root}" ]] || {
+    echo "error: Linux release cache root must be a writable non-symlink directory" >&2
+    exit 1
+  }
+  cache_root="$(cd "${cache_root}" && pwd -P)"
+  [[ "${cache_root}" != / ]] || {
+    echo "error: Linux release cache root must not be the filesystem root" >&2
+    exit 1
+  }
+fi
 task_prefix="${release_work_root}/ctx-public-${platform}-bazel-release."
 task_root="$(mktemp -d "${task_prefix}XXXXXX")"
+cache_root="${cache_root:-${task_root}/cache}"
 cleanup() {
   if [[ "${task_root:-}" == "${task_prefix}"* \
     && -d "${task_root}" && ! -L "${task_root}" ]]; then
@@ -254,7 +271,7 @@ cleanup() {
 trap cleanup EXIT
 install -d -m 0700 \
   "${task_root}/release-input" \
-  "${task_root}/cache"
+  "${cache_root}"
 
 docker_run_args=(
   --rm
@@ -278,6 +295,9 @@ docker_run_args=(
   -v "${task_root}:/build:rw"
   -w "${repo_root}"
 )
+if [[ "${cache_root}" != "${task_root}/cache" ]]; then
+  docker_run_args+=(-v "${cache_root}:/build/cache:rw")
+fi
 git_common_dir="$(git rev-parse --path-format=absolute --git-common-dir)"
 case "${git_common_dir}/" in
   "${repo_root}/"*) ;;
