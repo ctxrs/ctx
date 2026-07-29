@@ -156,10 +156,10 @@ const DAEMON_INSTALLATION_QUIESCE_TIMEOUT: StdDuration = StdDuration::from_secs(
 const DAEMON_UPGRADE_HANDOFF_FILE: &str = "upgrade-handoff.json";
 const DAEMON_UPGRADE_RESTART_REQUEST_DIR: &str = "upgrade-restart-requests";
 const DAEMON_UPGRADE_HANDOFF_TOKEN_ENV: &str = "CTX_DAEMON_UPGRADE_HANDOFF_TOKEN";
-// Installation recovery may restart several registered data-root daemons
-// serially before this daemon can publish final readiness. Keep setup bounded,
-// but allow that established five-second-per-registration path ample room.
-const DAEMON_SETUP_HANDOFF_POLL_ATTEMPTS: usize = 12_001;
+// Foreground setup/import/retrieval must never inherit the supervisor's
+// potentially multi-root recovery horizon. It verifies one usable endpoint
+// promptly; durable supervisor recovery continues independently.
+const DAEMON_SETUP_HANDOFF_POLL_ATTEMPTS: usize = 101;
 const DAEMON_SETUP_HANDOFF_MAX_HEARTBEAT_AGE_MS: i64 = 30_000;
 const DAEMON_SETUP_HANDOFF_MAX_FUTURE_HEARTBEAT_MS: i64 = 5_000;
 const DAEMON_HEALTH_TIMEOUT: StdDuration = StdDuration::from_millis(500);

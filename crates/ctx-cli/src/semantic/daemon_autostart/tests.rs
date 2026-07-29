@@ -727,6 +727,15 @@ fn setup_handoff_wait_accepts_authoritative_running_observation_without_sleep() 
 }
 
 #[test]
+fn enabled_daemon_handoff_is_bounded_to_five_seconds() {
+    let pauses = DAEMON_SETUP_HANDOFF_POLL_ATTEMPTS.saturating_sub(1);
+    let maximum_wait = DAEMON_UPGRADE_POLL_INTERVAL
+        .checked_mul(u32::try_from(pauses).unwrap())
+        .unwrap();
+    assert_eq!(maximum_wait, StdDuration::from_secs(5));
+}
+
+#[test]
 fn setup_handoff_waits_for_requested_config_instead_of_previous_applied_mode() {
     let expected = AppConfig::default();
     let previous = json!({

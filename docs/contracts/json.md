@@ -5,7 +5,8 @@ arguments, typed result identifiers, and local paths. Treat it as private until
 a user reviews it.
 
 Command result JSON uses `schema_version: 1` except for
-`ctx stats --format json` and `ctx import --format json`.
+`ctx setup --format json`, `ctx stats --format json`, and
+`ctx import --format json`.
 The Pro status object embedded by `ctx status --format json` and exposed through MCP
 uses its own version 2 contract, described below. Progress-event JSON is stderr
 progress output and does not include `schema_version`.
@@ -17,57 +18,43 @@ ctx setup --format json
 ctx setup --format json --no-daemon
 ```
 
-Writes local storage and returns:
+Writes local storage and returns schema version 2:
 
 - `schema_version`;
 - `data_root`;
-- `database_path`;
 - `config_path`;
-- `mode`, either `ready`, `background`, or `catalog_only`;
-- `indexed_items`;
-- `sources`;
-- `inventory`;
+- `mode`, one of `ready`, `pending`, `stale`, or `unavailable`;
+- `history_epoch`;
+- `lexical`;
 - `catalog`;
-- `catalog_sources`;
-- `import`;
-- `background_indexing`;
+- `resolver`;
+- `refresh`;
+- `refresh_request`;
+- `semantic`;
+- `relational`;
+- `pro_projection`;
+- `prior_epoch`;
+- `daemon`;
+- `daemon_autostart`;
+- `deprecated_catalog_only_ignored`;
+- `source_rebuild_required`;
 - `network_required: false`;
 - `repo_writes: false`.
 
-`import.ran` is true when setup imports in the foreground, including
-`ctx setup --wait` and daemon-disabled or `--no-daemon` runs. It is false when
-setup queues background indexing or uses `--catalog-only`. When it runs, `import.outcome`,
-`import.failure_scope`, `import.failure_type`, `import.totals`, and
-`import.sources` use the same semantics and shapes as `ctx import --format json`.
-Setup still uses top-level schema version 1; these nested fields are additive.
-An all-failed foreground setup import prints the complete JSON result and exits
-nonzero. Mixed success and source failures remain successful.
+When daemon maintenance is enabled, human and machine-readable setup both
+health-check and recover the persistent daemon before returning.
+`daemon_autostart.status: "verified"` includes the live PID. A one-run
+`--no-daemon` opt-out reports `status: "not_requested"` and reason
+`explicit_opt_out`; a durable disabled configuration uses reason
+`daemon_disabled`. `refresh_request` separately reports whether setup queued
+or waited for a daemon-owned source publication.
 
-`inventory` reports the shared local-history inventory across all native
-sources. It includes `sources`, `units`, `source_files`, `source_bytes`,
-`source_import_files`, `indexed_source_import_files`,
-`pending_source_import_files`, `failed_source_import_files`,
-`stale_source_import_files`, and Codex compatibility counters. The legacy
-`catalog` and `catalog_sources` blocks are retained for Codex session catalog
-consumers.
-
-`background_indexing.enabled` reports whether setup queued indexing work rather
-than whether daemon autostart was requested. Machine-readable setup never
-starts or nudges the daemon, so
-`background_indexing.daemon_autostart.status` is `not_needed` with reason
-`machine_readable_output`. The other `not_needed` reasons are
-`explicit_opt_out`, `daemon_disabled`, and `catalog_only`.
-Use `ctx daemon status --format json` for process state. That status distinguishes the
-current config request from the last config the running daemon actually
-applied. A semantic opt-in is not live merely because
-`background_indexing.semantic_enabled` is true.
-
-`ctx setup` may opportunistically start the ctx-owned background daemon
-maintenance profile after setup output when `[daemon].enabled` is true,
-including for empty and `--wait` human-readable setup runs. Machine-readable
-setup, `ctx setup --no-daemon`, and `ctx setup --catalog-only` do not autostart
-daemon maintenance. The daemon, when started, reports
-`start_mode: "auto"` and `trigger_command: "setup"` through status surfaces.
+Setup does not perform a foreground provider import. `--wait` waits for the
+daemon-owned source refresh; without it, setup requests background refresh.
+The deprecated `--catalog-only` flag is reported by
+`deprecated_catalog_only_ignored` and does not change the persistent lifecycle.
+Use `ctx daemon status --format json` for the complete process and applied
+configuration state.
 
 ## Status
 

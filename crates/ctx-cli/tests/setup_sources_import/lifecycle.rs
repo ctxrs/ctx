@@ -1,6 +1,6 @@
 use super::{
     assert_daemon_process_running, assert_no_daemon_autostart_mutation, support::*,
-    wait_for_daemon_status, write_active_daemon_upgrade_handoff, write_codex_setup_session,
+    wait_for_daemon_status, write_codex_setup_session,
 };
 use rusqlite::OpenFlags;
 
@@ -837,16 +837,20 @@ fn setup_no_daemon_is_one_run_opt_out_and_keeps_semantic_disabled() {
         "--progress",
         "none",
     ]));
-    assert_eq!(setup["mode"], "ready");
-    assert_eq!(setup["import"]["ran"], true);
-    assert_eq!(setup["background_indexing"]["enabled"], false);
+    assert_eq!(setup["schema_version"], 2, "{setup:#}");
+    assert!(setup.get("background_indexing").is_none(), "{setup:#}");
     assert_eq!(
-        setup["background_indexing"]["daemon_autostart"]["status"],
-        "not_needed"
+        setup["daemon_autostart"]["status"], "not_requested",
+        "{setup:#}"
     );
     assert_eq!(
-        setup["background_indexing"]["daemon_autostart"]["reason"],
-        "explicit_opt_out"
+        setup["daemon_autostart"]["reason"], "explicit_opt_out",
+        "{setup:#}"
+    );
+    assert_eq!(setup["daemon_autostart"]["requested"], false, "{setup:#}");
+    assert_eq!(
+        setup["refresh_request"]["reason"], "explicit_opt_out",
+        "{setup:#}"
     );
 
     let status = json_output(ctx(&temp).args(["status", "--format=json"]));
@@ -863,8 +867,7 @@ fn setup_no_daemon_is_one_run_opt_out_and_keeps_semantic_disabled() {
         .stdout
         .clone();
     let human_setup = String::from_utf8(human_setup).unwrap();
-    assert!(human_setup
-        .contains("Daemon autostart was skipped for this setup because --no-daemon was used."));
+    assert!(human_setup.contains("Daemon refresh was skipped because --no-daemon was used."));
 }
 
 #[test]
@@ -1022,6 +1025,25 @@ fn machine_readable_setup_attempts_enabled_daemon_startup() {
     let status = json_output(ctx(&temp).args(["daemon", "status", "--format=json"]));
     assert_eq!(status["daemon"]["status"], "failed", "{status:#}");
     assert_eq!(status["daemon"]["reason"], "spawn_failed", "{status:#}");
+}
+
+#[test]
+fn machine_readable_setup_uses_v2_top_level_persistent_daemon_contract() {
+    let temp = tempdir();
+
+    let setup = json_output(ctx(&temp).args(["setup", "--format=json", "--progress", "none"]));
+    assert_eq!(setup["schema_version"], 2, "{setup:#}");
+    assert!(setup.get("background_indexing").is_none(), "{setup:#}");
+    assert_eq!(setup["daemon_autostart"]["status"], "verified", "{setup:#}");
+    assert_eq!(setup["daemon_autostart"]["requested"], true, "{setup:#}");
+    assert!(setup["daemon_autostart"]["reason"].is_null(), "{setup:#}");
+    let pid = setup["daemon_autostart"]["pid"].as_u64().unwrap() as u32;
+    assert_daemon_process_running(pid);
+
+    let running = json_output(ctx(&temp).args(["daemon", "status", "--format=json"]));
+    assert_eq!(running["daemon"]["running"], true, "{running:#}");
+    assert_eq!(running["daemon"]["pid"], pid, "{running:#}");
+    assert_eq!(running["daemon"]["trigger_command"], "setup", "{running:#}");
 }
 
 #[test]
