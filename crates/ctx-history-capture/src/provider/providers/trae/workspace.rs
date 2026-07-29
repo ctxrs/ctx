@@ -1,53 +1,8 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::Path;
 
-use crate::common::io::{
-    ensure_provider_path_parents_are_not_symlinks, ensure_regular_provider_transcript_file,
-    read_json_file_limited,
-};
+use crate::common::io::read_json_file_limited;
 use crate::provider::providers::task_json::task_json_string_field;
-use crate::{Result, MAX_PROVIDER_JSONL_LINE_BYTES};
-
-pub(super) fn collect_trae_state_vscdb_paths(path: &Path) -> Result<Vec<PathBuf>> {
-    let metadata = fs::symlink_metadata(path)?;
-    let file_type = metadata.file_type();
-    if file_type.is_file() {
-        if path.file_name().and_then(|name| name.to_str()) != Some("state.vscdb") {
-            return Ok(Vec::new());
-        }
-        ensure_regular_provider_transcript_file(path)?;
-        return Ok(vec![path.to_path_buf()]);
-    }
-    if !file_type.is_dir() {
-        return Ok(Vec::new());
-    }
-    ensure_provider_path_parents_are_not_symlinks(path)?;
-
-    let direct = path.join("state.vscdb");
-    if direct.is_file() {
-        ensure_regular_provider_transcript_file(&direct)?;
-        return Ok(vec![direct]);
-    }
-
-    let mut paths = Vec::new();
-    for entry in fs::read_dir(path)? {
-        let entry = entry?;
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        if !file_type.is_dir() {
-            continue;
-        }
-        let candidate = entry.path().join("state.vscdb");
-        if candidate.is_file() {
-            ensure_regular_provider_transcript_file(&candidate)?;
-            paths.push(candidate);
-        }
-    }
-    Ok(paths)
-}
+use crate::MAX_PROVIDER_JSONL_LINE_BYTES;
 
 pub(super) fn trae_workspace_id(path: &Path) -> String {
     path.parent()

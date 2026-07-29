@@ -5,16 +5,23 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CertifiedSource, EventIdentityInput, LocatorRevisionPolicy,
-    NativeItemKey, NativeRecordCoordinate, NativeSessionKey, ProjectionContractError,
-    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation,
-    SourceRecordLocator, SourceResolverContractError, SubrecordSelector, TypedKey,
+    derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource,
+    EventIdentityInput, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
+    NativeSessionKey, ProjectionContractError, ScannedSourceCounts, SessionIdentityInput,
+    SourceAnchor, SourceKey, SourceObservation, SourceRecordLocator, SourceResolverContractError,
+    SubrecordSelector, TypedKey,
 };
 use ctx_history_index::LexicalDocument;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use super::*;
+use super::scanner::{
+    absolute_trae_path, acquire_source, packed_native_index, TraeCoreRecord, TraeFrontier,
+    TraeScanner, TraeSourceAuthority,
+};
+use crate::{CaptureError, ProviderImportFailure};
+
+use super::super::{TRAE_CHAT_KEYS, TRAE_STATE_VSCDB_SOURCE_FORMAT};
 
 const TRAE_SOURCE_ANCHOR_NAMESPACE: &str = "trae.workspace-storage";
 const TRAE_SOURCE_SCHEMA_VARIANT: &str = "trae-itemtable-json-v1";
@@ -88,8 +95,7 @@ pub(crate) fn scan_trae_source_backed_explicit_v0(
     emit: &mut dyn FnMut(TraeSourceBackedPageV0) -> TraeSourceBackedResultV0<()>,
 ) -> TraeSourceBackedResultV0<TraeSourceBackedScanV0> {
     let canonical_path = explicit_trae_leaf(path)?;
-    let source_root = canonical_path.parent().unwrap_or(canonical_path.as_path());
-    let authority = acquire_source(&canonical_path, source_root, DateTime::<Utc>::UNIX_EPOCH)?;
+    let authority = acquire_source(&canonical_path, DateTime::<Utc>::UNIX_EPOCH)?;
     let source = source_key(&authority)?;
     let opening = source_observation(&source, &authority.source_revision)?;
     let revision_digest = source_revision_digest(&authority.source_revision);
@@ -99,7 +105,7 @@ pub(crate) fn scan_trae_source_backed_explicit_v0(
 
     while let Some(page) = authority
         .database
-        .read(&canonical_path, |conn| scanner.next_page(conn, true, false))?
+        .read(&canonical_path, |conn| scanner.next_page(conn))?
     {
         let complete_records = u64::try_from(page.logical_units)
             .map_err(|_| TraeSourceBackedErrorV0::CountMismatch)?;
@@ -161,8 +167,7 @@ pub(crate) fn hydrate_trae_source_backed_locator_v0(
 ) -> TraeSourceBackedResultV0<TraeHydratedRecordV0> {
     locator.validate_contract()?;
     let canonical_path = explicit_trae_leaf(path)?;
-    let source_root = canonical_path.parent().unwrap_or(canonical_path.as_path());
-    let authority = acquire_source(&canonical_path, source_root, DateTime::<Utc>::UNIX_EPOCH)?;
+    let authority = acquire_source(&canonical_path, DateTime::<Utc>::UNIX_EPOCH)?;
     let source = source_key(&authority)?;
     if !source.exact_descriptor_eq(locator.source()) {
         return Err(TraeSourceBackedErrorV0::LocatorSourceMismatch);
@@ -297,9 +302,9 @@ fn lexical_document(
         agent_type: AgentType::Primary.as_str().to_owned(),
         is_primary: true,
         event_sequence,
-        occurred_at_unix_ms: Some(record.event.occurred_at.timestamp_millis()),
-        event_type: record.event.event_type.as_str().to_owned(),
-        role: record.event.role.map(|role| role.as_str().to_owned()),
+        occurred_at_unix_ms: Some(record.occurred_at.timestamp_millis()),
+        event_type: record.event_type.as_str().to_owned(),
+        role: record.role.map(|role| role.as_str().to_owned()),
         body,
         workspace: authority
             .workspace_folder
@@ -410,7 +415,7 @@ fn decode_locator(locator: &SourceRecordLocator) -> TraeSourceBackedResultV0<Dec
 #[cfg(test)]
 mod tests {
     use rusqlite::{params, Connection};
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     use super::*;
 
@@ -560,6 +565,234 @@ mod tests {
         );
     }
 
+    #[test]
+    fn source_backed_scans_chatstore_and_cn_stream_shapes() {
+        let temp = crate::test_support_paths::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace-stream-shapes");
+        fs::create_dir_all(&workspace).expect("workspace");
+        fs::write(
+            workspace.join("workspace.json"),
+            r#"{"folder":"file:///workspace/trae-stream-shapes"}"#,
+        )
+        .expect("workspace metadata");
+        let source = workspace.join("state.vscdb");
+        write_key_value(
+            &source,
+            "ChatStore",
+            &json!({
+                "entries": {
+                    "drift-session": {
+                        "id": "drift-session",
+                        "messages": [
+                            {
+                                "id": "drift-user",
+                                "role": "user",
+                                "content": [{"type": "text", "text": "chatstore prompt"}],
+                                "createdAt": "2026-07-28T12:00:00Z"
+                            },
+                            {
+                                "id": "drift-assistant",
+                                "role": "assistant",
+                                "content": {"summary": "chatstore answer"},
+                                "createdAt": "2026-07-28T12:00:01Z"
+                            }
+                        ]
+                    }
+                }
+            }),
+        );
+        write_key_value(
+            &source,
+            super::super::super::TRAE_CN_INPUT_HISTORY_KEY,
+            &json!([
+                {
+                    "id": "cn-input-1",
+                    "inputText": "cn prompt alpha",
+                    "createdAt": "2026-07-28T12:01:00Z"
+                },
+                {
+                    "id": "cn-input-2",
+                    "text": "cn prompt beta",
+                    "createdAt": "2026-07-28T12:01:01Z"
+                }
+            ]),
+        );
+
+        let (_, documents) = collect_scan(&source);
+        assert_eq!(documents.len(), 4);
+        assert!(
+            documents
+                .iter()
+                .all(|document| document.workspace.as_deref()
+                    == Some("/workspace/trae-stream-shapes"))
+        );
+        for expected in [
+            ("chatstore prompt", "user"),
+            ("chatstore answer", "assistant"),
+            ("cn prompt alpha", "user"),
+            ("cn prompt beta", "user"),
+        ] {
+            let document = documents
+                .iter()
+                .find(|document| document.body == expected.0)
+                .expect("stream-shape document");
+            assert_eq!(document.role.as_deref(), Some(expected.1));
+            assert_eq!(
+                hydrate_trae_source_backed_locator_v0(&source, &document.locator)
+                    .expect("stream-shape hydration")
+                    .exact_text,
+                expected.0
+            );
+        }
+        let (_, replayed) = collect_scan(&source);
+        assert_eq!(document_ids(&documents), document_ids(&replayed));
+    }
+
+    #[test]
+    fn append_rewrite_truncate_delete_unavailable_and_stale_are_source_exact() {
+        let temp = crate::test_support_paths::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace-lifecycle");
+        fs::create_dir_all(&workspace).expect("workspace");
+        let source = workspace.join("state.vscdb");
+
+        write_value(
+            &source,
+            &chat_value_from_messages(&[
+                ("native-message-1", "user", "cold body"),
+                ("native-message-2", "assistant", "second body"),
+            ]),
+        );
+        let (cold_scan, cold_documents) = collect_scan(&source);
+        let cold_ids = document_ids(&cold_documents);
+        let cold_locator = cold_documents[0].locator.clone();
+        assert_eq!(cold_documents.len(), 2);
+
+        write_value(
+            &source,
+            &chat_value_from_messages(&[
+                ("native-message-1", "user", "cold body"),
+                ("native-message-2", "assistant", "second body"),
+                ("native-message-3", "assistant", "appended body"),
+            ]),
+        );
+        let (append_scan, appended) = collect_scan(&source);
+        assert_eq!(&document_ids(&appended)[..2], cold_ids.as_slice());
+        assert_eq!(appended[2].body, "appended body");
+        assert_ne!(
+            cold_scan.source.content_digest(),
+            append_scan.source.content_digest()
+        );
+        assert!(hydrate_trae_source_backed_locator_v0(&source, &cold_locator).is_err());
+        let appended_locator = appended[2].locator.clone();
+
+        write_value(
+            &source,
+            &chat_value_from_messages(&[
+                ("native-message-1", "user", "rewritten body"),
+                ("native-message-2", "assistant", "second body"),
+                ("native-message-3", "assistant", "appended body"),
+            ]),
+        );
+        let (rewrite_scan, rewritten) = collect_scan(&source);
+        assert_eq!(document_ids(&rewritten), document_ids(&appended));
+        assert_eq!(rewritten[0].body, "rewritten body");
+        assert_eq!(
+            hydrate_trae_source_backed_locator_v0(&source, &rewritten[0].locator)
+                .expect("rewritten hydration")
+                .exact_text,
+            "rewritten body"
+        );
+        assert_ne!(
+            append_scan.source.content_digest(),
+            rewrite_scan.source.content_digest()
+        );
+
+        write_value(
+            &source,
+            &chat_value_from_messages(&[("native-message-1", "user", "rewritten body")]),
+        );
+        let (truncate_scan, truncated) = collect_scan(&source);
+        assert_eq!(truncated.len(), 1);
+        assert_eq!(truncated[0].event_id, cold_ids[0]);
+        assert!(hydrate_trae_source_backed_locator_v0(&source, &appended_locator).is_err());
+        let truncated_locator = truncated[0].locator.clone();
+        assert_ne!(
+            rewrite_scan.source.content_digest(),
+            truncate_scan.source.content_digest()
+        );
+
+        delete_value(&source);
+        let (delete_scan, deleted) = collect_scan(&source);
+        assert!(deleted.is_empty());
+        assert_eq!(delete_scan.source.counts().complete_records, 0);
+        assert_eq!(delete_scan.source.counts().retained_records, 0);
+        assert_eq!(delete_scan.source.counts().indexed_documents, 0);
+        assert_eq!(
+            delete_scan.source.observation().source(),
+            truncate_scan.source.observation().source()
+        );
+        assert_ne!(
+            delete_scan.source.content_digest(),
+            truncate_scan.source.content_digest()
+        );
+        assert!(hydrate_trae_source_backed_locator_v0(&source, &truncated_locator).is_err());
+
+        let unavailable = workspace.join("state.vscdb.unavailable");
+        fs::rename(&source, &unavailable).expect("make source unavailable");
+        let mut emitted = false;
+        let error = scan_trae_source_backed_explicit_v0(&source, &mut |_| {
+            emitted = true;
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(!emitted);
+        assert!(matches!(
+            error,
+            TraeSourceBackedErrorV0::Capture(CaptureError::Io(_))
+        ));
+    }
+
+    #[test]
+    fn source_backed_route_has_no_legacy_store_publication_fallback() {
+        let module_source = include_str!("../nativepath.rs");
+        let scanner_source = include_str!("scanner.rs");
+        let source_backed_source = include_str!("source_backed.rs");
+        let source_backed_production = source_backed_source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("source-backed production section");
+        let provider_source = include_str!("../../trae.rs");
+        for source in [module_source, scanner_source, source_backed_production] {
+            for forbidden in [
+                "EventSearchBulkGuard",
+                "NativePathPublicationGroup",
+                "NativePathCursorSetClassification",
+                "NativePathCursorTransition",
+                "NativePro",
+                "process_pro_replay_only",
+                "ProviderSourceRouteRetirement",
+                "ProOutputSink",
+            ] {
+                assert!(
+                    !source.contains(forbidden),
+                    "retained Trae source-backed code contains {forbidden}"
+                );
+            }
+            assert!(!source.contains("ctx_history_store"));
+        }
+        assert_eq!(
+            provider_source.matches("ctx_history_store::Store").count(),
+            1
+        );
+        assert_eq!(
+            provider_source
+                .matches("use ctx_history_store::Store")
+                .count(),
+            1
+        );
+        assert!(provider_source.contains("CaptureError::UnsupportedSchema"));
+    }
+
     fn collect_scan(source: &Path) -> (TraeSourceBackedScanV0, Vec<LexicalDocument>) {
         let mut documents = Vec::new();
         let scan = scan_trae_source_backed_explicit_v0(source, &mut |page| {
@@ -568,6 +801,10 @@ mod tests {
         })
         .expect("scan");
         (scan, documents)
+    }
+
+    fn document_ids(documents: &[LexicalDocument]) -> Vec<ctx_history_core::StableEntityId> {
+        documents.iter().map(|document| document.event_id).collect()
     }
 
     fn chat_value(user: &str, assistant: &str) -> Value {
@@ -593,7 +830,32 @@ mod tests {
         })
     }
 
+    fn chat_value_from_messages(messages: &[(&str, &str, &str)]) -> Value {
+        json!({
+            "list": [{
+                "id": "native-session-stable",
+                "title": "Source-backed Trae",
+                "messages": messages
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (id, role, body))| {
+                        json!({
+                            "id": id,
+                            "role": role,
+                            "content": body,
+                            "createdAt": format!("2026-07-28T12:00:{index:02}Z"),
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            }]
+        })
+    }
+
     fn write_value(path: &Path, value: &Value) {
+        write_key_value(path, TRAE_CHAT_KEYS[0], value);
+    }
+
+    fn write_key_value(path: &Path, key: &str, value: &Value) {
         if !path.exists() {
             let conn = Connection::open(path).expect("open fixture");
             conn.execute(
@@ -606,8 +868,18 @@ mod tests {
         conn.execute(
             "insert into ItemTable ([key], value) values (?1, ?2)
              on conflict([key]) do update set value = excluded.value",
-            params![TRAE_CHAT_KEYS[0], value.to_string()],
+            params![key, value.to_string()],
         )
         .expect("write value");
+    }
+
+    fn delete_value(path: &Path) {
+        Connection::open(path)
+            .expect("open fixture for deletion")
+            .execute(
+                "delete from ItemTable where [key] = ?1",
+                params![TRAE_CHAT_KEYS[0]],
+            )
+            .expect("delete value");
     }
 }

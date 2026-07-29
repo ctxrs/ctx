@@ -1,15 +1,17 @@
+use std::collections::BTreeSet;
+
 use chrono::{DateTime, Utc};
-use ctx_history_core::{EventRole, EventType, Fidelity};
+use ctx_history_core::EventType;
 use serde_json::{json, Value};
 
 use crate::provider::normalization::{
     provider_capped_json, provider_policy_body, provider_policy_event_text,
-    provider_result_identifier_evidence, provider_result_outcome_evidence, provider_role,
+    provider_result_identifier_evidence, provider_result_outcome_evidence,
 };
 use crate::provider::providers::task_json::{task_json_string_field, task_json_time_field};
 use crate::PROVIDER_MAX_PREVIEW_CHARS;
 
-use super::{TRAE_CN_INPUT_HISTORY_KEY, TRAE_STATE_VSCDB_SOURCE_FORMAT};
+use super::TRAE_CN_INPUT_HISTORY_KEY;
 
 #[derive(Debug, Clone)]
 pub(super) struct TraeEventInput {
@@ -27,12 +29,7 @@ pub(super) struct TraeCoreEvent {
     pub(super) provider_event_hash: String,
     pub(super) cursor: String,
     pub(super) event_type: EventType,
-    pub(super) role: Option<EventRole>,
-    pub(super) occurred_at: DateTime<Utc>,
-    pub(super) fidelity: Fidelity,
-    pub(super) idempotency_key: String,
     pub(super) payload: Value,
-    pub(super) metadata: Value,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -106,6 +103,83 @@ pub(super) fn trae_message_text(message: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
+pub(super) fn trae_message_is_output(message: &Value) -> bool {
+    fn normalized(value: &str) -> String {
+        value
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    }
+
+    for field in ["role", "type", "kind", "messageType", "message_type"] {
+        if message
+            .get(field)
+            .and_then(Value::as_str)
+            .map(normalized)
+            .is_some_and(|value| {
+                matches!(
+                    value.as_str(),
+                    "tool"
+                        | "toolresult"
+                        | "tooloutput"
+                        | "functionresult"
+                        | "functionoutput"
+                        | "commandresult"
+                        | "commandoutput"
+                )
+            })
+        {
+            return true;
+        }
+    }
+
+    let Value::Object(object) = message else {
+        return false;
+    };
+    let normalized_keys = object
+        .keys()
+        .map(|key| normalized(key))
+        .collect::<BTreeSet<_>>();
+    normalized_keys.iter().any(|key| {
+        matches!(
+            key.as_str(),
+            "toolresult"
+                | "tooloutput"
+                | "functionresult"
+                | "functionoutput"
+                | "commandresult"
+                | "commandoutput"
+        )
+    }) || (normalized_keys
+        .iter()
+        .any(|key| matches!(key.as_str(), "toolcallid" | "tooluseid" | "callid"))
+        && normalized_keys
+            .iter()
+            .any(|key| matches!(key.as_str(), "result" | "output" | "error")))
+        || (normalized_keys.iter().any(|key| {
+            matches!(
+                key.as_str(),
+                "output" | "result" | "error" | "stdout" | "stderr"
+            )
+        }) && normalized_keys.iter().any(|key| {
+            matches!(
+                key.as_str(),
+                "command"
+                    | "cmd"
+                    | "exitcode"
+                    | "duration"
+                    | "durationms"
+                    | "toolname"
+                    | "functionname"
+                    | "status"
+                    | "outcome"
+                    | "timedout"
+                    | "timeout"
+            )
+        }))
+}
+
 pub(super) fn trae_content_text(value: &Value) -> Option<String> {
     match value {
         Value::String(text) => Some(text.trim().to_owned()),
@@ -131,23 +205,6 @@ pub(super) fn trae_content_text(value: &Value) -> Option<String> {
     }
 }
 
-pub(super) fn trae_session_metadata_preview(session: &Value) -> Value {
-    provider_policy_body(EventType::Notice, &trae_session_metadata_source(session))
-}
-
-fn trae_session_metadata_source(session: &Value) -> Value {
-    let Value::Object(object) = session else {
-        return session.clone();
-    };
-    let mut preview = serde_json::Map::new();
-    for (key, value) in object {
-        if !["messages", "chatMessages", "bubbles", "items"].contains(&key.as_str()) {
-            preview.insert(key.clone(), value.clone());
-        }
-    }
-    Value::Object(preview)
-}
-
 pub(super) fn trae_core_event(
     provider_session_id: &str,
     workspace_id: &str,
@@ -165,10 +222,6 @@ pub(super) fn trae_core_event(
         provider_event_hash: event_id.clone(),
         cursor: format!("{chat_key}:{event_id}"),
         event_type,
-        role: Some(provider_role(event.role.as_deref())),
-        occurred_at: event.occurred_at,
-        fidelity: Fidelity::Partial,
-        idempotency_key: format!("provider-event:trae:{TRAE_STATE_VSCDB_SOURCE_FORMAT}:{event_id}"),
         payload: json!({
             "event_id": event_id,
             "native_workspace_id": workspace_id,
@@ -178,14 +231,6 @@ pub(super) fn trae_core_event(
             "result_evidence": result_evidence,
             "result_outcome": result_outcome,
             "body": provider_capped_json(&provider_policy_body(event_type, &event.raw_message), PROVIDER_MAX_PREVIEW_CHARS),
-        }),
-        metadata: json!({
-            "source": "trae_state_vscdb_itemtable",
-            "source_format": TRAE_STATE_VSCDB_SOURCE_FORMAT,
-            "chat_key": chat_key,
-            "native_message_id": event.native_message_id,
-            "role": event.role,
-            "model": task_json_string_field(&event.raw_message, &["model", "modelType", "model_id"]),
         }),
     }
 }

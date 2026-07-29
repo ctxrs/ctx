@@ -1,10 +1,6 @@
 use std::ops::Range;
 
-use chrono::{DateTime, Utc};
-use serde_json::Value;
-
-use crate::provider::providers::task_json::{task_json_string_field, task_json_time_field};
-use crate::{CaptureError, Result, PROVIDER_MAX_PREVIEW_CHARS};
+use crate::{CaptureError, Result};
 
 use super::TRAE_CN_INPUT_HISTORY_KEY;
 
@@ -16,10 +12,6 @@ pub(super) enum TraeSessionSelection {
 pub(super) struct TraeStreamSession {
     pub(super) native_session_id: String,
     pub(super) native_session_id_from_provider: bool,
-    pub(super) metadata_preview: Value,
-    pub(super) explicit_started_at: Option<DateTime<Utc>>,
-    pub(super) explicit_ended_at: Option<DateTime<Utc>>,
-    pub(super) explicit_title: Option<String>,
     pub(super) messages: Range<usize>,
 }
 
@@ -70,10 +62,15 @@ pub(super) fn trae_stream_session(
         return Ok(None);
     }
     let message_fields = ["messages", "chatMessages", "bubbles", "items"];
+    let session_id_fields = [
+        "sessionId",
+        "session_id",
+        "id",
+        "conversationId",
+        "conversation_id",
+    ];
     let mut message_ranges: [Option<Range<usize>>; 4] = std::array::from_fn(|_| None);
-    let mut metadata = serde_json::Map::new();
-    let mut retained_metadata_bytes = 0_usize;
-    let mut truncated = false;
+    let mut session_ids: [Option<String>; 5] = std::array::from_fn(|_| None);
     let mut object = TraeJsonObjectFields::new(bytes, range)?;
     while let Some((key, value_range)) = object.next_field()? {
         if let Some(index) = message_fields.iter().position(|field| *field == key) {
@@ -82,48 +79,18 @@ pub(super) fn trae_stream_session(
                 continue;
             }
         }
-        let value_bytes = value_range.end.saturating_sub(value_range.start);
-        if retained_metadata_bytes
-            .checked_add(value_bytes)
-            .is_some_and(|total| total <= PROVIDER_MAX_PREVIEW_CHARS.saturating_mul(4))
-        {
-            metadata.insert(key, serde_json::from_slice(&bytes[value_range])?);
-            retained_metadata_bytes = retained_metadata_bytes.saturating_add(value_bytes);
-        } else {
-            truncated = true;
+        if let Some(index) = session_id_fields.iter().position(|field| *field == key) {
+            session_ids[index] = serde_json::from_slice(&bytes[value_range]).ok();
         }
     }
     let Some(messages) = message_ranges.into_iter().flatten().next() else {
         return Ok(None);
     };
-    if truncated {
-        metadata.insert("ctx_metadata_truncated".to_owned(), Value::Bool(true));
-    }
-    let metadata_preview = Value::Object(metadata);
-    let provider_native_session_id = task_json_string_field(
-        &metadata_preview,
-        &[
-            "sessionId",
-            "session_id",
-            "id",
-            "conversationId",
-            "conversation_id",
-        ],
-    );
+    let provider_native_session_id = session_ids.into_iter().flatten().next();
     Ok(Some(TraeStreamSession {
         native_session_id_from_provider: provider_native_session_id.is_some(),
         native_session_id: provider_native_session_id
             .unwrap_or_else(|| format!("session-{}", session_index.saturating_add(1))),
-        explicit_started_at: task_json_time_field(
-            &metadata_preview,
-            &["createdAt", "created_at", "timestamp", "time"],
-        ),
-        explicit_ended_at: task_json_time_field(
-            &metadata_preview,
-            &["updatedAt", "updated_at", "lastModified"],
-        ),
-        explicit_title: task_json_string_field(&metadata_preview, &["title", "name"]),
-        metadata_preview,
         messages,
     }))
 }
@@ -355,18 +322,4 @@ fn trae_json_value_end(bytes: &[u8], start: usize, end: usize) -> Result<usize> 
         ));
     }
     Ok(value_end)
-}
-
-pub(super) fn trae_session_id(session: &Value, index: usize) -> String {
-    task_json_string_field(
-        session,
-        &[
-            "sessionId",
-            "session_id",
-            "id",
-            "conversationId",
-            "conversation_id",
-        ],
-    )
-    .unwrap_or_else(|| format!("session-{}", index.saturating_add(1)))
 }
