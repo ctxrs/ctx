@@ -37,10 +37,8 @@ pub(super) fn read_core_page(
     plan: &MuxSourcePlan,
     expected: MuxFrontier,
     mut rejected_records: u64,
-    mut first_failure: Option<MuxFailureWire>,
-    context: &ProviderAdapterContext,
+    mut first_failure: Option<MuxFailure>,
 ) -> Result<Option<MuxPreparedPage>> {
-    let previous_rejected_records = rejected_records;
     let mut rows = Vec::new();
     let mut source_bytes = 0_usize;
     let mut physical_records = 0_usize;
@@ -168,7 +166,6 @@ pub(super) fn read_core_page(
             line_number,
             session,
             plan,
-            context,
             &mut rejected_records,
             &mut first_failure,
         )?;
@@ -196,11 +193,9 @@ pub(super) fn read_core_page(
     };
     Ok(Some(MuxPreparedPage {
         rows,
-        expected,
         next,
         terminal,
         deferred_incomplete,
-        previous_rejected_records,
         rejected_records,
         first_failure,
     }))
@@ -321,7 +316,7 @@ pub(super) fn record_rejection(
     line: usize,
     error: String,
     rejected: &mut u64,
-    first_failure: &mut Option<MuxFailureWire>,
+    first_failure: &mut Option<MuxFailure>,
 ) -> Result<()> {
     *rejected = rejected
         .checked_add(1)
@@ -329,7 +324,7 @@ pub(super) fn record_rejection(
             "Mux rejection count overflowed",
         ))?;
     if first_failure.is_none() {
-        *first_failure = Some(MuxFailureWire {
+        *first_failure = Some(MuxFailure {
             line,
             error: bounded_mux_failure(error),
         });
@@ -345,9 +340,8 @@ pub(super) fn prepare_core_row(
     line_number: usize,
     session: &MuxBoundedSessionMetadata,
     plan: &MuxSourcePlan,
-    context: &ProviderAdapterContext,
     rejected_records: &mut u64,
-    first_failure: &mut Option<MuxFailureWire>,
+    first_failure: &mut Option<MuxFailure>,
 ) -> Result<MuxPreparedRow> {
     let started_at = session
         .started_at
@@ -428,9 +422,6 @@ pub(super) fn prepare_core_row(
     } else {
         None
     };
-    let event_hash = event
-        .as_ref()
-        .map(|event| event.provider_event_hash.clone());
     let mut file_touches = Vec::new();
     if matches!(
         event_type,
@@ -439,35 +430,12 @@ pub(super) fn prepare_core_row(
             | ctx_history_core::EventType::CommandOutput
             | ctx_history_core::EventType::FileTouched
     ) {
-        let raw_source_path = plan.path.display().to_string();
-        let source_root = context
-            .source_root
-            .as_ref()
-            .or(context.source_path.as_ref())
-            .map(|path| path.display().to_string());
-        let provider_event_index = event.as_ref().map(|_| native_ordinal);
         let limit_exceeded = match visit_provider_file_touch_drafts_with_limit(
             &row.value,
             event_type_supports_structured_file_touches(event_type),
             MUX_MAX_FILE_TOUCHES_PER_EVENT,
-            |(ordinal, touch)| {
-                let provider_touch_index = match provider_event_index {
-                    Some(index) if index > MAX_PACKED_PROVIDER_EVENT_INDEX => ordinal,
-                    _ => (native_ordinal << 16) | ordinal,
-                };
-                file_touches.push(MuxFileTouch {
-                    provider_touch_index,
-                    provider_event_index,
-                    raw_source_path: Some(raw_source_path.clone()),
-                    source_root: source_root.clone(),
-                    path: touch.path,
-                    change_kind: touch.change_kind,
-                    old_path: touch.old_path,
-                    line_count_delta: None,
-                    confidence: touch.confidence,
-                    occurred_at,
-                    metadata: touch.metadata,
-                });
+            |(_, touch)| {
+                file_touches.push(MuxFileTouch { path: touch.path });
                 Ok::<(), std::convert::Infallible>(())
             },
         ) {
@@ -484,8 +452,6 @@ pub(super) fn prepare_core_row(
         }
     }
     Ok(MuxPreparedRow {
-        line_number,
-        native_ordinal,
         source_record_ordinal: ordinal,
         source_locator,
         source_record_digest,
@@ -493,7 +459,6 @@ pub(super) fn prepare_core_row(
         message_content_ref,
         unaddressable_output,
         event,
-        event_hash,
         file_touches,
     })
 }
