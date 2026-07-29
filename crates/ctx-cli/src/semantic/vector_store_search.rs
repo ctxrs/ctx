@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     sync::{Condvar, LazyLock, Mutex},
     time::Instant,
 };
@@ -11,7 +11,9 @@ use super::{
     model_contract::SEMANTIC_DIMENSIONS,
     runtime_limits::{SEMANTIC_EXACT_QUERY_CONCURRENCY, SEMANTIC_EXACT_TOP_K_MAX},
     vector_store::{
-        flat_scan::{ActiveChunk, ExactFlatF32Scan, FlatScanConfig, FlatScanSkipReason},
+        flat_scan::{
+            ActiveChunk, ExactFlatF32Scan, FlatScanConfig, FlatScanLocation, FlatScanSkipReason,
+        },
         flat_segments::PinnedFlatGeneration,
         SemanticVectorHit, SemanticVectorSearch, SemanticVectorSearchStats, SemanticVectorStore,
     },
@@ -77,10 +79,25 @@ pub(super) fn scan_exact_generation(
     let mut scan = ExactFlatF32Scan::new(query_embedding, FlatScanConfig::new(dimensions, limit))
         .map_err(|error| SemanticVectorStoreError::unavailable(error.to_string()))?;
 
-    for segment in reader.scan_segments() {
-        let mut chunks = segment.chunks().peekable();
-        while let Some(chunk) = chunks.next() {
-            if allowed_events.is_some_and(|allowed| !allowed.contains(&chunk.event_id)) {
+    if let Some(allowed) = allowed_events {
+        for (segment_index, segment) in reader.scan_segments().iter().enumerate() {
+            let mut chunks = segment.scoring_chunks().peekable();
+            while let Some(chunk) = chunks.next() {
+                if allowed.contains(&chunk.event_id) {
+                    scan.scan_prevalidated_f32(std::iter::once((
+                        ActiveChunk::at_location(
+                            chunk.event_id,
+                            chunk.chunk_index,
+                            FlatScanLocation {
+                                segment_index,
+                                segment_ordinal: chunk.ordinal,
+                            },
+                        ),
+                        chunk.vector,
+                    )))
+                    .map_err(|error| SemanticVectorStoreError::unavailable(error.to_string()))?;
+                    continue;
+                }
                 let event_id = chunk.event_id;
                 let mut skipped = 1_usize;
                 while chunks.peek().is_some_and(|next| next.event_id == event_id) {
@@ -89,43 +106,54 @@ pub(super) fn scan_exact_generation(
                 }
                 scan.skip_event(skipped, FlatScanSkipReason::Filtered)
                     .map_err(|error| SemanticVectorStoreError::unavailable(error.to_string()))?;
-                continue;
             }
-            scan.scan_prevalidated_f32(std::iter::once((
-                ActiveChunk::new(chunk.event_id, chunk.chunk_index),
-                chunk.vector,
-            )))
+        }
+    } else {
+        for (segment_index, segment) in reader.scan_segments().iter().enumerate() {
+            scan.scan_prevalidated_f32(segment.scoring_chunks().map(|chunk| {
+                (
+                    ActiveChunk::at_location(
+                        chunk.event_id,
+                        chunk.chunk_index,
+                        FlatScanLocation {
+                            segment_index,
+                            segment_ordinal: chunk.ordinal,
+                        },
+                    ),
+                    chunk.vector,
+                )
+            }))
             .map_err(|error| SemanticVectorStoreError::unavailable(error.to_string()))?;
         }
     }
     let scanned = scan
         .finish()
         .map_err(|error| SemanticVectorStoreError::unavailable(error.to_string()))?;
-    let wanted = scanned
-        .hits
-        .iter()
-        .map(|hit| ((hit.event_id, hit.chunk_ordinal), hit.similarity))
-        .collect::<HashMap<_, _>>();
-    let mut hits = Vec::with_capacity(wanted.len());
-    for segment in reader.scan_segments() {
-        for chunk in segment.chunks() {
-            let Some(similarity) = wanted.get(&(chunk.event_id, chunk.chunk_index)) else {
-                continue;
-            };
-            hits.push(SemanticVectorHit {
-                event_id: chunk.event_id,
-                similarity: *similarity,
-                source_text_hash: chunk.source_text_hash.to_hex(),
-                start_char: chunk.start_char as usize,
-                end_char: chunk.end_char as usize,
-            });
-        }
-    }
-    if hits.len() != wanted.len() {
-        return Err(SemanticVectorStoreError::reset_required(
-            "semantic exact-scan winner metadata is missing from its pinned generation",
-        )
-        .into());
+    let mut hits = Vec::with_capacity(scanned.hits.len());
+    for hit in &scanned.hits {
+        let chunk = hit
+            .location
+            .and_then(|location| {
+                reader
+                    .scan_segments()
+                    .get(location.segment_index)
+                    .and_then(|segment| segment.chunk_at(location.segment_ordinal))
+            })
+            .filter(|chunk| {
+                chunk.event_id == hit.event_id && chunk.chunk_index == hit.chunk_ordinal
+            })
+            .ok_or_else(|| {
+                SemanticVectorStoreError::reset_required(
+                    "semantic exact-scan winner metadata is missing from its pinned generation",
+                )
+            })?;
+        hits.push(SemanticVectorHit {
+            event_id: chunk.event_id,
+            similarity: hit.similarity,
+            source_text_hash: chunk.source_text_hash.to_hex(),
+            start_char: chunk.start_char as usize,
+            end_char: chunk.end_char as usize,
+        });
     }
     hits.sort_by(|left, right| {
         right

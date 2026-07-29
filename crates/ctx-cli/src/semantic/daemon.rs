@@ -436,10 +436,10 @@ fn reload_daemon_runtime_config(
         return DaemonConfigReloadOutcome::StopDisabled;
     }
 
-    // v0.26 starts a fresh source-backed history epoch. Keep the legacy Store
-    // query runtime inactive until semantic materialization has a source-feed
-    // caller; activating it here would make old history a runtime fallback.
-    let semantic_runtime_requested = false;
+    let semantic_runtime_requested = daemon_semantic_runtime_requested(
+        &runtime.config,
+        semantic_query_service_supported() && daemon_query_service_transport_supported(),
+    );
     if daemon_query_service_transport_supported() && refresh_service.is_none() {
         match start_daemon_source_refresh_service(data_root, runtime.semantic_runtime.clone()) {
             Ok(service) => *refresh_service = Some(service),
@@ -468,6 +468,12 @@ fn reload_daemon_runtime_config(
 
     reload.applied();
     DaemonConfigReloadOutcome::Continue
+}
+
+fn daemon_semantic_runtime_requested(config: &AppConfig, service_supported: bool) -> bool {
+    service_supported
+        && config.semantic_search_enabled()
+        && !config.daemon.mode.runs_only_source_refresh()
 }
 
 fn daemon_semantic_runtime_active(

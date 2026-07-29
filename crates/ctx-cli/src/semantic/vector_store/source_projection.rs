@@ -32,7 +32,7 @@ const SOURCE_VECTOR_DIRECTORY: &str = "source-backed-semantic-flat-f32-v0";
 const SOURCE_CONTRACT_VERSION: u16 = 3;
 const SOURCE_CONTRACT_DOMAIN: &[u8] = b"ctx-source-backed-semantic-contract-v1\0";
 const SOURCE_BUILD_DOMAIN: &[u8] = b"ctx-source-backed-semantic-build-v1\0";
-const SOURCE_INPUT_LEXICAL_SCHEMA_VERSION: u32 = 4;
+const SOURCE_INPUT_LEXICAL_SCHEMA_VERSION: u32 = 5;
 const SHA256_HEX_BYTES: usize = 64;
 
 pub(in crate::semantic) fn source_backed_semantic_vector_path(data_root: &Path) -> PathBuf {

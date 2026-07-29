@@ -98,6 +98,28 @@ pub(crate) struct SourceBackedSemanticNotReady {
     detail: String,
 }
 
+impl SourceBackedSemanticNotReady {
+    pub(crate) fn new(code: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            code,
+            detail: detail.into(),
+        }
+    }
+
+    pub(crate) fn code(&self) -> &'static str {
+        self.code
+    }
+
+    pub(crate) fn detail(&self) -> &str {
+        &self.detail
+    }
+}
+
+pub(crate) struct SourceBackedSemanticQueryPin {
+    core_generation_id: String,
+    pinned: Option<PinnedFlatGeneration>,
+}
+
 #[derive(Debug, Error)]
 #[error(
     "generation-bound source hydration failed ({code}/{failure_kind}, refresh_scheduled={refresh_scheduled}): {detail}"
@@ -191,24 +213,36 @@ impl PinnedSourceBackedGeneration {
         hydrate_source_events_via_daemon(index, data_root, events, "complete", None)
     }
 
-    pub(crate) fn semantic_candidates_for_source_generation(
+    pub(crate) fn pin_semantic_query_for_source_generation(
         index: &VerifiedIndex,
         data_root: &Path,
-        query: &str,
-        filters: &EventSearchFilters,
-        candidate_limit: usize,
-    ) -> Result<(Vec<EventSearchCandidate>, Value)> {
+    ) -> Result<SourceBackedSemanticQueryPin> {
         let vector_root = source_backed_semantic_vector_path(data_root);
-        let vector_store = SemanticVectorStore::open_read_only(&vector_root)?.ok_or_else(|| {
+        let vector_store = SemanticVectorStore::open_read_only(&vector_root)
+            .map_err(|error| {
+                source_semantic_not_ready("semantic_store_unavailable", format!("{error:#}"))
+            })?
+            .ok_or_else(|| {
+                source_semantic_not_ready(
+                    "semantic_store_missing",
+                    "the fresh flat-F32 semantic projection does not exist",
+                )
+            })?;
+        let semantic_documents = index.semantic_eligible_event_count().map_err(|error| {
             source_semantic_not_ready(
-                "semantic_projection_missing",
-                "the fresh flat-F32 semantic projection does not exist",
+                "semantic_generation_unreadable",
+                format!("semantic-eligible event count failed: {error}"),
             )
         })?;
-        let semantic_documents = index.semantic_eligible_event_count()?;
-        if !vector_store
-            .source_backed_generation_ready_exact(index.generation_id(), semantic_documents)?
-        {
+        let ready = vector_store
+            .source_backed_generation_ready_exact(index.generation_id(), semantic_documents)
+            .map_err(|error| {
+                source_semantic_not_ready(
+                    "semantic_generation_unreadable",
+                    format!("semantic source acknowledgement could not be verified: {error:#}"),
+                )
+            })?;
+        if !ready {
             return Err(source_semantic_not_ready(
                 "semantic_generation_not_acknowledged",
                 format!(
@@ -217,9 +251,57 @@ impl PinnedSourceBackedGeneration {
                 ),
             ));
         }
-        let Some(pinned) =
-            vector_store.pin_source_backed_generation(index.generation_id(), semantic_documents)?
-        else {
+        let pinned = vector_store
+            .pin_source_backed_generation(index.generation_id(), semantic_documents)
+            .map_err(|error| {
+                source_semantic_not_ready(
+                    "semantic_generation_unreadable",
+                    format!("semantic source generation could not be pinned: {error:#}"),
+                )
+            })?;
+        Ok(SourceBackedSemanticQueryPin {
+            core_generation_id: index.generation_id().to_owned(),
+            pinned,
+        })
+    }
+
+    pub(crate) fn semantic_candidates_for_source_generation(
+        index: &VerifiedIndex,
+        data_root: &Path,
+        query: &str,
+        filters: &EventSearchFilters,
+        candidate_limit: usize,
+    ) -> Result<(Vec<EventSearchCandidate>, Value)> {
+        let pin = Self::pin_semantic_query_for_source_generation(index, data_root)?;
+        Self::semantic_candidates_for_pinned_source_generation(
+            index,
+            data_root,
+            query,
+            filters,
+            candidate_limit,
+            &pin,
+        )
+    }
+
+    pub(crate) fn semantic_candidates_for_pinned_source_generation(
+        index: &VerifiedIndex,
+        data_root: &Path,
+        query: &str,
+        filters: &EventSearchFilters,
+        candidate_limit: usize,
+        pin: &SourceBackedSemanticQueryPin,
+    ) -> Result<(Vec<EventSearchCandidate>, Value)> {
+        if pin.core_generation_id != index.generation_id() {
+            return Err(source_semantic_not_ready(
+                "semantic_generation_receipt_mismatch",
+                format!(
+                    "flat-F32 query pin belongs to Core generation {}, not {}",
+                    pin.core_generation_id,
+                    index.generation_id()
+                ),
+            ));
+        }
+        let Some(pinned) = pin.pinned.as_ref() else {
             return Ok((
                 Vec::new(),
                 source_semantic_diagnostics(
@@ -246,7 +328,7 @@ impl PinnedSourceBackedGeneration {
             })?;
         source_semantic_candidates_with_embedding(
             index,
-            &pinned,
+            pinned,
             filters,
             candidate_limit,
             &embedding,
@@ -262,30 +344,13 @@ impl PinnedSourceBackedGeneration {
         candidate_limit: usize,
         embedding: &[f32],
     ) -> Result<(Vec<EventSearchCandidate>, Value)> {
-        let vector_root = source_backed_semantic_vector_path(data_root);
-        let vector_store = SemanticVectorStore::open_read_only(&vector_root)?.ok_or_else(|| {
-            source_semantic_not_ready(
-                "semantic_projection_missing",
-                "the fresh flat-F32 semantic projection does not exist",
-            )
-        })?;
-        let semantic_documents = index.semantic_eligible_event_count()?;
-        if !vector_store
-            .source_backed_generation_ready_exact(index.generation_id(), semantic_documents)?
-        {
-            return Err(source_semantic_not_ready(
-                "semantic_generation_not_acknowledged",
-                "the flat-F32 projection does not match the pinned Core generation",
-            ));
-        }
-        let Some(pinned) =
-            vector_store.pin_source_backed_generation(index.generation_id(), semantic_documents)?
-        else {
+        let pin = Self::pin_semantic_query_for_source_generation(index, data_root)?;
+        let Some(pinned) = pin.pinned.as_ref() else {
             return Ok((Vec::new(), json!({"vector_backend": "flat_f32"})));
         };
         source_semantic_candidates_with_embedding(
             index,
-            &pinned,
+            pinned,
             filters,
             candidate_limit,
             embedding,
@@ -802,10 +867,7 @@ fn metadata_contains(value: &str, needle: &str) -> bool {
 }
 
 fn source_semantic_not_ready(code: &'static str, detail: impl Into<String>) -> anyhow::Error {
-    anyhow::Error::new(SourceBackedSemanticNotReady {
-        code,
-        detail: detail.into(),
-    })
+    anyhow::Error::new(SourceBackedSemanticNotReady::new(code, detail))
 }
 
 pub(super) fn semantic_candidate_limit(options: &ctx_history_search::PacketOptions) -> usize {

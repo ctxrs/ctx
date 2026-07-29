@@ -48,11 +48,18 @@ impl FlatScanConfig {
 /// Metadata required by the exact scan.
 ///
 /// The caller can retain richer metadata separately and resolve a returned hit
-/// by `(event_id, chunk_ordinal)`.
+/// directly through its optional pinned-generation location.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::semantic) struct FlatScanLocation {
+    pub(in crate::semantic) segment_index: usize,
+    pub(in crate::semantic) segment_ordinal: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::semantic) struct ActiveChunk {
     pub(in crate::semantic) event_id: Uuid,
     pub(in crate::semantic) chunk_ordinal: u32,
+    location: Option<FlatScanLocation>,
 }
 
 impl ActiveChunk {
@@ -60,6 +67,19 @@ impl ActiveChunk {
         Self {
             event_id,
             chunk_ordinal,
+            location: None,
+        }
+    }
+
+    pub(in crate::semantic) const fn at_location(
+        event_id: Uuid,
+        chunk_ordinal: u32,
+        location: FlatScanLocation,
+    ) -> Self {
+        Self {
+            event_id,
+            chunk_ordinal,
+            location: Some(location),
         }
     }
 }
@@ -107,10 +127,13 @@ pub(in crate::semantic) struct FlatScanHit {
     pub(in crate::semantic) event_id: Uuid,
     pub(in crate::semantic) chunk_ordinal: u32,
     pub(in crate::semantic) similarity: f32,
+    pub(in crate::semantic) location: Option<FlatScanLocation>,
 }
 
 impl PartialEq for FlatScanHit {
     fn eq(&self, other: &Self) -> bool {
+        // Location is provenance, not rank identity. Active-generation
+        // resolution guarantees one source record for an event chunk.
         self.event_id == other.event_id
             && self.chunk_ordinal == other.chunk_ordinal
             && self.similarity.total_cmp(&other.similarity) == Ordering::Equal
@@ -285,6 +308,7 @@ pub(in crate::semantic) struct ExactFlatF32Scan<'query> {
     query: Cow<'query, [f32]>,
     config: FlatScanConfig,
     vector_bytes: usize,
+    dot_product_kernel: ExactDotProductKernel,
     pending_event: Option<FlatScanHit>,
     heap: BinaryHeap<Reverse<FlatScanHit>>,
     counters: FlatScanCounters,
@@ -322,6 +346,7 @@ impl<'query> ExactFlatF32Scan<'query> {
             query,
             config,
             vector_bytes,
+            dot_product_kernel: ExactDotProductKernel::detect(),
             pending_event: None,
             heap: BinaryHeap::new(),
             counters: FlatScanCounters::default(),
@@ -461,7 +486,7 @@ impl<'query> ExactFlatF32Scan<'query> {
             Some(metadata.chunk_ordinal),
             self.config.normalization_tolerance,
         )?;
-        let similarity = exact_dot_product_f32(&self.query, vector);
+        let similarity = self.dot_product_kernel.dot(&self.query, vector);
         if !similarity.is_finite() {
             return Err(FlatScanError::NonFiniteDotProduct {
                 chunk_ordinal: Some(metadata.chunk_ordinal),
@@ -489,7 +514,7 @@ impl<'query> ExactFlatF32Scan<'query> {
             .counters
             .vector_bytes_read
             .saturating_add(self.vector_bytes);
-        let similarity = exact_dot_product_f32(&self.query, vector);
+        let similarity = self.dot_product_kernel.dot(&self.query, vector);
         if !similarity.is_finite() {
             return Err(FlatScanError::NonFiniteDotProduct {
                 chunk_ordinal: Some(metadata.chunk_ordinal),
@@ -553,6 +578,7 @@ impl<'query> ExactFlatF32Scan<'query> {
             event_id: metadata.event_id,
             chunk_ordinal: metadata.chunk_ordinal,
             similarity,
+            location: metadata.location,
         };
         match &mut self.pending_event {
             Some(pending) if pending.event_id == candidate.event_id => {
@@ -687,11 +713,39 @@ fn validate_norm_squared(
     Ok(())
 }
 
-/// Eight independent F32 accumulators match the measured flat-F32 prototype,
-/// avoid a loop-carried dependency in the hot path, and remain portable.
+#[derive(Debug, Clone, Copy)]
+enum ExactDotProductKernel {
+    Scalar,
+    #[cfg(target_arch = "x86_64")]
+    Avx,
+}
+
+impl ExactDotProductKernel {
+    fn detect() -> Self {
+        #[cfg(target_arch = "x86_64")]
+        if std::arch::is_x86_feature_detected!("avx") {
+            return Self::Avx;
+        }
+        Self::Scalar
+    }
+
+    #[inline(always)]
+    fn dot(self, query: &[f32], vector: &[f32]) -> f32 {
+        match self {
+            Self::Scalar => exact_dot_product_f32_scalar(query, vector),
+            #[cfg(target_arch = "x86_64")]
+            Self::Avx => {
+                // Detection occurs once when the scanner is constructed.
+                unsafe { exact_dot_product_f32_avx(query, vector) }
+            }
+        }
+    }
+}
+
+/// Eight independent F32 accumulators match the measured flat-F32 prototype.
 /// Reduction order is fixed so every backend can use this as its exact oracle.
 #[inline(always)]
-fn exact_dot_product_f32(query: &[f32], vector: &[f32]) -> f32 {
+fn exact_dot_product_f32_scalar(query: &[f32], vector: &[f32]) -> f32 {
     let mut sums = [0.0_f32; 8];
     let mut dimension = 0_usize;
     while dimension + sums.len() <= query.len() {
@@ -706,6 +760,41 @@ fn exact_dot_product_f32(query: &[f32], vector: &[f32]) -> f32 {
         dimension += sums.len();
     }
     let mut similarity = sums.into_iter().sum::<f32>();
+    while dimension < query.len() {
+        similarity += query[dimension] * vector[dimension];
+        dimension += 1;
+    }
+    similarity
+}
+
+/// AVX performs the same multiply, per-lane add, and final scalar lane
+/// reduction as `exact_dot_product_f32_scalar`. FMA is deliberately not
+/// enabled: contracting the multiply and add would change score bits.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
+unsafe fn exact_dot_product_f32_avx(query: &[f32], vector: &[f32]) -> f32 {
+    use std::arch::x86_64::{
+        __m256, _mm256_add_ps, _mm256_loadu_ps, _mm256_mul_ps, _mm256_setzero_ps, _mm256_storeu_ps,
+    };
+
+    let mut sums: __m256 = _mm256_setzero_ps();
+    let mut dimension = 0_usize;
+    while dimension + 8 <= query.len() {
+        // The loop bounds prove both unaligned eight-value loads are in range.
+        let (query_values, vector_values) = unsafe {
+            (
+                _mm256_loadu_ps(query.as_ptr().add(dimension)),
+                _mm256_loadu_ps(vector.as_ptr().add(dimension)),
+            )
+        };
+        sums = _mm256_add_ps(sums, _mm256_mul_ps(query_values, vector_values));
+        dimension += 8;
+    }
+    let mut lanes = [0.0_f32; 8];
+    unsafe {
+        _mm256_storeu_ps(lanes.as_mut_ptr(), sums);
+    }
+    let mut similarity = lanes.into_iter().sum::<f32>();
     while dimension < query.len() {
         similarity += query[dimension] * vector[dimension];
         dimension += 1;
@@ -820,6 +909,37 @@ mod tests {
         score
     }
 
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn avx_dot_product_preserves_scalar_score_bits() {
+        if !std::arch::is_x86_feature_detected!("avx") {
+            return;
+        }
+        let mut state = 0x243f_6a88_85a3_08d3_u64;
+        let mut value = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let unit = ((state >> 40) as u32) as f32 / ((1_u32 << 24) - 1) as f32;
+            (unit * 2.0) - 1.0
+        };
+        for dimensions in [1, 7, 8, 9, 15, 16, 31, 32, 383, 384, 385] {
+            for _ in 0..256 {
+                let query = (0..dimensions).map(|_| value()).collect::<Vec<_>>();
+                let vector = (0..dimensions).map(|_| value()).collect::<Vec<_>>();
+                let scalar = exact_dot_product_f32_scalar(&query, &vector);
+                // The host feature check above satisfies the target-feature
+                // precondition.
+                let avx = unsafe { exact_dot_product_f32_avx(&query, &vector) };
+                assert_eq!(
+                    avx.to_bits(),
+                    scalar.to_bits(),
+                    "AVX score changed at {dimensions} dimensions"
+                );
+            }
+        }
+    }
+
     #[test]
     fn exact_slice_and_byte_scans_match_the_f32_oracle() {
         const DIMENSIONS: usize = 13;
@@ -854,12 +974,14 @@ mod tests {
                     event_id: event_id(event as u128 + 1),
                     chunk_ordinal: 0,
                     similarity: oracle_dot(&query, &chunks[0]),
+                    location: None,
                 };
                 for (chunk, vector) in chunks.iter().enumerate().skip(1) {
                     let candidate = FlatScanHit {
                         event_id: best.event_id,
                         chunk_ordinal: chunk as u32,
                         similarity: oracle_dot(&query, vector),
+                        location: None,
                     };
                     if candidate.similarity.total_cmp(&best.similarity) == Ordering::Greater {
                         best = candidate;
@@ -983,9 +1105,39 @@ mod tests {
         let best = [1.0, 0.0];
         let other = normalized(vec![4.0, 3.0]);
         let records = [
-            (ActiveChunk::new(event_id(20), 0), weak.as_slice()),
-            (ActiveChunk::new(event_id(20), 1), best.as_slice()),
-            (ActiveChunk::new(event_id(10), 0), other.as_slice()),
+            (
+                ActiveChunk::at_location(
+                    event_id(20),
+                    0,
+                    FlatScanLocation {
+                        segment_index: 2,
+                        segment_ordinal: 40,
+                    },
+                ),
+                weak.as_slice(),
+            ),
+            (
+                ActiveChunk::at_location(
+                    event_id(20),
+                    1,
+                    FlatScanLocation {
+                        segment_index: 2,
+                        segment_ordinal: 41,
+                    },
+                ),
+                best.as_slice(),
+            ),
+            (
+                ActiveChunk::at_location(
+                    event_id(10),
+                    0,
+                    FlatScanLocation {
+                        segment_index: 1,
+                        segment_ordinal: 7,
+                    },
+                ),
+                other.as_slice(),
+            ),
         ];
         let mut scan = ExactFlatF32Scan::new(&query, FlatScanConfig::new(2, 1)).unwrap();
         scan.scan_f32(records).unwrap();
@@ -994,6 +1146,13 @@ mod tests {
         assert_eq!(result.hits.len(), 1);
         assert_eq!(result.hits[0].event_id, event_id(20));
         assert_eq!(result.hits[0].chunk_ordinal, 1);
+        assert_eq!(
+            result.hits[0].location,
+            Some(FlatScanLocation {
+                segment_index: 2,
+                segment_ordinal: 41,
+            })
+        );
         assert_eq!(result.counters.events_scored, 2);
         assert_eq!(result.counters.chunks_scanned, 3);
     }
