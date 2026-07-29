@@ -395,6 +395,12 @@ ctx_cli_integration_test(
 )
 
 ctx_cli_integration_test(
+    name = "search_source_identity_filters_tests",
+    src = "tests/search_source_identity_filters.rs",
+    tags = ["cli-contract"],
+)
+
+ctx_cli_integration_test(
     name = "search_show_locate_sql_tests",
     src = "tests/search_show_locate_sql.rs",
 )

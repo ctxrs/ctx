@@ -557,6 +557,119 @@ fn mcp_search_returns_structured_json_without_refresh() {
 }
 
 #[test]
+fn mcp_search_applies_source_backed_identity_filters() {
+    let temp = tempdir();
+    let (_daemon, _) = import_custom_history_fixture_source_backed(&temp, "basic.jsonl");
+    let responses = mcp_roundtrip(
+        &temp,
+        &[
+            json!({
+                "jsonrpc": "2.0",
+                "id": "init",
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": { "name": "ctx-test", "version": "0" }
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": "history-source",
+                "method": "tools/call",
+                "params": {
+                    "name": "search",
+                    "arguments": {
+                        "query": "parser test",
+                        "history_source": "demo-agent/demo-source"
+                    }
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": "identity-parts",
+                "method": "tools/call",
+                "params": {
+                    "name": "search",
+                    "arguments": {
+                        "query": "parser test",
+                        "provider_key": "demo-agent",
+                        "source_id": "demo-source"
+                    }
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": "conjunctive",
+                "method": "tools/call",
+                "params": {
+                    "name": "search",
+                    "arguments": {
+                        "query": "parser test",
+                        "history_source": "demo-agent/demo-source",
+                        "provider_key": "demo-agent",
+                        "source_id": "demo-source"
+                    }
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": "unknown",
+                "method": "tools/call",
+                "params": {
+                    "name": "search",
+                    "arguments": {
+                        "query": "parser test",
+                        "source_id": "unknown"
+                    }
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": "conflicting",
+                "method": "tools/call",
+                "params": {
+                    "name": "search",
+                    "arguments": {
+                        "query": "parser test",
+                        "history_source": "demo-agent/demo-source",
+                        "source_id": "other-source"
+                    }
+                }
+            }),
+        ],
+    );
+
+    for response in &responses[1..4] {
+        let search = &response["result"]["structuredContent"];
+        assert_eq!(search["retrieval"]["index"], "source_backed", "{search:#}");
+        assert_eq!(search["filters"]["provider"], "custom", "{search:#}");
+        assert_eq!(search["results"].as_array().map(Vec::len), Some(1));
+    }
+    assert_eq!(
+        responses[1]["result"]["structuredContent"]["filters"]["history_source"],
+        "demo-agent/demo-source"
+    );
+    assert_eq!(
+        responses[2]["result"]["structuredContent"]["filters"]["provider_key"],
+        "demo-agent"
+    );
+    assert_eq!(
+        responses[2]["result"]["structuredContent"]["filters"]["source_id"],
+        "demo-source"
+    );
+    for response in &responses[4..] {
+        let search = &response["result"]["structuredContent"];
+        assert_eq!(search["retrieval"]["index"], "source_backed", "{search:#}");
+        assert_eq!(search["results"].as_array().map(Vec::len), Some(0));
+    }
+    assert!(
+        !temp.path().join("work.sqlite").exists(),
+        "MCP source identity search must not create previous-epoch storage"
+    );
+}
+
+#[test]
 fn mcp_search_validates_inputs_and_reports_uninitialized_source_index() {
     let temp = tempdir();
     let responses = mcp_roundtrip(

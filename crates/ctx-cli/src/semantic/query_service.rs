@@ -717,6 +717,9 @@ fn source_semantic_diagnostics(
 }
 
 fn source_event_matches_filters(event: &EventRecord, filters: &EventSearchFilters) -> bool {
+    if !filters.matches_source_identity(event) {
+        return false;
+    }
     if filters
         .session_id
         .is_some_and(|id| event.session_id.as_uuid() != id)

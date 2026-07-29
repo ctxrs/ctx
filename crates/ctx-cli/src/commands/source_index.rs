@@ -26,7 +26,10 @@ use crate::{
     config,
     output::{compact_json, print_json, JsonOutputFormat, OutputFormat},
     provider_args::ProviderArg,
-    search_filters::parse_since_filter,
+    search_filters::{
+        normalize_source_identity_filters, parse_since_filter, SourceIdentityFilterArgs,
+        SourceIdentityFilters,
+    },
     semantic::{
         coordinate_source_backed_refresh, semantic_query_service_supported,
         PinnedSourceBackedGeneration, SourceBackedRefreshMode, SourceBackedRefreshObservation,
@@ -716,6 +719,7 @@ where
         request,
         &index,
         &collection,
+        &filters,
         &snippets,
         refresh_status,
         refresh_source_count,
@@ -725,12 +729,14 @@ where
 }
 
 fn validate_search_request(request: &SourceSearchRequest) -> Result<()> {
-    if request.history_source.is_some()
-        || request.provider_key.is_some()
-        || request.source_id.is_some()
+    let source_identity = normalized_source_identity_filters(request)?;
+    if !source_identity.is_empty()
+        && request
+            .provider
+            .is_some_and(|provider| provider != CaptureProvider::Custom)
     {
         return Err(anyhow!(
-            "custom history source identity filters are not yet exposed by the source-backed index query API"
+            "custom history source filters can only be combined with --provider custom"
         ));
     }
     let has_query = !search_query_texts(request).is_empty();
@@ -747,6 +753,17 @@ fn validate_search_request(request: &SourceSearchRequest) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn normalized_source_identity_filters(
+    request: &SourceSearchRequest,
+) -> Result<SourceIdentityFilters> {
+    normalize_source_identity_filters(SourceIdentityFilterArgs {
+        history_source: request.history_source.clone(),
+        provider_key: request.provider_key.clone(),
+        source_id: request.source_id.clone(),
+        source_format: request.source_format.clone(),
+    })
 }
 
 fn search_query_texts(request: &SourceSearchRequest) -> Vec<&str> {
@@ -796,6 +813,7 @@ fn index_search_filters(
     request: &SourceSearchRequest,
     index: &VerifiedIndex,
 ) -> Result<EventSearchFilters> {
+    let source_identity = normalized_source_identity_filters(request)?;
     let session_id = request
         .session
         .as_deref()
@@ -831,8 +849,12 @@ fn index_search_filters(
         session_id,
         provider: request
             .provider
+            .or_else(|| (!source_identity.is_empty()).then_some(CaptureProvider::Custom))
             .map(|provider| provider.as_str().to_owned()),
-        source_format: request.source_format.clone(),
+        history_source: source_identity.history_source,
+        provider_key: source_identity.provider_key,
+        source_id: source_identity.source_id,
+        source_format: source_identity.source_format,
         workspace: request.workspace.clone(),
         since_unix_ms,
         event_type,
@@ -1230,6 +1252,7 @@ fn search_json(
     request: &SourceSearchRequest,
     index: &VerifiedIndex,
     collection: &SearchCollection,
+    filters: &EventSearchFilters,
     snippets: &HashMap<Uuid, String>,
     refresh_status: &str,
     refresh_source_count: usize,
@@ -1263,8 +1286,11 @@ fn search_json(
         "payload_type": "search_results",
         "query": request.query.trim(),
         "filters": {
-            "provider": request.provider.map(CaptureProvider::as_str),
-            "source_format": request.source_format,
+            "provider": filters.provider,
+            "history_source": filters.history_source,
+            "provider_key": filters.provider_key,
+            "source_id": filters.source_id,
+            "source_format": filters.source_format,
             "workspace": request.workspace,
             "since": request.since,
             "event_type": request.event_type,
