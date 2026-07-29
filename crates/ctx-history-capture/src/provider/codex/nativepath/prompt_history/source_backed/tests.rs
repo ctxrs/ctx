@@ -60,7 +60,7 @@ fn cold_noop_append_and_exact_hydration_keep_stable_bounded_identity() {
     let path = temp.path().join("history.jsonl");
     let long = format!(
         "full-prompt-{}-prompt-tail-sentinel",
-        "x".repeat(ctx_history_index::MAX_BODY_PREVIEW_CHARS.saturating_add(128))
+        "x".repeat(8_192)
     );
     let mut lines = (0..70)
         .map(|index| {

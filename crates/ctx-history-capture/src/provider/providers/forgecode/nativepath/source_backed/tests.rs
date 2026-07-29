@@ -85,7 +85,7 @@ fn forgecode_source_backed_exact_resolver_uses_compound_row_coordinates() {
     let source_path = directory.path().join(".forge.db");
     let complete = format!(
         "{}-forgecode-tail-sentinel",
-        "x".repeat(ctx_history_index::MAX_BODY_PREVIEW_CHARS + 257)
+        "x".repeat(8_192)
     );
     write_source(
         &source_path,
