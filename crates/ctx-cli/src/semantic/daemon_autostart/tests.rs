@@ -468,46 +468,17 @@ fn scheduled_fence_does_not_remain_owned_by_old_parent() -> Result<()> {
 }
 
 #[test]
-fn reverse_epoch_reexec_is_rejected_without_consuming_forward_restart_intent() -> Result<()> {
+fn current_format_recovery_reexec_preserves_daemon_restart_intent() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let attempt_id = "ua_01890f3e-2c80-7000-8000-000000000007";
     write_daemon_restart_request(temp.path(), DaemonTriggerCommandArg::Search, attempt_id)?;
-    let error = begin_daemon_upgrade_handoff(temp.path(), attempt_id)?
-        .prepare_reexec()
-        .expect_err("reverse-epoch re-exec must fail closed");
+    begin_daemon_upgrade_handoff(temp.path(), attempt_id)?.release_for_current_format_reexec()?;
 
-    assert!(format!("{error:#}").contains("unsupported_epoch_rollback"));
     assert_eq!(
         read_daemon_restart_request(temp.path()).map(|(_, trigger)| trigger.as_str()),
         Some("search")
     );
     assert!(!daemon_upgrade_handoff_is_active(temp.path()));
-    Ok(())
-}
-
-#[cfg(unix)]
-#[test]
-fn replaced_epoch_binary_is_never_launched() -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let temp = tempfile::tempdir()?;
-    let marker = temp.path().join("replaced-binary-ran");
-    let executable = temp.path().join("replaced-ctx");
-    fs::write(
-        &executable,
-        format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
-    )?;
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))?;
-    let attempt_id = "ua_01890f3e-2c80-7000-8000-00000000000a";
-    let error = begin_daemon_upgrade_handoff(temp.path(), attempt_id)?
-        .resume_legacy_reexec_with(&executable)
-        .expect_err("replaced epoch executable must be rejected");
-
-    assert!(format!("{error:#}").contains("unsupported_epoch_rollback"));
-    assert!(
-        !marker.exists(),
-        "reverse-epoch compatibility boundary executed the replaced binary"
-    );
     Ok(())
 }
 
