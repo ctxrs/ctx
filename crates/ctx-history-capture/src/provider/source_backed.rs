@@ -21,8 +21,7 @@ use ctx_history_core::{
     HydrationFailureKind, ScannedSourceCounts, SourceAnchor, SourceFrontier, SourceKey, TypedKey,
 };
 use ctx_history_index::{
-    CommitReceipt, GenerationWriter, IndexError, LexicalDocument, RevalidationTarget,
-    VerifiedIndex, WriterOptions,
+    CommitReceipt, GenerationWriter, IndexError, LexicalDocument, RevalidationTarget, WriterOptions,
 };
 use thiserror::Error;
 
