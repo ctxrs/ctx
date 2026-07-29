@@ -437,10 +437,13 @@ fn xml_attributes(
         let attribute = attribute.map_err(|_| SelectorReadError::Parse)?;
         values.insert(
             decode_xml_bytes(attribute.key.as_ref())?,
-            attribute
-                .decode_and_unescape_value(decoder)
-                .map_err(|_| SelectorReadError::Parse)?
-                .into_owned(),
+            quick_xml::escape::unescape(
+                &decoder
+                    .decode(attribute.value.as_ref())
+                    .map_err(|_| SelectorReadError::Parse)?,
+            )
+            .map_err(|_| SelectorReadError::Parse)?
+            .into_owned(),
         );
     }
     Ok(values)
@@ -921,6 +924,21 @@ mod tests {
                 .unwrap()
                 .values(&["application", "component", "option"], Some("value")),
             vec!["/tmp/A&B/路径"]
+        );
+    }
+
+    #[test]
+    fn xml_reader_rejects_duplicate_attributes_after_many_unique_names() {
+        let temp = tempdir();
+        let xml = temp.path().join("selector.xml");
+        let attributes = (0..32)
+            .map(|index| format!(r#" key{index}="{index}""#))
+            .collect::<String>();
+        std::fs::write(&xml, format!(r#"<option{attributes} key0="duplicate"/>"#)).unwrap();
+
+        assert_eq!(
+            SelectorReader::default().read(&xml, SelectorFormat::Xml),
+            Err(SelectorReadError::Parse)
         );
     }
 }
