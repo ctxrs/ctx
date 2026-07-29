@@ -2467,8 +2467,12 @@ mod tests {
         assert_eq!(replay.counters.scanner_workers, 0);
         assert_eq!(replay.counters.replayed_sources, 1);
         assert_eq!(replay.counters.staged_documents, 0);
+        assert_eq!(replay.counters.complete_records_scanned, 0);
+        assert_eq!(replay.counters.retained_records_scanned, 0);
         assert_eq!(replay.counters.scanner_bytes_read, 0);
         assert_eq!(replay.counters.checkpoint_validation_bytes, 0);
+        assert_eq!(replay.counters.structural_json_parses, 0);
+        assert_eq!(replay.counters.typed_json_parses, 0);
         assert_eq!(replay.timings.scan_and_stage, Duration::ZERO);
         assert_eq!(replay.commit.indexed_documents, 2);
         assert_eq!(replay.commit.generation_id, append.commit.generation_id);
