@@ -25,7 +25,6 @@ mod provider_args;
 mod provider_sources;
 mod release_build_identity;
 mod search_filters;
-mod search_render;
 mod semantic;
 mod skill;
 mod store_util;
@@ -42,16 +41,12 @@ pub(crate) use cli::{
     SetupArgs, ShowArgs, ShowTarget, SourcesArgs, SqlArgs, StatusArgs, UsageStatusMode,
     MAX_EVENT_WINDOW, MAX_SEARCH_LIMIT,
 };
-pub(crate) use commands::search::{RefreshArg, SearchRefreshReport};
+pub(crate) use commands::search::RefreshArg;
 pub(crate) use commands::sql::raw_sql_result_json;
 pub(crate) use output::compact_json;
 pub(crate) use provider_args::{cli_supported_provider, parse_provider_arg, ProviderArg};
 pub(crate) use provider_sources::{discovered_plugin_sources_json, sources_json};
-pub(crate) use search_filters::{
-    search_filters, search_has_intent, SearchFilterInput, SearchIntentInput,
-    SourceIdentityFilterArgs,
-};
-pub(crate) use search_render::SearchDto;
+pub(crate) use search_filters::{search_has_intent, SearchIntentInput, SourceIdentityFilterArgs};
 pub(crate) use transcript::TranscriptMode;
 pub(crate) use value_parsers::parse_event_window_limit;
 
