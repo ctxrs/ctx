@@ -20,6 +20,7 @@ use crate::{
         show::run_show,
         sources::run_sources,
         sql::run_sql,
+        stats::{malformed_config_failure as malformed_stats_config_failure, run as run_stats},
         status::{
             malformed_config_failure, removed_cloud_config_failure, run_status, run_usage_action,
         },
@@ -74,7 +75,7 @@ pub(crate) fn run_cli() -> Result<()> {
     let json_output = command_json_output(&cli.command);
     let usage_control_action = matches!(
         &cli.command,
-        CommandRoot::Status(args) if args.usage.modifies_state()
+        CommandRoot::Status(args) if args.usage.is_some()
     );
     let quiet = quiet_output(cli.quiet);
     let data_root = cli
@@ -87,23 +88,29 @@ pub(crate) fn run_cli() -> Result<()> {
         let CommandRoot::Status(args) = cli.command else {
             unreachable!("usage controls are status commands");
         };
-        return run_usage_action(args.usage, &data_root, args.format.is_json(), quiet);
+        let Some(mode) = args.usage else {
+            unreachable!("usage control mode was checked above");
+        };
+        return run_usage_action(mode, &data_root, args.format.is_json(), quiet);
     }
     let daemon_autostart_trigger = command_daemon_autostart_trigger(&cli.command);
     let mut analytics_draft = ClientOperationDraft::from_command(&cli.command, json_output);
-    let mut local_usage_draft = local_usage::CliUsage::from_command(&cli.command);
+    let mut local_usage_draft = command_local_usage_draft(&cli.command);
     let mut provider_refreshes = ProviderRefreshCollector::default();
     let mut config =
         match AppConfig::load_with_deprecated_controls(&data_root, &deprecated_controls) {
             Ok(config) => config,
             Err(error)
-                if command_is_usage_status_report(&cli.command)
+                if command_is_status_report(&cli.command)
                     && crate::config::is_removed_cloud_mode_error(&error) =>
             {
                 return removed_cloud_config_failure(json_output);
             }
-            Err(_) if command_is_usage_status_report(&cli.command) => {
+            Err(_) if command_is_status_report(&cli.command) => {
                 return malformed_config_failure(json_output);
+            }
+            Err(_) if matches!(&cli.command, CommandRoot::Stats(_)) => {
+                return malformed_stats_config_failure(json_output);
             }
             Err(_) if command_can_report_malformed_config(&cli.command) => {
                 // Daemon status reads retained lifecycle/config-reload state. Keep
@@ -142,6 +149,7 @@ pub(crate) fn run_cli() -> Result<()> {
                 .expect("status has a telemetry draft")
                 .status_mut(),
         ),
+        CommandRoot::Stats(args) => run_stats(args, data_root.clone(), config.local_usage.enabled),
         CommandRoot::Index(args) => run_index(
             args,
             data_root.clone(),
@@ -158,6 +166,7 @@ pub(crate) fn run_cli() -> Result<()> {
                 .as_mut()
                 .expect("sources has a telemetry draft")
                 .sources_mut(),
+            &mut local_usage_draft,
         ),
         CommandRoot::Import(args) => run_import(
             args,
@@ -176,6 +185,7 @@ pub(crate) fn run_cli() -> Result<()> {
                 .as_mut()
                 .expect("show has a telemetry draft")
                 .show_mut(),
+            &mut local_usage_draft,
         ),
         CommandRoot::Locate(args) => run_locate(
             args,
@@ -184,6 +194,7 @@ pub(crate) fn run_cli() -> Result<()> {
                 .as_mut()
                 .expect("locate has a telemetry draft")
                 .locate_mut(),
+            &mut local_usage_draft,
         ),
         CommandRoot::Search(args) => run_search(
             args,
@@ -194,6 +205,7 @@ pub(crate) fn run_cli() -> Result<()> {
                 .search_mut(),
             &mut provider_refreshes,
             &config,
+            &mut local_usage_draft,
         ),
         CommandRoot::Pro(args) => pro::run_lifecycle(args, data_root.clone()),
         CommandRoot::Referral(args) => pro::run_referral(args, data_root.clone()),
@@ -207,6 +219,7 @@ pub(crate) fn run_cli() -> Result<()> {
                 .as_mut()
                 .expect("sql has a telemetry draft")
                 .sql_mut(),
+            &mut local_usage_draft,
         ),
         CommandRoot::Docs(args) => docs::run(
             args,
@@ -293,6 +306,7 @@ fn command_json_output(command: &CommandRoot) -> bool {
     match command {
         CommandRoot::Setup(args) => args.format.is_json(),
         CommandRoot::Status(args) => args.format.is_json(),
+        CommandRoot::Stats(args) => args.format.is_json(),
         CommandRoot::Index(args) => args.json_output(),
         CommandRoot::Sources(args) => args.format.is_json(),
         CommandRoot::Import(args) => args.format.is_json(),
@@ -381,11 +395,15 @@ fn command_can_report_malformed_config(command: &CommandRoot) -> bool {
     ) || matches!(command, CommandRoot::Mcp(_))
 }
 
-fn command_is_usage_status_report(command: &CommandRoot) -> bool {
-    matches!(
-        command,
-        CommandRoot::Status(args) if !args.usage.modifies_state()
-    )
+fn command_local_usage_draft(command: &CommandRoot) -> local_usage::CliUsage {
+    match command {
+        CommandRoot::Stats(_) => local_usage::CliUsage::excluded(),
+        _ => local_usage::CliUsage::from_command(command),
+    }
+}
+
+fn command_is_status_report(command: &CommandRoot) -> bool {
+    matches!(command, CommandRoot::Status(_))
 }
 
 fn import_should_autostart_daemon(args: &ImportArgs) -> bool {
@@ -438,5 +456,28 @@ mod tests {
             daemon_autostart_trigger(&["import"]),
             Some(DaemonTriggerCommandArg::Import)
         ));
+    }
+
+    #[test]
+    fn stats_is_excluded_from_local_and_remote_analytics() {
+        for args in [
+            &["stats"][..],
+            &["stats", "--detail"][..],
+            &["stats", "--format=json"][..],
+        ] {
+            let cli = Cli::try_parse_from(std::iter::once("ctx").chain(args.iter().copied()))
+                .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
+            assert!(
+                ClientOperationDraft::from_command(&cli.command, command_json_output(&cli.command))
+                    .is_none(),
+                "{args:?}"
+            );
+            assert!(
+                command_local_usage_draft(&cli.command)
+                    .completed(true, std::time::Duration::ZERO)
+                    .is_none(),
+                "{args:?}"
+            );
+        }
     }
 }

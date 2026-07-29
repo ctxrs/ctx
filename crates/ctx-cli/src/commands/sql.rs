@@ -1,4 +1,9 @@
-use std::{fs, io::Read, path::PathBuf, time::Duration as StdDuration};
+use std::{
+    fs,
+    io::{Read, Write as _},
+    path::PathBuf,
+    time::Duration as StdDuration,
+};
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Number, Value};
@@ -8,6 +13,7 @@ use ctx_history_relational::{
 };
 
 use crate::analytics::{count_bucket, duration_bucket, SqlTelemetry};
+use crate::local_usage::{CliUsage, ResultObservationAction};
 use crate::output::{compact_json, print_json, SqlFormat};
 use crate::source_sql::SqlCompatibility;
 use crate::SqlArgs;
@@ -46,6 +52,7 @@ pub(crate) fn run_sql(
     args: SqlArgs,
     data_root: PathBuf,
     telemetry: &mut SqlTelemetry,
+    local_usage: &mut CliUsage,
 ) -> Result<()> {
     let sql = read_sql_input(&args)?;
     let compatibility = SqlCompatibility::open_for_data_root(data_root)?;
@@ -65,12 +72,33 @@ pub(crate) fn run_sql(
     telemetry.values_truncated = Some(result.truncated.values);
     telemetry.query_duration = Some(duration_bucket(result.elapsed));
 
-    match args.output_format() {
+    let rows = result
+        .rows
+        .iter()
+        .map(|row| row.iter().map(raw_sql_value_json).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    let content_bytes = serde_json::to_vec(&rows)?.len();
+    let output_bytes = match args.output_format() {
         SqlFormat::Table => print_sql_table(&result),
-        SqlFormat::Json => print_json(raw_sql_result_json(&result)),
+        SqlFormat::Json => {
+            let value = raw_sql_result_json(&result);
+            let output_bytes = serde_json::to_string_pretty(&value)?
+                .len()
+                .saturating_add(1);
+            print_json(value)?;
+            Ok(output_bytes)
+        }
         SqlFormat::Csv => print_sql_csv(&result, args.no_header),
         SqlFormat::Raw => print_sql_raw(&result),
-    }
+    }?;
+    local_usage.set_result_observation(
+        ResultObservationAction::Sql,
+        result.returned_rows,
+        0,
+        content_bytes,
+    );
+    local_usage.set_measured_output_bytes(output_bytes);
+    Ok(())
 }
 
 pub(crate) fn read_sql_input(args: &SqlArgs) -> Result<String> {
@@ -111,7 +139,7 @@ pub(crate) fn read_sql_limited(
     Ok(input)
 }
 
-pub(crate) fn print_sql_table(result: &RawSqlResult) -> Result<()> {
+pub(crate) fn print_sql_table(result: &RawSqlResult) -> Result<usize> {
     let rows = result
         .rows
         .iter()
@@ -134,65 +162,75 @@ pub(crate) fn print_sql_table(result: &RawSqlResult) -> Result<()> {
         .enumerate()
         .map(|(index, column)| pad_table_cell(&column.name, widths[index]))
         .collect::<Vec<_>>();
-    println!("{}", headers.join(" | "));
+    let mut body = String::new();
+    body.push_str(&headers.join(" | "));
+    body.push('\n');
     let separators = widths
         .iter()
         .map(|width| "-".repeat(*width))
         .collect::<Vec<_>>();
-    println!("{}", separators.join(" | "));
+    body.push_str(&separators.join(" | "));
+    body.push('\n');
     for row in &rows {
         let cells = row
             .iter()
             .enumerate()
             .map(|(index, cell)| pad_table_cell(cell, widths[index]))
             .collect::<Vec<_>>();
-        println!("{}", cells.join(" | "));
+        body.push_str(&cells.join(" | "));
+        body.push('\n');
     }
     if result.rows.is_empty() {
-        println!("(0 rows)");
+        body.push_str("(0 rows)\n");
     }
-    print_sql_truncation_notice(result);
-    Ok(())
+    write_sql_stdout(body, result)
 }
 
-pub(crate) fn print_sql_csv(result: &RawSqlResult, no_header: bool) -> Result<()> {
+pub(crate) fn print_sql_csv(result: &RawSqlResult, no_header: bool) -> Result<usize> {
+    let mut body = String::new();
     if !no_header {
-        println!(
-            "{}",
-            result
+        body.push_str(
+            &result
                 .columns
                 .iter()
                 .map(|column| csv_escape(&column.name))
                 .collect::<Vec<_>>()
-                .join(",")
+                .join(","),
         );
+        body.push('\n');
     }
     for row in &result.rows {
-        println!(
-            "{}",
-            row.iter()
+        body.push_str(
+            &row.iter()
                 .map(sql_csv_cell)
                 .map(|cell| csv_escape(&cell))
                 .collect::<Vec<_>>()
-                .join(",")
+                .join(","),
         );
+        body.push('\n');
     }
-    print_sql_truncation_notice(result);
-    Ok(())
+    write_sql_stdout(body, result)
 }
 
-pub(crate) fn print_sql_raw(result: &RawSqlResult) -> Result<()> {
+pub(crate) fn print_sql_raw(result: &RawSqlResult) -> Result<usize> {
     if result.columns.len() != 1 {
         return Err(anyhow!(
             "--format raw requires exactly one selected column; got {}",
             result.columns.len()
         ));
     }
+    let mut body = String::new();
     for row in &result.rows {
-        println!("{}", sql_raw_cell(&row[0]));
+        body.push_str(&sql_raw_cell(&row[0]));
+        body.push('\n');
     }
+    write_sql_stdout(body, result)
+}
+
+fn write_sql_stdout(body: String, result: &RawSqlResult) -> Result<usize> {
+    std::io::stdout().lock().write_all(body.as_bytes())?;
     print_sql_truncation_notice(result);
-    Ok(())
+    Ok(body.len())
 }
 
 pub(crate) fn print_sql_truncation_notice(result: &RawSqlResult) {

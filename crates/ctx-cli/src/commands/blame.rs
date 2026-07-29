@@ -13,6 +13,7 @@ use crate::{
         send_pro_operation, Outcome, ProBlameTargetV1, ProBlameTelemetryV1, ProFailureBucketV1,
         ProHostOperationV1, ProSurfaceV1,
     },
+    local_usage::ResultObservationAction,
     output::JsonOutputFormat,
     pro::{print_blame_result, DEFAULT_BLAME_LIMIT},
 };
@@ -198,9 +199,32 @@ fn emit_blame_result(
     local_usage: &mut crate::local_usage::CliUsage,
     emit: impl FnOnce(&ctx_pro_host_protocol::BlameResult, bool) -> Result<()>,
 ) -> Result<()> {
+    let content_bytes = blame_content_bytes(result)?;
+    let measured_output_bytes = if json {
+        Some(blame_json_output_bytes(result)?)
+    } else {
+        None
+    };
     emit(result, json)?;
+    local_usage.set_result_observation(
+        ResultObservationAction::Blame,
+        result.matches.len(),
+        result.evidence.len(),
+        content_bytes,
+    );
     local_usage.set_blame_result(result);
+    if let Some(output_bytes) = measured_output_bytes {
+        local_usage.set_measured_output_bytes(output_bytes);
+    }
     Ok(())
+}
+
+fn blame_content_bytes(result: &ctx_pro_host_protocol::BlameResult) -> Result<usize> {
+    Ok(serde_json::to_vec(result)?.len())
+}
+
+fn blame_json_output_bytes(result: &ctx_pro_host_protocol::BlameResult) -> Result<usize> {
+    Ok(serde_json::to_vec_pretty(result)?.len().saturating_add(1))
 }
 
 fn finish_blame_telemetry(
@@ -327,10 +351,64 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.to_string(), "simulated output failure");
 
-        let completed = usage.completed(false, std::time::Duration::ZERO).unwrap();
+        let completed = usage.completed(true, std::time::Duration::ZERO).unwrap();
         assert_eq!(
             completed.result_metadata_for_test(),
             (crate::local_usage::ValueClass::NotApplicable, 0, 0)
+        );
+    }
+
+    #[test]
+    fn successful_blame_observes_structured_results_and_empty_pages() {
+        let resource = |id: &str, kind| ResourceRef {
+            id: id.to_owned(),
+            kind,
+            display: id.to_owned(),
+        };
+        let commit = resource("commit:abc1234", ResourceKind::Commit);
+        let mut result = BlameResult {
+            target: ResolvedBlameTarget::Commit {
+                commit: commit.clone(),
+                repository: resource("repository:ctx", ResourceKind::Repository),
+            },
+            git_snapshot: None,
+            matches: vec![ctx_pro_host_protocol::BlameMatch::Commit(
+                CommitBlameMatch {
+                    fact_id: "fact:1".to_owned(),
+                    fact_type: CommitFactType::Produced,
+                    predicate: CommitPredicate::ProducedBy,
+                    subject: commit,
+                    object: Some(resource("session:1", ResourceKind::Session)),
+                    fact_occurred_at_ms: None,
+                    confidence: FactConfidence::Explicit,
+                    state: FactState::Asserted,
+                    direct_actor: None,
+                    owning_root: None,
+                    evidence_numbers: Vec::new(),
+                },
+            )],
+            evidence: Vec::new(),
+            next: None,
+        };
+        let cli = crate::Cli::try_parse_from(["ctx", "blame", "commit", "abc1234"]).unwrap();
+        let mut usage = crate::local_usage::CliUsage::from_command(&cli.command);
+
+        emit_blame_result(&result, true, &mut usage, |_, _| Ok(())).unwrap();
+        let completed = usage.completed(true, std::time::Duration::ZERO).unwrap();
+        assert_eq!(
+            completed.result_metadata_for_test(),
+            (crate::local_usage::ValueClass::ResultBearing, 1, 0)
+        );
+        assert!(blame_content_bytes(&result).unwrap() > 0);
+        assert!(blame_json_output_bytes(&result).unwrap() > blame_content_bytes(&result).unwrap());
+
+        result.matches.clear();
+        let mut usage = crate::local_usage::CliUsage::from_command(&cli.command);
+        emit_blame_result(&result, false, &mut usage, |_, _| Ok(())).unwrap();
+        let completed = usage.completed(true, std::time::Duration::ZERO).unwrap();
+        assert_eq!(
+            completed.result_metadata_for_test(),
+            (crate::local_usage::ValueClass::Empty, 0, 0)
         );
     }
 

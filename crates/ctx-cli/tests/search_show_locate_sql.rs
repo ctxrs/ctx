@@ -239,6 +239,14 @@ fn search_result_window_is_truthful_in_json_and_human_output() {
     assert!(!complete_human.contains("More results available."));
 }
 
+fn measured_json_output(command: &mut Command) -> (Value, usize) {
+    let output = command.assert().success().get_output().clone();
+    let output_bytes = output.stdout.len();
+    let value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("invalid JSON output: {error}: {output:#?}"));
+    (value, output_bytes)
+}
+
 #[path = "support/search_show_locate_sql/import_paths.rs"]
 mod import_paths;
 
@@ -696,6 +704,223 @@ fn fresh_home_search_mvp_flow() {
     assert_eq!(doctor["ok"], true);
     assert_eq!(doctor["daemon"]["enabled"], true);
     assert!(doctor["daemon"]["jobs"]["semantic_index"]["status"].is_string());
+}
+
+#[test]
+fn foreground_core_observations_are_truthful_and_recorded_once_after_output() {
+    let temp = tempdir();
+    let fixture = provider_history_fixture("codex-sessions");
+    json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "codex",
+        "--path",
+        &fixture,
+        "--format=json",
+        "--progress",
+        "none",
+    ]));
+
+    let (search, search_output_bytes) =
+        measured_json_output(ctx(&temp).env_remove("CTX_LOCAL_USAGE_ENABLED").args([
+            "search",
+            "onboarding",
+            "--provider",
+            "codex",
+            "--refresh",
+            "off",
+            "--format=json",
+        ]));
+    let search_results = search["results"].as_array().unwrap();
+    let search_result_count = search_results.len();
+    let search_citation_count = search_results
+        .iter()
+        .map(|result| {
+            result["citations"]
+                .as_array()
+                .map(Vec::len)
+                .unwrap_or_default()
+        })
+        .sum::<usize>();
+    let search_result_bytes = serde_json::to_vec(&search["results"]).unwrap().len();
+    let ctx_event_id = search_results[0]["ctx_event_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let ctx_session_id = search_results[0]["ctx_session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let (empty_search, empty_search_output_bytes) =
+        measured_json_output(ctx(&temp).env_remove("CTX_LOCAL_USAGE_ENABLED").args([
+            "search",
+            "no-result-marker-7f8a",
+            "--provider",
+            "codex",
+            "--refresh",
+            "off",
+            "--format=json",
+        ]));
+    assert!(empty_search["results"].as_array().unwrap().is_empty());
+
+    let (shown_session, show_session_output_bytes) =
+        measured_json_output(ctx(&temp).env_remove("CTX_LOCAL_USAGE_ENABLED").args([
+            "show",
+            "session",
+            &ctx_session_id,
+            "--format=json",
+        ]));
+    let shown_session_events = shown_session["events"].as_array().unwrap().len();
+
+    let (shown_event, show_event_output_bytes) =
+        measured_json_output(ctx(&temp).env_remove("CTX_LOCAL_USAGE_ENABLED").args([
+            "show",
+            "event",
+            &ctx_event_id,
+            "--format=json",
+        ]));
+    let shown_event_events = shown_event["events"].as_array().unwrap().len();
+
+    let (_, locate_session_output_bytes) =
+        measured_json_output(ctx(&temp).env_remove("CTX_LOCAL_USAGE_ENABLED").args([
+            "locate",
+            "session",
+            &ctx_session_id,
+            "--format=json",
+        ]));
+    let (_, locate_event_output_bytes) =
+        measured_json_output(ctx(&temp).env_remove("CTX_LOCAL_USAGE_ENABLED").args([
+            "locate",
+            "event",
+            &ctx_event_id,
+            "--format=json",
+        ]));
+
+    let (sources, sources_output_bytes) = measured_json_output(
+        ctx(&temp)
+            .env_remove("CTX_LOCAL_USAGE_ENABLED")
+            .args(["sources", "--format=json"]),
+    );
+    let source_count = sources["sources"].as_array().unwrap().len();
+
+    let (sql, sql_output_bytes) =
+        measured_json_output(ctx(&temp).env_remove("CTX_LOCAL_USAGE_ENABLED").args([
+            "sql",
+            "SELECT 1 AS value UNION ALL SELECT 2",
+            "--format=json",
+        ]));
+    let sql_returned_rows = sql["returned_rows"].as_u64().unwrap() as usize;
+
+    let blocked_parent = temp.path().join("blocked-show-output");
+    fs::write(&blocked_parent, "not a directory").unwrap();
+    ctx(&temp)
+        .env_remove("CTX_LOCAL_USAGE_ENABLED")
+        .arg("show")
+        .arg("session")
+        .arg(&ctx_session_id)
+        .arg("--format=json")
+        .arg("--out")
+        .arg(blocked_parent.join("session.json"))
+        .assert()
+        .failure();
+
+    let connection = Connection::open(temp.path().join("usage.sqlite")).unwrap();
+    let totals = |operation: &str, result_action: &str, outcome: &str| {
+        connection
+            .query_row(
+                r#"
+                SELECT
+                    SUM(calls),
+                    SUM(result_count),
+                    SUM(citation_count),
+                    SUM(output_bytes),
+                    SUM(output_byte_samples),
+                    SUM(search_result_bytes)
+                FROM daily_usage
+                WHERE surface = 'cli'
+                  AND operation = ?1
+                  AND result_action = ?2
+                  AND outcome = ?3
+                "#,
+                params![operation, result_action, outcome],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                    ))
+                },
+            )
+            .unwrap()
+    };
+
+    assert_eq!(
+        totals("search", "search", "success"),
+        (
+            2,
+            search_result_count as i64,
+            search_citation_count as i64,
+            search_output_bytes.saturating_add(empty_search_output_bytes) as i64,
+            2,
+            search_result_bytes as i64,
+        )
+    );
+    assert_eq!(
+        totals("show", "open_session", "success"),
+        (
+            1,
+            shown_session_events as i64,
+            0,
+            show_session_output_bytes as i64,
+            1,
+            0,
+        )
+    );
+    assert_eq!(
+        totals("show", "open_event", "success"),
+        (
+            1,
+            shown_event_events as i64,
+            0,
+            show_event_output_bytes as i64,
+            1,
+            0,
+        )
+    );
+    assert_eq!(
+        totals("locate", "locate", "success"),
+        (
+            2,
+            2,
+            0,
+            locate_session_output_bytes.saturating_add(locate_event_output_bytes) as i64,
+            2,
+            0,
+        )
+    );
+    assert_eq!(
+        totals("sources", "sources", "success"),
+        (1, source_count as i64, 0, sources_output_bytes as i64, 1, 0)
+    );
+    assert_eq!(
+        totals("sql", "sql", "success"),
+        (
+            1,
+            sql_returned_rows as i64,
+            0,
+            sql_output_bytes as i64,
+            1,
+            0
+        )
+    );
+    assert_eq!(
+        totals("show", "not_applicable", "failure"),
+        (1, 0, 0, 0, 0, 0)
+    );
 }
 
 #[test]

@@ -285,6 +285,7 @@ impl ClientOperationDraft {
             CommandRoot::Pro(_)
             | CommandRoot::Referral(_)
             | CommandRoot::Blame(_)
+            | CommandRoot::Stats(_)
             | CommandRoot::Mcp(_)
             | CommandRoot::Daemon(_) => return None,
         };
