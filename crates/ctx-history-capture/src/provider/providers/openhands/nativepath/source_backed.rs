@@ -17,13 +17,13 @@ use ctx_history_index::LexicalDocument;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use super::output::openhands_output_outcome;
 use crate::{
     common::io::{open_provider_source_path, OpenedProviderSourcePath, ProviderSourceDirectory},
     provider::file_touches::{
         event_type_supports_structured_file_touches, visit_provider_file_touch_drafts_with_limit,
         MAX_PROVIDER_FILE_TOUCHES_PER_EVENT,
     },
+    provider::normalization::provider_result_outcome_evidence,
     CaptureError, OutputOutcome, OPENHANDS_FILE_EVENTS_SOURCE_FORMAT,
 };
 
@@ -608,14 +608,11 @@ fn lexical_body(decoded: &OpenHandsDecodedEvent) -> Option<String> {
         ctx_history_core::EventType::ToolOutput | ctx_history_core::EventType::CommandOutput
     ) {
         let outcome = openhands_output_outcome(decoded);
-        if !matches!(
-            outcome.outcome,
-            OutputOutcome::Failure | OutputOutcome::Timeout
-        ) {
+        if !matches!(outcome, OutputOutcome::Failure | OutputOutcome::Timeout) {
             return None;
         }
         if decoded.text().trim().is_empty() {
-            if outcome.outcome == OutputOutcome::Timeout {
+            if outcome == OutputOutcome::Timeout {
                 "OpenHands command timed out".to_owned()
             } else {
                 "OpenHands command failed".to_owned()
@@ -627,6 +624,57 @@ fn lexical_body(decoded: &OpenHandsDecodedEvent) -> Option<String> {
         decoded.text().to_owned()
     };
     (!text.trim().is_empty()).then_some(text)
+}
+
+fn openhands_output_outcome(decoded: &OpenHandsDecodedEvent) -> OutputOutcome {
+    if openhands_value_indicates_timeout(decoded.value()) {
+        return OutputOutcome::Timeout;
+    }
+    match provider_result_outcome_evidence(decoded.event_type(), decoded.value()).as_str() {
+        Some("success") => OutputOutcome::Success,
+        Some("failure") => OutputOutcome::Failure,
+        _ => OutputOutcome::Unknown,
+    }
+}
+
+fn openhands_value_indicates_timeout(value: &serde_json::Value) -> bool {
+    const MAX_NODES: usize = 4_096;
+
+    fn visit(value: &serde_json::Value, remaining: &mut usize) -> bool {
+        if *remaining == 0 {
+            return false;
+        }
+        *remaining -= 1;
+        match value {
+            serde_json::Value::Array(values) => values.iter().any(|value| visit(value, remaining)),
+            serde_json::Value::Object(values) => values.iter().any(|(key, value)| {
+                let normalized = key
+                    .chars()
+                    .filter(|ch| ch.is_ascii_alphanumeric())
+                    .flat_map(char::to_lowercase)
+                    .collect::<String>();
+                let direct = matches!(normalized.as_str(), "timeout" | "timedout" | "istimeout")
+                    && (value.as_bool().unwrap_or(false)
+                        || value.as_str().is_some_and(|value| {
+                            matches!(
+                                value.trim().to_ascii_lowercase().as_str(),
+                                "timeout" | "timed_out" | "timedout"
+                            )
+                        }));
+                direct || visit(value, remaining)
+            }),
+            serde_json::Value::String(value) => matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "timeout" | "timed_out" | "timedout"
+            ),
+            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+                false
+            }
+        }
+    }
+
+    let mut remaining = MAX_NODES;
+    visit(value, &mut remaining)
 }
 
 fn touched_files(decoded: &OpenHandsDecodedEvent) -> Vec<String> {

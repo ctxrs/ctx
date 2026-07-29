@@ -1,33 +1,12 @@
-use std::{collections::BTreeSet, path::Path};
+use std::collections::BTreeSet;
 
 use rusqlite::Connection;
 
 use crate::provider::sqlite::{
     ensure_sqlite_table_columns, sqlite_table_columns, sqlite_table_exists,
-    ProviderSqliteSourceSnapshot, SqliteLengthPreflightGuard,
+    SqliteLengthPreflightGuard,
 };
 use crate::{CaptureError, Result};
-
-use super::{SHELLEY_CAPTURE_REVISION, SHELLEY_POLICY_REVISION};
-
-pub(super) fn shelley_source_snapshot(path: &Path) -> Result<ProviderSqliteSourceSnapshot> {
-    ProviderSqliteSourceSnapshot::read(
-        path,
-        "Shelley SQLite source must be a regular non-symlink file",
-        "Shelley SQLite sidecar must be a regular non-symlink file",
-    )
-}
-
-pub(super) fn shelley_source_revision(
-    snapshot: &ProviderSqliteSourceSnapshot,
-    user_version: i64,
-    schema_fingerprint: &str,
-) -> String {
-    format!(
-        "shelley-sqlite-snapshot-v1:capture={SHELLEY_CAPTURE_REVISION};policy={SHELLEY_POLICY_REVISION};user_version={user_version};schema={schema_fingerprint};{}",
-        snapshot.revision_component(),
-    )
-}
 
 pub(crate) fn shelley_conversation_columns(conn: &Connection) -> Result<BTreeSet<String>> {
     if !sqlite_table_exists(conn, "conversations")? {

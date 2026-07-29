@@ -26,12 +26,6 @@ struct RovoDevFrozenFile {
 }
 
 impl RovoDevFrozenFile {
-    fn read(path: &Path) -> Result<Self> {
-        ensure_regular_provider_transcript_file(path)?;
-        let metadata = fs::symlink_metadata(path)?;
-        Self::from_metadata(path.to_path_buf(), &metadata)
-    }
-
     fn from_metadata(path: PathBuf, metadata: &fs::Metadata) -> Result<Self> {
         #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
@@ -95,18 +89,6 @@ impl RovoDevSessionObservation {
         })
     }
 
-    pub(super) fn read(source: &RovoDevSessionSource) -> Result<Self> {
-        Ok(Self {
-            canonical_path: fs::canonicalize(&source.context_path)?,
-            context_file: RovoDevFrozenFile::read(&source.context_path)?,
-            metadata_file: source
-                .metadata_path
-                .as_deref()
-                .map(RovoDevFrozenFile::read)
-                .transpose()?,
-        })
-    }
-
     pub(super) fn canonical_path(&self) -> &Path {
         &self.canonical_path
     }
@@ -131,64 +113,6 @@ impl RovoDevSessionObservation {
             None => digest.update([0]),
         }
         digest.finalize().into()
-    }
-
-    pub(super) fn physical_identity(&self) -> String {
-        let mut digest = Sha256::new();
-        digest.update(b"ctx-rovodev-physical-source-v1\0");
-        let canonical = format!("{:?}", self.canonical_path.as_os_str());
-        digest.update((canonical.len() as u64).to_be_bytes());
-        digest.update(canonical.as_bytes());
-        digest.update(self.context_file.device.unwrap_or(u64::MAX).to_be_bytes());
-        digest.update(self.context_file.inode.unwrap_or(u64::MAX).to_be_bytes());
-        if self.context_file.device.is_none() || self.context_file.inode.is_none() {
-            let (side, seconds, nanos) = match self.context_file.modified.duration_since(UNIX_EPOCH)
-            {
-                Ok(duration) => (b'+', duration.as_secs(), duration.subsec_nanos()),
-                Err(error) => {
-                    let duration = error.duration();
-                    (b'-', duration.as_secs(), duration.subsec_nanos())
-                }
-            };
-            digest.update([side]);
-            digest.update(seconds.to_be_bytes());
-            digest.update(nanos.to_be_bytes());
-        }
-        format!("sha256:{:x}", digest.finalize())
-    }
-
-    pub(super) fn revalidate(&self, source: &RovoDevSessionSource) -> Result<bool> {
-        let context_file = match RovoDevFrozenFile::read(&source.context_path) {
-            Ok(file) => file,
-            Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(false);
-            }
-            Err(CaptureError::InvalidProviderTranscriptPath { .. }) => return Ok(false),
-            Err(error) => return Err(error),
-        };
-        let current_metadata_path =
-            match provider_optional_regular_file(&source.session_dir.join("metadata.json")) {
-                Ok(path) => path,
-                Err(CaptureError::InvalidProviderTranscriptPath { .. }) => return Ok(false),
-                Err(error) => return Err(error),
-            };
-        if current_metadata_path != source.metadata_path {
-            return Ok(false);
-        }
-        let metadata_file = match current_metadata_path.as_deref() {
-            Some(path) => match RovoDevFrozenFile::read(path) {
-                Ok(file) => Some(file),
-                Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                    return Ok(false);
-                }
-                Err(CaptureError::InvalidProviderTranscriptPath { .. }) => return Ok(false),
-                Err(error) => return Err(error),
-            },
-            None => None,
-        };
-        Ok(context_file == self.context_file
-            && metadata_file == self.metadata_file
-            && fs::canonicalize(&source.context_path)? == self.canonical_path)
     }
 }
 
@@ -237,16 +161,6 @@ impl RovoDevDiscovery {
 
     pub(super) fn sources(&self) -> &[RovoDevSessionSource] {
         &self.sources
-    }
-
-    pub(super) fn canonical_context_paths(&self) -> Result<Vec<PathBuf>> {
-        let mut paths = self
-            .sources
-            .iter()
-            .map(|source| fs::canonicalize(&source.context_path))
-            .collect::<std::io::Result<Vec<_>>>()?;
-        paths.sort();
-        Ok(paths)
     }
 }
 

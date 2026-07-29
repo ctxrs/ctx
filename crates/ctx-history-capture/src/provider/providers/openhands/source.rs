@@ -6,30 +6,20 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-#[cfg(test)]
-use std::cell::Cell;
-
-use ctx_history_core::CaptureProvider;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
     common::io::{
-        open_provider_source_file, open_provider_source_path, path_has_component,
-        OpenedProviderSourceFile, OpenedProviderSourcePath, ProviderSourceRoot,
+        open_provider_source_path, path_has_component, OpenedProviderSourceFile,
+        OpenedProviderSourcePath, ProviderSourceRoot,
     },
-    fnv1a64,
-    provider::importer::{provider_path_identity, provider_source_cursor_stream_for_path},
-    CaptureError, Result, MAX_PROVIDER_JSONL_LINE_BYTES, OPENHANDS_FILE_EVENTS_SOURCE_FORMAT,
+    CaptureError, Result, MAX_PROVIDER_JSONL_LINE_BYTES,
 };
 
 const OPENHANDS_DISCOVERY_MAX_DEPTH: usize = 16;
 const OPENHANDS_DISCOVERY_MAX_ENTRIES: usize = 16_384;
 const OPENHANDS_MAX_PATH_BYTES: usize = 7 * 1024;
-const OPENHANDS_ROUTE_HASH_DOMAIN: &[u8] = b"ctx-openhands-nativepath-route-v1\0";
-const OPENHANDS_SOURCE_REVISION_DOMAIN: &[u8] = b"ctx-openhands-nativepath-source-revision-v1\0";
-const OPENHANDS_PHYSICAL_FINGERPRINT_DOMAIN: &[u8] =
-    b"ctx-openhands-nativepath-physical-fingerprint-v1\0";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct OpenHandsObservedTime {
@@ -86,22 +76,11 @@ impl OpenHandsFileObservation {
             inode,
         })
     }
-
-    pub(super) fn physical_identity(&self) -> (Option<u64>, Option<u64>) {
-        (self.device, self.inode)
-    }
 }
 
 #[derive(Debug)]
 pub(super) struct OpenHandsObservedFile {
-    pub(super) canonical_path: PathBuf,
     pub(super) canonical_path_text: String,
-    pub(super) conversation_dir: PathBuf,
-    pub(super) session_id: String,
-    pub(super) user_id: Option<String>,
-    pub(super) path_identity: String,
-    pub(super) route_sha256: [u8; 32],
-    pub(super) cursor_stream: String,
     pub(super) observation: OpenHandsFileObservation,
     pub(super) raw_bytes: Option<Vec<u8>>,
     pub(super) content_sha256: Option<[u8; 32]>,
@@ -109,24 +88,8 @@ pub(super) struct OpenHandsObservedFile {
 }
 
 impl OpenHandsObservedFile {
-    pub(super) fn open(path: &Path) -> Result<Self> {
-        let canonical_path = normalized_openhands_authority_path(path)?;
-        let opened = open_openhands_source_file(&canonical_path)?;
-        Self::from_opened(canonical_path, opened)
-    }
-
     fn from_opened(canonical_path: PathBuf, opened: OpenedProviderSourceFile) -> Result<Self> {
         let canonical_path_text = openhands_checked_path_text(&canonical_path)?;
-        let session_id = openhands_conversation_id_from_path(&canonical_path)
-            .ok_or_else(|| openhands_missing_event_files(&canonical_path))
-            .and_then(|value| openhands_bounded_derived_text(value, "conversation id"))?;
-        let user_id = openhands_user_id_from_path(&canonical_path)
-            .map(|value| openhands_bounded_derived_text(value, "user id"))
-            .transpose()?;
-        let conversation_dir = canonical_path
-            .parent()
-            .ok_or_else(|| openhands_missing_event_files(&canonical_path))?
-            .to_path_buf();
         let descriptor_observation = OpenHandsFileObservation::from_metadata(opened.metadata())?;
 
         let limit = u64::try_from(MAX_PROVIDER_JSONL_LINE_BYTES).map_err(|_| {
@@ -147,22 +110,8 @@ impl OpenHandsObservedFile {
         let content_sha256 = raw_bytes
             .as_deref()
             .map(|bytes| <[u8; 32]>::from(Sha256::digest(bytes)));
-        let path_identity = provider_path_identity(&canonical_path)?;
-        let route_sha256 = route_sha256(&path_identity);
-        let cursor_stream = provider_source_cursor_stream_for_path(
-            CaptureProvider::OpenHands,
-            OPENHANDS_FILE_EVENTS_SOURCE_FORMAT,
-            &path_identity,
-        );
         Ok(Self {
-            canonical_path,
             canonical_path_text,
-            conversation_dir,
-            session_id,
-            user_id,
-            path_identity,
-            route_sha256,
-            cursor_stream,
             observation: descriptor_observation,
             raw_bytes,
             content_sha256,
@@ -179,124 +128,6 @@ impl OpenHandsObservedFile {
             Err(error) => Err(error),
         }
     }
-
-    /// Cursor revision for this exact path. The route hash deliberately keeps a
-    /// cursor from being resumed after the file moves.
-    pub(super) fn cursor_revision(&self, inventory_token: Option<&str>) -> String {
-        let mut digest = Sha256::new();
-        digest.update(OPENHANDS_SOURCE_REVISION_DOMAIN);
-        digest.update(self.route_sha256);
-        digest.update(self.observation.length.to_be_bytes());
-        digest.update([u8::from(self.observation.modified.before_epoch)]);
-        digest.update(self.observation.modified.seconds.to_be_bytes());
-        digest.update(self.observation.modified.nanos.to_be_bytes());
-        digest.update([u8::from(self.observation.readonly)]);
-        hash_optional_u64(&mut digest, self.observation.device);
-        hash_optional_u64(&mut digest, self.observation.inode);
-        match self.content_sha256 {
-            Some(content_sha256) => {
-                digest.update([1]);
-                digest.update(content_sha256);
-            }
-            None => digest.update([0]),
-        }
-        if let Some(token) = inventory_token {
-            digest.update([1]);
-            digest.update((token.len() as u64).to_be_bytes());
-            digest.update(token.as_bytes());
-        } else {
-            digest.update([0]);
-        }
-        format!("openhands-nativepath-source-v1:{}", hex(&digest.finalize()))
-    }
-
-    /// Bounded physical-source evidence used only to reconcile a missing path
-    /// with one uniquely matching new path.
-    pub(super) fn physical_fingerprint(&self) -> String {
-        openhands_physical_fingerprint(&self.observation, self.content_sha256)
-    }
-
-    pub(super) fn current_prefix_matches(
-        &self,
-        prior_length: u64,
-        prior_content_sha256: [u8; 32],
-    ) -> bool {
-        let Some(bytes) = self.raw_bytes.as_deref() else {
-            return false;
-        };
-        let Ok(prior_length) = usize::try_from(prior_length) else {
-            return false;
-        };
-        bytes
-            .get(..prior_length)
-            .is_some_and(|prefix| <[u8; 32]>::from(Sha256::digest(prefix)) == prior_content_sha256)
-    }
-}
-
-pub(super) fn openhands_physical_fingerprint(
-    observation: &OpenHandsFileObservation,
-    content_sha256: Option<[u8; 32]>,
-) -> String {
-    let mut digest = Sha256::new();
-    digest.update(OPENHANDS_PHYSICAL_FINGERPRINT_DOMAIN);
-    digest.update(observation.length.to_be_bytes());
-    digest.update([u8::from(observation.modified.before_epoch)]);
-    digest.update(observation.modified.seconds.to_be_bytes());
-    digest.update(observation.modified.nanos.to_be_bytes());
-    digest.update([u8::from(observation.readonly)]);
-    hash_optional_u64(&mut digest, observation.device);
-    hash_optional_u64(&mut digest, observation.inode);
-    match content_sha256 {
-        Some(content_sha256) => {
-            digest.update([1]);
-            digest.update(content_sha256);
-        }
-        None => digest.update([0]),
-    }
-    format!(
-        "openhands-nativepath-physical-v1:{}",
-        hex(&digest.finalize())
-    )
-}
-
-#[cfg(test)]
-std::thread_local! {
-    static OPENHANDS_SOURCE_FILE_OPEN_COUNT: Cell<Option<usize>> = const { Cell::new(None) };
-}
-
-fn open_openhands_source_file(path: &Path) -> Result<OpenedProviderSourceFile> {
-    #[cfg(test)]
-    OPENHANDS_SOURCE_FILE_OPEN_COUNT.with(|count| {
-        if let Some(current) = count.get() {
-            count.set(Some(current.saturating_add(1)));
-        }
-    });
-    open_provider_source_file(path)
-}
-
-#[cfg(test)]
-pub(crate) fn count_openhands_source_file_opens<T>(operation: impl FnOnce() -> T) -> (T, usize) {
-    OPENHANDS_SOURCE_FILE_OPEN_COUNT.with(|count| {
-        assert_eq!(count.replace(Some(0)), None);
-    });
-    let output = operation();
-    let opens = OPENHANDS_SOURCE_FILE_OPEN_COUNT.with(|count| count.replace(None).unwrap());
-    (output, opens)
-}
-
-fn hash_optional_u64(digest: &mut Sha256, value: Option<u64>) {
-    digest.update([u8::from(value.is_some())]);
-    if let Some(value) = value {
-        digest.update(value.to_be_bytes());
-    }
-}
-
-fn route_sha256(path_identity: &str) -> [u8; 32] {
-    let mut digest = Sha256::new();
-    digest.update(OPENHANDS_ROUTE_HASH_DOMAIN);
-    digest.update((path_identity.len() as u64).to_be_bytes());
-    digest.update(path_identity.as_bytes());
-    digest.finalize().into()
 }
 
 #[derive(Debug)]
@@ -530,67 +361,4 @@ pub(super) fn openhands_checked_path_text(path: &Path) -> Result<String> {
 pub(crate) fn openhands_json_path_is_event(path: &Path) -> bool {
     path.extension().and_then(|ext| ext.to_str()) == Some("json")
         && path_has_component(path, "v1_conversations")
-}
-
-pub(super) fn openhands_conversation_id_from_path(path: &Path) -> Option<String> {
-    let mut components = path
-        .components()
-        .filter_map(|component| component.as_os_str().to_str());
-    while let Some(component) = components.next() {
-        if component == "v1_conversations" {
-            return components
-                .next()
-                .filter(|value| !value.trim().is_empty())
-                .map(str::to_owned);
-        }
-    }
-    None
-}
-
-pub(super) fn openhands_user_id_from_path(path: &Path) -> Option<String> {
-    let components = path
-        .components()
-        .filter_map(|component| component.as_os_str().to_str())
-        .collect::<Vec<_>>();
-    components.windows(2).find_map(|window| {
-        (window[1] == "v1_conversations" && !window[0].trim().is_empty())
-            .then(|| window[0].to_owned())
-    })
-}
-
-pub(super) fn openhands_line_number(path: &Path) -> usize {
-    fnv1a64(path.display().to_string().as_bytes()) as usize
-}
-
-pub(super) fn openhands_legacy_filename_index_candidate(path: &Path) -> Option<u64> {
-    let stem = path.file_stem()?.to_str()?;
-    let (ordinal, suffix) = stem.split_once('-')?;
-    if ordinal.is_empty() || suffix.is_empty() || !ordinal.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return None;
-    }
-    ordinal
-        .parse::<u64>()
-        .ok()
-        .and_then(|ordinal| ordinal.checked_sub(1))
-}
-
-fn openhands_bounded_derived_text(value: String, field: &str) -> Result<String> {
-    const MAX_DERIVED_TEXT_BYTES: usize = 16 * 1024;
-    if value.len() > MAX_DERIVED_TEXT_BYTES {
-        return Err(CaptureError::InvalidPayload(format!(
-            "OpenHands {field} exceeds {MAX_DERIVED_TEXT_BYTES} bytes"
-        )));
-    }
-    Ok(value)
-}
-
-pub(super) fn hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len().saturating_mul(2));
-    for byte in bytes {
-        output.push(char::from(HEX[usize::from(byte >> 4)]));
-        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    output
 }

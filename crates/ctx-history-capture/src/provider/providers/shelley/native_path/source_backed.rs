@@ -22,21 +22,21 @@ use thiserror::Error;
 
 use crate::{
     common::io::ProviderSourceRoot,
-    provider::{normalization::provider_local_preview, sqlite::sqlite_schema_fingerprint},
+    provider::sqlite::sqlite_schema_fingerprint,
     provider_sources::{
         open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
         SqliteSourceAccessError, SqliteSourceEvidence, SqliteSourceReadSnapshot,
     },
-    CaptureError, ProviderAdapterContext, MAX_PROVIDER_SQLITE_VALUE_BYTES,
+    CaptureError, OutputOutcome, ProviderAdapterContext, MAX_PROVIDER_SQLITE_VALUE_BYTES,
     SHELLEY_SQLITE_SOURCE_FORMAT,
 };
 
 use super::{
     super::{
-        normalization::{shelley_core_event, shelley_timestamp},
+        normalization::{shelley_output_classification, shelley_timestamp},
         relationships::{
-            shelley_logical_record_digest, shelley_message_complete_text,
-            shelley_verified_record_values,
+            shelley_event_role, shelley_event_type, shelley_logical_record_digest,
+            shelley_message_body, shelley_message_complete_text, shelley_verified_record_values,
         },
         source::{
             shelley_conversation_columns, shelley_conversation_select_expressions,
@@ -295,8 +295,8 @@ pub(crate) struct ShelleySourceBackedScan {
 }
 
 impl ShelleySourceBackedScan {
-    /// Returns at most 64 native records and one bounded lexical preview per
-    /// retained record after the complete source read has finished and passed
+    /// Returns at most 64 native records with each retained record's full
+    /// lexical body after the complete source read has finished and passed
     /// terminal revalidation.
     pub(crate) fn next_page(
         &mut self,
@@ -740,7 +740,10 @@ fn hex_digest(bytes: &[u8]) -> String {
 }
 
 fn shelley_lineage_label(provider_session_id: &str) -> String {
-    provider_local_preview(provider_session_id, SHELLEY_LINEAGE_LABEL_MAX_CHARS).0
+    provider_session_id
+        .chars()
+        .take(SHELLEY_LINEAGE_LABEL_MAX_CHARS)
+        .collect()
 }
 
 fn build_document(
@@ -750,15 +753,20 @@ fn build_document(
     record_digest: [u8; 32],
     lineage: &ShelleyDocumentLineage,
 ) -> ShelleySourceBackedResult<Option<LexicalDocument>> {
-    let Some(event) = shelley_core_event(
-        &value.message,
-        &value.conversation,
-        context,
-        value.parent_bearing,
-    )?
-    else {
+    let native_body = shelley_message_body(&value.message);
+    let event_type = shelley_event_type(&value.message, &native_body);
+    if shelley_output_classification(&value.message)
+        .as_ref()
+        .is_some_and(|classification| {
+            !matches!(
+                classification.outcome,
+                OutputOutcome::Failure | OutputOutcome::Timeout
+            )
+        })
+    {
         return Ok(None);
-    };
+    }
+    let role = shelley_event_role(&value.message.entry_type);
     let native_item_key = NativeItemKey::composite(
         SHELLEY_NATIVE_MESSAGE_NAMESPACE,
         vec![
@@ -795,10 +803,7 @@ fn build_document(
     if body.trim().is_empty() {
         return Err(ShelleySourceBackedError::MissingLexicalBody);
     }
-    let cwd = value.conversation.cwd.as_deref().map(|cwd| {
-        let (cwd, _) = provider_local_preview(cwd, crate::PROVIDER_MAX_PREVIEW_CHARS);
-        cwd
-    });
+    let cwd = value.conversation.cwd.clone();
     let started_at = shelley_timestamp(
         value.conversation.created_at.as_deref(),
         chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
@@ -821,8 +826,8 @@ fn build_document(
         is_primary: lineage.is_primary,
         event_sequence: value.provider_event_index,
         occurred_at_unix_ms: Some(occurred_at.timestamp_millis()),
-        event_type: event.event_type.as_str().to_owned(),
-        role: event.role.map(|role| role.as_str().to_owned()),
+        event_type: event_type.as_str().to_owned(),
+        role: role.map(|role| role.as_str().to_owned()),
         body,
         workspace: cwd.clone(),
         cwd,
