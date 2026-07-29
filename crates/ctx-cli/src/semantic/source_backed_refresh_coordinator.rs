@@ -357,6 +357,7 @@ pub(in crate::semantic) struct SourceBackedRefreshRun {
 #[allow(dead_code)] // Query IPC consumes this seam in the batch-hydration lane.
 pub(crate) struct GenerationBoundSourceBackedResolver {
     generation_id: String,
+    source_manifest: Option<SourceManifest>,
     resolver: Arc<SourceBackedResolverRegistry>,
 }
 
@@ -368,6 +369,10 @@ impl GenerationBoundSourceBackedResolver {
 
     pub(crate) fn resolver(&self) -> &SourceBackedResolverRegistry {
         self.resolver.as_ref()
+    }
+
+    pub(crate) fn source_manifest(&self) -> Option<&SourceManifest> {
+        self.source_manifest.as_ref()
     }
 }
 
@@ -656,11 +661,21 @@ impl SourceBackedRefreshCoordinator {
         let observed_generation = probe();
         let (verified, observed_for_status) = match (execution, observed_generation) {
             (Ok(publication), Ok(Some(observed))) if publication.generation_id == observed => {
-                let verified = if publication.resolver.is_some() || cfg!(test) {
+                let manifest_generation_matches = publication
+                    .source_manifest
+                    .as_ref()
+                    .is_none_or(|manifest| manifest.core_generation_id == observed);
+                let production_handoff_complete =
+                    publication.resolver.is_some() && publication.source_manifest.is_some();
+                let verified = if !manifest_generation_matches {
+                    Err(format!(
+                        "source-backed refresh published generation {observed} with a source manifest for another generation"
+                    ))
+                } else if production_handoff_complete || cfg!(test) {
                     Ok((observed.clone(), publication))
                 } else {
                     Err(format!(
-                        "source-backed refresh published generation {observed} without its resolver registry"
+                        "source-backed refresh published generation {observed} without its resolver registry or source manifest"
                     ))
                 };
                 (verified, Some(observed))
@@ -722,9 +737,11 @@ impl SourceBackedRefreshCoordinator {
                     attempt.certified_source_count = Some(publication.certified_source_count);
                     attempt.certified_source_bytes = Some(publication.certified_source_bytes);
                     attempt.timings = Some(publication.timings);
+                    let source_manifest = publication.source_manifest;
                     installed_resolver = publication.resolver.map(|resolver| {
                         Arc::new(GenerationBoundSourceBackedResolver {
                             generation_id: observed,
+                            source_manifest,
                             resolver,
                         })
                     });
@@ -1803,7 +1820,11 @@ mod tests {
                     WriterOptions::default(),
                 )?;
                 let receipt = writer.commit(|_| true)?;
-                let mut publication = test_publication(receipt.generation_id);
+                let mut publication = test_publication(receipt.generation_id.clone());
+                publication.source_manifest = Some(
+                    SourceManifest::new(receipt.generation_id, Vec::new(), Vec::new())
+                        .map_err(|error| anyhow!(error.message))?,
+                );
                 publication.resolver = Some(Arc::clone(&executor_resolver));
                 Ok(publication)
             },
@@ -1820,6 +1841,13 @@ mod tests {
 
         assert_eq!(retained.generation_id(), generation_id);
         assert!(std::ptr::eq(retained.resolver(), resolver.as_ref()));
+        assert_eq!(
+            retained
+                .source_manifest()
+                .expect("retained source manifest")
+                .core_generation_id,
+            generation_id
+        );
         assert!(!coordinator.has_pending_request());
 
         let error = coordinator
