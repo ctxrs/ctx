@@ -2,9 +2,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use ctx_history_index::{EventRecord, SessionRecord, VerifiedIndex};
+use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::transcript::normalize_uuid_prefix;
+use crate::{output::compact_json, transcript::normalize_uuid_prefix};
 
 const SEARCH_DIRECTORY: &str = "search";
 const LEXICAL_DIRECTORY: &str = "lexical";
@@ -15,7 +16,7 @@ pub(super) fn resolve_event(index: &VerifiedIndex, id: &str) -> Result<EventReco
             anyhow!("event {uuid} was not found in the source-backed Core generation")
         });
     }
-    let prefix = normalize_uuid_prefix(id, "event")?;
+    let prefix = validate_ctx_id(id, "event")?;
     match index.events_by_id_prefix(&prefix)?.as_slice() {
         [] => Err(anyhow!(
             "event id prefix {prefix:?} was not found in the source-backed Core generation"
@@ -35,7 +36,7 @@ pub(super) fn resolve_session(index: &VerifiedIndex, id: &str) -> Result<Session
             anyhow!("session {uuid} was not found in the source-backed Core generation")
         });
     }
-    let prefix = normalize_uuid_prefix(id, "session")?;
+    let prefix = validate_ctx_id(id, "session")?;
     match index.sessions_by_id_prefix(&prefix)?.as_slice() {
         [] => Err(anyhow!(
             "session id prefix {prefix:?} was not found in the source-backed Core generation"
@@ -47,6 +48,69 @@ pub(super) fn resolve_session(index: &VerifiedIndex, id: &str) -> Result<Session
             matches[1].session_id
         )),
     }
+}
+
+pub(super) fn validate_ctx_id(id: &str, kind: &str) -> Result<String> {
+    let trimmed = id.trim();
+    if Uuid::parse_str(trimmed).is_ok() {
+        return Ok(trimmed.to_ascii_lowercase());
+    }
+    normalize_uuid_prefix(trimmed, kind)
+}
+
+pub(super) fn validate_session_selector(
+    id: Option<&str>,
+    provider_session_id: Option<&str>,
+) -> Result<()> {
+    match (id, provider_session_id) {
+        (Some(id), None) => {
+            validate_ctx_id(id, "session")?;
+            Ok(())
+        }
+        (None, Some(provider_session_id)) if provider_session_id.trim().is_empty() => {
+            Err(anyhow!("provider session ID must not be empty"))
+        }
+        (None, Some(_)) => Ok(()),
+        (Some(_), Some(_)) => Err(anyhow!(
+            "pass either a ctx session ID or --provider-session, not both"
+        )),
+        (None, None) => Err(anyhow!(
+            "source-backed session lookup requires a ctx session ID or --provider-session"
+        )),
+    }
+}
+
+pub(super) fn source_path_exists(path: Option<&str>) -> Option<bool> {
+    path.map(|path| Path::new(path).exists())
+}
+
+pub(super) fn event_source_json(event: &EventRecord) -> Value {
+    compact_json(json!({
+        "source_id": event.locator.source().identity().as_uuid(),
+        "provider": event.provider,
+        "provider_session_id": event.provider_session_id,
+        "path": event.source_path,
+        "exists": source_path_exists(event.source_path.as_deref()),
+        "workspace": event.workspace,
+        "cwd": event.cwd,
+        "source_format": event.source_format,
+    }))
+}
+
+pub(super) fn session_source_json(
+    session: &SessionRecord,
+    first_event: Option<&EventRecord>,
+) -> Value {
+    compact_json(json!({
+        "source_id": first_event.map(|event| event.locator.source().identity().as_uuid()),
+        "provider": session.provider,
+        "provider_session_id": session.provider_session_id,
+        "path": session.source_path,
+        "exists": source_path_exists(session.source_path.as_deref()),
+        "workspace": session.workspace,
+        "cwd": session.cwd,
+        "source_format": session.source_format,
+    }))
 }
 
 pub(super) fn open_index(data_root: &Path) -> Result<VerifiedIndex> {

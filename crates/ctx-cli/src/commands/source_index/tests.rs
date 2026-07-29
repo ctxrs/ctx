@@ -18,13 +18,30 @@ mod tests {
         ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation,
         SourceRecordLocator, StableEntityId, TypedKey,
     };
-    use ctx_history_index::{GenerationWriter, LexicalDocument, WriterOptions};
+    use ctx_history_index::{
+        EventSearchFilters, GenerationWriter, LexicalDocument, SessionRecord, WriterOptions,
+    };
     use serde_json::json;
     use tempfile::tempdir;
 
-    use crate::semantic::SourceBackedRefreshDaemonUnavailable;
+    use crate::{
+        cli::{LocateEventArgs, LocateSessionArgs},
+        commands::show::{ShowEventArgs, ShowSessionArgs},
+        output::{JsonOutputFormat, OutputFormat},
+        transcript::TranscriptMode,
+        LocateTarget, ShowTarget,
+    };
 
     use super::*;
+    use super::{
+        locate::{locate_event_value, locate_session_value, validate_locate_target},
+        render::{render_locate_event_availability_text, render_search_text, search_json},
+        search::{NormalizedSearchQuery, SearchCollection, SearchHit, SearchResultWindow},
+        shared::session_source_json,
+        show::{
+            event_window_value, render_event_value, session_transcript_value, validate_show_target,
+        },
+    };
 
     const TEST_SESSION_ID: &str = "019fa000-0000-7000-8000-0000000000d1";
     const TEST_QUERY: &str = "pinnedgenerationrouting";
@@ -276,6 +293,495 @@ mod tests {
         writer.commit(|_| true).unwrap();
     }
 
+    fn sorted_json_keys(value: &serde_json::Value) -> Vec<String> {
+        let mut keys = value
+            .as_object()
+            .expect("schema snapshot target must be an object")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        keys.sort();
+        keys
+    }
+
+    fn show_session_args(id: Option<&str>, provider_session: Option<&str>) -> ShowSessionArgs {
+        ShowSessionArgs {
+            id: id.map(str::to_owned),
+            provider: None,
+            provider_session: provider_session.map(str::to_owned),
+            mode: TranscriptMode::Lite,
+            content: ContentPolicy::Indexed,
+            format: OutputFormat::Json,
+            out: None,
+        }
+    }
+
+    fn show_event_args(id: &str) -> ShowEventArgs {
+        ShowEventArgs {
+            id: id.to_owned(),
+            before: 0,
+            after: 0,
+            window: None,
+            content: ContentPolicy::Indexed,
+            format: OutputFormat::Json,
+        }
+    }
+
+    fn locate_session_target(id: Option<&str>, provider_session: Option<&str>) -> LocateTarget {
+        LocateTarget::Session(LocateSessionArgs {
+            id: id.map(str::to_owned),
+            provider: None,
+            provider_session: provider_session.map(str::to_owned),
+            format: JsonOutputFormat::Json,
+        })
+    }
+
+    fn locate_event_target(id: &str) -> LocateTarget {
+        LocateTarget::Event(LocateEventArgs {
+            id: id.to_owned(),
+            format: JsonOutputFormat::Json,
+        })
+    }
+
+    #[test]
+    fn normalized_query_representation_covers_terms_echo_and_safe_follow_up_arguments() {
+        let mut source_request = request(RefreshArg::Off);
+        source_request.query = "  build failure  ".to_owned();
+        source_request.terms = vec![
+            "release's checksum".to_owned(),
+            "BUILD FAILURE".to_owned(),
+            "   ".to_owned(),
+        ];
+
+        let normalized = NormalizedSearchQuery::from_request(&source_request);
+        assert_eq!(
+            normalized.texts(),
+            vec!["build failure", "release's checksum", "BUILD FAILURE"]
+        );
+        assert_eq!(
+            normalized.display(),
+            "build failure OR release's checksum OR BUILD FAILURE"
+        );
+        assert_eq!(
+            normalized.shell_arguments(),
+            "'build failure' --term='release'\\''s checksum' --term='BUILD FAILURE'"
+        );
+
+        source_request.query.clear();
+        source_request.terms = vec!["  term-only  ".to_owned()];
+        let term_only = NormalizedSearchQuery::from_request(&source_request);
+        assert_eq!(term_only.display(), "term-only");
+        assert_eq!(term_only.shell_arguments(), "--term=term-only");
+        assert_eq!(
+            render_search_text(
+                &json!({
+                    "query": term_only.display(),
+                    "results": [],
+                }),
+                false,
+            ),
+            "no results for term-only\n"
+        );
+
+        source_request.terms = vec!["--option-like".to_owned()];
+        assert_eq!(
+            NormalizedSearchQuery::from_request(&source_request).shell_arguments(),
+            "--term=--option-like"
+        );
+    }
+
+    #[test]
+    fn search_schema_v1_snapshot_has_timestamp_result_window_and_source_provenance() {
+        let temp = tempdir().unwrap();
+        write_test_generation(temp.path());
+        let index = open_index(temp.path()).unwrap();
+        let source_path = temp.path().join("search-source.jsonl");
+        fs::write(&source_path, "source").unwrap();
+        let mut event = fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 31, 1);
+        event.source_path = Some(source_path.display().to_string());
+        let event_id = event.event_id.as_uuid();
+        let mut source_request = request(RefreshArg::Off);
+        source_request.query = "  primary query ".to_owned();
+        source_request.terms = vec!["term with spaces".to_owned()];
+        source_request.limit = 1;
+        let collection = SearchCollection {
+            result_window: SearchResultWindow {
+                limit: 1,
+                hits: vec![SearchHit {
+                    event,
+                    score: 1.0,
+                    more_matches_in_session: 0,
+                }],
+                more_available: false,
+            },
+            candidate_pool: 1,
+            candidate_pool_truncated: false,
+            requested_backend: SearchBackendArg::Lexical,
+            effective_backend: SearchBackendArg::Lexical,
+            semantic_weight: 0.0,
+            semantic_status: "skipped",
+            semantic_fallback: None,
+            semantic_diagnostics: None,
+        };
+        let value = search_json(
+            &source_request,
+            &index,
+            &collection,
+            &EventSearchFilters::default(),
+            &HashMap::from([(event_id, "hydrated source snippet".to_owned())]),
+            "existing_generation",
+            1,
+            std::time::Duration::ZERO,
+        )
+        .unwrap();
+
+        assert_eq!(
+            sorted_json_keys(&value),
+            vec![
+                "filters",
+                "freshness",
+                "generated_at",
+                "payload_type",
+                "phase_attribution",
+                "query",
+                "result_window",
+                "results",
+                "retrieval",
+                "schema_version",
+                "truncation",
+            ]
+        );
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(value["generated_at"].as_str().unwrap()).is_ok()
+        );
+        assert_eq!(value["query"], "primary query OR term with spaces");
+        assert_eq!(
+            sorted_json_keys(&value["result_window"]),
+            vec!["limit", "more_available", "returned"]
+        );
+        assert_eq!(
+            value["result_window"],
+            json!({
+                "limit": 1,
+                "returned": 1,
+                "more_available": false,
+            })
+        );
+        assert!(value.get("cursor").is_none());
+        assert!(value["result_window"].get("cursor").is_none());
+        let result = &value["results"][0];
+        assert_eq!(result["source_path"], source_path.display().to_string());
+        assert_eq!(result["source_exists"], true);
+        assert!(result.get("cursor").is_none());
+        assert_eq!(result["citations"][0]["source_exists"], true);
+        assert!(result["citations"][0].get("cursor").is_none());
+        assert_eq!(
+            result["suggested_next_commands"][2],
+            format!(
+                "ctx search 'primary query' --term='term with spaces' --session {}",
+                result["ctx_session_id"].as_str().unwrap()
+            )
+        );
+    }
+
+    #[test]
+    fn show_schema_v1_snapshots_restore_source_and_content_shapes() {
+        let temp = tempdir().unwrap();
+        write_test_generation(temp.path());
+        let index = open_index(temp.path()).unwrap();
+        let session = index
+            .sessions_by_provider_session_id(TEST_SESSION_ID, Some("codex"))
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let events = index
+            .events_for_session(session.session_id.as_uuid())
+            .unwrap();
+        let selected = events.first().unwrap();
+
+        let session_value = session_transcript_value(
+            &session,
+            TranscriptMode::Log,
+            ContentPolicy::Indexed,
+            OutputFormat::Json,
+            session_source_json(&session, events.first()),
+            events
+                .iter()
+                .map(|event| {
+                    render_event_value(
+                        event,
+                        "injected provider-authoritative content".to_owned(),
+                        ContentPolicy::Indexed,
+                    )
+                })
+                .collect(),
+            false,
+            None,
+        );
+        assert_eq!(
+            sorted_json_keys(&session_value),
+            vec![
+                "content_policy",
+                "ctx_session_id",
+                "events",
+                "format",
+                "mode",
+                "payload_type",
+                "provider",
+                "provider_session_id",
+                "schema_version",
+                "session",
+                "source",
+                "target",
+            ]
+        );
+        assert_eq!(session_value["session"]["record_type"], "session");
+        assert_eq!(
+            session_value["session"]["item_id"],
+            session.session_id.as_uuid().to_string()
+        );
+        assert_eq!(session_value["source"]["exists"], true);
+
+        for policy in [ContentPolicy::Indexed, ContentPolicy::Complete] {
+            let event_value = event_window_value(
+                selected,
+                policy,
+                OutputFormat::Json,
+                vec![render_event_value(
+                    selected,
+                    "injected provider-authoritative content".to_owned(),
+                    policy,
+                )],
+            )
+            .unwrap();
+            assert_eq!(
+                sorted_json_keys(&event_value),
+                vec![
+                    "content_policy",
+                    "ctx_event_id",
+                    "ctx_session_id",
+                    "event",
+                    "events",
+                    "format",
+                    "payload_type",
+                    "schema_version",
+                    "source",
+                    "target",
+                ]
+            );
+            assert_eq!(
+                sorted_json_keys(&event_value["event"]["content"]),
+                vec![
+                    "complete",
+                    "complete_content_available",
+                    "origin",
+                    "requested",
+                    "source_verified",
+                    "stored_truncated",
+                ]
+            );
+            assert_eq!(
+                event_value["event"]["content"],
+                json!({
+                    "requested": policy.as_str(),
+                    "complete": true,
+                    "origin": "provider_source",
+                    "stored_truncated": false,
+                    "source_verified": true,
+                    "complete_content_available": true,
+                })
+            );
+            assert_eq!(event_value["event"]["source"]["exists"], true);
+            assert!(event_value["source"].get("cursor").is_none());
+            assert!(event_value["event"].get("cursor").is_none());
+        }
+    }
+
+    #[test]
+    fn locate_schema_v1_exposes_safe_provenance_and_deleted_source_availability() {
+        let temp = tempdir().unwrap();
+        let source_path = temp.path().join("deleted-source.jsonl");
+        fs::write(&source_path, "source").unwrap();
+        let mut event = fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 32, 1);
+        event.source_path = Some(source_path.display().to_string());
+        let session = SessionRecord {
+            session_id: event.session_id,
+            parent_session_id: event.parent_session_id,
+            root_session_id: event.root_session_id,
+            provider: event.provider.clone(),
+            source_format: event.source_format.clone(),
+            provider_session_id: event.provider_session_id.clone(),
+            branch: event.branch.clone(),
+            source_path: event.source_path.clone(),
+            agent_type: event.agent_type.clone(),
+            is_primary: event.is_primary,
+            workspace: event.workspace.clone(),
+            cwd: event.cwd.clone(),
+            first_event_sequence: event.event_sequence,
+            first_occurred_at_unix_ms: event.occurred_at_unix_ms,
+        };
+        let session_value = locate_session_value(&session, Some(&event));
+        assert_eq!(
+            sorted_json_keys(&session_value),
+            vec![
+                "agent_type",
+                "ctx_session_id",
+                "payload_type",
+                "provider",
+                "provider_session_id",
+                "resume",
+                "root_ctx_session_id",
+                "schema_version",
+                "source",
+                "target",
+            ]
+        );
+        assert_eq!(
+            session_value["source"]["source_id"],
+            event.locator.source().identity().as_uuid().to_string()
+        );
+        assert_eq!(session_value["source"]["exists"], true);
+
+        let present = locate_event_value(&event);
+        assert_eq!(
+            sorted_json_keys(&present),
+            vec![
+                "complete_content",
+                "ctx_event_id",
+                "ctx_session_id",
+                "event_type",
+                "payload_type",
+                "provider",
+                "provider_session_id",
+                "resume",
+                "role",
+                "schema_version",
+                "sequence",
+                "source",
+                "source_record",
+                "target",
+            ]
+        );
+        assert_eq!(
+            sorted_json_keys(&present["source"]),
+            vec![
+                "exists",
+                "path",
+                "provider",
+                "provider_session_id",
+                "source_format",
+                "source_id",
+            ]
+        );
+        assert_eq!(
+            sorted_json_keys(&present["source_record"]),
+            vec!["kind", "namespace"]
+        );
+        assert!(present["source_record"].get("locator").is_none());
+        assert!(present["source_record"].get("record_digest").is_none());
+        assert_eq!(
+            present["complete_content"],
+            json!({
+                "locator_available": true,
+                "available": true,
+                "source_authority": "provider",
+                "source_family": "provider_native",
+                "locator_kind": "provider_native",
+            })
+        );
+
+        fs::remove_file(&source_path).unwrap();
+        let deleted = locate_event_value(&event);
+        assert_eq!(deleted["source"]["exists"], false);
+        assert_eq!(deleted["complete_content"]["locator_available"], true);
+        assert_eq!(deleted["complete_content"]["available"], false);
+        let text = render_locate_event_availability_text(&deleted);
+        assert!(text.contains("source_exists: false\n"), "{text}");
+        assert!(
+            text.contains("complete_content_locator_available: true\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("complete_content_available: false\n"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn show_and_locate_selector_shapes_validate_before_pristine_root_access() {
+        for target in [
+            ShowTarget::Session(show_session_args(None, None)),
+            ShowTarget::Session(show_session_args(
+                Some("deadbeef"),
+                Some("provider-session"),
+            )),
+        ] {
+            let error = validate_show_target(&target).unwrap_err().to_string();
+            assert!(
+                error.contains("requires a ctx session ID or --provider-session")
+                    || error.contains("not both"),
+                "{error}"
+            );
+            assert!(!error.contains("index is not initialized"), "{error}");
+        }
+        for target in [
+            locate_session_target(None, None),
+            locate_session_target(Some("deadbeef"), Some("provider-session")),
+        ] {
+            let error = validate_locate_target(&target).unwrap_err().to_string();
+            assert!(
+                error.contains("requires a ctx session ID or --provider-session")
+                    || error.contains("not both"),
+                "{error}"
+            );
+            assert!(!error.contains("index is not initialized"), "{error}");
+        }
+
+        let show_identity = validate_show_target(&ShowTarget::Event(show_event_args("not-an-id")))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            show_identity.contains("event id must be"),
+            "{show_identity}"
+        );
+        let locate_identity = validate_locate_target(&locate_event_target("not-an-id"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            locate_identity.contains("event id must be"),
+            "{locate_identity}"
+        );
+        for error in [
+            validate_show_target(&ShowTarget::Session(show_session_args(
+                Some("not-an-id"),
+                None,
+            )))
+            .unwrap_err()
+            .to_string(),
+            validate_locate_target(&locate_session_target(Some("not-an-id"), None))
+                .unwrap_err()
+                .to_string(),
+        ] {
+            assert!(error.contains("session id must be"), "{error}");
+            assert!(!error.contains("index is not initialized"), "{error}");
+        }
+        for error in [
+            validate_show_target(&ShowTarget::Session(show_session_args(None, Some("   "))))
+                .unwrap_err()
+                .to_string(),
+            validate_locate_target(&locate_session_target(None, Some("   ")))
+                .unwrap_err()
+                .to_string(),
+        ] {
+            assert!(
+                error.contains("provider session ID must not be empty"),
+                "{error}"
+            );
+            assert!(!error.contains("index is not initialized"), "{error}");
+        }
+    }
+
     #[test]
     fn result_window_requires_one_additional_shaped_session() {
         let candidates = [
@@ -384,16 +890,17 @@ mod tests {
     }
 
     #[test]
-    fn daemon_unavailable_error_remains_typed_through_core_routing() {
+    fn refresh_off_uses_the_existing_generation_without_activation() {
         let temp = tempdir().unwrap();
-        let error = match refresh_for_search(&request(RefreshArg::Wait), temp.path()) {
-            Ok(_) => panic!("refresh unexpectedly succeeded without a daemon"),
-            Err(error) => error,
-        };
-        assert!(error
-            .downcast_ref::<SourceBackedRefreshDaemonUnavailable>()
-            .is_some());
-        assert!(format!("{error:#}").contains("no foreground writer was started"));
+        write_test_generation(temp.path());
+
+        let outcome = refresh_for_search(&request(RefreshArg::Off), temp.path()).unwrap();
+
+        assert_eq!(outcome.status, "existing_generation");
+        assert_eq!(
+            outcome.pin.generation_id(),
+            open_index(temp.path()).unwrap().generation_id()
+        );
     }
 
     #[test]
@@ -839,10 +1346,16 @@ resume_command: codex resume provider-1\n";
             "cursor": "cursor-1",
             "source": {
                 "path": "/tmp/session.jsonl",
+                "source_format": "codex_session_jsonl",
+                "exists": false,
             },
             "source_record": {
                 "ordinal": 4,
                 "subrecord_index": 2,
+            },
+            "complete_content": {
+                "locator_available": true,
+                "available": false,
             },
         });
         let event_text = "ctx_event_id: event-1\n\
@@ -854,7 +1367,11 @@ role: assistant\n\
 cursor: cursor-1\n\
 path: /tmp/session.jsonl\n\
 source_record_ordinal: 4\n\
-source_record_subrecord_index: 2\n";
+source_record_subrecord_index: 2\n\
+source_format: codex_session_jsonl\n\
+source_exists: false\n\
+complete_content_locator_available: true\n\
+complete_content_available: false\n";
         assert_eq!(locate_event_text_output_bytes(&event), event_text.len());
         assert_eq!(
             pretty_json_stdout_bytes(&event).unwrap(),

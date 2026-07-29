@@ -29,7 +29,7 @@ use crate::{
         PinnedSourceBackedGeneration, SourceBackedRefreshMode, SourceBackedRefreshObservation,
         SourceBackedSemanticNotReady,
     },
-    transcript::write_output,
+    transcript::{shell_quote_arg, write_output},
     RefreshArg, SearchArgs, SearchBackendArg,
 };
 
@@ -96,6 +96,68 @@ impl From<&SearchArgs> for SourceSearchRequest {
             refresh: args.refresh,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct NormalizedSearchQuery {
+    positional: Option<String>,
+    terms: Vec<String>,
+    alternatives: Vec<String>,
+    display: String,
+}
+
+impl NormalizedSearchQuery {
+    pub(super) fn from_request(request: &SourceSearchRequest) -> Self {
+        let positional = normalized_query_alternative(&request.query);
+        let terms = request
+            .terms
+            .iter()
+            .filter_map(|term| normalized_query_alternative(term))
+            .collect::<Vec<_>>();
+        let alternatives = positional
+            .iter()
+            .chain(terms.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        let display = alternatives.join(" OR ");
+        Self {
+            positional,
+            terms,
+            alternatives,
+            display,
+        }
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.alternatives.is_empty()
+    }
+
+    pub(super) fn texts(&self) -> Vec<&str> {
+        self.alternatives.iter().map(String::as_str).collect()
+    }
+
+    pub(super) fn display(&self) -> &str {
+        &self.display
+    }
+
+    pub(super) fn shell_arguments(&self) -> String {
+        let mut arguments = Vec::with_capacity(self.alternatives.len().saturating_mul(2));
+        if let Some(positional) = self.positional.as_deref() {
+            arguments.push(shell_quote_arg(positional));
+        }
+        for term in &self.terms {
+            arguments.push(format!("--term={}", shell_quote_arg(term)));
+        }
+        arguments.join(" ")
+    }
+}
+
+fn normalized_query_alternative(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    Some(value.to_owned())
 }
 
 #[derive(Debug)]
@@ -467,7 +529,7 @@ fn validate_search_request(request: &SourceSearchRequest) -> Result<()> {
             "custom history source filters can only be combined with --provider custom"
         ));
     }
-    let has_query = !search_query_texts(request).is_empty();
+    let has_query = !NormalizedSearchQuery::from_request(request).is_empty();
     if !has_query && request.file.is_none() {
         return Err(anyhow!("source-backed search needs a non-empty text query"));
     }
@@ -494,19 +556,13 @@ fn normalized_source_identity_filters(
     })
 }
 
-fn search_query_texts(request: &SourceSearchRequest) -> Vec<&str> {
-    std::iter::once(request.query.as_str())
-        .chain(request.terms.iter().map(String::as_str))
-        .map(str::trim)
-        .filter(|query| !query.is_empty())
-        .collect()
-}
-
 fn resolve_source_search_backend(
     request: &SourceSearchRequest,
     config: &config::AppConfig,
 ) -> Result<SearchBackendArg> {
-    if request.backend.is_none() && search_query_texts(request).is_empty() && request.file.is_some()
+    if request.backend.is_none()
+        && NormalizedSearchQuery::from_request(request).is_empty()
+        && request.file.is_some()
     {
         return Ok(SearchBackendArg::Lexical);
     }
@@ -660,7 +716,8 @@ where
     if requested_backend == SearchBackendArg::Lexical
         || (requested_backend == SearchBackendArg::Hybrid && semantic_weight == 0.0)
     {
-        let queries = search_query_texts(request);
+        let normalized_query = NormalizedSearchQuery::from_request(request);
+        let queries = normalized_query.texts();
         let mut collection =
             collect_search_hits(index, &queries, request.limit, request.events, filters)?;
         collection.requested_backend = requested_backend;
@@ -675,13 +732,10 @@ where
         if requested_backend == SearchBackendArg::Semantic {
             return Err(anyhow::Error::new(not_ready));
         }
-        let mut collection = collect_search_hits(
-            index,
-            &search_query_texts(request),
-            request.limit,
-            request.events,
-            filters,
-        )?;
+        let normalized_query = NormalizedSearchQuery::from_request(request);
+        let queries = normalized_query.texts();
+        let mut collection =
+            collect_search_hits(index, &queries, request.limit, request.events, filters)?;
         let fallback = SemanticFallbackDiagnostics {
             code: not_ready.code(),
             detail: not_ready.detail().to_owned(),
@@ -692,7 +746,7 @@ where
         collection.semantic_status = "disabled";
         collection.semantic_fallback = Some(fallback.clone());
         collection.semantic_diagnostics = Some(json!({
-            "query_count": search_query_texts(request).len(),
+            "query_count": queries.len(),
             "queries": [],
             "fallback": {
                 "code": fallback.code,
@@ -702,7 +756,8 @@ where
         return Ok(collection);
     }
 
-    let queries = search_query_texts(request);
+    let normalized_query = NormalizedSearchQuery::from_request(request);
+    let queries = normalized_query.texts();
     let mut semantic_by_event = BTreeMap::<Uuid, EventSearchCandidate>::new();
     let mut semantic_query_diagnostics = Vec::with_capacity(queries.len());
     let mut semantic_search = semantic_search;

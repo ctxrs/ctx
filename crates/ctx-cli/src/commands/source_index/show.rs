@@ -22,7 +22,10 @@ use crate::{
 
 use super::{
     render::{enforce_json_output_limit, timestamp_json, write_show_value},
-    shared::{open_index, resolve_event, resolve_session},
+    shared::{
+        event_source_json, open_index, resolve_event, resolve_session, session_source_json,
+        source_path_exists, validate_ctx_id, validate_session_selector,
+    },
 };
 
 #[derive(Debug)]
@@ -36,6 +39,7 @@ pub(crate) fn run_show(
     telemetry: &mut ShowTelemetry,
     local_usage: &mut CliUsage,
 ) -> Result<()> {
+    validate_show_target(&args.target)?;
     let index = open_index(&data_root)?;
     match args.target {
         ShowTarget::Event(args) => {
@@ -107,12 +111,22 @@ pub(crate) fn run_show(
     }
 }
 
+pub(super) fn validate_show_target(target: &ShowTarget) -> Result<()> {
+    match target {
+        ShowTarget::Session(args) => {
+            validate_session_selector(args.id.as_deref(), args.provider_session.as_deref())
+        }
+        ShowTarget::Event(args) => validate_ctx_id(&args.id, "event").map(|_| ()),
+    }
+}
+
 pub(super) fn resolve_show_session(
     index: &VerifiedIndex,
     id: Option<&str>,
     provider_session_id: Option<&str>,
     provider: Option<CaptureProvider>,
 ) -> Result<SessionRecord> {
+    validate_session_selector(id, provider_session_id)?;
     let session = match (id, provider_session_id) {
         (Some(id), None) => resolve_session(index, id)?,
         (None, Some(provider_session_id)) => select_show_provider_session(
@@ -229,13 +243,30 @@ fn session_json(
     output_limit_bytes: usize,
 ) -> Result<Value> {
     let mut events = index.events_for_session(session.session_id.as_uuid())?;
+    let source = session_source_json(session, events.first());
     let truncated = max_events.is_some_and(|limit| events.len() > limit);
     if let Some(limit) = max_events {
         events.truncate(limit);
     }
     let selected = select_session_events(&events, mode);
     let rendered = render_event_values(index, data_root, &selected, content, output_limit_bytes)?;
-    Ok(compact_json(json!({
+    Ok(session_transcript_value(
+        session, mode, content, format, source, rendered, truncated, max_events,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn session_transcript_value(
+    session: &SessionRecord,
+    mode: TranscriptMode,
+    content: ContentPolicy,
+    format: OutputFormat,
+    source: Value,
+    rendered: Vec<Value>,
+    truncated: bool,
+    max_events: Option<usize>,
+) -> Value {
+    compact_json(json!({
         "schema_version": 1,
         "target": "session",
         "payload_type": "session_transcript",
@@ -246,6 +277,9 @@ fn session_json(
         "content_policy": content.as_str(),
         "format": format.as_str(),
         "session": {
+            "id": session.session_id.as_uuid(),
+            "item_id": session.session_id.as_uuid(),
+            "record_type": "session",
             "ctx_session_id": session.session_id.as_uuid(),
             "provider": session.provider,
             "provider_session_id": session.provider_session_id,
@@ -258,13 +292,15 @@ fn session_json(
             "is_primary": session.is_primary,
             "workspace": session.workspace,
             "cwd": session.cwd,
+            "source_exists": source_path_exists(session.source_path.as_deref()),
         },
+        "source": source,
         "events": rendered,
         "truncated": truncated.then(|| json!({
             "events": true,
             "max_events": max_events,
         })),
-    })))
+    }))
 }
 
 fn event_window_json(
@@ -278,6 +314,15 @@ fn event_window_json(
 ) -> Result<Value> {
     let references = events.iter().collect::<Vec<_>>();
     let rendered = render_event_values(index, data_root, &references, content, output_limit_bytes)?;
+    event_window_value(selected, content, format, rendered)
+}
+
+pub(super) fn event_window_value(
+    selected: &EventRecord,
+    content: ContentPolicy,
+    format: OutputFormat,
+    rendered: Vec<Value>,
+) -> Result<Value> {
     let selected_value = rendered
         .iter()
         .find(|event| {
@@ -294,6 +339,7 @@ fn event_window_json(
         "content_policy": content.as_str(),
         "format": format.as_str(),
         "event": selected_value,
+        "source": event_source_json(selected),
         "events": rendered,
     })))
 }
@@ -309,39 +355,49 @@ fn render_event_values(
     events
         .iter()
         .zip(resolved)
-        .map(|(event, resolved)| {
-            Ok(compact_json(json!({
-                "ctx_event_id": event.event_id.as_uuid(),
-                "item_id": event.event_id.as_uuid(),
-                "record_type": "event",
-                "ctx_session_id": event.session_id.as_uuid(),
-                "provider": event.provider,
-                "provider_session_id": event.provider_session_id,
-                "source_format": event.source_format,
-                "source_path": event.source_path,
-                "parent_ctx_session_id": event.parent_session_id.map(|id| id.as_uuid()),
-                "root_ctx_session_id": event.root_session_id.as_uuid(),
-                "branch": event.branch,
-                "agent_type": event.agent_type,
-                "is_primary": event.is_primary,
-                "sequence": event.event_sequence,
-                "event_type": event.event_type,
-                "role": event.role,
-                "occurred_at": timestamp_json(event.occurred_at_unix_ms),
-                "workspace": event.workspace,
-                "cwd": event.cwd,
-                "touched_files": event.touched_files,
-                "text": resolved.text,
-                "content": {
-                    "requested": policy.as_str(),
-                    "complete": true,
-                    "origin": "provider_source",
-                    "source_verified": true,
-                    "complete_content_available": true,
-                },
-            })))
-        })
+        .map(|(event, resolved)| Ok(render_event_value(event, resolved.text, policy)))
         .collect()
+}
+
+pub(super) fn render_event_value(
+    event: &EventRecord,
+    text: String,
+    policy: ContentPolicy,
+) -> Value {
+    compact_json(json!({
+        "ctx_event_id": event.event_id.as_uuid(),
+        "item_id": event.event_id.as_uuid(),
+        "record_type": "event",
+        "ctx_session_id": event.session_id.as_uuid(),
+        "provider": event.provider,
+        "provider_session_id": event.provider_session_id,
+        "source_format": event.source_format,
+        "source_path": event.source_path,
+        "parent_ctx_session_id": event.parent_session_id.map(|id| id.as_uuid()),
+        "root_ctx_session_id": event.root_session_id.as_uuid(),
+        "branch": event.branch,
+        "agent_type": event.agent_type,
+        "is_primary": event.is_primary,
+        "sequence": event.event_sequence,
+        "event_type": event.event_type,
+        "role": event.role,
+        "occurred_at": timestamp_json(event.occurred_at_unix_ms),
+        "workspace": event.workspace,
+        "cwd": event.cwd,
+        "touched_files": event.touched_files,
+        "source_id": event.locator.source().identity().as_uuid(),
+        "source_exists": source_path_exists(event.source_path.as_deref()),
+        "source": event_source_json(event),
+        "text": text,
+        "content": {
+            "requested": policy.as_str(),
+            "complete": true,
+            "origin": "provider_source",
+            "stored_truncated": false,
+            "source_verified": true,
+            "complete_content_available": true,
+        },
+    }))
 }
 
 fn resolve_contents(

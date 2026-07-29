@@ -1,7 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
-use ctx_history_core::CaptureProvider;
+use ctx_history_core::{CaptureProvider, NativeRecordCoordinate, SourceRecordLocator};
 use ctx_history_index::{EventRecord, SessionRecord};
 use serde_json::{json, Value};
 
@@ -9,16 +9,21 @@ use crate::{
     local_usage::{CliUsage, ResultObservationAction},
     output::{compact_json, print_json},
     provider_args::ProviderArg,
-    transcript::{print_locate_event_text, print_locate_session_text, provider_resume_json},
+    transcript::{
+        print_locate_event_text, print_locate_session_text, provider_resume_json, write_output,
+    },
     LocateArgs, LocateTarget,
 };
 
 use super::{
     render::{
-        encode_hex, locate_event_text_output_bytes, locate_session_text_output_bytes,
-        pretty_json_stdout_bytes, timestamp_json,
+        locate_event_text_output_bytes, locate_session_text_output_bytes, pretty_json_stdout_bytes,
+        render_locate_event_availability_text, timestamp_json,
     },
-    shared::{open_index, resolve_event, resolve_session},
+    shared::{
+        event_source_json, open_index, resolve_event, resolve_session, session_source_json,
+        source_path_exists, validate_ctx_id, validate_session_selector,
+    },
 };
 
 pub(crate) fn run_locate(
@@ -26,6 +31,7 @@ pub(crate) fn run_locate(
     data_root: PathBuf,
     local_usage: &mut CliUsage,
 ) -> Result<()> {
+    validate_locate_target(&args.target)?;
     let index = open_index(&data_root)?;
     let (value, json_output) = match args.target {
         LocateTarget::Session(args) => {
@@ -74,7 +80,11 @@ pub(crate) fn run_locate(
                     ));
                 }
             }
-            let value = locate_session_value(&session);
+            let first_event = index
+                .events_for_session(session.session_id.as_uuid())?
+                .into_iter()
+                .next();
+            let value = locate_session_value(&session, first_event.as_ref());
             (value, args.format.is_json())
         }
         LocateTarget::Event(args) => {
@@ -95,6 +105,10 @@ pub(crate) fn run_locate(
     } else {
         let output_bytes = locate_event_text_output_bytes(&value);
         print_locate_event_text(&value)?;
+        let availability = render_locate_event_availability_text(&value);
+        if !availability.is_empty() {
+            write_output(availability, None)?;
+        }
         output_bytes
     };
     local_usage.set_result_observation(ResultObservationAction::Locate, 1, 0, content_bytes);
@@ -102,7 +116,19 @@ pub(crate) fn run_locate(
     Ok(())
 }
 
-fn locate_session_value(session: &SessionRecord) -> Value {
+pub(super) fn validate_locate_target(target: &LocateTarget) -> Result<()> {
+    match target {
+        LocateTarget::Session(args) => {
+            validate_session_selector(args.id.as_deref(), args.provider_session.as_deref())
+        }
+        LocateTarget::Event(args) => validate_ctx_id(&args.id, "event").map(|_| ()),
+    }
+}
+
+pub(super) fn locate_session_value(
+    session: &SessionRecord,
+    first_event: Option<&EventRecord>,
+) -> Value {
     let provider = session
         .provider
         .parse::<CaptureProvider>()
@@ -118,22 +144,18 @@ fn locate_session_value(session: &SessionRecord) -> Value {
         "root_ctx_session_id": session.root_session_id.as_uuid(),
         "agent_type": session.agent_type,
         "started_at": timestamp_json(session.first_occurred_at_unix_ms),
-        "source": {
-            "path": session.source_path,
-            "exists": session.source_path.as_deref().map(|path| Path::new(path).exists()),
-            "source_format": session.source_format,
-            "workspace": session.workspace,
-            "cwd": session.cwd,
-        },
+        "source": session_source_json(session, first_event),
         "resume": provider_resume_json(provider, session.provider_session_id.as_deref()),
     }))
 }
 
-fn locate_event_value(event: &EventRecord) -> Value {
+pub(super) fn locate_event_value(event: &EventRecord) -> Value {
     let provider = event
         .provider
         .parse::<CaptureProvider>()
         .unwrap_or(CaptureProvider::Unknown);
+    let source_exists = source_path_exists(event.source_path.as_deref());
+    let (source_family, locator_kind) = locator_kind(&event.locator);
     compact_json(json!({
         "schema_version": 1,
         "target": "event",
@@ -146,24 +168,58 @@ fn locate_event_value(event: &EventRecord) -> Value {
         "event_type": event.event_type,
         "role": event.role,
         "occurred_at": timestamp_json(event.occurred_at_unix_ms),
-        "source": {
-            "source_key": event.locator.source(),
-            "path": event.source_path,
-            "exists": event.source_path.as_deref().map(|path| Path::new(path).exists()),
-            "source_format": event.source_format,
-            "workspace": event.workspace,
-            "cwd": event.cwd,
-        },
-        "source_record": {
-            "locator": event.locator,
-            "locator_version": event.locator.locator_version(),
-            "record_digest": encode_hex(event.locator.record_digest()),
-        },
+        "source": event_source_json(event),
+        "source_record": safe_source_record_json(&event.locator),
         "complete_content": {
-            "available": true,
+            "locator_available": true,
+            "available": source_exists.unwrap_or(false),
             "source_authority": "provider",
-            "locator_kind": format!("{:?}", event.locator.coordinate()),
+            "source_family": source_family,
+            "locator_kind": locator_kind,
         },
         "resume": provider_resume_json(provider, event.provider_session_id.as_deref()),
     }))
+}
+
+fn locator_kind(locator: &SourceRecordLocator) -> (&'static str, &'static str) {
+    match locator.coordinate() {
+        NativeRecordCoordinate::Jsonl { .. } => ("jsonl", "jsonl"),
+        NativeRecordCoordinate::ProviderSqlite { .. } => ("sqlite", "provider_sqlite"),
+        NativeRecordCoordinate::Document { .. } => ("document", "document"),
+        NativeRecordCoordinate::TreeRecord { .. } => ("tree", "tree_record"),
+        NativeRecordCoordinate::ProviderNative { .. } => ("provider_native", "provider_native"),
+    }
+}
+
+fn safe_source_record_json(locator: &SourceRecordLocator) -> Value {
+    match locator.coordinate() {
+        NativeRecordCoordinate::Jsonl {
+            byte_offset,
+            byte_length,
+            physical_ordinal,
+            ..
+        } => json!({
+            "kind": "jsonl",
+            "byte_offset": byte_offset,
+            "byte_length": byte_length,
+            "ordinal": physical_ordinal,
+        }),
+        NativeRecordCoordinate::ProviderSqlite {
+            logical_relation, ..
+        } => json!({
+            "kind": "provider_sqlite",
+            "logical_relation": logical_relation,
+        }),
+        NativeRecordCoordinate::Document { json_pointer, .. } => compact_json(json!({
+            "kind": "document",
+            "json_pointer": json_pointer,
+        })),
+        NativeRecordCoordinate::TreeRecord { .. } => json!({
+            "kind": "tree_record",
+        }),
+        NativeRecordCoordinate::ProviderNative { namespace, .. } => json!({
+            "kind": "provider_native",
+            "namespace": namespace,
+        }),
+    }
 }

@@ -2,6 +2,7 @@ use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
+use ctx_history_core::utc_now;
 use ctx_history_index::{EventSearchFilters, VerifiedIndex};
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -15,7 +16,10 @@ use crate::{
     transcript::{shell_quote_arg, write_output},
 };
 
-use super::search::{SearchCollection, SearchHit, SourceSearchRequest};
+use super::{
+    search::{NormalizedSearchQuery, SearchCollection, SearchHit, SourceSearchRequest},
+    shared::source_path_exists,
+};
 
 pub(super) fn pretty_json_stdout_bytes(value: &Value) -> Result<usize> {
     Ok(serde_json::to_string_pretty(value)?.len().saturating_add(1))
@@ -80,7 +84,37 @@ pub(super) fn locate_event_text_output_bytes(value: &Value) -> usize {
             bytes = bytes.saturating_add(format!("source_record_subrecord_index: {index}\n").len());
         }
     }
-    bytes
+    bytes.saturating_add(render_locate_event_availability_text(value).len())
+}
+
+pub(super) fn render_locate_event_availability_text(value: &Value) -> String {
+    let mut output = String::new();
+    if let Some(source) = value.get("source") {
+        push_optional_json_text_line(&mut output, source, "source_format");
+        if let Some(exists) = source.get("exists").and_then(Value::as_bool) {
+            output.push_str(&format!("source_exists: {exists}\n"));
+        }
+    }
+    if let Some(complete_content) = value.get("complete_content") {
+        if let Some(locator_available) = complete_content
+            .get("locator_available")
+            .and_then(Value::as_bool)
+        {
+            output.push_str(&format!(
+                "complete_content_locator_available: {locator_available}\n"
+            ));
+        }
+        if let Some(available) = complete_content.get("available").and_then(Value::as_bool) {
+            output.push_str(&format!("complete_content_available: {available}\n"));
+        }
+    }
+    output
+}
+
+fn push_optional_json_text_line(output: &mut String, value: &Value, key: &str) {
+    if let Some(text) = value.get(key).and_then(Value::as_str) {
+        output.push_str(&format!("{key}: {text}\n"));
+    }
 }
 
 fn optional_json_text_line_bytes(value: &Value, key: &str) -> usize {
@@ -101,6 +135,7 @@ pub(super) fn search_json(
     refresh_source_count: usize,
     query_duration: Duration,
 ) -> Result<Value> {
+    let normalized_query = NormalizedSearchQuery::from_request(request);
     let result_scope = if request.events { "event" } else { "session" };
     let results = collection
         .result_window
@@ -120,7 +155,7 @@ pub(super) fn search_json(
                 hit,
                 snippet,
                 result_scope,
-                &request.query,
+                &normalized_query,
             ))
         })
         .collect::<Result<Vec<_>>>()?;
@@ -128,7 +163,7 @@ pub(super) fn search_json(
     Ok(compact_json(json!({
         "schema_version": 1,
         "payload_type": "search_results",
-        "query": request.query.trim(),
+        "query": normalized_query.display(),
         "filters": {
             "provider": filters.provider,
             "history_source": filters.history_source,
@@ -163,6 +198,7 @@ pub(super) fn search_json(
             "phase_attribution": phase_attribution,
         },
         "phase_attribution": phase_attribution,
+        "generated_at": utc_now().to_rfc3339_opts(SecondsFormat::Millis, true),
         "results": results,
         "result_window": {
             "limit": collection.result_window.limit,
@@ -176,7 +212,12 @@ pub(super) fn search_json(
     })))
 }
 
-fn search_result_json(hit: &SearchHit, snippet: &str, result_scope: &str, query: &str) -> Value {
+fn search_result_json(
+    hit: &SearchHit,
+    snippet: &str,
+    result_scope: &str,
+    query: &NormalizedSearchQuery,
+) -> Value {
     let event = &hit.event;
     let event_id = event.event_id.as_uuid();
     let session_id = event.session_id.as_uuid();
@@ -193,10 +234,13 @@ fn search_result_json(hit: &SearchHit, snippet: &str, result_scope: &str, query:
     if result_scope == "session" {
         next.insert(0, format!("ctx show session {session_id}"));
     }
-    next.push(format!(
-        "ctx search {} --session {session_id}",
-        shell_quote_arg(query)
-    ));
+    let query_arguments = query.shell_arguments();
+    if !query_arguments.is_empty() {
+        next.push(format!(
+            "ctx search {query_arguments} --session {session_id}"
+        ));
+    }
+    let source_exists = source_path_exists(event.source_path.as_deref());
     compact_json(json!({
         "item_id": item_id,
         "result_type": if result_scope == "session" { "session_result" } else { "event" },
@@ -216,6 +260,7 @@ fn search_result_json(hit: &SearchHit, snippet: &str, result_scope: &str, query:
         "provider_session_id": event.provider_session_id,
         "source_format": event.source_format,
         "source_path": event.source_path,
+        "source_exists": source_exists,
         "parent_ctx_session_id": event.parent_session_id.map(|id| id.as_uuid()),
         "root_ctx_session_id": event.root_session_id.as_uuid(),
         "branch": event.branch,
@@ -234,6 +279,7 @@ fn search_result_json(hit: &SearchHit, snippet: &str, result_scope: &str, query:
             "session_id": session_id,
             "event_seq": event.event_sequence,
             "source_path": event.source_path,
+            "source_exists": source_exists,
         }],
         "visibility": "local",
     }))
@@ -466,16 +512,6 @@ pub(super) fn timestamp_json(timestamp: Option<i64>) -> Option<String> {
     timestamp
         .and_then(DateTime::<Utc>::from_timestamp_millis)
         .map(|time| time.to_rfc3339_opts(SecondsFormat::Millis, true))
-}
-
-pub(super) fn encode_hex(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        let _ = write!(encoded, "{byte:02x}");
-    }
-    encoded
 }
 
 fn phase_attribution(query: Duration) -> Value {

@@ -654,9 +654,13 @@ such as binary data or provider-private blobs.
 `locate session` and `locate event` print provenance metadata: ctx IDs,
 provider, provider-owned session IDs, source path and cursor, source
 availability, import fidelity, and resume/cursor metadata when available.
-Event locations also report safe source-record coordinates and whether a
-complete-content locator is available; locator bytes and expected digests are
-not displayed.
+Cursor fields are emitted only for real provider provenance cursors; ctx does
+not turn a typed source-backed locator into a cursor. Event locations also
+report safe source-record coordinates, whether a complete-content locator is
+present, and conservative current content availability. A retained locator can
+remain present after its known backing source is deleted, but availability is
+then false. Locator key bytes, revision evidence, and expected digests are not
+displayed.
 
 Provider-owned IDs are metadata, not positional IDs. Positional session and
 event arguments are ctx-owned IDs. To look up a provider-owned session, use an
@@ -722,6 +726,10 @@ ahead of partial matches. Repeat
 `--term <query-or-keyword>` when you want to broaden a search across several
 related queries or keywords and merge the ranked results; `--term` is OR-style
 broadening, not a must-include filter.
+JSON echoes the normalized positional/`--term` alternatives in `query`, trims
+surrounding whitespace, and joins nonempty alternatives with ` OR `. Scoped
+follow-up commands preserve the positional and repeatable-term argument shape
+with safe shell quoting.
 Custom history imports can be filtered by canonical
 `--history-source provider_key/source_id`, or by exact `--provider-key`,
 `--source-id`, and `--source-format` values. The plugin/source alias is for
@@ -749,9 +757,11 @@ citations, `suggested_next_commands`, a JSON `freshness` object, a JSON
 timing/scan diagnostics when vector retrieval runs, a JSON `result_window`
 object with `limit`, `returned`, and shaped-sentinel `more_available`, and
 separate backend candidate-pool `truncation` fields. Search does not expose a
-cursor or run a second count scan. Default text output is compact and optimized
-for agent reading; it ends with exactly `More results available.` only when one
-additional shaped result exists. Use `--verbose` for expanded text diagnostics.
+continuation cursor or run a second count scan. Any per-result cursor is source
+provenance only and is omitted when unavailable. Default text output is compact
+and optimized for agent reading; it ends with exactly
+`More results available.` only when one additional shaped result exists. Use
+`--verbose` for expanded text diagnostics.
 
 Filters:
 

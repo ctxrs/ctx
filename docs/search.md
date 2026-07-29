@@ -80,6 +80,10 @@ Search filters narrow text and JSON output:
 `--file` searches normalized touched-file metadata; it does not inspect the
 current filesystem. Repeatable `--term` values broaden the query with OR-style
 semantics rather than acting as required terms.
+JSON `query` echoes the normalized positional query and repeatable-term
+alternatives, trimming surrounding whitespace and joining nonempty alternatives
+with ` OR ` in argument order. Suggested scoped-search commands preserve the
+positional and `--term` argument shape and safely quote each value.
 
 Search requires a nonempty query, at least one nonempty `--term`, or
 `--file <path>`. Other filters only narrow an actual search.
@@ -189,15 +193,18 @@ the same result metadata and citations plus:
 - `freshness`, describing refresh mode and outcome;
 - `retrieval`, describing requested/effective backend, lexical generation,
   semantic status/fallback, coverage, and timing/scan diagnostics;
+- `generated_at`, the RFC 3339 UTC render time;
 - `result_window`, with `limit`, `returned`, and `more_available`;
 - independent candidate-pool truncation metadata.
 
 `more_available` is true only when the bounded search pass finds one additional
 fully shaped result beyond the requested limit: a distinct session by default,
 or an event with `--events`. Search does not run a second count scan or expose a
-cursor. Text output ends with exactly `More results available.` only when that
-shaped sentinel exists. Candidate-pool truncation remains separate and does not
-by itself set `more_available`.
+continuation cursor. Per-result cursors, when present, are provider-source
+provenance only and are omitted when unavailable. Text output ends with exactly
+`More results available.` only when that shaped sentinel exists.
+Candidate-pool truncation remains separate and does not by itself set
+`more_available`.
 
 Raw output can contain queries, absolute paths, hydrated snippets, provider
 metadata, and transcript-derived content. Treat it as private local data and
