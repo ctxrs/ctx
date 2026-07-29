@@ -1,0 +1,131 @@
+use tantivy::schema::{
+    Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, FAST, INDEXED, STORED, STRING,
+};
+
+use crate::{IndexError, Result, LEXICAL_SCHEMA_VERSION};
+
+#[derive(Clone, Copy)]
+pub(crate) struct Fields {
+    pub(crate) event_id: Field,
+    pub(crate) event_identity_digest: Field,
+    pub(crate) event_identity: Field,
+    pub(crate) event_id_high: Field,
+    pub(crate) event_id_low: Field,
+    pub(crate) session_id: Field,
+    pub(crate) session_identity_digest: Field,
+    pub(crate) session_identity: Field,
+    pub(crate) parent_session_id: Field,
+    pub(crate) parent_session_identity: Field,
+    pub(crate) root_session_id: Field,
+    pub(crate) root_session_identity: Field,
+    pub(crate) source_key: Field,
+    pub(crate) native_locator: Field,
+    pub(crate) provider: Field,
+    pub(crate) source_format: Field,
+    pub(crate) provider_session_id: Field,
+    pub(crate) branch: Field,
+    pub(crate) source_path: Field,
+    pub(crate) agent_type: Field,
+    pub(crate) is_primary: Field,
+    pub(crate) event_sequence: Field,
+    pub(crate) occurred_at_unix_ms: Field,
+    pub(crate) event_type: Field,
+    pub(crate) role: Field,
+    pub(crate) body_search: Field,
+    pub(crate) workspace: Field,
+    pub(crate) workspace_filter: Field,
+    pub(crate) cwd: Field,
+    pub(crate) touched_file: Field,
+    pub(crate) touched_file_filter: Field,
+}
+
+pub(crate) fn validate_schema(schema: &Schema) -> Result<()> {
+    if serde_json::to_vec(schema)? != serde_json::to_vec(&lexical_schema())? {
+        return Err(IndexError::SchemaMismatch(LEXICAL_SCHEMA_VERSION));
+    }
+    Ok(())
+}
+
+pub(crate) fn lexical_schema() -> Schema {
+    let mut builder = Schema::builder();
+    builder.add_text_field("event_id", STRING | STORED);
+    builder.add_text_field("event_identity_digest", STRING | STORED);
+    builder.add_bytes_field("event_identity", STORED);
+    builder.add_u64_field("event_id_high", FAST);
+    builder.add_u64_field("event_id_low", FAST);
+    builder.add_text_field("session_id", STRING | STORED);
+    builder.add_text_field("session_identity_digest", STRING | STORED);
+    builder.add_bytes_field("session_identity", STORED);
+    builder.add_text_field("parent_session_id", STRING | STORED);
+    builder.add_bytes_field("parent_session_identity", STORED);
+    builder.add_text_field("root_session_id", STRING | STORED);
+    builder.add_bytes_field("root_session_identity", STORED);
+    builder.add_text_field("source_key", STRING | STORED);
+    builder.add_bytes_field("native_locator", STORED);
+    builder.add_text_field("provider", STRING | STORED);
+    builder.add_text_field("source_format", STRING | STORED);
+    builder.add_text_field("provider_session_id", STRING | STORED);
+    builder.add_text_field("branch", STRING | STORED);
+    builder.add_text_field("source_path", STORED);
+    builder.add_text_field("agent_type", STRING | STORED);
+    builder.add_u64_field("is_primary", STORED | INDEXED);
+    builder.add_u64_field("event_sequence", FAST | STORED | INDEXED);
+    builder.add_i64_field("occurred_at_unix_ms", FAST | STORED | INDEXED);
+    builder.add_text_field("event_type", STRING | STORED);
+    builder.add_text_field("role", STRING | STORED);
+    let body_indexing = TextFieldIndexing::default()
+        .set_tokenizer("default")
+        .set_index_option(IndexRecordOption::WithFreqsAndPositions);
+    builder.add_text_field(
+        "body_search",
+        TextOptions::default().set_indexing_options(body_indexing),
+    );
+    builder.add_text_field("workspace", STRING | STORED);
+    builder.add_text_field("workspace_filter", STRING);
+    builder.add_text_field("cwd", STRING | STORED);
+    builder.add_text_field("touched_file", STRING | STORED);
+    builder.add_text_field("touched_file_filter", STRING);
+    builder.build()
+}
+
+pub(crate) fn fields_from_schema(schema: &Schema) -> Result<Fields> {
+    Ok(Fields {
+        event_id: required_field(schema, "event_id")?,
+        event_identity_digest: required_field(schema, "event_identity_digest")?,
+        event_identity: required_field(schema, "event_identity")?,
+        event_id_high: required_field(schema, "event_id_high")?,
+        event_id_low: required_field(schema, "event_id_low")?,
+        session_id: required_field(schema, "session_id")?,
+        session_identity_digest: required_field(schema, "session_identity_digest")?,
+        session_identity: required_field(schema, "session_identity")?,
+        parent_session_id: required_field(schema, "parent_session_id")?,
+        parent_session_identity: required_field(schema, "parent_session_identity")?,
+        root_session_id: required_field(schema, "root_session_id")?,
+        root_session_identity: required_field(schema, "root_session_identity")?,
+        source_key: required_field(schema, "source_key")?,
+        native_locator: required_field(schema, "native_locator")?,
+        provider: required_field(schema, "provider")?,
+        source_format: required_field(schema, "source_format")?,
+        provider_session_id: required_field(schema, "provider_session_id")?,
+        branch: required_field(schema, "branch")?,
+        source_path: required_field(schema, "source_path")?,
+        agent_type: required_field(schema, "agent_type")?,
+        is_primary: required_field(schema, "is_primary")?,
+        event_sequence: required_field(schema, "event_sequence")?,
+        occurred_at_unix_ms: required_field(schema, "occurred_at_unix_ms")?,
+        event_type: required_field(schema, "event_type")?,
+        role: required_field(schema, "role")?,
+        body_search: required_field(schema, "body_search")?,
+        workspace: required_field(schema, "workspace")?,
+        workspace_filter: required_field(schema, "workspace_filter")?,
+        cwd: required_field(schema, "cwd")?,
+        touched_file: required_field(schema, "touched_file")?,
+        touched_file_filter: required_field(schema, "touched_file_filter")?,
+    })
+}
+
+pub(crate) fn required_field(schema: &Schema, name: &'static str) -> Result<Field> {
+    schema
+        .get_field(name)
+        .map_err(|_| IndexError::MissingSchemaField(name))
+}
