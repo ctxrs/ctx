@@ -26,20 +26,17 @@ use super::{
         current_process_owns_daemon_upgrade_handoff, daemon_upgrade_handoff_blocks_current_process,
         resume_completed_installation_daemons, InstallationDaemonLease,
     },
-    daemon_history::{history_retry_due, restore_daemon_history_runtime_state},
     daemon_retry::DaemonRetryBackoff,
-    daemon_scheduler::{daemon_run_start_mode, run_daemon_once_with_activity},
-    daemon_status::{
-        daemon_jobs_failure_message, daemon_report_failure_message, print_daemon_status_human,
+    daemon_scheduler::{
+        daemon_run_start_mode, restore_daemon_source_refresh_retry, run_daemon_once_with_activity,
+        source_refresh_retry_due,
     },
-    daemon_worker::{
-        semantic_worker_report_for_daemon, write_daemon_lifecycle_status_with_runtime,
-    },
+    daemon_status::{daemon_report_failure_message, print_daemon_status_human},
+    daemon_worker::write_daemon_lifecycle_status_with_runtime,
     health_search::semantic_env_flag,
     model_runtime::SharedSemanticRuntime,
     paths_status::{
-        daemon_history_refresh_job_path, daemon_report, daemon_report_with_disabled_status,
-        daemon_semantic_job_path, daemon_source_backed_refresh_job_path,
+        daemon_report, daemon_report_with_disabled_status, daemon_source_backed_refresh_job_path,
         lower_semantic_worker_priority, read_daemon_job_status, read_daemon_status,
         write_daemon_status, DaemonLock,
     },
@@ -48,6 +45,7 @@ use super::{
         observe_daemon_query_activity, semantic_query_service_supported,
         start_daemon_query_service, start_daemon_source_refresh_service, DaemonQueryService,
     },
+    reports::SemanticWorkerReport,
     runtime_limits::{
         DAEMON_BACKGROUND_CHILD_ENV, DAEMON_IDLE_EXIT_SECONDS_DEFAULT,
         DAEMON_LOOP_INTERVAL_SECONDS_DEFAULT,
@@ -442,9 +440,10 @@ fn reload_daemon_runtime_config(
         return DaemonConfigReloadOutcome::StopDisabled;
     }
 
-    let semantic_runtime_requested = !runtime.config.daemon.mode.runs_only_source_refresh()
-        && runtime.config.semantic_search_enabled()
-        && semantic_query_service_supported();
+    // v0.26 starts a fresh source-backed history epoch. Keep the legacy Store
+    // query runtime inactive until semantic materialization has a source-feed
+    // caller; activating it here would make old history a runtime fallback.
+    let semantic_runtime_requested = false;
     if daemon_query_service_transport_supported() && refresh_service.is_none() {
         match start_daemon_source_refresh_service(data_root, runtime.semantic_runtime.clone()) {
             Ok(service) => *refresh_service = Some(service),
@@ -617,7 +616,7 @@ fn daemon_iteration_events(
 }
 
 pub(super) fn run_daemon_status(args: FormatArgs, data_root: PathBuf) -> Result<()> {
-    let semantic_report = semantic_worker_report_for_daemon(&data_root);
+    let semantic_report = source_epoch_semantic_report(&data_root);
     let daemon = daemon_report(&data_root, &semantic_report);
     let pro = crate::pro::lifecycle_status_json(&data_root);
     if args.format.is_json() {
@@ -716,19 +715,19 @@ pub(super) fn run_daemon_inner(
     config: &AppConfig,
 ) -> Result<Value> {
     if !config.daemon.enabled && !args.force {
-        let semantic_report = semantic_worker_report_for_daemon(data_root);
+        let semantic_report = source_epoch_semantic_report(data_root);
         return Ok(daemon_report(data_root, &semantic_report));
     }
     if installation_upgrade_blocks_current_process(data_root) {
-        let semantic_report = semantic_worker_report_for_daemon(data_root);
+        let semantic_report = source_epoch_semantic_report(data_root);
         return Ok(daemon_report(data_root, &semantic_report));
     }
     if daemon_upgrade_handoff_blocks_current_process(data_root) {
-        let semantic_report = semantic_worker_report_for_daemon(data_root);
+        let semantic_report = source_epoch_semantic_report(data_root);
         return Ok(daemon_report(data_root, &semantic_report));
     }
     let Some(lock) = DaemonLock::acquire(data_root)? else {
-        let semantic_report = semantic_worker_report_for_daemon(data_root);
+        let semantic_report = source_epoch_semantic_report(data_root);
         return Ok(daemon_report(data_root, &semantic_report));
     };
     // Close the check/acquire race with an upgrader that fenced daemon starts
@@ -737,7 +736,7 @@ pub(super) fn run_daemon_inner(
         || installation_upgrade_blocks_current_process(data_root)
     {
         drop(lock);
-        let semantic_report = semantic_worker_report_for_daemon(data_root);
+        let semantic_report = source_epoch_semantic_report(data_root);
         return Ok(daemon_report(data_root, &semantic_report));
     }
     let run_once = args.once;
@@ -767,7 +766,7 @@ pub(super) fn run_daemon_inner(
     )?
     else {
         drop(lock);
-        let semantic_report = semantic_worker_report_for_daemon(data_root);
+        let semantic_report = source_epoch_semantic_report(data_root);
         return Ok(daemon_report(data_root, &semantic_report));
     };
     let mut prepared_auto_upgrade = None;
@@ -792,9 +791,7 @@ pub(super) fn run_daemon_inner(
             &config_reload.to_json(),
         )?;
         if !runtime.config.daemon.mode.runs_only_source_refresh() {
-            restore_daemon_history_runtime_state(&mut runtime, data_root);
-            let semantic_status = read_daemon_job_status(&daemon_semantic_job_path(data_root));
-            runtime.semantic_retry.restore(semantic_status.as_ref());
+            restore_daemon_source_refresh_retry(&mut runtime, data_root);
         }
         let stop_disabled = reload_daemon_runtime_config(
             data_root,
@@ -945,7 +942,7 @@ pub(super) fn run_daemon_inner(
                 send_daemon_events(data_root, &events);
             }
             let retry_due = !runtime.config.daemon.mode.runs_only_source_refresh()
-                && history_retry_due(&runtime);
+                && source_refresh_retry_due(&runtime);
             let source_refresh_pending = refresh_service
                 .as_ref()
                 .is_some_and(|service| service.source_refresh.has_pending_request());
@@ -1057,8 +1054,6 @@ pub(super) fn run_daemon_inner(
             );
         }
         let failure_message = failed.then(|| {
-            let history = read_daemon_job_status(&daemon_history_refresh_job_path(data_root));
-            let semantic = read_daemon_job_status(&daemon_semantic_job_path(data_root));
             let source_backed =
                 read_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root));
             source_backed
@@ -1067,7 +1062,6 @@ pub(super) fn run_daemon_inner(
                 .and_then(Value::as_str)
                 .filter(|error| !error.is_empty())
                 .map(|error| format!("source-backed refresh failed: {error}"))
-                .or_else(|| daemon_jobs_failure_message(history.as_ref(), semantic.as_ref()))
                 .unwrap_or_else(|| "one or more daemon jobs failed".to_owned())
         });
         write_daemon_lifecycle_status_with_runtime(
@@ -1129,12 +1123,19 @@ pub(super) fn run_daemon_inner(
             auto_upgrade_handoff,
         )?;
     }
-    let semantic_report = semantic_worker_report_for_daemon(data_root);
+    let semantic_report = source_epoch_semantic_report(data_root);
     Ok(daemon_report_with_disabled_status(
         data_root,
         &semantic_report,
         !args.force,
     ))
+}
+
+fn source_epoch_semantic_report(data_root: &Path) -> SemanticWorkerReport {
+    SemanticWorkerReport::unavailable(
+        data_root,
+        "source-backed semantic materialization is not integrated",
+    )
 }
 
 fn daemon_should_schedule_auto_upgrade(

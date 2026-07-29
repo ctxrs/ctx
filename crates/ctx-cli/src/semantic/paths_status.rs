@@ -694,7 +694,7 @@ pub(crate) fn daemon_report(data_root: &Path, semantic_report: &SemanticWorkerRe
 }
 pub(super) fn daemon_report_with_disabled_status(
     data_root: &Path,
-    semantic_report: &SemanticWorkerReport,
+    _semantic_report: &SemanticWorkerReport,
     disabled_overrides_lifecycle: bool,
 ) -> Value {
     let status_value = read_daemon_status(data_root);
@@ -764,37 +764,32 @@ pub(super) fn daemon_report_with_disabled_status(
             .clone()
             .or_else(|| Some("manual".to_owned()))
     };
-    let suppressed_job = |kind: &str| {
+    let suppressed_job = |kind: &str, reason: &str| {
         compact_json(json!({
             "status": "disabled",
             "enabled": false,
             "kind": kind,
-            "reason": "daemon_mode_source_refresh_only",
+            "reason": reason,
             "daemon_mode": daemon_mode.as_str(),
         }))
     };
+    let legacy_history_reason = if daemon_mode.runs_only_source_refresh() {
+        "daemon_mode_source_refresh_only"
+    } else {
+        "history_epoch_source_backed"
+    };
+    let semantic_reason = if daemon_mode.runs_only_source_refresh() {
+        "daemon_mode_source_refresh_only"
+    } else {
+        "source_backed_semantic_not_integrated"
+    };
     let jobs = json!({
-        "history_refresh": if daemon_mode.runs_only_source_refresh() {
-            suppressed_job("history_refresh")
-        } else {
-            daemon_history_refresh_job_report(data_root, disabled_overrides_lifecycle)
-        },
+        "history_refresh": suppressed_job("history_refresh", legacy_history_reason),
         "source_backed_refresh": daemon_source_backed_refresh_job_report(
             data_root,
             disabled_overrides_lifecycle
         ),
-        "semantic_index": if daemon_mode.runs_only_source_refresh() {
-            suppressed_job("semantic_index")
-        } else {
-            daemon_semantic_job_report_observed(
-                data_root,
-                semantic_report,
-                disabled_overrides_lifecycle,
-                running,
-                semantic_runtime_active,
-                &config_reload,
-            )
-        },
+        "semantic_index": suppressed_job("semantic_index", semantic_reason),
     });
     let lock_identity = compact_json(json!({
         "path": lock_path,
@@ -898,6 +893,11 @@ pub(super) fn daemon_source_backed_refresh_job_report(
                 .unwrap_or("unknown")
         },
         "enabled": daemon_enabled,
+        "reason": if disabled {
+            Some("daemon_disabled".to_owned())
+        } else {
+            job.and_then(|value| json_string(value, "reason"))
+        },
         "mode": job.and_then(|value| json_string(value, "mode")),
         "owner": job.and_then(|value| json_string(value, "owner")),
         "kind": job.and_then(|value| json_string(value, "kind")),
@@ -926,6 +926,12 @@ pub(super) fn daemon_source_backed_refresh_job_report(
         "certified_source_bytes": job
             .and_then(|value| value.get("certified_source_bytes").cloned()),
         "timings_us": job.and_then(|value| value.get("timings_us").cloned()),
+        "retryable": job.and_then(|value| value.get("retryable").cloned()),
+        "retry_after_ms": job.and_then(|value| value.get("retry_after_ms").cloned()),
+        "consecutive_failures": job
+            .and_then(|value| value.get("consecutive_failures").cloned()),
+        "retry_not_before_at_ms": job
+            .and_then(|value| value.get("retry_not_before_at_ms").cloned()),
         "last_error": job.and_then(|value| json_string(value, "last_error")),
     }))
 }

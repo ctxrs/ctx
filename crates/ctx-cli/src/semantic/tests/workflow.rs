@@ -589,7 +589,7 @@ fn semantic_failure_classes_control_retry_backoff() {
 }
 
 #[test]
-fn daemon_semantic_status_ignores_job_from_old_model_key() -> Result<()> {
+fn legacy_semantic_job_report_ignores_job_from_old_model_key() -> Result<()> {
     let temp = tempfile::tempdir()?;
     write_semantic_enabled_config(temp.path())?;
     write_daemon_job_status(
@@ -603,11 +603,11 @@ fn daemon_semantic_status_ignores_job_from_old_model_key() -> Result<()> {
         }),
     )?;
 
-    let daemon = daemon_report(
+    let semantic = daemon_semantic_job_report(
         temp.path(),
         &semantic_worker_report_best_effort(temp.path()),
+        true,
     );
-    let semantic = &daemon["jobs"]["semantic_index"];
     assert_eq!(semantic["status"], "unknown");
     assert_eq!(semantic["reason"], "searchable_items_unknown");
     assert_eq!(semantic["last_run_status"], Value::Null);
@@ -1003,14 +1003,7 @@ fn daemon_restart_finds_old_store_event_beyond_reordered_activity_page() -> Resu
 }
 
 #[test]
-fn daemon_scheduler_round_robins_sources_and_backoff_is_capped() {
-    let mut cursor = 0;
-    assert_eq!(daemon_take_next_source_index(&mut cursor, 3), Some(0));
-    assert_eq!(daemon_take_next_source_index(&mut cursor, 3), Some(1));
-    assert_eq!(daemon_take_next_source_index(&mut cursor, 3), Some(2));
-    assert_eq!(daemon_take_next_source_index(&mut cursor, 3), Some(0));
-    assert_eq!(daemon_take_next_source_index(&mut cursor, 0), None);
-
+fn daemon_retry_backoff_is_capped() {
     let mut backoff = DaemonRetryBackoff::default();
     let mut last = StdDuration::ZERO;
     for _ in 0..40 {
@@ -1062,15 +1055,7 @@ fn foreground_query_preempts_daemon_background_jobs() -> Result<()> {
     assert!(!iteration.did_work);
     assert!(!iteration.failed);
     assert!(calls.borrow().is_empty());
-    let daemon = daemon_report(temp.path(), &semantic_worker_report_for_daemon(temp.path()));
-    assert_eq!(
-        daemon["jobs"]["history_refresh"]["reason"],
-        "foreground_query"
-    );
-    assert_eq!(
-        daemon["jobs"]["semantic_index"]["last_run_reason"],
-        "foreground_query"
-    );
+    assert!(!daemon_source_backed_refresh_job_path(temp.path()).exists());
     Ok(())
 }
 
