@@ -150,9 +150,6 @@ pub(crate) fn run_search(
     request.semantic_enabled = config.semantic_search_enabled();
     let semantic_weight = request.semantic_weight;
     let json_output = args.format == JsonOutputFormat::Json;
-    if request.refresh == RefreshArg::Background && config.daemon.enabled && !json_output {
-        crate::semantic::maybe_autostart_daemon_for_search(&data_root, &config);
-    }
     if request.refresh == RefreshArg::Background
         && request.semantic_enabled
         && semantic_query_service_supported()
