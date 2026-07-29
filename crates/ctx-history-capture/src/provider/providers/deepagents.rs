@@ -2,7 +2,9 @@ use std::path::Path;
 
 use ctx_history_store::Store;
 
-use crate::{ProviderAdapterContext, ProviderImportOptions, ProviderImportSummary, Result};
+use crate::{
+    CaptureError, ProviderAdapterContext, ProviderImportOptions, ProviderImportSummary, Result,
+};
 
 mod complete_content;
 mod message;
@@ -15,12 +17,14 @@ pub(crate) use complete_content::{
 };
 
 pub(crate) fn import_deepagents_nativepath(
-    path: &Path,
-    store: &mut Store,
-    context: ProviderAdapterContext,
-    import_options: ProviderImportOptions,
+    _path: &Path,
+    _store: &mut Store,
+    _context: ProviderAdapterContext,
+    _import_options: ProviderImportOptions,
 ) -> Result<ProviderImportSummary> {
-    native_path::import_deepagents_sqlite_nativepath(path, store, context, import_options)
+    Err(CaptureError::UnsupportedSchema(
+        "Deep Agents Store ingestion was removed; use source-backed ingestion".to_owned(),
+    ))
 }
 
 #[cfg(test)]
