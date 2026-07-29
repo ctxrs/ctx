@@ -279,104 +279,49 @@ fn journal_v2_rejects_other_unshipped_schema_versions() {
 
 #[cfg(unix)]
 #[test]
-fn v025_schema_one_after_binary_publication_rolls_back_and_is_removed() {
-    use super::journal::{LegacyInstallTransactionJournal, LegacyJournalPath, LegacyJournalPhase};
-
+fn v025_data_root_schema_one_journal_is_not_recovery_authority() {
     let temp = tempdir().unwrap();
-    let target = temp.path().join("ctx");
-    let marker = temp.path().join("ctx.install.json");
-    let binary_backup = temp.path().join(".ctx.ctx-upgrade-old.binary.previous");
-    let marker_backup = temp
-        .path()
-        .join(".ctx.install.json.ctx-upgrade-old.marker.previous");
-    fs::write(&target, b"new").unwrap();
-    fs::write(&marker, b"new marker").unwrap();
-    fs::write(&binary_backup, b"old").unwrap();
-    fs::write(&marker_backup, b"old marker").unwrap();
-    fs::write(
-        temp.path().join("upgrade-install-transaction.json"),
-        b"legacy",
-    )
-    .unwrap();
-    let journal = LegacyInstallTransactionJournal {
-        schema_version: 1,
-        transaction_id: "old".to_owned(),
-        phase: LegacyJournalPhase::Publishing,
-        install_path: target.clone(),
-        paths: vec![
-            LegacyJournalPath {
-                label: "ctx binary".to_owned(),
-                staged: temp.path().join(".ctx-upgrade-old.new"),
-                target: target.clone(),
-                backup: binary_backup,
-                kind: JournalPathKind::File,
-            },
-            LegacyJournalPath {
-                label: "ctx install marker".to_owned(),
-                staged: temp.path().join(".ctx-upgrade-old.install.json.new"),
-                target: marker.clone(),
-                backup: marker_backup,
-                kind: JournalPathKind::File,
-            },
-        ],
-    };
-    let recovered = super::unix::recover_legacy_transaction(temp.path(), &journal).unwrap();
-    assert!(matches!(
-        recovered,
-        RecoveryOutcome::RolledBack {
-            restored_executable: Some(path)
-        } if path == target
-    ));
-    assert_eq!(fs::read(&target).unwrap(), b"old");
-    assert_eq!(fs::read(&marker).unwrap(), b"old marker");
-    assert!(!temp
-        .path()
-        .join("upgrade-install-transaction.json")
-        .exists());
+    let journal_path = temp.path().join("upgrade-install-transaction.json");
+    let old_journal = br#"{
+  "schema_version": 1,
+  "transaction_id": "old",
+  "phase": "committed",
+  "install_path": "/tmp/ctx",
+  "paths": []
+}"#;
+    let would_be_backup = temp.path().join("old-ctx-backup");
+    fs::write(&journal_path, old_journal).unwrap();
+    fs::write(&would_be_backup, b"old binary").unwrap();
+
+    assert!(super::pending_recovery(temp.path()).unwrap().is_none());
+    assert_eq!(fs::read(&journal_path).unwrap(), old_journal);
+    assert_eq!(fs::read(&would_be_backup).unwrap(), b"old binary");
 }
 
 #[cfg(unix)]
 #[test]
-fn v025_runtime_backup_is_restored_when_crash_left_staged_directory_without_target() {
-    use super::journal::{LegacyInstallTransactionJournal, LegacyJournalPath, LegacyJournalPhase};
-
+fn v025_schema_one_journal_is_rejected_at_current_journal_path() {
     let temp = tempdir().unwrap();
-    let runtime_target = temp.path().join("runtime/onnxruntime/1.27.0/linux-x64");
-    let runtime_staged = runtime_target.with_file_name(".linux-x64.ctx-upgrade-old.new");
-    let runtime_backup =
-        runtime_target.with_file_name(".linux-x64.ctx-upgrade-old.runtime.previous");
-    fs::create_dir_all(&runtime_staged).unwrap();
-    fs::write(runtime_staged.join("new-runtime"), b"new").unwrap();
-    fs::create_dir_all(&runtime_backup).unwrap();
-    fs::write(runtime_backup.join("old-runtime"), b"old").unwrap();
-    fs::write(
-        temp.path().join("upgrade-install-transaction.json"),
-        b"legacy",
-    )
-    .unwrap();
+    let install_path = temp.path().join("ctx");
+    let journal_path = journal::install_transaction_path(&install_path);
+    let old_journal = br#"{
+  "schema_version": 1,
+  "transaction_id": "old",
+  "phase": "committed",
+  "install_path": "/tmp/ctx",
+  "paths": []
+}"#;
+    fs::write(&journal_path, old_journal).unwrap();
 
-    let journal = LegacyInstallTransactionJournal {
-        schema_version: 1,
-        transaction_id: "old".to_owned(),
-        phase: LegacyJournalPhase::Publishing,
-        install_path: temp.path().join("ctx"),
-        paths: vec![LegacyJournalPath {
-            label: "ONNX Runtime sidecar".to_owned(),
-            staged: runtime_staged.clone(),
-            target: runtime_target.clone(),
-            backup: runtime_backup.clone(),
-            kind: JournalPathKind::Directory,
-        }],
-    };
+    let error = journal::read(&install_path).unwrap_err();
 
-    let recovered = super::unix::recover_legacy_transaction(temp.path(), &journal).unwrap();
-    assert!(matches!(recovered, RecoveryOutcome::RolledBack { .. }));
-    assert_eq!(
-        fs::read(runtime_target.join("old-runtime")).unwrap(),
-        b"old"
+    assert!(
+        error
+            .to_string()
+            .contains("parse interrupted install transaction"),
+        "{error:#}"
     );
-    assert!(!runtime_staged.exists());
-    assert!(!runtime_backup.exists());
+    assert_eq!(fs::read(&journal_path).unwrap(), old_journal);
 }
 
 #[test]

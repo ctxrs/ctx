@@ -274,17 +274,13 @@ fn latest_source_refresh_properties(temp: &TempDir) -> serde_json::Map<String, V
 }
 
 #[test]
-fn codex_reimport_preserves_opaque_prior_epoch_and_rebuilds_from_provider_source() {
+fn codex_reimport_rebuilds_from_provider_source() {
     let temp = tempdir();
     let _daemon = start_source_refresh_daemon(&temp);
     let source_root = home_root(&temp).join(".codex/sessions");
     let source = source_root.join("2026/07/23/rollout-2026-07-23T01-00-00-source-authority.jsonl");
     fs::create_dir_all(source.parent().unwrap()).unwrap();
     fs::write(&source, codex_source("provider authority before")).unwrap();
-
-    let legacy_path = data_root(&temp).join("work.sqlite");
-    let legacy_bytes = b"opaque v0.25 prior-epoch rollback sentinel\n";
-    fs::write(&legacy_path, legacy_bytes).unwrap();
 
     let initial = import_codex(&temp);
     assert_change(&initial, "changed");
@@ -301,8 +297,6 @@ fn codex_reimport_preserves_opaque_prior_epoch_and_rebuilds_from_provider_source
     assert!(initial_analytics.get("provider").is_none());
     assert!(initial_analytics.get("events_bucket").is_none());
     assert!(initial_analytics.get("rejections_bucket").is_none());
-    assert_eq!(fs::read(&legacy_path).unwrap(), legacy_bytes);
-
     let unchanged = import_codex(&temp);
     assert_change(&unchanged, "no_op");
     assert_eq!(unchanged["outcome"], "success", "{unchanged:#}");
@@ -336,8 +330,6 @@ fn codex_reimport_preserves_opaque_prior_epoch_and_rebuilds_from_provider_source
         initial_generation
     );
     assert_eq!(replay["sources"][0]["generation_changed"], true);
-    assert_eq!(fs::read(&legacy_path).unwrap(), legacy_bytes);
-
     let search = json_output(isolated_ctx(&temp).args([
         "search",
         "provider authority after",
@@ -364,8 +356,6 @@ fn codex_reimport_preserves_opaque_prior_epoch_and_rebuilds_from_provider_source
         "--format=json",
     ]));
     assert!(superseded["results"].as_array().unwrap().is_empty());
-    assert_eq!(fs::read(&legacy_path).unwrap(), legacy_bytes);
-
     let with_rejection = format!(
         "{}{{malformed json}}\n",
         fs::read_to_string(&source).unwrap()

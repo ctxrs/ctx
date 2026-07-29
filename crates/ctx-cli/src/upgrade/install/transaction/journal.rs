@@ -152,38 +152,6 @@ pub(super) struct WindowsDaemonRestart {
     pub(super) loop_interval_seconds: u64,
 }
 
-// This is intentionally the only compatibility decoder.  It is the exact
-// Unix schema shipped in v0.25.0; later or invented schemas fail closed.
-#[cfg(unix)]
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum LegacyJournalPhase {
-    Publishing,
-    Committed,
-}
-
-#[cfg(unix)]
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct LegacyJournalPath {
-    pub(super) label: String,
-    pub(super) staged: PathBuf,
-    pub(super) target: PathBuf,
-    pub(super) backup: PathBuf,
-    pub(super) kind: JournalPathKind,
-}
-
-#[cfg(unix)]
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct LegacyInstallTransactionJournal {
-    pub(super) schema_version: u32,
-    pub(super) transaction_id: String,
-    pub(super) phase: LegacyJournalPhase,
-    pub(super) install_path: PathBuf,
-    pub(super) paths: Vec<LegacyJournalPath>,
-}
-
 impl InstallTransactionJournal {
     pub(super) fn new(
         attempt_id: String,
@@ -233,33 +201,6 @@ pub(super) fn read(install_path: &Path) -> Result<Option<InstallTransactionJourn
     let journal = serde_json::from_slice(&bytes)
         .with_context(|| format!("parse interrupted install transaction {}", path.display()))?;
     Ok(Some(journal))
-}
-
-#[cfg(unix)]
-pub(super) fn read_legacy(data_root: &Path) -> Result<Option<LegacyInstallTransactionJournal>> {
-    let path = data_root.join(INSTALL_TRANSACTION_FILE);
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
-    };
-    let journal = serde_json::from_slice(&bytes).with_context(|| {
-        format!(
-            "parse v0.25 interrupted install transaction {}",
-            path.display()
-        )
-    })?;
-    Ok(Some(journal))
-}
-
-#[cfg(unix)]
-pub(super) fn remove_legacy(data_root: &Path) -> Result<()> {
-    let path = data_root.join(INSTALL_TRANSACTION_FILE);
-    match fs::remove_file(&path) {
-        Ok(()) => sync_removed_parent(data_root),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
-    }
 }
 
 pub(super) fn write(journal: &InstallTransactionJournal) -> Result<()> {
@@ -555,111 +496,6 @@ fn valid_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-#[cfg(unix)]
-pub(super) fn validate_legacy(
-    journal: &LegacyInstallTransactionJournal,
-    data_root: &Path,
-) -> Result<()> {
-    if journal.schema_version != 1
-        || journal.transaction_id.is_empty()
-        || journal.transaction_id.len() > 128
-        || !journal
-            .transaction_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
-    {
-        return Err(anyhow!("invalid v0.25 install transaction identity"));
-    }
-    if journal.install_path != current_install_path()? {
-        return Err(anyhow!(
-            "v0.25 install transaction targets a different executable"
-        ));
-    }
-    if journal.paths.len() != 2 && journal.paths.len() != 3 {
-        return Err(anyhow!(
-            "v0.25 install transaction has an unexpected path count"
-        ));
-    }
-    let binary = legacy_one_path(journal, "ctx binary")?;
-    let marker = legacy_one_path(journal, "ctx install marker")?;
-    let parent = journal
-        .install_path
-        .parent()
-        .ok_or_else(|| anyhow!("v0.25 install path has no parent"))?;
-    if binary.kind != JournalPathKind::File
-        || binary.target != journal.install_path
-        || binary.staged != parent.join(format!(".ctx-upgrade-{}.new", journal.transaction_id))
-        || binary.backup
-            != transaction_backup_path(&journal.install_path, &journal.transaction_id, "binary")
-    {
-        return Err(anyhow!(
-            "v0.25 install transaction has invalid binary paths"
-        ));
-    }
-    let marker_path = install_marker_path(&journal.install_path);
-    if marker.kind != JournalPathKind::File
-        || marker.target != marker_path
-        || marker.staged
-            != parent.join(format!(
-                ".ctx-upgrade-{}.install.json.new",
-                journal.transaction_id
-            ))
-        || marker.backup != transaction_backup_path(&marker_path, &journal.transaction_id, "marker")
-    {
-        return Err(anyhow!(
-            "v0.25 install transaction has invalid marker paths"
-        ));
-    }
-    let runtimes = journal
-        .paths
-        .iter()
-        .filter(|path| path.label == "ONNX Runtime sidecar")
-        .collect::<Vec<_>>();
-    if (journal.paths.len() == 3) != (runtimes.len() == 1) {
-        return Err(anyhow!(
-            "v0.25 install transaction has invalid runtime paths"
-        ));
-    }
-    if let Some(runtime) = runtimes.first() {
-        // v0.25 did not persist a runtime root.  Recompute it using the
-        // exact runtime-root selection contract it used while staging.  If a
-        // custom CTX_RUNTIME_DIR from the original attempt is no longer
-        // supplied, the journal cannot prove ownership and recovery fails
-        // closed instead of touching a guessed default root.
-        let runtime_root = super::super::runtime::semantic_runtime_root(data_root)?;
-        let name = runtime
-            .target
-            .file_name()
-            .and_then(|value| value.to_str())
-            .ok_or_else(|| anyhow!("v0.25 runtime target has no name"))?;
-        if runtime.kind != JournalPathKind::Directory
-            || runtime.staged
-                != runtime.target.with_file_name(format!(
-                    ".{name}.ctx-upgrade-{}.new",
-                    journal.transaction_id
-                ))
-            || runtime.backup
-                != transaction_backup_path(&runtime.target, &journal.transaction_id, "runtime")
-            || !runtime.target.starts_with(runtime_root.join("onnxruntime"))
-        {
-            return Err(anyhow!(
-                "v0.25 install transaction has invalid runtime paths"
-            ));
-        }
-    }
-    if journal.paths.iter().any(|path| {
-        !matches!(
-            path.label.as_str(),
-            "ctx binary" | "ctx install marker" | "ONNX Runtime sidecar"
-        )
-    }) {
-        return Err(anyhow!(
-            "v0.25 install transaction has an unknown path label"
-        ));
-    }
-    Ok(())
-}
-
 pub(super) fn validate_phase_state(journal: &InstallTransactionJournal) -> Result<()> {
     if matches!(
         journal.phase,
@@ -835,21 +671,6 @@ fn optional_one_path<'a>(
     let path = matching.next();
     if matching.next().is_some() {
         return Err(anyhow!("install transaction duplicates {label}"));
-    }
-    Ok(path)
-}
-
-#[cfg(unix)]
-fn legacy_one_path<'a>(
-    journal: &'a LegacyInstallTransactionJournal,
-    label: &str,
-) -> Result<&'a LegacyJournalPath> {
-    let mut matching = journal.paths.iter().filter(|path| path.label == label);
-    let path = matching
-        .next()
-        .ok_or_else(|| anyhow!("v0.25 install transaction missing {label}"))?;
-    if matching.next().is_some() {
-        return Err(anyhow!("v0.25 install transaction duplicates {label}"));
     }
     Ok(path)
 }

@@ -417,11 +417,7 @@ fn check_upgrade(
                             config.upgrade.interval,
                         )?;
                         drop(recovery_lock);
-                        if recovery.legacy_v025() {
-                            let _ = handoff.resume_legacy_reexec_with(&path)?;
-                        } else {
-                            handoff.prepare_reexec()?;
-                        }
+                        handoff.prepare_reexec()?;
                         reexec_recovered_executable(&path, &recovery.attempt_id)?;
                         unreachable!("successful recovery re-exec does not return");
                     }
@@ -576,16 +572,7 @@ fn apply_upgrade(
                         config.upgrade.interval,
                     )?;
                     drop(recovery_lock);
-                    if recovery.legacy_v025() {
-                        // v0.25 cannot consume the v0.26 deferred-restart request
-                        // contract. Restart and prove daemon readiness while this
-                        // process still understands the request, then re-exec.
-                        if let Some(warning) = daemon_handoff.resume_legacy_reexec_with(&path)? {
-                            eprintln!("warning: {warning}");
-                        }
-                    } else {
-                        daemon_handoff.prepare_reexec()?;
-                    }
+                    daemon_handoff.prepare_reexec()?;
                     reexec_recovered_executable(&path, &recovery_attempt_id)?;
                     unreachable!("successful recovery re-exec does not return");
                 }
