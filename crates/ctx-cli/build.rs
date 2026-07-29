@@ -3,6 +3,8 @@ use std::env;
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(ctx_release_qualification)");
     println!("cargo:rustc-check-cfg=cfg(ctx_semantic_fastembed)");
+    println!("cargo:rustc-check-cfg=cfg(ctx_pro_qualification)");
+    println!("cargo:rustc-check-cfg=cfg(ctx_pro_test_helper)");
 
     let os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
