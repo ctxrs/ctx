@@ -399,6 +399,15 @@ impl CodexNativeScanner {
         }
 
         if self.profile.projection_mode() == CodexProjectionMode::SourceBackedV0 {
+            if source_backed_output_eligibility(result_kind, structural)
+                == CodexSourceBackedDocumentEligibility::IntentionallyNonDisplay
+            {
+                if let Some(call_id) = call_id {
+                    self.tool_contexts.remove(call_id);
+                    self.tool_authorities.remove(call_id);
+                }
+                return Ok(CodexRecordProjection::default());
+            }
             let core_row = build_source_backed_sparse_output_row(
                 self.raw_ordinal,
                 start_byte,

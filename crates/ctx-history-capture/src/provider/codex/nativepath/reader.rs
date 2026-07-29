@@ -24,8 +24,10 @@ use super::{
     },
     rows::{
         attach_complete_message_locator, build_event_row, build_source_backed_event_row,
-        build_source_backed_sparse_output_row, build_sparse_output_row, tool_context_from_row,
-        CodexEventRow, CodexRetainedNonMaterialized, CodexSessionRow, CodexSourceBackedRowV0,
+        build_source_backed_sparse_output_row, build_sparse_output_row,
+        source_backed_output_eligibility, tool_context_from_row, CodexEventRow,
+        CodexRetainedNonMaterialized, CodexSessionRow, CodexSourceBackedDocumentEligibility,
+        CodexSourceBackedRowV0,
     },
     source::{CodexAppendProof, CodexCatalogSource, CodexFileObservation},
 };

@@ -175,6 +175,7 @@ impl<'a> StructuralJsonVisitor<'a> {
                 ..JsonScalarSummary::default()
             },
             direct_output_bytes: None,
+            direct_output_present: false,
         })
     }
 
@@ -479,6 +480,7 @@ pub(in super::super) fn probe_structural_output(
             duration_ms: signals.duration_ms,
         },
         output_bytes: payload.direct_output_bytes,
+        has_exact_display_field: payload.direct_output_present,
     })
 }
 
