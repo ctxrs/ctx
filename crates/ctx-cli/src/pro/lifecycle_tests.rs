@@ -17,6 +17,60 @@ use tempfile::TempDir;
 
 use super::*;
 
+const SOURCE_MANIFEST_AUTHORITY_SENTINEL: &[u8] =
+    b"v0.26 source-manifest authority; provider sources remain canonical";
+const SEMANTIC_INDEX_SENTINEL: &[u8] = b"v0.26 disposable semantic index";
+const OLD_EPOCH_STORE_SENTINEL: &[u8] =
+    b"opaque pre-v0.26 Store preserved only for rollback; never open";
+
+struct EpochStorageFixture {
+    source_manifest_authority: PathBuf,
+    semantic_index: PathBuf,
+    old_epoch_store: PathBuf,
+}
+
+impl EpochStorageFixture {
+    fn write(data_root: &Path) -> Self {
+        let source_manifest_authority = data_root
+            .join("search/lexical")
+            .join("ctx-generations")
+            .join("source-manifest-authority.sentinel");
+        let semantic_index = data_root
+            .join("search/semantic")
+            .join("fresh-epoch.sentinel");
+        let old_epoch_store = data_root.join("work.sqlite");
+        fs::create_dir_all(source_manifest_authority.parent().unwrap()).unwrap();
+        fs::create_dir_all(semantic_index.parent().unwrap()).unwrap();
+        fs::write(
+            &source_manifest_authority,
+            SOURCE_MANIFEST_AUTHORITY_SENTINEL,
+        )
+        .unwrap();
+        fs::write(&semantic_index, SEMANTIC_INDEX_SENTINEL).unwrap();
+        fs::write(&old_epoch_store, OLD_EPOCH_STORE_SENTINEL).unwrap();
+        Self {
+            source_manifest_authority,
+            semantic_index,
+            old_epoch_store,
+        }
+    }
+
+    fn assert_preserved(&self) {
+        assert_eq!(
+            fs::read(&self.source_manifest_authority).unwrap(),
+            SOURCE_MANIFEST_AUTHORITY_SENTINEL
+        );
+        assert_eq!(
+            fs::read(&self.semantic_index).unwrap(),
+            SEMANTIC_INDEX_SENTINEL
+        );
+        assert_eq!(
+            fs::read(&self.old_epoch_store).unwrap(),
+            OLD_EPOCH_STORE_SENTINEL
+        );
+    }
+}
+
 const TEST_PRIVATE_KEY_PEM: &str = r#"-----BEGIN PRIVATE KEY-----
 MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC4czAqM5XMipjl
 QxTatkq8VmeS13e2aEpqT1v/XGL17o43i624H80xEbvB5tV/YzpO5N8sb4wEUj9h
@@ -216,6 +270,8 @@ fn installed_pair(data_root: &Path) -> ValidatedPair {
     reconcile(data_root).unwrap().unwrap()
 }
 
+// These journals coordinate signed Pro helper publication only. They never carry
+// history or serve as a fallback source of truth for the fresh epoch.
 fn assert_no_transaction_files(data_root: &Path) {
     let target = default_helper_path(data_root);
     for path in [
@@ -874,8 +930,7 @@ fn assert_explicit_setup_repairs_invalid_current_pair(case: InvalidCurrentPair) 
 
     let graph = layout.graph_path();
     fs::write(&graph, b"encrypted graph data").unwrap();
-    let canonical = temp.path().join("work.sqlite");
-    fs::write(&canonical, b"canonical history").unwrap();
+    let epoch = EpochStorageFixture::write(temp.path());
     crate::pro::local_deletion::write_local_pro_initialization_indicator(temp.path()).unwrap();
 
     match case {
@@ -915,7 +970,7 @@ fn assert_explicit_setup_repairs_invalid_current_pair(case: InvalidCurrentPair) 
         bad_artifact
     );
     assert_eq!(fs::read(&graph).unwrap(), b"encrypted graph data");
-    assert_eq!(fs::read(&canonical).unwrap(), b"canonical history");
+    epoch.assert_preserved();
     assert!(
         crate::pro::local_deletion::local_pro_initialization_indicator_exists(temp.path()).unwrap()
     );
@@ -934,7 +989,7 @@ fn assert_explicit_setup_repairs_invalid_current_pair(case: InvalidCurrentPair) 
     assert!(!previous_helper.exists());
     assert!(!previous_marker.exists());
     assert_eq!(fs::read(graph).unwrap(), b"encrypted graph data");
-    assert_eq!(fs::read(canonical).unwrap(), b"canonical history");
+    epoch.assert_preserved();
     assert_eq!(
         fs::read(&bad_replacement.args.artifact).unwrap(),
         bad_artifact
@@ -1010,8 +1065,7 @@ fn assert_explicit_setup_repairs_invalid_rollback_pair(case: InvalidRollbackPair
 
     let graph = layout.graph_path();
     fs::write(&graph, b"encrypted graph data").unwrap();
-    let canonical = temp.path().join("work.sqlite");
-    fs::write(&canonical, b"canonical history").unwrap();
+    let epoch = EpochStorageFixture::write(temp.path());
     crate::pro::local_deletion::write_local_pro_initialization_indicator(temp.path()).unwrap();
 
     let invalid_helper = fs::read(&target).ok();
@@ -1051,7 +1105,7 @@ fn assert_explicit_setup_repairs_invalid_rollback_pair(case: InvalidRollbackPair
         bad_artifact
     );
     assert_eq!(fs::read(&graph).unwrap(), b"encrypted graph data");
-    assert_eq!(fs::read(&canonical).unwrap(), b"canonical history");
+    epoch.assert_preserved();
     assert!(
         crate::pro::local_deletion::local_pro_initialization_indicator_exists(temp.path()).unwrap()
     );
@@ -1068,7 +1122,7 @@ fn assert_explicit_setup_repairs_invalid_rollback_pair(case: InvalidRollbackPair
     assert_eq!(installed_pair(temp.path()).manifest.version, "3.0.0");
     assert_eq!(target_bytes(temp.path()), b"verified replacement helper");
     assert_eq!(fs::read(&graph).unwrap(), b"encrypted graph data");
-    assert_eq!(fs::read(&canonical).unwrap(), b"canonical history");
+    epoch.assert_preserved();
     assert_eq!(
         fs::read(&bad_replacement.args.artifact).unwrap(),
         bad_artifact
@@ -1132,8 +1186,7 @@ fn explicit_setup_repairs_an_unrecoverable_committed_journal() {
 
     let graph = layout.graph_path();
     fs::write(&graph, b"encrypted graph data").unwrap();
-    let canonical = temp.path().join("work.sqlite");
-    fs::write(&canonical, b"canonical history").unwrap();
+    let epoch = EpochStorageFixture::write(temp.path());
     crate::pro::local_deletion::write_local_pro_initialization_indicator(temp.path()).unwrap();
 
     let invalid_helper = fs::read(&target).unwrap();
@@ -1169,7 +1222,7 @@ fn explicit_setup_repairs_an_unrecoverable_committed_journal() {
         bad_artifact
     );
     assert_eq!(fs::read(&graph).unwrap(), b"encrypted graph data");
-    assert_eq!(fs::read(&canonical).unwrap(), b"canonical history");
+    epoch.assert_preserved();
     assert!(
         crate::pro::local_deletion::local_pro_initialization_indicator_exists(temp.path()).unwrap()
     );
@@ -1186,7 +1239,7 @@ fn explicit_setup_repairs_an_unrecoverable_committed_journal() {
     assert_eq!(installed_pair(temp.path()).manifest.version, "3.0.0");
     assert_eq!(target_bytes(temp.path()), b"verified replacement helper");
     assert_eq!(fs::read(&graph).unwrap(), b"encrypted graph data");
-    assert_eq!(fs::read(&canonical).unwrap(), b"canonical history");
+    epoch.assert_preserved();
     assert_eq!(
         fs::read(&bad_replacement.args.artifact).unwrap(),
         bad_artifact

@@ -2,6 +2,12 @@ use std::cell::Cell;
 
 use super::*;
 
+const SOURCE_MANIFEST_AUTHORITY_SENTINEL: &[u8] =
+    b"v0.26 source-manifest authority; provider sources remain canonical";
+const SEMANTIC_INDEX_SENTINEL: &[u8] = b"v0.26 disposable semantic index";
+const OLD_EPOCH_STORE_SENTINEL: &[u8] =
+    b"opaque pre-v0.26 Store preserved only for rollback; never open";
+
 #[derive(Default)]
 struct RecordingDeletion {
     calls: Vec<&'static str>,
@@ -35,7 +41,62 @@ impl ProDeletionService for RecordingDeletion {
     }
 }
 
-fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+struct EpochStorageFixture {
+    source_manifest_authority: PathBuf,
+    semantic_index: PathBuf,
+    old_epoch_store: PathBuf,
+}
+
+impl EpochStorageFixture {
+    fn write(data_root: &Path) -> Self {
+        let source_manifest_authority = data_root
+            .join("search/lexical")
+            .join("ctx-generations")
+            .join("source-manifest-authority.sentinel");
+        let semantic_index = data_root
+            .join("search/semantic")
+            .join("fresh-epoch.sentinel");
+        let old_epoch_store = data_root.join("work.sqlite");
+        fs::create_dir_all(source_manifest_authority.parent().unwrap()).unwrap();
+        fs::create_dir_all(semantic_index.parent().unwrap()).unwrap();
+        fs::write(
+            &source_manifest_authority,
+            SOURCE_MANIFEST_AUTHORITY_SENTINEL,
+        )
+        .unwrap();
+        fs::write(&semantic_index, SEMANTIC_INDEX_SENTINEL).unwrap();
+        fs::write(&old_epoch_store, OLD_EPOCH_STORE_SENTINEL).unwrap();
+        Self {
+            source_manifest_authority,
+            semantic_index,
+            old_epoch_store,
+        }
+    }
+
+    fn assert_preserved(&self) {
+        assert_eq!(
+            fs::read(&self.source_manifest_authority).unwrap(),
+            SOURCE_MANIFEST_AUTHORITY_SENTINEL
+        );
+        assert_eq!(
+            fs::read(&self.semantic_index).unwrap(),
+            SEMANTIC_INDEX_SENTINEL
+        );
+        assert_eq!(
+            fs::read(&self.old_epoch_store).unwrap(),
+            OLD_EPOCH_STORE_SENTINEL
+        );
+    }
+}
+
+struct LifecycleFixture {
+    root: tempfile::TempDir,
+    helper: PathBuf,
+    graph: PathBuf,
+    epoch: EpochStorageFixture,
+}
+
+fn fixture() -> LifecycleFixture {
     let root = tempfile::tempdir().unwrap();
     let helper = default_helper_path(root.path());
     fs::create_dir_all(helper.parent().unwrap()).unwrap();
@@ -46,10 +107,14 @@ fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
     write_local_pro_initialization_indicator(root.path()).unwrap();
     fs::write(&helper, b"helper").unwrap();
     let graph = ctx_pro_host_protocol::ProFilesystemLayout::new(root.path()).graph_path();
-    let canonical = root.path().join("work.sqlite");
     fs::write(&graph, b"encrypted graph").unwrap();
-    fs::write(&canonical, b"canonical history").unwrap();
-    (root, helper, graph, canonical)
+    let epoch = EpochStorageFixture::write(root.path());
+    LifecycleFixture {
+        root,
+        helper,
+        graph,
+        epoch,
+    }
 }
 
 #[test]
@@ -86,12 +151,17 @@ fn staged_activation_requires_exact_protocol_authorization_and_status() {
 }
 
 #[test]
-fn ordinary_uninstall_preserves_local_pro_data_and_history() {
-    let (root, helper, graph, canonical) = fixture();
+fn ordinary_uninstall_preserves_local_pro_data_and_fresh_epoch_authority() {
+    let LifecycleFixture {
+        root,
+        helper,
+        graph,
+        epoch,
+    } = fixture();
     run_uninstall(root.path(), None, UninstallDataDisposition::Keep, true).unwrap();
     assert!(!helper.exists());
     assert_eq!(fs::read(graph).unwrap(), b"encrypted graph");
-    assert_eq!(fs::read(canonical).unwrap(), b"canonical history");
+    epoch.assert_preserved();
     assert!(preserved_data_marker_is_set(root.path()));
     let status = lifecycle_status_json(root.path());
     assert_eq!(status["state"], "uninstalled_data_preserved");
@@ -103,7 +173,12 @@ fn ordinary_uninstall_preserves_local_pro_data_and_history() {
 
 #[test]
 fn delete_data_confirms_key_before_removing_graph_and_credentials() {
-    let (root, helper, graph, canonical) = fixture();
+    let LifecycleFixture {
+        root,
+        helper,
+        graph,
+        epoch,
+    } = fixture();
     let mut service = RecordingDeletion::default();
     run_uninstall(
         root.path(),
@@ -122,7 +197,7 @@ fn delete_data_confirms_key_before_removing_graph_and_credentials() {
     );
     assert!(!helper.exists());
     assert!(!graph.exists());
-    assert!(canonical.exists());
+    epoch.assert_preserved();
     assert_eq!(
         uninstall_payload(true, LocalProDataOutcome::Deleted),
         json!({
@@ -165,7 +240,7 @@ fn never_pro_missing_and_empty_roots_are_truthful_idempotent_noops() {
 
         let empty = tempfile::tempdir().unwrap();
         crate::identity::installation_id(empty.path()).unwrap();
-        fs::write(empty.path().join("work.sqlite"), b"canonical history").unwrap();
+        let epoch = EpochStorageFixture::write(empty.path());
         let mut empty_service = RecordingDeletion::default();
         let value = run_uninstall(
             empty.path(),
@@ -180,10 +255,7 @@ fn never_pro_missing_and_empty_roots_are_truthful_idempotent_noops() {
         assert_eq!(value["next_action"], serde_json::Value::Null);
         assert!(empty_service.calls.is_empty());
         assert!(!ProFilesystemLayout::new(empty.path()).pro_root().exists());
-        assert_eq!(
-            fs::read(empty.path().join("work.sqlite")).unwrap(),
-            b"canonical history"
-        );
+        epoch.assert_preserved();
     }
 }
 
@@ -310,7 +382,12 @@ fn keep_data_marks_only_real_graph_data() {
 
 #[test]
 fn failed_key_deletion_preserves_helper_graph_and_credentials() {
-    let (root, helper, graph, canonical) = fixture();
+    let LifecycleFixture {
+        root,
+        helper,
+        graph,
+        epoch,
+    } = fixture();
     let mut service = RecordingDeletion {
         fail_graph_key_deletion: true,
         ..RecordingDeletion::default()
@@ -326,7 +403,7 @@ fn failed_key_deletion_preserves_helper_graph_and_credentials() {
     assert_eq!(service.calls, ["delete_graph_data"]);
     assert!(helper.exists());
     assert!(graph.exists());
-    assert!(canonical.exists());
+    epoch.assert_preserved();
 }
 
 fn pro_status(access_state: &str) -> ProStatus {
@@ -490,7 +567,12 @@ fn manage_json_never_invokes_the_browser_opener() {
 
 #[test]
 fn ordinary_uninstall_then_delete_and_repeated_delete_are_idempotent() {
-    let (root, helper, graph, canonical) = fixture();
+    let LifecycleFixture {
+        root,
+        helper,
+        graph,
+        epoch,
+    } = fixture();
     run_uninstall(root.path(), None, UninstallDataDisposition::Keep, true).unwrap();
     assert!(!helper.exists());
     assert!(graph.exists());
@@ -505,7 +587,7 @@ fn ordinary_uninstall_then_delete_and_repeated_delete_are_idempotent() {
     .unwrap();
     assert!(!graph.exists());
     assert!(!preserved_data_marker_is_set(root.path()));
-    assert!(canonical.exists());
+    epoch.assert_preserved();
 
     let mut repeated = RecordingDeletion::default();
     let value = run_uninstall(
@@ -518,7 +600,7 @@ fn ordinary_uninstall_then_delete_and_repeated_delete_are_idempotent() {
     assert!(repeated.calls.is_empty());
     assert_eq!(value["local_pro_data"], "absent");
     assert_eq!(value["next_action"], serde_json::Value::Null);
-    assert!(canonical.exists());
+    epoch.assert_preserved();
 }
 
 #[test]
