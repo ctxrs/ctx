@@ -393,6 +393,7 @@ impl CliUsage {
         let (operation, target_type) = match command {
             CommandRoot::Setup(_) => (Some("setup"), TargetType::NotApplicable),
             CommandRoot::Status(_) => (None, TargetType::NotApplicable),
+            CommandRoot::Stats(_) => (None, TargetType::NotApplicable),
             CommandRoot::Index(_) => (Some("index"), TargetType::NotApplicable),
             CommandRoot::Sources(_) => (Some("sources"), TargetType::NotApplicable),
             CommandRoot::Import(_) => (Some("import"), TargetType::NotApplicable),
