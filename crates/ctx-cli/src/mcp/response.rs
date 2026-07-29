@@ -53,22 +53,6 @@ pub(super) fn tool_error_result(err: Error) -> Value {
             "structuredContent": structured,
         });
     }
-    if let Some(error) = err
-        .downcast_ref::<crate::semantic::SourceHydrationUnavailable>()
-        .and_then(crate::semantic::SourceHydrationUnavailable::complete_content_error)
-    {
-        let structured = crate::complete_content::complete_content_error_json(&error);
-        return json!({
-            "isError": true,
-            "content": [
-                {
-                    "type": "text",
-                    "text": error.to_string(),
-                }
-            ],
-            "structuredContent": structured,
-        });
-    }
     if let Some(error) = crate::dispatch::source_hydration_error_contract(&err) {
         return source_hydration_tool_error(error);
     }
