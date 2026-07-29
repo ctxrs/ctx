@@ -42,6 +42,7 @@ use sha2::{Digest, Sha256};
 use tantivy::{
     collector::Count,
     directory::{Directory, DirectoryLock, Lock, INDEX_WRITER_LOCK},
+    indexer::LogMergePolicy,
     schema::{
         Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, FAST, INDEXED, STORED,
         STRING,
@@ -63,6 +64,13 @@ const COMMIT_PAYLOAD_VERSION: u32 = 1;
 const INDEX_MEMORY_MIN_PER_THREAD: usize = 15_000_000;
 const MAX_DOCUMENT_METADATA_BYTES: usize = 64 * 1024;
 const MAX_TOUCHED_FILES: usize = 4_096;
+
+/// Comparable lexical segments are coalesced after this many accumulate.
+///
+/// A merge therefore retires at least `LEXICAL_SEGMENT_MERGE_FAN_IN - 1`
+/// active segments, bounding merge publications amortized over tiny appends
+/// while avoiding a full-index rewrite for each append.
+pub const LEXICAL_SEGMENT_MERGE_FAN_IN: usize = 8;
 
 pub type Result<T> = std::result::Result<T, IndexError>;
 
@@ -240,6 +248,35 @@ pub enum IndexError {
     },
     #[error("generation count overflow")]
     CountOverflow,
+    #[error(
+        "exact replay inventory coverage is incomplete: prior source {source_id} was neither \
+         replayed nor terminally removed"
+    )]
+    IncompleteExactReplayCoverage { source_id: String },
+    #[error(
+        "exact replay inventory for {provider} observed {observed} sources but matched {matched} \
+         retained source lineages"
+    )]
+    ExactReplayInventoryCountMismatch {
+        provider: String,
+        observed: usize,
+        matched: usize,
+    },
+    #[error(
+        "complete inventory authority {provider}/{authority_namespace} was certified more than once"
+    )]
+    DuplicateCompleteInventoryAuthority {
+        provider: String,
+        authority_namespace: String,
+    },
+    #[error(
+        "complete inventory authority {provider}/{authority_namespace} changed during final \
+         precommit revalidation"
+    )]
+    CompleteInventoryInvalidated {
+        provider: String,
+        authority_namespace: String,
+    },
     #[error("generation writer invariant violated: {0}")]
     WriterInvariant(&'static str),
     #[error("generation {generation_id} committed but failed {stage} verification: {detail}")]
@@ -597,6 +634,12 @@ enum PendingSourceMode {
     Append { base: CertifiedSource },
 }
 
+/// A structurally exact replay paired with separately certified current
+/// complete inventories. The prior manifest is comparison state only.
+struct ExactReplayInventoryWitness<'a> {
+    base: &'a GenerationManifest,
+}
+
 pub struct GenerationWriter {
     root: PathBuf,
     index: Index,
@@ -607,12 +650,17 @@ pub struct GenerationWriter {
     base_manifest: Option<GenerationManifest>,
     base_opstamp: u64,
     base_searcher: Option<Searcher>,
+    complete_inventories: Vec<CertifiedSourceInventory>,
     pending: HashMap<String, PendingSource>,
     deletions: HashMap<SourceKey, GenerationRemoval>,
     source_identities: HashMap<Uuid, [u8; 32]>,
     checked_base_sessions: HashSet<Uuid>,
     staged_event_identities: HashMap<Uuid, [u8; 32]>,
     staged_session_identities: HashMap<Uuid, [u8; 32]>,
+    #[cfg(test)]
+    index_writer_constructions: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
+    before_writer_handoff: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl GenerationWriter {
@@ -693,6 +741,13 @@ impl GenerationWriter {
         } else {
             return Err(IndexError::UnboundIndexState);
         };
+        // Base verification above and this reclamation both run while holding
+        // Tantivy's real writer lock. Interrupted ctx atomic publications are
+        // safe to remove only after the visible base has been proven, and
+        // reclaiming them must not require constructing IndexWriter. Tantivy
+        // managed-file garbage collection remains lazy on the mutation path.
+        reclaim_abandoned_atomic_writes(&root)?;
+        reclaim_abandoned_atomic_writes(&root.join(MANIFEST_DIRECTORY))?;
         let mut source_identities = HashMap::new();
         if let Some(manifest) = &base_manifest {
             for source in &manifest.sources {
@@ -725,12 +780,17 @@ impl GenerationWriter {
             base_manifest,
             base_opstamp: base_metas.opstamp,
             base_searcher,
+            complete_inventories: Vec::new(),
             pending: HashMap::new(),
             deletions: HashMap::new(),
             source_identities,
             checked_base_sessions: HashSet::new(),
             staged_event_identities: HashMap::new(),
             staged_session_identities: HashMap::new(),
+            #[cfg(test)]
+            index_writer_constructions: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            #[cfg(test)]
+            before_writer_handoff: None,
         })
     }
 
@@ -738,6 +798,31 @@ impl GenerationWriter {
     /// Tantivy's exclusive writer lock.
     pub fn base_manifest(&self) -> Option<&GenerationManifest> {
         self.base_manifest.as_ref()
+    }
+
+    /// Registers one complete provider inventory captured by the current
+    /// refresh. Exact no-op admission requires these inventories to cover the
+    /// full retained/removal set and requires a separate terminal callback to
+    /// revalidate each exact certificate.
+    pub fn certify_complete_inventory(
+        &mut self,
+        inventory: CertifiedSourceInventory,
+    ) -> Result<()> {
+        inventory.validate_contract()?;
+        let observation = inventory.observation();
+        if self.complete_inventories.iter().any(|existing| {
+            let existing = existing.observation();
+            existing.provider() == observation.provider()
+                && existing.authority_namespace() == observation.authority_namespace()
+                && existing.authority_key() == observation.authority_key()
+        }) {
+            return Err(IndexError::DuplicateCompleteInventoryAuthority {
+                provider: observation.provider().to_owned(),
+                authority_namespace: observation.authority_namespace().to_owned(),
+            });
+        }
+        self.complete_inventories.push(inventory);
+        Ok(())
     }
 
     fn writer_mut(&mut self) -> Result<&mut IndexWriter<TantivyDocument>> {
@@ -750,10 +835,18 @@ impl GenerationWriter {
                 ))?;
             drop(preflight_lock);
 
+            #[cfg(test)]
+            if let Some(hook) = self.before_writer_handoff.take() {
+                hook();
+            }
+
             let writer = self.index.writer_with_num_threads::<TantivyDocument>(
                 self.writer_options.indexer_threads,
                 self.writer_options.memory_bytes,
             )?;
+            #[cfg(test)]
+            self.index_writer_constructions
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let current_metas = self.index.load_metas()?;
             let expected_generation = self
                 .base_manifest
@@ -773,12 +866,13 @@ impl GenerationWriter {
                 return Err(IndexError::ConcurrentGenerationChange);
             }
 
-            // Mutation now owns Tantivy's writer lock. Reclaim interrupted ctx
-            // atomic writes by their exact reserved names, then let Tantivy
-            // remove only managed files absent from the active/pinned segment
-            // inventory.
-            reclaim_abandoned_atomic_writes(&self.root)?;
-            reclaim_abandoned_atomic_writes(&self.root.join(MANIFEST_DIRECTORY))?;
+            let mut merge_policy = LogMergePolicy::default();
+            merge_policy.set_min_num_segments(LEXICAL_SEGMENT_MERGE_FAN_IN);
+            writer.set_merge_policy(Box::new(merge_policy));
+
+            // Mutation now owns Tantivy's writer lock. Managed-file garbage
+            // collection is intentionally lazy so a healthy exact replay does
+            // no IndexWriter or segment-inventory work.
             let _ = writer.garbage_collect_files().wait()?;
             self.writer = Some(writer);
         }
@@ -787,15 +881,30 @@ impl GenerationWriter {
         ))
     }
 
-    fn exact_replay_base(&self) -> Option<&GenerationManifest> {
-        if !self.deletions.is_empty() {
-            return None;
+    fn exact_replay_inventory_witness(&self) -> Result<Option<ExactReplayInventoryWitness<'_>>> {
+        if self.writer.is_some() || !self.deletions.is_empty() {
+            return Ok(None);
         }
-        let base_manifest = self.base_manifest.as_ref()?;
-        if self.pending.len() != base_manifest.sources.len() {
-            return None;
+        let Some(base) = self.base_manifest.as_ref() else {
+            return Ok(None);
+        };
+
+        // A no-work candidate is a full-inventory claim. Do not silently turn
+        // an omitted prior source into an unchanged Tantivy publication.
+        if let Some(missing) = base.sources.iter().find(|base_source| {
+            !self
+                .pending
+                .contains_key(&source_token(base_source.observation().source()))
+        }) {
+            return Err(IndexError::IncompleteExactReplayCoverage {
+                source_id: missing.observation().source().identity().to_string(),
+            });
         }
-        let covers_every_base_source = base_manifest.sources.iter().all(|base_source| {
+        if self.pending.len() != base.sources.len() {
+            return Ok(None);
+        }
+
+        let retained_sources_are_exact = base.sources.iter().all(|base_source| {
             self.pending
                 .get(&source_token(base_source.observation().source()))
                 .is_some_and(|pending| {
@@ -808,7 +917,53 @@ impl GenerationWriter {
                     )
                 })
         });
-        covers_every_base_source.then_some(base_manifest)
+        if !retained_sources_are_exact {
+            return Ok(None);
+        }
+        if self.complete_inventories.is_empty() {
+            // Without a certified current inventory this is not an admissible
+            // exact no-op. Preserve compatibility for mutation-oriented
+            // callers by taking the ordinary IndexWriter publication path.
+            return Ok(None);
+        }
+
+        let mut covered_sources = HashSet::new();
+        for inventory in &self.complete_inventories {
+            let newly_matched = base
+                .sources
+                .iter()
+                .filter(|source| inventory.contains(source.observation().source()))
+                .filter(|source| {
+                    covered_sources.insert(source.observation().source().identity().digest())
+                })
+                .count();
+            if newly_matched != inventory.observed_sources() {
+                return Err(IndexError::ExactReplayInventoryCountMismatch {
+                    provider: inventory.observation().provider().to_owned(),
+                    observed: inventory.observed_sources(),
+                    matched: newly_matched,
+                });
+            }
+        }
+        if let Some(missing) = base.sources.iter().find(|source| {
+            !covered_sources.contains(&source.observation().source().identity().digest())
+        }) {
+            return Err(IndexError::IncompleteExactReplayCoverage {
+                source_id: missing.observation().source().identity().to_string(),
+            });
+        }
+        if let Some(missing) = base.removals.iter().find(|removal| {
+            !self
+                .complete_inventories
+                .iter()
+                .any(|inventory| removal.deletion().verifies(inventory))
+        }) {
+            return Err(IndexError::IncompleteExactReplayCoverage {
+                source_id: missing.source().identity().to_string(),
+            });
+        }
+
+        Ok(Some(ExactReplayInventoryWitness { base }))
     }
 
     /// Starts replacing every lexical document owned by `source`.
@@ -1167,38 +1322,53 @@ impl GenerationWriter {
     ///
     /// `revalidate` runs after Tantivy has flushed all staged indexing workers
     /// and immediately before the immutable manifest and `meta.json` commit.
-    pub fn commit<F>(mut self, mut revalidate: F) -> Result<CommitReceipt>
+    pub fn commit<F>(self, revalidate: F) -> Result<CommitReceipt>
     where
         F: FnMut(RevalidationTarget<'_>) -> bool,
     {
-        let exact_replay = self.exact_replay_base().is_some();
-        if exact_replay {
-            for pending in self.pending.values() {
-                let certificate =
-                    pending
-                        .certificate
-                        .as_ref()
-                        .ok_or(IndexError::WriterInvariant(
-                            "exact replay source is missing its certificate",
-                        ))?;
+        self.commit_with_complete_inventory_revalidation(revalidate, |_| false)
+    }
+
+    /// Publishes one atomic lexical generation with terminal revalidation for
+    /// each current complete-inventory certificate registered on the writer.
+    ///
+    /// The second callback is a distinct target because an authoritative
+    /// inventory remains meaningful when it contains zero retained sources
+    /// and zero removals.
+    pub fn commit_with_complete_inventory_revalidation<F, I>(
+        mut self,
+        mut revalidate: F,
+        mut revalidate_inventory: I,
+    ) -> Result<CommitReceipt>
+    where
+        F: FnMut(RevalidationTarget<'_>) -> bool,
+        I: FnMut(&CertifiedSourceInventory) -> bool,
+    {
+        if let Some(witness) = self.exact_replay_inventory_witness()? {
+            for certificate in &witness.base.sources {
                 if !revalidate(RevalidationTarget::Source(certificate)) {
                     return Err(IndexError::SourceInvalidated(
-                        pending.source.identity().to_string(),
+                        certificate.observation().source().identity().to_string(),
                     ));
                 }
             }
-            let base = self
-                .base_manifest
-                .as_ref()
-                .ok_or(IndexError::WriterInvariant(
-                    "exact replay is missing its base manifest",
-                ))?;
+            for inventory in &self.complete_inventories {
+                if !revalidate_inventory(inventory) {
+                    return Err(IndexError::CompleteInventoryInvalidated {
+                        provider: inventory.observation().provider().to_owned(),
+                        authority_namespace: inventory
+                            .observation()
+                            .authority_namespace()
+                            .to_owned(),
+                    });
+                }
+            }
             return Ok(CommitReceipt {
-                generation_id: base.generation_id()?,
+                generation_id: witness.base.generation_id()?,
                 opstamp: self.base_opstamp,
-                indexed_documents: base.indexed_documents,
-                certified_sources: base.sources.len(),
-                certified_source_bytes: base.certified_source_bytes,
+                indexed_documents: witness.base.indexed_documents,
+                certified_sources: witness.base.sources.len(),
+                certified_source_bytes: witness.base.certified_source_bytes,
             });
         }
 
@@ -1240,6 +1410,16 @@ impl GenerationWriter {
                 let source = removal.source().identity().to_string();
                 prepared.abort()?;
                 return Err(IndexError::SourceInvalidated(source));
+            }
+        }
+        for inventory in &self.complete_inventories {
+            if !revalidate_inventory(inventory) {
+                let error = IndexError::CompleteInventoryInvalidated {
+                    provider: inventory.observation().provider().to_owned(),
+                    authority_namespace: inventory.observation().authority_namespace().to_owned(),
+                };
+                prepared.abort()?;
+                return Err(error);
             }
         }
 
@@ -2063,10 +2243,7 @@ fn validate_optional_document_text(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    };
+    use std::sync::atomic::Ordering;
 
     use ctx_history_core::{
         derive_event_id, derive_session_id, CertifiedSourceInventory, EventIdentityInput,
@@ -2075,10 +2252,7 @@ mod tests {
         SourceInventoryObservation, SourceObservation, TypedKey,
     };
     use tantivy::{
-        collector::DocSetCollector,
-        index::SegmentMeta,
-        indexer::{LogMergePolicy, MergeCandidate, MergePolicy, NoMergePolicy},
-        query::AllQuery,
+        collector::DocSetCollector, indexer::NoMergePolicy, query::AllQuery,
         schema::Value as TantivyValue,
     };
     use tempfile::tempdir;
@@ -2156,19 +2330,54 @@ mod tests {
         source: &SourceKey,
         revision: u8,
     ) -> (CertifiedSourceDeletion, CertifiedSourceInventory) {
+        deletion_evidence_with_retained(source, revision, Vec::new())
+    }
+
+    fn deletion_evidence_with_retained(
+        source: &SourceKey,
+        revision: u8,
+        retained: Vec<SourceKey>,
+    ) -> (CertifiedSourceDeletion, CertifiedSourceInventory) {
+        let inventory = complete_inventory(source, revision, retained);
+        let deletion = CertifiedSourceDeletion::from_inventory(source.clone(), &inventory).unwrap();
+        (deletion, inventory)
+    }
+
+    fn complete_inventory(
+        authority_source: &SourceKey,
+        revision: u8,
+        sources: Vec<SourceKey>,
+    ) -> CertifiedSourceInventory {
         let inventory = SourceInventoryObservation::new(
-            source.provider(),
+            authority_source.provider(),
             "provider-root",
             TypedKey::utf8("root-lineage").unwrap(),
             "tree-inventory-v1",
             vec![revision],
         )
         .unwrap();
-        let inventory =
-            CertifiedSourceInventory::certify(inventory.clone(), inventory, "discovery-v1", vec![])
-                .unwrap();
-        let deletion = CertifiedSourceDeletion::from_inventory(source.clone(), &inventory).unwrap();
-        (deletion, inventory)
+        let inventory = CertifiedSourceInventory::certify(
+            inventory.clone(),
+            inventory,
+            "discovery-v1",
+            sources,
+        )
+        .unwrap();
+        inventory
+    }
+
+    fn stage_exact_replay(writer: &mut GenerationWriter, source: &SourceKey) -> CertifiedSource {
+        let base = writer.begin_source_append(source.clone()).unwrap().clone();
+        let frontier = base.frontier().unwrap();
+        let replay = CertifiedSourceAppend::certify(
+            &base,
+            base.clone(),
+            frontier.certified_prefix_bytes(),
+            *frontier.certified_prefix_digest(),
+        )
+        .unwrap();
+        writer.certify_source_append(replay).unwrap();
+        base
     }
 
     fn document(source: &SourceKey, sequence: u64, body: &str) -> LexicalDocument {
@@ -2253,19 +2462,6 @@ mod tests {
     fn sorted_uuids(mut ids: Vec<Uuid>) -> Vec<Uuid> {
         ids.sort();
         ids
-    }
-
-    #[derive(Debug)]
-    struct CountingLogMergePolicy {
-        inner: LogMergePolicy,
-        calls: Arc<AtomicUsize>,
-    }
-
-    impl MergePolicy for CountingLogMergePolicy {
-        fn compute_merge_candidates(&self, segments: &[SegmentMeta]) -> Vec<MergeCandidate> {
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            self.inner.compute_merge_candidates(segments)
-        }
     }
 
     fn collect_source_pages(
@@ -2369,6 +2565,12 @@ mod tests {
             unchanged_writer.preflight_lock.is_some(),
             "the lazy writer must retain Tantivy's exclusive lock"
         );
+        let index_writer_constructions =
+            std::sync::Arc::clone(&unchanged_writer.index_writer_constructions);
+        let inventory = complete_inventory(&source, 1, vec![source.clone()]);
+        unchanged_writer
+            .certify_complete_inventory(inventory.clone())
+            .unwrap();
         let base = unchanged_writer
             .begin_source_append(source.clone())
             .unwrap()
@@ -2388,15 +2590,23 @@ mod tests {
         );
         let mut revalidations = 0;
         let unchanged = unchanged_writer
-            .commit(|target| {
-                revalidations += 1;
-                matches!(
-                    target,
-                    RevalidationTarget::Source(certificate) if certificate == &base
-                )
-            })
+            .commit_with_complete_inventory_revalidation(
+                |target| {
+                    revalidations += 1;
+                    matches!(
+                        target,
+                        RevalidationTarget::Source(certificate) if certificate == &base
+                    )
+                },
+                |current| current == &inventory,
+            )
             .unwrap();
 
+        assert_eq!(
+            index_writer_constructions.load(Ordering::SeqCst),
+            0,
+            "a healthy exact no-op must construct zero Tantivy IndexWriters"
+        );
         assert_eq!(revalidations, 1);
         assert_eq!(unchanged.generation_id, initial_receipt.generation_id);
         assert_eq!(unchanged.opstamp, initial_receipt.opstamp);
@@ -2434,7 +2644,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_replay_requires_coverage_of_every_base_source() {
+    fn exact_replay_omission_fails_with_typed_incomplete_coverage() {
         let temp = tempdir().unwrap();
         let replayed_source = source("replayed.jsonl");
         let omitted_source = source("omitted.jsonl");
@@ -2469,77 +2679,327 @@ mod tests {
         )
         .unwrap();
         incomplete.certify_source_append(replay).unwrap();
-
-        assert!(
-            incomplete.exact_replay_base().is_none(),
-            "omitting one base-manifest source must disable the no-op shortcut"
+        let inventory = complete_inventory(
+            &replayed_source,
+            1,
+            vec![replayed_source.clone(), omitted_source.clone()],
         );
+        incomplete
+            .certify_complete_inventory(inventory.clone())
+            .unwrap();
+
+        assert!(matches!(
+            incomplete.exact_replay_inventory_witness(),
+            Err(IndexError::IncompleteExactReplayCoverage { .. })
+        ));
         assert!(
             incomplete.writer.is_none(),
             "the regression must reach commit through the lazy preflight state"
         );
-        let receipt = incomplete.commit(|_| true).unwrap();
-        assert_eq!(receipt.generation_id, initial_receipt.generation_id);
-        assert_eq!(receipt.indexed_documents, 2);
-        assert_eq!(receipt.certified_sources, 2);
+        let error = incomplete
+            .commit_with_complete_inventory_revalidation(|_| true, |current| current == &inventory)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            IndexError::IncompleteExactReplayCoverage { ref source_id }
+                if source_id == &omitted_source.identity().to_string()
+        ));
 
         let verified = VerifiedIndex::open(temp.path()).unwrap();
+        assert_eq!(verified.generation_id(), initial_receipt.generation_id);
         assert_eq!(verified.document_count(), 2);
         assert_eq!(verified.count_term("replayed").unwrap(), 1);
         assert_eq!(verified.count_term("omitted").unwrap(), 1);
     }
 
     #[test]
-    fn configured_log_merge_policy_runs_and_coalesces_eligible_segments() {
+    fn exact_replay_witness_covers_retained_sources_and_carried_removals() {
         let temp = tempdir().unwrap();
-        let first_source = source("first.jsonl");
-        let second_source = source("second.jsonl");
+        let retained = source("retained.jsonl");
+        let removed = source("removed.jsonl");
 
-        let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-        first
-            .writer_mut()
-            .unwrap()
-            .set_merge_policy(Box::<NoMergePolicy>::default());
-        first.begin_source(first_source.clone()).unwrap();
-        first
-            .add_document(document(&first_source, 1, "first segment"))
+        let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        initial.begin_source(retained.clone()).unwrap();
+        initial
+            .add_document(document(&retained, 1, "retained source"))
             .unwrap();
-        first
-            .certify_source(certificate(&first_source, 1, 1))
+        initial
+            .certify_source(appendable_certificate(&retained, 1, 1, 10))
             .unwrap();
-        first.commit(|_| true).unwrap();
+        initial.begin_source(removed.clone()).unwrap();
+        initial
+            .add_document(document(&removed, 1, "removed source"))
+            .unwrap();
+        initial
+            .certify_source(appendable_certificate(&removed, 1, 1, 10))
+            .unwrap();
+        initial.commit(|_| true).unwrap();
 
-        let calls = Arc::new(AtomicUsize::new(0));
-        let mut policy = LogMergePolicy::default();
-        policy.set_min_num_segments(2);
-        let mut second = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-        second
-            .writer_mut()
+        let (deletion, inventory) =
+            deletion_evidence_with_retained(&removed, 2, vec![retained.clone()]);
+        let current_inventory = inventory.clone();
+        let mut deleting = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        deleting.delete_source(deletion, inventory).unwrap();
+        let deleted = deleting.commit(|_| true).unwrap();
+
+        let mut replay = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        let replayed_source = stage_exact_replay(&mut replay, &retained);
+        replay
+            .certify_complete_inventory(current_inventory.clone())
+            .unwrap();
+        let constructions = std::sync::Arc::clone(&replay.index_writer_constructions);
+        let mut source_revalidations = 0;
+        let mut inventory_revalidations = 0;
+        let receipt = replay
+            .commit_with_complete_inventory_revalidation(
+                |target| match target {
+                    RevalidationTarget::Source(source) => {
+                        source_revalidations += 1;
+                        source == &replayed_source
+                    }
+                    RevalidationTarget::Deletion(_) => false,
+                },
+                |inventory| {
+                    inventory_revalidations += 1;
+                    inventory == &current_inventory
+                },
+            )
+            .unwrap();
+
+        assert_eq!(constructions.load(Ordering::SeqCst), 0);
+        assert_eq!(source_revalidations, 1);
+        assert_eq!(inventory_revalidations, 1);
+        assert_eq!(receipt.generation_id, deleted.generation_id);
+        assert_eq!(receipt.opstamp, deleted.opstamp);
+    }
+
+    #[test]
+    fn exact_replay_witness_covers_removal_only_and_rejects_stale_inventory() {
+        let temp = tempdir().unwrap();
+        let removed = source("removed.jsonl");
+        let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        initial.begin_source(removed.clone()).unwrap();
+        initial
+            .add_document(document(&removed, 1, "removed source"))
+            .unwrap();
+        initial
+            .certify_source(appendable_certificate(&removed, 1, 1, 10))
+            .unwrap();
+        initial.commit(|_| true).unwrap();
+
+        let (deletion, inventory) = deletion_evidence(&removed, 2);
+        let current_inventory = inventory.clone();
+        let mut deleting = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        deleting.delete_source(deletion, inventory).unwrap();
+        let deleted = deleting.commit(|_| true).unwrap();
+
+        let mut replay = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        replay
+            .certify_complete_inventory(current_inventory.clone())
+            .unwrap();
+        let constructions = std::sync::Arc::clone(&replay.index_writer_constructions);
+        let receipt = replay
+            .commit_with_complete_inventory_revalidation(
+                |_| false,
+                |inventory| inventory == &current_inventory,
+            )
+            .unwrap();
+        assert_eq!(constructions.load(Ordering::SeqCst), 0);
+        assert_eq!(receipt.generation_id, deleted.generation_id);
+        assert_eq!(receipt.opstamp, deleted.opstamp);
+
+        let mut stale = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        stale
+            .certify_complete_inventory(current_inventory.clone())
+            .unwrap();
+        let terminal_inventory =
+            std::sync::Arc::new(std::sync::Mutex::new(current_inventory.clone()));
+        let inventory_after_reappearance = complete_inventory(&removed, 3, vec![removed.clone()]);
+        *terminal_inventory.lock().unwrap() = inventory_after_reappearance;
+        let raced_constructions = std::sync::Arc::clone(&stale.index_writer_constructions);
+        let terminal_inventory_for_commit = std::sync::Arc::clone(&terminal_inventory);
+        let mut inventory_revalidations = 0;
+        let error = stale
+            .commit_with_complete_inventory_revalidation(
+                |_| false,
+                |inventory| {
+                    inventory_revalidations += 1;
+                    inventory == &*terminal_inventory_for_commit.lock().unwrap()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            IndexError::CompleteInventoryInvalidated { .. }
+        ));
+        assert_eq!(inventory_revalidations, 1);
+        assert_eq!(raced_constructions.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            VerifiedIndex::open(temp.path()).unwrap().generation_id(),
+            deleted.generation_id
+        );
+    }
+
+    #[test]
+    fn empty_inventory_requires_terminal_witness_and_rejects_discovered_source_race() {
+        let temp = tempdir().unwrap();
+        let discovered = source("discovered-after-opening.jsonl");
+        let initial = GenerationWriter::open(temp.path(), WriterOptions::default())
             .unwrap()
-            .set_merge_policy(Box::new(CountingLogMergePolicy {
-                inner: policy,
-                calls: Arc::clone(&calls),
-            }));
-        second.begin_source(second_source.clone()).unwrap();
-        second
-            .add_document(document(&second_source, 1, "second segment"))
+            .commit(|_| true)
             .unwrap();
-        second
-            .certify_source(certificate(&second_source, 1, 1))
+
+        let unwitnessed = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        let unwitnessed_constructions =
+            std::sync::Arc::clone(&unwitnessed.index_writer_constructions);
+        let unwitnessed_receipt = unwitnessed.commit(|_| true).unwrap();
+        assert_eq!(unwitnessed_receipt.generation_id, initial.generation_id);
+        assert_eq!(
+            unwitnessed_constructions.load(Ordering::SeqCst),
+            1,
+            "an empty base without current inventory authority must enter the ordinary writer path"
+        );
+
+        let opening_empty = complete_inventory(&discovered, 1, Vec::new());
+        let mut empty = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        empty
+            .certify_complete_inventory(opening_empty.clone())
             .unwrap();
-        second.commit(|_| true).unwrap();
+        let constructions = std::sync::Arc::clone(&empty.index_writer_constructions);
+        let mut revalidations = 0;
+        let replay = empty
+            .commit_with_complete_inventory_revalidation(
+                |_| false,
+                |inventory| {
+                    revalidations += 1;
+                    inventory == &opening_empty
+                },
+            )
+            .unwrap();
+
+        assert_eq!(constructions.load(Ordering::SeqCst), 0);
+        assert_eq!(revalidations, 1);
+        assert_eq!(replay.generation_id, initial.generation_id);
+        assert_eq!(replay.opstamp, unwitnessed_receipt.opstamp);
+        assert_eq!(replay.indexed_documents, 0);
+        assert_eq!(replay.certified_sources, 0);
+
+        let mut raced = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        raced
+            .certify_complete_inventory(opening_empty.clone())
+            .unwrap();
+        let raced_constructions = std::sync::Arc::clone(&raced.index_writer_constructions);
+        let terminal_inventory = std::sync::Arc::new(std::sync::Mutex::new(opening_empty));
+        let inventory_after_discovery =
+            complete_inventory(&discovered, 2, vec![discovered.clone()]);
+        *terminal_inventory.lock().unwrap() = inventory_after_discovery;
+        let terminal_inventory_for_commit = std::sync::Arc::clone(&terminal_inventory);
+        let mut inventory_revalidations = 0;
+        let error = raced
+            .commit_with_complete_inventory_revalidation(
+                |_| false,
+                |inventory| {
+                    inventory_revalidations += 1;
+                    inventory == &*terminal_inventory_for_commit.lock().unwrap()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            IndexError::CompleteInventoryInvalidated { .. }
+        ));
+        assert_eq!(inventory_revalidations, 1);
+        assert_eq!(raced_constructions.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            VerifiedIndex::open(temp.path()).unwrap().generation_id(),
+            unwitnessed_receipt.generation_id
+        );
+    }
+
+    #[test]
+    fn production_merge_policy_bounds_repeated_tiny_appends_amortized() {
+        let temp = tempdir().unwrap();
+        let source = source("tiny-appends.jsonl");
+        let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        initial.begin_source(source.clone()).unwrap();
+        initial
+            .add_document(document(&source, 1, "tiny append 1"))
+            .unwrap();
+        initial
+            .certify_source(appendable_certificate(&source, 1, 1, 10))
+            .unwrap();
+        initial.commit(|_| true).unwrap();
+
+        let initial_segments = VerifiedIndex::open(temp.path())
+            .unwrap()
+            .searcher
+            .segment_readers()
+            .len();
+        let append_count = LEXICAL_SEGMENT_MERGE_FAN_IN * 2 + 1;
+        let mut previous_segments = initial_segments;
+        let mut peak_segments = initial_segments;
+        let mut saw_coalescing = false;
+
+        for append_ordinal in 1..=append_count {
+            let sequence = append_ordinal as u64 + 1;
+            let mut append = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+            let base = append.begin_source_append(source.clone()).unwrap().clone();
+            append
+                .add_document(document(
+                    &source,
+                    sequence,
+                    &format!("tiny append {sequence}"),
+                ))
+                .unwrap();
+            let frontier = base.frontier().unwrap();
+            let current = appendable_certificate(&source, sequence as u8, sequence, sequence * 10);
+            append
+                .certify_source_append(
+                    CertifiedSourceAppend::certify(
+                        &base,
+                        current,
+                        frontier.certified_prefix_bytes(),
+                        *frontier.certified_prefix_digest(),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            append.commit(|_| true).unwrap();
+
+            let current_segments = VerifiedIndex::open(temp.path())
+                .unwrap()
+                .searcher
+                .segment_readers()
+                .len();
+            assert!(
+                current_segments <= previous_segments + 1,
+                "one tiny append exposed more than one additional active segment: \
+                 before={previous_segments}, after={current_segments}"
+            );
+            saw_coalescing |= current_segments <= previous_segments;
+            peak_segments = peak_segments.max(current_segments);
+            previous_segments = current_segments;
+        }
 
         assert!(
-            calls.load(Ordering::Relaxed) > 0,
-            "the configured LogMergePolicy was never consulted"
+            saw_coalescing,
+            "the repeated append run crossed fan-in {LEXICAL_SEGMENT_MERGE_FAN_IN} \
+             without an observable coalescing publication"
+        );
+        assert!(
+            peak_segments < initial_segments + LEXICAL_SEGMENT_MERGE_FAN_IN,
+            "same-tier tiny segments exceeded the configured fan-in bound: \
+             initial={initial_segments}, peak={peak_segments}"
         );
         let index = VerifiedIndex::open(temp.path()).unwrap();
+        assert_eq!(index.document_count(), append_count as u64 + 1);
         assert_eq!(
-            index.searcher.segment_readers().len(),
-            1,
-            "eligible one-document segments were not coalesced"
+            fs::read_dir(temp.path().join(MANIFEST_DIRECTORY))
+                .unwrap()
+                .count(),
+            append_count + 1,
+            "each changed append should publish exactly one logical generation"
         );
-        assert_eq!(index.document_count(), 2);
     }
 
     #[test]
@@ -2571,6 +3031,86 @@ mod tests {
             writer.base_manifest().unwrap().generation_id().unwrap(),
             receipt.generation_id
         );
+    }
+
+    #[test]
+    fn abandoned_publication_reclamation_does_not_construct_index_writer() {
+        let temp = tempdir().unwrap();
+        let source = source("session.jsonl");
+        let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        initial.begin_source(source.clone()).unwrap();
+        initial.add_document(document(&source, 1, "base")).unwrap();
+        initial
+            .certify_source(appendable_certificate(&source, 1, 1, 10))
+            .unwrap();
+        initial.commit(|_| true).unwrap();
+
+        let root_abandoned = temp
+            .path()
+            .join(".ctx-tantivy-atomic-0123456789abcdef0123456789abcdef.tmp");
+        let manifest_abandoned = temp
+            .path()
+            .join(MANIFEST_DIRECTORY)
+            .join(".ctx-tantivy-atomic-fedcba9876543210fedcba9876543210.tmp");
+        fs::write(&root_abandoned, b"abandoned root publication").unwrap();
+        fs::write(&manifest_abandoned, b"abandoned manifest publication").unwrap();
+
+        let mut replay = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        assert!(!root_abandoned.exists());
+        assert!(!manifest_abandoned.exists());
+        let constructions = std::sync::Arc::clone(&replay.index_writer_constructions);
+        let inventory = complete_inventory(&source, 1, vec![source.clone()]);
+        replay
+            .certify_complete_inventory(inventory.clone())
+            .unwrap();
+        stage_exact_replay(&mut replay, &source);
+        replay
+            .commit_with_complete_inventory_revalidation(|_| true, |current| current == &inventory)
+            .unwrap();
+        assert_eq!(
+            constructions.load(Ordering::SeqCst),
+            0,
+            "preflight reclamation must not construct Tantivy IndexWriter"
+        );
+    }
+
+    #[test]
+    fn lazy_writer_handoff_rejects_a_generation_published_in_the_lock_gap() {
+        let temp = tempdir().unwrap();
+        let source = source("session.jsonl");
+        let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        initial.begin_source(source.clone()).unwrap();
+        initial.add_document(document(&source, 1, "base")).unwrap();
+        initial
+            .certify_source(appendable_certificate(&source, 1, 1, 10))
+            .unwrap();
+        initial.commit(|_| true).unwrap();
+
+        let mut stale = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        stale.begin_source_append(source.clone()).unwrap();
+        let competing_root = temp.path().to_path_buf();
+        let competing_source = source.clone();
+        stale.before_writer_handoff = Some(Box::new(move || {
+            let mut competing =
+                GenerationWriter::open(&competing_root, WriterOptions::default()).unwrap();
+            competing.begin_source(competing_source.clone()).unwrap();
+            competing
+                .add_document(document(&competing_source, 1, "competing generation"))
+                .unwrap();
+            competing
+                .certify_source(appendable_certificate(&competing_source, 2, 1, 10))
+                .unwrap();
+            competing.commit(|_| true).unwrap();
+        }));
+
+        let error = stale
+            .add_document(document(&source, 2, "stale delta"))
+            .unwrap_err();
+        assert!(matches!(error, IndexError::ConcurrentGenerationChange));
+
+        let current = VerifiedIndex::open(temp.path()).unwrap();
+        assert_eq!(current.count_term("competing").unwrap(), 1);
+        assert_eq!(current.count_term("stale").unwrap(), 0);
     }
 
     #[test]

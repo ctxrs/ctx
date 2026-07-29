@@ -1,6 +1,6 @@
 mod support;
 
-use ctx_history_index::GenerationManifest;
+use ctx_history_index::{GenerationManifest, LEXICAL_SEGMENT_MERGE_FAN_IN};
 use std::{
     io::Read,
     process::{Child, Command as StdCommand, Stdio},
@@ -705,7 +705,7 @@ fn write_codex_session(path: &Path, native_session_id: &str, messages: &[(&str, 
 }
 
 #[test]
-fn search_refresh_exact_noop_skips_publication_and_tiny_append_is_one_document() {
+fn search_refresh_exact_noop_and_repeated_tiny_appends_stay_bounded() {
     let temp = tempdir();
     let fixture = PathBuf::from(provider_history_fixture("codex-sessions"));
     let sessions = temp.path().join(".codex/sessions");
@@ -776,81 +776,117 @@ fn search_refresh_exact_noop_skips_publication_and_tiny_append_is_one_document()
         (initial_opstamp, initial_segments.clone())
     );
 
-    let source_bytes_before = fs::metadata(&appended_source).unwrap().len();
-    let append_query = "canonical tiny append refresh oracle";
-    append_codex_message(
-        &appended_source,
-        "2026-06-23T15:00:08.000Z",
-        "assistant",
-        append_query,
-    );
-    let appended_bytes = fs::metadata(&appended_source).unwrap().len() - source_bytes_before;
-    assert!(appended_bytes > 0);
+    let append_runs = LEXICAL_SEGMENT_MERGE_FAN_IN + 2;
+    let mut previous_generation = initial_generation;
+    let mut previous_opstamp = initial_opstamp;
+    let mut previous_segments = initial_segments.clone();
+    let mut expected_documents = initial_documents;
+    let mut expected_complete_records = initial_current["current_complete_records"]
+        .as_u64()
+        .unwrap();
+    let mut expected_retained_records = initial_current["current_retained_records"]
+        .as_u64()
+        .unwrap();
+    let mut expected_source_bytes = initial_current["current_certified_source_bytes"]
+        .as_u64()
+        .unwrap();
+    let mut saw_coalescing = false;
 
-    let appended = json_output(ctx(&temp).args([
-        "search",
-        append_query,
-        "--provider",
-        "codex",
-        "--refresh",
-        "wait",
-        "--format=json",
-    ]));
-    assert_source_backed_search_show_oracle(&temp, &appended, "codex", append_query, 1, "message");
-    let append_generation = assert_published_generation(&appended, "wait");
-    assert_ne!(append_generation, initial_generation);
-    assert_eq!(
-        appended["retrieval"]["indexed_documents"],
-        initial_documents + 1,
-        "{appended:#}"
-    );
-    let append_status =
-        assert_daemon_publication(&temp, &append_generation, 1, &["codex", "codex"]);
-    let append_job = &append_status["daemon"]["jobs"]["source_backed_refresh"];
-    assert_eq!(append_job["generation_changed"], true, "{append_job:#}");
-    let append_current = &append_job["receipt"]["current"];
-    assert_eq!(
-        append_current["current_indexed_documents"].as_u64(),
-        initial_current["current_indexed_documents"]
-            .as_u64()
-            .map(|count| count + 1)
-    );
-    assert_eq!(
-        append_current["current_complete_records"].as_u64(),
-        initial_current["current_complete_records"]
-            .as_u64()
-            .map(|count| count + 1)
-    );
-    assert_eq!(
-        append_current["current_retained_records"].as_u64(),
-        initial_current["current_retained_records"]
-            .as_u64()
-            .map(|count| count + 1)
-    );
-    assert_eq!(
-        append_current["current_certified_source_bytes"].as_u64(),
-        initial_current["current_certified_source_bytes"]
-            .as_u64()
-            .map(|bytes| bytes + appended_bytes)
-    );
+    for append_ordinal in 0..append_runs {
+        let source_bytes_before = fs::metadata(&appended_source).unwrap().len();
+        let append_query = format!("canonical tiny append refresh oracle {append_ordinal}");
+        append_codex_message(
+            &appended_source,
+            &format!("2026-06-23T15:00:{:02}.000Z", append_ordinal + 8),
+            "assistant",
+            &append_query,
+        );
+        let appended_bytes = fs::metadata(&appended_source).unwrap().len() - source_bytes_before;
+        assert!(appended_bytes > 0);
 
-    let append_meta = published_file_state(&meta_path);
-    let (append_opstamp, append_segments) = tantivy_meta_facts(&append_meta);
-    let append_index_bytes = directory_bytes(&index_root);
-    assert!(append_opstamp > initial_opstamp);
+        let appended = json_output(ctx(&temp).args([
+            "search",
+            &append_query,
+            "--provider",
+            "codex",
+            "--refresh",
+            "wait",
+            "--format=json",
+        ]));
+        assert_source_backed_search_show_oracle(
+            &temp,
+            &appended,
+            "codex",
+            &append_query,
+            1,
+            "message",
+        );
+        let append_generation = assert_published_generation(&appended, "wait");
+        assert_ne!(append_generation, previous_generation);
+        expected_documents += 1;
+        expected_complete_records += 1;
+        expected_retained_records += 1;
+        expected_source_bytes += appended_bytes;
+        assert_eq!(
+            appended["retrieval"]["indexed_documents"], expected_documents,
+            "{appended:#}"
+        );
+
+        let append_status =
+            assert_daemon_publication(&temp, &append_generation, 1, &["codex", "codex"]);
+        let append_job = &append_status["daemon"]["jobs"]["source_backed_refresh"];
+        assert_eq!(append_job["generation_changed"], true, "{append_job:#}");
+        let append_current = &append_job["receipt"]["current"];
+        assert_eq!(
+            append_current["current_indexed_documents"], expected_documents,
+            "{append_job:#}"
+        );
+        assert_eq!(
+            append_current["current_complete_records"], expected_complete_records,
+            "{append_job:#}"
+        );
+        assert_eq!(
+            append_current["current_retained_records"], expected_retained_records,
+            "{append_job:#}"
+        );
+        assert_eq!(
+            append_current["current_certified_source_bytes"], expected_source_bytes,
+            "{append_job:#}"
+        );
+
+        let append_meta = published_file_state(&meta_path);
+        let (append_opstamp, append_segments) = tantivy_meta_facts(&append_meta);
+        assert!(append_opstamp > previous_opstamp);
+        assert!(
+            append_segments.len() <= previous_segments.len() + 1,
+            "one tiny append exposed more than one additional active segment: \
+             before={previous_segments:?}, after={append_segments:?}"
+        );
+        assert!(
+            append_segments.len() < initial_segments.len() + LEXICAL_SEGMENT_MERGE_FAN_IN,
+            "same-tier active segments exceeded the configured fan-in bound: \
+             initial={initial_segments:?}, current={append_segments:?}"
+        );
+        saw_coalescing |= append_segments.len() <= previous_segments.len();
+        previous_generation = append_generation;
+        previous_opstamp = append_opstamp;
+        previous_segments = append_segments;
+    }
+
     assert!(
-        append_segments.len() <= initial_segments.len() + 1,
-        "one appended document may add at most one uncompacted segment: \
-         before={initial_segments:?}, after={append_segments:?}"
+        saw_coalescing,
+        "the product refresh path crossed merge fan-in {LEXICAL_SEGMENT_MERGE_FAN_IN} \
+         without coalescing"
     );
+    let appended_index_bytes = directory_bytes(&index_root);
     assert!(
-        append_index_bytes <= initial_index_bytes.saturating_mul(2),
-        "one appended document must have bounded relative index growth: \
-         before={initial_index_bytes}, after={append_index_bytes}"
+        appended_index_bytes <= initial_index_bytes.saturating_mul(3),
+        "{append_runs} tiny appends exceeded the amortized retained-byte budget: \
+         before={initial_index_bytes}, after={appended_index_bytes}"
     );
     assert_eq!(
         generation_manifest_paths(&temp).len(),
-        initial_manifests.len() + 1
+        initial_manifests.len() + append_runs
     );
 }
 
