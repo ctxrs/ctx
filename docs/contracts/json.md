@@ -418,13 +418,20 @@ Writes nothing and returns:
 - `source`;
 - `events[]`.
 
+`source` contains the known source lineage ID, provider, provider-owned session
+ID, path, current path existence, working directory, and source format.
 `session` includes the ctx-owned `item_id`, `record_type`, `provider`, and
 `provider_session_id` when known. `event` and `events[]` rows include
 `ctx_event_id`, `record_type`, `ctx_session_id`, `sequence`, `event_type`,
 `role`, `occurred_at`, `source`, `cursor`, and `text` or `preview`. Each
 rendered event also includes `content` with `requested`, `complete`, `origin`,
 `stored_truncated`, and `source_verified`. `origin` is `ctx_index` or
-`provider_source`.
+`provider_source`. Source-backed show hydrates provider-authoritative content,
+so it reports `complete: true`, `origin: "provider_source"`,
+`stored_truncated: false`, and `source_verified: true`; it does not read a
+stored preview or body. A source or event `cursor` is present only when the
+provider exposes a real provenance cursor. Source-backed locators are not
+rendered as cursors.
 
 Complete-content failures are all-or-nothing. JSON mode writes no transcript
 and reports a stable error object containing `error`, `error_code`,
@@ -452,12 +459,16 @@ Writes nothing and returns provenance metadata:
 - `resume`.
 
 `source` includes `path`, `cursor`, `exists`, `source_id`, and
-`source_format` when known. `resume` includes provider cursor or import resume
-metadata when available.
-Event locations can additionally include `source_record`,
-`complete_content.available`, `complete_content.source_family`, and
-`complete_content.locator_kind`. They do not expose locator bytes or complete
-body digests.
+`source_format` when known. `cursor` is omitted when the provider has no real
+provenance cursor; ctx does not synthesize one from a source-backed locator.
+`resume` includes provider cursor or import resume metadata when available.
+Event locations can additionally include safe `source_record` coordinates and
+`complete_content.locator_available`, `complete_content.available`,
+`complete_content.source_family`, and `complete_content.locator_kind`.
+`locator_available` reports that the indexed event retains a typed locator.
+`available` reports conservative current availability and is false when the
+known backing path is absent. Locate does not expose locator key bytes,
+revision evidence, or complete body digests.
 
 ## Transcript Artifacts
 
@@ -503,6 +514,14 @@ exact omitted-result total. Text output ends with exactly
 not by itself make `more_available` true; that flag requires an additional
 shaped result.
 
+`query` is the normalized display of the positional query plus repeatable
+`--term` alternatives: surrounding whitespace is removed and nonempty
+alternatives are joined with ` OR ` in argument order. Suggested scoped-search
+commands preserve the positional/`--term` argument shape and shell-quote every
+user-provided value.
+`generated_at` is the RFC 3339 UTC time at which the result envelope was
+rendered.
+
 Each result can include:
 
 - `ctx_event_id` for event hits;
@@ -534,6 +553,8 @@ file match is backed by normalized touched-file storage and can appear when
 search uses `--file <path>` or when file-path metadata contributes to ranking.
 `citations[]` can cite sessions, events, files, or source metadata depending on
 which indexed item produced the match.
+Per-result and citation `cursor` fields are source-provenance cursors only.
+They are omitted when unavailable and are unrelated to search continuation.
 
 Search JSON is local/private by default.
 
