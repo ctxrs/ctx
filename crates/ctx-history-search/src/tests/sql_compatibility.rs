@@ -58,7 +58,7 @@ fn fresh_sql_compatibility_initializes_only_the_relational_projection() {
 #[test]
 fn committed_source_generation_without_relational_projection_fails_closed() {
     let temp = tempfile::tempdir().unwrap();
-    let generation_root = temp.path().join("source-backed-lexical-v0");
+    let generation_root = temp.path().join("search").join("lexical");
     std::fs::create_dir_all(&generation_root).unwrap();
     std::fs::write(generation_root.join("meta.json"), b"committed").unwrap();
 

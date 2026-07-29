@@ -315,7 +315,9 @@ fn full_scheduler_periodically_runs_the_global_source_refresh_executor() -> Resu
     assert_eq!(semantic_job["status"], "ready");
     assert!(temp
         .path()
-        .join("source-backed-lexical-v0/meta.json")
+        .join("search")
+        .join("lexical")
+        .join("meta.json")
         .is_file());
     Ok(())
 }

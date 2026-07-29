@@ -69,7 +69,7 @@ pub(crate) fn write_sqlite_fixture_from_sql(sql_fixture: &str, db_path: &Path) {
 }
 
 pub(crate) fn initialize_generation_only_sql_projection(data_root: &Path) -> String {
-    let index_root = data_root.join("source-backed-lexical-v0");
+    let index_root = data_root.join("search").join("lexical");
     let writer = GenerationWriter::open(
         &index_root,
         WriterOptions {

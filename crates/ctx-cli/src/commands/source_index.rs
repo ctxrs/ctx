@@ -39,7 +39,8 @@ use crate::{
     LocateArgs, LocateTarget, RefreshArg, SearchArgs, SearchBackendArg, ShowArgs, ShowTarget,
 };
 
-const INDEX_DIRECTORY: &str = "source-backed-lexical-v0";
+const SEARCH_DIRECTORY: &str = "search";
+const LEXICAL_DIRECTORY: &str = "lexical";
 const LEGACY_ACTIVE_SESSION_PROVIDER_ENV: &str = "CODEX_THREAD_ID";
 const LEGACY_ACTIVE_SESSION_PROVIDER: CaptureProvider = CaptureProvider::Codex;
 const MAX_SESSION_DIVERSITY_CANDIDATES: usize = 64 * 1024;
@@ -1885,7 +1886,7 @@ fn open_index(data_root: &Path) -> Result<VerifiedIndex> {
 }
 
 fn index_root(data_root: &Path) -> PathBuf {
-    data_root.join(INDEX_DIRECTORY)
+    data_root.join(SEARCH_DIRECTORY).join(LEXICAL_DIRECTORY)
 }
 
 fn timestamp_json(timestamp: Option<i64>) -> Option<String> {
@@ -2397,7 +2398,8 @@ mod tests {
         .unwrap();
         assert!(temp
             .path()
-            .join("source-backed-semantic-flat-f32-v0")
+            .join("search")
+            .join("semantic")
             .is_dir());
         assert!(
             !temp.path().join("semantic-vectors").exists(),
@@ -2478,7 +2480,8 @@ mod tests {
         assert_eq!(collection.hits.len(), 1);
         assert!(!temp
             .path()
-            .join("source-backed-semantic-flat-f32-v0")
+            .join("search")
+            .join("semantic")
             .exists());
         assert!(!database_path(temp.path().to_path_buf()).exists());
     }
