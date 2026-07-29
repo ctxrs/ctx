@@ -75,9 +75,14 @@ pub(crate) struct DeepAgentsNativeEvent {
     pub(crate) provider_event_hash: Option<String>,
     pub(crate) cursor: String,
     pub(crate) event_type: EventType,
+    // Role, time, and provider metadata remain part of the exact native event
+    // shape consumed by non-Core materializers.
+    #[allow(dead_code)]
     pub(crate) role: Option<EventRole>,
+    #[allow(dead_code)]
     pub(crate) occurred_at: DateTime<Utc>,
     pub(crate) payload: Value,
+    #[allow(dead_code)]
     pub(crate) metadata: Value,
 }
 
@@ -208,7 +213,11 @@ fn deepagents_output_outcome(message: &DeepAgentsMessage) -> OutputOutcomeMetada
 
 #[derive(Debug, Clone)]
 pub(super) struct DeepAgentsMessageRejection {
+    // Exact rejected-entry location and text are retained for provider
+    // diagnostics even though the release summary consumes only counts.
+    #[allow(dead_code)]
     pub(super) entry_offset: usize,
+    #[allow(dead_code)]
     pub(super) error: String,
 }
 

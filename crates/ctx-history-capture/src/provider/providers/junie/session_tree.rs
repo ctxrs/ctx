@@ -79,9 +79,14 @@ struct JunieIndex {
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct JunieSessionTreeVisit {
+    // Traversal detail and retained authority remain provider diagnostics; the
+    // release coordinator currently consumes only rejection_count.
+    #[allow(dead_code)]
     pub(super) visited: usize,
     pub(super) rejection_count: u64,
+    #[allow(dead_code)]
     pub(super) rejections: Vec<ProviderImportFailure>,
+    #[allow(dead_code)]
     pub(super) authority: Option<ProviderSourceRoot>,
 }
 

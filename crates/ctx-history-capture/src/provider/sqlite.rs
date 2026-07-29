@@ -419,27 +419,6 @@ pub(crate) fn open_sqlite_readonly_source(path: &Path) -> Result<ReadOnlySqliteC
     })
 }
 
-pub(crate) fn with_sqlite_read_snapshot<T>(
-    conn: &Connection,
-    read: impl FnOnce() -> Result<T>,
-) -> Result<T> {
-    // Root-authorized connections already own the snapshot transaction pinned by
-    // `open_root_handle_sqlite_source_snapshot`; never nest another transaction in it.
-    if !conn.is_autocommit() {
-        return read();
-    }
-    // Keep provider snapshots scoped to one bounded read. Callers can release the
-    // snapshot before writing to the ctx Store, even when they reuse the connection.
-    conn.execute_batch("begin")?;
-    let read_result = read();
-    let rollback_result = conn.execute_batch("rollback");
-    match (read_result, rollback_result) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Err(error), Ok(())) => Err(error),
-        (_, Err(error)) => Err(CaptureError::from(error)),
-    }
-}
-
 #[cold]
 fn inactive_readonly_sqlite_connection() -> ! {
     std::process::abort()

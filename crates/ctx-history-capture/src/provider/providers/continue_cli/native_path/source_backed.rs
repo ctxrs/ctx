@@ -23,7 +23,7 @@ use super::{
         locate_continue_exact_history_item, ContinueExactHistoryLookup, ContinueIncompleteSource,
         ContinueOutputExclusionStats, ContinueSourceFailure,
     },
-    source::{ContinueDiscovery, ContinueRootAuthority},
+    source::ContinueDiscovery,
     ContinueEventKind, ContinueEventRole, ContinueEventRow, ContinueGenerationAuthority,
     ContinueIndexObservation, ContinueNativePathError, ContinueSessionRow,
     ContinueSourceObservation,
@@ -88,10 +88,17 @@ pub(crate) type ContinueSourceBackedResult<T> = Result<T, ContinueSourceBackedEr
 /// coordinator. The terminal page carries its final source certificate.
 #[derive(Debug)]
 pub(crate) struct ContinueSourceBackedPage {
+    // Provider paging identity/accounting is retained for deterministic release
+    // receipts even when the shared coordinator consumes only payload vectors.
+    #[allow(dead_code)]
     pub(crate) page_identity: [u8; 32],
+    #[allow(dead_code)]
     pub(crate) page_ordinal: u64,
+    #[allow(dead_code)]
     pub(crate) expected_history_ordinal: u64,
+    #[allow(dead_code)]
     pub(crate) next_history_ordinal: u64,
+    #[allow(dead_code)]
     pub(crate) logical_units: usize,
     pub(crate) estimated_bytes: usize,
     pub(crate) documents: Vec<LexicalDocument>,
@@ -103,10 +110,15 @@ pub(crate) struct ContinueSourceBackedPage {
 #[derive(Debug)]
 pub(crate) struct ContinueSourceBackedLeaf {
     pub(crate) source: SourceKey,
+    // Terminal provider evidence remains coupled to the certificate so rebuild
+    // and exact-hydration consumers can evolve without changing page shape.
+    #[allow(dead_code)]
     pub(crate) session: ContinueSessionRow,
     pub(crate) session_id: StableEntityId,
     pub(crate) certificate: CertifiedSource,
+    #[allow(dead_code)]
     pub(crate) source_observation: ContinueSourceObservation,
+    #[allow(dead_code)]
     pub(crate) index_dependency: ContinueIndexObservation,
     pub(crate) output_exclusion: ContinueOutputExclusionStats,
 }
@@ -117,6 +129,8 @@ pub(crate) struct ContinueSourceBackedLeaf {
 #[derive(Debug)]
 pub(crate) enum ContinueSourceBackedOutcome {
     Page(ContinueSourceBackedPage),
+    // Preserve the bounded provider-owned diagnostic payload.
+    #[allow(dead_code)]
     Incomplete(Box<ContinueIncompleteSource>),
     Failed(ContinueSourceFailure),
 }
@@ -146,10 +160,6 @@ impl<'a> ContinueSourceBackedReader<'a> {
             native: prepare_continue_discovery(discovery)?,
             active: None,
         })
-    }
-
-    pub(crate) fn root_authority(&self) -> &ContinueRootAuthority {
-        self.native.root_authority()
     }
 
     pub(crate) fn next_outcome(

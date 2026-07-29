@@ -25,12 +25,17 @@ pub(super) struct MuxMessageRow {
 #[derive(Debug)]
 pub(super) struct MuxCoreEvent {
     pub(super) provider_event_index: u64,
+    // Hash, cursor, and metadata remain exact native-event evidence for
+    // non-Core materializers.
+    #[allow(dead_code)]
     pub(super) provider_event_hash: String,
+    #[allow(dead_code)]
     pub(super) cursor: String,
     pub(super) event_type: EventType,
     pub(super) role: Option<EventRole>,
     pub(super) occurred_at: DateTime<Utc>,
     pub(super) payload: Value,
+    #[allow(dead_code)]
     pub(super) metadata: Value,
 }
 

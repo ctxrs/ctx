@@ -1,13 +1,10 @@
 use chrono::{DateTime, Utc};
-use ctx_history_core::{CaptureProvider, ContentRef, EventRole, EventType};
+use ctx_history_core::{EventRole, EventType};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::complete_content::{
-    attach_verified_content_locator, verified_content_profile, CompleteContentBodyDigest,
-    CompleteContentSourceFamily, VerifiedContentLocatorV1, VerifiedContentRole,
-};
-use crate::native_source::{NativeLocator, NativeSqliteValue};
+use crate::complete_content::CompleteContentBodyDigest;
+use crate::native_source::NativeSqliteValue;
 use crate::provider::normalization::{
     provider_capped_json, provider_json_text, provider_nonnegative_i64_to_u64,
     provider_policy_body, provider_policy_event_text, provider_required_timestamp_seconds,
@@ -24,7 +21,6 @@ pub(crate) mod source_backed;
 mod sqlite;
 
 use self::layout::{decode_hermes_message, HermesMessageRow, HermesSchema, HermesSqliteValue};
-use self::sqlite::{HermesLocator, HERMES_LOCATOR_KIND};
 
 pub(super) const HERMES_CAPTURE_REVISION: u32 = 2;
 pub(super) const HERMES_POLICY_REVISION: u32 = 6;
@@ -101,16 +97,9 @@ fn hermes_sqlite_value(value: &NativeSqliteValue) -> Result<HermesSqliteValue> {
 }
 
 #[derive(Clone, Debug)]
-struct HermesPreparedCompleteContent {
-    content_ref: ContentRef,
-    record_digest: CompleteContentBodyDigest,
-}
-
-#[derive(Clone, Debug)]
 struct HermesPreparedCoreMessage {
     native: HermesNativeEvent,
     record_digest: CompleteContentBodyDigest,
-    complete_content: Option<HermesPreparedCompleteContent>,
 }
 
 impl HermesPreparedCoreMessage {
@@ -135,71 +124,11 @@ fn prepare_hermes_core_message(
 ) -> Result<HermesPreparedCoreMessage> {
     let mut native = hermes_native_event(row, source_record_ordinal)?;
     let record_digest = hermes_layout_record_digest(values);
-    let complete_content = if native.event_type == EventType::Message
-        && native
-            .payload
-            .pointer("/text_retention/truncated")
-            .and_then(Value::as_bool)
-            == Some(true)
-    {
-        let content_ref = ContentRef::from_bytes(native.complete_text.as_bytes()).ok_or(
-            CaptureError::SystemInvariant("SQLite content length exceeds ContentRef bounds"),
-        )?;
-        Some(HermesPreparedCompleteContent {
-            content_ref,
-            record_digest: record_digest.clone(),
-        })
-    } else {
-        None
-    };
     native.complete_text.clear();
     Ok(HermesPreparedCoreMessage {
         native,
         record_digest,
-        complete_content,
     })
-}
-
-fn attach_hermes_complete_content(
-    event: &mut HermesNativeEvent,
-    locator: &HermesLocator,
-    prepared: Option<&HermesPreparedCompleteContent>,
-) -> Result<()> {
-    let Some(prepared) = prepared else {
-        return Ok(());
-    };
-    let locator = NativeLocator::new(HERMES_LOCATOR_KIND, locator.payload())
-        .map_err(hermes_native_source_error)?;
-    let profile = verified_content_profile(
-        CaptureProvider::Hermes,
-        HERMES_SQLITE_SOURCE_FORMAT,
-        CompleteContentSourceFamily::Sqlite,
-        VerifiedContentRole::MessageBody,
-    )
-    .ok_or(CaptureError::SystemInvariant(
-        "supported SQLite message route must have a verified-content profile",
-    ))?;
-    let native_record_id = event
-        .provider_event_hash
-        .clone()
-        .unwrap_or_else(|| event.cursor.clone());
-    let persisted = VerifiedContentLocatorV1::new(
-        VerifiedContentRole::MessageBody,
-        profile,
-        prepared.content_ref.clone(),
-        CompleteContentSourceFamily::Sqlite,
-        locator.kind(),
-        locator.value(),
-        native_record_id,
-        prepared.record_digest.clone(),
-    )
-    .ok_or(CaptureError::SystemInvariant(
-        "SQLite complete-content locator exceeds the bounded canonical schema",
-    ))?;
-    attach_verified_content_locator(&mut event.metadata, persisted).ok_or(
-        CaptureError::SystemInvariant("verified-content locator collection is malformed"),
-    )?;
-    Ok(())
 }
 
 fn hermes_message_revision(row: &HermesMessageRow) -> Result<String> {
@@ -210,6 +139,9 @@ fn hermes_message_revision(row: &HermesMessageRow) -> Result<String> {
 #[derive(Clone, Debug)]
 pub(super) struct HermesNativeEvent {
     pub(super) provider_event_index: u64,
+    // Preserve the provider hash in the exact native event shape for staging
+    // Pro and diagnostic materializers.
+    #[allow(dead_code)]
     pub(super) provider_event_hash: Option<String>,
     pub(super) cursor: String,
     pub(super) event_type: EventType,
@@ -506,10 +438,6 @@ fn hermes_event_type(row: &HermesMessageRow) -> EventType {
     } else {
         EventType::Message
     }
-}
-
-pub(super) fn hermes_native_source_error(error: impl std::fmt::Display) -> CaptureError {
-    CaptureError::InvalidPayload(error.to_string())
 }
 
 #[cfg(test)]

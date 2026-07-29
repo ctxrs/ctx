@@ -7,6 +7,10 @@ use crate::provider::normalization::provider_value_text;
 /// Result reopening is deliberately narrower than display text: only the
 /// provider's `content` field is eligible. Names and tool-call summaries are
 /// presentation fallbacks and must never become result evidence.
+///
+/// Retained as the crate-visible cross-target complete-content seam while the
+/// current Linux Core graph has no direct caller.
+#[allow(dead_code)]
 pub(crate) fn firebender_result_content(message: &Value) -> Option<String> {
     (message.get("role").and_then(Value::as_str) == Some("tool"))
         .then(|| message.get("content").and_then(firebender_content_text))

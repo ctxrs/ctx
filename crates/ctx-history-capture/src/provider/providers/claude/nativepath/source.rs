@@ -39,8 +39,6 @@ pub(crate) enum ClaudeNativePathError {
     StaleDiscovery { path: PathBuf },
     #[error("Claude source changed while it was parsed: {path}")]
     SourceChanged { path: PathBuf },
-    #[error("Claude inventory changed after discovery: {path}")]
-    InventoryChanged { path: PathBuf },
     #[error("invalid Claude NativePath checkpoint: {reason}")]
     InvalidCheckpoint { reason: String },
     #[error("Claude NativePath byte or ordinal position overflow")]
@@ -84,12 +82,6 @@ impl ClaudeSessionKey {
             ),
             (Some(_), None) => self.root_session_id.clone(),
         }
-    }
-
-    pub(crate) fn parent_provider_session_id(&self) -> Option<&str> {
-        self.agent_id
-            .as_ref()
-            .map(|_| self.root_session_id.as_str())
     }
 }
 
@@ -265,16 +257,6 @@ impl PartialEq for ClaudeDiscovery {
 impl Eq for ClaudeDiscovery {}
 
 impl ClaudeDiscovery {
-    pub(crate) fn revalidate_inventory(&self) -> Result<(), ClaudeNativePathError> {
-        let current = self.rediscover()?;
-        if current.inventory != self.inventory {
-            return Err(ClaudeNativePathError::InventoryChanged {
-                path: self.root.clone(),
-            });
-        }
-        Ok(())
-    }
-
     pub(crate) fn rediscover(&self) -> Result<Self, ClaudeNativePathError> {
         discover_from_authority(&self.root, self.authority.clone())
     }

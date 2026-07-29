@@ -26,26 +26,6 @@ pub(crate) struct KiroConversationRow {
     pub(crate) updated_at: Option<i64>,
 }
 
-pub(super) fn kiro_row_complete_values(row: &KiroConversationRow) -> Vec<NativeSqliteValue> {
-    match row.table {
-        "conversations_v2" => vec![
-            NativeSqliteValue::Integer(row.rowid),
-            NativeSqliteValue::Text(row.key.clone()),
-            NativeSqliteValue::Text(row.conversation_id.clone().unwrap_or_default()),
-            NativeSqliteValue::Text(row.value.clone()),
-            row.created_at
-                .map_or(NativeSqliteValue::Null, NativeSqliteValue::Integer),
-            row.updated_at
-                .map_or(NativeSqliteValue::Null, NativeSqliteValue::Integer),
-        ],
-        _ => vec![
-            NativeSqliteValue::Integer(row.rowid),
-            NativeSqliteValue::Text(row.key.clone()),
-            NativeSqliteValue::Text(row.value.clone()),
-        ],
-    }
-}
-
 pub(super) fn decode_kiro_conversation(
     record_kind: &str,
     values: &[NativeSqliteValue],
@@ -142,28 +122,6 @@ pub(crate) fn kiro_session_started_at(
         .unwrap_or_else(|| provider_timestamp_millis(row.created_at, fallback))
 }
 
-pub(crate) fn kiro_session_ended_at(
-    row: &KiroConversationRow,
-    value: &Value,
-    fallback: DateTime<Utc>,
-) -> DateTime<Utc> {
-    value
-        .get("history")
-        .and_then(Value::as_array)
-        .and_then(|history| {
-            history
-                .iter()
-                .flat_map(|entry| {
-                    [
-                        kiro_entry_timestamp(entry, "user", fallback),
-                        kiro_entry_timestamp(entry, "assistant", fallback),
-                    ]
-                })
-                .max()
-        })
-        .unwrap_or_else(|| provider_timestamp_millis(row.updated_at.or(row.created_at), fallback))
-}
-
 pub(crate) fn kiro_entry_timestamp(
     entry: &Value,
     role: &str,
@@ -246,7 +204,6 @@ pub(super) fn kiro_history_entry_events(
     let mut events = Vec::with_capacity(2);
     if let Some(text) = kiro_user_prompt_text(entry) {
         events.push(KiroNativeHistoryEvent {
-            complete_text: text.clone(),
             event: kiro_native_event(
                 row,
                 provider_session_id,
@@ -263,7 +220,6 @@ pub(super) fn kiro_history_entry_events(
     }
     if let Some(assistant) = kiro_assistant_message(entry) {
         events.push(KiroNativeHistoryEvent {
-            complete_text: assistant.text.clone(),
             event: kiro_native_event(
                 row,
                 provider_session_id,
@@ -283,7 +239,6 @@ pub(super) fn kiro_history_entry_events(
 
 pub(super) struct KiroNativeHistoryEvent {
     pub(super) event: KiroNativeEvent,
-    pub(super) complete_text: String,
 }
 
 #[derive(Clone, Copy)]

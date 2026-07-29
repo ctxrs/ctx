@@ -54,7 +54,10 @@ impl MuxFrontier {
 
 #[derive(Debug, Clone)]
 pub(super) struct MuxFailure {
+    // Preserve exact rejected-line diagnostics in the bounded page shape.
+    #[allow(dead_code)]
     pub(super) line: usize,
+    #[allow(dead_code)]
     pub(super) error: String,
 }
 

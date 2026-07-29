@@ -13,8 +13,8 @@ use sha2::{Digest, Sha256};
 
 use crate::provider::file_touches::visit_all_file_touch_drafts;
 use crate::{
-    common::io::{open_provider_source_file, OpenedProviderSourceFile},
-    CaptureError, OutputOutcome, Result, MAX_PROVIDER_JSONL_LINE_BYTES,
+    common::io::OpenedProviderSourceFile, CaptureError, OutputOutcome, Result,
+    MAX_PROVIDER_JSONL_LINE_BYTES,
 };
 
 use super::super::{
@@ -86,26 +86,6 @@ pub(crate) struct DirectJsonlPageReader {
     skip_scan: bool,
     finished: bool,
     outcome: Option<DirectJsonlScanOutcome>,
-}
-
-pub(crate) fn open_direct_jsonl_pages(
-    provider: CaptureProvider,
-    source_format: &str,
-    path: &Path,
-    source_root: Option<PathBuf>,
-    imported_at: DateTime<Utc>,
-    previous: Option<&DirectJsonlCheckpoint>,
-) -> Result<DirectJsonlPageReader> {
-    let opened = Arc::new(open_provider_source_file(path)?);
-    open_direct_jsonl_pages_from_opened(
-        provider,
-        source_format,
-        path,
-        source_root,
-        imported_at,
-        previous,
-        opened,
-    )
 }
 
 pub(crate) fn open_direct_jsonl_pages_from_opened(

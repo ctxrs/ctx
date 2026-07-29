@@ -52,8 +52,6 @@ const MAX_CONTINUE_DIRECTORY_DEPTH: usize = 128;
 const MAX_CONTINUE_INVENTORY_ENTRIES: usize = 8_192;
 // Keep optional-index residency bounded by the same fixed corpus ceiling.
 const MAX_CONTINUE_INDEX_ENTRIES: usize = MAX_CONTINUE_INVENTORY_ENTRIES;
-#[cfg(test)]
-const MAX_CONTINUE_PENDING_PAGE_PATHS: usize = 256;
 const MAX_SPOOLED_PATH_BYTES: usize = 64 * 1024;
 
 #[derive(Debug)]
@@ -73,6 +71,9 @@ pub(crate) struct ContinueSourceObservation {
     file_token: [u8; 32],
     session_revision: String,
     raw_bytes: u64,
+    // Retain the opened authority with the observation so commit-time
+    // revalidation can be restored without reopening by pathname.
+    #[allow(dead_code)]
     opened: Arc<OpenedProviderSourceFile>,
 }
 
@@ -105,6 +106,9 @@ impl ContinueSourceObservation {
         self.raw_bytes
     }
 
+    // This is the authority-preserving revalidation operation for the retained
+    // observation shape; the current coordinator revalidates at the root.
+    #[allow(dead_code)]
     pub(crate) fn revalidate(&self) -> Result<bool, ContinueNativePathError> {
         let snapshot = match read_opened_exact_file(
             &self.requested_path,
@@ -193,11 +197,6 @@ impl ContinueIndexObservation {
         &self.path
     }
 
-    #[cfg(test)]
-    pub(crate) fn state(&self) -> ContinueIndexState {
-        self.state
-    }
-
     pub(crate) fn dependency_revision(&self) -> &str {
         &self.dependency_revision
     }
@@ -219,7 +218,11 @@ pub(crate) struct ContinueIndexMetadata {
 pub(crate) struct ContinueIndexSnapshot {
     observation: ContinueIndexObservation,
     metadata_entries: Vec<ContinueIndexEntry>,
+    // These retain the exact admitted index authority for item-local
+    // revalidation; the current release path consumes only its observation.
+    #[allow(dead_code)]
     authority: ProviderSourceRoot,
+    #[allow(dead_code)]
     relative_path: PathBuf,
     #[cfg(test)]
     entry_count: usize,
@@ -269,6 +272,9 @@ impl ContinueIndexSnapshot {
         self.metadata_entries.len()
     }
 
+    // Kept with the authority-bearing index snapshot for a future commit-time
+    // check without changing the release data shape.
+    #[allow(dead_code)]
     pub(crate) fn revalidate(&self) -> bool {
         observe_continue_index(&self.authority, self.relative_path.clone()).observation
             == self.observation
@@ -277,12 +283,15 @@ impl ContinueIndexSnapshot {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ContinueRootAuthority {
+    // The named root and discovery cardinality are retained diagnostic evidence.
+    #[allow(dead_code)]
     root: PathBuf,
     authority: ProviderSourceRoot,
     selected_relative: PathBuf,
     selected_file: bool,
     complete: bool,
     #[cfg(test)]
+    #[allow(dead_code)]
     discovered_sources: usize,
     inventory_entries: usize,
     inventory_digest: String,
@@ -293,26 +302,31 @@ pub(crate) struct ContinueRootAuthority {
 
 impl ContinueRootAuthority {
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn is_complete(&self) -> bool {
         self.complete
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn discovered_sources(&self) -> usize {
         self.discovered_sources
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn inventory_digest(&self) -> &str {
         &self.inventory_digest
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn before_token(&self) -> &[u8; 32] {
         &self.before_token
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn after_token(&self) -> &[u8; 32] {
         &self.after_token
     }
@@ -405,6 +419,8 @@ pub(crate) struct ContinueDiscovery {
     index: ContinueIndexSnapshot,
     root_authority: ContinueRootAuthority,
     #[cfg(test)]
+    // Retained as focused discovery-accounting evidence.
+    #[allow(dead_code)]
     stats: ContinueDiscoveryStats,
 }
 
@@ -440,6 +456,7 @@ impl ContinueDiscovery {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn stats(&self) -> ContinueDiscoveryStats {
         self.stats
     }
@@ -536,97 +553,6 @@ pub(crate) fn discover_continue_root(
         spool,
         index,
         #[cfg(test)]
-        stats,
-    })
-}
-
-#[cfg(test)]
-pub(crate) fn observe_continue_pending_paths(
-    root: &Path,
-    source_paths: impl IntoIterator<Item = PathBuf>,
-) -> Result<ContinueDiscovery, ContinueNativePathError> {
-    let normalized_root = normalized_continue_authority_path(root)?;
-    let authority = ProviderSourceRoot::open(&normalized_root)
-        .map_err(|error| capture_source_error(root, "open pending Continue root", error))?;
-    let canonical_root = authority.named_path().to_path_buf();
-    let mut bounded_paths = Vec::with_capacity(MAX_CONTINUE_PENDING_PAGE_PATHS);
-    for path in source_paths {
-        if bounded_paths.len() >= MAX_CONTINUE_PENDING_PAGE_PATHS {
-            return Err(ContinueNativePathError::PendingPageTooLarge {
-                limit: MAX_CONTINUE_PENDING_PAGE_PATHS,
-                observed: bounded_paths.len().saturating_add(1),
-            });
-        }
-        bounded_paths.push(path);
-    }
-    let mut canonical_paths = Vec::with_capacity(bounded_paths.len());
-    let mut spool = ContinuePathSpool::new(root)?;
-    for path in bounded_paths {
-        let canonical_path = normalized_continue_authority_path(&path)?;
-        let relative = canonical_path.strip_prefix(&canonical_root).map_err(|_| {
-            ContinueNativePathError::SourceAccess {
-                path: path.clone(),
-                message: "pending Continue observation must be a direct child of its retained root"
-                    .to_owned(),
-            }
-        })?;
-        if relative.components().count() != 1
-            || !matches!(relative.components().next(), Some(Component::Normal(_)))
-        {
-            return Err(ContinueNativePathError::SourceAccess {
-                path,
-                message: "pending Continue observation must be a direct child of its retained root"
-                    .to_owned(),
-            });
-        }
-        if !super::super::continue_session_json_path(&canonical_path) {
-            return Err(ContinueNativePathError::SourceAccess {
-                path,
-                message: "pending Continue observation is not a session JSON document".to_owned(),
-            });
-        }
-        authority
-            .open_file(relative)
-            .and_then(|opened| opened.revalidate())
-            .map_err(|error| {
-                capture_source_error(&path, "validate pending Continue source", error)
-            })?;
-        canonical_paths.push(canonical_path);
-    }
-    canonical_paths.sort();
-    canonical_paths.dedup();
-    for path in canonical_paths {
-        spool.push(&path)?;
-    }
-    let index = ContinueIndexSnapshot::observe(&authority, PathBuf::from("sessions.json"));
-    let stats = ContinueDiscoveryStats {
-        scanned_session_paths: spool.entries,
-        inventory_entries: 0,
-        index_observations: 1,
-        index_content_reads: usize::from(index.content_read),
-        index_entries: index.entry_count(),
-        index_resident_metadata_entries: index.resident_metadata_entries(),
-        spooled_path_bytes: spool.bytes,
-        maximum_spool_record_bytes: spool.maximum_record_bytes,
-        maximum_directory_sort_entries: 0,
-        maximum_directory_sort_key_bytes: 0,
-    };
-    Ok(ContinueDiscovery {
-        root_authority: ContinueRootAuthority {
-            root: canonical_root,
-            authority,
-            selected_relative: PathBuf::new(),
-            selected_file: false,
-            complete: false,
-            discovered_sources: spool.entries,
-            inventory_entries: 0,
-            inventory_digest: String::new(),
-            before_token: [0; 32],
-            after_token: [0; 32],
-            mutation_watch: None,
-        },
-        spool,
-        index,
         stats,
     })
 }

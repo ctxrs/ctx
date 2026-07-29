@@ -12,8 +12,8 @@ use sha2::{Digest, Sha256};
 
 use crate::common::io::{OpenedProviderSourceFile, ProviderSourceDirectory, ProviderSourceRoot};
 use crate::provider::provider_safe_path_segment;
+use crate::provider::sqlite::sqlite_component_change_token;
 use crate::provider::sqlite::{open_provider_sqlite_readonly, ReadOnlySqliteConnection};
-use crate::provider::sqlite::{sqlite_component_change_token, with_sqlite_read_snapshot};
 use crate::provider_sources::{
     observe_ordinary_file, open_root_handle_sqlite_source_snapshot,
     retain_sqlite_source_directory_authority, SqliteSourceAccessError,
@@ -700,28 +700,6 @@ impl NanoClawSourceBackedProject {
 }
 
 impl NanoClawProjectSnapshot {
-    pub(super) fn read(project_root: &Path, central_path: &Path) -> Result<Self> {
-        Self::read_inner(project_root, central_path)
-    }
-
-    fn read_inner(project_root: &Path, central_path: &Path) -> Result<Self> {
-        let central = NanoClawSqliteSnapshot::read(central_path)?;
-        let conn = open_provider_sqlite_readonly(central_path)?;
-        let inventory = with_sqlite_read_snapshot(&conn, || {
-            nanoclaw_stream_inventory(project_root, &conn, None)
-        })?;
-        let snapshot = Self {
-            central_path: central_path.to_path_buf(),
-            central,
-            central_root_bound: None,
-            inventory,
-        };
-        if !snapshot.revalidate_frozen_inventory()? {
-            return Err(CaptureError::SourceChangedDuringCapture);
-        }
-        Ok(snapshot)
-    }
-
     pub(super) fn source_backed_revision_evidence(
         &self,
         user_version: i64,
@@ -748,15 +726,6 @@ impl NanoClawProjectSnapshot {
         })?)
     }
 
-    pub(super) fn source_revision(&self, user_version: i64, schema_fingerprint: &str) -> String {
-        format!(
-            "nanoclaw-project-snapshot-v1:capture={NANOCLAW_CAPTURE_REVISION};policy={NANOCLAW_POLICY_REVISION};user_version={user_version};schema={schema_fingerprint};sessions={};inventory={};central={}",
-            self.inventory.session_count,
-            nanoclaw_hex(&self.inventory.digest),
-            nanoclaw_hex(&self.central.digest()),
-        )
-    }
-
     pub(super) fn database(
         &self,
         rowid: i64,
@@ -777,10 +746,6 @@ impl NanoClawProjectSnapshot {
     }
 
     pub(super) fn revalidate(&self) -> Result<bool> {
-        self.revalidate_frozen_inventory()
-    }
-
-    pub(super) fn revalidate_before_commit(&self) -> Result<bool> {
         self.revalidate_frozen_inventory()
     }
 

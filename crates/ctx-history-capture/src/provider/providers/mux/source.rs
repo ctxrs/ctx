@@ -94,11 +94,6 @@ pub(super) struct MuxFrozenFile {
 }
 
 impl MuxFrozenFile {
-    pub(super) fn read(path: &Path) -> Result<Self> {
-        ensure_regular_provider_transcript_file(path)?;
-        Self::from_metadata(&fs::symlink_metadata(path)?)
-    }
-
     pub(super) fn from_metadata(metadata: &Metadata) -> Result<Self> {
         #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
@@ -152,14 +147,6 @@ impl MuxFileObservation {
         })
     }
 
-    pub(super) fn read(path: &Path, metadata_path: Option<&Path>) -> Result<Self> {
-        Ok(Self {
-            canonical_path: fs::canonicalize(path)?,
-            content: MuxFrozenFile::read(path)?,
-            metadata: metadata_path.map(MuxFrozenFile::read).transpose()?,
-        })
-    }
-
     pub(super) fn source_revision(&self, kind: &str) -> String {
         let mut input = format!(
             "mux-{kind}-v1\0capture={MUX_CAPTURE_REVISION}\0policy={MUX_POLICY_REVISION}\ncontent\n"
@@ -187,28 +174,6 @@ impl MuxFileObservation {
             None => input.push_str("missing\n"),
         }
         format!("mux-metadata-v1:fnv1a64:{:016x}", fnv1a64(input.as_bytes()))
-    }
-
-    pub(super) fn revalidate(&self, path: &Path, metadata_path: Option<&Path>) -> Result<bool> {
-        let content = match MuxFrozenFile::read(path) {
-            Ok(content) => content,
-            Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(false);
-            }
-            Err(CaptureError::InvalidProviderTranscriptPath { .. }) => return Ok(false),
-            Err(error) => return Err(error),
-        };
-        let metadata = match metadata_path.map(MuxFrozenFile::read).transpose() {
-            Ok(metadata) => metadata,
-            Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(false);
-            }
-            Err(CaptureError::InvalidProviderTranscriptPath { .. }) => return Ok(false),
-            Err(error) => return Err(error),
-        };
-        Ok(content == self.content
-            && metadata == self.metadata
-            && fs::canonicalize(path)? == self.canonical_path)
     }
 }
 

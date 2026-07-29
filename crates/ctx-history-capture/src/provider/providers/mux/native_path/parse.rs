@@ -1,5 +1,8 @@
 use super::*;
 
+// Retain the exact frontier-opening primitive for generated/cross-target Mux
+// graphs; the current Linux source-backed route owns an equivalent local path.
+#[allow(dead_code)]
 pub(super) fn open_reader_at_frontier(
     path: &Path,
     frontier: &MuxFrontier,

@@ -166,10 +166,6 @@ impl FirebenderSourceBackedScanner {
         &self.source
     }
 
-    pub(crate) fn opening_observation(&self) -> &SourceObservation {
-        &self.opening
-    }
-
     pub(crate) fn next_page(
         &mut self,
     ) -> FirebenderSourceBackedResult<Option<FirebenderSourceBackedPage>> {
@@ -332,10 +328,6 @@ impl OpenedFirebenderSource {
             observation,
             database,
         })
-    }
-
-    fn revalidate(&self) -> FirebenderSourceBackedResult<()> {
-        self.database.revalidate().map_err(Into::into)
     }
 }
 

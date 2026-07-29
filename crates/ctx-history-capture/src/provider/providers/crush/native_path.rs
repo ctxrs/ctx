@@ -21,6 +21,9 @@ const CRUSH_NATIVE_MAX_ROW_BYTES: u64 = 6 * 1024 * 1024;
 const CRUSH_NATIVE_PAGE_OVERHEAD_BYTES: usize = 4 * 1024;
 const CRUSH_NATIVE_MAX_EVENT_TOUCHES: usize = 3_000;
 
+// The query decoder remains phase-complete even though the release source-backed
+// route currently emits only message rows.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CrushNativePhase {
     Sessions,
@@ -49,7 +52,8 @@ struct CrushNativeFrontier {
 
 // This is the per-row hydration result. Boxing the 400-byte message row merely
 // to approach the 184-byte session variant would add an allocation per row.
-#[allow(clippy::large_enum_variant)]
+// Non-message variants remain part of the phase-complete query data shape.
+#[allow(clippy::large_enum_variant, dead_code)]
 enum CrushHydratedRow {
     Session {
         row: CrushSessionRow,
@@ -76,7 +80,6 @@ struct CrushNativeSchema {
     message_columns: BTreeSet<String>,
     file_columns: Option<BTreeSet<String>>,
     read_file_columns: Option<BTreeSet<String>>,
-    user_version: i64,
     schema_fingerprint: String,
 }
 
@@ -86,7 +89,6 @@ fn read_native_schema(connection: &Connection) -> Result<CrushNativeSchema> {
         message_columns: super::source::message_columns(connection)?,
         file_columns: optional_file_columns(connection)?,
         read_file_columns: optional_read_file_columns(connection)?,
-        user_version: connection.pragma_query_value(None, "user_version", |row| row.get(0))?,
         schema_fingerprint: sqlite_schema_fingerprint(connection)?,
     })
 }

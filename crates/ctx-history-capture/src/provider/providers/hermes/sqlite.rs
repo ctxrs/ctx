@@ -88,15 +88,6 @@ pub(super) struct HermesLocator {
     pub(super) rowid: i64,
 }
 
-impl HermesLocator {
-    pub(super) fn payload(&self) -> Vec<u8> {
-        let mut value = Vec::with_capacity(9);
-        value.push(self.phase.tag());
-        value.extend_from_slice(&self.rowid.to_be_bytes());
-        value
-    }
-}
-
 #[derive(Debug)]
 pub(super) enum HermesNativeRecord {
     Session(HermesSessionRow),
@@ -115,13 +106,6 @@ pub(super) struct HermesNativeRow {
     pub(super) next_frontier: HermesFrontier,
     pub(super) observed_bytes: usize,
     pub(super) record: HermesNativeRecord,
-}
-
-impl HermesNativeRow {
-    pub(super) fn replace_with_rejection(&mut self, reason: String) {
-        self.observed_bytes = rejection_owned_bytes(&reason);
-        self.record = HermesNativeRecord::Rejected(reason);
-    }
 }
 
 pub(super) fn hermes_session_candidate_sql(

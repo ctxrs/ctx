@@ -20,6 +20,9 @@ pub(crate) struct NanoClawCoreEvent {
     pub(crate) role: Option<EventRole>,
     pub(crate) occurred_at: chrono::DateTime<Utc>,
     pub(crate) payload: Value,
+    // Preserve provider metadata in the exact native event shape for Pro and
+    // diagnostic materialization.
+    #[allow(dead_code)]
     pub(crate) metadata: Value,
 }
 

@@ -143,14 +143,6 @@ impl KimiWireObservation {
         self.layout.wire()
     }
 
-    pub(super) fn source_revision(&self, admission_scope_revision: &str) -> String {
-        format!(
-            "kimi-wire-jsonl-v3:{};aux={:016x};scope={admission_scope_revision}",
-            self.layout.wire().revision_component(),
-            self.session.auxiliary_revision,
-        )
-    }
-
     pub(super) fn complete_content_revision(&self, admission_scope_revision: &str) -> String {
         format!(
             "kimi-wire-jsonl-content-v1:aux={:016x};scope={admission_scope_revision}",
