@@ -88,7 +88,6 @@ impl Fixture {
             occurred_at_unix_ms: Some(sequence as i64),
             event_type: EventType::Message.as_str().to_owned(),
             role: Some(role.as_str().to_owned()),
-            preview: String::new(),
             workspace: Some("/workspace".to_owned()),
             cwd: Some("/workspace".to_owned()),
             touched_files: Vec::new(),

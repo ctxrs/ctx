@@ -172,14 +172,11 @@ fn write_late_activity_searchable_store(
 }
 
 fn daemon_history_completed_test_job() -> Value {
-    daemon_history_refresh_job_json(
-        "completed",
-        1,
-        ImportTotals::default(),
-        utc_now().timestamp_millis(),
-        None,
-        None,
-    )
+    json!({
+        "status": "completed",
+        "source_count": 1,
+        "last_run_at_ms": utc_now().timestamp_millis(),
+    })
 }
 
 fn daemon_semantic_indexed_test_job(_data_root: &Path) -> Value {

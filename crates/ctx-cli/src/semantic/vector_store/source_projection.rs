@@ -1108,7 +1108,6 @@ mod tests {
                 occurred_at_unix_ms: Some(sequence as i64),
                 event_type: "message".to_owned(),
                 role: Some("user".to_owned()),
-                preview: String::new(),
                 workspace: Some("/workspace".to_owned()),
                 cwd: Some("/workspace".to_owned()),
                 touched_files: Vec::new(),

@@ -1922,7 +1922,6 @@ mod tests {
             occurred_at_unix_ms: None,
             event_type: "message".to_owned(),
             role: Some("assistant".to_owned()),
-            preview: String::new(),
             workspace: None,
             cwd: None,
             touched_files: Vec::new(),
