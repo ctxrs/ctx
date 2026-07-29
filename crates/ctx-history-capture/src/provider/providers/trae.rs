@@ -3,20 +3,17 @@ use ctx_history_core::EventType;
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::Value;
 
-use crate::native_source::NativeLocator;
-use crate::{
-    CaptureError, Result,
-};
+use crate::{CaptureError, Result};
 
 mod event;
 mod json_stream;
 pub(crate) mod nativepath;
 mod workspace;
 
-#[allow(unused_imports)]
+#[cfg(test)]
 pub(crate) use nativepath::{
     hydrate_trae_source_backed_locator_v0, scan_trae_source_backed_explicit_v0,
-    TraeHydratedRecordV0, TraeSourceBackedErrorV0, TraeSourceBackedPageV0, TraeSourceBackedScanV0,
+    TraeSourceBackedErrorV0,
 };
 
 pub(crate) const TRAE_STATE_VSCDB_SOURCE_FORMAT: &str = "trae_state_vscdb";
@@ -29,25 +26,6 @@ pub(crate) const TRAE_CHAT_KEYS: &[&str] = &[
     "memento/icube-ai-chat-storage-7467774676505887760",
     "memento/icube-ai-ng-chat-storage-7467774676505887760",
 ];
-
-const TRAE_COMPLETE_MESSAGE_LOCATOR_KIND: &str = "trae-itemtable-message-v1";
-
-pub(crate) fn trae_complete_message_locator(
-    key_index: u16,
-    session_index: usize,
-    message_index: usize,
-) -> Result<NativeLocator> {
-    let session_index = u32::try_from(session_index)
-        .map_err(|_| CaptureError::InvalidPayload("Trae session index exceeds u32".to_owned()))?;
-    let message_index = u32::try_from(message_index)
-        .map_err(|_| CaptureError::InvalidPayload("Trae message index exceeds u32".to_owned()))?;
-    let mut bytes = Vec::with_capacity(10);
-    bytes.extend_from_slice(&key_index.to_be_bytes());
-    bytes.extend_from_slice(&session_index.to_be_bytes());
-    bytes.extend_from_slice(&message_index.to_be_bytes());
-    NativeLocator::new(TRAE_COMPLETE_MESSAGE_LOCATOR_KIND, bytes)
-        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))
-}
 
 pub(crate) fn trae_complete_value(conn: &Connection, key_index: u16) -> Result<Option<Vec<u8>>> {
     let Some(chat_key) = TRAE_CHAT_KEYS.get(usize::from(key_index)) else {

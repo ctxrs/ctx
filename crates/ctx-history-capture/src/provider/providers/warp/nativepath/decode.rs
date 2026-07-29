@@ -63,7 +63,7 @@ pub(super) struct WarpDecodeCounters {
 #[derive(Clone, Debug)]
 enum WarpClassifiedBody<'a> {
     Bytes(Option<&'a [u8]>),
-    Malformed(String),
+    Malformed,
 }
 
 #[derive(Clone, Debug)]
@@ -321,7 +321,7 @@ fn decode_excluded_output(
         WarpClassifiedBody::Bytes(body) => {
             u64::try_from(body.map_or(0, <[u8]>::len)).unwrap_or(u64::MAX)
         }
-        WarpClassifiedBody::Malformed(_) => 0,
+        WarpClassifiedBody::Malformed => 0,
     };
     counters.native_result_body_bytes_observed = counters
         .native_result_body_bytes_observed
@@ -476,7 +476,7 @@ fn classified_result_body(variant: u32, selected: Option<(u32, &[u8])>) -> WarpC
 fn classified_nested_text(data: &[u8], field: u32) -> WarpClassifiedBody<'_> {
     match last_length_delimited_value(data, field) {
         Ok(value) => WarpClassifiedBody::Bytes(value),
-        Err(error) => WarpClassifiedBody::Malformed(error.to_string()),
+        Err(_) => WarpClassifiedBody::Malformed,
     }
 }
 

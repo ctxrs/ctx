@@ -75,7 +75,6 @@ impl ZedNativeEvent {
 pub(super) struct ZedNativePageBuilder<'a> {
     sink: &'a mut dyn ZedNativeSink,
     page: ZedNativePage,
-    pages_emitted: u64,
 }
 
 impl<'a> ZedNativePageBuilder<'a> {
@@ -83,7 +82,6 @@ impl<'a> ZedNativePageBuilder<'a> {
         Self {
             sink,
             page: ZedNativePage::default(),
-            pages_emitted: 0,
         }
     }
 
@@ -109,9 +107,8 @@ impl<'a> ZedNativePageBuilder<'a> {
         Ok(())
     }
 
-    pub(super) fn finish(mut self) -> ZedNativeResult<u64> {
-        self.flush()?;
-        Ok(self.pages_emitted)
+    pub(super) fn finish(mut self) -> ZedNativeResult<()> {
+        self.flush()
     }
 
     fn reserve(&mut self, units: usize, bytes: usize) -> ZedNativeResult<usize> {
@@ -145,9 +142,6 @@ impl<'a> ZedNativePageBuilder<'a> {
         }
         let page = std::mem::take(&mut self.page);
         self.sink.push_page(page)?;
-        self.pages_emitted = self.pages_emitted.checked_add(1).ok_or_else(|| {
-            ZedNativePathError::UnsupportedSchema("Zed NativePath page count overflowed".to_owned())
-        })?;
         Ok(())
     }
 }

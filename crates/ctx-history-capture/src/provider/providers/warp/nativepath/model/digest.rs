@@ -195,20 +195,6 @@ fn hash_optional_i64(hasher: &mut Sha256, value: Option<i64>) {
     }
 }
 
-fn hash_optional_i32(hasher: &mut Sha256, value: Option<i32>) {
-    hasher.update([u8::from(value.is_some())]);
-    if let Some(value) = value {
-        hasher.update(value.to_le_bytes());
-    }
-}
-
-fn hash_optional_u32(hasher: &mut Sha256, value: Option<u32>) {
-    hasher.update([u8::from(value.is_some())]);
-    if let Some(value) = value {
-        hasher.update(value.to_le_bytes());
-    }
-}
-
 fn hash_optional_u64(hasher: &mut Sha256, value: Option<u64>) {
     hasher.update([u8::from(value.is_some())]);
     if let Some(value) = value {
