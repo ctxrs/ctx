@@ -1,173 +1,34 @@
 use super::*;
 
-fn create_deepagents_tables(conn: &Connection) {
-    conn.execute_batch(
-        "create table checkpoints (
-            thread_id text not null, checkpoint_ns text not null default '',
-            checkpoint_id text not null, checkpoint blob, metadata blob,
-            primary key (thread_id, checkpoint_ns, checkpoint_id)
-        );
-        create table writes (
-            thread_id text not null, checkpoint_ns text not null default '',
-            checkpoint_id text not null, task_id text not null, idx integer not null,
-            channel text not null, type text, value blob,
-            primary key (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
-        );",
-    )
-    .unwrap();
-}
-
-fn deepagents_message_blob(role: &str, text: &str, message_id: &str) -> Vec<u8> {
-    let message = MsgpackValue::Map(vec![
-        (
-            MsgpackValue::String("type".into()),
-            MsgpackValue::String(role.into()),
-        ),
-        (
-            MsgpackValue::String("content".into()),
-            MsgpackValue::String(text.into()),
-        ),
-        (
-            MsgpackValue::String("id".into()),
-            MsgpackValue::String(message_id.into()),
-        ),
-    ]);
-    let mut bytes = Vec::new();
-    write_msgpack_value(&mut bytes, &MsgpackValue::Array(vec![message])).unwrap();
-    bytes
-}
-
-fn insert_deepagents_checkpoint(conn: &Connection, checkpoint: &str) {
-    conn.execute(
-        "insert into checkpoints
-         (thread_id, checkpoint_ns, checkpoint_id, checkpoint, metadata)
-         values ('thread-a', '', ?1, x'00', ?2)",
-        params![
-            checkpoint,
-            serde_json::to_vec(&json!({"updated_at": "2026-07-22T12:00:00Z"})).unwrap()
-        ],
-    )
-    .unwrap();
-}
-
-fn insert_deepagents_write(
-    conn: &Connection,
-    checkpoint: &str,
-    task: &str,
-    idx: i64,
-    role: &str,
-    text: &str,
-    message_id: &str,
-) {
-    conn.execute(
-        "insert into writes
-         (thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, value)
-         values ('thread-a', '', ?1, ?2, ?3, 'messages', 'msgpack', ?4)",
-        params![
-            checkpoint,
-            task,
-            idx,
-            deepagents_message_blob(role, text, message_id)
-        ],
-    )
-    .unwrap();
-}
-
-fn deepagents_address(
-    checkpoint: &str,
-    task: &str,
-    idx: i64,
-) -> deepagents::DeepAgentsContentAddress {
-    deepagents::DeepAgentsContentAddress {
-        thread_id: "thread-a".to_owned(),
-        checkpoint_id: checkpoint.to_owned(),
-        task_id: task.to_owned(),
-        write_idx: idx,
-        message_offset: 0,
-    }
-}
-
-fn deepagents_message_request(
-    path: &Path,
-    address: &deepagents::DeepAgentsContentAddress,
-    ordinal: u64,
-    indexed_limit_chars: usize,
-) -> CompleteMessageRequest {
-    let conn = Connection::open(path).unwrap();
-    let resolved = deepagents::resolve_deepagents_content(&conn, address)
-        .unwrap()
-        .unwrap();
-    drop(conn);
-    let event_id = Uuid::new_v4();
-    CompleteMessageRequest {
-        event_id,
-        provider: CaptureProvider::DeepAgents,
-        source_format: crate::DEEPAGENTS_SQLITE_SOURCE_FORMAT.to_owned(),
-        source_access: sqlite_source_access(
-            path,
-            CaptureProvider::DeepAgents,
-            crate::DEEPAGENTS_SQLITE_SOURCE_FORMAT,
-            event_id,
-        ),
-        source_family: Some(CompleteContentSourceFamily::Sqlite),
-        content_profile: verified_content_profile(
-            CaptureProvider::DeepAgents,
-            crate::DEEPAGENTS_SQLITE_SOURCE_FORMAT,
-            CompleteContentSourceFamily::Sqlite,
-            VerifiedContentRole::MessageBody,
-        )
-        .unwrap()
-        .to_owned(),
-        source_locator: CompleteContentSourceLocator::new(
-            deepagents::DEEPAGENTS_CONTENT_LOCATOR_KIND,
-            address.encode().unwrap(),
-        ),
-        provider_session_id: Some("thread-a".to_owned()),
-        source_record_ordinal: ordinal,
-        source_record_subrecord_index: 0,
-        expected_provider_event_hash: resolved.event.provider_event_hash.clone().unwrap(),
-        expected_hash_authority: CompleteContentHashAuthority::ProviderSupplied,
-        expected_native_record_id: Some(native_record_id(
-            resolved.event.provider_event_index,
-            resolved.event.provider_event_hash.as_deref(),
-            Some(resolved.event.cursor.as_str()),
-        )),
-        expected_record_digest: Some(resolved.record_digest),
-        expected_content_ref: ContentRef::from_bytes(resolved.text.as_bytes()),
-        indexed_text: resolved.text.chars().take(indexed_limit_chars).collect(),
-        indexed_limit_chars,
-    }
-}
-
 #[test]
-fn deepagents_compound_address_recovers_message_across_checkpoints() {
+fn provider_native_batch_hydration_preserves_requested_order_and_full_bodies() {
     let temp = crate::test_support_paths::tempdir().unwrap();
-    let path = temp.path().join("sessions.db");
-    let conn = Connection::open(&path).unwrap();
-    create_deepagents_tables(&conn);
-    insert_deepagents_checkpoint(&conn, "checkpoint-a");
-    insert_deepagents_checkpoint(&conn, "checkpoint-b");
-    let message = long_body("DeepAgents complete message");
-    insert_deepagents_write(
-        &conn,
-        "checkpoint-a",
-        "task-a",
-        0,
-        "human",
-        &message,
-        "message-a",
-    );
-    drop(conn);
+    let path = temp.path().join("opencode-batch.sqlite");
+    let first = long_body("first source-backed batch row");
+    let second = long_body("second source-backed batch row");
+    create_opencode_session_message_database(&path, &[&first, &second]);
 
-    let request = deepagents_message_request(
-        &path,
-        &deepagents_address("checkpoint-a", "task-a", 0),
-        0,
-        PROVIDER_MAX_TEXT_CHARS,
-    );
-    let messages = SqliteCompleteContentResolver::new()
-        .resolve(&[request])
+    let registration = opencode::opencode_source_backed_registration();
+    let documents = collect_opencode_documents(registration, &path);
+    assert_eq!(documents.len(), 2);
+    let requests = vec![event_request(&documents[1]), event_request(&documents[0])];
+    let batch = BatchHydrationRequest::new(requests.clone()).unwrap();
+    let hydrated = registration
+        .exact_resolver(&path)
+        .hydrate_batch(&batch)
         .unwrap();
-    assert_eq!(messages[0].text, message);
-    assert!(messages[0].verification.is_verified());
+
+    assert_eq!(
+        hydrated
+            .records()
+            .iter()
+            .map(|record| record.event_id)
+            .collect::<Vec<_>>(),
+        requests
+            .iter()
+            .map(EventHydrationRequest::event_id)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(hydrated.records()[0].provider_bytes, second.as_bytes());
+    assert_eq!(hydrated.records()[1].provider_bytes, first.as_bytes());
 }
