@@ -4,7 +4,6 @@ use serde_json::Value;
 
 const MAX_TOOL_INPUT_BYTES: usize = 256 * 1024;
 const MAX_COMMAND_BYTES: usize = 64 * 1024;
-const MAX_WORKING_DIRECTORY_BYTES: usize = 4 * 1024;
 
 pub(crate) fn is_command_tool(name: &str) -> bool {
     matches!(name, "exec" | "exec_command" | "shell" | "bash" | "command")
@@ -28,19 +27,6 @@ pub(crate) fn command(value: &Value) -> Option<String> {
         return None;
     }
     Some(text.to_owned())
-}
-
-pub(crate) fn working_directory(value: &Value) -> Option<String> {
-    let mut values = BTreeSet::new();
-    collect_object_strings(value, &["workdir", "cwd"], &mut values, 0);
-    (values.len() == 1)
-        .then(|| values.into_iter().next())
-        .flatten()
-        .filter(|value| {
-            !value.trim().is_empty()
-                && value.len() <= MAX_WORKING_DIRECTORY_BYTES
-                && !value.contains('\0')
-        })
 }
 
 fn collect_object_strings(
@@ -169,15 +155,14 @@ fn looks_like_exec_wrapper(value: &str) -> bool {
 mod tests {
     use serde_json::json;
 
-    use super::{command, working_directory};
+    use super::command;
 
     #[test]
-    fn extracts_exact_custom_exec_command_and_workdir_without_executing_wrapper() {
+    fn extracts_exact_custom_exec_command_without_executing_wrapper() {
         let input = json!(
             "const r = await tools.exec_command({cmd:\"git cherry-pick b29a185e\",workdir:\"/workspace/ctx\",yield_time_ms:30000}); text(r.output);"
         );
         assert_eq!(command(&input).as_deref(), Some("git cherry-pick b29a185e"));
-        assert_eq!(working_directory(&input).as_deref(), Some("/workspace/ctx"));
     }
 
     #[test]
@@ -194,6 +179,5 @@ mod tests {
             "tools.exec_command({notcmd:'git reset --hard', cmd   :   'git status', workdir :  \"/workspace/ctx\"});"
         );
         assert_eq!(command(&input).as_deref(), Some("git status"));
-        assert_eq!(working_directory(&input).as_deref(), Some("/workspace/ctx"));
     }
 }

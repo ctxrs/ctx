@@ -4,7 +4,8 @@ use std::{
 };
 
 use ctx_history_core::{
-    CaptureProvider, CertifiedSourceDeletion, HydrationFailureKind, NativeRecordCoordinate,
+    CaptureProvider, CertifiedSourceDeletion, ContentSourceResolver, EventHydrationRequest,
+    HydrationFailureKind, NativeRecordCoordinate,
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -40,14 +41,16 @@ fn source_backed_resolvers_reject_swapped_authority_roots() {
         let fixture = Fixture::new(provider);
         let selected = exact_source(provider, fixture.root.clone());
         let (pages, _) = scan(provider, &selected);
-        let locator = pages[0].documents[0].locator.clone();
+        let document = &pages[0].documents[0];
+        let request = EventHydrationRequest::new(document.event_id, document.locator.clone())
+            .expect("valid task event request");
         let resolver = resolver(provider, std::slice::from_ref(&selected));
         let displaced = fixture.root.with_extension("displaced");
         fs::rename(&fixture.root, &displaced).expect("displace selected authority root");
         Fixture::write_task(provider, &fixture.task, fixture.task_id, "cold body");
 
         let error = resolver
-            .hydrate_locator(&locator)
+            .hydrate_event(&request)
             .expect_err("swapped root must not satisfy retained authority");
         assert_eq!(error.kind, HydrationFailureKind::StaleSourceEvidence);
     }
@@ -178,14 +181,16 @@ fn lifecycle_case(provider: CaptureProvider) {
         .expect("full source-backed body");
     assert_eq!(full_document.body, full_body);
     let cold_ids = event_ids(&cold_pages);
-    let cold_locator = full_document.locator.clone();
+    let cold_request =
+        EventHydrationRequest::new(full_document.event_id, full_document.locator.clone())
+            .expect("valid cold task event request");
     let cold_source = cold.tasks[0].source.clone();
     let cold_certificate = cold.tasks[0].certified_source.clone();
     let resolver = resolver(provider, &[selected.clone()]);
     let hydrated = resolver
-        .hydrate_locator(&cold_locator)
+        .hydrate_event(&cold_request)
         .expect("hydrate exact native item");
-    assert_eq!(hydrated, full_document.body.as_bytes());
+    assert_eq!(hydrated.provider_bytes, full_document.body.as_bytes());
 
     let (exact_pages, exact) = scan(provider, &selected);
     assert_eq!(event_ids(&exact_pages), cold_ids);
@@ -194,7 +199,7 @@ fn lifecycle_case(provider: CaptureProvider) {
 
     fixture.replace_api("replacement body");
     let stale = resolver
-        .hydrate_locator(&cold_locator)
+        .hydrate_event(&cold_request)
         .expect_err("old exact locator must go stale");
     assert_eq!(stale.kind, HydrationFailureKind::StaleSourceEvidence);
     let (replacement_pages, replacement) = scan(provider, &selected);

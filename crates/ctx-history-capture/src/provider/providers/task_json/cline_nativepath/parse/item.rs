@@ -276,9 +276,6 @@ pub(super) struct OutputCandidate<'a> {
     pub(super) call_id: Option<String>,
     pub(super) outcome: OutputOutcomeMetadata,
     pub(super) body: Option<&'a RawValue>,
-    pub(super) occurred_at_millis: Option<i64>,
-    pub(super) byte_start: u64,
-    pub(super) byte_end_exclusive: u64,
 }
 
 pub(super) struct OutputCandidateContext {
@@ -286,13 +283,9 @@ pub(super) struct OutputCandidateContext {
     pub(super) base_sub_index: u32,
     pub(super) call_id: Option<String>,
     pub(super) outcome: OutputOutcomeMetadata,
-    pub(super) occurred_at_millis: Option<i64>,
-    pub(super) item_start: u64,
-    pub(super) fallback_start: u64,
 }
 
 pub(super) fn push_explicit_outputs<'a>(
-    raw_item: &'a RawValue,
     selected: Option<&'a RawValue>,
     context: OutputCandidateContext,
     outputs: &mut Vec<OutputCandidate<'a>>,
@@ -308,11 +301,6 @@ pub(super) fn push_explicit_outputs<'a>(
                 "Cline result has more than 64 explicit inner outputs".to_owned(),
             ));
         }
-        let leaf_start = (leaf.get().as_ptr() as usize)
-            .checked_sub(raw_item.get().as_ptr() as usize)
-            .and_then(|offset| context.item_start.checked_add(offset as u64))
-            .unwrap_or(context.fallback_start);
-        let leaf_end = leaf_start.saturating_add(leaf.get().len() as u64);
         outputs.push(OutputCandidate {
             kind: context.kind,
             sub_index: context
@@ -321,20 +309,15 @@ pub(super) fn push_explicit_outputs<'a>(
             call_id: context.call_id.clone(),
             outcome: context.outcome.clone(),
             body: Some(leaf),
-            occurred_at_millis: context.occurred_at_millis,
-            byte_start: leaf_start,
-            byte_end_exclusive: leaf_end,
         });
     }
     Ok(())
 }
 
 pub(super) fn push_explicit_result_blocks<'a>(
-    raw_item: &'a RawValue,
     content: &'a RawValue,
     kind: OutputObservationKind,
     outer: &RawEnvelope<'a>,
-    item_byte_start: u64,
     outputs: &mut Vec<OutputCandidate<'a>>,
 ) -> Result<(), (ClineItemRejectionKind, String)> {
     let blocks = deserialize_bounded_raw_array(content, "Cline explicit result block array")?;
@@ -370,12 +353,7 @@ pub(super) fn push_explicit_result_blocks<'a>(
         } else {
             block_outcome
         };
-        let block_start = (raw_block.get().as_ptr() as usize)
-            .checked_sub(raw_item.get().as_ptr() as usize)
-            .and_then(|offset| item_byte_start.checked_add(offset as u64))
-            .unwrap_or(item_byte_start);
         push_explicit_outputs(
-            raw_item,
             block.block_result_body(),
             OutputCandidateContext {
                 kind,
@@ -384,9 +362,6 @@ pub(super) fn push_explicit_result_blocks<'a>(
                     .saturating_mul(1_024),
                 call_id: block.call_id.clone().or_else(|| outer.call_id.clone()),
                 outcome,
-                occurred_at_millis: block.occurred_at_millis.or(outer.occurred_at_millis),
-                item_start: item_byte_start,
-                fallback_start: block_start,
             },
             outputs,
         )?;
@@ -555,7 +530,6 @@ pub(super) fn parse_item(
     raw: &RawValue,
     context: ItemParseContext<'_>,
     native_index: u64,
-    byte_start: u64,
     native_id_occurrences: &mut BTreeMap<String, u64>,
     stats: &mut ClinePublicationStats,
 ) -> ParsedItem {
@@ -604,24 +578,11 @@ pub(super) fn parse_item(
 
     let parsed = match component {
         ClineEventComponent::ApiHistory | ClineEventComponent::FallbackHistory => {
-            parse_api_projection(
-                raw,
-                &envelope,
-                component,
-                identity,
-                &native_key,
-                native_index,
-                byte_start,
-            )
+            parse_api_projection(&envelope, component, identity, &native_key, native_index)
         }
-        ClineEventComponent::UiMessages => parse_ui_projection(
-            raw,
-            &envelope,
-            identity,
-            &native_key,
-            native_index,
-            byte_start,
-        ),
+        ClineEventComponent::UiMessages => {
+            parse_ui_projection(&envelope, identity, &native_key, native_index)
+        }
     };
     let mut projection = match parsed {
         Ok(projection) => projection,

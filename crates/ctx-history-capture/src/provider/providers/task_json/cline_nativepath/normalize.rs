@@ -1,4 +1,4 @@
-use std::{fmt, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 
 use ctx_history_core::{Confidence, FileChangeKind};
 use serde::{Deserialize, Serialize};
@@ -13,7 +13,6 @@ const EVENT_HASH_DOMAIN: &[u8] = b"ctx-cline-nativepath-event-v2\0";
 const EVENT_FILE_TOUCH_HASH_DOMAIN: &[u8] = b"ctx-cline-nativepath-event-file-touches-v1\0";
 const ITEM_HASH_DOMAIN: &[u8] = b"ctx-cline-nativepath-item-v2\0";
 const ARRAY_HASH_DOMAIN: &[u8] = b"ctx-cline-nativepath-array-v2\0";
-const PAGE_IDENTITY_DOMAIN: &[u8] = b"ctx-native-ingestion-page-v1\0";
 const SESSION_HASH_DOMAIN: &[u8] = b"ctx-cline-nativepath-session-v2\0";
 
 pub(crate) const CLINE_NATIVE_PAGE_MAX_UNITS: usize = 64;
@@ -412,18 +411,6 @@ impl ClinePageFrontier {
             prefix_semantic_sha256: hasher.finalize().into(),
         }
     }
-
-    pub(super) fn advance_metadata(&self, metadata_hash: &[u8; 32]) -> Self {
-        let mut hasher = Sha256::new();
-        hasher.update(b"ctx-cline-nativepath-metadata-frontier-v1\0");
-        hasher.update(self.prefix_semantic_sha256);
-        hasher.update(metadata_hash);
-        Self {
-            version: self.version,
-            next_native_index: 1,
-            prefix_semantic_sha256: hasher.finalize().into(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -456,18 +443,6 @@ impl ClineArrayCheckpoint {
             retained_rows,
             final_frontier,
         }
-    }
-
-    pub(super) fn estimated_bytes(&self) -> usize {
-        // Exact length of the provider-owned checkpoint encoding: component
-        // tag, observation, content digest, counters, and terminal frontier.
-        1_usize
-            .saturating_add(estimated_observation_bytes(&self.observation))
-            .saturating_add(32)
-            .saturating_add(8)
-            .saturating_add(8)
-            .saturating_add(8)
-            .saturating_add(estimated_frontier_bytes(&self.final_frontier))
     }
 }
 
@@ -592,89 +567,21 @@ pub(crate) struct ClineComponentReadOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ClineCertifiedRevision {
-    pub(crate) revision_sha256: [u8; 32],
-    pub(crate) observed_stamp_token: Box<str>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ClineFileSourceIdentity {
-    pub(crate) provider: &'static str,
-    pub(crate) task: ClineTaskIdentity,
-    pub(crate) task_origin: ClineTaskIdentityOrigin,
-    pub(crate) task_aliases: Box<[ClineTaskIdentity]>,
     pub(crate) component: ClineComponent,
     pub(crate) canonical_path: PathBuf,
-    pub(crate) stable_id: Box<str>,
-    /// Flat ordinal of the first item in this component in the released
-    /// v0.25 task-JSON importer (API, then UI, then Roo fallback).
-    pub(crate) released_ordinal_offset: u64,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct ClineNativePageIdentity(pub(crate) [u8; 32]);
-
-impl fmt::Debug for ClineNativePageIdentity {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_tuple("ClineNativePageIdentity")
-            .field(&format_args!("{:02x?}", &self.0[..8]))
-            .finish()
-    }
-}
-
-impl ClineNativePageIdentity {
-    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ClineTerminalEvidence {
-    CompleteArray {
-        observed_items: u64,
-        complete_bytes: u64,
-        certified_revision_sha256: [u8; 32],
-    },
-    CompleteMetadata {
-        content_sha256: Option<[u8; 32]>,
-    },
-    Deleted,
-    ControlOnly {
-        certified_revision_sha256: [u8; 32],
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ClinePageAccounting {
-    pub(crate) core_units: usize,
-    pub(crate) logical_units: usize,
-    pub(crate) conservative_core_bytes: usize,
-    pub(crate) conservative_serialized_bytes: usize,
 }
 
 #[derive(Debug)]
 pub(crate) struct ClineCorePayload {
-    #[cfg(test)]
-    pub(crate) transition: ClineComponentTransition,
     pub(crate) session: Option<ClineSessionRow>,
     pub(crate) events: Box<[ClineEventRow]>,
     pub(crate) rejections: Box<[ClineItemRejection]>,
-    pub(crate) terminal_metadata_checkpoint: Option<Box<ClineMetadataCheckpoint>>,
 }
 
 #[derive(Debug)]
 pub(crate) struct ClineCertifiedPage {
-    pub(crate) identity: ClineNativePageIdentity,
     pub(crate) source: ClineFileSourceIdentity,
-    pub(crate) authority_observation: ClineComponentObservation,
-    pub(crate) source_revision: ClineCertifiedRevision,
-    pub(crate) expected_frontier: ClinePageFrontier,
-    pub(crate) next_safe_frontier: ClinePageFrontier,
-    pub(crate) terminal: bool,
-    #[cfg(test)]
-    pub(crate) terminal_evidence: Option<ClineTerminalEvidence>,
-    pub(crate) accounting: ClinePageAccounting,
     pub(crate) core: ClineCorePayload,
     pub(crate) source_record: Option<ClineSourceRecordEvidence>,
 }

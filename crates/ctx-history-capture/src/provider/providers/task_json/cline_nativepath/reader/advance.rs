@@ -102,7 +102,6 @@ impl ClineNativeReader {
                 Ok(None)
             }
             ClineObservedFileState::Missing => {
-                self.run_before_exposure(&observation.path, observation.component);
                 if let Some(failure) = component_authority_failure(&observation, false)?
                     .or(directory_authority_failure(&task.task, &observation)?)
                 {
@@ -141,12 +140,7 @@ impl ClineNativeReader {
                     self.active_task = Some(task);
                     return Ok(None);
                 }
-                let page = self.build_deleted_array_page(
-                    &task.metadata,
-                    component,
-                    &observation,
-                    prior.as_ref(),
-                )?;
+                let page = self.build_deleted_array_page(&observation)?;
                 Self::set_task_component(&mut task, component, None);
                 task.needs_session = false;
                 self.outcomes.push(ClineComponentReadOutcome {
@@ -171,23 +165,12 @@ impl ClineNativeReader {
                     }
                     Err(ClineLocalReadError::Fatal(error)) => return Err(error),
                 };
-                let source = file_source(
-                    task.task.dialect,
-                    &task.metadata.session,
-                    observation.component,
-                    &observation.path,
-                    released_ordinal_offset(&task, component),
-                );
-                let revision = certified_revision(&observation, scanner.revision_sha256());
+                let source = file_source(observation.component, &observation.path);
+                let revision_sha256 = scanner.revision_sha256();
                 let frontier = ClinePageFrontier::zero(component);
                 let prior_prefix_matches = prior.as_ref().is_some_and(|prior| {
                     prior.observed_items == 0 && prior.final_frontier == frontier
                 });
-                let page_transition = if prior.is_some() {
-                    ClineComponentTransition::Rewrite
-                } else {
-                    ClineComponentTransition::Cold
-                };
                 self.active_array = Some(ActiveArray {
                     task: task.task.clone(),
                     metadata: task.metadata.clone(),
@@ -195,14 +178,13 @@ impl ClineNativeReader {
                     prior,
                     scanner,
                     source,
-                    revision,
+                    revision_sha256,
                     frontier,
                     observed_items: 0,
                     retained_rows: 0,
                     native_id_occurrences: BTreeMap::new(),
                     prior_prefix_matches,
                     attach_session: task.needs_session,
-                    page_transition,
                     pages: 0,
                 });
                 self.active_task = Some(task);
@@ -236,7 +218,7 @@ impl ClineNativeReader {
                         .task
                         .component(active.component.source_component())
                         .clone(),
-                    active.revision.revision_sha256,
+                    active.revision_sha256,
                     complete_bytes,
                     0,
                     0,
@@ -251,31 +233,9 @@ impl ClineNativeReader {
                     self.finish_array_failure(&active, failure);
                     return Ok(None);
                 }
-                let evidence = if transition == ClineComponentTransition::ControlOnlyRewrite {
-                    ClineTerminalEvidence::ControlOnly {
-                        certified_revision_sha256: active.revision.revision_sha256,
-                    }
-                } else {
-                    ClineTerminalEvidence::CompleteArray {
-                        observed_items: 0,
-                        complete_bytes,
-                        certified_revision_sha256: active.revision.revision_sha256,
-                    }
-                };
                 let page = match self.make_array_page(
                     active.source.clone(),
-                    active
-                        .task
-                        .component(active.component.source_component())
-                        .clone(),
-                    active.revision.clone(),
-                    active.frontier.clone(),
-                    active.frontier.clone(),
-                    active.page_transition,
                     None,
-                    Some(checkpoint.clone()),
-                    true,
-                    Some(evidence),
                     active
                         .attach_session
                         .then(|| active.metadata.session.clone()),
@@ -331,7 +291,7 @@ impl ClineNativeReader {
                             .task
                             .component(active.component.source_component())
                             .clone(),
-                        active.revision.revision_sha256,
+                        active.revision_sha256,
                         complete_bytes.ok_or_else(|| ClineNativePathError::Invariant {
                             message: "terminal Cline array item lacks an EOF boundary".to_owned(),
                         })?,
@@ -353,33 +313,9 @@ impl ClineNativeReader {
                     self.finish_array_failure(&active, failure);
                     return Ok(None);
                 }
-                let evidence = terminal_checkpoint.as_ref().map(|checkpoint| {
-                    if transition == Some(ClineComponentTransition::ControlOnlyRewrite) {
-                        ClineTerminalEvidence::ControlOnly {
-                            certified_revision_sha256: checkpoint.certified_revision_sha256,
-                        }
-                    } else {
-                        ClineTerminalEvidence::CompleteArray {
-                            observed_items: checkpoint.observed_items,
-                            complete_bytes: checkpoint.complete_bytes,
-                            certified_revision_sha256: checkpoint.certified_revision_sha256,
-                        }
-                    }
-                });
                 let page = match self.make_array_page(
                     active.source.clone(),
-                    active
-                        .task
-                        .component(active.component.source_component())
-                        .clone(),
-                    active.revision.clone(),
-                    expected,
-                    next,
-                    active.page_transition,
                     Some(item),
-                    terminal_checkpoint.clone(),
-                    terminal,
-                    evidence,
                     active
                         .attach_session
                         .then(|| active.metadata.session.clone()),

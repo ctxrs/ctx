@@ -49,9 +49,6 @@ pub(crate) struct NativePageAccounting {
 /// One owned bounded page.  `C` remains provider-specific Core data.
 #[derive(Debug)]
 pub(crate) struct NativeIngestionPage<C> {
-    pub(crate) expected_frontier: NativeSafeFrontier,
-    pub(crate) next_safe_frontier: NativeSafeFrontier,
-    pub(crate) terminal: bool,
     pub(crate) accounting: NativePageAccounting,
     pub(crate) core: C,
 }
@@ -60,7 +57,6 @@ impl<C> NativeIngestionPage<C> {
     pub(crate) fn new(
         expected_frontier: NativeSafeFrontier,
         next_safe_frontier: NativeSafeFrontier,
-        terminal: bool,
         accounting: NativePageAccounting,
         core: C,
     ) -> Result<Self, NativeIngestionPageError> {
@@ -69,13 +65,7 @@ impl<C> NativeIngestionPage<C> {
             accounting,
             known_ingestion_page_owned_payload_bytes(&expected_frontier, &next_safe_frontier),
         )?;
-        Ok(Self {
-            expected_frontier,
-            next_safe_frontier,
-            terminal,
-            accounting,
-            core,
-        })
+        Ok(Self { accounting, core })
     }
 }
 

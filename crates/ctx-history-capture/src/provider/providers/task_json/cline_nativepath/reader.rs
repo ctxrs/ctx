@@ -3,20 +3,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use sha2::{Digest, Sha256};
-
 use super::{
     normalize::{
-        core_payload_fingerprint, estimated_frontier_bytes, estimated_metadata_checkpoint_bytes,
-        estimated_rejection_bytes, estimated_revision_bytes, estimated_session_bytes,
-        estimated_source_bytes, page_identity, ClineArrayCheckpoint, ClineCatalogCompletion,
-        ClineCatalogIndex, ClineCatalogRejection, ClineCertifiedPage, ClineCertifiedRevision,
-        ClineComponentFailure, ClineComponentFailureKind, ClineComponentReadOutcome,
-        ClineComponentTransition, ClineCorePayload, ClineEventComponent, ClineEventKind,
-        ClineFileSourceIdentity, ClineMetadataCheckpoint, ClinePageAccounting, ClinePageFrontier,
+        estimated_rejection_bytes, estimated_session_bytes, estimated_source_bytes,
+        ClineArrayCheckpoint, ClineCatalogCompletion, ClineCatalogIndex, ClineCatalogRejection,
+        ClineCertifiedPage, ClineComponentFailure, ClineComponentFailureKind,
+        ClineComponentReadOutcome, ClineComponentTransition, ClineCorePayload, ClineEventComponent,
+        ClineEventKind, ClineFileSourceIdentity, ClineMetadataCheckpoint, ClinePageFrontier,
         ClinePublicationStats, ClineSessionRow, ClineTaskCheckpoint, ClineTaskIdentity,
-        ClineTaskIdentityOrigin, ClineTerminalEvidence, CLINE_NATIVE_CORE_PAGE_MAX_BYTES,
-        CLINE_NATIVE_FIXED_PAGE_UNITS, CLINE_NATIVE_SESSION_PAGE_UNITS,
+        ClineTaskIdentityOrigin, CLINE_NATIVE_CORE_PAGE_MAX_BYTES, CLINE_NATIVE_FIXED_PAGE_UNITS,
+        CLINE_NATIVE_SESSION_PAGE_UNITS,
     },
     parse::{
         hydrate_component, parse_metadata, parse_root_index, parse_scanned_item,
@@ -25,17 +21,13 @@ use super::{
     },
     source::{
         is_component_local_error, ClineComponent, ClineComponentObservation, ClineDiscovery,
-        ClineLiveTaskObservation, ClineObservedFileState, TaskJsonNativeDialect,
+        ClineLiveTaskObservation, ClineObservedFileState,
     },
     ClineNativePathError,
 };
 
-#[cfg(test)]
-type BeforeExposureHook = Box<dyn FnMut(&Path, ClineComponent)>;
-
 pub(crate) struct ClineNativeReader {
     discovery: ClineDiscovery,
-    dialect: TaskJsonNativeDialect,
     previous_by_path: BTreeMap<PathBuf, ClineTaskCheckpoint>,
     route_index: usize,
     pending_page: Option<ClineCertifiedPage>,
@@ -45,8 +37,6 @@ pub(crate) struct ClineNativeReader {
     live_checkpoints: Vec<ClineTaskCheckpoint>,
     stats: ClinePublicationStats,
     catalog_finished: bool,
-    #[cfg(test)]
-    before_exposure: Option<BeforeExposureHook>,
 }
 
 struct ActiveTask {
@@ -73,14 +63,13 @@ struct ActiveArray {
     prior: Option<ClineArrayCheckpoint>,
     scanner: ClineArrayScanner,
     source: ClineFileSourceIdentity,
-    revision: ClineCertifiedRevision,
+    revision_sha256: [u8; 32],
     frontier: ClinePageFrontier,
     observed_items: u64,
     retained_rows: u64,
     native_id_occurrences: BTreeMap<String, u64>,
     prior_prefix_matches: bool,
     attach_session: bool,
-    page_transition: ClineComponentTransition,
     pages: usize,
 }
 
@@ -148,70 +137,11 @@ fn merge_task_identity_authority(
     }
 }
 
-fn file_source(
-    dialect: super::source::TaskJsonNativeDialect,
-    session: &ClineSessionRow,
-    component: ClineComponent,
-    path: &Path,
-    released_ordinal_offset: u64,
-) -> ClineFileSourceIdentity {
+fn file_source(component: ClineComponent, path: &Path) -> ClineFileSourceIdentity {
     ClineFileSourceIdentity {
-        provider: dialect.provider.as_str(),
-        task: session.identity.clone(),
-        task_origin: session.identity_origin,
-        task_aliases: session.identity_aliases.clone(),
         component,
         canonical_path: path.to_path_buf(),
-        stable_id: format!(
-            "{}:{}:{}",
-            dialect.provider.as_str(),
-            path.display(),
-            component.file_name()
-        )
-        .into_boxed_str(),
-        released_ordinal_offset,
     }
-}
-
-fn released_ordinal_offset(task: &ActiveTask, component: ClineEventComponent) -> u64 {
-    let api = task
-        .api_history
-        .as_ref()
-        .map_or(0, |checkpoint| checkpoint.observed_items);
-    let ui = task
-        .ui_messages
-        .as_ref()
-        .map_or(0, |checkpoint| checkpoint.observed_items);
-    match component {
-        ClineEventComponent::ApiHistory => 0,
-        ClineEventComponent::UiMessages => api,
-        ClineEventComponent::FallbackHistory => api.saturating_add(ui),
-    }
-}
-
-fn certified_revision(
-    observation: &ClineComponentObservation,
-    revision_sha256: [u8; 32],
-) -> ClineCertifiedRevision {
-    let token = observation
-        .stamp()
-        .map_or_else(|| "missing".to_owned(), |stamp| stamp.token());
-    ClineCertifiedRevision {
-        revision_sha256,
-        observed_stamp_token: token.into_boxed_str(),
-    }
-}
-
-fn missing_revision(component: ClineComponent) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(b"ctx-cline-nativepath-missing-component-v1\0");
-    hasher.update([component as u8]);
-    hasher.finalize().into()
-}
-
-fn metadata_frontier(checkpoint: &ClineMetadataCheckpoint) -> ClinePageFrontier {
-    ClinePageFrontier::zero_component(checkpoint.observation.component)
-        .advance_metadata(&checkpoint.session.metadata_hash)
 }
 
 fn classify_transition(
@@ -337,48 +267,7 @@ fn local_authority_failure(
     }
 }
 
-fn estimated_page_envelope_bytes(
-    source: &ClineFileSourceIdentity,
-    revision: &ClineCertifiedRevision,
-    expected: &ClinePageFrontier,
-    next: &ClinePageFrontier,
-    evidence: Option<&ClineTerminalEvidence>,
-) -> usize {
-    32_usize
-        .saturating_add(estimated_source_bytes(source))
-        .saturating_add(estimated_revision_bytes(revision))
-        .saturating_add(estimated_frontier_bytes(expected))
-        .saturating_add(estimated_frontier_bytes(next))
-        .saturating_add(1)
-        .saturating_add(estimated_terminal_evidence_bytes(evidence))
-        .saturating_add(6 * 8)
-        .saturating_add(1)
-        .saturating_add(estimated_transition_bytes())
-        .saturating_add(1)
-        .saturating_add(8)
-        .saturating_add(8)
-        .saturating_add(1)
-        .saturating_add(1)
-        .saturating_add(1)
-}
-
 pub(super) fn owned_page_bounds_are_valid(core_bytes: usize, logical_units: usize) -> bool {
     logical_units <= super::normalize::CLINE_NATIVE_PAGE_MAX_UNITS
         && core_bytes <= CLINE_NATIVE_CORE_PAGE_MAX_BYTES
-}
-
-fn estimated_transition_bytes() -> usize {
-    // The largest legal transition encoding is its tag plus `prior_items`.
-    1 + 8
-}
-
-fn estimated_terminal_evidence_bytes(evidence: Option<&ClineTerminalEvidence>) -> usize {
-    1_usize.saturating_add(evidence.map_or(0, |evidence| match evidence {
-        ClineTerminalEvidence::CompleteArray { .. } => 1 + 8 + 8 + 32,
-        ClineTerminalEvidence::CompleteMetadata { content_sha256 } => {
-            1 + 1 + usize::from(content_sha256.is_some()) * 32
-        }
-        ClineTerminalEvidence::Deleted => 1,
-        ClineTerminalEvidence::ControlOnly { .. } => 1 + 32,
-    }))
 }

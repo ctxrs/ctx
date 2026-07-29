@@ -330,7 +330,6 @@ struct CoreLane {
     current: PiNativeCheckpoint,
     activate_at: u64,
     active: bool,
-    lifecycle: PiSourceLifecycle,
     builder: PiCorePageBuilder,
 }
 
@@ -430,7 +429,6 @@ fn open_pi_native_session_from_frozen(
             active: plan.checkpoint.complete_offset == scan_offset,
             emitted: plan.checkpoint,
             current,
-            lifecycle: plan.lifecycle,
             builder: PiCorePageBuilder::default(),
         }
     });
