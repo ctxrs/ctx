@@ -2506,7 +2506,7 @@ mod tests {
 
     #[test]
     fn source_event_pages_bind_generation_descriptor_and_bounds() {
-        assert!(MAX_SOURCE_EVENT_PAGE_ITEMS <= 4_096);
+        const { assert!(MAX_SOURCE_EVENT_PAGE_ITEMS <= 4_096) };
         let temp = tempdir().unwrap();
         let source = source("rewrite-delete-pages.jsonl");
         let old_first = document(&source, 1, "old first");
@@ -2658,7 +2658,7 @@ mod tests {
         writer.commit(|_| true).unwrap();
 
         let index = VerifiedIndex::open(temp.path()).unwrap();
-        let mut expected = vec![
+        let mut expected = [
             first.event_id,
             second.event_id,
             third.event_id,
