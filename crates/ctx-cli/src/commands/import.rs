@@ -14,6 +14,7 @@ mod catalog;
 mod entry;
 mod explicit;
 mod explicit_source_catalog;
+mod history_source_plugin;
 mod provider_refresh;
 mod report;
 mod totals;
@@ -28,6 +29,7 @@ pub(crate) use explicit_source_catalog::{
     register_explicit_source_catalog_routes, upsert_explicit_source,
     ExplicitSourceCatalogAuthority,
 };
+use history_source_plugin::{run_history_source_plugin_import, HistorySourcePluginImportContext};
 pub(crate) use provider_refresh::{ProviderRefreshCollector, ProviderRefreshRuntimeFacts};
 pub(crate) use totals::ImportTotals;
 
@@ -81,6 +83,17 @@ pub(crate) fn run_import_internal(
         operation: "initialize ctx data root",
         source,
     })?;
+    if args.history_source.is_some() || !args.history_source_manifest.is_empty() {
+        return run_history_source_plugin_import(HistorySourcePluginImportContext {
+            args,
+            data_root,
+            telemetry,
+            provider_refreshes,
+            refresh_trigger,
+            config,
+            options,
+        });
+    }
     if args.path.is_some() {
         return run_explicit_source_catalog_import(ExplicitSourceCatalogImportContext {
             args,
@@ -111,11 +124,6 @@ fn validate_import_args(args: &ImportArgs) -> Result<()> {
     if args.path.is_some() && args.input_format.is_none() && args.provider.is_none() {
         return Err(anyhow!(
             "ctx import --path requires --provider for native provider history; use `ctx import --provider codex --path <path>` or `ctx import --input-format ctx-history-jsonl-v1 --path <file>`"
-        ));
-    }
-    if args.history_source.is_some() || !args.history_source_manifest.is_empty() {
-        return Err(anyhow!(
-            "history source plugin imports have no source-backed adapter; no legacy import fallback was used"
         ));
     }
     Ok(())

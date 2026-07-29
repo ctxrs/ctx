@@ -58,7 +58,8 @@ provider lookup must be explicit.
 Search filters narrow text and JSON output:
 
 - `--provider <provider>`;
-- `--history-source <plugin/source-or-provider_key/source_id>`;
+- `--history-source <provider_key/source_id>` for the canonical custom route
+  identity;
 - `--provider-key <key>`, `--source-id <id>`, and
   `--source-format <format>`;
 - `--workspace <name-or-path>`;
@@ -137,8 +138,9 @@ rendering does not rediscover providers.
 
 On a fresh root, search may perform a bounded foreground lexical bootstrap. If
 daemon maintenance is disabled, background mode uses the bounded foreground
-source-refresh path for supported discovered providers and enabled automatic
-history-source plugins.
+source-refresh path for supported discovered providers. History-source plugins
+are not executed by search refresh in 1.0; explicitly import one before
+searching its published source-backed generation.
 
 `--refresh wait` performs foreground source refresh and fails if source-level
 or system-level work cannot complete. Isolated malformed records are reported

@@ -1,21 +1,14 @@
 # History Source Plugins
 
-History source plugins let local tools make their histories searchable in ctx
-without ctx owning their storage schemas.
+History source plugins let local tools export their history into ctx without
+ctx owning those tools' storage schemas. The stable 1.0 route is intentionally
+narrow: a user explicitly selects one manifest source, the source command emits
+`ctx-history-jsonl-v1`, and ctx publishes that provider export through the
+normal daemon-owned source-backed generation path.
 
-A plugin integration works like this:
-
-1. A local manifest declares one or more history sources.
-2. ctx invokes enabled auto-refresh commands during search refresh, or any
-   selected source during explicit import.
-3. The command writes `ctx-history-jsonl-v1` records to stdout.
-4. The stream is checked and imported as one batch.
-5. ctx passes the previous source cursor back on the next run.
-
-Plugins run as local commands. ctx does not load plugin code in-process or
-operate a plugin store. Plugin authors own their native JSONL, SQLite, or API
-reads. ctx owns the manifest, cursor handoff, validation, import, and search
-index.
+ctx does not load plugin code in-process and does not provide a second history
+store for plugins. The managed provider export remains the exact-body
+authority; the source-backed index is a derived search structure.
 
 ## Install And Discover
 
@@ -24,9 +17,12 @@ Put a manifest at one of:
 - `$CTX_DATA_ROOT/plugins/<plugin>/ctx-history-plugin.json`;
 - any directory or manifest file listed in `CTX_HISTORY_PLUGIN_PATH`.
 
-`ctx sources` and `ctx sources --format json` list plugin sources without executing
-their commands. Invalid installed manifests are listed as non-importable
-`history_source_plugin` rows so authors can diagnose broken local config.
+`ctx sources` and `ctx sources --format json` discover manifests without
+executing commands. A valid source is reported as `available`, `importable:
+true`, and `import_mode: explicit_source_backed`. Its `history_source` is the
+filterable `provider_key/source_id` route identity; `plugin_source` is the
+`plugin/source` import-selection alias. Invalid manifests are listed as
+non-importable `history_source_plugin` rows with their validation error.
 
 Manifest example:
 
@@ -35,7 +31,7 @@ Manifest example:
   "schema_version": 1,
   "name": "example-agent",
   "display_name": "Example Agent history",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "history_sources": [
     {
       "id": "default",
@@ -43,7 +39,7 @@ Manifest example:
       "source_id": "default",
       "source_format": "example-agent-sqlite-v1",
       "enabled": true,
-      "refresh": "auto",
+      "refresh": "manual",
       "command": ["example-agent-to-ctx", "export"],
       "timeout_seconds": 300
     }
@@ -52,60 +48,75 @@ Manifest example:
 ```
 
 `name`, `id`, `provider_key`, and `source_id` must be stable lowercase ASCII
-identifiers. `command` is an argv array; ctx does not run it through a shell.
+identifiers. `command` is an argv array; ctx never runs it through a shell.
+`working_dir` may be absolute or relative to the manifest directory. Explicit
+`env` entries are supported after manifest validation.
 
-`enabled: true` means `ctx import --all` may run that source. `refresh: auto`
-means `ctx search` may run it during the normal pre-search refresh. Explicit
-imports can run a discovered source even when it is not enabled or is marked
-`refresh: manual`.
+`enabled` and `refresh` remain discovery metadata in the 1.0 explicit route.
+They do not opt a plugin into `ctx import --all`, `ctx setup`, or automatic
+pre-search execution.
 
-## Import
+## Explicit Import
+
+Select exactly one source:
 
 ```bash
 ctx import --history-source example-agent/default
 ctx import --history-source-manifest ./ctx-history-plugin.json
-ctx import --all
 ctx import --history-source example-agent/default --reset-cursor
 ```
 
-Selectors match `plugin/source` or `provider_key/source_id`, and must resolve
-to exactly one source before ctx executes a command. ctx does not accept bare
-plugin names, bare source ids, or bare provider keys because many integrations
-use ids like `default`.
+Selectors match either `plugin/source` or `provider_key/source_id` and must
+resolve to exactly one source before ctx executes anything. Bare plugin names,
+source ids, and provider keys are rejected because values such as `default`
+are commonly reused.
 
-`--history-source-manifest` is a development path: it adds that manifest for the
-current command without installing it. With no selector, ctx imports sources
-from the supplied manifest path.
+`--history-source-manifest` adds a development manifest for the current
+command. Without `--history-source`, the supplied manifest path must resolve to
+exactly one source.
 
-`--reset-cursor` withholds the previous cursor and sets
-`CTX_HISTORY_FULL_RESCAN=1`. The plugin should emit a fresh `source.cursor.after`
-checkpoint if the rescan succeeds; ctx rejects reset runs that do not emit a
-new after checkpoint so an old cursor cannot be reused accidentally.
+The 1.0 plugin route does not execute plugins from `ctx import --all` or
+automatic search refresh. Run an explicit plugin import when its native
+history changes, then search the published generation with refresh disabled or
+with the normal provider refresh behavior.
 
-`ctx setup` does not execute plugins. `ctx search` defaults to
-`--refresh background` and lets daemon maintenance refresh discovered plugin
-sources when they are both `enabled: true` and `refresh: auto`. If daemon
-maintenance is disabled, foreground background refresh applies a short runtime
-cap so search can serve the existing index promptly. `--refresh off` never runs
-plugins, and `--refresh wait` fails if an auto plugin refresh fails while using
-the normal configured timeout. `ctx import` also uses the normal configured
-timeout. Plugin refresh is incremental because ctx passes the previously stored
-source cursor before invoking the command.
+## Source-Backed Publication
 
-Search can be limited to a custom history source after import:
+An accepted import has one authority path:
+
+1. ctx runs the selected command with bounded stdout, stderr, and runtime.
+2. ctx validates one `ctx-history-jsonl-v1` manifest and source record, source
+   identity, cursor identity, record references, and parent relationships.
+3. Incremental records are merged idempotently into a private managed
+   provider-export JSONL source under
+   `$CTX_DATA_ROOT/history-source-plugin-sources`.
+4. ctx registers that file as the explicit custom
+   `ctx_history_jsonl_v1` source route.
+5. the normal source-refresh endpoint publishes a fresh source-backed
+   generation, or returns an authoritative no-op receipt;
+6. only after that receipt does ctx commit the plugin cursor.
+
+Cold imports, appends, rewrites, resets, and no-ops all use this path. There is
+no fallback to the old Store database or to a synthetic `NativePath` body.
+`ctx show ... --content complete` rehydrates exact event content from the
+managed provider export and fails closed if that source no longer verifies.
+
+After import, `--history-source` uses the canonical
+`provider_key/source_id` route identity:
 
 ```bash
 ctx search "release notes" --history-source example-agent/default
 ctx search "release notes" --provider-key example-agent --source-id default
-ctx search "release notes" --source-format example-agent-sqlite-v1
 ```
 
-These filters imply `--provider custom`; combining them with another provider is
-an error.
+These filters imply `--provider custom`; combining them with another provider
+is an error. When plugin/source differs from provider_key/source_id, use the
+latter for search; the former remains the explicit import selector.
 
 ## Runtime Environment
 
-ctx sets these variables before invoking a plugin command:
+ctx clears the inherited environment, restores a small allowlist, applies the
+manifest `env` object, and sets:
 
 - `CTX_DATA_ROOT`
 - `CTX_HISTORY_PLUGIN=1`
@@ -118,115 +129,50 @@ ctx sets these variables before invoking a plugin command:
 - `CTX_HISTORY_CURSOR_STREAM`
 - `CTX_HISTORY_MACHINE_ID`
 - `CTX_HISTORY_FULL_RESCAN`, `1` or `0`
-- `CTX_HISTORY_CURSOR`, when a previous cursor exists and is small enough for
-  inline environment handoff
-- `CTX_HISTORY_CURSOR_FILE`, a temporary file containing the cursor
+- `CTX_HISTORY_CURSOR`, when a previous cursor is small enough for inline
+  handoff
+- `CTX_HISTORY_CURSOR_FILE`, a private temporary file when a previous cursor
+  exists
 
-Use `CTX_HISTORY_CURSOR_FILE` for large native cursor maps. The file exists only
-while the plugin process runs and is the reliable cursor handoff path.
+The inherited allowlist covers `PATH`, home and user names, locale variables,
+temporary-directory variables, and XDG config/data/cache/state roots.
 
-The plugin must write only `ctx-history-jsonl-v1` JSONL to stdout. Progress and
-diagnostics belong on stderr. If the command exits nonzero or stdout is invalid,
-ctx imports nothing from that run and does not advance the cursor.
-stdout is capped at 64 MiB per run and stderr at 256 KiB, so plugins should emit
-incremental batches from the supplied cursor instead of full historical dumps
-during normal refresh.
-
-Plugin commands receive a limited inherited environment by default: `PATH`,
-`HOME`, basic locale variables, temporary-directory variables, and XDG data or
-config homes. Put provider-specific environment values in the manifest `env`
-object instead of relying on the parent shell.
+The command must write only `ctx-history-jsonl-v1` JSONL to stdout. Diagnostics
+belong on stderr. stdout is capped at 64 MiB, stderr at 256 KiB, and
+`timeout_seconds` defaults to 300 seconds. A nonzero exit, timeout, oversized
+output, malformed stream, identity mismatch, or reference error fails before
+source registration and does not advance the cursor.
 
 ## Cursor Contract
 
-The plugin controls the cursor string. It may be a number, an opaque token, or a
-JSON string. ctx stores it under a stable custom stream derived from:
+The plugin owns the cursor string. It can be a byte offset, row id, JSON map,
+or opaque native token. ctx binds the cursor to:
 
 - `provider_key`
 - `source_id`
 - `source_format`
+- the local ctx machine identity
 
-The local machine id is stored separately with the cursor so multiple machines
-can import the same custom source without overwriting each other's progress.
+Every run must emit a source record matching the manifest identity. When a
+previous cursor exists, a `source.cursor.before` value, if emitted, must match
+the supplied cursor and `CTX_HISTORY_CURSOR_STREAM`.
+`source.cursor.after` advances the private sidecar only after daemon
+publication. Transient cursor fields are not used as event-body storage.
 
-On the next import, ctx passes the stored `cursor.after.cursor` value back in
-the runtime environment. This keeps native cursor design inside the provider
-adapter:
+`--reset-cursor` withholds the old cursor and sets
+`CTX_HISTORY_FULL_RESCAN=1`. A reset run must emit a fresh
+`source.cursor.after` checkpoint; otherwise ctx rejects it rather than risking
+reuse of stale state.
 
-- file appenders can use byte offsets;
-- SQLite stores can use row ids;
-- split stores can use JSON maps keyed by session id, file path, or direction.
-
-Every plugin run should emit a `source` record matching the manifest
-`provider_key`, `source_id`, and `source_format`. ctx rejects mismatches before
-writing imported rows.
-
-## Common Storage Shapes
-
-Use the cursor format that matches your native storage. ctx treats it as an
-opaque string and passes it back on the next run.
-
-### Append-Only Files
-
-For one JSONL transcript per session, read each file from the last imported byte
-offset and store a cursor keyed by path:
-
-```json
-{"files":{"/home/me/.example-agent/sessions/a.jsonl":{"offset":12345,"size":13000,"mtimeMs":1780000000000}}}
-```
-
-If a file shrinks or its fingerprint changes, rescan that file from the
-beginning and emit the same stable session and event IDs.
-
-### SQLite
-
-For a local database with monotonic message IDs, read rows above the previous
-high-water mark and advance the cursor to the largest imported ID:
-
-```json
-{"message_id":1234}
-```
-
-Use a second field if session metadata has its own reliable update marker:
-
-```json
-{"message_id":1234,"session_updated_at":"2026-07-01T12:00:00Z"}
-```
-
-### Split Stores
-
-Some tools keep session metadata in one place and transcripts somewhere else.
-Use a cursor map for each moving part:
-
-```json
-{"sessions_version":17,"transcripts":{"/home/me/.example-agent/transcripts/a.jsonl":{"offset":456,"size":900}}}
-```
-
-The plugin can change how it reads native storage later without changing the ctx
-manifest or stdout contract.
-
-### Local APIs Or Commands
-
-If the tool already has an export command or local API, call that API and store
-its sync token:
-
-```json
-{"sync_token":"opaque-provider-token"}
-```
-
-## Minimal Plugin Pseudocode
+## Minimal Exporter Shape
 
 ```python
-import json, os, pathlib, sqlite3, sys
+import json, os
 
-cursor_text = os.environ.get("CTX_HISTORY_CURSOR")
-if not cursor_text and os.environ.get("CTX_HISTORY_CURSOR_FILE"):
-    cursor_text = pathlib.Path(os.environ["CTX_HISTORY_CURSOR_FILE"]).read_text()
-cursor = json.loads(cursor_text or "{}")
-after_message_id = cursor.get("message_id", 0)
-db = sqlite3.connect(os.path.expanduser("~/.example-agent/state.db"))
-
-print(json.dumps({"record_type": "manifest", "schema_version": "ctx-history-jsonl-v1"}))
+print(json.dumps({
+    "record_type": "manifest",
+    "schema_version": "ctx-history-jsonl-v1",
+}))
 print(json.dumps({
     "record_type": "source",
     "source_id": os.environ["CTX_HISTORY_SOURCE_ID"],
@@ -235,13 +181,14 @@ print(json.dumps({
     "cursor": {
         "after": {
             "stream": os.environ["CTX_HISTORY_CURSOR_STREAM"],
-            "cursor": json.dumps({"message_id": after_message_id}),
-            "observed_at": "2026-07-01T12:00:00Z"
+            "cursor": "{\"message_id\":1234}",
+            "observed_at": "2026-07-01T12:00:00Z",
         }
-    }
+    },
 }))
 
-for row in db.execute("SELECT id, session_id, role, content, timestamp FROM messages WHERE id > ? ORDER BY id", (after_message_id,)):
-    # Emit session records as needed, then event records with stable event_index.
-    pass
+# Emit stable session, event, file_touch, and edge records for this increment.
 ```
+
+The complete record schema is documented in
+`docs/custom-history-import-format.md`.

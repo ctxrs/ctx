@@ -210,24 +210,28 @@ Example:
 ## Incremental Semantics
 
 v1 imports are explicit, local, and idempotent. On each file import, ctx rescans
-the file and upserts equivalent records instead of appending duplicates. On each
-plugin import, ctx invokes the plugin, validates stdout atomically, and upserts
-the emitted records.
+the file through its explicit source-backed route. On each selected plugin
+import, ctx invokes the plugin, validates stdout as one delta, and merges stable
+record identities into a private managed provider-export JSONL source.
 
-When a source record supplies `cursor`, ctx rewrites its storage stream under a
-`provider:custom:<provider_key>:<opaque-id>` namespace and also preserves the
-exporter-supplied cursor object in source metadata. Event `native_cursor` values
-are also preserved.
+Plugin imports register the managed export as a custom
+`ctx_history_jsonl_v1` route and wait for an authoritative daemon-owned
+source-backed publication receipt. The managed export remains exact-body
+authority for complete-content hydration; plugin imports do not write the old
+Store database or synthesize a `NativePath` body.
 
 For plugin imports, ctx passes the previously stored source cursor to the next
 command through `CTX_HISTORY_CURSOR` for small cursors and always through
 `CTX_HISTORY_CURSOR_FILE` when a previous cursor exists. The cursor string
 remains exporter-owned, so it can encode byte offsets, SQLite row ids, session
-sequence maps, or another native high-water mark.
+sequence maps, or another native high-water mark. ctx stores this transient
+cursor in a private sidecar, separate from the managed provider export, and
+commits it only after source-backed publication succeeds. Event
+`native_cursor` values remain part of the provider export.
 
 If an import is interrupted, run the same command again. File imports perform
-another idempotent rescan. Plugin imports receive the last successfully stored
-cursor; failed plugin runs do not advance it.
+another idempotent rescan. Plugin imports receive the last successfully
+published cursor; failed validation or publication does not advance it.
 
 ## Compact Example
 

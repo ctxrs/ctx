@@ -340,9 +340,10 @@ and daemon maintenance may acquire the local ONNX Runtime asset and embedding
 model when the installed build supports that path. Setup and native provider
 imports may opportunistically start the default-on ctx-owned background daemon
 maintenance profile when `[daemon].enabled` is true and output is
-human-readable. Machine-readable commands never start or nudge it; use
-`ctx setup --no-daemon` or `ctx import --no-daemon` for a human-readable
-one-run opt-out.
+human-readable. Explicit custom JSONL and history-source imports may start the
+required source-refresh endpoint even for machine-readable output. Use
+`ctx setup --no-daemon` or `ctx import --no-daemon` for a one-run opt-out; an
+explicit source-backed import with that opt-out requires an existing endpoint.
 `ctx setup --catalog-only` does not autostart daemon maintenance.
 `ctx search --refresh off` does not refresh providers, run plugins, autostart
 daemon maintenance, start semantic workers, schedule semantic indexing, or
@@ -358,10 +359,10 @@ the semantic generation when it already exists; this does not create semantic
 storage, initialize the model, or embed text.
 Explicit semantic search also refuses to initialize or download the embedding
 model when the required local cache is missing; hybrid falls back to lexical in
-that case. Default `--refresh background` lets daemon maintenance own enabled
-auto history-source plugin refresh when possible, and may autostart the
-configured daemon query service for semantic/hybrid retrieval; use
-`--refresh wait` or `ctx import` for exhaustive foreground plugin catch-up.
+that case. Default `--refresh background` lets daemon maintenance own native
+provider refresh and may autostart the configured daemon query service for
+semantic/hybrid retrieval. History-source plugins are refreshed only by an
+explicit selected-plugin import in 1.0.
 
 When `ctx daemon run` or setup/import autostart runs the ctx-owned background
 coordinator, it stores private lock/status files under `daemon/` in the ctx data

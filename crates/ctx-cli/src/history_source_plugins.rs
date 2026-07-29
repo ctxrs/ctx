@@ -3,38 +3,65 @@ use std::{
     env, fs,
     io::Read,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 
+mod runtime;
+mod source_backed;
+
+pub(crate) use source_backed::prepare_source_backed_history_source;
+
 const PLUGIN_MANIFEST_FILE: &str = "ctx-history-plugin.json";
 const MAX_PLUGIN_MANIFEST_BYTES: usize = 1024 * 1024;
+const DEFAULT_PLUGIN_TIMEOUT_SECONDS: u64 = 300;
 
-/// Discovery metadata for a legacy history-source plugin.
+/// Discovery and execution metadata for a manifest-backed history source.
 ///
-/// v0.26 does not execute these commands: a plugin must gain a source-backed
-/// adapter before it can participate in the new history epoch. Keeping bounded
-/// manifest discovery lets `ctx sources` explain that state without retaining a
-/// second ingestion mechanism.
+/// Commands emit the existing `ctx-history-jsonl-v1` interchange format. The
+/// plugin-local source bridge persists that provider export as the exact-content
+/// authority and registers it with the sole source-backed generation path.
 #[derive(Debug, Clone)]
 pub struct HistorySourcePluginSource {
     pub plugin_name: String,
     pub plugin_display_name: Option<String>,
     pub plugin_version: Option<String>,
     pub manifest_path: PathBuf,
+    pub manifest_dir: PathBuf,
     pub id: String,
     pub display_name: Option<String>,
     pub provider_key: String,
     pub source_id: String,
     pub source_format: String,
+    pub command: Vec<String>,
+    pub working_dir: Option<PathBuf>,
+    pub env: BTreeMap<String, String>,
     pub enabled: bool,
     pub refresh: HistorySourcePluginRefresh,
+    pub timeout: Duration,
 }
 
 impl HistorySourcePluginSource {
     pub fn label(&self) -> String {
         format!("{}/{}", self.plugin_name, self.id)
+    }
+
+    pub fn history_source(&self) -> String {
+        format!("{}/{}", self.provider_key, self.source_id)
+    }
+
+    pub fn cursor_stream(&self) -> String {
+        ctx_history_capture::custom_history_jsonl_v1_cursor_stream(
+            &self.provider_key,
+            &self.source_id,
+            &self.source_format,
+        )
+    }
+
+    pub fn matches_selector(&self, selector: &str) -> bool {
+        selector == self.label() || selector == self.history_source()
     }
 }
 
@@ -81,16 +108,23 @@ struct HistorySourcePluginSourceManifest {
     source_id: Option<String>,
     source_format: String,
     command: Vec<String>,
-    #[serde(default, rename = "working_dir")]
-    _working_dir: Option<PathBuf>,
-    #[serde(default, rename = "env")]
-    _env: BTreeMap<String, String>,
+    #[serde(default)]
+    working_dir: Option<PathBuf>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
     #[serde(default)]
     enabled: bool,
     #[serde(default)]
     refresh: HistorySourcePluginRefresh,
     #[serde(default, rename = "timeout_seconds")]
-    _timeout_seconds: Option<u64>,
+    timeout_seconds: Option<u64>,
+}
+
+pub fn discover_history_source_plugins(
+    data_root: &Path,
+    extra_manifests: &[PathBuf],
+) -> Result<Vec<HistorySourcePluginSource>> {
+    Ok(discover_history_source_plugins_with_diagnostics(data_root, extra_manifests)?.sources)
 }
 
 pub fn discover_history_source_plugins_with_diagnostics(
@@ -112,8 +146,63 @@ pub fn discover_history_source_plugins_with_diagnostics(
         let mut manifest_sources = read_plugin_manifest(&manifest_path)?;
         sources.append(&mut manifest_sources);
     }
-    sources.sort_by_key(HistorySourcePluginSource::label);
+    sources.sort_by(|left, right| {
+        left.label()
+            .cmp(&right.label())
+            .then_with(|| left.manifest_path.cmp(&right.manifest_path))
+    });
+    sources.dedup_by(|left, right| {
+        left.manifest_path == right.manifest_path
+            && left.plugin_name == right.plugin_name
+            && left.id == right.id
+    });
     Ok(HistorySourcePluginDiscovery { sources, failures })
+}
+
+pub(crate) fn select_history_source_plugin(
+    data_root: &Path,
+    extra_manifests: &[PathBuf],
+    selector: Option<&str>,
+) -> Result<HistorySourcePluginSource> {
+    let sources = discover_history_source_plugins(data_root, extra_manifests)?;
+    let matches = if let Some(selector) = selector {
+        sources
+            .into_iter()
+            .filter(|source| source.matches_selector(selector))
+            .collect::<Vec<_>>()
+    } else {
+        sources
+            .into_iter()
+            .filter(|source| {
+                extra_manifests
+                    .iter()
+                    .any(|path| manifest_arg_matches_source(path, &source.manifest_path))
+            })
+            .collect::<Vec<_>>()
+    };
+    if matches.is_empty() {
+        let detail = selector.map_or_else(
+            || "the supplied manifest path".to_owned(),
+            |selector| format!("`{selector}`"),
+        );
+        return Err(anyhow!(
+            "no history source plugin matched {detail}; use `ctx sources` to inspect configured plugins"
+        ));
+    }
+    if matches.len() > 1 {
+        let labels = matches
+            .iter()
+            .map(|source| format!("{} ({})", source.label(), source.manifest_path.display()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(anyhow!(
+            "history source plugin selection matched multiple sources ({labels}); select one plugin/source or provider_key/source_id"
+        ));
+    }
+    matches
+        .into_iter()
+        .next()
+        .context("selected history source plugin disappeared")
 }
 
 fn read_plugin_manifest(path: &Path) -> Result<Vec<HistorySourcePluginSource>> {
@@ -128,13 +217,38 @@ fn read_plugin_manifest(path: &Path) -> Result<Vec<HistorySourcePluginSource>> {
             manifest.schema_version
         ));
     }
+    let manifest_dir = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    if manifest.history_sources.is_empty() {
+        return Err(anyhow!(
+            "history source plugin manifest {} must declare at least one history source",
+            path.display()
+        ));
+    }
     let mut sources = Vec::new();
+    let mut source_ids = BTreeSet::new();
+    let mut route_identities = BTreeSet::new();
     for source in manifest.history_sources {
         validate_plugin_id("history source id", &source.id)?;
+        if !source_ids.insert(source.id.clone()) {
+            return Err(anyhow!(
+                "history source plugin manifest {} declares duplicate history source id `{}`",
+                path.display(),
+                source.id
+            ));
+        }
         let provider_key = source.provider_key.unwrap_or_else(|| manifest.name.clone());
         validate_plugin_id("provider_key", &provider_key)?;
         let source_id = source.source_id.unwrap_or_else(|| source.id.clone());
         validate_plugin_id("source_id", &source_id)?;
+        if !route_identities.insert((provider_key.clone(), source_id.clone())) {
+            return Err(anyhow!(
+                "history source plugin manifest {} declares duplicate provider/source route `{provider_key}/{source_id}`",
+                path.display()
+            ));
+        }
         validate_source_format(&source.source_format).with_context(|| {
             format!(
                 "history source plugin manifest {} source {} has invalid source_format",
@@ -149,18 +263,37 @@ fn read_plugin_manifest(path: &Path) -> Result<Vec<HistorySourcePluginSource>> {
                 source.id
             ));
         }
+        for (key, value) in &source.env {
+            validate_plugin_env(key, value).with_context(|| {
+                format!(
+                    "history source plugin manifest {} source {} has invalid env entry",
+                    path.display(),
+                    source.id
+                )
+            })?;
+        }
         sources.push(HistorySourcePluginSource {
             plugin_name: manifest.name.clone(),
             plugin_display_name: manifest.display_name.clone(),
             plugin_version: manifest.version.clone(),
             manifest_path: path.to_path_buf(),
+            manifest_dir: manifest_dir.clone(),
             id: source.id,
             display_name: source.display_name,
             provider_key,
             source_id,
             source_format: source.source_format,
+            command: source.command,
+            working_dir: source.working_dir,
+            env: source.env,
             enabled: source.enabled,
             refresh: source.refresh,
+            timeout: Duration::from_secs(
+                source
+                    .timeout_seconds
+                    .unwrap_or(DEFAULT_PLUGIN_TIMEOUT_SECONDS)
+                    .max(1),
+            ),
         });
     }
     Ok(sources)
@@ -253,6 +386,38 @@ fn collect_manifest_path_candidates(path: &Path, candidates: &mut BTreeSet<PathB
     }
 }
 
+fn manifest_arg_matches_source(arg: &Path, manifest_path: &Path) -> bool {
+    if arg.is_file() {
+        return same_pathish(arg, manifest_path);
+    }
+    if arg.is_dir() {
+        return manifest_path.starts_with(arg);
+    }
+    same_pathish(arg, manifest_path)
+}
+
+fn same_pathish(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    let left = fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
+    let right = fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
+    left == right
+}
+
+fn validate_plugin_env(key: &str, value: &str) -> Result<()> {
+    if key.is_empty()
+        || key.contains('=')
+        || key.chars().any(|ch| ch == '\0')
+        || value.chars().any(|ch| ch == '\0')
+    {
+        return Err(anyhow!(
+            "environment names must be non-empty and exclude '=' or NUL; values must exclude NUL"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_source_format(value: &str) -> Result<()> {
     if !value.trim().is_empty() && value.len() <= 512 && !value.chars().any(char::is_control) {
         Ok(())
@@ -287,7 +452,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn discovery_keeps_metadata_but_no_executor_state() {
+    fn manifest_preserves_validated_runtime_metadata() {
         let temp = tempfile::tempdir().unwrap();
         let manifest = temp.path().join(PLUGIN_MANIFEST_FILE);
         fs::write(
@@ -306,5 +471,6 @@ mod tests {
         let sources = read_plugin_manifest(&manifest).unwrap();
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].label(), "example/default");
+        assert_eq!(sources[0].command, ["example-export"]);
     }
 }

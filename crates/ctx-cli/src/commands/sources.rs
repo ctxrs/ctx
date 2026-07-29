@@ -55,8 +55,12 @@ pub(crate) fn run_sources(
             .saturating_add(plugin_sources.len())
             .saturating_add(plugin_failures.len()) as u64,
     ));
-    telemetry.providers_existing = Some(count_bucket(existing as u64));
-    telemetry.providers_importable = Some(count_bucket(importable as u64));
+    telemetry.providers_existing = Some(count_bucket(
+        existing.saturating_add(plugin_sources.len()) as u64,
+    ));
+    telemetry.providers_importable = Some(count_bucket(
+        importable.saturating_add(plugin_sources.len()) as u64,
+    ));
     let show_all_sources = args.all || args.show_missing || provider_filter.is_some();
     let visible_sources = sources
         .iter()
@@ -120,7 +124,7 @@ pub(crate) fn run_sources(
         for source in &plugin_sources {
             let _ = writeln!(
                 body,
-                "custom {} unsupported (history-source-plugin:{}): no v0.26 source-backed adapter",
+                "custom {} available (history-source-plugin:{}; explicit source-backed import)",
                 source.label(),
                 source.source_format
             );
