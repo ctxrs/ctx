@@ -107,7 +107,7 @@ and private relevance evals justify flipping the default.
   scan/hydration/ranking.
 - The query service is intentionally narrow for v1: it embeds query text only.
   Full vector search can move into the daemon later if command startup,
-  sqlite-vec scan, or hydration becomes the dominant latency.
+  flat-F32 scan, or hydration becomes the dominant latency.
 - Search with semantic enabled and default background refresh attempts to
   autostart the daemon before hybrid/semantic retrieval. Explicit
   `--refresh off` does not autostart daemon work; strict semantic fails with an
@@ -419,7 +419,8 @@ and private relevance evals justify flipping the default.
 - Consider moving full vector search into the daemon if subsecond
   semantic/hybrid search becomes a hard product requirement. The current branch
   removes foreground query-model setup, but each CLI command still opens the
-  store/sidecar and scans sqlite-vec locally.
+  generation-pinned semantic sidecar and scans immutable flat-F32 segments
+  locally.
 - Add a focused daemon query-service integration test that exercises a real
   socket with a fake or cached embedder shape, if it can be done without making
   CI download a model.
