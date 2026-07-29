@@ -15,9 +15,7 @@ use crate::{DaemonRunArgs, DaemonTriggerCommandArg};
 
 use super::{
     daemon::DaemonRuntime,
-    daemon_retry::{
-        annotate_semantic_failure, classify_semantic_failure, DaemonRetryBackoff,
-    },
+    daemon_retry::{annotate_semantic_failure, classify_semantic_failure, DaemonRetryBackoff},
     daemon_scheduler::{daemon_deadline_has_min_budget, daemon_run_start_mode},
     health_search::{semantic_model_acquisition_integrity_error, semantic_worker_cache_dir},
     model_contract::{semantic_model_key, SemanticModelLoadDeferred},

@@ -330,8 +330,7 @@ fn index_status_snapshot(data_root: &Path) -> Result<Value> {
     } else {
         0
     };
-    let failed_inventory_units =
-        usize::from(initialized && source_lexical_status == "unavailable");
+    let failed_inventory_units = usize::from(initialized && source_lexical_status == "unavailable");
     let stale_inventory_units = 0;
     let lexical_status = lexical_index_status(
         initialized,

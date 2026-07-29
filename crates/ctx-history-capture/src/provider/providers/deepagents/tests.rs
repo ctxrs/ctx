@@ -1,11 +1,9 @@
 use ctx_history_core::EventType;
 use rmpv::{encode::write_value as write_msgpack_value, Value as MsgpackValue};
 
-use super::{
-    message::{
-        core_eligible, deepagents_decode_msgpack, deepagents_event_type,
-        deepagents_messages_from_msgpack_value, DeepAgentsMessage,
-    },
+use super::message::{
+    core_eligible, deepagents_decode_msgpack, deepagents_event_type,
+    deepagents_messages_from_msgpack_value, DeepAgentsMessage,
 };
 use crate::CaptureError;
 

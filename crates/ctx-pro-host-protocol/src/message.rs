@@ -11,9 +11,8 @@ use crate::{
     FinishSourceManifestRequest, GraphKeyDeleted, GraphKeyDeletionPrepared,
     MaterializeSourcePageRequest, PrepareGraphKeyDeletionRequest, PrepareSourceRequest,
     ProtocolError, SourceDeleted, SourceManifestAdmissionBegan, SourceManifestAdmitted,
-    SourceManifestBegan, SourceManifestFinished, SourceManifestPageAdmitted,
-    SourceManifestReceipt, SourcePageMaterialized, SourcePrepared, PROTOCOL_FINGERPRINT,
-    PROTOCOL_VERSION,
+    SourceManifestBegan, SourceManifestFinished, SourceManifestPageAdmitted, SourceManifestReceipt,
+    SourcePageMaterialized, SourcePrepared, PROTOCOL_FINGERPRINT, PROTOCOL_VERSION,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

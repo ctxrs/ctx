@@ -61,7 +61,6 @@ fn blame_request_requires_source_manifest_authority() {
         identity.receipt_sha256,
         ctx_pro_host_protocol::source_manifest_receipt_sha256(&receipt).unwrap()
     );
-
 }
 
 #[test]

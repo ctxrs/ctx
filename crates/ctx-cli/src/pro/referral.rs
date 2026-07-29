@@ -248,14 +248,13 @@ pub(crate) fn run(args: ReferralArgs, data_root: PathBuf) -> Result<()> {
     args.validate_invocation()?;
     let json_output = args.json_output();
     prepare_referral_identity(&data_root, json_output)?;
-    let _lifecycle_lock =
-        super::lifecycle::acquire_commercial_lifecycle_lock(&data_root, !json_output)?.ok_or_else(
-            || {
-                anyhow::anyhow!(
-                    "authentication_required: rerun the referral command without --format=json to sign in"
-                )
-            },
-        )?;
+    let lifecycle_lock =
+        super::lifecycle::acquire_commercial_lifecycle_lock(&data_root, !json_output)?;
+    let _lifecycle_lock = lifecycle_lock.ok_or_else(|| {
+        anyhow::anyhow!(
+            "authentication_required: rerun the referral command without --format=json to sign in"
+        )
+    })?;
     let mut service = CommercialLifecycleService::production(&data_root)?;
     run_with_service(args, &mut service, &mut io::stdout().lock(), &open_browser)
 }

@@ -1,18 +1,11 @@
 pub mod provider_sources;
 pub use common::io::{
-    PROVIDER_JSONL_INVENTORY_MAX_DEPTH, PROVIDER_JSONL_INVENTORY_MAX_DIRECTORIES,
-    PROVIDER_JSONL_INVENTORY_MAX_ELIGIBLE_PATHS, PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES,
-    PROVIDER_JSONL_INVENTORY_MAX_PATH_BYTES, ProviderJsonlInventory, ProviderJsonlInventoryLimits,
     inventory_provider_jsonl_paths, inventory_provider_regular_paths, provider_regular_file_len,
+    ProviderJsonlInventory, ProviderJsonlInventoryLimits, PROVIDER_JSONL_INVENTORY_MAX_DEPTH,
+    PROVIDER_JSONL_INVENTORY_MAX_DIRECTORIES, PROVIDER_JSONL_INVENTORY_MAX_ELIGIBLE_PATHS,
+    PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES, PROVIDER_JSONL_INVENTORY_MAX_PATH_BYTES,
 };
 pub use provider_sources::{
-    DISCOVERY_ENV_ALLOWLIST, DiscoveredLingmaDatabase, DiscoveredWarpSource, DiscoveryContext,
-    DiscoveryIssue, DiscoveryIssueKind, DiscoveryPlatform, DiscoveryPlatformDirs, DiscoveryReport,
-    LingmaDatabaseCatalogLineage, LingmaDiscoveredInventory, LingmaDiscoveryUnavailable,
-    LingmaInventorySelector, LingmaVscodeClient, LingmaVscodeProfile, OrdinaryFileObservation,
-    ProviderCatalogSupport, ProviderDefaultLocation, ProviderImportSupport, ProviderSource,
-    ProviderSourceKind, ProviderSourceSpec, ProviderSourceStatus, WarpDiscoveryUnavailable,
-    WarpInstalledPlatform, WarpInstalledSurfaceKey, WarpReleaseChannel, WarpTerminalSurface,
     discover_lingma_inventory_with_authority, discover_provider_sources,
     discover_provider_sources_for_provider, discover_provider_sources_for_provider_report,
     discover_provider_sources_for_provider_with_context,
@@ -20,7 +13,14 @@ pub use provider_sources::{
     discover_provider_sources_with_context, discover_provider_sources_with_projects,
     discover_warp_sources_with_authority, observe_ordinary_file, provider_source_for_path,
     provider_source_spec, provider_source_specs, resolve_lingma_discovery_authority,
-    resolve_warp_discovery_authority,
+    resolve_warp_discovery_authority, DiscoveredLingmaDatabase, DiscoveredWarpSource,
+    DiscoveryContext, DiscoveryIssue, DiscoveryIssueKind, DiscoveryPlatform, DiscoveryPlatformDirs,
+    DiscoveryReport, LingmaDatabaseCatalogLineage, LingmaDiscoveredInventory,
+    LingmaDiscoveryUnavailable, LingmaInventorySelector, LingmaVscodeClient, LingmaVscodeProfile,
+    OrdinaryFileObservation, ProviderCatalogSupport, ProviderDefaultLocation,
+    ProviderImportSupport, ProviderSource, ProviderSourceKind, ProviderSourceSpec,
+    ProviderSourceStatus, WarpDiscoveryUnavailable, WarpInstalledPlatform, WarpInstalledSurfaceKey,
+    WarpReleaseChannel, WarpTerminalSurface, DISCOVERY_ENV_ALLOWLIST,
 };
 
 pub(crate) const MAX_PROVIDER_JSONL_LINE_BYTES: usize = 16 * 1024 * 1024;
@@ -106,24 +106,14 @@ mod test_support_paths;
 pub(crate) mod provider;
 pub use provider::adapter::{CaptureWorkLimit, ProviderAdapterContext, ProviderImportOptions};
 pub use provider::codex::{
-    CodexHydratedRecordV0, CodexLocatorResolverV0, CodexSourceBackedCountersV0,
-    CodexSourceBackedErrorV0, CodexSourceBackedIngestReceiptV0, CodexSourceBackedPhaseTimingsV0,
-    CodexSourceBackedResultV0, hydrate_codex_locator, ingest_codex_source_backed_v0,
+    hydrate_codex_locator, ingest_codex_source_backed_v0, CodexHydratedRecordV0,
+    CodexLocatorResolverV0, CodexSourceBackedCountersV0, CodexSourceBackedErrorV0,
+    CodexSourceBackedIngestReceiptV0, CodexSourceBackedPhaseTimingsV0, CodexSourceBackedResultV0,
 };
 pub use provider::custom_history_jsonl::{
     custom_history_jsonl_v1_cursor_stream, decode_custom_history_jsonl_v1_cursor,
 };
 pub use provider::source_backed::{
-    CrushProjectDatabaseV0, CrushProjectInventoryObservationV0, CrushProjectInventorySourceV0,
-    LANDED_SOURCE_BACKED_ROUTES, SourceBackedAutomaticRegistryBuild,
-    SourceBackedAutomaticRegistryIssue, SourceBackedAutomaticUnavailableReason,
-    SourceBackedCertifiedRemoval, SourceBackedCoordinatorError, SourceBackedCoordinatorResult,
-    SourceBackedGenerationSink, SourceBackedHydrationSupport, SourceBackedProviderRegistry,
-    SourceBackedProviderRouteMetadata, SourceBackedRefreshExecutor, SourceBackedRefreshProgress,
-    SourceBackedRefreshReceipt, SourceBackedResolverRegistry, SourceBackedRevalidationTarget,
-    SourceBackedRoute, SourceBackedRouteConstructor, SourceBackedRouteDriver,
-    SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteMetadata,
-    SourceBackedRouteResult, SourceBackedRouteSelection, SourceBackedSelectorAuthority,
     build_automatic_source_backed_registry, refresh_source_backed_generation,
     refresh_source_backed_generation_with_progress, register_astrbot_source_backed_route,
     register_codex_prompt_history_source_backed_route, register_crush_source_backed_route,
@@ -133,5 +123,15 @@ pub use provider::source_backed::{
     register_landed_source_backed_route, register_lingma_source_backed_route,
     register_nanoclaw_source_backed_route, register_shelley_source_backed_route,
     register_warp_source_backed_route, source_backed_route_constructor,
-    source_backed_route_inventory,
+    source_backed_route_inventory, CrushProjectDatabaseV0, CrushProjectInventoryObservationV0,
+    CrushProjectInventorySourceV0, SourceBackedAutomaticRegistryBuild,
+    SourceBackedAutomaticRegistryIssue, SourceBackedAutomaticUnavailableReason,
+    SourceBackedCertifiedRemoval, SourceBackedCoordinatorError, SourceBackedCoordinatorResult,
+    SourceBackedGenerationSink, SourceBackedHydrationSupport, SourceBackedProviderRegistry,
+    SourceBackedProviderRouteMetadata, SourceBackedRefreshExecutor, SourceBackedRefreshProgress,
+    SourceBackedRefreshReceipt, SourceBackedResolverRegistry, SourceBackedRevalidationTarget,
+    SourceBackedRoute, SourceBackedRouteConstructor, SourceBackedRouteDriver,
+    SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteMetadata,
+    SourceBackedRouteResult, SourceBackedRouteSelection, SourceBackedSelectorAuthority,
+    LANDED_SOURCE_BACKED_ROUTES,
 };

@@ -368,10 +368,7 @@ fn wait_for_completed_generation_with(
             if status.core_generation_id == core_generation_id
                 && status.status == SourceBackedProCatchUpState::Error
             {
-                let code = status
-                    .error_code
-                    .as_deref()
-                    .unwrap_or("not_materialized");
+                let code = status.error_code.as_deref().unwrap_or("not_materialized");
                 let detail = status
                     .last_error
                     .as_deref()
@@ -552,12 +549,9 @@ mod tests {
         let completed =
             SourceBackedProCatchUpStatus::pending(&generation, 1).completed(generation.clone());
         persist_status(temp.path(), &completed).unwrap();
-        wait_for_completed_generation_with(
-            temp.path(),
-            &generation,
-            Duration::ZERO,
-            || panic!("completed status must not sleep"),
-        )
+        wait_for_completed_generation_with(temp.path(), &generation, Duration::ZERO, || {
+            panic!("completed status must not sleep")
+        })
         .unwrap();
 
         let failed = SourceBackedProCatchUpStatus::pending(&generation, 2).error(
@@ -567,25 +561,21 @@ mod tests {
             },
         );
         persist_status(temp.path(), &failed).unwrap();
-        let error = wait_for_completed_generation_with(
-            temp.path(),
-            &generation,
-            Duration::ZERO,
-            || panic!("failed status must not sleep"),
-        )
-        .unwrap_err();
+        let error =
+            wait_for_completed_generation_with(temp.path(), &generation, Duration::ZERO, || {
+                panic!("failed status must not sleep")
+            })
+            .unwrap_err();
         assert!(format!("{error:#}").starts_with("helper_crashed:"));
 
         let stale =
             SourceBackedProCatchUpStatus::pending(&"b".repeat(64), 1).completed("b".repeat(64));
         persist_status(temp.path(), &stale).unwrap();
-        let error = wait_for_completed_generation_with(
-            temp.path(),
-            &generation,
-            Duration::ZERO,
-            || panic!("zero timeout must not sleep"),
-        )
-        .unwrap_err();
+        let error =
+            wait_for_completed_generation_with(temp.path(), &generation, Duration::ZERO, || {
+                panic!("zero timeout must not sleep")
+            })
+            .unwrap_err();
         assert!(format!("{error:#}").starts_with("not_materialized:"));
     }
 

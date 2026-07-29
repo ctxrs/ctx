@@ -22,9 +22,7 @@ use automatic_source_refresh::{
     run_automatic_source_refresh_import, AutomaticSourceRefreshImportContext,
 };
 pub(crate) use entry::{import_report_analytics_outcome, import_report_failure_type, run_import};
-use explicit::{
-    run_explicit_source_catalog_import, ExplicitSourceCatalogImportContext,
-};
+use explicit::{run_explicit_source_catalog_import, ExplicitSourceCatalogImportContext};
 pub(crate) use explicit_source_catalog::{
     explicit_source_for_import, load_explicit_source_catalog_authority,
     register_explicit_source_catalog_routes, upsert_explicit_source,

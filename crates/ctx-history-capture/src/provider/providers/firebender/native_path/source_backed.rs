@@ -595,8 +595,9 @@ fn load_exact_row(conn: &Connection, rowid: i64) -> CaptureResult<Option<Fireben
         return Ok(None);
     };
     if retained_bytes < 0
-        || usize::try_from(retained_bytes)
-            .map_or(true, |bytes| bytes > FIREBENDER_SOURCE_BACKED_PAGE_MAX_BYTES)
+        || usize::try_from(retained_bytes).map_or(true, |bytes| {
+            bytes > FIREBENDER_SOURCE_BACKED_PAGE_MAX_BYTES
+        })
     {
         return Err(CaptureError::InvalidPayload(
             FirebenderSourceBackedError::HydrationTooLarge.to_string(),

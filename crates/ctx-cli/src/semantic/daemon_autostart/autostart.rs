@@ -234,9 +234,9 @@ pub(super) fn daemon_handoff_observation_from(
         }
         Some("pending") => return DaemonHandoffObservation::Pending,
         Some("applied") => {
-            if expected_config.is_some_and(|expected| {
-                !daemon_applied_config_matches(status, expected)
-            }) {
+            if expected_config
+                .is_some_and(|expected| !daemon_applied_config_matches(status, expected))
+            {
                 return DaemonHandoffObservation::Pending;
             }
         }
@@ -265,8 +265,7 @@ fn daemon_applied_config_matches(status: &Value, expected: &AppConfig) -> bool {
         return false;
     };
     applied.get("daemon_enabled").and_then(Value::as_bool) == Some(expected.daemon.enabled)
-        && applied.get("daemon_mode").and_then(Value::as_str)
-            == Some(expected.daemon.mode.as_str())
+        && applied.get("daemon_mode").and_then(Value::as_str) == Some(expected.daemon.mode.as_str())
         && applied.get("semantic_enabled").and_then(Value::as_bool)
             == Some(expected.semantic_search_enabled())
 }

@@ -2555,11 +2555,7 @@ mod tests {
             exact_source_texts,
         )
         .unwrap();
-        assert!(temp
-            .path()
-            .join("search")
-            .join("semantic")
-            .is_dir());
+        assert!(temp.path().join("search").join("semantic").is_dir());
         assert!(
             !temp.path().join("semantic-vectors").exists(),
             "the fresh source epoch must not open or reuse the legacy vector root"
@@ -2637,11 +2633,7 @@ mod tests {
         assert_eq!(collection.semantic_status, "skipped");
         assert!(collection.semantic_fallback.is_none());
         assert_eq!(collection.hits.len(), 1);
-        assert!(!temp
-            .path()
-            .join("search")
-            .join("semantic")
-            .exists());
+        assert!(!temp.path().join("search").join("semantic").exists());
         assert!(!database_path(temp.path().to_path_buf()).exists());
     }
 

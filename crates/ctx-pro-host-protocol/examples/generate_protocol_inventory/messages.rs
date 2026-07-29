@@ -231,10 +231,7 @@ fn helper_messages(fingerprint: &str) -> Vec<(&'static str, HelperMessage)> {
                 replayed: false,
             }),
         ),
-        (
-            "blame",
-            HelperMessage::Blame(commit_blame_result()),
-        ),
+        ("blame", HelperMessage::Blame(commit_blame_result())),
         (
             "error",
             HelperMessage::Error(ProtocolError::new(
@@ -330,10 +327,7 @@ fn host_operation_messages(fingerprint: &str) -> Vec<(&'static str, HostMessage)
                 fingerprint,
             )),
         ),
-        (
-            "blame_commit",
-            HostMessage::Blame(blame(None, fingerprint)),
-        ),
+        ("blame_commit", HostMessage::Blame(blame(None, fingerprint))),
         (
             "blame_pull_request_number",
             HostMessage::Blame(blame_request(
@@ -378,8 +372,14 @@ fn helper_operation_messages() -> Vec<(&'static str, HelperMessage)> {
         })
     };
     vec![
-        ("authorized_trial", authorized(EntitlementAccessState::Trial)),
-        ("authorized_active", authorized(EntitlementAccessState::Active)),
+        (
+            "authorized_trial",
+            authorized(EntitlementAccessState::Trial),
+        ),
+        (
+            "authorized_active",
+            authorized(EntitlementAccessState::Active),
+        ),
         (
             "authorized_canceling_paid",
             authorized(EntitlementAccessState::CancelingPaid),
@@ -388,7 +388,10 @@ fn helper_operation_messages() -> Vec<(&'static str, HelperMessage)> {
             "authorized_offline_grace",
             authorized(EntitlementAccessState::OfflineGrace),
         ),
-        ("authorized_locked", authorized(EntitlementAccessState::Locked)),
+        (
+            "authorized_locked",
+            authorized(EntitlementAccessState::Locked),
+        ),
         (
             "status_not_materialized",
             status(GraphState::NotMaterialized),
