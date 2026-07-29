@@ -12,12 +12,13 @@ use std::{
 };
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, CertifiedSourceAppend,
-    CertifiedSourceDeletion, CertifiedSourceInventory, EventIdentityInput, LocatorRevisionPolicy,
-    NativeItemKey, NativeRecordCoordinate, NativeSessionKey, PositionStability,
-    ProjectionContractError, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
-    SourceFrontier, SourceInventoryObservation, SourceKey, SourceObservation, SourceRecordLocator,
-    SourceResolverContractError, StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, BatchHydrationRequest, BatchHydrationResult,
+    CaptureProvider, CertifiedSource, CertifiedSourceAppend, CertifiedSourceDeletion,
+    CertifiedSourceInventory, EventHydrationRequest, EventIdentityInput, HydratedProviderRecord,
+    LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
+    PositionStability, ProjectionContractError, ScannedSourceCounts, SessionIdentityInput,
+    SourceAnchor, SourceFrontier, SourceInventoryObservation, SourceKey, SourceObservation,
+    SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
 };
 #[cfg(test)]
 use ctx_history_index::VerifiedIndex;
@@ -41,10 +42,11 @@ use super::{
 #[cfg(test)]
 use crate::provider::codex::catalog::discover_codex_session_catalog;
 use crate::{
-    common::io::ProviderSourceRoot,
+    common::io::{open_provider_source_file, ProviderSourceRoot},
     provider::codex::{
         catalog::{
-            discover_codex_session_catalog_retained, rediscover_codex_session_catalog_retained,
+            catalog_codex_explicit_session_opened, discover_codex_session_catalog_retained,
+            rediscover_codex_session_catalog_retained,
         },
         nativepath::{open_codex_source_capability, revalidate_codex_source_observation},
     },
@@ -63,6 +65,10 @@ const CODEX_PARSER_REVISION: &str = "codex-nativepath-source-backed-v1";
 const CODEX_INVENTORY_AUTHORITY_NAMESPACE: &str = "codex.sessions-root";
 const CODEX_INVENTORY_REVISION_KIND: &str = "codex-session-tree-inventory-v0";
 const CODEX_DISCOVERY_REVISION: &str = "codex-session-catalog-v0";
+const CODEX_EXPLICIT_INVENTORY_AUTHORITY_NAMESPACE: &str = "codex.explicit-session-file";
+const CODEX_EXPLICIT_INVENTORY_REVISION_KIND: &str = "codex-explicit-session-inventory-v0";
+const CODEX_EXPLICIT_DISCOVERY_REVISION: &str = "codex-explicit-session-file-v0";
+const CODEX_EXPLICIT_INVENTORY_DIGEST_DOMAIN: &[u8] = b"ctx/codex-explicit-session-inventory/v0\0";
 const MAX_HYDRATED_CODEX_RECORD_BYTES: u64 = 16 * 1024 * 1024 + 1;
 const MAX_CODEX_SCANNER_WORKERS: usize = 16;
 const COLD_LANE_RECEIVE_TIMEOUT: Duration = Duration::from_millis(25);
@@ -126,8 +132,18 @@ pub enum CodexSourceBackedErrorV0 {
     LocatorRangeTooLarge,
     #[error("Codex locator byte range ends after the provider source")]
     LocatorRangeMissing,
+    #[error("Codex locator byte range no longer aligns with a complete provider record")]
+    LocatorRecordBoundaryMismatch,
     #[error("Codex locator record digest no longer matches provider bytes")]
     LocatorDigestMismatch,
+    #[error("Codex locator no longer identifies the indexed event")]
+    LocatorEventMismatch,
+    #[error("Codex locator record no longer has meaningful display text")]
+    LocatorRecordNotDisplayable,
+    #[error("explicit Codex session source changed its native session identity")]
+    ExplicitSourceIdentityChanged,
+    #[error("explicit Codex session inventory changed while it was being certified")]
+    ExplicitInventoryChanged,
 }
 
 pub type CodexSourceBackedResultV0<T> = Result<T, CodexSourceBackedErrorV0>;
@@ -268,6 +284,115 @@ pub(crate) struct CodexRootInventoryV0 {
     root: ProviderSourceRoot,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CodexExplicitSessionSourceBackedInputV0 {
+    path: PathBuf,
+    source: SourceKey,
+    native_session_id: String,
+}
+
+impl CodexExplicitSessionSourceBackedInputV0 {
+    pub(crate) fn discover(path: impl AsRef<Path>) -> CodexSourceBackedResultV0<Self> {
+        let path = absolute_lexical_path(path.as_ref())?;
+        let (_, source, native_session_id) = open_codex_explicit_source_plan_v0(&path)?;
+        Ok(Self {
+            path,
+            source,
+            native_session_id,
+        })
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(crate) fn source(&self) -> &SourceKey {
+        &self.source
+    }
+}
+
+#[derive(Debug, Clone)]
+enum CodexExplicitSessionInventoryStateV0 {
+    Present {
+        plan: (CodexCatalogSource, SourceKey, String),
+    },
+    Missing,
+}
+
+impl PartialEq for CodexExplicitSessionInventoryStateV0 {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Present { plan: left }, Self::Present { plan: right }) => {
+                let (left_source, left_key, left_native_session_id) = left;
+                let (right_source, right_key, right_native_session_id) = right;
+                left_key.exact_descriptor_eq(right_key)
+                    && left_native_session_id == right_native_session_id
+                    && left_source.source_root == right_source.source_root
+                    && left_source.source_path == right_source.source_path
+                    && left_source.catalog_observation == right_source.catalog_observation
+                    && left_source.catalog_native_session_id
+                        == right_source.catalog_native_session_id
+                    && left_source.catalog_parent_native_session_id
+                        == right_source.catalog_parent_native_session_id
+                    && left_source.catalog_root_native_session_id
+                        == right_source.catalog_root_native_session_id
+            }
+            (Self::Missing, Self::Missing) => true,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for CodexExplicitSessionInventoryStateV0 {}
+
+/// One finite observation of exactly one caller-selected Codex rollout.
+#[derive(Debug, Clone)]
+pub(crate) struct CodexExplicitSessionInventoryV0 {
+    input: CodexExplicitSessionSourceBackedInputV0,
+    observation: SourceInventoryObservation,
+    state: CodexExplicitSessionInventoryStateV0,
+}
+
+impl CodexExplicitSessionInventoryV0 {
+    pub(crate) fn is_missing(&self) -> bool {
+        self.state == CodexExplicitSessionInventoryStateV0::Missing
+    }
+
+    pub(crate) fn source_plan(&self) -> Option<(CodexCatalogSource, SourceKey, String)> {
+        match &self.state {
+            CodexExplicitSessionInventoryStateV0::Present { plan } => Some(plan.clone()),
+            CodexExplicitSessionInventoryStateV0::Missing => None,
+        }
+    }
+
+    pub(crate) fn certify_against(
+        &self,
+        closing: &Self,
+    ) -> CodexSourceBackedResultV0<CertifiedSourceInventory> {
+        if self.input != closing.input || self.state != closing.state {
+            return Err(CodexSourceBackedErrorV0::ExplicitInventoryChanged);
+        }
+        let sources = if self.is_missing() {
+            Vec::new()
+        } else {
+            vec![self.input.source.clone()]
+        };
+        Ok(CertifiedSourceInventory::certify(
+            self.observation.clone(),
+            closing.observation.clone(),
+            CODEX_EXPLICIT_DISCOVERY_REVISION,
+            sources,
+        )?)
+    }
+
+    pub(crate) fn resolver(&self) -> CodexSourceBackedResultV0<Option<CodexLocatorResolverV0>> {
+        let Some(plan) = self.source_plan() else {
+            return Ok(None);
+        };
+        Ok(Some(CodexLocatorResolverV0::from_bound_sources([plan])?))
+    }
+}
+
 #[derive(Debug)]
 struct ColdSourceJobV0 {
     source_index: usize,
@@ -326,6 +451,110 @@ impl ColdLaneStateV0 {
     }
 }
 
+pub(crate) fn observe_codex_explicit_session_source_backed_v0(
+    input: &CodexExplicitSessionSourceBackedInputV0,
+) -> CodexSourceBackedResultV0<CodexExplicitSessionInventoryV0> {
+    let state = match open_codex_explicit_source_plan_v0(input.path()) {
+        Ok(plan)
+            if plan.1.exact_descriptor_eq(input.source()) && plan.2 == input.native_session_id =>
+        {
+            CodexExplicitSessionInventoryStateV0::Present { plan }
+        }
+        Ok(_) => return Err(CodexSourceBackedErrorV0::ExplicitSourceIdentityChanged),
+        Err(CodexSourceBackedErrorV0::Capture(CaptureError::Io(error)))
+            if error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            CodexExplicitSessionInventoryStateV0::Missing
+        }
+        Err(error) => return Err(error),
+    };
+    let observation = codex_explicit_inventory_observation_v0(input, &state)?;
+    Ok(CodexExplicitSessionInventoryV0 {
+        input: input.clone(),
+        observation,
+        state,
+    })
+}
+
+fn open_codex_explicit_source_plan_v0(
+    path: &Path,
+) -> CodexSourceBackedResultV0<(CodexCatalogSource, SourceKey, String)> {
+    let opened = Arc::new(open_provider_source_file(path)?);
+    let catalog = catalog_codex_explicit_session_opened(path, &opened)?;
+    let discovery = super::discover_codex_catalog_sources(&[catalog]);
+    if discovery.ineligible != 0 || !discovery.rejections.is_empty() {
+        return Err(CodexSourceBackedErrorV0::IncompleteCatalog {
+            rejected: discovery.rejections.len(),
+            failed: discovery.ineligible,
+        });
+    }
+    let mut sources = discovery.sources;
+    let Some(source) = sources.first_mut() else {
+        return Err(CodexSourceBackedErrorV0::IncompleteCatalog {
+            rejected: 1,
+            failed: 0,
+        });
+    };
+    source.opened = Some(opened);
+    let mut bound = bind_source_keys(sources)?;
+    if bound.len() != 1 {
+        return Err(CodexSourceBackedErrorV0::IncompleteCatalog {
+            rejected: bound.len(),
+            failed: 0,
+        });
+    }
+    bound
+        .pop()
+        .ok_or(CodexSourceBackedErrorV0::IncompleteCatalog {
+            rejected: 1,
+            failed: 0,
+        })
+}
+
+fn codex_explicit_inventory_observation_v0(
+    input: &CodexExplicitSessionSourceBackedInputV0,
+    state: &CodexExplicitSessionInventoryStateV0,
+) -> CodexSourceBackedResultV0<SourceInventoryObservation> {
+    let path_identity = crate::provider::provider_path_identity(input.path())?;
+    let authority_key: [u8; 32] = Sha256::digest(path_identity.as_bytes()).into();
+    let mut revision = Sha256::new();
+    revision.update(CODEX_EXPLICIT_INVENTORY_DIGEST_DOMAIN);
+    revision.update(input.source.exact_descriptor_digest());
+    match state {
+        CodexExplicitSessionInventoryStateV0::Present { plan } => {
+            revision.update(b"present\0");
+            revision.update(serde_json::to_vec(&plan.0.catalog_observation)?);
+        }
+        CodexExplicitSessionInventoryStateV0::Missing => revision.update(b"missing\0"),
+    }
+    Ok(SourceInventoryObservation::new(
+        CaptureProvider::Codex.as_str(),
+        CODEX_EXPLICIT_INVENTORY_AUTHORITY_NAMESPACE,
+        TypedKey::bytes(authority_key.to_vec())?,
+        CODEX_EXPLICIT_INVENTORY_REVISION_KIND,
+        revision.finalize().to_vec(),
+    )?)
+}
+
+fn absolute_lexical_path(path: &Path) -> CodexSourceBackedResultV0<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    Ok(normalized)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexHydratedRecordV0 {
     pub provider_bytes: Vec<u8>,
@@ -378,6 +607,25 @@ impl CodexLocatorResolverV0 {
         })
     }
 
+    fn from_bound_sources(
+        sources: impl IntoIterator<Item = (CodexCatalogSource, SourceKey, String)>,
+    ) -> CodexSourceBackedResultV0<Self> {
+        let mut sources_by_native_session = HashMap::new();
+        for (source, source_key, native_session_id) in sources {
+            if sources_by_native_session
+                .insert(native_session_id.clone(), (source, source_key))
+                .is_some()
+            {
+                return Err(CodexSourceBackedErrorV0::DuplicateNativeSessionId(
+                    native_session_id,
+                ));
+            }
+        }
+        Ok(Self {
+            sources_by_native_session,
+        })
+    }
+
     pub fn hydrate(
         &self,
         locator: &SourceRecordLocator,
@@ -400,6 +648,43 @@ impl CodexLocatorResolverV0 {
         }
 
         hydrate_codex_source_record(source, locator, byte_offset, byte_length, physical_ordinal)
+    }
+
+    pub(crate) fn hydrate_event_request(
+        &self,
+        request: &EventHydrationRequest,
+    ) -> CodexSourceBackedResultV0<HydratedProviderRecord> {
+        let (native_session_id, _, _, physical_ordinal) =
+            validate_codex_locator(request.locator())?;
+        let event_id = codex_event_identity(
+            request.locator().source(),
+            &native_session_id,
+            physical_ordinal,
+        )?;
+        if event_id != request.event_id() {
+            return Err(CodexSourceBackedErrorV0::LocatorEventMismatch);
+        }
+        let hydrated = self.hydrate(request.locator())?;
+        let provider_bytes = hydrated
+            .decoded_display_text
+            .ok_or(CodexSourceBackedErrorV0::LocatorRecordNotDisplayable)?
+            .into_bytes();
+        Ok(HydratedProviderRecord {
+            event_id,
+            provider_bytes,
+        })
+    }
+
+    pub(crate) fn hydrate_batch_request(
+        &self,
+        request: &BatchHydrationRequest,
+    ) -> CodexSourceBackedResultV0<BatchHydrationResult> {
+        let records = request
+            .events()
+            .iter()
+            .map(|event| self.hydrate_event_request(event))
+            .collect::<CodexSourceBackedResultV0<Vec<_>>>()?;
+        Ok(BatchHydrationResult::new(records)?)
     }
 }
 
@@ -1162,6 +1447,12 @@ fn hydrate_codex_source_record(
     let byte_length =
         usize::try_from(byte_length).map_err(|_| CodexSourceBackedErrorV0::LocatorRangeTooLarge)?;
     let opened = open_codex_source_capability(source)?;
+    if byte_offset != 0 {
+        let boundary = opened.read_exact_range(byte_offset.saturating_sub(1), 1, 1)?;
+        if boundary != [b'\n'] {
+            return Err(CodexSourceBackedErrorV0::LocatorRecordBoundaryMismatch);
+        }
+    }
     let provider_bytes = opened
         .read_exact_range(
             byte_offset,
@@ -1172,11 +1463,15 @@ fn hydrate_codex_source_record(
             CaptureError::InvalidPayload(_) => CodexSourceBackedErrorV0::LocatorRangeMissing,
             other => CodexSourceBackedErrorV0::Capture(other),
         })?;
+    if !provider_bytes.ends_with(b"\n") {
+        return Err(CodexSourceBackedErrorV0::LocatorRecordBoundaryMismatch);
+    }
     let actual_digest: [u8; 32] = Sha256::digest(&provider_bytes).into();
     if &actual_digest != locator.record_digest() {
         return Err(CodexSourceBackedErrorV0::LocatorDigestMismatch);
     }
     let decoded_display_text = decode_exact_display_text(&provider_bytes, physical_ordinal)?;
+    opened.revalidate()?;
     Ok(CodexHydratedRecordV0 {
         provider_bytes,
         decoded_display_text,
@@ -1371,6 +1666,26 @@ fn codex_session_identity(
     })?)
 }
 
+fn codex_event_identity(
+    source: &SourceKey,
+    native_session_id: &str,
+    raw_ordinal: u64,
+) -> CodexSourceBackedResultV0<StableEntityId> {
+    let session_id = codex_session_identity(source, native_session_id)?;
+    let native_item_key = NativeItemKey::certified_position(
+        CODEX_NATIVE_EVENT_POSITION_KIND,
+        TypedKey::U64(raw_ordinal),
+        PositionStability::AppendStable,
+    )?;
+    Ok(derive_event_id(EventIdentityInput {
+        source,
+        session_id,
+        logical_item_kind: CODEX_LOGICAL_EVENT_KIND,
+        native_item_key: &native_item_key,
+        subrecord_selector: None,
+    })?)
+}
+
 fn codex_lexical_document(
     catalog_source: &CodexCatalogSource,
     source: &SourceKey,
@@ -1400,18 +1715,7 @@ fn codex_lexical_document(
         lexical_body,
         touched_paths,
     } = row;
-    let native_item_key = NativeItemKey::certified_position(
-        CODEX_NATIVE_EVENT_POSITION_KIND,
-        TypedKey::U64(raw_ordinal),
-        PositionStability::AppendStable,
-    )?;
-    let event_id = derive_event_id(EventIdentityInput {
-        source,
-        session_id,
-        logical_item_kind: CODEX_LOGICAL_EVENT_KIND,
-        native_item_key: &native_item_key,
-        subrecord_selector: None,
-    })?;
+    let event_id = codex_event_identity(source, native_session_id, raw_ordinal)?;
     let locator = SourceRecordLocator::new(
         source.clone(),
         NativeRecordCoordinate::Jsonl {
@@ -1591,6 +1895,8 @@ fn validate_codex_locator(
         || locator.source().source_format() != CODEX_SESSION_SOURCE_FORMAT
         || locator.source().schema_variant() != CODEX_SOURCE_SCHEMA_VARIANT
         || locator.source().provider_identity_version() != 1
+        || locator.revision_policy() != LocatorRevisionPolicy::StableRecordEvidence
+        || locator.certified_source_revision_digest().is_some()
     {
         return Err(CodexSourceBackedErrorV0::InvalidCodexLocator);
     }
@@ -1615,6 +1921,8 @@ fn validate_codex_locator(
     };
     if native_session_key.as_ref() != Some(&TypedKey::Utf8(source_native_session_id.clone()))
         || native_event_key.as_ref() != Some(&TypedKey::U64(*physical_ordinal))
+        || *byte_length == 0
+        || *byte_length > MAX_HYDRATED_CODEX_RECORD_BYTES
     {
         return Err(CodexSourceBackedErrorV0::InvalidCodexLocator);
     }
