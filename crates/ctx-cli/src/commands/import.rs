@@ -14,7 +14,6 @@ mod catalog;
 mod entry;
 mod explicit;
 mod explicit_source_catalog;
-mod pro_output;
 mod provider_refresh;
 mod report;
 mod totals;
@@ -31,10 +30,6 @@ pub(crate) use explicit_source_catalog::{
     register_explicit_source_catalog_routes, upsert_explicit_source,
     ExplicitSourceCatalogAuthority,
 };
-pub(crate) use pro_output::{
-    catch_up_pro_outputs, prepare_core_for_pro_materialization,
-};
-use pro_output::ProOutputSelection;
 pub(crate) use provider_refresh::{ProviderRefreshCollector, ProviderRefreshRuntimeFacts};
 pub(crate) use report::{ImportFailureScope, ImportFailureType};
 pub(crate) use totals::ImportTotals;
@@ -83,29 +78,6 @@ pub(crate) fn run_import_internal(
     refresh_trigger: ProviderRefreshTrigger,
     config: &crate::config::AppConfig,
     options: ImportRunOptions,
-) -> Result<ImportReport> {
-    run_import_internal_with_pro_output(
-        args,
-        data_root,
-        telemetry,
-        provider_refreshes,
-        refresh_trigger,
-        config,
-        options,
-        ProOutputSelection::Automatic,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn run_import_internal_with_pro_output(
-    args: &ImportArgs,
-    data_root: PathBuf,
-    telemetry: &mut ImportTelemetry,
-    provider_refreshes: &mut ProviderRefreshCollector,
-    refresh_trigger: ProviderRefreshTrigger,
-    config: &crate::config::AppConfig,
-    options: ImportRunOptions,
-    _pro_output_selection: ProOutputSelection,
 ) -> Result<ImportReport> {
     validate_import_args(args)?;
     fs::create_dir_all(&data_root).map_err(|source| CaptureError::SystemIo {
