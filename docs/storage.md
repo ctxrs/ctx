@@ -187,7 +187,7 @@ Local Pro uses one public, exact root-relative layout: the root identity is
 graph is `pro/ctx-pro.db`, and the persistent installer coordination lock is
 `pro/.ctx-pro.lifecycle.lock`. The private, nonsecret
 `pro/.ctx-pro.initialized` marker is durably published before setup or account
-management may write native-vault records, so interrupted initialization
+management may write credential-store records, so interrupted initialization
 remains deletable even when no helper or graph file was created. Destructive
 uninstall durably publishes the bounded, nonsecret, installation-bound
 `pro/.ctx-pro.graph-key-cleanup.json` phase before deleting any recorded graph
@@ -198,16 +198,23 @@ closed while that deletion phase remains. A separate nonsecret
 `pro/.ctx-pro.data-preserved` lifecycle marker distinguishes deliberate
 keep-data uninstall from first use, but it is created only when encrypted graph
 data actually exists. Provider history and Core's disposable search
-generations remain separate and usable without Pro. The operating-system key
-store stores an anonymous-trial
-credential, an optional WorkOS session used for explicit hosted account and
-referral commands, an installation-scoped signing key, a signed entitlement,
-and, after accepted referral activation, an optional opaque referral claim;
-ctx has no plaintext credential fallback. The raw referral code is never
-retained after activation. The claim is the immutable result of the sole
-attribution input, `ctx pro --referral <codename>`. The claim uses the
-native-vault commercial credential boundary and is removed by Pro
-commercial-credential cleanup.
+generations remain separate and usable without Pro. The selected credential
+store holds an anonymous-trial credential, an optional WorkOS session used for
+explicit hosted account and referral commands, an installation-scoped signing
+key, a signed entitlement, and, after accepted referral activation, an optional
+opaque referral claim. The platform-native store is preferred: Secret Service
+on Linux, Keychain Services on macOS, and Credential Manager on Windows. On a
+pristine root, an exact native-unavailable result may instead select a sticky
+owner-private local file store. That fallback persists the credential bytes
+with owner-only permissions or a protected current-user-only Windows ACL; it
+does not encrypt those bytes against the same OS user or root. Locked, denied,
+corrupt, ambiguous, canceled, and other native-store failures do not downgrade
+to files. Neither credential namespace accepts an environment-supplied key,
+universal key, or binary-embedded pepper, and the Pro graph never falls back to
+plaintext database mode. The raw referral code is never retained after
+activation. The claim is the immutable result of the sole attribution input,
+`ctx pro --referral <codename>`. The claim uses the same selected commercial
+credential boundary and is removed by Pro commercial-credential cleanup.
 A separate nonsecret marker under the selected data root records only that the
 one-time human Pro blame referral line has been shown. It contains no codename,
 claim, identity, payout data, or counts. JSON, JSONL, MCP, noninteractive,
@@ -223,18 +230,18 @@ staging, commit, cleanup, and final signed-pair verification across processes.
 
 `ctx pro uninstall --keep-data` is entirely local, removes only the helper, and
 records that local Pro data was deliberately preserved. It works even when
-commercial configuration, network access, or the native key store is
-unavailable. `ctx pro uninstall --delete-data` uses a public delete-only native
-key-store adapter to remove and verify the complete local Pro inventory. It
-does not need the helper and remains available after an earlier `--keep-data`
-uninstall. Initialization or helper evidence causes deletion to derive only
-this root identity's production/staging record IDs, collect the thumbprints
-recorded in its installation-key and entitlement records, and delete and verify
-those graph keys even when no graph file was completed. A corrupt record makes
-that inventory unverifiable and fails the operation before any graph key or
-graph file is deleted. Once the cleanup phase is published, a retry uses its
-exact thumbprints instead of broad vault enumeration or now-deleted credential
-records.
+commercial configuration, network access, or the selected credential store is
+unavailable. `ctx pro uninstall --delete-data` uses a public delete-only
+credential-store adapter to remove and verify the complete local Pro inventory.
+It does not need the helper and remains available after an earlier
+`--keep-data` uninstall. Initialization or helper evidence causes deletion to
+derive only this root identity's production/staging record IDs, collect the
+thumbprints recorded in its installation-key and entitlement records, and
+delete and verify those graph keys even when no graph file was completed. A
+corrupt record makes that inventory unverifiable and fails the operation before
+any graph key or graph file is deleted. Once the cleanup phase is published, a
+retry uses its exact thumbprints instead of broad vault enumeration or
+now-deleted credential records.
 Interactive use asks whether to delete; noninteractive callers must explicitly
 choose `--delete-data` or `--keep-data`. Neither form deletes provider history
 or Core's derived search generations.
@@ -322,10 +329,10 @@ local upsert as described above.
 | `ctx locate` | active lexical locator/provenance metadata | none |
 | `ctx search` | active lexical generation and exact provider records for result hydration; depending on refresh mode, bounded provider discovery/plugin stdout and existing semantic generation | candidate lexical generation publication and relational catch-up only when refresh runs; background mode may write daemon state, and semantic-enabled search may create query endpoint files |
 | `ctx sql` | `relational.sqlite` metadata projection and active lexical generation identity for generation checks | may initialize an empty disposable projection on a completely fresh root; never refreshes sources or creates prior-epoch storage |
-| `ctx pro` / `ctx pro setup` | operating-system key store, commercial account state, signed release metadata/artifact, source-backed Core history, and an optional first-challenge codename only for `ctx pro --referral <codename>` | key store, signed helper installation, encrypted derived graph, and an optional opaque referral claim after accepted activation; the raw codename is not retained, and the explicit `setup` form is a synonym without referral attribution |
-| `ctx pro manage` | key store and commercial account state | may refresh the WorkOS session in the key store and open a hosted billing-portal URL |
+| `ctx pro` / `ctx pro setup` | selected credential store, commercial account state, signed release metadata/artifact, source-backed Core history, and an optional first-challenge codename only for `ctx pro --referral <codename>` | selected credential store, signed helper installation, encrypted derived graph, and an optional opaque referral claim after accepted activation; the raw codename is not retained, and the explicit `setup` form is a synonym without referral attribution |
+| `ctx pro manage` | selected credential store and commercial account state | may refresh the WorkOS session in the selected credential store and open a hosted billing-portal URL |
 | `ctx pro uninstall` | helper and local Pro paths | requires or prompts for a data choice; `--keep-data` removes only the helper and records preserved local Pro graph data when it exists, while `--delete-data` removes and verifies local Pro data; never-Pro roots leave Pro state unchanged, while independent default-on Core usage reporting may create or increment `usage.sqlite` |
-| `ctx referral create` / `status` / `payout` | native-vault commercial session and explicit hosted referral state; status reads only the authenticated referrer's aggregate summary | may refresh the commercial session in the native vault; human mode may open WorkOS AuthKit, and payout may open a one-use Stripe-hosted onboarding URL; JSON mode never opens a browser |
+| `ctx referral create` / `status` / `payout` | selected-store commercial session and explicit hosted referral state; status reads only the authenticated referrer's aggregate summary | may refresh the commercial session in the selected credential store; human mode may open WorkOS AuthKit, and payout may open a one-use Stripe-hosted onboarding URL; JSON mode never opens a browser |
 | first successful nonempty interactive `ctx blame` | normal Pro blame inputs and whether the local shown-once marker already exists | may atomically create the private nonsecret shown-once marker after delivering the result; no referral network request or telemetry |
 | `ctx docs` | embedded documentation in the binary | selected topic `--out` path for `ctx docs show --out` or selected `--out` directory for `ctx docs man --out` |
 | `ctx upgrade` | signed release metadata and installed binary/sidecar metadata | installed binary for manual upgrade, install sidecar, and executable-adjacent `.ctx.upgrade-state.json`, `.ctx.install.lock`, and transaction journal |
@@ -591,15 +598,15 @@ Run the identity-aware Pro deletion command first, while the root-local
 the Core root. For a custom root, pass the same root to both operations, for
 example `ctx --data-root /path/to/ctx pro uninstall --delete-data` before
 removing `/path/to/ctx`. Deleting the directory first can orphan Pro credentials
-or graph keys in the operating-system key store because their opaque record IDs
+or graph keys in the selected credential store because their opaque record IDs
 depend on that identity.
 
 The final directory removal deletes ctx's derived indexes/projections, config,
 logs, lifecycle lock, and remaining root-local metadata. It does not remove
 provider-owned history such as
 `~/.codex/sessions`. The small installation-bound anti-rollback watermark
-described above may remain in the native key store after verified Pro deletion;
-it is security metadata outside the user-deletable Pro inventory.
+described above may remain in the selected credential store after verified Pro
+deletion; it is security metadata outside the user-deletable Pro inventory.
 
 ## Privacy Truth
 
@@ -633,8 +640,8 @@ platform identifiers never leave it, and the service stores separately keyed
 anti-repeat tokens rather than the submitted evidence. An optional referral
 codename is sent only with the first anonymous-trial challenge. After accepted
 activation, attribution is immutable; only the returned opaque claim may remain
-in the native vault and survive credential refresh. Paid Checkout sends only
-that opaque claim, never the raw codename. No website or cookie is an
+in the selected credential store and survive credential refresh. Paid Checkout
+sends only that opaque claim, never the raw codename. No website or cookie is an
 attribution input. `ctx pro manage` creates a hosted Stripe portal session
 after sign-in. `ctx referral create`, `status`, and `payout` are explicit
 hosted-service operations; human mode may start WorkOS AuthKit, and eligible
