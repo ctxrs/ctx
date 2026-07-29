@@ -309,13 +309,23 @@ fn digest_matching_malformed_native_record_reports_unsupported_parser_revision()
 
 #[test]
 fn source_backed_mux_has_no_preview_complete_or_legacy_store_publication_fallback() {
-    let provider_source = include_str!("../source_backed.rs");
+    let provider_source = [
+        include_str!("../source_backed.rs"),
+        include_str!("../source_backed/projection.rs"),
+        include_str!("../source_backed/resolver.rs"),
+    ]
+    .concat();
     let native_path_source = include_str!("../../native_path.rs");
     let native_source = include_str!("../source.rs");
     let model_source = include_str!("../model.rs");
     let parse_source = include_str!("../parse.rs");
     let registry_source = include_str!("../../../../source_backed.rs");
-    for source in [provider_source, native_source, model_source, parse_source] {
+    for source in [
+        provider_source.as_str(),
+        native_source,
+        model_source,
+        parse_source,
+    ] {
         for forbidden in [
             ["ctx_history_", "store"].concat(),
             ["Store", "::"].concat(),
