@@ -119,7 +119,7 @@ fn coexisting_selected_surfaces_project_cold_without_collapsing_lineage() {
     let directory = tempdir().unwrap();
     let gui_path = directory.path().join("gui-warp.sqlite");
     let tui_path = directory.path().join("tui-warp.sqlite");
-    let long_body = "g".repeat(3_000);
+    let long_body = format!("{}warp-tail", "g".repeat(3_000));
     create_source(
         &gui_path,
         "same-conversation",
@@ -151,7 +151,8 @@ fn coexisting_selected_surfaces_project_cold_without_collapsing_lineage() {
         snapshots[0].documents[0].event_id,
         snapshots[1].documents[0].event_id
     );
-    assert_eq!(snapshots[0].documents[0].body.chars().count(), 2_048);
+    assert_eq!(snapshots[0].documents[0].body, long_body);
+    assert!(snapshots[0].documents[0].body.ends_with("warp-tail"));
     assert_eq!(snapshots[1].documents[0].body, "tui body");
     for snapshot in &snapshots {
         assert_eq!(snapshot.documents.len(), 1);
@@ -341,6 +342,7 @@ fn exact_task_message_locator_reopens_the_unbounded_provider_body() {
     let selection = WarpSourceSelectionV0::new(&path, "linux:stable:gui").unwrap();
     let snapshot = project_warp_source_backed_v0(selection.clone()).unwrap();
     let document = &snapshot.documents[0];
+    assert_eq!(document.body, body);
 
     assert_eq!(
         document.locator.revision_policy(),
@@ -365,7 +367,7 @@ fn exact_task_message_locator_reopens_the_unbounded_provider_body() {
     );
 
     let hydrated = resolve_warp_locator_v0(&selection, &document.locator).unwrap();
-    assert_eq!(String::from_utf8(hydrated.provider_bytes).unwrap(), body);
+    assert_eq!(hydrated.provider_bytes, document.body.as_bytes());
     assert_eq!(hydrated.event_type, "message");
     assert_eq!(hydrated.native_record_id, "message-1");
 }

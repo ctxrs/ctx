@@ -454,6 +454,7 @@ impl<'a> TraeScanner<'a> {
                         raw_session_index: session_plan.raw_session_index,
                         legacy_session_index: self.frontier.session_index,
                         message_index: self.frontier.message_index,
+                        lexical_text: String::new(),
                         event: core_event,
                     });
                 }
@@ -480,7 +481,8 @@ impl<'a> TraeScanner<'a> {
                 )?;
                 page.estimated_bytes = page
                     .estimated_bytes
-                    .saturating_add(core_event_bytes(&core_event));
+                    .saturating_add(core_event_bytes(&core_event))
+                    .saturating_add(event.text.len());
                 page.core.push(TraeCoreRecord {
                     provider_session_id,
                     native_session_id: session_plan.session.native_session_id.clone(),
@@ -495,6 +497,7 @@ impl<'a> TraeScanner<'a> {
                     raw_session_index: session_plan.raw_session_index,
                     legacy_session_index: self.frontier.session_index,
                     message_index: self.frontier.message_index,
+                    lexical_text: event.text,
                     event: core_event,
                 });
             }

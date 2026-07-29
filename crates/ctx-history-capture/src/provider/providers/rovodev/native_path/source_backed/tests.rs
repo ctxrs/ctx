@@ -79,9 +79,10 @@ fn collect_scan(
 }
 
 #[test]
-fn cold_scan_emits_stable_bounded_documents_tree_coordinates_and_exact_counts() {
+fn cold_scan_emits_stable_full_documents_tree_coordinates_and_exact_counts() {
     let temp = tempdir().unwrap();
     let root = temp.path().join(".rovodev/sessions");
+    let full_body = format!("{}rovodev-tail", "bounded ".repeat(400));
     write_session(
         &root,
         "session-a",
@@ -92,7 +93,7 @@ fn cold_scan_emits_stable_bounded_documents_tree_coordinates_and_exact_counts() 
                 "id": "message-a",
                 "role": "user",
                 "timestamp": "2026-01-01T00:00:00Z",
-                "content": "bounded ".repeat(MAX_BODY_PREVIEW_CHARS)
+                "content": full_body
             }),
             json!({
                 "id": "tool-success",
@@ -118,7 +119,8 @@ fn cold_scan_emits_stable_bounded_documents_tree_coordinates_and_exact_counts() 
     assert_eq!(cold.source.counts().ignored_records, 1);
     assert_eq!(cold.source.counts().indexed_documents, 1);
     assert!(pages.last().is_some_and(|page| page.terminal));
-    assert!(documents[0].body.chars().count() <= MAX_BODY_PREVIEW_CHARS);
+    assert_eq!(documents[0].body, full_body);
+    assert!(documents[0].body.ends_with("rovodev-tail"));
     assert_eq!(documents[0].session_id, leaf.session_id());
     assert_eq!(documents[0].parent_session_id, None);
     assert_eq!(documents[0].root_session_id, leaf.session_id());
@@ -249,6 +251,7 @@ fn exact_route_reopens_full_body_and_replacement_rejects_stale_revision() {
     let original_leaf = &original_inventory.leaves()[0];
     let (cold, original_documents, _) = collect_scan(original_leaf, context.clone(), None);
     assert_eq!(original_documents.len(), 2);
+    assert_eq!(original_documents[0].body, original_text);
     let hydrated = hydrate_rovodev_source_record(
         &original_inventory,
         original_documents[0].event_id,
@@ -260,9 +263,8 @@ fn exact_route_reopens_full_body_and_replacement_rejects_stale_revision() {
         Some(original_text.as_str())
     );
     assert_eq!(
-        serde_json::from_slice::<Value>(&hydrated.provider_bytes).unwrap()["message_history"][0]
-            ["id"],
-        "stable-message"
+        hydrated.provider_bytes,
+        original_documents[0].body.as_bytes()
     );
 
     let replacement_text = format!("replaced exact body {}", "content ".repeat(500));

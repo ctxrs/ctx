@@ -17,6 +17,7 @@ pub(crate) struct OpenClawEventFact {
     pub(crate) event_type: EventType,
     pub(crate) role: Option<EventRole>,
     pub(crate) occurred_at: DateTime<Utc>,
+    pub(crate) lexical_text: String,
     pub(crate) payload: Value,
     pub(crate) metadata: Value,
 }
@@ -66,6 +67,7 @@ pub(super) fn event_fact(
         event_type,
         role,
         occurred_at,
+        lexical_text: text.clone(),
         payload: json!({
             "text": retained_text.text,
             "text_retention": retained_text.retention.as_json(),

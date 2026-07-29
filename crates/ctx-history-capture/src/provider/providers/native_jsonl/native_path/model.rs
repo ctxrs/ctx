@@ -89,6 +89,8 @@ pub(crate) struct DirectJsonlEvent {
     pub(crate) event_type: EventType,
     pub(crate) role: EventRole,
     pub(crate) occurred_at: DateTime<Utc>,
+    #[serde(skip)]
+    pub(crate) lexical_text: String,
     pub(crate) payload: Value,
     pub(crate) metadata: Value,
     pub(crate) touches: Vec<DirectJsonlTouch>,

@@ -21,12 +21,14 @@ const MACHINE: &str = "antigravity-nativepath-test-machine";
 
 #[test]
 fn source_backed_cold_projection_and_exact_locator() {
-    const SENTINEL: &str = "ANTIGRAVITY_SOURCE_BACKED_SENTINEL";
-
     let temp = tempdir().unwrap();
     let root = temp.path().join("brain");
     let transcript = transcript_path(&root);
-    let source_record = record(0, "USER_INPUT", SENTINEL);
+    let sentinel = format!(
+        "ANTIGRAVITY_SOURCE_BACKED_SENTINEL {}antigravity-tail",
+        "full-body ".repeat(400)
+    );
+    let source_record = record(0, "USER_INPUT", &sentinel);
     write_transcript(&transcript, std::slice::from_ref(&source_record));
     let mut expected_record = serde_json::to_vec(&source_record).unwrap();
     expected_record.push(b'\n');
@@ -35,7 +37,7 @@ fn source_backed_cold_projection_and_exact_locator() {
         antigravity_source_backed_adapter(),
         &root,
         "agy-life",
-        SENTINEL,
+        &sentinel,
         &expected_record,
         None,
         "agy-life",

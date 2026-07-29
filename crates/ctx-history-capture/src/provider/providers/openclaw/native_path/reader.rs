@@ -611,6 +611,7 @@ pub(super) fn core_event(
         event_type: event.event_type,
         role: event.role,
         occurred_at: event.occurred_at,
+        lexical_text: event.lexical_text,
         payload: event.payload,
         metadata: event.metadata,
     }
@@ -894,6 +895,7 @@ pub(super) fn event_wire_bytes(event: &CoreEvent) -> usize {
         .saturating_add(64)
         .saturating_add(event.provider_event_hash.len())
         .saturating_add(event.cursor.len())
+        .saturating_add(event.lexical_text.len())
         .saturating_add(serde_json::to_vec(&event.payload).map_or(usize::MAX, |v| v.len()))
         .saturating_add(serde_json::to_vec(&event.metadata).map_or(usize::MAX, |v| v.len()))
 }

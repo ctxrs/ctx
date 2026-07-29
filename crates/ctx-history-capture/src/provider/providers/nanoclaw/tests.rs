@@ -1410,13 +1410,17 @@ fn source_backed_reads_consistent_central_and_project_wal_without_persistent_wri
         .query_row("pragma journal_mode=wal", [], |row| row.get(0))
         .unwrap();
     assert_eq!(component_mode, "wal");
+    let full_body = format!(
+        "{}nanoclaw-tail",
+        "central-project-wal-content ".repeat(200)
+    );
     component_writer
         .execute(
             "insert into messages_in values (
                 'wal-message', 1, 'chat', 1000, 'done', 'message', 'chat-1',
-                'telegram', 'thread', 'central-project-wal-content', null, 0
+                'telegram', 'thread', ?1, null, 0
             )",
-            [],
+            [full_body.as_str()],
         )
         .unwrap();
     component_writer
@@ -1444,11 +1448,12 @@ fn source_backed_reads_consistent_central_and_project_wal_without_persistent_wri
     .unwrap();
 
     assert_eq!(documents.len(), 1);
-    assert!(documents[0].body.contains("central-project-wal-content"));
+    assert_eq!(documents[0].body, full_body);
+    assert!(documents[0].body.ends_with("nanoclaw-tail"));
     assert_eq!(receipt.source.counts().retained_records, 1);
     let exact =
         hydrate_nanoclaw_source_backed_exact(&root, [0x34; 32], &documents[0].locator).unwrap();
-    assert_eq!(exact.text, "central-project-wal-content");
+    assert_eq!(exact.text, documents[0].body);
     let after = sqlite_persistent_disk_state(&[&central_path, &inbound, &outbound]);
     assert_eq!(after, before);
 }

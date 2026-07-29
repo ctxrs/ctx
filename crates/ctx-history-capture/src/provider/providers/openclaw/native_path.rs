@@ -306,6 +306,7 @@ struct CoreEvent {
     event_type: EventType,
     role: Option<EventRole>,
     occurred_at: DateTime<Utc>,
+    lexical_text: String,
     payload: Value,
     metadata: Value,
 }

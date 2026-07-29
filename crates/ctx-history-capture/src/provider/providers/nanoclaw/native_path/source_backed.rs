@@ -6,7 +6,7 @@ use ctx_history_core::{
     ProjectionContractError, ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey,
     SourceObservation, SourceRecordLocator, SourceResolverContractError, TypedKey,
 };
-use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
+use ctx_history_index::LexicalDocument;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -17,7 +17,6 @@ use crate::{
     complete_content::sqlite::{CompleteContentSqliteBoundError, CompleteContentSqliteQueryBudget},
     native_source::{NativeLocator, NativeSourceError},
     provider::{
-        normalization::provider_local_preview,
         providers::nanoclaw::{
             complete_content::{resolve_source_backed_exact, NanoClawCompleteRecord},
             position::decode_nanoclaw_message_locator,
@@ -341,7 +340,7 @@ fn nanoclaw_lexical_document(
         .transpose()?;
     let (event, exact_text) =
         nanoclaw_core_event(session, message, seq, chrono::DateTime::UNIX_EPOCH);
-    let (mut body, _) = provider_local_preview(&exact_text, MAX_BODY_PREVIEW_CHARS);
+    let mut body = exact_text;
     if body.is_empty() {
         body = format!("NanoClaw {message_source} message");
     }

@@ -64,6 +64,7 @@ pub(super) const DIRECT_JSONL_MAX_FILE_TOUCHES_PER_RECORD: usize =
 #[path = "reader_projection.rs"]
 mod projection;
 pub(crate) use projection::direct_jsonl_complete_message_provider_event_hash;
+pub(super) use projection::hydrated_direct_jsonl_lexical_text;
 
 #[path = "reader_source.rs"]
 mod source;

@@ -46,7 +46,6 @@ const NATIVE_SESSION_NAMESPACE: &str = "task-json-task-id";
 const NATIVE_ITEM_NAMESPACE: &str = "task-json-native-item";
 const NATIVE_ITEM_POSITION_KIND: &str = "task-json-component-ordinal";
 const SUBRECORD_POSITION_KIND: &str = "task-json-subrecord";
-const MAX_LEXICAL_PREVIEW_CHARS: usize = 2_048;
 const MAX_SOURCE_BACKED_PAGE_DOCUMENTS: usize = 64;
 const MAX_SOURCE_BACKED_PAGE_BYTES: usize = 4 * 1024 * 1024;
 
@@ -168,6 +167,7 @@ struct ResolverTask {
 
 pub(crate) struct TaskJsonSourceBackedResolver {
     dialect: TaskJsonNativeDialect,
+    selected: Box<[ProviderSource]>,
     tasks: BTreeMap<[u8; 32], ResolverTask>,
 }
 
@@ -569,7 +569,7 @@ fn project_event(
         evidence.record_digest,
     )?;
     let event_sequence = event_sequence(dialect, &event)?;
-    let body = bounded_event_body(&event);
+    let body = lexical_event_body(&event);
     Ok(LexicalDocument {
         event_id,
         session_id,
@@ -709,10 +709,44 @@ impl TaskJsonSourceBackedResolver {
                 }
             }
         }
-        Ok(Self { dialect, tasks })
+        Ok(Self {
+            dialect,
+            selected: selected.to_vec().into_boxed_slice(),
+            tasks,
+        })
     }
 
     pub(crate) fn hydrate_locator(
+        &self,
+        locator: &SourceRecordLocator,
+    ) -> Result<Vec<u8>, HydrationFailure> {
+        let _ = self.validate_locator_bytes(locator)?;
+        let mut adapter = TaskJsonSourceBackedAdapter::new(self.dialect, &self.selected);
+        let mut provider_bytes = None;
+        while let Some(page) = adapter
+            .next_page()
+            .map_err(|error| hydration_failure(HydrationFailureKind::StaleSourceEvidence, error))?
+        {
+            if provider_bytes.is_none() {
+                provider_bytes = page
+                    .documents
+                    .iter()
+                    .find(|document| &document.locator == locator)
+                    .map(|document| document.body.as_bytes().to_vec());
+            }
+        }
+        adapter
+            .finish()
+            .map_err(|error| hydration_failure(HydrationFailureKind::StaleSourceEvidence, error))?;
+        provider_bytes.ok_or_else(|| {
+            hydration_failure(
+                HydrationFailureKind::MissingRecord,
+                "task locator no longer projects a retained lexical event",
+            )
+        })
+    }
+
+    fn validate_locator_bytes(
         &self,
         locator: &SourceRecordLocator,
     ) -> Result<Vec<u8>, HydrationFailure> {
@@ -871,9 +905,12 @@ impl ContentSourceResolver for TaskJsonSourceBackedResolver {
         &self,
         request: &EventHydrationRequest,
     ) -> Result<HydratedProviderRecord, HydrationFailure> {
-        Ok(HydratedProviderRecord {
-            event_id: request.event_id(),
-            provider_bytes: self.hydrate_locator(request.locator())?,
+        let mut hydrated = self.hydrate_requests(std::slice::from_ref(request))?;
+        hydrated.pop().ok_or_else(|| {
+            hydration_failure(
+                HydrationFailureKind::MissingRecord,
+                "task event disappeared during exact display hydration",
+            )
         })
     }
 
@@ -881,10 +918,52 @@ impl ContentSourceResolver for TaskJsonSourceBackedResolver {
         &self,
         request: &SessionHydrationRequest,
     ) -> Result<Vec<HydratedProviderRecord>, HydrationFailure> {
-        request
-            .events()
-            .iter()
-            .map(|event| self.hydrate_event(event))
+        self.hydrate_requests(request.events())
+    }
+}
+
+impl TaskJsonSourceBackedResolver {
+    fn hydrate_requests(
+        &self,
+        requests: &[EventHydrationRequest],
+    ) -> Result<Vec<HydratedProviderRecord>, HydrationFailure> {
+        for request in requests {
+            let _ = self.validate_locator_bytes(request.locator())?;
+        }
+        let mut records = vec![None; requests.len()];
+        let mut adapter = TaskJsonSourceBackedAdapter::new(self.dialect, &self.selected);
+        while let Some(page) = adapter
+            .next_page()
+            .map_err(|error| hydration_failure(HydrationFailureKind::StaleSourceEvidence, error))?
+        {
+            for document in page.documents {
+                if let Some((index, request)) =
+                    requests.iter().enumerate().find(|(index, request)| {
+                        records[*index].is_none()
+                            && request.event_id() == document.event_id
+                            && request.locator() == &document.locator
+                    })
+                {
+                    records[index] = Some(HydratedProviderRecord {
+                        event_id: request.event_id(),
+                        provider_bytes: document.body.into_bytes(),
+                    });
+                }
+            }
+        }
+        adapter
+            .finish()
+            .map_err(|error| hydration_failure(HydrationFailureKind::StaleSourceEvidence, error))?;
+        records
+            .into_iter()
+            .map(|record| {
+                record.ok_or_else(|| {
+                    hydration_failure(
+                        HydrationFailureKind::MissingRecord,
+                        "task locator no longer projects a retained lexical event",
+                    )
+                })
+            })
             .collect()
     }
 }
@@ -1082,11 +1161,10 @@ fn event_sequence(
     )
 }
 
-fn bounded_event_body(event: &ClineEventRow) -> String {
+fn lexical_event_body(event: &ClineEventRow) -> String {
     let candidate = event
-        .preview
+        .body
         .as_deref()
-        .or(event.body.as_deref())
         .or_else(|| {
             event
                 .tool_call
@@ -1100,7 +1178,7 @@ fn bounded_event_body(event: &ClineEventRow) -> String {
                 .and_then(|output| output.preview.as_deref())
         })
         .unwrap_or_else(|| event_kind(event.kind));
-    candidate.chars().take(MAX_LEXICAL_PREVIEW_CHARS).collect()
+    candidate.to_owned()
 }
 
 fn event_kind(kind: ClineEventKind) -> &'static str {

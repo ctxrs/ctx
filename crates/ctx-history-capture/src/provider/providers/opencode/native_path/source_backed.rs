@@ -50,7 +50,7 @@ use crate::{
         DiscoveryContext, DiscoveryReport, SqliteSourceAccessError, SqliteSourceEvidence,
         SqliteSourceReadSnapshot,
     },
-    CaptureError, MAX_PROVIDER_SQLITE_VALUE_BYTES, PROVIDER_MAX_PREVIEW_CHARS,
+    CaptureError, MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
 
 const SOURCE_ANCHOR_KEY: &str = "active-database";
@@ -392,7 +392,7 @@ fn stream_events(
 
 fn decode_source_event_row(
     row: &Row<'_>,
-    schema: &OpenCodeNativeSchema,
+    _schema: &OpenCodeNativeSchema,
     dialect: &OpenCodeSqliteDialect,
 ) -> OpenCodeSourceBackedResult<SourceEventRow> {
     let native_identity: String = row.get(0)?;
@@ -531,7 +531,11 @@ fn lexical_document(
         source_backed_retained_event_kind(&retained.effective_type, &retained.role, &retained.body);
     let searchable =
         source_backed_retained_searchable_text(kind, &retained.effective_type, &retained.body);
-    let body = bounded_preview(&searchable);
+    let body = if searchable.is_empty() {
+        "OpenCode event".to_owned()
+    } else {
+        searchable
+    };
     let (file_touches, _) = source_backed_retained_file_touches(kind, &retained.body);
     let event_sequence = *next_sequence;
     *next_sequence = checked_add(*next_sequence, 1)?;
@@ -788,17 +792,6 @@ fn hash_str(hasher: &mut Sha256, value: &str) {
 fn hash_bytes(hasher: &mut Sha256, value: &[u8]) {
     hasher.update((value.len() as u64).to_le_bytes());
     hasher.update(value);
-}
-
-fn bounded_preview(value: &str) -> String {
-    let mut preview = value
-        .chars()
-        .take(PROVIDER_MAX_PREVIEW_CHARS)
-        .collect::<String>();
-    if preview.is_empty() {
-        preview.push_str("OpenCode event");
-    }
-    preview
 }
 
 fn event_kind_label(kind: OpenCodeNativeEventKind) -> &'static str {
@@ -1065,7 +1058,15 @@ fn hydrate_exact_row(
             "provider SQLite typed row version no longer matches",
         ));
     }
-    Ok(provider_bytes)
+    let kind =
+        source_backed_retained_event_kind(&retained.effective_type, &retained.role, &retained.body);
+    let display_text =
+        source_backed_retained_searchable_text(kind, &retained.effective_type, &retained.body);
+    if display_text.is_empty() {
+        Ok(b"OpenCode event".to_vec())
+    } else {
+        Ok(display_text.into_bytes())
+    }
 }
 
 fn hydration_failure(kind: HydrationFailureKind, detail: impl Into<String>) -> HydrationFailure {
@@ -1184,9 +1185,10 @@ mod tests {
             assert_eq!(scan.emitted_pages, 1);
             assert_eq!(scan.schema_family, "session_message_seq");
             assert_eq!(documents.len(), 2);
-            assert!(documents
-                .iter()
-                .all(|document| document.body.chars().count() <= PROVIDER_MAX_PREVIEW_CHARS));
+            let first_row: serde_json::Value = serde_json::from_str(&expected[0]).unwrap();
+            let expected_first_body = first_row["text"].as_str().unwrap();
+            assert_eq!(documents[0].body, expected_first_body);
+            assert!(documents[0].body.ends_with("opencode-tail"));
             assert_eq!(documents[0].provider_session_id.as_deref(), Some("child"));
             let root_session_id = session_id(&scan.source, "root").unwrap();
             assert_eq!(documents[0].parent_session_id, Some(root_session_id));
@@ -1229,7 +1231,7 @@ mod tests {
                     .unwrap();
             let resolver = registration.exact_resolver(&path);
             let hydrated = resolver.hydrate_event(&request).unwrap();
-            assert_eq!(hydrated.provider_bytes, expected[0].as_bytes());
+            assert_eq!(hydrated.provider_bytes, documents[0].body.as_bytes());
 
             let conn = Connection::open(&path).unwrap();
             conn.execute(
@@ -1375,9 +1377,17 @@ mod tests {
         .unwrap();
         let mut expected = Vec::new();
         for sequence in 0..rows {
+            let text = if sequence == 0 {
+                format!(
+                    "{} opencode-tail",
+                    format!("{provider} retained ").repeat(400)
+                )
+            } else {
+                format!("{provider} retained message {sequence}")
+            };
             let data = json!({
                 "role": if sequence % 2 == 0 { "user" } else { "assistant" },
-                "text": format!("{provider} retained message {sequence}")
+                "text": text
             })
             .to_string();
             conn.execute(

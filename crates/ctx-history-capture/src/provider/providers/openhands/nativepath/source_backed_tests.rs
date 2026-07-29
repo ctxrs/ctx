@@ -8,14 +8,15 @@ use super::source_backed::{
 };
 
 #[test]
-fn source_backed_cold_projection_is_stable_and_bounded() {
+fn source_backed_cold_projection_is_stable_and_retains_full_lexical_body() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("profile");
+    let full_body = format!("{}openhands-tail", "x".repeat(8_000));
     write_event(
         &root,
         "conversation-cold",
         "event-a.json",
-        message("event-a", &"x".repeat(8_000)),
+        message("event-a", &full_body),
     );
     write_event(
         &root,
@@ -42,7 +43,8 @@ fn source_backed_cold_projection_is_stable_and_bounded() {
     assert_eq!(first.sources()[0].counts().ignored_records, 1);
     assert_eq!(first.sources()[0].counts().rejected_records, 1);
     assert_eq!(first.documents().len(), 1);
-    assert!(first.documents()[0].body.chars().count() <= 2_048);
+    assert_eq!(first.documents()[0].body, full_body);
+    assert!(first.documents()[0].body.ends_with("openhands-tail"));
     assert!(!first.documents()[0]
         .body
         .contains("private successful output"));
@@ -80,6 +82,13 @@ fn source_backed_cold_projection_is_stable_and_bounded() {
         first.documents()[0].session_id,
         second.documents()[0].session_id
     );
+    let resolver = OpenHandsLocatorResolverV1::discover(&root).unwrap();
+    let hydrated = resolver.hydrate(&first.documents()[0].locator).unwrap();
+    assert_eq!(
+        hydrated.provider_bytes,
+        first.documents()[0].body.as_bytes()
+    );
+    assert_eq!(hydrated.decoded_display_text, first.documents()[0].body);
 }
 
 #[test]
@@ -267,7 +276,7 @@ fn exact_locator_uses_relative_leaf_and_native_object_coordinate() {
 
     let resolver = OpenHandsLocatorResolverV1::discover(&root).unwrap();
     let hydrated = resolver.hydrate(&document.locator).unwrap();
-    assert_eq!(hydrated.provider_bytes, bytes);
+    assert_eq!(hydrated.provider_bytes, document.body.as_bytes());
     assert_eq!(hydrated.decoded_display_text, "exact provider bytes");
 }
 

@@ -143,8 +143,7 @@ fn lifecycle_case(provider: CaptureProvider) {
         page.documents.len() <= 64
             && page.estimated_owned_bytes <= 4 * 1024 * 1024
             && page.documents.iter().all(|document| {
-                document.body.chars().count() <= 2_048
-                    && document.parent_session_id.is_none()
+                document.parent_session_id.is_none()
                     && document.root_session_id == document.session_id
                     && document.provider_session_id.is_some()
                     && document.branch.is_none()
@@ -169,8 +168,15 @@ fn lifecycle_case(provider: CaptureProvider) {
                     )
             })
     }));
+    let full_body = source_fixture_body();
+    let full_document = cold_pages
+        .iter()
+        .flat_map(|page| &page.documents)
+        .find(|document| document.body.ends_with("task-json-tail"))
+        .expect("full source-backed body");
+    assert_eq!(full_document.body, full_body);
     let cold_ids = event_ids(&cold_pages);
-    let cold_locator = cold_pages[0].documents[0].locator.clone();
+    let cold_locator = full_document.locator.clone();
     let cold_source = cold.tasks[0].source.clone();
     let cold_certificate = cold.tasks[0].certified_source.clone();
     assert!(matches!(
@@ -187,7 +193,7 @@ fn lifecycle_case(provider: CaptureProvider) {
     let hydrated = resolver
         .hydrate_locator(&cold_locator)
         .expect("hydrate exact native item");
-    assert!(String::from_utf8_lossy(&hydrated).contains("cold body"));
+    assert_eq!(hydrated, full_document.body.as_bytes());
 
     let (exact_pages, exact) = scan(provider, &selected);
     assert_eq!(event_ids(&exact_pages), cold_ids);
@@ -305,7 +311,7 @@ impl Fixture {
             _ => unreachable!(),
         };
         let task = root.join("tasks").join(task_id);
-        Self::write_task(provider, &task, task_id, "cold body");
+        Self::write_task(provider, &task, task_id, &source_fixture_body());
         if provider == CaptureProvider::Cline {
             write_json(
                 &root.join("state/taskHistory.json"),
@@ -391,6 +397,10 @@ fn messages(body: &str) -> Value {
             "content": "assistant body"
         }
     ])
+}
+
+fn source_fixture_body() -> String {
+    format!("{}task-json-tail", "cold body ".repeat(400))
 }
 
 fn write_json(path: &Path, value: &Value) {
