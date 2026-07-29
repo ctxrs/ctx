@@ -437,10 +437,10 @@ where
             let changed = manifest
                 .sources
                 .iter()
-                .filter_map(|(source_id, source)| {
-                    (prior.get(source_id) != Some(&source.certificate_digest))
-                        .then(|| source_id.clone())
+                .filter(|&(source_id, source)| {
+                    prior.get(source_id) != Some(&source.certificate_digest)
                 })
+                .map(|(source_id, _)| source_id.clone())
                 .collect::<BTreeSet<_>>();
             for source_id in prior.keys().filter(|id| !manifest_ids.contains(*id)) {
                 if !manifest.removal_ids.contains(source_id) {
