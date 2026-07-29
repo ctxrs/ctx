@@ -1444,10 +1444,10 @@ mod tests {
         let legacy_store_type = ["ctx_history_", "store::Store"].concat();
         assert_eq!(
             nativepath_source.matches(&legacy_store_type).count(),
-            1,
-            "Junie compatibility Store reference must remain a single typed-unsupported shim"
+            0,
+            "Junie production code must not retain a Store compatibility shim"
         );
-        assert!(nativepath_source.contains("CaptureError::UnsupportedSchema"));
+        assert!(!nativepath_source.contains("legacy Store publication"));
         assert!(registry_source.contains("JunieLocatorResolverV0::discover_for_hydration"));
         assert!(registry_source.contains(".with_batch_hydration(move |request|"));
     }

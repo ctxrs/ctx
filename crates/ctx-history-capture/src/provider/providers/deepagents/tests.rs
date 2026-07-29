@@ -1,15 +1,13 @@
 use ctx_history_core::EventType;
-use ctx_history_store::Store;
 use rmpv::{encode::write_value as write_msgpack_value, Value as MsgpackValue};
 
 use super::{
-    import_deepagents_nativepath,
     message::{
         core_eligible, deepagents_decode_msgpack, deepagents_event_type,
         deepagents_messages_from_msgpack_value, DeepAgentsMessage,
     },
 };
-use crate::{CaptureError, ProviderAdapterContext, ProviderImportOptions};
+use crate::CaptureError;
 
 fn message(role: &str, text: &str, status: Option<&str>) -> MsgpackValue {
     let mut fields = vec![
@@ -88,25 +86,4 @@ fn source_backed_eligibility_keeps_provider_event_classification() {
         deepagents_event_type(&timed_out_tool),
         EventType::ToolOutput
     );
-}
-
-#[test]
-fn legacy_store_import_shape_is_typed_unsupported_schema() {
-    let directory = crate::test_support_paths::tempdir().unwrap();
-    let source_path = directory.path().join("sessions.db");
-    let mut store = Store::open(directory.path().join("store.sqlite")).unwrap();
-
-    let error = import_deepagents_nativepath(
-        &source_path,
-        &mut store,
-        ProviderAdapterContext::default(),
-        ProviderImportOptions::default(),
-    )
-    .unwrap_err();
-
-    assert!(matches!(
-        error,
-        CaptureError::UnsupportedSchema(ref reason)
-            if reason == "Deep Agents Store ingestion was removed; use source-backed ingestion"
-    ));
 }

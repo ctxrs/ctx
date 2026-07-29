@@ -1,12 +1,7 @@
-use std::path::Path;
-
 use chrono::{DateTime, Utc};
-use ctx_history_store::Store;
 
 use crate::native_source::NativeSqliteValue;
-use crate::{
-    CaptureError, ProviderAdapterContext, ProviderImportOptions, ProviderImportSummary, Result,
-};
+use crate::Result;
 
 mod content;
 mod lifecycle;
@@ -40,19 +35,6 @@ pub(crate) fn goose_complete_message_with_normalized_hash(
     values: &[NativeSqliteValue],
 ) -> Result<(String, String, String, String)> {
     content::complete_message_with_normalized_hash(conn, values)
-}
-
-/// Rejects the released Store-ingestion entrypoint while shared dispatch still
-/// carries its historical signature. Goose ingestion is source-backed.
-pub(crate) fn import_goose_nativepath(
-    _path: &Path,
-    _store: &mut Store,
-    _context: ProviderAdapterContext,
-    _import_options: ProviderImportOptions,
-) -> Result<ProviderImportSummary> {
-    Err(CaptureError::InvalidPayload(
-        "Goose Store ingestion was removed; use source-backed ingestion".to_owned(),
-    ))
 }
 
 pub(crate) fn goose_timestamp(raw: Option<&str>, fallback: DateTime<Utc>) -> DateTime<Utc> {

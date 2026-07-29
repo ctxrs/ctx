@@ -1,7 +1,4 @@
-use std::{
-    io::{BufReader, Read, Seek, SeekFrom},
-    path::Path,
-};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{EventRole, EventType};
@@ -10,8 +7,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     provider::normalization::{provider_local_preview, provider_timestamp_millis},
-    CaptureError, ProviderAdapterContext, ProviderImportOptions, ProviderImportSummary, Result,
-    PROVIDER_MAX_PREVIEW_CHARS,
+    CaptureError, Result, PROVIDER_MAX_PREVIEW_CHARS,
 };
 
 use super::{
@@ -37,18 +33,3 @@ pub(crate) use source_backed::{
     JunieLocatorResolverV0, JunieSourceBackedEmissionV0, JunieSourceBackedErrorV0,
     JunieSourceBackedResultV0, JunieSourceBackedScannerV0,
 };
-
-/// Temporary compatibility entry point for shared v0.25 import APIs.
-///
-/// Junie production ingestion is source-backed. The legacy Store publisher was
-/// deleted provider-locally and must not be reintroduced behind this symbol.
-pub(crate) fn import_junie_nativepath(
-    _path: &Path,
-    _store: &mut ctx_history_store::Store,
-    _context: ProviderAdapterContext,
-    _options: ProviderImportOptions,
-) -> Result<ProviderImportSummary> {
-    Err(CaptureError::UnsupportedSchema(
-        "Junie legacy Store publication is unavailable; use source-backed ingestion".to_owned(),
-    ))
-}

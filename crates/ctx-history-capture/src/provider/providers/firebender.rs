@@ -5,7 +5,6 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{EventRole, EventType};
-use ctx_history_store::Store;
 use serde_json::{json, Value};
 
 use crate::{
@@ -13,8 +12,7 @@ use crate::{
         provider_policy_body, provider_policy_event_text, provider_result_identifier_evidence,
         provider_result_outcome_evidence, provider_role, provider_timestamp_value,
     },
-    CaptureError, ProviderAdapterContext, ProviderImportOptions, ProviderImportSummary, Result,
-    FIREBENDER_SQLITE_SOURCE_FORMAT,
+    CaptureError, Result, FIREBENDER_SQLITE_SOURCE_FORMAT,
 };
 
 mod message_text;
@@ -23,19 +21,6 @@ pub(crate) mod native_path;
 pub(crate) use message_text::firebender_message_text;
 #[allow(unused_imports)]
 pub(crate) use message_text::firebender_result_content;
-
-/// Rejects the released Store-ingestion entrypoint while shared dispatch still
-/// carries its historical signature. Firebender ingestion is source-backed.
-pub(crate) fn import_firebender_nativepath(
-    _path: &Path,
-    _store: &mut Store,
-    _context: ProviderAdapterContext,
-    _import_options: ProviderImportOptions,
-) -> Result<ProviderImportSummary> {
-    Err(CaptureError::UnsupportedSchema(
-        "Firebender Store ingestion was removed; use source-backed ingestion".to_owned(),
-    ))
-}
 
 pub(crate) fn firebender_chat_history_db_path(path: &Path) -> Result<PathBuf> {
     match fs::symlink_metadata(path) {

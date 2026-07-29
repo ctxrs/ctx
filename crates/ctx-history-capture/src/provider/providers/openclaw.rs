@@ -5,7 +5,6 @@ use std::{
 };
 
 use ctx_history_core::EventType;
-use ctx_history_store::Store;
 use serde_json::Value;
 
 use crate::provider::normalization::{
@@ -13,8 +12,7 @@ use crate::provider::normalization::{
 };
 use crate::provider::tool_input;
 use crate::{
-    fnv1a64, CaptureError, OutputObservationKind, OutputOutcome, OutputOutcomeMetadata,
-    ProviderAdapterContext, ProviderImportOptions, ProviderImportSummary, Result,
+    fnv1a64, OutputObservationKind, OutputOutcome, OutputOutcomeMetadata, Result,
     PROVIDER_MAX_PREVIEW_CHARS,
 };
 
@@ -36,17 +34,6 @@ pub(crate) use native_path::{
     OpenClawSourceBackedSourceV0, OpenClawSourceBackedVerifiedPrefixV0,
 };
 pub(crate) use normalization::event as openclaw_event;
-
-pub(crate) fn import_openclaw_nativepath_tree(
-    _path: &Path,
-    _store: &mut Store,
-    _context: ProviderAdapterContext,
-    _options: ProviderImportOptions,
-) -> Result<ProviderImportSummary> {
-    Err(CaptureError::UnsupportedSchema(
-        "OpenClaw Store ingestion was removed; use source-backed ingestion".to_owned(),
-    ))
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct OpenClawFrozenFileMetadata {
@@ -312,31 +299,5 @@ fn openclaw_i64_field(value: &Value, fields: &[&str]) -> Option<i64> {
                     .find_map(|value| openclaw_i64_field(value, fields))
             }),
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn legacy_store_import_shape_is_typed_unsupported_schema() {
-        let directory = crate::test_support_paths::tempdir().unwrap();
-        let source_path = directory.path().join("session.jsonl");
-        let mut store = Store::open(directory.path().join("store.sqlite")).unwrap();
-
-        let error = import_openclaw_nativepath_tree(
-            &source_path,
-            &mut store,
-            ProviderAdapterContext::default(),
-            ProviderImportOptions::default(),
-        )
-        .unwrap_err();
-
-        assert!(matches!(
-            error,
-            CaptureError::UnsupportedSchema(ref reason)
-                if reason == "OpenClaw Store ingestion was removed; use source-backed ingestion"
-        ));
     }
 }

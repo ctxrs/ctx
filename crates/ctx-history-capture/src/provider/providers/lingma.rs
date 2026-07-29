@@ -1,12 +1,9 @@
-use std::path::Path;
-
 use ctx_history_core::EventType;
-use ctx_history_store::Store;
 use rusqlite::Connection;
 use serde_json::Value;
 
 use crate::native_source::NativeSqliteValue;
-use crate::{ProviderAdapterContext, ProviderImportOptions, ProviderImportSummary, Result};
+use crate::Result;
 
 pub(crate) mod native_path;
 
@@ -14,15 +11,6 @@ pub(crate) use native_path::{
     scan_lingma_source_backed_v0, LingmaDatabaseSourceV0, LingmaSourceBackedResolverV0,
     LingmaSourceInventoryV0,
 };
-
-pub(crate) fn import_lingma_nativepath(
-    path: &Path,
-    store: &mut Store,
-    context: ProviderAdapterContext,
-    import_options: ProviderImportOptions,
-) -> Result<ProviderImportSummary> {
-    native_path::import_lingma_native_path(path, store, context, import_options)
-}
 
 // Kept solely for the already-released verified-content resolver. Ingestion no
 // longer uses the traditional SQLite producer/projector.

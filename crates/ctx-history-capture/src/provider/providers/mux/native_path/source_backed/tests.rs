@@ -343,10 +343,10 @@ fn source_backed_mux_has_no_preview_complete_or_legacy_store_publication_fallbac
     let legacy_store_type = ["ctx_history_", "store::Store"].concat();
     assert_eq!(
         native_path_source.matches(&legacy_store_type).count(),
-        1,
-        "Mux compatibility Store reference must remain a single typed-unsupported shim"
+        0,
+        "Mux production code must not retain a Store compatibility shim"
     );
-    assert!(native_path_source.contains("CaptureError::UnsupportedSchema"));
+    assert!(!native_path_source.contains("legacy Store publication"));
     assert!(registry_source.contains("MuxSourceBackedResolverV0::discover_for_hydration"));
     assert!(registry_source.contains(".with_batch_hydration(move |request|"));
     let unsupported_fallback = ["Mux exact content requires", "brokered compound-file"].concat();
