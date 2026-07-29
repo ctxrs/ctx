@@ -1,77 +1,17 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
-use rusqlite::{Connection, OpenFlags};
+use anyhow::Result;
 use serde_json::{json, Value};
-
-use ctx_history_core::database_path;
 
 use crate::analytics::{count_bucket, StatusTelemetry};
 use crate::config::{self, CONFIG_FILE};
 use crate::local_usage;
 use crate::output::print_json;
-use crate::semantic::{
-    daemon_report, semantic_worker_report_cached, semantic_worker_report_configured_json,
-};
-use crate::store_util::open_existing_store_read_only;
+use crate::semantic::source_epoch_status_report;
 use crate::{StatusArgs, UsageStatusMode};
-
-const LEXICAL_INDEX_BYTES_PER_SECOND: u64 = 16 * 1024 * 1024;
 
 pub(super) fn upgrade_report(config: &config::AppConfig) -> serde_json::Value {
     crate::upgrade::upgrade_diagnostics(config).report
-}
-
-fn inventory_source_bytes(db_path: &Path) -> Result<u64> {
-    let connection = Connection::open_with_flags(
-        db_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .with_context(|| {
-        format!(
-            "open ctx status inventory database {} read-only",
-            db_path.display()
-        )
-    })?;
-    let (catalog_bytes, source_import_bytes) = connection.query_row(
-        r#"
-        SELECT
-            COALESCE((
-                SELECT SUM(file_size_bytes)
-                FROM catalog_sessions
-                WHERE is_stale = 0
-            ), 0),
-            COALESCE((
-                SELECT SUM(file_size_bytes)
-                FROM source_import_files
-                WHERE is_stale = 0
-                  AND json_type(metadata_json, '$.inventory_missing_generation_v1') IS NULL
-                  AND json_type(metadata_json, '$.inventory_control_v1') IS NULL
-                  AND json_type(metadata_json, '$.inventory_generation_v1') IS NULL
-                  AND json_type(metadata_json, '$.inventory_phase_v1') IS NULL
-                  AND json_type(metadata_json, '$.inventory_discovery_complete_v1') IS NULL
-                  AND json_type(metadata_json, '$.inventory_reconciliation_stage_v1') IS NULL
-                  AND json_type(metadata_json, '$.inventory_stale_keyset_v1') IS NULL
-            ), 0)
-        "#,
-        [],
-        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-    )?;
-    let catalog_bytes =
-        u64::try_from(catalog_bytes).context("catalog source bytes must be nonnegative")?;
-    let source_import_bytes =
-        u64::try_from(source_import_bytes).context("source import bytes must be nonnegative")?;
-    catalog_bytes
-        .checked_add(source_import_bytes)
-        .context("inventory source byte total exceeds u64")
-}
-
-fn lexical_index_estimate_seconds(source_bytes: u64) -> u64 {
-    if source_bytes == 0 {
-        0
-    } else {
-        source_bytes.div_ceil(LEXICAL_INDEX_BYTES_PER_SECOND).max(1)
-    }
 }
 
 pub(crate) fn run_status(
@@ -83,76 +23,16 @@ pub(crate) fn run_status(
     if args.usage.modifies_state() {
         return run_usage_action(args.usage, &data_root, args.format.is_json(), quiet);
     }
-    let db_path = database_path(data_root.clone());
-    let initialized = db_path.exists();
     let config_path = data_root.join(CONFIG_FILE);
     let Some(config) = load_status_config(&data_root) else {
         return malformed_config_failure(args.format.is_json());
     };
-    let (
-        records,
-        sessions,
-        events,
-        sources,
-        catalog_counts,
-        source_import_file_counts,
-        inventory_source_bytes,
-        semantic,
-        daemon,
-    ) = if initialized {
-        let store = open_existing_store_read_only(&db_path, "ctx status")?;
-        let counts = store.indexed_history_counts()?;
-        let semantic_report = semantic_worker_report_cached(&data_root, Some(&store))?;
-        let daemon = daemon_report(&data_root, &semantic_report);
-        let catalog_counts = store.catalog_session_counts()?;
-        let inventory_source_bytes = inventory_source_bytes(&db_path)?;
-        (
-            counts.items(),
-            counts.sessions,
-            counts.events,
-            store.capture_source_count()?,
-            catalog_counts,
-            store.source_import_file_counts()?,
-            Some(inventory_source_bytes),
-            semantic_worker_report_configured_json(&config, &semantic_report),
-            daemon,
-        )
-    } else {
-        let semantic_report = semantic_worker_report_cached(&data_root, None)?;
-        let daemon = daemon_report(&data_root, &semantic_report);
-        (
-            0,
-            0,
-            0,
-            0,
-            Default::default(),
-            Default::default(),
-            None,
-            semantic_worker_report_configured_json(&config, &semantic_report),
-            daemon,
-        )
-    };
-    let inventory_units = catalog_counts
-        .total
-        .saturating_add(source_import_file_counts.total);
-    let pending_inventory_units = catalog_counts
-        .pending
-        .saturating_add(source_import_file_counts.pending);
-    let failed_inventory_units = catalog_counts
-        .failed
-        .saturating_add(source_import_file_counts.failed);
-    let stale_inventory_units = catalog_counts
-        .stale
-        .saturating_add(source_import_file_counts.stale);
-    telemetry.initialized = Some(initialized);
-    telemetry.indexed_items = Some(count_bucket(records as u64));
-    telemetry.indexed_sessions = Some(count_bucket(sessions as u64));
-    telemetry.indexed_events = Some(count_bucket(events as u64));
-    telemetry.indexed_sources = Some(count_bucket(sources as u64));
-    telemetry.inventory_units = Some(count_bucket(inventory_units as u64));
-    telemetry.pending_inventory_units = Some(count_bucket(pending_inventory_units as u64));
-    telemetry.failed_inventory_units = Some(count_bucket(failed_inventory_units as u64));
-    telemetry.stale_inventory_units = Some(count_bucket(stale_inventory_units as u64));
+    let source = source_epoch_status_report(&data_root, &config)?;
+    telemetry.initialized = Some(source.initialized);
+    telemetry.indexed_items = source.indexed_items.map(count_bucket);
+    telemetry.indexed_sessions = source.indexed_sessions.map(count_bucket);
+    telemetry.indexed_events = source.indexed_events.map(count_bucket);
+    telemetry.indexed_sources = source.indexed_sources.map(count_bucket);
     let mut pro = crate::pro::lifecycle_status_json(&data_root);
     if let Some(object) = pro.as_object_mut() {
         object.insert(
@@ -169,104 +49,41 @@ pub(crate) fn run_status(
     );
 
     if args.format.is_json() {
-        print_json(json!({
-            "schema_version": 1,
-            "initialized": initialized,
-            "data_root": data_root,
-            "database_path": db_path,
-            "config_path": config_path,
-            "indexed_items": records,
-            "indexed_sessions": sessions,
-            "indexed_events": events,
-            "indexed_sources": sources,
-            "inventory_units": inventory_units,
-            "pending_inventory_units": pending_inventory_units,
-            "failed_inventory_units": failed_inventory_units,
-            "stale_inventory_units": stale_inventory_units,
-            "cataloged_sessions": catalog_counts.total,
-            "indexed_catalog_sessions": catalog_counts.indexed,
-            "pending_catalog_sessions": catalog_counts.pending,
-            "failed_catalog_sessions": catalog_counts.failed,
-            "stale_catalog_sessions": catalog_counts.stale,
-            "source_import_files": source_import_file_counts.total,
-            "indexed_source_import_files": source_import_file_counts.indexed,
-            "pending_source_import_files": source_import_file_counts.pending,
-            "failed_source_import_files": source_import_file_counts.failed,
-            "stale_source_import_files": source_import_file_counts.stale,
-            "inventory_source_bytes": inventory_source_bytes,
-            "lexical_index_estimate_seconds": inventory_source_bytes
-                .map(lexical_index_estimate_seconds),
-            "semantic": semantic,
-            "daemon": daemon,
-            "upgrade": upgrade,
-            "pro": pro,
-            "local_usage": local_usage,
-            "local_usage_action": Value::Null,
-            "local_only": true,
-            "read_only": !args.usage.modifies_state(),
-        }))?;
+        let mut report = source.report;
+        if let Some(object) = report.as_object_mut() {
+            object.insert("upgrade".to_owned(), upgrade);
+            object.insert("pro".to_owned(), pro);
+            object.insert("local_usage".to_owned(), json!(local_usage));
+            object.insert("local_usage_action".to_owned(), Value::Null);
+            object.insert("read_only".to_owned(), json!(!args.usage.modifies_state()));
+        }
+        print_json(report)?;
     } else if !quiet {
         println!("data_root: {}", data_root.display());
-        println!("database_path: {}", db_path.display());
         println!("config_path: {}", config_path.display());
-        println!("initialized: {initialized}");
-        println!("indexed_items: {records}");
-        println!("indexed_sources: {sources}");
-        println!("inventory_units: {inventory_units}");
-        println!("pending_inventory_units: {pending_inventory_units}");
-        println!("failed_inventory_units: {failed_inventory_units}");
-        println!("stale_inventory_units: {stale_inventory_units}");
-        println!("cataloged_sessions: {}", catalog_counts.total);
-        println!("indexed_catalog_sessions: {}", catalog_counts.indexed);
-        println!("pending_catalog_sessions: {}", catalog_counts.pending);
-        println!("failed_catalog_sessions: {}", catalog_counts.failed);
-        println!("stale_catalog_sessions: {}", catalog_counts.stale);
-        println!("source_import_files: {}", source_import_file_counts.total);
-        println!(
-            "indexed_source_import_files: {}",
-            source_import_file_counts.indexed
-        );
-        println!(
-            "pending_source_import_files: {}",
-            source_import_file_counts.pending
-        );
-        println!(
-            "failed_source_import_files: {}",
-            source_import_file_counts.failed
-        );
-        println!(
-            "stale_source_import_files: {}",
-            source_import_file_counts.stale
-        );
-        println!(
-            "semantic_status: {}",
-            semantic
-                .get("status")
-                .and_then(|value| value.as_str())
-                .unwrap_or("unknown")
-        );
-        println!(
-            "semantic_embedded_items: {}",
-            semantic
-                .get("coverage")
-                .and_then(|coverage| coverage.get("embedded_items"))
-                .and_then(|value| value.as_u64())
-                .unwrap_or(0)
-        );
-        println!(
-            "daemon_enabled: {}",
-            daemon
-                .get("enabled")
-                .and_then(|value| value.as_bool())
-                .unwrap_or(true)
-        );
-        println!(
-            "daemon_status: {}",
-            daemon
-                .get("status")
-                .and_then(|value| value.as_str())
-                .unwrap_or("unknown")
-        );
+        println!("initialized: {}", source.initialized);
+        print_optional_count("indexed_items", source.indexed_items);
+        print_optional_count("indexed_sessions", source.indexed_sessions);
+        print_optional_count("indexed_events", source.indexed_events);
+        print_optional_count("indexed_sources", source.indexed_sources);
+        print_component_status("history_epoch", &source.report["history_epoch"]);
+        print_component_status("lexical", &source.report["lexical"]);
+        if let Some(generation) = source.report["lexical"]["generation_id"].as_str() {
+            println!("lexical_generation: {generation}");
+        }
+        if let Some(policy) = source.report["lexical"]["policy"]["published_hash"].as_str() {
+            println!("lexical_policy_hash: {policy}");
+        }
+        print_component_status("catalog", &source.report["catalog"]);
+        print_component_status("resolver", &source.report["resolver"]);
+        print_component_status("source_refresh", &source.report["refresh"]);
+        print_component_status("semantic", &source.report["semantic"]);
+        print_component_status("flat_f32", &source.report["semantic"]["flat_f32"]);
+        print_component_status("relational", &source.report["relational"]);
+        print_component_status("pro_projection", &source.report["pro_projection"]);
+        print_component_status("legacy_history", &source.report["legacy_history"]);
+        let daemon = &source.report["daemon"];
+        print_component_status("daemon", daemon);
         println!("upgrade_auto: {}", config.auto_upgrade_mode().as_str());
         if let Some(reason) = daemon.get("reason").and_then(|value| value.as_str()) {
             println!("daemon_reason: {reason}");
@@ -324,6 +141,26 @@ pub(crate) fn run_status(
         println!("read_only: {}", !args.usage.modifies_state());
     }
     Ok(())
+}
+
+fn print_optional_count(name: &str, value: Option<u64>) {
+    match value {
+        Some(value) => println!("{name}: {value}"),
+        None => println!("{name}: unavailable"),
+    }
+}
+
+fn print_component_status(name: &str, component: &Value) {
+    println!(
+        "{name}_status: {}",
+        component
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unavailable")
+    );
+    if let Some(reason) = component.get("reason").and_then(Value::as_str) {
+        println!("{name}_reason: {reason}");
+    }
 }
 
 fn load_status_config(data_root: &Path) -> Option<config::AppConfig> {

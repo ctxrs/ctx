@@ -36,47 +36,28 @@ fn render_status_text(value: &Value) -> String {
     let mut out = String::from("ctx status\n");
     push_key_value(&mut out, "initialized", value.get("initialized"));
     push_key_value(&mut out, "data_root", value.get("data_root"));
-    push_key_value(&mut out, "database_path", value.get("database_path"));
     push_key_value(&mut out, "indexed_items", value.get("indexed_items"));
     push_key_value(&mut out, "indexed_sessions", value.get("indexed_sessions"));
     push_key_value(&mut out, "indexed_events", value.get("indexed_events"));
     push_key_value(&mut out, "indexed_sources", value.get("indexed_sources"));
-    push_key_value(&mut out, "inventory_units", value.get("inventory_units"));
-    push_key_value(
-        &mut out,
-        "pending_inventory_units",
-        value.get("pending_inventory_units"),
-    );
-    push_key_value(
-        &mut out,
-        "cataloged_sessions",
-        value.get("cataloged_sessions"),
-    );
-    push_key_value(
-        &mut out,
-        "indexed_catalog_sessions",
-        value.get("indexed_catalog_sessions"),
-    );
-    push_key_value(
-        &mut out,
-        "pending_catalog_sessions",
-        value.get("pending_catalog_sessions"),
-    );
-    push_key_value(
-        &mut out,
-        "failed_catalog_sessions",
-        value.get("failed_catalog_sessions"),
-    );
-    push_key_value(
-        &mut out,
-        "source_import_files",
-        value.get("source_import_files"),
-    );
-    push_key_value(
-        &mut out,
-        "pending_source_import_files",
-        value.get("pending_source_import_files"),
-    );
+    push_component_summary(&mut out, "history_epoch", value.get("history_epoch"));
+    push_component_summary(&mut out, "lexical", value.get("lexical"));
+    if let Some(lexical) = value.get("lexical") {
+        push_key_value(&mut out, "lexical_generation", lexical.get("generation_id"));
+        push_key_value(
+            &mut out,
+            "lexical_policy_hash",
+            lexical
+                .get("policy")
+                .and_then(|policy| policy.get("published_hash")),
+        );
+    }
+    push_component_summary(&mut out, "catalog", value.get("catalog"));
+    push_component_summary(&mut out, "resolver", value.get("resolver"));
+    push_component_summary(&mut out, "source_refresh", value.get("refresh"));
+    push_component_summary(&mut out, "relational", value.get("relational"));
+    push_component_summary(&mut out, "pro_projection", value.get("pro_projection"));
+    push_component_summary(&mut out, "legacy_history", value.get("legacy_history"));
     push_key_value(&mut out, "read_only", value.get("read_only"));
     push_key_value(&mut out, "local_only", value.get("local_only"));
     push_status_semantic_summary(&mut out, value.get("semantic"));
@@ -223,21 +204,21 @@ fn push_status_semantic_summary(out: &mut String, semantic: Option<&Value>) {
         semantic,
         &[
             ("status", "status"),
-            ("running", "running"),
-            ("model_cache_available", "model_cache_available"),
+            ("enabled", "enabled"),
+            ("reason", "reason"),
         ],
     );
-    if let Some(coverage) = semantic.get("coverage") {
+    if let Some(flat_f32) = semantic.get("flat_f32") {
         push_object_summary(
             out,
-            "semantic_coverage",
-            coverage,
+            "flat_f32",
+            flat_f32,
             &[
-                ("searchable_items", "searchable_items"),
-                ("embedded_items", "embedded_items"),
-                ("embedded_chunks", "embedded_chunks"),
-                ("dirty_items", "dirty_items"),
-                ("queued_items_estimate", "queued_items_estimate"),
+                ("status", "status"),
+                ("reason", "reason"),
+                ("core_generation_id", "core_generation_id"),
+                ("active_events", "active_events"),
+                ("active_chunks", "active_chunks"),
             ],
         );
     }
@@ -260,7 +241,7 @@ fn push_status_daemon_summary(out: &mut String, daemon: Option<&Value>) {
     let Some(jobs) = daemon.get("jobs") else {
         return;
     };
-    let job_parts = ["history_refresh", "semantic_index"]
+    let job_parts = ["source_backed_refresh"]
         .into_iter()
         .filter_map(|key| {
             jobs.get(key)
@@ -272,6 +253,18 @@ fn push_status_daemon_summary(out: &mut String, daemon: Option<&Value>) {
     if !job_parts.is_empty() {
         out.push_str(&format!("daemon_jobs: {}\n", job_parts.join(", ")));
     }
+}
+
+fn push_component_summary(out: &mut String, label: &str, component: Option<&Value>) {
+    let Some(component) = component else {
+        return;
+    };
+    push_object_summary(
+        out,
+        label,
+        component,
+        &[("status", "status"), ("reason", "reason")],
+    );
 }
 
 fn push_retrieval_summary(out: &mut String, retrieval: Option<&Value>) {
