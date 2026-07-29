@@ -423,6 +423,7 @@ pub(crate) fn run_cli() -> Result<()> {
                     "{}",
                     serde_json::to_string(&complete_content::complete_content_error_json(&error))?
                 );
+                Some(RenderedJsonError.into())
             } else if let Some(error) = source_hydration_error_contract(error) {
                 eprintln!("{}", serde_json::to_string(&error.structured())?);
                 Some(RenderedJsonError.into())
