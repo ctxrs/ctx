@@ -1,34 +1,26 @@
 use std::path::PathBuf;
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{
-    provider_sources::SqliteSourceReadSnapshot, CaptureError, OutputAssociations,
-    OutputNativeCoordinate, OutputObservationKind, OutputOutcome, OutputSourceLocator,
-    ProOutputObservation, Result,
-};
+use crate::{provider_sources::SqliteSourceReadSnapshot, CaptureError, OutputOutcome, Result};
 
 use super::{
     lifecycle::GooseNativeInventorySummary,
     metrics::GooseNativeMetrics,
     normalization::{
-        goose_normalized_result_content, goose_output_projection, goose_timestamp,
         normalize_goose_native_message, normalize_goose_native_output_diagnostic, GooseNativeEvent,
         GooseNativeExcludedOutput, GooseNativeRejection, GooseNativeRejectionKind,
         GooseNativeSession,
     },
-    position::{goose_message_locator, GooseNativeScanPhase, GooseNativeScanPosition},
+    position::{GooseNativeScanPhase, GooseNativeScanPosition},
     schema::{GooseNativeSchema, GooseSessionRow},
     source::{GooseLiveObservation, GooseNativePhysicalSourceIdentity, GooseSnapshotGeneration},
     stream::{
-        goose_fetch_native_message_page, goose_fetch_native_output_page,
-        goose_fetch_native_session_page, goose_has_any_native_message,
-        goose_has_native_message_after, goose_has_native_output_after,
+        goose_fetch_native_message_page, goose_fetch_native_session_page,
+        goose_has_any_native_message, goose_has_native_message_after,
         goose_has_native_session_after, goose_prepare_native_identity_index,
         GooseMessageCellDisposition, GooseNativePageLimits, GooseScannedMessage,
-        GooseScannedOutput,
     },
 };
 
@@ -43,7 +35,6 @@ const GOOSE_SESSION_INVENTORY_DIGEST_DOMAIN: &[u8] = b"ctx-goose-nativepath-sess
 const GOOSE_SESSION_SAMPLE_DIGEST_DOMAIN: &[u8] = b"ctx-goose-nativepath-session-sample-v1\0";
 const GOOSE_SESSION_IDENTITY_SAMPLE_LIMIT: usize = 8;
 const GOOSE_CORE_PAGE_IDENTITY_DOMAIN: &[u8] = b"ctx-goose-nativepath-core-page-v1\0";
-const GOOSE_PRO_PAGE_IDENTITY_DOMAIN: &[u8] = b"ctx-goose-nativepath-pro-page-v1\0";
 const GOOSE_EVENT_DIGEST_DOMAIN: &[u8] = b"ctx-goose-nativepath-event-v1\0";
 const GOOSE_SESSION_DIGEST_DOMAIN: &[u8] = b"ctx-goose-nativepath-session-v1\0";
 const GOOSE_PAGE_FIXED_BYTES: usize = 2 * 1024;
@@ -54,15 +45,6 @@ const GOOSE_INVENTORY_OBSERVATION_TOKEN_MAX_BYTES: usize = 4 * 1024;
 pub(super) enum GooseNativeProfile {
     #[default]
     CoreOnly,
-    CoreAndPro,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct GooseNativeProFrontier {
-    pub(super) last_output_rowid: Option<i64>,
-    pub(super) output_rows_seen: u64,
-    pub(super) terminal: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -73,24 +55,6 @@ pub(super) struct GooseNativePageAccounting {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub(super) struct GooseNativePageIdentity(pub(super) [u8; 32]);
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub(super) struct GooseNativeProPageIdentity(pub(super) [u8; 32]);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum GooseNativeProRejectionKind {
-    MalformedOutput,
-    OversizedOutput,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(super) struct GooseNativeProRejection {
-    pub(super) sqlite_rowid: i64,
-    pub(super) native_identity: String,
-    pub(super) kind: GooseNativeProRejectionKind,
-    pub(super) reason: String,
-    pub(super) locator: OutputSourceLocator,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum GooseNativeSourceAuthority {
@@ -138,17 +102,6 @@ pub(super) struct GooseNativePage {
     pub(super) rejections: Vec<GooseNativeRejection>,
 }
 
-#[derive(Debug)]
-pub(super) struct GooseNativeProOutputPage {
-    pub(super) identity: GooseNativeProPageIdentity,
-    pub(super) expected_frontier: GooseNativeProFrontier,
-    pub(super) next_frontier: GooseNativeProFrontier,
-    pub(super) terminal: bool,
-    pub(super) accounting: GooseNativePageAccounting,
-    pub(super) observations: Vec<ProOutputObservation>,
-    pub(super) rejections: Vec<GooseNativeProRejection>,
-}
-
 #[derive(Clone, Debug)]
 pub(super) struct GooseNativeScanSummary {
     pub(super) source_authority: GooseNativeSourceAuthority,
@@ -158,21 +111,10 @@ pub(super) struct GooseNativeScanSummary {
     pub(super) physical_source_identity: GooseNativePhysicalSourceIdentity,
     pub(super) completed_inventory_token: Option<String>,
     pub(super) complete: bool,
-    pub(super) profile: GooseNativeProfile,
     pub(super) position: GooseNativeScanPosition,
-    pub(super) pro_frontier: GooseNativeProFrontier,
     pub(super) inventory: GooseNativeInventorySummary,
     #[cfg(test)]
     pub(super) metrics: GooseNativeMetrics,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct GooseNativeProReplaySummary {
-    pub(super) source_authority: GooseNativeSourceAuthority,
-    pub(super) raw_generation_digest: String,
-    pub(super) capability_digest: String,
-    pub(super) frontier: GooseNativeProFrontier,
-    pub(super) complete: bool,
 }
 
 pub(super) struct GooseNativePathReader {
@@ -216,17 +158,11 @@ impl GooseNativePathReader {
 
     pub(super) fn scanner_with_profile(
         &self,
-        profile: GooseNativeProfile,
+        _profile: GooseNativeProfile,
         limits: GooseNativePageLimits,
     ) -> Result<GooseNativeScanner<'_>> {
         let limits = GooseNativePageLimits::new(limits.rows, limits.retained_bytes)?;
-        GooseNativeScanner::new(
-            &self.schema,
-            &self.snapshot,
-            self.authority.clone(),
-            limits,
-            profile,
-        )
+        GooseNativeScanner::new(&self.schema, &self.snapshot, self.authority.clone(), limits)
     }
 
     pub(super) fn revalidate_live(&self) -> Result<bool> {
@@ -270,11 +206,9 @@ pub(super) struct GooseNativeScanner<'connection> {
     schema: &'connection GooseNativeSchema,
     snapshot: &'connection GooseSnapshotGeneration,
     limits: GooseNativePageLimits,
-    profile: GooseNativeProfile,
     authority: GooseNativeSourceAuthority,
     raw_generation_digest: String,
     position: GooseNativeScanPosition,
-    pro_frontier: GooseNativeProFrontier,
     session_inventory_hasher: Sha256,
     session_identity_samples: Vec<String>,
     semantic_hasher: Sha256,
@@ -292,7 +226,6 @@ impl<'connection> GooseNativeScanner<'connection> {
         snapshot: &'connection GooseSnapshotGeneration,
         authority: GooseNativeSourceAuthority,
         limits: GooseNativePageLimits,
-        profile: GooseNativeProfile,
     ) -> Result<Self> {
         let conn = snapshot.connection()?;
         let preparation =
@@ -311,11 +244,9 @@ impl<'connection> GooseNativeScanner<'connection> {
             schema,
             snapshot,
             limits,
-            profile,
             authority,
             raw_generation_digest: snapshot.observation().generation_digest(),
             position: GooseNativeScanPosition::initial(),
-            pro_frontier: GooseNativeProFrontier::default(),
             session_inventory_hasher,
             session_identity_samples: Vec::with_capacity(GOOSE_SESSION_IDENTITY_SAMPLE_LIMIT),
             semantic_hasher,
@@ -548,137 +479,6 @@ impl<'connection> GooseNativeScanner<'connection> {
         Ok(())
     }
 
-    pub(super) fn next_pro_output_page(&mut self) -> Result<Option<GooseNativeProOutputPage>> {
-        self.with_query_snapshot(Self::next_pro_output_page_inner)
-    }
-
-    fn next_pro_output_page_inner(&mut self) -> Result<Option<GooseNativeProOutputPage>> {
-        if self.profile == GooseNativeProfile::CoreOnly || self.pro_frontier.terminal {
-            return Ok(None);
-        }
-        let expected_frontier = self.pro_frontier;
-        let keyset = self
-            .pro_frontier
-            .last_output_rowid
-            .map_or(super::position::GooseNativeRowKeyset::Unstarted, |rowid| {
-                super::position::GooseNativeRowKeyset::After(rowid)
-            });
-        let rows =
-            goose_fetch_native_output_page(self.connection()?, self.schema, keyset, self.limits)?;
-        if rows.is_empty() {
-            self.pro_frontier.terminal = true;
-            return Ok(None);
-        }
-        let mut observations = Vec::new();
-        let mut rejections = Vec::new();
-        for output in rows {
-            let rowid = output.sqlite_rowid;
-            let native_identity = output.native_identity.clone();
-            let locator = goose_output_locator(rowid)?;
-            self.pro_frontier.last_output_rowid = Some(rowid);
-            self.pro_frontier.output_rows_seen =
-                self.pro_frontier.output_rows_seen.saturating_add(1);
-            match project_goose_pro_output(output, locator.clone()) {
-                Ok(observation) => {
-                    self.metrics.output_content_cells_transferred = self
-                        .metrics
-                        .output_content_cells_transferred
-                        .saturating_add(1);
-                    self.metrics.output_content_bytes_transferred = self
-                        .metrics
-                        .output_content_bytes_transferred
-                        .saturating_add(observation.content.len() as u64);
-                    self.metrics.output_handoffs_built =
-                        self.metrics.output_handoffs_built.saturating_add(1);
-                    observations.push(observation);
-                }
-                Err((kind, reason)) => {
-                    self.metrics.pro_output_rejections =
-                        self.metrics.pro_output_rejections.saturating_add(1);
-                    rejections.push(GooseNativeProRejection {
-                        sqlite_rowid: rowid,
-                        native_identity,
-                        kind,
-                        reason,
-                        locator,
-                    });
-                }
-            }
-        }
-        let last_rowid =
-            self.pro_frontier
-                .last_output_rowid
-                .ok_or(CaptureError::SystemInvariant(
-                    "Goose nonempty Pro page lost its final rowid",
-                ))?;
-        self.pro_frontier.terminal = !goose_has_native_output_after(
-            self.connection()?,
-            self.schema,
-            last_rowid,
-            self.limits,
-        )?;
-        let mut page = GooseNativeProOutputPage {
-            identity: GooseNativeProPageIdentity::default(),
-            expected_frontier,
-            next_frontier: self.pro_frontier,
-            terminal: self.pro_frontier.terminal,
-            accounting: GooseNativePageAccounting::default(),
-            observations,
-            rejections,
-        };
-        finalize_pro_page(
-            &mut page,
-            self.raw_generation_digest.as_bytes(),
-            self.limits,
-        )?;
-        self.metrics.pro_output_pages = self.metrics.pro_output_pages.saturating_add(1);
-        Ok(Some(page))
-    }
-
-    pub(super) fn resume_pro_from(&mut self, frontier: GooseNativeProFrontier) -> Result<()> {
-        if self.profile != GooseNativeProfile::CoreAndPro {
-            return Err(CaptureError::InvalidPayload(
-                "Goose Pro replay requires the CoreAndPro profile".to_owned(),
-            ));
-        }
-        if self.pro_frontier != GooseNativeProFrontier::default() {
-            return Err(CaptureError::InvalidPayload(
-                "Goose Pro replay frontier must be installed before reading output pages"
-                    .to_owned(),
-            ));
-        }
-        if frontier.last_output_rowid.is_none() && frontier.output_rows_seen != 0 {
-            return Err(CaptureError::InvalidPayload(
-                "Goose Pro replay frontier is inconsistent".to_owned(),
-            ));
-        }
-        self.pro_frontier = frontier;
-        Ok(())
-    }
-
-    pub(super) fn finish_pro_replay(&mut self) -> Result<GooseNativeProReplaySummary> {
-        if self.profile != GooseNativeProfile::CoreAndPro || !self.pro_frontier.terminal {
-            return Err(CaptureError::InvalidPayload(
-                "Goose Pro replay must exhaust its exact output frontier before finish".to_owned(),
-            ));
-        }
-        if self.conn.is_some() {
-            return Err(CaptureError::SystemInvariant(
-                "Goose Pro scanner retained a SQLite guard between pages",
-            ));
-        }
-        if !self.snapshot.revalidate_live()? {
-            return Err(CaptureError::SourceChangedDuringCapture);
-        }
-        Ok(GooseNativeProReplaySummary {
-            source_authority: self.authority.clone(),
-            raw_generation_digest: self.raw_generation_digest.clone(),
-            capability_digest: self.schema.capability_digest.clone(),
-            frontier: self.pro_frontier,
-            complete: true,
-        })
-    }
-
     fn with_query_snapshot<T>(
         &mut self,
         operation: impl FnOnce(&mut Self) -> Result<T>,
@@ -727,9 +527,7 @@ impl<'connection> GooseNativeScanner<'connection> {
             physical_source_identity: self.snapshot.observation().physical_source_identity(),
             completed_inventory_token,
             complete: certified,
-            profile: self.profile,
             position: self.position,
-            pro_frontier: self.pro_frontier,
             inventory: GooseNativeInventorySummary {
                 native_session_rows: self.metrics.native_sessions,
                 native_message_rows: self.metrics.native_messages,

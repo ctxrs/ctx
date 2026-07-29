@@ -24,8 +24,5 @@ pub(super) struct GooseNativeMetrics {
     pub(super) output_previews_built: u64,
     pub(super) output_touches_built: u64,
     pub(super) output_fts_documents_built: u64,
-    pub(super) output_handoffs_built: u64,
     pub(super) generic_output_dtos_built: u64,
-    pub(super) pro_output_pages: u64,
-    pub(super) pro_output_rejections: u64,
 }

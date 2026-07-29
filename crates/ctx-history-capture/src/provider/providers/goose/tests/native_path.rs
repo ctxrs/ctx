@@ -5,8 +5,8 @@ use serde_json::json;
 
 use super::super::{
     native_path::{
-        GooseNativePage, GooseNativePathReader, GooseNativeProfile, GooseNativeScanSummary,
-        GooseNativeSourceAuthority, GooseNativeSourceSelection,
+        GooseNativePage, GooseNativePathReader, GooseNativeScanSummary, GooseNativeSourceAuthority,
+        GooseNativeSourceSelection,
     },
     normalization::{GooseNativeEventKind, GooseNativeRejectionKind},
     stream::{
@@ -754,7 +754,7 @@ fn goose_nativepath_leaf_swap_is_rejected_before_provider_rows_are_exposed() {
 }
 
 #[test]
-fn goose_nativepath_core_frontiers_are_profile_invariant_and_pro_replays_all_outcomes() {
+fn goose_nativepath_core_classifies_all_output_outcomes_without_publishing_output_bodies() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let path = temp.path().join("sessions.db");
     let conn = create_native_database(&path);
@@ -817,42 +817,15 @@ fn goose_nativepath_core_frontiers_are_profile_invariant_and_pro_replays_all_out
     )
     .unwrap();
     let limits = GooseNativePageLimits::new(2, GOOSE_NATIVE_DEFAULT_PAGE_BYTES).unwrap();
-    let mut core_only = reader.scanner(limits).unwrap();
-    let mut core_only_pages = Vec::new();
-    while let Some(page) = core_only.next_page().unwrap() {
-        core_only_pages.push(page);
+    let mut scanner = reader.scanner(limits).unwrap();
+    let mut pages = Vec::new();
+    while let Some(page) = scanner.next_page().unwrap() {
+        pages.push(page);
     }
-    let core_only_summary = core_only.finish_core().unwrap();
-    assert!(core_only.next_pro_output_page().unwrap().is_none());
-
-    let mut core_and_pro = reader
-        .scanner_with_profile(GooseNativeProfile::CoreAndPro, limits)
-        .unwrap();
-    let mut core_and_pro_pages = Vec::new();
-    while let Some(page) = core_and_pro.next_page().unwrap() {
-        core_and_pro_pages.push(page);
-    }
-    let core_and_pro_summary = core_and_pro.finish_core().unwrap();
+    let summary = scanner.finish_core().unwrap();
+    assert!(pages.iter().all(|page| page.excluded_outputs.is_empty()));
     assert_eq!(
-        core_only_pages
-            .iter()
-            .map(|page| (page.identity, page.expected_frontier, page.next_frontier))
-            .collect::<Vec<_>>(),
-        core_and_pro_pages
-            .iter()
-            .map(|page| (page.identity, page.expected_frontier, page.next_frontier))
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(
-        core_only_summary.semantic_digest,
-        core_and_pro_summary.semantic_digest
-    );
-    assert!(core_only_pages
-        .iter()
-        .chain(&core_and_pro_pages)
-        .all(|page| page.excluded_outputs.is_empty()));
-    assert_eq!(
-        core_only_pages
+        pages
             .iter()
             .flat_map(|page| page.events.iter())
             .map(|event| (event.native_order, event.kind))
@@ -862,76 +835,23 @@ fn goose_nativepath_core_frontiers_are_profile_invariant_and_pro_replays_all_out
             (3, GooseNativeEventKind::ToolOutput),
         ]
     );
-    assert_eq!(core_only_summary.metrics.outputs_success, 1);
-    assert_eq!(core_only_summary.metrics.outputs_failure, 1);
-    assert_eq!(core_only_summary.metrics.outputs_timeout, 1);
-    assert_eq!(core_only_summary.metrics.outputs_unknown, 1);
-    assert_eq!(
-        core_only_summary.metrics.output_content_cells_transferred,
-        2
-    );
-    assert_eq!(core_only_summary.metrics.output_hashes_built, 2);
-    assert_eq!(core_only_summary.metrics.output_previews_built, 2);
-    assert_eq!(core_only_summary.metrics.output_touches_built, 0);
-    assert_eq!(core_only_summary.metrics.output_fts_documents_built, 0);
-    assert_eq!(core_only_summary.metrics.output_handoffs_built, 0);
-    assert_eq!(core_only_summary.metrics.generic_output_dtos_built, 0);
-
-    let mut pro_pages = Vec::new();
-    while let Some(page) = core_and_pro.next_pro_output_page().unwrap() {
-        pro_pages.push(page);
-    }
-    let pro_summary = core_and_pro.finish_pro_replay().unwrap();
-    assert!(pro_summary.complete);
-    assert!(pro_summary.frontier.terminal);
-    assert_eq!(pro_pages.len(), 2);
-    assert!(pro_pages.iter().all(|page| {
-        page.accounting.logical_units <= 2
-            && page.accounting.conservative_serialized_bytes
-                <= GOOSE_NATIVE_DEFAULT_PAGE_BYTES as usize
-    }));
-    assert!(pro_pages
-        .windows(2)
-        .all(|pages| { pages[0].next_frontier == pages[1].expected_frontier }));
-    let observations = pro_pages
-        .iter()
-        .flat_map(|page| page.observations.iter())
-        .collect::<Vec<_>>();
-    assert_eq!(observations.len(), 4);
-    assert_eq!(
-        observations
-            .iter()
-            .map(|output| output.outcome.outcome)
-            .collect::<Vec<_>>(),
-        [
-            crate::OutputOutcome::Success,
-            crate::OutputOutcome::Failure,
-            crate::OutputOutcome::Timeout,
-            crate::OutputOutcome::Unknown,
-        ]
-    );
-    assert_eq!(
-        observations
-            .iter()
-            .map(|output| String::from_utf8(output.content.clone()).unwrap())
-            .collect::<Vec<_>>(),
-        [
-            "success body",
-            "failure body",
-            "timeout body",
-            "unknown body",
-        ]
-    );
-    assert!(observations.iter().enumerate().all(|(index, output)| {
-        output.coordinate.native_sequence == index as u64 + 1
-            && output.coordinate.source_record_ordinal == Some(index as u64 + 1)
-            && output.coordinate.source_record_subrecord_index == Some(0)
-            && output.locator.version == 1
-    }));
+    assert_eq!(summary.metrics.outputs_success, 1);
+    assert_eq!(summary.metrics.outputs_failure, 1);
+    assert_eq!(summary.metrics.outputs_timeout, 1);
+    assert_eq!(summary.metrics.outputs_unknown, 1);
+    assert_eq!(summary.metrics.output_content_cells_transferred, 2);
+    assert_eq!(summary.metrics.output_hashes_built, 2);
+    assert_eq!(summary.metrics.output_previews_built, 2);
+    assert_eq!(summary.metrics.output_touches_built, 0);
+    assert_eq!(summary.metrics.output_fts_documents_built, 0);
+    assert_eq!(summary.metrics.generic_output_dtos_built, 0);
+    let page_debug = format!("{pages:?}");
+    assert!(!page_debug.contains("success body"));
+    assert!(!page_debug.contains("unknown body"));
 }
 
 #[test]
-fn goose_nativepath_core_and_pro_pages_retry_idempotently_from_expected_frontiers() {
+fn goose_nativepath_core_pages_retry_idempotently_from_expected_frontiers() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let path = temp.path().join("retry.db");
     let conn = create_native_database(&path);
@@ -955,15 +875,11 @@ fn goose_nativepath_core_and_pro_pages_retry_idempotently_from_expected_frontier
     let reader = native_reader(&path);
     let limits = GooseNativePageLimits::new(1, GOOSE_NATIVE_DEFAULT_PAGE_BYTES).unwrap();
 
-    let mut first = reader
-        .scanner_with_profile(GooseNativeProfile::CoreAndPro, limits)
-        .unwrap();
+    let mut first = reader.scanner(limits).unwrap();
     let _session_page = first.next_page().unwrap().unwrap();
     let core_page = first.next_page().unwrap().unwrap();
     drop(first);
-    let mut core_retry = reader
-        .scanner_with_profile(GooseNativeProfile::CoreAndPro, limits)
-        .unwrap();
+    let mut core_retry = reader.scanner(limits).unwrap();
     core_retry
         .resume_core_from(core_page.expected_frontier)
         .unwrap();
@@ -972,31 +888,13 @@ fn goose_nativepath_core_and_pro_pages_retry_idempotently_from_expected_frontier
     assert_eq!(repeated_core.next_frontier, core_page.next_frontier);
     drop(core_retry);
 
-    let mut first = reader
-        .scanner_with_profile(GooseNativeProfile::CoreAndPro, limits)
+    let mut core_resume = reader.scanner(limits).unwrap();
+    core_resume
+        .resume_core_from(core_page.next_frontier)
         .unwrap();
-    while first.next_page().unwrap().is_some() {}
-    let _ = first.finish_core().unwrap();
-    let pro_page = first.next_pro_output_page().unwrap().unwrap();
-    drop(first);
-    let mut pro_retry = reader
-        .scanner_with_profile(GooseNativeProfile::CoreAndPro, limits)
-        .unwrap();
-    pro_retry
-        .resume_pro_from(pro_page.expected_frontier)
-        .unwrap();
-    let repeated_pro = pro_retry.next_pro_output_page().unwrap().unwrap();
-    assert_eq!(repeated_pro.identity, pro_page.identity);
-    assert_eq!(repeated_pro.next_frontier, pro_page.next_frontier);
-    drop(pro_retry);
-
-    let mut pro_resume = reader
-        .scanner_with_profile(GooseNativeProfile::CoreAndPro, limits)
-        .unwrap();
-    pro_resume.resume_pro_from(pro_page.next_frontier).unwrap();
-    let next_pro = pro_resume.next_pro_output_page().unwrap().unwrap();
-    assert_eq!(next_pro.expected_frontier, pro_page.next_frontier);
-    assert_ne!(next_pro.identity, pro_page.identity);
+    let next_core = core_resume.next_page().unwrap().unwrap();
+    assert_eq!(next_core.expected_frontier, core_page.next_frontier);
+    assert_ne!(next_core.identity, core_page.identity);
 }
 
 #[test]

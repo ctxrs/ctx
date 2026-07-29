@@ -26,7 +26,6 @@ pub(super) const GOOSE_NATIVE_DEFAULT_PAGE_BYTES: u64 = 8 * 1024 * 1024;
 pub(super) const GOOSE_NATIVE_MAX_PAGE_BYTES: u64 = 8 * 1024 * 1024;
 pub(super) const GOOSE_NATIVE_MIN_PAGE_BYTES: u64 = 4 * 1024;
 pub(super) const GOOSE_NATIVE_MAX_RETAINED_CONTENT_BYTES: u64 = 8 * 1024 * 1024;
-pub(super) const GOOSE_NATIVE_MAX_PRO_OUTPUT_BYTES: u64 = 8 * 1024 * 1024;
 const GOOSE_NATIVE_PAGE_ENVELOPE_BYTES: u64 = 2 * 1024;
 const GOOSE_NATIVE_PAGE_UNIT_OVERHEAD_BYTES: u64 = 1024;
 const GOOSE_NATIVE_MAX_MESSAGE_ID_BYTES: u64 = 1_024;
@@ -146,22 +145,6 @@ pub(super) struct GooseRetainedMessage {
     pub(super) tokens_json: Option<String>,
     pub(super) metadata_json: Option<String>,
     pub(super) logical_row_digest: [u8; 32],
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct GooseScannedOutput {
-    pub(super) sqlite_rowid: i64,
-    pub(super) native_order: i64,
-    pub(super) source_record_ordinal: u64,
-    pub(super) native_identity: String,
-    pub(super) provider_message_identity: String,
-    pub(super) identity_degraded: bool,
-    pub(super) session_identity: String,
-    pub(super) outcome: OutputOutcome,
-    pub(super) content_json: Option<String>,
-    pub(super) content_bytes: u64,
-    pub(super) created_timestamp: Option<i64>,
-    pub(super) timestamp: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -606,170 +589,6 @@ pub(super) fn goose_fetch_native_message_page(
         .map_err(CaptureError::from)
 }
 
-pub(super) fn goose_fetch_native_output_page(
-    conn: &Connection,
-    schema: &GooseNativeSchema,
-    keyset: GooseNativeRowKeyset,
-    limits: GooseNativePageLimits,
-) -> Result<Vec<GooseScannedOutput>> {
-    let row_limit = i64::try_from(limits.rows)
-        .map_err(|_| CaptureError::InvalidPayload("Goose page row limit exceeds i64".to_owned()))?;
-    let projection_budget = goose_projection_page_budget(limits, false)?;
-    let max_content = i64::try_from(GOOSE_NATIVE_MAX_PRO_OUTPUT_BYTES.min(projection_budget))
-        .map_err(|_| CaptureError::SystemInvariant("Goose Pro output limit exceeds i64"))?;
-    let page_bytes = i64::try_from(projection_budget).map_err(|_| {
-        CaptureError::InvalidPayload("Goose page byte limit exceeds i64".to_owned())
-    })?;
-    let created_timestamp = schema.message_created_timestamp_expression("m");
-    let timestamp = schema.message_timestamp_expression("m");
-    let tokens = schema.message_tokens_expression("m");
-    let metadata = schema.message_metadata_expression("m");
-    let normalized_message_id = goose_normalized_message_id_sql(&schema.message_id_expression("m"));
-    let message_id_uses = goose_message_id_uses_sql(schema, "m");
-    let parent_rowid = goose_accepted_session_rowid_sql(schema, "m", limits)?;
-    let storage_class_supported = schema.message_storage_class_predicate("m");
-    let keyset_operator = keyset.sql_operator();
-    let content_disposition = goose_native_content_visitor_sql();
-    let output_outcome = goose_native_output_outcome_sql();
-    let sql = format!(
-        "with candidates as (
-             select
-                 m.rowid as sqlite_rowid,
-                 cast(m.id as integer) as native_order,
-                 {normalized_message_id} as native_message_id,
-                 {message_id_uses} as message_id_uses,
-                 (
-                     select count(*)
-                     from messages ordinal_source
-                     where ordinal_source.rowid < m.rowid
-                 ) as message_ordinal,
-                 coalesce(
-                     case when typeof(m.session_id) = 'text' then m.session_id end,
-                     ''
-                 ) as session_identity,
-                 {parent_rowid} as parent_rowid,
-                 coalesce(
-                     case when typeof(m.role) = 'text' then m.role end,
-                     ''
-                 ) as role,
-                 m.content_json as content_json,
-                 typeof(m.content_json) as content_storage_class,
-                 coalesce(octet_length(m.content_json), 0) as content_bytes,
-                 coalesce(octet_length({tokens}), 0)
-                     + coalesce(octet_length({metadata}), 0)
-                     + coalesce(
-                         octet_length(
-                             case when typeof(m.session_id) = 'text' then m.session_id end
-                         ),
-                         0
-                     )
-                     + coalesce(
-                         octet_length(case when typeof(m.role) = 'text' then m.role end),
-                         0
-                     ) as auxiliary_bytes,
-                 case
-                     when typeof({created_timestamp}) in ('null', 'integer')
-                     then {created_timestamp}
-                 end as created_timestamp,
-                 case
-                     when typeof({timestamp}) in ('null', 'text')
-                     then {timestamp}
-                 end as native_timestamp,
-                 case when {storage_class_supported} then 1 else 0 end
-                     as storage_class_supported
-             from messages m
-             where m.rowid {keyset_operator} ?1
-         ),
-         structural as (
-             select *, {content_disposition} as disposition
-             from candidates
-         ),
-         output_candidates as (
-             select *,
-                 {output_outcome} as output_outcome,
-                 case when content_bytes + auxiliary_bytes <= ?3 then 1 else 0 end
-                     as representable
-             from structural
-             where disposition = 1
-             order by sqlite_rowid
-             limit ?2
-         ),
-         measured as (
-             select *,
-                 sum(
-                     case when representable = 1
-                          then content_bytes + auxiliary_bytes + 1024
-                          else auxiliary_bytes + 1024
-                     end
-                 ) over (order by sqlite_rowid rows unbounded preceding) as running_bytes
-             from output_candidates
-         )
-         select
-             sqlite_rowid,
-             native_order,
-             native_message_id,
-             message_id_uses,
-             message_ordinal + (select count(*) from sessions),
-             session_identity,
-             output_outcome,
-             case when representable = 1 then content_json else null end,
-             content_bytes,
-             created_timestamp,
-             native_timestamp
-         from measured
-         where running_bytes <= ?4
-         order by sqlite_rowid"
-    );
-
-    let _length_guard = SqliteLengthPreflightGuard::new(conn);
-    let mut statement = conn.prepare(&sql)?;
-    let rows = statement.query_map(
-        rusqlite::params![keyset.bound(), row_limit, max_content, page_bytes],
-        |row| {
-            let native_order: i64 = row.get(1)?;
-            let native_message_id: Option<String> = row.get(2)?;
-            let message_id_uses: i64 = row.get(3)?;
-            let identity =
-                goose_native_message_identity(native_message_id, message_id_uses, native_order);
-            let raw_ordinal: i64 = row.get(4)?;
-            let source_record_ordinal = u64::try_from(raw_ordinal)
-                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(4, raw_ordinal))?;
-            let outcome = match row.get::<_, i64>(6)? {
-                11 => OutputOutcome::Failure,
-                12 => OutputOutcome::Timeout,
-                13 => OutputOutcome::Unknown,
-                14 => OutputOutcome::Success,
-                value => {
-                    return Err(rusqlite::Error::FromSqlConversionFailure(
-                        6,
-                        rusqlite::types::Type::Integer,
-                        format!("unknown Goose NativePath output outcome {value}").into(),
-                    ));
-                }
-            };
-            let raw_content_bytes: i64 = row.get(8)?;
-            let content_bytes = u64::try_from(raw_content_bytes)
-                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(8, raw_content_bytes))?;
-            Ok(GooseScannedOutput {
-                sqlite_rowid: row.get(0)?,
-                native_order,
-                source_record_ordinal,
-                native_identity: identity.native_identity,
-                provider_message_identity: identity.provider_message_identity,
-                identity_degraded: identity.identity_degraded,
-                session_identity: row.get(5)?,
-                outcome,
-                content_json: row.get(7)?,
-                content_bytes,
-                created_timestamp: row.get(9)?,
-                timestamp: row.get(10)?,
-            })
-        },
-    )?;
-    rows.collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(CaptureError::from)
-}
-
 fn goose_projection_page_budget(
     limits: GooseNativePageLimits,
     duplicated_core_projection: bool,
@@ -814,45 +633,6 @@ pub(super) fn goose_has_any_native_message(conn: &Connection) -> Result<bool> {
     conn.query_row("select exists(select 1 from messages)", [], |row| {
         row.get::<_, i64>(0)
     })
-    .map(|value| value != 0)
-    .map_err(CaptureError::from)
-}
-
-pub(super) fn goose_has_native_output_after(
-    conn: &Connection,
-    schema: &GooseNativeSchema,
-    rowid: i64,
-    limits: GooseNativePageLimits,
-) -> Result<bool> {
-    let content_disposition = goose_native_content_visitor_sql();
-    let storage_class_supported = schema.message_storage_class_predicate("m");
-    let parent_rowid = goose_accepted_session_rowid_sql(schema, "m", limits)?;
-    let tokens = "NULL";
-    let metadata = "NULL";
-    conn.query_row(
-        &format!(
-            "select exists(
-                 select 1
-                 from (
-                     select
-                         m.content_json as content_json,
-                         typeof(m.content_json) as content_storage_class,
-                         coalesce(octet_length(m.content_json), 0) as content_bytes,
-                         coalesce(octet_length({tokens}), 0)
-                             + coalesce(octet_length({metadata}), 0) as auxiliary_bytes,
-                         {parent_rowid} as parent_rowid,
-                         case when {storage_class_supported} then 1 else 0 end
-                             as storage_class_supported
-                     from messages m
-                     where m.rowid > ?1
-                 )
-                 where {content_disposition} = 1
-                 limit 1
-             )"
-        ),
-        rusqlite::params![rowid, 0_i64, i64::MAX],
-        |row| row.get::<_, i64>(0),
-    )
     .map(|value| value != 0)
     .map_err(CaptureError::from)
 }
