@@ -127,7 +127,6 @@ impl WarpSourceSelectionV0 {
 
 #[derive(Debug)]
 pub(crate) struct WarpSourceBackedSnapshotV0 {
-    pub(crate) selection: WarpSourceSelectionV0,
     pub(crate) source: SourceKey,
     pub(crate) certified_source: CertifiedSource,
     pub(crate) documents: Vec<LexicalDocument>,
@@ -233,7 +232,6 @@ pub(crate) fn project_selected_warp_sources_v0(
         .into_iter()
         .zip(projected)
         .map(|(source, projected)| WarpSourceBackedSnapshotV0 {
-            selection: source.selection,
             source: source.source,
             certified_source: projected.certified_source,
             documents: projected.documents,

@@ -115,36 +115,6 @@ pub fn observe_ordinary_file(path: impl AsRef<Path>) -> Result<OrdinaryFileObser
     observe_ordinary_file_inner(path.as_ref(), || {})
 }
 
-/// Returns strong change identity without opening or reading file contents
-/// where the platform exposes that identity through ordinary metadata.
-///
-/// Callers must fall back to full source certification when this returns
-/// `None`. Unix metadata includes device, inode, and change time, so a
-/// same-size rewrite with restored mtime cannot pass this observation.
-pub(crate) fn observe_ordinary_file_strong_metadata(
-    path: &Path,
-) -> Result<Option<OrdinaryFileObservation>> {
-    #[cfg(any(
-        target_os = "linux",
-        target_os = "macos",
-        target_os = "freebsd",
-        target_os = "windows"
-    ))]
-    {
-        observe_ordinary_file(path).map(Some)
-    }
-    #[cfg(not(any(
-        target_os = "linux",
-        target_os = "macos",
-        target_os = "freebsd",
-        target_os = "windows"
-    )))]
-    {
-        let _ = path;
-        Ok(None)
-    }
-}
-
 fn observe_ordinary_file_inner(
     path: &Path,
     before_open: impl FnOnce(),
@@ -389,21 +359,6 @@ mod tests {
 
         assert_eq!(observation.len(), 256 * 1024);
         assert_eq!(content_reads, 0);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn strong_metadata_observation_matches_opened_authority_without_opening_content() {
-        let temp = crate::test_support_paths::tempdir().unwrap();
-        let path = temp.path().join("source.jsonl");
-        std::fs::write(&path, vec![b'x'; 256 * 1024]).unwrap();
-
-        let opened = observe_ordinary_file(&path).unwrap();
-        let metadata_only = observe_ordinary_file_strong_metadata(&path)
-            .unwrap()
-            .expect("Unix must expose strong metadata identity");
-
-        assert_eq!(metadata_only, opened);
     }
 
     #[cfg(any(unix, target_os = "windows"))]

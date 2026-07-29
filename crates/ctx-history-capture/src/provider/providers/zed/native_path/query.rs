@@ -554,7 +554,6 @@ pub(super) fn hydrate_zed_thread_row(
     Ok(hydrated.map(|row| {
         let digest = zed_logical_record_digest(&row);
         let thread = ZedThreadRow {
-            rowid: row.rowid,
             id: row.id,
             updated_at: row.updated_at,
             data_type: row.data_type,

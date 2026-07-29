@@ -154,7 +154,7 @@ fn coexisting_selected_surfaces_project_cold_without_collapsing_lineage() {
     assert_eq!(snapshots[0].documents[0].body, long_body);
     assert!(snapshots[0].documents[0].body.ends_with("warp-tail"));
     assert_eq!(snapshots[1].documents[0].body, "tui body");
-    for snapshot in &snapshots {
+    for (snapshot, path) in snapshots.iter().zip([&gui_path, &tui_path]) {
         assert_eq!(snapshot.documents.len(), 1);
         assert_eq!(snapshot.documents[0].parent_session_id, None);
         assert_eq!(
@@ -166,7 +166,7 @@ fn coexisting_selected_surfaces_project_cold_without_collapsing_lineage() {
             Some("same-conversation")
         );
         assert_eq!(snapshot.documents[0].branch, None);
-        let canonical_path = fs::canonicalize(snapshot.selection.path()).unwrap();
+        let canonical_path = fs::canonicalize(path).unwrap();
         assert_eq!(
             snapshot.documents[0].source_path.as_deref(),
             canonical_path.to_str()

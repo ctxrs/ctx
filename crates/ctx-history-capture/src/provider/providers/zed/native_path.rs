@@ -39,18 +39,6 @@ pub(crate) enum ZedNativePathError {
     Io(#[from] io::Error),
     #[error("SQLite error while preparing Zed NativePath source: {0}")]
     Sqlite(#[from] rusqlite::Error),
-    #[error("system I/O error during {operation}: {source}")]
-    SystemIo {
-        operation: &'static str,
-        #[source]
-        source: io::Error,
-    },
-    #[error("system SQLite error during {operation}: {source}")]
-    SystemSqlite {
-        operation: &'static str,
-        #[source]
-        source: rusqlite::Error,
-    },
     #[error(transparent)]
     SqliteSourceAccess(#[from] SqliteSourceAccessError),
     #[error("Zed NativePath source has an unsupported schema: {0}")]
@@ -68,7 +56,7 @@ pub(crate) struct ZedImmutableSqliteSnapshot {
 
 pub(crate) enum ZedSnapshotAcquisition {
     Acquired(Box<ZedImmutableSqliteSnapshot>),
-    Incomplete { physical_locator: String },
+    Incomplete,
 }
 
 impl ZedImmutableSqliteSnapshot {
@@ -366,13 +354,6 @@ pub(super) fn into_capture_error(error: ZedNativePathError) -> CaptureError {
         ZedNativePathError::Capture(error) => error,
         ZedNativePathError::Io(error) => CaptureError::Io(error),
         ZedNativePathError::Sqlite(error) => CaptureError::Sqlite(error),
-        ZedNativePathError::SystemIo { operation, source } => {
-            CaptureError::SystemIo { operation, source }
-        }
-        ZedNativePathError::SystemSqlite { operation, source } => CaptureError::SystemIo {
-            operation,
-            source: io::Error::other(source),
-        },
         ZedNativePathError::SqliteSourceAccess(error) => CaptureError::SystemIo {
             operation: "accessing a root-authorized Zed SQLite source",
             source: io::Error::other(error),
@@ -580,7 +561,5 @@ pub(super) fn acquire_immutable_snapshot(path: &Path) -> ZedNativeResult<ZedSnap
             },
         )));
     }
-    Ok(ZedSnapshotAcquisition::Incomplete {
-        physical_locator: fallback_locator,
-    })
+    Ok(ZedSnapshotAcquisition::Incomplete)
 }

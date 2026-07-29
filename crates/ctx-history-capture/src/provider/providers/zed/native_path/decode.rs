@@ -1,9 +1,4 @@
-use std::{
-    borrow::Cow,
-    collections::{BTreeMap, BTreeSet},
-    fmt,
-    io::Read,
-};
+use std::{borrow::Cow, collections::BTreeSet, fmt, io::Read};
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{EventRole, EventType};
@@ -372,7 +367,7 @@ fn decode_message(
                             collect_safe_touches(input, &mut touches);
                         }
                     }
-                    ZedContentWire::ToolResult(_) => {}
+                    ZedContentWire::ToolResult => {}
                     ZedContentWire::Mention(content) => {
                         if let Some(content) = content {
                             push_nonempty(&mut parts, content);
@@ -461,7 +456,7 @@ fn retained_content_text(content: &[ZedContentWire]) -> Option<String> {
             ZedContentWire::RedactedThinking => {
                 parts.push("<redacted_thinking />".to_owned());
             }
-            ZedContentWire::ToolResult(_) => {}
+            ZedContentWire::ToolResult => {}
             ZedContentWire::Mention(Some(content)) => {
                 push_nonempty(&mut parts, content.clone());
             }

@@ -8,7 +8,6 @@ type EventSnapshot = (Value, String);
 
 fn row(thread: Value) -> ZedThreadRow {
     ZedThreadRow {
-        rowid: 7,
         id: "zed-decoder-parity".to_owned(),
         updated_at: "2026-07-21T12:00:00Z".to_owned(),
         data_type: "json".to_owned(),

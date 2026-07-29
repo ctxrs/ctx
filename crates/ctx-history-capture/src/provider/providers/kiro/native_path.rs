@@ -25,10 +25,9 @@ mod scan;
 mod source_backed;
 
 pub(crate) use source_backed::registration::register as register_source_backed_route;
-#[allow(unused_imports)]
+#[cfg(test)]
 pub(crate) use source_backed::{
-    scan_kiro_source_backed_v0, KiroHydratedRecordV0, KiroLocatorResolverV0,
-    KiroSourceBackedErrorV0, KiroSourceBackedResultV0, KiroSourceBackedScanV0,
+    scan_kiro_source_backed_v0, KiroLocatorResolverV0, KiroSourceBackedErrorV0,
 };
 
 #[derive(Debug)]

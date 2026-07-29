@@ -35,11 +35,6 @@ use super::{
     CompleteMessage, CompleteMessageRequest, SourceVerification, VerifiedContentLocatorV1,
     VerifiedContentRole, COMPLETE_CONTENT_MAX_BODY_BYTES,
 };
-#[cfg(test)]
-use crate::{
-    FIREBENDER_SQLITE_SOURCE_FORMAT, KIRO_SQLITE_SOURCE_FORMAT, ZED_THREADS_SQLITE_SOURCE_FORMAT,
-};
-
 const FIREBENDER_LOCATOR_KIND: &str = "firebender-chat-session-row-v1";
 const KIRO_LOCATOR_KIND: &str = "kiro-conversation-row-v1";
 const ZED_LOCATOR_KIND: &str = "zed-thread-row-v1";
@@ -57,10 +52,8 @@ const SQLITE_RESOLVE_TIMEOUT: Duration = Duration::from_secs(2);
 const SQLITE_MAX_SCHEMA_OBJECTS: usize = 1_024;
 const SQLITE_MAX_ROW_VALUES: usize = 64;
 
-mod no_tool_messages;
-#[cfg(test)]
-use no_tool_messages::LINGMA_LOCATOR_KIND;
 mod deepagents;
+mod no_tool_messages;
 
 mod errors;
 mod locators;
@@ -74,8 +67,7 @@ use query::*;
 
 pub(crate) use errors::map_bounded_sqlite_error_for_event;
 pub(crate) use locators::{
-    attach_sqlite_complete_content_locator, attach_sqlite_complete_content_locator_with_ref,
-    sqlite_logical_record_digest,
+    attach_sqlite_complete_content_locator_with_ref, sqlite_logical_record_digest,
 };
 pub(crate) use query::{
     configure_complete_content_sqlite_connection, CompleteContentSqliteBoundError,

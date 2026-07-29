@@ -171,11 +171,6 @@ impl WarpNativePage {
             .saturating_add(self.events.len())
             .saturating_add(self.rejections.len())
     }
-
-    #[allow(dead_code)]
-    pub(in super::super) fn logical_unit_count(&self) -> usize {
-        self.logical_units
-    }
 }
 
 pub(in super::super) trait WarpNativeSink {

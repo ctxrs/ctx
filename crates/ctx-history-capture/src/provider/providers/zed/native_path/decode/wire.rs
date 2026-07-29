@@ -121,9 +121,7 @@ impl<'de> Visitor<'de> for ZedResultVisitor {
     }
 }
 
-pub(super) struct ZedResultOutputWire {
-    pub(super) status: Option<String>,
-}
+pub(super) struct ZedResultOutputWire;
 
 struct TolerantResultOutput {
     value: Option<ZedResultOutputWire>,
@@ -152,7 +150,6 @@ impl<'de> Visitor<'de> for TolerantResultOutputVisitor {
     where
         A: MapAccess<'de>,
     {
-        let mut status = None;
         let mut saw_status = false;
         let mut valid = true;
         while let Some(key) = map.next_key::<String>()? {
@@ -160,8 +157,6 @@ impl<'de> Visitor<'de> for TolerantResultOutputVisitor {
                 let parsed = map.next_value::<TolerantString>()?.0;
                 if saw_status || parsed.is_none() {
                     valid = false;
-                } else {
-                    status = parsed;
                 }
                 saw_status = true;
             } else {
@@ -169,7 +164,7 @@ impl<'de> Visitor<'de> for TolerantResultOutputVisitor {
             }
         }
         Ok(TolerantResultOutput {
-            value: Some(ZedResultOutputWire { status }),
+            value: Some(ZedResultOutputWire),
             valid,
         })
     }
@@ -589,14 +584,12 @@ pub(super) struct ZedUserWire {
 pub(super) struct ZedAgentWire {
     #[serde(default)]
     pub(super) content: Vec<ZedContentWire>,
-    #[serde(default)]
-    pub(super) tool_results: ZedToolResultsWire,
+    #[serde(default, rename = "tool_results")]
+    pub(super) _tool_results: ZedToolResultsWire,
 }
 
 #[derive(Default)]
-pub(super) struct ZedToolResultsWire {
-    pub(super) results: BTreeMap<String, ZedResultWire>,
-}
+pub(super) struct ZedToolResultsWire;
 
 impl<'de> Deserialize<'de> for ZedToolResultsWire {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
@@ -620,11 +613,8 @@ impl<'de> Visitor<'de> for ZedToolResultsVisitor {
     where
         A: MapAccess<'de>,
     {
-        let mut results = BTreeMap::new();
-        while let Some((key, result)) = map.next_entry::<String, ZedResultWire>()? {
-            results.insert(key, result);
-        }
-        Ok(ZedToolResultsWire { results })
+        while map.next_entry::<IgnoredAny, ZedResultWire>()?.is_some() {}
+        Ok(ZedToolResultsWire)
     }
 
     fn visit_seq<A>(self, mut sequence: A) -> std::result::Result<Self::Value, A::Error>
@@ -683,7 +673,7 @@ pub(super) enum ZedContentWire {
     Thinking(String),
     RedactedThinking,
     ToolUse(ZedToolUseWire),
-    ToolResult(ZedResultWire),
+    ToolResult,
     Mention(Option<String>),
     Image,
     Unknown(String),
@@ -725,7 +715,10 @@ impl<'de> Visitor<'de> for ZedContentVisitor {
                 ZedContentWire::RedactedThinking
             }
             "ToolUse" => ZedContentWire::ToolUse(map.next_value()?),
-            "ToolResult" => ZedContentWire::ToolResult(map.next_value()?),
+            "ToolResult" => {
+                map.next_value::<ZedResultWire>()?;
+                ZedContentWire::ToolResult
+            }
             "Mention" => {
                 let value: ZedMentionWire = map.next_value()?;
                 ZedContentWire::Mention(value.content)
