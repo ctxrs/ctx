@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use ctx_history_core::utc_now;
 use uuid::Uuid;
 
-use crate::{default_machine_id, ImportProfile};
+use crate::default_machine_id;
 
 #[derive(Debug, Clone)]
 pub struct ProviderAdapterContext {
@@ -39,7 +39,6 @@ pub struct ProviderImportOptions {
     pub history_record_id: Option<Uuid>,
     pub capture_work_limit: CaptureWorkLimit,
     pub inventory_observation_token: Option<String>,
-    pub import_profile: ImportProfile,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -55,7 +54,6 @@ impl Default for ProviderImportOptions {
             history_record_id: None,
             capture_work_limit: CaptureWorkLimit::Drain,
             inventory_observation_token: None,
-            import_profile: ImportProfile::CoreOnly,
         }
     }
 }
