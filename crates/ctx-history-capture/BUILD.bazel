@@ -129,7 +129,6 @@ ctx_rust_test(
     compile_data = [
         "//:provider_support_matrix",
         "//:public_test_fixtures",
-        "//crates/ctx-cli:native_dispatch_source",
     ],
     edition = crate_edition(),
     aliases = aliases(
