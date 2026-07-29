@@ -27,6 +27,7 @@ mod release_build_identity;
 mod search_filters;
 mod semantic;
 mod skill;
+mod source_sql;
 mod transcript;
 mod upgrade;
 mod value_parsers;

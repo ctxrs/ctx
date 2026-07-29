@@ -18,7 +18,8 @@ use ctx_history_capture::{
     OpenClawImportOptions, ProviderImportWorkResult,
 };
 use ctx_history_core::{CaptureProvider, ContentRef};
-use ctx_history_store::{RawSqlOptions, RawSqlValue, Store};
+use ctx_history_store::Store;
+use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -39,43 +40,27 @@ fn message_locator(
 }
 
 fn provider_cursor_count(store: &Store) -> i64 {
-    let result = store
-        .raw_sql_query(
-            "SELECT COUNT(*) FROM sync_cursors WHERE stream LIKE 'provider:%'",
-            RawSqlOptions::default(),
-        )
-        .unwrap();
-    match &result.rows[0][0] {
-        RawSqlValue::Integer(count) => *count,
-        value => panic!("unexpected cursor count value: {value:?}"),
-    }
+    let conn = Connection::open_with_flags(store.path(), OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    conn.query_row(
+        "SELECT COUNT(*) FROM sync_cursors WHERE stream LIKE 'provider:%'",
+        [],
+        |row| row.get(0),
+    )
+    .unwrap()
 }
 
 fn provider_cursor_rows(store: &Store) -> Vec<(String, String, String)> {
-    let result = store
-        .raw_sql_query(
-            "SELECT device_id, stream FROM sync_cursors WHERE stream LIKE 'provider:%' ORDER BY stream",
-            RawSqlOptions::default(),
+    let conn = Connection::open_with_flags(store.path(), OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let mut statement = conn
+        .prepare(
+            "SELECT device_id, stream, cursor FROM sync_cursors WHERE stream LIKE 'provider:%' ORDER BY stream",
         )
         .unwrap();
-    result
-        .rows
-        .iter()
-        .map(|row| {
-            let text = |value: &RawSqlValue| match value {
-                RawSqlValue::Text { value, .. } => value.clone(),
-                value => panic!("unexpected cursor value: {value:?}"),
-            };
-            let device_id = text(&row[0]);
-            let stream = text(&row[1]);
-            let cursor = store
-                .get_sync_cursor(None, &device_id, &stream)
-                .unwrap()
-                .unwrap()
-                .cursor;
-            (device_id, stream, cursor)
-        })
-        .collect()
+    statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
 }
 
 fn provider_cursor_payload_rows(store: &Store) -> Vec<(String, String)> {

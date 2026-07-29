@@ -7,7 +7,6 @@ use std::{
 use anyhow::Result;
 use clap::{Args, Subcommand};
 use ctx_history_core::EventType;
-use ctx_history_search::SqlCompatibility;
 use ctx_history_store::{
     RawSqlOptions, RAW_SQL_DEFAULT_MAX_COLUMNS, RAW_SQL_DEFAULT_MAX_ROWS,
     RAW_SQL_DEFAULT_MAX_SQL_BYTES, RAW_SQL_DEFAULT_MAX_VALUE_BYTES, RAW_SQL_DEFAULT_TIMEOUT,
@@ -57,6 +56,7 @@ use crate::complete_content::MCP_COMPLETE_CONTENT_MAX_OUTPUT_BYTES;
 use crate::local_usage::{McpInvocation, McpUsageRecorder};
 use crate::provider_sources::{discovered_sources_report, discovery_report_issues_json};
 use crate::semantic::source_epoch_status_report;
+use crate::source_sql::SqlCompatibility;
 
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const MCP_SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &[MCP_PROTOCOL_VERSION, "2025-06-18"];

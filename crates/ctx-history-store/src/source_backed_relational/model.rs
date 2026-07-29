@@ -82,6 +82,34 @@ pub enum RelationalProjectionError {
     GenerationEventCountMismatch { expected: u64, projected: u64 },
     #[error("source-backed relational count does not fit SQLite INTEGER: {0}")]
     CountOverflow(&'static str),
+    #[error("SQL query is empty")]
+    RawSqlEmpty,
+    #[error("SQL query contains an interior NUL byte")]
+    RawSqlInteriorNul,
+    #[error("SQL query must be read-only")]
+    RawSqlNotReadOnly,
+    #[error("SQL query parameters are not supported")]
+    RawSqlHasParameters,
+    #[error("SQL query must return at least one column")]
+    RawSqlNoColumns,
+    #[error("SQL query returned {columns} columns; maximum is {max_columns}")]
+    RawSqlTooManyColumns { columns: usize, max_columns: usize },
+    #[error("{field} must be between {min} and {max}, got {value}")]
+    RawSqlLimitOutOfRange {
+        field: &'static str,
+        value: usize,
+        min: usize,
+        max: usize,
+    },
+    #[error(
+        "SQL result preview budget {estimated_bytes} bytes exceeds maximum {max_result_bytes}; lower max_rows, max_columns, or max_value_bytes"
+    )]
+    RawSqlResultBudgetTooLarge {
+        estimated_bytes: usize,
+        max_result_bytes: usize,
+    },
+    #[error("SQL query timed out after {timeout_ms}ms")]
+    RawSqlTimedOut { timeout_ms: u64 },
 }
 
 /// The exact post-publication receipt plus canonical generation manifest.

@@ -6,4 +6,3 @@ mod provider_allowlist;
 mod provider_identity;
 mod released_upgrades;
 mod semantic_role_indexes;
-mod stable_views;

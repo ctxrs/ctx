@@ -9,7 +9,6 @@ use ctx_history_core::{
     AgentType, Confidence, EventRole, EventType, Fidelity, SessionStatus, StableEntityId,
 };
 use ctx_history_index::{EventRecord, VerifiedIndex, MAX_SOURCE_EVENT_PAGE_ITEMS};
-use ctx_history_search::sql_compatibility_path;
 use ctx_history_store::{
     CommittedCoreGeneration, RawSqlOptions, RawSqlValue, RelationalEventMetadata,
     RelationalFileTouchMetadata, RelationalProjectionError, RelationalProjectionMetadata,
@@ -23,7 +22,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::compact_json;
+use crate::{compact_json, source_sql::sql_compatibility_path};
 
 use super::{
     paths_status::{daemon_jobs_path, read_daemon_job_status, write_daemon_job_status},
@@ -757,10 +756,10 @@ mod tests {
         SourceInventoryObservation, SourceObservation, SourceRecordLocator, TypedKey,
     };
     use ctx_history_index::{GenerationWriter, LexicalDocument, WriterOptions};
-    use ctx_history_search::SqlCompatibility;
     use ctx_history_store::{RawSqlValue, RelationalProjectionStatus};
 
     use super::*;
+    use crate::source_sql::SqlCompatibility;
 
     const PROVIDER_TEXT: &str = "provider-body-sentinel-must-not-enter-relational";
     const PREVIEW_TEXT: &str = "provider-preview-sentinel-must-not-enter-relational";

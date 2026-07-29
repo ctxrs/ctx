@@ -5,7 +5,6 @@ use ctx_history_core::database_path;
 use ctx_history_index::{
     current_source_generation_policy, current_source_generation_policy_hash, VerifiedIndex,
 };
-use ctx_history_search::{sql_compatibility_path, SqlCompatibility};
 use ctx_history_store::RelationalProjectionStatus;
 use serde_json::{json, Value};
 
@@ -13,6 +12,7 @@ use crate::{
     commands::import::load_explicit_source_catalog_authority,
     compact_json,
     config::AppConfig,
+    source_sql::{sql_compatibility_path, SqlCompatibility},
     upgrade::data_migration::{self, MigrationOrigin, MigrationPhase},
 };
 
@@ -737,13 +737,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn previous_store_is_metadata_only_and_remains_untouched() {
+    fn source_status_reports_previous_store_without_opening_it() {
         let temp = tempfile::tempdir().unwrap();
         let path = database_path(temp.path().to_path_buf());
         let sentinel = b"not a sqlite database";
         fs::write(&path, sentinel).unwrap();
 
-        let report = legacy_history_report(temp.path());
+        let status =
+            source_epoch_status_report(temp.path(), &AppConfig::default()).expect("source status");
+        let report = &status.report["legacy_history"];
 
         assert_eq!(report["status"], "inactive");
         assert_eq!(report["active"], false);
