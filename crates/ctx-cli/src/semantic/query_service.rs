@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Result};
+use ctx_history_capture::complete_content::{CompleteContentError, CompleteContentErrorKind};
 use ctx_history_core::{
     BatchHydrationRequest, EventHydrationRequest, HydrationFailure, HydrationFailureKind,
 };
@@ -94,6 +95,7 @@ pub(crate) struct SourceHydrationUnavailable {
     failure_kind: &'static str,
     detail: String,
     refresh_scheduled: bool,
+    complete_content_event_id: Option<Uuid>,
 }
 
 impl SourceHydrationUnavailable {
@@ -102,12 +104,14 @@ impl SourceHydrationUnavailable {
         failure_kind: &'static str,
         detail: impl Into<String>,
         refresh_scheduled: bool,
+        complete_content_event_id: Option<Uuid>,
     ) -> Self {
         Self {
             code: code.into(),
             failure_kind,
             detail: detail.into(),
             refresh_scheduled,
+            complete_content_event_id,
         }
     }
 
@@ -135,6 +139,21 @@ impl SourceHydrationUnavailable {
             },
             detail: self.to_string(),
         }
+    }
+
+    pub(crate) fn complete_content_error(&self) -> Option<CompleteContentError> {
+        let event_id = self.complete_content_event_id?;
+        let kind = match self.failure_kind {
+            "confirmed_deleted" => CompleteContentErrorKind::SourceMissing,
+            "stale_source_evidence" | "stale_record_evidence" => {
+                CompleteContentErrorKind::SourceChanged
+            }
+            "missing_record" => CompleteContentErrorKind::SourceRecordMissing,
+            "unsupported_parser_revision" => CompleteContentErrorKind::HydrationUnsupported,
+            "invalid_locator" => CompleteContentErrorKind::ContentVerificationFailed,
+            _ => CompleteContentErrorKind::SourceUnreadable,
+        };
+        Some(CompleteContentError::new(kind, event_id))
     }
 }
 
@@ -358,6 +377,9 @@ fn hydrate_source_events_via_daemon(
 ) -> Result<HashMap<Uuid, String>> {
     let mut hydrated = HashMap::with_capacity(events.len());
     for batch in events.chunks(SOURCE_HYDRATION_BATCH_MAX_ITEMS) {
+        let complete_content_event_id = (mode == "complete")
+            .then(|| batch.first().map(|event| event.event_id.as_uuid()))
+            .flatten();
         let requests = batch
             .iter()
             .map(|event| {
@@ -411,6 +433,7 @@ fn hydrate_source_events_via_daemon(
                     "temporarily_unavailable",
                     "daemon generation-bound source hydration service is unavailable; no provider rediscovery or stored preview fallback was attempted",
                     false,
+                    complete_content_event_id,
                 )
                 .into())
             }
@@ -424,6 +447,7 @@ fn hydrate_source_events_via_daemon(
                     "temporarily_unavailable",
                     format!("{error:#}; no provider rediscovery or stored preview fallback was attempted"),
                     false,
+                    complete_content_event_id,
                 )
                 .into())
             }
@@ -454,9 +478,14 @@ fn hydrate_source_events_via_daemon(
             let kind = source_hydration_failure_kind(kind).ok_or_else(|| {
                 anyhow!("daemon source hydration returned unknown failure kind {kind:?}")
             })?;
-            return Err(
-                SourceHydrationUnavailable::new(code, kind, detail, refresh_scheduled).into(),
-            );
+            return Err(SourceHydrationUnavailable::new(
+                code,
+                kind,
+                detail,
+                refresh_scheduled,
+                complete_content_event_id,
+            )
+            .into());
         }
         if response.get("generation_id").and_then(Value::as_str) != Some(index.generation_id()) {
             return Err(SourceHydrationUnavailable::new(
@@ -467,6 +496,7 @@ fn hydrate_source_events_via_daemon(
                     index.generation_id()
                 ),
                 true,
+                complete_content_event_id,
             )
             .into());
         }

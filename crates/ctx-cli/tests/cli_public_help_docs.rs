@@ -180,7 +180,7 @@ fn complete_content_json_failure_is_one_parseable_error_object() {
     let expanded = original.replacen(indexed_message, &expanded_message, 1);
     assert_ne!(expanded, original);
     fs::write(&source, &expanded).unwrap();
-    json_output(ctx(&temp).args([
+    json_output(ctx_with_enabled_daemon(&temp).args([
         "import",
         "--provider",
         "codex",
@@ -222,7 +222,14 @@ fn complete_content_json_failure_is_one_parseable_error_object() {
         output.stdout.is_empty(),
         "JSON failure wrote partial stdout"
     );
-    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap_or_else(|error| {
+        panic!(
+            "JSON failure was not parseable ({error}); status={:?}, stdout={:?}, stderr={:?}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
     assert_eq!(error["error"], "source_changed");
     assert_eq!(error["error_code"], "source_changed");
     assert_eq!(error["ctx_event_id"], event_id);
@@ -953,7 +960,10 @@ fn provider_session_lookup_requires_explicit_provider_flags_in_help() {
 #[test]
 fn provider_session_rejects_whitespace_only_value() {
     let temp = tempdir();
-    ctx(&temp).arg("setup").assert().success();
+    ctx_with_enabled_daemon(&temp)
+        .arg("setup")
+        .assert()
+        .success();
 
     for args in [
         vec![

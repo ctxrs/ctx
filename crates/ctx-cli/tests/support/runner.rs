@@ -23,9 +23,7 @@ pub(crate) fn tempdir() -> TempDir {
 }
 
 pub(crate) fn ctx(temp: &TempDir) -> Command {
-    let mut command = Command::new(ctx_binary());
-    apply_hermetic_env(&mut command, temp);
-    command
+    ctx_with_enabled_daemon(temp)
 }
 
 fn ctx_binary() -> PathBuf {
@@ -41,6 +39,11 @@ pub(crate) fn ctx_from_binary(temp: &TempDir, binary: &Path) -> Command {
     let mut command = Command::new(binary);
     apply_hermetic_env(&mut command, temp);
     command
+}
+
+pub(crate) fn ctx_with_enabled_daemon(temp: &TempDir) -> Command {
+    let binary = copied_ctx_binary(temp);
+    ctx_from_binary(temp, &binary)
 }
 
 pub(crate) fn apply_hermetic_env(command: &mut Command, temp: &TempDir) {
@@ -62,9 +65,11 @@ pub(crate) fn apply_hermetic_env(command: &mut Command, temp: &TempDir) {
         command.env_remove(name);
     }
     command.env_remove("CTX_DAEMON_ENABLED");
-    // Keep ordinary integration tests process-local now that daemon maintenance
-    // defaults on. Dedicated lifecycle tests remove this override explicitly.
-    command.env("CTX_DAEMON_AUTOSTART_OFF", "1");
+    command.env_remove("CTX_DAEMON_AUTOSTART_OFF");
+    // Exercise the public enabled-by-default contract while bounding detached
+    // process lifetime in tests. Production has no implicit idle exit; this is
+    // the explicit finite test option retained for hermetic temporary roots.
+    command.env("CTX_DAEMON_AUTOSTART_IDLE_EXIT_SECONDS", "2");
     command.env_remove("CTX_QUIET");
     // Tests set CI explicitly when they need CI-only behavior.
     command.env_remove("CI");
@@ -95,16 +100,24 @@ pub(crate) fn apply_hermetic_env(command: &mut Command, temp: &TempDir) {
 }
 
 pub(crate) fn copied_ctx_binary(temp: &TempDir) -> PathBuf {
+    let target = test_binary_copy_path(temp);
+    if target.exists() {
+        return target;
+    }
     let source = ctx_binary();
     copied_binary(temp, &source)
 }
 
-pub(crate) fn copied_binary(temp: &TempDir, source: &Path) -> PathBuf {
-    let target = temp.path().join(if cfg!(windows) {
+fn test_binary_copy_path(temp: &TempDir) -> PathBuf {
+    temp.path().join(if cfg!(windows) {
         "ctx-test-copy.exe"
     } else {
         "ctx-test-copy"
-    });
+    })
+}
+
+pub(crate) fn copied_binary(temp: &TempDir, source: &Path) -> PathBuf {
+    let target = test_binary_copy_path(temp);
     // Close every write handle before the caller attempts to execute the copy.
     // Some Linux filesystems otherwise expose a brief ETXTBSY window here.
     let mut source_file = fs::File::open(source).unwrap();
@@ -136,7 +149,7 @@ pub(crate) fn hosted_install_marker_path(binary: &Path) -> PathBuf {
 
 pub(crate) fn initialize_empty_store(temp: &TempDir) {
     fs::create_dir_all(temp.path().join(".codex").join("sessions")).unwrap();
-    ctx(temp)
+    ctx_with_enabled_daemon(temp)
         .args(["setup", "--catalog-only", "--progress", "none"])
         .assert()
         .success();

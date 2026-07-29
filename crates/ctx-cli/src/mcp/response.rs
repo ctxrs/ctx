@@ -53,6 +53,22 @@ pub(super) fn tool_error_result(err: Error) -> Value {
             "structuredContent": structured,
         });
     }
+    if let Some(error) = err
+        .downcast_ref::<crate::semantic::SourceHydrationUnavailable>()
+        .and_then(crate::semantic::SourceHydrationUnavailable::complete_content_error)
+    {
+        let structured = crate::complete_content::complete_content_error_json(&error);
+        return json!({
+            "isError": true,
+            "content": [
+                {
+                    "type": "text",
+                    "text": error.to_string(),
+                }
+            ],
+            "structuredContent": structured,
+        });
+    }
     if let Some(error) = err.downcast_ref::<InvalidToolRequest>() {
         let message = error.to_string();
         return json!({

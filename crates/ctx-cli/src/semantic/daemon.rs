@@ -948,6 +948,13 @@ pub(super) fn run_daemon_inner(
         let mut observed_refresh_generation = 0;
         let mut next_safety_reconcile = Instant::now() + safety_interval;
         loop {
+            // Hermetic callers may remove their complete temporary data root
+            // while an explicitly finite test daemon is winding down. Treat
+            // that as shutdown and, crucially, do not recreate the deleted
+            // root merely to publish a terminal receipt.
+            if !data_root.exists() {
+                break;
+            }
             if stop_disabled {
                 break;
             }
@@ -1193,16 +1200,18 @@ pub(super) fn run_daemon_inner(
                 .map(|error| format!("source-backed refresh failed: {error}"))
                 .unwrap_or_else(|| "one or more daemon jobs failed".to_owned())
         });
-        write_daemon_lifecycle_status_with_runtime(
-            data_root,
-            &args,
-            if failed { "failed" } else { "completed" },
-            started_at_ms,
-            Some(utc_now().timestamp_millis()),
-            failure_message,
-            daemon_semantic_runtime_active(&runtime, query_service.as_ref()),
-            &config_reload.to_json(),
-        )?;
+        if data_root.exists() {
+            write_daemon_lifecycle_status_with_runtime(
+                data_root,
+                &args,
+                if failed { "failed" } else { "completed" },
+                started_at_ms,
+                Some(utc_now().timestamp_millis()),
+                failure_message,
+                daemon_semantic_runtime_active(&runtime, query_service.as_ref()),
+                &config_reload.to_json(),
+            )?;
+        }
         // Keep daemon ownership until the query service has removed its endpoint
         // and joined its listener thread. Otherwise a replacement can publish a
         // new endpoint that this service's destructor then removes.
