@@ -787,6 +787,30 @@ impl GenerationWriter {
         ))
     }
 
+    fn exact_replay_base(&self) -> Option<&GenerationManifest> {
+        if !self.deletions.is_empty() {
+            return None;
+        }
+        let base_manifest = self.base_manifest.as_ref()?;
+        if self.pending.len() != base_manifest.sources.len() {
+            return None;
+        }
+        let covers_every_base_source = base_manifest.sources.iter().all(|base_source| {
+            self.pending
+                .get(&source_token(base_source.observation().source()))
+                .is_some_and(|pending| {
+                    matches!(
+                        (&pending.mode, &pending.certificate),
+                        (PendingSourceMode::Append { base }, Some(current))
+                            if pending.staged_documents == 0
+                                && base == base_source
+                                && current == base_source
+                    )
+                })
+        });
+        covers_every_base_source.then_some(base_manifest)
+    }
+
     /// Starts replacing every lexical document owned by `source`.
     ///
     /// Documents can then be submitted as they are parsed; no whole-source or
@@ -1147,15 +1171,7 @@ impl GenerationWriter {
     where
         F: FnMut(RevalidationTarget<'_>) -> bool,
     {
-        let exact_replay = self.deletions.is_empty()
-            && self.base_manifest.is_some()
-            && self.pending.values().all(|pending| {
-                matches!(
-                    (&pending.mode, &pending.certificate),
-                    (PendingSourceMode::Append { base }, Some(current))
-                        if pending.staged_documents == 0 && current == base
-                )
-            });
+        let exact_replay = self.exact_replay_base().is_some();
         if exact_replay {
             for pending in self.pending.values() {
                 let certificate =
@@ -2415,6 +2431,62 @@ mod tests {
         assert_eq!(verified.generation_id(), unchanged.generation_id);
         assert_eq!(verified.document_count(), 1);
         assert_eq!(verified.count_term("stable").unwrap(), 1);
+    }
+
+    #[test]
+    fn exact_replay_requires_coverage_of_every_base_source() {
+        let temp = tempdir().unwrap();
+        let replayed_source = source("replayed.jsonl");
+        let omitted_source = source("omitted.jsonl");
+        let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        initial.begin_source(replayed_source.clone()).unwrap();
+        initial
+            .add_document(document(&replayed_source, 1, "replayed source"))
+            .unwrap();
+        initial
+            .certify_source(appendable_certificate(&replayed_source, 1, 1, 10))
+            .unwrap();
+        initial.begin_source(omitted_source.clone()).unwrap();
+        initial
+            .add_document(document(&omitted_source, 1, "omitted source"))
+            .unwrap();
+        initial
+            .certify_source(appendable_certificate(&omitted_source, 1, 1, 10))
+            .unwrap();
+        let initial_receipt = initial.commit(|_| true).unwrap();
+
+        let mut incomplete = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        let base = incomplete
+            .begin_source_append(replayed_source.clone())
+            .unwrap()
+            .clone();
+        let frontier = base.frontier().unwrap();
+        let replay = CertifiedSourceAppend::certify(
+            &base,
+            base.clone(),
+            frontier.certified_prefix_bytes(),
+            *frontier.certified_prefix_digest(),
+        )
+        .unwrap();
+        incomplete.certify_source_append(replay).unwrap();
+
+        assert!(
+            incomplete.exact_replay_base().is_none(),
+            "omitting one base-manifest source must disable the no-op shortcut"
+        );
+        assert!(
+            incomplete.writer.is_none(),
+            "the regression must reach commit through the lazy preflight state"
+        );
+        let receipt = incomplete.commit(|_| true).unwrap();
+        assert_eq!(receipt.generation_id, initial_receipt.generation_id);
+        assert_eq!(receipt.indexed_documents, 2);
+        assert_eq!(receipt.certified_sources, 2);
+
+        let verified = VerifiedIndex::open(temp.path()).unwrap();
+        assert_eq!(verified.document_count(), 2);
+        assert_eq!(verified.count_term("replayed").unwrap(), 1);
+        assert_eq!(verified.count_term("omitted").unwrap(), 1);
     }
 
     #[test]
