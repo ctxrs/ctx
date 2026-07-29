@@ -1,10 +1,15 @@
+use std::path::Path;
+
 use chrono::{DateTime, Utc};
 use ctx_history_core::EventType;
+use ctx_history_store::Store;
 use rusqlite::{Connection, OptionalExtension};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::native_source::NativeLocator;
-use crate::{CaptureError, Result};
+use crate::{
+    CaptureError, ProviderAdapterContext, ProviderImportOptions, ProviderImportSummary, Result,
+};
 
 mod event;
 mod json_stream;
@@ -13,9 +18,8 @@ mod workspace;
 
 #[allow(unused_imports)]
 pub(crate) use nativepath::{
-    hydrate_trae_source_backed_locator_v0, import_trae_nativepath,
-    scan_trae_source_backed_explicit_v0, TraeHydratedRecordV0, TraeSourceBackedErrorV0,
-    TraeSourceBackedPageV0, TraeSourceBackedScanV0,
+    hydrate_trae_source_backed_locator_v0, scan_trae_source_backed_explicit_v0,
+    TraeHydratedRecordV0, TraeSourceBackedErrorV0, TraeSourceBackedPageV0, TraeSourceBackedScanV0,
 };
 
 pub(crate) const TRAE_STATE_VSCDB_SOURCE_FORMAT: &str = "trae_state_vscdb";
@@ -30,6 +34,21 @@ pub(crate) const TRAE_CHAT_KEYS: &[&str] = &[
 ];
 
 const TRAE_COMPLETE_MESSAGE_LOCATOR_KIND: &str = "trae-itemtable-message-v1";
+
+/// Temporary compatibility entry point for shared v0.25 import APIs.
+///
+/// Trae production ingestion is source-backed. The legacy Store publisher was
+/// deleted provider-locally and must not be reintroduced behind this symbol.
+pub(crate) fn import_trae_nativepath(
+    _path: &Path,
+    _store: &mut Store,
+    _context: ProviderAdapterContext,
+    _options: ProviderImportOptions,
+) -> Result<ProviderImportSummary> {
+    Err(CaptureError::UnsupportedSchema(
+        "Trae legacy Store publication is unavailable; use source-backed ingestion".to_owned(),
+    ))
+}
 
 pub(crate) fn trae_complete_message_locator(
     key_index: u16,
@@ -86,13 +105,6 @@ pub(crate) fn trae_complete_message(
             json_stream::TraeStreamSession {
                 native_session_id: "trae-cn-input-history".to_owned(),
                 native_session_id_from_provider: true,
-                metadata_preview: json!({
-                    "id": "trae-cn-input-history",
-                    "title": "Trae CN input history",
-                }),
-                explicit_started_at: None,
-                explicit_ended_at: None,
-                explicit_title: Some("Trae CN input history".to_owned()),
                 messages,
             }
         }
@@ -137,7 +149,6 @@ pub(crate) fn trae_complete_message(
             };
             let text = input.text.clone();
             let event = event::trae_core_event(provider_session_id, workspace_id, chat_key, &input);
-            let _ = &event.idempotency_key;
             return Ok(Some((
                 TraeCompleteEvent {
                     provider_event_index: event.provider_event_index,

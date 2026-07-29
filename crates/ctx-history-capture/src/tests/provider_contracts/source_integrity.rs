@@ -11,20 +11,18 @@ use crate::tests::support::source_snapshot::{
     assert_provider_source_unchanged, assert_sqlite_source_file_unchanged,
 };
 use crate::{
-    import_antigravity_cli_history, import_auggie_history,
-    import_claude_projects_jsonl_tree, import_cline_task_json_history, import_codebuddy_history,
-    import_codex_history_jsonl, import_codex_session_tree, import_continue_cli_sessions,
-    import_copilot_cli_session_events, import_crush_sqlite, import_cursor_native_history,
-    import_deepagents_sqlite, import_factory_ai_droid_sessions, import_firebender_sqlite,
-    import_gemini_cli_history, import_hermes_sqlite, import_junie_history, import_kilo_sqlite,
-    import_kimi_code_cli_history, import_kiro_sqlite, import_lingma_sqlite, import_mimocode_sqlite,
-    import_mistral_vibe_history, import_mux_history, import_nanoclaw_project,
-    import_openclaw_history, import_opencode_sqlite,
+    import_antigravity_cli_history, import_auggie_history, import_claude_projects_jsonl_tree,
+    import_cline_task_json_history, import_codebuddy_history, import_codex_history_jsonl,
+    import_codex_session_tree, import_continue_cli_sessions, import_copilot_cli_session_events,
+    import_crush_sqlite, import_cursor_native_history, import_deepagents_sqlite,
+    import_factory_ai_droid_sessions, import_firebender_sqlite, import_gemini_cli_history,
+    import_hermes_sqlite, import_junie_history, import_kilo_sqlite, import_kimi_code_cli_history,
+    import_kiro_sqlite, import_lingma_sqlite, import_mimocode_sqlite, import_mistral_vibe_history,
+    import_mux_history, import_nanoclaw_project, import_openclaw_history, import_opencode_sqlite,
     import_pi_session_jsonl, import_qoder_history, import_qwen_code_history,
     import_roo_task_json_history, import_rovodev_history, import_shelley_sqlite,
-    import_tabnine_cli_history, import_trae_history, import_warp_sqlite,
-    import_windsurf_cascade_hook_transcripts, import_zed_threads_sqlite,
-    AntigravityCliImportOptions, AuggieImportOptions,
+    import_tabnine_cli_history, import_warp_sqlite, import_windsurf_cascade_hook_transcripts,
+    import_zed_threads_sqlite, AntigravityCliImportOptions, AuggieImportOptions,
     ClaudeProjectsImportOptions, ClineTaskJsonImportOptions, CodeBuddyImportOptions,
     CodexHistoryImportOptions, CodexSessionImportOptions, ContinueCliImportOptions,
     CopilotCliImportOptions, CrushSqliteImportOptions, CursorNativeImportOptions,
@@ -34,7 +32,7 @@ use crate::{
     MiMoCodeSqliteImportOptions, MistralVibeImportOptions, MuxImportOptions, NanoClawImportOptions,
     OpenClawImportOptions, OpenCodeSqliteImportOptions, PiSessionImportOptions,
     ProviderImportSummary, QoderImportOptions, QwenCodeImportOptions, RooTaskJsonImportOptions,
-    RovoDevImportOptions, ShelleySqliteImportOptions, TabnineCliImportOptions, TraeImportOptions,
+    RovoDevImportOptions, ShelleySqliteImportOptions, TabnineCliImportOptions,
     WarpSqliteImportOptions, WindsurfCascadeHookImportOptions, ZedThreadsSqliteImportOptions,
 };
 use ctx_history_store::Store;
@@ -201,19 +199,6 @@ fn native_file_tree_imports_do_not_mutate_provider_sources() {
             OpenClawImportOptions {
                 source_path: Some(openclaw_root.clone()),
                 ..OpenClawImportOptions::default()
-            },
-        )
-        .unwrap()
-    });
-
-    let trae = provider_history_fixture("trae/User/workspaceStorage");
-    assert_native_source_clean_import_preserves_source("Trae", &trae, |store| {
-        import_trae_history(
-            &trae,
-            store,
-            TraeImportOptions {
-                source_path: Some(trae.clone()),
-                ..TraeImportOptions::default()
             },
         )
         .unwrap()
