@@ -103,10 +103,9 @@ fn terminal_nul_padding_never_becomes_an_append_boundary() {
     let mut appended = initial.clone();
     appended.extend_from_slice(message("assistant", "must force full revalidation").as_bytes());
     fs::write(&path, appended).unwrap();
-    let append_error = CodexNativeScanner::new(
+    let append_error = CodexNativeScanner::new_source_backed_v0(
         discover_one(&path, "nul-mutation-owner"),
         Some(&proof),
-        CodexNativeProfile::CoreOnly,
     )
     .unwrap_err();
     assert!(
@@ -118,10 +117,9 @@ fn terminal_nul_padding_never_becomes_an_append_boundary() {
     rewritten.extend_from_slice(message("assistant", "same length rewrite").as_bytes());
     rewritten.resize(initial.len(), 0);
     fs::write(&path, rewritten).unwrap();
-    let rewrite_error = CodexNativeScanner::new(
+    let rewrite_error = CodexNativeScanner::new_source_backed_v0(
         discover_one(&path, "nul-mutation-owner"),
         Some(&proof),
-        CodexNativeProfile::CoreOnly,
     )
     .unwrap_err();
     assert!(
@@ -151,7 +149,7 @@ fn append_resumes_at_complete_prefix_and_preserves_suffix_ordinal() {
     assert_eq!(second.counters.prefix_bytes_read, initial.len() as u64);
     assert_eq!(sink.rows.len(), 1);
     assert_eq!(sink.rows[0].raw_ordinal, 3);
-    assert_eq!(sink.rows[0].provider_event.event_type, EventType::ToolCall);
+    assert_eq!(sink.rows[0].event_type, EventType::ToolCall);
     assert_eq!(second.next_raw_ordinal, 4);
     assert_eq!(second.counters.native_result_records, 1);
 }
@@ -461,10 +459,9 @@ fn append_proof_cannot_cross_canonical_locator_identity() {
     assert_eq!(proof.identity.canonical_source_key, "canonical-proof-a");
     assert_eq!(proof.identity.locator, first_path);
 
-    let error = CodexNativeScanner::new(
+    let error = CodexNativeScanner::new_source_backed_v0(
         discover_one(&second_path, "proof-owner"),
         Some(&proof),
-        CodexNativeProfile::CoreOnly,
     )
     .unwrap_err();
     assert!(format!("{error}").contains("does not belong to catalog source"));

@@ -1,3 +1,4 @@
+use super::super::rows::{build_event_row, tool_context_from_row};
 use super::*;
 
 pub(super) struct BoundedRecordRead {

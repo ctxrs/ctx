@@ -1,20 +1,18 @@
 use super::*;
 
 impl CodexNativeScanner {
-    pub(crate) fn new(
+    pub(super) fn new(
         source: CodexCatalogSource,
         proof: Option<&CodexAppendProof>,
-        profile: CodexNativeProfile,
     ) -> Result<Self> {
         let opened = open_codex_source_capability(&source)?;
-        Self::new_retained(source, opened, proof, profile)
+        Self::new_retained(source, opened, proof)
     }
 
-    pub(crate) fn new_retained(
+    pub(super) fn new_retained(
         mut source: CodexCatalogSource,
         opened: Arc<OpenedProviderSourceFile>,
         proof: Option<&CodexAppendProof>,
-        profile: CodexNativeProfile,
     ) -> Result<Self> {
         source.opened = Some(Arc::clone(&opened));
         if let Some(proof) = proof {
@@ -85,7 +83,6 @@ impl CodexNativeScanner {
                 opened,
                 before,
                 reader,
-                profile,
                 disposition: CodexParseDisposition::ObservationReplay,
                 prefix_proof: PrefixProof::Matched,
                 resume_proof: Some(proof.clone()),
@@ -102,9 +99,7 @@ impl CodexNativeScanner {
                 counters: replay.counters,
                 replay: Some(replay),
                 active_core_page: None,
-                pro_page: None,
                 ready_core_page: None,
-                ready_pro_page: None,
                 exhausted: true,
             });
         }
@@ -175,17 +170,11 @@ impl CodexNativeScanner {
             }
         };
 
-        let initial_frontier = CodexNativeFrontier {
-            complete_prefix_end: offset,
-            next_raw_ordinal: raw_ordinal,
-            complete_prefix_sha256: complete_hasher.clone().finalize().into(),
-        };
         Ok(Self {
             source,
             opened,
             before,
             reader,
-            profile,
             disposition,
             prefix_proof,
             resume_proof,
@@ -207,10 +196,7 @@ impl CodexNativeScanner {
             },
             replay: None,
             active_core_page: None,
-            pro_page: (profile == CodexNativeProfile::CoreAndPro)
-                .then(|| new_pro_page(initial_frontier)),
             ready_core_page: None,
-            ready_pro_page: None,
             exhausted: false,
         })
     }
@@ -229,18 +215,11 @@ impl CodexNativeScanner {
         loop {
             let core_is_full = self.active_core_page.as_ref().is_some_and(|page| {
                 page.units() >= MAX_CODEX_PAGE_UNITS
-                    || match self.profile.projection_mode() {
-                        CodexProjectionMode::Legacy => {
-                            page.physical_records >= MAX_CODEX_PAGE_UNITS as u64
-                        }
-                        CodexProjectionMode::SourceBackedV0 => {
-                            page.physical_records >= MAX_CODEX_SOURCE_BACKED_PAGE_RECORDS
-                                || self
-                                    .offset
-                                    .saturating_sub(page.expected_frontier.complete_prefix_end)
-                                    >= MAX_CODEX_SOURCE_BACKED_PAGE_PROGRESS_BYTES
-                        }
-                    }
+                    || page.physical_records >= MAX_CODEX_SOURCE_BACKED_PAGE_RECORDS
+                    || self
+                        .offset
+                        .saturating_sub(page.expected_frontier.complete_prefix_end)
+                        >= MAX_CODEX_SOURCE_BACKED_PAGE_PROGRESS_BYTES
             });
             if core_is_full {
                 return self.emit_active_core_page().map(Some);
@@ -345,9 +324,6 @@ impl CodexNativeScanner {
                     .ok_or(CaptureError::SystemInvariant(
                         "Codex NativePath lost its active Core page",
                     ))?;
-                if let Some(row) = projection.core_row.take() {
-                    page.core_rows.push(row);
-                }
                 page.serialized_bytes = next_bytes;
             }
             if let Some(mutation) = projection.context_mutation.take() {
@@ -355,7 +331,6 @@ impl CodexNativeScanner {
             }
 
             self.raw_ordinal = self.raw_ordinal.saturating_add(1);
-            let next_frontier = self.frontier();
             let page = self
                 .active_core_page
                 .as_mut()
@@ -363,12 +338,6 @@ impl CodexNativeScanner {
                     "Codex NativePath lost its active Core page",
                 ))?;
             page.physical_records = page.physical_records.saturating_add(1);
-            if let Some(output) = projection.pro_output.take() {
-                self.push_pro_output(output, projection.pro_serialized_bytes, next_frontier)?;
-            }
-            if let Some(page) = self.take_ready_page() {
-                return Ok(Some(page));
-            }
         }
     }
 
