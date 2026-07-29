@@ -1,8 +1,15 @@
-use std::{env, io::Write as _, process::ExitCode, time::Instant};
+use std::{
+    env,
+    io::{self, Write},
+    process::ExitCode,
+    time::Instant,
+};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use ctx_history_core::default_data_root;
+use ctx_history_capture::complete_content::CompleteContentErrorKind;
+use ctx_history_core::{default_data_root, HydrationFailure, HydrationFailureKind};
+use serde_json::{json, Value};
 
 use crate::{
     analytics::{self, ClientOperationDraft},
@@ -43,6 +50,139 @@ pub(crate) struct RenderedCliError;
 
 pub(crate) fn rendered_cli_error() -> anyhow::Error {
     RenderedCliError.into()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SourceHydrationErrorContract {
+    error_code: String,
+    failure_kind: &'static str,
+    detail: &'static str,
+    retryable: bool,
+}
+
+impl SourceHydrationErrorContract {
+    pub(crate) fn from_failure(
+        failure: HydrationFailure,
+        retryable: bool,
+        stable_code_override: Option<&str>,
+    ) -> Self {
+        let (error_kind, failure_kind, detail) = match failure.kind {
+            HydrationFailureKind::TemporarilyUnavailable => (
+                CompleteContentErrorKind::SourceUnreadable,
+                "temporarily_unavailable",
+                "source hydration is temporarily unavailable",
+            ),
+            HydrationFailureKind::ConfirmedDeleted => (
+                CompleteContentErrorKind::SourceMissing,
+                "confirmed_deleted",
+                "the indexed source is no longer available",
+            ),
+            HydrationFailureKind::StaleSourceEvidence => (
+                CompleteContentErrorKind::SourceChanged,
+                "stale_source_evidence",
+                "the source identity changed after indexing",
+            ),
+            HydrationFailureKind::StaleRecordEvidence => (
+                CompleteContentErrorKind::ContentVerificationFailed,
+                "stale_record_evidence",
+                "the source record changed after indexing",
+            ),
+            HydrationFailureKind::MissingRecord => (
+                CompleteContentErrorKind::SourceRecordMissing,
+                "missing_record",
+                "the indexed source record is no longer available",
+            ),
+            HydrationFailureKind::UnsupportedParserRevision => (
+                CompleteContentErrorKind::HydrationUnsupported,
+                "unsupported_parser_revision",
+                "the source parser revision does not support hydration",
+            ),
+            HydrationFailureKind::InvalidLocator => (
+                CompleteContentErrorKind::ContentVerificationFailed,
+                "invalid_locator",
+                "the indexed source locator could not be verified",
+            ),
+        };
+        // Resolver details can contain provider-native paths or content. The
+        // stable contract deliberately exposes only the typed failure class.
+        let _ = failure.detail;
+        let error_code = stable_code_override
+            .and_then(stable_source_hydration_error_code_override)
+            .unwrap_or_else(|| error_kind.as_str())
+            .to_owned();
+        Self {
+            error_code,
+            failure_kind,
+            detail,
+            retryable,
+        }
+    }
+
+    pub(crate) fn detail(&self) -> &'static str {
+        self.detail
+    }
+
+    pub(crate) fn structured(&self) -> Value {
+        let error = format!("{}/{}", self.error_code, self.failure_kind);
+        json!({
+            "error": error,
+            "error_code": self.error_code,
+            "failure_kind": self.failure_kind,
+            "detail": self.detail,
+            "retryable": self.retryable,
+        })
+    }
+}
+
+fn stable_source_hydration_error_code_override(code: &str) -> Option<&str> {
+    match code {
+        // The aggregate hydration-budget P0 will expose this code from
+        // SourceHydrationUnavailable. Keep the override allowlisted so daemon
+        // implementation codes never become public by accident.
+        "hydration_budget_exceeded" => Some(code),
+        _ => None,
+    }
+}
+
+pub(crate) fn source_hydration_error_contract(
+    error: &anyhow::Error,
+) -> Option<SourceHydrationErrorContract> {
+    let retryable = semantic::PinnedSourceBackedGeneration::source_hydration_retryable(error);
+    let failure = semantic::PinnedSourceBackedGeneration::source_hydration_failure(error)?;
+    Some(SourceHydrationErrorContract::from_failure(
+        failure, retryable, None,
+    ))
+}
+
+#[derive(Debug, thiserror::Error)]
+enum FinalOutputFlushError {
+    #[error("flush CLI stdout: {0}")]
+    Stdout(io::Error),
+    #[error("flush CLI stderr: {0}")]
+    Stderr(io::Error),
+    #[error("flush CLI stdout: {stdout}; flush CLI stderr: {stderr}")]
+    Both {
+        stdout: io::Error,
+        stderr: io::Error,
+    },
+}
+
+fn flush_cli_output_then(
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+    after_delivery: impl FnOnce(),
+) -> std::result::Result<(), FinalOutputFlushError> {
+    let stdout_result = stdout.flush();
+    let stderr_result = stderr.flush();
+    match (stdout_result, stderr_result) {
+        (Ok(()), Ok(())) => {
+            after_delivery();
+            Ok(())
+        }
+        (Err(stdout), Ok(())) => Err(FinalOutputFlushError::Stdout(stdout)),
+        (Ok(()), Err(stderr)) => Err(FinalOutputFlushError::Stderr(stderr)),
+        (Err(stdout), Err(stderr)) => Err(FinalOutputFlushError::Both { stdout, stderr }),
+    }
 }
 
 pub(crate) fn run() -> ExitCode {
@@ -283,6 +423,8 @@ pub(crate) fn run_cli() -> Result<()> {
                     "{}",
                     serde_json::to_string(&complete_content::complete_content_error_json(&error))?
                 );
+            } else if let Some(error) = source_hydration_error_contract(error) {
+                eprintln!("{}", serde_json::to_string(&error.structured())?);
                 Some(RenderedJsonError.into())
             } else {
                 eprintln!("Error: {error:?}");
@@ -295,11 +437,13 @@ pub(crate) fn run_cli() -> Result<()> {
     } else {
         None
     };
-    let _ = std::io::stdout().flush();
-    let _ = std::io::stderr().flush();
-    if let Some(operation) = local_usage_draft.completed(result.is_ok(), duration) {
-        local_usage::record_best_effort(&data_root, config.local_usage.enabled, operation);
-    }
+    let mut stdout = io::stdout();
+    let mut stderr = io::stderr();
+    let delivery_result = flush_cli_output_then(&mut stdout, &mut stderr, || {
+        if let Some(operation) = local_usage_draft.completed(result.is_ok(), duration) {
+            local_usage::record_best_effort(&data_root, config.local_usage.enabled, operation);
+        }
+    });
     let mut events = provider_refreshes.finish();
     if let Some(draft) = analytics_draft {
         if draft.should_emit() {
@@ -312,6 +456,7 @@ pub(crate) fn run_cli() -> Result<()> {
             semantic::maybe_autostart_daemon(&data_root, &config, trigger);
         }
     }
+    delivery_result?;
     if let Some(error) = rendered_error {
         return Err(error);
     }
@@ -444,6 +589,8 @@ fn env_truthy(key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::Cell, rc::Rc};
+
     use super::*;
 
     fn daemon_autostart_trigger(args: &[&str]) -> Option<DaemonTriggerCommandArg> {
@@ -493,6 +640,161 @@ mod tests {
                     .is_none(),
                 "{args:?}"
             );
+        }
+    }
+
+    #[test]
+    fn source_hydration_failures_use_stable_safe_public_contracts() {
+        let cases = [
+            (
+                HydrationFailureKind::TemporarilyUnavailable,
+                "source_unreadable",
+                "temporarily_unavailable",
+                true,
+            ),
+            (
+                HydrationFailureKind::ConfirmedDeleted,
+                "source_missing",
+                "confirmed_deleted",
+                true,
+            ),
+            (
+                HydrationFailureKind::StaleSourceEvidence,
+                "source_changed",
+                "stale_source_evidence",
+                true,
+            ),
+            (
+                HydrationFailureKind::StaleRecordEvidence,
+                "content_verification_failed",
+                "stale_record_evidence",
+                true,
+            ),
+            (
+                HydrationFailureKind::MissingRecord,
+                "source_record_missing",
+                "missing_record",
+                true,
+            ),
+            (
+                HydrationFailureKind::UnsupportedParserRevision,
+                "hydration_unsupported",
+                "unsupported_parser_revision",
+                false,
+            ),
+            (
+                HydrationFailureKind::InvalidLocator,
+                "content_verification_failed",
+                "invalid_locator",
+                false,
+            ),
+        ];
+
+        for (kind, error_code, failure_kind, retryable) in cases {
+            let contract = SourceHydrationErrorContract::from_failure(
+                HydrationFailure {
+                    kind,
+                    detail: "secret provider content at /private/source/path".to_owned(),
+                },
+                retryable,
+                None,
+            );
+            let structured = contract.structured();
+            let encoded = serde_json::to_string(&structured).unwrap();
+            let reparsed: Value = serde_json::from_str(&encoded).unwrap();
+
+            assert_eq!(reparsed["error"], format!("{error_code}/{failure_kind}"));
+            assert_eq!(reparsed["error_code"], error_code);
+            assert_eq!(reparsed["failure_kind"], failure_kind);
+            assert_eq!(reparsed["retryable"], retryable);
+            assert!(reparsed["detail"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()));
+            assert!(!encoded.contains("secret provider content"));
+            assert!(!encoded.contains("/private/source/path"));
+        }
+    }
+
+    #[test]
+    fn source_hydration_budget_override_preserves_specific_stable_code() {
+        let contract = SourceHydrationErrorContract::from_failure(
+            HydrationFailure {
+                kind: HydrationFailureKind::TemporarilyUnavailable,
+                detail: "internal budget implementation detail".to_owned(),
+            },
+            true,
+            Some("hydration_budget_exceeded"),
+        );
+        let structured = contract.structured();
+
+        assert_eq!(
+            structured["error"],
+            "hydration_budget_exceeded/temporarily_unavailable"
+        );
+        assert_eq!(structured["error_code"], "hydration_budget_exceeded");
+        assert_eq!(structured["failure_kind"], "temporarily_unavailable");
+        assert_eq!(structured["retryable"], true);
+        assert!(!structured
+            .to_string()
+            .contains("internal budget implementation detail"));
+    }
+
+    struct FlushWriter {
+        failure: Option<&'static str>,
+        flushes: Rc<Cell<usize>>,
+    }
+
+    impl Write for FlushWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.flushes.set(self.flushes.get() + 1);
+            match self.failure {
+                Some(message) => Err(io::Error::new(io::ErrorKind::BrokenPipe, message)),
+                None => Ok(()),
+            }
+        }
+    }
+
+    #[test]
+    fn local_usage_hook_runs_only_after_both_final_output_flushes_succeed() {
+        for (stdout_failure, stderr_failure, expected_delivery, expected_error) in [
+            (None, None, 1, None),
+            (Some("stdout"), None, 0, Some("flush CLI stdout: stdout")),
+            (None, Some("stderr"), 0, Some("flush CLI stderr: stderr")),
+            (
+                Some("stdout"),
+                Some("stderr"),
+                0,
+                Some("flush CLI stdout: stdout; flush CLI stderr: stderr"),
+            ),
+        ] {
+            let stdout_flushes = Rc::new(Cell::new(0));
+            let stderr_flushes = Rc::new(Cell::new(0));
+            let mut stdout = FlushWriter {
+                failure: stdout_failure,
+                flushes: stdout_flushes.clone(),
+            };
+            let mut stderr = FlushWriter {
+                failure: stderr_failure,
+                flushes: stderr_flushes.clone(),
+            };
+            let mut deliveries = 0;
+
+            let result = flush_cli_output_then(&mut stdout, &mut stderr, || deliveries += 1);
+
+            assert_eq!(deliveries, expected_delivery);
+            assert_eq!(stdout_flushes.get(), 1);
+            assert_eq!(stderr_flushes.get(), 1);
+            match expected_error {
+                Some(expected) => {
+                    assert!(result.is_err());
+                    assert!(result.unwrap_err().to_string().contains(expected));
+                }
+                None => assert!(result.is_ok()),
+            }
         }
     }
 }

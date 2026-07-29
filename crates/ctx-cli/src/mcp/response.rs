@@ -69,6 +69,9 @@ pub(super) fn tool_error_result(err: Error) -> Value {
             "structuredContent": structured,
         });
     }
+    if let Some(error) = crate::dispatch::source_hydration_error_contract(&err) {
+        return source_hydration_tool_error(error);
+    }
     if let Some(error) = err.downcast_ref::<InvalidToolRequest>() {
         let message = error.to_string();
         return json!({
@@ -115,6 +118,19 @@ pub(super) fn tool_error_result(err: Error) -> Value {
     })
 }
 
+fn source_hydration_tool_error(error: crate::dispatch::SourceHydrationErrorContract) -> Value {
+    json!({
+        "isError": true,
+        "content": [
+            {
+                "type": "text",
+                "text": error.detail(),
+            }
+        ],
+        "structuredContent": error.structured(),
+    })
+}
+
 pub(super) fn success_response(id: Value, result: Value) -> Value {
     json!({
         "jsonrpc": "2.0",
@@ -156,7 +172,10 @@ pub(super) fn json_rpc_error(code: i64, message: &str, data: Option<Value>) -> V
 
 #[cfg(test)]
 mod tests {
+    use ctx_history_capture::complete_content::{CompleteContentError, CompleteContentErrorKind};
+    use ctx_history_core::{HydrationFailure, HydrationFailureKind};
     use serde_json::json;
+    use uuid::Uuid;
 
     use super::{
         error_response, invalid_request_response, invalid_tool_request, tool_error_result,
@@ -205,5 +224,52 @@ mod tests {
         );
         assert_eq!(result["structuredContent"]["error_code"], "invalid_request");
         assert_eq!(result["content"][0]["text"], "limit must be an integer");
+    }
+
+    #[test]
+    fn source_hydration_error_has_typed_safe_structured_content() {
+        let contract = crate::dispatch::SourceHydrationErrorContract::from_failure(
+            HydrationFailure {
+                kind: HydrationFailureKind::StaleRecordEvidence,
+                detail: "secret provider content at /private/source/path".to_owned(),
+            },
+            true,
+            None,
+        );
+        let result = super::source_hydration_tool_error(contract);
+
+        assert_eq!(result["isError"], true);
+        assert_eq!(
+            result["structuredContent"],
+            json!({
+                "error": "content_verification_failed/stale_record_evidence",
+                "error_code": "content_verification_failed",
+                "failure_kind": "stale_record_evidence",
+                "detail": "the source record changed after indexing",
+                "retryable": true,
+            })
+        );
+        assert_eq!(
+            result["content"][0]["text"],
+            "the source record changed after indexing"
+        );
+        assert!(!result.to_string().contains("secret provider content"));
+        assert!(!result.to_string().contains("/private/source/path"));
+    }
+
+    #[test]
+    fn complete_content_error_keeps_legacy_shape() {
+        let event_id = Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").unwrap();
+        let error = CompleteContentError::new(CompleteContentErrorKind::SourceChanged, event_id);
+        let result = tool_error_result(error.clone().into());
+
+        assert_eq!(result["isError"], true);
+        assert_eq!(
+            result["structuredContent"],
+            crate::complete_content::complete_content_error_json(&error)
+        );
+        assert_eq!(result["structuredContent"]["error_code"], "source_changed");
+        assert_eq!(result["structuredContent"]["retryable"], true);
+        assert_eq!(result["content"][0]["text"], error.to_string());
     }
 }
