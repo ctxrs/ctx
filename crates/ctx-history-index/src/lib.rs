@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tantivy::{
     collector::Count,
-    directory::{Directory, Lock},
+    directory::{Directory, DirectoryLock, Lock, INDEX_WRITER_LOCK},
     schema::{
         Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, FAST, INDEXED, STORED,
         STRING,
@@ -240,6 +240,8 @@ pub enum IndexError {
     },
     #[error("generation count overflow")]
     CountOverflow,
+    #[error("generation writer invariant violated: {0}")]
+    WriterInvariant(&'static str),
     #[error("generation {generation_id} committed but failed {stage} verification: {detail}")]
     CommittedGenerationNeedsRecovery {
         generation_id: String,
@@ -598,7 +600,9 @@ enum PendingSourceMode {
 pub struct GenerationWriter {
     root: PathBuf,
     index: Index,
-    writer: IndexWriter<TantivyDocument>,
+    preflight_lock: Option<DirectoryLock>,
+    writer: Option<IndexWriter<TantivyDocument>>,
+    writer_options: WriterOptions,
     fields: Fields,
     base_manifest: Option<GenerationManifest>,
     base_opstamp: u64,
@@ -655,11 +659,22 @@ impl GenerationWriter {
         drop(initialization_guard);
         let fields = fields_from_schema(&index.schema())?;
         validate_schema(&index.schema())?;
-        // IndexWriter owns Tantivy's writer lock. Load the base generation only
-        // after acquiring it so a concurrent writer cannot advance meta.json
-        // between base capture and candidate construction.
-        let writer = index
-            .writer_with_num_threads::<TantivyDocument>(indexer_threads, options.memory_bytes)?;
+        // Hold Tantivy's real writer lock while capturing and staging against
+        // the base, but defer construction of IndexWriter and its worker/memory
+        // floor until the first actual mutation.
+        let preflight_lock = directory
+            .acquire_lock(&INDEX_WRITER_LOCK)
+            .map_err(|error| {
+                tantivy::TantivyError::LockFailure(
+                    error,
+                    Some(
+                        "Failed to acquire index lock. If you are using a regular directory, this \
+                         means there is already an `IndexWriter` working on this `Directory`, in \
+                         this process or in a different process."
+                            .to_owned(),
+                    ),
+                )
+            })?;
         let base_metas = index.load_metas()?;
         let (base_manifest, base_searcher) = if base_metas.payload.is_some() {
             let manifest = load_manifest_for_metas(&root, &base_metas)?;
@@ -678,13 +693,6 @@ impl GenerationWriter {
         } else {
             return Err(IndexError::UnboundIndexState);
         };
-        // No other writer can create candidates while this writer owns
-        // Tantivy's lock. Reclaim interrupted ctx atomic writes by their exact
-        // reserved names, then let Tantivy remove only managed files absent
-        // from its active/pinned segment inventory.
-        reclaim_abandoned_atomic_writes(&root)?;
-        reclaim_abandoned_atomic_writes(&root.join(MANIFEST_DIRECTORY))?;
-        let _ = writer.garbage_collect_files().wait()?;
         let mut source_identities = HashMap::new();
         if let Some(manifest) = &base_manifest {
             for source in &manifest.sources {
@@ -707,7 +715,12 @@ impl GenerationWriter {
         Ok(Self {
             root,
             index,
-            writer,
+            preflight_lock: Some(preflight_lock),
+            writer: None,
+            writer_options: WriterOptions {
+                indexer_threads,
+                memory_bytes: options.memory_bytes,
+            },
             fields,
             base_manifest,
             base_opstamp: base_metas.opstamp,
@@ -727,6 +740,53 @@ impl GenerationWriter {
         self.base_manifest.as_ref()
     }
 
+    fn writer_mut(&mut self) -> Result<&mut IndexWriter<TantivyDocument>> {
+        if self.writer.is_none() {
+            let preflight_lock = self
+                .preflight_lock
+                .take()
+                .ok_or(IndexError::WriterInvariant(
+                    "missing preflight lock before lazy writer construction",
+                ))?;
+            drop(preflight_lock);
+
+            let writer = self.index.writer_with_num_threads::<TantivyDocument>(
+                self.writer_options.indexer_threads,
+                self.writer_options.memory_bytes,
+            )?;
+            let current_metas = self.index.load_metas()?;
+            let expected_generation = self
+                .base_manifest
+                .as_ref()
+                .map(GenerationManifest::generation_id)
+                .transpose()?;
+            let current_generation = payload_generation_id(&current_metas)?;
+            let expected_segments = self
+                .base_searcher
+                .as_ref()
+                .map(searcher_generation)
+                .unwrap_or_default();
+            if current_metas.opstamp != self.base_opstamp
+                || current_generation != expected_generation
+                || meta_generation(&current_metas) != expected_segments
+            {
+                return Err(IndexError::ConcurrentGenerationChange);
+            }
+
+            // Mutation now owns Tantivy's writer lock. Reclaim interrupted ctx
+            // atomic writes by their exact reserved names, then let Tantivy
+            // remove only managed files absent from the active/pinned segment
+            // inventory.
+            reclaim_abandoned_atomic_writes(&self.root)?;
+            reclaim_abandoned_atomic_writes(&self.root.join(MANIFEST_DIRECTORY))?;
+            let _ = writer.garbage_collect_files().wait()?;
+            self.writer = Some(writer);
+        }
+        self.writer.as_mut().ok_or(IndexError::WriterInvariant(
+            "lazy writer construction completed without a writer",
+        ))
+    }
+
     /// Starts replacing every lexical document owned by `source`.
     ///
     /// Documents can then be submitted as they are parsed; no whole-source or
@@ -742,8 +802,9 @@ impl GenerationWriter {
         if self.pending.contains_key(&token) {
             return Err(IndexError::DuplicateSource(source.identity().to_string()));
         }
-        self.writer
-            .delete_term(Term::from_field_text(self.fields.source_key, &token));
+        let source_key_field = self.fields.source_key;
+        self.writer_mut()?
+            .delete_term(Term::from_field_text(source_key_field, &token));
         self.deletions.remove(&source);
         self.pending.insert(
             token,
@@ -977,7 +1038,7 @@ impl GenerationWriter {
             target.add_text(self.fields.touched_file_filter, touched_file.to_lowercase());
             target.add_text(self.fields.touched_file, touched_file);
         }
-        self.writer.add_document(target)?;
+        self.writer_mut()?.add_document(target)?;
         let pending = self
             .pending
             .get_mut(&token)
@@ -1071,8 +1132,9 @@ impl GenerationWriter {
         if self.pending.contains_key(&token) {
             return Err(IndexError::DuplicateSource(source.identity().to_string()));
         }
-        self.writer
-            .delete_term(Term::from_field_text(self.fields.source_key, &token));
+        let source_key_field = self.fields.source_key;
+        self.writer_mut()?
+            .delete_term(Term::from_field_text(source_key_field, &token));
         self.deletions.insert(source.clone(), removal);
         Ok(())
     }
@@ -1096,10 +1158,13 @@ impl GenerationWriter {
             });
         if exact_replay {
             for pending in self.pending.values() {
-                let certificate = pending
-                    .certificate
-                    .as_ref()
-                    .expect("exact replay requires a certificate");
+                let certificate =
+                    pending
+                        .certificate
+                        .as_ref()
+                        .ok_or(IndexError::WriterInvariant(
+                            "exact replay source is missing its certificate",
+                        ))?;
                 if !revalidate(RevalidationTarget::Source(certificate)) {
                     return Err(IndexError::SourceInvalidated(
                         pending.source.identity().to_string(),
@@ -1109,7 +1174,9 @@ impl GenerationWriter {
             let base = self
                 .base_manifest
                 .as_ref()
-                .expect("exact replay requires a base manifest");
+                .ok_or(IndexError::WriterInvariant(
+                    "exact replay is missing its base manifest",
+                ))?;
             return Ok(CommitReceipt {
                 generation_id: base.generation_id()?,
                 opstamp: self.base_opstamp,
@@ -1127,6 +1194,7 @@ impl GenerationWriter {
             }
         }
 
+        self.writer_mut()?;
         let manifest = self.next_manifest()?;
         let previous_generation_id = self
             .base_manifest
@@ -1134,7 +1202,13 @@ impl GenerationWriter {
             .map(GenerationManifest::generation_id)
             .transpose()?;
         let root = self.root.clone();
-        let mut prepared = self.writer.prepare_commit()?;
+        let mut prepared = self
+            .writer
+            .as_mut()
+            .ok_or(IndexError::WriterInvariant(
+                "mutating commit is missing its lazy writer",
+            ))?
+            .prepare_commit()?;
         for pending in self.pending.values() {
             let certificate = pending.certificate.as_ref().ok_or_else(|| {
                 IndexError::SourceNotCertified(pending.source.identity().to_string())
@@ -1164,7 +1238,10 @@ impl GenerationWriter {
         })?;
         prepared.set_payload(&payload);
         let commit_result = prepared.commit();
-        if let Err(error) = self.writer.wait_merging_threads() {
+        let writer = self.writer.take().ok_or(IndexError::WriterInvariant(
+            "published commit is missing its lazy writer",
+        ))?;
+        if let Err(error) = writer.wait_merging_threads() {
             return Err(classify_publication_failure(
                 &self.index,
                 &generation_id,
@@ -1970,6 +2047,11 @@ fn validate_optional_document_text(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
     use ctx_history_core::{
         derive_event_id, derive_session_id, CertifiedSourceInventory, EventIdentityInput,
         LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
@@ -1977,7 +2059,10 @@ mod tests {
         SourceInventoryObservation, SourceObservation, TypedKey,
     };
     use tantivy::{
-        collector::DocSetCollector, indexer::NoMergePolicy, query::AllQuery,
+        collector::DocSetCollector,
+        index::SegmentMeta,
+        indexer::{LogMergePolicy, MergeCandidate, MergePolicy, NoMergePolicy},
+        query::AllQuery,
         schema::Value as TantivyValue,
     };
     use tempfile::tempdir;
@@ -2154,6 +2239,19 @@ mod tests {
         ids
     }
 
+    #[derive(Debug)]
+    struct CountingLogMergePolicy {
+        inner: LogMergePolicy,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl MergePolicy for CountingLogMergePolicy {
+        fn compute_merge_candidates(&self, segments: &[SegmentMeta]) -> Vec<MergeCandidate> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.inner.compute_merge_candidates(segments)
+        }
+    }
+
     fn collect_source_pages(
         index: &VerifiedIndex,
         source: &SourceKey,
@@ -2247,6 +2345,14 @@ mod tests {
 
         let mut unchanged_writer =
             GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        assert!(
+            unchanged_writer.writer.is_none(),
+            "opening a generation must not construct Tantivy's IndexWriter"
+        );
+        assert!(
+            unchanged_writer.preflight_lock.is_some(),
+            "the lazy writer must retain Tantivy's exclusive lock"
+        );
         let base = unchanged_writer
             .begin_source_append(source.clone())
             .unwrap()
@@ -2260,6 +2366,10 @@ mod tests {
         )
         .unwrap();
         unchanged_writer.certify_source_append(replay).unwrap();
+        assert!(
+            unchanged_writer.writer.is_none(),
+            "an exact certified replay must not construct Tantivy's IndexWriter"
+        );
         let mut revalidations = 0;
         let unchanged = unchanged_writer
             .commit(|target| {
@@ -2305,6 +2415,59 @@ mod tests {
         assert_eq!(verified.generation_id(), unchanged.generation_id);
         assert_eq!(verified.document_count(), 1);
         assert_eq!(verified.count_term("stable").unwrap(), 1);
+    }
+
+    #[test]
+    fn configured_log_merge_policy_runs_and_coalesces_eligible_segments() {
+        let temp = tempdir().unwrap();
+        let first_source = source("first.jsonl");
+        let second_source = source("second.jsonl");
+
+        let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        first
+            .writer_mut()
+            .unwrap()
+            .set_merge_policy(Box::<NoMergePolicy>::default());
+        first.begin_source(first_source.clone()).unwrap();
+        first
+            .add_document(document(&first_source, 1, "first segment"))
+            .unwrap();
+        first
+            .certify_source(certificate(&first_source, 1, 1))
+            .unwrap();
+        first.commit(|_| true).unwrap();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut policy = LogMergePolicy::default();
+        policy.set_min_num_segments(2);
+        let mut second = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        second
+            .writer_mut()
+            .unwrap()
+            .set_merge_policy(Box::new(CountingLogMergePolicy {
+                inner: policy,
+                calls: Arc::clone(&calls),
+            }));
+        second.begin_source(second_source.clone()).unwrap();
+        second
+            .add_document(document(&second_source, 1, "second segment"))
+            .unwrap();
+        second
+            .certify_source(certificate(&second_source, 1, 1))
+            .unwrap();
+        second.commit(|_| true).unwrap();
+
+        assert!(
+            calls.load(Ordering::Relaxed) > 0,
+            "the configured LogMergePolicy was never consulted"
+        );
+        let index = VerifiedIndex::open(temp.path()).unwrap();
+        assert_eq!(
+            index.searcher.segment_readers().len(),
+            1,
+            "eligible one-document segments were not coalesced"
+        );
+        assert_eq!(index.document_count(), 2);
     }
 
     #[test]
@@ -2508,7 +2671,8 @@ mod tests {
 
         let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
         first
-            .writer
+            .writer_mut()
+            .unwrap()
             .set_merge_policy(Box::<NoMergePolicy>::default());
         first.begin_source(target.clone()).unwrap();
         first.add_document(target_fourth.clone()).unwrap();
@@ -2524,7 +2688,8 @@ mod tests {
 
         let mut append = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
         append
-            .writer
+            .writer_mut()
+            .unwrap()
             .set_merge_policy(Box::<NoMergePolicy>::default());
         let base = append.begin_source_append(target.clone()).unwrap().clone();
         append.add_document(target_third.clone()).unwrap();

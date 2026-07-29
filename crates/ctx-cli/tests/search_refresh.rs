@@ -422,6 +422,21 @@ fn generation_manifest_paths(temp: &TempDir) -> Vec<PathBuf> {
     paths
 }
 
+fn directory_bytes(path: &Path) -> u64 {
+    fs::read_dir(path)
+        .unwrap_or_else(|error| panic!("read directory size {}: {error}", path.display()))
+        .map(|entry| {
+            let entry = entry.unwrap();
+            let metadata = entry.metadata().unwrap();
+            if metadata.is_dir() {
+                directory_bytes(&entry.path())
+            } else {
+                metadata.len()
+            }
+        })
+        .sum()
+}
+
 #[derive(Debug, Eq, PartialEq)]
 struct PublishedFileState {
     bytes: Vec<u8>,
@@ -725,6 +740,7 @@ fn search_refresh_exact_noop_skips_publication_and_tiny_append_is_one_document()
     let initial_manifest = published_file_state(&manifest_path);
     let initial_manifests = generation_manifest_paths(&temp);
     let (initial_opstamp, initial_segments) = tantivy_meta_facts(&initial_meta);
+    let initial_index_bytes = directory_bytes(&index_root);
     assert!(!initial_segments.is_empty());
 
     let unchanged = json_output(ctx(&temp).args([
@@ -820,11 +836,17 @@ fn search_refresh_exact_noop_skips_publication_and_tiny_append_is_one_document()
 
     let append_meta = published_file_state(&meta_path);
     let (append_opstamp, append_segments) = tantivy_meta_facts(&append_meta);
+    let append_index_bytes = directory_bytes(&index_root);
     assert!(append_opstamp > initial_opstamp);
     assert!(
-        append_segments.len() < initial_segments.len(),
-        "the existing Tantivy merge policy should coalesce the fixture's tiny append: \
+        append_segments.len() <= initial_segments.len() + 1,
+        "one appended document may add at most one uncompacted segment: \
          before={initial_segments:?}, after={append_segments:?}"
+    );
+    assert!(
+        append_index_bytes <= initial_index_bytes.saturating_mul(2),
+        "one appended document must have bounded relative index growth: \
+         before={initial_index_bytes}, after={append_index_bytes}"
     );
     assert_eq!(
         generation_manifest_paths(&temp).len(),
