@@ -816,6 +816,7 @@ sh_test(
 
 test_suite(name = "cli_contract_tests", tests = [
     "//crates/ctx-cli:cli_public_help_docs_tests",
+    "//crates/ctx-cli:search_source_identity_filters_tests",
     "//crates/ctx-cli:stats_tests",
     "//crates/ctx-cli:upgrade_tests",
 ])
@@ -887,6 +888,7 @@ NATIVE_RUST_TESTS = [
 RELEASE_QUALIFICATION_TESTS = [
     "//crates/ctx-cli:auto_upgrade_acceptance_tests",
     "//crates/ctx-cli:persistent_daemon_lifecycle_tests",
+    "//crates/ctx-cli:pro_qualification_tests",
     "//scripts/source-backed-recovery:fault_qualification",
 ]
 
@@ -982,6 +984,7 @@ test_suite(
         ":presubmit",
         ":sdk_package_dry_run",
         ":package_audit_release",
+        "//crates/ctx-cli:daemon_config_reload_tests",
     ],
 )
 

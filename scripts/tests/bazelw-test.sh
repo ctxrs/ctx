@@ -108,4 +108,29 @@ export XDG_CACHE_HOME="${test_root}/xdg-cache"
 grep -Fq "cache=${XDG_CACHE_HOME}/ctx/bazel/bazel-7.4.1" "${test_root}/xdg-config.log" \
   || fail 'XDG cache fallback was not selected'
 
+# A writable volume can still be unusable to Bazel when blocks or inodes are
+# exhausted. Exercise the capacity decision directly with deterministic df
+# output instead of requiring a dedicated filesystem in the test sandbox.
+source "${repo_root}/scripts/ci-common.sh"
+df() {
+  case "$1" in
+    -Pk)
+      printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
+      printf 'fixture 10000000 1 9000000 1%% %s\n' "$2"
+      ;;
+    -Pi)
+      printf 'Filesystem Inodes IUsed IFree IUse%% Mounted on\n'
+      printf 'fixture 500000 499999 1 100%% %s\n' "$2"
+      ;;
+    *)
+      return 2
+      ;;
+  esac
+}
+export CTX_BAZEL_SPACIOUS_ROOT="${test_root}/spacious"
+export XDG_CACHE_HOME="${test_root}/xdg-low-inode"
+selected_cache="$(ctx_bazel_cache_root)"
+[[ "${selected_cache}" == "${XDG_CACHE_HOME}/ctx/bazel" ]] \
+  || fail 'low-inode spacious root did not fall back before invoking Bazel'
+
 printf 'bazelw tests passed\n'
