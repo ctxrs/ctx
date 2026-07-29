@@ -12,11 +12,7 @@ use ctx_pro_host_protocol::ProFilesystemLayout;
 use serde_json::json;
 use uuid::Uuid;
 
-use super::{
-    client::materialize,
-    lifecycle::{lifecycle_status_json, sync_parent_directory},
-};
-use crate::analytics::ProMaterializationTelemetryV1;
+use super::lifecycle::{lifecycle_status_json, sync_parent_directory};
 
 const MARKER_FILE_NAME: &str = ".ctx-pro.materialization-pending";
 const MARKER_CONTENT: &[u8] = b"ctx-pro-materialization-pending-v1\n";
@@ -112,16 +108,6 @@ pub(super) fn clear(data_root: &Path) -> Result<()> {
 pub(super) fn clear_after<T>(data_root: &Path, value: T) -> Result<T> {
     clear(data_root)?;
     Ok(value)
-}
-
-pub(crate) fn run_if_pending(data_root: &Path) -> Result<bool> {
-    if !pending(data_root)? {
-        return Ok(false);
-    }
-    let mut telemetry = ProMaterializationTelemetryV1::started();
-    materialize(data_root, &mut telemetry)?;
-    clear(data_root)?;
-    Ok(true)
 }
 
 pub(super) fn marker_path(data_root: &Path) -> PathBuf {

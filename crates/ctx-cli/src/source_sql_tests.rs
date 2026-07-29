@@ -17,7 +17,6 @@ fn sql_compatibility_opens_only_the_independent_projection() {
     drop(writer);
 
     let reader = SqlCompatibility::open(&path).unwrap();
-    assert_eq!(reader.path(), path);
     assert_eq!(
         reader.metadata().unwrap().status,
         RelationalProjectionStatus::Empty
@@ -43,8 +42,7 @@ fn fresh_sql_compatibility_initializes_only_the_relational_projection() {
     let temp = tempfile::tempdir().unwrap();
     let reader = SqlCompatibility::open_for_data_root(temp.path()).unwrap();
 
-    assert_eq!(reader.path(), sql_compatibility_path(temp.path()));
-    assert!(reader.path().is_file());
+    assert!(sql_compatibility_path(temp.path()).is_file());
     assert!(!database_path(temp.path().to_path_buf()).exists());
     assert_eq!(
         reader
@@ -80,8 +78,7 @@ fn old_store_is_left_untouched_and_runtime_inactive() {
     std::fs::write(&legacy_path, legacy_bytes).unwrap();
 
     let reader = SqlCompatibility::open_for_data_root(temp.path()).unwrap();
-    assert_eq!(reader.path(), sql_compatibility_path(temp.path()));
-    assert!(reader.path().is_file());
+    assert!(sql_compatibility_path(temp.path()).is_file());
     assert_eq!(
         reader
             .query(

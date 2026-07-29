@@ -138,10 +138,6 @@ struct ResolvedIndexContent {
     text: String,
 }
 
-pub(crate) fn index_is_available(data_root: &Path) -> bool {
-    index_root(data_root).join("meta.json").is_file()
-}
-
 pub(crate) fn run_search(
     args: SearchArgs,
     data_root: PathBuf,

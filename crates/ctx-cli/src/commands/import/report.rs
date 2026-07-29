@@ -97,7 +97,6 @@ impl ImportFailureScope {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ImportFailureType {
-    RecordRejection,
     UnsupportedSchema,
     NotFound,
     Permission,
@@ -112,7 +111,6 @@ pub(crate) enum ImportFailureType {
 impl ImportFailureType {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
-            Self::RecordRejection => "record_rejection",
             Self::UnsupportedSchema => "unsupported_schema",
             Self::NotFound => "not_found",
             Self::Permission => "permission",
