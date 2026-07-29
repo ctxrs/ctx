@@ -200,7 +200,7 @@ mod tests {
         let second_root = temp.path().join("second");
         fs::create_dir_all(&first_root).unwrap();
         let legacy_path = first_root.join("work.sqlite");
-        let legacy_bytes = b"opaque v0.25 Store rollback sentinel\n";
+        let legacy_bytes = b"opaque v0.25 prior-epoch rollback sentinel\n";
         fs::write(&legacy_path, legacy_bytes).unwrap();
 
         let first = qualify(&source_root, &first_root.join("search/lexical"));

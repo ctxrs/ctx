@@ -148,7 +148,7 @@ fn assert_change(report: &Value, expected: &str) {
 }
 
 #[test]
-fn codex_reimport_ignores_legacy_store_and_rebuilds_from_provider_source() {
+fn codex_reimport_preserves_opaque_prior_epoch_and_rebuilds_from_provider_source() {
     let temp = tempdir();
     let _daemon = start_source_refresh_daemon(&temp);
     let source_root = temp.path().join(".codex/sessions");
@@ -158,7 +158,7 @@ fn codex_reimport_ignores_legacy_store_and_rebuilds_from_provider_source() {
 
     let data_root = temp.path();
     let legacy_path = data_root.join("work.sqlite");
-    let legacy_bytes = b"opaque v0.25 Store rollback sentinel\n";
+    let legacy_bytes = b"opaque v0.25 prior-epoch rollback sentinel\n";
     fs::write(&legacy_path, legacy_bytes).unwrap();
 
     let initial = import_codex(&temp);

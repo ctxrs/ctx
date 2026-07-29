@@ -26,7 +26,8 @@ fn removed_cloud_config_is_rejected_without_initializing_storage() {
         .stderr(predicate::str::contains("cloud.mode"));
 
     assert_eq!(fs::read_to_string(config_path).unwrap(), stale_config);
-    assert!(!temp.path().join("work.sqlite").exists());
+    assert!(!temp.path().join("search").exists());
+    assert!(!temp.path().join("relational.sqlite").exists());
     assert!(!temp.path().join("spool").exists());
 }
 

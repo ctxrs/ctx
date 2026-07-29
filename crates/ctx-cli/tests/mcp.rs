@@ -3,7 +3,7 @@ mod support;
 use support::*;
 
 #[test]
-fn mcp_status_and_tools_list_are_read_only_without_initialized_store() {
+fn mcp_status_and_tools_list_are_read_only_without_initialized_epoch() {
     let temp = tempdir();
     let responses = mcp_roundtrip(
         &temp,
@@ -156,10 +156,6 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_store() {
             "daemon_endpoint:",
             "daemon_jobs: source_backed_refresh=",
         ],
-    );
-    assert!(
-        !temp.path().join("work.sqlite").exists(),
-        "MCP status should not initialize the ctx store"
     );
     assert!(
         std::fs::read_dir(temp.path()).unwrap().next().is_none(),
@@ -317,7 +313,10 @@ fn mcp_rejects_invalid_utf8_input_line_and_continues() {
 fn mcp_sql_tool_returns_structured_json_and_rejects_writes() {
     let temp = tempdir();
     let generation_id = initialize_generation_only_sql_projection(temp.path());
-    assert!(!temp.path().join("work.sqlite").exists());
+    assert!(
+        !temp.path().join("work.sqlite").exists(),
+        "relational projection setup must not create prior-epoch storage"
+    );
 
     let responses = mcp_roundtrip(
         &temp,
@@ -429,7 +428,10 @@ fn mcp_sql_tool_returns_structured_json_and_rejects_writes() {
         .unwrap()
         .contains("SQL result preview budget"));
     assert!(mcp_content_text(budget).contains("SQL result preview budget"));
-    assert!(!temp.path().join("work.sqlite").exists());
+    assert!(
+        !temp.path().join("work.sqlite").exists(),
+        "MCP SQL must remain in the fresh relational projection"
+    );
 }
 
 #[test]
@@ -467,7 +469,10 @@ fn mcp_sql_fresh_root_initializes_only_relational_projection() {
         json!([[1]])
     );
     assert!(temp.path().join("relational.sqlite").is_file());
-    assert!(!temp.path().join("work.sqlite").exists());
+    assert!(
+        !temp.path().join("work.sqlite").exists(),
+        "fresh-root MCP SQL must not create prior-epoch storage"
+    );
 }
 
 #[test]
@@ -554,7 +559,7 @@ fn mcp_search_returns_structured_json_without_refresh() {
 }
 
 #[test]
-fn mcp_search_requires_query_term_or_file_without_opening_store() {
+fn mcp_search_validates_inputs_and_reports_uninitialized_source_index() {
     let temp = tempdir();
     let responses = mcp_roundtrip(
         &temp,
@@ -635,16 +640,17 @@ fn mcp_search_requires_query_term_or_file_without_opening_store() {
     assert!(alias_result["structuredContent"]["error"]
         .as_str()
         .unwrap()
-        .contains("ctx store is not initialized"));
-    assert!(mcp_content_text(alias_result).contains("ctx store is not initialized"));
+        .contains("source-backed Core index is not initialized"));
+    assert!(mcp_content_text(alias_result).contains("source-backed Core index is not initialized"));
     assert!(
-        !temp.path().join("work.sqlite").exists(),
-        "invalid MCP search should fail before opening the ctx store"
+        !temp.path().join("search/lexical").exists(),
+        "MCP search must not create an uninitialized source-backed index"
     );
+    assert!(!temp.path().join("relational.sqlite").exists());
 }
 
 #[test]
-fn mcp_invalid_search_session_is_typed_before_store_open() {
+fn mcp_invalid_search_session_is_typed_before_source_index_open() {
     let temp = tempdir();
     let responses = mcp_roundtrip(
         &temp,
@@ -682,9 +688,10 @@ fn mcp_invalid_search_session_is_typed_before_store_open() {
         .unwrap()
         .contains("session id prefix must be at least 8 hex characters"));
     assert!(
-        !temp.path().join("work.sqlite").exists(),
-        "invalid session syntax must fail before opening the ctx store"
+        !temp.path().join("search/lexical").exists(),
+        "invalid session syntax must fail before opening the source-backed index"
     );
+    assert!(!temp.path().join("relational.sqlite").exists());
 }
 
 #[test]
@@ -1010,12 +1017,12 @@ fn mcp_tool_input_validation_returns_stable_invalid_request_and_server_recovers(
     }));
     requests.push(json!({
         "jsonrpc": "2.0",
-        "id": "store-failure",
+        "id": "index-failure",
         "method": "tools/call",
         "params": {
             "name": "search",
             "arguments": {
-                "query": "valid input reaches the store",
+                "query": "valid input reaches the source-backed index",
                 "provider": "roo_code"
             }
         }
@@ -1047,13 +1054,13 @@ fn mcp_tool_input_validation_returns_stable_invalid_request_and_server_recovers(
         assert!(mcp_content_text(result).contains(detail));
     }
 
-    let store_failure = &responses[cases.len() + 1]["result"];
-    assert_eq!(store_failure["isError"], true);
-    assert!(store_failure["structuredContent"]["error_code"].is_null());
-    assert!(store_failure["structuredContent"]["error"]
+    let index_failure = &responses[cases.len() + 1]["result"];
+    assert_eq!(index_failure["isError"], true);
+    assert!(index_failure["structuredContent"]["error_code"].is_null());
+    assert!(index_failure["structuredContent"]["error"]
         .as_str()
         .unwrap()
-        .contains("ctx store is not initialized"));
+        .contains("source-backed Core index is not initialized"));
 
     let recovered = &responses[cases.len() + 2]["result"];
     assert!(recovered["isError"].is_null());

@@ -290,9 +290,11 @@ fn usage_reports_are_literal_read_only_and_never_create_or_increment_the_store()
 }
 
 #[test]
-fn usage_actions_ignore_core_status_damage_and_fail_with_stable_json_for_owned_inputs() {
+fn usage_actions_preserve_opaque_prior_epoch_and_fail_with_stable_json_for_owned_inputs() {
     let temp = tempdir();
-    fs::write(temp.path().join("work.sqlite"), b"malformed core").unwrap();
+    let prior_epoch_path = temp.path().join("work.sqlite");
+    let prior_epoch_bytes = b"opaque v0.25 prior-epoch sentinel";
+    fs::write(&prior_epoch_path, prior_epoch_bytes).unwrap();
     let enabled_action = json_output(enabled(ctx(&temp).args([
         "status",
         "--usage",
@@ -340,6 +342,13 @@ fn usage_actions_ignore_core_status_damage_and_fail_with_stable_json_for_owned_i
         "usage_reset_failed"
     );
     assert!(!encoded.contains("SECRET_STORE_PATH"));
+    assert_eq!(fs::read(&prior_epoch_path).unwrap(), prior_epoch_bytes);
+    for suffix in ["-wal", "-shm", "-journal"] {
+        assert!(
+            !PathBuf::from(format!("{}{suffix}", prior_epoch_path.display())).exists(),
+            "local usage action created a prior-epoch SQLite auxiliary: {suffix}"
+        );
+    }
 }
 
 #[test]
