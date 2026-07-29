@@ -88,8 +88,7 @@ pub use error::{CaptureError, ProviderJsonlInventoryLimit, ProviderSourceFailure
 
 mod summaries;
 pub use summaries::{
-    CatalogSummary, ProviderImportFailure, ProviderImportSummary, ProviderImportTerminalOutcome,
-    ProviderImportWorkResult,
+    CatalogSummary, ProviderImportFailure, ProviderImportSummary, ProviderImportWorkResult,
 };
 
 pub(crate) mod common {
