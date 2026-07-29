@@ -11,6 +11,7 @@ use ctx_history_core::{
 };
 use serde_json::{json, Value};
 
+use super::resolver::encode_mux_coordinate;
 use super::*;
 use crate::test_support_paths::tempdir;
 
