@@ -715,7 +715,8 @@ fn machine_readable_default_search_reports_daemon_unavailable_without_autostart(
         status["daemon"]["source_refresh_endpoint"]["available"], false,
         "{status:#}"
     );
-    assert_eq!(status["legacy_history"]["present"], false, "{status:#}");
+    assert_eq!(status["prior_epoch"]["present"], false, "{status:#}");
+    assert_eq!(status["prior_epoch"]["opened"], false, "{status:#}");
 }
 
 #[test]
@@ -943,7 +944,8 @@ fn search_refresh_wait_recovers_after_invalid_source_is_removed() {
         "--format=json",
     ]));
     assert!(
-        uncommitted.contains("lexical index has no ctx generation payload"),
+        uncommitted
+            .contains("the source-backed index does not exist; retry with daemon refresh enabled"),
         "{uncommitted}"
     );
     let failed = assert_daemon_refresh_failure(&temp, 2, None);
@@ -1705,7 +1707,8 @@ fn search_refresh_wait_reports_typed_failure_for_empty_source_inventory() {
         status["refresh"]["progress"]["phase"], "failed",
         "{status:#}"
     );
-    assert_eq!(status["legacy_history"]["present"], false, "{status:#}");
+    assert_eq!(status["prior_epoch"]["present"], false, "{status:#}");
+    assert_eq!(status["prior_epoch"]["opened"], false, "{status:#}");
     assert!(!temp.path().join("search/lexical/meta.json").exists());
     assert!(generation_manifest_paths(&temp).is_empty());
 }

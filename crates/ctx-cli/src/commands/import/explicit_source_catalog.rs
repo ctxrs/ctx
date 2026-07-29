@@ -400,7 +400,8 @@ pub(crate) fn register_explicit_source_catalog_routes(
         }
     }
 
-    let base_sources = if index_root.join("meta.json").is_file() {
+    let needs_base_sources = snapshot.entries.iter().any(|entry| !entry.enabled);
+    let base_sources = if needs_base_sources && index_root.join("meta.json").is_file() {
         VerifiedIndex::open(index_root)
             .with_context(|| {
                 format!(
