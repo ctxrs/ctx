@@ -766,7 +766,8 @@ fn source_backed_hydration_rejects_malformed_coordinate_and_forbidden_fallbacks(
             "Lingma source-backed path contains forbidden fallback {forbidden}"
         );
     }
-    let route_source = include_str!("../../../../source_backed.rs");
+    let route_source =
+        include_str!("../../../../source_backed/registration/selected.rs");
     let route = route_source
         .split_once("pub fn register_lingma_source_backed_route")
         .unwrap()
