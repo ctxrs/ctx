@@ -37,6 +37,11 @@ pub(super) fn run_daemon_once_with_activity(
             false,
         );
     }
+    if let Some(iteration) =
+        run_pending_source_backed_pro_catch_up(data_root, runtime, source_refresh)?
+    {
+        return Ok(iteration);
+    }
     if !runtime.history_retry.ready() {
         let job = source_backed_refresh_retry_backoff_job(data_root, &runtime.history_retry);
         write_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root), &job)?;
@@ -59,6 +64,36 @@ pub(super) fn run_daemon_once_with_activity(
         source_refresh,
         true,
     )
+}
+
+fn run_pending_source_backed_pro_catch_up(
+    data_root: &Path,
+    runtime: &mut DaemonRuntime,
+    source_refresh: Option<&SourceBackedRefreshCoordinator>,
+) -> Result<Option<DaemonIteration>> {
+    if !daemon_mode_runs_source_backed_pro_catch_up(runtime.config.daemon.mode) {
+        return Ok(None);
+    }
+    let Some(authority) =
+        source_refresh.and_then(SourceBackedRefreshCoordinator::retained_published_generation)
+    else {
+        return Ok(None);
+    };
+    let generation = authority.generation_id();
+    if !pro_generation_needs_catch_up(data_root, generation) {
+        return Ok(None);
+    }
+    prepare_pro_retry_for_generation(runtime, data_root, generation);
+    if !runtime.pro_retry.ready() {
+        return Ok(None);
+    }
+    let run =
+        run_pro_catch_up_with_retry(data_root, runtime, generation, Some(authority.as_ref()))?;
+    Ok(Some(DaemonIteration::new(
+        run.did_work,
+        false,
+        DaemonCycleStateV1::unknown(),
+    )))
 }
 
 fn run_pending_source_backed_refresh(
@@ -160,7 +195,12 @@ fn run_full_source_backed_refresh(
         {
             let authority = source_refresh
                 .and_then(SourceBackedRefreshCoordinator::retained_published_generation);
-            match run_after_core_publication(data_root, &core_generation_id, authority.as_deref()) {
+            match run_pro_catch_up_with_retry(
+                data_root,
+                runtime,
+                &core_generation_id,
+                authority.as_deref(),
+            ) {
                 Ok(pro_run) => {
                     did_work |= pro_run.did_work;
                     job["pro_projection"] = pro_run.status;
@@ -196,6 +236,51 @@ fn run_full_source_backed_refresh(
         job["semantic_projection"] = semantic_job;
     }
     finish_full_source_backed_refresh(data_root, runtime, job, did_work)
+}
+
+fn run_pro_catch_up_with_retry(
+    data_root: &Path,
+    runtime: &mut DaemonRuntime,
+    core_generation_id: &str,
+    authority: Option<&GenerationBoundSourceBackedResolver>,
+) -> Result<SourceBackedProCatchUpRun> {
+    prepare_pro_retry_for_generation(runtime, data_root, core_generation_id);
+    if !runtime.pro_retry.ready() {
+        let mut status = read_pro_status(data_root).unwrap_or_else(|| {
+            compact_json(json!({
+                "schema_version": 1,
+                "owner": "daemon",
+                "kind": "source_backed_pro_catch_up",
+                "status": "pending",
+                "pending": true,
+                "retryable": true,
+                "core_generation_id": core_generation_id,
+            }))
+        });
+        status["reason"] = Value::String("retry_backoff".to_owned());
+        preserve_daemon_retry_state(&mut status, &runtime.pro_retry);
+        return Ok(SourceBackedProCatchUpRun {
+            status,
+            did_work: false,
+        });
+    }
+    let run = run_after_core_publication(data_root, core_generation_id, authority)?;
+    let status = record_daemon_job_retry(&mut runtime.pro_retry, run.status);
+    persist_pro_status(data_root, &status)?;
+    Ok(SourceBackedProCatchUpRun {
+        status,
+        did_work: run.did_work,
+    })
+}
+
+fn prepare_pro_retry_for_generation(
+    runtime: &mut DaemonRuntime,
+    data_root: &Path,
+    core_generation_id: &str,
+) {
+    if pro_status_generation(data_root).as_deref() != Some(core_generation_id) {
+        runtime.pro_retry.reset();
+    }
 }
 
 fn daemon_mode_runs_source_backed_pro_catch_up(mode: crate::config::DaemonMode) -> bool {
@@ -276,8 +361,14 @@ pub(super) fn restore_daemon_source_refresh_retry(runtime: &mut DaemonRuntime, d
     runtime.history_retry.restore(status.as_ref());
 }
 
-pub(super) fn source_refresh_retry_due(runtime: &DaemonRuntime) -> bool {
-    runtime.history_retry.consecutive_failures > 0 && runtime.history_retry.ready()
+pub(super) fn restore_daemon_consumer_retries(runtime: &mut DaemonRuntime, data_root: &Path) {
+    let status = read_pro_status(data_root);
+    runtime.pro_retry.restore(status.as_ref());
+}
+
+pub(super) fn daemon_retry_due(runtime: &DaemonRuntime) -> bool {
+    (runtime.history_retry.consecutive_failures > 0 && runtime.history_retry.ready())
+        || (runtime.pro_retry.consecutive_failures > 0 && runtime.pro_retry.ready())
 }
 
 fn source_backed_refresh_failed_job(data_root: &Path, message: String) -> Value {
@@ -456,14 +547,21 @@ use super::{
     },
     query_service::DaemonQueryActivity,
     runtime_limits::DAEMON_MIN_REMAINING_FOR_JOB_SECS,
-    source_backed_pro_catch_up::run_after_core_publication,
-    source_backed_refresh_coordinator::SourceBackedRefreshCoordinator,
+    source_backed_pro_catch_up::{
+        generation_needs_catch_up as pro_generation_needs_catch_up,
+        persist_status_json as persist_pro_status, read_status_json as read_pro_status,
+        run_after_core_publication, status_generation as pro_status_generation,
+        SourceBackedProCatchUpRun,
+    },
+    source_backed_refresh_coordinator::{
+        GenerationBoundSourceBackedResolver, SourceBackedRefreshCoordinator,
+    },
     source_backed_relational_catch_up::run_after_core_publication as run_relational_after_core_publication,
 };
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     use crate::{
         config::{AppConfig, DaemonMode},
@@ -474,8 +572,10 @@ mod tests {
     use super::{
         daemon_job_should_backoff, daemon_mode_runs_source_backed_pro_catch_up,
         daemon_mode_runs_source_backed_relational_catch_up,
-        daemon_mode_runs_source_backed_semantic_projection, record_daemon_job_retry,
-        run_daemon_once_with_activity, DaemonRetryBackoff, DaemonRuntime,
+        daemon_mode_runs_source_backed_semantic_projection, persist_pro_status,
+        prepare_pro_retry_for_generation, read_pro_status, record_daemon_job_retry,
+        restore_daemon_consumer_retries, run_daemon_once_with_activity,
+        run_pro_catch_up_with_retry, DaemonRetryBackoff, DaemonRuntime,
     };
 
     #[test]
@@ -564,6 +664,103 @@ mod tests {
         assert_eq!(recorded["status"], "completed");
         assert_eq!(recorded["pro_projection"]["status"], "error");
         assert_eq!(backoff.consecutive_failures, 0);
+    }
+
+    fn failed_pro_status(generation: &str) -> Value {
+        json!({
+            "schema_version": 1,
+            "owner": "daemon",
+            "kind": "source_backed_pro_catch_up",
+            "status": "error",
+            "pending": true,
+            "retryable": true,
+            "core_generation_id": generation,
+            "receipt_core_generation_id": null,
+            "attempts": 1,
+            "last_attempt_at_ms": 1,
+            "error_code": "helper_crashed",
+            "last_error": "fixture failure",
+        })
+    }
+
+    #[test]
+    fn pro_failure_backoff_is_independent_and_skips_until_due() {
+        let temp = tempfile::tempdir().unwrap();
+        let generation = "a".repeat(64);
+        let mut runtime = DaemonRuntime::default();
+        runtime.history_retry.record_failure();
+        runtime.semantic_retry.record_failure();
+        let history_failures = runtime.history_retry.consecutive_failures;
+        let semantic_failures = runtime.semantic_retry.consecutive_failures;
+
+        let status =
+            record_daemon_job_retry(&mut runtime.pro_retry, failed_pro_status(&generation));
+        persist_pro_status(temp.path(), &status).unwrap();
+        assert_eq!(runtime.pro_retry.consecutive_failures, 1);
+        assert!(!runtime.pro_retry.ready());
+        assert_eq!(runtime.history_retry.consecutive_failures, history_failures);
+        assert_eq!(
+            runtime.semantic_retry.consecutive_failures,
+            semantic_failures
+        );
+
+        let skipped =
+            run_pro_catch_up_with_retry(temp.path(), &mut runtime, &generation, None).unwrap();
+        assert!(!skipped.did_work);
+        assert_eq!(skipped.status["reason"], "retry_backoff");
+        assert_eq!(skipped.status["consecutive_failures"], 1);
+        assert_eq!(read_pro_status(temp.path()).unwrap()["status"], "error");
+    }
+
+    #[test]
+    fn pro_retry_restores_across_restart_and_core_backoff_does_not_gate_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let generation = "b".repeat(64);
+        let mut first = DaemonRuntime::default();
+        let status = record_daemon_job_retry(&mut first.pro_retry, failed_pro_status(&generation));
+        persist_pro_status(temp.path(), &status).unwrap();
+
+        let mut restarted = DaemonRuntime::default();
+        restarted.history_retry.record_failure();
+        restore_daemon_consumer_retries(&mut restarted, temp.path());
+        assert!(!restarted.history_retry.ready());
+        assert!(!restarted.pro_retry.ready());
+        assert_eq!(restarted.pro_retry.consecutive_failures, 1);
+
+        restarted.pro_retry.retry_not_before = None;
+        restarted.pro_retry.retry_not_before_at_ms = None;
+        prepare_pro_retry_for_generation(&mut restarted, temp.path(), &generation);
+        assert!(
+            restarted.pro_retry.ready(),
+            "Core history backoff must not block a due Pro retry"
+        );
+        assert!(!restarted.history_retry.ready());
+    }
+
+    #[test]
+    fn successful_pro_retry_resets_only_pro_state() {
+        let mut runtime = DaemonRuntime::default();
+        runtime.history_retry.record_failure();
+        runtime.semantic_retry.record_failure();
+        runtime.pro_retry.record_failure();
+        let history_failures = runtime.history_retry.consecutive_failures;
+        let semantic_failures = runtime.semantic_retry.consecutive_failures;
+
+        let completed = record_daemon_job_retry(
+            &mut runtime.pro_retry,
+            json!({
+                "status": "completed",
+                "pending": false,
+                "retryable": false,
+            }),
+        );
+        assert_eq!(completed["status"], "completed");
+        assert_eq!(runtime.pro_retry.consecutive_failures, 0);
+        assert_eq!(runtime.history_retry.consecutive_failures, history_failures);
+        assert_eq!(
+            runtime.semantic_retry.consecutive_failures,
+            semantic_failures
+        );
     }
 
     #[test]

@@ -52,6 +52,14 @@ struct SourceBackedProCatchUpStatus {
     last_attempt_at_ms: i64,
     error_code: Option<String>,
     last_error: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    consecutive_failures: u32,
+    #[serde(default)]
+    retry_after_ms: Option<u64>,
+    #[serde(default)]
+    retry_not_before_at_ms: Option<i64>,
 }
 
 impl SourceBackedProCatchUpStatus {
@@ -69,6 +77,10 @@ impl SourceBackedProCatchUpStatus {
             last_attempt_at_ms: utc_now().timestamp_millis(),
             error_code: None,
             last_error: None,
+            reason: None,
+            consecutive_failures: 0,
+            retry_after_ms: None,
+            retry_not_before_at_ms: None,
         }
     }
 
@@ -88,6 +100,10 @@ impl SourceBackedProCatchUpStatus {
         self.receipt_core_generation_id = Some(receipt_generation);
         self.error_code = None;
         self.last_error = None;
+        self.reason = None;
+        self.consecutive_failures = 0;
+        self.retry_after_ms = None;
+        self.retry_not_before_at_ms = None;
         self
     }
 
@@ -327,12 +343,27 @@ fn status_path(data_root: &Path) -> PathBuf {
 }
 
 fn read_status(data_root: &Path) -> Option<SourceBackedProCatchUpStatus> {
-    read_daemon_job_status(&status_path(data_root))
-        .and_then(|value| serde_json::from_value(value).ok())
+    read_status_json(data_root).and_then(|value| serde_json::from_value(value).ok())
 }
 
 fn persist_status(data_root: &Path, status: &SourceBackedProCatchUpStatus) -> Result<()> {
     write_daemon_job_status(&status_path(data_root), &status.to_json()?)
+}
+
+pub(super) fn read_status_json(data_root: &Path) -> Option<Value> {
+    read_daemon_job_status(&status_path(data_root))
+}
+
+pub(super) fn persist_status_json(data_root: &Path, status: &Value) -> Result<()> {
+    write_daemon_job_status(&status_path(data_root), status)
+}
+
+pub(super) fn generation_needs_catch_up(data_root: &Path, core_generation_id: &str) -> bool {
+    !read_status(data_root).is_some_and(|status| status.is_completed_for(core_generation_id))
+}
+
+pub(super) fn status_generation(data_root: &Path) -> Option<String> {
+    read_status(data_root).map(|status| status.core_generation_id)
 }
 
 /// Waits for the daemon-owned Pro projection of one exact Core generation.
