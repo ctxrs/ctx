@@ -32,7 +32,7 @@ pub(super) fn daemon_history_refresh_job_path(data_root: &Path) -> PathBuf {
 }
 
 pub(super) fn daemon_source_backed_refresh_job_path(data_root: &Path) -> PathBuf {
-    daemon_jobs_path(data_root).join("source-backed-refresh.json")
+    daemon_jobs_path(data_root).join("core-refresh.json")
 }
 
 pub(super) fn daemon_semantic_job_path(data_root: &Path) -> PathBuf {
@@ -1254,3 +1254,16 @@ use super::{
 
 #[cfg(unix)]
 use super::runtime_limits::DAEMON_QUERY_SOCKET_FILE;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn durable_state_path_is_purpose_based() {
+        assert_eq!(
+            daemon_source_backed_refresh_job_path(Path::new("ctx-data")),
+            Path::new("ctx-data/daemon/jobs/core-refresh.json")
+        );
+    }
+}

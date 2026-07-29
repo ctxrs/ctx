@@ -29,7 +29,7 @@ use super::{
     source_backed_refresh_coordinator::source_backed_index_root,
 };
 
-const SOURCE_BACKED_RELATIONAL_STATUS_FILE: &str = "source-backed-relational-catch-up.json";
+const SOURCE_BACKED_RELATIONAL_STATUS_FILE: &str = "relational-catch-up.json";
 const SOURCE_BACKED_RELATIONAL_STATUS_SCHEMA_VERSION: u16 = 1;
 const CERTIFICATE_DIGEST_BYTES: usize = 32;
 
@@ -763,6 +763,14 @@ mod tests {
 
     const PROVIDER_TEXT: &str = "provider-body-sentinel-must-not-enter-relational";
     const PREVIEW_TEXT: &str = "provider-preview-sentinel-must-not-enter-relational";
+
+    #[test]
+    fn durable_state_path_is_purpose_based() {
+        assert_eq!(
+            status_path(Path::new("ctx-data")),
+            Path::new("ctx-data/daemon/jobs/relational-catch-up.json")
+        );
+    }
 
     fn source() -> ctx_history_core::SourceKey {
         ctx_history_core::SourceKey::derive(

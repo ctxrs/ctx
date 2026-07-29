@@ -31,7 +31,7 @@ use uuid::Uuid;
 
 use crate::{provider_args::ImportFormatArg, ImportArgs};
 
-const CATALOG_DIRECTORY: &str = "source-backed-explicit-catalog-v1";
+const CATALOG_DIRECTORY: &str = "catalogs/explicit-sources";
 const CATALOG_LOCK_FILE: &str = "catalog.lock";
 const CATALOG_SCHEMA_VERSION: u32 = 1;
 const CATALOG_INTEGRITY_ALGORITHM: &str = "sha256";
@@ -1179,6 +1179,14 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn durable_state_path_is_purpose_based() {
+        assert_eq!(
+            catalog_root(Path::new("ctx-data")),
+            Path::new("ctx-data/catalogs/explicit-sources")
+        );
+    }
 
     fn custom_source(path: &Path) -> ProviderSource {
         custom_provider_source(path.to_path_buf(), true).unwrap()
