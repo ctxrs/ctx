@@ -629,13 +629,13 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         CatalogLineage,
         Full
     ),
-    partial_route!(
+    route!(
         AstrBot,
         "astrbot_data_v4_sqlite",
         true,
         true,
         DiscoveredWinner,
-        "AstrBot exact hydration is currently limited to conversation messages"
+        Full
     ),
     route!(Shelley, "shelley_sqlite", true, false, ExactCwd, Full),
     route!(
