@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use ctx_history_core::{LocatorRevisionPolicy, NativeRecordCoordinate, StableEntityId};
+use ctx_history_core::{EventType, LocatorRevisionPolicy, NativeRecordCoordinate, StableEntityId};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -146,7 +146,7 @@ fn cursor_source_backed_cold_extraction_preserves_winning_root_ids_and_bounds() 
     assert_eq!(first_summary.projects_root, winning_projects);
     assert_eq!(first_summary.discovered_sources, 1);
     assert_eq!(first_summary.projected_records, 4);
-    assert_eq!(first_summary.indexed_documents, 4);
+    assert_eq!(first_summary.indexed_documents, 3);
     assert_eq!(first_summary, replay_summary);
     assert_eq!(first.event_ids(), replay.event_ids());
     assert_eq!(first.plans[0].native_session_id, "session-a");
@@ -162,7 +162,7 @@ fn cursor_source_backed_cold_extraction_preserves_winning_root_ids_and_bounds() 
             .certified_source
             .counts()
             .indexed_documents,
-        4
+        3
     );
     assert_eq!(first.aborted, 0);
     assert!(first.pages.iter().all(
@@ -177,26 +177,78 @@ fn cursor_source_backed_cold_extraction_preserves_winning_root_ids_and_bounds() 
                 NativeRecordCoordinate::Jsonl { byte_length, .. } if *byte_length > 0
             )
     }));
+    assert!(first
+        .records()
+        .filter_map(|record| record.lexical_document())
+        .all(|document| {
+            let record = first
+                .records()
+                .find(|record| record.event_id == document.event_id)
+                .unwrap();
+            document.event_id == record.event_id
+                && document.session_id == record.session_id
+                && document.parent_session_id.is_none()
+                && document.root_session_id == record.session_id
+                && document.provider_session_id.as_deref() == Some("session-a")
+                && document.branch.is_none()
+                && document.source_path.as_deref() == Some(record.source_path.as_str())
+                && document.agent_type == "primary"
+                && document.is_primary
+                && document.workspace.is_none()
+                && document.cwd.is_none()
+        }));
     assert!(first.records().all(|record| {
-        let document = record
-            .lexical_document()
-            .expect("fixture events all have lexical projections");
-        document.event_id == record.event_id
-            && document.session_id == record.session_id
-            && document.parent_session_id.is_none()
-            && document.root_session_id == record.session_id
-            && document.provider_session_id.as_deref() == Some("session-a")
-            && document.branch.is_none()
-            && document.source_path.as_deref() == Some(record.source_path.as_str())
-            && document.agent_type == "primary"
-            && document.is_primary
-            && document.workspace.is_none()
-            && document.cwd.is_none()
+        (record.lexical_document().is_some())
+            == (record.event_type == EventType::Message
+                && record.verified_content_locator.is_some()
+                && record.verified_content_indexed_text.is_some())
     }));
+    let tool_call = first
+        .records()
+        .find(|record| record.event_type == EventType::ToolCall)
+        .expect("fixture retains tool-call metadata");
+    assert!(
+        tool_call.lexical_document().is_none(),
+        "non-display metadata must not bypass exact hydration"
+    );
     assert!(first
         .plans
         .iter()
         .all(|plan| plan.native_session_id != "decoy-session"));
+}
+
+#[test]
+fn cursor_source_backed_short_message_is_searchable_and_exactly_hydratable() {
+    let temp = tempdir();
+    let data_dir = temp.path().join("cursor-data");
+    let projects = data_dir.join("projects");
+    let short_text = "short Cursor hydration fixture";
+    write_transcript(&projects, "project", "short-session", [user(short_text)]);
+
+    let mut sink = CollectingSink::default();
+    extract_cursor_source_backed_cold(&data_dir, &mut sink).unwrap();
+    let record = sink.records().next().unwrap();
+
+    assert_eq!(
+        record.lexical_document().unwrap().body,
+        short_text,
+        "Core admission must use the exact-hydration eligibility contract"
+    );
+    assert_eq!(
+        record.verified_content_indexed_text.as_deref(),
+        Some(short_text)
+    );
+    let verified_locator = record
+        .verified_content_locator
+        .as_ref()
+        .expect("every searchable Cursor message has an exact content address");
+    assert!(verified_locator
+        .content_ref()
+        .verifies(short_text.as_bytes()));
+    assert_eq!(
+        hydrate_cursor_source_backed_message(&data_dir, record).unwrap(),
+        short_text
+    );
 }
 
 #[test]

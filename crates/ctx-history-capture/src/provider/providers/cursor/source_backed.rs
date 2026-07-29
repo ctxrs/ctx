@@ -17,14 +17,12 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     complete_content::{
-        jsonl::{JsonlCompleteContentResolver, EXACT_JSONL_COMPLETE_CONTENT_LOCATOR_KIND},
-        verified_content_address_supported, verified_content_profile, AuthorizedSourceRoute,
-        CompleteContentBodyDigest, CompleteContentError, CompleteContentErrorKind,
-        CompleteContentHashAuthority, CompleteContentResolver, CompleteContentSourceFamily,
-        CompleteMessageRequest, SourceAccessBroker, SourceSnapshot, VerifiedContentLocatorV1,
-        VerifiedContentRole,
+        jsonl::EXACT_JSONL_COMPLETE_CONTENT_LOCATOR_KIND, verified_content_address_supported,
+        verified_content_profile, AuthorizedSourceRoute, CompleteContentBodyDigest,
+        CompleteContentError, CompleteContentErrorKind, CompleteContentSourceFamily,
+        SourceAccessBroker, SourceSnapshot, VerifiedContentLocatorV1, VerifiedContentRole,
     },
-    CaptureError, Result, CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT, PROVIDER_MAX_TEXT_CHARS,
+    CaptureError, Result, CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
 };
 
 use super::{
@@ -75,8 +73,30 @@ pub(crate) struct CursorSourceBackedRecord {
     pub(crate) verified_content_indexed_text: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CursorExactDisplayContent<'a> {
+    indexed_text: &'a str,
+    locator: &'a VerifiedContentLocatorV1,
+}
+
 impl CursorSourceBackedRecord {
+    fn exact_display_content(&self) -> Option<CursorExactDisplayContent<'_>> {
+        if self.event_type != EventType::Message {
+            return None;
+        }
+        let lexical_body = self.lexical_body.as_deref()?;
+        let indexed_text = self.verified_content_indexed_text.as_deref()?;
+        if lexical_body != indexed_text {
+            return None;
+        }
+        Some(CursorExactDisplayContent {
+            indexed_text,
+            locator: self.verified_content_locator.as_ref()?,
+        })
+    }
+
     pub(crate) fn lexical_document(&self) -> Option<LexicalDocument> {
+        let display = self.exact_display_content()?;
         Some(LexicalDocument {
             event_id: self.event_id,
             session_id: self.session_id,
@@ -93,7 +113,7 @@ impl CursorSourceBackedRecord {
             occurred_at_unix_ms: self.occurred_at.map(|value| value.timestamp_millis()),
             event_type: self.event_type.as_str().to_owned(),
             role: Some(self.role.as_str().to_owned()),
-            body: self.lexical_body.clone()?,
+            body: display.indexed_text.to_owned(),
             workspace: None,
             cwd: None,
             touched_files: self.touched_files.clone(),
@@ -271,24 +291,13 @@ pub(crate) fn hydrate_cursor_source_backed_message(
             "Cursor source-backed message hydration received a non-message event".to_owned(),
         ));
     }
-    record.lexical_body.as_deref().ok_or_else(|| {
+    let display = record.exact_display_content().ok_or_else(|| {
         CaptureError::InvalidPayload(
-            "Cursor source-backed message hydration is missing its lexical body".to_owned(),
+            "Cursor source-backed message is not eligible for exact display hydration".to_owned(),
         )
     })?;
-    let verified_locator = record.verified_content_locator.as_ref().ok_or_else(|| {
-        CaptureError::InvalidPayload(
-            "Cursor source-backed message has no verified complete-content locator".to_owned(),
-        )
-    })?;
-    let indexed_text = record
-        .verified_content_indexed_text
-        .as_ref()
-        .ok_or_else(|| {
-            CaptureError::InvalidPayload(
-                "Cursor source-backed message has no verified indexed-text witness".to_owned(),
-            )
-        })?;
+    let verified_locator = display.locator;
+    let indexed_text = display.indexed_text;
     EventHydrationRequest::new(record.event_id, record.locator.clone())
         .map_err(|error| contract_error("event hydration request", error))?;
     let (native_session_id, byte_offset, byte_length, physical_ordinal, part_ordinal) =
@@ -344,6 +353,19 @@ pub(crate) fn hydrate_cursor_source_backed_message(
                 .to_owned(),
         ));
     }
+    if source_locator.value()[16..48]
+        != complete_content_digest(
+            CURSOR_EXACT_SOURCE_REVISION_DIGEST_DOMAIN,
+            &cursor_complete_content_source_revision(frozen.observation()),
+        )
+        || source_locator.value()[48..]
+            != complete_content_digest(
+                CURSOR_EXACT_PATH_IDENTITY_DIGEST_DOMAIN,
+                &frozen.observation().locator_identity,
+            )
+    {
+        return Err(CaptureError::SourceChangedDuringCapture);
+    }
     let event_id = record.event_id.as_uuid();
     let route = AuthorizedSourceRoute {
         source_id: record.locator.source().identity().as_uuid(),
@@ -358,35 +380,39 @@ pub(crate) fn hydrate_cursor_source_backed_message(
     let source_access = SourceAccessBroker::new()
         .admit_for_source_locators(route, std::slice::from_ref(&source_locator), event_id)
         .map_err(complete_content_error)?;
-    let request = CompleteMessageRequest {
-        event_id,
-        provider: CaptureProvider::Cursor,
-        source_format: CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT.to_owned(),
-        source_access,
-        source_family: Some(CompleteContentSourceFamily::Jsonl),
-        content_profile: verified_locator.content_profile().to_owned(),
-        source_locator: Some(source_locator),
-        provider_session_id: Some(record.provider_session_id.clone()),
-        source_record_ordinal: physical_ordinal,
-        source_record_subrecord_index: part_ordinal,
-        expected_provider_event_hash: record.provider_event_hash.clone(),
-        expected_hash_authority: CompleteContentHashAuthority::NormalizedPayloadFallback,
-        expected_native_record_id: Some(expected_native_record_id),
-        expected_record_digest: Some(verified_locator.record_sha256().clone()),
-        expected_content_ref: Some(verified_locator.content_ref().clone()),
-        indexed_text: indexed_text.clone(),
-        indexed_limit_chars: PROVIDER_MAX_TEXT_CHARS,
-    };
-    let resolved = JsonlCompleteContentResolver::new()
-        .resolve(&[request])
+    if source_access.exact_jsonl_binding().is_none() {
+        return Err(CaptureError::InvalidPayload(
+            "Cursor source-backed message has no exact JSONL source binding".to_owned(),
+        ));
+    }
+    let record_bytes = source_access
+        .read_jsonl_record(
+            byte_offset,
+            expected_byte_end,
+            verified_locator.record_sha256(),
+            event_id,
+        )
         .map_err(complete_content_error)?;
-    let message = resolved
-        .into_iter()
-        .next()
-        .ok_or(CaptureError::SystemInvariant(
-            "Cursor exact complete-content route returned no message",
-        ))?;
-    Ok(message.text)
+    let value = serde_json::from_slice(&record_bytes)
+        .map_err(|_| CaptureError::SourceChangedDuringCapture)?;
+    let (text, resolved_native_record_id, resolved_provider_event_hash) =
+        super::cursor_complete_content_message_record(
+            &value,
+            physical_ordinal,
+            part_ordinal,
+            indexed_text,
+        )
+        .ok_or(CaptureError::SourceChangedDuringCapture)?;
+    if resolved_native_record_id != expected_native_record_id
+        || resolved_provider_event_hash != record.provider_event_hash
+        || !verified_locator.content_ref().verifies(text.as_bytes())
+    {
+        return Err(CaptureError::SourceChangedDuringCapture);
+    }
+    source_access
+        .revalidate_jsonl(event_id)
+        .map_err(complete_content_error)?;
+    Ok(text)
 }
 
 fn source_plan(
@@ -554,7 +580,7 @@ impl<'a> CursorProjectionBridge<'a> {
                 "Cursor source-backed native-record count overflowed",
             )?;
         }
-        if record.lexical_body.is_some() {
+        if record.exact_display_content().is_some() {
             self.counts.indexed_documents = checked_add(
                 self.counts.indexed_documents,
                 1,

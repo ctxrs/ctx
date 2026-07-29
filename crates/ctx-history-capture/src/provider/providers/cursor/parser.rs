@@ -485,13 +485,9 @@ struct CursorRetainedMessageText {
 fn retained_cursor_message_text(event_type: EventType, value: &str) -> CursorRetainedMessageText {
     let retained = provider_policy_event_text(event_type, value, &json!({}));
     let retention = retained.retention.as_json();
-    let complete_content_ref = (event_type == EventType::Message
-        && retention
-            .get("truncated")
-            .and_then(Value::as_bool)
-            .is_some_and(|truncated| truncated))
-    .then(|| ContentRef::from_bytes(value.as_bytes()))
-    .flatten();
+    let complete_content_ref = (event_type == EventType::Message)
+        .then(|| ContentRef::from_bytes(value.as_bytes()))
+        .flatten();
     CursorRetainedMessageText {
         text: retained.text,
         retention,
