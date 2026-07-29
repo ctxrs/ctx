@@ -33,6 +33,10 @@ use ctx_pro_host_protocol::{
 
 use super::{protocol_error, stable_error_code, ProClient, BATCH_TIMEOUT};
 
+#[allow(dead_code)]
+#[path = "source_backed_pro_provider.rs"]
+mod source_backed_pro_provider;
+
 struct SharedProClient {
     client: Mutex<ProClient>,
 }
@@ -190,6 +194,24 @@ impl ProOutputImport {
         format!(
             "Core history update succeeded, but Pro output catch-up remains incomplete ({code}); a later import or refresh will retry it"
         )
+    }
+
+    /// Reconciles Pro from one already-published, pinned Core source manifest.
+    ///
+    /// This opens no Store or body projection. Exact canonical content is
+    /// hydrated through the supplied source resolver, and any failure leaves
+    /// Core intact while Pro remains independently retryable.
+    #[allow(dead_code)]
+    pub(crate) fn sync_committed_source_manifest(
+        data_root: &Path,
+        manifest: ctx_pro_host_protocol::SourceManifest,
+        index: &ctx_history_index::VerifiedIndex,
+        resolver: &ctx_history_capture::SourceBackedResolverRegistry,
+    ) -> Result<ctx_pro_host_protocol::SourceManifestReceipt> {
+        source_backed_pro_provider::sync_committed_source_manifest(
+            data_root, manifest, index, resolver,
+        )
+        .map(|report| report.receipt)
     }
 }
 
@@ -672,12 +694,16 @@ pub(crate) mod source_backed_feed {
     where
         P: SourceBackedProProvider,
     {
-        let required = BTreeSet::from([Capability::SourceMaterialization]);
+        let required = source_materialization_capabilities();
         let client = ProClient::connect(data_root, &required)?;
         let mut consumer = ProtocolSourceBackedProConsumer {
             client: Arc::new(SharedProClient::new(client)),
         };
         sync_source_backed_pro_feed(manifest, provider, &mut consumer)
+    }
+
+    pub(super) fn source_materialization_capabilities() -> BTreeSet<Capability> {
+        BTreeSet::from([Capability::SourceMaterialization])
     }
 
     fn source_identity_digest(source: &CertifiedSource) -> [u8; 32] {
@@ -1395,6 +1421,14 @@ mod tests {
         assert!(warning.contains("Core history update succeeded"));
         assert!(warning.contains("Pro output catch-up remains incomplete"));
         assert!(warning.contains("helper_timeout"));
+    }
+
+    #[test]
+    fn source_backed_helper_negotiates_source_materialization_capability() {
+        assert_eq!(
+            source_backed_feed::source_materialization_capabilities(),
+            BTreeSet::from([Capability::SourceMaterialization])
+        );
     }
 
     #[test]
