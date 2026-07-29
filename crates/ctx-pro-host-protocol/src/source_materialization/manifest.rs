@@ -152,6 +152,7 @@ pub struct SourceManifestHeader {
     pub policy_schema_hash: String,
     pub source_count: u32,
     pub removal_count: u32,
+    pub page_count: u32,
     pub aggregate_sha256: String,
 }
 
@@ -164,6 +165,7 @@ impl SourceManifestHeader {
         lexical_schema_version: u32,
         lexical_analyzer_version: u32,
         policy_schema_hash: impl Into<String>,
+        page_count: u32,
         sources: &[CertifiedSource],
         removals: &[SourceRemoval],
     ) -> Result<Self, ProtocolError> {
@@ -190,6 +192,7 @@ impl SourceManifestHeader {
             policy_schema_hash: policy_schema_hash.into(),
             source_count,
             removal_count,
+            page_count,
             aggregate_sha256: String::new(),
         };
         header.aggregate_sha256 = source_manifest_aggregate_sha256(&header, sources, removals)?;
@@ -226,6 +229,19 @@ impl SourceManifestHeader {
             return Err(ProtocolError::new(
                 ErrorClass::Bounds,
                 "source manifest header exceeds its source or removal count bound",
+            ));
+        }
+        let minimum_page_count = sources
+            .div_ceil(MAX_SOURCE_MANIFEST_PAGE_ITEMS)
+            .saturating_add(removals.div_ceil(MAX_SOURCE_MANIFEST_PAGE_ITEMS));
+        let total_entries = sources.saturating_add(removals);
+        if usize::try_from(self.page_count)
+            .ok()
+            .is_none_or(|page_count| page_count < minimum_page_count || page_count > total_entries)
+        {
+            return Err(ProtocolError::new(
+                ErrorClass::Bounds,
+                "source manifest header page count is outside its bounded entry topology",
             ));
         }
         Ok(())
@@ -290,6 +306,7 @@ pub struct SourceManifestPage {
     pub contract_version: u16,
     pub core_generation_id: String,
     pub aggregate_sha256: String,
+    pub previous_page_sha256: String,
     pub page_index: u32,
     pub item_index: u32,
     pub entries: SourceManifestPageEntries,
@@ -299,15 +316,23 @@ pub struct SourceManifestPage {
 impl SourceManifestPage {
     pub fn new(
         header: &SourceManifestHeader,
+        previous_page_sha256: impl Into<String>,
         page_index: u32,
         item_index: u32,
         entries: SourceManifestPageEntries,
     ) -> Result<Self, ProtocolError> {
         header.validate()?;
+        if page_index >= header.page_count {
+            return Err(ProtocolError::new(
+                ErrorClass::Sequence,
+                "source manifest page index exceeds its declared topology",
+            ));
+        }
         let mut page = Self {
             contract_version: SOURCE_MATERIALIZATION_CONTRACT_VERSION,
             core_generation_id: header.core_generation_id.clone(),
             aggregate_sha256: header.aggregate_sha256.clone(),
+            previous_page_sha256: previous_page_sha256.into(),
             page_index,
             item_index,
             entries,
@@ -327,6 +352,7 @@ impl SourceManifestPage {
         }
         validate_sha256(&self.core_generation_id, "Core generation ID")?;
         validate_sha256(&self.aggregate_sha256, "source manifest aggregate")?;
+        validate_sha256(&self.previous_page_sha256, "source manifest previous page")?;
         validate_sha256(&self.page_sha256, "source manifest page")?;
         if self.entries.is_empty() || self.entries.len() > MAX_SOURCE_MANIFEST_PAGE_ITEMS {
             return Err(ProtocolError::new(
@@ -361,6 +387,7 @@ impl SourceManifestPage {
 pub struct SourceManifestAdmissionCursor {
     pub core_generation_id: String,
     pub aggregate_sha256: String,
+    pub next_page_previous_sha256: String,
     pub next_page_index: u32,
     pub next_source_index: u32,
     pub next_removal_index: u32,
@@ -372,6 +399,7 @@ impl SourceManifestAdmissionCursor {
         Self {
             core_generation_id: header.core_generation_id.clone(),
             aggregate_sha256: header.aggregate_sha256.clone(),
+            next_page_previous_sha256: source_manifest_initial_chain_sha256(header),
             next_page_index: 0,
             next_source_index: 0,
             next_removal_index: 0,
@@ -380,8 +408,13 @@ impl SourceManifestAdmissionCursor {
 
     pub fn validate_for(&self, header: &SourceManifestHeader) -> Result<(), ProtocolError> {
         header.validate()?;
+        validate_sha256(
+            &self.next_page_previous_sha256,
+            "source manifest admission chain",
+        )?;
         if self.core_generation_id != header.core_generation_id
             || self.aggregate_sha256 != header.aggregate_sha256
+            || self.next_page_index > header.page_count
             || self.next_source_index > header.source_count
             || self.next_removal_index > header.removal_count
             || (self.next_source_index < header.source_count && self.next_removal_index != 0)
@@ -389,6 +422,34 @@ impl SourceManifestAdmissionCursor {
             return Err(ProtocolError::new(
                 ErrorClass::Sequence,
                 "source manifest admission cursor is outside its exact manifest",
+            ));
+        }
+        let admitted_entries = self
+            .next_source_index
+            .checked_add(self.next_removal_index)
+            .ok_or_else(|| {
+                ProtocolError::new(
+                    ErrorClass::Bounds,
+                    "source manifest admission cursor count overflowed",
+                )
+            })?;
+        if (self.next_page_index == 0) != (admitted_entries == 0)
+            || self.next_page_index > admitted_entries
+            || admitted_entries
+                > self
+                    .next_page_index
+                    .saturating_mul(
+                        u32::try_from(MAX_SOURCE_MANIFEST_PAGE_ITEMS).unwrap_or(u32::MAX),
+                    )
+            || (self.next_page_index == header.page_count)
+                != (self.next_source_index == header.source_count
+                    && self.next_removal_index == header.removal_count)
+            || (self.next_page_index == 0
+                && self.next_page_previous_sha256 != source_manifest_initial_chain_sha256(header))
+        {
+            return Err(ProtocolError::new(
+                ErrorClass::Sequence,
+                "source manifest admission cursor has an invalid page topology",
             ));
         }
         Ok(())
@@ -407,10 +468,25 @@ impl SourceManifestAdmissionCursor {
 pub struct SourceManifestAdmissionReceipt {
     pub header: SourceManifestHeader,
     pub page_count: u32,
+    pub terminal_chain_sha256: String,
 }
 
 impl SourceManifestAdmissionReceipt {
     pub fn validate(&self) -> Result<(), ProtocolError> {
-        self.header.validate()
+        self.header.validate()?;
+        validate_sha256(
+            &self.terminal_chain_sha256,
+            "source manifest terminal chain",
+        )?;
+        if self.page_count != self.header.page_count
+            || (self.page_count == 0
+                && self.terminal_chain_sha256 != source_manifest_initial_chain_sha256(&self.header))
+        {
+            return Err(ProtocolError::new(
+                ErrorClass::Sequence,
+                "source manifest receipt does not match its exact page topology",
+            ));
+        }
+        Ok(())
     }
 }

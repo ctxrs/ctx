@@ -243,21 +243,27 @@ pub(super) fn inventory() -> Value {
             "SourceManifestHeader": fields(&[
                 "contract_version", "core_generation_id", "generation_manifest_version",
                 "identity_version", "lexical_schema_version", "lexical_analyzer_version",
-                "policy_schema_hash", "source_count", "removal_count", "aggregate_sha256"
+                "policy_schema_hash", "source_count", "removal_count", "page_count",
+                "aggregate_sha256"
             ], &[]),
             "SourceManifestPage.sources": fields(&[
-                "contract_version", "core_generation_id", "aggregate_sha256", "page_index",
-                "item_index", "kind", "entries", "page_sha256"
+                "contract_version", "core_generation_id", "aggregate_sha256",
+                "previous_page_sha256", "page_index", "item_index", "kind", "entries",
+                "page_sha256"
             ], &[]),
             "SourceManifestPage.removals": fields(&[
-                "contract_version", "core_generation_id", "aggregate_sha256", "page_index",
-                "item_index", "kind", "entries", "page_sha256"
+                "contract_version", "core_generation_id", "aggregate_sha256",
+                "previous_page_sha256", "page_index", "item_index", "kind", "entries",
+                "page_sha256"
             ], &[]),
             "SourceManifestAdmissionCursor": fields(&[
-                "core_generation_id", "aggregate_sha256", "next_page_index",
-                "next_source_index", "next_removal_index"
+                "core_generation_id", "aggregate_sha256", "next_page_previous_sha256",
+                "next_page_index", "next_source_index", "next_removal_index"
             ], &[]),
-            "SourceManifestAdmissionReceipt": fields(&["header", "page_count"], &[]),
+            "SourceManifestAdmissionReceipt": fields(
+                &["header", "page_count", "terminal_chain_sha256"],
+                &[],
+            ),
             "SourceManifestBegan": fields(&[
                 "core_generation_id", "materializer_revision", "progress", "replayed"
             ], &[]),
