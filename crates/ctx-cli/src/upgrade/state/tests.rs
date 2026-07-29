@@ -1,9 +1,65 @@
 use super::*;
 
+fn test_installation() -> Result<(tempfile::TempDir, PathBuf)> {
+    let temp = tempfile::tempdir()?;
+    let bin = temp.path().join("bin");
+    fs::create_dir_all(&bin)?;
+    let install_path = bin.join("ctx");
+    fs::write(&install_path, b"test ctx executable")?;
+    Ok((temp, install_path))
+}
+
 #[test]
 fn recovering_is_an_active_installation_phase() {
     assert!(is_active_upgrade_status("recovering"));
     assert!(!is_active_upgrade_status("error"));
+}
+
+#[test]
+fn missing_state_contended_by_non_upgrade_checker_is_not_active() -> Result<()> {
+    let (_temp, install_path) = test_installation()?;
+    let _checker =
+        InstallationLock::try_acquire(&install_path)?.ok_or_else(|| anyhow!("test lock held"))?;
+
+    assert_eq!(
+        observe_installation_upgrade(&install_path),
+        InstallationUpgradeObservation::Missing
+    );
+    assert!(!installation_upgrade_is_active_for(&install_path)?);
+    Ok(())
+}
+
+#[test]
+fn active_current_state_remains_fenced_while_installation_is_locked() -> Result<()> {
+    let (_temp, install_path) = test_installation()?;
+    let _upgrade =
+        InstallationLock::try_acquire(&install_path)?.ok_or_else(|| anyhow!("test lock held"))?;
+    atomic_write_json(
+        &state_path(&install_path),
+        &json!({
+            "schema_version": STATE_SCHEMA_VERSION,
+            "status": "applying",
+            "attempt_id": "ua_active_test",
+        }),
+    )?;
+
+    assert!(installation_upgrade_is_active_for(&install_path)?);
+    Ok(())
+}
+
+#[test]
+fn untrusted_state_remains_fail_closed_while_installation_is_locked() -> Result<()> {
+    let (_temp, install_path) = test_installation()?;
+    let _upgrade =
+        InstallationLock::try_acquire(&install_path)?.ok_or_else(|| anyhow!("test lock held"))?;
+    fs::write(state_path(&install_path), b"{not valid upgrade state")?;
+
+    assert_eq!(
+        observe_installation_upgrade(&install_path),
+        InstallationUpgradeObservation::Untrusted
+    );
+    assert!(installation_upgrade_is_active_for(&install_path)?);
+    Ok(())
 }
 
 #[test]
