@@ -63,6 +63,28 @@ fn previous_store_is_only_detected_and_never_opened_or_modified() {
 }
 
 #[test]
+fn prototype_search_directory_is_not_migrated_or_reused() {
+    let temp = tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let prototype_root = data_root.join("source-backed-lexical-v0");
+    fs::create_dir_all(&prototype_root).unwrap();
+    fs::write(prototype_root.join("prototype-marker"), b"leave untouched").unwrap();
+
+    let prepared = prepare(&data_root, &[]).unwrap();
+
+    assert!(prepared.daemon_rebuild_required());
+    assert_eq!(
+        lexical_projection_path(&data_root),
+        data_root.join("search").join("lexical")
+    );
+    assert!(!lexical_projection_path(&data_root).exists());
+    assert_eq!(
+        fs::read(prototype_root.join("prototype-marker")).unwrap(),
+        b"leave untouched"
+    );
+}
+
+#[test]
 fn activation_accepts_only_the_exact_fresh_generation() {
     let temp = tempdir().unwrap();
     let data_root = temp.path().join("data");

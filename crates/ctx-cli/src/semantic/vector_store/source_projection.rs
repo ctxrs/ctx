@@ -28,7 +28,8 @@ use crate::semantic::{
 
 const SOURCE_FRONTIER_STATE: &str = "source_backed_semantic_frontier_v1";
 const SOURCE_ACKNOWLEDGEMENT_STATE: &str = "source_backed_semantic_acknowledgement_v1";
-const SOURCE_VECTOR_DIRECTORY: &str = "source-backed-semantic-flat-f32-v0";
+const SEARCH_DIRECTORY: &str = "search";
+const SEMANTIC_DIRECTORY: &str = "semantic";
 const SOURCE_CONTRACT_VERSION: u16 = 3;
 const SOURCE_CONTRACT_DOMAIN: &[u8] = b"ctx-source-backed-semantic-contract-v1\0";
 const SOURCE_BUILD_DOMAIN: &[u8] = b"ctx-source-backed-semantic-build-v1\0";
@@ -36,7 +37,7 @@ const SOURCE_INPUT_LEXICAL_SCHEMA_VERSION: u32 = 5;
 const SHA256_HEX_BYTES: usize = 64;
 
 pub(in crate::semantic) fn source_backed_semantic_vector_path(data_root: &Path) -> PathBuf {
-    data_root.join(SOURCE_VECTOR_DIRECTORY)
+    data_root.join(SEARCH_DIRECTORY).join(SEMANTIC_DIRECTORY)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

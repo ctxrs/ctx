@@ -24,7 +24,7 @@ fn source_indexed_codex_message() -> SourceIndexedMessage {
     let source = source_root.join(format!(
         "2026/07/28/rollout-{SOURCE_INDEX_PROVIDER_SESSION_ID}.jsonl"
     ));
-    let index_root = temp.path().join("source-backed-lexical-v0");
+    let index_root = temp.path().join("search").join("lexical");
     fs::create_dir_all(source.parent().unwrap()).unwrap();
     let complete_text = format!(
         "{SOURCE_INDEX_QUERY} {BEGIN_SENTINEL}{}{END_SENTINEL}",

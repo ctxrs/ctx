@@ -41,7 +41,8 @@ use super::{
     query_service::{daemon_source_refresh_request, DaemonSourceRefreshServiceUnavailable},
 };
 
-const SOURCE_BACKED_INDEX_DIRECTORY: &str = "source-backed-lexical-v0";
+const SEARCH_DIRECTORY: &str = "search";
+const LEXICAL_DIRECTORY: &str = "lexical";
 const SOURCE_REFRESH_REQUEST_OP: &str = "source_refresh_request";
 const SOURCE_REFRESH_STATUS_OP: &str = "source_refresh_status";
 const SOURCE_REFRESH_ATTEMPT_HISTORY: usize = 64;
@@ -986,7 +987,7 @@ fn trim_attempt_history(state: &mut SourceBackedRefreshCoordinatorState) {
 }
 
 pub(super) fn source_backed_index_root(data_root: &Path) -> PathBuf {
-    data_root.join(SOURCE_BACKED_INDEX_DIRECTORY)
+    data_root.join(SEARCH_DIRECTORY).join(LEXICAL_DIRECTORY)
 }
 
 fn published_generation_id(data_root: &Path) -> Result<Option<String>> {

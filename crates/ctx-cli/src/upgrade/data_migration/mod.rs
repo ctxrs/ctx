@@ -25,7 +25,8 @@ const EPOCH_SCHEMA_VERSION: u32 = 1;
 const EPOCH_DIRECTORY: &str = "epochs/v26";
 const EPOCH_JOURNAL: &str = "activation.jsonl";
 const EPOCH_LOCK: &str = "activation.lock";
-const SOURCE_BACKED_INDEX_DIRECTORY: &str = "source-backed-lexical-v0";
+const SEARCH_DIRECTORY: &str = "search";
+const LEXICAL_DIRECTORY: &str = "lexical";
 const MAX_JOURNAL_BYTES: u64 = 1024 * 1024;
 const MAX_ERROR_CHARS: usize = 4_096;
 
@@ -229,7 +230,7 @@ pub(crate) fn migration_directory(data_root: &Path) -> PathBuf {
 }
 
 pub(crate) fn lexical_projection_path(data_root: &Path) -> PathBuf {
-    data_root.join(SOURCE_BACKED_INDEX_DIRECTORY)
+    data_root.join(SEARCH_DIRECTORY).join(LEXICAL_DIRECTORY)
 }
 
 fn detect_origin(data_root: &Path) -> Result<MigrationOrigin> {

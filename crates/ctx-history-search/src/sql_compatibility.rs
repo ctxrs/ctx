@@ -18,7 +18,8 @@ use ctx_history_store::{
 
 pub type SqlCompatibilityResult<T> = std::result::Result<T, RelationalProjectionError>;
 
-const SOURCE_BACKED_INDEX_DIRECTORY: &str = "source-backed-lexical-v0";
+const SEARCH_DIRECTORY: &str = "search";
+const LEXICAL_DIRECTORY: &str = "lexical";
 
 /// A read-only handle to current stable `ctx_*` views and projection metadata.
 pub struct SqlCompatibility {
@@ -43,7 +44,7 @@ impl SqlCompatibility {
     pub fn open_for_data_root(data_root: impl AsRef<Path>) -> SqlCompatibilityResult<Self> {
         let data_root = data_root.as_ref();
         let projection_path = sql_compatibility_path(data_root);
-        let generation_path = data_root.join(SOURCE_BACKED_INDEX_DIRECTORY);
+        let generation_path = data_root.join(SEARCH_DIRECTORY).join(LEXICAL_DIRECTORY);
         if projection_path.try_exists()? {
             let compatibility = Self::open(projection_path)?;
             if generation_path.join("meta.json").try_exists()? {
