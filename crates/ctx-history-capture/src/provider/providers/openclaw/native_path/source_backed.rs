@@ -7,27 +7,27 @@ use std::{
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource,
-    EventIdentityInput, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
+    EventIdentityInput, EventType, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
     NativeSessionKey, PositionStability, ProjectionContractError, ScannedSourceCounts,
     SessionIdentityInput, SourceAnchor, SourceFrontier, SourceKey,
     SourceObservation as ProjectionSourceObservation, SourceRecordLocator,
     SourceResolverContractError, StableEntityId, TypedKey,
 };
-use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
+use ctx_history_index::LexicalDocument;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::{
-    complete_content, discover_inventory, open_pages_from_admitted, Checkpoint, CoreEvent,
-    PageReader, SourceChange, SourceObservation as LegacySourceObservation,
-    OPENCLAW_SOURCE_FORMAT,
+    complete_content, discover_inventory, normalization, open_pages_from_admitted,
+    openclaw_output_metadata, Checkpoint, CoreEvent, PageReader, SourceChange,
+    SourceObservation as LegacySourceObservation, OPENCLAW_SOURCE_FORMAT,
 };
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
-    provider::normalization::provider_local_preview,
     provider_sources::{provider_source_for_path, ProviderSourceStatus},
-    CaptureError, MAX_OPENCLAW_SESSION_INDEX_BYTES, MAX_PROVIDER_JSONL_LINE_BYTES,
+    CaptureError, OutputObservationKind, MAX_OPENCLAW_SESSION_INDEX_BYTES,
+    MAX_PROVIDER_JSONL_LINE_BYTES,
 };
 
 const SOURCE_ANCHOR_NAMESPACE: &str = "openclaw.legacy-session";
@@ -126,9 +126,7 @@ impl OpenClawSourceBackedAdapterV0 {
         inventory
             .paths
             .into_iter()
-            .map(|path| {
-                OpenClawSourceBackedSourceV0::from_canonical_path(authority.clone(), path)
-            })
+            .map(|path| OpenClawSourceBackedSourceV0::from_canonical_path(authority.clone(), path))
             .collect()
     }
 
@@ -470,10 +468,7 @@ impl OpenClawSourceBackedReaderV0 {
         session: &OpenClawLexicalSessionV0,
         touched_files: Vec<String>,
     ) -> OpenClawSourceBackedResultV0<Option<LexicalDocument>> {
-        let Some(text) = event.payload.get("text").and_then(Value::as_str) else {
-            return Ok(None);
-        };
-        let (body, _) = provider_local_preview(text, MAX_BODY_PREVIEW_CHARS);
+        let body = openclaw_lexical_body(event.event_type, &event.lexical_text);
         if body.trim().is_empty() {
             return Ok(None);
         }
@@ -582,6 +577,14 @@ impl OpenClawSourceBackedReaderV0 {
     }
 }
 
+fn openclaw_lexical_body(event_type: EventType, text: &str) -> String {
+    if text.trim().is_empty() {
+        format!("OpenClaw {}", event_type.as_str())
+    } else {
+        text.to_owned()
+    }
+}
+
 struct OpenClawLexicalSessionV0 {
     provider_session_id: String,
     parent_session_id: Option<StableEntityId>,
@@ -628,18 +631,18 @@ fn hydrate_locator(
     }
     let record_length = usize::try_from(byte_length)
         .map_err(|_| OpenClawSourceBackedErrorV0::LocatorRangeInvalid)?;
-    let provider_bytes = admitted.transcript.read_exact_range(
+    let source_bytes = admitted.transcript.read_exact_range(
         byte_offset,
         record_length,
         MAX_HYDRATED_RECORD_BYTES as usize,
     )?;
-    let first_newline = provider_bytes.iter().position(|byte| *byte == b'\n');
-    if first_newline.is_some_and(|position| position + 1 != provider_bytes.len())
+    let first_newline = source_bytes.iter().position(|byte| *byte == b'\n');
+    if first_newline.is_some_and(|position| position + 1 != source_bytes.len())
         || (first_newline.is_none() && range_end != observation.transcript.length)
     {
         return Err(OpenClawSourceBackedErrorV0::LocatorRangeMissing);
     }
-    let record = strip_jsonl_terminator(&provider_bytes);
+    let record = strip_jsonl_terminator(&source_bytes);
     let observed_record_digest: [u8; 32] = Sha256::digest(record).into();
     if &observed_record_digest != locator.record_digest() {
         return Err(OpenClawSourceBackedErrorV0::LocatorDigestMismatch);
@@ -649,9 +652,9 @@ fn hydrate_locator(
         .ok()
         .and_then(|ordinal| ordinal.checked_add(1))
         .ok_or(OpenClawSourceBackedErrorV0::InvalidLocator)?;
-    let decoded = complete_content::message_record(&value, line_number);
-    match (&native_event_key, decoded.as_ref()) {
-        (TypedKey::Utf8(expected), Some((_, observed))) if expected == observed => {}
+    let observed_native_id = value.get("id").and_then(Value::as_str);
+    match (&native_event_key, observed_native_id) {
+        (TypedKey::Utf8(expected), Some(observed)) if expected == observed => {}
         (TypedKey::Utf8(_), _) => {
             return Err(OpenClawSourceBackedErrorV0::LocatorRecordIdentityMismatch);
         }
@@ -666,9 +669,21 @@ fn hydrate_locator(
     if closing_revision != expected_revision {
         return Err(OpenClawSourceBackedErrorV0::LocatorSourceRevisionMismatch);
     }
+    let mut event = normalization::event_fact(
+        physical_ordinal,
+        line_number,
+        &value,
+        DateTime::<Utc>::UNIX_EPOCH,
+    );
+    if let Some(output) = openclaw_output_metadata(&value, line_number, None) {
+        if output.kind == OutputObservationKind::Command {
+            event.event_type = EventType::CommandOutput;
+        }
+    }
+    let decoded_display_text = openclaw_lexical_body(event.event_type, &event.lexical_text);
     Ok(OpenClawHydratedRecordV0 {
-        provider_bytes,
-        decoded_display_text: decoded.map(|(text, _)| text),
+        provider_bytes: decoded_display_text.as_bytes().to_vec(),
+        decoded_display_text: Some(decoded_display_text),
     })
 }
 
@@ -848,7 +863,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn openclaw_source_backed_cold_extraction_is_bounded_and_stable() {
+    fn openclaw_source_backed_cold_extraction_retains_full_body_and_is_stable() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("openclaw");
         let transcript = transcript_path(&root);
@@ -905,11 +920,8 @@ mod tests {
         );
         assert_eq!(first_documents[0].agent_type, "primary");
         assert!(first_documents[0].is_primary);
-        assert_eq!(
-            first_documents[0].body.chars().count(),
-            MAX_BODY_PREVIEW_CHARS
-        );
-        assert!(!first_documents[0].body.contains("exact-tail"));
+        assert_eq!(first_documents[0].body, complete);
+        assert!(first_documents[0].body.ends_with("exact-tail"));
         assert_eq!(
             first_documents[0].locator.revision_policy(),
             LocatorRevisionPolicy::ExactSourceRevision

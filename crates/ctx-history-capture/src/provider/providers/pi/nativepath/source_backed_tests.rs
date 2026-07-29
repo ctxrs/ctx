@@ -7,7 +7,6 @@ use std::{
 use ctx_history_core::{
     EventHydrationRequest, LocatorRevisionPolicy, NativeRecordCoordinate, TypedKey,
 };
-use ctx_history_index::MAX_BODY_PREVIEW_CHARS;
 
 use crate::{
     provider::importer::provider_path_identity, test_support_paths::tempdir, ProviderAdapterContext,
@@ -74,7 +73,7 @@ fn cold_projection_certifies_lineage_and_old_locator_survives_append() {
     let child_session = "pi-child-session";
     let long_message = format!(
         "pi exact-content sentinel {} complete-tail",
-        "界".repeat(MAX_BODY_PREVIEW_CHARS + 128)
+        "界".repeat(2_176)
     );
     write_session(
         &parent_path,
@@ -138,8 +137,8 @@ fn cold_projection_certifies_lineage_and_old_locator_survives_append() {
         child_document.source_path.as_deref(),
         Some(provider_path_identity(&child_path).unwrap().as_str())
     );
-    assert_eq!(child_document.body.chars().count(), MAX_BODY_PREVIEW_CHARS);
-    assert!(!child_document.body.contains("complete-tail"));
+    assert_eq!(child_document.body, long_message);
+    assert!(child_document.body.ends_with("complete-tail"));
     assert_eq!(
         child_document.locator.revision_policy(),
         LocatorRevisionPolicy::StableRecordEvidence

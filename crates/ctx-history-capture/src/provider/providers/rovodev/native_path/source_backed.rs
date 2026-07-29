@@ -18,7 +18,7 @@ use ctx_history_core::{
     SessionIdentityInput, SourceAnchor, SourceFrontier, SourceInventoryObservation, SourceKey,
     SourceObservation, SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
 };
-use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
+use ctx_history_index::LexicalDocument;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -171,16 +171,16 @@ impl RovoDevSnapshot {
             authority.named_path().join(context_relative_path),
             source.context_path.clone(),
             context_handle.metadata(),
-            metadata_handle
-                .as_ref()
-                .map(|metadata| (source.session_dir.join("metadata.json"), metadata.metadata())),
+            metadata_handle.as_ref().map(|metadata| {
+                (
+                    source.session_dir.join("metadata.json"),
+                    metadata.metadata(),
+                )
+            }),
         )?;
         let context_oversized = frozen.context_length() > MAX_PROVIDER_JSONL_LINE_BYTES as u64;
-        let context_file = FileSnapshot::read(
-            &context_handle,
-            frozen.context_length(),
-            !context_oversized,
-        )?;
+        let context_file =
+            FileSnapshot::read(&context_handle, frozen.context_length(), !context_oversized)?;
         let metadata_oversized = frozen
             .metadata_length()
             .is_some_and(|length| length > MAX_PROVIDER_JSONL_LINE_BYTES as u64);
@@ -888,7 +888,7 @@ fn lexical_document(
         Some(leaf.snapshot.source_sha256),
         leaf.snapshot.context_sha256,
     )?;
-    let body = lexical_preview(raw_message, &event);
+    let body = lexical_body(raw_message, event.event_type);
     Ok(LexicalDocument {
         event_id,
         session_id: leaf.session_id,
@@ -968,32 +968,13 @@ fn native_item_key(
     )?)
 }
 
-fn lexical_preview(raw_message: &serde_json::Value, event: &super::RovoDevCoreEvent) -> String {
-    let mut text = provider_block_text(raw_message)
-        .or_else(|| {
-            event
-                .payload
-                .get("text")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-        })
-        .or_else(|| {
-            event
-                .payload
-                .get("output_preview")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-        })
-        .unwrap_or_else(|| {
-            ["tool", "command", "call_id"]
-                .into_iter()
-                .filter_map(|field| event.payload.get(field).and_then(serde_json::Value::as_str))
-                .collect::<Vec<_>>()
-                .join(" ")
-        });
-    text = text.chars().take(MAX_BODY_PREVIEW_CHARS).collect();
+fn lexical_body(
+    raw_message: &serde_json::Value,
+    event_type: ctx_history_core::EventType,
+) -> String {
+    let text = provider_block_text(raw_message).unwrap_or_default();
     if text.trim().is_empty() {
-        event.event_type.as_str().to_owned()
+        event_type.as_str().to_owned()
     } else {
         text
     }
@@ -1053,13 +1034,17 @@ pub(crate) fn hydrate_rovodev_source_record(
     if observed_native_id != expected_native_id {
         return Err(RovoDevSourceBackedError::LocatorObjectChanged);
     }
-    let provider_bytes = current
+    current
         .context_bytes
-        .clone()
+        .as_ref()
         .ok_or(RovoDevSourceBackedError::LocatorObjectChanged)?;
-    let decoded_display_text = provider_block_text(message)
-        .filter(|text| !text.is_empty())
-        .map(|text| text.to_owned());
+    let role_text = message
+        .get("role")
+        .or_else(|| message.get("kind"))
+        .or_else(|| message.get("type"))
+        .and_then(serde_json::Value::as_str);
+    let decoded_display_text = lexical_body(message, super::rovodev_event_type(message, role_text));
+    let provider_bytes = decoded_display_text.as_bytes().to_vec();
     current.revalidate(&leaf.authority)?;
     let closing = RovoDevSnapshot::read(
         &leaf.source,
@@ -1077,7 +1062,7 @@ pub(crate) fn hydrate_rovodev_source_record(
     }
     Ok(RovoDevHydratedSourceRecord {
         provider_bytes,
-        decoded_display_text,
+        decoded_display_text: Some(decoded_display_text),
     })
 }
 

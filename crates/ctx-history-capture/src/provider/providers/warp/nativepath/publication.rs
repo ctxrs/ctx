@@ -223,6 +223,7 @@ pub(in super::super) struct WarpNativeEvent {
     pub(in super::super) result_outcome: Option<OutputOutcome>,
     pub(in super::super) call_id: Option<String>,
     pub(in super::super) occurred_at: Option<DateTime<Utc>>,
+    pub(in super::super) lexical_body: String,
     pub(in super::super) body: String,
     pub(in super::super) content_hash: String,
     pub(in super::super) preview: String,
@@ -260,7 +261,8 @@ impl WarpNativeEvent {
                 "Warp complete message content exceeds ContentRef bounds".to_owned(),
             ));
         }
-        let body = truncate_chars(&draft.body, WARP_NATIVE_BODY_MAX_CHARS);
+        let lexical_body = draft.body;
+        let body = truncate_chars(&lexical_body, WARP_NATIVE_BODY_MAX_CHARS);
         let preview = truncate_chars(&body, WARP_NATIVE_PREVIEW_MAX_CHARS);
         let message = draft.message_id.map_or(
             WarpNativeMessageIdentity::MessageOrdinal(draft.message_ordinal),
@@ -293,6 +295,7 @@ impl WarpNativeEvent {
             result_outcome: draft.result_outcome,
             call_id: draft.call_id,
             occurred_at: draft.occurred_at,
+            lexical_body,
             body,
             content_hash,
             preview,

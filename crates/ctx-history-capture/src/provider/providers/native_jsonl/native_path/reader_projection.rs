@@ -306,6 +306,67 @@ fn direct_jsonl_event_text(
     }
 }
 
+fn direct_jsonl_lexical_text(
+    event_type: EventType,
+    text: &str,
+    result: Option<&super::result_content::NativeJsonlResultSubrecord<'_>>,
+) -> String {
+    if let Some(result) = result {
+        let tool_name = result.tool_name.unwrap_or(event_type.as_str());
+        let outcome = match result.outcome.outcome {
+            OutputOutcome::Failure => "failure",
+            OutputOutcome::Timeout => "timeout",
+            OutputOutcome::Success => "success",
+            OutputOutcome::Unknown => "event",
+        };
+        return format!("{tool_name} {outcome}");
+    }
+    if text.trim().is_empty() {
+        event_type.as_str().to_owned()
+    } else {
+        text.to_owned()
+    }
+}
+
+pub(crate) fn hydrated_direct_jsonl_lexical_text(
+    provider: CaptureProvider,
+    value: &Value,
+    sub_ordinal: u32,
+) -> Result<Option<String>> {
+    let event_type = direct_jsonl_event_type(provider, value);
+    if event_type != EventType::ToolOutput {
+        let entry_type = native_jsonl_entry_type(provider, value);
+        let text = direct_jsonl_event_text(provider, value, event_type, &entry_type);
+        return Ok(Some(direct_jsonl_lexical_text(event_type, &text, None)));
+    }
+    let subrecords = match provider {
+        CaptureProvider::FactoryAiDroid => super::enumerate_factory_droid_results(value),
+        CaptureProvider::Qoder => super::qoder_parser::enumerate_qoder_results(value),
+        CaptureProvider::QwenCode => super::qwen_code::enumerate_qwen_code_results(value),
+        _ => {
+            let Some(profile) = native_jsonl_result_content_profile(provider) else {
+                return Ok(None);
+            };
+            enumerate_native_jsonl_result_subrecords(profile, value)
+        }
+    }
+    .map_err(|error| {
+        CaptureError::InvalidPayload(format!(
+            "direct JSONL result record changed shape during hydration: {error:?}"
+        ))
+    })?;
+    Ok(subrecords
+        .iter()
+        .find(|result| {
+            result.subrecord_index == sub_ordinal
+                && matches!(
+                    result.outcome.outcome,
+                    OutputOutcome::Failure | OutputOutcome::Timeout
+                )
+        })
+        .map(|result| direct_jsonl_lexical_text(event_type, "", Some(result))))
+}
+
 fn direct_jsonl_model(provider: CaptureProvider, value: &Value) -> Option<Value> {
     match provider {
         CaptureProvider::FactoryAiDroid => super::factory_droid_model(value),
@@ -451,6 +512,7 @@ fn direct_event(
         direct_jsonl_event_text(provider, value, event_type, &entry_type)
     };
     let retained_text = provider_policy_event_text(event_type, &text, &body_value);
+    let lexical_text = direct_jsonl_lexical_text(event_type, &text, result);
     let event_id = native_jsonl_event_id(provider, value, line_number);
     let mut legacy_provider_event_hash = event_id.clone();
     let mut cursor = event_id.clone();
@@ -533,6 +595,7 @@ fn direct_event(
         event_type,
         role,
         occurred_at,
+        lexical_text,
         payload,
         metadata: json!({
             "source": source_format,

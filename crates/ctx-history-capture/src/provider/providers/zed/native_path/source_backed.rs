@@ -63,8 +63,8 @@ pub(crate) enum ZedSourceBackedErrorV0 {
     MissingSessionContext(String),
     #[error("Zed retained thread {0:?} disappeared while resolving its native lineage")]
     MissingLineageThread(String),
-    #[error("Zed source-backed parser emitted an empty lexical preview")]
-    MissingLexicalPreview,
+    #[error("Zed source-backed parser emitted an empty lexical body")]
+    MissingLexicalBody,
     #[error("Zed source-backed parser emitted an invalid SHA-256 digest")]
     InvalidDigest,
     #[error("locator is not a Zed threads SQLite row coordinate")]
@@ -459,8 +459,8 @@ fn zed_lexical_document(
     context: &ZedSessionProjectionContextV0,
     event: ZedNativeEvent,
 ) -> ZedSourceBackedResultV0<LexicalDocument> {
-    if event.preview.is_empty() {
-        return Err(ZedSourceBackedErrorV0::MissingLexicalPreview);
+    if event.lexical_body.is_empty() {
+        return Err(ZedSourceBackedErrorV0::MissingLexicalBody);
     }
     let session = &context.session;
     let session_id = context.session_id;
@@ -518,7 +518,7 @@ fn zed_lexical_document(
         occurred_at_unix_ms: Some(event.occurred_at.timestamp_millis()),
         event_type: event.event_type.as_str().to_owned(),
         role: Some(event.role.as_str().to_owned()),
-        body: event.preview,
+        body: event.lexical_body,
         workspace: session.folder_paths.first().cloned(),
         cwd: session.cwd.clone(),
         touched_files: event.safe_file_touches,
@@ -762,7 +762,7 @@ fn hydration_failure(error: ZedSourceBackedErrorV0) -> HydrationFailure {
 mod tests {
     use std::fs;
 
-    use ctx_history_core::{CaptureProvider, NativeRecordCoordinate};
+    use ctx_history_core::{CaptureProvider, EventRole, EventType, NativeRecordCoordinate};
     use ctx_history_index::VerifiedIndex;
     use rusqlite::{params, Connection};
     use serde_json::json;
@@ -852,6 +852,54 @@ mod tests {
             hydrated.unwrap().decoded_display_text,
             "replacement exact sentinel"
         );
+    }
+
+    #[test]
+    fn zed_lexical_document_retains_full_tail_beyond_legacy_preview_fields() {
+        let source = zed_source_key().unwrap();
+        let session_id = zed_session_identity(&source, "thread-full-body").unwrap();
+        let context = ZedSessionProjectionContextV0 {
+            session: ZedNativeSession {
+                thread_id: "thread-full-body".to_owned(),
+                parent_thread_id: None,
+                root_thread_id: "thread-full-body".to_owned(),
+                title: "Full body".to_owned(),
+                summary: String::new(),
+                created_at: "2026-07-28T12:00:00Z".parse().unwrap(),
+                updated_at: "2026-07-28T12:00:01Z".parse().unwrap(),
+                cwd: Some("/workspace/zed".to_owned()),
+                folder_paths: vec!["/workspace/zed".to_owned()],
+                encoding: super::super::dto::ZedNativeEncoding::Json,
+            },
+            session_id,
+            parent_session_id: None,
+            root_session_id: session_id,
+        };
+        let full_body = format!("{}zed-tail", "zed full body ".repeat(400));
+        let event = ZedNativeEvent::from_draft(
+            1,
+            "thread-full-body",
+            super::super::publication::ZedDecodedCoreEvent {
+                provider_message_id: Some("message-full-body".to_owned()),
+                thread_ordinal: 0,
+                message_ordinal: 0,
+                event_type: EventType::Message,
+                role: EventRole::User,
+                occurred_at: "2026-07-28T12:00:01Z".parse().unwrap(),
+                kind: "user",
+                call_ids: Vec::new(),
+                body: full_body.clone(),
+                safe_file_touches: Vec::new(),
+            },
+            CompleteContentBodyDigest::from_text(&full_body),
+        )
+        .unwrap();
+        assert_ne!(event.preview, full_body);
+
+        let document =
+            zed_lexical_document(&source, [0x5a; 32], "/tmp/threads.db", &context, event).unwrap();
+        assert_eq!(document.body, full_body);
+        assert!(document.body.ends_with("zed-tail"));
     }
 
     #[test]

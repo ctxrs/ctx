@@ -10,7 +10,7 @@ use ctx_history_core::{
     ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation,
     SourceRecordLocator, SourceResolverContractError, SubrecordSelector, TypedKey,
 };
-use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
+use ctx_history_index::LexicalDocument;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -206,10 +206,7 @@ fn lexical_document(
     revision_digest: [u8; 32],
     record: TraeCoreRecord,
 ) -> TraeSourceBackedResultV0<Option<LexicalDocument>> {
-    let Some(text) = record.event.payload.get("text").and_then(Value::as_str) else {
-        return Ok(None);
-    };
-    let body = bounded_body(text);
+    let body = record.lexical_text;
     if body.is_empty() {
         return Ok(None);
     }
@@ -354,10 +351,6 @@ fn explicit_trae_leaf(path: &Path) -> TraeSourceBackedResultV0<PathBuf> {
     Ok(absolute_trae_path(path)?)
 }
 
-fn bounded_body(text: &str) -> String {
-    text.chars().take(MAX_BODY_PREVIEW_CHARS).collect()
-}
-
 fn checked_add(left: u64, right: u64) -> TraeSourceBackedResultV0<u64> {
     left.checked_add(right)
         .ok_or(TraeSourceBackedErrorV0::CountMismatch)
@@ -427,12 +420,10 @@ mod tests {
         let workspace = temp.path().join("workspace-explicit");
         fs::create_dir_all(&workspace).expect("workspace");
         let source = workspace.join("state.vscdb");
+        let full_assistant_body = format!("{}trae-tail", "bounded ".repeat(400));
         write_value(
             &source,
-            &chat_value(
-                "cold exact nested sentinel",
-                &"bounded ".repeat(MAX_BODY_PREVIEW_CHARS),
-            ),
+            &chat_value("cold exact nested sentinel", &full_assistant_body),
         );
 
         let mut pages = Vec::new();
@@ -453,7 +444,8 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(documents.len(), 2);
         assert_eq!(documents[0].body, "cold exact nested sentinel");
-        assert_eq!(documents[1].body.chars().count(), MAX_BODY_PREVIEW_CHARS);
+        assert_eq!(documents[1].body, full_assistant_body);
+        assert!(documents[1].body.ends_with("trae-tail"));
         assert_eq!(documents[0].parent_session_id, None);
         assert_eq!(documents[0].root_session_id, documents[0].session_id);
         assert_eq!(
@@ -488,6 +480,10 @@ mod tests {
         let hydrated = hydrate_trae_source_backed_locator_v0(&source, &documents[0].locator)
             .expect("exact hydration");
         assert_eq!(hydrated.exact_text, "cold exact nested sentinel");
+        let hydrated_assistant =
+            hydrate_trae_source_backed_locator_v0(&source, &documents[1].locator)
+                .expect("exact assistant hydration");
+        assert_eq!(hydrated_assistant.exact_text, documents[1].body);
 
         let mut replay_ids = Vec::new();
         scan_trae_source_backed_explicit_v0(&source, &mut |page| {

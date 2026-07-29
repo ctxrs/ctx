@@ -12,7 +12,7 @@ use ctx_history_core::{
     SourceAnchor, SourceKey, SourceObservation, SourceRecordLocator, SourceResolverContractError,
     StableEntityId, TypedKey,
 };
-use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
+use ctx_history_index::LexicalDocument;
 use rusqlite::{limits::Limit, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -569,7 +569,11 @@ fn lexical_document(
         Some(source_revision_digest),
         record_digest,
     )?;
-    let body = bounded_lexical_body(&event.body, event.kind);
+    let body = if event.lexical_body.is_empty() {
+        event.kind.to_owned()
+    } else {
+        event.lexical_body
+    };
     if body.is_empty() {
         return Err(WarpSourceBackedErrorV0::EmptyLexicalRecord);
     }
@@ -788,18 +792,6 @@ fn digest_bytes(value: &str) -> WarpSourceBackedResultV0<[u8; 32]> {
             .map_err(|_| WarpSourceBackedErrorV0::InvalidDigest)?;
     }
     Ok(digest)
-}
-
-fn bounded_lexical_body(body: &str, fallback: &str) -> String {
-    let bounded = body
-        .chars()
-        .take(MAX_BODY_PREVIEW_CHARS)
-        .collect::<String>();
-    if bounded.is_empty() {
-        fallback.chars().take(MAX_BODY_PREVIEW_CHARS).collect()
-    } else {
-        bounded
-    }
 }
 
 fn source_backed_capture_error(error: WarpSourceBackedErrorV0) -> CaptureError {

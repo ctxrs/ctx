@@ -344,6 +344,7 @@ struct TraeCoreRecord {
     raw_session_index: u32,
     legacy_session_index: u32,
     message_index: u32,
+    lexical_text: String,
     event: TraeCoreEvent,
 }
 

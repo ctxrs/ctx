@@ -112,7 +112,7 @@ fn parse_pi_session_header(value: Value) -> Result<PiNativeSessionHeader, Captur
     })
 }
 
-fn pi_native_event_type(entry_type: &str, message: Option<&Value>) -> EventType {
+pub(super) fn pi_native_event_type(entry_type: &str, message: Option<&Value>) -> EventType {
     match entry_type {
         "compaction" | "branch_summary" => EventType::Summary,
         "message" => match message

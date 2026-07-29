@@ -18,13 +18,13 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::{
-    DirectJsonlCheckpoint, DirectJsonlEvent, DirectJsonlFileObservation, DirectJsonlSession,
-    DirectJsonlSourceChange,
+    reader::hydrated_direct_jsonl_lexical_text, DirectJsonlCheckpoint, DirectJsonlEvent,
+    DirectJsonlFileObservation, DirectJsonlSession, DirectJsonlSourceChange,
 };
 use crate::{
-    common::io::OpenedProviderSourceFile, provider::normalization::provider_local_preview,
-    CaptureError, ProviderJsonlInventoryLimit, MAX_PROVIDER_JSONL_LINE_BYTES,
-    PROVIDER_JSONL_INVENTORY_MAX_ELIGIBLE_PATHS, PROVIDER_JSONL_INVENTORY_MAX_PATH_BYTES,
+    common::io::OpenedProviderSourceFile, CaptureError, ProviderJsonlInventoryLimit,
+    MAX_PROVIDER_JSONL_LINE_BYTES, PROVIDER_JSONL_INVENTORY_MAX_ELIGIBLE_PATHS,
+    PROVIDER_JSONL_INVENTORY_MAX_PATH_BYTES,
 };
 
 const DIRECT_JSONL_SOURCE_IDENTITY_VERSION: u32 = 1;
@@ -33,7 +33,6 @@ const DIRECT_JSONL_SOURCE_FRONTIER_KIND: &str = "direct-native-jsonl-checkpoint-
 const DIRECT_JSONL_INVENTORY_AUTHORITY_NAMESPACE: &str = "direct-native-jsonl-provider-root-v1";
 const DIRECT_JSONL_INVENTORY_REVISION_KIND: &str = "direct-native-jsonl-inventory-sha256-v1";
 const DIRECT_JSONL_DISCOVERY_REVISION: &str = "direct-native-jsonl-discovery-v1";
-const DIRECT_JSONL_LEXICAL_PREVIEW_CHARS: usize = 2_048;
 const DIRECT_JSONL_DOCUMENT_METADATA_BYTES: usize = 64 * 1024;
 const DIRECT_JSONL_MAX_TOUCHED_FILES: usize = 256;
 
@@ -71,6 +70,8 @@ pub(crate) enum DirectJsonlSourceBackedError {
     LocatorRangeMissing,
     #[error("direct JSONL locator digest no longer matches provider bytes")]
     LocatorDigestMismatch,
+    #[error("direct JSONL locator no longer selects a retained lexical event")]
+    LocatorRecordNotRetained,
 }
 
 pub(crate) type DirectJsonlSourceBackedResult<T> = Result<T, DirectJsonlSourceBackedError>;
@@ -260,6 +261,7 @@ impl DirectJsonlSourceAdapter {
             byte_offset,
             byte_length,
             native_session_key,
+            native_event_key,
             ..
         } = locator.coordinate()
         else {
@@ -268,6 +270,14 @@ impl DirectJsonlSourceAdapter {
         if native_session_key.as_ref() != Some(&TypedKey::Utf8(leaf.native_session_id.clone())) {
             return Err(DirectJsonlSourceBackedError::InvalidLocator);
         }
+        let Some(TypedKey::Composite(event_key)) = native_event_key else {
+            return Err(DirectJsonlSourceBackedError::InvalidLocator);
+        };
+        let Some(TypedKey::U64(sub_ordinal)) = event_key.get(1) else {
+            return Err(DirectJsonlSourceBackedError::InvalidLocator);
+        };
+        let sub_ordinal = u32::try_from(*sub_ordinal)
+            .map_err(|_| DirectJsonlSourceBackedError::InvalidLocator)?;
         if *byte_length == 0
             || *byte_length > (MAX_PROVIDER_JSONL_LINE_BYTES as u64).saturating_add(2)
         {
@@ -299,7 +309,10 @@ impl DirectJsonlSourceAdapter {
         if &digest != locator.record_digest() {
             return Err(DirectJsonlSourceBackedError::LocatorDigestMismatch);
         }
-        Ok(bytes)
+        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+        let display_text = hydrated_direct_jsonl_lexical_text(self.provider, &value, sub_ordinal)?
+            .ok_or(DirectJsonlSourceBackedError::LocatorRecordNotRetained)?;
+        Ok(display_text.into_bytes())
     }
 
     fn source_key(self, native_session_id: &str) -> DirectJsonlSourceBackedResult<SourceKey> {
@@ -703,7 +716,11 @@ fn project_event(
         Some(root) => direct_jsonl_session_identity(adapter, root)?.1,
         None => session_id,
     };
-    let body = lexical_body(&event);
+    let body = if event.lexical_text.trim().is_empty() {
+        event.event_type.as_str().to_owned()
+    } else {
+        event.lexical_text.clone()
+    };
     let touched_files = event
         .touches
         .into_iter()
@@ -749,41 +766,6 @@ fn direct_jsonl_session_identity(
         native_session_key: &native_session_key,
     })?;
     Ok((source, session_id))
-}
-
-fn lexical_body(event: &DirectJsonlEvent) -> String {
-    let candidate = event
-        .payload
-        .get("text")
-        .and_then(serde_json::Value::as_str)
-        .filter(|text| !text.is_empty())
-        .map(str::to_owned)
-        .or_else(|| {
-            event.payload.get("body").and_then(|body| {
-                (!body.is_null())
-                    .then(|| serde_json::to_string(body).ok())
-                    .flatten()
-            })
-        })
-        .unwrap_or_else(|| {
-            let tool_name = event
-                .payload
-                .get("tool_name")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or(event.event_type.as_str());
-            let outcome = event
-                .payload
-                .get("result_outcome")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("event");
-            format!("{tool_name} {outcome}")
-        });
-    let (body, _) = provider_local_preview(&candidate, DIRECT_JSONL_LEXICAL_PREVIEW_CHARS);
-    if body.is_empty() {
-        event.event_type.as_str().to_owned()
-    } else {
-        body
-    }
 }
 
 fn source_observation(
@@ -880,7 +862,6 @@ pub(super) fn assert_source_backed_fixture(
         .iter()
         .find(|document| document.body.contains(expected_body))
         .unwrap();
-    assert!(document.body.chars().count() <= DIRECT_JSONL_LEXICAL_PREVIEW_CHARS);
     assert_eq!(
         document.provider_session_id.as_deref(),
         Some(expected_native_session_id)
@@ -914,7 +895,7 @@ pub(super) fn assert_source_backed_fixture(
     assert!(native_event_key.is_some());
     assert_eq!(
         adapter.hydrate(&certified, &document.locator).unwrap(),
-        expected_record
+        document.body.as_bytes()
     );
 
     let closing = adapter.discover(root).unwrap();
@@ -952,6 +933,99 @@ fn collect_test_leaf(
         documents.extend(page.documents);
     }
     (documents, reader.finish().unwrap())
+}
+
+#[cfg(test)]
+mod architecture_tests {
+    #[test]
+    fn owned_source_backed_constructors_have_no_preview_body_or_store_fallback() {
+        let sources = [
+            (
+                "mistral_vibe",
+                include_str!("../../mistral_vibe/native_path/source_backed.rs"),
+            ),
+            (
+                "nanoclaw",
+                include_str!("../../nanoclaw/native_path/source_backed.rs"),
+            ),
+            ("native_jsonl", include_str!("source_backed.rs")),
+            (
+                "openclaw",
+                include_str!("../../openclaw/native_path/source_backed.rs"),
+            ),
+            (
+                "opencode",
+                include_str!("../../opencode/native_path/source_backed.rs"),
+            ),
+            (
+                "openhands",
+                include_str!("../../openhands/nativepath/source_backed.rs"),
+            ),
+            ("pi", include_str!("../../pi/nativepath/source_backed.rs")),
+            (
+                "rovodev",
+                include_str!("../../rovodev/native_path/source_backed.rs"),
+            ),
+            (
+                "shelley",
+                include_str!("../../shelley/native_path/source_backed.rs"),
+            ),
+            (
+                "task_json",
+                include_str!("../../task_json/cline_nativepath/source_backed.rs"),
+            ),
+            (
+                "trae",
+                include_str!("../../trae/nativepath/source_backed.rs"),
+            ),
+            ("warp", include_str!("../../warp/source_backed.rs")),
+            (
+                "zed",
+                include_str!("../../zed/native_path/source_backed.rs"),
+            ),
+        ];
+        let forbidden = [
+            concat!("MAX_BODY_", "PREVIEW_CHARS"),
+            concat!("DIRECT_JSONL_LEXICAL_", "PREVIEW_CHARS"),
+            concat!("MAX_LEXICAL_", "PREVIEW_CHARS"),
+            concat!("bounded_", "lexical_body"),
+            concat!("bounded_", "body"),
+            concat!("lexical_", "preview"),
+            concat!("body: event.", "preview"),
+            concat!("ctx_history_", "store"),
+            concat!("Store", "::"),
+        ];
+
+        for (provider, source) in sources {
+            let has_body_assignment = source.lines().any(|line| {
+                let line = line.trim();
+                line == "body," || line.starts_with("body:")
+            });
+            assert!(
+                source.contains("LexicalDocument {") && has_body_assignment,
+                "{provider} no longer exposes an auditable LexicalDocument body assignment"
+            );
+            for token in forbidden {
+                assert!(
+                    !source.contains(token),
+                    "{provider} source-backed path contains forbidden architecture token {token}"
+                );
+            }
+        }
+
+        assert!(sources
+            .iter()
+            .find(|(provider, _)| *provider == "warp")
+            .unwrap()
+            .1
+            .contains("event.lexical_body"));
+        assert!(sources
+            .iter()
+            .find(|(provider, _)| *provider == "zed")
+            .unwrap()
+            .1
+            .contains("body: event.lexical_body"));
+    }
 }
 
 #[cfg(all(test, unix))]

@@ -16,7 +16,7 @@ use ctx_history_core::{
     ProjectionContractError, ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey,
     SourceObservation, SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
 };
-use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
+use ctx_history_index::LexicalDocument;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -790,12 +790,8 @@ fn build_document(
         None,
         record_digest,
     )?;
-    let text = event
-        .payload
-        .pointer("/text")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    let (body, _) = provider_local_preview(text, MAX_BODY_PREVIEW_CHARS);
+    let body = shelley_message_complete_text(&value.message)
+        .unwrap_or_else(|| format!("Shelley {} message", value.message.entry_type));
     if body.trim().is_empty() {
         return Err(ShelleySourceBackedError::MissingLexicalBody);
     }
@@ -1010,10 +1006,6 @@ mod tests {
         let mut documents = Vec::new();
         while let Some(page) = scan.next_page().unwrap() {
             assert!(page.documents.len() <= SHELLEY_PAGE_MAX_UNITS);
-            assert!(page
-                .documents
-                .iter()
-                .all(|document| document.body.chars().count() <= MAX_BODY_PREVIEW_CHARS));
             documents.extend(page.documents);
         }
         let receipt = scan.finish().unwrap();
@@ -1035,7 +1027,7 @@ mod tests {
     #[test]
     fn shelley_source_backed_cold_exact_and_replacement_keep_identity() {
         let temp = crate::test_support_paths::tempdir().unwrap();
-        let original = "x".repeat(MAX_BODY_PREVIEW_CHARS + 1_000);
+        let original = format!("{}shelley-tail", "x".repeat(4_096));
         let database = create_fixture(temp.path(), &original);
         let adapter = discover_shelley_source_backed_exact_cwd(temp.path())
             .unwrap()
@@ -1044,7 +1036,8 @@ mod tests {
         let (cold_documents, cold_receipt) = drain(&adapter);
         assert_eq!(cold_documents.len(), 1);
         let cold = &cold_documents[0];
-        assert_eq!(cold.body.chars().count(), MAX_BODY_PREVIEW_CHARS);
+        assert_eq!(cold.body, original);
+        assert!(cold.body.ends_with("shelley-tail"));
         assert_eq!(cold.provider_session_id.as_deref(), Some("conversation-1"));
         assert_eq!(cold.parent_session_id, None);
         assert_eq!(cold.root_session_id, cold.session_id);

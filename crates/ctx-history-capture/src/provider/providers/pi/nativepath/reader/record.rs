@@ -366,6 +366,7 @@ impl PiNativeScanner {
             })?;
         let event_type = pi_native_event_type(entry_type, message);
         let role = message_role.map(pi_event_role);
+        let lexical_text = pi_entry_text(entry, message).unwrap_or_default();
         let mut payload = pi_native_event_payload(entry, event_type);
         if let Some((outcome, content)) = failure {
             let payload = payload.as_object_mut().ok_or_else(|| {
@@ -416,6 +417,7 @@ impl PiNativeScanner {
             role,
             occurred_at,
             idempotency_key: pi_event_idempotency_key(header, entry, line_number_usize),
+            lexical_text,
             payload,
             metadata: json!({
                 "source": "pi_session",

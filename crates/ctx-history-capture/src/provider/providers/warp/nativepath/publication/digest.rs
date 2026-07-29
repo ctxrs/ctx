@@ -196,6 +196,7 @@ pub(super) fn event_estimated_bytes(event: &WarpNativeEvent) -> usize {
         .saturating_add(event.native_order.task_key.len())
         .saturating_add(event.request_id.as_ref().map_or(0, String::len))
         .saturating_add(event.call_id.as_ref().map_or(0, String::len))
+        .saturating_add(event.lexical_body.len())
         .saturating_add(event.body.len())
         .saturating_add(event.content_hash.len())
         .saturating_add(event.preview.len())

@@ -9,7 +9,7 @@ use ctx_history_core::{
     SourceObservation as ProjectionSourceObservation, SourceRecordLocator,
     SourceResolverContractError, StableEntityId, TypedKey,
 };
-use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
+use ctx_history_index::LexicalDocument;
 use thiserror::Error;
 
 use super::*;
@@ -192,13 +192,9 @@ fn scan_leaf(
 )> {
     let metadata_relative_path = relative_to_authority(authority, &native.metadata_path)?;
     let messages_relative_path = relative_to_authority(authority, &native.messages_path)?;
-    let opening = admit_mistral_vibe_source(
-        authority,
-        &metadata_relative_path,
-        &messages_relative_path,
-    )?;
-    let (session, _) =
-        SessionFact::from_admitted(&native, imported_at, &opening.metadata_bytes)?;
+    let opening =
+        admit_mistral_vibe_source(authority, &metadata_relative_path, &messages_relative_path)?;
+    let (session, _) = SessionFact::from_admitted(&native, imported_at, &opening.metadata_bytes)?;
     let native_session_id = session.provider_session_id.clone();
     let source = source_key(&native_session_id)?;
     let session_id = session_identity(&source, &native_session_id)?;
@@ -458,14 +454,11 @@ fn lexical_document(
         if output.kind == OutputObservationKind::Command {
             event_type = EventType::CommandOutput;
         }
-        format!(
-            "Mistral Vibe failed {} output",
-            value.get("name").and_then(Value::as_str).unwrap_or("tool")
-        )
+        mistral_vibe_lexical_text(&value, role, true)
     } else {
-        mistral_vibe_event_text(role, &value, event_type)
+        mistral_vibe_lexical_text(&value, role, false)
     };
-    let body = provider_local_preview(&lexical_text, MAX_BODY_PREVIEW_CHARS).0;
+    let body = lexical_text;
     if body.is_empty() {
         return Ok(RecordProjection::Rejected);
     }
@@ -539,6 +532,17 @@ fn lexical_document(
         cwd: session.cwd.clone(),
         touched_files: touches,
     }))
+}
+
+fn mistral_vibe_lexical_text(value: &Value, role: &str, failed_output: bool) -> String {
+    if failed_output {
+        format!(
+            "Mistral Vibe failed {} output",
+            value.get("name").and_then(Value::as_str).unwrap_or("tool")
+        )
+    } else {
+        mistral_vibe_event_text(role, value, mistral_vibe_event_type(role, value))
+    }
 }
 
 fn provider_native_event_id(value: &Value) -> Option<String> {
@@ -753,7 +757,7 @@ impl MistralVibeSourceResolver {
                     return Err(stale_source("Mistral Vibe record boundary changed"));
                 }
             }
-            let provider_bytes = admitted
+            let source_bytes = admitted
                 .messages
                 .read_exact_range(
                     byte_offset,
@@ -762,23 +766,32 @@ impl MistralVibeSourceResolver {
                     MAX_PROVIDER_JSONL_LINE_BYTES.saturating_add(2),
                 )
                 .map_err(|_| stale_source("Mistral Vibe record bytes changed"))?;
-            let first_newline = provider_bytes.iter().position(|byte| *byte == b'\n');
-            if first_newline.is_some_and(|position| position + 1 != provider_bytes.len())
+            let first_newline = source_bytes.iter().position(|byte| *byte == b'\n');
+            if first_newline.is_some_and(|position| position + 1 != source_bytes.len())
                 || (first_newline.is_none() && byte_end_exclusive != admitted.messages.len())
             {
                 return Err(stale_source("Mistral Vibe record boundary changed"));
             }
-            let payload = provider_bytes
+            let payload = source_bytes
                 .strip_suffix(b"\n")
-                .unwrap_or(&provider_bytes)
+                .unwrap_or(&source_bytes)
                 .strip_suffix(b"\r")
-                .unwrap_or_else(|| provider_bytes.strip_suffix(b"\n").unwrap_or(&provider_bytes));
+                .unwrap_or_else(|| source_bytes.strip_suffix(b"\n").unwrap_or(&source_bytes));
             if Sha256::digest(payload).as_slice() != request.locator().record_digest() {
                 return Err(HydrationFailure {
                     kind: HydrationFailureKind::StaleRecordEvidence,
                     detail: "Mistral Vibe record digest changed".to_owned(),
                 });
             }
+            let value: Value = serde_json::from_slice(payload)
+                .map_err(|_| stale_source("Mistral Vibe record is no longer valid JSON"))?;
+            let role = valid_mistral_vibe_record_role(&value)
+                .map_err(|_| stale_source("Mistral Vibe record role changed"))?;
+            let event_type = mistral_vibe_event_type(role, &value);
+            let failed_output =
+                matches!(event_type, EventType::ToolOutput | EventType::CommandOutput);
+            let provider_bytes =
+                mistral_vibe_lexical_text(&value, role, failed_output).into_bytes();
             hydrated.push(HydratedProviderRecord {
                 event_id: request.event_id(),
                 provider_bytes,
@@ -955,7 +968,7 @@ mod tests {
     }
 
     #[test]
-    fn cold_scan_emits_stable_bounded_documents_and_exact_grouped_hydration() {
+    fn cold_scan_emits_stable_full_documents_and_exact_grouped_hydration() {
         let (_temp, root, records) = fixture();
         let first = scan_mistral_vibe_source_backed(&root, imported_at()).unwrap();
         let second =
@@ -996,10 +1009,10 @@ mod tests {
                 && document.agent_type == AgentType::Primary.as_str()
                 && document.is_primary
         }));
-        assert_eq!(
-            leaf.documents[0].body.chars().count(),
-            MAX_BODY_PREVIEW_CHARS
-        );
+        let first_record: Value = serde_json::from_slice(&records[0]).unwrap();
+        let expected_first_body = first_record["content"].as_str().unwrap();
+        assert_eq!(leaf.documents[0].body, expected_first_body);
+        assert!(leaf.documents[0].body.ends_with(&"x".repeat(4_096)));
         assert!(leaf
             .documents
             .iter()
@@ -1023,11 +1036,8 @@ mod tests {
             SessionHydrationRequest::new(leaf.documents[0].session_id, requests).unwrap();
         let hydrated = first.resolver.hydrate_session(&session_request).unwrap();
         assert_eq!(hydrated.len(), records.len());
-        for (hydrated, expected) in hydrated.iter().zip(records) {
-            assert_eq!(
-                hydrated.provider_bytes.strip_suffix(b"\n").unwrap(),
-                expected
-            );
+        for (hydrated, document) in hydrated.iter().zip(&leaf.documents) {
+            assert_eq!(hydrated.provider_bytes, document.body.as_bytes());
         }
     }
 

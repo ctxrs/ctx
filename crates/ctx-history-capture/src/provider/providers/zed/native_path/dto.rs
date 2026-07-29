@@ -108,6 +108,8 @@ pub(crate) struct ZedNativeEvent {
     pub(super) occurred_at: DateTime<Utc>,
     pub(super) kind: String,
     pub(super) call_ids: Vec<String>,
+    #[serde(skip)]
+    pub(super) lexical_body: String,
     pub(super) body: String,
     pub(super) content_hash: String,
     pub(super) legacy_content_hash: String,

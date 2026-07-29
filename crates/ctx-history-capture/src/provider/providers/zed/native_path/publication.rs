@@ -58,12 +58,13 @@ impl ZedNativeEvent {
         let provider_event_index = draft.message_ordinal.checked_mul(2).ok_or_else(|| {
             ZedNativePathError::UnsupportedSchema("Zed provider event index overflowed".to_owned())
         })?;
+        let lexical_body = draft.body;
         let body_shape = json!({
             "message_kind": draft.kind,
-            "text": draft.body,
+            "text": lexical_body,
             "call_ids": draft.call_ids,
         });
-        let retained = provider_policy_event_text(draft.event_type, &draft.body, &body_shape);
+        let retained = provider_policy_event_text(draft.event_type, &lexical_body, &body_shape);
         let body = retained.text;
         let preview = truncate_chars(&body, ZED_NATIVE_PREVIEW_MAX_CHARS);
         let cursor = event_cursor(&identity);
@@ -89,7 +90,7 @@ impl ZedNativeEvent {
                 .and_then(Value::as_bool)
                 == Some(true))
         .then(|| {
-            ContentRef::from_bytes(draft.body.as_bytes()).map(|content_ref| {
+            ContentRef::from_bytes(lexical_body.as_bytes()).map(|content_ref| {
                 ZedNativeCompleteMessageEvidence {
                     record_digest: record_digest.clone(),
                     content_ref,
@@ -123,6 +124,7 @@ impl ZedNativeEvent {
             occurred_at: draft.occurred_at,
             kind: draft.kind.to_owned(),
             call_ids: draft.call_ids,
+            lexical_body,
             body,
             content_hash,
             legacy_content_hash,
@@ -134,7 +136,9 @@ impl ZedNativeEvent {
     }
 
     fn estimated_bytes(&self) -> usize {
-        serde_json::to_vec(self).map_or(usize::MAX, |encoded| encoded.len())
+        serde_json::to_vec(self)
+            .map_or(usize::MAX, |encoded| encoded.len())
+            .saturating_add(self.lexical_body.len())
     }
 }
 

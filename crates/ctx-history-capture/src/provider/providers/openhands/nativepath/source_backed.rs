@@ -13,19 +13,16 @@ use ctx_history_core::{
     SessionIdentityInput, SourceAnchor, SourceInventoryObservation, SourceKey, SourceObservation,
     SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
 };
-use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
+use ctx_history_index::LexicalDocument;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::output::openhands_output_outcome;
 use crate::{
     common::io::{open_provider_source_path, OpenedProviderSourcePath, ProviderSourceDirectory},
-    provider::{
-        file_touches::{
-            event_type_supports_structured_file_touches,
-            visit_provider_file_touch_drafts_with_limit, MAX_PROVIDER_FILE_TOUCHES_PER_EVENT,
-        },
-        normalization::{provider_local_preview, provider_policy_event_text},
+    provider::file_touches::{
+        event_type_supports_structured_file_touches, visit_provider_file_touch_drafts_with_limit,
+        MAX_PROVIDER_FILE_TOUCHES_PER_EVENT,
     },
     CaptureError, OutputOutcome, OPENHANDS_FILE_EVENTS_SOURCE_FORMAT,
 };
@@ -340,9 +337,11 @@ impl OpenHandsLocatorResolverV1 {
             return Err(OpenHandsSourceBackedErrorV1::SourceChangedDuringProjection);
         }
         self.inventory.revalidate()?;
+        let decoded_display_text =
+            lexical_body(&decoded).ok_or(OpenHandsSourceBackedErrorV1::ObjectCoordinateMismatch)?;
         Ok(OpenHandsHydratedRecordV1 {
-            provider_bytes,
-            decoded_display_text: decoded.text().to_owned(),
+            provider_bytes: decoded_display_text.as_bytes().to_vec(),
+            decoded_display_text,
         })
     }
 
@@ -372,7 +371,7 @@ impl ContentSourceResolver for OpenHandsLocatorResolverV1 {
         self.hydrate_request(request)
             .map(|record| HydratedProviderRecord {
                 event_id: request.event_id(),
-                provider_bytes: record.provider_bytes,
+                provider_bytes: record.decoded_display_text.into_bytes(),
             })
             .map_err(hydration_failure)
     }
@@ -402,7 +401,7 @@ impl ContentSourceResolver for OpenHandsLocatorResolverV1 {
                 self.hydrate_request(event)
                     .map(|record| HydratedProviderRecord {
                         event_id: event.event_id(),
-                        provider_bytes: record.provider_bytes,
+                        provider_bytes: record.decoded_display_text.into_bytes(),
                     })
                     .map_err(hydration_failure)
             })
@@ -615,20 +614,18 @@ fn lexical_body(decoded: &OpenHandsDecodedEvent) -> Option<String> {
         ) {
             return None;
         }
-        let (preview, _) = provider_local_preview(decoded.text(), MAX_BODY_PREVIEW_CHARS);
-        if preview.trim().is_empty() {
+        if decoded.text().trim().is_empty() {
             if outcome.outcome == OutputOutcome::Timeout {
                 "OpenHands command timed out".to_owned()
             } else {
                 "OpenHands command failed".to_owned()
             }
         } else {
-            preview
+            decoded.text().to_owned()
         }
     } else {
-        provider_policy_event_text(event_type, decoded.text(), decoded.value()).text
+        decoded.text().to_owned()
     };
-    let (text, _) = provider_local_preview(&text, MAX_BODY_PREVIEW_CHARS);
     (!text.trim().is_empty()).then_some(text)
 }
 

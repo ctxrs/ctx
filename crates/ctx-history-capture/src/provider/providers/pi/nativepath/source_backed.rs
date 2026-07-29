@@ -19,7 +19,7 @@ use ctx_history_core::{
     SourceAnchor, SourceFrontier, SourceInventoryObservation, SourceKey, SourceObservation,
     SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
 };
-use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
+use ctx_history_index::LexicalDocument;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -37,8 +37,7 @@ use crate::{
     common::io::OpenedProviderSourceFile,
     provider::{
         importer::provider_path_identity,
-        normalization::provider_local_preview,
-        providers::pi::{pi_complete_content_message_record, PI_SOURCE_FORMAT},
+        providers::pi::{pi_entry_text, PI_SOURCE_FORMAT},
     },
     CaptureError, ProviderAdapterContext, MAX_PROVIDER_JSONL_LINE_BYTES,
 };
@@ -500,7 +499,7 @@ impl PiSourceBackedScanner {
                 actual: row.provider_session_id,
             });
         }
-        let body = lexical_preview(&row);
+        let body = lexical_body(&row);
         if body.is_empty() {
             return Ok(None);
         }
@@ -710,20 +709,12 @@ impl PiSourceBackedResolver {
         request: &EventHydrationRequest,
     ) -> Result<Option<String>, HydrationFailure> {
         let hydrated = self.hydrate_event(request)?;
-        let record = json_record_bytes(&hydrated.provider_bytes);
-        let value: Value = serde_json::from_slice(record).map_err(|error| HydrationFailure {
-            kind: HydrationFailureKind::InvalidLocator,
-            detail: error.to_string(),
-        })?;
-        let (_, _, ordinal, _) =
-            validate_pi_locator(request.locator()).map_err(hydration_failure)?;
-        let line_number =
-            usize::try_from(ordinal.saturating_add(1)).map_err(|_| HydrationFailure {
+        String::from_utf8(hydrated.provider_bytes)
+            .map(Some)
+            .map_err(|error| HydrationFailure {
                 kind: HydrationFailureKind::InvalidLocator,
-                detail: "Pi JSONL ordinal does not fit the exact-content parser".to_owned(),
-            })?;
-        // Share the same exact-content decoder as the existing JSONL resolver.
-        Ok(pi_complete_content_message_record(&value, line_number).map(|(text, _)| text))
+                detail: error.to_string(),
+            })
     }
 
     fn hydrate_exact(
@@ -762,9 +753,19 @@ impl PiSourceBackedResolver {
         if &digest != request.locator().record_digest() {
             return Err(PiSourceBackedError::LocatorDigestMismatch);
         }
+        let record = json_record_bytes(&provider_bytes);
+        let value: Value = serde_json::from_slice(record)?;
+        let entry_type = value
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let event_type = super::reader::pi_native_event_type(entry_type, value.get("message"));
+        let display_text = pi_entry_text(&value, value.get("message"))
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or_else(|| event_type.as_str().to_owned());
         Ok(HydratedProviderRecord {
             event_id: request.event_id(),
-            provider_bytes,
+            provider_bytes: display_text.into_bytes(),
         })
     }
 }
@@ -913,13 +914,12 @@ fn decode_checkpoint(previous: &CertifiedSource) -> PiSourceBackedResult<PiNativ
     Ok(checkpoint)
 }
 
-fn lexical_preview(row: &PiNativeEventRow) -> String {
-    ["text", "output_preview", "command"]
-        .into_iter()
-        .filter_map(|key| row.payload.get(key).and_then(Value::as_str))
-        .find(|text| !text.trim().is_empty())
-        .map(|text| provider_local_preview(text, MAX_BODY_PREVIEW_CHARS).0)
-        .unwrap_or_default()
+fn lexical_body(row: &PiNativeEventRow) -> String {
+    if row.lexical_text.trim().is_empty() {
+        row.event_type.as_str().to_owned()
+    } else {
+        row.lexical_text.clone()
+    }
 }
 
 fn collect_touch(touches: &mut HashMap<u64, Vec<String>>, row: PiNativeFileTouchRow) {

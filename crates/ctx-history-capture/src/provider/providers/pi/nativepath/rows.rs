@@ -43,6 +43,8 @@ pub(crate) struct PiNativeEventRow {
     pub(crate) role: Option<EventRole>,
     pub(crate) occurred_at: DateTime<Utc>,
     pub(crate) idempotency_key: String,
+    #[serde(skip)]
+    pub(crate) lexical_text: String,
     pub(crate) payload: Value,
     pub(crate) metadata: Value,
     pub(crate) locator: PiNativePhysicalLocator,
@@ -159,5 +161,13 @@ impl PiCorePageBuilder {
 pub(super) fn core_units_encoded_bytes(
     units: &[PiNativeCoreUnit],
 ) -> Result<usize, serde_json::Error> {
-    serde_json::to_vec(units).map(|bytes| bytes.len())
+    serde_json::to_vec(units).map(|bytes| {
+        units
+            .iter()
+            .filter_map(|unit| match unit {
+                PiNativeCoreUnit::Event(event) => Some(event.lexical_text.len()),
+                _ => None,
+            })
+            .fold(bytes.len(), usize::saturating_add)
+    })
 }
