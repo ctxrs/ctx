@@ -1,0 +1,318 @@
+use super::*;
+
+pub(super) fn source_backed_retained_event_kind(
+    effective_type: &str,
+    role: &str,
+    body: &serde_json::Value,
+) -> OpenCodeNativeEventKind {
+    if body.get("result_outcome").is_some() {
+        if effective_type == "shell" || body.get("command").is_some() {
+            return OpenCodeNativeEventKind::CommandOutput;
+        }
+        return OpenCodeNativeEventKind::ToolOutput;
+    }
+    if matches!(
+        effective_type,
+        "tool" | "tool_call" | "tool-call" | "tool_use" | "tooluse"
+    ) || json_contains_tool_call(body)
+    {
+        OpenCodeNativeEventKind::ToolCall
+    } else if matches!(effective_type, "reasoning" | "summary") {
+        OpenCodeNativeEventKind::Summary
+    } else if matches!(role, "user" | "assistant")
+        || matches!(effective_type, "user" | "assistant" | "text")
+    {
+        OpenCodeNativeEventKind::Message
+    } else {
+        OpenCodeNativeEventKind::Notice
+    }
+}
+
+fn json_contains_tool_call(body: &serde_json::Value) -> bool {
+    body.get("tool_calls").is_some()
+        || body.get("toolCall").is_some()
+        || body.get("tool_call").is_some()
+        || body
+            .get("content")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|blocks| {
+                blocks.iter().any(|block| {
+                    matches!(
+                        block.get("type").and_then(serde_json::Value::as_str),
+                        Some("tool" | "tool_use" | "toolCall" | "tool_call")
+                    )
+                })
+            })
+}
+
+pub(super) fn source_backed_retained_searchable_text(
+    kind: OpenCodeNativeEventKind,
+    effective_type: &str,
+    body: &serde_json::Value,
+) -> String {
+    if let Some(text) = body.get("text").and_then(serde_json::Value::as_str) {
+        return text.to_owned();
+    }
+    if let Some(text) = body.get("summary").and_then(serde_json::Value::as_str) {
+        return text.to_owned();
+    }
+    if kind == OpenCodeNativeEventKind::ToolCall {
+        let tool = body
+            .get("tool")
+            .or_else(|| body.get("name"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("tool");
+        let command = body
+            .pointer("/state/input/command")
+            .or_else(|| body.pointer("/input/command"))
+            .or_else(|| body.get("command"))
+            .and_then(serde_json::Value::as_str);
+        return command.map_or_else(
+            || format!("tool call: {tool}"),
+            |command| format!("{tool}\n{command}"),
+        );
+    }
+    if let Some(content) = body.get("content") {
+        let text = match content {
+            serde_json::Value::String(value) => value.clone(),
+            serde_json::Value::Array(values) => values
+                .iter()
+                .filter_map(|value| {
+                    value
+                        .get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => String::new(),
+        };
+        if !text.is_empty() {
+            return text;
+        }
+    }
+    format!("OpenCode {effective_type} event")
+}
+
+fn source_backed_retained_file_touches(
+    kind: OpenCodeNativeEventKind,
+    body: &serde_json::Value,
+) -> (Vec<OpenCodeNativeFileTouch>, usize) {
+    if !matches!(
+        kind,
+        OpenCodeNativeEventKind::ToolCall | OpenCodeNativeEventKind::Notice
+    ) {
+        return (Vec::new(), 0);
+    }
+    let mut paths = BTreeSet::new();
+    for pointer in [
+        "/path",
+        "/file_path",
+        "/filePath",
+        "/input/path",
+        "/input/file_path",
+        "/state/input/path",
+        "/state/input/file_path",
+    ] {
+        if let Some(path) = body.pointer(pointer).and_then(serde_json::Value::as_str) {
+            if !path.trim().is_empty() {
+                paths.insert(path.to_owned());
+            }
+        }
+    }
+    if let Some(files) = body.get("files").and_then(serde_json::Value::as_array) {
+        for file in files {
+            let path = file
+                .as_str()
+                .or_else(|| file.get("path").and_then(serde_json::Value::as_str));
+            if let Some(path) = path.filter(|path| !path.trim().is_empty()) {
+                paths.insert(path.to_owned());
+            }
+        }
+    }
+    let observed = paths.len();
+    let retained = paths
+        .into_iter()
+        .take(SOURCE_BACKED_MAX_FILE_TOUCHES)
+        .map(|path| OpenCodeNativeFileTouch { path })
+        .collect();
+    (retained, observed)
+}
+
+pub(super) fn decode_source_event_row(
+    row: &Row<'_>,
+    _schema: &OpenCodeNativeSchema,
+    dialect: &OpenCodeSqliteDialect,
+) -> OpenCodeSourceBackedResult<SourceEventRow> {
+    let native_identity: String = row.get(0)?;
+    let message_identity: String = row.get(1)?;
+    let session_identity: String = row.get(2)?;
+    let order_tag: i64 = row.get(3)?;
+    let order_a: i64 = row.get(4)?;
+    let order_b: i64 = row.get(5)?;
+    let time_created: i64 = row.get(6)?;
+    let time_updated: i64 = row.get(7)?;
+    let content_bytes = u64::try_from(row.get::<_, i64>(8)?).map_err(|_| {
+        CaptureError::InvalidPayload("OpenCode-family content byte count is negative".to_owned())
+    })?;
+    let mut projection_bytes: Vec<u8> = row.get(9)?;
+    let has_explicit_event_time: i64 = row.get(10)?;
+    if has_explicit_event_time == 0 {
+        if let Err(error) = provider_required_timestamp_millis(
+            time_created,
+            dialect.session_message_time_created_field,
+        ) {
+            projection_bytes = encode_rejection_reason(error.to_string());
+        }
+    }
+    let projection = decode_projection(&projection_bytes)?;
+    Ok(SourceEventRow {
+        native_order: source_backed_decode_order(
+            order_tag,
+            &session_identity,
+            &message_identity,
+            &native_identity,
+            order_a,
+            order_b,
+        )?,
+        native_identity,
+        message_identity,
+        session_identity,
+        time_created,
+        time_updated,
+        content_bytes,
+        projection,
+        projection_bytes,
+        source_rowid: row.get(11)?,
+        source_data: SqliteSourceValue::from_ref(row.get_ref(12)?),
+    })
+}
+
+pub(super) fn retained_projection(
+    projection: &OpenCodeJsonProjection,
+) -> Option<OpenCodeRetainedJson> {
+    match projection {
+        OpenCodeJsonProjection::Retained(retained) => Some(retained.clone()),
+        OpenCodeJsonProjection::Output(output) => output.diagnostic.clone(),
+        OpenCodeJsonProjection::ExcludedOutput
+        | OpenCodeJsonProjection::Rejected(_)
+        | OpenCodeJsonProjection::RejectedWithReason(_, _) => None,
+    }
+}
+
+pub(super) fn projection_is_rejected(bytes: &[u8]) -> OpenCodeSourceBackedResult<bool> {
+    Ok(matches!(
+        decode_projection(bytes)?,
+        OpenCodeJsonProjection::Rejected(_) | OpenCodeJsonProjection::RejectedWithReason(_, _)
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn lexical_document(
+    source: &SourceKey,
+    family: OpenCodeNativeSchemaFamily,
+    source_revision_digest: [u8; 32],
+    source_path: &Path,
+    session: &SourceSession,
+    event: SourceEventRow,
+    retained: OpenCodeRetainedJson,
+    next_sequence: &mut u64,
+) -> OpenCodeSourceBackedResult<LexicalDocument> {
+    let raw_record = event
+        .source_data
+        .exact_text()
+        .ok_or(OpenCodeSourceBackedError::MissingExactText)?;
+    let record_digest: [u8; 32] = Sha256::digest(raw_record).into();
+    let normalized_time = retained
+        .body
+        .pointer("/time/created")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(event.time_created);
+    let semantic_digest = source_backed_event_digest(
+        family,
+        &event.native_identity,
+        &event.native_order,
+        normalized_time,
+        event.time_updated,
+        &retained,
+    )?;
+    let native_record_identity = source_backed_native_record_identity(
+        family,
+        &event.message_identity,
+        &event.native_identity,
+    );
+    let native_item_key = if family == OpenCodeNativeSchemaFamily::MessagePart {
+        NativeItemKey::composite(
+            family.identity_semantics(),
+            vec![
+                TypedKey::utf8(event.message_identity.clone())?,
+                TypedKey::utf8(event.native_identity.clone())?,
+            ],
+        )?
+    } else {
+        NativeItemKey::native_id(
+            family.identity_semantics(),
+            TypedKey::utf8(native_record_identity)?,
+        )?
+    };
+    let event_id = derive_event_id(EventIdentityInput {
+        source,
+        session_id: session.session_id,
+        logical_item_kind: LOGICAL_EVENT_KIND,
+        native_item_key: &native_item_key,
+        subrecord_selector: None,
+    })?;
+    let row_version = TypedKey::composite(vec![
+        TypedKey::I64(event.time_updated),
+        TypedKey::utf8(semantic_digest)?,
+    ])?;
+    let locator = SourceRecordLocator::new(
+        source.clone(),
+        NativeRecordCoordinate::ProviderSqlite {
+            logical_relation: family.event_table().to_owned(),
+            primary_key: TypedKey::utf8(event.native_identity.clone())?,
+            row_version: Some(row_version),
+        },
+        LocatorRevisionPolicy::ExactSourceRevision,
+        Some(source_revision_digest),
+        record_digest,
+    )?;
+
+    let kind =
+        source_backed_retained_event_kind(&retained.effective_type, &retained.role, &retained.body);
+    let searchable =
+        source_backed_retained_searchable_text(kind, &retained.effective_type, &retained.body);
+    let body = if searchable.is_empty() {
+        "OpenCode event".to_owned()
+    } else {
+        searchable
+    };
+    let (file_touches, _) = source_backed_retained_file_touches(kind, &retained.body);
+    let event_sequence = *next_sequence;
+    *next_sequence = checked_add(*next_sequence, 1)?;
+    Ok(LexicalDocument {
+        event_id,
+        session_id: session.session_id,
+        parent_session_id: session.parent_session_id,
+        root_session_id: session.root_session_id,
+        source: source.clone(),
+        locator,
+        provider_session_id: Some(session.native_identity.clone()),
+        branch: session.branch.clone(),
+        source_path: Some(source_path.to_string_lossy().into_owned()),
+        agent_type: if session.parent_native_identity.is_some() {
+            "subagent".to_owned()
+        } else {
+            "primary".to_owned()
+        },
+        is_primary: session.parent_native_identity.is_none(),
+        event_sequence,
+        occurred_at_unix_ms: Some(normalized_time),
+        event_type: event_kind_label(kind).to_owned(),
+        role: Some(retained.role),
+        body,
+        workspace: None,
+        cwd: session.directory.clone(),
+        touched_files: file_touches.into_iter().map(|touch| touch.path).collect(),
+    })
+}
