@@ -22,6 +22,24 @@ use super::{
 const SUPERVISOR_RECEIPT_FILE: &str = "supervisor.json";
 const SUPERVISOR_HANDOFF_TIMEOUT: Duration = Duration::from_secs(5);
 static SUPERVISOR_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+const SUPERVISOR_ENV_ALLOWLIST: &[&str] = &[
+    "DBUS_SESSION_BUS_ADDRESS",
+    "DISPLAY",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "PATH",
+    "SystemRoot",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "USER",
+    "USERPROFILE",
+    "WAYLAND_DISPLAY",
+    "WINDIR",
+    "XDG_CONFIG_HOME",
+    "XDG_RUNTIME_DIR",
+];
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(super) enum DaemonSupervisorStart {
@@ -260,7 +278,7 @@ fn linux_systemd_unit_path() -> Result<PathBuf> {
 #[cfg(target_os = "linux")]
 fn linux_systemd_unit(executable: &Path, data_root: &Path) -> String {
     format!(
-        "[Unit]\nDescription=ctx persistent history daemon\n\n[Service]\nType=simple\nExecStart={} --data-root {} daemon run --format=json\nRestart=on-failure\nRestartSec=2\nStandardOutput=null\nStandardError=journal\n\n[Install]\nWantedBy=default.target\n",
+        "[Unit]\nDescription=ctx persistent history daemon\n\n[Service]\nType=simple\nExecStart=/usr/bin/env -i HOME=%h PATH=/usr/local/bin:/usr/bin:/bin {} --data-root {} daemon run --format=json\nRestart=on-failure\nRestartSec=2\nStandardOutput=null\nStandardError=journal\n\n[Install]\nWantedBy=default.target\n",
         systemd_quote(executable),
         systemd_quote(data_root),
     )
@@ -274,11 +292,9 @@ fn systemd_quote(path: &Path) -> String {
 
 #[cfg(target_os = "linux")]
 fn systemctl_user<const N: usize>(args: [&str; N]) -> Result<()> {
-    let output = Command::new("systemctl")
-        .arg("--user")
-        .args(args)
-        .output()
-        .context("run systemctl --user")?;
+    let mut command = supervisor_command("systemctl");
+    command.arg("--user").args(args);
+    let output = supervisor_output(&mut command).context("run systemctl --user")?;
     if output.status.success() {
         return Ok(());
     }
@@ -302,21 +318,16 @@ fn install_native_supervisor(data_root: &Path, executable: &Path) -> Result<Path
         .with_context(|| format!("create LaunchAgent directory {}", parent.display()))?;
     write_atomic_file(&path, launch_agent_plist(executable, data_root).as_bytes())?;
     let domain = format!("gui/{}", unsafe { libc::getuid() });
-    let _ = Command::new("launchctl")
-        .args(["bootout", &domain])
-        .arg(&path)
-        .output();
+    let mut bootout = supervisor_command("launchctl");
+    bootout.args(["bootout", &domain]).arg(&path);
+    let _ = supervisor_output(&mut bootout);
     migrate_existing_daemon_to_supervisor(data_root)?;
-    command_success(
-        Command::new("launchctl")
-            .args(["bootstrap", &domain])
-            .arg(&path),
-        "launchctl bootstrap",
-    )?;
-    command_success(
-        Command::new("launchctl").args(["kickstart", "-k", &format!("{domain}/rs.ctx.daemon")]),
-        "launchctl kickstart",
-    )?;
+    let mut bootstrap = supervisor_command("launchctl");
+    bootstrap.args(["bootstrap", &domain]).arg(&path);
+    command_success(&mut bootstrap, "launchctl bootstrap")?;
+    let mut kickstart = supervisor_command("launchctl");
+    kickstart.args(["kickstart", "-k", &format!("{domain}/rs.ctx.daemon")]);
+    command_success(&mut kickstart, "launchctl kickstart")?;
     Ok(path)
 }
 
@@ -328,10 +339,9 @@ fn disable_native_supervisor() -> Result<Option<PathBuf>> {
         .join("LaunchAgents")
         .join("rs.ctx.daemon.plist");
     let domain = format!("gui/{}", unsafe { libc::getuid() });
-    let _ = Command::new("launchctl")
-        .args(["bootout", &domain])
-        .arg(&path)
-        .output();
+    let mut bootout = supervisor_command("launchctl");
+    bootout.args(["bootout", &domain]).arg(&path);
+    let _ = supervisor_output(&mut bootout);
     match fs::remove_file(&path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -342,46 +352,28 @@ fn disable_native_supervisor() -> Result<Option<PathBuf>> {
 
 #[cfg(target_os = "macos")]
 fn launch_agent_plist(executable: &Path, data_root: &Path) -> String {
+    let home = identity::home_dir().unwrap_or_default();
     format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>rs.ctx.daemon</string>\n<key>ProgramArguments</key><array><string>{}</string><string>--data-root</string><string>{}</string><string>daemon</string><string>run</string><string>--format=json</string></array>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n<key>ProcessType</key><string>Background</string>\n<key>StandardOutPath</key><string>/dev/null</string>\n<key>StandardErrorPath</key><string>/dev/null</string>\n</dict></plist>\n",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>rs.ctx.daemon</string>\n<key>ProgramArguments</key><array><string>/usr/bin/env</string><string>-i</string><string>HOME={}</string><string>PATH=/usr/local/bin:/usr/bin:/bin</string><string>{}</string><string>--data-root</string><string>{}</string><string>daemon</string><string>run</string><string>--format=json</string></array>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n<key>ProcessType</key><string>Background</string>\n<key>StandardOutPath</key><string>/dev/null</string>\n<key>StandardErrorPath</key><string>/dev/null</string>\n</dict></plist>\n",
+        xml_escape(&home.to_string_lossy()),
         xml_escape(&executable.to_string_lossy()),
         xml_escape(&data_root.to_string_lossy()),
     )
 }
 
 #[cfg(windows)]
-fn install_native_supervisor(data_root: &Path, executable: &Path) -> Result<PathBuf> {
-    let root = daemon_root_path(data_root);
-    create_private_dir_all(&root)?;
-    let xml_path = root.join("windows-task.xml");
-    write_atomic_file(
-        &xml_path,
-        windows_task_xml(executable, data_root).as_bytes(),
-    )?;
-    command_success(
-        Command::new("schtasks")
-            .args(["/Create", "/TN", "ctx-daemon", "/XML"])
-            .arg(&xml_path)
-            .arg("/F"),
-        "schtasks /Create",
-    )?;
-    migrate_existing_daemon_to_supervisor(data_root)?;
-    command_success(
-        Command::new("schtasks").args(["/Run", "/TN", "ctx-daemon"]),
-        "schtasks /Run",
-    )?;
-    Ok(xml_path)
+fn install_native_supervisor(_data_root: &Path, _executable: &Path) -> Result<PathBuf> {
+    Err(anyhow!(native_supervisor_limitation()))
 }
 
 #[cfg(windows)]
 fn disable_native_supervisor() -> Result<Option<PathBuf>> {
-    let _ = Command::new("schtasks")
-        .args(["/End", "/TN", "ctx-daemon"])
-        .output();
-    let output = Command::new("schtasks")
-        .args(["/Delete", "/TN", "ctx-daemon", "/F"])
-        .output()
-        .context("run schtasks /Delete")?;
+    let mut end = supervisor_command("schtasks");
+    end.args(["/End", "/TN", "ctx-daemon"]);
+    let _ = supervisor_output(&mut end);
+    let mut delete = supervisor_command("schtasks");
+    delete.args(["/Delete", "/TN", "ctx-daemon", "/F"]);
+    let output = supervisor_output(&mut delete).context("run schtasks /Delete")?;
     if output.status.success() || String::from_utf8_lossy(&output.stderr).contains("cannot find") {
         return Ok(None);
     }
@@ -389,19 +381,6 @@ fn disable_native_supervisor() -> Result<Option<PathBuf>> {
         "schtasks /Delete failed: {}",
         String::from_utf8_lossy(&output.stderr).trim()
     ))
-}
-
-#[cfg(windows)]
-fn windows_task_xml(executable: &Path, data_root: &Path) -> String {
-    let arguments = format!(
-        "--data-root \"{}\" daemon run --format=json",
-        data_root.to_string_lossy().replace('"', "\"\"")
-    );
-    format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Task version=\"1.4\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\"><RegistrationInfo><Description>ctx persistent history daemon</Description></RegistrationInfo><Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers><Principals><Principal id=\"Author\"><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Enabled>true</Enabled></Settings><Actions Context=\"Author\"><Exec><Command>{}</Command><Arguments>{}</Arguments></Exec></Actions></Task>",
-        xml_escape(&executable.to_string_lossy()),
-        xml_escape(&arguments),
-    )
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
@@ -416,7 +395,7 @@ fn disable_native_supervisor() -> Result<Option<PathBuf>> {
 
 #[cfg(any(target_os = "macos", windows))]
 fn command_success(command: &mut Command, label: &str) -> Result<()> {
-    let output = command.output().with_context(|| format!("run {label}"))?;
+    let output = supervisor_output(command).with_context(|| format!("run {label}"))?;
     if output.status.success() {
         return Ok(());
     }
@@ -424,6 +403,21 @@ fn command_success(command: &mut Command, label: &str) -> Result<()> {
         "{label} failed: {}",
         String::from_utf8_lossy(&output.stderr).trim()
     ))
+}
+
+fn supervisor_command(program: &str) -> Command {
+    let inherited = SUPERVISOR_ENV_ALLOWLIST
+        .iter()
+        .filter_map(|name| env::var_os(name).map(|value| (*name, value)))
+        .collect::<Vec<_>>();
+    let mut command = Command::new(program);
+    command.env_clear().envs(inherited);
+    command
+}
+
+fn supervisor_output(command: &mut Command) -> std::io::Result<std::process::Output> {
+    crate::process_environment::sanitize_release_authority_env(command);
+    command.output()
 }
 
 #[cfg(any(target_os = "macos", windows))]
@@ -590,7 +584,7 @@ fn native_supervisor_limitation() -> &'static str {
     }
     #[cfg(windows)]
     {
-        "per-user Task Scheduler registration is unavailable; retrieval commands retain CLI self-healing"
+        "Task Scheduler cannot guarantee a clear inherited environment for ctx; retrieval commands retain CLI self-healing"
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
@@ -611,6 +605,8 @@ mod tests {
         );
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("WantedBy=default.target"));
+        assert!(unit.contains("ExecStart=/usr/bin/env -i "));
+        assert!(!unit.contains("CTX_RELEASE_"));
         assert!(!unit.contains("idle-exit-seconds"));
         assert!(!unit.contains("loop-interval-seconds"));
     }

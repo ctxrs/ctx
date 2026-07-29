@@ -130,14 +130,14 @@ impl DaemonUpgradeHandoff {
             .or_else(|| read_daemon_restart_request(&self.data_root).map(|(_, trigger)| trigger));
         if daemon_restart_allowed(&self.data_root)? {
             if let Some(trigger) = restart_trigger {
-                let mut child = configured_daemon_autostart_command(
+                let mut command = configured_daemon_autostart_command(
                     executable,
                     &self.data_root,
                     trigger,
                     Some(&self.handoff_id),
-                )
-                .spawn()
-                .context("restart ctx daemon after upgrade")?;
+                );
+                let mut child =
+                    spawn_daemon_child(&mut command).context("restart ctx daemon after upgrade")?;
                 wait_for_replacement_daemon(&self.data_root, &mut child)?;
             }
         }
@@ -167,14 +167,14 @@ impl DaemonUpgradeHandoff {
             if daemon_autostart_allowed(&self.data_root, &config) {
                 if let Some(trigger) = restart_trigger {
                     clear_legacy_daemon_readiness(&self.data_root)?;
-                    let mut child = configured_daemon_autostart_command(
+                    let mut command = configured_daemon_autostart_command(
                         executable,
                         &self.data_root,
                         trigger,
                         Some(&self.handoff_id),
-                    )
-                    .spawn()
-                    .context("restart legacy ctx daemon after rollback")?;
+                    );
+                    let mut child = spawn_daemon_child(&mut command)
+                        .context("restart legacy ctx daemon after rollback")?;
                     wait_for_legacy_replacement_daemon(
                         &self.data_root,
                         &mut child,
@@ -301,16 +301,18 @@ pub(crate) fn begin_daemon_upgrade_handoff(
     while daemon_lock_is_active(data_root) {
         if Instant::now() >= deadline {
             #[cfg(unix)]
-            terminate_identity_verified_residual_daemon(
-                data_root,
-                &env::current_exe().context("resolve upgrading ctx executable")?,
-            )
-            .context("stop residual ctx daemon before upgrade")?;
+            {
+                terminate_identity_verified_residual_daemon(
+                    data_root,
+                    &env::current_exe().context("resolve upgrading ctx executable")?,
+                )
+                .context("stop residual ctx daemon before upgrade")?;
+                break;
+            }
             #[cfg(not(unix))]
             return Err(anyhow!(
                 "timed out waiting for the ctx daemon to stop before upgrade"
             ));
-            break;
         }
         std::thread::sleep(DAEMON_UPGRADE_POLL_INTERVAL);
     }
@@ -375,7 +377,6 @@ fn request_disabled_daemon_shutdown(data_root: &Path) {
     );
 }
 
-#[cfg(unix)]
 fn wait_for_daemon_lifecycle_release(data_root: &Path) -> Result<()> {
     let deadline = Instant::now() + DAEMON_UPGRADE_RESTART_TIMEOUT;
     while daemon_lock_is_active(data_root) {
@@ -708,9 +709,8 @@ pub(crate) fn complete_replacement_daemon_handoff(
                     Some(handoff_id),
                 )
             };
-            let mut child = command
-                .spawn()
-                .context("restart ctx daemon after replacement")?;
+            let mut child =
+                spawn_daemon_child(&mut command).context("restart ctx daemon after replacement")?;
             wait_for_replacement_daemon(data_root, &mut child)?;
         } else {
             wait_for_daemon_ready_ack(data_root)?;
