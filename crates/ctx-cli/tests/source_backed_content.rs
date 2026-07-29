@@ -379,6 +379,49 @@ fn cli_show_hydrates_exact_provider_source_for_both_policy_tokens_without_previe
 }
 
 #[test]
+fn cli_show_session_resolves_exact_provider_session_with_complete_hydration() {
+    let fixture = source_indexed_codex_message();
+
+    for provider in [None, Some("codex")] {
+        let mut command = ctx(&fixture.temp);
+        command.args([
+            "show",
+            "session",
+            "--provider-session",
+            SOURCE_INDEX_PROVIDER_SESSION_ID,
+        ]);
+        if let Some(provider) = provider {
+            command.args(["--provider", provider]);
+        }
+        let session =
+            json_output(command.args(["--mode", "full", "--content", "complete", "--format=json"]));
+        assert_eq!(session["payload_type"], "session_transcript");
+        assert_eq!(session["ctx_session_id"], fixture.session_id);
+        assert_eq!(session["provider"], "codex");
+        assert_eq!(
+            session["provider_session_id"],
+            SOURCE_INDEX_PROVIDER_SESSION_ID
+        );
+        assert_provider_authoritative_event(&session["events"][0], &fixture, "complete");
+    }
+
+    let stderr = failure_stderr(ctx(&fixture.temp).args([
+        "show",
+        "session",
+        "--provider-session",
+        SOURCE_INDEX_PROVIDER_SESSION_ID,
+        "--provider",
+        "claude",
+        "--format=json",
+    ]));
+    assert!(
+        stderr.contains("was not found in the source-backed Core generation"),
+        "{stderr}"
+    );
+    assert_no_legacy_store(&fixture);
+}
+
+#[test]
 fn mcp_show_hydrates_exact_provider_source_for_both_policy_tokens_without_preview() {
     let fixture = source_indexed_codex_message();
 
