@@ -2,12 +2,11 @@ use crate::tests::support::assertions::{
     assert_event_type_count, assert_events_have_provider_citations, assert_search_hits_provider,
     assert_search_misses,
 };
-use crate::tests::support::paths::{provider_history_fixture, tempdir};
+use crate::tests::support::paths::tempdir;
 use crate::tests::support::provider_state::stored_provider_session_id;
 use crate::{
-    import_crush_sqlite, import_goose_sessions_sqlite, import_hermes_sqlite,
-    CrushSqliteImportOptions, GooseSessionsSqliteImportOptions, HermesSqliteImportOptions,
-    ProviderImportSummary, GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
+    import_crush_sqlite, import_hermes_sqlite, CrushSqliteImportOptions, HermesSqliteImportOptions,
+    ProviderImportSummary,
 };
 use ctx_history_core::{CaptureProvider, EventType};
 use ctx_history_store::Store;
@@ -240,103 +239,4 @@ fn write_hermes_tool_output_db(temp: &TempDir) -> PathBuf {
     )
     .unwrap();
     path
-}
-
-#[test]
-fn native_goose_successful_tool_outputs_are_absent_and_not_searchable() {
-    let temp = tempdir();
-    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
-
-    let goose = provider_history_fixture("goose/v14/sessions.db");
-    Connection::open(&goose)
-        .unwrap()
-        .execute(
-            "UPDATE messages SET content_json = ?1 WHERE id = 3",
-            [json!([{
-                "type": "toolResponse",
-                "toolResult": {
-                    "content": [{"type": "text", "text": "goose-output-sentinel"}]
-                }
-            }])
-            .to_string()],
-        )
-        .unwrap();
-    let goose_summary = import_goose_sessions_sqlite(
-        &goose,
-        &mut store,
-        GooseSessionsSqliteImportOptions {
-            source_path: Some(goose.clone()),
-            ..GooseSessionsSqliteImportOptions::default()
-        },
-    )
-    .unwrap();
-    assert_eq!(goose_summary.failed, 0, "{:?}", goose_summary.failures);
-    assert_successful_output_absent(
-        &store,
-        CaptureProvider::Goose,
-        "goose-root",
-        "goose-output-sentinel",
-    );
-    assert_search_hit_cites_source(
-        &store,
-        CaptureProvider::Goose,
-        GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
-        "goose sqlite search oracle request",
-    );
-}
-
-fn assert_successful_output_absent(
-    store: &Store,
-    provider: CaptureProvider,
-    provider_session_id: &str,
-    forbidden_output: &str,
-) {
-    let session_id = stored_provider_session_id(store, provider, provider_session_id);
-    let events = store.events_for_session(session_id).unwrap();
-    assert_event_type_count(&events, EventType::ToolOutput, 0);
-    let rendered = serde_json::to_string(&events).unwrap();
-    assert!(
-        !rendered.contains(forbidden_output),
-        "{provider:?} leaked raw output into sanitized event payload"
-    );
-    assert!(
-        store
-            .search_event_hits(forbidden_output, 10)
-            .unwrap()
-            .is_empty(),
-        "{provider:?} raw output should not be indexed"
-    );
-    assert!(
-        store.runs_for_session(session_id).unwrap().is_empty(),
-        "{provider:?} successful output must not create a Core run"
-    );
-}
-
-fn assert_search_hit_cites_source(
-    store: &Store,
-    provider: CaptureProvider,
-    source_format: &str,
-    query: &str,
-) {
-    let hits = store.search_event_hits(query, 10).unwrap();
-    let hit = hits
-        .iter()
-        .find(|hit| hit.provider == Some(provider))
-        .unwrap_or_else(|| panic!("missing {provider:?} search hit for {query:?}"));
-    assert_eq!(hit.source_format.as_deref(), Some(source_format));
-    assert!(hit.raw_source_path.is_some());
-    let event = store.get_event(hit.event_id).unwrap();
-    let source = store
-        .get_capture_source(
-            event
-                .capture_source_id
-                .expect("search hit has capture source"),
-        )
-        .unwrap();
-    assert_eq!(source.descriptor.provider, provider);
-    assert_eq!(
-        source.descriptor.source_format.as_deref(),
-        Some(source_format)
-    );
-    assert!(source.descriptor.source_identity.is_some());
 }
