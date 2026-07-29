@@ -40,12 +40,6 @@ impl ContinuePathSpool {
                 path: path.to_path_buf(),
                 message: "Continue source path exceeds u32 path-spool encoding".to_owned(),
             })?;
-        if let Some(source) = injected_io_failure(ContinueInjectedIoOperation::SpoolWrite, path) {
-            return Err(ContinueNativePathError::SystemIo {
-                operation: "write Continue path spool",
-                source,
-            });
-        }
         self.file
             .write_all(&length.to_le_bytes())
             .and_then(|_| self.file.write_all(&encoded))

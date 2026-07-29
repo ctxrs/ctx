@@ -30,15 +30,12 @@ pub(crate) use normalize::{
 #[cfg(test)]
 pub(crate) use parse::{ContinueOutputExclusionStats, ContinueSourceFailureKind};
 pub(crate) use production::import_continue_nativepath_history;
-#[cfg(test)]
-pub(crate) use source::{
-    clear_continue_io_failure, inject_continue_io_failure, observe_continue_pending_paths,
-    ContinueDiscovery, ContinueIndexState, ContinueInjectedIoOperation,
-};
 pub(crate) use source::{
     discover_continue_root, ContinueIndexObservation, ContinueIndexSnapshot,
     ContinueSourceObservation,
 };
+#[cfg(test)]
+pub(crate) use source::{observe_continue_pending_paths, ContinueDiscovery, ContinueIndexState};
 pub(crate) use source_backed::{
     hydrate_continue_source_backed_record, ContinueSourceBackedOutcome, ContinueSourceBackedReader,
 };

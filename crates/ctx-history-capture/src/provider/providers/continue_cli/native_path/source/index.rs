@@ -191,9 +191,6 @@ pub(super) fn read_opened_exact_file(
         });
     }
     let file_token = opened_file_token(&opened, path)?;
-    if let Some(error) = injected_io_failure(ContinueInjectedIoOperation::SourceRead, path) {
-        return Err(source_io(path, "read Continue source", error));
-    }
     let length =
         usize::try_from(opened.len()).map_err(|_| ContinueNativePathError::SourceTooLarge {
             path: path.to_path_buf(),

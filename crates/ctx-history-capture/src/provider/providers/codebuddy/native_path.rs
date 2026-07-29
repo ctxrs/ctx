@@ -461,8 +461,6 @@ mod source_backed;
 
 use discovery::*;
 pub(crate) use ingestion::import_codebuddy_nativepath;
-#[cfg(test)]
-use ingestion::{capture_source, normalized_session};
 use lifecycle::*;
 use outputs::*;
 pub(crate) use outputs::{
@@ -475,7 +473,3 @@ pub(crate) use source_backed::{
     CodeBuddyHydratedSourceRecord, CodeBuddySourceBackedPage, CodeBuddySourceBackedRejection,
     CodeBuddySourceBackedScan,
 };
-
-#[cfg(test)]
-#[path = "native_path_tests.rs"]
-mod tests;

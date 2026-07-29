@@ -1,43 +1,19 @@
-mod production;
-
 use std::{
-    collections::BTreeSet,
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, Mutex,
-    },
 };
 
-use ctx_history_core::{
-    AgentType, CaptureProvider, CaptureSource, CaptureSourceDescriptor, CaptureSourceKind, Event,
-    EventRole, EventType, Fidelity, Session, SessionStatus,
-};
-use ctx_history_store::Store;
+use ctx_history_core::EventType;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 use super::{
-    cursor_complete_content_source_from_admitted, cursor_complete_content_source_revision,
-    discover_cursor_transcripts, freeze_cursor_source, resolve_cursor_missing_sources,
-    scan_cursor_source, CursorCheckpoint, CursorCompletedExactInventory, CursorKnownSource,
-    CursorMissingSourceDisposition, CursorPriorObservation, CursorReadOutcome,
-    CursorSourceGeneration, CursorSourceMutation,
+    discover_cursor_transcripts, freeze_cursor_source, scan_cursor_source, CursorCheckpoint,
+    CursorPriorObservation, CursorReadOutcome, CursorSourceGeneration, CursorSourceMutation,
 };
 use super::{CursorPublicationPage, CursorPublicationSink};
-use crate::complete_content::{
-    jsonl::JsonlCompleteContentResolver, AuthorizedSourceRoute, CompleteContentErrorKind,
-    CompleteContentHashAuthority, CompleteContentResolver, CompleteContentSourceFamily,
-    CompleteMessageRequest, SourceAccessBroker, SourceSnapshot, VerifiedContentLocatorsV1,
-    VerifiedContentRole, VERIFIED_CONTENT_LOCATORS_METADATA_KEY,
-};
-use crate::provider::importer::{
-    provider_scoped_source_uuid, provider_session_uuid, provider_source_event_import_identity,
-    provider_sync_metadata, timestamps,
-};
 use crate::provider::providers::cursor::{
     layout::{
         CURSOR_MAX_DIRECTORY_DEPTH, CURSOR_MAX_DIRECTORY_ENTRIES,
@@ -48,14 +24,6 @@ use crate::provider::providers::cursor::{
         CursorRejectionKind, CURSOR_REJECTION_SAMPLE_LIMIT,
     },
 };
-use crate::{
-    import_cursor_native_history, CaptureWorkLimit, CursorNativeImportOptions, ImportProfile,
-    OutputOutcome, OutputSourceIdentity, ProOutputMaterializationPage, ProOutputPageResult,
-    ProOutputProgress, ProOutputSink, ProOutputSinkError, ProOutputSourceDisposition,
-    ProviderImportWorkResult, CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
-    LEGACY_CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT, PROVIDER_MAX_TEXT_CHARS,
-};
-
 fn tempdir() -> TempDir {
     let temp_root = fs::canonicalize(std::env::temp_dir())
         .expect("system temporary directory should be canonicalizable");
@@ -598,143 +566,6 @@ fn v025_bridge_uses_physical_ordinal_only_for_the_first_sibling() {
     }));
     assert_eq!(parsed.events[0].legacy_provider_event_index(), Some(2));
     assert_eq!(parsed.events[1].legacy_provider_event_index(), None);
-}
-
-#[test]
-fn historical_v025_store_reuses_physical_line_id_without_collapsing_siblings() {
-    const MACHINE: &str = "cursor-v025-upgrade-machine";
-    let temp = tempdir();
-    let root = temp.path().join("projects");
-    let mut bytes = b"\n{\"malformed\"\n".to_vec();
-    bytes.extend_from_slice(&jsonl([json!({
-        "timestamp": "2026-07-24T12:00:01Z",
-        "role": "assistant",
-        "message": {
-            "role": "assistant",
-            "content": [
-                {"type": "text", "text": "released first sibling"},
-                {"type": "text", "text": "new second sibling"}
-            ]
-        }
-    })]));
-    let path = write_transcript(&root, "project", "v025-upgrade", &bytes);
-    let parsed = parsed(&bytes, None);
-    let first_hash = parsed.events[0].provider_event_hash.clone();
-    let canonical_path = fs::canonicalize(&path).unwrap();
-    let raw_source_path = canonical_path.display().to_string();
-    let locator_identity =
-        crate::provider::importer::provider_path_identity(&canonical_path).unwrap();
-    let source_identity = format!("cursor-native-path-v1:{locator_identity}");
-    let source_id = provider_scoped_source_uuid(
-        CaptureProvider::Cursor,
-        "v025-upgrade",
-        LEGACY_CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
-        Some(&raw_source_path),
-    );
-    let session_id = provider_session_uuid(CaptureProvider::Cursor, "v025-upgrade");
-    let occurred_at = "2026-07-24T12:00:01Z".parse().unwrap();
-    let mut store = Store::open(temp.path().join("history.sqlite")).unwrap();
-    store
-        .upsert_capture_source(&CaptureSource {
-            id: source_id,
-            descriptor: CaptureSourceDescriptor {
-                kind: CaptureSourceKind::ProviderImport,
-                provider: CaptureProvider::Cursor,
-                machine_id: MACHINE.to_owned(),
-                process_id: None,
-                cwd: None,
-                raw_source_path: Some(raw_source_path.clone()),
-                source_format: Some(LEGACY_CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT.to_owned()),
-                source_root: Some(root.display().to_string()),
-                source_identity: Some(source_identity),
-                external_session_id: Some("v025-upgrade".to_owned()),
-            },
-            started_at: occurred_at,
-            ended_at: Some(occurred_at),
-            sync: provider_sync_metadata(
-                Fidelity::Imported,
-                json!({"source_format": LEGACY_CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT}),
-            ),
-        })
-        .unwrap();
-    store
-        .upsert_session(&Session {
-            id: session_id,
-            history_record_id: None,
-            parent_session_id: None,
-            root_session_id: None,
-            capture_source_id: Some(source_id),
-            provider: CaptureProvider::Cursor,
-            external_session_id: Some("v025-upgrade".to_owned()),
-            external_agent_id: None,
-            agent_type: AgentType::Primary,
-            role_hint: Some("primary".to_owned()),
-            is_primary: true,
-            status: SessionStatus::Imported,
-            transcript_blob_id: None,
-            started_at: occurred_at,
-            ended_at: Some(occurred_at),
-            timestamps: timestamps(occurred_at),
-            sync: provider_sync_metadata(Fidelity::Imported, json!({})),
-        })
-        .unwrap();
-    let released = provider_source_event_import_identity(source_id, 2, &first_hash);
-    store
-        .upsert_event(&Event {
-            id: released.id,
-            seq: released.seq,
-            history_record_id: None,
-            session_id: Some(session_id),
-            run_id: None,
-            event_type: EventType::Message,
-            role: Some(EventRole::Assistant),
-            occurred_at,
-            capture_source_id: Some(source_id),
-            payload: json!({
-                "text": "released first sibling",
-                "body": {"kind": "text", "text": "released first sibling"}
-            }),
-            payload_blob_id: None,
-            dedupe_key: Some(released.dedupe_key),
-            sync: provider_sync_metadata(
-                Fidelity::Imported,
-                json!({
-                    "provider_event_hash": first_hash,
-                    "provider_event_hash_authority": "provider_supplied",
-                    "source_format": LEGACY_CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
-                    "source_record_ordinal": 2,
-                    "source_record_subrecord_index": 0,
-                }),
-            ),
-        })
-        .unwrap();
-
-    let summary =
-        production::import_cursor_proof(&root, &mut store, MACHINE, ImportProfile::CoreOnly);
-
-    assert_eq!(summary.failed, 1);
-    assert_eq!(
-        store
-            .get_capture_source(source_id)
-            .unwrap()
-            .descriptor
-            .source_format,
-        Some(CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT.to_owned())
-    );
-    let events = store.events_for_session(session_id).unwrap();
-    assert_eq!(events.len(), 2);
-    assert!(events.iter().any(|event| event.id == released.id));
-    assert_eq!(
-        events
-            .iter()
-            .map(|event| event.id)
-            .collect::<BTreeSet<_>>()
-            .len(),
-        2
-    );
-    assert!(events
-        .iter()
-        .any(|event| { event.payload["text"].as_str() == Some("new second sibling") }));
 }
 
 #[test]

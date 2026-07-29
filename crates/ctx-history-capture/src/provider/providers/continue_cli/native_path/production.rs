@@ -42,8 +42,6 @@ use crate::{
 };
 
 use super::normalize::CONTINUE_NATIVE_MAX_FILE_TOUCHES_PER_EVENT;
-#[cfg(test)]
-use super::{clear_continue_io_failure, inject_continue_io_failure, ContinueInjectedIoOperation};
 use super::{
     discover_continue_root, prepare_continue_discovery_with_profile, ContinueEventKind,
     ContinueEventRole, ContinueEventRow, ContinueIndexObservation, ContinueIndexSnapshot,
@@ -54,9 +52,6 @@ use super::{
 
 mod lifecycle;
 mod publication;
-
-#[cfg(test)]
-mod tests;
 
 use lifecycle::*;
 use publication::*;

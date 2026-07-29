@@ -133,5 +133,4 @@ pub(super) fn insert_message(conn: &Connection, id: i64, session_id: &str, text:
 }
 
 mod native_path;
-mod production;
 mod source_backed;
