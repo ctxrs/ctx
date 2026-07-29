@@ -3,8 +3,8 @@ use std::{collections::BTreeMap, path::Path};
 use anyhow::Result;
 use ctx_history_capture::SourceBackedResolverRegistry;
 use ctx_history_core::{
-    ContentSourceResolver, EventHydrationRequest, HydratedProviderRecord, HydrationFailureKind,
-    SourceFrontier, SourceKey, StableEntityId, TypedKey,
+    BatchHydrationRequest, ContentSourceResolver, EventHydrationRequest, HydratedProviderRecord,
+    HydrationFailureKind, SourceFrontier, SourceKey, StableEntityId, TypedKey,
 };
 use ctx_history_index::{
     EventRecord, IndexError, SourceEventCursor, VerifiedIndex, MAX_SOURCE_EVENT_PAGE_ITEMS,
@@ -48,6 +48,8 @@ pub(super) enum SourceBackedProProviderError {
     Index(#[from] IndexError),
     #[error("source_cursor_invalid: {0}")]
     CursorContract(#[from] ctx_history_core::ProjectionContractError),
+    #[error("source_hydration_batch_invalid: {0}")]
+    BatchContract(ctx_history_core::SourceResolverContractError),
     #[error("source_cursor_invalid: cursor serialization failed: {0}")]
     CursorSerialization(#[from] serde_json::Error),
     #[error(
@@ -70,6 +72,11 @@ pub(super) enum SourceBackedProProviderError {
     Hydration {
         kind: HydrationFailureKind,
         event_id: StableEntityId,
+        detail: String,
+    },
+    #[error("source_hydration_failed: {kind:?} while hydrating an ordered page: {detail}")]
+    BatchHydration {
+        kind: HydrationFailureKind,
         detail: String,
     },
     #[error(
@@ -255,25 +262,19 @@ impl<'a> SourceBackedProProvider<'a> {
     }
 }
 
-/// Keeps the runtime page-oriented while the ordered multi-event resolver
-/// contract is integrated. Once available, only this compatibility adapter
-/// needs to switch to the registry's ordered batch method.
 fn hydrate_source_event_page(
     resolver: &SourceBackedResolverRegistry,
     requests: &[EventHydrationRequest],
 ) -> std::result::Result<Vec<HydratedProviderRecord>, SourceBackedProProviderError> {
-    requests
-        .iter()
-        .map(|request| {
-            resolver.hydrate_event(request).map_err(|failure| {
-                SourceBackedProProviderError::Hydration {
-                    kind: failure.kind,
-                    event_id: request.event_id(),
-                    detail: failure.detail,
-                }
-            })
+    let batch = BatchHydrationRequest::new(requests.to_vec())
+        .map_err(SourceBackedProProviderError::BatchContract)?;
+    resolver
+        .hydrate_batch(&batch)
+        .map_err(|failure| SourceBackedProProviderError::BatchHydration {
+            kind: failure.kind,
+            detail: failure.detail,
         })
-        .collect()
+        .map(ctx_history_core::BatchHydrationResult::into_records)
 }
 
 impl SourceBackedProProviderContract for SourceBackedProProvider<'_> {
