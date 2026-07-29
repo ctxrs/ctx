@@ -287,6 +287,7 @@ impl Drop for SqliteSourceReadSnapshot {
 }
 
 mod family;
+mod logical;
 mod snapshot;
 
 use family::{
@@ -296,6 +297,7 @@ use family::{
     NativeFileState, SqliteConnectionEvidence, SqliteFamilyEvidence, SqliteFamilyMember,
     SqliteSchemaEvidence, SqliteSnapshotEvidence, SqliteSourceFamily,
 };
+pub(crate) use logical::SqliteLogicalSnapshot;
 #[cfg(test)]
 use snapshot::open_root_handle_sqlite_source_snapshot_for_test;
 pub(crate) use snapshot::{
