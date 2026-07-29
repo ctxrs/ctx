@@ -177,7 +177,7 @@ fn hash_inventory_file(
     path: &Path,
 ) -> Result<(), ContinueNativePathError> {
     hash_inventory_path(hasher, relative, path)?;
-    hasher.update([b'f']);
+    hasher.update(*b"f");
     hasher.update(file.len().to_le_bytes());
     hasher.update(opened_metadata_identity(file, path)?);
     Ok(())
@@ -189,7 +189,7 @@ fn hash_inventory_directory(
     path: &Path,
 ) -> Result<(), ContinueNativePathError> {
     hash_inventory_path(hasher, relative, path)?;
-    hasher.update([b'd']);
+    hasher.update(*b"d");
     Ok(())
 }
 

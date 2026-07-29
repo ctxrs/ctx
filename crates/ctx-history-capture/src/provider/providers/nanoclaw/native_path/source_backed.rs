@@ -132,7 +132,7 @@ where
     let user_version = central
         .query_row("pragma user_version", [], |row| row.get(0))
         .map_err(CaptureError::from)?;
-    let schema_fingerprint = sqlite_schema_fingerprint(&central)?;
+    let schema_fingerprint = sqlite_schema_fingerprint(central)?;
     let revision = project
         .snapshot()
         .source_backed_revision_evidence(user_version, &schema_fingerprint)?;
@@ -253,7 +253,7 @@ pub(crate) fn hydrate_nanoclaw_source_backed_exact(
     let user_version = central
         .query_row("pragma user_version", [], |row| row.get(0))
         .map_err(CaptureError::from)?;
-    let schema_fingerprint = sqlite_schema_fingerprint(&central)?;
+    let schema_fingerprint = sqlite_schema_fingerprint(central)?;
     let revision = project
         .snapshot()
         .source_backed_revision_evidence(user_version, &schema_fingerprint)?;

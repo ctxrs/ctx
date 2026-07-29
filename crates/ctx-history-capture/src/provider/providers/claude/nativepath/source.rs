@@ -501,19 +501,18 @@ fn bind_opened_tree(
     Ok(())
 }
 
+type ClassifiedClaudeRelative = (
+    Option<PathBuf>,
+    Option<SessionLayout>,
+    Option<ClaudeSessionKey>,
+);
+
 fn classify_claude_relative(
     projects_root: &Path,
     projects_container: bool,
     components: &[&OsStr],
     path: &Path,
-) -> Result<
-    (
-        Option<PathBuf>,
-        Option<SessionLayout>,
-        Option<ClaudeSessionKey>,
-    ),
-    ClaudeNativePathError,
-> {
+) -> Result<ClassifiedClaudeRelative, ClaudeNativePathError> {
     let (project_dir, inner) = if projects_container {
         let Some(project) = components.first() else {
             return Ok((None, None, None));

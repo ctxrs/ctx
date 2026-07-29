@@ -316,6 +316,14 @@ struct SourceSession {
     agent_identity: Option<String>,
 }
 
+type RawSession = (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 #[derive(Debug)]
 struct WorkingScan {
     source: SourceKey,
@@ -763,19 +771,7 @@ fn load_sessions(
     Ok(sessions)
 }
 
-fn root_session_identity(
-    identity: &str,
-    sessions: &BTreeMap<
-        String,
-        (
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        ),
-    >,
-) -> String {
+fn root_session_identity(identity: &str, sessions: &BTreeMap<String, RawSession>) -> String {
     let mut root = identity.to_owned();
     let mut visited = HashSet::from([identity.to_owned()]);
     for _ in 0..64 {

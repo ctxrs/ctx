@@ -1885,7 +1885,7 @@ fn digest_optional_file(bytes: Option<&[u8]>) -> MuxSourceBackedResult<Option<Mu
     };
     Ok(Some(MuxComponentDigest {
         bytes: u64::try_from(bytes.len()).map_err(|_| MuxSourceBackedError::CountOverflow)?,
-        digest: Sha256::digest(&bytes).into(),
+        digest: Sha256::digest(bytes).into(),
     }))
 }
 

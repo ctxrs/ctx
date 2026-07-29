@@ -81,7 +81,7 @@ fn current_cline_sdk_format_remains_detected_but_unsupported() {
     assert_eq!(detected.import_support, ProviderImportSupport::Unsupported);
     assert_eq!(detected.status, ProviderSourceStatus::Unsupported);
 
-    let mut adapter = cline_task_json_source_backed_adapter(&[detected.clone()]);
+    let mut adapter = cline_task_json_source_backed_adapter(std::slice::from_ref(&detected));
     assert_eq!(adapter.detected_but_unsupported(), &[detected]);
     assert!(adapter
         .next_page()
@@ -186,7 +186,7 @@ fn lifecycle_case(provider: CaptureProvider) {
             .expect("valid cold task event request");
     let cold_source = cold.tasks[0].source.clone();
     let cold_certificate = cold.tasks[0].certified_source.clone();
-    let resolver = resolver(provider, &[selected.clone()]);
+    let resolver = resolver(provider, std::slice::from_ref(&selected));
     let hydrated = resolver
         .hydrate_event(&cold_request)
         .expect("hydrate exact native item");

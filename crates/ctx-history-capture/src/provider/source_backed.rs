@@ -4696,12 +4696,11 @@ impl CursorSourceBackedSink for CursorHydrationSink<'_> {
         for record in page.records {
             if record.event_id == self.request.event_id()
                 && record.locator == *self.request.locator()
+                && self.record.replace(record).is_some()
             {
-                if self.record.replace(record).is_some() {
-                    return Err(CaptureError::InvalidPayload(
-                        "Cursor exact locator resolved more than once".to_owned(),
-                    ));
-                }
+                return Err(CaptureError::InvalidPayload(
+                    "Cursor exact locator resolved more than once".to_owned(),
+                ));
             }
         }
         Ok(())

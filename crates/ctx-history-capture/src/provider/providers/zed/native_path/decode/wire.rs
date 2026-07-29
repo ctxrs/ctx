@@ -622,43 +622,43 @@ impl<'de> Visitor<'de> for ZedToolResultsVisitor {
         A: SeqAccess<'de>,
     {
         while sequence.next_element::<IgnoredAny>()?.is_some() {}
-        Ok(ZedToolResultsWire::default())
+        Ok(ZedToolResultsWire)
     }
 
     fn visit_bool<E>(self, _value: bool) -> std::result::Result<Self::Value, E> {
-        Ok(ZedToolResultsWire::default())
+        Ok(ZedToolResultsWire)
     }
 
     fn visit_i64<E>(self, _value: i64) -> std::result::Result<Self::Value, E> {
-        Ok(ZedToolResultsWire::default())
+        Ok(ZedToolResultsWire)
     }
 
     fn visit_u64<E>(self, _value: u64) -> std::result::Result<Self::Value, E> {
-        Ok(ZedToolResultsWire::default())
+        Ok(ZedToolResultsWire)
     }
 
     fn visit_f64<E>(self, _value: f64) -> std::result::Result<Self::Value, E> {
-        Ok(ZedToolResultsWire::default())
+        Ok(ZedToolResultsWire)
     }
 
     fn visit_none<E>(self) -> std::result::Result<Self::Value, E> {
-        Ok(ZedToolResultsWire::default())
+        Ok(ZedToolResultsWire)
     }
 
     fn visit_unit<E>(self) -> std::result::Result<Self::Value, E> {
-        Ok(ZedToolResultsWire::default())
+        Ok(ZedToolResultsWire)
     }
 
     fn visit_borrowed_str<E>(self, _value: &'de str) -> std::result::Result<Self::Value, E> {
-        Ok(ZedToolResultsWire::default())
+        Ok(ZedToolResultsWire)
     }
 
     fn visit_str<E>(self, _value: &str) -> std::result::Result<Self::Value, E> {
-        Ok(ZedToolResultsWire::default())
+        Ok(ZedToolResultsWire)
     }
 
     fn visit_string<E>(self, _value: String) -> std::result::Result<Self::Value, E> {
-        Ok(ZedToolResultsWire::default())
+        Ok(ZedToolResultsWire)
     }
 }
 

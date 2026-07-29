@@ -286,7 +286,7 @@ fn filesystem_identity(file: &File) -> Result<FilesystemIdentity, AuthorityOpenE
         return Err(io::Error::last_os_error().into());
     }
     let filesystem = unsafe { filesystem.assume_init() };
-    let filesystem_type = filesystem.f_type as i64;
+    let filesystem_type = filesystem.f_type;
     if !linux_filesystem_is_qualified(filesystem_type) {
         return Err(AuthorityOpenError::Rejected(
             "provider source roots require a qualified local Linux filesystem",

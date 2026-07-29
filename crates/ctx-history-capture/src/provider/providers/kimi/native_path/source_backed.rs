@@ -793,7 +793,7 @@ fn auxiliary_snapshot(
     };
     Ok(AuxiliarySnapshot {
         length: file.len(),
-        digest: Sha256::digest(&bytes).into(),
+        digest: Sha256::digest(bytes).into(),
         revision: Some(
             KimiFrozenFileMetadata::from_metadata(file.metadata())?.revision_component(),
         ),
