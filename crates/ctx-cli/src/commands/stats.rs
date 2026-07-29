@@ -75,7 +75,9 @@ struct DiscoveryProxy {
     context_searches: u64,
     context_found: u64,
     context_opened: u64,
-    context_cited: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_cited: Option<u64>,
+    context_cited_coverage: &'static str,
     validated_discoveries: u64,
 }
 
@@ -170,7 +172,9 @@ impl StatsView {
                     context_searches: context.context_searches,
                     context_found: context.context_found,
                     context_opened: context.context_opened,
-                    context_cited: context.context_cited,
+                    context_cited: (context.context_cited_coverage == "measured")
+                        .then_some(context.context_cited),
+                    context_cited_coverage: context.context_cited_coverage,
                     validated_discoveries: context.validated_discoveries,
                 },
             },
@@ -265,7 +269,10 @@ fn render_human(report: &UsageReport, detailed: bool) {
     println!("  Context searches: {}", discovery.context_searches);
     println!("  Context found: {}", discovery.context_found);
     println!("  Context opened: {}", discovery.context_opened);
-    println!("  Context cited: {}", discovery.context_cited);
+    match discovery.context_cited {
+        Some(context_cited) => println!("  Context cited: {context_cited}"),
+        None => println!("  Context cited: {}", discovery.context_cited_coverage),
+    }
     println!(
         "  Validated discoveries: {}",
         discovery.validated_discoveries

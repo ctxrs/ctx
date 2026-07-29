@@ -209,7 +209,11 @@ fn v2_json_keeps_measured_channels_actions_proxies_and_estimates_distinct() {
     assert_eq!(history["discovery_proxy"]["context_searches"], 1);
     assert_eq!(history["discovery_proxy"]["context_found"], 1);
     assert_eq!(history["discovery_proxy"]["context_opened"], 1);
-    assert_eq!(history["discovery_proxy"]["context_cited"], 0);
+    assert!(history["discovery_proxy"].get("context_cited").is_none());
+    assert_eq!(
+        history["discovery_proxy"]["context_cited_coverage"],
+        "unsupported"
+    );
     assert_eq!(history["discovery_proxy"]["validated_discoveries"], 1);
 
     let provenance = &report["measured"]["code_provenance"];
