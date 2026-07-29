@@ -2,6 +2,28 @@ mod support;
 
 use support::*;
 
+fn source_backed_count(temp: &TempDir, sql: &str) -> i64 {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let packet = loop {
+        let output = ctx(temp)
+            .args(["sql", sql, "--format=json"])
+            .output()
+            .unwrap();
+        if output.status.success() {
+            break serde_json::from_slice::<Value>(&output.stdout).unwrap();
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("source-backed SQL projection") && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+            continue;
+        }
+        panic!("source-backed SQL failed: {stderr}");
+    };
+    packet["rows"][0][0]
+        .as_i64()
+        .unwrap_or_else(|| panic!("expected integer SQL scalar in {packet:#}"))
+}
+
 #[test]
 fn antigravity_cli_import_skips_malformed_file_among_valid_files() {
     let temp = tempdir();
@@ -189,14 +211,16 @@ fn firebender_replay_preserves_mixed_and_all_invalid_outcomes() {
         );
     }
 
-    let conn = Connection::open(invalid_temp.path().join("work.sqlite")).unwrap();
-    for table in ["capture_sources", "sessions", "events"] {
-        let count = conn
-            .query_row(&format!("select count(*) from {table}"), [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .unwrap();
-        assert_eq!(count, 0, "unexpected all-invalid rows in {table}");
+    assert!(
+        !invalid_temp.path().join("work.sqlite").exists(),
+        "an all-invalid provider source must not create the previous-epoch Store"
+    );
+    for view in ["ctx_sources", "ctx_sessions", "ctx_events"] {
+        assert_eq!(
+            source_backed_count(&invalid_temp, &format!("select count(*) from {view}")),
+            0,
+            "unexpected all-invalid source-backed rows in {view}"
+        );
     }
 }
 
@@ -405,14 +429,16 @@ fn complete_oversize_only_codex_session_replays_failure_without_import_scaffoldi
         assert_eq!(report["totals"]["rejected_records"], 1, "{report:#}");
     }
 
-    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
-    for table in ["history_records", "capture_sources", "sessions", "events"] {
-        let count = conn
-            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .unwrap();
-        assert_eq!(count, 0, "unexpected rows in {table}");
+    assert!(
+        !temp.path().join("work.sqlite").exists(),
+        "an all-rejected provider source must not create the previous-epoch Store"
+    );
+    for view in ["ctx_sources", "ctx_sessions", "ctx_events"] {
+        assert_eq!(
+            source_backed_count(&temp, &format!("SELECT COUNT(*) FROM {view}")),
+            0,
+            "unexpected all-rejected source-backed rows in {view}"
+        );
     }
 }
 
