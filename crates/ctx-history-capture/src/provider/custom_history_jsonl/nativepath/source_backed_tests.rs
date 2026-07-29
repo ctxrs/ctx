@@ -100,13 +100,12 @@ fn collect(
 ) -> (
     CustomHistorySourceBackedOutcome,
     Vec<LexicalDocument>,
-    Vec<(usize, usize)>,
+    Vec<usize>,
 ) {
     let mut documents = Vec::new();
     let mut page_bounds = Vec::new();
     let outcome = scan_custom_history_source_backed_explicit(input, prior, |page| {
-        assert_eq!(page.source, input.source_key().unwrap());
-        page_bounds.push((page.documents.len(), page.retained_bytes));
+        page_bounds.push(page.documents.len());
         documents.extend(page.documents);
         Ok(())
     })
@@ -153,12 +152,12 @@ fn cold_noop_and_append_emit_stable_ids_in_bounded_pages() {
         CustomHistorySourceBackedDisposition::Cold
     ));
     assert_eq!(cold_documents.len(), 70);
-    assert_eq!(cold.emitted_documents, 70);
-    assert!(cold.terminal);
+    assert_eq!(
+        cold.certificate.counts().certified_bytes,
+        fs::metadata(&path).unwrap().len()
+    );
     assert!(cold_pages.len() >= 2);
-    assert!(cold_pages
-        .iter()
-        .all(|(documents, bytes)| *documents <= 64 && *bytes <= 1024 * 1024));
+    assert!(cold_pages.iter().all(|documents| *documents <= 64));
     assert_eq!(cold_documents[0].body, long);
     assert!(cold_documents[0].body.ends_with("custom-tail-sentinel"));
     assert_eq!(cold_documents[0].agent_type, "subagent");
@@ -185,7 +184,7 @@ fn cold_noop_and_append_emit_stable_ids_in_bounded_pages() {
     assert!(!String::from_utf8_lossy(checkpoint).contains("bounded-preview-sentinel"));
 
     let (rebuilt_outcome, rebuilt_documents, _) = collect(&input, None);
-    let rebuilt = present(rebuilt_outcome);
+    present(rebuilt_outcome);
     assert_eq!(
         rebuilt_documents
             .iter()
@@ -193,7 +192,7 @@ fn cold_noop_and_append_emit_stable_ids_in_bounded_pages() {
             .collect::<Vec<_>>(),
         cold_ids
     );
-    assert_eq!(rebuilt.route.source(), cold.route.source());
+    assert_eq!(rebuilt_documents[0].source, cold_documents[0].source);
 
     #[cfg(unix)]
     let _forbid_open = crate::provider_sources::forbid_ordinary_file_content_open(&path);
@@ -214,12 +213,11 @@ fn cold_noop_and_append_emit_stable_ids_in_bounded_pages() {
     let append = present(append_outcome);
     assert!(matches!(
         append.disposition,
-        CustomHistorySourceBackedDisposition::Append { .. }
+        CustomHistorySourceBackedDisposition::Append
     ));
     assert_eq!(append_documents.len(), 1);
     assert_eq!(append_documents[0].body, "appended event");
     assert_eq!(append_documents[0].touched_files, vec!["src/appended.rs"]);
-    assert_eq!(append.emitted_documents, 1);
     assert!(revalidate_custom_history_source_backed(&input, &append.certificate).unwrap());
 }
 
@@ -247,13 +245,10 @@ fn rewrite_and_truncate_are_replacements_but_keep_native_ids_stable() {
     write_records(&path, &rewritten);
     let (rewrite_outcome, rewrite_documents, _) = collect(&input, Some(&cold.certificate));
     let rewrite = present(rewrite_outcome);
-    let CustomHistorySourceBackedDisposition::Replacement { evidence } = rewrite.disposition else {
-        panic!("rewrite must replace the prior source");
-    };
-    assert_eq!(
-        evidence.reason,
-        CustomHistoryReplacementReason::PrefixChanged
-    );
+    assert!(matches!(
+        rewrite.disposition,
+        CustomHistorySourceBackedDisposition::Replacement
+    ));
     assert_eq!(rewrite_documents[0].event_id, cold_documents[0].event_id);
     assert_eq!(
         rewrite_documents[0].session_id,
@@ -264,11 +259,10 @@ fn rewrite_and_truncate_are_replacements_but_keep_native_ids_stable() {
     write_records(&path, &[manifest(), source(), session("root", None, true)]);
     let (truncate_outcome, truncate_documents, _) = collect(&input, Some(&rewrite.certificate));
     let truncate = present(truncate_outcome);
-    let CustomHistorySourceBackedDisposition::Replacement { evidence } = truncate.disposition
-    else {
-        panic!("truncate must replace the prior source");
-    };
-    assert_eq!(evidence.reason, CustomHistoryReplacementReason::Truncated);
+    assert!(matches!(
+        truncate.disposition,
+        CustomHistorySourceBackedDisposition::Replacement
+    ));
     assert!(truncate_documents.is_empty());
     assert_eq!(truncate.certificate.counts().indexed_documents, 0);
 }
@@ -295,9 +289,7 @@ fn malformed_complete_record_is_rejected_and_incomplete_tail_waits_for_append() 
 
     let (cold_outcome, cold_documents, _) = collect(&input, None);
     let cold = present(cold_outcome);
-    assert!(!cold.terminal);
     assert_eq!(cold_documents.len(), 1);
-    assert_eq!(cold.summary.failed, 1);
     assert_eq!(cold.certificate.counts().rejected_records, 1);
     assert!(cold.certificate.counts().certified_bytes < fs::metadata(&path).unwrap().len());
 
@@ -307,14 +299,17 @@ fn malformed_complete_record_is_rejected_and_incomplete_tail_waits_for_append() 
     drop(file);
     let (append_outcome, append_documents, _) = collect(&input, Some(&cold.certificate));
     let append = present(append_outcome);
-    assert!(append.terminal);
+    assert_eq!(
+        append.certificate.counts().certified_bytes,
+        fs::metadata(&path).unwrap().len()
+    );
     assert!(matches!(
         append.disposition,
-        CustomHistorySourceBackedDisposition::Append { .. }
+        CustomHistorySourceBackedDisposition::Append
     ));
     assert_eq!(append_documents.len(), 1);
     assert_eq!(append_documents[0].body, "completed after append");
-    assert_eq!(append.summary.failed, 1);
+    assert_eq!(append.certificate.counts().rejected_records, 1);
 }
 
 #[test]

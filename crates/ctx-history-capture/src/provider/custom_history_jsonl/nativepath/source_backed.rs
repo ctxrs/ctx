@@ -121,10 +121,6 @@ impl CustomHistorySourceBackedInput {
         &self.path
     }
 
-    pub(crate) fn catalog_lineage(&self) -> &[u8; 32] {
-        &self.catalog_lineage
-    }
-
     pub(crate) fn source_key(&self) -> CustomHistorySourceBackedResult<SourceKey> {
         Ok(SourceKey::derive(
             CaptureProvider::Custom.as_str(),
@@ -219,16 +215,8 @@ pub(crate) struct CustomHistorySourceBackedInventory {
 }
 
 impl CustomHistorySourceBackedInventory {
-    pub(crate) fn input(&self) -> &CustomHistorySourceBackedInput {
-        &self.input
-    }
-
     pub(crate) fn source(&self) -> &SourceKey {
         &self.source
-    }
-
-    pub(crate) fn observation(&self) -> &SourceInventoryObservation {
-        &self.observation
     }
 
     pub(crate) fn is_missing(&self) -> bool {
@@ -272,33 +260,12 @@ impl CustomHistorySourceBackedInventory {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CustomHistoryReplacementReason {
-    ParserRevisionChanged,
-    InvalidPriorFrontier,
-    Truncated,
-    PrefixChanged,
-    AppendInvalidatedPriorProjection,
-    PriorEventMetadataChanged,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CustomHistoryReplacementEvidence {
-    pub(crate) reason: CustomHistoryReplacementReason,
-    pub(crate) prior_content_digest: [u8; 32],
-    pub(crate) replacement_content_digest: [u8; 32],
-}
-
 #[derive(Debug, Clone)]
 pub(crate) enum CustomHistorySourceBackedDisposition {
     Cold,
     Unchanged,
-    Append {
-        proof: CertifiedSourceAppend,
-    },
-    Replacement {
-        evidence: CustomHistoryReplacementEvidence,
-    },
+    Append,
+    Replacement,
 }
 
 #[derive(Debug, Clone)]
@@ -308,32 +275,16 @@ pub(crate) struct CustomHistorySourceBackedRoute {
     opened: Arc<OpenedProviderSourceFile>,
 }
 
-impl CustomHistorySourceBackedRoute {
-    pub(crate) fn source(&self) -> &SourceKey {
-        &self.source
-    }
-
-    pub(crate) fn path(&self) -> &Path {
-        self.input.path()
-    }
-}
-
 #[derive(Debug)]
 pub(crate) struct CustomHistorySourceBackedPage {
-    pub(crate) source: SourceKey,
     pub(crate) documents: Vec<LexicalDocument>,
-    pub(crate) retained_bytes: usize,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct CustomHistorySourceBackedReceipt {
     pub(crate) route: CustomHistorySourceBackedRoute,
-    pub(crate) inventory: CertifiedSourceInventory,
     pub(crate) certificate: CertifiedSource,
     pub(crate) disposition: CustomHistorySourceBackedDisposition,
-    pub(crate) summary: ProviderImportSummary,
-    pub(crate) emitted_documents: u64,
-    pub(crate) terminal: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -464,9 +415,9 @@ pub(crate) fn scan_custom_history_source_backed_explicit(
         if prior.parser_revision() == CUSTOM_SOURCE_BACKED_PARSER_REVISION
             && prior.observation() == &opening_observation
         {
-            if let Ok(checkpoint) = decode_checkpoint(prior) {
+            if decode_checkpoint(prior).is_ok() {
                 let closing = observe_custom_history_source_backed_explicit(input)?;
-                let inventory = opening_inventory.certify_against(&closing)?;
+                opening_inventory.certify_against(&closing)?;
                 return Ok(CustomHistorySourceBackedOutcome::Present(
                     CustomHistorySourceBackedReceipt {
                         route: route(
@@ -478,12 +429,8 @@ pub(crate) fn scan_custom_history_source_backed_explicit(
                                     .ok_or(CustomHistorySourceBackedError::InventoryChanged)?,
                             ),
                         ),
-                        inventory,
                         certificate: prior.clone(),
                         disposition: CustomHistorySourceBackedDisposition::Unchanged,
-                        summary: ProviderImportSummary::default(),
-                        emitted_documents: 0,
-                        terminal: checkpoint.terminal,
                     },
                 ));
             }
@@ -503,9 +450,9 @@ pub(crate) fn scan_custom_history_source_backed_explicit(
     if opening_inventory.ordinary() != Some(closing_ordinary) {
         return Err(CustomHistorySourceBackedError::InventoryChanged);
     }
-    let inventory = opening_inventory.certify_against(&closing_inventory)?;
+    opening_inventory.certify_against(&closing_inventory)?;
     let closing_observation = source_observation(source.clone(), closing_ordinary)?;
-    let mut projection = parse_projection(&bytes)?;
+    let projection = parse_projection(&bytes)?;
     let certificate = CertifiedSource::certify_with_frontier(
         opening_observation,
         closing_observation,
@@ -521,19 +468,12 @@ pub(crate) fn scan_custom_history_source_backed_explicit(
     )?;
 
     let (disposition, emit_from) = classify_projection(prior, &bytes, &projection, &certificate)?;
-    let emitted_documents =
-        emit_projection_pages(&source, input, &projection, emit_from, &mut emit)?;
-    let terminal = projection.checkpoint.terminal;
-    let summary = std::mem::take(&mut projection.parsed.summary);
+    emit_projection_pages(&source, input, &projection, emit_from, &mut emit)?;
     Ok(CustomHistorySourceBackedOutcome::Present(
         CustomHistorySourceBackedReceipt {
             route: route(input, source, opened),
-            inventory,
             certificate,
             disposition,
-            summary,
-            emitted_documents,
-            terminal,
         },
     ))
 }
@@ -596,8 +536,7 @@ fn parse_projection(bytes: &[u8]) -> CustomHistorySourceBackedResult<ParsedProje
     let (prefix_len, terminal) = complete_prefix(bytes);
     let prefix = &bytes[..prefix_len];
     let content_digest = prefix_digest(prefix);
-    let source_revision = format!("custom-source-backed-sha256-v1:{content_digest:x?}");
-    let mut parsed = parse_custom_history(std::io::Cursor::new(prefix), source_revision)?;
+    let mut parsed = parse_custom_history(std::io::Cursor::new(prefix))?;
     let ordered = ordered_sessions(&parsed.sessions, &mut parsed.summary);
     let valid_sessions = ordered.into_iter().collect::<BTreeSet<_>>();
     let lines = complete_lines(prefix)?;
@@ -785,30 +724,13 @@ fn classify_projection(
     let Some(prior) = prior else {
         return Ok((CustomHistorySourceBackedDisposition::Cold, 0));
     };
-    let replacement = |reason| {
-        (
-            CustomHistorySourceBackedDisposition::Replacement {
-                evidence: CustomHistoryReplacementEvidence {
-                    reason,
-                    prior_content_digest: *prior.content_digest(),
-                    replacement_content_digest: projection.content_digest,
-                },
-            },
-            0,
-        )
-    };
+    let replacement = || (CustomHistorySourceBackedDisposition::Replacement, 0);
     if prior.parser_revision() != CUSTOM_SOURCE_BACKED_PARSER_REVISION {
-        return Ok(replacement(
-            CustomHistoryReplacementReason::ParserRevisionChanged,
-        ));
+        return Ok(replacement());
     }
     let checkpoint = match decode_checkpoint(prior) {
         Ok(checkpoint) => checkpoint,
-        Err(CustomHistorySourceBackedError::InvalidCheckpoint) => {
-            return Ok(replacement(
-                CustomHistoryReplacementReason::InvalidPriorFrontier,
-            ))
-        }
+        Err(CustomHistorySourceBackedError::InvalidCheckpoint) => return Ok(replacement()),
         Err(error) => return Err(error),
     };
     let prefix_len = usize::try_from(checkpoint.certified_prefix_bytes)
@@ -816,15 +738,13 @@ fn classify_projection(
     if projection.checkpoint.certified_prefix_bytes < checkpoint.certified_prefix_bytes
         || bytes.len() < prefix_len
     {
-        return Ok(replacement(CustomHistoryReplacementReason::Truncated));
+        return Ok(replacement());
     }
     if prefix_digest(&bytes[..prefix_len]) != *prior.content_digest() {
-        return Ok(replacement(CustomHistoryReplacementReason::PrefixChanged));
+        return Ok(replacement());
     }
     if appended_touch_changes_prior_document(projection, checkpoint.certified_prefix_bytes)? {
-        return Ok(replacement(
-            CustomHistoryReplacementReason::PriorEventMetadataChanged,
-        ));
+        return Ok(replacement());
     }
     match CertifiedSourceAppend::certify(
         prior,
@@ -832,13 +752,11 @@ fn classify_projection(
         checkpoint.certified_prefix_bytes,
         *prior.content_digest(),
     ) {
-        Ok(proof) => Ok((
-            CustomHistorySourceBackedDisposition::Append { proof },
+        Ok(_) => Ok((
+            CustomHistorySourceBackedDisposition::Append,
             checkpoint.certified_prefix_bytes,
         )),
-        Err(ProjectionContractError::AppendCountRegression) => Ok(replacement(
-            CustomHistoryReplacementReason::AppendInvalidatedPriorProjection,
-        )),
+        Err(ProjectionContractError::AppendCountRegression) => Ok(replacement()),
         Err(error) => Err(error.into()),
     }
 }
@@ -876,11 +794,10 @@ fn emit_projection_pages(
     projection: &ParsedProjection,
     emit_from: u64,
     emit: &mut impl FnMut(CustomHistorySourceBackedPage) -> CustomHistorySourceBackedResult<()>,
-) -> CustomHistorySourceBackedResult<u64> {
+) -> CustomHistorySourceBackedResult<()> {
     let touches = event_touches(&projection.parsed.file_touches);
     let mut documents = Vec::new();
     let mut retained_bytes = 0_usize;
-    let mut emitted = 0_u64;
     for (line_number, event) in &projection.parsed.events {
         if !projection
             .valid_sessions
@@ -924,26 +841,17 @@ fn emit_projection_pages(
                 || retained_bytes.saturating_add(document_bytes) > CUSTOM_PAGE_MAX_RETAINED_BYTES)
         {
             emit(CustomHistorySourceBackedPage {
-                source: source.clone(),
                 documents: std::mem::take(&mut documents),
-                retained_bytes,
             })?;
             retained_bytes = 0;
         }
         retained_bytes = retained_bytes.saturating_add(document_bytes);
         documents.push(document);
-        emitted = emitted
-            .checked_add(1)
-            .ok_or(CustomHistorySourceBackedError::CountMismatch)?;
     }
     if !documents.is_empty() {
-        emit(CustomHistorySourceBackedPage {
-            source: source.clone(),
-            documents,
-            retained_bytes,
-        })?;
+        emit(CustomHistorySourceBackedPage { documents })?;
     }
-    Ok(emitted)
+    Ok(())
 }
 
 fn event_touches(

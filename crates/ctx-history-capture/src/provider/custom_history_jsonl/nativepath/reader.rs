@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::{BufRead, Cursor, Read},
-    path::Path,
+    io::BufRead,
 };
 
 use ctx_history_core::{
@@ -11,8 +10,7 @@ use ctx_history_core::{
 };
 
 use crate::{
-    common::io::{open_provider_source_file, read_provider_jsonl_record_or_skip_oversized},
-    ProviderImportSummary, Result,
+    common::io::read_provider_jsonl_record_or_skip_oversized, ProviderImportSummary, Result,
 };
 
 use super::super::{
@@ -28,29 +26,9 @@ pub(super) struct ParsedCustomHistory {
     pub(super) sessions: BTreeMap<(String, String), (usize, CtxHistoryJsonlSessionRecord)>,
     pub(super) events: Vec<(usize, CtxHistoryJsonlEventRecord)>,
     pub(super) file_touches: Vec<(usize, CtxHistoryJsonlFileTouchRecord)>,
-    pub(super) edges: Vec<(usize, CtxHistoryJsonlEdgeRecord)>,
-    pub(super) source_revision: String,
 }
 
-pub(crate) fn validate_custom_history_nativepath(path: &Path) -> Result<ProviderImportSummary> {
-    let source = open_provider_source_file(path)?;
-    let bytes = source.read_all_bounded(usize::MAX)?;
-    source.revalidate()?;
-    Ok(parse_custom_history(Cursor::new(bytes), "validation-only".to_owned())?.summary)
-}
-
-pub(crate) fn validate_custom_history_nativepath_reader(
-    mut reader: impl BufRead,
-) -> Result<ProviderImportSummary> {
-    let mut bytes = Vec::new();
-    reader.read_to_end(&mut bytes)?;
-    Ok(parse_custom_history(Cursor::new(bytes), "validation-only".to_owned())?.summary)
-}
-
-pub(super) fn parse_custom_history(
-    mut reader: impl BufRead,
-    source_revision: String,
-) -> Result<ParsedCustomHistory> {
+pub(super) fn parse_custom_history(mut reader: impl BufRead) -> Result<ParsedCustomHistory> {
     let mut summary = ProviderImportSummary::default();
     let mut manifest_line = None;
     let mut manifest_is_structurally_invalid = false;
@@ -281,8 +259,6 @@ pub(super) fn parse_custom_history(
             sessions,
             events,
             file_touches,
-            edges,
-            source_revision,
         });
     }
 
@@ -302,7 +278,5 @@ pub(super) fn parse_custom_history(
         sessions,
         events,
         file_touches,
-        edges,
-        source_revision,
     })
 }
