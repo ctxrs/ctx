@@ -47,9 +47,8 @@ use telemetry::{McpHandled, McpTelemetry, RequestDescriptor};
 use text::render_tool_text;
 
 use super::{
-    compact_json, config, config::CONFIG_FILE, discovered_plugin_sources_json, event_window,
-    event_window_json, raw_sql_result_json, search_filters, search_has_intent,
-    session_transcript_json, sources_json, OutputFormat, ProviderArg, RefreshArg, SearchDto,
+    compact_json, config, config::CONFIG_FILE, discovered_plugin_sources_json, raw_sql_result_json,
+    search_filters, search_has_intent, sources_json, ProviderArg, RefreshArg, SearchDto,
     SearchFilterInput, SearchIntentInput, SearchRefreshReport, SourceIdentityFilterArgs,
     TranscriptMode, MAX_EVENT_WINDOW, MAX_SEARCH_LIMIT,
 };

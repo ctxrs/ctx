@@ -3,20 +3,12 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Args;
 
-use ctx_history_core::database_path;
-
-use crate::analytics::{count_bucket, ShowTelemetry};
-use crate::complete_content::{
-    resolve_event_contents, ContentPolicy, CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
-};
+use crate::analytics::ShowTelemetry;
+use crate::complete_content::ContentPolicy;
 use crate::output::OutputFormat;
 use crate::provider_args::ProviderArg;
-use crate::store_util::open_existing_store_read_only;
-use crate::transcript::{
-    event_window, resolve_event, resolve_session, selected_transcript_events,
-    write_rendered_events, write_rendered_session, TranscriptMode,
-};
-use crate::{parse_event_window_limit, parse_provider_arg, ShowArgs, ShowTarget};
+use crate::transcript::TranscriptMode;
+use crate::{parse_event_window_limit, parse_provider_arg, ShowArgs};
 
 #[derive(Debug, Args)]
 pub(crate) struct ShowSessionArgs {
@@ -67,51 +59,5 @@ pub(crate) fn run_show(
     data_root: PathBuf,
     telemetry: &mut ShowTelemetry,
 ) -> Result<()> {
-    if crate::commands::source_index::index_is_available(&data_root) {
-        return crate::commands::source_index::run_show(args, data_root, telemetry);
-    }
-    match args.target {
-        ShowTarget::Session(args) => {
-            let store = open_existing_store_read_only(&database_path(data_root), "ctx show")?;
-            let session = resolve_session(
-                &store,
-                args.id,
-                args.provider.map(ProviderArg::capture_provider),
-                args.provider_session.as_deref(),
-            )?;
-            let events = store.events_for_session(session.id)?;
-            telemetry.events_returned = Some(count_bucket(events.len() as u64));
-            let selected = selected_transcript_events(&events, args.mode);
-            let content = resolve_event_contents(
-                &store,
-                &selected,
-                args.content,
-                CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
-            )?;
-            write_rendered_session(
-                &store,
-                &session,
-                &events,
-                args.mode,
-                args.format,
-                args.out,
-                &content,
-            )?;
-        }
-        ShowTarget::Event(args) => {
-            let store = open_existing_store_read_only(&database_path(data_root), "ctx show")?;
-            let event = resolve_event(&store, &args.id)?;
-            let events = event_window(&store, &event, args.before, args.after, args.window)?;
-            telemetry.events_returned = Some(count_bucket(events.len() as u64));
-            let selected = events.iter().collect::<Vec<_>>();
-            let content = resolve_event_contents(
-                &store,
-                &selected,
-                args.content,
-                CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
-            )?;
-            write_rendered_events(&store, &event, &events, args.format, None, &content)?;
-        }
-    }
-    Ok(())
+    crate::commands::source_index::run_show(args, data_root, telemetry)
 }
