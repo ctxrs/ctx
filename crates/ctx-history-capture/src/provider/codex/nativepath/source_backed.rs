@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    io::{Read, Seek, SeekFrom},
     panic::{catch_unwind, AssertUnwindSafe},
     path::{Path, PathBuf},
     sync::{
@@ -42,13 +43,16 @@ use super::{
 #[cfg(test)]
 use crate::provider::codex::catalog::discover_codex_session_catalog;
 use crate::{
-    common::io::{open_provider_source_file, ProviderSourceRoot},
+    common::io::{open_provider_source_file, OpenedProviderSourceFile, ProviderSourceRoot},
     provider::codex::{
         catalog::{
             catalog_codex_explicit_session_opened, discover_codex_session_catalog_retained,
             rediscover_codex_session_catalog_retained,
         },
-        nativepath::{open_codex_source_capability, revalidate_codex_source_observation},
+        nativepath::{
+            open_codex_source_capability, opened_codex_file_observation,
+            revalidate_codex_source_observation,
+        },
     },
     CaptureError, CODEX_SESSION_SOURCE_FORMAT,
 };
@@ -72,6 +76,14 @@ const CODEX_EXPLICIT_INVENTORY_DIGEST_DOMAIN: &[u8] = b"ctx/codex-explicit-sessi
 const MAX_HYDRATED_CODEX_RECORD_BYTES: u64 = 16 * 1024 * 1024 + 1;
 const MAX_CODEX_SCANNER_WORKERS: usize = 16;
 const COLD_LANE_RECEIVE_TIMEOUT: Duration = Duration::from_millis(25);
+
+#[cfg(test)]
+std::thread_local! {
+    static CODEX_HYDRATION_SOURCE_OPEN_CALLS: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+    static CODEX_BATCH_READ_OFFSETS: std::cell::RefCell<Vec<u64>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
 
 #[derive(Debug, Error)]
 pub enum CodexSourceBackedErrorV0 {
@@ -679,13 +691,92 @@ impl CodexLocatorResolverV0 {
         &self,
         request: &BatchHydrationRequest,
     ) -> CodexSourceBackedResultV0<BatchHydrationResult> {
-        let records = request
-            .events()
-            .iter()
-            .map(|event| self.hydrate_event_request(event))
+        let Some(first) = request.events().first() else {
+            return Ok(BatchHydrationResult::new(Vec::new())?);
+        };
+        let (first_native_session_id, _, _, _) = validate_codex_event_request(first)?;
+        let (source, source_key) = self
+            .sources_by_native_session
+            .get(&first_native_session_id)
+            .ok_or_else(|| {
+                CodexSourceBackedErrorV0::LocatorSourceNotFound(first_native_session_id.clone())
+            })?;
+        if !source_key.exact_descriptor_eq(first.locator().source()) {
+            return Err(CodexSourceBackedErrorV0::InvalidCodexLocator);
+        }
+
+        let mut reads = Vec::with_capacity(request.len());
+        for (caller_index, event) in request.events().iter().enumerate() {
+            let (native_session_id, byte_offset, byte_length, physical_ordinal) =
+                validate_codex_event_request(event)?;
+            if native_session_id != first_native_session_id
+                || !source_key.exact_descriptor_eq(event.locator().source())
+            {
+                return Err(CodexSourceBackedErrorV0::InvalidCodexLocator);
+            }
+            reads.push(CodexBatchReadV0 {
+                caller_index,
+                event,
+                byte_offset,
+                byte_length,
+                physical_ordinal,
+            });
+        }
+        reads.sort_by_key(|read| (read.byte_offset, read.physical_ordinal, read.caller_index));
+
+        let opened = open_codex_hydration_source(source)?;
+        let opening_observation =
+            opened_codex_file_observation(&source.source_path, opened.file())?;
+        opened
+            .revalidate()
+            .map_err(normalize_codex_hydration_capture_error)?;
+        if opening_observation != source.catalog_observation {
+            return Err(CodexSourceBackedErrorV0::Capture(
+                CaptureError::SourceChangedDuringCapture,
+            ));
+        }
+        let mut reader = opened.file().try_clone()?;
+        let mut ordered = vec![None; request.len()];
+        #[cfg(test)]
+        CODEX_BATCH_READ_OFFSETS.with(|offsets| offsets.borrow_mut().clear());
+        for read in reads {
+            #[cfg(test)]
+            CODEX_BATCH_READ_OFFSETS.with(|offsets| offsets.borrow_mut().push(read.byte_offset));
+            let hydrated = hydrate_codex_source_record_from_batch_reader(
+                &mut reader,
+                opened.len(),
+                read.event.locator(),
+                read.byte_offset,
+                read.byte_length,
+                read.physical_ordinal,
+            )?;
+            let provider_bytes = hydrated
+                .decoded_display_text
+                .ok_or(CodexSourceBackedErrorV0::LocatorRecordNotDisplayable)?
+                .into_bytes();
+            ordered[read.caller_index] = Some(HydratedProviderRecord {
+                event_id: read.event.event_id(),
+                provider_bytes,
+            });
+        }
+        opened
+            .revalidate()
+            .map_err(normalize_codex_hydration_capture_error)?;
+        let records = ordered
+            .into_iter()
+            .map(|record| record.ok_or(CodexSourceBackedErrorV0::LocatorEventMismatch))
             .collect::<CodexSourceBackedResultV0<Vec<_>>>()?;
         Ok(BatchHydrationResult::new(records)?)
     }
+}
+
+#[derive(Debug)]
+struct CodexBatchReadV0<'a> {
+    caller_index: usize,
+    event: &'a EventHydrationRequest,
+    byte_offset: u64,
+    byte_length: u64,
+    physical_ordinal: u64,
 }
 
 pub fn ingest_codex_source_backed_v0(
@@ -1437,6 +1528,27 @@ pub fn hydrate_codex_locator(
     CodexLocatorResolverV0::discover([session_root])?.hydrate(locator)
 }
 
+fn open_codex_hydration_source(
+    source: &CodexCatalogSource,
+) -> CodexSourceBackedResultV0<Arc<OpenedProviderSourceFile>> {
+    #[cfg(test)]
+    CODEX_HYDRATION_SOURCE_OPEN_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
+    open_codex_source_capability(source)
+        .map_err(normalize_codex_hydration_capture_error)
+        .map_err(Into::into)
+}
+
+fn normalize_codex_hydration_capture_error(error: CaptureError) -> CaptureError {
+    match error {
+        CaptureError::InvalidProviderTranscriptPath { reason, .. }
+            if reason == "provider source changed while its authority handle was retained" =>
+        {
+            CaptureError::SourceChangedDuringCapture
+        }
+        other => other,
+    }
+}
+
 fn hydrate_codex_source_record(
     source: &CodexCatalogSource,
     locator: &SourceRecordLocator,
@@ -1446,7 +1558,7 @@ fn hydrate_codex_source_record(
 ) -> CodexSourceBackedResultV0<CodexHydratedRecordV0> {
     let byte_length =
         usize::try_from(byte_length).map_err(|_| CodexSourceBackedErrorV0::LocatorRangeTooLarge)?;
-    let opened = open_codex_source_capability(source)?;
+    let opened = open_codex_hydration_source(source)?;
     if byte_offset != 0 {
         let boundary = opened.read_exact_range(byte_offset.saturating_sub(1), 1, 1)?;
         if boundary != [b'\n'] {
@@ -1471,7 +1583,60 @@ fn hydrate_codex_source_record(
         return Err(CodexSourceBackedErrorV0::LocatorDigestMismatch);
     }
     let decoded_display_text = decode_exact_display_text(&provider_bytes, physical_ordinal)?;
-    opened.revalidate()?;
+    opened
+        .revalidate()
+        .map_err(normalize_codex_hydration_capture_error)?;
+    Ok(CodexHydratedRecordV0 {
+        provider_bytes,
+        decoded_display_text,
+    })
+}
+
+fn hydrate_codex_source_record_from_batch_reader(
+    reader: &mut (impl Read + Seek),
+    source_length: u64,
+    locator: &SourceRecordLocator,
+    byte_offset: u64,
+    byte_length: u64,
+    physical_ordinal: u64,
+) -> CodexSourceBackedResultV0<CodexHydratedRecordV0> {
+    let byte_length =
+        usize::try_from(byte_length).map_err(|_| CodexSourceBackedErrorV0::LocatorRangeTooLarge)?;
+    let byte_length_u64 =
+        u64::try_from(byte_length).map_err(|_| CodexSourceBackedErrorV0::LocatorRangeTooLarge)?;
+    let record_end = byte_offset
+        .checked_add(byte_length_u64)
+        .ok_or(CodexSourceBackedErrorV0::LocatorRangeMissing)?;
+    if record_end > source_length {
+        return Err(CodexSourceBackedErrorV0::LocatorRangeMissing);
+    }
+
+    let boundary_length = usize::from(byte_offset != 0);
+    let read_length = byte_length
+        .checked_add(boundary_length)
+        .ok_or(CodexSourceBackedErrorV0::LocatorRangeTooLarge)?;
+    let read_offset = byte_offset.saturating_sub(boundary_length as u64);
+    reader.seek(SeekFrom::Start(read_offset))?;
+    let mut bytes = vec![0_u8; read_length];
+    reader.read_exact(&mut bytes).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::UnexpectedEof {
+            CodexSourceBackedErrorV0::Capture(CaptureError::SourceChangedDuringCapture)
+        } else {
+            CodexSourceBackedErrorV0::Capture(CaptureError::Io(error))
+        }
+    })?;
+    if boundary_length != 0 && bytes.first() != Some(&b'\n') {
+        return Err(CodexSourceBackedErrorV0::LocatorRecordBoundaryMismatch);
+    }
+    let provider_bytes = bytes.split_off(boundary_length);
+    if !provider_bytes.ends_with(b"\n") {
+        return Err(CodexSourceBackedErrorV0::LocatorRecordBoundaryMismatch);
+    }
+    let actual_digest: [u8; 32] = Sha256::digest(&provider_bytes).into();
+    if &actual_digest != locator.record_digest() {
+        return Err(CodexSourceBackedErrorV0::LocatorDigestMismatch);
+    }
+    let decoded_display_text = decode_exact_display_text(&provider_bytes, physical_ordinal)?;
     Ok(CodexHydratedRecordV0 {
         provider_bytes,
         decoded_display_text,
@@ -1886,6 +2051,28 @@ pub(crate) fn source_observation(
         CODEX_SOURCE_REVISION_KIND,
         serde_json::to_vec(observation)?,
     )?)
+}
+
+fn validate_codex_event_request(
+    request: &EventHydrationRequest,
+) -> CodexSourceBackedResultV0<(String, u64, u64, u64)> {
+    request.validate_contract()?;
+    let (native_session_id, byte_offset, byte_length, physical_ordinal) =
+        validate_codex_locator(request.locator())?;
+    let event_id = codex_event_identity(
+        request.locator().source(),
+        &native_session_id,
+        physical_ordinal,
+    )?;
+    if event_id != request.event_id() {
+        return Err(CodexSourceBackedErrorV0::LocatorEventMismatch);
+    }
+    Ok((
+        native_session_id,
+        byte_offset,
+        byte_length,
+        physical_ordinal,
+    ))
 }
 
 fn validate_codex_locator(
@@ -2421,6 +2608,271 @@ mod tests {
             .expect("replayed Codex document must remain exactly hydratable");
         assert_eq!(replayed_text, cold_text);
         assert_eq!(replayed_index.manifest().sources[0].counts(), cold_counts);
+    }
+
+    #[test]
+    fn source_backed_batch_opens_once_reads_by_offset_and_restores_caller_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        let index = temp.path().join("global-index");
+        fs::create_dir_all(&sessions).unwrap();
+        let native_session_id = "019fa000-0000-7000-8000-000000000081";
+        write_session(
+            &sessions,
+            native_session_id,
+            &[
+                message("user", "batch first sentinel"),
+                message("assistant", "batch second sentinel"),
+                message("user", "batch third sentinel"),
+            ],
+        );
+        ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+        let source = codex_source_key(native_session_id).unwrap();
+        let session_id = codex_session_identity(&source, native_session_id).unwrap();
+        let events = VerifiedIndex::open(&index)
+            .unwrap()
+            .events_for_session(session_id.as_uuid())
+            .unwrap();
+        assert_eq!(events.len(), 3);
+        let requests = [2_usize, 0, 1]
+            .into_iter()
+            .map(|index| {
+                EventHydrationRequest::new(events[index].event_id, events[index].locator.clone())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let resolver = CodexLocatorResolverV0::discover([&sessions]).unwrap();
+        let individual = requests
+            .iter()
+            .map(|request| resolver.hydrate_event_request(request).unwrap())
+            .collect::<Vec<_>>();
+
+        CODEX_HYDRATION_SOURCE_OPEN_CALLS.with(|calls| calls.set(0));
+        let batch = BatchHydrationRequest::new(requests.clone()).unwrap();
+        let hydrated = resolver.hydrate_batch_request(&batch).unwrap();
+        assert_eq!(
+            CODEX_HYDRATION_SOURCE_OPEN_CALLS.with(|calls| calls.get()),
+            1
+        );
+        assert_eq!(hydrated.records(), individual);
+        assert_eq!(
+            hydrated
+                .records()
+                .iter()
+                .map(|record| record.event_id)
+                .collect::<Vec<_>>(),
+            requests
+                .iter()
+                .map(EventHydrationRequest::event_id)
+                .collect::<Vec<_>>()
+        );
+
+        let mut expected_offsets = requests
+            .iter()
+            .map(|request| match request.locator().coordinate() {
+                NativeRecordCoordinate::Jsonl { byte_offset, .. } => *byte_offset,
+                _ => panic!("Codex event locator is not JSONL"),
+            })
+            .collect::<Vec<_>>();
+        expected_offsets.sort_unstable();
+        assert_eq!(
+            CODEX_BATCH_READ_OFFSETS.with(|offsets| offsets.borrow().clone()),
+            expected_offsets
+        );
+    }
+
+    #[test]
+    fn source_backed_batch_rejects_duplicate_cross_source_invalid_ordinal_and_digest() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        let index = temp.path().join("global-index");
+        fs::create_dir_all(&sessions).unwrap();
+        let first_id = "019fa000-0000-7000-8000-000000000082";
+        let second_id = "019fa000-0000-7000-8000-000000000083";
+        write_session(
+            &sessions,
+            first_id,
+            &[message("user", "batch validation first")],
+        );
+        write_session(
+            &sessions,
+            second_id,
+            &[message("assistant", "batch validation second")],
+        );
+        ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+        let verified = VerifiedIndex::open(&index).unwrap();
+        let first = verified
+            .source_event_page(&codex_source_key(first_id).unwrap(), None, 8)
+            .unwrap()
+            .items
+            .into_iter()
+            .next()
+            .unwrap();
+        let second = verified
+            .source_event_page(&codex_source_key(second_id).unwrap(), None, 8)
+            .unwrap()
+            .items
+            .into_iter()
+            .next()
+            .unwrap();
+        let first_request =
+            EventHydrationRequest::new(first.event_id, first.locator.clone()).unwrap();
+        let second_request =
+            EventHydrationRequest::new(second.event_id, second.locator.clone()).unwrap();
+        assert!(matches!(
+            BatchHydrationRequest::new(vec![first_request.clone(), first_request.clone()]),
+            Err(SourceResolverContractError::DuplicateEventIdentity)
+        ));
+
+        let resolver = CodexLocatorResolverV0::discover([&sessions]).unwrap();
+        let cross_source =
+            BatchHydrationRequest::new(vec![first_request.clone(), second_request]).unwrap();
+        assert!(matches!(
+            resolver.hydrate_batch_request(&cross_source),
+            Err(CodexSourceBackedErrorV0::InvalidCodexLocator)
+        ));
+
+        let NativeRecordCoordinate::Jsonl {
+            byte_offset,
+            byte_length,
+            physical_ordinal,
+            native_session_key,
+            native_event_key,
+        } = first.locator.coordinate().clone()
+        else {
+            panic!("Codex event locator is not JSONL");
+        };
+        let invalid_ordinal_locator = SourceRecordLocator::new(
+            first.locator.source().clone(),
+            NativeRecordCoordinate::Jsonl {
+                byte_offset,
+                byte_length,
+                physical_ordinal: physical_ordinal + 1,
+                native_session_key,
+                native_event_key,
+            },
+            LocatorRevisionPolicy::StableRecordEvidence,
+            None,
+            *first.locator.record_digest(),
+        )
+        .unwrap();
+        let invalid_ordinal = BatchHydrationRequest::new(vec![EventHydrationRequest::new(
+            first.event_id,
+            invalid_ordinal_locator,
+        )
+        .unwrap()])
+        .unwrap();
+        assert!(matches!(
+            resolver.hydrate_batch_request(&invalid_ordinal),
+            Err(CodexSourceBackedErrorV0::InvalidCodexLocator)
+        ));
+
+        let invalid_digest_locator = SourceRecordLocator::new(
+            first.locator.source().clone(),
+            first.locator.coordinate().clone(),
+            LocatorRevisionPolicy::StableRecordEvidence,
+            None,
+            [0_u8; 32],
+        )
+        .unwrap();
+        let invalid_digest = BatchHydrationRequest::new(vec![EventHydrationRequest::new(
+            first.event_id,
+            invalid_digest_locator,
+        )
+        .unwrap()])
+        .unwrap();
+        assert!(matches!(
+            resolver.hydrate_batch_request(&invalid_digest),
+            Err(CodexSourceBackedErrorV0::LocatorDigestMismatch)
+        ));
+
+        let invalid_source = SourceKey::derive(
+            CaptureProvider::Codex.as_str(),
+            CODEX_SESSION_SOURCE_FORMAT,
+            "codex-invalid-batch-descriptor",
+            1,
+            first.locator.source().anchor().clone(),
+        )
+        .unwrap();
+        let invalid_source_event =
+            codex_event_identity(&invalid_source, first_id, physical_ordinal).unwrap();
+        let invalid_source_locator = SourceRecordLocator::new(
+            invalid_source,
+            first.locator.coordinate().clone(),
+            LocatorRevisionPolicy::StableRecordEvidence,
+            None,
+            *first.locator.record_digest(),
+        )
+        .unwrap();
+        let invalid_source_batch = BatchHydrationRequest::new(vec![EventHydrationRequest::new(
+            invalid_source_event,
+            invalid_source_locator,
+        )
+        .unwrap()])
+        .unwrap();
+        assert!(matches!(
+            resolver.hydrate_batch_request(&invalid_source_batch),
+            Err(CodexSourceBackedErrorV0::InvalidCodexLocator)
+        ));
+    }
+
+    #[test]
+    fn source_backed_batch_detects_source_revision_change_and_missing_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        let index = temp.path().join("global-index");
+        fs::create_dir_all(&sessions).unwrap();
+        let native_session_id = "019fa000-0000-7000-8000-000000000084";
+        write_session(
+            &sessions,
+            native_session_id,
+            &[message("user", "batch source revision sentinel")],
+        );
+        ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+        let event = VerifiedIndex::open(&index)
+            .unwrap()
+            .source_event_page(&codex_source_key(native_session_id).unwrap(), None, 8)
+            .unwrap()
+            .items
+            .into_iter()
+            .next()
+            .unwrap();
+        let batch = BatchHydrationRequest::new(vec![EventHydrationRequest::new(
+            event.event_id,
+            event.locator,
+        )
+        .unwrap()])
+        .unwrap();
+        let resolver = CodexLocatorResolverV0::discover([&sessions]).unwrap();
+        let source_path = session_path(&sessions, native_session_id);
+        let original = fs::read(&source_path).unwrap();
+        let mut replacement = original.clone();
+        let marker = b"batch source revision sentinel";
+        let marker_offset = replacement
+            .windows(marker.len())
+            .position(|window| window == marker)
+            .unwrap();
+        replacement[marker_offset] = b'B';
+        fs::remove_file(&source_path).unwrap();
+        fs::write(&source_path, replacement).unwrap();
+        let changed_result = resolver.hydrate_batch_request(&batch);
+        assert!(
+            matches!(
+                changed_result,
+                Err(CodexSourceBackedErrorV0::Capture(
+                    CaptureError::SourceChangedDuringCapture
+                ))
+            ),
+            "unexpected changed-source result: {changed_result:?}"
+        );
+
+        fs::remove_file(&source_path).unwrap();
+        let missing_resolver = CodexLocatorResolverV0::discover([&sessions]).unwrap();
+        assert!(matches!(
+            missing_resolver.hydrate_batch_request(&batch),
+            Err(CodexSourceBackedErrorV0::LocatorSourceNotFound(id))
+                if id == native_session_id
+        ));
     }
 
     /// Read-only production oracle. The provider corpus is only observed and
