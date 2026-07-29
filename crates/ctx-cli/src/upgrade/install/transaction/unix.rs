@@ -388,10 +388,12 @@ fn legacy_remove(path: &Path, kind: JournalPathKind) -> Result<()> {
 pub(super) fn reexec_restored_executable(path: &Path, attempt_id: &str) -> Result<()> {
     use std::os::unix::process::CommandExt as _;
 
-    let error = Command::new(path)
+    let mut command = Command::new(path);
+    command
         .args(env::args_os().skip(1))
-        .env(super::RECOVERY_REEXEC_ENV, attempt_id)
-        .exec();
+        .env(super::RECOVERY_REEXEC_ENV, attempt_id);
+    crate::process_environment::sanitize_release_authority_env(&mut command);
+    let error = command.exec();
     Err(error).with_context(|| format!("re-exec restored ctx {}", path.display()))
 }
 

@@ -1,11 +1,15 @@
-use std::{collections::BTreeMap, env};
+use std::collections::BTreeMap;
+
+#[cfg(ctx_release_qualification)]
+use std::env;
 
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use url::Url;
 
 use crate::config::AppConfig;
 
-use super::{env_flag, version::parse_semver};
+use super::version::parse_semver;
 
 mod semantic;
 pub(in crate::upgrade) use semantic::{
@@ -13,7 +17,8 @@ pub(in crate::upgrade) use semantic::{
     SemanticAssetMetadata, SemanticFileMetadata,
 };
 
-const DEFAULT_METADATA_PUBLIC_KEY_PEM: &str = r#"-----BEGIN RSA PUBLIC KEY-----
+const RELEASE_METADATA_BASE_URL: &str = "https://cli.ctx.rs/functions/v1";
+const RELEASE_METADATA_PUBLIC_KEY_PEM: &str = r#"-----BEGIN RSA PUBLIC KEY-----
 MIIBigKCAYEAyBPNIx3H/NwWlN9CPHY5kOEe9kQEshOJEMpv3Atq086H1FWqliTm
 3BCWiO4s/89wNMn11Pla2JetCWNiWsbxm3BIxCd1o6cq8y9ur6Zk1RGOQBLQgqhF
 m5BpcTTavhtlc3FdV2KSm2UU1IEJAiFXJyMlbgmf3tXfO8Cji/3mG11rWCXfnEzX
@@ -25,6 +30,9 @@ t4JAElZCs8SGTlV70MSlnyZb5/rkKx9kMvb7YjuYbY6vnN5Pp3P7gMhOKehP+62U
 /a+X6TNV/k5fAgMBAAE=
 -----END RSA PUBLIC KEY-----"#;
 const RELEASE_BASE_PREFIX: &str = "https://cli.ctx.rs/storage/v1/object/public/releases/artifacts/";
+#[cfg(test)]
+const RELEASE_METADATA_PUBLIC_KEY_DER_SHA256: &str =
+    "f989f75ad5eb476db0606125746fa524edb0a02ea5a6dde3bc83a5ea4fa93a4c";
 const ONNXRUNTIME_METADATA_PREFIX: &str = "CTX_RELEASE_ONNXRUNTIME_";
 const SUPPORTED_PLATFORM_KEYS: [&str; 6] = [
     "linux_x64",
@@ -57,23 +65,20 @@ pub(super) struct ReleaseMetadata {
     pub(super) semantic: Option<semantic::SemanticReleaseMetadata>,
 }
 
-pub(super) fn metadata_url(config: &AppConfig, channel: &str) -> String {
-    if let Ok(url) = env::var("CTX_RELEASE_METADATA_URL") {
-        if !url.trim().is_empty() {
-            return url;
-        }
+pub(super) fn metadata_url(_config: &AppConfig, channel: &str) -> String {
+    #[cfg(ctx_release_qualification)]
+    if let Some(url) = qualification_env("CTX_RELEASE_METADATA_URL") {
+        return url;
     }
-    format!(
-        "{}/releases/{channel}/ctx-release-metadata.env",
-        config.upgrade.functions_base.trim_end_matches('/')
-    )
+    format!("{RELEASE_METADATA_BASE_URL}/releases/{channel}/ctx-release-metadata.env")
 }
 
 pub(super) fn metadata_signature_url(metadata_url: &str) -> String {
-    env::var("CTX_RELEASE_METADATA_SIGNATURE_URL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| format!("{metadata_url}.sig"))
+    #[cfg(ctx_release_qualification)]
+    if let Some(url) = qualification_env("CTX_RELEASE_METADATA_SIGNATURE_URL") {
+        return url;
+    }
+    format!("{metadata_url}.sig")
 }
 
 pub(super) fn parse_release_metadata(
@@ -201,9 +206,6 @@ fn metadata_bool(metadata: &BTreeMap<String, String>, key: &str, default: bool) 
 }
 
 pub(super) fn verify_metadata_signature(metadata: &[u8], signature: &[u8]) -> Result<()> {
-    if cfg!(debug_assertions) && env_flag("CTX_RELEASE_SKIP_SIGNATURE_VERIFY_FOR_TESTS") {
-        return Ok(());
-    }
     let der = public_key_der()?;
     let signature_text = std::str::from_utf8(signature)
         .context("metadata signature is not UTF-8 base64")?
@@ -218,8 +220,11 @@ pub(super) fn verify_metadata_signature(metadata: &[u8], signature: &[u8]) -> Re
 }
 
 fn public_key_der() -> Result<Vec<u8>> {
-    let pem = env::var("CTX_RELEASE_METADATA_PUBLIC_KEY_PEM")
-        .unwrap_or_else(|_| DEFAULT_METADATA_PUBLIC_KEY_PEM.to_owned());
+    #[cfg(ctx_release_qualification)]
+    let pem = qualification_env("CTX_RELEASE_METADATA_PUBLIC_KEY_PEM")
+        .unwrap_or_else(|| RELEASE_METADATA_PUBLIC_KEY_PEM.to_owned());
+    #[cfg(not(ctx_release_qualification))]
+    let pem = RELEASE_METADATA_PUBLIC_KEY_PEM;
     let body: String = pem
         .lines()
         .filter(|line| !line.starts_with("-----"))
@@ -231,18 +236,57 @@ fn public_key_der() -> Result<Vec<u8>> {
 }
 
 pub(super) fn validate_artifact_url(base_url: &str, artifact: &str) -> Result<()> {
-    if !base_url.starts_with("https://") && !base_url.starts_with("file://") {
+    #[cfg(ctx_release_qualification)]
+    if qualification_artifact_base(base_url) {
+        return validate_artifact_name(artifact);
+    }
+    if !is_production_artifact_base(base_url) {
         return Err(anyhow!("metadata base URL must be HTTPS"));
     }
-    if !base_url.starts_with(RELEASE_BASE_PREFIX)
-        && !base_url.starts_with("file://")
-        && !env_flag("CTX_ALLOW_CUSTOM_RELEASE_BASE_URL")
-    {
-        return Err(anyhow!(
-            "metadata base URL must be under {RELEASE_BASE_PREFIX}"
-        ));
-    }
     validate_artifact_name(artifact)
+}
+
+fn is_production_artifact_base(base_url: &str) -> bool {
+    let Ok(url) = Url::parse(base_url) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.host_str() == Some("cli.ctx.rs")
+        && url.port().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && base_url.starts_with(RELEASE_BASE_PREFIX)
+        && url.as_str().starts_with(RELEASE_BASE_PREFIX)
+}
+
+#[cfg(ctx_release_qualification)]
+fn qualification_artifact_base(base_url: &str) -> bool {
+    let Ok(url) = Url::parse(base_url) else {
+        return false;
+    };
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return false;
+    }
+    if url.scheme() == "file" {
+        return true;
+    }
+    matches!(url.scheme(), "http" | "https")
+        && url.host().is_some_and(|host| match host {
+            url::Host::Domain(domain) => domain.eq_ignore_ascii_case("localhost"),
+            url::Host::Ipv4(address) => address.is_loopback(),
+            url::Host::Ipv6(address) => address.is_loopback(),
+        })
+}
+
+#[cfg(ctx_release_qualification)]
+fn qualification_env(key: &str) -> Option<String> {
+    env::var(key).ok().filter(|value| !value.trim().is_empty())
 }
 
 pub(super) fn validate_artifact_name(artifact: &str) -> Result<()> {
@@ -289,6 +333,66 @@ pub(super) fn validate_sha256(value: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
+    use std::{
+        env,
+        ffi::OsString,
+        sync::{Mutex, MutexGuard},
+    };
+
+    static RELEASE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct ReleaseEnvGuard {
+        _lock: MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl ReleaseEnvGuard {
+        fn hostile() -> Self {
+            let lock = RELEASE_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let values = [
+                (
+                    "CTX_RELEASE_METADATA_URL",
+                    "file:///attacker/ctx-release-metadata.env",
+                ),
+                (
+                    "CTX_RELEASE_METADATA_SIGNATURE_URL",
+                    "custom://attacker/signature",
+                ),
+                ("CTX_RELEASE_METADATA_PUBLIC_KEY_PEM", "not-a-public-key"),
+                ("CTX_RELEASE_BASE_URL", "https://attacker.invalid/artifacts"),
+                ("CTX_RELEASE_SKIP_SIGNATURE_VERIFY_FOR_TESTS", "1"),
+                ("CTX_ALLOW_CUSTOM_RELEASE_BASE_URL", "1"),
+                (
+                    "CTX_UPGRADE_FUNCTIONS_BASE",
+                    "https://attacker.invalid/functions",
+                ),
+                ("CTX_FUNCTIONS_BASE", "file:///legacy-attacker"),
+            ];
+            let saved = values
+                .iter()
+                .map(|(key, value)| {
+                    let previous = env::var_os(key);
+                    env::set_var(key, value);
+                    (*key, previous)
+                })
+                .collect();
+            Self { _lock: lock, saved }
+        }
+    }
+
+    impl Drop for ReleaseEnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                match value {
+                    Some(value) => env::set_var(key, value),
+                    None => env::remove_var(key),
+                }
+            }
+        }
+    }
 
     fn minimal_release_metadata(version: &str) -> Vec<u8> {
         format!(
@@ -351,5 +455,52 @@ CTX_RELEASE_SHA256_linux_x64={}
         let metadata = parse_release_metadata(&bytes, "linux-x64", "stable", false).unwrap();
 
         assert!(metadata.semantic.is_none());
+    }
+
+    #[cfg(not(ctx_release_qualification))]
+    #[test]
+    fn production_authority_ignores_mixed_ambient_substitution() {
+        let _guard = ReleaseEnvGuard::hostile();
+        let metadata = metadata_url(&AppConfig::default(), "stable");
+
+        assert_eq!(
+            metadata,
+            "https://cli.ctx.rs/functions/v1/releases/stable/ctx-release-metadata.env"
+        );
+        assert_eq!(
+            metadata_signature_url(&metadata),
+            "https://cli.ctx.rs/functions/v1/releases/stable/ctx-release-metadata.env.sig"
+        );
+        let key = public_key_der().expect("decode embedded production release key");
+        assert_eq!(
+            format!("{:x}", Sha256::digest(key)),
+            RELEASE_METADATA_PUBLIC_KEY_DER_SHA256
+        );
+    }
+
+    #[cfg(not(ctx_release_qualification))]
+    #[test]
+    fn production_artifact_authority_rejects_local_custom_and_mixed_urls() {
+        let _guard = ReleaseEnvGuard::hostile();
+        for base_url in [
+            "file:///tmp/ctx-release",
+            "http://127.0.0.1:8080/releases",
+            "https://attacker.invalid/releases",
+            "custom://attacker/releases",
+            "https://cli.ctx.rs.attacker.invalid/storage/v1/object/public/releases/artifacts/",
+            "https://attacker@cli.ctx.rs/storage/v1/object/public/releases/artifacts/",
+            "https://cli.ctx.rs/storage/v1/object/public/releases/artifacts/../redirected",
+            "https://cli.ctx.rs/storage/v1/object/public/releases/artifacts/?redirect=attacker",
+        ] {
+            assert!(
+                validate_artifact_url(base_url, "ctx-linux-x64").is_err(),
+                "production accepted ambient/custom artifact base {base_url}"
+            );
+        }
+        validate_artifact_url(
+            "https://cli.ctx.rs/storage/v1/object/public/releases/artifacts/1.0.0",
+            "ctx-linux-x64",
+        )
+        .expect("accept immutable production artifact authority");
     }
 }

@@ -234,7 +234,6 @@ pub struct UpgradeConfig {
     pub auto: String,
     pub channel: String,
     pub interval: Duration,
-    pub functions_base: String,
 }
 
 #[derive(Debug, Clone)]
@@ -265,7 +264,6 @@ impl Default for AppConfig {
                 auto: AUTO_UPGRADE_DEFAULT_MODE.to_owned(),
                 channel: "stable".to_owned(),
                 interval: Duration::from_secs(24 * 60 * 60),
-                functions_base: "https://cli.ctx.rs/functions/v1".to_owned(),
             },
             daemon: DaemonConfig {
                 enabled: DAEMON_DEFAULT_ENABLED,
@@ -354,9 +352,6 @@ impl AppConfig {
                     let hours = parse_config_u64(key, value)?;
                     self.upgrade.interval = Duration::from_secs(hours.saturating_mul(60 * 60));
                 }
-                "upgrade.functions_base" => {
-                    self.upgrade.functions_base = parse_non_empty_string(key, value)?;
-                }
                 "daemon.enabled" => {
                     self.daemon.enabled = parse_config_bool(key, value)?;
                 }
@@ -411,11 +406,6 @@ impl AppConfig {
         if let Ok(channel) = env::var("CTX_UPGRADE_CHANNEL") {
             if !channel.trim().is_empty() {
                 self.upgrade.channel = channel;
-            }
-        }
-        if let Ok(functions_base) = env::var("CTX_UPGRADE_FUNCTIONS_BASE") {
-            if !functions_base.trim().is_empty() {
-                self.upgrade.functions_base = functions_base;
             }
         }
         if let Ok(seconds) = env::var("CTX_UPGRADE_INTERVAL_SECONDS") {

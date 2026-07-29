@@ -38,7 +38,10 @@ the local retrieval product.
   directory when `ctx docs man --out` is used.
 - `ctx upgrade` uses signed release metadata with explicit self-upgrade policy
   and applies only to official installer-managed binaries with a matching
-  install sidecar.
+  install sidecar. Production metadata origin, detached-signature derivation,
+  public key, and artifact-origin prefix are binary constants; ambient config
+  and environment cannot replace them, and release-related child processes
+  remove inherited release-authority variables before execution.
 - Automatic upgrade defaults on for managed installs, but the enabled daemon is
   its only scheduler. A disabled daemon performs no automatic check, download,
   or apply. Signed policy and explicit opt-outs remain mandatory, and upgrade

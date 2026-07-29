@@ -1,6 +1,7 @@
 use std::env;
 
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(ctx_release_qualification)");
     println!("cargo:rustc-check-cfg=cfg(ctx_semantic_fastembed)");
 
     let os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();

@@ -89,7 +89,8 @@ impl Drop for ParentProcess {
 pub(super) fn spawn(transaction: &mut InstallTransactionJournal, parent_pid: u32) -> Result<u32> {
     let expected = protocol::prepare_launch(transaction, parent_pid)?;
     copy_helper(&transaction.install_path, expected.helper_path())?;
-    let mut child = Command::new(expected.helper_path())
+    let mut command = Command::new(expected.helper_path());
+    command
         .arg("--data-root")
         .arg(&transaction.data_root)
         .arg("upgrade")
@@ -103,7 +104,9 @@ pub(super) fn spawn(transaction: &mut InstallTransactionJournal, parent_pid: u32
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
+        .creation_flags(CREATE_NO_WINDOW);
+    crate::process_environment::sanitize_release_authority_env(&mut command);
+    let mut child = command
         .spawn()
         .context("spawn Windows ctx replacement helper")?;
     let helper_pid = child.id();

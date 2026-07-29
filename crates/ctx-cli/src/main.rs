@@ -20,6 +20,7 @@ mod mcp;
 mod net;
 mod output;
 mod pro;
+mod process_environment;
 mod progress;
 mod provider_args;
 mod provider_sources;

@@ -59,11 +59,6 @@
       "environment_variable": "CTX_UPGRADE_INTERVAL_SECONDS"
     },
     {
-      "behavior": "upgrade metadata base",
-      "config_key": "upgrade.functions_base",
-      "environment_variable": "CTX_UPGRADE_FUNCTIONS_BASE"
-    },
-    {
       "behavior": "daemon maintenance",
       "config_key": "daemon.enabled",
       "environment_variable": "CTX_DAEMON_ENABLED",
@@ -105,7 +100,9 @@
   "retired_controls": [
     "CTX_CHANNEL",
     "CTX_FUNCTIONS_BASE",
+    "CTX_UPGRADE_FUNCTIONS_BASE",
     "CTX_DISABLE_SEMANTIC_SEARCH",
+    "upgrade.functions_base",
     "upgrade.interval_seconds"
   ],
   "retired_control_reference": "docs/storage.md",

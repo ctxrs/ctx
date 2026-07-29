@@ -88,9 +88,11 @@ impl Drop for MetadataRequestProbe {
 #[cfg(unix)]
 const INSTALLER_UPGRADE_ENV: &[&str] = &[
     "CTX_ALLOW_CUSTOM_RELEASE_BASE_URL",
+    "CTX_FUNCTIONS_BASE",
     "CTX_RELEASE_METADATA_PUBLIC_KEY_PEM",
     "CTX_RELEASE_METADATA_SIGNATURE_URL",
     "CTX_RELEASE_METADATA_URL",
+    "CTX_RELEASE_SKIP_SIGNATURE_VERIFY_FOR_TESTS",
     "CTX_UPGRADE_AUTO",
     "CTX_UPGRADE_CHANNEL",
     "CTX_UPGRADE_FUNCTIONS_BASE",
@@ -104,17 +106,14 @@ fn remove_installer_upgrade_env(command: &mut Command) {
 }
 
 #[cfg(unix)]
-fn write_probe_config(temp: &TempDir, endpoint: &str) {
+fn write_probe_config(temp: &TempDir) {
     fs::write(
         temp.path().join("config.toml"),
-        format!(
-            "[analytics]\n\
-             enabled = false\n\
-             [upgrade]\n\
-             auto = \"apply\"\n\
-             channel = \"stable\"\n\
-             functions_base = \"{endpoint}\"\n"
-        ),
+        "[analytics]\n\
+         enabled = false\n\
+         [upgrade]\n\
+         auto = \"apply\"\n\
+         channel = \"stable\"\n",
     )
     .unwrap();
 }
@@ -1160,7 +1159,7 @@ fn staging_dogfood_marker_survives_fresh_process_and_blocks_stable_metadata() {
     let binary = managed_candidate(&temp, "ia_staging_dogfood_isolation");
     mark_staging_dogfood(&binary);
     let probe = MetadataRequestProbe::start();
-    write_probe_config(&temp, &probe.endpoint);
+    write_probe_config(&temp);
 
     let mut status_command = ctx_from_binary(&temp, &binary);
     remove_installer_upgrade_env(&mut status_command);
@@ -1171,7 +1170,11 @@ fn staging_dogfood_marker_survives_fresh_process_and_blocks_stable_metadata() {
 
     let mut check_command = ctx_from_binary(&temp, &binary);
     remove_installer_upgrade_env(&mut check_command);
-    let stderr = failure_stderr(check_command.args(["upgrade", "check"]));
+    let stderr = failure_stderr(
+        check_command
+            .args(["upgrade", "check"])
+            .env("CTX_RELEASE_METADATA_URL", &probe.endpoint),
+    );
     assert!(
         stderr.contains("staging dogfood ctx installation is isolated from release upgrades"),
         "{stderr}"
@@ -1193,7 +1196,7 @@ fn ordinary_hosted_install_marker_keeps_production_upgrade_behavior() {
     let temp = tempdir();
     let binary = managed_candidate(&temp, "ia_ordinary_hosted_install");
     let probe = MetadataRequestProbe::start();
-    write_probe_config(&temp, &probe.endpoint);
+    write_probe_config(&temp);
 
     let mut status_command = ctx_from_binary(&temp, &binary);
     remove_installer_upgrade_env(&mut status_command);
@@ -1204,7 +1207,11 @@ fn ordinary_hosted_install_marker_keeps_production_upgrade_behavior() {
 
     let mut check_command = ctx_from_binary(&temp, &binary);
     remove_installer_upgrade_env(&mut check_command);
-    let stderr = failure_stderr(check_command.args(["upgrade", "check"]));
+    let stderr = failure_stderr(
+        check_command
+            .args(["upgrade", "check"])
+            .env("CTX_RELEASE_METADATA_URL", &probe.endpoint),
+    );
     assert!(
         stderr.contains("download release metadata"),
         "ordinary hosted installs must retain normal metadata planning: {stderr}"

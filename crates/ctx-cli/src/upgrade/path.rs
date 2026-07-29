@@ -388,11 +388,14 @@ struct VersionCommandOutput {
 }
 
 fn run_ctx_version_command(path: &Path) -> Result<VersionCommandOutput> {
-    let mut child = Command::new(path)
+    let mut command = Command::new(path);
+    command
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    crate::process_environment::sanitize_release_authority_env(&mut command);
+    let mut child = command
         .spawn()
         .with_context(|| format!("run {} --version", path.display()))?;
     let stdout = child
