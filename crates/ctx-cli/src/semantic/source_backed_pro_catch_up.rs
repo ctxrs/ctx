@@ -599,7 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn cli_wait_is_generation_exact_and_fails_closed_on_projection_error() {
+    fn explicit_wait_is_generation_exact_and_fails_closed_on_projection_error() {
         let temp = tempfile::tempdir().unwrap();
         let generation = "a".repeat(64);
         let completed =
@@ -623,7 +623,12 @@ mod tests {
             })
             .unwrap_err();
         assert!(format!("{error:#}").starts_with("helper_crashed:"));
+    }
 
+    #[test]
+    fn explicit_wait_times_out_on_a_stale_frontier() {
+        let temp = tempfile::tempdir().unwrap();
+        let generation = "a".repeat(64);
         let stale =
             SourceBackedProCatchUpStatus::pending(&"b".repeat(64), 1).completed("b".repeat(64));
         persist_status(temp.path(), &stale).unwrap();

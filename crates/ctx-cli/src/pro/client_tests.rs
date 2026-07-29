@@ -1,5 +1,6 @@
 use super::*;
 use ctx_pro_host_protocol::GraphState;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn source_receipt(generation: char) -> ctx_pro_host_protocol::SourceManifestReceipt {
     ctx_pro_host_protocol::SourceManifestReceipt {
@@ -86,7 +87,7 @@ fn incomplete_source_authority_fails_closed() {
 }
 
 #[test]
-fn blame_request_rejects_g1_cursor_after_core_publishes_g2() {
+fn stale_graph_frontier_is_a_typed_error_instead_of_a_valid_looking_result() {
     let receipt = source_receipt('a');
     let status = StatusResult {
         state: GraphState::Ready,
@@ -105,6 +106,120 @@ fn blame_request_rejects_g1_cursor_after_core_publishes_g2() {
     )
     .expect_err("G1 helper authority and cursor must be rejected after verified Core G2");
     assert_eq!(stable_error_code(&error), Some("stale_source"));
+}
+
+#[test]
+fn default_blame_policy_never_invokes_the_synchronous_wait_path() {
+    assert_eq!(
+        DEFAULT_BLAME_FRESHNESS_POLICY,
+        BlameFreshnessPolicy::LatestCommitted
+    );
+    let latest_calls = AtomicUsize::new(0);
+    let generation = prepare_blame_generation_with(
+        BlameFreshnessPolicy::LatestCommitted,
+        || {
+            latest_calls.fetch_add(1, Ordering::SeqCst);
+            Ok("a".repeat(64))
+        },
+        || panic!("ordinary blame must not synchronously wait for Pro catch-up"),
+    )
+    .unwrap();
+
+    assert_eq!(generation, "a".repeat(64));
+    assert_eq!(latest_calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn explicit_wait_policy_uses_only_the_synchronous_wait_path() {
+    let wait_calls = AtomicUsize::new(0);
+    let generation = prepare_blame_generation_with(
+        BlameFreshnessPolicy::WaitForCurrent,
+        || panic!("explicit wait policy must not use latest-committed preparation"),
+        || {
+            wait_calls.fetch_add(1, Ordering::SeqCst);
+            Ok("b".repeat(64))
+        },
+    )
+    .unwrap();
+
+    assert_eq!(generation, "b".repeat(64));
+    assert_eq!(wait_calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn daemon_disabled_still_reads_the_latest_committed_core_generation() {
+    let generation = latest_committed_blame_generation_with(
+        || anyhow::bail!("daemon start was suppressed (not_allowed)"),
+        || Ok("a".repeat(64)),
+    )
+    .unwrap();
+
+    assert_eq!(generation, "a".repeat(64));
+}
+
+#[test]
+fn dead_daemon_does_not_hide_an_existing_committed_core_generation() {
+    let generation = latest_committed_blame_generation_with(
+        || anyhow::bail!("ctx daemon did not become ready: daemon process exited"),
+        || Ok("b".repeat(64)),
+    )
+    .unwrap();
+
+    assert_eq!(generation, "b".repeat(64));
+}
+
+#[test]
+fn missing_core_generation_preserves_bounded_daemon_wake_failure() {
+    let error = latest_committed_blame_generation_with(
+        || anyhow::bail!("ctx daemon did not become ready"),
+        || anyhow::bail!("source_unavailable: active verified Core generation is missing"),
+    )
+    .unwrap_err();
+
+    assert_eq!(stable_error_code(&error), Some("source_unavailable"));
+    assert!(format!("{error:#}").contains("bounded daemon wake failed"));
+}
+
+#[test]
+fn already_materialized_graph_stays_bound_to_its_exact_source_generation() {
+    let receipt = source_receipt('a');
+    let status = StatusResult {
+        state: GraphState::Ready,
+        authority: ctx_pro_host_protocol::MaterializationAuthority::Source,
+        source_receipt: Some(receipt.clone()),
+    };
+
+    let request = support::current_blame_request(
+        BlameTarget::Commit {
+            oid: "0123456789abcdef".to_owned(),
+            repository: None,
+        },
+        10,
+        None,
+        &status,
+        &receipt.core_generation_id,
+    )
+    .unwrap();
+
+    let ctx_pro_host_protocol::QuerySnapshotExpectation::Source { receipt: identity } =
+        request.expected_snapshot;
+    assert_eq!(identity.core_generation_id, receipt.core_generation_id);
+}
+
+#[test]
+fn core_advance_during_blame_returns_typed_stale_source() {
+    let error = ensure_blame_generation_is_current(&"a".repeat(64), &"b".repeat(64)).unwrap_err();
+    assert_eq!(stable_error_code(&error), Some("stale_source"));
+}
+
+#[test]
+fn cli_and_mcp_use_the_same_default_blame_operation() {
+    let cli = include_str!("../commands/blame.rs");
+    let mcp = include_str!("../mcp/pro.rs");
+    let operation = "crate::pro::blame(";
+
+    assert!(cli.contains(operation));
+    assert!(mcp.contains(operation));
 }
 
 #[test]

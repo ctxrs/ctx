@@ -6,55 +6,43 @@ pub(crate) fn blame(
     limit: u32,
     cursor: Option<String>,
 ) -> Result<BlameResult> {
-    // Blame is generation-sensitive: a healthy but older Pro receipt is not
-    // authoritative for the currently published Core generation. The
-    // materialization path is a no-op when both generations already match.
-    let expected_generation = prepare_blame_generation(data_root)?;
-    let first = blame_once(
+    blame_with_policy(
         data_root,
-        target.clone(),
+        target,
         limit,
-        cursor.clone(),
-        &expected_generation,
-    );
-    let should_catch_up = first.as_ref().is_err_and(|error| {
-        matches!(
-            stable_error_code(error),
-            Some(
-                "not_materialized"
-                    | "needs_rebuild"
-                    | "partial"
-                    | "needs_resume"
-                    | "stale_source"
-                    | "stale_snapshot"
-            )
-        )
-    });
-    if !should_catch_up {
-        return first;
-    }
-    let expected_generation = prepare_blame_generation(data_root)?;
-    blame_once(data_root, target, limit, cursor, &expected_generation)
+        cursor,
+        DEFAULT_BLAME_FRESHNESS_POLICY,
+    )
 }
 
-fn prepare_blame_generation(data_root: &Path) -> Result<String> {
-    let mut materialization = ProMaterializationTelemetryV1::started();
-    materialize(data_root, &mut materialization)?;
-
-    let mut expected = crate::semantic::pin_active_verified_generation(data_root)?
+pub(super) fn blame_with_policy(
+    data_root: &Path,
+    target: BlameTarget,
+    limit: u32,
+    cursor: Option<String>,
+    policy: BlameFreshnessPolicy,
+) -> Result<BlameResult> {
+    let expected_generation = prepare_blame_generation(data_root, policy)?;
+    let result = blame_once(data_root, target, limit, cursor, &expected_generation)?;
+    let active_generation = crate::semantic::pin_active_verified_generation(data_root)?
         .generation_id()
         .to_owned();
-    for _ in 0..3 {
-        crate::semantic::wait_for_source_backed_pro_generation(data_root, &expected)?;
-        let active = crate::semantic::pin_active_verified_generation(data_root)?
-            .generation_id()
-            .to_owned();
-        if active == expected {
-            return Ok(expected);
-        }
-        expected = active;
+    ensure_blame_generation_is_current(&expected_generation, &active_generation)?;
+    Ok(result)
+}
+
+pub(super) fn ensure_blame_generation_is_current(
+    expected_generation: &str,
+    active_generation: &str,
+) -> Result<()> {
+    if expected_generation != active_generation {
+        bail!(
+            "stale_source: Core generation advanced from {} to {} while blame was running",
+            expected_generation,
+            active_generation
+        );
     }
-    bail!("stale_source: active verified Core generation advanced repeatedly while preparing blame")
+    Ok(())
 }
 
 pub(super) fn blame_once(
