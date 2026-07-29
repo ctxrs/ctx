@@ -594,8 +594,10 @@ mod tests {
 
     #[test]
     fn ordered_batch_is_bounded_and_rejects_duplicate_event_identities() {
-        assert_eq!(MAX_BATCH_HYDRATION_EVENTS, 100_000);
-        assert!(MAX_BATCH_HYDRATION_EVENTS >= 200);
+        const {
+            assert!(MAX_BATCH_HYDRATION_EVENTS == 100_000);
+            assert!(MAX_BATCH_HYDRATION_EVENTS >= 200);
+        }
 
         let source = source(1);
         let event = request(&source, "event");
