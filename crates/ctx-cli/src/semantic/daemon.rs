@@ -11,10 +11,8 @@ use serde_json::{json, Value};
 
 use crate::{
     analytics::{
-        self, count_bucket, DaemonBackoffV1, DaemonCycleFactsV1, DaemonCycleResultV1,
-        DaemonCycleStateV1, DaemonOperationV1, DaemonRunFactsV1, DaemonRuntimeObservationV1,
-        DaemonRuntimeSnapshotV1, DaemonStartModeV1, DaemonSupervisorV1, DaemonTriggerV1,
-        OperationCompletedV1, Outcome, PublicEventV1, RuntimeObservationV1,
+        DaemonCycleStateV1, DaemonOperationV1, DaemonRunFactsV1, DaemonStartModeV1,
+        DaemonSupervisorV1, DaemonTriggerV1, OperationCompletedV1, Outcome, PublicEventV1,
     },
     compact_json,
     config::{self, AppConfig, DaemonMode, CONFIG_FILE},
@@ -22,6 +20,9 @@ use crate::{
     DaemonArgs, DaemonCommand, DaemonDisableArgs, DaemonRunArgs, DaemonStartModeArg,
     DaemonTriggerCommandArg, FormatArgs,
 };
+
+#[cfg(test)]
+use crate::analytics::DaemonRuntimeObservationV1;
 
 #[cfg(test)]
 use super::source_backed_refresh_coordinator::SourceBackedRefreshCoordinator;
@@ -43,17 +44,32 @@ use super::{
     model_runtime::SharedSemanticRuntime,
     paths_status::{
         daemon_lock_is_active, daemon_report, daemon_report_with_disabled_status,
-        daemon_source_backed_refresh_job_path, lower_semantic_worker_priority,
-        read_daemon_job_status, read_daemon_status, write_daemon_status, DaemonLock,
+        daemon_source_backed_refresh_job_path, read_daemon_job_status, read_daemon_status,
+        write_daemon_status, DaemonLock,
     },
     query_service::{
-        daemon_can_begin_idle_shutdown, daemon_query_service_transport_supported,
-        daemon_source_refresh_request, observe_daemon_query_activity,
-        semantic_query_service_supported, start_daemon_query_service,
-        start_daemon_source_refresh_service, DaemonQueryService,
+        daemon_can_begin_idle_shutdown, daemon_source_refresh_request,
+        observe_daemon_query_activity, DaemonQueryService,
     },
     runtime_limits::DAEMON_BACKGROUND_CHILD_ENV,
     source_backed_refresh_coordinator::reconcile_verified_source_epoch,
+};
+
+mod config_reload;
+mod telemetry;
+
+use config_reload::{
+    daemon_semantic_runtime_active, reload_daemon_runtime_config, DaemonConfigReloadOutcome,
+    DaemonConfigReloadState,
+};
+use telemetry::{daemon_safety_reconcile_interval, send_daemon_events, DaemonTelemetry};
+
+#[cfg(test)]
+use config_reload::daemon_semantic_runtime_requested;
+#[cfg(test)]
+use telemetry::{
+    daemon_liveness_interval, reload_daemon_analytics_config, runtime_event,
+    DAEMON_LIVENESS_JITTER_WINDOW, DAEMON_LIVENESS_MIN_INTERVAL,
 };
 
 #[derive(Debug)]
@@ -83,251 +99,6 @@ impl DaemonIteration {
     }
 }
 
-const DAEMON_LIVENESS_MIN_INTERVAL: StdDuration = StdDuration::from_secs(23 * 60 * 60);
-const DAEMON_LIVENESS_JITTER_WINDOW: StdDuration = StdDuration::from_secs(60 * 60);
-const DAEMON_SAFETY_RECONCILE_MIN_INTERVAL: StdDuration = StdDuration::from_secs(15 * 60);
-const DAEMON_SAFETY_RECONCILE_JITTER_WINDOW: StdDuration = StdDuration::from_secs(5 * 60);
-
-#[derive(Debug)]
-struct DaemonTelemetry {
-    run: DaemonRunFactsV1,
-    started: Instant,
-    next_liveness: Instant,
-    jitter_seed: u64,
-    liveness_sequence: u64,
-    current_state: DaemonCycleStateV1,
-    idle_state: Option<DaemonCycleStateV1>,
-    pending_idle_cycles: u64,
-    pending_idle_duration: StdDuration,
-    failure_active: bool,
-}
-
-impl DaemonTelemetry {
-    fn new(run: DaemonRunFactsV1, started: Instant, jitter_seed: u64) -> Self {
-        Self {
-            run,
-            started,
-            next_liveness: started + daemon_liveness_interval(jitter_seed),
-            jitter_seed,
-            liveness_sequence: 1,
-            current_state: DaemonCycleStateV1::unknown(),
-            idle_state: None,
-            pending_idle_cycles: 0,
-            pending_idle_duration: StdDuration::ZERO,
-            failure_active: false,
-        }
-    }
-
-    fn ready_events(&self, recovered: bool, now: Instant) -> Vec<PublicEventV1> {
-        let elapsed = now.saturating_duration_since(self.started);
-        let mut events = vec![runtime_event(
-            DaemonRuntimeObservationV1::ready(self.run),
-            Outcome::Success,
-            elapsed,
-        )];
-        if recovered {
-            events.push(runtime_event(
-                DaemonRuntimeObservationV1::recovered(self.snapshot()),
-                Outcome::Success,
-                elapsed,
-            ));
-        }
-        events
-    }
-
-    fn observe_cycle(
-        &mut self,
-        iteration: &mut DaemonIteration,
-        duration: StdDuration,
-    ) -> Vec<PublicEventV1> {
-        let mut events = std::mem::take(&mut iteration.provider_refresh_events);
-        let state = iteration.telemetry_state;
-        self.current_state = state;
-        let result = if iteration.failed {
-            DaemonCycleResultV1::Failure
-        } else if iteration.did_work {
-            DaemonCycleResultV1::Work
-        } else {
-            DaemonCycleResultV1::NoWork
-        };
-
-        if result == DaemonCycleResultV1::NoWork {
-            match self.idle_state {
-                None => {
-                    events.push(self.cycle_event(result, 1, state, duration));
-                    self.idle_state = Some(state);
-                }
-                Some(previous) if previous == state => {
-                    self.pending_idle_cycles = self.pending_idle_cycles.saturating_add(1);
-                    self.pending_idle_duration =
-                        self.pending_idle_duration.saturating_add(duration);
-                }
-                Some(_) => {
-                    self.flush_pending_idle(&mut events);
-                    events.push(self.cycle_event(result, 1, state, duration));
-                    self.idle_state = Some(state);
-                }
-            }
-        } else {
-            self.flush_pending_idle(&mut events);
-            self.idle_state = None;
-            events.push(self.cycle_event(result, 1, state, duration));
-        }
-        if iteration.failed && !self.failure_active {
-            events.push(runtime_event(
-                DaemonRuntimeObservationV1::failed(self.snapshot()),
-                Outcome::Failure,
-                duration,
-            ));
-            self.failure_active = true;
-        } else if !iteration.failed
-            && self.failure_active
-            && state.retry_backoff() == DaemonBackoffV1::None
-        {
-            events.push(runtime_event(
-                DaemonRuntimeObservationV1::recovered(self.snapshot()),
-                Outcome::Success,
-                duration,
-            ));
-            self.failure_active = false;
-        }
-        events
-    }
-
-    fn liveness_events(&mut self, now: Instant) -> Vec<PublicEventV1> {
-        if now < self.next_liveness {
-            return Vec::new();
-        }
-        let mut events = Vec::new();
-        self.flush_pending_idle(&mut events);
-        events.push(runtime_event(
-            DaemonRuntimeObservationV1::liveness(self.snapshot()),
-            Outcome::Success,
-            now.saturating_duration_since(self.started),
-        ));
-        let seed = self
-            .jitter_seed
-            .wrapping_add(self.liveness_sequence.wrapping_mul(0x9e37_79b9_7f4a_7c15));
-        self.liveness_sequence = self.liveness_sequence.saturating_add(1);
-        self.next_liveness = now + daemon_liveness_interval(seed);
-        events
-    }
-
-    fn stopped_events(&mut self, failed: bool, now: Instant) -> Vec<PublicEventV1> {
-        let mut events = Vec::new();
-        self.flush_pending_idle(&mut events);
-        events.push(runtime_event(
-            DaemonRuntimeObservationV1::stopped(self.snapshot()),
-            if failed {
-                Outcome::Failure
-            } else {
-                Outcome::Success
-            },
-            now.saturating_duration_since(self.started),
-        ));
-        events
-    }
-
-    fn fatal_events(&mut self, now: Instant) -> Vec<PublicEventV1> {
-        let mut events = Vec::new();
-        self.flush_pending_idle(&mut events);
-        if !self.failure_active {
-            events.push(runtime_event(
-                DaemonRuntimeObservationV1::failed(self.snapshot()),
-                Outcome::Failure,
-                now.saturating_duration_since(self.started),
-            ));
-            self.failure_active = true;
-        }
-        events
-    }
-
-    fn flush_pending_idle(&mut self, events: &mut Vec<PublicEventV1>) {
-        if self.pending_idle_cycles == 0 {
-            return;
-        }
-        let state = self.idle_state.unwrap_or(self.current_state);
-        events.push(self.cycle_event(
-            DaemonCycleResultV1::NoWork,
-            self.pending_idle_cycles,
-            state,
-            self.pending_idle_duration,
-        ));
-        self.pending_idle_cycles = 0;
-        self.pending_idle_duration = StdDuration::ZERO;
-    }
-
-    fn cycle_event(
-        &self,
-        result: DaemonCycleResultV1,
-        cycles: u64,
-        state: DaemonCycleStateV1,
-        duration: StdDuration,
-    ) -> PublicEventV1 {
-        runtime_event(
-            DaemonRuntimeObservationV1::cycle(DaemonCycleFactsV1::new(
-                self.run,
-                result,
-                count_bucket(cycles),
-                state,
-            )),
-            if result == DaemonCycleResultV1::Failure {
-                Outcome::Failure
-            } else {
-                Outcome::Success
-            },
-            duration,
-        )
-    }
-
-    fn snapshot(&self) -> DaemonRuntimeSnapshotV1 {
-        DaemonRuntimeSnapshotV1::new(self.run, self.current_state)
-    }
-}
-
-fn daemon_liveness_interval(seed: u64) -> StdDuration {
-    let jitter_window_secs = DAEMON_LIVENESS_JITTER_WINDOW.as_secs();
-    let jitter_secs = if jitter_window_secs == 0 {
-        0
-    } else {
-        seed % jitter_window_secs
-    };
-    DAEMON_LIVENESS_MIN_INTERVAL + StdDuration::from_secs(jitter_secs)
-}
-
-fn daemon_safety_reconcile_interval(seed: u64) -> StdDuration {
-    let jitter_window_secs = DAEMON_SAFETY_RECONCILE_JITTER_WINDOW.as_secs();
-    let jitter_secs = if jitter_window_secs == 0 {
-        0
-    } else {
-        seed % jitter_window_secs
-    };
-    DAEMON_SAFETY_RECONCILE_MIN_INTERVAL + StdDuration::from_secs(jitter_secs)
-}
-
-fn runtime_event(
-    observation: DaemonRuntimeObservationV1,
-    outcome: Outcome,
-    duration: StdDuration,
-) -> PublicEventV1 {
-    PublicEventV1::RuntimeObservation(RuntimeObservationV1::daemon(observation, outcome, duration))
-}
-
-fn send_daemon_events(data_root: &Path, events: &[PublicEventV1]) {
-    if events.is_empty() {
-        return;
-    }
-    let Some(config) = reload_daemon_analytics_config(data_root) else {
-        return;
-    };
-    analytics::send_batch(data_root, &config, events);
-}
-
-fn reload_daemon_analytics_config(data_root: &Path) -> Option<AppConfig> {
-    let config = AppConfig::load(data_root).ok()?;
-    config.analytics.enabled.then_some(config)
-}
-
 #[derive(Default)]
 pub(super) struct DaemonRuntime {
     pub(super) semantic_runtime: SharedSemanticRuntime,
@@ -336,171 +107,6 @@ pub(super) struct DaemonRuntime {
     pub(super) semantic_retry: DaemonRetryBackoff,
     pub(super) semantic_blocked_job: Option<Value>,
     pub(super) config: AppConfig,
-}
-
-#[derive(Debug, Clone)]
-struct DaemonConfigReloadState {
-    status: &'static str,
-    last_attempt_at_ms: i64,
-    last_applied_at_ms: Option<i64>,
-    requested_daemon_enabled: bool,
-    requested_daemon_mode: DaemonMode,
-    requested_semantic_enabled: bool,
-    applied_daemon_enabled: Option<bool>,
-    applied_daemon_mode: Option<DaemonMode>,
-    applied_semantic_enabled: Option<bool>,
-    last_error: Option<String>,
-}
-
-impl DaemonConfigReloadState {
-    fn pending(config: &AppConfig) -> Self {
-        Self {
-            status: "pending",
-            last_attempt_at_ms: utc_now().timestamp_millis(),
-            last_applied_at_ms: None,
-            requested_daemon_enabled: config.daemon.enabled,
-            requested_daemon_mode: config.daemon.mode,
-            requested_semantic_enabled: config.semantic_search_enabled(),
-            applied_daemon_enabled: None,
-            applied_daemon_mode: None,
-            applied_semantic_enabled: None,
-            last_error: None,
-        }
-    }
-
-    fn begin_attempt(&mut self, config: &AppConfig) {
-        self.last_attempt_at_ms = utc_now().timestamp_millis();
-        self.requested_daemon_enabled = config.daemon.enabled;
-        self.requested_daemon_mode = config.daemon.mode;
-        self.requested_semantic_enabled = config.semantic_search_enabled();
-        self.last_error = None;
-    }
-
-    fn applied(&mut self) {
-        self.status = "applied";
-        self.last_applied_at_ms = Some(self.last_attempt_at_ms);
-        self.applied_daemon_enabled = Some(self.requested_daemon_enabled);
-        self.applied_daemon_mode = Some(self.requested_daemon_mode);
-        self.applied_semantic_enabled = Some(self.requested_semantic_enabled);
-        self.last_error = None;
-    }
-
-    fn load_failed(&mut self, error: anyhow::Error) {
-        self.status = "failed";
-        self.last_attempt_at_ms = utc_now().timestamp_millis();
-        self.last_error = Some(format!("{error:#}"));
-    }
-
-    fn activation_failed(&mut self, error: anyhow::Error) {
-        self.status = "activation_failed";
-        self.applied_daemon_enabled = Some(self.requested_daemon_enabled);
-        self.last_error = Some(format!("{error:#}"));
-    }
-
-    fn to_json(&self) -> Value {
-        json!({
-            "status": self.status,
-            "last_attempt_at_ms": self.last_attempt_at_ms,
-            "last_applied_at_ms": self.last_applied_at_ms,
-            "requested": {
-                "daemon_enabled": self.requested_daemon_enabled,
-                "daemon_mode": self.requested_daemon_mode.as_str(),
-                "semantic_enabled": self.requested_semantic_enabled,
-            },
-            "applied": {
-                "daemon_enabled": self.applied_daemon_enabled,
-                "daemon_mode": self.applied_daemon_mode.map(DaemonMode::as_str),
-                "semantic_enabled": self.applied_semantic_enabled,
-            },
-            "last_error": self.last_error,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DaemonConfigReloadOutcome {
-    Continue,
-    StopDisabled,
-}
-
-fn reload_daemon_runtime_config(
-    data_root: &Path,
-    args: &DaemonRunArgs,
-    runtime: &mut DaemonRuntime,
-    query_service: &mut Option<DaemonQueryService>,
-    refresh_service: &mut Option<DaemonQueryService>,
-    reload: &mut DaemonConfigReloadState,
-    wakeup: &Arc<DaemonWakeup>,
-) -> DaemonConfigReloadOutcome {
-    let config = match AppConfig::load(data_root) {
-        Ok(config) => config,
-        Err(error) => {
-            reload.load_failed(error);
-            return DaemonConfigReloadOutcome::Continue;
-        }
-    };
-    reload.begin_attempt(&config);
-    runtime.config = config;
-
-    if !runtime.config.daemon.enabled && !args.force {
-        drop(query_service.take());
-        drop(refresh_service.take());
-        let _ = runtime.semantic_runtime.release_if_idle();
-        reload.applied();
-        return DaemonConfigReloadOutcome::StopDisabled;
-    }
-
-    let semantic_runtime_requested = daemon_semantic_runtime_requested(
-        &runtime.config,
-        semantic_query_service_supported() && daemon_query_service_transport_supported(),
-    );
-    if daemon_query_service_transport_supported() && refresh_service.is_none() {
-        match start_daemon_source_refresh_service(
-            data_root,
-            runtime.semantic_runtime.clone(),
-            Arc::clone(wakeup),
-        ) {
-            Ok(service) => *refresh_service = Some(service),
-            Err(error) => {
-                reload.activation_failed(error);
-                return DaemonConfigReloadOutcome::Continue;
-            }
-        }
-    }
-    if semantic_runtime_requested && query_service.is_none() {
-        match start_daemon_query_service(data_root, runtime.semantic_runtime.clone()) {
-            Ok(service) => {
-                *query_service = Some(service);
-                // The query service thread keeps normal interactive priority.
-                lower_semantic_worker_priority();
-            }
-            Err(error) => {
-                reload.activation_failed(error);
-                return DaemonConfigReloadOutcome::Continue;
-            }
-        }
-    } else if !semantic_runtime_requested && query_service.is_some() {
-        drop(query_service.take());
-        let _ = runtime.semantic_runtime.release_if_idle();
-    }
-
-    reload.applied();
-    DaemonConfigReloadOutcome::Continue
-}
-
-fn daemon_semantic_runtime_requested(config: &AppConfig, service_supported: bool) -> bool {
-    service_supported
-        && config.semantic_search_enabled()
-        && !config.daemon.mode.runs_only_source_refresh()
-}
-
-fn daemon_semantic_runtime_active(
-    runtime: &DaemonRuntime,
-    query_service: Option<&DaemonQueryService>,
-) -> bool {
-    query_service.is_some()
-        && runtime.config.semantic_search_enabled()
-        && semantic_query_service_supported()
 }
 
 #[cfg(test)]
