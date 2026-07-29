@@ -1,9 +1,4 @@
-//! Provider-owned Cline NativePath page producer.
-//!
-//! Discovery is deliberately metadata-only. The pull reader hydrates each
-//! changed component once, parses it once, certifies that component's
-//! authority, and only then makes an owned Core/optional-Pro page observable.
-//! Directory reconciliation is a separate terminal catalog operation.
+//! Provider-owned Cline/Roo source discovery, parsing, and exact hydration.
 
 mod bounded;
 mod normalize;
@@ -11,26 +6,21 @@ mod parse;
 mod reader;
 mod source;
 mod source_backed;
-mod store_adapter;
-mod vertical;
 
 #[cfg(test)]
 mod source_backed_tests;
-#[cfg(test)]
-mod tests;
 
 pub(super) use normalize::{
     ClineArrayCheckpoint, ClineCatalogCompletion, ClineCatalogIndex, ClineCertifiedPage,
     ClineEventComponent, ClineEventKind, ClineEventRole, ClineEventRow, ClineFileSourceIdentity,
-    ClineMetadataCheckpoint, ClineNativeItemKey, ClineNativeProfile, ClinePageFrontier,
-    ClineSessionRow, ClineTaskCheckpoint, ClineTaskIdentity, ClineTaskIdentityOrigin,
-    ClineTransientOutputPayload,
+    ClineMetadataCheckpoint, ClineNativeItemKey, ClinePageFrontier, ClineSessionRow,
+    ClineTaskCheckpoint, ClineTaskIdentity, ClineTaskIdentityOrigin,
 };
 #[cfg(test)]
 pub(super) use normalize::{
     ClineComponentFailureKind, ClineComponentReadOutcome, ClineComponentTransition,
     ClineItemRejectionKind, ClinePublicationStats, ClineTerminalEvidence,
-    CLINE_NATIVE_PAGE_MAX_BYTES, CLINE_NATIVE_PAGE_MAX_UNITS,
+    CLINE_NATIVE_PAGE_MAX_UNITS,
 };
 pub(super) use reader::ClineNativeReader;
 #[cfg(test)]
@@ -47,11 +37,39 @@ pub(crate) use source_backed::{
     roo_task_json_source_backed_adapter, roo_task_json_source_backed_resolver,
     TaskJsonSourceBackedCompletion, TaskJsonSourceBackedPage, TaskJsonSourceBackedResolver,
 };
-pub(crate) use vertical::{import_cline_nativepath_history, import_roo_nativepath_history};
 
-use std::{io, path::PathBuf};
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 
+use ctx_history_store::Store;
 use thiserror::Error;
+
+use crate::{
+    CaptureError, ClineTaskJsonImportOptions, ProviderImportSummary, Result,
+    RooTaskJsonImportOptions,
+};
+
+pub(crate) fn import_cline_nativepath_history(
+    _path: &Path,
+    _store: &mut Store,
+    _options: ClineTaskJsonImportOptions,
+) -> Result<ProviderImportSummary> {
+    Err(CaptureError::UnsupportedSchema(
+        "Cline Store ingestion was removed; use source-backed ingestion".to_owned(),
+    ))
+}
+
+pub(crate) fn import_roo_nativepath_history(
+    _path: &Path,
+    _store: &mut Store,
+    _options: RooTaskJsonImportOptions,
+) -> Result<ProviderImportSummary> {
+    Err(CaptureError::UnsupportedSchema(
+        "Roo Code Store ingestion was removed; use source-backed ingestion".to_owned(),
+    ))
+}
 
 #[derive(Debug, Error)]
 pub(crate) enum ClineNativePathError {

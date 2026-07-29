@@ -218,7 +218,6 @@ impl DirectJsonlSourceAdapter {
             &leaf.path,
             Some(leaf.source_root.clone()),
             imported_at,
-            false,
             None,
             leaf.source_file.clone(),
         )?;

@@ -61,53 +61,12 @@ pub(crate) struct ParseCheckpoint {
     pub(crate) native_identity_records: u64,
     pub(crate) terminal: bool,
     pub(crate) appendable_boundary: bool,
-    /// Output materialization advances independently from Core.
-    #[serde(default)]
-    pub(crate) pro_complete_offset: u64,
-    #[serde(default)]
-    pub(crate) pro_next_raw_ordinal: u64,
-    #[serde(default)]
-    pub(crate) pro_complete_record_chain_sha256: [u8; 32],
-    #[serde(default)]
-    pub(crate) pro_boundary_proof_len: u32,
-    #[serde(default)]
-    pub(crate) pro_boundary_proof_sha256: [u8; 32],
-    #[serde(default)]
-    pub(crate) pro_native_identity_chain_sha256: [u8; 32],
-    #[serde(default)]
-    pub(crate) pro_native_identity_records: u64,
-    #[serde(default)]
-    pub(crate) pro_appendable_boundary: bool,
-    #[serde(default)]
-    pub(crate) pro_initialized: bool,
-    #[serde(default)]
-    pub(crate) pro_terminal: bool,
-    /// The Pro lane observation under which its frontier and terminal flag
-    /// were accepted.
-    #[serde(default)]
-    pub(crate) pro_observed_file_len: u64,
-    #[serde(default)]
-    pub(crate) pro_observation_sha256: [u8; 32],
-    #[serde(default)]
-    pub(crate) pro_observation_binding_sha256: [u8; 32],
-    /// The legacy top-level revisions belong to Core. Pro revisions are
-    /// explicitly lane-local and are never inferred from Core.
-    #[serde(default)]
-    pub(crate) pro_parser_revision: u32,
-    #[serde(default)]
-    pub(crate) pro_policy_revision: u32,
 }
 
 impl ParseCheckpoint {
     pub(super) fn core_revisions_match(&self) -> bool {
         self.parser_revision == CLAUDE_NATIVEPATH_PARSER_REVISION
             && self.policy_revision == CLAUDE_NATIVEPATH_POLICY_REVISION
-    }
-
-    pub(super) fn pro_revisions_match(&self) -> bool {
-        self.pro_initialized
-            && self.pro_parser_revision == CLAUDE_NATIVEPATH_PARSER_REVISION
-            && self.pro_policy_revision == CLAUDE_NATIVEPATH_POLICY_REVISION
     }
 
     pub(super) fn core_observation_binding_matches(&self) -> bool {
@@ -120,17 +79,6 @@ impl ParseCheckpoint {
             )
     }
 
-    pub(super) fn pro_observation_binding_matches(&self) -> bool {
-        self.pro_initialized
-            && self.pro_observation_binding_sha256
-                == lane_observation_binding(
-                    self.pro_observed_file_len,
-                    &self.pro_observation_sha256,
-                    &self.pro_frontier(),
-                    self.pro_terminal,
-                )
-    }
-
     pub(crate) fn core_frontier(&self) -> ClaudeNativeFrontier {
         ClaudeNativeFrontier {
             complete_offset: self.complete_offset,
@@ -141,19 +89,6 @@ impl ParseCheckpoint {
             native_identity_chain_sha256: self.native_identity_chain_sha256,
             native_identity_records: self.native_identity_records,
             appendable_boundary: self.appendable_boundary,
-        }
-    }
-
-    pub(crate) fn pro_frontier(&self) -> ClaudeNativeFrontier {
-        ClaudeNativeFrontier {
-            complete_offset: self.pro_complete_offset,
-            next_raw_ordinal: self.pro_next_raw_ordinal,
-            complete_record_chain_sha256: self.pro_complete_record_chain_sha256,
-            boundary_proof_len: self.pro_boundary_proof_len,
-            boundary_proof_sha256: self.pro_boundary_proof_sha256,
-            native_identity_chain_sha256: self.pro_native_identity_chain_sha256,
-            native_identity_records: self.pro_native_identity_records,
-            appendable_boundary: self.pro_appendable_boundary,
         }
     }
 }

@@ -173,8 +173,6 @@ pub(crate) enum RejectionKind {
     OversizeRecord,
     OversizeRetainedRecord,
     SessionIdentityMismatch,
-    OversizeProOutput,
-    TooManyResultSubrecords,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,11 +222,6 @@ pub(crate) struct ParseStats {
     pub(crate) tagged_command_output_records: u64,
     pub(crate) result_block_records: u64,
     pub(crate) result_like_shape_records: u64,
-    pub(crate) result_body_bytes_decoded_or_allocated: u64,
-    pub(crate) result_hashes_created: u64,
-    pub(crate) result_previews_created: u64,
-    pub(crate) result_touches_created: u64,
-    pub(crate) result_fts_rows_created: u64,
     pub(crate) semantic_record_parses: u64,
     pub(crate) retention_pass_records: u64,
     pub(crate) retained_messages: u64,
@@ -241,10 +234,6 @@ pub(crate) struct ParseStats {
     pub(crate) emitted_rows: u64,
     pub(crate) peak_page_rows: usize,
     pub(crate) peak_page_bytes: usize,
-    pub(crate) emitted_pro_pages: u64,
-    pub(crate) emitted_pro_outputs: u64,
-    pub(crate) peak_pro_page_outputs: usize,
-    pub(crate) peak_pro_page_bytes: usize,
 }
 
 impl ParseStats {

@@ -10,8 +10,6 @@ use ctx_history_core::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::OutputOutcome;
-
 pub(crate) const DIRECT_JSONL_NATIVEPATH_PARSER_REVISION: u32 = 1;
 pub(crate) const DIRECT_JSONL_NATIVEPATH_POLICY_REVISION: u32 = 1;
 
@@ -80,18 +78,13 @@ pub(crate) struct DirectJsonlEvent {
     pub(crate) raw_ordinal: u64,
     pub(crate) sub_ordinal: u32,
     pub(crate) native_record_id: Option<String>,
-    pub(crate) provider_event_index: u64,
     pub(crate) provider_event_sequence_index: u64,
     pub(crate) provider_event_hash: String,
-    pub(crate) legacy_provider_event_index: u64,
-    pub(crate) legacy_provider_event_hash: String,
-    pub(crate) cursor: String,
     pub(crate) event_type: EventType,
     pub(crate) role: EventRole,
     pub(crate) occurred_at: DateTime<Utc>,
     #[serde(skip)]
     pub(crate) lexical_text: String,
-    pub(crate) payload: Value,
     pub(crate) metadata: Value,
     pub(crate) touches: Vec<DirectJsonlTouch>,
     #[serde(skip, default)]
@@ -103,21 +96,6 @@ pub(crate) struct DirectJsonlSourceRecord {
     pub(crate) byte_start: u64,
     pub(crate) byte_end_exclusive: u64,
     pub(crate) record_digest: [u8; 32],
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct DirectJsonlOutput {
-    pub(crate) raw_ordinal: u64,
-    pub(crate) sub_ordinal: u32,
-    pub(crate) native_record_id: Option<String>,
-    pub(crate) byte_start: u64,
-    pub(crate) byte_end_exclusive: u64,
-    pub(crate) call_id: Option<String>,
-    pub(crate) tool_name: Option<String>,
-    pub(crate) outcome: OutputOutcome,
-    pub(crate) exit_code: Option<i32>,
-    pub(crate) duration_ms: Option<u64>,
-    pub(crate) content: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -175,7 +153,6 @@ pub(crate) struct DirectJsonlPage {
     pub(crate) expected_checkpoint: DirectJsonlCheckpoint,
     pub(crate) next_checkpoint: DirectJsonlCheckpoint,
     pub(crate) events: Vec<DirectJsonlEvent>,
-    pub(crate) outputs: Vec<DirectJsonlOutput>,
     pub(crate) rejections: Vec<DirectJsonlRejection>,
     pub(crate) logical_units: usize,
     pub(crate) conservative_serialized_bytes: usize,

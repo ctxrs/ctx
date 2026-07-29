@@ -27,14 +27,10 @@ use super::{
         decode_projection, encode_rejection_reason, register_projection_function,
         OpenCodeJsonProjection, OpenCodeRetainedJson,
     },
-    model::{OpenCodeNativeEventKind, OpenCodeNativeProfile, OpenCodeNativeSchemaFamily},
+    model::{OpenCodeNativeEventKind, OpenCodeNativeFileTouch, OpenCodeNativeSchemaFamily},
     query::{
         source_backed_decode_order, source_backed_event_digest, source_backed_event_sql,
         source_backed_native_record_identity,
-    },
-    scanner::{
-        source_backed_retained_event_kind, source_backed_retained_file_touches,
-        source_backed_retained_searchable_text,
     },
     schema::{hex_digest, OpenCodeNativeSchema},
 };
@@ -61,8 +57,148 @@ const LOGICAL_SESSION_KIND: &str = "opencode-family-session";
 const LOGICAL_EVENT_KIND: &str = "opencode-family-event";
 const NATIVE_SESSION_NAMESPACE: &str = "opencode-family.session-id";
 const SOURCE_BACKED_PAGE_ROWS: usize = 64;
+const SOURCE_BACKED_MAX_FILE_TOUCHES: usize = 32;
 const SQLITE_SOURCE_INVALID_REASON: &str =
     "OpenCode-family history database must be a regular file";
+
+fn source_backed_retained_event_kind(
+    effective_type: &str,
+    role: &str,
+    body: &serde_json::Value,
+) -> OpenCodeNativeEventKind {
+    if body.get("result_outcome").is_some() {
+        if effective_type == "shell" || body.get("command").is_some() {
+            return OpenCodeNativeEventKind::CommandOutput;
+        }
+        return OpenCodeNativeEventKind::ToolOutput;
+    }
+    if matches!(
+        effective_type,
+        "tool" | "tool_call" | "tool-call" | "tool_use" | "tooluse"
+    ) || json_contains_tool_call(body)
+    {
+        OpenCodeNativeEventKind::ToolCall
+    } else if matches!(effective_type, "reasoning" | "summary") {
+        OpenCodeNativeEventKind::Summary
+    } else if matches!(role, "user" | "assistant")
+        || matches!(effective_type, "user" | "assistant" | "text")
+    {
+        OpenCodeNativeEventKind::Message
+    } else {
+        OpenCodeNativeEventKind::Notice
+    }
+}
+
+fn json_contains_tool_call(body: &serde_json::Value) -> bool {
+    body.get("tool_calls").is_some()
+        || body.get("toolCall").is_some()
+        || body.get("tool_call").is_some()
+        || body
+            .get("content")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|blocks| {
+                blocks.iter().any(|block| {
+                    matches!(
+                        block.get("type").and_then(serde_json::Value::as_str),
+                        Some("tool" | "tool_use" | "toolCall" | "tool_call")
+                    )
+                })
+            })
+}
+
+fn source_backed_retained_searchable_text(
+    kind: OpenCodeNativeEventKind,
+    effective_type: &str,
+    body: &serde_json::Value,
+) -> String {
+    if let Some(text) = body.get("text").and_then(serde_json::Value::as_str) {
+        return text.to_owned();
+    }
+    if let Some(text) = body.get("summary").and_then(serde_json::Value::as_str) {
+        return text.to_owned();
+    }
+    if kind == OpenCodeNativeEventKind::ToolCall {
+        let tool = body
+            .get("tool")
+            .or_else(|| body.get("name"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("tool");
+        let command = body
+            .pointer("/state/input/command")
+            .or_else(|| body.pointer("/input/command"))
+            .or_else(|| body.get("command"))
+            .and_then(serde_json::Value::as_str);
+        return command.map_or_else(
+            || format!("tool call: {tool}"),
+            |command| format!("{tool}\n{command}"),
+        );
+    }
+    if let Some(content) = body.get("content") {
+        let text = match content {
+            serde_json::Value::String(value) => value.clone(),
+            serde_json::Value::Array(values) => values
+                .iter()
+                .filter_map(|value| {
+                    value
+                        .get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => String::new(),
+        };
+        if !text.is_empty() {
+            return text;
+        }
+    }
+    format!("OpenCode {effective_type} event")
+}
+
+fn source_backed_retained_file_touches(
+    kind: OpenCodeNativeEventKind,
+    body: &serde_json::Value,
+) -> (Vec<OpenCodeNativeFileTouch>, usize) {
+    if !matches!(
+        kind,
+        OpenCodeNativeEventKind::ToolCall | OpenCodeNativeEventKind::Notice
+    ) {
+        return (Vec::new(), 0);
+    }
+    let mut paths = BTreeSet::new();
+    for pointer in [
+        "/path",
+        "/file_path",
+        "/filePath",
+        "/input/path",
+        "/input/file_path",
+        "/state/input/path",
+        "/state/input/file_path",
+    ] {
+        if let Some(path) = body.pointer(pointer).and_then(serde_json::Value::as_str) {
+            if !path.trim().is_empty() {
+                paths.insert(path.to_owned());
+            }
+        }
+    }
+    if let Some(files) = body.get("files").and_then(serde_json::Value::as_array) {
+        for file in files {
+            let path = file
+                .as_str()
+                .or_else(|| file.get("path").and_then(serde_json::Value::as_str));
+            if let Some(path) = path.filter(|path| !path.trim().is_empty()) {
+                paths.insert(path.to_owned());
+            }
+        }
+    }
+    let observed = paths.len();
+    let retained = paths
+        .into_iter()
+        .take(SOURCE_BACKED_MAX_FILE_TOUCHES)
+        .map(|path| OpenCodeNativeFileTouch { path })
+        .collect();
+    (retained, observed)
+}
 
 #[derive(Debug, Error)]
 pub(crate) enum OpenCodeSourceBackedError {
@@ -265,7 +401,7 @@ fn scan_source(
     let mut pending_pages = Vec::new();
     let working = {
         let connection = sqlite_snapshot.connection()?;
-        register_projection_function(connection, OpenCodeNativeProfile::CoreOnly, dialect)?;
+        register_projection_function(connection, dialect)?;
         let schema = OpenCodeNativeSchema::probe(connection, dialect)?;
         let source = source_key(dialect, schema.family).map_err(source_backed_as_capture)?;
         let opening =
@@ -333,7 +469,7 @@ fn stream_events(
     hash_str(&mut hasher, &schema.capability_digest);
     hash_sessions(&mut hasher, sessions);
 
-    let mut sql = source_backed_event_sql(schema, OpenCodeNativeProfile::CoreOnly);
+    let mut sql = source_backed_event_sql(schema);
     sql.push_str(" order by 3, 4, 5, 6, 2, 1, 12");
     let max_json_bytes = i64::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
         .map_err(|_| OpenCodeSourceBackedError::CountOverflow)?;
@@ -906,12 +1042,8 @@ impl OpenCodeSourceBackedExactResolver {
         let connection = sqlite_snapshot
             .connection()
             .map_err(temporary_hydration_failure)?;
-        register_projection_function(
-            connection,
-            OpenCodeNativeProfile::CoreOnly,
-            self.registration.dialect,
-        )
-        .map_err(temporary_hydration_failure)?;
+        register_projection_function(connection, self.registration.dialect)
+            .map_err(temporary_hydration_failure)?;
         let provider_bytes = hydrate_exact_row(connection, self.registration.dialect, locator)
             .map_err(|failure| {
                 CaptureError::InvalidPayload(format!(
@@ -975,7 +1107,7 @@ fn hydrate_exact_row(
         ));
     }
 
-    let mut sql = source_backed_event_sql(&schema, OpenCodeNativeProfile::CoreOnly);
+    let mut sql = source_backed_event_sql(&schema);
     let alias = if schema.family == OpenCodeNativeSchemaFamily::MessagePart {
         "p"
     } else {

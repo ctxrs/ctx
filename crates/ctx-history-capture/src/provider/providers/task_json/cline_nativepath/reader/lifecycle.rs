@@ -2,16 +2,11 @@ use super::*;
 
 impl ClineNativeReader {
     /// Metadata-only construction. No provider component is opened or parsed.
-    pub(crate) fn new(
-        discovery: ClineDiscovery,
-        previous: &[ClineTaskCheckpoint],
-        profile: ClineNativeProfile,
-    ) -> Self {
+    pub(crate) fn new(discovery: ClineDiscovery, previous: &[ClineTaskCheckpoint]) -> Self {
         let dialect = discovery.dialect();
         Self {
             discovery,
             dialect,
-            profile,
             previous_by_path: previous
                 .iter()
                 .cloned()
@@ -215,7 +210,15 @@ impl ClineNativeReader {
             .and_then(|checkpoint| checkpoint.fallback_history.clone());
         let event_components = task
             .event_components()
-            .filter_map(event_component)
+            .filter_map(|component| match component {
+                ClineComponent::ApiHistory => Some(ClineEventComponent::ApiHistory),
+                ClineComponent::UiMessages => Some(ClineEventComponent::UiMessages),
+                ClineComponent::FallbackHistory => Some(ClineEventComponent::FallbackHistory),
+                ClineComponent::TaskMetadata
+                | ClineComponent::RootIndex
+                | ClineComponent::HistoryItem
+                | ClineComponent::TaskIndex => None,
+            })
             .collect::<Vec<_>>()
             .into_boxed_slice();
         let needs_session = metadata.page.is_none();

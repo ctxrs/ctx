@@ -2,10 +2,8 @@ use super::*;
 
 #[derive(Clone, Copy)]
 pub(super) struct ItemParseContext<'a> {
-    pub(super) source: &'a ClineFileSourceIdentity,
     pub(super) identity: &'a ClineTaskIdentity,
     pub(super) component: ClineEventComponent,
-    pub(super) profile: ClineNativeProfile,
     pub(super) max_item_units: usize,
 }
 
@@ -562,10 +560,8 @@ pub(super) fn parse_item(
     stats: &mut ClinePublicationStats,
 ) -> ParsedItem {
     let ItemParseContext {
-        source,
         identity,
         component,
-        profile,
         max_item_units,
     } = context;
     let observed_bytes = u64::try_from(raw.get().len()).unwrap_or(u64::MAX);
@@ -611,7 +607,7 @@ pub(super) fn parse_item(
             parse_api_projection(
                 raw,
                 &envelope,
-                source,
+                component,
                 identity,
                 &native_key,
                 native_index,
@@ -621,7 +617,6 @@ pub(super) fn parse_item(
         ClineEventComponent::UiMessages => parse_ui_projection(
             raw,
             &envelope,
-            source,
             identity,
             &native_key,
             native_index,
@@ -653,15 +648,14 @@ pub(super) fn parse_item(
             )
         })
         .count();
-    let potential_units = projection
+    let retained_units = projection
         .rows
         .len()
-        .saturating_add(projection.outputs.len())
         .saturating_add(failure_rows)
         .saturating_add(projection.rows.iter().fold(0_usize, |count, row| {
             count.saturating_add(row.file_touches.len())
         }));
-    if potential_units > max_item_units {
+    if retained_units > max_item_units {
         return rejected_item_with_key(
             component,
             native_index,
@@ -691,48 +685,10 @@ pub(super) fn parse_item(
         );
     }
 
-    let mut outputs = Vec::new();
-    let mut transient_rejections = Vec::new();
-    let mut transient_bytes = 0_usize;
     let mut output_outcomes = Vec::with_capacity(projection.outputs.len());
     for output in projection.outputs {
         stats.output_outcomes_observed = stats.output_outcomes_observed.saturating_add(1);
         output_outcomes.push(output.outcome.clone());
-        let content = if profile.wants_outputs() {
-            match decode_output_body(output.body) {
-                Ok(content) => {
-                    stats.output_bodies_hydrated = stats.output_bodies_hydrated.saturating_add(1);
-                    stats.output_body_bytes_hydrated = stats
-                        .output_body_bytes_hydrated
-                        .saturating_add(content.len());
-                    Some(content)
-                }
-                Err(detail) => {
-                    push_transient_rejection(
-                        &mut transient_rejections,
-                        item_rejection(
-                            component,
-                            native_index,
-                            envelope.native_id.as_deref(),
-                            ClineItemRejectionKind::OversizedTransientOutput,
-                            observed_bytes,
-                            detail,
-                        ),
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        let preview = if matches!(
-            output.outcome.outcome,
-            OutputOutcome::Failure | OutputOutcome::Timeout
-        ) {
-            decode_failure_preview(output.body)
-        } else {
-            None
-        };
         if matches!(
             output.outcome.outcome,
             OutputOutcome::Failure | OutputOutcome::Timeout
@@ -756,37 +712,9 @@ pub(super) fn parse_item(
                     exit_code: output.outcome.exit_code,
                     duration_ms: output.outcome.duration_ms,
                     output_bytes: output.body.map_or(0, |body| body.get().len()),
-                    preview,
                     call_id: output.call_id.clone().map(String::into_boxed_str),
                 },
             ));
-        }
-        if let Some(content) = content {
-            let observation = build_output_observation(
-                source,
-                identity,
-                &native_key,
-                native_index,
-                output,
-                content,
-            );
-            let bytes = estimated_output_bytes(&observation);
-            if transient_bytes.saturating_add(bytes) > CLINE_NATIVE_TRANSIENT_PAGE_MAX_BYTES {
-                push_transient_rejection(
-                    &mut transient_rejections,
-                    item_rejection(
-                        component,
-                        native_index,
-                        envelope.native_id.as_deref(),
-                        ClineItemRejectionKind::OversizedTransientOutput,
-                        observed_bytes,
-                        "Cline transient outputs exceed their independent 4 MiB page lane",
-                    ),
-                );
-            } else {
-                transient_bytes = transient_bytes.saturating_add(bytes);
-                outputs.push(observation);
-            }
         }
     }
     projection
@@ -814,9 +742,7 @@ pub(super) fn parse_item(
     ParsedItem {
         checkpoint,
         rows: projection.rows,
-        outputs,
         rejection: None,
-        transient_rejections,
         core_bytes,
         source_record: None,
     }

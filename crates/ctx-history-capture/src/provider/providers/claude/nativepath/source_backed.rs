@@ -26,9 +26,8 @@ use thiserror::Error;
 use super::{
     checkpoint::ChangeSignal,
     source::{open_discovered_file, revalidate_open_file, ClaudeDiscovery, ClaudeSessionKey},
-    ClaudeEventKind, ClaudeNativeOwnedPage, ClaudeNativePathError, ClaudeNativeProfile,
-    ClaudeNativeScanner, ClaudeRetainedRow, ClaudeSessionMetadata, DiscoveredClaudeSession,
-    ParseCheckpoint, SessionLayout,
+    ClaudeEventKind, ClaudeNativePathError, ClaudeNativeScanner, ClaudeRetainedRow,
+    ClaudeSessionMetadata, DiscoveredClaudeSession, ParseCheckpoint, SessionLayout,
 };
 use crate::{
     provider::normalization::provider_policy_event_text, CLAUDE_PROJECTS_SOURCE_FORMAT,
@@ -319,11 +318,7 @@ impl ClaudeSourceBackedScanner {
         let previous_checkpoint = previous
             .map(|certificate| decode_checkpoint(&leaf, certificate))
             .transpose()?;
-        let inner = ClaudeNativeScanner::new(
-            leaf.source.clone(),
-            previous_checkpoint.as_ref(),
-            ClaudeNativeProfile::CoreOnly,
-        )?;
+        let inner = ClaudeNativeScanner::new(leaf.source.clone(), previous_checkpoint.as_ref())?;
         Ok(Self {
             leaf,
             inner,
@@ -337,9 +332,6 @@ impl ClaudeSourceBackedScanner {
     pub(crate) fn next_page(&mut self) -> ClaudeSourceBackedResult<Option<ClaudeSourceBackedPage>> {
         let Some(page) = self.inner.next_page()? else {
             return Ok(None);
-        };
-        let ClaudeNativeOwnedPage::Core(page) = page else {
-            return Err(ClaudeSourceBackedError::InvalidCheckpoint);
         };
         let checkpoint = self
             .inner

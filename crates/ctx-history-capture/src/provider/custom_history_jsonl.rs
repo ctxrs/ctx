@@ -9,7 +9,9 @@ use serde_json::{json, Value};
 
 use crate::stable_capture_uuid;
 
-use crate::{ProviderAdapterContext, ProviderImportFailure, ProviderImportSummary, Result};
+use crate::{
+    CaptureError, ProviderAdapterContext, ProviderImportFailure, ProviderImportSummary, Result,
+};
 
 mod nativepath;
 
@@ -29,7 +31,10 @@ pub(crate) use nativepath::{
 };
 
 pub fn decode_custom_history_jsonl_v1_cursor(encoded: &str) -> Result<String> {
-    nativepath::decode_released_or_native_upstream_cursor(encoded)
+    let _ = encoded;
+    Err(CaptureError::UnsupportedSchema(
+        "Custom History Store cursors were removed with legacy Store ingestion".to_owned(),
+    ))
 }
 
 pub(crate) fn push_provider_import_failure(

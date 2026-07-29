@@ -20,22 +20,19 @@ use crate::{
         visit_provider_file_touch_drafts_with_limit, MAX_PROVIDER_FILE_TOUCHES_PER_EVENT,
         PROVIDER_FILE_TOUCH_LIMIT_REJECTION,
     },
-    OutputAssociations, OutputNativeCoordinate, OutputObservationKind, OutputOutcome,
-    OutputOutcomeMetadata, OutputSourceLocator, ProOutputObservation,
+    OutputObservationKind, OutputOutcome, OutputOutcomeMetadata,
 };
 
 use super::{
     bounded::BoundedString,
     normalize::{
-        estimated_event_bytes, estimated_output_bytes, ClineCatalogEntry, ClineEventComponent,
-        ClineEventContext, ClineEventKind, ClineEventRole, ClineEventRow, ClineFileSourceIdentity,
-        ClineFileTouch, ClineItemCheckpoint, ClineItemRejection, ClineItemRejectionKind,
-        ClineMetadataCheckpoint, ClineNativeItemKey, ClineNativeProfile, ClinePublicationStats,
-        ClineSessionRow, ClineSourceRecordEvidence, ClineSparseOutputDiagnostic, ClineTaskIdentity,
-        ClineTaskIdentityOrigin, CLINE_NATIVE_CORE_PAGE_MAX_BYTES,
-        CLINE_NATIVE_MAX_FAILURE_PREVIEW_BYTES, CLINE_NATIVE_MAX_REJECTIONS,
-        CLINE_NATIVE_MAX_RETAINED_ITEM_BYTES, CLINE_NATIVE_PAGE_MAX_UNITS,
-        CLINE_NATIVE_TRANSIENT_PAGE_MAX_BYTES,
+        estimated_event_bytes, ClineCatalogEntry, ClineEventComponent, ClineEventContext,
+        ClineEventKind, ClineEventRole, ClineEventRow, ClineFileSourceIdentity, ClineFileTouch,
+        ClineItemCheckpoint, ClineItemRejection, ClineItemRejectionKind, ClineMetadataCheckpoint,
+        ClineNativeItemKey, ClinePublicationStats, ClineSessionRow, ClineSourceRecordEvidence,
+        ClineSparseOutputDiagnostic, ClineTaskIdentity, ClineTaskIdentityOrigin,
+        CLINE_NATIVE_CORE_PAGE_MAX_BYTES, CLINE_NATIVE_MAX_RETAINED_ITEM_BYTES,
+        CLINE_NATIVE_PAGE_MAX_UNITS,
     },
     source::{
         capture_source_error, injected_io_failure, is_component_local_error, source_io,
@@ -51,7 +48,6 @@ const MAX_NATIVE_ID_BYTES: usize = 512;
 const MAX_SMALL_FIELD_BYTES: usize = 4 * 1024;
 const MAX_METADATA_TEXT_BYTES: usize = 64 * 1024;
 const MAX_JSON_KEY_BYTES: usize = 128;
-const MAX_OUTPUT_BODY_RAW_BYTES: usize = CLINE_NATIVE_TRANSIENT_PAGE_MAX_BYTES;
 const MAX_ARRAY_ITEM_BYTES: usize = crate::MAX_PROVIDER_JSONL_LINE_BYTES;
 const MAX_EXPLICIT_RESULT_DEPTH: usize = 64;
 
@@ -468,20 +464,9 @@ fn rejected_item_with_key(
     ParsedItem {
         checkpoint,
         rows: Vec::new(),
-        outputs: Vec::new(),
         rejection: Some(rejection),
-        transient_rejections: Vec::new(),
         core_bytes: 0,
         source_record: None,
-    }
-}
-
-fn push_transient_rejection(
-    rejections: &mut Vec<ClineItemRejection>,
-    rejection: ClineItemRejection,
-) {
-    if rejections.len() < CLINE_NATIVE_MAX_REJECTIONS {
-        rejections.push(rejection);
     }
 }
 

@@ -1,46 +1,9 @@
 use super::*;
 
-pub(super) fn project_output(
-    body: &Value,
-    effective_type: &str,
-    profile: OpenCodeNativeProfile,
-) -> Vec<u8> {
+pub(super) fn project_output(body: &Value, effective_type: &str) -> Vec<u8> {
     let aggregate = collect_outcome(body);
-    let Some(selected) = selected_output_subrecords(effective_type, body) else {
-        return encode_output(OutputWire {
-            diagnostic: output_diagnostic(body, effective_type, &aggregate),
-            outputs: Vec::new(),
-            pro_rejection: (profile == OpenCodeNativeProfile::CoreAndPro)
-                .then(|| "output-bearing row has no eligible canonical result field".to_owned()),
-        });
-    };
-    if selected.len() > MAX_OUTPUT_SUBRECORDS_PER_NATIVE_ROW {
-        return encode_output(OutputWire {
-            diagnostic: output_diagnostic(body, effective_type, &aggregate),
-            outputs: Vec::new(),
-            pro_rejection: (profile == OpenCodeNativeProfile::CoreAndPro).then(|| {
-                format!(
-                    "native output row has {} subrecords; maximum is {}",
-                    selected.len(),
-                    MAX_OUTPUT_SUBRECORDS_PER_NATIVE_ROW
-                )
-            }),
-        });
-    }
-    let diagnostic = output_diagnostic(body, effective_type, &aggregate);
-    let outputs = if profile == OpenCodeNativeProfile::CoreAndPro {
-        selected
-            .iter()
-            .enumerate()
-            .map(|(index, value)| output_draft(body, value, index, effective_type, &aggregate))
-            .collect()
-    } else {
-        Vec::new()
-    };
     encode_output(OutputWire {
-        diagnostic,
-        outputs,
-        pro_rejection: None,
+        diagnostic: output_diagnostic(body, effective_type, &aggregate),
     })
 }
 
@@ -113,116 +76,6 @@ fn output_diagnostic(
         role: "tool".to_owned(),
         body: Value::Object(diagnostic),
     })
-}
-
-fn selected_output_subrecords(effective_type: &str, body: &Value) -> Option<Vec<Value>> {
-    let candidates: &[&str] = if normalize_token(effective_type) == "shell" {
-        &[
-            "/output",
-            "/state/output",
-            "/stdout",
-            "/stderr",
-            "/result",
-            "/content",
-            "/text",
-        ]
-    } else {
-        &[
-            "/state/output",
-            "/state/result",
-            "/state/content",
-            "/output",
-            "/result",
-            "/content",
-            "/text",
-        ]
-    };
-    let selected = candidates.iter().find_map(|pointer| body.pointer(pointer));
-    match selected {
-        Some(Value::Array(values)) if values.is_empty() => Some(vec![Value::Array(Vec::new())]),
-        Some(Value::Array(values)) => Some(values.clone()),
-        Some(value) => Some(vec![value.clone()]),
-        None if is_direct_output_token(effective_type) || is_tool_token(effective_type) => {
-            Some(vec![Value::String(String::new())])
-        }
-        None => None,
-    }
-}
-
-fn normalized_output_value(value: &Value) -> String {
-    if let Some(value) = value.as_str() {
-        value.to_owned()
-    } else {
-        serde_json::to_string(value).unwrap_or_default()
-    }
-}
-
-fn output_draft(
-    body: &Value,
-    subrecord: &Value,
-    index: usize,
-    effective_type: &str,
-    aggregate: &OutcomeAggregate,
-) -> OpenCodeOutputDraft {
-    let local = collect_outcome(subrecord);
-    let selected_outcome = if local.has_signal() {
-        &local
-    } else {
-        aggregate
-    };
-    let content_value = if subrecord.is_object() {
-        [
-            "/output", "/result", "/content", "/text", "/stdout", "/stderr",
-        ]
-        .iter()
-        .find_map(|pointer| subrecord.pointer(pointer))
-        .unwrap_or(subrecord)
-    } else {
-        subrecord
-    };
-    OpenCodeOutputDraft {
-        subrecord_index: u32::try_from(index).unwrap_or(u32::MAX),
-        kind: u8::from(normalize_token(effective_type) == "shell"),
-        call_id: string_at(subrecord, &["/call_id", "/callId", "/tool_call_id", "/id"]).or_else(
-            || {
-                string_at(
-                    body,
-                    &[
-                        "/call_id",
-                        "/callId",
-                        "/callID",
-                        "/tool_call_id",
-                        "/state/call_id",
-                        "/state/callId",
-                        "/id",
-                    ],
-                )
-            },
-        ),
-        tool_name: string_at(body, &["/tool", "/tool_name", "/name"]),
-        command: string_at(
-            body,
-            &[
-                "/command",
-                "/cmd",
-                "/state/input/command",
-                "/state/metadata/command",
-            ],
-        ),
-        working_directory: string_at(
-            body,
-            &[
-                "/working_directory",
-                "/workingDirectory",
-                "/cwd",
-                "/state/metadata/cwd",
-            ],
-        ),
-        outcome: selected_outcome.outcome(),
-        exit_code: selected_outcome.exit_code,
-        duration_ms: selected_outcome.duration_ms,
-        content: normalized_output_value(content_value),
-    }
 }
 
 pub(super) fn tag(value: u8) -> Vec<u8> {

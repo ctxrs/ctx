@@ -187,9 +187,7 @@ pub(super) fn rejection_wire_bytes(rejection: &DirectJsonlRejection) -> usize {
 pub(super) fn event_wire_bytes(event: &DirectJsonlEvent) -> usize {
     DIRECT_JSONL_EVENT_ENVELOPE_BYTES
         .saturating_add(event.provider_event_hash.len())
-        .saturating_add(event.cursor.len())
         .saturating_add(event.lexical_text.len())
-        .saturating_add(serde_json::to_vec(&event.payload).map_or(usize::MAX, |value| value.len()))
         .saturating_add(serde_json::to_vec(&event.metadata).map_or(usize::MAX, |value| value.len()))
         .saturating_add(
             event
@@ -203,11 +201,4 @@ pub(super) fn event_wire_bytes(event: &DirectJsonlEvent) -> usize {
                 })
                 .sum::<usize>(),
         )
-}
-
-pub(super) fn output_wire_bytes(output: &DirectJsonlOutput) -> usize {
-    512_usize
-        .saturating_add(output.call_id.as_deref().map_or(0, str::len))
-        .saturating_add(output.tool_name.as_deref().map_or(0, str::len))
-        .saturating_add(output.content.len())
 }

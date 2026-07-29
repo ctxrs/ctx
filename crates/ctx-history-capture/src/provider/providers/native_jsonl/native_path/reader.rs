@@ -12,14 +12,9 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::provider::file_touches::visit_all_file_touch_drafts;
-use crate::provider::normalization::{
-    provider_capped_json, provider_capped_json_value, provider_policy_body,
-    provider_policy_event_text, provider_result_identifier_evidence,
-    provider_result_outcome_evidence,
-};
 use crate::{
     common::io::{open_provider_source_file, OpenedProviderSourceFile},
-    CaptureError, OutputOutcome, Result, MAX_PROVIDER_JSONL_LINE_BYTES, PROVIDER_MAX_PREVIEW_CHARS,
+    CaptureError, OutputOutcome, Result, MAX_PROVIDER_JSONL_LINE_BYTES,
 };
 
 use super::super::{
@@ -43,21 +38,17 @@ use super::{
     copilot, enumerate_factory_droid_results, factory_droid_event_identity,
     factory_droid_event_text, factory_droid_event_type, factory_droid_model, factory_droid_role,
     qoder_parser, qwen_code, tabnine, windsurf, DirectJsonlCheckpoint, DirectJsonlEvent,
-    DirectJsonlFileObservation, DirectJsonlObservedTime, DirectJsonlOutput, DirectJsonlPage,
-    DirectJsonlRejection, DirectJsonlScanOutcome, DirectJsonlSession, DirectJsonlSourceChange,
-    DirectJsonlSourceRecord, DirectJsonlTouch, DIRECT_JSONL_NATIVEPATH_PARSER_REVISION,
+    DirectJsonlFileObservation, DirectJsonlObservedTime, DirectJsonlPage, DirectJsonlRejection,
+    DirectJsonlScanOutcome, DirectJsonlSession, DirectJsonlSourceChange, DirectJsonlSourceRecord,
+    DirectJsonlTouch, DIRECT_JSONL_NATIVEPATH_PARSER_REVISION,
     DIRECT_JSONL_NATIVEPATH_POLICY_REVISION,
 };
 
 const DIRECT_JSONL_PREFIX_HASH_DOMAIN: &[u8] = b"ctx-direct-jsonl-nativepath-prefix-v1\0";
-// Scanner pages own the provider contract directly. Publication mechanics are
-// accounted separately by the Store and must not reduce this 64-unit bound.
 const DIRECT_JSONL_PAGE_MAX_RECORDS: usize = 64;
 pub(super) const DIRECT_JSONL_PAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
 const DIRECT_JSONL_PAGE_ENVELOPE_BYTES: usize = 2 * 1024;
 const DIRECT_JSONL_EVENT_ENVELOPE_BYTES: usize = 1024;
-// One event reconciliation and its file-touch upserts share a Store group.
-// Keep the event itself inside the normalized-row page bound.
 pub(super) const DIRECT_JSONL_MAX_FILE_TOUCHES_PER_RECORD: usize =
     DIRECT_JSONL_PAGE_MAX_RECORDS - 1;
 
@@ -73,8 +64,8 @@ pub(crate) use source::{
     observe_opened_file,
 };
 use source::{
-    event_wire_bytes, hash_prefix, new_prefix_hasher, observe_metadata, output_wire_bytes,
-    prefix_digest, read_bounded_jsonl_line, rejection_wire_bytes, same_file_identity, DirectLine,
+    event_wire_bytes, hash_prefix, new_prefix_hasher, observe_metadata, prefix_digest,
+    read_bounded_jsonl_line, rejection_wire_bytes, same_file_identity, DirectLine,
 };
 
 pub(crate) struct DirectJsonlPageReader {
@@ -83,7 +74,6 @@ pub(crate) struct DirectJsonlPageReader {
     path: PathBuf,
     source_root: Option<PathBuf>,
     imported_at: DateTime<Utc>,
-    collect_transient_outputs: bool,
     observation: DirectJsonlFileObservation,
     source_file: Arc<OpenedProviderSourceFile>,
     reader: BufReader<File>,
@@ -107,7 +97,6 @@ pub(crate) fn open_direct_jsonl_pages(
     path: &Path,
     source_root: Option<PathBuf>,
     imported_at: DateTime<Utc>,
-    collect_transient_outputs: bool,
     previous: Option<&DirectJsonlCheckpoint>,
 ) -> Result<DirectJsonlPageReader> {
     let opened = Arc::new(open_provider_source_file(path)?);
@@ -117,7 +106,6 @@ pub(crate) fn open_direct_jsonl_pages(
         path,
         source_root,
         imported_at,
-        collect_transient_outputs,
         previous,
         opened,
     )
@@ -129,7 +117,6 @@ pub(crate) fn open_direct_jsonl_pages_from_opened(
     path: &Path,
     source_root: Option<PathBuf>,
     imported_at: DateTime<Utc>,
-    collect_transient_outputs: bool,
     previous: Option<&DirectJsonlCheckpoint>,
     source_file: Arc<OpenedProviderSourceFile>,
 ) -> Result<DirectJsonlPageReader> {
@@ -204,7 +191,6 @@ pub(crate) fn open_direct_jsonl_pages_from_opened(
         path: canonical_path,
         source_root,
         imported_at,
-        collect_transient_outputs,
         observation,
         source_file,
         reader: BufReader::new(file),
@@ -235,7 +221,6 @@ impl DirectJsonlPageReader {
 
         let expected_checkpoint = self.checkpoint(false);
         let mut events = Vec::new();
-        let mut outputs = Vec::new();
         let mut rejections = Vec::new();
         let mut physical_records = 0_usize;
         let mut logical_units = 0_usize;
@@ -307,7 +292,6 @@ impl DirectJsonlPageReader {
                 .iter()
                 .map(|event| 1_usize.saturating_add(event.touches.len()))
                 .sum::<usize>()
-                .saturating_add(projected.outputs.len())
                 .saturating_add(projected.rejections.len())
                 .max(1);
             let projected_bytes = projected.serialized_bytes;
@@ -354,7 +338,6 @@ impl DirectJsonlPageReader {
             logical_units = logical_units.saturating_add(projected_units);
             serialized_bytes = serialized_bytes.saturating_add(projected_bytes);
             events.extend(projected.events);
-            outputs.extend(projected.outputs);
             rejections.extend(projected.rejections);
         }
 
@@ -370,7 +353,6 @@ impl DirectJsonlPageReader {
             expected_checkpoint,
             next_checkpoint: self.publication_checkpoint(terminal),
             events,
-            outputs,
             rejections,
             logical_units,
             conservative_serialized_bytes: serialized_bytes,
