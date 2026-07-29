@@ -659,13 +659,17 @@ pub(super) fn run_daemon_inner(
             let source_refresh_pending = refresh_service
                 .as_ref()
                 .is_some_and(|service| service.source_refresh.has_pending_request());
-            if source_refresh_pending {
-                idle_since = None;
-            }
-            if idle_exit.is_some_and(|limit| idle_since.is_some_and(|idle| idle.elapsed() >= limit))
-                && !retry_due
-                && !source_refresh_pending
-            {
+            // Retry and queued-refresh state describe future scheduler work,
+            // not work currently executing. An explicit finite daemon must
+            // still attempt shutdown once its idle lifetime expires; the
+            // generation-aware service gate below protects active requests,
+            // and refresh/publication work runs synchronously between gates.
+            if daemon_should_attempt_finite_idle_shutdown(
+                idle_exit,
+                idle_since,
+                retry_due,
+                source_refresh_pending,
+            ) {
                 if daemon_services_can_begin_idle_shutdown(
                     query_service.as_ref(),
                     observed_query_generation,
@@ -928,6 +932,15 @@ fn daemon_services_can_begin_idle_shutdown(
         activity.resume_accepting();
     }
     false
+}
+
+fn daemon_should_attempt_finite_idle_shutdown(
+    idle_exit: Option<StdDuration>,
+    idle_since: Option<Instant>,
+    _retry_due: bool,
+    _source_refresh_pending: bool,
+) -> bool {
+    idle_exit.is_some_and(|limit| idle_since.is_some_and(|idle| idle.elapsed() >= limit))
 }
 
 fn installation_upgrade_blocks_current_process(data_root: &Path) -> bool {

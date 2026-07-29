@@ -103,6 +103,36 @@ fn only_enabled_long_lived_daemon_uses_upgrade_scheduler() {
     ));
 }
 
+#[test]
+fn explicit_finite_idle_exit_remains_due_with_retry_and_refresh_pending() {
+    let mut runtime = DaemonRuntime::default();
+    runtime.history_retry.consecutive_failures = 1;
+    let retry_due = super::super::daemon_scheduler::daemon_retry_due(&runtime);
+    assert!(retry_due);
+
+    let coordinator = SourceBackedRefreshCoordinator::new();
+    coordinator.enqueue_for_test(None);
+    let source_refresh_pending = coordinator.has_pending_request();
+    assert!(source_refresh_pending);
+
+    assert!(daemon_should_attempt_finite_idle_shutdown(
+        Some(StdDuration::ZERO),
+        Some(Instant::now()),
+        retry_due,
+        source_refresh_pending,
+    ));
+}
+
+#[test]
+fn persistent_default_never_has_a_finite_idle_exit() {
+    assert!(!daemon_should_attempt_finite_idle_shutdown(
+        None,
+        Some(Instant::now()),
+        true,
+        true,
+    ));
+}
+
 fn test_daemon_run_args() -> DaemonRunArgs {
     DaemonRunArgs {
         foreground: false,
