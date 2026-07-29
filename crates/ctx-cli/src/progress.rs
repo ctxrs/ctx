@@ -7,11 +7,6 @@ use std::{
 use clap::ValueEnum;
 use serde_json::json;
 
-use ctx_history_capture::{CodexSessionImportProgress, CodexSessionImportProgressCallback};
-use ctx_history_core::CaptureProvider;
-
-use crate::provider_sources::SourceInfo;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum ProgressArg {
     Auto,
@@ -166,32 +161,6 @@ impl ProgressReporter {
             ProgressRenderMode::Plain { .. } => eprintln!("{}\n", message.as_ref()),
             ProgressRenderMode::None => {}
         }
-    }
-
-    pub(crate) fn codex_import_callback(
-        &self,
-        source: &SourceInfo,
-        source_offset_bytes: u64,
-    ) -> Option<CodexSessionImportProgressCallback> {
-        if !self.is_enabled() || source.provider != CaptureProvider::Codex {
-            return None;
-        }
-        let reporter = self.clone();
-        let provider = source.provider.as_str().to_owned();
-        Some(Arc::new(move |progress: CodexSessionImportProgress| {
-            let completed_bytes = source_offset_bytes.saturating_add(progress.completed_bytes);
-            reporter.emit(ProgressLine {
-                phase: "indexing",
-                message: provider.clone(),
-                completed_bytes,
-                total_bytes: reporter.total_bytes.max(completed_bytes),
-                completed_files: Some(progress.completed_files),
-                total_files: Some(progress.total_files),
-                imported_events: Some(progress.imported_events),
-                done: progress.done,
-                force: progress.done,
-            });
-        }))
     }
 
     fn emit(&self, line: ProgressLine) {
