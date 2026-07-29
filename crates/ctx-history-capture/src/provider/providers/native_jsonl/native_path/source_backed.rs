@@ -74,6 +74,7 @@ pub(crate) mod registration {
         let provider = source.provider;
         let certified_source_format = adapter.source_format();
         let driver = captured_route_driver(
+            &source,
             move |sink| capture(adapter, &capture_root, sink),
             provider_format_scope(provider, certified_source_format),
             move |request| hydrate(adapter, &hydration_root, request),
@@ -109,7 +110,10 @@ pub(crate) mod registration {
     ) -> SourceBackedRouteResult<()> {
         let inventory = adapter.discover(root).map_err(route_error)?;
         if inventory.root_missing() {
-            return Ok(());
+            return Err(SourceBackedRouteError::new(
+                SourceBackedRouteErrorKind::Unavailable,
+                "direct JSONL route root is temporarily unavailable",
+            ));
         }
         if !inventory.failures().is_empty() {
             return Err(SourceBackedRouteError::new(
@@ -117,6 +121,7 @@ pub(crate) mod registration {
                 "direct JSONL inventory contains inaccessible sources",
             ));
         }
+        let mut sources = Vec::with_capacity(inventory.leaves().len());
         for leaf in inventory.leaves() {
             let mut reader = adapter
                 .open_leaf(leaf, DateTime::<Utc>::UNIX_EPOCH)
@@ -135,9 +140,14 @@ pub(crate) mod registration {
             if !began {
                 sink.begin(certified.source().clone())?;
             }
+            sources.push(certified.source().clone());
             sink.certify(certified.certificate().clone())?;
         }
-        Ok(())
+        let closing = adapter.discover(root).map_err(route_error)?;
+        let inventory = inventory
+            .certify_against(&closing, sources)
+            .map_err(route_error)?;
+        sink.certify_complete_inventory(inventory)
     }
 
     fn hydrate(

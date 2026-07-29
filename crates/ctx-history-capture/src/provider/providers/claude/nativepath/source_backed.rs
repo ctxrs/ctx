@@ -757,6 +757,7 @@ pub(crate) mod registration {
         let capture_root = root.clone();
         let hydration_root = root;
         let driver = captured_route_driver(
+            &source,
             move |sink| {
                 let inventory =
                     discover_claude_source_backed(&capture_root).map_err(route_error)?;
@@ -772,8 +773,8 @@ pub(crate) mod registration {
                     let scan = scanner.finish().map_err(route_error)?;
                     sink.certify(scan.source)?;
                 }
-                inventory.certify().map_err(route_error)?;
-                Ok(())
+                let inventory = inventory.certify().map_err(route_error)?;
+                sink.certify_complete_inventory(inventory)
             },
             provider_format_scope(CaptureProvider::Claude, "claude_projects_jsonl_tree"),
             move |request| {

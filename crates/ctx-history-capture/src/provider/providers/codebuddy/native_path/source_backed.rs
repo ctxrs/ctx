@@ -805,6 +805,7 @@ pub(crate) mod registration {
         let capture_root = root.clone();
         let hydration_root = root;
         let driver = captured_route_driver(
+            &source,
             move |sink| {
                 for scan in
                     scan_codebuddy_source_backed_root(&capture_root, DateTime::<Utc>::UNIX_EPOCH)
