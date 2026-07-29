@@ -366,7 +366,7 @@ fn delivered_foreground_tools_record_once_with_truthful_classification() {
         "context_searches": 3,
         "context_found": expected_context_found,
         "context_opened": 2,
-        "context_cited": 0,
+        "context_cited_coverage": "unsupported",
         "validated_discoveries": 2,
     });
     assert_eq!(
