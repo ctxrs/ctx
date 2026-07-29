@@ -24,6 +24,8 @@ pub const MAX_SOURCE_TOUCHED_FILES_PER_RECORD: usize = 4_096;
 pub const MAX_SOURCE_CONTENT_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_SOURCE_CONTENT_BYTES_PER_PAGE: usize = MAX_SOURCE_CONTENT_BYTES;
 pub const MAX_SOURCE_MANIFEST_WIRE_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_SOURCE_MANIFEST_PAGE_ITEMS: usize = 64;
+pub const MAX_SOURCE_MANIFEST_PAGE_WIRE_BYTES: usize = MAX_SOURCE_MANIFEST_WIRE_BYTES;
 pub const MAX_SOURCE_CONTROL_WIRE_BYTES: usize = 24 * 1024 * 1024;
 pub const MAX_SOURCE_PAGE_WIRE_BYTES: usize = 24 * 1024 * 1024;
 pub const MAX_SOURCE_IDENTITY_BYTES: usize = 8 * 1024;
@@ -155,11 +157,296 @@ impl SourceManifest {
             }
             prior_removal = Some(current);
         }
+        Ok(())
+    }
+
+    fn validate_legacy_wire(&self) -> Result<(), ProtocolError> {
         validate_encoded_bound(
             self,
             MAX_SOURCE_MANIFEST_WIRE_BYTES,
             "source manifest exceeds its encoded byte bound",
         )
+    }
+}
+
+/// Exact metadata-only identity admitted before source records are reread.
+///
+/// `core_generation_id` is the digest of the immutable Core generation
+/// manifest. The explicit contract fields fail closed before any page is
+/// accepted, while `aggregate_sha256` binds them to every ordered source and
+/// removal entry without requiring a whole-manifest wire transfer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceManifestHeader {
+    pub contract_version: u16,
+    pub core_generation_id: String,
+    pub generation_manifest_version: u32,
+    pub identity_version: u16,
+    pub lexical_schema_version: u32,
+    pub lexical_analyzer_version: u32,
+    pub policy_schema_hash: String,
+    pub source_count: u32,
+    pub removal_count: u32,
+    pub aggregate_sha256: String,
+}
+
+impl SourceManifestHeader {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        core_generation_id: impl Into<String>,
+        generation_manifest_version: u32,
+        identity_version: u16,
+        lexical_schema_version: u32,
+        lexical_analyzer_version: u32,
+        policy_schema_hash: impl Into<String>,
+        sources: &[CertifiedSource],
+        removals: &[SourceRemoval],
+    ) -> Result<Self, ProtocolError> {
+        validate_manifest_entries(sources, removals)?;
+        let source_count = u32::try_from(sources.len()).map_err(|_| {
+            ProtocolError::new(
+                ErrorClass::Bounds,
+                "source manifest source count overflowed",
+            )
+        })?;
+        let removal_count = u32::try_from(removals.len()).map_err(|_| {
+            ProtocolError::new(
+                ErrorClass::Bounds,
+                "source manifest removal count overflowed",
+            )
+        })?;
+        let mut header = Self {
+            contract_version: SOURCE_MATERIALIZATION_CONTRACT_VERSION,
+            core_generation_id: core_generation_id.into(),
+            generation_manifest_version,
+            identity_version,
+            lexical_schema_version,
+            lexical_analyzer_version,
+            policy_schema_hash: policy_schema_hash.into(),
+            source_count,
+            removal_count,
+            aggregate_sha256: String::new(),
+        };
+        header.aggregate_sha256 = source_manifest_aggregate_sha256(&header, sources, removals)?;
+        header.validate()?;
+        Ok(header)
+    }
+
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.contract_version != SOURCE_MATERIALIZATION_CONTRACT_VERSION {
+            return Err(ProtocolError::new(
+                ErrorClass::ProtocolMismatch,
+                "source manifest header does not match the materialization contract",
+            ));
+        }
+        validate_sha256(&self.core_generation_id, "Core generation ID")?;
+        validate_sha256(&self.policy_schema_hash, "source generation policy")?;
+        validate_sha256(&self.aggregate_sha256, "source manifest aggregate")?;
+        let sources = usize::try_from(self.source_count).map_err(|_| {
+            ProtocolError::new(
+                ErrorClass::Bounds,
+                "source manifest source count overflowed",
+            )
+        })?;
+        let removals = usize::try_from(self.removal_count).map_err(|_| {
+            ProtocolError::new(
+                ErrorClass::Bounds,
+                "source manifest removal count overflowed",
+            )
+        })?;
+        if sources > MAX_SOURCE_MANIFEST_SOURCES
+            || removals > MAX_SOURCE_MANIFEST_REMOVALS
+            || sources.saturating_add(removals) > MAX_SOURCE_MANIFEST_SOURCES
+        {
+            return Err(ProtocolError::new(
+                ErrorClass::Bounds,
+                "source manifest header exceeds its source or removal count bound",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn validate_contents(
+        &self,
+        sources: &[CertifiedSource],
+        removals: &[SourceRemoval],
+    ) -> Result<(), ProtocolError> {
+        self.validate()?;
+        validate_manifest_entries(sources, removals)?;
+        if usize::try_from(self.source_count).ok() != Some(sources.len())
+            || usize::try_from(self.removal_count).ok() != Some(removals.len())
+        {
+            return Err(ProtocolError::new(
+                ErrorClass::Sequence,
+                "source manifest aggregate counts do not match admitted entries",
+            ));
+        }
+        if source_manifest_aggregate_sha256(self, sources, removals)? != self.aggregate_sha256 {
+            return Err(ProtocolError::new(
+                ErrorClass::InvalidRequest,
+                "source manifest aggregate digest does not match admitted entries",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "entries",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum SourceManifestPageEntries {
+    Sources(Vec<CertifiedSource>),
+    Removals(Vec<SourceRemoval>),
+}
+
+impl SourceManifestPageEntries {
+    #[must_use]
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Sources(entries) => entries.len(),
+            Self::Removals(entries) => entries.len(),
+        }
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// One deterministic metadata-only page in a source-manifest admission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceManifestPage {
+    pub contract_version: u16,
+    pub core_generation_id: String,
+    pub aggregate_sha256: String,
+    pub page_index: u32,
+    pub item_index: u32,
+    pub entries: SourceManifestPageEntries,
+    pub page_sha256: String,
+}
+
+impl SourceManifestPage {
+    pub fn new(
+        header: &SourceManifestHeader,
+        page_index: u32,
+        item_index: u32,
+        entries: SourceManifestPageEntries,
+    ) -> Result<Self, ProtocolError> {
+        header.validate()?;
+        let mut page = Self {
+            contract_version: SOURCE_MATERIALIZATION_CONTRACT_VERSION,
+            core_generation_id: header.core_generation_id.clone(),
+            aggregate_sha256: header.aggregate_sha256.clone(),
+            page_index,
+            item_index,
+            entries,
+            page_sha256: String::new(),
+        };
+        page.page_sha256 = source_manifest_page_sha256(&page)?;
+        page.validate()?;
+        Ok(page)
+    }
+
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.contract_version != SOURCE_MATERIALIZATION_CONTRACT_VERSION {
+            return Err(ProtocolError::new(
+                ErrorClass::ProtocolMismatch,
+                "source manifest page does not match the materialization contract",
+            ));
+        }
+        validate_sha256(&self.core_generation_id, "Core generation ID")?;
+        validate_sha256(&self.aggregate_sha256, "source manifest aggregate")?;
+        validate_sha256(&self.page_sha256, "source manifest page")?;
+        if self.entries.is_empty() || self.entries.len() > MAX_SOURCE_MANIFEST_PAGE_ITEMS {
+            return Err(ProtocolError::new(
+                ErrorClass::Bounds,
+                "source manifest page exceeds its item count bound",
+            ));
+        }
+        match &self.entries {
+            SourceManifestPageEntries::Sources(sources) => {
+                validate_manifest_entries(sources, &[])?;
+            }
+            SourceManifestPageEntries::Removals(removals) => {
+                validate_manifest_entries(&[], removals)?;
+            }
+        }
+        if source_manifest_page_sha256(self)? != self.page_sha256 {
+            return Err(ProtocolError::new(
+                ErrorClass::InvalidRequest,
+                "source manifest page digest does not match its entries",
+            ));
+        }
+        validate_encoded_bound(
+            self,
+            MAX_SOURCE_MANIFEST_PAGE_WIRE_BYTES,
+            "source manifest page exceeds its encoded byte bound",
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceManifestAdmissionCursor {
+    pub core_generation_id: String,
+    pub aggregate_sha256: String,
+    pub next_page_index: u32,
+    pub next_source_index: u32,
+    pub next_removal_index: u32,
+}
+
+impl SourceManifestAdmissionCursor {
+    #[must_use]
+    pub fn initial(header: &SourceManifestHeader) -> Self {
+        Self {
+            core_generation_id: header.core_generation_id.clone(),
+            aggregate_sha256: header.aggregate_sha256.clone(),
+            next_page_index: 0,
+            next_source_index: 0,
+            next_removal_index: 0,
+        }
+    }
+
+    pub fn validate_for(&self, header: &SourceManifestHeader) -> Result<(), ProtocolError> {
+        header.validate()?;
+        if self.core_generation_id != header.core_generation_id
+            || self.aggregate_sha256 != header.aggregate_sha256
+            || self.next_source_index > header.source_count
+            || self.next_removal_index > header.removal_count
+            || (self.next_source_index < header.source_count && self.next_removal_index != 0)
+        {
+            return Err(ProtocolError::new(
+                ErrorClass::Sequence,
+                "source manifest admission cursor is outside its exact manifest",
+            ));
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn is_complete_for(&self, header: &SourceManifestHeader) -> bool {
+        self.validate_for(header).is_ok()
+            && self.next_source_index == header.source_count
+            && self.next_removal_index == header.removal_count
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceManifestAdmissionReceipt {
+    pub header: SourceManifestHeader,
+    pub page_count: u32,
+}
+
+impl SourceManifestAdmissionReceipt {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        self.header.validate()
     }
 }
 
@@ -475,6 +762,7 @@ pub struct BeginSourceManifestRequest {
 impl BeginSourceManifestRequest {
     pub fn validate(&self) -> Result<(), ProtocolError> {
         self.manifest.validate()?;
+        self.manifest.validate_legacy_wire()?;
         validate_encoded_bound(
             self,
             MAX_SOURCE_CONTROL_WIRE_BYTES,
@@ -506,6 +794,120 @@ impl SourceManifestBegan {
             self,
             MAX_SOURCE_CONTROL_WIRE_BYTES,
             "source manifest begin response exceeds its encoded byte bound",
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BeginSourceManifestAdmissionRequest {
+    pub header: SourceManifestHeader,
+}
+
+impl BeginSourceManifestAdmissionRequest {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        self.header.validate()?;
+        validate_encoded_bound(
+            self,
+            MAX_SOURCE_CONTROL_WIRE_BYTES,
+            "begin source manifest admission request exceeds its encoded byte bound",
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceManifestAdmissionBegan {
+    pub cursor: SourceManifestAdmissionCursor,
+    pub replayed: bool,
+}
+
+impl SourceManifestAdmissionBegan {
+    pub fn validate_for(&self, header: &SourceManifestHeader) -> Result<(), ProtocolError> {
+        self.cursor.validate_for(header)?;
+        validate_encoded_bound(
+            self,
+            MAX_SOURCE_CONTROL_WIRE_BYTES,
+            "source manifest admission begin response exceeds its encoded byte bound",
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdmitSourceManifestPageRequest {
+    pub page: SourceManifestPage,
+}
+
+impl AdmitSourceManifestPageRequest {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        self.page.validate()?;
+        validate_encoded_bound(
+            self,
+            MAX_SOURCE_MANIFEST_PAGE_WIRE_BYTES,
+            "source manifest page admission request exceeds its encoded byte bound",
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceManifestPageAdmitted {
+    pub cursor: SourceManifestAdmissionCursor,
+    pub replayed: bool,
+}
+
+impl SourceManifestPageAdmitted {
+    pub fn validate_for(&self, header: &SourceManifestHeader) -> Result<(), ProtocolError> {
+        self.cursor.validate_for(header)?;
+        validate_encoded_bound(
+            self,
+            MAX_SOURCE_CONTROL_WIRE_BYTES,
+            "source manifest page admission response exceeds its encoded byte bound",
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FinishSourceManifestAdmissionRequest {
+    pub header: SourceManifestHeader,
+}
+
+impl FinishSourceManifestAdmissionRequest {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        self.header.validate()?;
+        validate_encoded_bound(
+            self,
+            MAX_SOURCE_CONTROL_WIRE_BYTES,
+            "finish source manifest admission request exceeds its encoded byte bound",
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceManifestAdmitted {
+    pub receipt: SourceManifestAdmissionReceipt,
+    pub materializer_revision: String,
+    pub progress: Vec<SourceProgress>,
+    pub replayed: bool,
+}
+
+impl SourceManifestAdmitted {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        self.receipt.validate()?;
+        validate_identity(&self.materializer_revision, "source materializer revision")?;
+        validate_progress_set(
+            &self.progress,
+            None,
+            false,
+            "admitted source manifest progress",
+        )?;
+        validate_encoded_bound(
+            self,
+            MAX_SOURCE_CONTROL_WIRE_BYTES,
+            "source manifest admission response exceeds its encoded byte bound",
         )
     }
 }
@@ -778,6 +1180,7 @@ pub struct FinishSourceManifestRequest {
 impl FinishSourceManifestRequest {
     pub fn validate(&self) -> Result<(), ProtocolError> {
         self.manifest.validate()?;
+        self.manifest.validate_legacy_wire()?;
         validate_progress_set(
             &self.expected_progress,
             None,
@@ -823,8 +1226,58 @@ impl FinishSourceManifestRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct FinishAdmittedSourceManifestRequest {
+    pub admission: SourceManifestAdmissionReceipt,
+    pub expected_progress: Vec<SourceProgress>,
+}
+
+impl FinishAdmittedSourceManifestRequest {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        self.admission.validate()?;
+        validate_progress_set(
+            &self.expected_progress,
+            None,
+            true,
+            "finished admitted source progress",
+        )?;
+        if self.expected_progress.len()
+            != usize::try_from(self.admission.header.source_count).map_err(|_| {
+                ProtocolError::new(
+                    ErrorClass::Bounds,
+                    "admitted source manifest source count overflowed",
+                )
+            })?
+        {
+            return Err(ProtocolError::new(
+                ErrorClass::Sequence,
+                "finish admitted source manifest progress does not cover every retained source",
+            ));
+        }
+        let mut materializer_revision = None;
+        for progress in &self.expected_progress {
+            if materializer_revision
+                .is_some_and(|revision: &str| revision != progress.materializer_revision)
+            {
+                return Err(ProtocolError::new(
+                    ErrorClass::Sequence,
+                    "finish admitted source manifest progress mixes materializer revisions",
+                ));
+            }
+            materializer_revision = Some(progress.materializer_revision.as_str());
+        }
+        validate_encoded_bound(
+            self,
+            MAX_SOURCE_CONTROL_WIRE_BYTES,
+            "finish admitted source manifest request exceeds its encoded byte bound",
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SourceManifestReceipt {
     pub core_generation_id: String,
+    pub manifest_aggregate_sha256: String,
     pub materializer_revision: String,
     pub progress: Vec<SourceProgress>,
 }
@@ -832,6 +1285,7 @@ pub struct SourceManifestReceipt {
 impl SourceManifestReceipt {
     pub fn validate(&self) -> Result<(), ProtocolError> {
         validate_sha256(&self.core_generation_id, "Core generation ID")?;
+        validate_sha256(&self.manifest_aggregate_sha256, "source manifest aggregate")?;
         validate_identity(&self.materializer_revision, "source materializer revision")?;
         validate_progress_set(
             &self.progress,
@@ -904,6 +1358,18 @@ pub fn certified_source_revision_sha256(source: &CertifiedSource) -> Result<Stri
     Ok(sha256_hex(&bytes))
 }
 
+pub fn legacy_source_manifest_sha256(manifest: &SourceManifest) -> Result<String, ProtocolError> {
+    manifest.validate()?;
+    manifest.validate_legacy_wire()?;
+    let bytes = serde_json::to_vec(manifest).map_err(|_| {
+        ProtocolError::new(
+            ErrorClass::Internal,
+            "legacy source manifest encoding failed",
+        )
+    })?;
+    Ok(sha256_hex(&bytes))
+}
+
 pub fn source_manifest_receipt_sha256(
     receipt: &SourceManifestReceipt,
 ) -> Result<String, ProtocolError> {
@@ -915,6 +1381,121 @@ pub fn source_manifest_receipt_sha256(
         )
     })?;
     Ok(sha256_hex(&bytes))
+}
+
+fn validate_manifest_entries(
+    sources: &[CertifiedSource],
+    removals: &[SourceRemoval],
+) -> Result<(), ProtocolError> {
+    if sources.len() > MAX_SOURCE_MANIFEST_SOURCES
+        || removals.len() > MAX_SOURCE_MANIFEST_REMOVALS
+        || sources.len().saturating_add(removals.len()) > MAX_SOURCE_MANIFEST_SOURCES
+    {
+        return Err(ProtocolError::new(
+            ErrorClass::Bounds,
+            "source manifest exceeds its source or removal count bound",
+        ));
+    }
+    let mut prior_source = None;
+    for source in sources {
+        source
+            .validate_contract()
+            .map_err(|error| invalid_contract("certified source", error))?;
+        let current = source_identity_digest(source);
+        if prior_source.is_some_and(|prior| prior >= current) {
+            return Err(ProtocolError::new(
+                ErrorClass::InvalidRequest,
+                "source manifest sources must be sorted and unique by stable lineage",
+            ));
+        }
+        prior_source = Some(current);
+    }
+    let retained = sources
+        .iter()
+        .map(source_identity_digest)
+        .collect::<BTreeSet<_>>();
+    let mut prior_removal = None;
+    for removal in removals {
+        removal.validate()?;
+        let current = removal.deletion.source().identity().digest();
+        if retained.contains(&current) {
+            return Err(ProtocolError::new(
+                ErrorClass::InvalidRequest,
+                "source manifest cannot retain and delete the same stable lineage",
+            ));
+        }
+        if prior_removal.is_some_and(|prior| prior >= current) {
+            return Err(ProtocolError::new(
+                ErrorClass::InvalidRequest,
+                "source manifest removals must be sorted and unique by stable lineage",
+            ));
+        }
+        prior_removal = Some(current);
+    }
+    Ok(())
+}
+
+fn source_manifest_aggregate_sha256(
+    header: &SourceManifestHeader,
+    sources: &[CertifiedSource],
+    removals: &[SourceRemoval],
+) -> Result<String, ProtocolError> {
+    let mut digest = Sha256::new();
+    digest.update(b"ctx-pro-source-manifest-admission-v1\0");
+    digest.update(header.contract_version.to_be_bytes());
+    digest_field(&mut digest, header.core_generation_id.as_bytes());
+    digest.update(header.generation_manifest_version.to_be_bytes());
+    digest.update(header.identity_version.to_be_bytes());
+    digest.update(header.lexical_schema_version.to_be_bytes());
+    digest.update(header.lexical_analyzer_version.to_be_bytes());
+    digest_field(&mut digest, header.policy_schema_hash.as_bytes());
+    digest.update(header.source_count.to_be_bytes());
+    digest.update(header.removal_count.to_be_bytes());
+    for source in sources {
+        digest.update(b"s");
+        digest_json(&mut digest, source)?;
+    }
+    for removal in removals {
+        digest.update(b"r");
+        digest_json(&mut digest, removal)?;
+    }
+    Ok(hex_digest(digest.finalize()))
+}
+
+fn source_manifest_page_sha256(page: &SourceManifestPage) -> Result<String, ProtocolError> {
+    let mut digest = Sha256::new();
+    digest.update(b"ctx-pro-source-manifest-page-v1\0");
+    digest.update(page.contract_version.to_be_bytes());
+    digest_field(&mut digest, page.core_generation_id.as_bytes());
+    digest_field(&mut digest, page.aggregate_sha256.as_bytes());
+    digest.update(page.page_index.to_be_bytes());
+    digest.update(page.item_index.to_be_bytes());
+    digest_json(&mut digest, &page.entries)?;
+    Ok(hex_digest(digest.finalize()))
+}
+
+fn digest_json<T: Serialize>(digest: &mut Sha256, value: &T) -> Result<(), ProtocolError> {
+    let bytes = serde_json::to_vec(value).map_err(|_| {
+        ProtocolError::new(
+            ErrorClass::Internal,
+            "source manifest digest encoding failed",
+        )
+    })?;
+    digest_field(digest, &bytes);
+    Ok(())
+}
+
+fn digest_field(digest: &mut Sha256, bytes: &[u8]) {
+    digest.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_be_bytes());
+    digest.update(bytes);
+}
+
+fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
+    bytes
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn validate_progress_set(

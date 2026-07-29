@@ -4,16 +4,19 @@ use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    AuthorizationRequest, AuthorizationResult, BeginOutputInventoryRequest,
-    BeginSourceManifestRequest, BlameRequest, BlameResult, ConfirmGraphKeyDeletionRequest,
-    DeleteSourceRequest, ErrorClass, FinishOutputInventoryRequest, FinishSourceManifestRequest,
-    GraphKeyDeleted, GraphKeyDeletionPrepared, JournalCheckpoint, JournalSyncRequest,
-    JournalSyncResult, MaterializeSourcePageRequest, ObserveOutputSourceRequest,
-    OutputInventoryBegan, OutputInventoryFinished, OutputPageMaterialized, OutputProgressRequest,
-    OutputProgressResult, OutputSourceObserved, PrepareGraphKeyDeletionRequest,
-    PrepareSourceRequest, ProOutputMaterializationPage, ProtocolError, SourceDeleted,
-    SourceManifestBegan, SourceManifestFinished, SourceManifestReceipt, SourcePageMaterialized,
-    SourcePrepared, PROTOCOL_FINGERPRINT, PROTOCOL_VERSION,
+    AdmitSourceManifestPageRequest, AuthorizationRequest, AuthorizationResult,
+    BeginOutputInventoryRequest, BeginSourceManifestAdmissionRequest, BeginSourceManifestRequest,
+    BlameRequest, BlameResult, ConfirmGraphKeyDeletionRequest, DeleteSourceRequest, ErrorClass,
+    FinishAdmittedSourceManifestRequest, FinishOutputInventoryRequest,
+    FinishSourceManifestAdmissionRequest, FinishSourceManifestRequest, GraphKeyDeleted,
+    GraphKeyDeletionPrepared, JournalCheckpoint, JournalSyncRequest, JournalSyncResult,
+    MaterializeSourcePageRequest, ObserveOutputSourceRequest, OutputInventoryBegan,
+    OutputInventoryFinished, OutputPageMaterialized, OutputProgressRequest, OutputProgressResult,
+    OutputSourceObserved, PrepareGraphKeyDeletionRequest, PrepareSourceRequest,
+    ProOutputMaterializationPage, ProtocolError, SourceDeleted, SourceManifestAdmissionBegan,
+    SourceManifestAdmitted, SourceManifestBegan, SourceManifestFinished,
+    SourceManifestPageAdmitted, SourceManifestReceipt, SourcePageMaterialized, SourcePrepared,
+    PROTOCOL_FINGERPRINT, PROTOCOL_VERSION,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -100,10 +103,14 @@ pub enum HostMessage {
     FinishOutputInventory(FinishOutputInventoryRequest),
     GetOutputProgress(OutputProgressRequest),
     BeginSourceManifest(BeginSourceManifestRequest),
+    BeginSourceManifestAdmission(BeginSourceManifestAdmissionRequest),
+    AdmitSourceManifestPage(AdmitSourceManifestPageRequest),
+    FinishSourceManifestAdmission(FinishSourceManifestAdmissionRequest),
     PrepareSource(PrepareSourceRequest),
     MaterializeSourcePage(MaterializeSourcePageRequest),
     DeleteSource(DeleteSourceRequest),
     FinishSourceManifest(FinishSourceManifestRequest),
+    FinishAdmittedSourceManifest(FinishAdmittedSourceManifestRequest),
     Blame(BlameRequest),
 }
 
@@ -127,6 +134,9 @@ pub enum HelperMessage {
     OutputInventoryFinished(OutputInventoryFinished),
     OutputProgress(OutputProgressResult),
     SourceManifestBegan(SourceManifestBegan),
+    SourceManifestAdmissionBegan(SourceManifestAdmissionBegan),
+    SourceManifestPageAdmitted(SourceManifestPageAdmitted),
+    SourceManifestAdmitted(SourceManifestAdmitted),
     SourcePrepared(SourcePrepared),
     SourcePageMaterialized(SourcePageMaterialized),
     SourceDeleted(SourceDeleted),

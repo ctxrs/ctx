@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::source_backed_feed::{
-    sync_source_backed_pro_feed_deferred,
+    sync_source_backed_pro_feed_deferred_paged,
     SourceBackedProProvider as SourceBackedProProviderContract, SourceBackedProSyncReport,
     SourceBackedProviderPage,
 };
@@ -295,7 +295,7 @@ pub(super) fn sync_committed_source_manifest(
     resolver: &SourceBackedResolverRegistry,
 ) -> Result<SourceBackedProSyncReport> {
     let mut provider = SourceBackedProProvider::new(index, resolver, &manifest)?;
-    sync_source_backed_pro_feed_deferred(data_root, manifest, &mut provider)
+    sync_source_backed_pro_feed_deferred_paged(data_root, manifest, index.manifest(), &mut provider)
 }
 
 fn validate_manifest_sources(

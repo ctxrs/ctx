@@ -771,6 +771,7 @@ fn source_authority_blame_request_does_not_open_legacy_store() {
     let data_root = tempdir().expect("empty data root");
     let receipt = ctx_pro_host_protocol::SourceManifestReceipt {
         core_generation_id: "a".repeat(64),
+        manifest_aggregate_sha256: "b".repeat(64),
         materializer_revision: "materializer-v1".to_owned(),
         progress: Vec::new(),
     };

@@ -45,6 +45,51 @@ fn certified_source() -> CertifiedSource {
     .unwrap()
 }
 
+fn source_key_at(index: u32) -> SourceKey {
+    let mut lineage = [0_u8; 32];
+    lineage[..4].copy_from_slice(&index.to_be_bytes());
+    SourceKey::derive(
+        "fixture",
+        "fixture_jsonl",
+        "fixture-v1",
+        1,
+        SourceAnchor::CatalogLineage(lineage),
+    )
+    .unwrap()
+}
+
+fn certified_source_at(index: u32, revision_bytes: usize) -> CertifiedSource {
+    let source = source_key_at(index);
+    let mut revision = vec![7; revision_bytes];
+    revision[..4].copy_from_slice(&index.to_be_bytes());
+    let observation = SourceObservation::new(source, "fixture-revision-v1", revision).unwrap();
+    let counts = ScannedSourceCounts {
+        complete_records: 1,
+        retained_records: 1,
+        indexed_documents: 1,
+        certified_bytes: 10,
+        ..ScannedSourceCounts::default()
+    };
+    let mut digest = [9_u8; 32];
+    digest[..4].copy_from_slice(&index.to_be_bytes());
+    let frontier = SourceFrontier::new(
+        "fixture-frontier-v1",
+        TypedKey::U64(u64::from(index) + 1),
+        10,
+        digest,
+    )
+    .unwrap();
+    CertifiedSource::certify_with_frontier(
+        observation.clone(),
+        observation,
+        "fixture-parser-v1",
+        digest,
+        counts,
+        Some(frontier),
+    )
+    .unwrap()
+}
+
 fn source_record(content: &[u8], event_sequence: u64) -> SourceRecord {
     let source = certified_source().observation().source().clone();
     let session_key =
@@ -268,6 +313,7 @@ fn source_backed_pro_five_lifecycle_variants_have_exact_tags_and_round_trip() {
         HelperMessage::SourceManifestFinished(SourceManifestFinished {
             receipt: SourceManifestReceipt {
                 core_generation_id: manifest.core_generation_id,
+                manifest_aggregate_sha256: "b".repeat(64),
                 materializer_revision: "fixture-materializer-v1".to_owned(),
                 progress: vec![progress(true)],
             },
@@ -350,6 +396,135 @@ fn source_backed_pro_page_count_finish_cas_and_deletion_witness_are_bounded() {
     let encoded = serde_json::to_vec(&deletion_manifest).unwrap();
     let decoded: SourceManifest = serde_json::from_slice(&encoded).unwrap();
     decoded.validate().unwrap();
+}
+
+#[test]
+fn source_manifest_admission_pages_a_3464_source_production_fixture_deterministically() {
+    const SOURCE_COUNT: usize = 3_464;
+    let mut sources = (0..u32::try_from(SOURCE_COUNT).unwrap())
+        .map(|index| certified_source_at(index, 4 * 1024))
+        .collect::<Vec<_>>();
+    sources.sort_by_key(source_identity_digest);
+    let header =
+        SourceManifestHeader::new("a".repeat(64), 1, 1, 1, 1, "b".repeat(64), &sources, &[])
+            .unwrap();
+    assert_eq!(header.source_count, 3_464);
+    assert_eq!(
+        BeginSourceManifestRequest {
+            manifest: SourceManifest::new("a".repeat(64), sources.clone(), Vec::new()).unwrap(),
+        }
+        .validate()
+        .unwrap_err()
+        .class,
+        ErrorClass::Bounds,
+        "the rollback whole-manifest transfer must remain bounded"
+    );
+
+    let pages = sources
+        .chunks(MAX_SOURCE_MANIFEST_PAGE_ITEMS)
+        .enumerate()
+        .map(|(page_index, entries)| {
+            SourceManifestPage::new(
+                &header,
+                u32::try_from(page_index).unwrap(),
+                u32::try_from(page_index * MAX_SOURCE_MANIFEST_PAGE_ITEMS).unwrap(),
+                SourceManifestPageEntries::Sources(entries.to_vec()),
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        pages.len(),
+        SOURCE_COUNT.div_ceil(MAX_SOURCE_MANIFEST_PAGE_ITEMS)
+    );
+    assert!(pages.iter().all(|page| {
+        serde_json::to_vec(&AdmitSourceManifestPageRequest { page: page.clone() })
+            .unwrap()
+            .len()
+            <= MAX_SOURCE_MANIFEST_PAGE_WIRE_BYTES
+    }));
+    assert_eq!(
+        pages,
+        sources
+            .chunks(MAX_SOURCE_MANIFEST_PAGE_ITEMS)
+            .enumerate()
+            .map(|(page_index, entries)| SourceManifestPage::new(
+                &header,
+                u32::try_from(page_index).unwrap(),
+                u32::try_from(page_index * MAX_SOURCE_MANIFEST_PAGE_ITEMS).unwrap(),
+                SourceManifestPageEntries::Sources(entries.to_vec()),
+            )
+            .unwrap())
+            .collect::<Vec<_>>()
+    );
+    header.validate_contents(&sources, &[]).unwrap();
+}
+
+#[test]
+fn source_manifest_admission_rejects_an_oversize_metadata_only_page() {
+    let observed_sources = (10_000..14_000).map(source_key_at).collect::<Vec<_>>();
+    let observation = SourceInventoryObservation::new(
+        "fixture",
+        "fixture-root",
+        TypedKey::utf8("fixture-authority").unwrap(),
+        "fixture-inventory-v1",
+        vec![1],
+    )
+    .unwrap();
+    let inventory = CertifiedSourceInventory::certify(
+        observation.clone(),
+        observation,
+        "fixture-discovery-v1",
+        observed_sources,
+    )
+    .unwrap();
+    let mut removals = (20_000..20_064)
+        .map(|index| {
+            let deletion =
+                CertifiedSourceDeletion::from_inventory(source_key_at(index), &inventory).unwrap();
+            SourceRemoval::new(deletion, inventory.clone()).unwrap()
+        })
+        .collect::<Vec<_>>();
+    removals.sort_by_key(|removal| removal.deletion.source().identity().digest());
+    let header =
+        SourceManifestHeader::new("a".repeat(64), 1, 1, 1, 1, "b".repeat(64), &[], &removals)
+            .unwrap();
+    let result =
+        SourceManifestPage::new(&header, 0, 0, SourceManifestPageEntries::Removals(removals));
+    match result {
+        Err(error) => assert_eq!(error.class, ErrorClass::Bounds),
+        Ok(page) => panic!(
+            "oversize page unexpectedly encoded in {} bytes",
+            serde_json::to_vec(&page).unwrap().len()
+        ),
+    }
+}
+
+#[test]
+fn source_manifest_admission_binds_exact_counts_and_aggregate_digest() {
+    let mut sources = vec![certified_source_at(1, 4), certified_source_at(2, 4)];
+    sources.sort_by_key(source_identity_digest);
+    let header =
+        SourceManifestHeader::new("a".repeat(64), 1, 1, 1, 1, "b".repeat(64), &sources, &[])
+            .unwrap();
+    let mut wrong_count = header.clone();
+    wrong_count.source_count -= 1;
+    assert_eq!(
+        wrong_count
+            .validate_contents(&sources, &[])
+            .unwrap_err()
+            .class,
+        ErrorClass::Sequence
+    );
+    let mut wrong_digest = header;
+    wrong_digest.aggregate_sha256 = "f".repeat(64);
+    assert_eq!(
+        wrong_digest
+            .validate_contents(&sources, &[])
+            .unwrap_err()
+            .class,
+        ErrorClass::InvalidRequest
+    );
 }
 
 #[test]

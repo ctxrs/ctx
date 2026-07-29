@@ -80,10 +80,14 @@ fn host_kind(message: &HostMessage) -> &'static str {
         HostMessage::FinishOutputInventory(_) => "finish_output_inventory",
         HostMessage::GetOutputProgress(_) => "get_output_progress",
         HostMessage::BeginSourceManifest(_) => "begin_source_manifest",
+        HostMessage::BeginSourceManifestAdmission(_) => "begin_source_manifest_admission",
+        HostMessage::AdmitSourceManifestPage(_) => "admit_source_manifest_page",
+        HostMessage::FinishSourceManifestAdmission(_) => "finish_source_manifest_admission",
         HostMessage::PrepareSource(_) => "prepare_source",
         HostMessage::MaterializeSourcePage(_) => "materialize_source_page",
         HostMessage::DeleteSource(_) => "delete_source",
         HostMessage::FinishSourceManifest(_) => "finish_source_manifest",
+        HostMessage::FinishAdmittedSourceManifest(_) => "finish_admitted_source_manifest",
         HostMessage::Blame(_) => "blame",
     }
 }
@@ -102,6 +106,9 @@ fn helper_kind(message: &HelperMessage) -> &'static str {
         HelperMessage::OutputInventoryFinished(_) => "output_inventory_finished",
         HelperMessage::OutputProgress(_) => "output_progress",
         HelperMessage::SourceManifestBegan(_) => "source_manifest_began",
+        HelperMessage::SourceManifestAdmissionBegan(_) => "source_manifest_admission_began",
+        HelperMessage::SourceManifestPageAdmitted(_) => "source_manifest_page_admitted",
+        HelperMessage::SourceManifestAdmitted(_) => "source_manifest_admitted",
         HelperMessage::SourcePrepared(_) => "source_prepared",
         HelperMessage::SourcePageMaterialized(_) => "source_page_materialized",
         HelperMessage::SourceDeleted(_) => "source_deleted",
@@ -225,10 +232,14 @@ fn host_operation_kind(message: &HostMessage) -> Option<&'static str> {
         | HostMessage::FinishOutputInventory(_)
         | HostMessage::GetOutputProgress(_)
         | HostMessage::BeginSourceManifest(_)
+        | HostMessage::BeginSourceManifestAdmission(_)
+        | HostMessage::AdmitSourceManifestPage(_)
+        | HostMessage::FinishSourceManifestAdmission(_)
         | HostMessage::PrepareSource(_)
         | HostMessage::MaterializeSourcePage(_)
         | HostMessage::DeleteSource(_)
-        | HostMessage::FinishSourceManifest(_) => None,
+        | HostMessage::FinishSourceManifest(_)
+        | HostMessage::FinishAdmittedSourceManifest(_) => None,
     }
 }
 
@@ -302,6 +313,9 @@ fn helper_operation_kind(message: &HelperMessage) -> Option<&'static str> {
         | HelperMessage::OutputInventoryFinished(_)
         | HelperMessage::OutputProgress(_)
         | HelperMessage::SourceManifestBegan(_)
+        | HelperMessage::SourceManifestAdmissionBegan(_)
+        | HelperMessage::SourceManifestPageAdmitted(_)
+        | HelperMessage::SourceManifestAdmitted(_)
         | HelperMessage::SourcePrepared(_)
         | HelperMessage::SourcePageMaterialized(_)
         | HelperMessage::SourceDeleted(_)
@@ -455,6 +469,38 @@ fn certified_source() -> CertifiedSource {
 
 fn source_manifest() -> SourceManifest {
     SourceManifest::new("a".repeat(64), vec![certified_source()], Vec::new()).unwrap()
+}
+
+fn source_manifest_header() -> SourceManifestHeader {
+    let manifest = source_manifest();
+    SourceManifestHeader::new(
+        manifest.core_generation_id,
+        1,
+        1,
+        1,
+        1,
+        "b".repeat(64),
+        &manifest.sources,
+        &manifest.removals,
+    )
+    .unwrap()
+}
+
+fn source_manifest_page() -> SourceManifestPage {
+    SourceManifestPage::new(
+        &source_manifest_header(),
+        0,
+        0,
+        SourceManifestPageEntries::Sources(vec![certified_source()]),
+    )
+    .unwrap()
+}
+
+fn source_manifest_admission_receipt() -> SourceManifestAdmissionReceipt {
+    SourceManifestAdmissionReceipt {
+        header: source_manifest_header(),
+        page_count: 1,
+    }
 }
 
 fn source_progress(terminal: bool) -> SourceProgress {
@@ -687,6 +733,15 @@ fn host_messages() -> Vec<HostMessage> {
         HostMessage::BeginSourceManifest(BeginSourceManifestRequest {
             manifest: source_manifest(),
         }),
+        HostMessage::BeginSourceManifestAdmission(BeginSourceManifestAdmissionRequest {
+            header: source_manifest_header(),
+        }),
+        HostMessage::AdmitSourceManifestPage(AdmitSourceManifestPageRequest {
+            page: source_manifest_page(),
+        }),
+        HostMessage::FinishSourceManifestAdmission(FinishSourceManifestAdmissionRequest {
+            header: source_manifest_header(),
+        }),
         HostMessage::PrepareSource(PrepareSourceRequest {
             core_generation_id: "a".repeat(64),
             source: source_progress(false).source,
@@ -709,6 +764,10 @@ fn host_messages() -> Vec<HostMessage> {
         }),
         HostMessage::FinishSourceManifest(FinishSourceManifestRequest {
             manifest: source_manifest(),
+            expected_progress: vec![source_progress(true)],
+        }),
+        HostMessage::FinishAdmittedSourceManifest(FinishAdmittedSourceManifestRequest {
+            admission: source_manifest_admission_receipt(),
             expected_progress: vec![source_progress(true)],
         }),
         HostMessage::Blame(blame()),
@@ -805,6 +864,26 @@ fn helper_messages() -> Vec<HelperMessage> {
             progress: Vec::new(),
             replayed: false,
         }),
+        HelperMessage::SourceManifestAdmissionBegan(SourceManifestAdmissionBegan {
+            cursor: SourceManifestAdmissionCursor::initial(&source_manifest_header()),
+            replayed: false,
+        }),
+        HelperMessage::SourceManifestPageAdmitted(SourceManifestPageAdmitted {
+            cursor: SourceManifestAdmissionCursor {
+                core_generation_id: "a".repeat(64),
+                aggregate_sha256: source_manifest_header().aggregate_sha256,
+                next_page_index: 1,
+                next_source_index: 1,
+                next_removal_index: 0,
+            },
+            replayed: false,
+        }),
+        HelperMessage::SourceManifestAdmitted(SourceManifestAdmitted {
+            receipt: source_manifest_admission_receipt(),
+            materializer_revision: "conformance-source-materializer-v1".to_owned(),
+            progress: Vec::new(),
+            replayed: false,
+        }),
         HelperMessage::SourcePrepared(SourcePrepared {
             core_generation_id: "a".repeat(64),
             progress: source_progress(false),
@@ -826,6 +905,7 @@ fn helper_messages() -> Vec<HelperMessage> {
         HelperMessage::SourceManifestFinished(SourceManifestFinished {
             receipt: SourceManifestReceipt {
                 core_generation_id: "a".repeat(64),
+                manifest_aggregate_sha256: "b".repeat(64),
                 materializer_revision: "conformance-source-materializer-v1".to_owned(),
                 progress: vec![source_progress(true)],
             },

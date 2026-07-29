@@ -213,6 +213,7 @@ fn blame_request(target: BlameTarget) -> BlameRequest {
 fn empty_source_receipt() -> SourceManifestReceipt {
     SourceManifestReceipt {
         core_generation_id: "a".repeat(64),
+        manifest_aggregate_sha256: "b".repeat(64),
         materializer_revision: "materializer-v1".to_owned(),
         progress: Vec::new(),
     }

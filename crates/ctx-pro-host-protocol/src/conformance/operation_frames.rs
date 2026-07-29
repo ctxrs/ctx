@@ -147,10 +147,14 @@ fn operation_frames_cover_every_typed_request_response_and_operation_variant() {
             | HostMessage::FinishOutputInventory(_)
             | HostMessage::GetOutputProgress(_)
             | HostMessage::BeginSourceManifest(_)
+            | HostMessage::BeginSourceManifestAdmission(_)
+            | HostMessage::AdmitSourceManifestPage(_)
+            | HostMessage::FinishSourceManifestAdmission(_)
             | HostMessage::PrepareSource(_)
             | HostMessage::MaterializeSourcePage(_)
             | HostMessage::DeleteSource(_)
-            | HostMessage::FinishSourceManifest(_) => {
+            | HostMessage::FinishSourceManifest(_)
+            | HostMessage::FinishAdmittedSourceManifest(_) => {
                 panic!("{name} is not an operation-specific host fixture");
             }
         }
@@ -251,6 +255,9 @@ fn operation_frames_cover_every_typed_request_response_and_operation_variant() {
             | HelperMessage::OutputInventoryFinished(_)
             | HelperMessage::OutputProgress(_)
             | HelperMessage::SourceManifestBegan(_)
+            | HelperMessage::SourceManifestAdmissionBegan(_)
+            | HelperMessage::SourceManifestPageAdmitted(_)
+            | HelperMessage::SourceManifestAdmitted(_)
             | HelperMessage::SourcePrepared(_)
             | HelperMessage::SourcePageMaterialized(_)
             | HelperMessage::SourceDeleted(_)

@@ -77,6 +77,8 @@ pub(super) fn inventory() -> Value {
             "source_content_bytes": MAX_SOURCE_CONTENT_BYTES,
             "source_content_bytes_per_page": MAX_SOURCE_CONTENT_BYTES_PER_PAGE,
             "source_manifest_wire_bytes": MAX_SOURCE_MANIFEST_WIRE_BYTES,
+            "source_manifest_page_items": MAX_SOURCE_MANIFEST_PAGE_ITEMS,
+            "source_manifest_page_wire_bytes": MAX_SOURCE_MANIFEST_PAGE_WIRE_BYTES,
             "source_control_wire_bytes": MAX_SOURCE_CONTROL_WIRE_BYTES,
             "source_page_wire_bytes": MAX_SOURCE_PAGE_WIRE_BYTES,
             "source_identity_bytes": MAX_SOURCE_IDENTITY_BYTES,
@@ -93,15 +95,19 @@ pub(super) fn inventory() -> Value {
             "confirm_graph_key_deletion", "status", "sync_journal",
             "begin_output_inventory", "observe_output_source", "materialize_output_page",
             "finish_output_inventory", "get_output_progress",
-            "begin_source_manifest", "prepare_source", "materialize_source_page",
-            "delete_source", "finish_source_manifest", "blame"
+            "begin_source_manifest", "begin_source_manifest_admission",
+            "admit_source_manifest_page",
+            "finish_source_manifest_admission", "prepare_source", "materialize_source_page",
+            "delete_source", "finish_source_manifest", "finish_admitted_source_manifest", "blame"
         ],
         "helper_message_kinds": [
             "hello", "authorized", "graph_key_deletion_prepared", "graph_key_deleted",
             "status", "journal_synced", "output_inventory_began", "output_source_observed",
             "output_page_materialized", "output_inventory_finished", "output_progress",
-            "source_manifest_began", "source_prepared", "source_page_materialized",
-            "source_deleted", "source_manifest_finished",
+            "source_manifest_began", "source_manifest_admission_began",
+            "source_manifest_page_admitted", "source_manifest_admitted",
+            "source_prepared", "source_page_materialized", "source_deleted",
+            "source_manifest_finished",
             "blame", "error"
         ],
         "capabilities": wire_names(&capabilities, Capability::wire_name),
@@ -174,6 +180,8 @@ pub(super) fn inventory() -> Value {
             "ByteRange": fields(&["start", "end_exclusive"], &[]),
             "BeginOutputInventoryRequest": fields(&["generation"], &[]),
             "BeginSourceManifestRequest": fields(&["manifest"], &[]),
+            "BeginSourceManifestAdmissionRequest": fields(&["header"], &[]),
+            "AdmitSourceManifestPageRequest": fields(&["page"], &[]),
             "BlameContinuation": fields(&["cursor", "reason"], &[]),
             "BlameRequest": fields(&["target", "limit", "expected_snapshot"], &["cursor"]),
             "BlameResult": fields(&["target", "matches", "evidence"], &["git_snapshot", "next"]),
@@ -246,6 +254,9 @@ pub(super) fn inventory() -> Value {
             "NumberedEvidence": fields(&["number", "citation"], &[]),
             "FinishOutputInventoryRequest": fields(&["generation"], &[]),
             "FinishSourceManifestRequest": fields(&["manifest", "expected_progress"], &[]),
+            "FinishSourceManifestAdmissionRequest": fields(&["header"], &[]),
+            "FinishAdmittedSourceManifestRequest": fields(
+                &["admission", "expected_progress"], &[]),
             "ObserveOutputSourceRequest": fields(
                 &["generation", "source", "availability"], &[]),
             "OutputAssociations": fields(
@@ -335,12 +346,36 @@ pub(super) fn inventory() -> Value {
             "SourceManifest": fields(&[
                 "contract_version", "core_generation_id", "sources", "removals"
             ], &[]),
+            "SourceManifestHeader": fields(&[
+                "contract_version", "core_generation_id", "generation_manifest_version",
+                "identity_version", "lexical_schema_version", "lexical_analyzer_version",
+                "policy_schema_hash", "source_count", "removal_count", "aggregate_sha256"
+            ], &[]),
+            "SourceManifestPage.sources": fields(&[
+                "contract_version", "core_generation_id", "aggregate_sha256", "page_index",
+                "item_index", "kind", "entries", "page_sha256"
+            ], &[]),
+            "SourceManifestPage.removals": fields(&[
+                "contract_version", "core_generation_id", "aggregate_sha256", "page_index",
+                "item_index", "kind", "entries", "page_sha256"
+            ], &[]),
+            "SourceManifestAdmissionCursor": fields(&[
+                "core_generation_id", "aggregate_sha256", "next_page_index",
+                "next_source_index", "next_removal_index"
+            ], &[]),
+            "SourceManifestAdmissionReceipt": fields(&["header", "page_count"], &[]),
             "SourceManifestBegan": fields(&[
                 "core_generation_id", "materializer_revision", "progress", "replayed"
             ], &[]),
+            "SourceManifestAdmissionBegan": fields(&["cursor", "replayed"], &[]),
+            "SourceManifestPageAdmitted": fields(&["cursor", "replayed"], &[]),
+            "SourceManifestAdmitted": fields(&[
+                "receipt", "materializer_revision", "progress", "replayed"
+            ], &[]),
             "SourceManifestFinished": fields(&["receipt", "replayed"], &[]),
             "SourceManifestReceipt": fields(&[
-                "core_generation_id", "materializer_revision", "progress"
+                "core_generation_id", "manifest_aggregate_sha256",
+                "materializer_revision", "progress"
             ], &[]),
             "SourceManifestReceiptIdentity": fields(&[
                 "core_generation_id", "materializer_revision", "receipt_sha256"
