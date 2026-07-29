@@ -66,12 +66,6 @@ def main() -> int:
         * 1024.0
         * 1024.0
     )
-    max_wal_bytes = (
-        env_float("CTX_PERF_SMOKE_MAX_WAL_MIB", 64.0, 1.0, 64.0)
-        * 1024.0
-        * 1024.0
-    )
-
     comparison_selector = os.environ.get(
         "CTX_PERF_SMOKE_COMPARISON_ORDER", "both"
     ).strip()
@@ -82,13 +76,13 @@ def main() -> int:
     )
 
     work_base = Path(
-        os.environ.get("CTX_PERF_SMOKE_WORK_DIR", SIDECAR_ROOT / "target" / "ctx-perf-smoke")
+        os.environ.get("CTX_PERF_SMOKE_WORK_DIR", HARNESS_ROOT / "target" / "ctx-perf-smoke")
     )
     work_root = prepare_work_root(work_base)
     default_artifact_dir = Path(
         os.environ.get(
             "TEST_UNDECLARED_OUTPUTS_DIR",
-            SIDECAR_ROOT / "target" / "ctx-artifacts" / "perf-smoke",
+            HARNESS_ROOT / "target" / "ctx-artifacts" / "perf-smoke",
         )
     )
     artifact_path = Path(
@@ -178,11 +172,10 @@ def main() -> int:
             runs_by_role = {str(run["role"]): run for run in order_runs}
             report = comparison_report(
                 order,
-                runs_by_role["baseline-v0.25"],
+                runs_by_role["baseline"],
                 runs_by_role["candidate"],
                 allowed_regression_pct,
                 max_peak_rss_bytes,
-                max_wal_bytes,
             )
             order_passed = (
                 all(run["status"] == "passed" for run in order_runs)
@@ -218,7 +211,6 @@ def main() -> int:
                 "wall_ratio_max_inclusive": WALL_PARITY_RATIO,
                 "device_write_ratio_max_inclusive": DEVICE_WRITE_PARITY_RATIO,
                 "max_peak_rss_bytes": round2(max_peak_rss_bytes),
-                "max_wal_bytes": round2(max_wal_bytes),
                 "io_amplification_ratio_max_exclusive": IO_AMPLIFICATION_RATIO,
                 "cpu_rss_ratio_max_inclusive": CPU_RSS_RELATIVE_RATIO,
             },
@@ -230,7 +222,7 @@ def main() -> int:
     comparison_passed = comparison is None or comparison["status"] == "passed"
     passed = run_checks_passed and comparison_passed
     artifact = {
-        "schema_version": 4,
+        "schema_version": 5,
         "profile": "ctx-cli-perf-smoke",
         "status": "passed" if passed else "failed",
         "enforced": enforce,
@@ -261,7 +253,6 @@ def main() -> int:
             "cpu_rss_relative_ratio": CPU_RSS_RELATIVE_RATIO,
             "io_amplification_ratio_exclusive": IO_AMPLIFICATION_RATIO,
             "max_peak_rss_bytes": round2(max_peak_rss_bytes),
-            "max_wal_bytes": round2(max_wal_bytes),
             "env_overrides": [
                 "CTX_PERF_SMOKE_STATUS_P95_MS",
                 "CTX_PERF_SMOKE_SEARCH_P95_MS",
@@ -272,18 +263,16 @@ def main() -> int:
                 "CTX_PERF_SMOKE_SHOW_SESSION_P95_MS",
                 "CTX_PERF_SMOKE_REGRESSION_PCT",
                 "CTX_PERF_SMOKE_MAX_PEAK_RSS_MIB",
-                "CTX_PERF_SMOKE_MAX_WAL_MIB",
             ],
         },
         "measurement_contract": {
-            "baseline_identity": (
-                f"comparison baseline --version must equal {EXACT_BASELINE_VERSION!r}; "
-                "enforced comparison also binds baseline and candidate paths to explicit "
+            "binary_identity": (
+                "enforced comparison binds baseline and candidate paths to explicit "
                 "expected SHA-256 values before any binary or corpus execution"
             ),
             "append_oracles": (
-                "v0.25 reports one imported session per appended source; the candidate "
-                "reports appended events without re-importing sessions"
+                "both binaries must report appended source events without re-importing "
+                "the existing session"
             ),
             "wall_clock": "Python time.perf_counter around one ctx process",
             "cpu_and_rss": "wait4 child rusage; Linux ru_maxrss converted from KiB to bytes",
@@ -293,12 +282,14 @@ def main() -> int:
                 "total I/O is their per-process sum before percentile aggregation"
             ),
             "block_io_fallback": "wait4 ru_inblock/ru_oublock multiplied by 512 bytes",
-            "wal_high_water": (
-                "maximum observed work.sqlite-wal size at the configured polling interval; "
+            "source_backed_storage_high_water": (
+                "maximum observed combined search/lexical, search/semantic, and "
+                "relational projection bytes at the configured polling interval; "
                 "a shorter transient can be missed"
             ),
             "scope_limits": (
-                "process counters include binary, SQLite, and source activity and do not isolate "
+                "process counters include binary, index, projection, and source activity "
+                "and do not isolate "
                 "provider-source reads; /proc counters exclude work performed by separately spawned "
                 "descendants"
             ),

@@ -42,43 +42,52 @@ def expect_exact_import_delta(
         raise HarnessError(f"{label} imported unexpected fixture totals: {actual} != {expected}")
 
 
+def expect_source_backed_status(packet: dict[str, object], data_root: Path) -> None:
+    lexical = packet.get("lexical")
+    semantic = packet.get("semantic")
+    relational = packet.get("relational")
+    prior_epoch = packet.get("prior_epoch")
+    if packet.get("schema_version") != 2 or packet.get("initialized") is not True:
+        raise HarnessError(f"status is not a ready v0.26 source epoch: {packet}")
+    if not isinstance(lexical, dict) or lexical.get("path") != str(
+        data_root / "search" / "lexical"
+    ):
+        raise HarnessError(f"status has an unexpected lexical generation path: {lexical}")
+    flat_f32 = semantic.get("flat_f32") if isinstance(semantic, dict) else None
+    if not isinstance(flat_f32, dict) or flat_f32.get("path") != str(
+        data_root / "search" / "semantic"
+    ):
+        raise HarnessError(f"status has an unexpected semantic generation path: {semantic}")
+    if not isinstance(relational, dict) or relational.get("path") != str(
+        data_root / "relational.sqlite"
+    ):
+        raise HarnessError(f"status has an unexpected relational projection path: {relational}")
+    if (
+        not isinstance(prior_epoch, dict)
+        or prior_epoch.get("status") != "absent"
+        or prior_epoch.get("active") is not False
+        or prior_epoch.get("opened") is not False
+        or (data_root / "work.sqlite").exists()
+    ):
+        raise HarnessError(f"fresh source-backed run activated prior-epoch storage: {prior_epoch}")
+
+
 def effective_role(role: str, version: str) -> str:
-    if role == "baseline-v0.25":
-        if version != EXACT_BASELINE_VERSION:
-            raise HarnessError(
-                "comparison baseline must be the exact v0.25 release version: "
-                f"expected {EXACT_BASELINE_VERSION!r}, got {version!r}"
-            )
+    if role in {"baseline", "candidate", "single"}:
         return role
-    if role == "candidate":
-        if version == EXACT_BASELINE_VERSION:
-            raise HarnessError(
-                "candidate resolves to the v0.25 baseline version; supply the candidate binary"
-            )
-        return role
-    if role == "single":
-        return "baseline-v0.25" if version == EXACT_BASELINE_VERSION else "candidate"
     raise HarnessError(f"unknown performance role: {role}")
 
 
 def append_expectation(role: str, changed_files: int) -> dict[str, object]:
-    if role == "baseline-v0.25":
-        return {
-            "role": role,
-            "imported_sessions": changed_files,
-            "imported_events": changed_files,
-            "imported_edges": 0,
-            "shape": "v0.25 reports each appended source as an imported session",
-        }
-    if role == "candidate":
-        return {
-            "role": role,
-            "imported_sessions": 0,
-            "imported_events": changed_files,
-            "imported_edges": 0,
-            "shape": "candidate reports appended events without re-importing the session",
-        }
-    raise HarnessError(f"append expectation is unavailable for role: {role}")
+    if role not in {"baseline", "candidate", "single"}:
+        raise HarnessError(f"append expectation is unavailable for role: {role}")
+    return {
+        "role": role,
+        "imported_sessions": 0,
+        "imported_events": changed_files,
+        "imported_edges": 0,
+        "shape": "source-backed refresh appends events without re-importing the session",
+    }
 
 
 def result_metric(result: dict[str, object], name: str) -> int | float:
@@ -134,28 +143,41 @@ def command_profile(
             "block_output_proxy_bytes": integer_stats(
                 [int(result_metric(result, "block_output_proxy_bytes")) for result in results]
             ),
-            "wal_high_water_bytes": integer_stats(
-                [int(result_metric(result, "wal_high_water_bytes")) for result in results]
+            "source_backed_storage_high_water_bytes": integer_stats(
+                [
+                    int(result_metric(result, "source_backed_storage_high_water_bytes"))
+                    for result in results
+                ]
             ),
-            "wal_growth_high_water_bytes": integer_stats(
-                [int(result_metric(result, "wal_growth_high_water_bytes")) for result in results]
+            "source_backed_storage_growth_high_water_bytes": integer_stats(
+                [
+                    int(
+                        result_metric(
+                            result,
+                            "source_backed_storage_growth_high_water_bytes",
+                        )
+                    )
+                    for result in results
+                ]
             ),
         },
     }
 
 
-def db_footprint_bytes(data_root: Path) -> int:
-    return sum(sqlite_footprint(data_root).values())
+def source_backed_footprint_bytes(data_root: Path) -> int:
+    return source_backed_storage_footprint(data_root)["total"]
 
 
 def storage_sample(label: str, data_root: Path, corpus_events: int) -> dict[str, object]:
-    files = sqlite_footprint(data_root)
-    footprint = sum(files.values())
+    files = source_backed_storage_footprint(data_root)
+    footprint = files["total"]
     return {
         "label": label,
         "files": files,
-        "db_footprint_bytes": footprint,
-        "db_bytes_per_generated_event": round2(footprint / max(corpus_events, 1)),
+        "source_backed_footprint_bytes": footprint,
+        "source_backed_bytes_per_generated_event": round2(
+            footprint / max(corpus_events, 1)
+        ),
     }
 
 
@@ -242,7 +264,7 @@ def preflight_binary_hashes(
             }
         )
 
-    if observed_by_role["baseline-v0.25"] == observed_by_role["candidate"]:
+    if observed_by_role["baseline"] == observed_by_role["candidate"]:
         raise HarnessError("baseline and candidate binaries must be distinct")
     return {
         "status": (
@@ -425,7 +447,10 @@ def ratio_check(
         "reason": (
             None
             if passed
-            else f"candidate must be {'at most' if inclusive else 'below'} {max_ratio:.2f}x v0.25"
+            else (
+                "candidate must be "
+                f"{'at most' if inclusive else 'below'} {max_ratio:.2f}x baseline"
+            )
         ),
     }
 

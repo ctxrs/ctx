@@ -22,7 +22,7 @@ import time
 
 
 DEFAULT_BACKENDS = {
-    "fts": "{ctx} {data_root_args} search {q} --backend lexical --refresh off --limit {limit} --format json {search_args}",
+    "lexical": "{ctx} {data_root_args} search {q} --backend lexical --refresh off --limit {limit} --format json {search_args}",
     "semantic": "{ctx} {data_root_args} search {q} --backend semantic --refresh background --limit {limit} --format json {search_args}",
     "hybrid": "{ctx} {data_root_args} search {q} --backend hybrid --refresh background --limit {limit} --format json {search_args}",
 }
@@ -559,7 +559,7 @@ def main():
     )
     parser.add_argument(
         "--baseline-backend",
-        default="fts",
+        default="lexical",
         help="backend name to compare against in the private-safe comparison summary",
     )
     parser.add_argument("--output")

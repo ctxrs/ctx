@@ -13,8 +13,8 @@ Runs an offline public ctx CLI performance smoke against a generated Codex
 session corpus. CTX_PUBLIC_CTX_REPO defaults to the checkout containing this
 script.
 
-For a comparison, set CTX_PERF_SMOKE_BASELINE_BIN to the exact v0.25 release
-binary and CTX_PERF_SMOKE_CANDIDATE_BIN to the candidate executable.
+For a comparison, set CTX_PERF_SMOKE_BASELINE_BIN to a source-authoritative
+ctx executable and CTX_PERF_SMOKE_CANDIDATE_BIN to the candidate executable.
 CTX_PERF_SMOKE_HEAD_BIN remains an alias for the candidate. Comparison mode
 runs both baseline-first and candidate-first with isolated roots. Set
 CTX_PERF_SMOKE_BIN for a single-binary diagnostic. If no binary is supplied,
@@ -36,7 +36,6 @@ Common overrides:
   CTX_PERF_SMOKE_COMPARISON_ORDER=both
   CTX_PERF_SMOKE_REGRESSION_PCT=10
   CTX_PERF_SMOKE_MAX_PEAK_RSS_MIB=1024
-  CTX_PERF_SMOKE_MAX_WAL_MIB=64
   CTX_PERF_SMOKE_STATUS_P95_MS=750
   CTX_PERF_SMOKE_SEARCH_P95_MS=2500
   CTX_PERF_SMOKE_IMPORT_NOOP_P95_MS=2500
@@ -47,17 +46,16 @@ Common overrides:
   CTX_PERF_SMOKE_ENFORCE=1 (set to 0 for diagnostic-only runs)
 
 The JSON artifact records wall and CPU time, peak RSS, Linux /proc filesystem
-and device-I/O proxies, sampled SQLite WAL high-water, and refresh-off query
-latency while an idempotent rescan is active. It includes per-order relative
-gate receipts. Every run uses a newly created disposable HOME, CTX_DATA_ROOT,
-and generated provider tree.
+and device-I/O proxies, source-backed lexical/semantic/relational footprint,
+and refresh-off query latency while an idempotent source rescan is active. It
+includes per-order relative gate receipts. Every run uses a newly created
+disposable HOME, CTX_DATA_ROOT, and generated provider tree.
 
 Hard comparison policy is not weakenable: candidate wall and device writes
-must be at or below v0.25, CPU and RSS must be at or below 1.10x, device
-read/write/total-I/O must remain below 1.73x, RSS must remain at or below
-1 GiB, and WAL must remain at or below 64 MiB. RSS/WAL overrides may only
-tighten those caps. CTX_PERF_SMOKE_REGRESSION_PCT applies to the retained
-legacy comparison checks.
+must be at or below the selected source-backed baseline, CPU and RSS must be at
+or below 1.10x, device read/write/total-I/O must remain below 1.73x, and RSS
+must remain at or below 1 GiB. The RSS override may only tighten that cap.
+CTX_PERF_SMOKE_REGRESSION_PCT applies to the relative comparison checks.
 USAGE
 }
 
@@ -77,7 +75,7 @@ perf_smoke_find_repo_root() {
 perf_smoke_run() {
   local baseline_bin candidate_bin ctx_bin_one ctx_bin_two
   local ctx_label_one ctx_label_two head_bin_alias repo_root run_mode
-  local script_dir sidecar_root single_bin
+  local harness_root script_dir single_bin
 
   script_dir="$1"
   shift
@@ -96,7 +94,7 @@ perf_smoke_run() {
 
   repo_root="$(perf_smoke_find_repo_root "${script_dir}")"
   cd "${repo_root}" || perf_smoke_fail "cannot enter public ctx checkout: ${repo_root}"
-  sidecar_root="$(cd "${script_dir}/../.." && pwd)"
+  harness_root="$(cd "${script_dir}/../.." && pwd)"
 
   baseline_bin="${CTX_PERF_SMOKE_BASELINE_BIN:-}"
   candidate_bin="${CTX_PERF_SMOKE_CANDIDATE_BIN:-}"
@@ -116,7 +114,7 @@ perf_smoke_run() {
       perf_smoke_fail 'CTX_PERF_SMOKE_BASELINE_BIN and CTX_PERF_SMOKE_CANDIDATE_BIN must be set together'
     run_mode='comparison'
     ctx_bin_one="${baseline_bin}"
-    ctx_label_one="${CTX_PERF_SMOKE_BASELINE_LABEL:-v0.25}"
+    ctx_label_one="${CTX_PERF_SMOKE_BASELINE_LABEL:-baseline}"
     ctx_bin_two="${candidate_bin}"
     ctx_label_two="${CTX_PERF_SMOKE_CANDIDATE_LABEL:-${CTX_PERF_SMOKE_HEAD_LABEL:-candidate}}"
   else
@@ -139,7 +137,7 @@ perf_smoke_run() {
   fi
 
   perf_smoke_python_source | python3 - \
-    "${repo_root}" "${sidecar_root}" "${run_mode}" \
+    "${repo_root}" "${harness_root}" "${run_mode}" \
     "${ctx_bin_one}" "${ctx_label_one}" "${ctx_bin_two}" "${ctx_label_two}"
 }
 
@@ -162,20 +160,19 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(sys.argv[1]).resolve()
-SIDECAR_ROOT = Path(sys.argv[2]).resolve()
+HARNESS_ROOT = Path(sys.argv[2]).resolve()
 RUN_MODE = sys.argv[3]
 RUN_SPECS = [
     (Path(sys.argv[4]).resolve(), sys.argv[5], "single"),
 ]
 if RUN_MODE == "comparison":
     RUN_SPECS = [
-        (Path(sys.argv[4]).resolve(), sys.argv[5], "baseline-v0.25"),
+        (Path(sys.argv[4]).resolve(), sys.argv[5], "baseline"),
         (Path(sys.argv[6]).resolve(), sys.argv[7], "candidate"),
     ]
 QUERY = "perfneedle"
 PROC_IO_FIELDS = ("rchar", "wchar", "read_bytes", "write_bytes", "cancelled_write_bytes")
 HARNESS_STARTED = time.perf_counter()
-EXACT_BASELINE_VERSION = "ctx 0.25.0"
 CORE_PHASES = (
     "initial_import",
     "noop_incremental_import",
@@ -187,7 +184,7 @@ DEVICE_WRITE_PARITY_RATIO = 1.0
 CPU_RSS_RELATIVE_RATIO = 1.10
 IO_AMPLIFICATION_RATIO = 1.73
 EXPECTED_SHA256_ENV_BY_ROLE = {
-    "baseline-v0.25": "CTX_PERF_SMOKE_BASELINE_SHA256",
+    "baseline": "CTX_PERF_SMOKE_BASELINE_SHA256",
     "candidate": "CTX_PERF_SMOKE_CANDIDATE_SHA256",
 }
 

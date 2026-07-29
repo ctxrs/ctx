@@ -8,10 +8,9 @@ def comparison_report(
     candidate: dict[str, object],
     allowed_regression_pct: float,
     max_peak_rss_bytes: float,
-    max_wal_bytes: float,
 ) -> dict[str, object]:
-    if baseline.get("role") != "baseline-v0.25":
-        raise HarnessError(f"{order} comparison is missing its v0.25 baseline role")
+    if baseline.get("role") != "baseline":
+        raise HarnessError(f"{order} comparison is missing its baseline role")
     if candidate.get("role") != "candidate":
         raise HarnessError(f"{order} comparison is missing its candidate role")
 
@@ -41,15 +40,6 @@ def comparison_report(
         )
         checks.append(
             absolute_limit_check(
-                f"{phase}_wal_high_water_max",
-                lookup_resource(baseline, phase, "wal_high_water_bytes", "max"),
-                lookup_resource(candidate, phase, "wal_high_water_bytes", "max"),
-                max_wal_bytes,
-                "bytes",
-            )
-        )
-        checks.append(
-            absolute_limit_check(
                 f"{phase}_peak_rss_max",
                 lookup_resource(baseline, phase, "peak_rss_bytes", "max"),
                 lookup_resource(candidate, phase, "peak_rss_bytes", "max"),
@@ -65,7 +55,7 @@ def comparison_report(
                     candidate_wall,
                     WALL_PARITY_RATIO,
                     "ms",
-                    "candidate_wall_at_or_below_v0.25",
+                    "candidate_wall_at_or_below_baseline",
                     inclusive=True,
                 ),
                 ratio_check(
@@ -92,7 +82,7 @@ def comparison_report(
                     lookup_resource(candidate, phase, "device_read_bytes", "p95"),
                     IO_AMPLIFICATION_RATIO,
                     "bytes",
-                    "device_read_below_1.73x_v0.25",
+                    "device_read_below_1.73x_baseline",
                     inclusive=False,
                 ),
                 ratio_check(
@@ -101,7 +91,7 @@ def comparison_report(
                     candidate_write,
                     DEVICE_WRITE_PARITY_RATIO,
                     "bytes",
-                    "candidate_device_write_at_or_below_v0.25",
+                    "candidate_device_write_at_or_below_baseline",
                     inclusive=True,
                 ),
                 ratio_check(
@@ -110,7 +100,7 @@ def comparison_report(
                     candidate_write,
                     IO_AMPLIFICATION_RATIO,
                     "bytes",
-                    "device_write_below_1.73x_v0.25",
+                    "device_write_below_1.73x_baseline",
                     inclusive=False,
                 ),
                 ratio_check(
@@ -119,7 +109,7 @@ def comparison_report(
                     lookup_resource(candidate, phase, "device_total_io_bytes", "p95"),
                     IO_AMPLIFICATION_RATIO,
                     "bytes",
-                    "device_total_io_below_1.73x_v0.25",
+                    "device_total_io_below_1.73x_baseline",
                     inclusive=False,
                 ),
             ]
@@ -150,14 +140,17 @@ def comparison_report(
                 candidate_query_wall,
                 WALL_PARITY_RATIO,
                 "ms",
-                "candidate_wall_at_or_below_v0.25",
+                "candidate_wall_at_or_below_baseline",
                 inclusive=True,
             )
         )
     else:
         for name, policy in [
             ("concurrent_refresh_off_search_wall_p95", "legacy_relative_regression"),
-            ("concurrent_refresh_off_search_wall_parity", "candidate_wall_at_or_below_v0.25"),
+            (
+                "concurrent_refresh_off_search_wall_parity",
+                "candidate_wall_at_or_below_baseline",
+            ),
         ]:
             checks.append({
                 "name": name,
@@ -183,8 +176,8 @@ def comparison_report(
             ("device_read_bytes", "p95", "bytes"),
             ("device_write_bytes", "p95", "bytes"),
             ("device_total_io_bytes", "p95", "bytes"),
-            ("wal_high_water_bytes", "max", "bytes"),
-            ("wal_growth_high_water_bytes", "p95", "bytes"),
+            ("source_backed_storage_high_water_bytes", "max", "bytes"),
+            ("source_backed_storage_growth_high_water_bytes", "p95", "bytes"),
         ]:
             baseline_value = lookup_resource(baseline, phase, resource, statistic)
             candidate_value = lookup_resource(candidate, phase, resource, statistic)
@@ -214,7 +207,6 @@ def comparison_report(
         "device_write_parity_ratio": DEVICE_WRITE_PARITY_RATIO,
         "io_amplification_ratio_exclusive": IO_AMPLIFICATION_RATIO,
         "max_peak_rss_bytes": round2(max_peak_rss_bytes),
-        "max_wal_bytes": round2(max_wal_bytes),
         "status": "passed" if all(bool(check["passed"]) for check in checks) else "failed",
         "checks": checks,
         "informational_metrics": informational,

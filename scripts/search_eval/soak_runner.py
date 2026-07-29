@@ -41,7 +41,7 @@ DEFAULT_THRESHOLDS: dict[str, Any] = {
         "require_hybrid_fallback_safe": True,
     },
     "private_eval": {
-        "baseline": "fts",
+        "baseline": "lexical",
         "candidate": "hybrid",
         "min_hit5_delta": 0.0,
         "min_mrr_delta": 0.0,

@@ -1,6 +1,10 @@
 # CLI Reference
 
-ctx is a local CLI for indexing and searching agent session history.
+ctx is a local CLI for indexing and searching agent session history. In v0.26,
+provider sources are the sole content authority. Lexical search lives under
+`search/lexical`, semantic search under `search/semantic`, and read-only SQL
+uses the disposable `relational.sqlite` metadata projection. Rendered search,
+show, and MCP content is hydrated from exact provider records.
 
 ## Global Options
 
@@ -44,25 +48,28 @@ ctx daemon disable
 ctx daemon enable
 ```
 
-- `setup` creates the data root, opens or creates `work.sqlite`, discovers known
-  provider history locations, inventories local history sources, imports
-  discovered native provider sources, optimizes the local search index, and
-  prints next steps. It does not write `config.toml` for implicit defaults and
-  does not execute history-source plugin commands. When `[daemon].enabled` is
-  true, setup may opportunistically start the ctx-owned background daemon after
-  foreground setup work completes. Use `setup --no-daemon` for a one-run opt-out.
+- `setup` creates the data root, discovers known provider history locations,
+  inventories current sources, builds and atomically publishes the
+  source-backed lexical generation, catches up the relational projection, and
+  prints next steps. It does not open, migrate, or create the pre-v0.26
+  `work.sqlite` Store. If that prior-epoch file exists, setup preserves it
+  untouched for rollback or manual recovery and rebuilds from provider sources.
+  Setup does not write `config.toml` for implicit defaults or execute
+  history-source plugin commands. When `[daemon].enabled` is true, setup may
+  opportunistically start the ctx-owned background daemon after foreground
+  work completes. Use `setup --no-daemon` for a one-run opt-out.
 - `setup --catalog-only` stops after source discovery and inventory. The flag
   name is kept for compatibility; it is useful for fast troubleshooting, but it
   does not make history searchable and does not autostart daemon maintenance.
 - `setup --quiet` performs setup without printing success status lines, import
   summaries, data-root details, or get-started tips. It still exits nonzero and
   prints errors on failure.
-- `status` reports the ctx root, database path, config path, indexed item
-  count, indexed source count, inventory counters, legacy Codex catalog
-  counters, semantic coverage, daemon enabled/coordinator state,
+- `status` reports the ctx root, source epoch, lexical generation and policy,
+  generation-bound catalog/resolver state, semantic generation and coverage,
+  relational projection state, prior-epoch preservation state, daemon state,
   initialization state, compact local usage/value aggregates, local-only
-  marker, and read-only marker. It does not initialize, migrate, or repair the
-  canonical history store.
+  marker, and read-only marker. It does not initialize or repair derived Core
+  storage and never opens prior-epoch history.
 - `status --usage detail` expands the usage report by ctx version, surface,
   operation, and duration bucket. `status --usage disable` and `enable` write
   the canonical `[local_usage] enabled` override; `status --usage reset`
@@ -75,8 +82,8 @@ ctx daemon enable
   reporting controls.
 - `status --quiet` performs the same local checks but prints nothing on
   success. Use `status --format json` when scripts need the actual state.
-- `doctor` opens local storage and reports validation findings, including
-  semantic sidecar/worker and daemon lock/status problems when present.
+- `doctor` validates source-epoch storage and reports lexical, semantic,
+  relational, resolver, and daemon lock/status problems when present.
 - `daemon status` reports the same ctx-owned daemon coordinator state without
   mutating storage. It separates current requested config from the last config
   applied by the running daemon, and reports observed semantic query-runtime
@@ -288,13 +295,15 @@ ctx import --format json
 ctx import --progress json --format json
 ```
 
-`import` explicitly indexes provider history into the local SQLite store. The
+`import` explicitly rebuilds source-backed history from provider sources. The
 normal first-run path is `ctx setup`, which already imports discovered native
-provider sources.
-Use `import` to repair, re-run, resume, or target a specific provider/path. It
-creates the data root if needed, reads provider transcript files, and writes
-indexed source metadata, sessions, events, searchable text, citations, and
-import totals to SQLite. It does not write `config.toml` for implicit defaults.
+provider sources. Use `import` to repair, re-run, resume, or target a specific
+provider/path. It creates the data root if needed, reads provider transcript
+files, builds a private immutable Tantivy candidate containing indexed-only
+meaningful text plus locator/metadata fields, verifies it, and atomically
+publishes it under `search/lexical`. It then advances disposable consumers such
+as `relational.sqlite`; semantic catch-up is daemon-owned. It does not write
+`config.toml` for implicit defaults.
 
 Imports always commit valid records and report rejected records. An unreadable
 or structurally incompatible input fails that source, while ctx-owned storage
@@ -302,10 +311,9 @@ or index failures abort the command. A source with only rejected records is a
 failure; a source with valid content and rejections completes with an explicit
 `completed_with_rejections` outcome.
 
-Import results report `change: changed|no_op` independently from insert and
-skip counters. Replacing a changed source can reconcile existing rows in place,
-so `change: changed` remains truthful even when `imported_events` is zero and
-the existing rows are counted as skipped.
+Import results report `change: changed|no_op` independently from import and
+skip counters. `change: changed` remains truthful even when a source projects
+to the same stable event identities.
 
 When `[daemon].enabled` is true, `import` may opportunistically start a short
 one-pass ctx-owned maintenance profile after the foreground import finishes.
@@ -332,14 +340,16 @@ installs or repairs a signed target-specific helper, and catches the graph up.
 It is idempotent across first setup, resume, repair, and later catch-up.
 `ctx pro setup` is a supported explicit synonym with the same setup JSON and
 operation. Use `ctx status` (or the existing MCP `pro_status` tool) for
-Pro state without mutating canonical history or graph data. Entitlement
+Pro state without mutating provider history, Core search generations, or graph
+data. Entitlement
 authorization may advance nonsecret anti-clock-rollback metadata. `manage`
 opens hosted account and billing management.
 Interactive `uninstall` asks exactly `Delete
 all local Pro data? It can be rebuilt if you set up Pro again. [Y/n]`; Enter
 chooses deletion and `n` preserves local Pro data.
 Noninteractive and JSON callers must choose `--delete-data` or `--keep-data`.
-Canonical ctx history is always preserved. If the selected root has never held
+Provider history and Core search generations are always preserved. If the
+selected root has never held
 Pro data, either explicit choice succeeds as an idempotent Pro-state no-op and
 does not create a Pro directory or preservation marker. The foreground
 `pro_uninstall` command remains eligible for independent default-on Core local
@@ -611,16 +621,17 @@ transcript artifact to that path and prints nothing on success.
 neighboring events in the same session; `--window N` is shorthand for
 `--before N --after N`. It accepts the same output formats as `show session`.
 
-Both commands default to `--content indexed`, which renders only SQLite data
-and never opens a provider transcript. `--content complete` is an explicit
-local-data read: for eligible messages whose indexed text was truncated at the
-16,000-character import boundary, ctx opens the recorded provider source and
-returns the complete body only after its source, native record, indexed prefix,
-and body digest all verify. Untruncated messages continue to use the index.
-Complete mode is strict for the selected event or session: an unsupported,
-missing, changed, unverifiable, or oversized record fails the command without a
-partial transcript. It never expands omitted tool output, patches, diffs,
-binary data, or other provider-private payloads.
+Both commands hydrate exact provider content through typed locators bound to
+the active lexical generation. `--content indexed` remains the default
+compatibility selector, but its name no longer means a body is stored in the
+index. `--content complete` requests the strict complete-output policy; both
+policies obtain displayed text from provider sources.
+
+Hydration is source-grouped and preserves event order. An unsupported, missing,
+changed, stale, unverifiable, or oversized source record fails the selected
+event/session without a partial transcript, stale fallback, or empty
+placeholder. Show never expands payload classes excluded by provider policy,
+such as binary data or provider-private blobs.
 
 `locate session` and `locate event` print provenance metadata: ctx IDs,
 provider, provider-owned session IDs, source path and cursor, source
@@ -634,8 +645,8 @@ event arguments are ctx-owned IDs. To look up a provider-owned session, use an
 explicit provider lookup such as `--provider codex --provider-session
 <provider-session-id>` on commands that support provider lookup.
 
-JSON output may expose local paths, event payloads, and compatibility field
-names from the current store schema, so treat it as private local data.
+JSON output may expose local paths, hydrated event payloads, and compatibility
+field names, so treat it as private local data.
 
 ## Search
 
@@ -657,22 +668,21 @@ ctx search "release notes" --history-source example-agent/default
 ctx search "release notes" --provider-key example-agent --source-id default
 ```
 
-`search` defaults to `--refresh background`, which serves the existing index and
-lets the ctx daemon refresh lexical and semantic indexes in the background when
-daemon maintenance is enabled. If no local index exists yet, search performs a
-bounded foreground text bootstrap so direct first-search usage still works. If
-daemon maintenance is disabled, `background` uses the same bounded foreground
-text-refresh path for discovered native provider sources and enabled auto
-history-source plugins. Semantic retrieval reads
-existing local sidecar coverage when it is already available, and freshness is
-visible through `ctx status`, `ctx index status`, and the search JSON
-`retrieval.worker` report. ctx does not initialize or download embedding models
-during search, does not create the semantic sidecar from the query path, and
-does not start semantic indexing. Use `--refresh off` to search the existing
-index without refreshing or scheduling semantic work, or `--refresh wait` to run
-foreground text refresh and fail when it cannot complete. Foreground refresh skips isolated
-malformed history records with a warning and commits valid records; source-level and system-level
-failures remain fatal. Explicit-only native sources such as
+`search` defaults to `--refresh background`, which serves the published
+Tantivy generation while the ctx daemon owns lexical publication plus
+relational and semantic catch-up. If no local generation exists yet, search
+performs a bounded foreground lexical bootstrap. If daemon maintenance is
+disabled, background mode uses the same bounded foreground source-refresh path
+for discovered native providers and enabled automatic history-source plugins.
+Semantic retrieval reads an existing compatible generation under
+`search/semantic`; search does not initialize semantic storage, download
+embedding models, or run semantic indexing. Use `--refresh off` to query the
+published generations without refreshing or scheduling work, or
+`--refresh wait` to run foreground source refresh and fail when it cannot
+complete. Exact result rendering still hydrates provider records under every
+refresh mode. Foreground refresh skips isolated malformed records with a
+warning and publishes valid records; source-level and system-level failures
+remain fatal. Explicit-only native sources such as
 NanoClaw, plus search-only sources without native import support, are searched
 from the existing index until they are explicitly imported through a supported
 path. Supported AstrBot `data_v4.db` locations participate in bounded native
@@ -704,11 +714,10 @@ should be searched too.
 When ctx is run from Codex and `CODEX_THREAD_ID` is available, search excludes
 the active Codex session tree by default so the current task and its subagents
 do not dominate historical retrieval. Use `--include-current-session` to opt
-back in. Use `--refresh off` for a strictly read-only query over the existing
-ctx index. Explicit semantic or hybrid requests may read an existing semantic
-sidecar under `--refresh off`, but the command does not update the sidecar or
-download models. They may ask the daemon query service to embed the query from
-an already-cached local model.
+back in. `--refresh off` is read-only for ctx-derived storage, but it still
+reads provider records to hydrate exact snippets. Explicit semantic or hybrid
+requests may read a compatible semantic generation and ask the retained daemon
+query service to embed the query from an already-cached model.
 
 Results are local hits over indexed history. Event hits include `ctx_event_id`;
 hits with known session context include `ctx_session_id`; provider metadata
@@ -734,14 +743,12 @@ Filters:
 - `--session <ctx-session-id-or-prefix>`, for dense event results within one session;
 - `--term <query-or-keyword>`, repeatable broadening queries or keywords merged with OR-style semantics;
 - `--events`, for dense event-level results instead of the default session-diverse results;
-- `--backend hybrid|semantic|lexical`, where `hybrid` blends lexical and
-  semantic evidence only when existing sidecar coverage is complete and dirty
-  work is drained, and falls back to lexical with a structured fallback reason
-  when semantic prerequisites are missing. Explicit `semantic` reports a local
-  error instead of downloading a model during search when the cache is missing,
-  when the semantic worker is actively indexing, when filters/terms cannot be
-  honored, or when the installed build target does not include a compatible
-  local embedding/vector backend for the requested sidecar;
+- `--backend hybrid|semantic|lexical`, where `lexical` queries
+  `search/lexical`, `semantic` queries `search/semantic`, and `hybrid` blends
+  both only when semantic coverage is complete and bound to the active lexical
+  generation. Hybrid falls back to lexical with a structured reason when
+  semantic prerequisites are missing. Explicit semantic reports a local error
+  rather than downloading a model or using an incompatible generation;
 - `--semantic-weight <0.0-1.0>`, for hybrid ranking;
 - `--include-subagents`;
 - `--limit <n>`, capped at `200`;
@@ -752,28 +759,19 @@ CLI provider filters use kebab-case names. JSON output and stable SQL views use
 provider IDs in ctx output; multiword IDs may be snake_case, such as
 `copilot_cli`, `factory_ai_droid`, `qwen_code`, `kimi_code_cli`, `kiro_cli`, `mistral_vibe`, and `roo_code`; compact IDs such as `forgecode`, `deepagents`, `mux`, `rovodev`, `openclaw`, `nanoclaw`, `astrbot`, `shelley`, `continue`, and `openhands` stay compact.
 
-`search` reads discovered native provider files and runs enabled auto
-history-source plugin commands for pre-search text refresh, then queries SQLite.
-Default daemon maintenance owns native and plugin refresh when enabled. If the
-daemon is disabled, `--refresh background` bounds native and plugin work for
-interactive use; run `--refresh wait` or `ctx import` for exhaustive foreground
-plugin catch-up. Foreground refresh may write newly discovered provider or
-plugin history into the local `work.sqlite` index before querying. Semantic retrieval reads the
-`vectors.sqlite` sidecar when it already exists; search itself does not start
-semantic indexing or download models. Default background refresh may start the
-configured daemon for local history freshness. With semantic enabled, the
-daemon-owned query service can embed the query; `--refresh off` skips daemon
-autostart. Use
-`ctx daemon run` for explicit foreground local native history refresh and
-semantic catch-up. JSON status includes a top-level `semantic` object with worker
-`status`, `running`, `pid`, heartbeat/error timestamps, `indexed_chunks`, and a
-`coverage` object with `searchable_items`, `embedded_items`, `embedded_chunks`,
-`dirty_items`, `queued_items_estimate`, and `coverage_ratio`, plus the private
-local sidecar and worker status paths. JSON status also includes a top-level
-`daemon` object
-with coordinator status and `history_refresh`/`semantic_index` job state.
-`ctx doctor` is the diagnostic surface for semantic
-sidecar, worker, and daemon health.
+Lexical matching indexes the complete policy-selected meaningful body but
+stores no body or display preview. Before serialization, search hydrates every
+returned hit from its exact typed locator through the resolver retained for
+the active generation. Hydration is bounded and grouped by source. A stale,
+changed, missing, or unsupported record produces a typed failure/refresh path;
+ctx never emits an empty placeholder or falls back to prior-epoch content.
+
+Default daemon maintenance owns provider/plugin refresh, immutable candidate
+construction, atomic lexical publication, generation-bound resolver/catalog
+lifetime, relational projection catch-up, and semantic catch-up. Use
+`ctx daemon run` for explicit foreground maintenance. JSON status exposes
+`lexical`, `catalog`, `resolver`, `semantic`, `relational`, `prior_epoch`, and
+`daemon` objects. `ctx doctor` is the diagnostic surface for those components.
 
 ## SQL
 
@@ -785,11 +783,13 @@ cat query.sql | ctx sql - --format csv
 ctx sql "SELECT ctx_session_id FROM ctx_sessions LIMIT 5" --format raw
 ```
 
-`sql` runs one read-only SQL statement against the existing local ctx SQLite
-index. It does not create or migrate the store, refresh provider history, import
-sources, run background upgrade checks, or write provider files or source
-repositories. If the store is missing or uses an old schema, run a writable
-command such as `ctx setup` or `ctx import` first.
+`sql` runs one read-only SQL statement against `relational.sqlite`, the
+disposable metadata projection bound to the active lexical generation. On a
+completely fresh root it may initialize an empty projection. If a lexical
+generation exists but the projection is missing, behind, or generation-mismatched,
+SQL fails closed until catch-up completes. It does not refresh provider history,
+import sources, run background upgrade checks, or open/migrate prior-epoch
+storage.
 
 Prefer stable read-only `ctx_*` views for scripts:
 
@@ -798,9 +798,9 @@ Prefer stable read-only `ctx_*` views for scripts:
 - `ctx_files_touched`, one row per normalized touched-file record;
 - `ctx_sources`, one row per indexed provider source session.
 
-Advanced users can query internal tables directly, but internal table details
-are not the compatibility surface. SQL output is private local history and can
-include transcript payloads, paths, and source metadata.
+Advanced users can query internal projection tables directly, but they are not
+the compatibility surface. SQL contains metadata rather than transcript
+bodies; output can still expose private paths, IDs, and source metadata.
 
 Formats:
 
@@ -835,7 +835,7 @@ ctx docs man --out ~/.local/share/man/man1
 `docs` exposes a curated copy of the public ctx docs inside the binary. It is
 intended for humans and agents that need local command help without opening the
 website. `docs list`, `docs search`, and `docs show` read embedded text and do
-not touch provider history or the local SQLite index. `docs show --out PATH`
+not touch provider history or derived search storage. `docs show --out PATH`
 writes one embedded topic to that explicit path. `docs man --print PAGE` prints
 one generated man page to stdout; `docs man --out DIR` writes generated
 section-1 man pages for `ctx` and its public subcommands.

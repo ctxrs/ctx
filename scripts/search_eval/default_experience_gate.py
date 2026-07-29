@@ -543,7 +543,7 @@ def parse_args() -> argparse.Namespace:
         "--mode",
         action="append",
         choices=DEFAULT_MODES,
-        help="retrieval mode to run; repeatable (default: all four modes)",
+        help="retrieval mode to run; repeatable (default: all three modes)",
     )
     parser.add_argument(
         "--search-arg",

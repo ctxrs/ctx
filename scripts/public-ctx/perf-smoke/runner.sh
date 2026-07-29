@@ -182,10 +182,7 @@ def run_one(
         env,
         data_root,
         sampling_interval_ms,
-        lambda packet: (
-            packet.get("initialized") is True
-            or (_ for _ in ()).throw(HarnessError(f"status did not report initialized: {packet}"))
-        ),
+        lambda packet: expect_source_backed_status(packet, data_root),
     )
 
     search_args = ["search", QUERY, "--refresh", "off", "--format=json", "--limit", "20"]
@@ -380,8 +377,12 @@ def run_one(
             **status_profile,
             "last": {
                 "indexed_items": status_last.get("indexed_items"),
-                "indexed_catalog_sessions": status_last.get("indexed_catalog_sessions"),
-                "database_path": status_last.get("database_path"),
+                "indexed_sessions": status_last.get("indexed_sessions"),
+                "indexed_sources": status_last.get("indexed_sources"),
+                "lexical": status_last.get("lexical"),
+                "semantic": status_last.get("semantic"),
+                "relational": status_last.get("relational"),
+                "prior_epoch": status_last.get("prior_epoch"),
             },
         },
         "search_refresh_off": {
@@ -507,8 +508,8 @@ def run_one(
         "profiles": profiles,
         "storage": {
             "data_root": str(data_root),
-            "db_footprint_bytes": db_footprint_bytes(data_root),
-            "files": sqlite_footprint(data_root),
+            "source_backed_footprint_bytes": source_backed_footprint_bytes(data_root),
+            "files": source_backed_storage_footprint(data_root),
             "samples": storage_samples,
         },
         "checks": checks,
