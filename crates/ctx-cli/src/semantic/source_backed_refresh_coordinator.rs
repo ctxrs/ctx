@@ -17,7 +17,7 @@ use ctx_history_capture::{
 #[cfg(test)]
 use ctx_history_core::CaptureProvider;
 use ctx_history_core::{utc_now, HydrationFailure, HydrationFailureKind};
-use ctx_history_index::{VerifiedIndex, WriterOptions};
+use ctx_history_index::{IndexError, VerifiedIndex, WriterOptions};
 use ctx_pro_host_protocol::{SourceManifest, SourceRemoval};
 use serde_json::{json, Value};
 use thiserror::Error;
@@ -991,21 +991,28 @@ pub(super) fn source_backed_index_root(data_root: &Path) -> PathBuf {
 }
 
 fn published_generation_id(data_root: &Path) -> Result<Option<String>> {
+    Ok(open_published_generation(data_root)?.map(|index| index.generation_id().to_owned()))
+}
+
+fn open_published_generation(data_root: &Path) -> Result<Option<VerifiedIndex>> {
     let index_root = source_backed_index_root(data_root);
     if !index_root.join("meta.json").is_file() {
         return Ok(None);
     }
-    Ok(Some(
-        VerifiedIndex::open(&index_root)
-            .with_context(|| {
-                format!(
-                    "open verified source-backed lexical index {}",
-                    index_root.display()
-                )
-            })?
-            .generation_id()
-            .to_owned(),
-    ))
+    match VerifiedIndex::open(&index_root) {
+        Ok(index) => Ok(Some(index)),
+        // Tantivy creates schema-only meta.json before the first ctx commit.
+        // It is a replaceable cold-build artifact only while the epoch proves
+        // that no lexical generation has ever been activated. Once activation
+        // succeeds, the same typed error is corruption and remains fail-closed.
+        Err(IndexError::MissingCommitPayload) if pending_source_rebuild(data_root)? => Ok(None),
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "open verified source-backed lexical index {}",
+                index_root.display()
+            )
+        }),
+    }
 }
 
 fn prepare_source_rebuild_if_needed(data_root: &Path) -> Result<()> {
@@ -1553,18 +1560,7 @@ fn response_source_count(response: &Value) -> usize {
 pub(super) fn pin_published_generation(
     data_root: &Path,
 ) -> Result<Option<PinnedSourceBackedGeneration>> {
-    let index_root = source_backed_index_root(data_root);
-    if !index_root.join("meta.json").is_file() {
-        return Ok(None);
-    }
-    Ok(Some(PinnedSourceBackedGeneration {
-        index: VerifiedIndex::open(&index_root).with_context(|| {
-            format!(
-                "open verified source-backed lexical index {}",
-                index_root.display()
-            )
-        })?,
-    }))
+    Ok(open_published_generation(data_root)?.map(|index| PinnedSourceBackedGeneration { index }))
 }
 
 #[cfg(test)]
@@ -2200,5 +2196,89 @@ mod tests {
             .error
             .as_deref()
             .is_some_and(|error| error.contains("provider-neutral executor failed")));
+    }
+
+    #[test]
+    fn cold_failed_writer_artifacts_are_retried_as_no_prior_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_root = temp.path().join("data");
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let executor_attempts = attempts.clone();
+        let coordinator = SourceBackedRefreshCoordinator::with_executor(Arc::new(
+            move |execution: SourceBackedRefreshExecution<'_>| {
+                let writer = ctx_history_index::GenerationWriter::open(
+                    execution.index_root,
+                    WriterOptions::default(),
+                )?;
+                if executor_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Err(anyhow!("injected cold writer failure before commit"));
+                }
+                let receipt = writer.commit(|_| true)?;
+                Ok(test_publication(receipt.generation_id))
+            },
+        ));
+
+        let first_request = coordinator.enqueue_periodic(&data_root).unwrap();
+        let first_run = coordinator.run_next(&data_root).expect("first refresh");
+        assert!(first_run.failed);
+        assert!(first_run.job["published_generation"].is_null());
+        assert!(source_backed_index_root(&data_root)
+            .join("meta.json")
+            .is_file());
+        assert!(matches!(
+            VerifiedIndex::open(source_backed_index_root(&data_root)),
+            Err(IndexError::MissingCommitPayload)
+        ));
+        assert!(pin_published_generation(&data_root).unwrap().is_none());
+
+        let retry_request = coordinator
+            .enqueue_periodic(&data_root)
+            .expect("incomplete cold generation must enqueue for retry");
+        let retry_run = coordinator.run_next(&data_root).expect("retry refresh");
+
+        assert_ne!(request_id(&first_request), request_id(&retry_request));
+        assert!(!retry_run.failed);
+        assert!(retry_run.did_work);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        let published = retry_run.job["published_generation"]
+            .as_str()
+            .expect("retry publication");
+        let pinned = pin_published_generation(&data_root)
+            .unwrap()
+            .expect("verified retry generation");
+        assert_eq!(pinned.generation_id(), published);
+    }
+
+    #[test]
+    fn activated_generation_missing_commit_payload_remains_typed_corruption() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_root = temp.path().join("data");
+        let coordinator = SourceBackedRefreshCoordinator::with_executor(Arc::new(
+            move |execution: SourceBackedRefreshExecution<'_>| {
+                let writer = ctx_history_index::GenerationWriter::open(
+                    execution.index_root,
+                    WriterOptions::default(),
+                )?;
+                let receipt = writer.commit(|_| true)?;
+                Ok(test_publication(receipt.generation_id))
+            },
+        ));
+        coordinator.enqueue_periodic(&data_root).unwrap();
+        let run = coordinator.run_next(&data_root).expect("initial refresh");
+        assert!(!run.failed);
+
+        let meta_path = source_backed_index_root(&data_root).join("meta.json");
+        let mut meta: Value = serde_json::from_slice(&std::fs::read(&meta_path).unwrap()).unwrap();
+        assert!(meta.as_object_mut().unwrap().remove("payload").is_some());
+        std::fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
+
+        let error = coordinator
+            .enqueue_periodic(&data_root)
+            .expect_err("activated generation corruption must fail closed");
+        assert!(matches!(
+            error.downcast_ref::<IndexError>(),
+            Some(IndexError::MissingCommitPayload)
+        ));
+        assert!(!coordinator.has_pending_request());
     }
 }
