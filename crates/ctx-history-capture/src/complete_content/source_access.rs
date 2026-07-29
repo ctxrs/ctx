@@ -645,7 +645,9 @@ fn admit_sqlite(
     }
     // Opening now proves that the copied DB/WAL set is coherent. Resolvers open
     // their own bounded read-only connection against the same immutable snapshot.
-    open_provider_sqlite_readonly(&path).map_err(|cause| map_capture_error(event_id, cause))?;
+    open_provider_sqlite_readonly(&path)
+        .and_then(ReadOnlySqliteConnection::finish)
+        .map_err(|cause| map_capture_error(event_id, cause))?;
     Ok(BrokeredSqliteSource { _dir: dir, path })
 }
 
@@ -718,7 +720,9 @@ fn admit_sqlite(
             event_id,
         )?;
     }
-    open_provider_sqlite_readonly(&path).map_err(|cause| map_capture_error(event_id, cause))?;
+    open_provider_sqlite_readonly(&path)
+        .and_then(ReadOnlySqliteConnection::finish)
+        .map_err(|cause| map_capture_error(event_id, cause))?;
     Ok(BrokeredSqliteSource { _dir: dir, path })
 }
 
