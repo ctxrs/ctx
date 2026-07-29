@@ -8,7 +8,9 @@ use ctx_history_core::{SourceKey, SourceRecordLocator, StableEntityId, StableEnt
 use serde::{Deserialize, Serialize};
 use tantivy::{
     collector::{DocSetCollector, TopDocs},
-    query::{BooleanQuery, ConstScoreQuery, Occur, Query, RangeQuery, RegexQuery, TermQuery},
+    query::{
+        AllQuery, BooleanQuery, ConstScoreQuery, Occur, Query, RangeQuery, RegexQuery, TermQuery,
+    },
     schema::{IndexRecordOption, Value as TantivyValue},
     tokenizer::TokenStream,
     DocAddress, DocSet, Score, TantivyDocument, Term, TERMINATED,
@@ -356,24 +358,73 @@ impl VerifiedIndex {
         filters: &EventSearchFilters,
         limit: usize,
     ) -> Result<Vec<EventSearchCandidate>> {
+        self.search_event_candidates_any_with_filters(&[natural_text], filters, limit)
+    }
+
+    /// Searches OR-composed natural-text alternatives with shared filters.
+    ///
+    /// Tokens within one alternative remain conjunctive; matching any
+    /// alternative admits the event. This is the indexed implementation of
+    /// the CLI's repeated `--term` contract.
+    pub fn search_event_candidates_any_with_filters(
+        &self,
+        natural_texts: &[&str],
+        filters: &EventSearchFilters,
+        limit: usize,
+    ) -> Result<Vec<EventSearchCandidate>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
         let fields = fields_from_schema(self.searcher.schema())?;
-        let terms = self.body_query_terms(natural_text, fields)?;
-        if terms.is_empty() {
+        let mut alternatives: Vec<Box<dyn Query>> = Vec::new();
+        for natural_text in natural_texts {
+            let terms = self.body_query_terms(natural_text, fields)?;
+            if terms.is_empty() {
+                continue;
+            }
+            alternatives.push(Box::new(BooleanQuery::intersection(
+                terms
+                    .into_iter()
+                    .map(|term| {
+                        Box::new(TermQuery::new(term, IndexRecordOption::WithFreqs))
+                            as Box<dyn Query>
+                    })
+                    .collect(),
+            )));
+        }
+        if alternatives.is_empty() {
             return Ok(Vec::new());
         }
+        let body_query: Box<dyn Query> = if alternatives.len() == 1 {
+            alternatives.pop().expect("one alternative")
+        } else {
+            Box::new(BooleanQuery::union(alternatives))
+        };
+        self.collect_event_candidates(body_query, filters, limit, fields)
+    }
+
+    /// Lists filtered metadata records without requiring a lexical term.
+    pub fn list_event_candidates_with_filters(
+        &self,
+        filters: &EventSearchFilters,
+        limit: usize,
+    ) -> Result<Vec<EventSearchCandidate>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let fields = fields_from_schema(self.searcher.schema())?;
+        self.collect_event_candidates(Box::new(AllQuery), filters, limit, fields)
+    }
+
+    fn collect_event_candidates(
+        &self,
+        body_query: Box<dyn Query>,
+        filters: &EventSearchFilters,
+        limit: usize,
+        fields: Fields,
+    ) -> Result<Vec<EventSearchCandidate>> {
         validate_event_sort_fast_fields(&self.searcher)?;
-        let body_query = BooleanQuery::intersection(
-            terms
-                .into_iter()
-                .map(|term| {
-                    Box::new(TermQuery::new(term, IndexRecordOption::WithFreqs)) as Box<dyn Query>
-                })
-                .collect(),
-        );
-        let query = filtered_event_query(Box::new(body_query), filters, fields)?;
+        let query = filtered_event_query(body_query, filters, fields)?;
         let collector = TopDocs::with_limit(limit).tweak_score(|segment_reader| {
             // These readers were checked above. The fallbacks keep this
             // infallible collector closure panic-free if Tantivy ever changes
