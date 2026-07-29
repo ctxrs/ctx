@@ -111,6 +111,9 @@ pub(crate) struct ContinueSourceBackedLeaf {
     pub(crate) output_exclusion: ContinueOutputExclusionStats,
 }
 
+// Pages are transferred as owned bounded ingestion units. Boxing the 1,504-byte
+// page to match the 56-byte failure variant would allocate once per source page.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub(crate) enum ContinueSourceBackedOutcome {
     Page(ContinueSourceBackedPage),

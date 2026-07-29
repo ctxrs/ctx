@@ -404,6 +404,9 @@ fn admit_mistral_vibe_source(
     })
 }
 
+// This value is produced per native record. Boxing each retained 1,400-byte
+// document to match the empty outcomes would add a hot-path allocation.
+#[allow(clippy::large_enum_variant)]
 enum RecordProjection {
     Retained(LexicalDocument),
     Rejected,

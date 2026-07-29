@@ -945,6 +945,9 @@ fn path_key(path: &Path) -> Vec<u8> {
 }
 
 #[cfg(test)]
+// The fixture helper keeps all nine expected contract values explicit at call
+// sites; a test-only argument struct would make failures less legible.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn assert_source_backed_fixture(
     adapter: DirectJsonlSourceAdapter,
     root: &Path,

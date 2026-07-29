@@ -1395,6 +1395,9 @@ fn conversation_document(
     })
 }
 
+// These eight values are the explicit certified identity and projection inputs;
+// bundling them would only obscure the provider-local contract.
+#[allow(clippy::too_many_arguments)]
 fn platform_document(
     source: &AstrBotSourceBackedSourceV0,
     source_revision_digest: &[u8; 32],

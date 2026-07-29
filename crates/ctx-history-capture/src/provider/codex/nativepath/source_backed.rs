@@ -323,6 +323,9 @@ impl CodexExplicitSessionSourceBackedInputV0 {
     }
 }
 
+// The 488-byte present plan is moved intact through bounded inventory discovery;
+// boxing it would add allocation without reducing retained source authority.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 enum CodexExplicitSessionInventoryStateV0 {
     Present {
@@ -430,6 +433,9 @@ struct ColdSourceCompleteV0 {
     worker_busy: Duration,
 }
 
+// Completion is emitted once per source. Boxing its 1,032-byte owned scan solely
+// to match the 40-byte page message has no measured throughput benefit.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 enum ColdLaneMessageV0 {
     Page(ColdPreparedPageV0),

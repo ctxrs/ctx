@@ -120,6 +120,9 @@ impl ForgeCodeSourceSelectionV0 {
     }
 }
 
+// Discovery transfers the live 984-byte scan directly into the source-backed
+// route; boxing it to match the 24-byte missing path adds an avoidable allocation.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum ForgeCodeSourceBackedDiscoveryV0 {
     Missing { preferred_path: PathBuf },
     Live(ForgeCodeSourceBackedScanV0),

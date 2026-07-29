@@ -47,6 +47,9 @@ struct CrushNativeFrontier {
     next_ordinal: u64,
 }
 
+// This is the per-row hydration result. Boxing the 400-byte message row merely
+// to approach the 184-byte session variant would add an allocation per row.
+#[allow(clippy::large_enum_variant)]
 enum CrushHydratedRow {
     Session {
         row: CrushSessionRow,

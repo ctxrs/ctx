@@ -461,6 +461,9 @@ fn scan_source(
     })
 }
 
+// These eight parameters are the explicit schema, authority, session, and sink
+// inputs for one streaming scan; a one-use context bundle adds no reuse.
+#[allow(clippy::too_many_arguments)]
 fn stream_events(
     connection: &Connection,
     schema: &OpenCodeNativeSchema,
