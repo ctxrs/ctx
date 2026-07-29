@@ -28,10 +28,11 @@ pub(crate) use identity::{
     source_sort_key, source_token, validate_event_identity_against_base,
     validate_referenced_session_identity_against_base, validate_session_identity_against_base,
 };
+#[cfg(test)]
+pub(crate) use publication::manifest_path;
 pub(crate) use publication::{
-    classify_publication_failure, load_manifest_for_metas, manifest_path, meta_generation,
-    payload_generation_id, reconcile_commit_error, searcher_generation, sync_directory,
-    verify_searcher, write_manifest,
+    classify_publication_failure, load_manifest_for_metas, meta_generation, payload_generation_id,
+    reconcile_commit_error, searcher_generation, sync_directory, verify_searcher, write_manifest,
 };
 pub(crate) use schema::{
     fields_from_schema, lexical_schema, required_field, validate_schema, Fields,
@@ -62,8 +63,10 @@ use std::{
 
 use ctx_history_core::{
     CertifiedSource, CertifiedSourceAppend, CertifiedSourceDeletion, CertifiedSourceInventory,
-    SourceKey, SourceRecordLocator, StableEntityId, StableEntityKind, IDENTITY_VERSION,
+    SourceKey, StableEntityId, StableEntityKind,
 };
+#[cfg(test)]
+use ctx_history_core::{SourceRecordLocator, IDENTITY_VERSION};
 use tantivy::{
     directory::{Directory, DirectoryLock, Lock, INDEX_WRITER_LOCK},
     indexer::LogMergePolicy,
