@@ -572,10 +572,7 @@ fn push_event_summary(out: &mut String, index: usize, event: &Value) {
         "\n{index}. {sequence}{role} {event_type}{suffix}\n"
     ));
     push_indented_key_value(out, "ctx_event_id", event.get("ctx_event_id"));
-    if let Some(text) = value_field(event, "text")
-        .or_else(|| value_field(event, "preview"))
-        .filter(|text| !text.is_empty())
-    {
+    if let Some(text) = value_field(event, "text").filter(|text| !text.is_empty()) {
         out.push_str(&format!(
             "   text: {}\n",
             clip_inline(&text, MCP_TEXT_MAX_EVENT_CHARS)

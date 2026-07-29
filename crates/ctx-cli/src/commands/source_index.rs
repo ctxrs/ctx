@@ -247,13 +247,7 @@ pub(crate) fn run_show(
                 args.format,
                 CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
             )?;
-            write_show_value(
-                value,
-                args.format,
-                args.content,
-                None,
-                selected.event_id.as_uuid(),
-            )
+            write_show_value(value, args.format, None, selected.event_id.as_uuid())
         }
         ShowTarget::Session(args) => {
             if args.provider_session.is_some() {
@@ -297,7 +291,7 @@ pub(crate) fn run_show(
                 .and_then(|event| event["ctx_event_id"].as_str())
                 .and_then(|id| Uuid::parse_str(id).ok())
                 .unwrap_or_else(|| session.session_id.as_uuid());
-            write_show_value(value, args.format, args.content, args.out, event_id)
+            write_show_value(value, args.format, args.out, event_id)
         }
     }
 }
@@ -328,7 +322,7 @@ pub(crate) fn mcp_show_session(
         .and_then(|event| event["ctx_event_id"].as_str())
         .and_then(|id| Uuid::parse_str(id).ok())
         .unwrap_or_else(|| session.session_id.as_uuid());
-    enforce_json_output_limit(content, &value, output_limit_bytes, event_id)?;
+    enforce_json_output_limit(&value, output_limit_bytes, event_id)?;
     Ok(value)
 }
 
@@ -353,12 +347,7 @@ pub(crate) fn mcp_show_event(
         OutputFormat::Json,
         output_limit_bytes,
     )?;
-    enforce_json_output_limit(
-        content,
-        &value,
-        output_limit_bytes,
-        selected.event_id.as_uuid(),
-    )?;
+    enforce_json_output_limit(&value, output_limit_bytes, selected.event_id.as_uuid())?;
     Ok(value)
 }
 
@@ -1528,13 +1517,11 @@ fn render_event_values(
                 "workspace": event.workspace,
                 "cwd": event.cwd,
                 "touched_files": event.touched_files,
-                "preview": resolved.text.chars().take(2_048).collect::<String>(),
                 "text": resolved.text,
                 "content": {
                     "requested": policy.as_str(),
                     "complete": true,
                     "origin": "provider_source",
-                    "stored_truncated": false,
                     "source_verified": true,
                     "complete_content_available": true,
                 },
@@ -1637,7 +1624,6 @@ fn resolve_complete_contents(
 fn write_show_value(
     value: Value,
     format: OutputFormat,
-    content: ContentPolicy,
     out: Option<PathBuf>,
     event_id: Uuid,
 ) -> Result<()> {
@@ -1648,7 +1634,7 @@ fn write_show_value(
         OutputFormat::Markdown => render_show_markdown(&value),
     };
     enforce_complete_content_cli_output_limit(
-        content,
+        ContentPolicy::Complete,
         &body,
         out.is_none(),
         CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
@@ -1686,13 +1672,17 @@ fn render_show_jsonl(value: &Value) -> Result<String> {
 }
 
 fn enforce_json_output_limit(
-    policy: ContentPolicy,
     value: &Value,
     output_limit_bytes: usize,
     event_id: Uuid,
 ) -> Result<()> {
     let serialized_bytes = serde_json::to_vec(value)?.len();
-    enforce_complete_content_output_limit(policy, serialized_bytes, output_limit_bytes, event_id)?;
+    enforce_complete_content_output_limit(
+        ContentPolicy::Complete,
+        serialized_bytes,
+        output_limit_bytes,
+        event_id,
+    )?;
     Ok(())
 }
 
@@ -1942,7 +1932,10 @@ mod tests {
         fs,
     };
 
-    use ctx_history_capture::ingest_codex_source_backed_v0;
+    use ctx_history_capture::{
+        complete_content::{CompleteContentError, CompleteContentErrorKind},
+        ingest_codex_source_backed_v0,
+    };
     use ctx_history_core::{
         database_path, derive_event_id, derive_session_id, BatchHydrationRequest,
         BatchHydrationResult, ContentSourceResolver, EventHydrationRequest, EventIdentityInput,
@@ -2568,5 +2561,25 @@ mod tests {
 
         assert!(format!("{error:#}").contains("exceeds the 7-byte output limit"));
         assert!(format!("{error:#}").contains(&second.event_id.to_string()));
+    }
+
+    #[test]
+    fn show_json_output_limit_is_typed_for_both_policy_tokens() {
+        let event = fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 7, 7);
+        for policy in [ContentPolicy::Indexed, ContentPolicy::Complete] {
+            let value = json!({
+                "content_policy": policy.as_str(),
+                "events": [{
+                    "ctx_event_id": event.event_id.as_uuid(),
+                    "text": "provider source",
+                }],
+            });
+            let error = enforce_json_output_limit(&value, 1, event.event_id.as_uuid()).unwrap_err();
+            let typed = error
+                .downcast_ref::<CompleteContentError>()
+                .expect("show output bound should preserve the typed content error");
+            assert_eq!(typed.kind, CompleteContentErrorKind::ContentTooLarge);
+            assert_eq!(typed.event_id, event.event_id.as_uuid());
+        }
     }
 }
