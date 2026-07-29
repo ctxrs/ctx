@@ -107,7 +107,10 @@ pub(crate) struct SetupArgs {
     pub(crate) semantic: bool,
     #[arg(long, help = "Do not start daemon maintenance after setup")]
     pub(crate) no_daemon: bool,
-    #[arg(long, help = "Wait for foreground lexical indexing before returning")]
+    #[arg(
+        long,
+        help = "Wait for the daemon-owned lexical refresh to publish before returning"
+    )]
     pub(crate) wait: bool,
     #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
     pub(crate) format: JsonOutputFormat,
