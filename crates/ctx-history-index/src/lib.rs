@@ -11,6 +11,7 @@ mod identity;
 pub mod policy;
 mod publication;
 mod query;
+mod reader;
 mod schema;
 
 pub(crate) use contracts::{
@@ -51,12 +52,12 @@ pub use query::{
     SemanticEligibility, SemanticEventCursor, SemanticEventPage, SessionRecord, SourceEventCursor,
     SourceEventPage, MAX_SEMANTIC_EVENT_PAGE_ITEMS, MAX_SOURCE_EVENT_PAGE_ITEMS,
 };
+pub use reader::VerifiedIndex;
 
 use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
-    sync::OnceLock,
 };
 
 use ctx_history_core::{
@@ -64,10 +65,8 @@ use ctx_history_core::{
     SourceKey, SourceRecordLocator, StableEntityId, StableEntityKind, IDENTITY_VERSION,
 };
 use tantivy::{
-    collector::Count,
     directory::{Directory, DirectoryLock, Lock, INDEX_WRITER_LOCK},
     indexer::LogMergePolicy,
-    schema::IndexRecordOption,
     Index, IndexSettings, IndexWriter, ReloadPolicy, Searcher, TantivyDocument, Term,
 };
 use uuid::Uuid;
@@ -971,72 +970,6 @@ impl GenerationWriter {
             sources.into_values().collect(),
             removals.into_values().collect(),
         )
-    }
-}
-
-/// A verified reader pinned to one immutable lexical generation.
-pub struct VerifiedIndex {
-    searcher: Searcher,
-    manifest: GenerationManifest,
-    generation_id: String,
-    semantic_eligible_event_count: OnceLock<u64>,
-    custom_source_identity_events: OnceLock<Vec<(Uuid, String, String)>>,
-}
-
-impl VerifiedIndex {
-    pub fn open(root: impl AsRef<Path>) -> Result<Self> {
-        let root = root.as_ref();
-        let directory = DurableMmapDirectory::open(root).map_err(tantivy::TantivyError::from)?;
-        let root = directory.root_path().to_path_buf();
-        let index = Index::open(directory)?;
-        validate_schema(&index.schema())?;
-        let metas = index.load_metas()?;
-        let manifest = load_manifest_for_metas(&root, &metas)?;
-        let reader = index
-            .reader_builder()
-            .reload_policy(ReloadPolicy::Manual)
-            .try_into()?;
-        let searcher = reader.searcher();
-        if searcher_generation(&searcher) != meta_generation(&metas) {
-            return Err(IndexError::ConcurrentGenerationChange);
-        }
-        verify_searcher(&searcher, &manifest)?;
-        let generation_id = manifest.generation_id()?;
-        Ok(Self {
-            searcher,
-            manifest,
-            generation_id,
-            semantic_eligible_event_count: OnceLock::new(),
-            custom_source_identity_events: OnceLock::new(),
-        })
-    }
-
-    pub fn generation_id(&self) -> &str {
-        &self.generation_id
-    }
-
-    pub fn manifest(&self) -> &GenerationManifest {
-        &self.manifest
-    }
-
-    pub fn document_count(&self) -> u64 {
-        self.searcher.num_docs()
-    }
-
-    pub fn validate_checksums(&self) -> Result<HashSet<PathBuf>> {
-        Ok(self.searcher.index().validate_checksum()?)
-    }
-
-    #[cfg(test)]
-    fn count_term(&self, term_text: &str) -> Result<usize> {
-        use tantivy::query::TermQuery;
-
-        let body = required_field(self.searcher.schema(), "body_search")?;
-        let query = TermQuery::new(
-            Term::from_field_text(body, term_text),
-            IndexRecordOption::Basic,
-        );
-        Ok(self.searcher.search(&query, &Count)?)
     }
 }
 
