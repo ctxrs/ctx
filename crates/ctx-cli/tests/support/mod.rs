@@ -2,6 +2,7 @@
 
 pub(crate) use assert_cmd::Command;
 pub(crate) use predicates::prelude::*;
+#[cfg(ctx_cli_test_support_fixtures)]
 pub(crate) use rusqlite::{params, Connection};
 pub(crate) use serde_json::{json, Value};
 pub(crate) use std::{
@@ -15,20 +16,28 @@ pub(crate) use tempfile::{Builder, TempDir};
 
 mod analytics;
 mod assertions;
+#[cfg(ctx_cli_test_support_fixtures)]
 mod fixtures;
 mod history_plugins;
 mod mcp;
+#[cfg(ctx_cli_test_support_fixtures)]
 mod native_fixtures;
+#[cfg(ctx_cli_test_support_pro)]
 mod pro;
 mod runner;
+#[cfg(ctx_cli_test_support_upgrade)]
 mod upgrade;
 
 pub(crate) use analytics::*;
 pub(crate) use assertions::*;
+#[cfg(ctx_cli_test_support_fixtures)]
 pub(crate) use fixtures::*;
 pub(crate) use history_plugins::*;
 pub(crate) use mcp::*;
+#[cfg(ctx_cli_test_support_fixtures)]
 pub(crate) use native_fixtures::*;
+#[cfg(ctx_cli_test_support_pro)]
 pub(crate) use pro::*;
 pub(crate) use runner::*;
+#[cfg(ctx_cli_test_support_upgrade)]
 pub(crate) use upgrade::*;

@@ -1,6 +1,6 @@
 """Native Bazel integration-test helper for the ctx CLI package."""
 
-load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
+load("@crates//:defs.bzl", "aliases", "crate_deps", "crate_edition")
 load("//tools/bazel:ctx_rust.bzl", "ctx_rust_test")
 
 CTX_CLI_RUSTC_FLAGS = [
@@ -8,6 +8,9 @@ CTX_CLI_RUSTC_FLAGS = [
     "--check-cfg=cfg(ctx_pro_test_helper)",
     "--check-cfg=cfg(ctx_release_qualification)",
     "--check-cfg=cfg(ctx_semantic_fastembed)",
+    "--check-cfg=cfg(ctx_cli_test_support_fixtures)",
+    "--check-cfg=cfg(ctx_cli_test_support_pro)",
+    "--check-cfg=cfg(ctx_cli_test_support_upgrade)",
     "--check-cfg=cfg(test)",
 ] + select({
     "@rules_rust//rust/platform:aarch64-apple-darwin": [
@@ -34,13 +37,88 @@ CTX_CLI_RUSTC_FLAGS = [
     "//conditions:default": [],
 })
 
-_CTX_CLI_DEPS = [
-    "//crates/ctx-history-capture:lib",
-    "//crates/ctx-history-core:lib",
-    "//crates/ctx-history-index:lib",
-    "//crates/ctx-history-relational:lib",
-    "//crates/ctx-pro-host-protocol:lib",
-]
+_CTX_CLI_TEST_SUPPORT = {
+    "base": struct(
+        crates = [
+            "assert_cmd",
+            "predicates",
+            "serde_json",
+            "tempfile",
+            "uuid",
+        ],
+        deps = [],
+        rustc_flags = [],
+        srcs = [
+            "tests/support/mod.rs",
+            "tests/support/analytics.rs",
+            "tests/support/assertions.rs",
+            "tests/support/history_plugins.rs",
+            "tests/support/mcp.rs",
+            "tests/support/runner.rs",
+        ],
+    ),
+    "fixtures": struct(
+        crates = ["rusqlite"],
+        deps = [
+            "//crates/ctx-history-index:lib",
+            "//crates/ctx-history-relational:lib",
+        ],
+        rustc_flags = ["--cfg=ctx_cli_test_support_fixtures"],
+        srcs = [
+            "tests/support/fixtures.rs",
+            "tests/support/native_fixtures.rs",
+            "tests/support/native_fixtures/appends.rs",
+            "tests/support/native_fixtures/installs.rs",
+            "tests/support/native_fixtures/json_tree.rs",
+            "tests/support/native_fixtures/sqlite.rs",
+        ],
+    ),
+    "pro": struct(
+        crates = [],
+        deps = ["//crates/ctx-pro-host-protocol:lib"],
+        rustc_flags = ["--cfg=ctx_cli_test_support_pro"],
+        srcs = ["tests/support/pro.rs"],
+    ),
+    "upgrade": struct(
+        crates = [
+            "base64",
+            "chrono",
+            "flate2",
+            "ring",
+            "sha2",
+            "tar",
+        ],
+        deps = ["//crates/ctx-history-core:lib"],
+        rustc_flags = ["--cfg=ctx_cli_test_support_upgrade"],
+        srcs = ["tests/support/upgrade.rs"],
+    ),
+}
+
+def _ctx_cli_test_support(groups):
+    crates = []
+    deps = []
+    rustc_flags = []
+    srcs = []
+    seen = {}
+    for group in groups:
+        if group not in _CTX_CLI_TEST_SUPPORT:
+            fail("unknown ctx CLI test support group %r; expected one of %s" % (
+                group,
+                sorted(_CTX_CLI_TEST_SUPPORT.keys()),
+            ))
+        if group in seen:
+            fail("duplicate ctx CLI test support group %r" % group)
+        seen[group] = True
+        support = _CTX_CLI_TEST_SUPPORT[group]
+        crates.extend(support.crates)
+        deps.extend(support.deps)
+        rustc_flags.extend(support.rustc_flags)
+        srcs.extend(support.srcs)
+    return struct(
+        deps = crate_deps(crates) + deps,
+        rustc_flags = rustc_flags,
+        srcs = srcs,
+    )
 
 def ctx_cli_test_data():
     return ["//:public_test_fixtures"] + native.glob([
@@ -53,19 +131,22 @@ def ctx_cli_integration_test(
         src,
         binary = ":ctx",
         crate_features = [],
+        extra_crates = [],
         extra_env = {},
         extra_compile_data = [],
         extra_data = [],
         extra_deps = [],
         extra_srcs = [],
-        tags = []):
+        tags = [],
+        test_support = ["base"]):
+    test_support = _ctx_cli_test_support(test_support)
     test_env = {
         "CARGO_BIN_EXE_ctx": "$(rootpath %s)" % binary,
     }
     test_env.update(extra_env)
     ctx_rust_test(
         name = name,
-        srcs = [src] + extra_srcs + native.glob(["tests/support/**/*.rs"]),
+        srcs = [src] + test_support.srcs + extra_srcs,
         crate_name = name,
         crate_root = src,
         edition = crate_edition(),
@@ -79,17 +160,11 @@ def ctx_cli_integration_test(
         ] + native.glob(["tests/fixtures/**"]) + extra_compile_data,
         crate_features = crate_features,
         data = ctx_cli_test_data() + [binary] + extra_data,
-        deps = all_crate_deps(
-            normal = True,
-            normal_dev = True,
-        ) + _CTX_CLI_DEPS + extra_deps,
+        deps = test_support.deps + crate_deps(extra_crates) + extra_deps,
         env = test_env,
-        proc_macro_deps = all_crate_deps(
-            proc_macro = True,
-            proc_macro_dev = True,
-        ),
+        proc_macro_deps = [],
         rustc_env = {"CARGO_MANIFEST_DIR": "crates/ctx-cli"},
         rustc_env_files = [":cargo_toml_env_vars"],
-        rustc_flags = CTX_CLI_RUSTC_FLAGS,
+        rustc_flags = CTX_CLI_RUSTC_FLAGS + test_support.rustc_flags,
         tags = tags,
     )

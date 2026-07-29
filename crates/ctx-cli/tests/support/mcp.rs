@@ -7,7 +7,9 @@ use std::{
 use serde_json::Value;
 use tempfile::TempDir;
 
-use super::{copied_ctx_binary, ctx, ctx_from_binary, custom_history_fixture, json_output};
+#[cfg(ctx_cli_test_support_fixtures)]
+use super::custom_history_fixture;
+use super::{copied_ctx_binary, ctx, ctx_from_binary, json_output};
 
 pub(crate) struct McpSourceRefreshDaemon {
     child: Option<Child>,
@@ -143,6 +145,7 @@ pub(crate) fn import_codex_fixture_through_daemon(
     (daemon, imported)
 }
 
+#[cfg(ctx_cli_test_support_fixtures)]
 pub(crate) fn import_custom_history_fixture_source_backed(
     temp: &TempDir,
     fixture_name: &str,
