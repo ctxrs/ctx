@@ -20,8 +20,8 @@ pub(crate) fn run_status(
     quiet: bool,
     telemetry: &mut StatusTelemetry,
 ) -> Result<()> {
-    if args.usage.modifies_state() {
-        return run_usage_action(args.usage, &data_root, args.format.is_json(), quiet);
+    if let Some(mode) = args.usage {
+        return run_usage_action(mode, &data_root, args.format.is_json(), quiet);
     }
     let config_path = data_root.join(CONFIG_FILE);
     let Some(config) = load_status_config(&data_root) else {
@@ -42,20 +42,17 @@ pub(crate) fn run_status(
         );
     }
     let upgrade = upgrade_report(&config);
-    let local_usage = local_usage::read_report(
-        &data_root,
-        config.local_usage.enabled,
-        args.usage.detailed(),
-    );
-
+    let local_usage = local_usage::read_report(&data_root, config.local_usage.enabled, false);
     if args.format.is_json() {
         let mut report = source.report;
         if let Some(object) = report.as_object_mut() {
             object.insert("upgrade".to_owned(), upgrade);
             object.insert("pro".to_owned(), pro);
-            object.insert("local_usage".to_owned(), json!(local_usage));
-            object.insert("local_usage_action".to_owned(), Value::Null);
-            object.insert("read_only".to_owned(), json!(!args.usage.modifies_state()));
+            object.insert(
+                "local_usage".to_owned(),
+                compact_usage_health_json(&local_usage),
+            );
+            object.insert("read_only".to_owned(), json!(true));
         }
         print_json(report)?;
     } else if !quiet {
@@ -206,9 +203,12 @@ pub(crate) fn run_status(
                 }
             }
         }
-        local_usage::render_human_summary(&local_usage, args.usage.detailed());
+        println!("local_usage: {}", local_usage.state);
+        if let Some(error) = &local_usage.error {
+            println!("local_usage_error: {} ({})", error.code, error.message);
+        }
         println!("local_only: true");
-        println!("read_only: {}", !args.usage.modifies_state());
+        println!("read_only: true");
     }
     Ok(())
 }
@@ -258,9 +258,6 @@ pub(crate) fn run_usage_action(
     quiet: bool,
 ) -> Result<()> {
     match mode {
-        UsageStatusMode::Summary | UsageStatusMode::Detail => {
-            unreachable!("reporting modes do not modify local usage")
-        }
         UsageStatusMode::Enable => {
             if config::set_local_usage_enabled(data_root, true).is_err() {
                 return usage_action_failure(
@@ -380,10 +377,20 @@ pub(crate) fn removed_cloud_config_failure(json_output: bool) -> Result<()> {
 fn malformed_config_json() -> Value {
     json!({
         "schema_version": 1,
-        "local_usage": local_usage::UsageReport::config_error(),
-        "local_usage_action": Value::Null,
+        "local_usage": compact_usage_health_json(&local_usage::UsageReport::config_error()),
         "local_only": true,
         "read_only": true,
+    })
+}
+
+fn compact_usage_health_json(report: &local_usage::UsageReport) -> Value {
+    json!({
+        "schema_version": report.schema_version,
+        "enabled": report.enabled,
+        "state": report.state,
+        "definition_version": report.definition_version,
+        "retention_days": report.retention_days,
+        "error": report.error,
     })
 }
 
@@ -424,7 +431,6 @@ fn emit_usage_action(
                 "local_usage_store: {}",
                 action["store_state"].as_str().unwrap_or("missing")
             ),
-            UsageStatusMode::Summary | UsageStatusMode::Detail => unreachable!(),
         }
     }
     Ok(())

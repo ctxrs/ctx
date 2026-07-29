@@ -47,8 +47,10 @@ pub(crate) struct Cli {
 pub(crate) enum CommandRoot {
     #[command(about = "Create local ctx storage and index discovered history")]
     Setup(SetupArgs),
-    #[command(about = "Show local ctx index and usage status")]
+    #[command(about = "Show local ctx index and health status")]
     Status(StatusArgs),
+    #[command(about = "Show local history retrieval and value statistics")]
+    Stats(StatsArgs),
     #[command(about = "Show, watch, or wait for local indexing progress")]
     Index(commands::index::IndexArgs),
     #[command(about = "List configured and discovered agent history sources")]
@@ -125,34 +127,29 @@ pub(crate) struct StatusArgs {
     #[arg(
         long,
         value_enum,
-        default_value_t = UsageStatusMode::Summary,
-        help = "Local usage report/control: summary, detail, enable, disable, or reset"
+        help = "Local usage control: enable, disable, or reset"
     )]
-    pub(crate) usage: UsageStatusMode,
+    pub(crate) usage: Option<UsageStatusMode>,
+}
+
+#[derive(Debug, Args, Clone)]
+pub(crate) struct StatsArgs {
+    #[arg(long, help = "Show CLI/MCP operation and latency breakdowns")]
+    pub(crate) detail: bool,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    pub(crate) format: JsonOutputFormat,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum UsageStatusMode {
-    Summary,
-    Detail,
     Enable,
     Disable,
     Reset,
 }
 
 impl UsageStatusMode {
-    pub(crate) const fn modifies_state(self) -> bool {
-        matches!(self, Self::Enable | Self::Disable | Self::Reset)
-    }
-
-    pub(crate) const fn detailed(self) -> bool {
-        matches!(self, Self::Detail)
-    }
-
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
-            Self::Summary => "summary",
-            Self::Detail => "detail",
             Self::Enable => "enable",
             Self::Disable => "disable",
             Self::Reset => "reset",

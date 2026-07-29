@@ -66,6 +66,10 @@ ctx show event <ctx-event-id> --window 3
 
 # Or print a compact transcript of the original session
 ctx show session <ctx-session-id>
+
+# Inspect local, read-only retrieval and value statistics
+ctx stats
+ctx stats --detail
 ```
 
 Those IDs let your current agent recover as much context from previous sessions as it needs.
