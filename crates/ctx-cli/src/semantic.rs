@@ -111,6 +111,7 @@ mod daemon_retry;
 mod daemon_status;
 #[cfg(test)]
 use daemon_retry::*;
+mod source_backed_pro_catch_up;
 mod source_backed_refresh_coordinator;
 #[allow(unused_imports)] // Provider-neutral executor types are the capture coordinator seam.
 pub(crate) use source_backed_refresh_coordinator::{

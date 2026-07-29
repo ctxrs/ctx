@@ -417,6 +417,15 @@ impl SourceBackedRefreshCoordinator {
             .is_some_and(|attempt| attempt.state.is_active())
     }
 
+    pub(in crate::semantic) fn retained_published_generation(
+        &self,
+    ) -> Option<Arc<GenerationBoundSourceBackedResolver>> {
+        self.lock_state()
+            .published_resolver
+            .as_ref()
+            .map(Arc::clone)
+    }
+
     /// Returns the resolver only when it is bound to the caller's exact
     /// lexical generation. Missing or stale daemon state queues the same
     /// provider-wide refresh path and remains a typed failure.
@@ -867,7 +876,7 @@ fn trim_attempt_history(state: &mut SourceBackedRefreshCoordinatorState) {
     }
 }
 
-fn source_backed_index_root(data_root: &Path) -> PathBuf {
+pub(super) fn source_backed_index_root(data_root: &Path) -> PathBuf {
     data_root.join(SOURCE_BACKED_INDEX_DIRECTORY)
 }
 
