@@ -18,19 +18,17 @@ use crate::provider::normalization::{
     provider_value_text,
 };
 use crate::{
-    CaptureError, OutputAssociations, OutputNativeCoordinate, OutputObservationKind, OutputOutcome,
-    OutputOutcomeMetadata, OutputSourceLocator, ProOutputObservation, ProviderAdapterContext,
+    CaptureError, OutputOutcome, OutputOutcomeMetadata, ProviderAdapterContext,
     ProviderImportOptions, ProviderImportSummary, Result, HERMES_SQLITE_SOURCE_FORMAT,
     PROVIDER_MAX_PREVIEW_CHARS,
 };
 
 mod layout;
-mod native_path;
 pub(crate) mod source_backed;
 mod sqlite;
 
 use self::layout::{decode_hermes_message, HermesMessageRow, HermesSchema, HermesSqliteValue};
-use self::sqlite::{HermesLocator, HermesNativeRow, HERMES_LOCATOR_KIND};
+use self::sqlite::{HermesLocator, HERMES_LOCATOR_KIND};
 
 pub(super) const HERMES_CAPTURE_REVISION: u32 = 2;
 pub(super) const HERMES_POLICY_REVISION: u32 = 6;
@@ -369,55 +367,14 @@ pub(crate) fn hermes_decode_content(raw: Option<&str>) -> Value {
 }
 
 pub(crate) fn import_hermes_nativepath(
-    path: &Path,
-    store: &mut Store,
-    context: ProviderAdapterContext,
-    import_options: ProviderImportOptions,
+    _path: &Path,
+    _store: &mut Store,
+    _context: ProviderAdapterContext,
+    _import_options: ProviderImportOptions,
 ) -> Result<ProviderImportSummary> {
-    native_path::import_hermes_native_path(path, store, context, import_options)
-}
-
-fn hermes_pro_output(
-    row: &HermesMessageRow,
-    record: &HermesNativeRow,
-) -> Result<ProOutputObservation> {
-    let content = hermes_decode_content(row.content.as_deref());
-    let outcome = hermes_output_outcome(row, &content);
-    let native_sequence = provider_nonnegative_i64_to_u64(row.id, "Hermes message id")?;
-    let occurred_at =
-        provider_required_timestamp_seconds(row.timestamp, "Hermes message timestamp")?;
-    Ok(ProOutputObservation {
-        kind: OutputObservationKind::Tool,
-        coordinate: OutputNativeCoordinate {
-            unit_key: format!("hermes:{}:message:{}:output", row.session_id, row.id),
-            native_sequence,
-            native_record_id: Some(format!("message:{}", row.id)),
-            source_record_ordinal: Some(record.ordinal),
-            source_record_subrecord_index: Some(0),
-            byte_start: None,
-            byte_end_exclusive: None,
-        },
-        occurred_at_unix_ms: Some(occurred_at.timestamp_millis()),
-        associations: OutputAssociations {
-            direct_session_id: row.session_id.clone(),
-            root_session_id: row.session_id.clone(),
-            parent_session_id: None,
-            provider_session_id: Some(row.session_id.clone()),
-            agent_id: None,
-            repository: None,
-        },
-        call_id: row.tool_call_id.clone(),
-        command: None,
-        outcome,
-        locator: OutputSourceLocator {
-            version: 1,
-            kind: HERMES_LOCATOR_KIND.to_owned(),
-            payload: record.locator.payload(),
-        },
-        content: hermes_normalized_result_content(&row.role, &content)
-            .unwrap_or_default()
-            .into_bytes(),
-    })
+    Err(CaptureError::UnsupportedSchema(
+        "Hermes Store ingestion was removed; use source-backed ingestion".to_owned(),
+    ))
 }
 
 fn hermes_output_outcome(row: &HermesMessageRow, content: &Value) -> OutputOutcomeMetadata {
