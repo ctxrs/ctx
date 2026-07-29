@@ -51,9 +51,10 @@ use crate::{
 mod reader;
 
 pub(crate) use reader::{
-    hydrate_rovodev_source_record, RovoDevSourceBackedDisposition, RovoDevSourceBackedPage,
-    RovoDevSourceBackedReader, RovoDevSourceBackedScan,
+    hydrate_rovodev_source_record, RovoDevSourceBackedDisposition, RovoDevSourceBackedReader,
 };
+#[cfg(test)]
+pub(crate) use reader::{RovoDevSourceBackedPage, RovoDevSourceBackedScan};
 
 const SOURCE_ANCHOR_NAMESPACE: &str = "rovodev.session";
 const SESSION_KEY_NAMESPACE: &str = "rovodev.session";
