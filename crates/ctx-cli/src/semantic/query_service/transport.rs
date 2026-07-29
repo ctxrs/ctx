@@ -54,6 +54,29 @@ impl fmt::Display for DaemonSourceRefreshServiceUnavailable {
 
 impl std::error::Error for DaemonSourceRefreshServiceUnavailable {}
 
+#[derive(Debug)]
+pub(in crate::semantic) struct DaemonQueryResponseTooLarge {
+    limit: u64,
+}
+
+impl DaemonQueryResponseTooLarge {
+    pub(in crate::semantic) fn new(limit: u64) -> Self {
+        Self { limit }
+    }
+}
+
+impl fmt::Display for DaemonQueryResponseTooLarge {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "daemon query response exceeded its {}-byte transport limit",
+            self.limit
+        )
+    }
+}
+
+impl std::error::Error for DaemonQueryResponseTooLarge {}
+
 impl DaemonQueryEndpoint {
     pub(in crate::semantic) fn token(&self) -> &str {
         match self {
@@ -351,6 +374,9 @@ pub(in crate::semantic) fn daemon_query_roundtrip(
     match endpoint {
         #[cfg(unix)]
         DaemonQueryEndpoint::Unix { path, .. } => {
+            if max_response_bytes == 0 {
+                return Err(DaemonQueryResponseTooLarge::new(0).into());
+            }
             let mut stream = UnixStream::connect(path)
                 .with_context(|| format!("connect daemon query socket {}", path.display()))?;
             stream
@@ -363,12 +389,15 @@ pub(in crate::semantic) fn daemon_query_roundtrip(
                 .write_all(request)
                 .context("write daemon query request")?;
             let _ = stream.shutdown(Shutdown::Write);
-            let mut body = String::new();
+            let mut body = Vec::new();
             stream
-                .take(max_response_bytes)
-                .read_to_string(&mut body)
+                .take(max_response_bytes.saturating_add(1))
+                .read_to_end(&mut body)
                 .context("read daemon query response")?;
-            Ok(body)
+            if body.len() as u64 > max_response_bytes {
+                return Err(DaemonQueryResponseTooLarge::new(max_response_bytes).into());
+            }
+            String::from_utf8(body).context("daemon query response is not UTF-8")
         }
         #[cfg(windows)]
         DaemonQueryEndpoint::WindowsNamedPipe { pipe_name, .. } => {
@@ -732,7 +761,7 @@ pub(in crate::semantic) fn read_windows_daemon_query_pipe(
         }
         response.extend_from_slice(&chunk[..read]);
         if response.len() > response_limit {
-            return Err(anyhow!("daemon query response is too large"));
+            return Err(DaemonQueryResponseTooLarge::new(response_limit as u64).into());
         }
     }
     Ok(response)

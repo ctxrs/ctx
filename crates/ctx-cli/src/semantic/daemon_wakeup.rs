@@ -9,7 +9,10 @@ use std::{
 
 use anyhow::{Context, Result};
 use ctx_history_capture::discover_provider_sources;
-use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{
+    event::{AccessKind, AccessMode},
+    Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
+};
 use serde_json::{json, Value};
 
 use crate::{compact_json, config::CONFIG_FILE, identity};
@@ -141,9 +144,13 @@ enum WatchMessage {
 #[derive(Debug, Default)]
 struct WatchCounters {
     raw_events: u64,
+    ignored_access_events: u64,
+    ignored_other_events: u64,
+    last_ignored_access_path: Option<PathBuf>,
     backend_errors: u64,
     coalesced_wakeups: u64,
     reconciliations: u64,
+    last_relevant_path: Option<PathBuf>,
 }
 
 pub(super) struct DaemonFileWatcher {
@@ -161,23 +168,39 @@ pub(super) struct DaemonFileWatcher {
 impl DaemonFileWatcher {
     pub(super) fn start(data_root: &Path, wakeup: Arc<DaemonWakeup>) -> Result<Self> {
         let (sender, receiver) = mpsc::channel();
+        let targets = Arc::new(RwLock::new(Vec::new()));
+        let counters = Arc::new(Mutex::new(WatchCounters::default()));
         let callback_sender = sender.clone();
+        let callback_counters = Arc::clone(&counters);
         let watcher = RecommendedWatcher::new(
-            move |event| {
+            move |event: notify::Result<Event>| {
+                if let Ok(event) = event.as_ref() {
+                    if ignored_access_event(event) {
+                        record_ignored_access_event(&callback_counters, event);
+                        return;
+                    }
+                }
                 let _ = callback_sender.send(WatchMessage::Event(event));
             },
             Config::default(),
         )
         .context("start native daemon filesystem watcher")?;
-        let targets = Arc::new(RwLock::new(Vec::new()));
-        let counters = Arc::new(Mutex::new(WatchCounters::default()));
         let thread_targets = Arc::clone(&targets);
         let thread_counters = Arc::clone(&counters);
         let thread_wakeup = Arc::clone(&wakeup);
+        let thread_data_root = data_root.to_path_buf();
+        let thread_daemon_root = daemon_root_path(data_root);
         let thread = thread::Builder::new()
             .name("ctx-daemon-watch".to_owned())
             .spawn(move || {
-                watch_event_loop(receiver, thread_targets, thread_counters, thread_wakeup);
+                watch_event_loop(
+                    receiver,
+                    thread_targets,
+                    thread_counters,
+                    thread_wakeup,
+                    thread_data_root,
+                    thread_daemon_root,
+                );
             })
             .context("start daemon filesystem debounce worker")?;
         let mut service = Self {
@@ -254,9 +277,13 @@ impl DaemonFileWatcher {
             "idle_strategy": "blocking",
             "watched_roots": self.watched.len(),
             "raw_events": counters.raw_events,
+            "ignored_access_events": counters.ignored_access_events,
+            "ignored_other_events": counters.ignored_other_events,
+            "last_ignored_access_path": counters.last_ignored_access_path,
             "backend_errors": counters.backend_errors,
             "coalesced_wakeups": counters.coalesced_wakeups,
             "reconciliations": counters.reconciliations,
+            "last_relevant_path": counters.last_relevant_path,
             "last_error": self.last_error,
             "wakeup": wakeup,
         }));
@@ -279,6 +306,10 @@ impl Drop for DaemonFileWatcher {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+        // Persist the final in-memory blocking/wakeup/work counters only at
+        // explicit service teardown. Idle operation itself performs no receipt
+        // heartbeat writes.
+        let _ = self.write_receipt("stopped");
     }
 }
 
@@ -287,6 +318,8 @@ fn watch_event_loop(
     targets: Arc<RwLock<Vec<PathBuf>>>,
     counters: Arc<Mutex<WatchCounters>>,
     wakeup: Arc<DaemonWakeup>,
+    data_root: PathBuf,
+    daemon_root: PathBuf,
 ) {
     loop {
         let first = match receiver.recv() {
@@ -294,7 +327,7 @@ fn watch_event_loop(
             Ok(WatchMessage::Stop) | Err(_) => return,
         };
         let started = Instant::now();
-        let mut relevant = record_watch_event(&targets, &counters, first);
+        let mut relevant = record_watch_event(&targets, &counters, &data_root, &daemon_root, first);
         loop {
             let elapsed = started.elapsed();
             if elapsed >= WATCH_DEBOUNCE_MAX {
@@ -303,7 +336,8 @@ fn watch_event_loop(
             let timeout = WATCH_DEBOUNCE_QUIET.min(WATCH_DEBOUNCE_MAX - elapsed);
             match receiver.recv_timeout(timeout) {
                 Ok(WatchMessage::Event(event)) => {
-                    relevant |= record_watch_event(&targets, &counters, event);
+                    relevant |=
+                        record_watch_event(&targets, &counters, &data_root, &daemon_root, event);
                 }
                 Ok(WatchMessage::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
                 Err(mpsc::RecvTimeoutError::Timeout) => break,
@@ -323,29 +357,67 @@ fn watch_event_loop(
 fn record_watch_event(
     targets: &RwLock<Vec<PathBuf>>,
     counters: &Mutex<WatchCounters>,
+    data_root: &Path,
+    daemon_root: &Path,
     event: notify::Result<Event>,
 ) -> bool {
-    let mut counters = counters
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    counters.raw_events = counters.raw_events.saturating_add(1);
     let event = match event {
         Ok(event) => event,
         Err(_) => {
+            let mut counters = counters
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             counters.backend_errors = counters.backend_errors.saturating_add(1);
             return true;
         }
     };
-    drop(counters);
+    if ignored_access_event(&event) {
+        record_ignored_access_event(counters, &event);
+        return false;
+    }
     let targets = targets
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    event.paths.is_empty()
-        || event.paths.iter().any(|event_path| {
-            targets
-                .iter()
-                .any(|target| paths_overlap(target, event_path))
-        })
+    let relevant_path = event.paths.iter().find(|event_path| {
+        if event_path.as_path() == data_root || event_path.starts_with(daemon_root) {
+            return false;
+        }
+        targets
+            .iter()
+            .any(|target| paths_overlap(target, event_path))
+    });
+    let relevant = event.paths.is_empty() || relevant_path.is_some();
+    drop(targets);
+    if relevant {
+        let mut counters = counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        counters.raw_events = counters.raw_events.saturating_add(1);
+        counters.last_relevant_path = relevant_path.cloned();
+    } else {
+        let mut counters = counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        counters.ignored_other_events = counters.ignored_other_events.saturating_add(1);
+    }
+    relevant
+}
+
+fn ignored_access_event(event: &Event) -> bool {
+    matches!(
+        event.kind,
+        EventKind::Access(AccessKind::Open(_))
+            | EventKind::Access(AccessKind::Close(AccessMode::Read))
+            | EventKind::Access(AccessKind::Read)
+    )
+}
+
+fn record_ignored_access_event(counters: &Mutex<WatchCounters>, event: &Event) {
+    let mut counters = counters
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    counters.ignored_access_events = counters.ignored_access_events.saturating_add(1);
+    counters.last_ignored_access_path = event.paths.first().cloned();
 }
 
 fn paths_overlap(target: &Path, event: &Path) -> bool {
@@ -456,5 +528,63 @@ mod tests {
             target,
             Path::new("/tmp/unrelated.sqlite-wal")
         ));
+    }
+
+    #[test]
+    fn core_owned_writes_do_not_retrigger_provider_refresh_or_increment_work_counters() {
+        let data_root = Path::new("/tmp/ctx-data");
+        let daemon_root = data_root.join("daemon");
+        let targets = RwLock::new(vec![
+            data_root.join("config.toml"),
+            data_root.join(".codex/sessions"),
+        ]);
+        let counters = Mutex::new(WatchCounters::default());
+        let event = |path: &Path| {
+            let mut event = Event::new(notify::EventKind::Any);
+            event.paths.push(path.to_path_buf());
+            event
+        };
+
+        assert!(!record_watch_event(
+            &targets,
+            &counters,
+            data_root,
+            &daemon_root,
+            Ok(event(&daemon_root.join("wakeup.json"))),
+        ));
+        assert!(!record_watch_event(
+            &targets,
+            &counters,
+            data_root,
+            &daemon_root,
+            Ok(event(data_root)),
+        ));
+        let mut access = event(&data_root.join("config.toml"));
+        access.kind = EventKind::Access(AccessKind::Read);
+        assert!(!record_watch_event(
+            &targets,
+            &counters,
+            data_root,
+            &daemon_root,
+            Ok(access),
+        ));
+        assert_eq!(counters.lock().unwrap().raw_events, 0);
+        let mut close_write = event(&data_root.join("config.toml"));
+        close_write.kind = EventKind::Access(AccessKind::Close(AccessMode::Write));
+        assert!(record_watch_event(
+            &targets,
+            &counters,
+            data_root,
+            &daemon_root,
+            Ok(close_write),
+        ));
+        assert!(record_watch_event(
+            &targets,
+            &counters,
+            data_root,
+            &daemon_root,
+            Ok(event(&data_root.join("config.toml"))),
+        ));
+        assert_eq!(counters.lock().unwrap().raw_events, 2);
     }
 }

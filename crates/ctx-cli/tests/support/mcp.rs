@@ -13,6 +13,16 @@ pub(crate) struct McpSourceRefreshDaemon {
     child: Option<Child>,
 }
 
+impl McpSourceRefreshDaemon {
+    pub(crate) fn kill_and_wait(&mut self) -> u32 {
+        let mut child = self.child.take().expect("MCP source-refresh daemon");
+        let pid = child.id();
+        child.kill().expect("kill MCP source-refresh daemon");
+        child.wait().expect("wait for MCP source-refresh daemon");
+        pid
+    }
+}
+
 impl Drop for McpSourceRefreshDaemon {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
@@ -22,7 +32,7 @@ impl Drop for McpSourceRefreshDaemon {
     }
 }
 
-fn start_mcp_source_refresh_daemon(temp: &TempDir) -> McpSourceRefreshDaemon {
+pub(crate) fn start_mcp_source_refresh_daemon(temp: &TempDir) -> McpSourceRefreshDaemon {
     std::fs::write(
         temp.path().join("config.toml"),
         "[daemon]\nenabled = true\nmode = \"source-refresh-only\"\n\n[search]\nsemantic = false\n",

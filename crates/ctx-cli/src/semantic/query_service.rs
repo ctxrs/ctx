@@ -45,7 +45,7 @@ pub(in crate::semantic) use transport::*;
 #[cfg(not(test))]
 pub(in crate::semantic) use transport::{
     daemon_query_request, daemon_source_hydration_request, daemon_source_refresh_request,
-    DaemonSourceRefreshServiceUnavailable,
+    DaemonQueryResponseTooLarge, DaemonSourceRefreshServiceUnavailable,
 };
 mod hydration_budget;
 mod server;
@@ -115,6 +115,10 @@ impl SourceHydrationUnavailable {
         }
     }
 
+    pub(crate) fn code(&self) -> &str {
+        &self.code
+    }
+
     fn retryable_after_refresh(&self) -> bool {
         matches!(
             self.failure_kind,
@@ -159,8 +163,125 @@ impl SourceHydrationUnavailable {
 
 const SOURCE_HYDRATION_BATCH_MAX_ITEMS: usize = 128;
 const SOURCE_HYDRATION_RESPONSE_MAX_BYTES: u64 = 64 * 1024 * 1024;
+const SOURCE_HYDRATION_RETAINED_ITEM_OVERHEAD_BYTES: usize = 512;
 const SOURCE_HYDRATION_TIMEOUT: StdDuration = StdDuration::from_secs(10);
+const SOURCE_HYDRATION_RECOVERY_TIMEOUT: StdDuration = StdDuration::from_secs(5);
+const SOURCE_HYDRATION_RECOVERY_RETRY: StdDuration = StdDuration::from_millis(50);
 const SOURCE_SEARCH_DISPLAY_MAX_CHARS: usize = 2_048;
+
+#[derive(Debug)]
+struct SourceHydrationOperationBudget {
+    limit_bytes: usize,
+    retained_bytes: usize,
+}
+
+impl SourceHydrationOperationBudget {
+    fn new(limit_bytes: usize) -> Self {
+        Self {
+            limit_bytes,
+            retained_bytes: 0,
+        }
+    }
+
+    fn remaining_response_bytes(&self, complete_content_event_id: Option<Uuid>) -> Result<u64> {
+        let remaining = self.limit_bytes.saturating_sub(self.retained_bytes);
+        if remaining == 0 {
+            return Err(source_hydration_budget_exceeded(
+                "operation-wide source hydration allowance is exhausted before the next daemon request",
+                complete_content_event_id,
+            ));
+        }
+        u64::try_from(remaining).map_err(|_| {
+            source_hydration_budget_exceeded(
+                "operation-wide source hydration allowance exceeds the transport byte domain",
+                complete_content_event_id,
+            )
+        })
+    }
+
+    fn retain_batch(
+        &mut self,
+        items: &[(Uuid, String)],
+        complete_content_event_id: Option<Uuid>,
+    ) -> Result<()> {
+        let batch_bytes = items.iter().try_fold(0usize, |total, (_, text)| {
+            retained_source_hydration_text_bytes(text)
+                .and_then(|bytes| total.checked_add(bytes))
+                .ok_or_else(|| {
+                    source_hydration_budget_exceeded(
+                        "source hydration retained-byte accounting overflowed",
+                        complete_content_event_id,
+                    )
+                })
+        })?;
+        let retained_bytes = self
+            .retained_bytes
+            .checked_add(batch_bytes)
+            .ok_or_else(|| {
+                source_hydration_budget_exceeded(
+                    "source hydration operation retained-byte accounting overflowed",
+                    complete_content_event_id,
+                )
+            })?;
+        if retained_bytes > self.limit_bytes {
+            return Err(source_hydration_budget_exceeded(
+                "source hydration response exceeds the operation-wide retained-byte allowance",
+                complete_content_event_id,
+            ));
+        }
+        self.retained_bytes = retained_bytes;
+        Ok(())
+    }
+}
+
+fn retained_source_hydration_text_bytes(text: &String) -> Option<usize> {
+    escaped_json_string_bytes(text)
+        .max(text.capacity())
+        .checked_add(SOURCE_HYDRATION_RETAINED_ITEM_OVERHEAD_BYTES)
+}
+
+fn escaped_json_string_bytes(value: &str) -> usize {
+    value.bytes().fold(0usize, |total, byte| {
+        total.saturating_add(match byte {
+            b'"' | b'\\' | b'\x08' | b'\x09' | b'\x0a' | b'\x0c' | b'\x0d' => 2,
+            0x00..=0x1f => 6,
+            _ => 1,
+        })
+    })
+}
+
+fn source_hydration_budget_exceeded(
+    detail: impl Into<String>,
+    complete_content_event_id: Option<Uuid>,
+) -> anyhow::Error {
+    SourceHydrationUnavailable::new(
+        "hydration_budget_exceeded",
+        "content_too_large",
+        detail,
+        false,
+        complete_content_event_id,
+    )
+    .into()
+}
+
+fn map_source_hydration_request_error(
+    error: anyhow::Error,
+    complete_content_event_id: Option<Uuid>,
+) -> anyhow::Error {
+    if error
+        .downcast_ref::<DaemonQueryResponseTooLarge>()
+        .is_some()
+    {
+        source_hydration_budget_exceeded(
+            "daemon source hydration response exceeded the remaining operation-wide transport allowance",
+            complete_content_event_id,
+        )
+    } else {
+        error.context(
+            "request daemon generation-bound source hydration without rediscovery fallback",
+        )
+    }
+}
 
 impl PinnedSourceBackedGeneration {
     pub(crate) fn source_hydration_retryable(error: &anyhow::Error) -> bool {
@@ -375,7 +496,10 @@ fn hydrate_source_events_via_daemon(
     mode: &'static str,
     max_chars: Option<usize>,
 ) -> Result<HashMap<Uuid, String>> {
-    let mut hydrated = HashMap::with_capacity(events.len());
+    let mut hydrated = HashMap::with_capacity(events.len().min(SOURCE_HYDRATION_BATCH_MAX_ITEMS));
+    let mut operation_budget =
+        SourceHydrationOperationBudget::new(SOURCE_HYDRATION_RESPONSE_MAX_BYTES as usize);
+    let recovery_deadline = Instant::now() + SOURCE_HYDRATION_RECOVERY_TIMEOUT;
     for batch in events.chunks(SOURCE_HYDRATION_BATCH_MAX_ITEMS) {
         let complete_content_event_id = (mode == "complete")
             .then(|| batch.first().map(|event| event.event_id.as_uuid()))
@@ -413,49 +537,64 @@ fn hydrate_source_events_via_daemon(
                 })
             })
             .collect::<Vec<_>>();
-        let response = match daemon_source_hydration_request(
-            data_root,
-            compact_json(json!({
-                "schema_version": 1,
-                "op": "source_hydrate_batch",
-                "generation_id": index.generation_id(),
-                "mode": mode,
-                "max_chars": max_chars,
-                "items": items,
-            })),
-            SOURCE_HYDRATION_TIMEOUT,
-            SOURCE_HYDRATION_RESPONSE_MAX_BYTES,
-        ) {
-            Ok(Some(response)) => response,
-            Ok(None) => {
-                return Err(SourceHydrationUnavailable::new(
-                    "resolver_service_unavailable",
-                    "temporarily_unavailable",
-                    "daemon generation-bound source hydration service is unavailable; no provider rediscovery or stored preview fallback was attempted",
-                    false,
-                    complete_content_event_id,
-                )
-                .into())
+        let payload = compact_json(json!({
+            "schema_version": 1,
+            "op": "source_hydrate_batch",
+            "generation_id": index.generation_id(),
+            "mode": mode,
+            "max_chars": max_chars,
+            "items": items,
+        }));
+        let remaining_response_bytes =
+            operation_budget.remaining_response_bytes(complete_content_event_id)?;
+        let mut response = loop {
+            let response = match daemon_source_hydration_request(
+                data_root,
+                payload.clone(),
+                SOURCE_HYDRATION_TIMEOUT,
+                remaining_response_bytes,
+            ) {
+                Ok(Some(response)) => response,
+                Ok(None) => {
+                    return Err(SourceHydrationUnavailable::new(
+                        "resolver_service_unavailable",
+                        "temporarily_unavailable",
+                        "daemon generation-bound source hydration service is unavailable; no provider rediscovery or stored preview fallback was attempted",
+                        false,
+                        complete_content_event_id,
+                    )
+                    .into())
+                }
+                Err(error)
+                    if error
+                        .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
+                        .is_some() =>
+                {
+                    return Err(SourceHydrationUnavailable::new(
+                        "resolver_service_unavailable",
+                        "temporarily_unavailable",
+                        format!("{error:#}; no provider rediscovery or stored preview fallback was attempted"),
+                        false,
+                        complete_content_event_id,
+                    )
+                    .into())
+                }
+                Err(error) => {
+                    return Err(map_source_hydration_request_error(
+                        error,
+                        complete_content_event_id,
+                    ))
+                }
+            };
+            let resolver_recovery_pending = response.get("ok").and_then(Value::as_bool)
+                != Some(true)
+                && response.get("code").and_then(Value::as_str)
+                    == Some("resolver_generation_unavailable")
+                && response.get("refresh_scheduled").and_then(Value::as_bool) == Some(true);
+            if !resolver_recovery_pending || Instant::now() >= recovery_deadline {
+                break response;
             }
-            Err(error)
-                if error
-                    .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
-                    .is_some() =>
-            {
-                return Err(SourceHydrationUnavailable::new(
-                    "resolver_service_unavailable",
-                    "temporarily_unavailable",
-                    format!("{error:#}; no provider rediscovery or stored preview fallback was attempted"),
-                    false,
-                    complete_content_event_id,
-                )
-                .into())
-            }
-            Err(error) => {
-                return Err(error.context(
-                    "request daemon generation-bound source hydration without rediscovery fallback",
-                ))
-            }
+            std::thread::sleep(SOURCE_HYDRATION_RECOVERY_RETRY);
         };
         if response.get("ok").and_then(Value::as_bool) != Some(true) {
             let code = response
@@ -501,8 +640,8 @@ fn hydrate_source_events_via_daemon(
             .into());
         }
         let results = response
-            .get("items")
-            .and_then(Value::as_array)
+            .get_mut("items")
+            .and_then(Value::as_array_mut)
             .ok_or_else(|| anyhow!("daemon source hydration response has no item array"))?;
         if results.len() != batch.len() {
             return Err(anyhow!(
@@ -511,35 +650,48 @@ fn hydrate_source_events_via_daemon(
                 batch.len()
             ));
         }
+        let mut batch_hydrated = Vec::with_capacity(batch.len());
         for (expected, value) in batch.iter().zip(results) {
             let event_id = value
                 .get("event_id")
                 .and_then(Value::as_str)
                 .and_then(|value| Uuid::parse_str(value).ok())
                 .ok_or_else(|| anyhow!("daemon source hydration item has no valid event ID"))?;
-            if event_id != expected.event_id.as_uuid() || hydrated.contains_key(&event_id) {
+            if event_id != expected.event_id.as_uuid()
+                || hydrated.contains_key(&event_id)
+                || batch_hydrated
+                    .iter()
+                    .any(|(retained_event_id, _)| *retained_event_id == event_id)
+            {
                 return Err(anyhow!(
                     "daemon source hydration response is reordered, duplicated, or mismatched at event {}",
                     expected.event_id
                 ));
             }
-            let text = value
-                .get("text")
-                .and_then(Value::as_str)
-                .filter(|text| !text.is_empty())
-                .ok_or_else(|| {
-                    anyhow!(
+            let text_value = value.get_mut("text").ok_or_else(|| {
+                anyhow!(
+                    "daemon source hydration returned no content for event {}",
+                    expected.event_id
+                )
+            })?;
+            let mut text = match text_value.take() {
+                Value::String(text) if !text.is_empty() => text,
+                _ => {
+                    return Err(anyhow!(
                         "daemon source hydration returned empty content for event {}",
                         expected.event_id
-                    )
-                })?;
-            let text = if let Some(max_chars) = max_chars {
-                text.chars().take(max_chars).collect()
-            } else {
-                text.to_owned()
+                    ))
+                }
             };
-            hydrated.insert(event_id, text);
+            if let Some(max_chars) = max_chars {
+                if let Some((byte_index, _)) = text.char_indices().nth(max_chars) {
+                    text.truncate(byte_index);
+                }
+            }
+            batch_hydrated.push((event_id, text));
         }
+        operation_budget.retain_batch(&batch_hydrated, complete_content_event_id)?;
+        hydrated.extend(batch_hydrated);
     }
     Ok(hydrated)
 }
@@ -553,6 +705,7 @@ fn source_hydration_failure_kind(value: &str) -> Option<&'static str> {
         "missing_record" => Some("missing_record"),
         "unsupported_parser_revision" => Some("unsupported_parser_revision"),
         "invalid_locator" => Some("invalid_locator"),
+        "content_too_large" => Some("content_too_large"),
         _ => None,
     }
 }
@@ -865,6 +1018,24 @@ pub(crate) fn semantic_query_service_supported() -> bool {
 mod tests {
     use super::*;
 
+    fn exercise_complete_session_budget(
+        event_count: usize,
+        response_texts: &[String],
+        limit_bytes: usize,
+        daemon_calls: &mut usize,
+    ) -> Result<()> {
+        let event_id = Uuid::nil();
+        let events = (0..event_count).collect::<Vec<_>>();
+        let mut budget = SourceHydrationOperationBudget::new(limit_bytes);
+        for (batch_index, _) in events.chunks(SOURCE_HYDRATION_BATCH_MAX_ITEMS).enumerate() {
+            let _remaining = budget.remaining_response_bytes(Some(event_id))?;
+            *daemon_calls += 1;
+            let text = response_texts.get(batch_index).cloned().unwrap_or_default();
+            budget.retain_batch(&[(event_id, text)], Some(event_id))?;
+        }
+        Ok(())
+    }
+
     #[test]
     fn semantic_query_pin_rejects_a_different_core_generation() {
         let pin = SourceBackedSemanticQueryPin {
@@ -880,6 +1051,91 @@ mod tests {
         assert_eq!(not_ready.code(), "semantic_generation_receipt_mismatch");
         assert!(not_ready.detail().contains("generation-a"));
         assert!(not_ready.detail().contains("generation-b"));
+    }
+
+    #[test]
+    fn hydration_client_preserves_budget_code_and_accepts_content_too_large_kind() {
+        let unavailable = SourceHydrationUnavailable::new(
+            "hydration_budget_exceeded",
+            source_hydration_failure_kind("content_too_large").unwrap(),
+            "aggregate request budget was exceeded",
+            false,
+            None,
+        );
+
+        assert_eq!(unavailable.code(), "hydration_budget_exceeded");
+        assert_eq!(unavailable.failure_kind, "content_too_large");
+        assert!(!unavailable.retryable_after_refresh());
+    }
+
+    #[test]
+    fn complete_session_200_events_succeeds_when_multi_chunk_aggregate_is_small() {
+        let mut daemon_calls = 0;
+        exercise_complete_session_budget(
+            200,
+            &["a".repeat(512), "b".repeat(512)],
+            4 * 1024,
+            &mut daemon_calls,
+        )
+        .unwrap();
+
+        assert_eq!(daemon_calls, 2);
+    }
+
+    #[test]
+    fn complete_session_129th_event_makes_no_daemon_call_after_exact_exhaustion() {
+        let mut daemon_calls = 0;
+        let error = exercise_complete_session_budget(
+            129,
+            &["a".repeat(512), "b".to_owned()],
+            1024,
+            &mut daemon_calls,
+        )
+        .expect_err("the second chunk must stop before transport");
+
+        assert_eq!(daemon_calls, 1);
+        let unavailable = error
+            .downcast_ref::<SourceHydrationUnavailable>()
+            .expect("aggregate exhaustion remains typed");
+        assert_eq!(unavailable.code(), "hydration_budget_exceeded");
+        assert_eq!(unavailable.failure_kind, "content_too_large");
+        assert!(!unavailable.retryable_after_refresh());
+        assert!(unavailable.complete_content_error().is_some());
+    }
+
+    #[test]
+    fn complete_session_multi_chunk_overage_is_typed_and_stops_before_third_call() {
+        let mut daemon_calls = 0;
+        let error = exercise_complete_session_budget(
+            300,
+            &["a".repeat(512), "b".repeat(1200), "c".to_owned()],
+            2500,
+            &mut daemon_calls,
+        )
+        .expect_err("aggregate retained content must share one allowance");
+
+        assert_eq!(daemon_calls, 2);
+        let unavailable = error
+            .downcast_ref::<SourceHydrationUnavailable>()
+            .expect("aggregate overage remains typed");
+        assert_eq!(unavailable.code(), "hydration_budget_exceeded");
+        assert_eq!(unavailable.failure_kind, "content_too_large");
+        assert!(!unavailable.retryable_after_refresh());
+    }
+
+    #[test]
+    fn transport_overage_maps_without_parsing_error_detail() {
+        let error = map_source_hydration_request_error(
+            DaemonQueryResponseTooLarge::new(1024).into(),
+            Some(Uuid::nil()),
+        );
+
+        let unavailable = error
+            .downcast_ref::<SourceHydrationUnavailable>()
+            .expect("transport overage remains typed");
+        assert_eq!(unavailable.code(), "hydration_budget_exceeded");
+        assert_eq!(unavailable.failure_kind, "content_too_large");
+        assert!(!unavailable.retryable_after_refresh());
     }
 }
 

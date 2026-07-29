@@ -1,6 +1,6 @@
 use std::{
     collections::VecDeque,
-    fmt,
+    fmt, fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration as StdDuration,
@@ -10,6 +10,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use ctx_history_capture::{
     build_automatic_source_backed_registry, DiscoveryContext, ProviderSourceStatus,
     SourceBackedAutomaticRegistryIssue, SourceBackedAutomaticUnavailableReason,
+    SourceBackedProviderRegistry,
     SourceBackedRefreshProgress as CaptureSourceBackedRefreshProgress,
     SourceBackedResolverRegistry, SourceBackedRouteError, SourceBackedRouteErrorKind,
     SourceBackedRouteResult,
@@ -33,12 +34,12 @@ use crate::{
     compact_json,
     config::{AppConfig, DaemonMode},
     identity,
-    upgrade::data_migration::{self, MigrationPhase},
 };
 
 use super::{
     paths_status::{
-        daemon_source_backed_refresh_job_path, read_daemon_status, write_daemon_job_status,
+        daemon_source_backed_refresh_job_path, read_daemon_job_status, read_daemon_status,
+        write_daemon_job_status,
     },
     query_service::{daemon_source_refresh_request, DaemonSourceRefreshServiceUnavailable},
 };
@@ -52,6 +53,16 @@ const SOURCE_REFRESH_POLL_INTERVAL: StdDuration = StdDuration::from_millis(50);
 const SOURCE_REFRESH_IPC_TIMEOUT: StdDuration = StdDuration::from_secs(2);
 const SOURCE_REFRESH_RESPONSE_MAX_BYTES: u64 = 64 * 1024;
 const SOURCE_REFRESH_BUILD_ISSUE_LIMIT: usize = 8;
+const TERMINAL_COVERAGE_ERROR_CODE: &str = "all_provider_terminal_coverage_unavailable";
+const OLD_STORE_DATABASE_SUFFIXES: &[&str] = &["", "-wal", "-shm", "-journal", "-lock", ".lock"];
+const OLD_STORE_LOCK_DATABASE_SUFFIXES: &[&str] = &[
+    ".event-search-bulk.lock.sqlite",
+    ".source-inventory.lock.sqlite",
+    ".migration.lock.sqlite",
+];
+const OLD_STORE_SQLITE_SIDECAR_SUFFIXES: &[&str] = &["", "-wal", "-shm", "-journal"];
+const OLD_STORE_DIRECTORIES: &[&str] = &["objects", "spool", "semantic-vectors"];
+const OLD_NATIVE_COLD_STAGE_MARKER: &str = ".ctx-native-cold-";
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum SourceBackedRefreshMode {
@@ -373,6 +384,18 @@ struct SourceBackedRefreshAttempt {
 }
 
 impl SourceBackedRefreshAttempt {
+    fn failure_code(&self) -> Option<&'static str> {
+        self.last_error
+            .as_deref()
+            .filter(|error| error.contains(TERMINAL_COVERAGE_ERROR_CODE))
+            .map(|_| TERMINAL_COVERAGE_ERROR_CODE)
+    }
+
+    fn failure_reason(&self) -> Option<&'static str> {
+        self.failure_code()
+            .map(|_| "provider_terminal_coverage_unavailable")
+    }
+
     fn to_json(&self) -> Value {
         compact_json(json!({
             "ok": true,
@@ -403,6 +426,8 @@ impl SourceBackedRefreshAttempt {
             "daemon_mode": self.daemon_mode.as_str(),
             "trigger": self.trigger,
             "trigger_provenance": self.trigger_provenance,
+            "error_code": self.failure_code(),
+            "reason": self.failure_reason(),
             "last_error": self.last_error,
         }))
     }
@@ -442,6 +467,8 @@ impl SourceBackedRefreshAttempt {
             "daemon_mode": self.daemon_mode.as_str(),
             "trigger": self.trigger,
             "trigger_provenance": self.trigger_provenance,
+            "error_code": self.failure_code(),
+            "reason": self.failure_reason(),
             "last_error": self.last_error,
         }))
     }
@@ -667,7 +694,6 @@ impl SourceBackedRefreshCoordinator {
         let executor = Arc::clone(&self.executor);
         self.run_next_with(
             |request_id, coordinator| {
-                prepare_source_rebuild_if_needed(data_root)?;
                 let requested_catalog =
                     coordinator.requested_explicit_source_catalog(request_id);
                 let publication = execute_source_backed_refresh(
@@ -690,8 +716,8 @@ impl SourceBackedRefreshCoordinator {
                 Ok(publication)
             },
             || published_generation_id(data_root),
-            |generation_id| complete_pending_source_rebuild(data_root, generation_id),
-            |error| record_pending_source_rebuild_failure(data_root, error),
+            |generation_id| complete_verified_source_epoch(data_root, generation_id),
+            |_| Ok(()),
         )
     }
 
@@ -1102,15 +1128,26 @@ fn published_generation_id(data_root: &Path) -> Result<Option<String>> {
 fn open_published_generation(data_root: &Path) -> Result<Option<VerifiedIndex>> {
     let index_root = source_backed_index_root(data_root);
     if !index_root.join("meta.json").is_file() {
+        if let Some(generation_id) = published_generation_receipt(data_root)? {
+            bail!(
+                "verified source-backed lexical generation {generation_id} is missing from {}",
+                index_root.display()
+            );
+        }
         return Ok(None);
     }
     match VerifiedIndex::open(&index_root) {
         Ok(index) => Ok(Some(index)),
         // Tantivy creates schema-only meta.json before the first ctx commit.
-        // It is a replaceable cold-build artifact only while the epoch proves
-        // that no lexical generation has ever been activated. Once activation
-        // succeeds, the same typed error is corruption and remains fail-closed.
-        Err(IndexError::MissingCommitPayload) if pending_source_rebuild(data_root)? => Ok(None),
+        // It is replaceable only while no durable publication receipt proves
+        // that a real generation was activated. Once publication succeeds,
+        // the same typed error is corruption and remains fail-closed.
+        Err(IndexError::MissingCommitPayload)
+            if published_generation_receipt(data_root)?.is_none()
+                && source_backed_lexical_artifact_is_uncommitted_schema_only(&index_root)? =>
+        {
+            Ok(None)
+        }
         Err(error) => Err(error).with_context(|| {
             format!(
                 "open verified source-backed lexical index {}",
@@ -1120,45 +1157,247 @@ fn open_published_generation(data_root: &Path) -> Result<Option<VerifiedIndex>> 
     }
 }
 
-fn prepare_source_rebuild_if_needed(data_root: &Path) -> Result<()> {
-    let Some(marker) = data_migration::inspect(data_root)? else {
+pub(in crate::semantic) fn source_backed_lexical_artifact_is_uncommitted_schema_only(
+    index_root: &Path,
+) -> Result<bool> {
+    let meta_path = index_root.join("meta.json");
+    let meta: Value = serde_json::from_slice(
+        &fs::read(&meta_path)
+            .with_context(|| format!("read lexical metadata {}", meta_path.display()))?,
+    )
+    .with_context(|| format!("parse lexical metadata {}", meta_path.display()))?;
+    let schema_only = meta.get("payload").is_none_or(Value::is_null)
+        && meta.get("opstamp").and_then(Value::as_u64) == Some(0)
+        && meta
+            .get("segments")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty);
+    Ok(schema_only)
+}
+
+fn published_generation_receipt(data_root: &Path) -> Result<Option<String>> {
+    let Some(job) = read_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root))
+    else {
+        return Ok(None);
+    };
+    if job.get("request_state").and_then(Value::as_str) != Some("published") {
+        return Ok(None);
+    }
+    Ok(job
+        .get("published_generation")
+        .and_then(Value::as_str)
+        .filter(|generation_id| !generation_id.is_empty())
+        .map(str::to_owned))
+}
+
+fn complete_verified_source_epoch(data_root: &Path, generation_id: &str) -> Result<()> {
+    let verified = VerifiedIndex::open(source_backed_index_root(data_root))
+        .context("reopen source-backed generation before retiring the old Store family")?;
+    if verified.generation_id() != generation_id {
+        bail!(
+            "active source-backed generation {} changed before retiring old Store state for {generation_id}",
+            verified.generation_id()
+        );
+    }
+    remove_old_store_family(data_root)?;
+    Ok(())
+}
+
+pub(in crate::semantic) fn reconcile_verified_source_epoch(data_root: &Path) -> Result<()> {
+    let Some(verified) = open_published_generation(data_root)? else {
         return Ok(());
     };
-    if marker.source_rebuild_required
-        && matches!(
-            marker.phase,
-            MigrationPhase::Detected | MigrationPhase::SourceRebuildFailed
-        )
+    complete_verified_source_epoch(data_root, verified.generation_id())
+}
+
+fn remove_old_store_family(data_root: &Path) -> Result<()> {
+    let database = ctx_history_core::database_path(data_root.to_path_buf());
+    let mut files = OLD_STORE_DATABASE_SUFFIXES
+        .iter()
+        .map(|suffix| path_with_suffix(&database, suffix))
+        .collect::<Vec<_>>();
+    for lock_suffix in OLD_STORE_LOCK_DATABASE_SUFFIXES {
+        let lock_database = path_with_suffix(&database, lock_suffix);
+        files.extend(
+            OLD_STORE_SQLITE_SIDECAR_SUFFIXES
+                .iter()
+                .map(|suffix| path_with_suffix(&lock_database, suffix)),
+        );
+    }
+    for entry in fs::read_dir(data_root)
+        .with_context(|| format!("inventory old Store artifacts in {}", data_root.display()))?
     {
-        data_migration::prepare(data_root, &[])?;
+        let entry = entry?;
+        if old_native_cold_stage_name_is_allowlisted(&entry.file_name()) {
+            files.push(entry.path());
+        }
+    }
+    let directories = OLD_STORE_DIRECTORIES
+        .iter()
+        .map(|name| data_root.join(name))
+        .collect::<Vec<_>>();
+
+    // Preflight the complete fixed allowlist before deleting anything. This
+    // turns links, devices, and unexpected directory shapes into a fail-closed
+    // retry rather than following them or partially widening cleanup.
+    for path in &files {
+        verify_old_store_file(path)?;
+    }
+    for path in &directories {
+        verify_old_store_directory_tree(data_root, path)?;
+    }
+
+    let mut removed_any = false;
+    for path in files {
+        if path.exists() {
+            fs::remove_file(&path)
+                .with_context(|| format!("retire old Store file {}", path.display()))?;
+            removed_any = true;
+        }
+    }
+    for path in directories {
+        if path.exists() {
+            fs::remove_dir_all(&path)
+                .with_context(|| format!("retire old Store directory {}", path.display()))?;
+            removed_any = true;
+        }
+    }
+    #[cfg(unix)]
+    if removed_any {
+        fs::File::open(data_root)
+            .and_then(|directory| directory.sync_all())
+            .with_context(|| {
+                format!(
+                    "durably retire old Store artifacts in {}",
+                    data_root.display()
+                )
+            })?;
+    }
+    #[cfg(not(unix))]
+    let _ = removed_any;
+    Ok(())
+}
+
+fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut suffixed = path.as_os_str().to_os_string();
+    suffixed.push(suffix);
+    PathBuf::from(suffixed)
+}
+
+fn old_native_cold_stage_name_is_allowlisted(name: &std::ffi::OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    let Some(rest) = name
+        .strip_prefix("work.sqlite")
+        .and_then(|rest| rest.strip_prefix(OLD_NATIVE_COLD_STAGE_MARKER))
+    else {
+        return false;
+    };
+    let Some((uuid, suffix)) = rest.split_at_checked(36) else {
+        return false;
+    };
+    Uuid::parse_str(uuid).is_ok()
+        && [
+            ".sqlite",
+            ".sqlite-wal",
+            ".sqlite-shm",
+            ".sqlite-journal",
+            ".sqlite.event-search-bulk.lock.sqlite",
+            ".sqlite.event-search-bulk.lock.sqlite-wal",
+            ".sqlite.event-search-bulk.lock.sqlite-shm",
+            ".sqlite.event-search-bulk.lock.sqlite-journal",
+            ".sqlite.source-inventory.lock.sqlite",
+            ".sqlite.source-inventory.lock.sqlite-wal",
+            ".sqlite.source-inventory.lock.sqlite-shm",
+            ".sqlite.source-inventory.lock.sqlite-journal",
+            ".sqlite.migration.lock.sqlite",
+            ".sqlite.migration.lock.sqlite-wal",
+            ".sqlite.migration.lock.sqlite-shm",
+            ".sqlite.migration.lock.sqlite-journal",
+        ]
+        .contains(&suffix)
+}
+
+fn verify_old_store_file(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => Ok(()),
+        Ok(_) => bail!(
+            "refusing unexpected old Store file target {}",
+            path.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            Err(error).with_context(|| format!("inspect old Store file {}", path.display()))
+        }
+    }
+}
+
+fn verify_old_store_directory_tree(data_root: &Path, path: &Path) -> Result<()> {
+    if path.parent() != Some(data_root)
+        || path
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .is_none_or(|name| !OLD_STORE_DIRECTORIES.contains(&name))
+    {
+        bail!(
+            "old Store directory target {} is outside the fixed root allowlist",
+            path.display()
+        );
+    }
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => bail!(
+            "refusing unexpected old Store directory target {}",
+            path.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect old Store directory {}", path.display()))
+        }
+    }
+    for entry in fs::read_dir(path)
+        .with_context(|| format!("inventory old Store directory {}", path.display()))?
+    {
+        let entry = entry?;
+        let child = entry.path();
+        let metadata = fs::symlink_metadata(&child)
+            .with_context(|| format!("inspect old Store artifact {}", child.display()))?;
+        if metadata.file_type().is_symlink() {
+            bail!(
+                "refusing symlink in old Store directory {}",
+                child.display()
+            );
+        }
+        if metadata.is_dir() {
+            verify_old_store_directory_descendants(&child)?;
+        } else if !metadata.is_file() {
+            bail!("refusing non-file old Store artifact {}", child.display());
+        }
     }
     Ok(())
 }
 
-fn pending_source_rebuild(data_root: &Path) -> Result<bool> {
-    Ok(data_migration::inspect(data_root)?.is_some_and(|marker| {
-        marker.source_rebuild_required
-            && matches!(
-                marker.phase,
-                MigrationPhase::Detected
-                    | MigrationPhase::RebuildPending
-                    | MigrationPhase::SourceRebuildFailed
-            )
-    }))
-}
-
-fn complete_pending_source_rebuild(data_root: &Path, generation_id: &str) -> Result<()> {
-    if pending_source_rebuild(data_root)? {
-        prepare_source_rebuild_if_needed(data_root)?;
-        data_migration::complete_source_rebuild(data_root, generation_id)?;
-    }
-    Ok(())
-}
-
-fn record_pending_source_rebuild_failure(data_root: &Path, error: &str) -> Result<()> {
-    if pending_source_rebuild(data_root)? {
-        prepare_source_rebuild_if_needed(data_root)?;
-        data_migration::record_source_rebuild_failure(data_root, error)?;
+fn verify_old_store_directory_descendants(path: &Path) -> Result<()> {
+    for entry in fs::read_dir(path)
+        .with_context(|| format!("inventory old Store directory {}", path.display()))?
+    {
+        let entry = entry?;
+        let child = entry.path();
+        let metadata = fs::symlink_metadata(&child)
+            .with_context(|| format!("inspect old Store artifact {}", child.display()))?;
+        if metadata.file_type().is_symlink() {
+            bail!(
+                "refusing symlink in old Store directory {}",
+                child.display()
+            );
+        }
+        if metadata.is_dir() {
+            verify_old_store_directory_descendants(&child)?;
+        } else if !metadata.is_file() {
+            bail!("refusing non-file old Store artifact {}", child.display());
+        }
     }
     Ok(())
 }
@@ -1244,7 +1483,11 @@ fn refresh_all_provider_sources(
     let mut build = build_automatic_source_backed_registry(discovery);
     register_explicit_source_catalog_routes(data_root, index_root, &mut build)?;
     let (executor, issues) = build.into_refresh_executor(WriterOptions::default());
-    reject_blocking_automatic_registry_issues(&issues)?;
+    let retained_sources = open_published_generation(data_root)?
+        .map(|index| index.manifest().sources.clone())
+        .unwrap_or_default();
+    reject_blocking_automatic_registry_issues(&issues, &retained_sources)?;
+    reject_unowned_retained_source_families(executor.registry(), &retained_sources)?;
     let resolver = Arc::new(executor.registry().resolver_registry());
     let receipt = executor
         .refresh(index_root, report_progress)
@@ -1303,6 +1546,7 @@ fn source_backed_discovery_context() -> Result<DiscoveryContext> {
 
 fn reject_blocking_automatic_registry_issues(
     issues: &[SourceBackedAutomaticRegistryIssue],
+    retained_sources: &[CertifiedSource],
 ) -> Result<()> {
     let mut blocker_count = 0usize;
     let mut blocker_details = Vec::new();
@@ -1310,15 +1554,23 @@ fn reject_blocking_automatic_registry_issues(
         let SourceBackedAutomaticRegistryIssue::Unavailable { source, reason } = issue else {
             continue;
         };
-        let blocks_publication = match reason {
-            SourceBackedAutomaticUnavailableReason::SourceStatus(
-                ProviderSourceStatus::Missing | ProviderSourceStatus::Unknown,
-            ) => false,
-            SourceBackedAutomaticUnavailableReason::SourceStatus(_)
-            | SourceBackedAutomaticUnavailableReason::UnsupportedFormat { .. }
-            | SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable { .. }
-            | SourceBackedAutomaticUnavailableReason::RegistrationRejected { .. } => source.exists,
-        };
+        let retained_provider_family = retained_sources.iter().any(|retained| {
+            let retained = retained.observation().source();
+            retained.provider() == source.provider.as_str()
+                && retained.source_format() == source.source_format
+        });
+        let blocks_publication = retained_provider_family
+            || match reason {
+                SourceBackedAutomaticUnavailableReason::SourceStatus(
+                    ProviderSourceStatus::Missing | ProviderSourceStatus::Unknown,
+                ) => false,
+                SourceBackedAutomaticUnavailableReason::SourceStatus(_)
+                | SourceBackedAutomaticUnavailableReason::UnsupportedFormat { .. }
+                | SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable { .. }
+                | SourceBackedAutomaticUnavailableReason::RegistrationRejected { .. } => {
+                    source.exists
+                }
+            };
         if !blocks_publication {
             continue;
         }
@@ -1342,9 +1594,45 @@ fn reject_blocking_automatic_registry_issues(
         format!("; {omitted} additional blocking issue(s) omitted")
     };
     Err(anyhow!(
-        "capture automatic registry has {blocker_count} blocking detected-source issue(s): {}{omitted}",
+        "{TERMINAL_COVERAGE_ERROR_CODE}: capture automatic registry has {blocker_count} blocking detected or retained-provider issue(s): {}{omitted}",
         blocker_details.join("; ")
     ))
+}
+
+fn reject_unowned_retained_source_families(
+    registry: &SourceBackedProviderRegistry,
+    retained_sources: &[CertifiedSource],
+) -> Result<()> {
+    let mut uncovered = retained_sources
+        .iter()
+        .filter_map(|retained| {
+            let source = retained.observation().source();
+            let covered = registry.routes().any(|route| {
+                route.selection.is_some()
+                    && route.source.provider.as_str() == source.provider()
+                    && route.certified_source_format == source.source_format()
+            });
+            (!covered).then(|| format!("{} {}", source.provider(), source.source_format()))
+        })
+        .collect::<Vec<_>>();
+    uncovered.sort();
+    uncovered.dedup();
+    if uncovered.is_empty() {
+        return Ok(());
+    }
+    let omitted = uncovered
+        .len()
+        .saturating_sub(SOURCE_REFRESH_BUILD_ISSUE_LIMIT);
+    uncovered.truncate(SOURCE_REFRESH_BUILD_ISSUE_LIMIT);
+    let omitted = if omitted == 0 {
+        String::new()
+    } else {
+        format!("; {omitted} additional uncovered provider family/families omitted")
+    };
+    bail!(
+        "{TERMINAL_COVERAGE_ERROR_CODE}: retained source generation has no current resolver-owning route family for {}{omitted}",
+        uncovered.join(", ")
+    )
 }
 
 fn automatic_registry_issue_reason(reason: &SourceBackedAutomaticUnavailableReason) -> String {
@@ -2126,7 +2414,7 @@ mod tests {
                 ProviderSourceStatus::Missing,
             ),
         };
-        assert!(reject_blocking_automatic_registry_issues(&[missing]).is_ok());
+        assert!(reject_blocking_automatic_registry_issues(&[missing], &[]).is_ok());
 
         let selector_gap = SourceBackedAutomaticRegistryIssue::Unavailable {
             source: source(
@@ -2138,7 +2426,7 @@ mod tests {
                 detail: "injected selector gap",
             },
         };
-        let error = reject_blocking_automatic_registry_issues(&[selector_gap]).unwrap_err();
+        let error = reject_blocking_automatic_registry_issues(&[selector_gap], &[]).unwrap_err();
         assert!(format!("{error:#}").contains("injected selector gap"));
     }
 
@@ -2481,9 +2769,45 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_refresh_activates_fresh_v026_source_state() {
+    fn verified_activation_retires_old_store_family_idempotently() {
         let temp = tempfile::tempdir().unwrap();
         let data_root = temp.path().join("data");
+        fs::create_dir_all(&data_root).unwrap();
+        let database = ctx_history_core::database_path(data_root.clone());
+        let old_artifacts = std::iter::once(database.clone())
+            .chain(
+                ["-wal", "-shm", "-journal", "-lock", ".lock"]
+                    .into_iter()
+                    .map(|suffix| path_with_suffix(&database, suffix)),
+            )
+            .chain([
+                path_with_suffix(&database, ".event-search-bulk.lock.sqlite"),
+                path_with_suffix(&database, ".event-search-bulk.lock.sqlite-wal"),
+                data_root.join(
+                    "work.sqlite.ctx-native-cold-00000000-0000-4000-8000-000000000000.sqlite",
+                ),
+            ])
+            .collect::<Vec<_>>();
+        for path in &old_artifacts {
+            fs::write(path, b"old-store-sentinel").unwrap();
+        }
+        for directory in OLD_STORE_DIRECTORIES {
+            let nested = data_root.join(directory).join("nested");
+            fs::create_dir_all(&nested).unwrap();
+            fs::write(nested.join("old-history-artifact"), b"old").unwrap();
+        }
+        let preserved = [
+            data_root.join("config.toml"),
+            data_root.join("install.json"),
+            data_root.join("usage.sqlite"),
+            data_root.join("logs/daemon.log"),
+            data_root.join("search/semantic/current"),
+            data_root.join("relational/current"),
+        ];
+        for path in &preserved {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"current-state").unwrap();
+        }
         let calls = Arc::new(AtomicUsize::new(0));
         let executor_calls = calls.clone();
         let coordinator = SourceBackedRefreshCoordinator::with_executor(Arc::new(
@@ -2509,22 +2833,53 @@ mod tests {
         assert!(source_backed_index_root(&data_root)
             .join("meta.json")
             .is_file());
-        assert!(!ctx_history_core::database_path(data_root.clone()).exists());
-        let marker = data_migration::inspect(&data_root)
-            .unwrap()
-            .expect("v0.26 epoch marker");
-        assert_eq!(marker.phase, MigrationPhase::Ready);
-        assert!(!marker.source_rebuild_required);
-        assert_eq!(
-            marker.lexical_generation_id.as_deref(),
-            run.job["published_generation"].as_str()
-        );
+        for path in &old_artifacts {
+            assert!(
+                !path.exists(),
+                "verified activation retained {}",
+                path.display()
+            );
+        }
+        for directory in OLD_STORE_DIRECTORIES {
+            assert!(!data_root.join(directory).exists());
+        }
+        for path in preserved {
+            assert_eq!(fs::read(path).unwrap(), b"current-state");
+        }
+        remove_old_store_family(&data_root).expect("cleanup is idempotent");
+        assert!(run.job["published_generation"].is_string());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn old_store_cleanup_refuses_symlinked_directory_targets_before_deleting_files() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let data_root = temp.path().join("data");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&data_root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("sentinel"), b"outside").unwrap();
+        let database = ctx_history_core::database_path(data_root.clone());
+        fs::write(&database, b"old-store").unwrap();
+        symlink(&outside, data_root.join("objects")).unwrap();
+
+        let error =
+            remove_old_store_family(&data_root).expect_err("directory links must fail closed");
+
+        assert!(format!("{error:#}").contains("unexpected old Store directory target"));
+        assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"outside");
+        assert_eq!(fs::read(database).unwrap(), b"old-store");
     }
 
     #[test]
-    fn scheduled_refresh_failure_leaves_v026_source_state_resumable() {
+    fn failed_pre_activation_refresh_leaves_old_store_bytes_for_forward_retry() {
         let temp = tempfile::tempdir().unwrap();
         let data_root = temp.path().join("data");
+        fs::create_dir_all(&data_root).unwrap();
+        let database = ctx_history_core::database_path(data_root.clone());
+        fs::write(&database, b"old-store-before-failed-activation").unwrap();
         let coordinator = SourceBackedRefreshCoordinator::with_executor(Arc::new(TestExecutor {
             calls: Arc::new(AtomicUsize::new(0)),
             generation_id: "unused-generation".to_owned(),
@@ -2539,23 +2894,22 @@ mod tests {
         assert!(run.job["last_error"]
             .as_str()
             .is_some_and(|error| error.contains("provider-neutral executor failed")));
-        assert!(!ctx_history_core::database_path(data_root.clone()).exists());
-        let marker = data_migration::inspect(&data_root)
-            .unwrap()
-            .expect("v0.26 epoch marker");
-        assert_eq!(marker.phase, MigrationPhase::SourceRebuildFailed);
-        assert!(marker.source_rebuild_required);
-        assert!(marker.resumable);
-        assert!(marker
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("provider-neutral executor failed")));
+        assert_eq!(
+            fs::read(&database).unwrap(),
+            b"old-store-before-failed-activation"
+        );
+        assert!(open_published_generation(&data_root).unwrap().is_none());
     }
 
     #[test]
     fn cold_failed_writer_artifacts_are_retried_as_no_prior_generation() {
         let temp = tempfile::tempdir().unwrap();
         let data_root = temp.path().join("data");
+        fs::create_dir_all(&data_root).unwrap();
+        let database = ctx_history_core::database_path(data_root.clone());
+        let wal = PathBuf::from(format!("{}-wal", database.display()));
+        fs::write(&database, b"old-store").unwrap();
+        fs::write(&wal, b"old-wal").unwrap();
         let attempts = Arc::new(AtomicUsize::new(0));
         let executor_attempts = attempts.clone();
         let coordinator = SourceBackedRefreshCoordinator::with_executor(Arc::new(
@@ -2584,6 +2938,8 @@ mod tests {
             Err(IndexError::MissingCommitPayload)
         ));
         assert!(pin_published_generation(&data_root).unwrap().is_none());
+        assert_eq!(fs::read(&database).unwrap(), b"old-store");
+        assert_eq!(fs::read(&wal).unwrap(), b"old-wal");
 
         let retry_request = coordinator
             .enqueue_periodic(&data_root)
@@ -2601,6 +2957,33 @@ mod tests {
             .unwrap()
             .expect("verified retry generation");
         assert_eq!(pinned.generation_id(), published);
+        assert!(!database.exists());
+        assert!(!wal.exists());
+    }
+
+    #[test]
+    fn restart_reconciliation_finishes_commit_before_cleanup_without_rebuild() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_root = temp.path().join("data");
+        let index_root = source_backed_index_root(&data_root);
+        let writer =
+            ctx_history_index::GenerationWriter::open(&index_root, WriterOptions::default())
+                .unwrap();
+        let receipt = writer.commit(|_| true).unwrap();
+        let database = ctx_history_core::database_path(data_root.clone());
+        let wal = PathBuf::from(format!("{}-wal", database.display()));
+        fs::write(&database, b"old-store-after-commit").unwrap();
+        fs::write(&wal, b"old-wal-after-commit").unwrap();
+
+        reconcile_verified_source_epoch(&data_root).unwrap();
+        reconcile_verified_source_epoch(&data_root).unwrap();
+
+        assert_eq!(
+            VerifiedIndex::open(&index_root).unwrap().generation_id(),
+            receipt.generation_id
+        );
+        assert!(!database.exists());
+        assert!(!wal.exists());
     }
 
     #[test]
@@ -2630,6 +3013,8 @@ mod tests {
         coordinator.enqueue_periodic(&data_root).unwrap();
         let run = coordinator.run_next(&data_root).expect("initial refresh");
         assert!(!run.failed);
+        write_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root), &run.job)
+            .unwrap();
 
         let meta_path = source_backed_index_root(&data_root).join("meta.json");
         let mut meta: Value = serde_json::from_slice(&std::fs::read(&meta_path).unwrap()).unwrap();

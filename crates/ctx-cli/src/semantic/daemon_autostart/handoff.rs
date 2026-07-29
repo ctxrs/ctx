@@ -1,4 +1,5 @@
 use super::*;
+use anyhow::bail;
 
 fn daemon_upgrade_handoff_path(data_root: &Path) -> PathBuf {
     daemon_root_path(data_root).join(DAEMON_UPGRADE_HANDOFF_FILE)
@@ -8,7 +9,6 @@ fn daemon_upgrade_restart_request_root(data_root: &Path) -> PathBuf {
     daemon_root_path(data_root).join(DAEMON_UPGRADE_RESTART_REQUEST_DIR)
 }
 
-#[cfg(unix)]
 const DAEMON_UNINSTALL_ABORT_AFTER_DISABLE_ENV: &str =
     "CTX_DAEMON_UNINSTALL_ABORT_AFTER_DISABLE_FOR_TESTS";
 
@@ -108,22 +108,17 @@ impl DaemonUpgradeHandoff {
         ))
     }
 
-    /// Preserve restart intent across a Unix rollback re-exec. The restored
-    /// executable consumes this request only after it is running.
-    pub(crate) fn prepare_reexec(mut self) -> Result<()> {
-        if read_daemon_restart_request(&self.data_root).is_none() {
-            if let Some(trigger) = self.restart_trigger {
-                write_daemon_restart_request(&self.data_root, trigger, &self.handoff_id)?;
-            }
-        }
-        self.release("aborted", None)?;
-        self.release_on_drop = false;
-        Ok(())
+    /// Compatibility boundary for upgrade callers that have not yet removed
+    /// their historical reverse-epoch branch. A clean source-rebuild epoch can
+    /// only fix forward and must never execute the replaced binary.
+    pub(crate) fn prepare_reexec(self) -> Result<()> {
+        bail!(
+            "unsupported_epoch_rollback: ctx 1.0 history epochs recover only by forward reinstall or upgrade"
+        )
     }
 
-    /// Release the upgrade fence and restart the auto-daemon when requested.
-    /// Call this after publication succeeds, or with the restored executable
-    /// after a rollback has made that path safe to run.
+    /// Release the upgrade fence and restart the current auto-daemon after a
+    /// verified forward publication succeeds.
     pub(crate) fn resume_with(mut self, executable: &Path) -> Result<()> {
         let restart_trigger = self
             .restart_trigger
@@ -152,64 +147,12 @@ impl DaemonUpgradeHandoff {
         Ok(())
     }
 
-    /// Restart an executable from v0.25, which predates durable restart
-    /// acknowledgement. Clear the v0.26-only request before launching it and
-    /// verify the strongest readiness signal that version provides: ownership
-    /// of the daemon lifecycle lock. A restart failure is returned as a warning
-    /// rather than blocking the required rollback re-exec.
-    pub(crate) fn resume_legacy_reexec_with(mut self, executable: &Path) -> Result<Option<String>> {
-        let restart_trigger = self
-            .restart_trigger
-            .or_else(|| read_daemon_restart_request(&self.data_root).map(|(_, trigger)| trigger));
-        remove_daemon_restart_requests(&self.data_root);
-        let restart = (|| -> Result<()> {
-            let config = AppConfig::load(&self.data_root)?;
-            if daemon_autostart_allowed(&self.data_root, &config) {
-                if let Some(trigger) = restart_trigger {
-                    clear_legacy_daemon_readiness(&self.data_root)?;
-                    let mut command = configured_daemon_autostart_command(
-                        executable,
-                        &self.data_root,
-                        trigger,
-                        Some(&self.handoff_id),
-                    );
-                    let mut child = spawn_daemon_child(&mut command)
-                        .context("restart legacy ctx daemon after rollback")?;
-                    wait_for_legacy_replacement_daemon(
-                        &self.data_root,
-                        &mut child,
-                        trigger,
-                        config.semantic_search_enabled()
-                            && super::super::semantic_query_service_supported(),
-                    )?;
-                }
-            }
-            restart_acknowledged_legacy_installation_daemons(
-                executable,
-                &self.handoff_id,
-                Some(&self.data_root),
-            )?;
-            Ok(())
-        })();
-        // A v0.25 executable cannot consume the v0.26 restart-request
-        // protocol. A failed best-effort daemon restart must therefore not
-        // restore that request or prevent rollback recovery from re-execing.
-        remove_daemon_restart_requests(&self.data_root);
-        let warning = restart.err().map(|error| {
-            format!(
-                "legacy ctx daemon restart failed; continuing rollback recovery without a running daemon: {error:#}"
-            )
-        });
-        self.release(
-            if warning.is_none() {
-                "completed"
-            } else {
-                "aborted"
-            },
-            None,
-        )?;
-        self.release_on_drop = false;
-        Ok(warning)
+    /// Compatibility boundary for reverse-epoch upgrade callers. The supplied
+    /// executable is deliberately never inspected or launched.
+    pub(crate) fn resume_legacy_reexec_with(self, _executable: &Path) -> Result<Option<String>> {
+        bail!(
+            "unsupported_epoch_rollback: ctx 1.0 never relaunches a replaced history-epoch binary"
+        )
     }
 
     /// Keep the fence owned by a platform replacement helper after apply
@@ -300,7 +243,7 @@ pub(crate) fn begin_daemon_upgrade_handoff(
     let deadline = Instant::now() + DAEMON_UPGRADE_STOP_TIMEOUT;
     while daemon_lock_is_active(data_root) {
         if Instant::now() >= deadline {
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             {
                 terminate_identity_verified_residual_daemon(
                     data_root,
@@ -309,7 +252,7 @@ pub(crate) fn begin_daemon_upgrade_handoff(
                 .context("stop residual ctx daemon before upgrade")?;
                 break;
             }
-            #[cfg(not(unix))]
+            #[cfg(not(any(unix, windows)))]
             return Err(anyhow!(
                 "timed out waiting for the ctx daemon to stop before upgrade"
             ));
@@ -322,11 +265,10 @@ pub(crate) fn begin_daemon_upgrade_handoff(
     Ok(handoff)
 }
 
-/// Hosted POSIX uninstallers call this command before deleting the installed
+/// Hosted uninstallers call this command before deleting the installed
 /// executable. Each phase is idempotent so an interrupted uninstaller can
 /// invoke it again safely.
-#[cfg(unix)]
-pub(crate) fn prepare_posix_daemon_uninstall(data_root: &Path) -> Result<Value> {
+pub(crate) fn prepare_daemon_uninstall(data_root: &Path) -> Result<Value> {
     crate::config::set_daemon_enabled(data_root, false)
         .context("durably disable ctx daemon before uninstall")?;
     if cfg!(debug_assertions) && env::var_os(DAEMON_UNINSTALL_ABORT_AFTER_DISABLE_ENV).is_some() {
@@ -348,6 +290,8 @@ pub(crate) fn prepare_posix_daemon_uninstall(data_root: &Path) -> Result<Value> 
     wait_for_daemon_lifecycle_release(data_root)?;
     super::super::daemon_supervisor::disable_daemon_supervisor(data_root)
         .context("remove ctx daemon supervisor before uninstall")?;
+    super::installation::remove_installation_daemon_coordination_for(data_root)
+        .context("remove ctx daemon upgrade coordination before uninstall")?;
     remove_daemon_lifecycle_coordination(data_root)?;
     Ok(compact_json(json!({
         "schema_version": 1,
@@ -364,7 +308,6 @@ pub(crate) fn prepare_posix_daemon_uninstall(data_root: &Path) -> Result<Value> 
     })))
 }
 
-#[cfg(unix)]
 fn request_disabled_daemon_shutdown(data_root: &Path) {
     let _ = daemon_source_refresh_request(
         data_root,
@@ -535,7 +478,146 @@ fn signal_verified_process(pid: u32, signal: libc::c_int) -> Result<()> {
     Err(error).context("signal identity-verified residual ctx daemon")
 }
 
-#[cfg(unix)]
+#[cfg(windows)]
+fn terminate_identity_verified_residual_daemon(
+    data_root: &Path,
+    expected_executable: &Path,
+) -> Result<()> {
+    use windows_sys::Win32::{
+        Foundation::CloseHandle,
+        System::Threading::{
+            OpenProcess, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+        },
+    };
+
+    let lock_path = daemon_lock_path(data_root);
+    let value = read_pid_lock_json(&lock_path)
+        .ok_or_else(|| anyhow!("active ctx daemon lock has no readable identity"))?;
+    let pid = pid_from_lock_json(&value)
+        .ok_or_else(|| anyhow!("active ctx daemon lock has no process identity"))?;
+    verify_residual_daemon_identity(data_root, expected_executable, pid, &value)?;
+    let handle = unsafe {
+        OpenProcess(
+            PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+            0,
+            pid,
+        )
+    };
+    if handle.is_null() {
+        return Err(std::io::Error::last_os_error())
+            .context("open identity-verified residual ctx daemon");
+    }
+    let terminated = unsafe { TerminateProcess(handle, 0) };
+    unsafe {
+        CloseHandle(handle);
+    }
+    if terminated == 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("terminate identity-verified residual ctx daemon");
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn verify_residual_daemon_identity(
+    data_root: &Path,
+    expected_executable: &Path,
+    pid: u32,
+    value: &Value,
+) -> Result<()> {
+    if pid == process::id() {
+        return Err(anyhow!("refusing to terminate the current ctx process"));
+    }
+    if observe_pid_advisory_lock(&daemon_lock_path(data_root))
+        != Some(PidAdvisoryLockObservation {
+            held: true,
+            released: false,
+        })
+    {
+        return Err(anyhow!(
+            "ctx daemon owner lock is not held; refusing residual termination"
+        ));
+    }
+    let recorded_root = value
+        .get("data_root")
+        .and_then(Value::as_str)
+        .map(Path::new)
+        .ok_or_else(|| anyhow!("ctx daemon lock has no data-root identity"))?;
+    if !same_windows_path(recorded_root, data_root) {
+        return Err(anyhow!(
+            "ctx daemon lock data-root identity does not match uninstall target"
+        ));
+    }
+    let recorded_binary = value
+        .get("binary")
+        .and_then(Value::as_str)
+        .map(Path::new)
+        .ok_or_else(|| anyhow!("ctx daemon lock has no executable identity"))?;
+    if !same_windows_path(recorded_binary, expected_executable) {
+        return Err(anyhow!(
+            "ctx daemon lock executable is not the installed ctx executable"
+        ));
+    }
+    let process_executable = windows_process_executable(pid).ok_or_else(|| {
+        anyhow!(
+            "cannot verify executable identity for residual ctx process {pid}; refusing to terminate"
+        )
+    })?;
+    if !same_windows_path(&process_executable, expected_executable) {
+        return Err(anyhow!(
+            "residual lock owner is not the installed ctx executable; refusing to terminate"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn same_windows_path(left: &Path, right: &Path) -> bool {
+    let normalize = |path: &Path| {
+        fs::canonicalize(path)
+            .ok()
+            .map(|path| path.to_string_lossy().to_lowercase())
+    };
+    normalize(left) == normalize(right)
+}
+
+#[cfg(windows)]
+fn windows_process_executable(pid: u32) -> Option<PathBuf> {
+    use windows_sys::Win32::{
+        Foundation::CloseHandle,
+        System::Threading::{
+            OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+        },
+    };
+
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return None;
+    }
+    let mut buffer = vec![0_u16; 32_768];
+    let mut length = u32::try_from(buffer.len()).ok()?;
+    let succeeded =
+        unsafe { QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &raw mut length) };
+    unsafe {
+        CloseHandle(handle);
+    }
+    (succeeded != 0).then(|| {
+        PathBuf::from(String::from_utf16_lossy(
+            &buffer[..usize::try_from(length).unwrap_or(0)],
+        ))
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn terminate_identity_verified_residual_daemon(
+    _data_root: &Path,
+    _expected_executable: &Path,
+) -> Result<()> {
+    Err(anyhow!(
+        "this platform cannot identity-verify residual daemon termination"
+    ))
+}
+
 fn remove_daemon_lifecycle_coordination(data_root: &Path) -> Result<()> {
     remove_daemon_restart_requests(data_root);
     let root = daemon_root_path(data_root);

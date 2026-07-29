@@ -53,6 +53,7 @@ use super::{
         start_daemon_source_refresh_service, DaemonQueryService,
     },
     runtime_limits::DAEMON_BACKGROUND_CHILD_ENV,
+    source_backed_refresh_coordinator::reconcile_verified_source_epoch,
 };
 
 #[derive(Debug)]
@@ -674,17 +675,30 @@ pub(super) fn run_daemon_enabled_update(
         super::daemon_supervisor::disable_daemon_supervisor(&data_root)?;
         None
     };
+    let supervisor = super::daemon_supervisor::daemon_supervisor_report(&data_root);
+    let persistent = supervisor.get("status").and_then(Value::as_str) == Some("installed")
+        && supervisor
+            .get("registration_verified")
+            .and_then(Value::as_bool)
+            == Some(true)
+        && supervisor
+            .get("live_owner_verified")
+            .and_then(Value::as_bool)
+            == Some(true);
     if args.format.is_json() {
         print_json(json!({
             "schema_version": 1,
             "daemon_enabled": enabled,
             "running": handoff.is_some(),
             "pid": handoff.map(|handoff| handoff.pid),
+            "persistent": enabled && persistent,
+            "supervisor": supervisor,
             "config_path": data_root.join(CONFIG_FILE),
             "local_only": true,
         }))?;
     } else {
         println!("daemon_enabled: {enabled}");
+        println!("persistent: {}", enabled && persistent);
         println!("config_path: {}", data_root.join(CONFIG_FILE).display());
     }
     Ok(())
@@ -700,25 +714,15 @@ fn run_daemon_disable(args: DaemonDisableArgs, data_root: PathBuf) -> Result<()>
             false,
         );
     }
-    #[cfg(unix)]
-    {
-        let report = super::daemon_autostart::prepare_posix_daemon_uninstall(&data_root)?;
-        if args.format.is_json() {
-            print_json(report)?;
-        } else {
-            println!("daemon_enabled: false");
-            println!("daemon_running: false");
-            println!("supervisor_removed: true");
-        }
-        Ok(())
+    let report = super::daemon_autostart::prepare_daemon_uninstall(&data_root)?;
+    if args.format.is_json() {
+        print_json(report)?;
+    } else {
+        println!("daemon_enabled: false");
+        println!("daemon_running: false");
+        println!("supervisor_removed: true");
     }
-    #[cfg(not(unix))]
-    {
-        let _ = (args, data_root);
-        Err(anyhow!(
-            "--prepare-uninstall is available only to POSIX hosted uninstallers"
-        ))
-    }
+    Ok(())
 }
 
 fn request_daemon_shutdown_and_wait(data_root: &Path) -> Result<()> {
@@ -852,6 +856,11 @@ pub(super) fn run_daemon_inner(
     let mut auto_upgrade_handoff = None;
     let wakeup = Arc::new(DaemonWakeup::default());
     let active_result = (|| -> Result<bool> {
+        // A crash can occur after the immutable generation commit and before
+        // old Store-family cleanup. A verified active generation is sufficient
+        // evidence to finish that idempotent cleanup without scheduling a
+        // marker-driven rebuild.
+        reconcile_verified_source_epoch(data_root)?;
         let mut failed = false;
         let mut runtime = DaemonRuntime {
             config: config.clone(),
@@ -1124,9 +1133,11 @@ pub(super) fn run_daemon_inner(
                 &mut idle_since,
                 &mut observed_refresh_generation,
             );
-            if iteration.did_work {
-                idle_since = None;
-            } else if idle_since.is_none() {
+            if idle_since.is_none() {
+                // A blocking persistent loop has no synthetic follow-up tick
+                // after productive work. Start the explicit finite-idle clock
+                // here so --idle-exit-seconds/test daemons can still stop
+                // after their last work cycle without scheduler polling.
                 idle_since = Some(Instant::now());
             }
             let now = Instant::now();

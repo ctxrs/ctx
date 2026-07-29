@@ -26,7 +26,8 @@ pub(crate) fn autostart_daemon_and_wait(
     trigger: DaemonTriggerCommandArg,
 ) -> Result<DaemonHandoff> {
     if daemon_autostart_suppression_reason().is_none() {
-        let _ = super::super::daemon_supervisor::ensure_daemon_supervisor(data_root);
+        super::super::daemon_supervisor::ensure_daemon_supervisor(data_root)
+            .context("establish persistent ctx daemon supervision")?;
     }
     let request = request_daemon_autostart(data_root, config, trigger).map_err(|error| {
         anyhow!(

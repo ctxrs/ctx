@@ -330,7 +330,7 @@ fn full_scheduler_periodically_runs_the_global_source_refresh_executor() -> Resu
 }
 
 #[test]
-fn full_scheduler_never_runs_or_activates_legacy_history_state() -> Result<()> {
+fn full_scheduler_retires_prior_store_only_after_verified_activation() -> Result<()> {
     use super::super::source_backed_refresh_coordinator::{
         SourceBackedRefreshCurrent, SourceBackedRefreshExecution, SourceBackedRefreshPublication,
         SourceBackedRefreshTimings,
@@ -390,13 +390,12 @@ fn full_scheduler_never_runs_or_activates_legacy_history_state() -> Result<()> {
     assert!(iteration.did_work);
     assert!(!iteration.failed);
     assert!(calls.borrow().is_empty());
-    assert_eq!(fs::read(&legacy_database)?, b"legacy-store");
+    assert!(!legacy_database.exists());
     assert_eq!(fs::read(&legacy_semantic_job)?, b"legacy-semantic-job");
-    let marker = crate::upgrade::data_migration::inspect(temp.path())?.expect("v0.26 epoch marker");
-    assert_eq!(
-        marker.phase,
-        crate::upgrade::data_migration::MigrationPhase::Ready
-    );
+    assert!(ctx_history_index::VerifiedIndex::open(
+        crate::semantic::source_backed_refresh_coordinator::source_backed_index_root(temp.path())
+    )
+    .is_ok());
     let report = daemon_report(temp.path());
     assert_eq!(
         report["jobs"]["history_refresh"]["reason"],

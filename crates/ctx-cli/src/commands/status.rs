@@ -126,7 +126,6 @@ pub(crate) fn run_status(
             "pro_source_manifest_receipt_generation",
             &source.report["pro_projection"]["receipt"]["core_generation_id"],
         );
-        print_component_status("prior_epoch", &source.report["prior_epoch"]);
         let daemon = &source.report["daemon"];
         print_component_status("daemon", daemon);
         for (label, value) in [

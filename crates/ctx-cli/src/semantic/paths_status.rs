@@ -575,18 +575,20 @@ pub(super) fn daemon_report_with_disabled_status(
     } else {
         "history_epoch_source_backed"
     };
-    let semantic_reason = if daemon_mode.runs_only_source_refresh() {
-        "daemon_mode_source_refresh_only"
-    } else {
-        "source_backed_semantic_not_integrated"
-    };
     let jobs = json!({
         "history_refresh": suppressed_job("history_refresh", legacy_history_reason),
         "source_backed_refresh": daemon_source_backed_refresh_job_report(
             data_root,
             disabled_overrides_lifecycle
         ),
-        "semantic_index": suppressed_job("semantic_index", semantic_reason),
+        "semantic_index": daemon_semantic_job_report(
+            data_root,
+            daemon_mode,
+            disabled_overrides_lifecycle,
+            running,
+            semantic_runtime_active,
+            &config_reload,
+        ),
     });
     let lock_identity = compact_json(json!({
         "path": lock_path,
@@ -635,6 +637,126 @@ pub(super) fn daemon_report_with_disabled_status(
     }))
 }
 
+fn daemon_semantic_job_report(
+    data_root: &Path,
+    daemon_mode: crate::config::DaemonMode,
+    disabled_overrides_lifecycle: bool,
+    daemon_running: bool,
+    semantic_runtime_active: bool,
+    config_reload: &Value,
+) -> Value {
+    let requested_daemon_enabled = config_reload
+        .pointer("/requested/daemon_enabled")
+        .and_then(Value::as_bool);
+    let requested_semantic_enabled = config_reload
+        .pointer("/requested/semantic_enabled")
+        .and_then(Value::as_bool);
+    let applied_daemon_enabled = config_reload
+        .pointer("/applied/daemon_enabled")
+        .and_then(Value::as_bool);
+    let applied_semantic_enabled = config_reload
+        .pointer("/applied/semantic_enabled")
+        .and_then(Value::as_bool);
+    let daemon_enabled = requested_daemon_enabled
+        .or(applied_daemon_enabled)
+        .unwrap_or_else(|| daemon_enabled_for_status(data_root));
+    let semantic_enabled = requested_semantic_enabled
+        .or(applied_semantic_enabled)
+        .unwrap_or_else(|| {
+            AppConfig::load(data_root)
+                .map(|config| config.semantic_search_enabled())
+                .unwrap_or(false)
+        });
+    let semantic_supported = super::semantic_query_service_supported();
+    let mode_allows_semantic = !daemon_mode.runs_only_source_refresh();
+    let enabled = daemon_enabled && semantic_enabled && semantic_supported && mode_allows_semantic;
+    let config_reload_status = config_reload
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let config_out_of_sync = config_reload
+        .get("out_of_sync")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let activation_failed = config_reload_status == "activation_failed" && semantic_enabled;
+    let reload_pending = daemon_running && config_reload_status == "pending" && config_out_of_sync;
+    let disabled = !enabled && disabled_overrides_lifecycle && !semantic_runtime_active;
+    let status_value = read_daemon_job_status(&daemon_semantic_job_path(data_root));
+    let last_run_status = status_value
+        .as_ref()
+        .and_then(|value| json_string(value, "status"));
+    let last_run_reason = status_value
+        .as_ref()
+        .and_then(|value| json_string(value, "reason"));
+    let status = if activation_failed {
+        "failed"
+    } else if reload_pending || (daemon_running && enabled && !semantic_runtime_active) {
+        "pending"
+    } else if disabled {
+        "disabled"
+    } else {
+        last_run_status.as_deref().unwrap_or("unknown")
+    };
+    let reason = if activation_failed {
+        Some("semantic_activation_failed".to_owned())
+    } else if reload_pending {
+        Some("daemon_config_reload_pending".to_owned())
+    } else if daemon_running && enabled && !semantic_runtime_active {
+        Some("semantic_runtime_inactive".to_owned())
+    } else if disabled {
+        Some(if daemon_mode.runs_only_source_refresh() {
+            "daemon_mode_source_refresh_only".to_owned()
+        } else if !semantic_enabled {
+            "semantic_disabled".to_owned()
+        } else if !semantic_supported {
+            "unsupported_platform".to_owned()
+        } else {
+            "daemon_disabled".to_owned()
+        })
+    } else {
+        last_run_reason.clone()
+    };
+    compact_json(json!({
+        "status": status,
+        "enabled": enabled,
+        "semantic_enabled": semantic_enabled,
+        "daemon_configured": applied_daemon_enabled,
+        "semantic_configured": applied_semantic_enabled,
+        "runtime_active": semantic_runtime_active,
+        "config_reload_status": config_reload_status,
+        "configuration_pending": reload_pending,
+        "reason": reason,
+        "last_run_at_ms": status_value
+            .as_ref()
+            .and_then(|value| json_i64(value, "last_run_at_ms")),
+        "last_run_status": last_run_status,
+        "last_run_reason": last_run_reason,
+        "last_error": if activation_failed {
+            config_reload
+                .get("last_error")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        } else {
+            status_value
+                .as_ref()
+                .and_then(|value| json_string(value, "last_error"))
+        },
+        "retryable": status_value
+            .as_ref()
+            .and_then(|value| value.get("retryable").and_then(Value::as_bool)),
+        "failure_class": status_value
+            .as_ref()
+            .and_then(|value| json_string(value, "failure_class")),
+        "indexed_chunks": status_value
+            .as_ref()
+            .and_then(|value| value.get("indexed_chunks").and_then(Value::as_u64)),
+        "model_key": status_value
+            .as_ref()
+            .and_then(|value| json_string(value, "model_key")),
+        "daemon_mode": daemon_mode.as_str(),
+    }))
+}
+
 pub(super) fn daemon_source_backed_refresh_job_report(
     data_root: &Path,
     disabled_overrides_lifecycle: bool,
@@ -657,6 +779,7 @@ pub(super) fn daemon_source_backed_refresh_job_report(
         } else {
             job.and_then(|value| json_string(value, "reason"))
         },
+        "error_code": job.and_then(|value| json_string(value, "error_code")),
         "mode": job.and_then(|value| json_string(value, "mode")),
         "owner": job.and_then(|value| json_string(value, "owner")),
         "kind": job.and_then(|value| json_string(value, "kind")),

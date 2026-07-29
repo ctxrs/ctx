@@ -98,7 +98,6 @@ fn render_status_text(value: &Value) -> String {
                 .and_then(|receipt| receipt.get("core_generation_id")),
         );
     }
-    push_component_summary(&mut out, "prior_epoch", value.get("prior_epoch"));
     push_key_value(&mut out, "read_only", value.get("read_only"));
     push_key_value(&mut out, "local_only", value.get("local_only"));
     push_status_semantic_summary(&mut out, value.get("semantic"));
