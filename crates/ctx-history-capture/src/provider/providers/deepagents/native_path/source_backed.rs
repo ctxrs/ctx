@@ -618,6 +618,7 @@ fn open_root_authorized_snapshot_with_hook(
     let sqlite_snapshot =
         open_root_handle_sqlite_source_snapshot(&sqlite_authority, database_leaf)?;
     after_authorize();
+    sqlite_snapshot.revalidate()?;
     source_directory.revalidate()?;
     source_root.revalidate()?;
     let connection = sqlite_snapshot.connection()?;
