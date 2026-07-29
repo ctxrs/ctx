@@ -51,11 +51,9 @@
       "targets": {
         "lib:ctx_history_capture": "//crates/ctx-history-capture:lib",
         "test:codex_tail_nativepath": "//crates/ctx-history-capture:codex_tail_nativepath_tests",
-        "test:complete_content_jsonl": "//crates/ctx-history-capture:complete_content_jsonl_tests",
         "test:complete_content_sqlite": "//crates/ctx-history-capture:complete_content_sqlite_tests",
         "test:crush_identity_storage": "//crates/ctx-history-capture:crush_identity_storage_tests",
         "test:opencode_nativepath_release_blockers": "//crates/ctx-history-capture:opencode_nativepath_release_blockers_tests",
-        "test:structured_complete_content": "//crates/ctx-history-capture:structured_complete_content_tests",
         "test:cursor_native": "//crates/ctx-history-capture:cursor_native_tests"
       },
       "native_unit": "//crates/ctx-history-capture:unit_tests"

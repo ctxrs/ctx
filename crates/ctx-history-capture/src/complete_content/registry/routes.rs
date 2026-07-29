@@ -188,9 +188,8 @@ pub const VERIFIED_CONTENT_ROUTES: &[VerifiedContentRoute] = &[
         CaptureProvider::CodeBuddy,
         crate::CODEBUDDY_SOURCE_FORMAT,
         VerifiedContentRole::MessageBody,
-        "ctx-history-capture/tests/complete_content_jsonl.rs::four_provider_capability_matrix_imports_persists_and_recovers_exact_content";
-        (CompleteContentSourceFamily::Jsonl, "codebuddy-jsonl.message-body.v1", "jsonl-exact-range-v1"),
-        (CompleteContentSourceFamily::Structured, "codebuddy-history.message-body.v1", "structured-message-v1")
+        "provider::providers::codebuddy::native_path::source_backed::tests::dual_format_cold_scan_emits_independent_full_body_exact_records";
+        (CompleteContentSourceFamily::Jsonl, "codebuddy-jsonl.message-body.v1", "jsonl-exact-range-v1")
     ),
     supported_route!(
         CaptureProvider::MistralVibe,
@@ -213,47 +212,41 @@ pub const VERIFIED_CONTENT_ROUTES: &[VerifiedContentRoute] = &[
         "ctx-history-capture/tests/complete_content_jsonl.rs::four_provider_capability_matrix_imports_persists_and_recovers_exact_content";
         (CompleteContentSourceFamily::Jsonl, "kimi-code-cli.message-body.v1", "jsonl-exact-range-v1")
     ),
-    supported_route!(
+    unsupported_route!(
         CaptureProvider::Auggie,
         crate::AUGGIE_SESSION_JSON_SOURCE_FORMAT,
         VerifiedContentRole::MessageBody,
-        "complete_content::structured::tests::resolves_one_file_and_compound_provider_families";
-        (CompleteContentSourceFamily::Structured, "auggie-session.message-body.v1", "structured-message-v1")
+        "legacy structured resolver retired; production hydration is SourceRecordLocator-backed"
     ),
-    supported_route!(
+    unsupported_route!(
         CaptureProvider::Continue,
         crate::CONTINUE_CLI_SOURCE_FORMAT,
         VerifiedContentRole::MessageBody,
-        "complete_content::structured::tests::resolves_one_file_and_compound_provider_families";
-        (CompleteContentSourceFamily::Structured, "continue-session.message-body.v1", "structured-message-v1")
+        "legacy structured resolver retired; production hydration is SourceRecordLocator-backed"
     ),
-    supported_route!(
+    unsupported_route!(
         CaptureProvider::OpenHands,
         crate::OPENHANDS_FILE_EVENTS_SOURCE_FORMAT,
         VerifiedContentRole::MessageBody,
-        "complete_content::structured::tests::openhands_recovery_matches_authoritative_current_and_legacy_decoding";
-        (CompleteContentSourceFamily::Structured, "openhands-events.message-body.v1", "structured-message-v1")
+        "legacy structured resolver retired; production hydration is SourceRecordLocator-backed"
     ),
-    supported_route!(
+    unsupported_route!(
         CaptureProvider::RovoDev,
         crate::ROVODEV_SOURCE_FORMAT,
         VerifiedContentRole::MessageBody,
-        "ctx-history-capture/tests/structured_complete_content.rs::public_resolver_recovers_verified_rovo_body";
-        (CompleteContentSourceFamily::Structured, "rovodev-tree.message-body.v1", "structured-message-v1")
+        "legacy structured resolver retired; production hydration is SourceRecordLocator-backed"
     ),
-    supported_route!(
+    unsupported_route!(
         CaptureProvider::Cline,
         crate::CLINE_TASK_JSON_SOURCE_FORMAT,
         VerifiedContentRole::MessageBody,
-        "complete_content::structured::tests::resolves_one_file_and_compound_provider_families";
-        (CompleteContentSourceFamily::Structured, "cline-task.message-body.v1", "structured-message-v1")
+        "legacy structured resolver retired; production hydration is SourceRecordLocator-backed"
     ),
-    supported_route!(
+    unsupported_route!(
         CaptureProvider::RooCode,
         crate::ROO_TASK_JSON_SOURCE_FORMAT,
         VerifiedContentRole::MessageBody,
-        "complete_content::structured::tests::resolves_one_file_and_compound_provider_families";
-        (CompleteContentSourceFamily::Structured, "roo-task.message-body.v1", "structured-message-v1")
+        "legacy structured resolver retired; production hydration is SourceRecordLocator-backed"
     ),
     supported_route!(
         CaptureProvider::Firebender,

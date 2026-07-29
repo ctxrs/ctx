@@ -9,7 +9,6 @@ mod registry;
 mod resolver;
 pub mod source_access;
 pub mod sqlite;
-pub mod structured;
 
 pub use locator::{
     attach_verified_content_locator, CompleteContentBodyDigest, CompleteContentHashAuthority,

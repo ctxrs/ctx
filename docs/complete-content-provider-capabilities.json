@@ -2,8 +2,8 @@
   "schema_version": 2,
   "scope": "complete_content_capability_matrix",
   "statuses": {
-    "supported": "Resolved by this bounded structured/tree/compound family.",
-    "not_needed": "Owned by the named JSONL or SQLite family; never an indexed-text fallback.",
+    "supported": "Resolved by a live bounded complete-content resolver family.",
+    "not_needed": "Owned by JSONL, SQLite, or SourceRecordLocator-backed provider hydration; never an indexed-text fallback.",
     "unsupported": "No safe complete-content resolver exists; complete show must typed-fail."
   },
   "providers": [
@@ -19,15 +19,15 @@
     {"id":"lingma","status":"not_needed","owner":"sqlite","notes":"Exact complete-message recovery is limited to row-local user prompts; assistant rows remain summary/error fidelity and receive no locator.","routes":[{"family":"sqlite","source_format":"lingma_sqlite","locator_kind":"lingma-chat-record-v1"}]},
     {"id":"qoder","status":"not_needed","owner":"jsonl"},
     {"id":"warp","status":"not_needed","owner":"sqlite"},
-    {"id":"codebuddy","status":"supported","owner":"structured","notes":"Extension message JSON is structured; CLI JSONL is routed by persisted family.","routes":[{"family":"structured","source_format":"codebuddy_history_json","locator_kind":"structured-message-v1"},{"family":"jsonl","source_format":"codebuddy_history_json","locator_kind":"jsonl-exact-range-v1"}]},
+    {"id":"codebuddy","status":"not_needed","owner":"source_backed","notes":"Extension message JSON uses production SourceRecordLocator hydration; the CLI JSONL compatibility contract remains routed by persisted family.","routes":[{"family":"jsonl","source_format":"codebuddy_history_json","locator_kind":"jsonl-exact-range-v1"}]},
     {"id":"trae","status":"not_needed","owner":"sqlite","notes":"Exact recovery verifies the complete ItemTable JSON value and selects one session/message coordinate.","routes":[{"family":"sqlite","source_format":"trae_state_vscdb","locator_kind":"trae-itemtable-message-v1"}]},
     {"id":"openclaw","status":"not_needed","owner":"jsonl","routes":[{"family":"jsonl","source_format":"openclaw_session_jsonl_tree","locator_kind":"jsonl-exact-range-v1"}]},
     {"id":"hermes","status":"not_needed","owner":"sqlite"},
     {"id":"nanoclaw","status":"not_needed","owner":"sqlite"},
     {"id":"astrbot","status":"not_needed","owner":"sqlite","notes":"Conversation JSON messages are recoverable; platform-message rows remain unlocatable because their session identity depends on a checkpoint-parent join.","routes":[{"family":"sqlite","source_format":"astrbot_data_v4_sqlite","locator_kind":"astrbot-conversation-message-v1"}]},
     {"id":"shelley","status":"not_needed","owner":"sqlite"},
-    {"id":"continue","status":"supported","owner":"structured"},
-    {"id":"openhands","status":"supported","owner":"structured"},
+    {"id":"continue","status":"not_needed","owner":"source_backed"},
+    {"id":"openhands","status":"not_needed","owner":"source_backed"},
     {"id":"antigravity_cli","status":"not_needed","owner":"jsonl"},
     {"id":"gemini_cli","status":"not_needed","owner":"jsonl"},
     {"id":"tabnine","status":"not_needed","owner":"jsonl"},
@@ -38,15 +38,15 @@
     {"id":"factory_ai_droid","status":"not_needed","owner":"jsonl"},
     {"id":"qwen_code","status":"not_needed","owner":"jsonl"},
     {"id":"kimi_code_cli","status":"not_needed","owner":"jsonl","routes":[{"family":"jsonl","source_format":"kimi_code_cli_wire_jsonl","locator_kind":"jsonl-exact-range-v1"}]},
-    {"id":"auggie","status":"supported","owner":"structured","routes":[{"family":"structured","source_format":"auggie_session_json","locator_kind":"structured-message-v1"}]},
+    {"id":"auggie","status":"not_needed","owner":"source_backed"},
     {"id":"junie","status":"not_needed","owner":"jsonl","notes":"User prompts use one-element record sets; buffered assistant messages and tool results use bounded ordered record sets. Over-limit turns remain indexed but are not advertised as reopenable.","routes":[{"family":"jsonl","source_format":"junie_session_events_jsonl_tree","locator_kind":"junie-jsonl-record-set-v1"}]},
     {"id":"firebender","status":"not_needed","owner":"sqlite"},
     {"id":"forgecode","status":"not_needed","owner":"sqlite"},
     {"id":"deepagents","status":"not_needed","owner":"sqlite"},
     {"id":"mistral_vibe","status":"not_needed","owner":"jsonl","routes":[{"family":"jsonl","source_format":"mistral_vibe_session_jsonl","locator_kind":"jsonl-exact-range-v1"}]},
     {"id":"mux","status":"not_needed","owner":"jsonl","notes":"Append-only chat records and mutable partial snapshots share one tagged verified-record address; redacted or missing tool outputs are never addressable.","routes":[{"family":"jsonl","source_format":"mux_session_jsonl","locator_kind":"mux-record-v1"}]},
-    {"id":"rovodev","status":"supported","owner":"structured"},
-    {"id":"cline","status":"supported","owner":"structured"},
-    {"id":"roo_code","status":"supported","owner":"structured"}
+    {"id":"rovodev","status":"not_needed","owner":"source_backed"},
+    {"id":"cline","status":"not_needed","owner":"source_backed"},
+    {"id":"roo_code","status":"not_needed","owner":"source_backed"}
   ]
 }

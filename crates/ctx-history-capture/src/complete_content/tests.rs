@@ -312,7 +312,6 @@ fn active_core_complete_content_sources_forbid_result_hydration_surfaces() {
         ("routes", include_str!("registry/routes.rs")),
         ("jsonl", include_str!("jsonl.rs")),
         ("sqlite", include_str!("sqlite.rs")),
-        ("structured", include_str!("structured.rs")),
         (
             "warp provider",
             include_str!("../provider/providers/warp.rs"),
@@ -341,6 +340,99 @@ fn active_core_complete_content_sources_forbid_result_hydration_surfaces() {
             );
         }
     }
+}
+
+#[test]
+fn structured_family_is_only_a_serialized_metadata_tombstone() {
+    assert_eq!(
+        serde_json::to_value(CompleteContentSourceFamily::Structured).unwrap(),
+        serde_json::json!("structured")
+    );
+    assert_eq!(
+        serde_json::from_value::<CompleteContentSourceFamily>(serde_json::json!("structured"))
+            .unwrap(),
+        CompleteContentSourceFamily::Structured
+    );
+    assert!(VERIFIED_CONTENT_ROUTES
+        .iter()
+        .flat_map(|route| route.contracts)
+        .all(|contract| contract.family != CompleteContentSourceFamily::Structured));
+    assert!(!registry::valid_opaque_locator(
+        CompleteContentSourceFamily::Structured,
+        "structured-message-v1",
+        b"SC\0\x01",
+    ));
+}
+
+#[test]
+fn legacy_structured_routes_are_unsupported_source_backed_tombstones() {
+    for (provider, source_format) in [
+        (
+            CaptureProvider::Auggie,
+            crate::AUGGIE_SESSION_JSON_SOURCE_FORMAT,
+        ),
+        (CaptureProvider::Continue, crate::CONTINUE_CLI_SOURCE_FORMAT),
+        (
+            CaptureProvider::OpenHands,
+            crate::OPENHANDS_FILE_EVENTS_SOURCE_FORMAT,
+        ),
+        (CaptureProvider::RovoDev, crate::ROVODEV_SOURCE_FORMAT),
+        (CaptureProvider::Cline, crate::CLINE_TASK_JSON_SOURCE_FORMAT),
+        (CaptureProvider::RooCode, crate::ROO_TASK_JSON_SOURCE_FORMAT),
+    ] {
+        let route = VERIFIED_CONTENT_ROUTES
+            .iter()
+            .find(|route| route.provider == provider && route.source_format == source_format)
+            .unwrap();
+        assert!(route.contracts.is_empty());
+        assert!(route.platform_dispositions.iter().all(|disposition| {
+            disposition.status == VerifiedContentRouteStatus::Unsupported
+                && disposition.reason.contains("SourceRecordLocator-backed")
+        }));
+        assert!(!verified_content_route_supported(
+            provider,
+            source_format,
+            CompleteContentSourceFamily::Structured,
+            VerifiedContentRole::MessageBody,
+        ));
+    }
+
+    assert!(verified_content_route_supported(
+        CaptureProvider::CodeBuddy,
+        crate::CODEBUDDY_SOURCE_FORMAT,
+        CompleteContentSourceFamily::Jsonl,
+        VerifiedContentRole::MessageBody,
+    ));
+    assert!(!verified_content_route_supported(
+        CaptureProvider::CodeBuddy,
+        crate::CODEBUDDY_SOURCE_FORMAT,
+        CompleteContentSourceFamily::Structured,
+        VerifiedContentRole::MessageBody,
+    ));
+}
+
+#[test]
+fn structured_broker_reservation_and_admission_typed_fail_without_io() {
+    let event_id = Uuid::new_v4();
+    let route = AuthorizedSourceRoute {
+        source_id: Uuid::new_v4(),
+        provider: CaptureProvider::Auggie,
+        source_format: crate::AUGGIE_SESSION_JSON_SOURCE_FORMAT.to_owned(),
+        family: CompleteContentSourceFamily::Structured,
+        raw_source_path: std::path::PathBuf::from("/does/not/exist"),
+        source_root: None,
+        source_identity: None,
+        source_snapshot: SourceSnapshot::default(),
+    };
+    let broker = SourceAccessBroker::new();
+    assert_eq!(
+        broker.prepare(route.clone(), event_id).unwrap_err().kind,
+        CompleteContentErrorKind::HydrationUnsupported
+    );
+    assert_eq!(
+        broker.admit(route, event_id).unwrap_err().kind,
+        CompleteContentErrorKind::HydrationUnsupported
+    );
 }
 
 #[test]
