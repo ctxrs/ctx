@@ -776,23 +776,10 @@ fn native_provider_cli_policy_excludes_success_tool_outputs_from_search_and_payl
     assert_eq!(
         source_backed_count(
             &temp,
-            "SELECT COUNT(*) FROM ctx_events WHERE payload_json LIKE '%qoder-success-tool-output-sentinel%'",
+            "SELECT COUNT(*) FROM pragma_table_info('ctx_events') WHERE name = 'payload_json'",
         ),
-        0
-    );
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_events WHERE payload_json LIKE '%openhands-success-tool-output-sentinel%'",
-        ),
-        0
-    );
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_events WHERE payload_json LIKE '%continue-success-tool-output-sentinel%'",
-        ),
-        0
+        0,
+        "the metadata-only relational projection must expose no payload column"
     );
     assert!(
         source_backed_count(

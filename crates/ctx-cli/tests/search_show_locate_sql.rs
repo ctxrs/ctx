@@ -1331,29 +1331,13 @@ fn codex_cli_provider_oracle_covers_retrieval_and_claimed_fidelity() {
         ),
         0
     );
-    for forbidden_output in [
-        "all onboarding tests passed",
-        "unit tests passed in /workspace/ctx-rich-fixture",
-        "Success. Updated files:",
-    ] {
-        assert_eq!(
-            source_backed_count(
-                &temp,
-                &format!(
-                    "SELECT COUNT(*) FROM ctx_events \
-                     WHERE provider = 'codex' AND payload_json LIKE '%{forbidden_output}%'"
-                ),
-            ),
-            0,
-            "successful Codex output body leaked into Core rows: {forbidden_output}"
-        );
-    }
     assert_eq!(
         source_backed_count(
             &temp,
-            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'codex' AND payload_json LIKE '%token_usage%'"
+            "SELECT COUNT(*) FROM pragma_table_info('ctx_events') WHERE name = 'payload_json'"
         ),
-        0
+        0,
+        "the metadata-only relational projection must expose no payload column"
     );
     assert_eq!(
         source_backed_count(&temp, "SELECT COUNT(*) FROM ctx_files_touched"),

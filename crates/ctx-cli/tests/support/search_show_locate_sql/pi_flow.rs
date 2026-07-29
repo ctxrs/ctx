@@ -99,19 +99,14 @@ fn pi_cli_import_search_flow() {
             "successful Pi output created a Core {event_type} row"
         );
     }
-    for forbidden_output in ["tests passed", "ok token=fixture-secret"] {
-        assert_eq!(
-            source_backed_count(
-                &temp,
-                &format!(
-                    "SELECT COUNT(*) FROM ctx_events \
-                     WHERE provider = 'pi' AND payload_json LIKE '%{forbidden_output}%'"
-                ),
-            ),
-            0,
-            "successful Pi output body leaked into Core rows: {forbidden_output}"
-        );
-    }
+    assert_eq!(
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM pragma_table_info('ctx_events') WHERE name = 'payload_json'",
+        ),
+        0,
+        "the metadata-only relational projection must expose no payload column"
+    );
     assert_eq!(
         source_backed_count(
             &temp,
