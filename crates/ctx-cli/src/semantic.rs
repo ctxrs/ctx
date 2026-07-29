@@ -115,6 +115,7 @@ use daemon_retry::*;
 mod source_status;
 pub(crate) use source_status::{source_epoch_status_report, SourceEpochStatus};
 mod source_backed_pro_catch_up;
+pub(crate) use source_backed_pro_catch_up::wait_for_completed_generation as wait_for_source_backed_pro_generation;
 mod source_backed_refresh_coordinator;
 mod source_backed_relational_catch_up;
 #[allow(unused_imports)] // Provider-neutral executor types are the capture coordinator seam.

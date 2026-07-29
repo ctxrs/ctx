@@ -30,7 +30,7 @@ pub(super) fn blame_once(
     let capabilities = required_blame_capabilities(&target);
     let mut client = ProClient::connect(data_root, &capabilities)?;
     let status = helper_status(&mut client)?;
-    let request = support::current_blame_request(data_root, target, limit, cursor, &status)?;
+    let request = support::current_blame_request(target, limit, cursor, &status)?;
     request
         .validate()
         .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
