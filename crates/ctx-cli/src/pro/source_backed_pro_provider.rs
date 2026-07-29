@@ -6,14 +6,14 @@ use ctx_history_core::{
     BatchHydrationRequest, ContentSourceResolver, EventHydrationRequest, HydratedProviderRecord,
     HydrationFailureKind, SourceFrontier, SourceKey, StableEntityId, TypedKey,
 };
-use ctx_history_index::{
-    EventRecord, IndexError, SourceEventCursor, VerifiedIndex, MAX_SOURCE_EVENT_PAGE_ITEMS,
-};
+#[cfg(test)]
+use ctx_history_index::MAX_SOURCE_EVENT_PAGE_ITEMS;
+use ctx_history_index::{EventRecord, IndexError, SourceEventCursor, VerifiedIndex};
 use ctx_pro_host_protocol::{
     certified_source_revision_sha256, ErrorClass, SourceCommandFact, SourceManifest,
     SourceMessageFact, SourceOutcome, SourceRecord, SourceRecordMetadata, SourceResultFact,
     SourceSessionRelationships, TransientSourceContent, TransientSourceFact,
-    MAX_SOURCE_CONTENT_BYTES, MAX_SOURCE_CONTENT_BYTES_PER_PAGE,
+    MAX_SOURCE_CONTENT_BYTES, MAX_SOURCE_CONTENT_BYTES_PER_PAGE, MAX_SOURCE_RECORDS_PER_PAGE,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -71,7 +71,7 @@ pub(super) enum SourceBackedProProviderError {
     #[error("source_hydration_failed: {kind:?} while hydrating event {event_id}: {detail}")]
     Hydration {
         kind: HydrationFailureKind,
-        event_id: StableEntityId,
+        event_id: Box<StableEntityId>,
         detail: String,
     },
     #[error("source_hydration_failed: {kind:?} while hydrating an ordered page: {detail}")]
@@ -84,8 +84,8 @@ pub(super) enum SourceBackedProProviderError {
          while hydrating {expected_event_id}"
     )]
     HydratedIdentityMismatch {
-        expected_event_id: StableEntityId,
-        actual_event_id: StableEntityId,
+        expected_event_id: Box<StableEntityId>,
+        actual_event_id: Box<StableEntityId>,
     },
     #[error(
         "source_hydration_failed: ordered page hydration returned {actual} records for \
@@ -97,7 +97,7 @@ pub(super) enum SourceBackedProProviderError {
          maximum {maximum}"
     )]
     ContentBoundExceeded {
-        event_id: StableEntityId,
+        event_id: Box<StableEntityId>,
         actual: usize,
         maximum: usize,
     },
@@ -180,7 +180,7 @@ impl<'a> SourceBackedProProvider<'a> {
         let page = self.index.source_event_page(
             source_key,
             cursor.as_ref(),
-            MAX_SOURCE_EVENT_PAGE_ITEMS,
+            MAX_SOURCE_RECORDS_PER_PAGE,
         )?;
         if page.generation_id != self.index.generation_id()
             || !page.source.exact_descriptor_eq(source_key)
@@ -195,7 +195,7 @@ impl<'a> SourceBackedProProvider<'a> {
                 EventHydrationRequest::new(event.event_id, event.locator.clone()).map_err(|error| {
                     SourceBackedProProviderError::Hydration {
                         kind: HydrationFailureKind::InvalidLocator,
-                        event_id: event.event_id,
+                        event_id: Box::new(event.event_id),
                         detail: error.to_string(),
                     }
                 })
@@ -216,14 +216,14 @@ impl<'a> SourceBackedProProvider<'a> {
         for (event, hydrated) in events.into_iter().zip(hydrated_records) {
             if hydrated.event_id != event.event_id {
                 return Err(SourceBackedProProviderError::HydratedIdentityMismatch {
-                    expected_event_id: event.event_id,
-                    actual_event_id: hydrated.event_id,
+                    expected_event_id: Box::new(event.event_id),
+                    actual_event_id: Box::new(hydrated.event_id),
                 });
             }
             let exact_bytes = hydrated.provider_bytes;
             if exact_bytes.len() > MAX_SOURCE_CONTENT_BYTES {
                 return Err(SourceBackedProProviderError::ContentBoundExceeded {
-                    event_id: event.event_id,
+                    event_id: Box::new(event.event_id),
                     actual: exact_bytes.len(),
                     maximum: MAX_SOURCE_CONTENT_BYTES,
                 });
@@ -426,7 +426,7 @@ fn source_record(
 ) -> std::result::Result<SourceRecord, SourceBackedProProviderError> {
     let content = TransientSourceContent::from_bytes(&exact_bytes).ok_or(
         SourceBackedProProviderError::ContentBoundExceeded {
-            event_id: event.event_id,
+            event_id: Box::new(event.event_id),
             actual: exact_bytes.len(),
             maximum: MAX_SOURCE_CONTENT_BYTES,
         },
@@ -529,9 +529,9 @@ mod tests {
     }
 
     #[test]
-    fn production_provider_pages_and_resumes_beyond_index_limit() {
+    fn production_provider_pages_and_resumes_beyond_protocol_limit() {
         let fixture = runtime_fixture(
-            (0..=MAX_SOURCE_EVENT_PAGE_ITEMS)
+            (0..=MAX_SOURCE_RECORDS_PER_PAGE)
                 .map(|index| {
                     (
                         "message",
@@ -548,7 +548,7 @@ mod tests {
         let first = provider
             .reread_source_page(&fixture.source, None)
             .expect("first bounded source page");
-        assert_eq!(first.records.len(), MAX_SOURCE_EVENT_PAGE_ITEMS);
+        assert_eq!(first.records.len(), MAX_SOURCE_RECORDS_PER_PAGE);
         assert!(!first.terminal);
         let resume = first
             .next_frontier
@@ -585,7 +585,7 @@ mod tests {
         assert!(first_ids.is_disjoint(&second_ids));
         assert_eq!(
             first_ids.len() + second_ids.len(),
-            MAX_SOURCE_EVENT_PAGE_ITEMS + 1
+            MAX_SOURCE_RECORDS_PER_PAGE + 1
         );
     }
 
