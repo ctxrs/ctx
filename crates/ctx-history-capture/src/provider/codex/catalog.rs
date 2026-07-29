@@ -1,5 +1,4 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
     io::BufReader,
     path::{Path, PathBuf},
     thread,
@@ -7,7 +6,7 @@ use std::{
 };
 
 use ctx_history_core::{AgentType, CaptureProvider};
-use ctx_history_store::{CatalogSession, Store};
+use ctx_history_store::CatalogSession;
 use serde_json::{json, Value};
 
 use crate::common::io::{
@@ -19,8 +18,7 @@ use crate::common::io::{
 };
 use crate::common::time::{parse_rfc3339_utc, system_time_ms};
 use crate::{
-    CaptureError, CatalogSummary, CodexSessionCatalogOptions, ProviderImportFailure, Result,
-    CODEX_SESSION_SOURCE_FORMAT,
+    CaptureError, CatalogSummary, ProviderImportFailure, Result, CODEX_SESSION_SOURCE_FORMAT,
 };
 
 use crate::provider::codex::nativepath::{opened_codex_file_observation, CodexFileObservation};
@@ -112,13 +110,6 @@ pub(crate) struct RetainedCodexSessionCatalog {
     pub(crate) root: ProviderSourceRoot,
 }
 
-#[derive(Debug)]
-pub(crate) struct RetainedCodexCatalogTree {
-    pub(crate) summary: CatalogSummary,
-    pub(crate) live_paths: BTreeSet<String>,
-    pub(crate) root: ProviderSourceRoot,
-}
-
 pub(crate) fn discover_codex_session_catalog(
     root: &Path,
 ) -> Result<(CatalogSummary, Vec<CatalogSession>)> {
@@ -160,36 +151,6 @@ fn build_retained_codex_session_catalog(
         sessions,
         root: authority,
     })
-}
-
-fn apply_codex_session_import_bounds(
-    routes: &mut Vec<CodexCatalogRoute>,
-    max_files: Option<usize>,
-    max_total_bytes: Option<u64>,
-) -> Result<usize> {
-    routes.sort_by(|left, right| left.path.cmp(&right.path));
-    if max_files.is_none() && max_total_bytes.is_none() {
-        return Ok(0);
-    }
-
-    let original_len = routes.len();
-    let mut selected = Vec::new();
-    let mut total_bytes = 0_u64;
-    for route in routes.iter().rev() {
-        if max_files.is_some_and(|limit| selected.len() >= limit) {
-            continue;
-        }
-        let len = route.open().map(|source| source.opened.len()).unwrap_or(0);
-        if max_total_bytes.is_some_and(|limit| total_bytes.saturating_add(len) > limit) {
-            continue;
-        }
-        total_bytes = total_bytes.saturating_add(len);
-        selected.push(route.clone());
-    }
-    selected.sort_by(|left, right| left.path.cmp(&right.path));
-    let skipped = original_len.saturating_sub(selected.len());
-    *routes = selected;
-    Ok(skipped)
 }
 
 fn discover_codex_catalog_files(
@@ -307,190 +268,6 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
             .any(|window| window == needle)
 }
 
-pub fn catalog_codex_session_tree(
-    root: impl AsRef<Path>,
-    store: &Store,
-    options: CodexSessionCatalogOptions,
-) -> Result<CatalogSummary> {
-    Ok(catalog_codex_session_tree_retained(root, store, options)?.summary)
-}
-
-pub(crate) fn catalog_codex_session_tree_retained(
-    root: impl AsRef<Path>,
-    store: &Store,
-    options: CodexSessionCatalogOptions,
-) -> Result<RetainedCodexCatalogTree> {
-    let root = root.as_ref();
-    provider_path_identity(root)?;
-    let source_root_path = options.source_root.as_deref().unwrap_or(root);
-    provider_path_identity(source_root_path)?;
-    let source_root = source_root_path.display().to_string();
-    let cataloged_at_ms = options.cataloged_at.timestamp_millis();
-    let (authority, mut routes) = discover_codex_catalog_files(root)?;
-    let skipped_by_bounds = apply_codex_session_import_bounds(
-        &mut routes,
-        options.max_session_files,
-        options.max_total_bytes,
-    )?;
-
-    let mut summary = CatalogSummary {
-        skipped_sessions: skipped_by_bounds,
-        ..CatalogSummary::default()
-    };
-    let existing = store
-        .list_catalog_sessions_for_source_bounded(
-            CaptureProvider::Codex,
-            &source_root,
-            CODEX_CATALOG_MAX_SOURCES,
-        )?
-        .into_iter()
-        .map(|session| (session.source_path.clone(), session))
-        .collect::<BTreeMap<_, _>>();
-    let mut current_paths = Vec::with_capacity(routes.len());
-    let mut cached_sessions = Vec::new();
-    let mut sources_to_parse = Vec::new();
-    let mut metadata_failures = Vec::new();
-    for route in routes {
-        let source = match route.open() {
-            Ok(source) => source,
-            Err(err) => {
-                summary.failed_sessions += 1;
-                metadata_failures.push(format!("{}: {err}", route.path.display()));
-                continue;
-            }
-        };
-        let source_path = source.path.display().to_string();
-        let observation = match codex_catalog_observation(&source) {
-            Ok(observation) => observation,
-            Err(err) => {
-                summary.failed_sessions += 1;
-                metadata_failures.push(format!("{}: {err}", source.path.display()));
-                continue;
-            }
-        };
-        summary.source_files += 1;
-        summary.source_bytes = summary.source_bytes.saturating_add(observation.len);
-        current_paths.push(source_path.clone());
-        if let Some(session) = cached_catalog_session_if_unchanged(
-            existing.get(&source_path),
-            &observation,
-            cataloged_at_ms,
-        ) {
-            summary.cached_sessions += 1;
-            cached_sessions.push(session);
-            continue;
-        }
-        sources_to_parse.push(route);
-    }
-    summary.failures.extend(
-        metadata_failures
-            .iter()
-            .cloned()
-            .map(|error| ProviderImportFailure { line: 0, error }),
-    );
-    let stale_session_count =
-        store.catalog_source_stale_session_count(CaptureProvider::Codex, &source_root)?;
-    let current_path_set = current_paths.iter().cloned().collect::<BTreeSet<_>>();
-    let has_missing_existing_paths = existing
-        .keys()
-        .any(|source_path| !current_path_set.contains(source_path));
-    if sources_to_parse.is_empty()
-        && metadata_failures.is_empty()
-        && cached_sessions.len() == current_paths.len()
-        && existing.len() == current_paths.len()
-        && !has_missing_existing_paths
-        && stale_session_count == 0
-    {
-        summary.cataloged_sessions = cached_sessions.len();
-        authority.revalidate()?;
-        return Ok(RetainedCodexCatalogTree {
-            summary,
-            live_paths: current_path_set,
-            root: authority,
-        });
-    }
-    let (scan_summary, sessions) = catalog_codex_session_routes(
-        sources_to_parse,
-        &source_root,
-        cataloged_at_ms,
-        options.parallelism,
-    )?;
-    summary.failed_sessions += scan_summary.failed_sessions;
-    summary.failures.extend(scan_summary.failures);
-    summary.parsed_sessions += scan_summary.parsed_sessions;
-    let parsed_session_count = sessions.len();
-    let cached_session_count = cached_sessions.len();
-    let mut sessions_to_persist = sessions;
-    if stale_session_count > 0 {
-        sessions_to_persist.extend(cached_sessions);
-    }
-    summary.cataloged_sessions = parsed_session_count.saturating_add(cached_session_count);
-
-    store.begin_immediate_batch()?;
-    let persist = (|| -> Result<()> {
-        if !sessions_to_persist.is_empty() {
-            store.upsert_catalog_sessions(&sessions_to_persist)?;
-        }
-        if stale_session_count > 0 || has_missing_existing_paths {
-            store.mark_catalog_source_missing_paths_stale(
-                CaptureProvider::Codex,
-                &source_root,
-                &current_paths,
-                cataloged_at_ms,
-            )?;
-        }
-        Ok(())
-    })();
-    match persist {
-        Ok(()) => {
-            store.commit_batch()?;
-        }
-        Err(err) => {
-            let _ = store.rollback_batch();
-            return Err(err);
-        }
-    }
-    authority.revalidate()?;
-    Ok(RetainedCodexCatalogTree {
-        summary,
-        live_paths: current_path_set,
-        root: authority,
-    })
-}
-
-pub fn catalog_codex_session_files(
-    paths: Vec<PathBuf>,
-    source_root: impl AsRef<Path>,
-    store: &Store,
-    options: CodexSessionCatalogOptions,
-) -> Result<CatalogSummary> {
-    ensure_catalog_source_bound(paths.len())?;
-    let source_root_path = options
-        .source_root
-        .as_deref()
-        .unwrap_or(source_root.as_ref());
-    provider_path_identity(source_root_path)?;
-    let mut routes = Vec::with_capacity(paths.len());
-    for path in paths {
-        provider_path_identity(&path)?;
-        routes.push(CodexCatalogRoute {
-            path,
-            root: None,
-            relative_path: None,
-        });
-    }
-    let source_root = source_root_path.display().to_string();
-    let cataloged_at_ms = options.cataloged_at.timestamp_millis();
-    let (scan_summary, sessions) =
-        catalog_codex_session_routes(routes, &source_root, cataloged_at_ms, options.parallelism)?;
-    let mut summary = scan_summary;
-    summary.cataloged_sessions = sessions.len();
-    if !sessions.is_empty() {
-        store.upsert_catalog_sessions(&sessions)?;
-    }
-    Ok(summary)
-}
-
 pub(crate) fn ensure_catalog_source_bound(source_count: usize) -> Result<()> {
     if source_count > CODEX_CATALOG_MAX_SOURCES {
         return Err(CaptureError::InvalidPayload(format!(
@@ -500,40 +277,6 @@ pub(crate) fn ensure_catalog_source_bound(source_count: usize) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn cached_catalog_session_if_unchanged(
-    session: Option<&CatalogSession>,
-    observation: &CodexFileObservation,
-    cataloged_at_ms: i64,
-) -> Option<CatalogSession> {
-    let session = session?;
-    let observation_token = hex_digest(&observation.change_token);
-    if session.provider == CaptureProvider::Codex
-        && session.source_format == CODEX_SESSION_SOURCE_FORMAT
-        && session.file_size_bytes == observation.len
-        && session.file_modified_at_ms == observation.modified_at_ms
-        && session
-            .metadata
-            .get("inventory_file_change_token_v1")
-            .and_then(Value::as_str)
-            == Some(observation_token.as_str())
-        && session
-            .metadata
-            .get("normalization_capture_revision")
-            .and_then(Value::as_u64)
-            == Some(u64::from(CODEX_CAPTURE_REVISION))
-        && session
-            .metadata
-            .get("normalization_policy_revision")
-            .and_then(Value::as_u64)
-            == Some(u64::from(CODEX_POLICY_REVISION))
-    {
-        let mut session = session.clone();
-        session.cataloged_at_ms = cataloged_at_ms;
-        Some(session)
-    } else {
-        None
-    }
-}
 #[derive(Debug, Default)]
 pub(crate) struct CatalogWorkerBatch {
     pub(crate) summary: CatalogSummary,

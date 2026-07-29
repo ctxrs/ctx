@@ -90,12 +90,6 @@ mod error;
 pub use error::{CaptureError, ProviderJsonlInventoryLimit, ProviderSourceFailureKind, Result};
 
 mod summaries;
-#[cfg(codex_nativepath_qualification)]
-#[doc(hidden)]
-pub use provider::codex::nativepath::{
-    qualify_codex_native_session_root, CodexNativePathQualificationEvidence,
-    QualificationInputIdentity, QualificationProducerCounters, QualificationStoreCounters,
-};
 pub use summaries::{
     CatalogSummary, ProviderImportFailure, ProviderImportSummary, ProviderImportTerminalOutcome,
     ProviderImportWorkResult,
@@ -103,10 +97,8 @@ pub use summaries::{
 
 mod options;
 pub use options::{
-    AntigravityCliImportOptions, AuggieImportOptions,
-    ClaudeProjectsImportOptions, ClineTaskJsonImportOptions, CodeBuddyImportOptions,
-    CodexHistoryImportOptions, CodexSessionCatalogOptions, CodexSessionImportOptions,
-    CodexSessionImportProgress, CodexSessionImportProgressCallback, ContinueCliImportOptions,
+    AntigravityCliImportOptions, AuggieImportOptions, ClaudeProjectsImportOptions,
+    ClineTaskJsonImportOptions, CodeBuddyImportOptions, ContinueCliImportOptions,
     CopilotCliImportOptions, CrushSqliteImportOptions, CursorNativeImportOptions,
     CustomHistoryJsonlV1ImportOptions, DeepAgentsSqliteImportOptions, FactoryAiDroidImportOptions,
     FirebenderSqliteImportOptions, ForgeCodeSqliteImportOptions, GeminiCliImportOptions,
@@ -135,13 +127,9 @@ mod test_support_paths;
 pub(crate) mod provider;
 pub use provider::adapter::{CaptureWorkLimit, ProviderAdapterContext, ProviderImportOptions};
 pub use provider::codex::{
-    build_codex_cold_store, catalog_codex_session_files, catalog_codex_session_tree,
-    hydrate_codex_locator, import_codex_history_jsonl, import_codex_session_jsonl,
-    import_codex_session_jsonl_tail, import_codex_session_paths, import_codex_session_tree,
-    ingest_codex_source_backed_v0, CodexColdPromptHistoryOptions, CodexColdStoreOptions,
-    CodexColdStoreOutcome, CodexHydratedRecordV0, CodexLocatorResolverV0,
-    CodexSourceBackedCountersV0, CodexSourceBackedErrorV0, CodexSourceBackedIngestReceiptV0,
-    CodexSourceBackedPhaseTimingsV0, CodexSourceBackedResultV0,
+    hydrate_codex_locator, ingest_codex_source_backed_v0, CodexHydratedRecordV0,
+    CodexLocatorResolverV0, CodexSourceBackedCountersV0, CodexSourceBackedErrorV0,
+    CodexSourceBackedIngestReceiptV0, CodexSourceBackedPhaseTimingsV0, CodexSourceBackedResultV0,
 };
 pub use provider::custom_history_jsonl::{
     custom_history_jsonl_v1_cursor_stream, decode_custom_history_jsonl_v1_cursor,
