@@ -319,10 +319,6 @@ pub(super) struct DaemonRuntime {
     pub(super) semantic_reconciliation_sweep:
         super::daemon_worker::SemanticReconciliationSweepState,
     pub(super) semantic_bootstrap_passes_since_refresh: usize,
-    pub(super) history_source_cursor: usize,
-    pub(super) history_followup_passes_remaining: usize,
-    pub(super) history_retry_drain_passes_remaining: usize,
-    pub(super) history_rejected_records_by_source: std::collections::BTreeMap<String, u64>,
     pub(super) history_retry: DaemonRetryBackoff,
     pub(super) semantic_retry: DaemonRetryBackoff,
     pub(super) semantic_blocked_job: Option<Value>,

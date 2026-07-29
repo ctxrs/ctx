@@ -138,10 +138,6 @@ pub(crate) use daemon_autostart::{
     mark_replacement_helper_handoff, maybe_autostart_daemon, maybe_autostart_daemon_for_search,
     DaemonHandoff, DaemonUpgradeHandoff,
 };
-#[cfg(test)]
-mod daemon_history;
-#[cfg(test)]
-use daemon_history::*;
 mod health_search;
 pub(crate) use health_search::semantic_health_findings;
 pub(crate) use health_search::semantic_worker_cache_dir;
