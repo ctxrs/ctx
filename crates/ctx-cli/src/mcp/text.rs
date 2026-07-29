@@ -43,6 +43,7 @@ fn render_status_text(value: &Value) -> String {
     push_component_summary(&mut out, "history_epoch", value.get("history_epoch"));
     push_component_summary(&mut out, "lexical", value.get("lexical"));
     if let Some(lexical) = value.get("lexical") {
+        push_key_value(&mut out, "lexical_path", lexical.get("path"));
         push_key_value(&mut out, "lexical_generation", lexical.get("generation_id"));
         push_key_value(
             &mut out,
@@ -55,9 +56,49 @@ fn render_status_text(value: &Value) -> String {
     push_component_summary(&mut out, "catalog", value.get("catalog"));
     push_component_summary(&mut out, "resolver", value.get("resolver"));
     push_component_summary(&mut out, "source_refresh", value.get("refresh"));
-    push_component_summary(&mut out, "relational", value.get("relational"));
-    push_component_summary(&mut out, "pro_projection", value.get("pro_projection"));
-    push_component_summary(&mut out, "legacy_history", value.get("legacy_history"));
+    if let Some(refresh) = value.get("refresh") {
+        push_object_summary(
+            &mut out,
+            "source_refresh_metrics",
+            refresh,
+            &[
+                ("sources", "source_count"),
+                ("certified_sources", "certified_source_count"),
+                ("certified_bytes", "certified_source_bytes"),
+                ("timings_us", "timings_us"),
+            ],
+        );
+    }
+    if let Some(relational) = value.get("relational") {
+        push_component_summary(&mut out, "relational", Some(relational));
+        push_key_value(&mut out, "relational_path", relational.get("path"));
+        push_key_value(
+            &mut out,
+            "relational_generation",
+            relational.get("active_core_generation_id"),
+        );
+    }
+    if let Some(pro_projection) = value.get("pro_projection") {
+        push_component_summary(&mut out, "pro_projection", Some(pro_projection));
+        push_key_value(
+            &mut out,
+            "pro_projection_authority",
+            pro_projection.get("authority"),
+        );
+        push_component_summary(
+            &mut out,
+            "pro_source_manifest_receipt",
+            pro_projection.get("receipt"),
+        );
+        push_key_value(
+            &mut out,
+            "pro_source_manifest_receipt_generation",
+            pro_projection
+                .get("receipt")
+                .and_then(|receipt| receipt.get("core_generation_id")),
+        );
+    }
+    push_component_summary(&mut out, "prior_epoch", value.get("prior_epoch"));
     push_key_value(&mut out, "read_only", value.get("read_only"));
     push_key_value(&mut out, "local_only", value.get("local_only"));
     push_status_semantic_summary(&mut out, value.get("semantic"));
@@ -217,10 +258,13 @@ fn push_status_semantic_summary(out: &mut String, semantic: Option<&Value>) {
                 ("status", "status"),
                 ("reason", "reason"),
                 ("core_generation_id", "core_generation_id"),
+                ("flat_generation", "flat_generation"),
+                ("flat_generation_hash", "flat_generation_hash"),
                 ("active_events", "active_events"),
                 ("active_chunks", "active_chunks"),
             ],
         );
+        push_key_value(out, "semantic_path", flat_f32.get("path"));
     }
 }
 
@@ -236,8 +280,34 @@ fn push_status_daemon_summary(out: &mut String, daemon: Option<&Value>) {
             ("enabled", "enabled"),
             ("status", "status"),
             ("running", "running"),
+            ("mode", "mode"),
+            ("pid", "pid"),
+            ("start_mode", "start_mode"),
+            ("trigger_command", "trigger_command"),
+            ("trigger_provenance", "trigger_provenance"),
         ],
     );
+    if let Some(lock) = daemon.get("lock_identity") {
+        push_object_summary(
+            out,
+            "daemon_lock",
+            lock,
+            &[("path", "path"), ("active", "active"), ("pid", "pid")],
+        );
+    }
+    if let Some(endpoint) = daemon.get("source_refresh_endpoint") {
+        push_object_summary(
+            out,
+            "daemon_endpoint",
+            endpoint,
+            &[
+                ("available", "available"),
+                ("transport", "transport"),
+                ("address", "address"),
+                ("owner_pid", "owner_pid"),
+            ],
+        );
+    }
     let Some(jobs) = daemon.get("jobs") else {
         return;
     };

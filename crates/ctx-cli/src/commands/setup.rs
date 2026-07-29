@@ -91,12 +91,11 @@ pub(crate) fn run_setup(
     telemetry.providers_detected = source.indexed_sources.map(analytics::count_bucket);
     telemetry.has_indexed_content = source.indexed_items.map(|count| count > 0);
 
-    let mode = if lexical_status == "ready" {
-        "ready"
-    } else if lexical_status == "pending" {
-        "pending"
-    } else {
-        "unavailable"
+    let mode = match lexical_status {
+        "ready" => "ready",
+        "pending" => "pending",
+        "stale" => "stale",
+        _ => "unavailable",
     };
     let output = json!({
         "schema_version": 2,
@@ -112,7 +111,7 @@ pub(crate) fn run_setup(
         "semantic": source.report["semantic"].clone(),
         "relational": source.report["relational"].clone(),
         "pro_projection": source.report["pro_projection"].clone(),
-        "legacy_history": source.report["legacy_history"].clone(),
+        "prior_epoch": source.report["prior_epoch"].clone(),
         "daemon": source.report["daemon"].clone(),
         "daemon_autostart": daemon_autostart_json(
             daemon_autostart_requested,
@@ -237,12 +236,20 @@ fn print_setup_human(
     if let Some(generation) = source["lexical"]["generation_id"].as_str() {
         println!("Lexical generation: {generation}");
     }
+    if let Some(path) = source["lexical"]["path"].as_str() {
+        println!("Lexical path: {path}");
+    }
+    if let Some(path) = source["semantic"]["flat_f32"]["path"].as_str() {
+        println!("Semantic path: {path}");
+    }
     println!(
         "Source refresh: {}",
         refresh_request["status"].as_str().unwrap_or("unavailable")
     );
-    if source["legacy_history"]["present"].as_bool() == Some(true) {
-        println!("Previous history Store: inactive (rollback/manual recovery only).");
+    if source["prior_epoch"]["preserved"].as_bool() == Some(true) {
+        println!(
+            "Prior v0.25-or-earlier history epoch: preserved, non-authoritative, rollback/manual recovery only."
+        );
     }
     match daemon_handoff {
         Some(handoff) => println!(

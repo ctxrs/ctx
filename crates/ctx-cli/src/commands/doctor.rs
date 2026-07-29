@@ -21,6 +21,7 @@ pub(crate) fn run_doctor(
     }
     let config = AppConfig::load(&data_root)?;
     let source = source_epoch_status_report(&data_root, &config)?;
+    let pro = crate::pro::lifecycle_status_json(&data_root);
     for (name, required) in [
         ("history_epoch", true),
         ("lexical", true),
@@ -28,6 +29,10 @@ pub(crate) fn run_doctor(
         ("resolver", true),
         ("relational", true),
         ("semantic", config.semantic_search_enabled()),
+        (
+            "pro_projection",
+            pro.get("installed").and_then(serde_json::Value::as_bool) == Some(true),
+        ),
     ] {
         if !required {
             continue;
@@ -46,7 +51,6 @@ pub(crate) fn run_doctor(
         }
     }
     let daemon = source.report["daemon"].clone();
-    let pro = crate::pro::lifecycle_status_json(&data_root);
     let upgrade_diagnostics = crate::upgrade::upgrade_diagnostics(&config);
     findings.extend(upgrade_diagnostics.findings);
     let upgrade = upgrade_diagnostics.report;

@@ -1,8 +1,4 @@
-use std::path::Path;
-
-use crate::{
-    CaptureError, ProviderAdapterContext, ProviderImportOptions, ProviderImportSummary, Result,
-};
+use crate::Result;
 
 mod event;
 pub(crate) mod nativepath;
@@ -16,19 +12,6 @@ pub(crate) use nativepath::{
     OpenHandsRejectedEventV1, OpenHandsSourceBackedAdapterV1, OpenHandsSourceBackedErrorV1,
     OpenHandsSourceBackedProjectionV1, OpenHandsSourceBackedResultV1,
 };
-
-/// Rejects the historical Store publisher while shared v0.25 dispatch still
-/// carries its signature. OpenHands production ingestion is source-backed.
-pub(crate) fn import_openhands_nativepath(
-    _path: &Path,
-    _store: &mut ctx_history_store::Store,
-    _context: ProviderAdapterContext,
-    _options: ProviderImportOptions,
-) -> Result<ProviderImportSummary> {
-    Err(CaptureError::UnsupportedSchema(
-        "OpenHands Store ingestion was removed; use source-backed ingestion".to_owned(),
-    ))
-}
 
 fn openhands_bounded_derived_text(value: String, field: &str) -> Result<String> {
     const MAX_DERIVED_TEXT_BYTES: usize = 16 * 1024;
