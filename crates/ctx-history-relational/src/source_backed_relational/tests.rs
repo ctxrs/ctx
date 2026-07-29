@@ -270,9 +270,10 @@ fn source_backed_projection_preserves_metadata_sql_and_exact_generation_evidence
 
     let events = query_rows(
         &projection,
-        "SELECT ctx_event_id, ctx_session_id, event_type, role, payload_json,
-                branch, workspace
-         FROM ctx_events",
+        "SELECT e.ctx_event_id, e.ctx_session_id, e.event_type, e.role, e.payload_json,
+                s.agent_type, e.branch, e.workspace
+         FROM ctx_events e
+         JOIN ctx_sessions s ON s.ctx_session_id = e.ctx_session_id",
     );
     assert_eq!(events.len(), 1);
     let RawSqlValue::Text { value: payload, .. } = &events[0][4] else {
@@ -286,6 +287,25 @@ fn source_backed_projection_preserves_metadata_sql_and_exact_generation_evidence
     assert!(payload.get("text").is_none());
     assert!(payload.get("body").is_none());
     assert!(payload.get("content").is_none());
+    assert_eq!(
+        events[0][5],
+        RawSqlValue::Text {
+            value: "primary".to_owned(),
+            bytes: 7,
+            truncated: false,
+        }
+    );
+    // Agent scope is session metadata; native locator evidence remains internal.
+    let misplaced_event_view_columns: i64 = projection
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('ctx_events')
+             WHERE name IN ('agent_type', 'native_locator_json')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(misplaced_event_view_columns, 0);
 
     let files = query_rows(
         &projection,
