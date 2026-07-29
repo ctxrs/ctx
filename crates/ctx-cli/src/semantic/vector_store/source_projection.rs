@@ -1,4 +1,7 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{anyhow, Result};
 use ctx_history_core::{
@@ -15,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use super::flat_segments::PinnedFlatGeneration;
 use super::{SemanticChunkDocument, SemanticVectorStore};
 use crate::semantic::{
     indexing::{semantic_chunks_for_document, semantic_document_hash, semantic_source_text},
@@ -24,11 +28,16 @@ use crate::semantic::{
 
 const SOURCE_FRONTIER_STATE: &str = "source_backed_semantic_frontier_v1";
 const SOURCE_ACKNOWLEDGEMENT_STATE: &str = "source_backed_semantic_acknowledgement_v1";
-const SOURCE_CONTRACT_VERSION: u16 = 1;
+const SOURCE_VECTOR_DIRECTORY: &str = "source-backed-semantic-flat-f32-v0";
+const SOURCE_CONTRACT_VERSION: u16 = 3;
 const SOURCE_CONTRACT_DOMAIN: &[u8] = b"ctx-source-backed-semantic-contract-v1\0";
 const SOURCE_BUILD_DOMAIN: &[u8] = b"ctx-source-backed-semantic-build-v1\0";
 const SOURCE_INPUT_LEXICAL_SCHEMA_VERSION: u32 = 4;
 const SHA256_HEX_BYTES: usize = 64;
+
+pub(in crate::semantic) fn source_backed_semantic_vector_path(data_root: &Path) -> PathBuf {
+    data_root.join(SOURCE_VECTOR_DIRECTORY)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SourceBackedSemanticGeneration {
@@ -111,6 +120,7 @@ pub(in crate::semantic) struct SourceBackedSemanticOutcome {
     pub(in crate::semantic) records_scanned: usize,
     pub(in crate::semantic) records_embedded: usize,
     pub(in crate::semantic) records_reused: usize,
+    pub(in crate::semantic) records_filtered: usize,
     pub(in crate::semantic) invalidated_chunks: usize,
     pub(in crate::semantic) deleted_chunks: usize,
     pub(in crate::semantic) ready: bool,
@@ -137,6 +147,15 @@ struct SourceProjectionAcknowledgement {
     core_generation_id: String,
     consumer_build_id: String,
     semantic_documents: u64,
+    projected_documents: u64,
+    #[serde(default)]
+    flat_generation: u64,
+    #[serde(default)]
+    flat_generation_hash: String,
+    #[serde(default)]
+    flat_active_events: u64,
+    #[serde(default)]
+    flat_active_chunks: u64,
 }
 
 #[derive(Debug)]
@@ -145,6 +164,10 @@ struct StoredSourceDocument {
     locator_json: Vec<u8>,
     source_text_sha256: String,
     core_generation_id: String,
+}
+
+struct AcknowledgedSourceProjection {
+    flat: Option<PinnedFlatGeneration>,
 }
 
 impl SemanticVectorStore {
@@ -261,6 +284,22 @@ impl SemanticVectorStore {
                 validate_resolved_document(&event, &document)?;
 
                 let source_text = semantic_source_text(&document.text);
+                if semantic_hydrated_source_is_control(&source_text) {
+                    outcome.invalidated_chunks = outcome
+                        .invalidated_chunks
+                        .saturating_add(self.invalidate_source_event(event.event_id.as_uuid())?);
+                    outcome.records_filtered = outcome.records_filtered.saturating_add(1);
+                    frontier.processed_documents =
+                        frontier.processed_documents.checked_add(1).ok_or_else(|| {
+                            SemanticVectorStoreError::reset_required(
+                                "source-backed semantic frontier document count overflowed",
+                            )
+                        })?;
+                    frontier.after_identity = Some(stable_identity);
+                    frontier.last_failure = None;
+                    self.store_source_frontier(&frontier)?;
+                    continue;
+                }
                 let source_text_sha256 = semantic_document_hash(&document, &source_text);
                 let existing_hash = self
                     .existing_hashes_for_event_ids(&[document.event_id])?
@@ -333,13 +372,46 @@ impl SemanticVectorStore {
         &self,
         core_generation_id: &str,
     ) -> Result<bool> {
-        semantic_owned_sidecar_result((|| {
+        semantic_owned_sidecar_result(
+            self.acknowledged_source_projection(core_generation_id, None)
+                .map(|projection| projection.is_some()),
+        )
+    }
+
+    pub(in crate::semantic) fn pin_source_backed_generation(
+        &self,
+        core_generation_id: &str,
+        semantic_documents: u64,
+    ) -> Result<Option<PinnedFlatGeneration>> {
+        semantic_owned_sidecar_result(
+            self.acknowledged_source_projection(core_generation_id, Some(semantic_documents))
+                .map(|projection| projection.and_then(|projection| projection.flat)),
+        )
+    }
+
+    pub(in crate::semantic) fn source_backed_generation_ready_exact(
+        &self,
+        core_generation_id: &str,
+        semantic_documents: u64,
+    ) -> Result<bool> {
+        semantic_owned_sidecar_result(
+            self.acknowledged_source_projection(core_generation_id, Some(semantic_documents))
+                .map(|projection| projection.is_some()),
+        )
+    }
+
+    fn acknowledged_source_projection(
+        &self,
+        core_generation_id: &str,
+        expected_semantic_documents: Option<u64>,
+    ) -> Result<Option<AcknowledgedSourceProjection>> {
+        (|| {
             validate_generation_id(core_generation_id)?;
             let Some(acknowledgement) = self.source_acknowledgement()? else {
-                return Ok(false);
+                return Ok(None);
             };
             if self.source_frontier()?.is_some() {
-                return Ok(false);
+                return Ok(None);
             }
             let fingerprint = source_contract_fingerprint();
             if acknowledgement.contract_version != SOURCE_CONTRACT_VERSION
@@ -347,8 +419,10 @@ impl SemanticVectorStore {
                 || acknowledgement.core_generation_id != core_generation_id
                 || acknowledgement.consumer_build_id
                     != source_consumer_build_id(&fingerprint, core_generation_id)
+                || expected_semantic_documents
+                    .is_some_and(|expected| acknowledgement.semantic_documents != expected)
             {
-                return Ok(false);
+                return Ok(None);
             }
             let stored_documents: u64 = self.conn.query_row(
                 "SELECT COUNT(*) FROM semantic_source_documents
@@ -356,8 +430,45 @@ impl SemanticVectorStore {
                 [core_generation_id],
                 |row| row.get(0),
             )?;
-            Ok(acknowledgement.semantic_documents == stored_documents)
-        })())
+            if acknowledgement.projected_documents != stored_documents
+                || acknowledgement.projected_documents > acknowledgement.semantic_documents
+            {
+                return Ok(None);
+            }
+            let pinned = self.flat_pin_generation()?;
+            if acknowledgement.projected_documents == 0 {
+                let flat_matches = match pinned.as_ref() {
+                    Some(pinned) => {
+                        acknowledgement.flat_generation == pinned.generation()
+                            && acknowledgement.flat_generation_hash == pinned.generation_hash()
+                            && acknowledgement.flat_active_events
+                                == pinned.stats().active_events as u64
+                            && acknowledgement.flat_active_chunks
+                                == pinned.stats().active_chunks as u64
+                            && acknowledgement.flat_active_events == 0
+                            && acknowledgement.flat_active_chunks == 0
+                    }
+                    None => {
+                        acknowledgement.flat_generation == 0
+                            && acknowledgement.flat_generation_hash.is_empty()
+                            && acknowledgement.flat_active_events == 0
+                            && acknowledgement.flat_active_chunks == 0
+                    }
+                };
+                return Ok(flat_matches.then_some(AcknowledgedSourceProjection { flat: pinned }));
+            }
+            let Some(pinned) = pinned else {
+                return Ok(None);
+            };
+            let stats = pinned.stats();
+            let matches = acknowledgement.flat_generation != 0
+                && acknowledgement.flat_generation == pinned.generation()
+                && acknowledgement.flat_generation_hash == pinned.generation_hash()
+                && acknowledgement.flat_active_events == stats.active_events as u64
+                && acknowledgement.flat_active_chunks == stats.active_chunks as u64
+                && acknowledgement.flat_active_events == acknowledgement.projected_documents;
+            Ok(matches.then_some(AcknowledgedSourceProjection { flat: Some(pinned) }))
+        })()
     }
 
     pub(super) fn source_backed_frontier_generation(&self) -> Result<Option<String>> {
@@ -551,33 +662,38 @@ impl SemanticVectorStore {
 
     fn finish_source_generation(&mut self, frontier: &SourceProjectionFrontier) -> Result<usize> {
         let mut statement = self.conn.prepare(
-            "SELECT event_id FROM semantic_source_documents WHERE core_generation_id = ?1",
+            "SELECT event_id, source_text_sha256
+             FROM semantic_source_documents WHERE core_generation_id = ?1",
         )?;
         let rows = statement.query_map([&frontier.core_generation_id], |row| {
-            row.get::<_, String>(0)
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
         let current = rows
             .map(|row| {
-                let value = row?;
-                Uuid::parse_str(&value).map_err(|_| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        0,
-                        rusqlite::types::Type::Text,
-                        Box::new(SemanticVectorStoreError::reset_required(format!(
-                            "invalid source-backed semantic event id: {value}"
-                        ))),
-                    )
-                })
+                let (value, source_text_sha256) = row?;
+                Uuid::parse_str(&value)
+                    .map_err(|_| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(SemanticVectorStoreError::reset_required(format!(
+                                "invalid source-backed semantic event id: {value}"
+                            ))),
+                        )
+                    })
+                    .map(|event_id| (event_id, source_text_sha256))
             })
-            .collect::<std::result::Result<std::collections::HashSet<_>, _>>()?;
+            .collect::<std::result::Result<HashMap<_, _>, _>>()?;
         drop(statement);
         let retired = self
             .flat_active_events()?
             .into_iter()
             .map(|event| event.event_id)
-            .filter(|event_id| !current.contains(event_id))
+            .filter(|event_id| !current.contains_key(event_id))
             .collect::<Vec<_>>();
         let deleted = self.delete_events(&retired)?;
+        let pinned = self.flat_pin_generation()?;
+        let projected_documents = validate_flat_projection(frontier, &current, pinned.as_ref())?;
 
         let transaction = self.conn.transaction()?;
         transaction.execute(
@@ -590,6 +706,17 @@ impl SemanticVectorStore {
             core_generation_id: frontier.core_generation_id.clone(),
             consumer_build_id: frontier.consumer_build_id.clone(),
             semantic_documents: frontier.semantic_documents,
+            projected_documents,
+            flat_generation: pinned.as_ref().map_or(0, PinnedFlatGeneration::generation),
+            flat_generation_hash: pinned
+                .as_ref()
+                .map_or_else(String::new, |pinned| pinned.generation_hash().to_owned()),
+            flat_active_events: pinned
+                .as_ref()
+                .map_or(0, |pinned| pinned.stats().active_events as u64),
+            flat_active_chunks: pinned
+                .as_ref()
+                .map_or(0, |pinned| pinned.stats().active_chunks as u64),
         };
         transaction.execute(
             "INSERT INTO semantic_maintenance_state(key, value) VALUES (?1, ?2)
@@ -606,6 +733,76 @@ impl SemanticVectorStore {
         transaction.commit()?;
         Ok(deleted)
     }
+}
+
+fn validate_flat_projection(
+    frontier: &SourceProjectionFrontier,
+    source_documents: &HashMap<Uuid, String>,
+    pinned: Option<&PinnedFlatGeneration>,
+) -> Result<u64> {
+    let source_document_count = u64::try_from(source_documents.len())?;
+    if source_document_count > frontier.semantic_documents {
+        return Err(SemanticVectorStoreError::reset_required(format!(
+            "source-backed semantic completion has {source_document_count} projected documents, but only {} metadata-eligible records",
+            frontier.semantic_documents
+        ))
+        .into());
+    }
+    if source_document_count == 0 {
+        if pinned.is_some_and(|pinned| {
+            pinned.stats().active_events != 0 || pinned.stats().active_chunks != 0
+        }) {
+            return Err(SemanticVectorStoreError::reset_required(
+                "empty source-backed semantic generation has active flat F32 records",
+            )
+            .into());
+        }
+        return Ok(0);
+    }
+    let pinned = pinned.ok_or_else(|| {
+        SemanticVectorStoreError::reset_required(
+            "source-backed semantic completion has no flat F32 generation",
+        )
+    })?;
+    if pinned.stats().active_events as u64 != source_document_count
+        || pinned.active_events().len() != source_documents.len()
+    {
+        return Err(SemanticVectorStoreError::reset_required(
+            "source-backed semantic source-document count does not match flat F32 events",
+        )
+        .into());
+    }
+    for event in pinned.active_events() {
+        if event.chunk_count == 0
+            || source_documents
+                .get(&event.event_id)
+                .is_none_or(|hash| hash != &event.source_text_hash.to_hex())
+        {
+            return Err(SemanticVectorStoreError::reset_required(
+                "source-backed semantic source documents do not match flat F32 event metadata",
+            )
+            .into());
+        }
+    }
+    Ok(source_document_count)
+}
+
+/// The metadata feed deliberately does not inspect indexed or stored body
+/// text. Control-message exclusion happens only after exact provider content
+/// has been hydrated for the generation-bound locator.
+pub(in crate::semantic) fn semantic_hydrated_source_is_control(text: &str) -> bool {
+    let user = text
+        .strip_prefix("user:\n")
+        .unwrap_or(text)
+        .split_once("\n\nassistant:\n")
+        .map_or(text.strip_prefix("user:\n").unwrap_or(text), |(user, _)| {
+            user
+        })
+        .trim();
+    user.starts_with("<environment_context>")
+        || user.starts_with("<turn_aborted>")
+        || user.starts_with("<subagent_notification>")
+        || user.starts_with("Warning: The maximum number of unified exec processes")
 }
 
 fn validate_generation(generation: &SourceBackedSemanticGeneration) -> Result<()> {
@@ -752,6 +949,7 @@ mod tests {
     struct FakeResolver {
         texts: HashMap<Uuid, String>,
         failures: HashMap<Uuid, HydrationFailureKind>,
+        calls: Vec<Uuid>,
     }
 
     impl FakeResolver {
@@ -767,6 +965,7 @@ mod tests {
                     })
                     .collect(),
                 failures: HashMap::new(),
+                calls: Vec::new(),
             }
         }
     }
@@ -779,6 +978,7 @@ mod tests {
         ) -> std::result::Result<EventEmbeddingDocument, HydrationFailure> {
             assert_eq!(request.event_id(), event.event_id);
             assert_eq!(request.locator(), &event.locator);
+            self.calls.push(event.event_id.as_uuid());
             if let Some(kind) = self.failures.get(&event.event_id.as_uuid()).copied() {
                 return Err(HydrationFailure {
                     kind,
@@ -908,7 +1108,7 @@ mod tests {
                 occurred_at_unix_ms: Some(sequence as i64),
                 event_type: "message".to_owned(),
                 role: Some("user".to_owned()),
-                preview: format!("bounded preview {sequence}"),
+                preview: String::new(),
                 workspace: Some("/workspace".to_owned()),
                 cwd: Some("/workspace".to_owned()),
                 touched_files: Vec::new(),
@@ -986,6 +1186,53 @@ mod tests {
                 .len(),
             2
         );
+        let pinned = store
+            .pin_source_backed_generation(&target.core_generation_id, 2)?
+            .expect("exact flat generation");
+        assert_eq!(pinned.stats().active_events, 2);
+        store.delete_events(&[first.event_id.as_uuid()])?;
+        assert!(!store.source_backed_generation_ready_exact(&target.core_generation_id, 2)?);
+        assert!(store
+            .pin_source_backed_generation(&target.core_generation_id, 2)?
+            .is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn metadata_eligible_control_record_is_filtered_only_after_exact_hydration() -> Result<()> {
+        let fixture = Fixture::new()?;
+        let event = fixture.event(1, 1)?;
+        let target = generation(9, 1);
+        let mut resolver = FakeResolver::available(std::slice::from_ref(&event));
+        resolver.texts.insert(
+            event.event_id.as_uuid(),
+            "<environment_context>exact provider control record</environment_context>".to_owned(),
+        );
+        let mut embedder = FakeEmbedder::default();
+        let mut store = SemanticVectorStore::open(&fixture.path)?;
+
+        let outcome = store.reconcile_source_backed_page(
+            &target,
+            SourceBackedSemanticPage {
+                core_generation_id: target.core_generation_id.clone(),
+                after: None,
+                records: vec![event.clone()],
+                terminal: true,
+            },
+            &mut resolver,
+            &mut embedder,
+        )?;
+
+        assert_eq!(resolver.calls, vec![event.event_id.as_uuid()]);
+        assert_eq!(outcome.records_filtered, 1);
+        assert_eq!(outcome.records_embedded, 0);
+        assert_eq!(embedder.calls, 0);
+        assert!(outcome.ready);
+        assert!(store.source_backed_generation_ready_exact(&target.core_generation_id, 1)?);
+        if let Some(pinned) = store.pin_source_backed_generation(&target.core_generation_id, 1)? {
+            assert_eq!(pinned.stats().active_events, 0);
+            assert_eq!(pinned.stats().active_chunks, 0);
+        }
         Ok(())
     }
 

@@ -1,23 +1,26 @@
-use std::{
-    env,
-    path::Path,
-    process,
-    time::{Duration as StdDuration, Instant},
-};
+#[cfg(test)]
+use std::{env, time::Duration as StdDuration};
+use std::{path::Path, process, time::Instant};
 
-use anyhow::{anyhow, Context, Result};
-use ctx_history_capture::{
-    build_automatic_source_backed_registry, DiscoveryContext, SourceBackedResolverRegistry,
-};
+use anyhow::Result;
+#[cfg(test)]
+use anyhow::{anyhow, Context};
+#[cfg(test)]
+use ctx_history_capture::SourceBackedResolverRegistry;
+#[cfg(test)]
+use ctx_history_core::database_path;
 use ctx_history_core::{
-    database_path, utc_now, AgentType, CaptureProvider, ContentSourceResolver,
-    EventHydrationRequest, EventRole, EventType, HydrationFailure, HydrationFailureKind,
+    utc_now, AgentType, BatchHydrationRequest, BatchHydrationResult, CaptureProvider,
+    ContentSourceResolver, EventHydrationRequest, EventRole, EventType, HydratedProviderRecord,
+    HydrationFailure, HydrationFailureKind,
 };
 use ctx_history_index::{EventRecord, VerifiedIndex};
-use ctx_history_store::{CanonicalSemanticProjectionVersion, EventEmbeddingDocument, Store};
+#[cfg(test)]
+use ctx_history_store::Store;
+use ctx_history_store::{CanonicalSemanticProjectionVersion, EventEmbeddingDocument};
 use serde_json::{json, Value};
 
-use crate::{store_util::open_existing_store_read_only, DaemonRunArgs, DaemonTriggerCommandArg};
+use crate::{DaemonRunArgs, DaemonTriggerCommandArg};
 
 use super::{
     daemon::DaemonRuntime,
@@ -25,24 +28,19 @@ use super::{
         annotate_semantic_failure, classify_semantic_failure, DaemonRetryBackoff,
         SemanticFailureClass,
     },
-    daemon_scheduler::{
-        daemon_deadline_has_min_budget, daemon_deadline_remaining, daemon_run_start_mode,
-        refresh_semantic_document_count_cache, semantic_report_should_queue_recent_work,
-    },
+    daemon_scheduler::{daemon_deadline_has_min_budget, daemon_run_start_mode},
     health_search::{
-        env_usize, json_string, json_usize, semantic_embed_policy_status_json,
-        semantic_model_acquisition_integrity_error, semantic_model_acquisition_status_json,
-        semantic_model_cache_available, semantic_worker_cache_dir,
+        semantic_embed_policy_status_json, semantic_model_acquisition_integrity_error,
+        semantic_model_acquisition_status_json, semantic_model_cache_available,
+        semantic_worker_cache_dir,
     },
-    indexing::{backfill_semantic_embeddings, semantic_document_hash, semantic_source_text},
-    model_contract::{semantic_model_key, SemanticModelLoadDeferred, SEMANTIC_MODEL_ID},
+    model_contract::{semantic_model_key, SemanticModelLoadDeferred},
     model_runtime::{
         SemanticDaemonCpuFallbackRequired, SemanticDaemonModelAcquisition, SharedSemanticRuntime,
     },
     paths_status::{
-        read_semantic_worker_status, semantic_status_file_model_matches, semantic_vector_path,
-        semantic_worker_report, semantic_worker_report_best_effort, semantic_worker_report_cached,
-        write_daemon_status, write_semantic_worker_status, SemanticWorkerLock,
+        semantic_worker_lock_path, semantic_worker_status_path, write_daemon_status,
+        write_semantic_worker_status,
     },
     reports::SemanticWorkerReport,
     resource_policy::{
@@ -51,19 +49,34 @@ use super::{
     },
     runtime_limits::{
         DAEMON_MIN_REMAINING_FOR_JOB_SECS, DAEMON_SEMANTIC_RESERVE_GRACE_SECS,
-        SEMANTIC_DIRTY_QUEUE_RECENT_LIMIT, SEMANTIC_MODEL_INIT_MIN_REMAINING_SECS,
-        SEMANTIC_SOURCE_MAX_CHARS, SEMANTIC_WORKER_BATCH_DEFAULT, SEMANTIC_WORKER_BATCH_MAX,
-        SEMANTIC_WORKER_MAX_SECONDS_CAP, SEMANTIC_WORKER_MAX_SECONDS_DEFAULT,
+        SEMANTIC_MODEL_INIT_MIN_REMAINING_SECS, SEMANTIC_SOURCE_MAX_CHARS,
     },
     source_backed_refresh_coordinator::{pin_published_generation, PinnedSourceBackedGeneration},
     vector_store::{
-        SemanticChunkDocument, SemanticSidecarStats, SemanticVectorStore,
-        SourceBackedSemanticEmbedder, SourceBackedSemanticOutcome, SourceBackedSemanticResolver,
+        semantic_hydrated_source_is_control, source_backed_semantic_vector_path,
+        SemanticChunkDocument, SemanticVectorStore, SourceBackedSemanticEmbedder,
+        SourceBackedSemanticOutcome, SourceBackedSemanticResolver,
     },
 };
 
 #[cfg(test)]
-use super::daemon::daemon_test_job;
+use super::{
+    daemon::daemon_test_job,
+    daemon_scheduler::{daemon_deadline_remaining, refresh_semantic_document_count_cache},
+    health_search::{env_usize, json_string, json_usize},
+    indexing::{backfill_semantic_embeddings, semantic_document_hash, semantic_source_text},
+    model_contract::SEMANTIC_MODEL_ID,
+    paths_status::{
+        read_semantic_worker_status, semantic_status_file_model_matches, semantic_vector_path,
+        SemanticWorkerLock,
+    },
+    runtime_limits::{
+        SEMANTIC_DIRTY_QUEUE_RECENT_LIMIT, SEMANTIC_WORKER_BATCH_DEFAULT,
+        SEMANTIC_WORKER_BATCH_MAX, SEMANTIC_WORKER_MAX_SECONDS_CAP,
+        SEMANTIC_WORKER_MAX_SECONDS_DEFAULT,
+    },
+    vector_store::SemanticSidecarStats,
+};
 
 use crate::output::compact_json;
 
@@ -75,6 +88,7 @@ pub(super) struct SemanticReconciliationSweepState {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[cfg(test)]
 pub(super) struct SemanticReconciliationOutcome {
     pub(super) committed_documents_scanned: usize,
     pub(super) committed_documents_queued: usize,
@@ -85,6 +99,7 @@ pub(super) struct SemanticReconciliationOutcome {
 }
 
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub(super) struct SemanticWorkerArgs {
     pub(super) max_chunks: Option<usize>,
     pub(super) max_seconds: Option<u64>,
@@ -233,7 +248,7 @@ where
 }
 
 pub(super) fn run_daemon_semantic_job(
-    args: &DaemonRunArgs,
+    _args: &DaemonRunArgs,
     data_root: &Path,
     runtime: &mut DaemonRuntime,
     deadline: Option<Instant>,
@@ -255,17 +270,15 @@ pub(super) fn run_daemon_semantic_job(
         return Ok(value);
     }
 
-    let source_generation = pin_published_generation(data_root)?;
-    let db_path = database_path(data_root.to_path_buf());
-    if source_generation.is_none() && !db_path.exists() {
+    let Some(source_generation) = pin_published_generation(data_root)? else {
         return Ok(daemon_semantic_job_json(
             "skipped",
-            Some("store_missing"),
+            Some("source_generation_missing"),
             last_run_at_ms,
             None,
             None,
         ));
-    }
+    };
     if !daemon_deadline_has_min_budget(deadline, DAEMON_MIN_REMAINING_FOR_JOB_SECS) {
         return Ok(daemon_semantic_job_json(
             "skipped",
@@ -292,52 +305,17 @@ pub(super) fn run_daemon_semantic_job(
         ));
     }
 
-    let store = db_path
-        .exists()
-        .then(|| Store::open(&db_path).context("open ctx store for daemon semantic job"))
-        .transpose()?;
-    let vector_path = semantic_vector_path(data_root);
-    let mut source_vector_store = None;
-    let mut source_pending = false;
-    let mut source_eligible_events = 0_u64;
-    let mut before = if let Some(source_generation) = source_generation.as_ref() {
-        let vector_store = SemanticVectorStore::open(&vector_path)?;
-        source_pending =
-            !vector_store.source_backed_generation_ready(source_generation.generation_id())?;
-        source_eligible_events = source_generation.semantic_eligible_event_count()?;
-        source_vector_store = Some(vector_store);
-        semantic_worker_report(data_root, store.as_ref())?
-    } else {
-        let store = store
-            .as_ref()
-            .ok_or_else(|| anyhow!("legacy semantic projection has no canonical store"))?;
-        refresh_semantic_document_count_cache(store)?;
-        let _ = reconcile_committed_semantic_work_with_state(
-            data_root,
-            store,
-            &mut runtime.semantic_reconciliation_sweep,
-        )?;
-        let mut report = semantic_worker_report(data_root, Some(store))?;
-        if semantic_report_should_queue_recent_work(&report)
-            && queue_recent_semantic_work(data_root, store, "daemon_recent")? > 0
-        {
-            report = semantic_worker_report(data_root, Some(store))?;
-        }
-        report
-    };
-    if source_generation.is_some() && !source_pending {
+    let vector_path = source_backed_semantic_vector_path(data_root);
+    let mut vector_store = SemanticVectorStore::open(&vector_path)?;
+    let source_eligible_events = source_generation.semantic_eligible_event_count()?;
+    let source_pending = !vector_store.source_backed_generation_ready_exact(
+        source_generation.generation_id(),
+        source_eligible_events,
+    )?;
+    if !source_pending {
         return Ok(daemon_semantic_job_json(
             "ready",
             None,
-            last_run_at_ms,
-            None,
-            None,
-        ));
-    }
-    if source_generation.is_none() && before.searchable_items == 0 {
-        return Ok(daemon_semantic_job_json(
-            "empty",
-            Some("no_searchable_items"),
             last_run_at_ms,
             None,
             None,
@@ -359,10 +337,8 @@ pub(super) fn run_daemon_semantic_job(
         ));
     }
     let source_model_load_needed =
-        source_pending && source_eligible_events > 0 && !runtime.semantic_runtime.is_loaded();
-    if source_model_load_needed
-        || semantic_daemon_model_load_needed(&before, runtime.semantic_runtime.is_loaded())
-    {
+        source_eligible_events > 0 && !runtime.semantic_runtime.is_loaded();
+    if source_model_load_needed {
         let cache_dir = semantic_worker_cache_dir(data_root);
         match run_daemon_semantic_model_startup_with(
             data_root,
@@ -383,127 +359,45 @@ pub(super) fn run_daemon_semantic_job(
                 ))
             },
         )? {
-            DaemonSemanticModelStartup::Loaded => {
-                before = semantic_worker_report(data_root, store.as_ref())?;
-            }
+            DaemonSemanticModelStartup::Loaded => {}
             DaemonSemanticModelStartup::Finished(job) => return Ok(job),
         }
     }
-    if let Some(source_generation) = source_generation {
-        let cache_dir = semantic_worker_cache_dir(data_root);
-        let vector_store = source_vector_store
-            .as_mut()
-            .ok_or_else(|| anyhow!("source-backed semantic generation has no flat vector store"))?;
-        let (outcome, indexed_chunks) = reconcile_source_backed_semantic_page(
-            source_generation,
-            vector_store,
-            &runtime.semantic_runtime,
-            &cache_dir,
-            deadline,
-        )?;
-        let (status, reason, last_error) = if let Some(unavailable) = outcome.unavailable {
-            (
-                "failed",
-                Some("source_hydration_unavailable"),
-                Some(format!(
-                    "source-backed semantic hydration failed: {unavailable:?}"
-                )),
-            )
-        } else if outcome.ready {
-            ("ready", None, None)
-        } else {
-            ("budget_exhausted", None, None)
-        };
-        let mut job = daemon_semantic_job_json(
-            status,
-            reason,
-            last_run_at_ms,
-            (indexed_chunks > 0).then_some(indexed_chunks),
-            last_error,
-        );
-        annotate_source_backed_semantic_progress(&mut job, &outcome);
-        return Ok(job);
-    }
-    if before.queued_items_estimate == 0 {
-        return Ok(daemon_semantic_job_json(
-            "ready",
-            None,
-            last_run_at_ms,
-            None,
-            None,
-        ));
-    }
-    drop(store);
-
-    if let Some(deferred) =
-        semantic_background_resource_deferred(data_root, SemanticBackgroundOperation::IndexBatch)
-    {
-        if semantic_resource_deferral_releases_runtime(deferred.reason) {
-            let _ = runtime.semantic_runtime.release_if_idle();
-        }
-        let _ = write_semantic_resource_deferred_status(data_root, deferred);
-        return Ok(daemon_semantic_resource_deferred_job(
-            last_run_at_ms,
-            deferred,
-        ));
-    }
-
-    let worker_max_seconds = daemon_semantic_worker_seconds_budget(args, deadline);
-    if worker_max_seconds == 0 {
-        return Ok(daemon_semantic_job_json(
-            "skipped",
-            Some("daemon_deadline"),
-            last_run_at_ms,
-            None,
-            None,
-        ));
-    }
-    let worker_args = SemanticWorkerArgs {
-        max_chunks: args.max_chunks,
-        max_seconds: Some(worker_max_seconds),
-    };
-    let worker_result =
-        run_semantic_worker_inner_with_runtime(worker_args, data_root, &runtime.semantic_runtime);
-    if let Err(error) = worker_result {
-        if let Some(deferred) = error.downcast_ref::<SemanticModelLoadDeferred>() {
-            let _ = write_semantic_model_load_deferred_status(data_root, deferred);
-            return Ok(daemon_semantic_model_load_deferred_job(
-                last_run_at_ms,
-                deferred,
-            ));
-        }
-        let message = format!("{error:#}");
-        let failure_class = classify_semantic_failure(&error);
-        let _ = write_semantic_worker_failure_status(data_root, message.clone());
-        return Ok(annotate_semantic_failure(
-            daemon_semantic_job_json("failed", None, last_run_at_ms, None, Some(message)),
-            failure_class,
-        ));
-    }
-    let report = semantic_worker_report_for_daemon(data_root);
-    let indexed_chunks_now = report
-        .embedded_chunks
-        .saturating_sub(before.embedded_chunks);
-    let indexed_chunks = (indexed_chunks_now > 0).then_some(indexed_chunks_now);
-    let status = if report.running {
-        "running"
-    } else if report.queued_items_estimate == 0 {
-        "ready"
-    } else if indexed_chunks_now > 0 {
-        "budget_exhausted"
+    let cache_dir = semantic_worker_cache_dir(data_root);
+    let (outcome, indexed_chunks) = reconcile_source_backed_semantic_page(
+        data_root,
+        source_generation,
+        &mut vector_store,
+        &runtime.semantic_runtime,
+        &cache_dir,
+        deadline,
+    )?;
+    let (status, reason, last_error) = if let Some(unavailable) = outcome.unavailable {
+        (
+            "failed",
+            Some("source_hydration_unavailable"),
+            Some(format!(
+                "source-backed semantic hydration failed: {unavailable:?}"
+            )),
+        )
+    } else if outcome.ready {
+        ("ready", None, None)
     } else {
-        report.status.as_str()
+        ("budget_exhausted", None, None)
     };
-    Ok(daemon_semantic_job_json(
+    let mut job = daemon_semantic_job_json(
         status,
-        None,
+        reason,
         last_run_at_ms,
-        indexed_chunks,
-        None,
-    ))
+        (indexed_chunks > 0).then_some(indexed_chunks),
+        last_error,
+    );
+    annotate_source_backed_semantic_progress(&mut job, &outcome);
+    Ok(job)
 }
 
 fn reconcile_source_backed_semantic_page(
+    data_root: &Path,
     generation: PinnedSourceBackedGeneration,
     vector_store: &mut SemanticVectorStore,
     runtime: &SharedSemanticRuntime,
@@ -511,14 +405,12 @@ fn reconcile_source_backed_semantic_page(
     deadline: Option<Instant>,
 ) -> Result<(SourceBackedSemanticOutcome, usize)> {
     let index = generation.into_index();
-    let home = crate::provider_sources::home_dir()
-        .ok_or_else(|| anyhow!("resolve home directory for source-backed semantic hydration"))?;
-    let discovery = DiscoveryContext::from_process(home);
-    let source_registry = build_automatic_source_backed_registry(&discovery).registry;
-    let sources: SourceBackedResolverRegistry = source_registry.resolver_registry();
     let mut resolver = ProviderSourceSemanticResolver {
         index: &index,
-        sources,
+        sources: DaemonGenerationSourceResolver {
+            index: &index,
+            data_root,
+        },
     };
     let mut embedder = RuntimeSourceSemanticEmbedder {
         runtime,
@@ -531,6 +423,143 @@ fn reconcile_source_backed_semantic_page(
     Ok((outcome, embedder.indexed_chunks))
 }
 
+struct DaemonGenerationSourceResolver<'a> {
+    index: &'a VerifiedIndex,
+    data_root: &'a Path,
+}
+
+impl ContentSourceResolver for DaemonGenerationSourceResolver<'_> {
+    fn hydrate_event(
+        &self,
+        request: &EventHydrationRequest,
+    ) -> std::result::Result<HydratedProviderRecord, HydrationFailure> {
+        let event = self
+            .index
+            .event_by_id(request.event_id().as_uuid())
+            .map_err(|error| {
+                source_hydration_failure(
+                    HydrationFailureKind::TemporarilyUnavailable,
+                    format!(
+                        "read source-backed semantic event {}: {error}",
+                        request.event_id()
+                    ),
+                )
+            })?
+            .ok_or_else(|| {
+                source_hydration_failure(
+                    HydrationFailureKind::MissingRecord,
+                    format!(
+                        "source-backed generation omitted semantic event {}",
+                        request.event_id()
+                    ),
+                )
+            })?;
+        validate_source_semantic_request(&event, request)?;
+        let mut hydrated = PinnedSourceBackedGeneration::hydrate_source_complete_events(
+            self.index,
+            self.data_root,
+            &[&event],
+        )
+        .map_err(daemon_source_hydration_failure)?;
+        let text = hydrated
+            .remove(&request.event_id().as_uuid())
+            .filter(|text| !text.is_empty())
+            .ok_or_else(|| {
+                source_hydration_failure(
+                    HydrationFailureKind::MissingRecord,
+                    format!(
+                        "daemon source hydration omitted semantic event {}",
+                        request.event_id()
+                    ),
+                )
+            })?;
+        Ok(HydratedProviderRecord {
+            event_id: request.event_id(),
+            provider_bytes: text.into_bytes(),
+        })
+    }
+
+    fn hydrate_batch(
+        &self,
+        request: &BatchHydrationRequest,
+    ) -> std::result::Result<BatchHydrationResult, HydrationFailure> {
+        let mut events = Vec::with_capacity(request.events().len());
+        for event_request in request.events() {
+            let event = self
+                .index
+                .event_by_id(event_request.event_id().as_uuid())
+                .map_err(|error| {
+                    source_hydration_failure(
+                        HydrationFailureKind::TemporarilyUnavailable,
+                        format!(
+                            "read source-backed semantic session event {}: {error}",
+                            event_request.event_id()
+                        ),
+                    )
+                })?
+                .ok_or_else(|| {
+                    source_hydration_failure(
+                        HydrationFailureKind::MissingRecord,
+                        format!(
+                            "source-backed generation omitted semantic session event {}",
+                            event_request.event_id()
+                        ),
+                    )
+                })?;
+            validate_source_semantic_request(&event, event_request)?;
+            events.push(event);
+        }
+        let references = events.iter().collect::<Vec<_>>();
+        let mut hydrated = PinnedSourceBackedGeneration::hydrate_source_complete_events(
+            self.index,
+            self.data_root,
+            &references,
+        )
+        .map_err(daemon_source_hydration_failure)?;
+        let records = request
+            .events()
+            .iter()
+            .map(|event| {
+                let text = hydrated
+                    .remove(&event.event_id().as_uuid())
+                    .filter(|text| !text.is_empty())
+                    .ok_or_else(|| {
+                        source_hydration_failure(
+                            HydrationFailureKind::MissingRecord,
+                            format!(
+                                "daemon source hydration omitted semantic session event {}",
+                                event.event_id()
+                            ),
+                        )
+                    })?;
+                Ok(HydratedProviderRecord {
+                    event_id: event.event_id(),
+                    provider_bytes: text.into_bytes(),
+                })
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let result = BatchHydrationResult::new(records).map_err(|error| {
+            source_hydration_failure(
+                HydrationFailureKind::InvalidLocator,
+                format!("construct daemon semantic batch hydration result: {error}"),
+            )
+        })?;
+        result.validate_for_request(request)?;
+        Ok(result)
+    }
+}
+
+fn daemon_source_hydration_failure(error: anyhow::Error) -> HydrationFailure {
+    PinnedSourceBackedGeneration::source_hydration_failure(&error).unwrap_or_else(|| {
+        source_hydration_failure(
+            HydrationFailureKind::TemporarilyUnavailable,
+            format!(
+                "request generation-bound daemon source hydration for semantic projection: {error:#}"
+            ),
+        )
+    })
+}
+
 fn annotate_source_backed_semantic_progress(
     job: &mut Value,
     outcome: &SourceBackedSemanticOutcome,
@@ -538,6 +567,7 @@ fn annotate_source_backed_semantic_progress(
     job["source_records_scanned"] = json!(outcome.records_scanned);
     job["source_records_embedded"] = json!(outcome.records_embedded);
     job["source_records_reused"] = json!(outcome.records_reused);
+    job["source_records_filtered"] = json!(outcome.records_filtered);
     job["source_invalidated_chunks"] = json!(outcome.invalidated_chunks);
     job["source_deleted_chunks"] = json!(outcome.deleted_chunks);
     job["source_generation_ready"] = json!(outcome.ready);
@@ -608,14 +638,15 @@ where
     ) -> std::result::Result<EventEmbeddingDocument, HydrationFailure> {
         validate_source_semantic_request(event, request)?;
         let user_text = hydrate_source_semantic_text(&self.sources, event, request)?;
-        let assistant = self.paired_assistant(event)?;
         let mut sections = vec![format!("user:\n{}", user_text.trim())];
         let mut occurred_at_ms = event.occurred_at_unix_ms.unwrap_or_default();
-        if let Some((assistant_text, assistant_at_ms)) = assistant {
-            if !assistant_text.trim().is_empty() {
-                sections.push(format!("assistant:\n{}", assistant_text.trim()));
+        if !semantic_hydrated_source_is_control(&sections[0]) {
+            if let Some((assistant_text, assistant_at_ms)) = self.paired_assistant(event)? {
+                if !assistant_text.trim().is_empty() {
+                    sections.push(format!("assistant:\n{}", assistant_text.trim()));
+                }
+                occurred_at_ms = occurred_at_ms.max(assistant_at_ms);
             }
-            occurred_at_ms = occurred_at_ms.max(assistant_at_ms);
         }
         let text = sections
             .join("\n\n")
@@ -749,7 +780,16 @@ fn hydrate_source_semantic_text(
             ),
         ));
     }
-    let text = String::from_utf8_lossy(&hydrated.provider_bytes).into_owned();
+    let text = String::from_utf8(hydrated.provider_bytes).map_err(|error| {
+        source_hydration_failure(
+            HydrationFailureKind::UnsupportedParserRevision,
+            format!(
+                "provider resolver returned non-UTF-8 source content for {}: {}",
+                request.event_id(),
+                error.utf8_error()
+            ),
+        )
+    })?;
     if text.trim().is_empty() {
         return Err(source_hydration_failure(
             HydrationFailureKind::MissingRecord,
@@ -808,6 +848,7 @@ fn parse_source_agent_type(value: &str) -> std::result::Result<AgentType, Hydrat
     })
 }
 
+#[cfg(test)]
 pub(super) fn reconcile_committed_semantic_work_with_state(
     data_root: &Path,
     store: &Store,
@@ -898,6 +939,7 @@ pub(super) fn reconcile_committed_semantic_work_with_state(
     Ok(outcome)
 }
 
+#[cfg(test)]
 fn prepare_semantic_reconciliation_version(
     vector_store: &mut SemanticVectorStore,
     store: &Store,
@@ -938,6 +980,7 @@ fn prepare_semantic_reconciliation_version(
     }
 }
 
+#[cfg(test)]
 fn rearm_semantic_reconciliation(
     vector_store: &mut SemanticVectorStore,
     sweep: &mut SemanticReconciliationSweepState,
@@ -950,6 +993,7 @@ fn rearm_semantic_reconciliation(
     Ok(())
 }
 
+#[cfg(test)]
 fn compare_and_ack_semantic_reconciliation_version(
     vector_store: &mut SemanticVectorStore,
     store: &Store,
@@ -978,6 +1022,7 @@ fn compare_and_ack_semantic_reconciliation_version(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn daemon_semantic_requested_seconds(args: &DaemonRunArgs) -> u64 {
     semantic_worker_seconds_budget(&SemanticWorkerArgs {
         max_chunks: args.max_chunks,
@@ -985,6 +1030,7 @@ pub(super) fn daemon_semantic_requested_seconds(args: &DaemonRunArgs) -> u64 {
     })
 }
 
+#[cfg(test)]
 pub(super) fn semantic_daemon_model_load_needed(
     report: &SemanticWorkerReport,
     runtime_loaded: bool,
@@ -992,6 +1038,7 @@ pub(super) fn semantic_daemon_model_load_needed(
     report.searchable_items > 0 && !runtime_loaded
 }
 
+#[cfg(test)]
 pub(super) fn daemon_semantic_worker_seconds_budget(
     args: &DaemonRunArgs,
     deadline: Option<Instant>,
@@ -1194,22 +1241,84 @@ fn write_daemon_lifecycle_status_observed(
 }
 
 pub(super) fn semantic_worker_report_for_daemon(data_root: &Path) -> SemanticWorkerReport {
-    let db_path = database_path(data_root.to_path_buf());
-    if db_path.exists() {
-        match open_existing_store_read_only(&db_path, "ctx daemon status") {
-            Ok(store) => {
-                return semantic_worker_report_cached(data_root, Some(&store)).unwrap_or_else(
-                    |error| SemanticWorkerReport::unavailable(data_root, format!("{error:#}")),
-                );
-            }
-            Err(error) => {
-                return SemanticWorkerReport::unavailable(data_root, format!("{error:#}"));
-            }
-        }
-    }
-    semantic_worker_report_best_effort(data_root)
+    let source_vector_path = source_backed_semantic_vector_path(data_root);
+    let report = (|| -> Result<SemanticWorkerReport> {
+        let source_generation = pin_published_generation(data_root)?;
+        let (searchable_items, searchable_items_known, embedded_items, embedded_chunks, ready) =
+            if let Some(source_generation) = source_generation {
+                let semantic_documents = source_generation.semantic_eligible_event_count()?;
+                let searchable_items = usize::try_from(semantic_documents).unwrap_or(usize::MAX);
+                let vector_store = SemanticVectorStore::open_read_only(&source_vector_path)?;
+                let stats = vector_store
+                    .as_ref()
+                    .map(SemanticVectorStore::cached_or_exact_stats)
+                    .transpose()?
+                    .unwrap_or_default();
+                let ready = vector_store
+                    .as_ref()
+                    .map(|store| {
+                        store.source_backed_generation_ready_exact(
+                            source_generation.generation_id(),
+                            semantic_documents,
+                        )
+                    })
+                    .transpose()?
+                    .unwrap_or(false);
+                (
+                    searchable_items,
+                    true,
+                    stats.embedded_items,
+                    stats.embedded_chunks,
+                    ready,
+                )
+            } else {
+                (0, false, 0, 0, false)
+            };
+        Ok(SemanticWorkerReport {
+            status: if ready {
+                "ready".to_owned()
+            } else if searchable_items_known {
+                "pending".to_owned()
+            } else {
+                "waiting_for_source_generation".to_owned()
+            },
+            running: false,
+            pid: None,
+            started_at_ms: None,
+            heartbeat_at_ms: None,
+            finished_at_ms: None,
+            indexed_chunks: None,
+            model_init_ms: None,
+            last_error: None,
+            searchable_items,
+            searchable_items_known,
+            embedded_items,
+            embedded_chunks,
+            dirty_items: 0,
+            queued_items_estimate: searchable_items.saturating_sub(embedded_items),
+            model_cache_available: semantic_model_cache_available(&semantic_worker_cache_dir(
+                data_root,
+            )),
+            model_acquisition: semantic_model_acquisition_status_json(&semantic_worker_cache_dir(
+                data_root,
+            )),
+            embed_policy: Some(semantic_embed_policy_status_json()),
+            embedding_runtime: None,
+            failure_class: None,
+            resource_deferral: None,
+            vector_path: source_vector_path.clone(),
+            lock_path: semantic_worker_lock_path(data_root),
+            status_path: semantic_worker_status_path(data_root),
+        })
+    })();
+    report.unwrap_or_else(|error| {
+        let mut report = SemanticWorkerReport::unavailable(data_root, format!("{error:#}"));
+        report.vector_path = source_vector_path;
+        report
+    })
 }
 
+#[cfg(test)]
 pub(super) fn write_semantic_worker_failure_status(
     data_root: &Path,
     message: String,
@@ -1374,6 +1483,7 @@ pub(super) fn write_semantic_model_loaded_status(
     )
 }
 
+#[cfg(test)]
 pub(super) fn run_semantic_worker_inner_with_runtime(
     args: SemanticWorkerArgs,
     data_root: &Path,
@@ -1505,6 +1615,7 @@ pub(super) fn run_semantic_worker_inner_with_runtime(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn semantic_worker_chunk_budget(args: &SemanticWorkerArgs) -> usize {
     args.max_chunks
         .or_else(|| env_usize("CTX_SEMANTIC_WORKER_MAX_CHUNKS"))
@@ -1512,6 +1623,7 @@ pub(super) fn semantic_worker_chunk_budget(args: &SemanticWorkerArgs) -> usize {
         .unwrap_or(SEMANTIC_WORKER_BATCH_DEFAULT)
 }
 
+#[cfg(test)]
 pub(super) fn semantic_worker_seconds_budget(args: &SemanticWorkerArgs) -> u64 {
     args.max_seconds
         .or_else(|| {
@@ -1524,6 +1636,7 @@ pub(super) fn semantic_worker_seconds_budget(args: &SemanticWorkerArgs) -> u64 {
         .unwrap_or(SEMANTIC_WORKER_MAX_SECONDS_DEFAULT)
 }
 
+#[cfg(test)]
 pub(super) fn semantic_worker_status_was_ready_for_stats(
     data_root: &Path,
     stats: SemanticSidecarStats,
@@ -1544,6 +1657,7 @@ pub(super) fn semantic_worker_status_was_ready_for_stats(
         && embedded_items >= searchable_items
 }
 
+#[cfg(test)]
 pub(super) fn queue_recent_semantic_work(
     data_root: &Path,
     store: &Store,

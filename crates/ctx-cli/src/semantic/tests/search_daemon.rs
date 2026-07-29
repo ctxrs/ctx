@@ -13,13 +13,13 @@ fn short_test_query_socket_path() -> Result<(tempfile::TempDir, PathBuf)> {
 }
 
 #[test]
-fn hybrid_search_with_semantic_disabled_uses_lexical_without_sidecar() -> Result<()> {
+fn legacy_hybrid_route_requires_a_fresh_source_generation() -> Result<()> {
     let temp = tempfile::tempdir()?;
     write_searchable_store(temp.path(), 1)?;
     let vector_path = semantic_vector_path(temp.path());
     let store = Store::open(database_path(temp.path().to_path_buf()))?;
 
-    let (packet, retrieval) = search_packet_with_backend(
+    let error = search_packet_with_backend(
         &store,
         temp.path(),
         "semantic daemon scheduling fixture",
@@ -30,14 +30,10 @@ fn hybrid_search_with_semantic_disabled_uses_lexical_without_sidecar() -> Result
         0.35,
         RefreshArg::Off,
         false,
-    )?;
+    )
+    .expect_err("legacy hybrid search must not fall back to Store rows");
 
-    assert_eq!(retrieval.effective_mode(), SearchBackendArg::Lexical);
-    assert_eq!(
-        retrieval.to_json()["semantic_fallback_code"],
-        "semantic_disabled"
-    );
-    assert_eq!(packet.query, "semantic daemon scheduling fixture");
+    assert!(format!("{error:#}").contains("fresh source-backed Core generation"));
     assert!(!vector_path.exists());
     Ok(())
 }
@@ -69,7 +65,7 @@ fn hybrid_search_reports_missing_daemon_query_service() -> Result<()> {
         drop(vector_store);
 
         let store = Store::open(database_path(temp.path().to_path_buf()))?;
-        let (packet, retrieval) = search_packet_with_backend(
+        let hybrid_error = search_packet_with_backend(
             &store,
             temp.path(),
             "semantic daemon scheduling fixture",
@@ -80,14 +76,9 @@ fn hybrid_search_reports_missing_daemon_query_service() -> Result<()> {
             0.35,
             RefreshArg::Off,
             false,
-        )?;
-
-        assert_eq!(retrieval.effective_mode(), SearchBackendArg::Lexical);
-        assert_eq!(
-            retrieval.to_json()["semantic_fallback_code"],
-            "daemon_query_service_unavailable"
-        );
-        assert_eq!(packet.query, "semantic daemon scheduling fixture");
+        )
+        .expect_err("legacy hybrid search must require a source generation");
+        assert!(format!("{hybrid_error:#}").contains("fresh source-backed Core generation"));
 
         let err = search_packet_with_backend(
             &store,
@@ -101,18 +92,15 @@ fn hybrid_search_reports_missing_daemon_query_service() -> Result<()> {
             RefreshArg::Off,
             false,
         )
-        .expect_err("semantic-only search should require the daemon query service");
-        assert!(err
-            .downcast_ref::<DaemonQueryServiceUnavailable>()
-            .is_some());
-        assert!(format!("{err:#}").contains("daemon semantic query service is unavailable"));
+        .expect_err("legacy semantic search must require a source generation");
+        assert!(format!("{err:#}").contains("fresh source-backed Core generation"));
     }
     Ok(())
 }
 
 #[cfg(all(ctx_semantic_fastembed, unix))]
 #[test]
-fn stale_daemon_endpoint_falls_back_without_leaking_local_details() -> Result<()> {
+fn legacy_route_does_not_consume_a_stale_daemon_endpoint() -> Result<()> {
     let temp = tempfile::tempdir()?;
     write_test_semantic_cache(&temp.path().join("semantic-model-cache"))?;
     let docs = write_searchable_store(temp.path(), 1)?;
@@ -135,7 +123,7 @@ fn stale_daemon_endpoint_falls_back_without_leaking_local_details() -> Result<()
     )?;
     let store = Store::open(database_path(temp.path().to_path_buf()))?;
 
-    let (_, retrieval) = search_packet_with_backend(
+    let hybrid_error = search_packet_with_backend(
         &store,
         temp.path(),
         "semantic daemon scheduling fixture",
@@ -146,19 +134,10 @@ fn stale_daemon_endpoint_falls_back_without_leaking_local_details() -> Result<()
         0.35,
         RefreshArg::Off,
         false,
-    )?;
-    let retrieval = retrieval.to_json();
-    let fallback = retrieval["semantic_fallback"]
-        .as_str()
-        .expect("typed fallback reason");
-    assert_eq!(
-        retrieval["semantic_fallback_code"],
-        "daemon_query_service_unavailable"
-    );
-    assert!(!fallback.contains(&private_path.display().to_string()));
-    assert!(!fallback.contains("Connection refused"));
-    assert!(!fallback.contains("os error"));
-    assert!(!daemon_query_endpoint_path(temp.path()).exists());
+    )
+    .expect_err("legacy hybrid search must require a source generation");
+    assert!(format!("{hybrid_error:#}").contains("fresh source-backed Core generation"));
+    assert!(daemon_query_endpoint_path(temp.path()).exists());
 
     let error = search_packet_with_backend(
         &store,
@@ -172,11 +151,9 @@ fn stale_daemon_endpoint_falls_back_without_leaking_local_details() -> Result<()
         RefreshArg::Off,
         false,
     )
-    .expect_err("semantic-only search should return a typed unavailable error");
-    assert!(error
-        .downcast_ref::<DaemonQueryServiceUnavailable>()
-        .is_some());
+    .expect_err("legacy semantic search must require a source generation");
     let message = format!("{error:#}");
+    assert!(message.contains("fresh source-backed Core generation"));
     assert!(!message.contains(&private_path.display().to_string()));
     assert!(!message.contains("Connection refused"));
     Ok(())

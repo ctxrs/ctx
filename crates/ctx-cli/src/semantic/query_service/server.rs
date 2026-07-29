@@ -1,6 +1,10 @@
 use std::{
+    collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration as StdDuration, Instant},
 };
 
@@ -12,6 +16,11 @@ use std::os::unix::{ffi::OsStrExt, fs::PermissionsExt};
 use std::{env, fs};
 
 use anyhow::{anyhow, Context, Result};
+use ctx_history_core::{
+    BatchHydrationRequest, ContentSourceResolver, EventHydrationRequest, HydrationFailure,
+    HydrationFailureKind, SourceRecordLocator, StableEntityId,
+};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -23,7 +32,9 @@ use crate::semantic::{
     model_contract::semantic_model_key,
     model_runtime::SharedSemanticRuntime,
     paths_status::daemon_root_path,
-    source_backed_refresh_coordinator::SourceBackedRefreshCoordinator,
+    source_backed_refresh_coordinator::{
+        SourceBackedRefreshCoordinator, SourceBackedResolverAccessError,
+    },
 };
 
 #[cfg(unix)]
@@ -63,6 +74,9 @@ pub(in crate::semantic) struct DaemonQueryService {
 pub(in crate::semantic) const DAEMON_QUERY_REQUEST_MAX_BYTES: usize = 256 * 1024;
 pub(in crate::semantic) const DAEMON_QUERY_REQUEST_READ_TIMEOUT: StdDuration =
     StdDuration::from_secs(2);
+pub(in crate::semantic) const DAEMON_SOURCE_HYDRATION_MAX_ITEMS: usize = 128;
+pub(in crate::semantic) const DAEMON_SOURCE_HYDRATION_MAX_WORKERS: usize = 8;
+pub(in crate::semantic) const DAEMON_SOURCE_HYDRATION_MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
 impl Drop for DaemonQueryService {
     fn drop(&mut self) {
@@ -834,6 +848,392 @@ pub(in crate::semantic) fn start_daemon_source_refresh_service(
     ))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceHydrationBatchItem {
+    event_identity: StableEntityId,
+    locator: SourceRecordLocator,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum SourceHydrationMode {
+    SearchDisplay { max_chars: usize },
+    Complete,
+}
+
+struct SourceHydrationGroup {
+    first_position: usize,
+    requests: Vec<EventHydrationRequest>,
+}
+
+pub(in crate::semantic) fn handle_source_hydration_batch(
+    data_root: &Path,
+    source_refresh: &SourceBackedRefreshCoordinator,
+    request: &Value,
+) -> Value {
+    let generation_id = request
+        .get("generation_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if !valid_source_generation_id(generation_id) {
+        return source_hydration_protocol_failure(
+            "invalid_generation",
+            "invalid_locator",
+            "source hydration generation ID must be a lowercase SHA-256 digest",
+            false,
+        );
+    }
+    let retained = match source_refresh.resolver_for_generation(data_root, generation_id) {
+        Ok(retained) => retained,
+        Err(error @ SourceBackedResolverAccessError::Missing { .. }) => {
+            return source_hydration_protocol_failure(
+                "resolver_generation_unavailable",
+                "temporarily_unavailable",
+                &error.to_string(),
+                source_refresh.has_pending_request(),
+            );
+        }
+        Err(error @ SourceBackedResolverAccessError::GenerationMismatch { .. }) => {
+            return source_hydration_protocol_failure(
+                "resolver_generation_mismatch",
+                "stale_source_evidence",
+                &error.to_string(),
+                source_refresh.has_pending_request(),
+            );
+        }
+    };
+    if retained.generation_id() != generation_id {
+        return source_hydration_protocol_failure(
+            "resolver_generation_mismatch",
+            "stale_source_evidence",
+            "daemon resolver changed while accepting the hydration batch",
+            true,
+        );
+    }
+    handle_source_hydration_batch_with(request, generation_id, retained.resolver(), |failure| {
+        source_refresh.handle_hydration_failure(data_root, generation_id, failure.clone());
+        source_refresh.has_pending_request()
+    })
+}
+
+pub(in crate::semantic) fn handle_source_hydration_batch_with<R, Refresh>(
+    request: &Value,
+    retained_generation_id: &str,
+    resolver: &R,
+    refresh: Refresh,
+) -> Value
+where
+    R: ContentSourceResolver + Sync,
+    Refresh: Fn(&HydrationFailure) -> bool,
+{
+    let generation_id = request
+        .get("generation_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if generation_id != retained_generation_id {
+        return source_hydration_protocol_failure(
+            "resolver_generation_mismatch",
+            "stale_source_evidence",
+            &format!(
+                "requested source generation {generation_id:?}, retained {retained_generation_id:?}"
+            ),
+            false,
+        );
+    }
+    let mode = match source_hydration_mode(request) {
+        Ok(mode) => mode,
+        Err(error) => {
+            return source_hydration_protocol_failure(
+                "invalid_request",
+                "invalid_locator",
+                &format!("{error:#}"),
+                false,
+            );
+        }
+    };
+    let Some(values) = request.get("items").and_then(Value::as_array) else {
+        return source_hydration_protocol_failure(
+            "invalid_request",
+            "invalid_locator",
+            "source hydration request has no item array",
+            false,
+        );
+    };
+    if values.is_empty() || values.len() > DAEMON_SOURCE_HYDRATION_MAX_ITEMS {
+        return source_hydration_protocol_failure(
+            "item_limit",
+            "invalid_locator",
+            &format!(
+                "source hydration batch has {} items; expected 1..={DAEMON_SOURCE_HYDRATION_MAX_ITEMS}",
+                values.len()
+            ),
+            false,
+        );
+    }
+    let mut requests = Vec::with_capacity(values.len());
+    for value in values {
+        let item: SourceHydrationBatchItem = match serde_json::from_value(value.clone()) {
+            Ok(item) => item,
+            Err(error) => {
+                return source_hydration_protocol_failure(
+                    "invalid_request",
+                    "invalid_locator",
+                    &format!("decode typed source hydration item: {error}"),
+                    false,
+                );
+            }
+        };
+        let request = match EventHydrationRequest::new(item.event_identity, item.locator.clone()) {
+            Ok(request) => request,
+            Err(error) => {
+                return source_hydration_protocol_failure(
+                    "invalid_request",
+                    "invalid_locator",
+                    &format!("validate source hydration locator: {error}"),
+                    false,
+                );
+            }
+        };
+        requests.push(request);
+    }
+    let batch = match BatchHydrationRequest::new(requests) {
+        Ok(batch) => batch,
+        Err(error) => {
+            return source_hydration_protocol_failure(
+                "invalid_request",
+                "invalid_locator",
+                &format!("validate ordered source hydration batch: {error}"),
+                false,
+            )
+        }
+    };
+
+    let mut grouped = BTreeMap::<[u8; 32], (usize, Vec<EventHydrationRequest>)>::new();
+    for (position, request) in batch.events().iter().enumerate() {
+        let key = request.locator().source().exact_descriptor_digest();
+        let group = grouped.entry(key).or_insert_with(|| (position, Vec::new()));
+        group.1.push(request.clone());
+    }
+    let groups = grouped
+        .into_values()
+        .map(|(first_position, requests)| SourceHydrationGroup {
+            first_position,
+            requests,
+        })
+        .collect::<Vec<_>>();
+    let next = AtomicUsize::new(0);
+    let results = Mutex::new(Vec::<(
+        usize,
+        std::result::Result<Vec<(StableEntityId, String)>, HydrationFailure>,
+    )>::with_capacity(groups.len()));
+    std::thread::scope(|scope| {
+        for _ in 0..groups.len().min(DAEMON_SOURCE_HYDRATION_MAX_WORKERS) {
+            scope.spawn(|| loop {
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                let Some(group) = groups.get(index) else {
+                    break;
+                };
+                let result = hydrate_source_group(resolver, group, mode);
+                results
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push((group.first_position, result));
+            });
+        }
+    });
+    let mut results = results
+        .into_inner()
+        .unwrap_or_else(|error| error.into_inner());
+    results.sort_by_key(|(position, _)| *position);
+    let mut hydrated = HashMap::with_capacity(batch.len());
+    for (_, result) in results {
+        let records = match result {
+            Ok(records) => records,
+            Err(failure) => {
+                let refresh_scheduled = refresh(&failure);
+                return source_hydration_protocol_failure(
+                    "source_hydration_failed",
+                    hydration_failure_kind_name(failure.kind),
+                    &failure.detail,
+                    refresh_scheduled,
+                );
+            }
+        };
+        for (event_id, text) in records {
+            if hydrated.insert(event_id, text).is_some() {
+                return source_hydration_protocol_failure(
+                    "invalid_resolver_response",
+                    "invalid_locator",
+                    "source resolver returned a duplicate event",
+                    false,
+                );
+            }
+        }
+    }
+    let response_items = batch
+        .events()
+        .iter()
+        .map(|request| {
+            let text = hydrated.remove(&request.event_id()).ok_or_else(|| {
+                anyhow!(
+                    "source resolver omitted requested event {}",
+                    request.event_id()
+                )
+            })?;
+            Ok(json!({
+                "event_id": request.event_id().as_uuid(),
+                "text": text,
+            }))
+        })
+        .collect::<Result<Vec<_>>>();
+    let response_items = match response_items {
+        Ok(items) if hydrated.is_empty() => items,
+        Ok(_) => {
+            return source_hydration_protocol_failure(
+                "invalid_resolver_response",
+                "invalid_locator",
+                "source resolver returned unrequested events",
+                false,
+            );
+        }
+        Err(error) => {
+            return source_hydration_protocol_failure(
+                "invalid_resolver_response",
+                "missing_record",
+                &format!("{error:#}"),
+                false,
+            );
+        }
+    };
+    let response = compact_json(json!({
+        "ok": true,
+        "schema_version": 1,
+        "generation_id": retained_generation_id,
+        "items": response_items,
+    }));
+    if serde_json::to_vec(&response).map_or(true, |body| {
+        body.len() > DAEMON_SOURCE_HYDRATION_MAX_RESPONSE_BYTES
+    }) {
+        return source_hydration_protocol_failure(
+            "response_limit",
+            "temporarily_unavailable",
+            "source hydration response exceeds the daemon byte cap",
+            false,
+        );
+    }
+    response
+}
+
+fn hydrate_source_group(
+    resolver: &impl ContentSourceResolver,
+    group: &SourceHydrationGroup,
+    mode: SourceHydrationMode,
+) -> std::result::Result<Vec<(StableEntityId, String)>, HydrationFailure> {
+    let request =
+        BatchHydrationRequest::new(group.requests.clone()).map_err(|error| HydrationFailure {
+            kind: HydrationFailureKind::InvalidLocator,
+            detail: format!("validate grouped source hydration request: {error}"),
+        })?;
+    let result = resolver.hydrate_batch(&request)?;
+    result.validate_for_request(&request)?;
+    request
+        .events()
+        .iter()
+        .zip(result.into_records())
+        .map(|(expected, record)| {
+            if record.event_id != expected.event_id() {
+                return Err(HydrationFailure {
+                    kind: HydrationFailureKind::InvalidLocator,
+                    detail: format!(
+                        "source resolver reordered event {} as {}",
+                        expected.event_id(),
+                        record.event_id
+                    ),
+                });
+            }
+            let text =
+                String::from_utf8(record.provider_bytes).map_err(|error| HydrationFailure {
+                    kind: HydrationFailureKind::UnsupportedParserRevision,
+                    detail: format!(
+                        "source resolver returned non-UTF-8 display content for {}: {}",
+                        expected.event_id(),
+                        error.utf8_error()
+                    ),
+                })?;
+            if text.is_empty() {
+                return Err(HydrationFailure {
+                    kind: HydrationFailureKind::MissingRecord,
+                    detail: format!(
+                        "source resolver returned empty display content for {}",
+                        expected.event_id()
+                    ),
+                });
+            }
+            let text = match mode {
+                SourceHydrationMode::SearchDisplay { max_chars } => {
+                    text.chars().take(max_chars).collect()
+                }
+                SourceHydrationMode::Complete => text,
+            };
+            Ok((record.event_id, text))
+        })
+        .collect()
+}
+
+fn source_hydration_mode(request: &Value) -> Result<SourceHydrationMode> {
+    match request.get("mode").and_then(Value::as_str) {
+        Some("search_display") => {
+            let max_chars = request
+                .get("max_chars")
+                .and_then(Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .filter(|value| (1..=2_048).contains(value))
+                .ok_or_else(|| anyhow!("search display max_chars must be between 1 and 2048"))?;
+            Ok(SourceHydrationMode::SearchDisplay { max_chars })
+        }
+        Some("complete") if request.get("max_chars").is_none_or(Value::is_null) => {
+            Ok(SourceHydrationMode::Complete)
+        }
+        Some(mode) => Err(anyhow!("invalid source hydration mode `{mode}`")),
+        None => Err(anyhow!("source hydration mode is missing")),
+    }
+}
+
+fn valid_source_generation_id(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn source_hydration_protocol_failure(
+    code: &str,
+    failure_kind: &str,
+    detail: &str,
+    refresh_scheduled: bool,
+) -> Value {
+    compact_json(json!({
+        "ok": false,
+        "schema_version": 1,
+        "code": code,
+        "failure_kind": failure_kind,
+        "detail": detail,
+        "refresh_scheduled": refresh_scheduled,
+    }))
+}
+
+fn hydration_failure_kind_name(kind: HydrationFailureKind) -> &'static str {
+    match kind {
+        HydrationFailureKind::TemporarilyUnavailable => "temporarily_unavailable",
+        HydrationFailureKind::ConfirmedDeleted => "confirmed_deleted",
+        HydrationFailureKind::StaleSourceEvidence => "stale_source_evidence",
+        HydrationFailureKind::StaleRecordEvidence => "stale_record_evidence",
+        HydrationFailureKind::MissingRecord => "missing_record",
+        HydrationFailureKind::UnsupportedParserRevision => "unsupported_parser_revision",
+        HydrationFailureKind::InvalidLocator => "invalid_locator",
+    }
+}
+
 pub(in crate::semantic) fn handle_daemon_query_stream<S: std::io::Write>(
     data_root: &Path,
     runtime: &SharedSemanticRuntime,
@@ -882,6 +1282,11 @@ pub(in crate::semantic) fn handle_daemon_query_stream_inner<S: std::io::Write>(
     }
     let op = request.get("op").and_then(Value::as_str).unwrap_or("");
     if service == DaemonIpcService::SourceRefresh {
+        if op == "source_hydrate_batch" {
+            let response = handle_source_hydration_batch(data_root, source_refresh, &request);
+            writeln!(stream, "{}", serde_json::to_string(&response)?)?;
+            return Ok(());
+        }
         if let Some(response) = source_refresh.handle_ipc_request(data_root, &request)? {
             writeln!(stream, "{}", serde_json::to_string(&response)?)?;
             return Ok(());
@@ -956,4 +1361,341 @@ pub(in crate::semantic) fn handle_daemon_query_stream_inner<S: std::io::Write>(
         })))?
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod source_hydration_tests {
+    use std::{
+        collections::HashMap,
+        sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            Mutex,
+        },
+        time::Duration,
+    };
+
+    use ctx_history_core::{
+        derive_event_id, derive_session_id, BatchHydrationResult, EventIdentityInput,
+        HydratedProviderRecord, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
+        NativeSessionKey, SessionIdentityInput, SourceAnchor, SourceKey, TypedKey,
+    };
+
+    use super::*;
+
+    const GENERATION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    struct FixtureLocator {
+        event_id: StableEntityId,
+        locator: SourceRecordLocator,
+    }
+
+    fn fixture(lineage: u8, sequence: u64) -> FixtureLocator {
+        let source = SourceKey::derive(
+            "codex",
+            "fixture_jsonl",
+            "fixture",
+            1,
+            SourceAnchor::CatalogLineage([lineage; 32]),
+        )
+        .unwrap();
+        let native_session_key = NativeSessionKey::native_id(
+            "session",
+            TypedKey::utf8(format!("session-{lineage}")).unwrap(),
+        )
+        .unwrap();
+        let session_id = derive_session_id(SessionIdentityInput {
+            source: &source,
+            logical_session_kind: "thread",
+            native_session_key: &native_session_key,
+        })
+        .unwrap();
+        let native_item_key = NativeItemKey::native_id("message", TypedKey::U64(sequence)).unwrap();
+        let event_id = derive_event_id(EventIdentityInput {
+            source: &source,
+            session_id,
+            logical_item_kind: "message",
+            native_item_key: &native_item_key,
+            subrecord_selector: None,
+        })
+        .unwrap();
+        let locator = SourceRecordLocator::new(
+            source,
+            NativeRecordCoordinate::ProviderNative {
+                namespace: "fixture".to_owned(),
+                coordinate: TypedKey::U64(sequence),
+            },
+            LocatorRevisionPolicy::ExactSourceRevision,
+            Some([lineage; 32]),
+            [sequence as u8; 32],
+        )
+        .unwrap();
+        FixtureLocator { event_id, locator }
+    }
+
+    fn request(items: &[&FixtureLocator], mode: &str, max_chars: Option<usize>) -> Value {
+        json!({
+            "schema_version": 1,
+            "op": "source_hydrate_batch",
+            "generation_id": GENERATION,
+            "mode": mode,
+            "max_chars": max_chars,
+            "items": items.iter().map(|item| json!({
+                "event_identity": item.event_id,
+                "locator": item.locator,
+            })).collect::<Vec<_>>(),
+        })
+    }
+
+    #[derive(Default)]
+    struct MockResolver {
+        bodies: HashMap<StableEntityId, Vec<u8>>,
+        batch_calls: Mutex<Vec<Vec<StableEntityId>>>,
+        failure: Option<HydrationFailure>,
+        delayed: bool,
+        active: AtomicUsize,
+        max_active: AtomicUsize,
+    }
+
+    impl MockResolver {
+        fn with_body(mut self, item: &FixtureLocator, text: impl Into<Vec<u8>>) -> Self {
+            self.bodies.insert(item.event_id, text.into());
+            self
+        }
+
+        fn with_failure(mut self, kind: HydrationFailureKind, detail: &str) -> Self {
+            self.failure = Some(HydrationFailure {
+                kind,
+                detail: detail.to_owned(),
+            });
+            self
+        }
+
+        fn with_delay(mut self) -> Self {
+            self.delayed = true;
+            self
+        }
+    }
+
+    impl ContentSourceResolver for MockResolver {
+        fn hydrate_event(
+            &self,
+            request: &EventHydrationRequest,
+        ) -> std::result::Result<HydratedProviderRecord, HydrationFailure> {
+            if let Some(failure) = self.failure.as_ref() {
+                return Err(failure.clone());
+            }
+            let provider_bytes =
+                self.bodies
+                    .get(&request.event_id())
+                    .cloned()
+                    .ok_or_else(|| HydrationFailure {
+                        kind: HydrationFailureKind::MissingRecord,
+                        detail: "fixture body is absent".to_owned(),
+                    })?;
+            Ok(HydratedProviderRecord {
+                event_id: request.event_id(),
+                provider_bytes,
+            })
+        }
+
+        fn hydrate_batch(
+            &self,
+            request: &BatchHydrationRequest,
+        ) -> std::result::Result<BatchHydrationResult, HydrationFailure> {
+            if self.delayed {
+                let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+                self.max_active.fetch_max(active, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            self.batch_calls.lock().unwrap().push(
+                request
+                    .events()
+                    .iter()
+                    .map(|event| event.event_id())
+                    .collect(),
+            );
+            let result = (|| {
+                let records = request
+                    .events()
+                    .iter()
+                    .map(|event| self.hydrate_event(event))
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                let result =
+                    BatchHydrationResult::new(records).map_err(|error| HydrationFailure {
+                        kind: HydrationFailureKind::InvalidLocator,
+                        detail: error.to_string(),
+                    })?;
+                result.validate_for_request(request)?;
+                Ok(result)
+            })();
+            if self.delayed {
+                self.active.fetch_sub(1, Ordering::SeqCst);
+            }
+            result
+        }
+    }
+
+    #[test]
+    fn source_hydration_groups_by_exact_source_and_restores_request_order() {
+        let first = fixture(1, 1);
+        let second_source = fixture(2, 2);
+        let third = fixture(1, 3);
+        let resolver = MockResolver::default()
+            .with_body(&first, "first")
+            .with_body(&second_source, "second")
+            .with_body(&third, "third");
+
+        let response = handle_source_hydration_batch_with(
+            &request(&[&second_source, &first, &third], "complete", None),
+            GENERATION,
+            &resolver,
+            |_| false,
+        );
+
+        assert_eq!(response["ok"], true);
+        assert_eq!(
+            response["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["event_id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                second_source.event_id.as_uuid().to_string(),
+                first.event_id.as_uuid().to_string(),
+                third.event_id.as_uuid().to_string(),
+            ]
+        );
+        assert_eq!(
+            response["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["text"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["second", "first", "third"]
+        );
+        let mut call_sizes = resolver
+            .batch_calls
+            .into_inner()
+            .unwrap()
+            .into_iter()
+            .map(|call| call.len())
+            .collect::<Vec<_>>();
+        call_sizes.sort_unstable();
+        assert_eq!(call_sizes, vec![1, 2]);
+    }
+
+    #[test]
+    fn source_search_hydration_truncates_exact_content_by_character() {
+        let item = fixture(3, 1);
+        let resolver = MockResolver::default().with_body(&item, "αβγδ");
+        let response = handle_source_hydration_batch_with(
+            &request(&[&item], "search_display", Some(3)),
+            GENERATION,
+            &resolver,
+            |_| false,
+        );
+
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["items"][0]["text"], "αβγ");
+    }
+
+    #[test]
+    fn source_hydration_caps_exact_source_workers_at_eight() {
+        let items = (1..=9)
+            .map(|lineage| fixture(lineage, 1))
+            .collect::<Vec<_>>();
+        let resolver = items
+            .iter()
+            .fold(MockResolver::default().with_delay(), |resolver, item| {
+                resolver.with_body(item, format!("source {}", item.event_id))
+            });
+        let references = items.iter().collect::<Vec<_>>();
+        let response = handle_source_hydration_batch_with(
+            &request(&references, "complete", None),
+            GENERATION,
+            &resolver,
+            |_| false,
+        );
+
+        assert_eq!(response["ok"], true);
+        assert!(resolver.max_active.load(Ordering::SeqCst) <= 8);
+        assert_eq!(resolver.batch_calls.into_inner().unwrap().len(), 9);
+    }
+
+    #[test]
+    fn source_hydration_without_resident_generation_is_typed_and_queues_refresh() {
+        let temp = tempfile::tempdir().unwrap();
+        let item = fixture(10, 1);
+        let coordinator = SourceBackedRefreshCoordinator::new();
+        let response = handle_source_hydration_batch(
+            temp.path(),
+            &coordinator,
+            &request(&[&item], "complete", None),
+        );
+
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["code"], "resolver_generation_unavailable");
+        assert_eq!(response["failure_kind"], "temporarily_unavailable");
+        assert_eq!(response["refresh_scheduled"], true);
+        assert!(coordinator.has_pending_request());
+    }
+
+    #[test]
+    fn source_hydration_preserves_typed_stale_failure_and_refresh_signal() {
+        let item = fixture(4, 1);
+        let refresh_called = AtomicBool::new(false);
+        let resolver = MockResolver::default().with_failure(
+            HydrationFailureKind::StaleSourceEvidence,
+            "fixture source revision changed",
+        );
+        let response = handle_source_hydration_batch_with(
+            &request(&[&item], "complete", None),
+            GENERATION,
+            &resolver,
+            |_| {
+                refresh_called.store(true, Ordering::Relaxed);
+                true
+            },
+        );
+
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["code"], "source_hydration_failed");
+        assert_eq!(response["failure_kind"], "stale_source_evidence");
+        assert_eq!(response["refresh_scheduled"], true);
+        assert!(refresh_called.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn source_hydration_rejects_generation_mismatch_before_resolver_access() {
+        let item = fixture(5, 1);
+        let resolver = MockResolver::default().with_body(&item, "body");
+        let response = handle_source_hydration_batch_with(
+            &request(&[&item], "complete", None),
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            &resolver,
+            |_| false,
+        );
+
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["code"], "resolver_generation_mismatch");
+        assert_eq!(response["failure_kind"], "stale_source_evidence");
+        assert!(resolver.batch_calls.into_inner().unwrap().is_empty());
+    }
+
+    #[test]
+    fn source_hydration_rejects_empty_content_instead_of_emitting_a_placeholder() {
+        let item = fixture(6, 1);
+        let resolver = MockResolver::default().with_body(&item, Vec::new());
+        let response = handle_source_hydration_batch_with(
+            &request(&[&item], "complete", None),
+            GENERATION,
+            &resolver,
+            |_| false,
+        );
+
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["failure_kind"], "missing_record");
+    }
 }

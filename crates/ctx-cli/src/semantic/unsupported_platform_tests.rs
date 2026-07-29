@@ -34,7 +34,7 @@ fn insert_test_event(store: &Store, text: &str) -> Result<()> {
 }
 
 #[test]
-fn hybrid_search_falls_back_to_lexical_on_unsupported_platform() -> Result<()> {
+fn legacy_semantic_and_hybrid_require_a_fresh_source_generation() -> Result<()> {
     let temp = tempfile::tempdir()?;
     fs::create_dir_all(temp.path())?;
     let store = Store::open(database_path(temp.path().to_path_buf()))?;
@@ -43,7 +43,7 @@ fn hybrid_search_falls_back_to_lexical_on_unsupported_platform() -> Result<()> {
         "semantic unsupported platform lexical fallback fixture",
     )?;
 
-    let (packet, retrieval) = search_packet_with_backend(
+    let hybrid_error = search_packet_with_backend(
         &store,
         temp.path(),
         "semantic unsupported platform lexical fallback fixture",
@@ -54,18 +54,9 @@ fn hybrid_search_falls_back_to_lexical_on_unsupported_platform() -> Result<()> {
         0.35,
         RefreshArg::Off,
         false,
-    )?;
-
-    assert_eq!(retrieval.effective_mode(), SearchBackendArg::Lexical);
-    assert_eq!(retrieval.to_json()["semantic_status"], "unavailable");
-    assert_eq!(
-        retrieval.to_json()["semantic_fallback_code"],
-        "unsupported_platform"
-    );
-    assert_eq!(
-        packet.query,
-        "semantic unsupported platform lexical fallback fixture"
-    );
+    )
+    .expect_err("legacy hybrid search must not fall back to Store rows");
+    assert!(format!("{hybrid_error:#}").contains("fresh source-backed Core generation"));
 
     let error = search_packet_with_backend(
         &store,
@@ -79,7 +70,7 @@ fn hybrid_search_falls_back_to_lexical_on_unsupported_platform() -> Result<()> {
         RefreshArg::Off,
         false,
     )
-    .expect_err("explicit semantic search should fail on unsupported platforms");
-    assert!(format!("{error:#}").contains("local semantic search is not supported"));
+    .expect_err("legacy semantic search must require a source generation");
+    assert!(format!("{error:#}").contains("fresh source-backed Core generation"));
     Ok(())
 }
