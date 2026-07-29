@@ -52,10 +52,14 @@ mod unix {
     }
 
     fn write_config(root: &Path, semantic: bool) {
+        write_mode_config(root, "full", semantic);
+    }
+
+    fn write_mode_config(root: &Path, daemon_mode: &str, semantic: bool) {
         fs::write(
             root.join("config.toml"),
             format!(
-                "[analytics]\nenabled = false\n\n[upgrade]\nauto = \"off\"\n\n[daemon]\nenabled = true\n\n[search]\nsemantic = {semantic}\n"
+                "[analytics]\nenabled = false\n\n[upgrade]\nauto = \"off\"\n\n[daemon]\nenabled = true\nmode = \"{daemon_mode}\"\n\n[search]\nsemantic = {semantic}\n"
             ),
         )
         .unwrap();
@@ -253,6 +257,67 @@ mod unix {
             status["jobs"]["semantic_index"]["reason"],
             "semantic_disabled"
         );
+    }
+
+    #[test]
+    fn daemon_mode_switch_updates_query_endpoint_before_setup_handoff_returns() {
+        let temp = tempdir();
+        let binary = copied_ctx_binary(&temp);
+        write_mode_config(temp.path(), "source-refresh-only", true);
+        initialize_store(&temp, &binary);
+        let mut daemon = spawn_daemon(&temp, &binary, 1);
+        let original_pid = daemon.pid();
+
+        wait_for("source-refresh-only daemon cycle", || {
+            daemon_lifecycle(temp.path()).is_some_and(|lifecycle| {
+                lifecycle["status"] == "running"
+                    && lifecycle["pid"] == original_pid
+                    && lifecycle["semantic_runtime_active"] == false
+                    && lifecycle["config_reload"]["status"] == "applied"
+                    && lifecycle["config_reload"]["applied"]["daemon_mode"]
+                        == "source-refresh-only"
+                    && lifecycle["config_reload"]["applied"]["semantic_enabled"] == true
+                    && !temp.path().join("daemon/query-endpoint.json").exists()
+            })
+        });
+
+        write_mode_config(temp.path(), "full", true);
+        let _setup = run_supported_setup(&temp, &binary);
+        let full = daemon_lifecycle(temp.path()).expect("full-mode lifecycle");
+        assert_eq!(full["pid"], original_pid);
+        assert_eq!(full["semantic_runtime_active"], true);
+        assert_eq!(full["config_reload"]["status"], "applied");
+        assert_eq!(full["config_reload"]["applied"]["daemon_mode"], "full");
+        assert_eq!(
+            full["config_reload"]["applied"]["semantic_enabled"],
+            true
+        );
+        assert!(
+            temp.path().join("daemon/query-endpoint.json").is_file(),
+            "full-mode setup returned before the query endpoint was live"
+        );
+        daemon.assert_running();
+
+        write_mode_config(temp.path(), "source-refresh-only", true);
+        let _setup = run_supported_setup(&temp, &binary);
+        let source_only =
+            daemon_lifecycle(temp.path()).expect("source-refresh-only lifecycle");
+        assert_eq!(source_only["pid"], original_pid);
+        assert_eq!(source_only["semantic_runtime_active"], false);
+        assert_eq!(source_only["config_reload"]["status"], "applied");
+        assert_eq!(
+            source_only["config_reload"]["applied"]["daemon_mode"],
+            "source-refresh-only"
+        );
+        assert_eq!(
+            source_only["config_reload"]["applied"]["semantic_enabled"],
+            true
+        );
+        assert!(
+            !temp.path().join("daemon/query-endpoint.json").exists(),
+            "source-refresh-only setup returned before the query endpoint was removed"
+        );
+        daemon.assert_running();
     }
 
     #[test]
