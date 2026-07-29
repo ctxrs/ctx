@@ -5,15 +5,14 @@ use crate::tests::support::assertions::{
 use crate::tests::support::paths::{provider_history_fixture, tempdir};
 use crate::tests::support::provider_state::stored_provider_session_id;
 use crate::{
-    import_crush_sqlite, import_forgecode_sqlite, import_goose_sessions_sqlite,
-    import_hermes_sqlite, CrushSqliteImportOptions, ForgeCodeSqliteImportOptions,
-    GooseSessionsSqliteImportOptions, HermesSqliteImportOptions, ProviderImportSummary,
-    FORGECODE_SQLITE_SOURCE_FORMAT, GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
+    import_crush_sqlite, import_goose_sessions_sqlite, import_hermes_sqlite,
+    CrushSqliteImportOptions, GooseSessionsSqliteImportOptions, HermesSqliteImportOptions,
+    ProviderImportSummary, GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
 };
 use ctx_history_core::{CaptureProvider, EventType};
 use ctx_history_store::Store;
 use rusqlite::Connection;
-use serde_json::{json, Value};
+use serde_json::json;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -244,7 +243,7 @@ fn write_hermes_tool_output_db(temp: &TempDir) -> PathBuf {
 }
 
 #[test]
-fn native_sqlite_successful_tool_outputs_are_absent_and_not_searchable() {
+fn native_goose_successful_tool_outputs_are_absent_and_not_searchable() {
     let temp = tempdir();
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
 
@@ -283,48 +282,6 @@ fn native_sqlite_successful_tool_outputs_are_absent_and_not_searchable() {
         CaptureProvider::Goose,
         GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
         "goose sqlite search oracle request",
-    );
-
-    let forgecode = provider_history_fixture("forgecode/v1/forge.db");
-    let forge_connection = Connection::open(&forgecode).unwrap();
-    let context: String = forge_connection
-        .query_row(
-            "SELECT context FROM conversations WHERE conversation_id = 'forge-root'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let mut context: Value = serde_json::from_str(&context).unwrap();
-    context["messages"][2]["message"]["tool"]["output"]["values"][0]["text"] =
-        Value::String("forge-output-sentinel".into());
-    forge_connection
-        .execute(
-            "UPDATE conversations SET context = ?1 WHERE conversation_id = 'forge-root'",
-            [serde_json::to_string(&context).unwrap()],
-        )
-        .unwrap();
-    drop(forge_connection);
-    let forge_summary = import_forgecode_sqlite(
-        &forgecode,
-        &mut store,
-        ForgeCodeSqliteImportOptions {
-            source_path: Some(forgecode.clone()),
-            ..ForgeCodeSqliteImportOptions::default()
-        },
-    )
-    .unwrap();
-    assert_eq!(forge_summary.failed, 0, "{:?}", forge_summary.failures);
-    assert_successful_output_absent(
-        &store,
-        CaptureProvider::ForgeCode,
-        "forge-root",
-        "forge-output-sentinel",
-    );
-    assert_search_hit_cites_source(
-        &store,
-        CaptureProvider::ForgeCode,
-        FORGECODE_SQLITE_SOURCE_FORMAT,
-        "forgecode oracle prompt",
     );
 }
 

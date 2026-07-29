@@ -11,7 +11,6 @@ use std::{
 use chrono::Duration;
 use ctx_history_core::EventType;
 use rusqlite::{Connection, OptionalExtension};
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
@@ -47,7 +46,6 @@ use super::super::event::{
 
 pub(super) const FORGECODE_NATIVE_PARSER_REVISION: u32 = 1;
 pub(super) const FORGECODE_NATIVE_POLICY_REVISION: u32 = 6;
-pub(super) const FORGECODE_NATIVE_FRONTIER_VERSION: u32 = 1;
 pub(super) const FORGECODE_NATIVE_LOCATOR_KIND: &str = "forgecode-conversation-row-v1";
 pub(super) const FORGECODE_NATIVE_PAGE_MAX_BYTES: usize = 6 * 1024 * 1024;
 const FORGECODE_NATIVE_PAGE_REJECTION_RESERVE_BYTES: usize = 4 * 1024;
@@ -60,8 +58,7 @@ const FORGECODE_NATIVE_MAX_EVENT_BYTES: usize = 2 * 1024 * 1024;
 const FORGECODE_NATIVE_MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 const FORGECODE_SQLITE_VALUE_OVERHEAD_BYTES: u64 = 64 * 8;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(in crate::provider::providers::forgecode) struct ForgeCodeFrontier {
     pub(super) rowid: Option<i64>,
     pub(super) next_message: u32,
@@ -82,7 +79,6 @@ impl ForgeCodeFrontier {
 pub(in crate::provider::providers::forgecode) struct ForgeCodeSourceObservation {
     pub(super) canonical_path: PathBuf,
     pub(super) database: Arc<ForgeCodeSqliteDatabase>,
-    pub(super) source_revision: String,
     pub(super) schema_fingerprint: String,
     pub(super) user_version: i64,
     columns: BTreeSet<String>,
@@ -98,7 +94,6 @@ pub(in crate::provider::providers::forgecode) enum ForgeCodeDiscovery {
 
 pub(in crate::provider::providers::forgecode) struct ForgeCodeMissingSource {
     pub(in crate::provider::providers::forgecode) preferred_path: PathBuf,
-    pub(super) candidates: Vec<PathBuf>,
 }
 
 pub(in crate::provider::providers::forgecode) fn discover_forgecode_source(
@@ -116,14 +111,9 @@ pub(in crate::provider::providers::forgecode) fn discover_forgecode_source(
                 .extension()
                 .and_then(|extension| extension.to_str())
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("db"));
-            let (preferred_path, candidates) = if exact_is_preferred {
-                (exact.clone(), vec![exact, child])
-            } else {
-                (child.clone(), vec![child, exact])
-            };
+            let preferred_path = if exact_is_preferred { exact } else { child };
             return Ok(ForgeCodeDiscovery::Missing(ForgeCodeMissingSource {
                 preferred_path,
-                candidates,
             }));
         }
         Err(error) => return Err(error.into()),
@@ -132,8 +122,7 @@ pub(in crate::provider::providers::forgecode) fn discover_forgecode_source(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let candidate = absolute_path(&candidate)?;
             return Ok(ForgeCodeDiscovery::Missing(ForgeCodeMissingSource {
-                preferred_path: candidate.clone(),
-                candidates: vec![candidate],
+                preferred_path: candidate,
             }));
         }
         Err(error) => return Err(error.into()),
@@ -160,16 +149,9 @@ pub(in crate::provider::providers::forgecode) fn discover_forgecode_source(
                 conn.pragma_query_value(None, "user_version", |row| row.get(0))?,
             ))
         })?;
-    let source_revision = format!(
-        "forgecode-nativepath-v2:parser={FORGECODE_NATIVE_PARSER_REVISION};policy={FORGECODE_NATIVE_POLICY_REVISION};schema={schema_fingerprint};identity={};length={};revision={}",
-        hex(database.evidence().identity()),
-        database.evidence().length(),
-        hex(database.evidence().revision()),
-    );
     Ok(ForgeCodeDiscovery::Live(ForgeCodeSourceObservation {
         canonical_path,
         database: Arc::new(database),
-        source_revision,
         schema_fingerprint,
         user_version,
         columns,
@@ -282,15 +264,6 @@ impl ForgeCodeSqliteDatabase {
     pub(super) fn evidence(&self) -> &SqliteSourceEvidence {
         &self.evidence
     }
-
-    pub(super) fn revision_component(&self) -> String {
-        format!(
-            "identity={};length={};revision={}",
-            hex(self.evidence.identity()),
-            self.evidence.length(),
-            hex(self.evidence.revision()),
-        )
-    }
 }
 
 fn forgecode_sqlite_source_error(path: &Path, error: SqliteSourceAccessError) -> CaptureError {
@@ -306,16 +279,6 @@ fn forgecode_sqlite_source_error(path: &Path, error: SqliteSourceAccessError) ->
             detail: error.to_string(),
         },
     }
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
-    for byte in bytes {
-        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
-        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    encoded
 }
 
 pub(in crate::provider::providers::forgecode) struct ForgeCodeScanner {
@@ -631,10 +594,6 @@ fn output_outcome(parts: super::super::event::ForgeCodeMessageParts<'_>) -> Outp
 
 pub(super) fn ordered_rowid(rowid: i64) -> u64 {
     (rowid as u64) ^ (1_u64 << 63)
-}
-
-pub(super) fn frontier_bytes(frontier: &ForgeCodeFrontier) -> Result<Vec<u8>> {
-    serde_json::to_vec(frontier).map_err(CaptureError::from)
 }
 
 #[cfg(test)]

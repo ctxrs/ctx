@@ -2,14 +2,13 @@ use crate::provider::providers::forgecode::forgecode_text_message_text;
 use crate::tests::support::paths::{provider_history_fixture, tempdir};
 use crate::tests::support::provider_state::stored_provider_session_id;
 use crate::{
-    import_crush_sqlite, import_deepagents_sqlite, import_forgecode_sqlite,
+    import_crush_sqlite, import_deepagents_sqlite,
     import_goose_sessions_sqlite, import_junie_history, import_kiro_sqlite,
     import_zed_threads_sqlite, provider_source_for_path,
-    CrushSqliteImportOptions, DeepAgentsSqliteImportOptions, ForgeCodeSqliteImportOptions,
-    GooseSessionsSqliteImportOptions, JunieImportOptions, KiroSqliteImportOptions,
-    ProviderImportSupport, ProviderSourceStatus, ZedThreadsSqliteImportOptions,
-    CRUSH_SQLITE_SOURCE_FORMAT, DEEPAGENTS_SQLITE_SOURCE_FORMAT,
-    FORGECODE_SQLITE_SOURCE_FORMAT, JUNIE_SESSION_EVENTS_SOURCE_FORMAT, KIRO_SQLITE_SOURCE_FORMAT,
+    CrushSqliteImportOptions, DeepAgentsSqliteImportOptions, GooseSessionsSqliteImportOptions,
+    JunieImportOptions, KiroSqliteImportOptions, ProviderImportSupport, ProviderSourceStatus,
+    ZedThreadsSqliteImportOptions, CRUSH_SQLITE_SOURCE_FORMAT,
+    DEEPAGENTS_SQLITE_SOURCE_FORMAT, JUNIE_SESSION_EVENTS_SOURCE_FORMAT, KIRO_SQLITE_SOURCE_FORMAT,
     ZED_THREADS_SQLITE_SOURCE_FORMAT,
 };
 use chrono::{DateTime, Utc};
@@ -668,84 +667,6 @@ fn write_zed_raw_tool_input_db(temp: &TempDir) -> PathBuf {
 }
 
 #[test]
-fn native_forgecode_fixture_imports_searches_reimports_and_file_metrics() {
-    let temp = tempdir();
-    let fixture = provider_history_fixture("forgecode/v1/forge.db");
-    let store_path = temp.path().join("work.sqlite");
-    let mut store = Store::open(&store_path).unwrap();
-
-    let source = provider_source_for_path(CaptureProvider::ForgeCode, fixture.clone());
-    assert_eq!(source.source_format, FORGECODE_SQLITE_SOURCE_FORMAT);
-    assert_eq!(source.status, ProviderSourceStatus::Available);
-
-    let first = import_forgecode_sqlite(
-        &fixture,
-        &mut store,
-        ForgeCodeSqliteImportOptions {
-            machine_id: "test-machine".into(),
-            source_path: Some(fixture.clone()),
-            imported_at: DateTime::parse_from_rfc3339("2026-06-24T12:00:00Z")
-                .unwrap()
-                .with_timezone(&Utc),
-            ..ForgeCodeSqliteImportOptions::default()
-        },
-    )
-    .unwrap();
-
-    assert_eq!(first.failed, 0, "{:?}", first.failures);
-    assert_eq!(first.imported_sessions, 1);
-    assert_eq!(first.imported_events, 2);
-    let session_id = stored_provider_session_id(&store, CaptureProvider::ForgeCode, "forge-root");
-    let events = store.events_for_session(session_id).unwrap();
-    assert_eq!(events.len(), 2);
-    assert!(events
-        .iter()
-        .any(|event| event.event_type == EventType::ToolCall));
-    assert!(!events
-        .iter()
-        .any(|event| event.event_type == EventType::ToolOutput));
-    assert!(store
-        .search_event_hits("forgecode oracle", 10)
-        .unwrap()
-        .iter()
-        .any(|hit| hit.provider == Some(CaptureProvider::ForgeCode)));
-    let file_touch_count: i64 = Connection::open(&store_path)
-        .unwrap()
-        .query_row(
-            "SELECT COUNT(*) FROM ctx_files_touched WHERE provider = 'forgecode'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(file_touch_count, 4);
-
-    let second = import_forgecode_sqlite(
-        &fixture,
-        &mut store,
-        ForgeCodeSqliteImportOptions {
-            machine_id: "test-machine".into(),
-            source_path: Some(fixture.clone()),
-            ..ForgeCodeSqliteImportOptions::default()
-        },
-    )
-    .unwrap();
-    assert_eq!(second.failed, 0, "{:?}", second.failures);
-    assert_eq!(second.imported_sessions, 0);
-    assert_eq!(second.imported_events, 0);
-    assert_eq!(second.skipped_sessions, 0);
-    assert_eq!(second.skipped_events, 0);
-    let file_touch_count_after: i64 = Connection::open(&store_path)
-        .unwrap()
-        .query_row(
-            "SELECT COUNT(*) FROM ctx_files_touched WHERE provider = 'forgecode'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(file_touch_count_after, file_touch_count);
-}
-
-#[test]
 fn native_forgecode_empty_text_message_does_not_fabricate_search_text() {
     let text = forgecode_text_message_text(&json!({"role": "assistant"}), EventType::Message);
     assert!(text.is_empty());
@@ -871,40 +792,6 @@ fn native_deepagents_reports_malformed_writes_and_corrupt_db() {
         &corrupt,
         &mut store,
         DeepAgentsSqliteImportOptions::default(),
-    )
-    .unwrap_err();
-    assert!(err.to_string().contains("not a database"));
-}
-
-#[test]
-fn native_forgecode_reports_missing_table_and_corrupt_db() {
-    let temp = tempdir();
-    let missing_table = temp.path().join("missing-forge.db");
-    let conn = Connection::open(&missing_table).unwrap();
-    conn.execute_batch("CREATE TABLE unrelated (id INTEGER PRIMARY KEY);")
-        .unwrap();
-    drop(conn);
-    let corrupt = temp.path().join("corrupt-forge.db");
-    fs::write(&corrupt, b"not sqlite").unwrap();
-    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
-
-    let err = import_forgecode_sqlite(
-        &missing_table,
-        &mut store,
-        ForgeCodeSqliteImportOptions::default(),
-    )
-    .unwrap_err();
-    assert!(
-        err.to_string().contains(
-            "ForgeCode conversations table missing required column(s): conversation_id, workspace_id, created_at"
-        ),
-        "{err}"
-    );
-
-    let err = import_forgecode_sqlite(
-        &corrupt,
-        &mut store,
-        ForgeCodeSqliteImportOptions::default(),
     )
     .unwrap_err();
     assert!(err.to_string().contains("not a database"));
