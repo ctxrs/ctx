@@ -195,7 +195,6 @@ pub(crate) fn run_history_source_plugin_import(
             "rejected_records": 0,
             "rejections": [],
             "provider_source_authority": true,
-            "legacy_store_fallback": false,
             "plugin_stderr_bytes": prepared.plugin_stderr.len(),
             "display_source_bytes": format_bytes(stats.bytes),
         })],
