@@ -113,6 +113,7 @@ mod daemon_status;
 use daemon_retry::*;
 mod source_backed_pro_catch_up;
 mod source_backed_refresh_coordinator;
+mod source_backed_relational_catch_up;
 #[allow(unused_imports)] // Provider-neutral executor types are the capture coordinator seam.
 pub(crate) use source_backed_refresh_coordinator::{
     coordinate_source_backed_refresh, PinnedSourceBackedGeneration,

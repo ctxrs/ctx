@@ -102,6 +102,37 @@ fn run_full_source_backed_refresh(
     };
     let mut job = run.job;
     let mut did_work = run.did_work;
+    if !run.failed && daemon_mode_runs_source_backed_relational_catch_up(runtime.config.daemon.mode)
+    {
+        if let Some(core_generation_id) = job
+            .get("published_generation")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        {
+            match run_relational_after_core_publication(data_root, &core_generation_id) {
+                Ok(relational_run) => {
+                    did_work |= relational_run.did_work;
+                    job["relational_projection"] = relational_run.status;
+                }
+                Err(error) => {
+                    job["relational_projection"] = compact_json(json!({
+                        "schema_version": 1,
+                        "owner": "daemon",
+                        "kind": "source_backed_relational_catch_up",
+                        "status": "error",
+                        "pending": true,
+                        "retryable": true,
+                        "core_generation_id": core_generation_id,
+                        "active_core_generation_id": null,
+                        "receipt_core_generation_id": null,
+                        "projection_status": null,
+                        "error_code": "source_relational_status_unavailable",
+                        "last_error": format!("{error:#}"),
+                    }));
+                }
+            }
+        }
+    }
     if !run.failed && daemon_mode_runs_source_backed_pro_catch_up(runtime.config.daemon.mode) {
         if let Some(core_generation_id) = job
             .get("published_generation")
@@ -136,6 +167,10 @@ fn run_full_source_backed_refresh(
 }
 
 fn daemon_mode_runs_source_backed_pro_catch_up(mode: crate::config::DaemonMode) -> bool {
+    !mode.runs_only_source_refresh()
+}
+
+fn daemon_mode_runs_source_backed_relational_catch_up(mode: crate::config::DaemonMode) -> bool {
     !mode.runs_only_source_refresh()
 }
 
@@ -352,6 +387,7 @@ use super::{
     runtime_limits::DAEMON_MIN_REMAINING_FOR_JOB_SECS,
     source_backed_pro_catch_up::run_after_core_publication,
     source_backed_refresh_coordinator::SourceBackedRefreshCoordinator,
+    source_backed_relational_catch_up::run_after_core_publication as run_relational_after_core_publication,
 };
 
 #[cfg(test)]
@@ -366,7 +402,8 @@ mod tests {
 
     use super::{
         daemon_job_should_backoff, daemon_mode_runs_source_backed_pro_catch_up,
-        record_daemon_job_retry, run_daemon_once_with_activity, DaemonRetryBackoff, DaemonRuntime,
+        daemon_mode_runs_source_backed_relational_catch_up, record_daemon_job_retry,
+        run_daemon_once_with_activity, DaemonRetryBackoff, DaemonRuntime,
     };
 
     #[test]
@@ -380,7 +417,17 @@ mod tests {
     }
 
     #[test]
-    fn source_refresh_only_tick_creates_no_pro_catch_up_status() {
+    fn source_refresh_only_mode_excludes_source_backed_relational_catch_up() {
+        assert!(daemon_mode_runs_source_backed_relational_catch_up(
+            DaemonMode::Full
+        ));
+        assert!(!daemon_mode_runs_source_backed_relational_catch_up(
+            DaemonMode::SourceRefreshOnly
+        ));
+    }
+
+    #[test]
+    fn source_refresh_only_tick_creates_no_consumer_catch_up_status() {
         let temp = tempfile::tempdir().unwrap();
         let mut config = AppConfig::default();
         config.daemon.mode = DaemonMode::SourceRefreshOnly;
@@ -418,6 +465,10 @@ mod tests {
             .path()
             .join("daemon/jobs/source-backed-pro-catch-up.json")
             .exists());
+        assert!(!temp
+            .path()
+            .join("daemon/jobs/source-backed-relational-catch-up.json")
+            .exists());
     }
 
     #[test]
@@ -439,6 +490,28 @@ mod tests {
 
         assert_eq!(recorded["status"], "completed");
         assert_eq!(recorded["pro_projection"]["status"], "error");
+        assert_eq!(backoff.consecutive_failures, 0);
+    }
+
+    #[test]
+    fn relational_projection_error_never_puts_core_refresh_into_backoff() {
+        let core_job = json!({
+            "status": "completed",
+            "published_generation": "a".repeat(64),
+            "relational_projection": {
+                "status": "error",
+                "pending": true,
+                "retryable": true,
+                "error_code": "source_relational_projection_unavailable",
+            },
+        });
+        let mut backoff = DaemonRetryBackoff::default();
+
+        assert!(!daemon_job_should_backoff(&core_job));
+        let recorded = record_daemon_job_retry(&mut backoff, core_job);
+
+        assert_eq!(recorded["status"], "completed");
+        assert_eq!(recorded["relational_projection"]["status"], "error");
         assert_eq!(backoff.consecutive_failures, 0);
     }
 }
