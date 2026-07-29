@@ -48,9 +48,11 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use ctx_history_core::{
+    platform_security::{restrict_private_directory, restrict_private_file},
     CertifiedSource, CertifiedSourceDeletion, CertifiedSourceInventory, EventRole, FileChangeKind,
     ProjectionContractError, SourceKey, SourceResolverContractError, StableEntityId,
     StableEntityKind, IDENTITY_VERSION,
@@ -59,12 +61,9 @@ use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{
-    connection::{configure_read_only_connection, BUSY_TIMEOUT},
-    object_store::{restrict_private_dir, restrict_private_file},
-};
 use raw_sql::raw_sql_query_connection;
 
+const BUSY_TIMEOUT: Duration = Duration::from_secs(30);
 pub(super) const GENERATION_MANIFEST_VERSION: u32 = 3;
 pub(super) const REQUIRED_LEXICAL_SCHEMA_VERSION: u32 = 5;
 const REQUIRED_LEXICAL_ANALYZER_VERSION: u32 = 1;
@@ -91,7 +90,7 @@ impl SourceBackedRelationalProjection {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
-            restrict_private_dir(parent)?;
+            restrict_private_directory(parent)?;
         }
         let conn = Connection::open(&path)?;
         restrict_private_file(&path)?;
@@ -108,7 +107,7 @@ impl SourceBackedRelationalProjection {
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        configure_read_only_connection(&conn, BUSY_TIMEOUT)?;
+        configure_read_only_connection(&conn)?;
         schema::verify(&conn)?;
         Ok(Self {
             path,
@@ -234,6 +233,17 @@ impl SourceBackedRelationalProjection {
         }
         result
     }
+}
+
+fn configure_read_only_connection(conn: &Connection) -> Result<()> {
+    conn.busy_timeout(BUSY_TIMEOUT)?;
+    conn.execute_batch(
+        "PRAGMA foreign_keys = ON;
+         PRAGMA temp_store = MEMORY;
+         PRAGMA cache_size = -32768;
+         PRAGMA query_only = ON;",
+    )?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
