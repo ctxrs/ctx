@@ -119,34 +119,51 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_store() {
     assert!(status["indexed_events"].is_null());
     assert_eq!(status["history_epoch"]["status"], "unavailable");
     assert_eq!(status["lexical"]["status"], "unavailable");
+    assert_eq!(
+        status["lexical"]["path"],
+        json!(temp.path().join("search/lexical"))
+    );
     assert_eq!(status["refresh"]["status"], "unavailable");
     assert_eq!(status["relational"]["status"], "unavailable");
-    assert_eq!(status["legacy_history"]["status"], "absent");
-    assert_eq!(status["legacy_history"]["opened"], false);
+    assert_eq!(status["prior_epoch"]["status"], "absent");
+    assert_eq!(status["prior_epoch"]["authority"], "non_authoritative");
+    assert_eq!(status["prior_epoch"]["opened"], false);
     assert_eq!(status["read_only"], true);
     assert_eq!(status["semantic"]["status"], "disabled");
+    assert_eq!(
+        status["semantic"]["flat_f32"]["path"],
+        json!(temp.path().join("search/semantic"))
+    );
     assert_eq!(status["daemon"]["enabled"], true);
     assert_useful_mcp_text(
         &responses[2]["result"],
         &[
             "ctx status",
             "initialized: false",
-            "history_epoch: status=unavailable reason=epoch_not_initialized",
-            "lexical: status=unavailable reason=epoch_not_initialized",
-            "source_refresh: status=unavailable reason=daemon_unavailable",
-            "relational: status=unavailable reason=lexical_generation_unavailable",
-            "legacy_history: status=absent",
+            "history_epoch: status=unavailable, reason=epoch_not_initialized",
+            "lexical: status=unavailable, reason=epoch_not_initialized",
+            "source_refresh: status=unavailable, reason=daemon_unavailable",
+            "relational: status=unavailable, reason=lexical_generation_unavailable",
+            "prior_epoch: status=absent",
             "read_only: true",
             "local_only: true",
             "semantic: status=disabled",
-            "flat_f32: status=unavailable reason=lexical_generation_unavailable",
+            "flat_f32: status=unavailable, reason=lexical_generation_unavailable",
+            "semantic_path:",
             "daemon: enabled=true",
+            "mode=full",
+            "daemon_lock:",
+            "daemon_endpoint:",
             "daemon_jobs: source_backed_refresh=",
         ],
     );
     assert!(
         !temp.path().join("work.sqlite").exists(),
         "MCP status should not initialize the ctx store"
+    );
+    assert!(
+        std::fs::read_dir(temp.path()).unwrap().next().is_none(),
+        "MCP status should not create any file in a pristine data root"
     );
 }
 

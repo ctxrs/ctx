@@ -68,6 +68,7 @@ pub(crate) fn run_status(
         print_optional_count("indexed_sources", source.indexed_sources);
         print_component_status("history_epoch", &source.report["history_epoch"]);
         print_component_status("lexical", &source.report["lexical"]);
+        print_json_field("lexical_path", &source.report["lexical"]["path"]);
         if let Some(generation) = source.report["lexical"]["generation_id"].as_str() {
             println!("lexical_generation: {generation}");
         }
@@ -77,13 +78,82 @@ pub(crate) fn run_status(
         print_component_status("catalog", &source.report["catalog"]);
         print_component_status("resolver", &source.report["resolver"]);
         print_component_status("source_refresh", &source.report["refresh"]);
+        for (label, field) in [
+            ("source_refresh_source_count", "source_count"),
+            (
+                "source_refresh_certified_source_count",
+                "certified_source_count",
+            ),
+            (
+                "source_refresh_certified_source_bytes",
+                "certified_source_bytes",
+            ),
+            ("source_refresh_timings_us", "timings_us"),
+        ] {
+            print_json_field(label, &source.report["refresh"][field]);
+        }
         print_component_status("semantic", &source.report["semantic"]);
         print_component_status("flat_f32", &source.report["semantic"]["flat_f32"]);
+        print_json_field(
+            "semantic_path",
+            &source.report["semantic"]["flat_f32"]["path"],
+        );
+        for (label, field) in [
+            ("semantic_core_generation", "core_generation_id"),
+            ("semantic_flat_generation", "flat_generation"),
+            ("semantic_flat_generation_hash", "flat_generation_hash"),
+        ] {
+            print_json_field(label, &source.report["semantic"]["flat_f32"][field]);
+        }
         print_component_status("relational", &source.report["relational"]);
+        print_json_field("relational_path", &source.report["relational"]["path"]);
+        print_json_field(
+            "relational_core_generation",
+            &source.report["relational"]["active_core_generation_id"],
+        );
+        print_json_field(
+            "relational_policy_hash",
+            &source.report["relational"]["active_policy_schema_hash"],
+        );
         print_component_status("pro_projection", &source.report["pro_projection"]);
-        print_component_status("legacy_history", &source.report["legacy_history"]);
+        print_json_field(
+            "pro_projection_authority",
+            &source.report["pro_projection"]["authority"],
+        );
+        print_component_status(
+            "pro_source_manifest_receipt",
+            &source.report["pro_projection"]["receipt"],
+        );
+        print_json_field(
+            "pro_source_manifest_receipt_generation",
+            &source.report["pro_projection"]["receipt"]["core_generation_id"],
+        );
+        print_component_status("prior_epoch", &source.report["prior_epoch"]);
         let daemon = &source.report["daemon"];
         print_component_status("daemon", daemon);
+        for (label, value) in [
+            ("daemon_mode", &daemon["mode"]),
+            ("daemon_pid", &daemon["pid"]),
+            ("daemon_start_mode", &daemon["start_mode"]),
+            ("daemon_trigger_command", &daemon["trigger_command"]),
+            ("daemon_trigger_provenance", &daemon["trigger_provenance"]),
+            ("daemon_lock_path", &daemon["lock_identity"]["path"]),
+            ("daemon_lock_active", &daemon["lock_identity"]["active"]),
+            (
+                "daemon_endpoint_available",
+                &daemon["source_refresh_endpoint"]["available"],
+            ),
+            (
+                "daemon_endpoint_transport",
+                &daemon["source_refresh_endpoint"]["transport"],
+            ),
+            (
+                "daemon_endpoint_address",
+                &daemon["source_refresh_endpoint"]["address"],
+            ),
+        ] {
+            print_json_field(label, value);
+        }
         println!("upgrade_auto: {}", config.auto_upgrade_mode().as_str());
         if let Some(reason) = daemon.get("reason").and_then(|value| value.as_str()) {
             println!("daemon_reason: {reason}");
@@ -160,6 +230,17 @@ fn print_component_status(name: &str, component: &Value) {
     );
     if let Some(reason) = component.get("reason").and_then(Value::as_str) {
         println!("{name}_reason: {reason}");
+    }
+}
+
+fn print_json_field(name: &str, value: &Value) {
+    if value.is_null() {
+        return;
+    }
+    if let Some(value) = value.as_str() {
+        println!("{name}: {value}");
+    } else {
+        println!("{name}: {value}");
     }
 }
 

@@ -243,8 +243,7 @@ fn daemon_acquisition_failure_is_explicit_retryable_and_fail_closed() -> Result<
     let job = record_daemon_job_retry(&mut backoff, job);
     write_daemon_job_status(&daemon_semantic_job_path(temp.path()), &job)?;
 
-    let store = Store::open(database_path(temp.path().to_path_buf()))?;
-    let report = semantic_worker_report(temp.path(), Some(&store))?;
+    let report = semantic_worker_report(temp.path())?;
     let value = daemon_semantic_job_report(temp.path(), &report, true);
     assert_eq!(value["status"], "skipped");
     assert_eq!(value["reason"], "model_acquisition_failed");
@@ -316,8 +315,7 @@ fn verified_cache_missing_runtime_reports_model_load_failed_compatibly() -> Resu
         .as_str()
         .is_some_and(|message| message.contains("failed to load ONNX Runtime")));
 
-    let store = Store::open(database_path(temp.path().to_path_buf()))?;
-    let report = semantic_worker_report(temp.path(), Some(&store))?;
+    let report = semantic_worker_report(temp.path())?;
     let value = daemon_semantic_job_report(temp.path(), &report, true);
     assert_eq!(value["status"], "skipped");
     assert_eq!(value["reason"], "model_load_failed");
