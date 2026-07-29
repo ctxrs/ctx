@@ -1,4 +1,15 @@
 {
   "schema_version": 1,
-  "exceptions": []
+  "exceptions": [
+    {
+      "advisory_id": "RUSTSEC-2024-0436",
+      "ecosystem": "crates.io",
+      "package": "paste",
+      "version": "1.0.15",
+      "lockfile": "Cargo.lock",
+      "rationale": "Informational unmaintained-only advisory for a build-time proc macro used directly by tokenizers 0.22.2; paste is not linked into or callable by the release binary, has no normal dependencies, and contains no unsafe blocks. macro_rules_attribute was upgraded to 0.2.3 to replace its independent paste edge with pastey, but fastembed 5.17.4 still requires tokenizers 0.22.2, tokenizers 0.23.1 still requires paste, and upstream intentionally reverted its pastey migration, so no published compatible maintained path removes the residual without replacing or forking the embedding stack. Re-evaluate the upstream tokenizers migration before expiry.",
+      "owner": "ctx-release-security",
+      "expires": "2026-08-12"
+    }
+  ]
 }
