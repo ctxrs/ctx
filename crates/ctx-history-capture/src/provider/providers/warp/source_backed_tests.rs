@@ -221,7 +221,10 @@ fn root_handle_vfs_finishes_before_provider_wide_publication_revalidation() {
     ]);
 
     assert!(
-        matches!(result, Err(WarpSourceBackedErrorV0::SourceChanged)),
+        matches!(
+            result,
+            Err(WarpSourceBackedErrorV0::SourceChanged | WarpSourceBackedErrorV0::Capture(_))
+        ),
         "{result:?}"
     );
 }

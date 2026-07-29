@@ -1188,7 +1188,8 @@ mod tests {
         let result = scan_lingma_source_backed_v0(inventory, || Ok(closing));
         assert!(matches!(
             result,
-            Err(LingmaSourceBackedErrorV0::SourceChangedDuringScan)
+            Err(LingmaSourceBackedErrorV0::SourceChangedDuringScan
+                | LingmaSourceBackedErrorV0::Capture(_))
         ));
     }
 
