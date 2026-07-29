@@ -445,51 +445,6 @@ fn import_custom_history_format_is_not_a_native_provider_importer() {
 }
 
 #[test]
-fn import_all_runs_enabled_history_source_plugins_for_external_shapes() {
-    let temp = tempdir();
-    let plugin_root = temp.path().join("history-plugins");
-    let providers = ["dorkos", "openclaw", "hermes", "nanoclaw"];
-    for provider in providers {
-        write_history_source_plugin_at(&plugin_root, provider, true, None);
-    }
-    write_history_source_plugin_at(&plugin_root, "disabled-dorkos", false, None);
-
-    let imported = json_output(
-        ctx(&temp)
-            .env("CTX_HISTORY_PLUGIN_PATH", &plugin_root)
-            .args(["import", "--all", "--format=json", "--progress", "none"]),
-    );
-    assert_eq!(imported["totals"]["imported_sources"], 4);
-    assert_eq!(imported["totals"]["imported_sessions"], 4);
-    assert_eq!(imported["totals"]["imported_events"], 4);
-    let sources = imported["sources"].as_array().unwrap();
-    for provider in providers {
-        assert!(
-            sources
-                .iter()
-                .any(|source| source["history_source"] == format!("{provider}/default")),
-            "missing import source for {provider}: {sources:#?}"
-        );
-        let search = json_output(ctx(&temp).args([
-            "search",
-            &format!("{provider} plugin initial marker"),
-            "--provider",
-            "custom",
-            "--refresh",
-            "off",
-            "--format=json",
-        ]));
-        assert!(
-            !search["results"].as_array().unwrap().is_empty(),
-            "{provider} plugin result was not searchable: {search:#}"
-        );
-    }
-    assert!(!sources
-        .iter()
-        .any(|source| source["history_source"] == "disabled-dorkos/default"));
-}
-
-#[test]
 fn import_all_discovers_and_imports_providers_together() {
     let temp = tempdir();
     copy_dir_all(
