@@ -22,6 +22,7 @@
         "test:local_usage": "//crates/ctx-cli:local_usage_tests",
         "test:mcp": "//crates/ctx-cli:mcp_tests",
         "test:mcp_integration_e2e": "//crates/ctx-cli:mcp_integration_e2e_tests",
+        "test:mcp_local_usage_v2": "//crates/ctx-cli:mcp_local_usage_v2_tests",
         "test:mcp_telemetry": "//crates/ctx-cli:mcp_telemetry_tests",
         "test:native_provider_real_shapes": "//crates/ctx-cli:native_provider_real_shapes_tests",
         "test:native_provider_rejections": "//crates/ctx-cli:native_provider_rejections_tests",
