@@ -143,6 +143,14 @@ CREATE TABLE daily_usage (
         )
     ),
     CHECK (
+        operation != 'blame'
+        OR outcome = 'failure'
+        OR (
+            (pro_outcome NOT IN ('produced', 'possible') OR value_class = 'result_bearing')
+            AND (value_class != 'empty' OR pro_outcome = 'none')
+        )
+    ),
+    CHECK (
         outcome = 'failure'
         OR (
             surface = 'cli'
@@ -173,6 +181,21 @@ CREATE TABLE daily_usage (
     )
 ) WITHOUT ROWID, STRICT;
 "#;
+
+const BLAME_VALUE_CLASS_CHECK: &str = r#"
+    CHECK (
+        operation != 'blame'
+        OR outcome = 'failure'
+        OR (
+            (pro_outcome NOT IN ('produced', 'possible') OR value_class = 'result_bearing')
+            AND (value_class != 'empty' OR pro_outcome = 'none')
+        )
+    ),
+"#;
+
+fn legacy_daily_usage_schema_v1() -> String {
+    DAILY_USAGE_SCHEMA_V1.replacen(BLAME_VALUE_CLASS_CHECK, "", 1)
+}
 
 const DAILY_USAGE_SCHEMA: &str = r#"
 CREATE TABLE daily_usage (
@@ -377,6 +400,14 @@ CREATE TABLE daily_usage (
         OR (
             target_type IN ('file', 'commit', 'pull_request')
             OR (outcome = 'failure' AND target_type = 'not_applicable')
+        )
+    ),
+    CHECK (
+        operation != 'blame'
+        OR outcome = 'failure'
+        OR (
+            (pro_outcome NOT IN ('produced', 'possible') OR value_class = 'result_bearing')
+            AND (value_class != 'empty' OR pro_outcome = 'none')
         )
     ),
     CHECK (
@@ -793,6 +824,32 @@ pub(super) fn record_with_ctx_version_for_test(
 
 #[cfg(test)]
 pub(super) fn create_mixed_v1_fixture_for_test(data_root: &Path) -> Result<(), UsageStoreError> {
+    create_v1_fixture_for_test(data_root, DAILY_USAGE_SCHEMA_V1, "none", false)
+}
+
+#[cfg(test)]
+pub(super) fn create_legacy_impossible_blame_v1_fixture_for_test(
+    data_root: &Path,
+) -> Result<(), UsageStoreError> {
+    let legacy_schema = legacy_daily_usage_schema_v1();
+    create_v1_fixture_for_test(data_root, &legacy_schema, "possible", false)
+}
+
+#[cfg(test)]
+pub(super) fn create_legacy_colliding_blame_v1_fixture_for_test(
+    data_root: &Path,
+) -> Result<(), UsageStoreError> {
+    let legacy_schema = legacy_daily_usage_schema_v1();
+    create_v1_fixture_for_test(data_root, &legacy_schema, "possible", true)
+}
+
+#[cfg(test)]
+fn create_v1_fixture_for_test(
+    data_root: &Path,
+    daily_schema: &str,
+    empty_blame_outcome: &str,
+    add_normalized_collision: bool,
+) -> Result<(), UsageStoreError> {
     create_private_directory_all(data_root)?;
     verify_private_directory_and_owner(data_root)?;
     let path = usage_path(data_root);
@@ -808,7 +865,7 @@ pub(super) fn create_mixed_v1_fixture_for_test(data_root: &Path) -> Result<(), U
     conn.pragma_update(None, "page_size", PAGE_SIZE_BYTES)?;
     let day = utc_day(SystemTime::now());
     let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    transaction.execute_batch(DAILY_USAGE_SCHEMA_V1)?;
+    transaction.execute_batch(daily_schema)?;
     transaction.execute_batch(MAINTENANCE_SCHEMA)?;
     let insert = r#"
         INSERT INTO daily_usage (
@@ -880,7 +937,7 @@ pub(super) fn create_mixed_v1_fixture_for_test(data_root: &Path) -> Result<(), U
             "empty",
             "250_to_999_ms",
             "file",
-            "possible",
+            empty_blame_outcome,
             1,
             0,
             0,
@@ -904,6 +961,25 @@ pub(super) fn create_mixed_v1_fixture_for_test(data_root: &Path) -> Result<(), U
             insert,
             params![
                 day, row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10
+            ],
+        )?;
+    }
+    if add_normalized_collision {
+        transaction.execute(
+            insert,
+            params![
+                day,
+                "mcp",
+                "blame",
+                "success",
+                "empty",
+                "250_to_999_ms",
+                "file",
+                "none",
+                1_i64,
+                0_i64,
+                0_i64,
+                200_i64,
             ],
         )?;
     }
@@ -932,12 +1008,10 @@ pub(super) fn fail_v1_migration_before_commit_for_test(
     data_root: &Path,
 ) -> Result<(), UsageStoreError> {
     let path = usage_path(data_root);
-    let mut conn = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )?;
-    configure_transient(&conn, BUSY_TIMEOUT)?;
-    migrate_to_current(&mut conn, || Err::<(), _>(UsageStoreError::Integrity))
+    open_writable_with_migration_hook(&path, false, BUSY_TIMEOUT, || {
+        Err(UsageStoreError::Integrity)
+    })
+    .map(|_| ())
 }
 
 pub(crate) struct ReadOnlyStore {
@@ -1039,6 +1113,15 @@ fn open_writable(
     create: bool,
     busy_timeout: Duration,
 ) -> Result<Option<WritableStore>, UsageStoreError> {
+    open_writable_with_migration_hook(path, create, busy_timeout, || Ok(()))
+}
+
+fn open_writable_with_migration_hook(
+    path: &Path,
+    create: bool,
+    busy_timeout: Duration,
+    before_migration_commit: impl FnOnce() -> Result<(), UsageStoreError>,
+) -> Result<Option<WritableStore>, UsageStoreError> {
     let prepared = prepare_file(path, create)?;
     let newly_created = matches!(prepared, PreparedFile::NewInitialized(_));
     let guard = match prepared {
@@ -1080,20 +1163,29 @@ fn open_writable(
         // again; v2 persistent configuration restores WAL after commit.
         let journal_mode: String =
             conn.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
-        if journal_mode != "wal" {
-            return Err(UsageStoreError::SchemaIdentity);
-        }
-        conn.pragma_update(None, "journal_mode", "DELETE")?;
-        let journal_mode: String =
-            conn.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
-        if journal_mode != "delete" {
-            return Err(UsageStoreError::UnsafeReadState);
+        match journal_mode.as_str() {
+            "wal" => {
+                conn.pragma_update(None, "journal_mode", "DELETE")?;
+                let journal_mode: String =
+                    conn.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+                if journal_mode != "delete" {
+                    return Err(UsageStoreError::UnsafeReadState);
+                }
+            }
+            // The WAL-to-rollback transition is durable independently of the
+            // schema transaction. A prior attempt can therefore fail after
+            // this transition while leaving a valid v1 main image in DELETE
+            // mode. Treat that exact state as the retry continuation.
+            "delete" => {}
+            _ => return Err(UsageStoreError::SchemaIdentity),
         }
         guard.recheck(&path)?;
     }
     migrate_to_current(&mut conn, || {
         guard.recheck(path)?;
-        preflight_existing_family(path, true)
+        let commit_guard = preflight_existing_family(path, true)?;
+        before_migration_commit()?;
+        Ok(commit_guard)
     })?;
     configure_persistent(&conn)?;
     verify_schema(&conn)?;
@@ -1343,6 +1435,40 @@ fn migrate_to_current<T>(
             search_result_byte_samples, context_searches, context_found,
             context_opened, context_cited, validated_discoveries
         )
+        WITH normalized AS (
+            SELECT
+                day_utc,
+                ctx_version,
+                surface,
+                operation,
+                outcome,
+                value_class,
+                duration_bucket,
+                target_type,
+                CASE
+                    WHEN operation = 'blame'
+                        AND pro_outcome IN ('produced', 'possible')
+                        AND value_class != 'result_bearing'
+                        THEN 'none'
+                    ELSE pro_outcome
+                END AS normalized_pro_outcome,
+                CASE
+                    WHEN outcome != 'success' OR value_class = 'not_applicable'
+                        THEN 'not_applicable'
+                    WHEN operation = 'search' THEN 'search'
+                    WHEN surface = 'mcp' AND operation = 'show_session' THEN 'open_session'
+                    WHEN surface = 'mcp' AND operation = 'show_event' THEN 'open_event'
+                    WHEN operation = 'sources' THEN 'sources'
+                    WHEN operation = 'sql' THEN 'sql'
+                    WHEN operation = 'blame' THEN 'blame'
+                    ELSE 'not_applicable'
+                END AS normalized_result_action,
+                calls,
+                result_count,
+                citation_count,
+                response_bytes
+            FROM daily_usage_v1
+        )
         SELECT
             day_utc,
             2,
@@ -1353,25 +1479,15 @@ fn migrate_to_current<T>(
             value_class,
             duration_bucket,
             target_type,
-            pro_outcome,
-            CASE
-                WHEN outcome != 'success' OR value_class = 'not_applicable'
-                    THEN 'not_applicable'
-                WHEN operation = 'search' THEN 'search'
-                WHEN surface = 'mcp' AND operation = 'show_session' THEN 'open_session'
-                WHEN surface = 'mcp' AND operation = 'show_event' THEN 'open_event'
-                WHEN operation = 'sources' THEN 'sources'
-                WHEN operation = 'sql' THEN 'sql'
-                WHEN operation = 'blame' THEN 'blame'
-                ELSE 'not_applicable'
-            END,
-            calls,
-            result_count,
-            citation_count,
+            normalized_pro_outcome,
+            normalized_result_action,
+            SUM(calls),
+            SUM(result_count),
+            SUM(citation_count),
             0,
             0,
-            response_bytes,
-            CASE WHEN surface = 'mcp' THEN calls ELSE 0 END,
+            SUM(response_bytes),
+            CASE WHEN surface = 'mcp' THEN SUM(calls) ELSE 0 END,
             0,
             0,
             0,
@@ -1383,7 +1499,18 @@ fn migrate_to_current<T>(
             0,
             0,
             0
-        FROM daily_usage_v1;
+        FROM normalized
+        GROUP BY
+            day_utc,
+            ctx_version,
+            surface,
+            operation,
+            outcome,
+            value_class,
+            duration_bucket,
+            target_type,
+            normalized_pro_outcome,
+            normalized_result_action;
         DROP TABLE daily_usage_v1;
         "#,
     )?;
@@ -1414,9 +1541,7 @@ pub(super) fn verify_supported_schema(conn: &Connection) -> Result<i64, UsageSto
     let user_version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     verify_schema_object_allowlist(conn)?;
     match user_version {
-        LEGACY_SCHEMA_VERSION => {
-            verify_daily_schema(conn, DAILY_USAGE_SCHEMA_V1, EXPECTED_DAILY_COLUMNS_V1)?
-        }
+        LEGACY_SCHEMA_VERSION => verify_daily_schema_v1(conn)?,
         SCHEMA_VERSION => verify_daily_schema(conn, DAILY_USAGE_SCHEMA, EXPECTED_DAILY_COLUMNS)?,
         _ => return Err(UsageStoreError::SchemaVersion(user_version)),
     }
@@ -1432,9 +1557,26 @@ pub(super) fn verify_schema(conn: &Connection) -> Result<(), UsageStoreError> {
     Ok(())
 }
 
+fn verify_daily_schema_v1(conn: &Connection) -> Result<(), UsageStoreError> {
+    let legacy_schema = legacy_daily_usage_schema_v1();
+    verify_daily_schema_variants(
+        conn,
+        &[DAILY_USAGE_SCHEMA_V1, legacy_schema.as_str()],
+        EXPECTED_DAILY_COLUMNS_V1,
+    )
+}
+
 fn verify_daily_schema(
     conn: &Connection,
     expected_schema: &str,
+    expected_columns: &[&str],
+) -> Result<(), UsageStoreError> {
+    verify_daily_schema_variants(conn, &[expected_schema], expected_columns)
+}
+
+fn verify_daily_schema_variants(
+    conn: &Connection,
+    expected_schemas: &[&str],
     expected_columns: &[&str],
 ) -> Result<(), UsageStoreError> {
     let mut statement = conn.prepare("PRAGMA table_info(daily_usage)")?;
@@ -1448,8 +1590,19 @@ fn verify_daily_schema(
     {
         return Err(UsageStoreError::SchemaIdentity);
     }
-    verify_table_schema(conn, "daily_usage", expected_schema)?;
+    let actual = table_schema(conn, "daily_usage")?;
+    if !expected_schemas
+        .iter()
+        .any(|expected| canonical_schema(&actual) == canonical_schema(expected))
+    {
+        return Err(UsageStoreError::SchemaIdentity);
+    }
     Ok(())
+}
+
+pub(super) fn v1_uses_legacy_blame_schema(conn: &Connection) -> Result<bool, UsageStoreError> {
+    let actual = table_schema(conn, "daily_usage")?;
+    Ok(canonical_schema(&actual) == canonical_schema(&legacy_daily_usage_schema_v1()))
 }
 
 fn verify_schema_object_allowlist(conn: &Connection) -> Result<(), UsageStoreError> {
@@ -1493,18 +1646,21 @@ fn verify_table_schema(
     table: &str,
     expected: &str,
 ) -> Result<(), UsageStoreError> {
-    let actual = conn
-        .query_row(
-            "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?1",
-            [table],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?
-        .ok_or(UsageStoreError::SchemaIdentity)?;
+    let actual = table_schema(conn, table)?;
     if canonical_schema(&actual) != canonical_schema(expected) {
         return Err(UsageStoreError::SchemaIdentity);
     }
     Ok(())
+}
+
+fn table_schema(conn: &Connection, table: &str) -> Result<String, UsageStoreError> {
+    conn.query_row(
+        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+        [table],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()?
+    .ok_or(UsageStoreError::SchemaIdentity)
 }
 
 fn canonical_schema(sql: &str) -> String {

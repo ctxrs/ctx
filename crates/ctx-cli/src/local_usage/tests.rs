@@ -265,7 +265,8 @@ fn cite_only_validation_has_no_open_time_estimate() {
     let estimates = estimate_usage(EstimateFacts {
         discovered_record_opens: usage.context_opened,
         ..EstimateFacts::default()
-    });
+    })
+    .unwrap();
     assert_eq!(estimates.estimated_time_saved_seconds, 0);
 }
 
@@ -281,7 +282,8 @@ fn estimate_model_uses_approved_coefficients_and_one_copy_bytes() {
         discovered_record_opens: 2,
         produced_blame_requests: 1,
         possible_blame_requests: 1,
-    });
+    })
+    .unwrap();
 
     assert_eq!(ESTIMATE_MODEL.approximate_bytes_per_token, 4);
     assert_eq!(ESTIMATE_MODEL.avoided_search_token_multiplier, 49);
@@ -307,7 +309,8 @@ fn legacy_missing_semantic_measurements_are_named_and_not_fabricated_zero() {
         result_bearing_searches: 3,
         semantic_context_eligible_samples: 4,
         ..EstimateFacts::default()
-    });
+    })
+    .unwrap();
 
     assert_eq!(
         estimates.approximate_context_tokens.coverage,
@@ -333,7 +336,7 @@ fn legacy_missing_semantic_measurements_are_named_and_not_fabricated_zero() {
         "unavailable_legacy"
     );
 
-    let no_eligible_actions = estimate_usage(EstimateFacts::default());
+    let no_eligible_actions = estimate_usage(EstimateFacts::default()).unwrap();
     assert_eq!(
         no_eligible_actions.approximate_context_tokens.coverage,
         EstimateCoverage::Complete
@@ -447,9 +450,9 @@ fn reporting_never_changes_checkpointed_or_active_sqlite_families() {
 }
 
 #[test]
-fn v1_detached_read_migration_preserves_the_entire_source_family() {
+fn v1_detached_read_migration_normalizes_impossible_blame_without_mutating_source() {
     let root = private_tempdir();
-    store::create_mixed_v1_fixture_for_test(root.path()).unwrap();
+    store::create_legacy_impossible_blame_v1_fixture_for_test(root.path()).unwrap();
     let path = usage_path(root.path());
     let before = sqlite_family_snapshot(&path);
 
@@ -460,6 +463,9 @@ fn v1_detached_read_migration_preserves_the_entire_source_family() {
     assert_eq!(summary.result_count, 9);
     assert_eq!(summary.citation_count, 1);
     assert_eq!(summary.pro_blame.citation_count, 1);
+    assert_eq!(summary.pro_blame.produced_attribution_requests, 1);
+    assert_eq!(summary.pro_blame.possible_or_reference_only_requests, 0);
+    assert_eq!(summary.pro_blame.no_confident_attribution_requests, 1);
     assert_eq!(summary.mcp_response_bytes, 1_500);
     assert_eq!(summary.mcp_response_byte_samples, 6);
     assert_eq!(summary.cli_output_bytes, 0);
@@ -494,7 +500,7 @@ fn v1_detached_read_migration_preserves_the_entire_source_family() {
             .approximate_tokens,
         None
     );
-    assert_eq!(estimates.estimated_time_saved_seconds, 600);
+    assert_eq!(estimates.estimated_time_saved_seconds, 480);
     assert_eq!(sqlite_family_snapshot(&path), before);
 
     let conn = Connection::open(path).unwrap();
@@ -508,7 +514,7 @@ fn v1_detached_read_migration_preserves_the_entire_source_family() {
 #[test]
 fn v1_writable_migration_preserves_facts_and_leaves_new_measurements_unknown() {
     let root = private_tempdir();
-    store::create_mixed_v1_fixture_for_test(root.path()).unwrap();
+    store::create_legacy_impossible_blame_v1_fixture_for_test(root.path()).unwrap();
     store::growth_policy_for_test(root.path()).unwrap();
     let path = usage_path(root.path());
     let conn = Connection::open(&path).unwrap();
@@ -583,6 +589,16 @@ fn v1_writable_migration_preserves_facts_and_leaves_new_measurements_unknown() {
         [0; 13]
     );
     assert_eq!((migrated.18, migrated.19), (2, 2));
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM daily_usage \
+             WHERE operation = 'blame' AND value_class = 'empty' AND pro_outcome != 'none'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        0
+    );
     drop(conn);
 
     store::growth_policy_for_test(root.path()).unwrap();
@@ -614,16 +630,41 @@ fn v1_writable_migration_preserves_facts_and_leaves_new_measurements_unknown() {
 }
 
 #[test]
-fn v1_migration_rolls_back_before_commit_and_unknown_versions_fail_closed() {
+fn v1_migration_coalesces_rows_that_conservative_blame_normalization_collides() {
+    let root = private_tempdir();
+    store::create_legacy_colliding_blame_v1_fixture_for_test(root.path()).unwrap();
+    store::growth_policy_for_test(root.path()).unwrap();
+
+    let conn = Connection::open(usage_path(root.path())).unwrap();
+    let normalized: (i64, i64, i64) = conn
+        .query_row(
+            "SELECT calls, response_bytes, response_byte_samples FROM daily_usage \
+             WHERE operation = 'blame' AND value_class = 'empty' AND pro_outcome = 'none'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(normalized, (2, 400, 2));
+    drop(conn);
+
+    let report = read_report(root.path(), true, false);
+    assert_eq!(report.state, "ready", "{:?}", report.error);
+    let summary = report.summary.unwrap();
+    assert_eq!(summary.calls, 10);
+    assert_eq!(summary.pro_blame.possible_or_reference_only_requests, 0);
+    assert_eq!(summary.pro_blame.no_confident_attribution_requests, 2);
+    assert_eq!(report.estimates.unwrap().estimated_time_saved_seconds, 480);
+}
+
+#[test]
+fn v1_open_writable_migration_retries_after_post_delete_failure() {
     let rollback = private_tempdir();
     store::create_mixed_v1_fixture_for_test(rollback.path()).unwrap();
     let rollback_path = usage_path(rollback.path());
-    let before = sqlite_family_snapshot(&rollback_path);
     assert!(matches!(
         store::fail_v1_migration_before_commit_for_test(rollback.path()),
         Err(store::UsageStoreError::Integrity)
     ));
-    assert_eq!(sqlite_family_snapshot(&rollback_path), before);
     let conn = Connection::open(&rollback_path).unwrap();
     assert_eq!(
         conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
@@ -639,8 +680,40 @@ fn v1_migration_rolls_back_before_commit_and_unknown_versions_fail_closed() {
         .unwrap(),
         0
     );
+    assert_eq!(
+        conn.pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))
+            .unwrap(),
+        "delete"
+    );
+    assert_eq!(
+        conn.query_row("SELECT SUM(calls) FROM daily_usage", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap(),
+        9
+    );
     drop(conn);
 
+    store::growth_policy_for_test(rollback.path()).unwrap();
+    let conn = Connection::open(&rollback_path).unwrap();
+    assert_eq!(
+        conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        conn.pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))
+            .unwrap(),
+        "wal"
+    );
+    drop(conn);
+    let report = read_report(rollback.path(), true, false);
+    assert_eq!(report.state, "ready", "{:?}", report.error);
+    assert_eq!(report.summary.unwrap().calls, 9);
+}
+
+#[test]
+fn unknown_versions_fail_closed_without_mutation() {
     let unknown = private_tempdir();
     store::create_mixed_v1_fixture_for_test(unknown.path()).unwrap();
     let unknown_path = usage_path(unknown.path());
@@ -700,21 +773,58 @@ fn blame_citations_are_separate_from_global_delivery_citations() {
 }
 
 #[test]
-fn report_rejects_aggregate_correlation_counts_that_exceed_found_results() {
+fn report_accepts_open_after_best_effort_search_write_is_dropped() {
+    let root = private_tempdir();
+    store::record(root.path(), operation("doctor")).unwrap();
+    let lock = Connection::open(usage_path(root.path())).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let mut search = mcp_operation("search", true, ValueClass::ResultBearing, 1);
+    search.context.context_searches = 1;
+    search.context.context_found = 1;
+    super::record_best_effort(root.path(), true, search);
+    lock.execute_batch("ROLLBACK").unwrap();
+    drop(lock);
+
+    let mut opened = mcp_operation("show_session", true, ValueClass::ResultBearing, 1);
+    opened.context.context_opened = 1;
+    opened.context.validated_discoveries = 1;
+    store::record(root.path(), opened).unwrap();
+
+    let report = read_report(root.path(), true, false);
+    assert_eq!(report.state, "ready", "{:?}", report.error);
+    let summary = report.summary.unwrap();
+    assert_eq!(summary.calls, 2);
+    assert_eq!(summary.context.context_found, 0);
+    assert_eq!(summary.context.context_opened, 1);
+    assert_eq!(summary.context.context_cited_coverage, "unsupported");
+    assert_eq!(summary.context.validated_discoveries, 1);
+    assert_eq!(
+        report.estimates.unwrap().estimated_time_saved_seconds,
+        ESTIMATE_MODEL.discovered_record_open_seconds
+    );
+}
+
+#[test]
+fn report_accepts_show_persisted_after_reset_removed_its_search() {
     let root = private_tempdir();
     let mut search = mcp_operation("search", true, ValueClass::ResultBearing, 1);
     search.context.context_searches = 1;
     search.context.context_found = 1;
     store::record(root.path(), search).unwrap();
+    assert!(reset(root.path()).unwrap());
 
-    for operation in ["show_session", "show_event"] {
-        let mut opened = mcp_operation(operation, true, ValueClass::ResultBearing, 1);
-        opened.context.context_opened = 1;
-        opened.context.validated_discoveries = 1;
-        store::record(root.path(), opened).unwrap();
-    }
+    let mut opened = mcp_operation("show_event", true, ValueClass::ResultBearing, 1);
+    opened.context.context_opened = 1;
+    opened.context.validated_discoveries = 1;
+    store::record(root.path(), opened).unwrap();
 
-    assert_eq!(read_report(root.path(), true, false).state, "error");
+    let report = read_report(root.path(), true, false);
+    assert_eq!(report.state, "ready", "{:?}", report.error);
+    let summary = report.summary.unwrap();
+    assert_eq!(summary.calls, 1);
+    assert_eq!(summary.context.context_found, 0);
+    assert_eq!(summary.context.context_opened, 1);
+    assert_eq!(summary.context.validated_discoveries, 1);
 }
 
 #[test]
@@ -1308,23 +1418,20 @@ fn retention_keeps_approximately_four_hundred_utc_days() {
     let day = Duration::from_secs(24 * 60 * 60);
     let recent = UNIX_EPOCH + day * 20_000;
     let expired = recent - day * 401;
-    store::record_at_for_test(
-        root.path(),
-        operation("doctor"),
-        expired,
-        Duration::from_secs(1),
-    )
-    .unwrap();
-    store::record_at_for_test(
-        root.path(),
-        operation("doctor"),
-        recent,
-        Duration::from_secs(1),
-    )
-    .unwrap();
+    let mut search = mcp_operation("search", true, ValueClass::ResultBearing, 1);
+    search.context.context_searches = 1;
+    search.context.context_found = 1;
+    store::record_at_for_test(root.path(), search, expired, Duration::from_secs(1)).unwrap();
+    let mut opened = mcp_operation("show_session", true, ValueClass::ResultBearing, 1);
+    opened.context.context_opened = 1;
+    opened.context.validated_discoveries = 1;
+    store::record_at_for_test(root.path(), opened, recent, Duration::from_secs(1)).unwrap();
     let summary = read_report(root.path(), true, false).summary.unwrap();
     assert_eq!(summary.calls, 1);
     assert_eq!(summary.active_days, 1);
+    assert_eq!(summary.context.context_found, 0);
+    assert_eq!(summary.context.context_opened, 1);
+    assert_eq!(summary.context.validated_discoveries, 1);
 }
 
 #[test]
@@ -1416,6 +1523,58 @@ fn report_rejects_tampered_impossible_rows_and_aggregate_overflow() {
     assert_eq!(report.state, "error");
     assert!(report.summary.is_none());
     assert_eq!(report.error.unwrap().code, "usage_store_unavailable");
+}
+
+#[test]
+fn report_rejects_estimate_arithmetic_overflow_instead_of_saturating() {
+    let root = private_tempdir();
+    let mut blame = operation("blame");
+    blame.value_class = ValueClass::ResultBearing;
+    blame.target_type = TargetType::Commit;
+    blame.pro_outcome = ProOutcome::Produced;
+    blame.result_action = Some(ResultObservationAction::Blame);
+    blame.result_count = 1;
+    store::record(root.path(), blame).unwrap();
+
+    let conn = Connection::open(usage_path(root.path())).unwrap();
+    conn.execute(
+        "UPDATE daily_usage SET calls = ?1, result_count = ?1",
+        [i64::MAX],
+    )
+    .unwrap();
+    drop(conn);
+
+    let report = read_report(root.path(), true, false);
+    assert_eq!(report.state, "error");
+    assert!(report.summary.is_none());
+    assert!(report.estimates.is_none());
+    assert_eq!(
+        report.error.unwrap().message,
+        "local usage store format is not supported"
+    );
+
+    let token_root = private_tempdir();
+    store::record(
+        token_root.path(),
+        mcp_operation("search", true, ValueClass::ResultBearing, 1),
+    )
+    .unwrap();
+    let conn = Connection::open(usage_path(token_root.path())).unwrap();
+    conn.execute(
+        "UPDATE daily_usage SET context_bytes = ?1, search_result_bytes = ?1",
+        [i64::MAX],
+    )
+    .unwrap();
+    drop(conn);
+
+    let report = read_report(token_root.path(), true, false);
+    assert_eq!(report.state, "error");
+    assert!(report.summary.is_none());
+    assert!(report.estimates.is_none());
+    assert_eq!(
+        report.error.unwrap().message,
+        "local usage store format is not supported"
+    );
 }
 
 #[test]
@@ -1553,7 +1712,8 @@ fn mcp_search_keeps_wire_and_single_structured_result_bytes_separate() {
         semantic_search_result_bytes: completed.search_result_bytes,
         semantic_search_result_byte_samples: completed.search_result_byte_samples,
         ..EstimateFacts::default()
-    });
+    })
+    .unwrap();
     assert_eq!(
         estimates.approximate_context_tokens.approximate_tokens,
         Some((context_bytes + 3) / 4)

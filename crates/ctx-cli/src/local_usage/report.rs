@@ -14,6 +14,7 @@ use super::{
 };
 
 const HUMAN_OUTPUT_WIDTH: usize = 80;
+const CONTEXT_CITED_COVERAGE_UNSUPPORTED: &str = "unsupported";
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct UsageReport {
@@ -61,13 +62,28 @@ pub(crate) struct UsageSummary {
     pub(crate) pro_blame: ProBlameSummary,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct ContextProxySummary {
     pub(crate) context_searches: u64,
     pub(crate) context_found: u64,
     pub(crate) context_opened: u64,
+    #[serde(skip)]
     pub(crate) context_cited: u64,
+    pub(crate) context_cited_coverage: &'static str,
     pub(crate) validated_discoveries: u64,
+}
+
+impl Default for ContextProxySummary {
+    fn default() -> Self {
+        Self {
+            context_searches: 0,
+            context_found: 0,
+            context_opened: 0,
+            context_cited: 0,
+            context_cited_coverage: CONTEXT_CITED_COVERAGE_UNSUPPORTED,
+            validated_discoveries: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -176,6 +192,10 @@ pub(crate) fn read_report(data_root: &Path, enabled: bool, detailed: bool) -> Us
         Err(error) => return error_report(enabled, error.public_message()),
     };
     if !exists {
+        let estimates = match estimate_usage(EstimateFacts::default()) {
+            Ok(estimates) => estimates,
+            Err(error) => return error_report(enabled, error.public_message()),
+        };
         return UsageReport {
             schema_version: 2,
             enabled,
@@ -184,29 +204,27 @@ pub(crate) fn read_report(data_root: &Path, enabled: bool, detailed: bool) -> Us
             retention_days: RETENTION_DAYS,
             summary: Some(UsageSummary::default()),
             details: detailed.then(UsageDetails::default),
-            estimates: Some(estimate_usage(EstimateFacts::default())),
+            estimates: Some(estimates),
             error: None,
         };
     }
     match open_read_only(&path).and_then(|mut store| {
-        let report = query_report(store.connection_mut(), detailed)?;
+        let (summary, details) = query_report(store.connection_mut(), detailed)?;
+        let estimates = estimate_usage(estimate_facts(&summary)?)?;
         store.verify_unchanged()?;
-        Ok(report)
+        Ok((summary, details, estimates))
     }) {
-        Ok((summary, details)) => {
-            let estimates = estimate_usage(estimate_facts(&summary));
-            UsageReport {
-                schema_version: 2,
-                enabled,
-                state: if summary.calls == 0 { "empty" } else { "ready" },
-                definition_version: DEFINITION_VERSION,
-                retention_days: RETENTION_DAYS,
-                summary: Some(summary),
-                details,
-                estimates: Some(estimates),
-                error: None,
-            }
-        }
+        Ok((summary, details, estimates)) => UsageReport {
+            schema_version: 2,
+            enabled,
+            state: if summary.calls == 0 { "empty" } else { "ready" },
+            definition_version: DEFINITION_VERSION,
+            retention_days: RETENTION_DAYS,
+            summary: Some(summary),
+            details,
+            estimates: Some(estimates),
+            error: None,
+        },
         Err(error) => error_report(enabled, error.public_message()),
     }
 }
@@ -327,6 +345,7 @@ fn query_report(
             context_found: checked_count(raw.22)?,
             context_opened: checked_count(raw.23)?,
             context_cited: checked_count(raw.24)?,
+            context_cited_coverage: CONTEXT_CITED_COVERAGE_UNSUPPORTED,
             validated_discoveries: checked_count(raw.25)?,
         },
         result_actions: ResultActionSummary::default(),
@@ -410,6 +429,7 @@ pub(super) fn validate_rows_for_schema(
 }
 
 fn validate_rows_v1(conn: &Connection) -> Result<(), super::UsageStoreError> {
+    let normalize_legacy_blame = super::store::v1_uses_legacy_blame_schema(conn)?;
     let mut statement = conn.prepare(
         r#"
         SELECT day_utc, definition_version, ctx_version, surface, operation,
@@ -437,7 +457,7 @@ fn validate_rows_v1(conn: &Connection) -> Result<(), super::UsageStoreError> {
         })
     })?;
     for row in rows {
-        if !stored_row_v1_is_valid(&row?) {
+        if !stored_row_v1_is_valid(&row?, normalize_legacy_blame) {
             return Err(super::UsageStoreError::Integrity);
         }
     }
@@ -524,7 +544,7 @@ fn validate_maintenance(conn: &Connection) -> Result<(), super::UsageStoreError>
     Ok(())
 }
 
-fn stored_row_v1_is_valid(row: &StoredRowV1) -> bool {
+fn stored_row_v1_is_valid(row: &StoredRowV1, normalize_legacy_blame: bool) -> bool {
     let nonnegative = row.calls > 0
         && row.result_count >= 0
         && row.citation_count >= 0
@@ -546,6 +566,12 @@ fn stored_row_v1_is_valid(row: &StoredRowV1) -> bool {
         &row.outcome,
         &row.target_type,
         &row.pro_outcome,
+    ) && blame_value_class_is_valid(
+        &row.operation,
+        &row.outcome,
+        &row.value_class,
+        &row.pro_outcome,
+        normalize_legacy_blame,
     ) && (blame || row.citation_count == 0);
     let classification_valid = match row.surface.as_str() {
         "cli" if row.outcome == "failure" => row.value_class == "not_applicable",
@@ -724,6 +750,13 @@ fn stored_row_v2_is_valid(row: &StoredRowV2) -> bool {
             &row.target_type,
             &row.pro_outcome,
         )
+        && blame_value_class_is_valid(
+            &row.operation,
+            &row.outcome,
+            &row.value_class,
+            &row.pro_outcome,
+            false,
+        )
         && action_valid
 }
 
@@ -828,6 +861,20 @@ fn dimensions_are_valid(
     }
 }
 
+fn blame_value_class_is_valid(
+    operation: &str,
+    outcome: &str,
+    value_class: &str,
+    pro_outcome: &str,
+    normalize_legacy_blame: bool,
+) -> bool {
+    normalize_legacy_blame
+        || operation != "blame"
+        || outcome == "failure"
+        || ((!matches!(pro_outcome, "produced" | "possible") || value_class == "result_bearing")
+            && (value_class != "empty" || pro_outcome == "none"))
+}
+
 fn result_action_is_valid(
     result_action: &str,
     surface: &str,
@@ -904,9 +951,7 @@ fn reconcile_summary(summary: &UsageSummary) -> Result<(), super::UsageStoreErro
         || context.context_searches > actions.searches
         || context.context_found > summary.result_count
         || (context.context_found > 0 && context.context_searches == 0)
-        || context.context_opened > context.context_found
-        || context.context_cited > context.context_found
-        || context.validated_discoveries > context.context_found
+        || context.context_cited != 0
         || context.validated_discoveries > validation_sources
     {
         return Err(super::UsageStoreError::Integrity);
@@ -1087,9 +1132,9 @@ fn query_result_actions(conn: &Connection) -> Result<ResultActionSummary, super:
     })
 }
 
-fn estimate_facts(summary: &UsageSummary) -> EstimateFacts {
+fn estimate_facts(summary: &UsageSummary) -> Result<EstimateFacts, super::UsageStoreError> {
     let actions = &summary.result_actions;
-    let semantic_context_eligible_samples = [
+    let semantic_context_eligible_samples = checked_sum([
         actions.searches,
         actions.sessions_opened,
         actions.events_opened,
@@ -1097,10 +1142,8 @@ fn estimate_facts(summary: &UsageSummary) -> EstimateFacts {
         actions.sources_requests,
         actions.sql_requests,
         actions.blame_requests,
-    ]
-    .into_iter()
-    .fold(0_u64, u64::saturating_add);
-    EstimateFacts {
+    ])?;
+    Ok(EstimateFacts {
         result_bearing_searches: actions.result_bearing_searches,
         semantic_context_eligible_samples,
         semantic_context_bytes: summary.semantic_context_bytes,
@@ -1110,7 +1153,7 @@ fn estimate_facts(summary: &UsageSummary) -> EstimateFacts {
         discovered_record_opens: summary.context.context_opened,
         produced_blame_requests: summary.pro_blame.produced_attribution_requests,
         possible_blame_requests: summary.pro_blame.possible_or_reference_only_requests,
-    }
+    })
 }
 
 fn query_details(conn: &Connection) -> Result<UsageDetails, super::UsageStoreError> {
@@ -1213,7 +1256,7 @@ pub(crate) fn render_human_summary(report: &UsageReport, detailed: bool) {
         summary.context.context_searches,
         summary.context.context_found,
         summary.context.context_opened,
-        summary.context.context_cited,
+        summary.context.context_cited_coverage,
         summary.context.validated_discoveries
     );
     if let Some(estimates) = &report.estimates {
