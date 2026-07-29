@@ -36,7 +36,10 @@ Default root:
 
 ```text
 ~/.ctx/
-  work.sqlite
+  search/
+    lexical/
+    semantic/
+  relational.sqlite
   usage.sqlite
   config.toml
   runtime/
@@ -62,10 +65,10 @@ installed executable, not indexed provider history.
 ## Local Usage Product State
 
 `usage.sqlite` is an owner-private SQLite sidecar under the selected ctx data
-root. It is separate from canonical history in `work.sqlite` and from the
-encrypted Local Pro graph. Local usage is product state, not telemetry: it has
-no network path or analytics identity and remains available when analytics are
-disabled.
+root. It is separate from provider history, the disposable
+`relational.sqlite` metadata projection, and the encrypted Local Pro graph.
+Local usage is product state, not telemetry: it has no network path or
+analytics identity and remains available when analytics are disabled.
 
 Version 1 stores daily UTC aggregate rows only. Its closed dimensions are UTC
 day, usage-definition version, ctx binary/client version, surface (`cli` or
@@ -143,27 +146,35 @@ installer and development installer place those native runtime files under
 They are product runtime assets, not provider-history storage, and may be shared
 by multiple ctx data roots on the same machine.
 
-## What SQLite Stores
+## Source-authoritative derived storage
 
-The SQLite store may contain:
+Provider transcript files and explicit plugin/custom source streams are the
+sole authority for history content in v0.26. ctx creates three disposable
+local consumers:
 
-- provider and source metadata;
-- source file paths and import cursors when available;
-- session IDs and event IDs;
-- timestamps and working-directory metadata when known;
-- normalized user, assistant, system, and developer conversation text;
-- a bounded, versioned local source-record locator and verification digests for
-  eligible truncated messages when the provider adapter can supply them;
-- tool-call, command, file-touch, and lifecycle metadata;
-- compact typed command/tool result outcome/evidence and an optional full-body
-  `ContentRef` (SHA-256 plus exact normalized byte length);
-- FTS-indexable text required for search;
-- citations and offsets or line/cursor metadata when available;
-- compatibility rows used by the current search implementation.
+- `search/lexical` contains immutable Tantivy generations. The complete
+  policy-selected meaningful body is indexed for term matching but is not
+  stored. Stored fields are bounded identity, filter, ordering, citation, and
+  exact typed-locator metadata.
+- `search/semantic` contains generation-bound flat-F32 vectors, hashes, and
+  offsets. Semantic projection hydrates provider bytes before filtering,
+  chunking, or embedding and does not persist plaintext transcript chunks.
+- `relational.sqlite` contains a disposable metadata projection for stable
+  read-only `ctx_*` SQL views. It can contain IDs, provider/source metadata,
+  timestamps, workspace/cwd data, touched-file metadata, event classes,
+  locators, and projection state. It does not contain message bodies or
+  display previews.
 
-If text is searchable, assume a copy or normalized form exists in SQLite. Raw
-provider transcript files may still remain in provider-owned locations such as
-`~/.codex/sessions`, but the searchable parts are local ctx data too.
+All three consumers are rebuildable from current provider sources. Search,
+show, and MCP presentation hydrate exact content through the typed locator and
+resolver bound to the active lexical generation. A missing, changed, stale, or
+unsupported source fails with typed source availability rather than falling
+back to a stored text copy.
+
+A pre-v0.26 `work.sqlite` file is prior-epoch, non-authoritative data. v0.26
+leaves its bytes untouched for rollback or manual recovery only. Setup,
+refresh, search, show, SQL, and MCP never open it as live storage, migrate it,
+or use it as fallback; setup also does not create it.
 
 ## Local Pro Storage
 
@@ -183,8 +194,9 @@ only after those deletion phases verify. Setup and keep-data uninstall fail
 closed while that deletion phase remains. A separate nonsecret
 `pro/.ctx-pro.data-preserved` lifecycle marker distinguishes deliberate
 keep-data uninstall from first use, but it is created only when encrypted graph
-data actually exists. The canonical `work.sqlite` history remains separate and
-usable without Pro. The operating-system key store stores an anonymous-trial
+data actually exists. Provider history and Core's disposable search
+generations remain separate and usable without Pro. The operating-system key
+store stores an anonymous-trial
 credential, an optional WorkOS session used for explicit hosted account and
 referral commands, an installation-scoped signing key, a signed entitlement,
 and, after accepted referral activation, an optional opaque referral claim;
@@ -221,7 +233,8 @@ graph file is deleted. Once the cleanup phase is published, a retry uses its
 exact thumbprints instead of broad vault enumeration or now-deleted credential
 records.
 Interactive use asks whether to delete; noninteractive callers must explicitly
-choose `--delete-data` or `--keep-data`. Neither form deletes canonical history.
+choose `--delete-data` or `--keep-data`. Neither form deletes provider history
+or Core's derived search generations.
 On a root that has never contained Pro data, either explicit choice is an
 idempotent Pro-state no-op and reports `local_pro_data: "absent"` without
 creating a Pro directory, initialization or preservation marker, vault access,
@@ -240,10 +253,11 @@ same identity-aware `--delete-data` operation completes. The nonsecret
 
 ## What ctx Avoids By Default
 
-The current CLI does not copy command/tool result bodies, stdout/stderr,
-binary artifacts, image payloads, raw diffs, or provider-private blobs into
-SQLite. Result events retain compact metadata, typed evidence, citations, and
-an optional `ContentRef`; the original provider source remains authoritative.
+The current CLI does not store command/tool result bodies, stdout/stderr,
+binary artifacts, image payloads, raw diffs, provider-private blobs, message
+bodies, or display previews in Tantivy or the relational projection. Result
+events retain compact metadata, typed evidence, citations, exact locators, and
+an optional `ContentRef`; the provider source remains authoritative.
 See
 [`provider-import-policy.md`](provider-import-policy.md) for the native adapter
 content policy.
@@ -256,12 +270,13 @@ copy token values from `agent_conversations.conversation_data`.
 No session text, prompts, transcripts, or indexed snippets are sent by ctx by
 default.
 
-`ctx show session --content complete` and
-`ctx show event --content complete` read complete message bodies ephemerally from
-their recorded local provider sources. Hydrated bodies are not written back to
-SQLite, cached, or materialized into the Pro graph. The persisted locator is
-capped at 4 KiB and the imported searchable
-message prefix remains capped at 16,000 characters.
+Search, show, and MCP read rendered message bodies ephemerally from their
+recorded local provider sources. `--content indexed` remains an accepted
+compatibility selector, but it does not mean the body comes from an index:
+both show policies hydrate provider-authoritative content. Hydrated bodies are
+not written back to Tantivy, the semantic generation, the relational
+projection, or the Pro graph. Exact locators and verification metadata remain
+bounded.
 
 For local Pro materialization, eligible Codex result bodies are re-read from
 their original JSONL records immediately before a journal page is sent. The
@@ -280,9 +295,11 @@ files needed to choose the provider's winning root. It does not create provider
 directories, migrate provider data, execute provider commands, or combine a
 selected replacement with old defaults. Exact one-shot paths are read only
 after the user supplies `--path` and are not remembered as discovery policy.
-If a raw source path moves or is deleted, `ctx show` and `ctx search` can still
-return indexed text and should mark source availability when that information
-is known.
+If a source moves, changes, or is deleted, a matching lexical record may remain
+discoverable but content rendering fails with typed source availability. ctx
+does not return an old indexed copy or an empty placeholder. Refresh or
+explicitly re-import the source to publish a generation bound to its current
+bytes.
 
 ## Command Read/Write Behavior
 
@@ -293,25 +310,25 @@ local upsert as described above.
 
 | Command | Reads | Writes |
 | --- | --- | --- |
-| `ctx setup` | provider transcript files and home path metadata for source discovery | data root, `work.sqlite`, SQLite index, and optional daemon lock/status/job files when eligible human-readable daemon autostart runs |
-| `ctx status` | data root metadata, existing SQLite store, semantic sidecar/status metadata, ctx-owned daemon lock/status/job metadata, and Pro authorization state when installed | may advance nonsecret anti-clock-rollback security metadata during Pro entitlement authorization; does not mutate canonical history or local Pro graph data |
+| `ctx setup` | provider transcript files and bounded path metadata for source discovery | data root, source catalog/epoch metadata, `search/lexical`, `relational.sqlite`, and optional daemon lock/status/job files when eligible human-readable daemon autostart runs; it neither opens nor creates prior-epoch storage |
+| `ctx status` | data root metadata, source epoch, lexical/semantic generation metadata, relational projection metadata, daemon state, and Pro authorization state when installed | may advance nonsecret anti-clock-rollback security metadata during Pro entitlement authorization; does not mutate provider history, Core generations, or local Pro graph data |
 | `ctx sources` | bounded provider path metadata, allowlisted persistent selector files, and local history-source plugin manifests | none |
-| `ctx import` | provider transcript files and path metadata, the explicit custom history JSONL file passed with `--input-format ctx-history-jsonl-v1 --path`, or stdout from an explicit history-source plugin command | data root, SQLite index, and optional daemon lock/status/job files when eligible human-readable daemon autostart runs |
-| `ctx show session` / `ctx show event` | SQLite index; with explicit `--content complete`, selected recorded provider source files | selected `--out` path for `show session` when provided |
-| `ctx locate` | SQLite index and raw source path metadata | none |
-| `ctx search` | native provider transcript files, path metadata, enabled auto history-source plugin stdout, SQLite index, and existing semantic sidecar/status metadata | SQLite index for newly discovered native provider or plugin history, and optional daemon lock/status files when eligible human-readable background refresh autostarts maintenance; semantic-enabled search may also create query endpoint files |
-| `ctx sql` | existing SQLite index only | none |
-| `ctx pro` / `ctx pro setup` | operating-system key store, commercial account state, signed release metadata/artifact, canonical history, and an optional first-challenge codename only for `ctx pro --referral <codename>` | key store, signed helper installation, encrypted derived graph, and an optional opaque referral claim after accepted activation; the raw codename is not retained, and the explicit `setup` form is a synonym without referral attribution |
+| `ctx import` | provider transcript files and path metadata, the explicit custom history JSONL file passed with `--input-format ctx-history-jsonl-v1 --path`, or stdout from an explicit history-source plugin command | immutable candidate lexical generation and atomic publication, catalog/epoch metadata, relational catch-up, and optional daemon files; semantic catch-up is daemon-owned |
+| `ctx show session` / `ctx show event` | active lexical metadata plus exact provider records selected by typed locators | selected `--out` path for `show session` when provided |
+| `ctx locate` | active lexical locator/provenance metadata | none |
+| `ctx search` | active lexical generation and exact provider records for result hydration; depending on refresh mode, bounded provider discovery/plugin stdout and existing semantic generation | candidate lexical generation publication and relational catch-up only when refresh runs; background mode may write daemon state, and semantic-enabled search may create query endpoint files |
+| `ctx sql` | `relational.sqlite` metadata projection and active lexical generation identity for generation checks | may initialize an empty disposable projection on a completely fresh root; never refreshes sources or creates prior-epoch storage |
+| `ctx pro` / `ctx pro setup` | operating-system key store, commercial account state, signed release metadata/artifact, source-backed Core history, and an optional first-challenge codename only for `ctx pro --referral <codename>` | key store, signed helper installation, encrypted derived graph, and an optional opaque referral claim after accepted activation; the raw codename is not retained, and the explicit `setup` form is a synonym without referral attribution |
 | `ctx pro manage` | key store and commercial account state | may refresh the WorkOS session in the key store and open a hosted billing-portal URL |
 | `ctx pro uninstall` | helper and local Pro paths | requires or prompts for a data choice; `--keep-data` removes only the helper and records preserved local Pro graph data when it exists, while `--delete-data` removes and verifies local Pro data; never-Pro roots leave Pro state unchanged, while independent default-on Core usage reporting may create or increment `usage.sqlite` |
 | `ctx referral create` / `status` / `payout` | native-vault commercial session and explicit hosted referral state; status reads only the authenticated referrer's aggregate summary | may refresh the commercial session in the native vault; human mode may open WorkOS AuthKit, and payout may open a one-use Stripe-hosted onboarding URL; JSON mode never opens a browser |
 | first successful nonempty interactive `ctx blame` | normal Pro blame inputs and whether the local shown-once marker already exists | may atomically create the private nonsecret shown-once marker after delivering the result; no referral network request or telemetry |
 | `ctx docs` | embedded documentation in the binary | selected topic `--out` path for `ctx docs show --out` or selected `--out` directory for `ctx docs man --out` |
 | `ctx upgrade` | signed release metadata and installed binary/sidecar metadata | installed binary for manual upgrade, install sidecar, and executable-adjacent `.ctx.upgrade-state.json`, `.ctx.install.lock`, and transaction journal |
-| `ctx doctor` | SQLite index, data root metadata, semantic sidecar/status metadata, and ctx-owned daemon lock/status/job metadata | none |
-| `ctx daemon status` | semantic sidecar/status metadata and ctx-owned daemon lock/status/job metadata | none |
+| `ctx doctor` | source epoch, lexical/semantic generation metadata, relational projection metadata, and ctx-owned daemon lock/status/job metadata | none |
+| `ctx daemon status` | lexical/semantic generation and ctx-owned daemon lock/status/job metadata | none |
 | `ctx daemon enable` / `ctx daemon disable` | `config.toml` | `config.toml` |
-| `ctx daemon run` | native provider transcript files, SQLite index, semantic sidecar/status metadata, model-cache metadata, and ctx-owned daemon lock/status/job metadata | SQLite index for bounded native provider refresh, ctx-owned daemon lock/status/job metadata, and semantic sidecar/status metadata when local semantic indexing or dirty-queue freshness checks run |
+| `ctx daemon run` | provider transcripts, active lexical generation, relational projection, semantic generation, model-cache metadata, and daemon state | candidate lexical generation publication, relational and semantic catch-up, and daemon state |
 
 Setup, import, and default search do not require source repository writes, model
 APIs, API keys, or remote accounts. Without semantic opt-in they do not download
@@ -325,16 +342,17 @@ human-readable. Machine-readable commands never start or nudge it; use
 one-run opt-out.
 `ctx setup --catalog-only` does not autostart daemon maintenance.
 `ctx search --refresh off` does not refresh providers, run plugins, autostart
-daemon maintenance, start semantic workers, schedule semantic indexing, or write
-the main store or semantic sidecar. Default `--backend hybrid --refresh off`
-uses semantic evidence only when sidecar coverage is complete and dirty work is
+daemon maintenance, start semantic workers, schedule semantic indexing, or
+write any derived generation. It still reads exact provider records to hydrate
+results. Default `--backend hybrid --refresh off`
+uses semantic evidence only when semantic coverage is complete and dirty work is
 drained, and otherwise falls back to lexical. Explicit semantic searches may ask
 the daemon query service to embed the query from an already-cached local model
-and read partial existing sidecar coverage, but they do not download a model or
-write semantic catch-up work during search.
+and read partial existing semantic generation coverage, but they do not
+download a model or write semantic catch-up work during search.
 Explicit imports may best-effort mark recent semantic-eligible items dirty in
-the semantic sidecar when the sidecar already exists; this does not create the
-sidecar, initialize the model, or embed text.
+the semantic generation when it already exists; this does not create semantic
+storage, initialize the model, or embed text.
 Explicit semantic search also refuses to initialize or download the embedding
 model when the required local cache is missing; hybrid falls back to lexical in
 that case. Default `--refresh background` lets daemon maintenance own enabled
@@ -350,7 +368,7 @@ the foreground. The coordinator always bounds native provider-history refresh
 and local semantic indexing by its local runtime/model availability. Foreground
 query activity preempts background work.
 A looping daemon may keep the
-local embedding model resident between passes and uses the sidecar dirty queue
+local embedding model resident between passes and uses semantic projection state
 to prioritize recent/stale events. Default background refresh may start the
 configured daemon for local history freshness. With semantic enabled, the same
 daemon-owned query service can embed the query; `ctx search --refresh off` does
@@ -464,44 +482,37 @@ ctx import --history-source example-agent/default
 Current adapters are safe to re-run. They rescan sources idempotently and keep
 source paths or cursors when available. Imports always commit valid records and
 report rejected records. Sources with no usable imported content fail, as do
-unreadable or incompatible sources; ctx-owned storage or index failures abort
-the command. Native
-provider cursor progress is scoped by provider,
-source format, and an opaque source identity derived from the configured root or
-source path, so two roots for the same provider do not overwrite each other's
-progress.
-Custom history JSONL imports follow the same v1 lifecycle: ctx rescans the
-explicit file, upserts already-imported records, stores supplied source cursor
-metadata under ctx-owned custom cursor streams, and preserves event native
-cursors. History-source plugins receive the previous stored cursor on each
-explicit import and stream the same JSONL format to stdout. Failed plugin runs
-do not advance cursors. Explicit file paths and plugin manifests are not added
-to `config.toml` or treated as fixed provider homes.
+unreadable or incompatible sources; ctx-owned generation failures abort the
+command. Native provider progress is scoped by provider, source format, and an
+opaque source identity derived from the configured source root.
 
-## Upgrade Reindexing
+Refresh builds a private immutable candidate from current provider sources,
+verifies its manifest and policy identity, then atomically publishes it under
+`search/lexical`. Published generations are never opened writable. Relational,
+semantic, and Pro consumers are advanced only against a verified active Core
+generation and fail closed on generation mismatch.
 
-When an existing `0.8.x` or `0.9.x` data root is opened by `0.10.x` or newer, ctx keeps
-the SQLite database and migrates it in place. The migration rebuilds derived
-search projections and marks prior provider import cache rows pending so the
-next normal refresh can re-read original provider transcripts.
+Custom history JSONL and history-source plugins follow the same
+source-authoritative lifecycle. Failed plugin runs do not advance cursor state.
+Explicit file paths and plugin manifests are not added to `config.toml` or
+treated as fixed provider homes.
 
-This is a one-time reimport, not a destructive wipe. It is needed because older
-indexes can lack touched-file metadata or can contain text that was sanitized
-before storage. If the original provider transcript files still exist, refresh
-replaces those old rows with current local/private transcript text. If source
-files were deleted or moved, ctx can still return indexed text from SQLite but
-cannot reconstruct text that was already stored as a placeholder.
+## v0.26 epoch transition
 
-Writable opens also repair a historical provider-identity transition that
-could leave multiple physical rows for one provider session. Rows are treated
-as the same source when they share either a nonempty source identity or the
-same nonempty raw source path, provided their known source formats are
-compatible. The repair keeps the oldest session and event IDs canonical, moves
-genuinely new events onto that session, retains the newer duplicate row's
-session relationships and state, and keeps removed duplicate IDs as
-compatibility aliases. Different raw paths with different source identities
-remain distinct. The store also rejects future same-source duplicates at write
-time.
+v0.26 starts a fresh source-backed history epoch. It does not migrate or read
+the deleted legacy canonical Store. If an old `work.sqlite` family is present,
+ctx reports it as a preserved, non-authoritative prior epoch for rollback or
+manual recovery only and leaves all family members byte-for-byte untouched.
+No live command uses it as fallback.
+
+Setup discovers current provider sources and builds new derived generations.
+If a source needed for rebuilding no longer exists, ctx reports that source as
+unavailable; it does not recover content from prior-epoch rows.
+
+Generation policy includes meaningful-body selection, no-stored-content mode,
+event projector/class revision, tokenizer and lexical schema revision, and
+semantic settings. A mismatch makes derived storage stale and requires a
+source rebuild rather than an in-place migration.
 
 Remove a source from future imports:
 
@@ -518,13 +529,16 @@ import only the sources you still want.
 ## SQL Inspection
 
 `ctx sql` is a read-only advanced inspection command for cases normal search
-does not express, such as exact counts, joins, audits, and one-off scripts. It
-opens the existing SQLite store in read-only mode, rejects writes, rejects
-multiple statements, enforces row/column/value caps, and times out long-running
-queries. It also applies SQLite runtime limits to bound SQL text and generated
-value allocation. It does not initialize or migrate the store; run a writable
-command such as `ctx setup` or `ctx import` first when a schema migration is
-required.
+does not express, such as exact metadata counts, joins, audits, and one-off
+scripts. It queries `relational.sqlite`, a disposable projection bound to the
+active lexical generation. It rejects writes and multiple statements, enforces
+row/column/value caps, and times out long-running queries.
+
+On a completely fresh root, SQL may initialize an empty projection. If a
+lexical generation exists but its relational projection is missing, behind, or
+bound to another generation, SQL fails closed until catch-up completes. It
+never opens or migrates prior-epoch storage and does not refresh provider
+sources.
 
 Stable read-only views are the preferred compatibility surface:
 
@@ -534,24 +548,30 @@ Stable read-only views are the preferred compatibility surface:
 - `ctx_sources`.
 
 Run `ctx docs show sql` for view schemas, examples, limits, and output formats.
-Internal tables remain local and queryable, but they are implementation details
-and can change across versions. SQL output is private local history by default.
+Internal projection tables remain local and queryable, but they are
+implementation details and can change across versions. The projection contains
+metadata rather than provider content. SQL output can still expose private
+paths and identifiers.
 
-Reset and rebuild the index:
+Reset and rebuild disposable Core projections:
 
 ```bash
-rm -f ~/.ctx/work.sqlite ~/.ctx/work.sqlite-wal ~/.ctx/work.sqlite-shm
+rm -rf ~/.ctx/search/lexical ~/.ctx/search/semantic
+rm -f ~/.ctx/relational.sqlite ~/.ctx/relational.sqlite-wal ~/.ctx/relational.sqlite-shm
 ctx setup
 ```
 
-This removes the local SQLite index and recreates it from provider history. It
-does not delete raw provider transcript files.
+This removes only derived Core search and SQL consumers and recreates them from
+provider history. It does not delete provider transcripts. If a prior-epoch
+database is present, leave it untouched unless you have separately decided to
+discard rollback/manual-recovery data.
 
 Inspect storage size:
 
 ```bash
 du -sh ~/.ctx
-du -h ~/.ctx/work.sqlite*
+du -sh ~/.ctx/search/lexical ~/.ctx/search/semantic
+du -h ~/.ctx/relational.sqlite*
 ctx status --format json
 ```
 
@@ -570,30 +590,32 @@ removing `/path/to/ctx`. Deleting the directory first can orphan Pro credentials
 or graph keys in the operating-system key store because their opaque record IDs
 depend on that identity.
 
-The final directory removal deletes ctx's local index, config, logs, lifecycle
-lock, and any remaining root-local metadata. It does not remove provider-owned
-history such as `~/.codex/sessions`. The small installation-bound anti-rollback
-watermark described above may remain in the native key store after verified Pro
-deletion; it is security metadata outside the user-deletable Pro inventory.
+The final directory removal deletes ctx's derived indexes/projections, config,
+logs, lifecycle lock, preserved prior-epoch files, and remaining root-local
+metadata. It does not remove provider-owned history such as
+`~/.codex/sessions`. The small installation-bound anti-rollback watermark
+described above may remain in the native key store after verified Pro deletion;
+it is security metadata outside the user-deletable Pro inventory.
 
 ## Privacy Truth
 
-Indexed prompts, code, commands, file paths, and failed-output diagnostic
-previews may contain credentials, customer data, private repository names, or
+Provider transcripts, indexed terms, hydrated snippets, commands, and file
+paths may contain credentials, customer data, private repository names, or
 proprietary design notes.
 
 Recommended handling:
 
 - keep `~/.ctx` out of source repositories;
-- do not share SQLite databases or logs;
+- do not share provider transcripts, ctx search generations, projections, or logs;
 - review JSON output before sharing it outside the machine;
-- delete or reinitialize the local store when working on shared machines;
+- delete or rebuild derived ctx data when working on shared machines;
 - use provider filters and result limits to keep agent retrieval focused on
   relevant material.
 
 ## Network Behavior
 
-Core indexing work uses local filesystem and SQLite operations. The tools that
+Core indexing work uses local filesystem, Tantivy, flat-vector, and projection
+operations. The tools that
 originally produced provider transcripts may have used the network according to
 their own configuration; ctx indexing those transcripts does not repeat that
 behavior.
@@ -619,10 +641,10 @@ repository paths, facts, graph rows, queries, or query results. Valid offline
 grants keep local graph operations usable when renewal is temporarily
 unavailable.
 
-The referral feature writes no state to `ctx.db`, `work.sqlite`,
-`usage.sqlite`, the encrypted Pro graph, provider transcripts, Git data, local
-analytics, routine `ctx status`, MCP, or ordinary Core flows. It emits no
-referral telemetry. The hosted service is authoritative for distinct qualifying
+The referral feature writes no state to Core search generations,
+`relational.sqlite`, `usage.sqlite`, the encrypted Pro graph, provider
+transcripts, Git data, local analytics, routine `ctx status`, MCP, or ordinary
+Core flows. It emits no referral telemetry. The hosted service is authoritative for distinct qualifying
 $20 monthly invoice reconciliation, 14-day holds, the invoice 2 gate for
 invoices 1 and 2, invoices 3 through 12, refunds, disputes, manual payability,
 paid-reversal debt and negative adjustments, and the $120-per-referral cap. The
@@ -637,7 +659,8 @@ The separate shown-once marker is content-free local output state, not
 attribution, identity, or payout state.
 
 An expired trial or subscription locks graph operations without deleting
-canonical history, encrypted graph data, or key material. Resubscription plus
+provider history, Core search generations, encrypted graph data, or key
+material. Resubscription plus
 `ctx pro` refreshes the entitlement and restores the preserved graph.
 
 Official installer-managed binaries can contact the signed release metadata

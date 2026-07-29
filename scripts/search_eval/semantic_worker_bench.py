@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Benchmark ctx search plus default semantic catch-up.
+"""Benchmark ctx search plus source-backed semantic catch-up.
 
-Measures first-search wall time, worker progress over time, sidecar size, RSS
-when a worker PID is visible through status, and an optional incremental search
-+ catch-up cycle. Output omits search result rows and raw queries.
+Measures first-search wall time, worker progress over time, `search/semantic`
+generation size, RSS when a worker PID is visible through status, and an
+optional incremental search + catch-up cycle. Output omits search result rows
+and raw queries.
 """
 
 from __future__ import annotations
@@ -90,14 +91,22 @@ def stable_hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:20]
 
 
-def sidecar_file_bytes(path: str | None) -> int:
+def semantic_index_bytes(path: str | None) -> int:
     if not path:
         return 0
+    root = pathlib.Path(path)
+    if root.is_file():
+        return root.stat().st_size
     total = 0
-    for suffix in ("", "-wal", "-shm"):
+    try:
+        entries = root.rglob("*")
+    except OSError:
+        return 0
+    for entry in entries:
         try:
-            total += pathlib.Path(path + suffix).stat().st_size
-        except FileNotFoundError:
+            if entry.is_file():
+                total += entry.stat().st_size
+        except OSError:
             pass
     return total
 
@@ -129,26 +138,25 @@ def nested_string(data: Any, path: tuple[str, ...]) -> str | None:
     return current if isinstance(current, str) and current else None
 
 
-def extract_sidecar_path(
+def extract_semantic_index_path(
     *documents: Any,
-    explicit_sidecar: str | None = None,
+    explicit_semantic_root: str | None = None,
     data_root: str | None = None,
 ) -> str | None:
-    if explicit_sidecar:
-        return str(pathlib.Path(explicit_sidecar).expanduser())
+    if explicit_semantic_root:
+        return str(pathlib.Path(explicit_semantic_root).expanduser())
     for document in documents:
         for path in (
+            ("semantic", "flat_f32", "path"),
             ("retrieval", "vector_path"),
             ("vector_path",),
             ("semantic", "vector_path"),
-            ("sidecar", "path"),
-            ("sidecar_path",),
         ):
             value = nested_string(document, path)
             if value:
                 return value
     if data_root:
-        return str(pathlib.Path(data_root).expanduser() / "vectors.sqlite")
+        return str(pathlib.Path(data_root).expanduser() / "search" / "semantic")
     return None
 
 
@@ -416,7 +424,11 @@ def sanitize_search_json(data: Any) -> dict[str, Any] | None:
     return summary
 
 
-def run_search(args, query: str, sidecar_path: str | None) -> tuple[dict[str, Any], str | None]:
+def run_search(
+    args,
+    query: str,
+    semantic_index_path: str | None,
+) -> tuple[dict[str, Any], str | None]:
     argv = ctx_base_argv(args.ctx_command, args.data_root)
     argv.extend(
         [
@@ -433,51 +445,54 @@ def run_search(args, query: str, sidecar_path: str | None) -> tuple[dict[str, An
     )
     argv.extend(args.search_arg)
     run = run_json(argv, args.cwd, args.timeout_seconds)
-    sidecar_path = extract_sidecar_path(
+    semantic_index_path = extract_semantic_index_path(
         run["json"],
-        explicit_sidecar=args.sidecar or sidecar_path,
+        explicit_semantic_root=args.semantic_root or semantic_index_path,
         data_root=args.data_root,
     )
     return (
         {
             "command": command_summary(run),
             "search": sanitize_search_json(run["json"]),
-            "sidecar_bytes": sidecar_file_bytes(sidecar_path),
+            "semantic_index_bytes": semantic_index_bytes(semantic_index_path),
         },
-        sidecar_path,
+        semantic_index_path,
     )
 
 
-def capture_status(args, sidecar_path: str | None) -> tuple[dict[str, Any], str | None]:
+def capture_status(
+    args,
+    semantic_index_path: str | None,
+) -> tuple[dict[str, Any], str | None]:
     argv = ctx_base_argv(args.ctx_command, args.data_root)
     argv.extend(["status", "--format=json"])
     run = run_json(argv, args.cwd, args.timeout_seconds)
     semantic_doc = run["json"].get("semantic") if isinstance(run["json"], dict) else None
-    sidecar_path = extract_sidecar_path(
+    semantic_index_path = extract_semantic_index_path(
         run["json"],
         semantic_doc,
-        explicit_sidecar=args.sidecar or sidecar_path,
+        explicit_semantic_root=args.semantic_root or semantic_index_path,
         data_root=args.data_root,
     )
     status = sanitize_worker_status(semantic_doc)
     if status is not None:
-        status["sidecar_bytes"] = sidecar_file_bytes(sidecar_path)
+        status["semantic_index_bytes"] = semantic_index_bytes(semantic_index_path)
         status["worker_rss_kib"] = read_linux_rss_kib(status.get("pid"))
-    return {"command": command_summary(run), "status": status}, sidecar_path
+    return {"command": command_summary(run), "status": status}, semantic_index_path
 
 
-def poll_status(args, label: str, sidecar_path: str | None):
+def poll_status(args, label: str, semantic_index_path: str | None):
     samples = []
     started = time.perf_counter()
     for index in range(args.polls):
         if index and args.poll_interval > 0:
             time.sleep(args.poll_interval)
-        sample, sidecar_path = capture_status(args, sidecar_path)
+        sample, semantic_index_path = capture_status(args, semantic_index_path)
         sample["label"] = label
         sample["sample_index"] = index
         sample["elapsed_ms"] = (time.perf_counter() - started) * 1000
         samples.append(sample)
-    return samples, sidecar_path
+    return samples, semantic_index_path
 
 
 def ctx_command_summary(ctx_command: str) -> dict[str, Any]:
@@ -491,7 +506,9 @@ def ctx_command_summary(ctx_command: str) -> dict[str, Any]:
 
 
 def private_values_from_args(args) -> dict[str, list[str]]:
-    path_values = [value for value in (args.data_root, args.cwd, args.sidecar) if value]
+    path_values = [
+        value for value in (args.data_root, args.cwd, args.semantic_root) if value
+    ]
     for token in shlex.split(args.ctx_command):
         if is_path_like(token):
             path_values.append(token)
@@ -576,7 +593,10 @@ def main() -> int:
     )
     parser.add_argument("--data-root")
     parser.add_argument("--cwd")
-    parser.add_argument("--sidecar", help="explicit vectors.sqlite path")
+    parser.add_argument(
+        "--semantic-root",
+        help="explicit source-backed semantic generation root (default: DATA_ROOT/search/semantic)",
+    )
     parser.add_argument("--backend", choices=["hybrid", "lexical", "semantic"], default="hybrid")
     parser.add_argument("--refresh", choices=["background", "off", "wait"], default="background")
     parser.add_argument("--limit", type=positive_int, default=20)
@@ -597,18 +617,33 @@ def main() -> int:
     parser.add_argument("--output")
     args = parser.parse_args()
 
-    sidecar_path = extract_sidecar_path(explicit_sidecar=args.sidecar, data_root=args.data_root)
-    status_before, sidecar_path = capture_status(args, sidecar_path)
-    first_search, sidecar_path = run_search(args, args.query, sidecar_path)
-    status_samples, sidecar_path = poll_status(args, "after_first_search", sidecar_path)
+    semantic_index_path = extract_semantic_index_path(
+        explicit_semantic_root=args.semantic_root,
+        data_root=args.data_root,
+    )
+    status_before, semantic_index_path = capture_status(args, semantic_index_path)
+    first_search, semantic_index_path = run_search(
+        args,
+        args.query,
+        semantic_index_path,
+    )
+    status_samples, semantic_index_path = poll_status(
+        args,
+        "after_first_search",
+        semantic_index_path,
+    )
 
     incremental = None
     if args.incremental_query:
-        incremental_search, sidecar_path = run_search(args, args.incremental_query, sidecar_path)
-        incremental_samples, sidecar_path = poll_status(
+        incremental_search, semantic_index_path = run_search(
+            args,
+            args.incremental_query,
+            semantic_index_path,
+        )
+        incremental_samples, semantic_index_path = poll_status(
             args,
             "after_incremental_search",
-            sidecar_path,
+            semantic_index_path,
         )
         incremental = {
             "query_hash": stable_hash(args.incremental_query),
@@ -622,7 +657,7 @@ def main() -> int:
             "ctx_command_summary": ctx_command_summary(args.ctx_command),
             "has_data_root": bool(args.data_root),
             "has_cwd": bool(args.cwd),
-            "has_sidecar": bool(args.sidecar),
+            "has_semantic_root": bool(args.semantic_root),
             "backend": args.backend,
             "refresh": args.refresh,
             "limit": args.limit,
@@ -636,7 +671,7 @@ def main() -> int:
         "first_search_wall_ms": first_search["command"]["wall_ms"],
         "status_samples": status_samples,
         "incremental": incremental,
-        "sidecar_bytes_final": sidecar_file_bytes(sidecar_path),
+        "semantic_index_bytes_final": semantic_index_bytes(semantic_index_path),
     }
     private_values = private_values_from_args(args)
     validate_private_output(

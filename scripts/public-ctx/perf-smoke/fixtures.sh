@@ -9,8 +9,8 @@ def prepare_work_root(base: Path) -> Path:
         Path.home().resolve(),
         REPO_ROOT,
         REPO_ROOT.parent,
-        SIDECAR_ROOT,
-        SIDECAR_ROOT.parent,
+        HARNESS_ROOT,
+        HARNESS_ROOT.parent,
     }
     if resolved in forbidden:
         raise HarnessError(f"refusing unsafe performance work base: {resolved}")

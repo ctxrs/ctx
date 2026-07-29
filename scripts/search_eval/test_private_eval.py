@@ -185,7 +185,7 @@ class PrivateEvalRetrievalSummaryTest(unittest.TestCase):
     def test_backend_comparison_reports_quality_and_latency_deltas(self):
         comparison = private_eval.backend_comparison(
             {
-                "fts": {
+                "lexical": {
                     "hit1": 0.25,
                     "hit5": 0.5,
                     "mrr": 0.4,
@@ -200,10 +200,10 @@ class PrivateEvalRetrievalSummaryTest(unittest.TestCase):
                     "semantic_fallback_rate": 0.2,
                 },
             },
-            "fts",
+            "lexical",
         )
 
-        self.assertEqual(comparison["hybrid"]["baseline"], "fts")
+        self.assertEqual(comparison["hybrid"]["baseline"], "lexical")
         self.assertAlmostEqual(comparison["hybrid"]["hit1_delta"], 0.25)
         self.assertAlmostEqual(comparison["hybrid"]["hit5_delta"], 0.25)
         self.assertAlmostEqual(comparison["hybrid"]["mrr_delta"], 0.15)

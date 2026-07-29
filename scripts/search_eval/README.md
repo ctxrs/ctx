@@ -1,6 +1,7 @@
 # ctx search eval harnesses
 
-These scripts are local-only dogfood tools for the semantic/hybrid search branch.
+These scripts are local-only dogfood tools for source-backed lexical,
+semantic, and hybrid search.
 They may read private agent-history queries, snippets, local paths, and ctx IDs.
 Do not publish raw outputs without review.
 
@@ -12,8 +13,8 @@ Do not publish raw outputs without review.
 - `private_eval.py` scores a private JSONL manifest with hashed expected IDs.
   Its output is private unless the manifest and output have been separately
   reviewed.
-- `semantic_worker_bench.py` records worker/search/status timing and sidecar
-  metrics for local performance work.
+- `semantic_worker_bench.py` records worker/search/status timing and
+  `search/semantic` generation size for local performance work.
 - `soak_runner.py` reads those private reports and writes a private-safe
   aggregate promotion report. It exits nonzero when configured thresholds fail.
 
@@ -32,7 +33,7 @@ thresholds use conservative defaults.
     "require_hybrid_fallback_lexical": true
   },
   "private_eval": {
-    "baseline": "fts",
+    "baseline": "lexical",
     "candidate": "hybrid",
     "min_hit5_delta": 0.0,
     "min_mrr_delta": 0.0,

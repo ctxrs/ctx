@@ -60,14 +60,35 @@ PY
 
 perf_smoke_emit_python_metrics() {
   cat <<'PY'
-def sqlite_footprint(data_root: Path) -> dict[str, int]:
-    sizes: dict[str, int] = {}
-    for suffix in ["work.sqlite", "work.sqlite-wal", "work.sqlite-shm"]:
-        path = data_root / suffix
+def tree_bytes(path: Path) -> int:
+    if path.is_file():
+        return path.stat().st_size
+    total = 0
+    try:
+        entries = path.rglob("*")
+    except OSError:
+        return 0
+    for entry in entries:
         try:
-            sizes[suffix] = path.stat().st_size
-        except FileNotFoundError:
-            sizes[suffix] = 0
+            if entry.is_file():
+                total += entry.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def source_backed_storage_footprint(data_root: Path) -> dict[str, int]:
+    relational_files = [
+        data_root / "relational.sqlite",
+        data_root / "relational.sqlite-wal",
+        data_root / "relational.sqlite-shm",
+    ]
+    sizes = {
+        "search/lexical": tree_bytes(data_root / "search" / "lexical"),
+        "search/semantic": tree_bytes(data_root / "search" / "semantic"),
+        "relational": sum(tree_bytes(path) for path in relational_files),
+    }
+    sizes["total"] = sum(sizes.values())
     return sizes
 
 
@@ -96,8 +117,8 @@ class MetricSampler:
         self.stop_event = threading.Event()
         self.proc_io_max = {field: 0 for field in PROC_IO_FIELDS}
         self.proc_io_available = False
-        self.sqlite_start = sqlite_footprint(data_root)
-        self.sqlite_max = dict(self.sqlite_start)
+        self.storage_start = source_backed_storage_footprint(data_root)
+        self.storage_max = dict(self.storage_start)
         self.thread = threading.Thread(target=self._monitor, daemon=True)
         self.sample()
         self.thread.start()
@@ -108,9 +129,9 @@ class MetricSampler:
             self.proc_io_available = True
             for field in PROC_IO_FIELDS:
                 self.proc_io_max[field] = max(self.proc_io_max[field], proc_io.get(field, 0))
-        sizes = sqlite_footprint(self.data_root)
+        sizes = source_backed_storage_footprint(self.data_root)
         for name, size in sizes.items():
-            self.sqlite_max[name] = max(self.sqlite_max.get(name, 0), size)
+            self.storage_max[name] = max(self.storage_max.get(name, 0), size)
 
     def _monitor(self) -> None:
         while not self.stop_event.wait(self.interval_seconds):
@@ -120,19 +141,22 @@ class MetricSampler:
         self.sample()
         self.stop_event.set()
         self.thread.join()
-        sqlite_end = sqlite_footprint(self.data_root)
-        for name, size in sqlite_end.items():
-            self.sqlite_max[name] = max(self.sqlite_max.get(name, 0), size)
-        wal_start = self.sqlite_start["work.sqlite-wal"]
-        wal_high = self.sqlite_max["work.sqlite-wal"]
+        storage_end = source_backed_storage_footprint(self.data_root)
+        for name, size in storage_end.items():
+            self.storage_max[name] = max(self.storage_max.get(name, 0), size)
+        storage_start = self.storage_start["total"]
+        storage_high = self.storage_max["total"]
         return {
             "sampling_interval_ms": round2(self.interval_seconds * 1000.0),
             "proc_io_available": self.proc_io_available,
             "proc_io": dict(self.proc_io_max) if self.proc_io_available else None,
-            "sqlite_start_bytes": self.sqlite_start,
-            "sqlite_high_water_bytes": self.sqlite_max,
-            "sqlite_end_bytes": sqlite_end,
-            "wal_growth_high_water_bytes": max(0, wal_high - wal_start),
+            "source_backed_storage_start_bytes": self.storage_start,
+            "source_backed_storage_high_water_bytes": self.storage_max,
+            "source_backed_storage_end_bytes": storage_end,
+            "source_backed_storage_growth_high_water_bytes": max(
+                0,
+                storage_high - storage_start,
+            ),
         }
 
 
@@ -234,8 +258,12 @@ class TrackedProcess:
             ),
             "block_input_proxy_bytes": int(usage.ru_inblock) * 512,
             "block_output_proxy_bytes": int(usage.ru_oublock) * 512,
-            "wal_high_water_bytes": int(sampled["sqlite_high_water_bytes"]["work.sqlite-wal"]),
-            "wal_growth_high_water_bytes": int(sampled["wal_growth_high_water_bytes"]),
+            "source_backed_storage_high_water_bytes": int(
+                sampled["source_backed_storage_high_water_bytes"]["total"]
+            ),
+            "source_backed_storage_growth_high_water_bytes": int(
+                sampled["source_backed_storage_growth_high_water_bytes"]
+            ),
         }
         if timed_out.is_set():
             raise HarnessError(
