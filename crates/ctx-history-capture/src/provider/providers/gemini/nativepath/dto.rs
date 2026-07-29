@@ -140,10 +140,9 @@ pub(crate) struct GeminiRetainedEvent {
     pub(crate) safe_file_touches: Vec<String>,
 }
 
-/// Controls whether the scanner constructs its bounded, transient output lane.
-/// Core-only capture must not inspect result bodies beyond structural routing.
+/// Internal result-hydration mode retained by the sparse diagnostic parser.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum GeminiNativePathProfile {
+pub(super) enum GeminiNativePathProfile {
     CoreOnly,
     CoreAndTransientOutputs,
 }
@@ -158,9 +157,8 @@ pub(crate) struct GeminiSourceLocator {
     pub(crate) byte_end_exclusive: u64,
 }
 
-/// The certified scanner position immediately before or after a page. A
-/// coordinator can acknowledge this position independently for Core and Pro;
-/// it only covers records actually contained by that page.
+/// The certified scanner position immediately before or after a page. It only
+/// covers records actually contained by that page.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct GeminiPageFrontier {
     pub(crate) parser_revision: u32,
@@ -179,25 +177,11 @@ pub(crate) struct GeminiPageFrontier {
 }
 
 /// Stable scanner-local identity for one provider-owned Core page. It binds
-/// only the safe frontiers and Core payload, so enabling Pro cannot change
-/// Core idempotency.
+/// only the safe frontiers and Core payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct GeminiPageIdentity(pub(crate) [u8; 32]);
 
 impl GeminiPageIdentity {
-    pub(crate) const fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-}
-
-/// Independent identity for one bounded transient Pro output page nested under
-/// a canonical Core page.
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct GeminiOutputPageIdentity(pub(crate) [u8; 32]);
-
-#[cfg(test)]
-impl GeminiOutputPageIdentity {
     pub(crate) const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }

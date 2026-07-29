@@ -11,25 +11,18 @@ use tempfile::TempDir;
 use super::discover_gemini_transcripts;
 use super::discovery::{discover_gemini_transcripts_with_limits, DiscoveryBudget};
 use super::dto::{
-    GeminiCompleteness, GeminiEventBody, GeminiEventIdentity, GeminiNativePathProfile,
-    GeminiPreviousSource, GeminiPublicationShape, GeminiRejectionKind, GeminiRetainedEvent,
-    GeminiScanError, GeminiScanOutcome, GeminiSourceChange, GeminiTranscriptLayout,
-    GeminiTranscriptSource,
+    GeminiCompleteness, GeminiEventBody, GeminiEventIdentity, GeminiPreviousSource,
+    GeminiPublicationShape, GeminiRejectionKind, GeminiRetainedEvent, GeminiScanError,
+    GeminiScanOutcome, GeminiSourceChange, GeminiTranscriptLayout, GeminiTranscriptSource,
 };
 use super::parser::{
     gemini_parse_counters, gemini_resume_work_counters, read_gemini_transcript_pages,
-    read_gemini_transcript_pages_from_frontier, read_gemini_transcript_pages_with_profile,
-    reset_gemini_parse_counters, GeminiNativeEventIds, MAX_GEMINI_FILE_TOUCHES_PER_EVENT,
-    MAX_GEMINI_FILE_TOUCH_BYTES_PER_EVENT, MAX_GEMINI_NATIVE_PAGE_BYTES,
-    MAX_GEMINI_NATIVE_PAGE_RECORDS,
+    read_gemini_transcript_pages_from_frontier, reset_gemini_parse_counters, GeminiNativeEventIds,
+    MAX_GEMINI_FILE_TOUCHES_PER_EVENT, MAX_GEMINI_FILE_TOUCH_BYTES_PER_EVENT,
+    MAX_GEMINI_NATIVE_PAGE_BYTES, MAX_GEMINI_NATIVE_PAGE_RECORDS,
 };
 use super::source_backed::{hydrate_gemini_source_backed_record, GeminiSourceBackedLeafReader};
-use crate::provider::providers::native_jsonl::result_content::{
-    gemini_result_subrecord_oracle_for_tests, NativeJsonlResultExtractionError,
-};
-use crate::{
-    CaptureError, OutputOutcome, MAX_PROVIDER_JSONL_LINE_BYTES, PROVIDER_MAX_PREVIEW_CHARS,
-};
+use crate::{CaptureError, MAX_PROVIDER_JSONL_LINE_BYTES, PROVIDER_MAX_PREVIEW_CHARS};
 
 fn fixture_root(temp: &TempDir) -> PathBuf {
     temp.path().join(".gemini")
@@ -95,7 +88,6 @@ fn previous(outcome: &GeminiScanOutcome, prior_route_still_live: bool) -> Gemini
 }
 
 mod discovery;
-mod output;
 mod paging;
 mod parsing;
 mod resume;

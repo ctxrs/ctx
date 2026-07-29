@@ -1,39 +1,28 @@
 use super::reader::ScanState;
 use super::*;
 
-#[cfg(test)]
 pub(crate) fn read_gemini_transcript_pages<'a>(
     source: &'a GeminiTranscriptSource,
     previous: Option<&'a GeminiPreviousSource>,
 ) -> GeminiScanResult<GeminiNativePageReader<'a>> {
-    read_gemini_transcript_pages_with_profile(source, previous, GeminiNativePathProfile::CoreOnly)
-}
-
-pub(crate) fn read_gemini_transcript_pages_with_profile<'a>(
-    source: &'a GeminiTranscriptSource,
-    previous: Option<&'a GeminiPreviousSource>,
-    profile: GeminiNativePathProfile,
-) -> GeminiScanResult<GeminiNativePageReader<'a>> {
-    read_gemini_transcript_pages_from(source, previous, profile, None)
+    read_gemini_transcript_pages_from(source, previous, None)
 }
 
 /// Reopens a source at a previously emitted safe page frontier. This is the
-/// retry seam for a lagging Core or Pro consumer: the prefix digest and parser
-/// revisions must still match, and growth is accepted only from an
+/// retry seam for a lagging source-backed consumer: the prefix digest and
+/// parser revisions must still match, and growth is accepted only from an
 /// append-safe boundary.
 #[cfg(test)]
 pub(crate) fn read_gemini_transcript_pages_from_frontier<'a>(
     source: &'a GeminiTranscriptSource,
     frontier: &GeminiPageFrontier,
-    profile: GeminiNativePathProfile,
 ) -> GeminiScanResult<GeminiNativePageReader<'a>> {
-    read_gemini_transcript_pages_from(source, None, profile, Some(frontier))
+    read_gemini_transcript_pages_from(source, None, Some(frontier))
 }
 
 fn read_gemini_transcript_pages_from<'a>(
     source: &'a GeminiTranscriptSource,
     previous: Option<&'a GeminiPreviousSource>,
-    profile: GeminiNativePathProfile,
     resume_frontier: Option<&GeminiPageFrontier>,
 ) -> GeminiScanResult<GeminiNativePageReader<'a>> {
     let initial_observation = GeminiFileObservation::from_metadata(source.source_file.metadata())?;
@@ -156,7 +145,6 @@ fn read_gemini_transcript_pages_from<'a>(
         terminal,
         retained_event_count,
         state,
-        profile,
         outcome: None,
     })
 }

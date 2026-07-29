@@ -204,23 +204,15 @@ fn gemini_nativepath_structural_rejections_advance_with_durable_detail_and_resum
     assert_eq!(outcome.checkpoint.rejected_records, 1);
     assert!(outcome.signals.cursor_advance_allowed);
 
-    let mut replay = read_gemini_transcript_pages_from_frontier(
-        &source,
-        &expected_frontier,
-        GeminiNativePathProfile::CoreOnly,
-    )
-    .unwrap();
+    let mut replay =
+        read_gemini_transcript_pages_from_frontier(&source, &expected_frontier).unwrap();
     let replayed_page = replay.next_page().unwrap().unwrap();
     assert_eq!(replayed_page.identity, page_identity);
     assert_eq!(replayed_page.rejections, page.rejections);
     assert_eq!(replayed_page.events, page.events);
 
-    let mut after_commit = read_gemini_transcript_pages_from_frontier(
-        &source,
-        &committed_frontier,
-        GeminiNativePathProfile::CoreOnly,
-    )
-    .unwrap();
+    let mut after_commit =
+        read_gemini_transcript_pages_from_frontier(&source, &committed_frontier).unwrap();
     assert!(after_commit.next_page().unwrap().is_none());
     assert_eq!(after_commit.outcome().unwrap().rejected_records, 1);
 
