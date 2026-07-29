@@ -1,6 +1,6 @@
 use super::{
-    assert_daemon_process_running, assert_no_daemon_autostart_mutation, support::*,
-    wait_for_daemon_status, write_active_daemon_upgrade_handoff, write_codex_setup_session,
+    assert_daemon_process_running, support::*, wait_for_daemon_status,
+    write_active_daemon_upgrade_handoff, write_codex_setup_session,
 };
 use rusqlite::OpenFlags;
 use std::{
@@ -179,38 +179,30 @@ fn import_progress_json_goes_to_stderr_without_polluting_stdout() {
 }
 
 #[test]
-fn machine_readable_native_import_preserves_json_without_autostarting_daemon() {
+fn machine_readable_native_import_recovers_daemon_without_polluting_json() {
     let temp = tempdir();
     let fixture = provider_history_fixture("codex-sessions");
-    let missing_exe = temp.path().join("missing-ctx-binary");
-    write_active_daemon_upgrade_handoff(&temp);
 
-    let import = json_output(
-        ctx(&temp)
-            .args([
-                "import",
-                "--provider",
-                "codex",
-                "--path",
-                &fixture,
-                "--format=json",
-                "--progress",
-                "none",
-            ])
-            .env("CTX_DAEMON_AUTOSTART_EXE", &missing_exe)
-            .env_remove("CI")
-            .env_remove("CTX_DAEMON_AUTOSTART_OFF"),
-    );
+    let import = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "codex",
+        "--path",
+        &fixture,
+        "--format=json",
+        "--progress",
+        "none",
+    ]));
     assert_eq!(import["schema_version"], 2);
-    assert!(import["totals"]["imported_sessions"].as_u64().unwrap() > 0);
-    assert_no_daemon_autostart_mutation(&temp);
+    assert_eq!(import["sources"][0]["status"], "published");
+    let running = wait_for_daemon_status(&temp, "running", true, "import");
+    assert_eq!(running["daemon"]["start_mode"], "auto");
 }
 
 #[test]
-fn progress_json_native_import_does_not_autostart_or_nudge_daemon() {
+fn progress_json_native_import_recovers_enabled_daemon() {
     let temp = tempdir();
     let fixture = provider_history_fixture("codex-sessions");
-    write_active_daemon_upgrade_handoff(&temp);
 
     let output = ctx(&temp)
         .args([
@@ -231,7 +223,40 @@ fn progress_json_native_import_does_not_autostart_or_nudge_daemon() {
 
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains(r#""type":"ctx_progress""#), "{stderr}");
-    assert_no_daemon_autostart_mutation(&temp);
+    let running = wait_for_daemon_status(&temp, "running", true, "import");
+    assert_eq!(running["daemon"]["start_mode"], "auto");
+}
+
+#[test]
+fn machine_readable_native_import_bounds_upgrade_handoff_recovery() {
+    let temp = tempdir();
+    let fixture = provider_history_fixture("codex-sessions");
+    write_active_daemon_upgrade_handoff(&temp);
+
+    let started = Instant::now();
+    let output = ctx(&temp)
+        .args([
+            "import",
+            "--provider",
+            "codex",
+            "--path",
+            &fixture,
+            "--format=json",
+            "--progress",
+            "none",
+        ])
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "enabled-daemon handoff exceeded the bounded foreground recovery window"
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("timed out waiting"), "{stderr}");
 }
 
 #[test]

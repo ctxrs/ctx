@@ -475,22 +475,23 @@ fn fresh_home_search_mvp_flow() {
         .arg("setup")
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "ctx is initialized; no local history was indexed",
-        ));
+        .stdout(predicate::str::contains("Daemon is running"));
     assert!(
         !temp.path().join("config.toml").exists(),
         "setup should not write config.toml for implicit defaults"
     );
 
     let setup_json = json_output(ctx(&temp).args(["setup", "--format=json"]));
-    assert_eq!(setup_json["schema_version"], 1);
+    assert_eq!(setup_json["schema_version"], 2);
     assert_eq!(setup_json["network_required"], false);
     assert_eq!(setup_json["repo_writes"], false);
-    assert_eq!(setup_json["mode"], "ready");
-    assert_eq!(setup_json["import"]["ran"], false);
-    assert_eq!(setup_json["import"]["reason"], "no_sources");
-    assert_eq!(setup_json["background_indexing"]["enabled"], false);
+    assert!(
+        matches!(setup_json["mode"].as_str(), Some("pending" | "ready")),
+        "{setup_json:#}"
+    );
+    assert_eq!(setup_json["daemon_autostart"]["status"], "verified");
+    assert_eq!(setup_json["daemon_autostart"]["requested"], true);
+    assert!(setup_json.get("background_indexing").is_none());
 
     let sources = json_output(ctx(&temp).args(["sources", "--format=json"]));
     assert_eq!(sources["schema_version"], 1);

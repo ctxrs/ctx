@@ -68,19 +68,16 @@ ctx setup
 ctx status
 ```
 
-Setup creates the configured ctx data root, initializes SQLite, discovers known
-provider history paths, inventories local history sources, imports discovered
-native provider sources, optimizes the local search index, and prints next
-steps. It does not write `config.toml` for implicit defaults and does not
-execute history-source plugin commands. The default data root is `~/.ctx`.
-Daemon maintenance is enabled by default. Use `ctx daemon disable` for a durable
-opt-out or `ctx setup --no-daemon` for a one-run opt-out. Existing configurations
-that already set `[daemon] enabled = false` remain disabled after upgrade.
-`ctx setup --catalog-only` does not autostart daemon maintenance.
-Machine-readable setup does not start or nudge the daemon. Its result reports
-`background_indexing.daemon_autostart.status: "not_needed"` with reason
-`machine_readable_output`; use a human-readable setup or an explicit daemon
-command when background maintenance should start.
+Setup creates the configured ctx data root, prepares the source-backed history
+epoch, starts or health-checks the enabled persistent daemon, requests provider
+source refresh, and prints next steps. It does not write `config.toml` for
+implicit defaults and does not execute history-source plugin commands. The
+default data root is `~/.ctx`. Use `ctx daemon disable` for a durable opt-out or
+`ctx setup --no-daemon` for a one-run opt-out. Existing configurations that
+already set `[daemon] enabled = false` remain disabled after upgrade.
+Machine-readable setup follows the same lifecycle and reports schema version 2
+with top-level `daemon_autostart` and `refresh_request` objects. The deprecated
+`--catalog-only` flag no longer disables daemon maintenance.
 
 Use a different root when testing:
 
