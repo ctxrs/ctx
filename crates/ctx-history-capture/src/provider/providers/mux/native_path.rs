@@ -19,8 +19,7 @@ use crate::{
         event_type_supports_structured_file_touches, visit_provider_file_touch_drafts_with_limit,
         PROVIDER_FILE_TOUCH_LIMIT_REJECTION,
     },
-    CaptureError, ProviderAdapterContext, ProviderImportOptions, ProviderImportSummary, Result,
-    MAX_PROVIDER_JSONL_LINE_BYTES,
+    CaptureError, Result, MAX_PROVIDER_JSONL_LINE_BYTES,
 };
 
 use super::{
@@ -48,18 +47,3 @@ pub(crate) use source_backed::{
     MuxSourceBackedResolverV0, MuxSourceBackedResult, MuxSourceBackedScanReceipt,
     MuxUnaddressableReason, MuxUnaddressableRecord,
 };
-
-/// Temporary compatibility entry point for shared v0.25 import APIs.
-///
-/// Mux production ingestion is source-backed. The legacy Store publisher was
-/// deleted provider-locally and must not be reintroduced behind this symbol.
-pub(crate) fn import_mux_native_path(
-    _path: &Path,
-    _store: &mut ctx_history_store::Store,
-    _context: ProviderAdapterContext,
-    _options: ProviderImportOptions,
-) -> Result<ProviderImportSummary> {
-    Err(CaptureError::UnsupportedSchema(
-        "Mux legacy Store publication is unavailable; use source-backed ingestion".to_owned(),
-    ))
-}

@@ -6,8 +6,6 @@ mod source;
 pub(crate) use assistant::{
     junie_buffer_result_text, junie_merge_buffered_agent_event, JunieAssistantBuffer,
 };
-pub(crate) use nativepath::import_junie_nativepath;
-
 const JUNIE_SOURCE_REVISION_SCHEMA: &str = "junie-session-events-v2";
 // Match the existing Junie discovery probe's physical index-entry budget.
 const MAX_JUNIE_INDEX_ENTRIES: usize = 10_000;

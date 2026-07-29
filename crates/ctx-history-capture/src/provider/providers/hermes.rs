@@ -1,8 +1,5 @@
-use std::path::Path;
-
 use chrono::{DateTime, Utc};
 use ctx_history_core::{CaptureProvider, ContentRef, EventRole, EventType};
-use ctx_history_store::Store;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -18,8 +15,7 @@ use crate::provider::normalization::{
     provider_value_text,
 };
 use crate::{
-    CaptureError, OutputOutcome, OutputOutcomeMetadata, ProviderAdapterContext,
-    ProviderImportOptions, ProviderImportSummary, Result, HERMES_SQLITE_SOURCE_FORMAT,
+    CaptureError, OutputOutcome, OutputOutcomeMetadata, Result, HERMES_SQLITE_SOURCE_FORMAT,
     PROVIDER_MAX_PREVIEW_CHARS,
 };
 
@@ -364,17 +360,6 @@ pub(crate) fn hermes_decode_content(raw: Option<&str>) -> Value {
         return provider_json_text(json);
     }
     Value::String(raw.to_owned())
-}
-
-pub(crate) fn import_hermes_nativepath(
-    _path: &Path,
-    _store: &mut Store,
-    _context: ProviderAdapterContext,
-    _import_options: ProviderImportOptions,
-) -> Result<ProviderImportSummary> {
-    Err(CaptureError::UnsupportedSchema(
-        "Hermes Store ingestion was removed; use source-backed ingestion".to_owned(),
-    ))
 }
 
 fn hermes_output_outcome(row: &HermesMessageRow, content: &Value) -> OutputOutcomeMetadata {

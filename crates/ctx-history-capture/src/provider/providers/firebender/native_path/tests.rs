@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use ctx_history_store::{Store, NATIVE_PATH_MAX_RETAINED_PAGE_BYTES};
+use ctx_history_store::NATIVE_PATH_MAX_RETAINED_PAGE_BYTES;
 use rusqlite::{config::DbConfig, params, Connection};
 use serde_json::{json, Value};
 
@@ -77,34 +77,6 @@ fn drain_source_backed_plan(
     }
     let certificate = scanner.finish().unwrap();
     (certificate, documents, page_sizes)
-}
-
-#[test]
-fn released_store_import_shape_rejects_with_unsupported_schema() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let path = temp.path().join("project");
-    let mut store = Store::open(temp.path().join("ctx.sqlite")).unwrap();
-
-    let error = super::super::import_firebender_nativepath(
-        &path,
-        &mut store,
-        crate::ProviderAdapterContext {
-            machine_id: "firebender-typed-shim-test".to_owned(),
-            source_path: Some(path.clone()),
-            source_root: Some(path.clone()),
-            imported_at: "2026-07-29T12:00:00Z".parse().unwrap(),
-        },
-        crate::ProviderImportOptions::default(),
-    )
-    .unwrap_err();
-
-    match error {
-        CaptureError::UnsupportedSchema(reason) => assert_eq!(
-            reason,
-            "Firebender Store ingestion was removed; use source-backed ingestion"
-        ),
-        other => panic!("expected typed unsupported-schema rejection, got {other:?}"),
-    }
 }
 
 #[test]

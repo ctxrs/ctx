@@ -1,14 +1,11 @@
-use std::path::Path;
-
 use ctx_history_core::EventType;
-use ctx_history_store::Store;
 use rusqlite::Connection;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::{
     provider::sqlite::{ensure_sqlite_table_columns, sqlite_table_columns, sqlite_table_exists},
-    CaptureError, ProviderAdapterContext, ProviderImportOptions, ProviderImportSummary, Result,
+    CaptureError, Result,
 };
 
 mod records;
@@ -73,19 +70,6 @@ pub(super) struct LingmaCoreEvent {
     pub(super) event_type: EventType,
     pub(super) idempotency_key: String,
     pub(super) payload: Value,
-}
-
-/// Rejects the released Store-ingestion entrypoint while shared dispatch still
-/// carries its historical signature. Lingma ingestion is source-backed.
-pub(super) fn import_lingma_native_path(
-    _path: &Path,
-    _store: &mut Store,
-    _context: ProviderAdapterContext,
-    _options: ProviderImportOptions,
-) -> Result<ProviderImportSummary> {
-    Err(CaptureError::InvalidPayload(
-        "Lingma Store ingestion was removed; use source-backed ingestion".to_owned(),
-    ))
 }
 
 fn detect_schema(conn: &Connection) -> Result<SqliteEncoding> {

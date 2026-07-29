@@ -4,26 +4,9 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use crate::provider::normalization::{provider_string_field, provider_timestamp_from_fields};
-use crate::{
-    CaptureError, ProviderAdapterContext, ProviderImportOptions, ProviderImportSummary, Result,
-};
+use crate::{CaptureError, ProviderAdapterContext, Result};
 
 pub(crate) mod native_path;
-
-/// Temporary compatibility entry point for shared v0.25 import APIs.
-///
-/// Auggie production ingestion is source-backed. The legacy Store publisher
-/// was deleted provider-locally and must not be reintroduced behind this symbol.
-pub(crate) fn import_auggie_sessions_nativepath(
-    _path: &Path,
-    _store: &mut ctx_history_store::Store,
-    _context: ProviderAdapterContext,
-    _import_options: ProviderImportOptions,
-) -> Result<ProviderImportSummary> {
-    Err(CaptureError::UnsupportedSchema(
-        "Auggie legacy Store publication is unavailable; use source-backed ingestion".to_owned(),
-    ))
-}
 
 pub(super) struct AuggieSessionData<'a> {
     pub(super) provider_session_id: String,

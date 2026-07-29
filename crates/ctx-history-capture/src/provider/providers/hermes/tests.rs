@@ -1,6 +1,5 @@
 use std::path::Path;
 
-use ctx_history_store::Store;
 use rusqlite::Connection;
 use serde_json::Value;
 
@@ -173,34 +172,6 @@ fn row_reader_scans_sessions_then_messages_and_rejects_before_hydration() {
         .all(|phase| *phase == HermesPhase::Messages));
     assert_eq!(rejected, 1);
     assert_eq!(reader.session_hydration_queries, 1);
-}
-
-#[test]
-fn released_store_import_shape_rejects_with_unsupported_schema() {
-    let temp = tempdir().unwrap();
-    let path = temp.path().join("state.db");
-    let mut store = Store::open(temp.path().join("ctx.sqlite")).unwrap();
-
-    let error = import_hermes_nativepath(
-        &path,
-        &mut store,
-        ProviderAdapterContext {
-            machine_id: "hermes-typed-shim-test".to_owned(),
-            source_path: Some(path.clone()),
-            source_root: path.parent().map(Path::to_path_buf),
-            imported_at: "2026-07-29T12:00:00Z".parse().unwrap(),
-        },
-        ProviderImportOptions::default(),
-    )
-    .unwrap_err();
-
-    match error {
-        CaptureError::UnsupportedSchema(reason) => assert_eq!(
-            reason,
-            "Hermes Store ingestion was removed; use source-backed ingestion"
-        ),
-        other => panic!("expected typed unsupported-schema rejection, got {other:?}"),
-    }
 }
 
 #[test]

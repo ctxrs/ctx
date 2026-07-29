@@ -205,8 +205,8 @@ fn source_backed_route_has_no_legacy_store_publication_fallback() {
         assert!(!source.contains("NativePathPublicationGroup"));
     }
     assert!(!source_backed_source.contains("publication::"));
-    assert_eq!(module_source.matches("ctx_history_store::Store").count(), 1);
-    assert!(module_source.contains("CaptureError::UnsupportedSchema"));
+    assert!(!module_source.contains("ctx_history_store"));
+    assert!(!module_source.contains("legacy Store publication"));
 }
 
 #[test]

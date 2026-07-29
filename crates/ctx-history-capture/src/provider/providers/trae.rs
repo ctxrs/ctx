@@ -1,14 +1,11 @@
-use std::path::Path;
-
 use chrono::{DateTime, Utc};
 use ctx_history_core::EventType;
-use ctx_history_store::Store;
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::Value;
 
 use crate::native_source::NativeLocator;
 use crate::{
-    CaptureError, ProviderAdapterContext, ProviderImportOptions, ProviderImportSummary, Result,
+    CaptureError, Result,
 };
 
 mod event;
@@ -34,21 +31,6 @@ pub(crate) const TRAE_CHAT_KEYS: &[&str] = &[
 ];
 
 const TRAE_COMPLETE_MESSAGE_LOCATOR_KIND: &str = "trae-itemtable-message-v1";
-
-/// Temporary compatibility entry point for shared v0.25 import APIs.
-///
-/// Trae production ingestion is source-backed. The legacy Store publisher was
-/// deleted provider-locally and must not be reintroduced behind this symbol.
-pub(crate) fn import_trae_nativepath(
-    _path: &Path,
-    _store: &mut Store,
-    _context: ProviderAdapterContext,
-    _options: ProviderImportOptions,
-) -> Result<ProviderImportSummary> {
-    Err(CaptureError::UnsupportedSchema(
-        "Trae legacy Store publication is unavailable; use source-backed ingestion".to_owned(),
-    ))
-}
 
 pub(crate) fn trae_complete_message_locator(
     key_index: u16,

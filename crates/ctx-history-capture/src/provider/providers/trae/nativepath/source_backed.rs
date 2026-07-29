@@ -780,17 +780,8 @@ mod tests {
             }
             assert!(!source.contains("ctx_history_store"));
         }
-        assert_eq!(
-            provider_source.matches("ctx_history_store::Store").count(),
-            1
-        );
-        assert_eq!(
-            provider_source
-                .matches("use ctx_history_store::Store")
-                .count(),
-            1
-        );
-        assert!(provider_source.contains("CaptureError::UnsupportedSchema"));
+        assert!(!provider_source.contains("ctx_history_store"));
+        assert!(!provider_source.contains("legacy Store publication"));
     }
 
     fn collect_scan(source: &Path) -> (TraeSourceBackedScanV0, Vec<LexicalDocument>) {
