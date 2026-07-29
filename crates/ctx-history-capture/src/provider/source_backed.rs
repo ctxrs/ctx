@@ -5826,7 +5826,7 @@ mod tests {
                 .hydrate_event(&event_request)
                 .unwrap()
                 .provider_bytes,
-            prompt_bytes
+            prompt_text.as_bytes()
         );
         assert_eq!(
             resolver
@@ -5835,7 +5835,7 @@ mod tests {
                 .into_iter()
                 .map(|record| record.provider_bytes)
                 .collect::<Vec<_>>(),
-            vec![prompt_bytes.clone()]
+            vec![prompt_text.clone().into_bytes()]
         );
 
         let index = temp.path().join("index");
