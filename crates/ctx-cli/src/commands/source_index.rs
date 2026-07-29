@@ -653,11 +653,6 @@ where
 }
 
 fn validate_search_request(request: &SourceSearchRequest) -> Result<()> {
-    if request.terms.iter().any(|term| !term.trim().is_empty()) {
-        return Err(anyhow!(
-            "OR-composed --term search is not yet exposed by the source-backed index query API"
-        ));
-    }
     if request.history_source.is_some()
         || request.provider_key.is_some()
         || request.source_id.is_some()
@@ -666,15 +661,28 @@ fn validate_search_request(request: &SourceSearchRequest) -> Result<()> {
             "custom history source identity filters are not yet exposed by the source-backed index query API"
         ));
     }
-    if request.query.trim().is_empty() {
-        if request.file.is_some() {
-            return Err(anyhow!(
-                "file-only search is not yet exposed by the source-backed index query API; add a text query"
-            ));
-        }
+    let has_query = !search_query_texts(request).is_empty();
+    if !has_query && request.file.is_none() {
         return Err(anyhow!("source-backed search needs a non-empty text query"));
     }
+    if !has_query
+        && request
+            .backend
+            .is_some_and(|backend| backend != SearchBackendArg::Lexical)
+    {
+        return Err(anyhow!(
+            "semantic and hybrid search need a non-empty text query"
+        ));
+    }
     Ok(())
+}
+
+fn search_query_texts(request: &SourceSearchRequest) -> Vec<&str> {
+    std::iter::once(request.query.as_str())
+        .chain(request.terms.iter().map(String::as_str))
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+        .collect()
 }
 
 fn index_search_filters(
@@ -766,7 +774,7 @@ fn collect_search_hits_with_backend_using<SemanticSearch>(
     semantic_search: SemanticSearch,
 ) -> Result<SearchCollection>
 where
-    SemanticSearch: FnOnce(
+    SemanticSearch: FnMut(
         &VerifiedIndex,
         &Path,
         &str,
@@ -783,37 +791,67 @@ where
     if requested_backend == SearchBackendArg::Lexical
         || (requested_backend == SearchBackendArg::Hybrid && semantic_weight == 0.0)
     {
-        let mut collection = collect_search_hits(
-            index,
-            &request.query,
-            request.limit,
-            request.events,
-            filters,
-        )?;
+        let queries = search_query_texts(request);
+        let mut collection =
+            collect_search_hits(index, &queries, request.limit, request.events, filters)?;
         collection.requested_backend = requested_backend;
         collection.semantic_weight = 0.0;
         return Ok(collection);
     }
 
-    let (semantic_candidates, semantic_diagnostics) = semantic_search(
-        index,
-        data_root,
-        &request.query,
-        filters,
-        SOURCE_FUSION_CANDIDATES,
-    )
-    .with_context(|| {
-            format!(
-                "{} search requires a complete flat-F32 projection of the pinned source-backed generation",
-                requested_backend.as_str()
-            )
-        })?;
+    let queries = search_query_texts(request);
+    let mut semantic_by_event = BTreeMap::<Uuid, EventSearchCandidate>::new();
+    let mut semantic_query_diagnostics = Vec::with_capacity(queries.len());
+    let mut semantic_search = semantic_search;
+    for query in &queries {
+        let (candidates, diagnostics) = semantic_search(
+            index,
+            data_root,
+            query,
+            filters,
+            SOURCE_FUSION_CANDIDATES,
+        )
+        .with_context(|| {
+                format!(
+                    "{} search requires a complete flat-F32 projection of the pinned source-backed generation",
+                    requested_backend.as_str()
+                )
+            })?;
+        semantic_query_diagnostics.push(json!({
+            "query": query,
+            "diagnostics": diagnostics,
+        }));
+        for candidate in candidates {
+            semantic_by_event
+                .entry(candidate.event.event_id.as_uuid())
+                .and_modify(|existing| {
+                    if candidate.score > existing.score {
+                        *existing = candidate.clone();
+                    }
+                })
+                .or_insert(candidate);
+        }
+    }
+    let mut semantic_candidates = semantic_by_event.into_values().collect::<Vec<_>>();
+    semantic_candidates.sort_by(|left, right| {
+        right.score.total_cmp(&left.score).then_with(|| {
+            left.event
+                .event_id
+                .as_uuid()
+                .cmp(&right.event.event_id.as_uuid())
+        })
+    });
+    semantic_candidates.truncate(SOURCE_FUSION_CANDIDATES);
+    let semantic_diagnostics = json!({
+        "query_count": queries.len(),
+        "queries": semantic_query_diagnostics,
+    });
 
     let candidates = if requested_backend == SearchBackendArg::Semantic {
         semantic_candidates
     } else {
-        let lexical_candidates = index.search_event_candidates_with_filters(
-            request.query.trim(),
+        let lexical_candidates = index.search_event_candidates_any_with_filters(
+            &queries,
             filters,
             SOURCE_FUSION_CANDIDATES,
         )?;
@@ -838,7 +876,7 @@ where
 
 fn collect_search_hits(
     index: &VerifiedIndex,
-    query: &str,
+    queries: &[&str],
     limit: usize,
     event_results: bool,
     filters: &EventSearchFilters,
@@ -851,8 +889,11 @@ fn collect_search_hits(
         .min(maximum.max(1));
 
     loop {
-        let candidates =
-            index.search_event_candidates_with_filters(query.trim(), filters, candidate_limit)?;
+        let candidates = if queries.is_empty() {
+            index.list_event_candidates_with_filters(filters, candidate_limit)?
+        } else {
+            index.search_event_candidates_any_with_filters(queries, filters, candidate_limit)?
+        };
         let exhausted = candidates.len() < candidate_limit || candidate_limit >= document_count;
         let hits = shape_search_hits(candidates.iter(), limit, event_results);
         let enough = hits.len() >= limit;
