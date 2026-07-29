@@ -2,10 +2,10 @@
 
 `ctx mcp serve` starts a local MCP server over newline-delimited stdio JSON-RPC.
 It is for agents or MCP hosts that prefer tool discovery over shell commands.
-The CLI remains the primary interface. Pro blame may perform bounded local
-catch-up that updates the canonical Core index, writes the encrypted derived Pro
-graph, and writes the projection acknowledgement. It never writes provider
-history or repositories.
+The CLI remains the primary interface. MCP startup performs a bounded,
+content-free health-check/wake and recovers the default-enabled persistent
+daemon when needed. The MCP process never becomes a provider-history or
+projection writer.
 
 ```bash
 ctx mcp serve
@@ -17,7 +17,8 @@ ctx integrations status mcp
 file-backed coding-agent MCP configs. Run `ctx docs show mcp-integrations` for
 the support matrix, config paths, and manual snippets.
 
-The server exposes 13 tools. Six use the OSS local index:
+The server advertises its current tool set through MCP discovery rather than a
+fixed documented count. Core tools include:
 
 - `status`, local ctx index status, semantic coverage, and daemon coordinator
   state;
@@ -29,14 +30,15 @@ The server exposes 13 tools. Six use the OSS local index:
   event ID.
 
 `show_session` and `show_event` accept `content: "indexed" | "complete"` and
-default to `indexed`. Complete mode explicitly reads eligible, verified local
-provider records, applies the MCP aggregate response limit, and fails without a
-partial result if any selected record cannot be verified. MCP hosts may log or
-forward the returned complete transcript, so callers should request it only
-when needed. Typed failures are returned in `structuredContent` with the same
-stable complete-content error codes as the CLI JSON contract.
+default to `indexed`. Both policies hydrate exact bodies from eligible,
+verified local provider records; `indexed` controls item selection and the
+generation-bound parser contract, not a stored body or preview. Both apply the
+MCP aggregate response limit and fail without a partial result if any selected
+record cannot be verified. MCP hosts may log or forward the returned
+transcript. Typed failures are returned in `structuredContent` with the same
+stable hydration error codes as the CLI JSON contract.
 
-Two use the optional local Pro helper:
+Optional Local Pro tools include:
 
 - `pro_status`, inspect helper availability, capabilities, nonsecret access
   state, applicable refresh/access/grace deadlines, and compact local usage
@@ -61,9 +63,11 @@ page exceeds that MCP-specific cap, the tool returns a small
 not fabricate a continuation cursor.
 
 `pro_status` is read-only. `blame` advertises `readOnlyHint: false` because its
-bounded catch-up updates the canonical Core index, writes the encrypted derived
-Pro graph, and writes the projection acknowledgement. It never writes provider
-history or repositories. The operation is nondestructive and idempotent.
+bounded maintenance wake can cause the daemon to advance the encrypted derived
+Pro graph. Ordinary blame reads the latest committed Pro generation while that
+catch-up proceeds; only an explicit wait policy waits for a requested frontier.
+It never writes provider history or repositories. The wake is nondestructive
+and idempotent.
 
 PR activity remains separate from code production. PR code membership appears
 only when structured captured forge evidence names the canonical PR and exact
@@ -102,9 +106,13 @@ instead of raw paths or causes. The server re-resolves the dedicated local
 control for every delivered call; an explicit `false` takes effect before store
 I/O, while an unrelated config read/parse failure retains the last known state.
 
-MCP search and SQL query the existing index only. They do not refresh provider
-history, import files, initialize storage, or write provider data. MCP search
-currently uses the lexical search path only.
+MCP search sends the same bounded maintenance wake as CLI search and then
+queries committed generations. It follows the CLI lexical, semantic, and
+hybrid contracts, including lexical fallback for unavailable hybrid semantic
+state, typed failure for semantic-only unavailability, and no vector work when
+the semantic weight is zero. The MCP process does not import provider history,
+initialize storage, or write provider data. MCP SQL remains an existing
+metadata-projection-only read and performs no body hydration.
 
 The `sources` tool returns the same bounded provider discovery `issues` as
 `ctx sources --format json`, including stable issue codes and truncation markers.

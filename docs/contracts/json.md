@@ -318,7 +318,7 @@ ctx import --format json
 ctx import --format json --no-daemon
 ```
 
-Writes the local SQLite index and returns:
+Requests source-backed publication and returns:
 
 - `schema_version`;
 - `outcome`;
@@ -343,7 +343,7 @@ up to five rejection details when every content record was rejected.
 
 `totals` and each source row include `change`, whose value is `changed` or
 `no_op`, plus file, byte, session, event, edge, skipped, and
-`rejected_records` counts. `change` reports whether canonical source work
+`rejected_records` counts. `change` reports whether certified source state
 changed; it is independent of insert counters. A deterministic source
 replacement can therefore report `change: "changed"`, zero newly imported
 events, and skipped existing events while reconciling those rows in place.
@@ -424,15 +424,16 @@ ID, path, current path existence, working directory, and source format.
 `ctx_event_id`, `record_type`, `ctx_session_id`, `sequence`, `event_type`,
 `role`, `occurred_at`, `source`, `cursor`, and `text` or `preview`. Each
 rendered event also includes `content` with `requested`, `complete`, `origin`,
-`stored_truncated`, and `source_verified`. `origin` is `ctx_index` or
-`provider_source`. Source-backed show hydrates provider-authoritative content,
-so it reports `complete: true`, `origin: "provider_source"`,
-`stored_truncated: false`, and `source_verified: true`; it does not read a
-stored preview or body. A source or event `cursor` is present only when the
-provider exposes a real provenance cursor. Source-backed locators are not
-rendered as cursors.
+`stored_truncated`, and `source_verified`. Every rendered body is hydrated from
+the provider source, so successful output reports `complete: true`,
+`origin: "provider_source"`, `stored_truncated: false`, and
+`source_verified: true`; it does not read a stored preview or body. This is
+true for both the default `indexed` policy and the explicit `complete` policy:
+`indexed` controls item selection and the generation-bound parser contract. A
+source or event `cursor` is present only when the provider exposes a real
+provenance cursor. Source-backed locators are not rendered as cursors.
 
-Complete-content failures are all-or-nothing. JSON mode writes no transcript
+Hydration failures are all-or-nothing. JSON mode writes no transcript
 and reports a stable error object containing `error`, `error_code`,
 `ctx_event_id`, `retryable`, and a `ctx locate event` remediation command.
 Current error codes are `source_missing`, `source_unreadable`, `source_changed`,
@@ -557,15 +558,15 @@ They are omitted when unavailable and are unrelated to search continuation.
 
 Search JSON is local/private by default.
 
-`freshness` describes the pre-search refresh attempt:
+`freshness` describes the maintenance request and committed generation observed
+by search. It never means that the query process became a foreground writer:
 
 - `mode`, one of `background`, `off`, or `wait`;
 - `status`, such as `completed`, `skipped`, `no_sources`, `read_only`,
-  `budget_exhausted`, or `failed`. `read_only` means foreground refresh skipped
-  writes because the existing index is readable but not writable by this binary,
-  or because daemon background refresh owns freshness for this command;
-  `budget_exhausted` means foreground refresh imported a bounded batch and served
-  results while leaving more backlog for a later search or `--refresh wait`;
+  `budget_exhausted`, or `failed`. `read_only` means search queried an existing
+  committed generation without an accepted maintenance wake;
+  `budget_exhausted` means daemon-owned bounded maintenance left backlog while
+  search served the latest committed generation;
 - `reason`, present for explanatory read-only or skipped states;
 - `budget_reasons`, present when `status` is `budget_exhausted`; stable
   machine-readable reasons include `codex_session_limit`,
@@ -573,8 +574,16 @@ Search JSON is local/private by default.
   `total_bytes`;
 - `source_count`;
 - `daemon_last_run_at_ms`, present when search relies on a recent daemon refresh;
-- `totals`, using the same import total fields as `ctx import --format json`;
-- `error`, present when refresh failed but results were still served.
+- `totals`, when a daemon receipt supplies the same bounded total fields as
+  `ctx import --format json`;
+- `error`, present when a background maintenance request failed but committed
+  results were still served.
+
+Background mode health-checks and may recover the default-enabled persistent
+daemon, then returns the latest committed generation without waiting for
+relational, semantic, or Pro catch-up. Wait mode waits for the requested source
+frontier and lexical receipt or fails; it never falls back to a foreground
+importer. Off mode sends no maintenance wake.
 
 `retrieval` describes the requested and effective search path:
 
@@ -582,7 +591,8 @@ Search JSON is local/private by default.
 - `effective_mode`, one of `lexical`, `semantic`, or `hybrid`;
 - `semantic_weight`, the effective semantic contribution used for ranking. It
   is `0.0` when the effective mode is lexical, even if a semantic weight was
-  requested;
+  requested. A zero-weight hybrid request performs no model, query-service,
+  vector-open, or vector-scan work;
 - `semantic_status`;
 - `semantic_fallback_code`, nullable/omitted stable reason code for clients;
 - `semantic_fallback`, nullable/omitted;
@@ -602,8 +612,10 @@ Search JSON is local/private by default.
   and dirty work is drained.
 
 `retrieval.semantic_fallback_code`, when present, is the stable machine-readable
-reason why the requested semantic/hybrid path degraded to lexical.
+reason why a hybrid request used lexical fallback.
 `retrieval.semantic_fallback`, when present, is the human-readable explanation.
+Semantic-only unavailability is a typed command error, not a successful
+`search_results` object with `effective_mode: "lexical"`.
 
 `retrieval.coverage` includes `embedded_items`, `embedded_chunks`,
 `searchable_items`, `indexed_now`, and `dirty_items` when known. Coverage counts
@@ -667,10 +679,12 @@ encoded as objects with `type: "blob"`, `bytes`, `preview_hex`, and
 `truncated`.
 
 `share_safe` is required and is always `false` for schema-version-1 SQL
-results. `read_only: true` describes database mutation only; selected rows can
-still contain prompts, transcript content, command arguments, and local paths.
-Clients must not infer that SQL output is safe to share from its read-only
-status.
+results. `read_only: true` describes database mutation only. The relational
+projection and its stable/internal views are metadata/locator-only: they do not
+contain event bodies, previews, command/result payloads, or transcript text and
+SQL does not hydrate provider sources. Selected metadata can still contain
+private paths and identifiers, so clients must not infer that SQL output is
+safe to share.
 
 Use stable `ctx_*` views for scripts when possible: `ctx_sessions`,
 `ctx_events`, `ctx_files_touched`, and `ctx_sources`. Internal tables remain
@@ -679,19 +693,23 @@ surface.
 
 ## MCP Tool Results
 
-`ctx mcp serve` exposes read-only MCP tools over stdio for status, sources,
-search, SQL, showing sessions and events, and Pro status. Pro blame can perform
-bounded local catch-up that updates the canonical Core index, writes the
-encrypted derived Pro graph, and writes the projection acknowledgement. It
-never writes provider history or repositories. Tool results include
+`ctx mcp serve` exposes MCP tools over stdio for status, sources, search, SQL,
+showing sessions and events, and Pro status/blame. Startup health-checks and may
+recover the default-enabled persistent daemon. Search and blame can send
+bounded, content-free maintenance wakes; the MCP process never becomes an
+importer or projection writer and never writes provider history or
+repositories. Tool results include
 `structuredContent` JSON using the same private local fields as CLI JSON. MCP
 output may include absolute paths, source metadata, snippets, and transcript
 text, and the MCP host may log or forward it.
 
-MCP search does not refresh or import provider history and currently uses the
-lexical search path only. It also excludes the active Codex session tree by
-default when `CODEX_THREAD_ID` is set; pass `include_current_session: true` to
-opt back in.
+MCP search follows the same committed-generation and lexical/semantic/hybrid
+retrieval contract as CLI search. Hybrid may report lexical fallback when
+semantic is disabled or unavailable; semantic-only unavailability is a typed
+error, and zero semantic weight performs no vector work. MCP search does not
+itself import provider history. It also excludes the active Codex session tree
+by default when `CODEX_THREAD_ID` is set; pass
+`include_current_session: true` to opt back in.
 
 The MCP `sources` tool includes the same bounded `issues` and
 `issues_truncated` fields as `ctx sources --format json`.
@@ -879,8 +897,8 @@ ordinary 14-day trial.
 `ctx pro manage --no-open --format json` and
 `ctx pro uninstall (--delete-data|--keep-data) --format json` return the `pro_manage`
 and `pro_uninstall` payload types respectively.
-Materialization is an internal,
-idempotent part of setup, daemon freshness, and blame catch-up.
+Materialization is an internal, idempotent daemon-owned activity requested by
+setup and maintenance wakes.
 The `pro_manage` payload includes `portal_url`, `browser_opened`, the compact
 `local_usage` report, `conversion_action`, and the same nonsecret access
 state/deadline fields. A locked account preserves canonical history, encrypted
@@ -914,6 +932,11 @@ claims:
 - `evidence`, a complete deduplicated table numbered contiguously from one;
 - `next`, null or an opaque cursor plus `more_matches` or
   `more_committed_lines` reason.
+
+Ordinary CLI and MCP blame send a bounded maintenance wake, read the latest
+committed Pro generation, and report its frontier or typed stale state while
+catch-up proceeds. Only an explicit wait policy waits for a requested frontier;
+the query process never performs foreground materialization.
 
 File matches contain an inclusive committed line range, commit reference,
 line-level evidence numbers, and zero or more typed production attributions.
