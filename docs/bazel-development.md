@@ -102,6 +102,8 @@ wrapper defaults unless the host or concurrent workload needs an override.
 scripts/check.sh --mode=fast
 scripts/check.sh --mode=presubmit
 scripts/check.sh --mode=ci
+scripts/check.sh --mode=nightly
+scripts/check.sh --mode=release
 scripts/bazel-affected.sh origin/main
 ```
 
@@ -109,6 +111,9 @@ Run focused tests repeatedly while editing, then run the affected selector
 against the comparison base. Use `presubmit` when the change
 touches build configuration, affected selection expands or fails closed, or
 ownership is uncertain. Use `ci` for the complete public repository check.
+Serialized auto-upgrade acceptance, persistent-daemon soak, and process/fault
+injection run in `nightly` and `release`; they are intentionally outside the
+per-change `presubmit` and `ci` loops.
 
 The affected command uses pinned bazel-diff, an ephemeral detached base
 worktree, a commit-keyed cached base hash, and complete-content hashes for both
@@ -125,6 +130,10 @@ Bazel automatically reuses successful results when their declared inputs,
 configuration, toolchain, platform, and target are unchanged. Use
 `scripts/check.sh --force-rerun` only when deliberately checking for a flake;
 it reruns test actions without deleting compiled outputs.
+
+Do not inherit changing CI job identifiers through global `--test_env`.
+CI-shaped behavior belongs in target-local stable fixtures so an otherwise
+identical test action remains reusable across jobs.
 
 ## Bounded Cargo diagnostics
 

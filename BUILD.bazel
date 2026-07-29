@@ -393,6 +393,7 @@ sh_test(
     name = "check_force_rerun_tests",
     srcs = ["scripts/tests/check-force-rerun-test.sh"],
     data = [
+        ".bazelrc",
         "scripts/check.sh",
         "scripts/tests/fixtures/fake-bazel.sh",
     ],
@@ -836,7 +837,6 @@ NATIVE_RUST_TESTS = [
     "//crates/ctx-cli:analytics_identity_tests",
     "//crates/ctx-cli:analytics_tests",
     "//crates/ctx-cli:analytics_policy_tests",
-    "//crates/ctx-cli:auto_upgrade_acceptance_tests",
     "//crates/ctx-cli:cli_public_help_docs_tests",
     "//crates/ctx-cli:cloud_removed_tests",
     "//crates/ctx-cli:custom_root_discovery_tests",
@@ -884,6 +884,12 @@ NATIVE_RUST_TESTS = [
     "//crates/ctx-sdk:unit_tests",
 ]
 
+RELEASE_QUALIFICATION_TESTS = [
+    "//crates/ctx-cli:auto_upgrade_acceptance_tests",
+    "//crates/ctx-cli:persistent_daemon_lifecycle_tests",
+    "//scripts/source-backed-recovery:fault_qualification",
+]
+
 test_suite(
     name = "native_rust_smoke",
     tests = [
@@ -897,6 +903,12 @@ test_suite(
 )
 
 test_suite(name = "native_rust", tests = NATIVE_RUST_TESTS)
+
+test_suite(
+    name = "release_qualification",
+    tests = RELEASE_QUALIFICATION_TESTS,
+    tags = ["release-gate"],
+)
 
 test_suite(
     name = "real_harness",
@@ -958,18 +970,34 @@ test_suite(
     ],
 )
 
-# Presubmit owns the safe, non-ignored recovery subset through native_rust.
+# Presubmit owns deterministic unit, contract, and bounded integration tests.
+# Serialized upgrade acceptance, daemon soak, and injected process/filesystem
+# faults remain explicit release qualification rather than running after every
+# ordinary source or BUILD-file change.
 test_suite(name = "presubmit", tests = [":fast", ":native_rust"])
 
-# The process-local Linux fault shim runs only in the broader CI gate. Its leaf
-# tests are platform-incompatible elsewhere, so non-Linux callers skip them.
 test_suite(
     name = "ci",
     tests = [
         ":presubmit",
         ":sdk_package_dry_run",
         ":package_audit_release",
-        "//scripts/source-backed-recovery:fault_qualification",
+    ],
+)
+
+test_suite(
+    name = "nightly",
+    tests = [
+        ":ci",
+        ":release_qualification",
+    ],
+)
+
+test_suite(
+    name = "release",
+    tests = [
+        ":ci",
+        ":release_qualification",
     ],
 )
 test_suite(name = "smoke", tests = [":fast", ":fresh_home_e2e", ":provider_fixture_e2e"])

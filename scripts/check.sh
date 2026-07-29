@@ -26,9 +26,11 @@ usage: scripts/check.sh [--mode MODE] [--force-rerun]
 
 Modes:
   fast       format, policy, SDK, and native Rust smoke tests
-  presubmit  fast plus the complete native Rust test graph
+  presubmit  fast plus deterministic native Rust unit/integration tests
   smoke      fast plus fresh-home and provider fixture flows
-  ci         presubmit plus native clippy and release/content gates
+  ci         presubmit plus native clippy and release/content audits
+  nightly    ci plus serialized upgrade, daemon, and fault qualification
+  release    same qualification graph as nightly for a release candidate
 
 Cargo is not invoked by these modes; Bazel is the build and test authority.
 --force-rerun disables test-result reuse without deleting compilation caches.
@@ -47,7 +49,7 @@ while (( "$#" > 0 )); do
       shift
       ;;
     --force-rerun) force_rerun=1; shift ;;
-    --list-modes) printf '%s\n' fast presubmit smoke ci; exit 0 ;;
+    --list-modes) printf '%s\n' fast presubmit smoke ci nightly release; exit 0 ;;
     -h|--help) usage; exit 0 ;;
     --)
       shift
@@ -68,6 +70,14 @@ case "${mode}" in
   ci)
     run_bazel build //... --config=ci --config=lint
     run_bazel test //:ci --config=ci
+    ;;
+  nightly)
+    run_bazel build //... --config=ci --config=lint
+    run_bazel test //:nightly --config=ci
+    ;;
+  release)
+    run_bazel build //... --config=ci --config=lint
+    run_bazel test //:release --config=ci
     ;;
   *) printf 'unknown check mode: %s\n' "${mode}" >&2; usage >&2; exit 2 ;;
 esac

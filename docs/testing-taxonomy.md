@@ -10,14 +10,17 @@ Cargo commands are not routine entry points.
 | --- | --- |
 | `fast` | Native Rust formatting/smoke, target inventory, public docs, CLI contracts, and package-surface audit. |
 | `smoke` | `fast` plus a fresh-home CLI flow and basic provider fixture smoke. |
-| `presubmit` | `fast` plus the complete native Rust unit and integration graph. |
-| `ci` | Buildkite gate: native clippy, `presubmit`, SDK packaging, and release/content audit. |
+| `presubmit` | `fast` plus deterministic native Rust unit and bounded integration tests. |
+| `ci` | Buildkite gate: native clippy, `presubmit`, SDK packaging, and release/content audits. |
+| `nightly` | `ci` plus serialized upgrade acceptance, persistent-daemon soak, and injected crash/ENOSPC qualification. |
+| `release` | The same complete qualification graph as `nightly`, named explicitly for candidate receipts. |
 
 During editing, run the smallest owning test and then the affected selector.
 Use `presubmit` when the build graph changes or selection is uncertain, and
-`ci` for the complete public check. Stress, network-dependent, external,
-platform-native, and release/manual checks are separate from the default
-public development loop.
+`ci` for the ordinary hosted public check. Use `nightly` or `release` for the
+serialized upgrade, daemon-soak, and fault-injection qualification that is too
+expensive for each source change. Network-dependent, external,
+platform-native, and manual checks remain separate.
 
 ## Commands
 
@@ -26,6 +29,8 @@ scripts/check.sh --mode=fast
 scripts/check.sh --mode=smoke
 scripts/check.sh --mode=presubmit
 scripts/check.sh --mode=ci
+scripts/check.sh --mode=nightly
+scripts/check.sh --mode=release
 scripts/check.sh --mode=ci --force-rerun
 scripts/bazel-affected.sh origin/main
 ```
@@ -57,6 +62,11 @@ Bazel reuses a passing result when its declared source, graph, configuration,
 toolchain, platform, and target inputs are identical. Do not force reruns merely
 to make a test execute again. Rerun when an input differs, the affected selector
 fails or cannot classify a change, or a flake is being investigated.
+
+The checked-in CI configuration deliberately does not inherit per-job CI
+identifiers into every test action. Tests that need CI-shaped inputs must
+declare stable values or fixtures locally; otherwise each Buildkite job would
+invalidate the entire test cache.
 
 When comparison with Cargo is necessary to diagnose Bazel parity, use
 `scripts/cargo-diagnostic.sh <cargo arguments...>`. It bounds build jobs to one

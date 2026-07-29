@@ -44,6 +44,7 @@ SOURCE_BACKED_RECOVERY_FAULT_RUNFILES = [
 SOURCE_BACKED_RECOVERY_FAULT_TAGS = [
     "fault-injection",
     "linux-only",
+    "release-gate",
     "source-backed-recovery",
 ]
 
