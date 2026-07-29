@@ -7,7 +7,6 @@
 
 use std::{
     collections::BTreeSet,
-    fs::File,
     path::{Path, PathBuf},
 };
 
@@ -23,16 +22,18 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
+    common::io::ProviderSourceRoot,
     native_source::NativeSqliteValue,
     provider::{
         native_ingestion::{NATIVE_INGESTION_PAGE_MAX_BYTES, NATIVE_INGESTION_PAGE_MAX_UNITS},
         normalization::provider_required_timestamp_seconds,
-        sqlite::{sqlite_schema_fingerprint, ProviderSqliteSourceSnapshot},
+        sqlite::sqlite_schema_fingerprint,
     },
     provider_sources::{
-        discover_provider_sources_for_provider_with_context, open_ordinary_file_without_following,
-        open_sqlite_source_snapshot, DiscoveryContext, DiscoveryIssue, ProviderSource,
-        ProviderSourceStatus, SqliteSourceAccessError, SqliteSourceReadSnapshot,
+        discover_provider_sources_for_provider_with_context,
+        open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
+        DiscoveryContext, DiscoveryIssue, ProviderSource, ProviderSourceStatus,
+        SqliteSourceAccessError, SqliteSourceEvidence, SqliteSourceReadSnapshot,
     },
     CaptureError, HERMES_SQLITE_SOURCE_FORMAT, MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
@@ -53,6 +54,8 @@ const HERMES_LOGICAL_SESSION_KIND: &str = "hermes-session";
 const HERMES_LOGICAL_EVENT_KIND: &str = "hermes-message";
 const HERMES_SOURCE_SCHEMA_VARIANT: &str = "hermes-state-db-v1";
 const HERMES_SOURCE_REVISION_KIND: &str = "hermes-sqlite-snapshot-v1";
+const SQLITE_SOURCE_INVALID_REASON: &str =
+    "Hermes SQLite source must have an authorized parent and database leaf";
 const HERMES_SOURCE_PARSER_REVISION: &str = "hermes-source-backed-v1";
 const HERMES_SESSION_RELATION: &str = "sessions";
 const HERMES_MESSAGE_RELATION: &str = "messages";
@@ -275,15 +278,16 @@ pub(crate) fn scan_hermes_source_backed(
         .to_str()
         .ok_or_else(|| HermesSourceBackedError::InvalidProfilePath(candidate.path.clone()))?
         .to_owned();
-    let snapshot = hermes_snapshot(&candidate.path)?;
-    let (root_bound_database, sqlite_snapshot) = open_root_authorized_snapshot(&candidate.path)?;
+    let (source_root, sqlite_snapshot) = open_root_authorized_snapshot(&candidate.path)?;
+    let opening_evidence = sqlite_snapshot.evidence().clone();
     let conn = sqlite_snapshot.connection()?;
     let sqlite_user_version = conn
         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
         .map_err(CaptureError::from)?;
     let schema_fingerprint = sqlite_schema_fingerprint(&conn)?;
     let schema = HermesSchema::detect(&conn)?;
-    let revision = hermes_source_revision(&snapshot, sqlite_user_version, &schema_fingerprint);
+    let revision =
+        hermes_source_revision(&opening_evidence, sqlite_user_version, &schema_fingerprint);
     let revision_digest: [u8; 32] = Sha256::digest(&revision).into();
     let opening = SourceObservation::new(
         candidate.source.clone(),
@@ -379,12 +383,12 @@ pub(crate) fn scan_hermes_source_backed(
     drop(reader);
 
     let finish = sqlite_snapshot.finish();
-    let stable = snapshot.revalidate(&candidate.path);
     let (counts, content_digest) = operation?;
-    finish?;
-    if !stable? {
+    let closing_evidence = finish?;
+    if closing_evidence != opening_evidence {
         return Err(HermesSourceBackedError::SourceChanged);
     }
+    source_root.revalidate()?;
     let closing = opening.clone();
     let certificate = CertifiedSource::certify(
         opening,
@@ -393,7 +397,6 @@ pub(crate) fn scan_hermes_source_backed(
         content_digest,
         counts,
     )?;
-    drop(root_bound_database);
     for page in pending_pages {
         emit(page)?;
     }
@@ -405,27 +408,37 @@ fn checked_add(left: u64, right: u64) -> HermesSourceBackedResult<u64> {
         .ok_or(HermesSourceBackedError::CountOverflow)
 }
 
-fn hermes_snapshot(path: &Path) -> Result<ProviderSqliteSourceSnapshot, CaptureError> {
-    ProviderSqliteSourceSnapshot::read(
-        path,
-        "Hermes source-backed SQLite source must be a regular non-symlink file",
-        "Hermes source-backed SQLite sidecar must be a regular non-symlink file",
-    )
-}
-
 fn open_root_authorized_snapshot(
     path: &Path,
-) -> HermesSourceBackedResult<(File, SqliteSourceReadSnapshot)> {
+) -> HermesSourceBackedResult<(ProviderSourceRoot, SqliteSourceReadSnapshot)> {
     open_root_authorized_snapshot_with_hook(path, || {})
 }
 
 fn open_root_authorized_snapshot_with_hook(
     path: &Path,
     after_authorize: impl FnOnce(),
-) -> HermesSourceBackedResult<(File, SqliteSourceReadSnapshot)> {
-    let root_bound_database = open_ordinary_file_without_following(path)?;
+) -> HermesSourceBackedResult<(ProviderSourceRoot, SqliteSourceReadSnapshot)> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let database_leaf =
+        path.file_name()
+            .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
+                path: path.to_path_buf(),
+                reason: SQLITE_SOURCE_INVALID_REASON,
+            })?;
+    let source_root = ProviderSourceRoot::open(parent)?;
+    let source_directory = source_root.directory()?;
+    let parent_handle = source_directory
+        .try_clone_authority_handle()
+        .map_err(CaptureError::from)?;
+    let sqlite_authority = retain_sqlite_source_directory_authority(&parent_handle)?;
+    let sqlite_snapshot =
+        open_root_handle_sqlite_source_snapshot(&sqlite_authority, database_leaf)?;
     after_authorize();
-    let sqlite_snapshot = open_sqlite_source_snapshot(path, &root_bound_database)?;
+    source_directory.revalidate()?;
+    source_root.revalidate()?;
     let connection = sqlite_snapshot.connection()?;
     let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
         .map_err(|_| HermesSourceBackedError::CountOverflow)?;
@@ -433,21 +446,32 @@ fn open_root_authorized_snapshot_with_hook(
     connection
         .busy_timeout(std::time::Duration::from_secs(5))
         .map_err(CaptureError::from)?;
-    Ok((root_bound_database, sqlite_snapshot))
+    Ok((source_root, sqlite_snapshot))
 }
 
 fn hermes_source_revision(
-    snapshot: &ProviderSqliteSourceSnapshot,
+    evidence: &SqliteSourceEvidence,
     sqlite_user_version: i64,
     schema_fingerprint: &str,
 ) -> Vec<u8> {
     format!(
         "hermes-source-backed-snapshot-v1:capture={HERMES_CAPTURE_REVISION};\
          policy={HERMES_POLICY_REVISION};user_version={sqlite_user_version};\
-         schema={schema_fingerprint};{}",
-        snapshot.revision_component(),
+         schema={schema_fingerprint};identity={};length={};revision={}",
+        hex_digest(evidence.identity()),
+        evidence.length(),
+        hex_digest(evidence.revision()),
     )
     .into_bytes()
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    let mut value = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(value, "{byte:02x}");
+    }
+    value
 }
 
 #[derive(Debug, Clone)]
@@ -1003,8 +1027,8 @@ pub(crate) fn hydrate_hermes_source_backed_message(
         return Err(HermesSourceBackedError::InvalidLocator);
     }
     let (provider_session_id, message_id, rowid) = decode_message_coordinate(locator)?;
-    let snapshot = hermes_snapshot(path)?;
-    let (root_bound_database, sqlite_snapshot) = open_root_authorized_snapshot(path)?;
+    let (source_root, sqlite_snapshot) = open_root_authorized_snapshot(path)?;
+    let opening_evidence = sqlite_snapshot.evidence().clone();
     let conn = sqlite_snapshot.connection()?;
     let operation = (|| {
         let sqlite_user_version = conn
@@ -1012,7 +1036,8 @@ pub(crate) fn hydrate_hermes_source_backed_message(
             .map_err(CaptureError::from)?;
         let schema_fingerprint = sqlite_schema_fingerprint(&conn)?;
         HermesSchema::detect(&conn)?;
-        let revision = hermes_source_revision(&snapshot, sqlite_user_version, &schema_fingerprint);
+        let revision =
+            hermes_source_revision(&opening_evidence, sqlite_user_version, &schema_fingerprint);
         let revision_digest: [u8; 32] = Sha256::digest(&revision).into();
         if locator.certified_source_revision_digest() != Some(&revision_digest) {
             return Err(HermesSourceBackedError::StaleSourceEvidence);
@@ -1044,13 +1069,12 @@ pub(crate) fn hydrate_hermes_source_backed_message(
         })
     })();
     let finish = sqlite_snapshot.finish();
-    let stable = snapshot.revalidate(path);
     let hydrated = operation?;
-    finish?;
-    if !stable? {
+    let closing_evidence = finish?;
+    if closing_evidence != opening_evidence {
         return Err(HermesSourceBackedError::StaleSourceEvidence);
     }
-    drop(root_bound_database);
+    source_root.revalidate()?;
     Ok(hydrated)
 }
 

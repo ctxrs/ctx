@@ -35,24 +35,79 @@ fn create_database(path: &Path) -> Connection {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn source_backed_open_rejects_leaf_swap_after_authorization() {
+fn source_backed_open_does_not_follow_leaf_swap_after_authorization() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let path = temp.path().join("sessions.db");
     let attacker = temp.path().join("attacker.db");
     let original = temp.path().join("original.db");
-    drop(create_database(&path));
-    drop(create_database(&attacker));
+    let expected = create_database(&path);
+    expected.pragma_update(None, "user_version", 41).unwrap();
+    drop(expected);
+    let attacker_database = create_database(&attacker);
+    attacker_database
+        .pragma_update(None, "user_version", 99)
+        .unwrap();
+    drop(attacker_database);
 
     let result = open_root_authorized_snapshot_with_hook(&path, || {
         fs::rename(&path, &original).unwrap();
         fs::rename(&attacker, &path).unwrap();
     });
-    assert!(matches!(
-        result,
-        Err(DeepAgentsSourceBackedErrorV0::SqliteSource(
-            SqliteSourceAccessError::ConnectionIdentityMismatch
+    match result {
+        Ok((source_root, sqlite_snapshot)) => {
+            let user_version: i64 = sqlite_snapshot
+                .connection()
+                .unwrap()
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap();
+            assert_eq!(user_version, 41);
+            match sqlite_snapshot.finish() {
+                Ok(_) => source_root.revalidate().unwrap(),
+                Err(SqliteSourceAccessError::RootHandleVfs(_)) => {}
+                Err(error) => panic!("unexpected finish result after source swap: {error:?}"),
+            }
+        }
+        Err(DeepAgentsSourceBackedErrorV0::Capture(
+            CaptureError::InvalidProviderTranscriptPath { .. },
         ))
-    ));
+        | Err(DeepAgentsSourceBackedErrorV0::SqliteSource(
+            SqliteSourceAccessError::RootHandleVfs(_),
+        )) => {}
+        Err(error) => panic!("unexpected source-swap result: {error:?}"),
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn active_wal_scan_reads_latest_rows_without_writing_source_files() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let path = temp.path().join("sessions.db");
+    let writer = create_database(&path);
+    writer.pragma_update(None, "journal_mode", "wal").unwrap();
+    writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+    writer
+        .execute_batch("pragma wal_checkpoint(truncate)")
+        .unwrap();
+    insert_checkpoint(&writer, b"opaque checkpoint state");
+    insert_write(
+        &writer,
+        "task-a",
+        0,
+        "messages",
+        Some("msgpack"),
+        &message_blob(vec![message(
+            "human",
+            "DeepAgents active WAL sentinel",
+            "message-wal",
+        )]),
+    );
+    let before = sqlite_family_bytes(&path);
+    let (documents, _, _) = scan(DeepAgentsDatabaseSelectionV0::explicit(&path));
+    assert!(documents
+        .iter()
+        .any(|document| document.body.contains("DeepAgents active WAL sentinel")));
+    assert_eq!(sqlite_family_bytes(&path), before);
+    drop(writer);
 }
 
 fn insert_checkpoint(conn: &Connection, checkpoint_state: &[u8]) {
@@ -120,6 +175,18 @@ fn replace_messages(conn: &Connection, messages: Vec<MsgpackValue>) {
         [message_blob(messages)],
     )
     .unwrap();
+}
+
+#[cfg(target_os = "linux")]
+fn sqlite_family_bytes(path: &Path) -> Vec<Vec<u8>> {
+    ["", "-wal", "-shm"]
+        .into_iter()
+        .map(|suffix| {
+            let mut component = path.as_os_str().to_os_string();
+            component.push(suffix);
+            fs::read(PathBuf::from(component)).unwrap()
+        })
+        .collect()
 }
 
 fn scan(
