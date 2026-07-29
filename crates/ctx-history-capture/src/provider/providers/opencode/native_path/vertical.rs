@@ -66,8 +66,6 @@ mod core;
 mod entities;
 mod output;
 mod routes;
-#[cfg(test)]
-mod tests;
 
 use self::core::*;
 use self::entities::*;

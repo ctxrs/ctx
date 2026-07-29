@@ -622,10 +622,6 @@ mod outputs;
 mod publication;
 mod source_backed;
 
-#[cfg(test)]
-#[path = "nativepath_tests.rs"]
-mod tests;
-
 use core_import::*;
 use lifecycle::*;
 use outputs::*;

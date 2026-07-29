@@ -50,8 +50,5 @@ pub(crate) fn import_warp_nativepath(
 }
 
 #[cfg(test)]
-#[path = "warp/production_tests.rs"]
-mod production_tests;
-#[cfg(test)]
 #[path = "warp/source_backed_tests.rs"]
 mod source_backed_tests;

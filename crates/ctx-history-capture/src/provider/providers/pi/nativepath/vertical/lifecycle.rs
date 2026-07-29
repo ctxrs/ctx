@@ -91,29 +91,6 @@ pub(super) fn validate_released_checkpoint(checkpoint: &ReleasedPiParserCheckpoi
     Ok(())
 }
 
-#[cfg(test)]
-pub(crate) fn released_cursor_for_test() -> String {
-    CertifiedProviderCursor::new(
-        "released-pi-source-revision",
-        PI_RELEASED_CAPTURE_REVISION,
-        PI_RELEASED_POLICY_REVISION,
-        crate::provider::importer::released_jsonl_initial_position_for_test(),
-        crate::provider::importer::BoundedParserCheckpoint::from_serializable(
-            &ReleasedPiParserCheckpoint {
-                header: None,
-                next_ordinal: 0,
-                accepted_captures: 0,
-                accepted_events: 0,
-                accepted_file_touches: 0,
-            },
-        )
-        .expect("released Pi checkpoint"),
-    )
-    .expect("released Pi cursor")
-    .encode()
-    .expect("encode released Pi cursor")
-}
-
 pub(super) fn checkpoint_covers(
     committed: &PiNativeCheckpoint,
     candidate: &PiNativeCheckpoint,

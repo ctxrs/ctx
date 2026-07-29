@@ -27,9 +27,6 @@ use crate::{
     ProviderImportSummary, ProviderImportWorkResult, Result, ANTIGRAVITY_CLI_SOURCE_FORMAT,
 };
 
-#[cfg(test)]
-use crate::ProOutputSinkError;
-
 use super::{
     committed_direct_jsonl_replay_authority, decode_direct_jsonl_native_cursor,
     direct_jsonl_checkpoint_is_covered_by, encode_direct_jsonl_cursor,

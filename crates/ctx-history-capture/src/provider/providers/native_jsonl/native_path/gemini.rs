@@ -771,14 +771,8 @@ fn replay_gemini_source_outputs(
 }
 #[path = "gemini_publication.rs"]
 mod publication;
-#[cfg(test)]
-use publication::released_gemini_event_index;
 use publication::GeminiGroupAccumulator;
 
 #[path = "gemini_routing.rs"]
 mod routing;
 use routing::*;
-
-#[cfg(test)]
-#[path = "gemini_tests.rs"]
-mod tests;

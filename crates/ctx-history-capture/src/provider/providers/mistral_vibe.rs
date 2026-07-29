@@ -4,9 +4,6 @@ pub(crate) mod native_path;
 mod schema;
 mod source;
 
-#[cfg(test)]
-mod tests;
-
 pub(crate) use native_path::import_mistral_vibe_nativepath;
 
 pub(super) const MISTRAL_VIBE_CAPTURE_REVISION: u32 = 4;

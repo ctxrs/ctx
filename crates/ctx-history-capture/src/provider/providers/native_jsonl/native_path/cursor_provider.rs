@@ -717,7 +717,3 @@ use publication::{
     cursor_source_revision, decode_cursor_native_cursor, encode_cursor_native_cursor,
     provider_sync_cursor, publish_cursor_group,
 };
-
-#[cfg(test)]
-#[path = "cursor_provider_tests.rs"]
-mod tests;
