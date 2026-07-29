@@ -15,7 +15,7 @@ use super::super::{
 };
 
 pub(super) fn render_status(data_root: &Path, config: &AppConfig, json_output: bool) -> Result<()> {
-    let state = read_state_json(data_root).unwrap_or_else(|| {
+    let state = read_state_json().unwrap_or_else(|| {
         json!({
             "schema_version": STATE_SCHEMA_VERSION,
             "status": "never_checked"
