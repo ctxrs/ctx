@@ -24,13 +24,17 @@ use crate::{
         ContentPolicy, CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
     },
     output::{compact_json, print_json, JsonOutputFormat, OutputFormat},
+    provider_args::ProviderArg,
     search_filters::parse_since_filter,
     semantic::{
         coordinate_source_backed_refresh, PinnedSourceBackedGeneration, SourceBackedRefreshMode,
         SourceBackedRefreshObservation,
     },
-    transcript::{normalize_uuid_prefix, shell_quote_arg, write_output, TranscriptMode},
-    RefreshArg, SearchArgs, SearchBackendArg, ShowArgs, ShowTarget,
+    transcript::{
+        normalize_uuid_prefix, print_locate_event_text, print_locate_session_text,
+        provider_resume_json, shell_quote_arg, write_output, TranscriptMode,
+    },
+    LocateArgs, LocateTarget, RefreshArg, SearchArgs, SearchBackendArg, ShowArgs, ShowTarget,
 };
 
 const INDEX_DIRECTORY: &str = "source-backed-lexical-v0";
@@ -309,6 +313,139 @@ pub(crate) fn mcp_show_event(
         selected.event_id.as_uuid(),
     )?;
     Ok(value)
+}
+
+pub(crate) fn run_locate(args: LocateArgs, data_root: PathBuf) -> Result<()> {
+    let index = open_index(&data_root)?;
+    let (value, json_output) = match args.target {
+        LocateTarget::Session(args) => {
+            let provider = args.provider.map(ProviderArg::capture_provider);
+            let session = match (args.id.as_deref(), args.provider_session.as_deref()) {
+                (Some(id), None) => resolve_session(&index, id)?,
+                (None, Some(provider_session_id)) => {
+                    let matches = index.sessions_by_provider_session_id(
+                        provider_session_id,
+                        provider.map(CaptureProvider::as_str),
+                    )?;
+                    match matches.as_slice() {
+                        [] => {
+                            return Err(anyhow!(
+                                "provider session {provider_session_id:?} was not found in the source-backed Core generation"
+                            ));
+                        }
+                        [session] => session.clone(),
+                        matches => {
+                            return Err(anyhow!(
+                                "provider session {provider_session_id:?} is ambiguous; first matches are {} and {}; pass --provider or a ctx session ID",
+                                matches[0].session_id,
+                                matches[1].session_id
+                            ));
+                        }
+                    }
+                }
+                (Some(_), Some(_)) => {
+                    return Err(anyhow!(
+                        "pass either a ctx session ID or --provider-session, not both"
+                    ));
+                }
+                (None, None) => {
+                    return Err(anyhow!(
+                        "source-backed session lookup requires a ctx session ID or --provider-session"
+                    ));
+                }
+            };
+            if let Some(provider) = provider {
+                if session.provider != provider.as_str() {
+                    return Err(anyhow!(
+                        "source-backed session {} belongs to provider {}, not {}",
+                        session.session_id,
+                        session.provider,
+                        provider
+                    ));
+                }
+            }
+            let value = locate_session_value(&session);
+            (value, args.format.is_json())
+        }
+        LocateTarget::Event(args) => {
+            let event = resolve_event(&index, &args.id)?;
+            let value = locate_event_value(&event);
+            (value, args.format.is_json())
+        }
+    };
+    if json_output {
+        print_json(value)
+    } else if value["target"] == "session" {
+        print_locate_session_text(&value)
+    } else {
+        print_locate_event_text(&value)
+    }
+}
+
+fn locate_session_value(session: &SessionRecord) -> Value {
+    let provider = session
+        .provider
+        .parse::<CaptureProvider>()
+        .unwrap_or(CaptureProvider::Unknown);
+    compact_json(json!({
+        "schema_version": 1,
+        "target": "session",
+        "payload_type": "session_location",
+        "ctx_session_id": session.session_id.as_uuid(),
+        "provider": session.provider,
+        "provider_session_id": session.provider_session_id,
+        "parent_ctx_session_id": session.parent_session_id.map(|id| id.as_uuid()),
+        "root_ctx_session_id": session.root_session_id.as_uuid(),
+        "agent_type": session.agent_type,
+        "started_at": timestamp_json(session.first_occurred_at_unix_ms),
+        "source": {
+            "path": session.source_path,
+            "exists": session.source_path.as_deref().map(|path| Path::new(path).exists()),
+            "source_format": session.source_format,
+            "workspace": session.workspace,
+            "cwd": session.cwd,
+        },
+        "resume": provider_resume_json(provider, session.provider_session_id.as_deref()),
+    }))
+}
+
+fn locate_event_value(event: &EventRecord) -> Value {
+    let provider = event
+        .provider
+        .parse::<CaptureProvider>()
+        .unwrap_or(CaptureProvider::Unknown);
+    compact_json(json!({
+        "schema_version": 1,
+        "target": "event",
+        "payload_type": "event_location",
+        "ctx_event_id": event.event_id.as_uuid(),
+        "ctx_session_id": event.session_id.as_uuid(),
+        "provider": event.provider,
+        "provider_session_id": event.provider_session_id,
+        "sequence": event.event_sequence,
+        "event_type": event.event_type,
+        "role": event.role,
+        "occurred_at": timestamp_json(event.occurred_at_unix_ms),
+        "source": {
+            "source_key": event.locator.source(),
+            "path": event.source_path,
+            "exists": event.source_path.as_deref().map(|path| Path::new(path).exists()),
+            "source_format": event.source_format,
+            "workspace": event.workspace,
+            "cwd": event.cwd,
+        },
+        "source_record": {
+            "locator": event.locator,
+            "locator_version": event.locator.locator_version(),
+            "record_digest": encode_hex(event.locator.record_digest()),
+        },
+        "complete_content": {
+            "available": true,
+            "source_authority": "provider",
+            "locator_kind": format!("{:?}", event.locator.coordinate()),
+        },
+        "resume": provider_resume_json(provider, event.provider_session_id.as_deref()),
+    }))
 }
 
 fn refresh_for_search(request: &SourceSearchRequest, data_root: &Path) -> Result<RefreshOutcome> {
@@ -1553,6 +1690,16 @@ fn timestamp_json(timestamp: Option<i64>) -> Option<String> {
     timestamp
         .and_then(DateTime::<Utc>::from_timestamp_millis)
         .map(|time| time.to_rfc3339_opts(SecondsFormat::Millis, true))
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
 }
 
 fn phase_attribution(query: Duration) -> Value {

@@ -463,6 +463,47 @@ impl VerifiedIndex {
         Ok(sessions.into_values().take(ID_PREFIX_MATCH_LIMIT).collect())
     }
 
+    /// Returns at most two sessions for an exact provider-native session key.
+    ///
+    /// Two are sufficient for callers to distinguish a unique lookup from an
+    /// ambiguous provider key without materializing the full provider history.
+    pub fn sessions_by_provider_session_id(
+        &self,
+        provider_session_id: &str,
+        provider: Option<&str>,
+    ) -> Result<Vec<SessionRecord>> {
+        let fields = fields_from_schema(self.searcher.schema())?;
+        let provider_session_id =
+            validated_filter_text("provider_session_id", provider_session_id)?;
+        let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![(
+            Occur::Must,
+            Box::new(TermQuery::new(
+                Term::from_field_text(fields.provider_session_id, provider_session_id),
+                IndexRecordOption::Basic,
+            )),
+        )];
+        if let Some(provider) = provider {
+            let provider = validated_filter_text("provider", provider)?;
+            clauses.push((
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(fields.provider, provider),
+                    IndexRecordOption::Basic,
+                )),
+            ));
+        }
+        let query = BooleanQuery::new(clauses);
+        let mut events = self.event_records_for_query(&query, fields)?;
+        sort_events_for_session(&mut events);
+        let mut sessions = BTreeMap::new();
+        for event in &events {
+            sessions
+                .entry(event.session_id.as_uuid())
+                .or_insert_with(|| SessionRecord::from(event));
+        }
+        Ok(sessions.into_values().take(ID_PREFIX_MATCH_LIMIT).collect())
+    }
+
     pub fn events_for_session(&self, session_id: Uuid) -> Result<Vec<EventRecord>> {
         let fields = fields_from_schema(self.searcher.schema())?;
         let query = TermQuery::new(
