@@ -7,7 +7,7 @@
 
 use std::{
     collections::HashSet,
-    fs::File,
+    ffi::OsString,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -33,13 +33,15 @@ use super::{
     CRUSH_NATIVE_MAX_EVENT_TOUCHES, CRUSH_NATIVE_MAX_ROW_BYTES,
 };
 use crate::{
+    common::io::ProviderSourceRoot,
     native_source::NativeSqliteValue,
     provider::file_touches::{
         event_type_supports_structured_file_touches, visit_provider_file_touch_drafts_with_limit,
     },
     provider_sources::{
-        open_ordinary_file_without_following, open_sqlite_source_snapshot, SqliteSourceAccessError,
-        SqliteSourceEvidence, SqliteSourceReadSnapshot,
+        open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
+        SqliteSourceAccessError, SqliteSourceDirectoryAuthority, SqliteSourceEvidence,
+        SqliteSourceReadSnapshot,
     },
     CaptureError, OutputOutcome, ProviderAdapterContext, CRUSH_SQLITE_SOURCE_FORMAT,
     MAX_PROVIDER_SQLITE_VALUE_BYTES,
@@ -51,7 +53,7 @@ use super::super::{
         crush_complete_message, project_message, CrushMessageProjection, CrushRecordProjection,
         CrushSessionRow,
     },
-    source::{source_revision, source_snapshot},
+    CRUSH_CAPTURE_REVISION, CRUSH_POLICY_REVISION,
 };
 
 const CRUSH_SOURCE_ANCHOR_NAMESPACE: &str = "crush.project-database";
@@ -228,7 +230,9 @@ pub struct CrushHydratedRecordV0 {
 pub(crate) struct BoundDatabase {
     pub(crate) source_key: SourceKey,
     pub(crate) canonical_path: PathBuf,
-    root_bound_database: Arc<File>,
+    source_root: ProviderSourceRoot,
+    sqlite_authority: Arc<SqliteSourceDirectoryAuthority>,
+    database_name: OsString,
 }
 
 #[derive(Debug)]
@@ -270,15 +274,16 @@ impl FrozenInventory {
 }
 
 struct SourceRevalidation {
-    canonical_path: PathBuf,
-    family_snapshot: crate::provider::sqlite::ProviderSqliteSourceSnapshot,
-    _root_bound_database: Arc<File>,
+    source_root: ProviderSourceRoot,
+    sqlite_authority: Arc<SqliteSourceDirectoryAuthority>,
+    database_name: OsString,
+    family_snapshot: SqliteSourceEvidence,
     _root_evidence: SqliteSourceEvidence,
 }
 
 pub(crate) struct OpenedSource {
     pub(crate) database: BoundDatabase,
-    family_snapshot: crate::provider::sqlite::ProviderSqliteSourceSnapshot,
+    family_snapshot: SqliteSourceEvidence,
     read_snapshot: SqliteSourceReadSnapshot,
     schema: CrushNativeSchema,
     pub(crate) observation: SourceObservation,
@@ -304,6 +309,32 @@ struct MessageAddress {
     parent_rowid: i64,
     provider_session_id: String,
 }
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_SOURCE_PUBLICATION_REVALIDATION:
+        std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_before_source_publication_revalidation(hook: Option<Box<dyn FnOnce()>>) {
+    BEFORE_SOURCE_PUBLICATION_REVALIDATION.with(|slot| {
+        *slot.borrow_mut() = hook;
+    });
+}
+
+#[cfg(test)]
+fn before_source_publication_revalidation() {
+    BEFORE_SOURCE_PUBLICATION_REVALIDATION.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn before_source_publication_revalidation() {}
 
 /// One-invocation exact resolver for source-backed Crush locators.
 pub struct CrushLocatorResolverV0 {
@@ -430,7 +461,8 @@ pub(crate) fn bind_inventory(
             ));
         }
         let canonical_path = std::fs::canonicalize(&database.path)?;
-        let root_bound_database = Arc::new(open_ordinary_file_without_following(&canonical_path)?);
+        let (source_root, sqlite_authority, database_name) =
+            retain_crush_sqlite_authority(&canonical_path)?;
         let source_key = crush_source_key(database.project_key)?;
         if !source_ids.insert(source_key.identity().digest()) {
             return Err(CrushSourceBackedErrorV0::DuplicateProjectKey);
@@ -441,7 +473,9 @@ pub(crate) fn bind_inventory(
         databases.push(BoundDatabase {
             source_key,
             canonical_path,
-            root_bound_database,
+            source_root,
+            sqlite_authority: Arc::new(sqlite_authority),
+            database_name,
         });
     }
     databases.sort_by_key(|database| database.source_key.identity().digest());
@@ -463,9 +497,11 @@ fn crush_source_key(project_key: TypedKey) -> CrushSourceBackedResultV0<SourceKe
 }
 
 pub(crate) fn open_source(database: BoundDatabase) -> CrushSourceBackedResultV0<OpenedSource> {
-    let family_snapshot = source_snapshot(&database.canonical_path)?;
-    let read_snapshot =
-        open_sqlite_source_snapshot(&database.canonical_path, &database.root_bound_database)?;
+    let read_snapshot = open_root_handle_sqlite_source_snapshot(
+        &database.sqlite_authority,
+        &database.database_name,
+    )?;
+    let family_snapshot = read_snapshot.evidence().clone();
     let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
         .map_err(|_| CrushSourceBackedErrorV0::CountOverflow)?;
     read_snapshot
@@ -475,10 +511,8 @@ pub(crate) fn open_source(database: BoundDatabase) -> CrushSourceBackedResultV0<
         .connection()?
         .busy_timeout(std::time::Duration::from_secs(5))?;
     let schema = read_native_schema(read_snapshot.connection()?)?;
-    if source_snapshot(&database.canonical_path)? != family_snapshot {
-        return Err(CaptureError::SourceChangedDuringCapture.into());
-    }
-    let revision = source_revision(&family_snapshot, &schema.schema_fingerprint).into_bytes();
+    database.source_root.revalidate()?;
+    let revision = crush_source_revision(&family_snapshot, &schema.schema_fingerprint).into_bytes();
     let observation = SourceObservation::new(
         database.source_key.clone(),
         CRUSH_SOURCE_REVISION_KIND,
@@ -503,10 +537,12 @@ fn finish_source(source: OpenedSource) -> CrushSourceBackedResultV0<SourceRevali
         ..
     } = source;
     let root_evidence = read_snapshot.finish()?;
+    before_source_publication_revalidation();
     Ok(SourceRevalidation {
-        canonical_path: database.canonical_path,
+        source_root: database.source_root,
+        sqlite_authority: database.sqlite_authority,
+        database_name: database.database_name,
         family_snapshot,
-        _root_bound_database: database.root_bound_database,
         _root_evidence: root_evidence,
     })
 }
@@ -523,10 +559,60 @@ pub(crate) fn finish_opened_source(source: OpenedSource) -> CrushSourceBackedRes
 }
 
 fn source_revalidation_is_current(evidence: &SourceRevalidation) -> bool {
-    evidence
-        .family_snapshot
-        .revalidate(&evidence.canonical_path)
-        .unwrap_or(false)
+    if evidence.source_root.revalidate().is_err() {
+        return false;
+    }
+    let Ok(current) = open_root_handle_sqlite_source_snapshot(
+        &evidence.sqlite_authority,
+        &evidence.database_name,
+    ) else {
+        return false;
+    };
+    let current_evidence = current.evidence().clone();
+    if current.finish().is_err() || evidence.source_root.revalidate().is_err() {
+        return false;
+    }
+    current_evidence == evidence.family_snapshot
+}
+
+fn retain_crush_sqlite_authority(
+    canonical_path: &Path,
+) -> CrushSourceBackedResultV0<(ProviderSourceRoot, SqliteSourceDirectoryAuthority, OsString)> {
+    let parent = canonical_path.parent().ok_or_else(|| {
+        CaptureError::InvalidPayload("Crush SQLite source has no parent directory".to_owned())
+    })?;
+    let database_name = canonical_path
+        .file_name()
+        .map(OsString::from)
+        .ok_or_else(|| {
+            CaptureError::InvalidPayload("Crush SQLite source has no leaf name".to_owned())
+        })?;
+    let source_root = ProviderSourceRoot::open(parent)?;
+    let directory = source_root.directory()?;
+    let authority_handle = directory.try_clone_authority_handle()?;
+    let sqlite_authority = retain_sqlite_source_directory_authority(&authority_handle)?;
+    source_root.revalidate()?;
+    Ok((source_root, sqlite_authority, database_name))
+}
+
+fn crush_source_revision(evidence: &SqliteSourceEvidence, schema_fingerprint: &str) -> String {
+    format!(
+        "crush-sqlite-snapshot-v1:capture={CRUSH_CAPTURE_REVISION};policy={CRUSH_POLICY_REVISION};schema={schema_fingerprint};{}",
+        sqlite_evidence_revision_component(evidence),
+    )
+}
+
+fn sqlite_evidence_revision_component(evidence: &SqliteSourceEvidence) -> String {
+    format!(
+        "identity={};length={};revision={}",
+        hex_bytes(evidence.identity()),
+        evidence.length(),
+        hex_bytes(evidence.revision()),
+    )
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 pub(crate) fn exact_replay_matches(base: &CertifiedSource, source: &OpenedSource) -> bool {
@@ -541,12 +627,7 @@ pub(crate) fn exact_replay_matches(base: &CertifiedSource, source: &OpenedSource
 pub(crate) fn closing_observation(
     source: &OpenedSource,
 ) -> CrushSourceBackedResultV0<SourceObservation> {
-    if !source
-        .family_snapshot
-        .revalidate(&source.database.canonical_path)?
-    {
-        return Err(CaptureError::SourceChangedDuringCapture.into());
-    }
+    source.database.source_root.revalidate()?;
     Ok(SourceObservation::new(
         source.database.source_key.clone(),
         CRUSH_SOURCE_REVISION_KIND,
@@ -934,7 +1015,7 @@ fn checked_add(left: u64, right: u64) -> CrushSourceBackedResultV0<u64> {
 
 #[cfg(test)]
 mod tests {
-    use rusqlite::Connection;
+    use rusqlite::{config::DbConfig, Connection};
     use serde_json::json;
 
     use super::*;
@@ -1115,6 +1196,70 @@ mod tests {
             &projection,
         )
         .unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn root_handle_vfs_scan_sees_committed_content_retained_in_active_wal() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let path = temp.path().join("wal-project.db");
+        write_database(&path, "wal-session", "wal-message", "main database body");
+        let writer = Connection::open(&path).unwrap();
+        let mode: String = writer
+            .query_row("pragma journal_mode = wal", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        writer
+            .execute_batch("pragma wal_autocheckpoint = 0")
+            .unwrap();
+        let parts =
+            json!([{"type": "text", "data": {"text": "committed Crush WAL body"}}]).to_string();
+        writer
+            .execute(
+                "update messages set parts = ?1 where id = 'wal-message'",
+                [parts],
+            )
+            .unwrap();
+        writer
+            .set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
+            .unwrap();
+        drop(writer);
+        assert!(path.with_file_name("wal-project.db-wal").exists());
+        assert!(path.with_file_name("wal-project.db-shm").exists());
+
+        let frozen = bind_inventory(inventory(
+            b"wal-inventory",
+            vec![database("wal-project", &path)],
+        ))
+        .unwrap();
+        let source = open_source(frozen.databases.into_iter().next().unwrap()).unwrap();
+        let document = document_for_only_message(&source);
+        assert_eq!(document.body, "committed Crush WAL body");
+        assert!(finish_opened_source(source).unwrap());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn root_handle_vfs_finish_precedes_publication_revalidation() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let path = temp.path().join("project.db");
+        let replacement = temp.path().join("replacement.db");
+        write_database(&path, "session", "message", "opening body");
+        write_database(
+            &replacement,
+            "session",
+            "message",
+            "replacement after finish",
+        );
+        let frozen =
+            bind_inventory(inventory(b"finish-order", vec![database("project", &path)])).unwrap();
+        let opened = open_source(frozen.databases[0].clone()).unwrap();
+        let replaced_path = path.clone();
+        set_before_source_publication_revalidation(Some(Box::new(move || {
+            std::fs::rename(&replacement, &replaced_path).unwrap();
+        })));
+
+        assert!(!finish_opened_source(opened).unwrap());
     }
 
     fn inventory(

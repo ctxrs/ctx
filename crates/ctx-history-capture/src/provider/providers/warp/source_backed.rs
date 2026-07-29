@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, File},
+    ffi::OsString,
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -26,12 +27,13 @@ use super::{
     warp_message_content_at,
 };
 use crate::{
+    common::io::ProviderSourceRoot,
     complete_content::sqlite::sqlite_logical_record_digest,
     native_source::NativeSqliteValue,
-    provider::sqlite::ProviderSqliteSourceSnapshot,
     provider_sources::{
-        open_ordinary_file_without_following, open_sqlite_source_snapshot, SqliteSourceAccessError,
-        SqliteSourceEvidence, SqliteSourceReadSnapshot,
+        open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
+        SqliteSourceAccessError, SqliteSourceDirectoryAuthority, SqliteSourceEvidence,
+        SqliteSourceReadSnapshot,
     },
     CaptureError, Result as CaptureResult, MAX_PROVIDER_SQLITE_VALUE_BYTES,
     WARP_SQLITE_SOURCE_FORMAT,
@@ -46,8 +48,6 @@ const WARP_SOURCE_SCHEMA_VARIANT: &str = "warp-agent-task-protobuf-v1";
 const WARP_SOURCE_REVISION_KIND: &str = "warp-sqlite-snapshot-observation-v0";
 const WARP_SOURCE_BACKED_PARSER_REVISION: &str = "warp-source-backed-v0";
 const WARP_TASK_MESSAGE_RELATION: &str = "agent_tasks.task-message.v1";
-const WARP_SOURCE_INVALID_REASON: &str = "Warp SQLite source must be a regular non-symlink file";
-const WARP_SIDECAR_INVALID_REASON: &str = "Warp SQLite sidecar must be a regular non-symlink file";
 const WARP_SOURCE_REVISION_DIGEST_DOMAIN: &[u8] = b"ctx.warp.source-backed.revision.v0\0";
 
 #[derive(Debug, Error)]
@@ -145,8 +145,10 @@ struct OpenedWarpSource {
     selection: WarpSourceSelectionV0,
     source: SourceKey,
     canonical_path: PathBuf,
-    family_snapshot: ProviderSqliteSourceSnapshot,
-    root_bound_database: File,
+    source_root: ProviderSourceRoot,
+    sqlite_authority: SqliteSourceDirectoryAuthority,
+    database_name: OsString,
+    family_snapshot: SqliteSourceEvidence,
     read_snapshot: SqliteSourceReadSnapshot,
 }
 
@@ -159,8 +161,10 @@ struct FinishedWarpSource {
     selection: WarpSourceSelectionV0,
     source: SourceKey,
     canonical_path: PathBuf,
-    family_snapshot: ProviderSqliteSourceSnapshot,
-    _root_bound_database: File,
+    source_root: ProviderSourceRoot,
+    sqlite_authority: SqliteSourceDirectoryAuthority,
+    database_name: OsString,
+    family_snapshot: SqliteSourceEvidence,
     _root_evidence: SqliteSourceEvidence,
 }
 
@@ -251,9 +255,10 @@ fn open_warp_source(
 ) -> WarpSourceBackedResultV0<OpenedWarpSource> {
     let source = warp_source_key(&selection)?;
     let canonical_path = fs::canonicalize(selection.path())?;
-    let root_bound_database = open_ordinary_file_without_following(&canonical_path)?;
-    let family_snapshot = read_source_snapshot(&canonical_path)?;
-    let read_snapshot = open_sqlite_source_snapshot(&canonical_path, &root_bound_database)?;
+    let (source_root, sqlite_authority, database_name) =
+        retain_warp_sqlite_authority(&canonical_path)?;
+    let read_snapshot = open_root_handle_sqlite_source_snapshot(&sqlite_authority, &database_name)?;
+    let family_snapshot = read_snapshot.evidence().clone();
     let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
         .map_err(|_| WarpSourceBackedErrorV0::CountOverflow)?;
     read_snapshot
@@ -262,15 +267,15 @@ fn open_warp_source(
     read_snapshot
         .connection()?
         .busy_timeout(std::time::Duration::from_secs(5))?;
-    if read_source_snapshot(&canonical_path)? != family_snapshot {
-        return Err(WarpSourceBackedErrorV0::SourceChanged);
-    }
+    source_root.revalidate()?;
     Ok(OpenedWarpSource {
         selection,
         source,
         canonical_path,
+        source_root,
+        sqlite_authority,
+        database_name,
         family_snapshot,
-        root_bound_database,
         read_snapshot,
     })
 }
@@ -278,7 +283,7 @@ fn open_warp_source(
 fn project_opened_warp_source(
     opened: &OpenedWarpSource,
 ) -> WarpSourceBackedResultV0<ProjectedWarpSource> {
-    let opening_revision = opened.family_snapshot.revision_component();
+    let opening_revision = sqlite_evidence_revision_component(&opened.family_snapshot);
     let revision_digest = source_revision_digest(&opened.source, &opening_revision);
     let mut sink = WarpProjectionSink::new(
         opened.source.clone(),
@@ -315,8 +320,10 @@ fn finish_warp_source(opened: OpenedWarpSource) -> WarpSourceBackedResultV0<Fini
         selection,
         source,
         canonical_path,
+        source_root,
+        sqlite_authority,
+        database_name,
         family_snapshot,
-        root_bound_database,
         read_snapshot,
     } = opened;
     let root_evidence = read_snapshot.finish()?;
@@ -324,15 +331,25 @@ fn finish_warp_source(opened: OpenedWarpSource) -> WarpSourceBackedResultV0<Fini
         selection,
         source,
         canonical_path,
+        source_root,
+        sqlite_authority,
+        database_name,
         family_snapshot,
-        _root_bound_database: root_bound_database,
         _root_evidence: root_evidence,
     })
 }
 
 fn revalidate_finished_warp_source(source: &FinishedWarpSource) -> WarpSourceBackedResultV0<bool> {
-    Ok(source.family_snapshot.revalidate(&source.canonical_path)?
-        && fs::canonicalize(source.selection.path())? == source.canonical_path)
+    source.source_root.revalidate()?;
+    if fs::canonicalize(source.selection.path())? != source.canonical_path {
+        return Ok(false);
+    }
+    let current =
+        open_root_handle_sqlite_source_snapshot(&source.sqlite_authority, &source.database_name)?;
+    let current_evidence = current.evidence().clone();
+    current.finish()?;
+    source.source_root.revalidate()?;
+    Ok(current_evidence == source.family_snapshot)
 }
 
 pub(crate) fn resolve_warp_locator_v0(
@@ -351,8 +368,10 @@ pub(crate) fn resolve_warp_locator_v0(
         .certified_source_revision_digest()
         .ok_or(WarpSourceBackedErrorV0::InvalidLocator)?;
     let opened = open_warp_source(selection.clone())?;
-    if &source_revision_digest(&source, &opened.family_snapshot.revision_component())
-        != expected_revision
+    if &source_revision_digest(
+        &source,
+        &sqlite_evidence_revision_component(&opened.family_snapshot),
+    ) != expected_revision
     {
         return Err(WarpSourceBackedErrorV0::StaleSourceRevision);
     }
@@ -708,12 +727,37 @@ fn load_task_values(
         .map_err(WarpSourceBackedErrorV0::from)
 }
 
-fn read_source_snapshot(path: &Path) -> WarpSourceBackedResultV0<ProviderSqliteSourceSnapshot> {
-    Ok(ProviderSqliteSourceSnapshot::read(
-        path,
-        WARP_SOURCE_INVALID_REASON,
-        WARP_SIDECAR_INVALID_REASON,
-    )?)
+fn retain_warp_sqlite_authority(
+    canonical_path: &Path,
+) -> WarpSourceBackedResultV0<(ProviderSourceRoot, SqliteSourceDirectoryAuthority, OsString)> {
+    let parent = canonical_path.parent().ok_or_else(|| {
+        CaptureError::InvalidPayload("Warp SQLite source has no parent directory".to_owned())
+    })?;
+    let database_name = canonical_path
+        .file_name()
+        .map(OsString::from)
+        .ok_or_else(|| {
+            CaptureError::InvalidPayload("Warp SQLite source has no leaf name".to_owned())
+        })?;
+    let source_root = ProviderSourceRoot::open(parent)?;
+    let directory = source_root.directory()?;
+    let authority_handle = directory.try_clone_authority_handle()?;
+    let sqlite_authority = retain_sqlite_source_directory_authority(&authority_handle)?;
+    source_root.revalidate()?;
+    Ok((source_root, sqlite_authority, database_name))
+}
+
+fn sqlite_evidence_revision_component(evidence: &SqliteSourceEvidence) -> String {
+    format!(
+        "identity={};length={};revision={}",
+        hex_bytes(evidence.identity()),
+        evidence.length(),
+        hex_bytes(evidence.revision()),
+    )
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn source_revision_digest(source: &SourceKey, revision: &str) -> [u8; 32] {

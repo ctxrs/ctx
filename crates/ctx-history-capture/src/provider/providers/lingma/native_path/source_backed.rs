@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    fs::File,
+    ffi::OsString,
     path::{Path, PathBuf},
 };
 
@@ -17,8 +17,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::{
-    detect_schema, hash_candidate, initial_prefix_hasher, lingma_source_snapshot, load_candidates,
-    load_raw_row,
+    detect_schema, hash_candidate, initial_prefix_hasher, load_candidates, load_raw_row,
     publication::{provider_event, EventDraft},
     records::{
         assistant_text, event_base_index, lingma_logical_record_sha256, lingma_timestamp,
@@ -27,9 +26,11 @@ use super::{
     LingmaRow, SqliteEncoding,
 };
 use crate::{
-    provider::sqlite::{sqlite_schema_fingerprint, ProviderSqliteSourceSnapshot},
+    common::io::ProviderSourceRoot,
+    provider::sqlite::sqlite_schema_fingerprint,
     provider_sources::{
-        open_ordinary_file_without_following, open_sqlite_source_snapshot, SqliteSourceAccessError,
+        open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
+        SqliteSourceAccessError, SqliteSourceDirectoryAuthority, SqliteSourceEvidence,
         SqliteSourceReadSnapshot,
     },
     CaptureError, LINGMA_SQLITE_SOURCE_FORMAT, MAX_PROVIDER_SQLITE_VALUE_BYTES,
@@ -83,6 +84,61 @@ pub(crate) enum LingmaSourceBackedErrorV0 {
 }
 
 pub(crate) type LingmaSourceBackedResultV0<T> = Result<T, LingmaSourceBackedErrorV0>;
+
+struct LingmaRootAuthorizedSource {
+    source_root: ProviderSourceRoot,
+    sqlite_authority: SqliteSourceDirectoryAuthority,
+    database_name: OsString,
+}
+
+impl LingmaRootAuthorizedSource {
+    fn retain(path: &Path) -> LingmaSourceBackedResultV0<Self> {
+        let parent = path.parent().ok_or_else(|| {
+            CaptureError::InvalidPayload("Lingma SQLite source has no parent directory".to_owned())
+        })?;
+        let database_name = path.file_name().map(OsString::from).ok_or_else(|| {
+            CaptureError::InvalidPayload("Lingma SQLite source has no leaf name".to_owned())
+        })?;
+        let source_root = ProviderSourceRoot::open(parent)?;
+        let directory = source_root.directory()?;
+        let authority_handle = directory
+            .try_clone_authority_handle()
+            .map_err(CaptureError::from)?;
+        let sqlite_authority = retain_sqlite_source_directory_authority(&authority_handle)?;
+        source_root.revalidate()?;
+        Ok(Self {
+            source_root,
+            sqlite_authority,
+            database_name,
+        })
+    }
+
+    fn open_snapshot(&self) -> LingmaSourceBackedResultV0<SqliteSourceReadSnapshot> {
+        let snapshot =
+            open_root_handle_sqlite_source_snapshot(&self.sqlite_authority, &self.database_name)?;
+        let connection = snapshot.connection()?;
+        let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
+            .map_err(|_| LingmaSourceBackedErrorV0::CountOverflow)?;
+        connection.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, value_limit);
+        connection
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(CaptureError::from)?;
+        self.source_root.revalidate()?;
+        Ok(snapshot)
+    }
+
+    fn evidence_is_current(
+        &self,
+        expected: &SqliteSourceEvidence,
+    ) -> LingmaSourceBackedResultV0<bool> {
+        self.source_root.revalidate()?;
+        let snapshot = self.open_snapshot()?;
+        let current = snapshot.evidence().clone();
+        snapshot.finish()?;
+        self.source_root.revalidate()?;
+        Ok(&current == expected)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct LingmaDatabaseSourceV0 {
@@ -253,6 +309,31 @@ pub(crate) struct LingmaSourceBackedScanV0 {
     databases: Vec<LingmaDatabaseScanV0>,
 }
 
+#[cfg(test)]
+thread_local! {
+    static BEFORE_DATABASE_CERTIFICATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_before_database_certification(hook: Option<Box<dyn FnOnce()>>) {
+    BEFORE_DATABASE_CERTIFICATION.with(|slot| {
+        *slot.borrow_mut() = hook;
+    });
+}
+
+#[cfg(test)]
+fn before_database_certification() {
+    BEFORE_DATABASE_CERTIFICATION.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn before_database_certification() {}
+
 impl LingmaSourceBackedScanV0 {
     pub(crate) fn inventory(&self) -> &CertifiedSourceInventory {
         &self.inventory
@@ -310,12 +391,10 @@ fn scan_database(
     database: &LingmaDatabaseSourceV0,
 ) -> LingmaSourceBackedResultV0<LingmaDatabaseScanV0> {
     let source = database.source_key()?;
-    let opening_snapshot = lingma_source_snapshot(&database.path)?;
-    let (root_bound_database, sqlite_snapshot) = open_root_authorized_snapshot(&database.path)?;
+    let root_authority = LingmaRootAuthorizedSource::retain(&database.path)?;
+    let sqlite_snapshot = root_authority.open_snapshot()?;
+    let opening_evidence = sqlite_snapshot.evidence().clone();
     let connection = sqlite_snapshot.connection()?;
-    if !opening_snapshot.revalidate(&database.path)? {
-        return Err(LingmaSourceBackedErrorV0::SourceChangedDuringScan);
-    }
     let encoding = detect_schema(connection)?;
     let user_version = connection
         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
@@ -323,7 +402,7 @@ fn scan_database(
     let schema_fingerprint = sqlite_schema_fingerprint(connection)?;
     let opening = source_observation(
         source.clone(),
-        &opening_snapshot,
+        &opening_evidence,
         user_version,
         &schema_fingerprint,
         encoding,
@@ -332,14 +411,10 @@ fn scan_database(
     let source_path = database.path.display().to_string();
     let parsed = scan_rows(connection, encoding, &source, &revision_scope, &source_path)?;
     sqlite_snapshot.finish()?;
-    if !opening_snapshot.revalidate(&database.path)? {
-        return Err(LingmaSourceBackedErrorV0::SourceChangedDuringScan);
-    }
-    drop(root_bound_database);
+    root_authority.source_root.revalidate()?;
 
-    let closing_snapshot = lingma_source_snapshot(&database.path)?;
-    let (closing_root_bound_database, closing_sqlite_snapshot) =
-        open_root_authorized_snapshot(&database.path)?;
+    let closing_sqlite_snapshot = root_authority.open_snapshot()?;
+    let closing_evidence = closing_sqlite_snapshot.evidence().clone();
     let closing_connection = closing_sqlite_snapshot.connection()?;
     let closing_encoding = detect_schema(closing_connection)?;
     let closing_user_version = closing_connection
@@ -347,13 +422,13 @@ fn scan_database(
         .map_err(CaptureError::from)?;
     let closing_schema_fingerprint = sqlite_schema_fingerprint(closing_connection)?;
     closing_sqlite_snapshot.finish()?;
-    if !closing_snapshot.revalidate(&database.path)? {
+    before_database_certification();
+    if !root_authority.evidence_is_current(&closing_evidence)? {
         return Err(LingmaSourceBackedErrorV0::SourceChangedDuringScan);
     }
-    drop(closing_root_bound_database);
     let closing = source_observation(
         source,
-        &closing_snapshot,
+        &closing_evidence,
         closing_user_version,
         &closing_schema_fingerprint,
         closing_encoding,
@@ -378,29 +453,6 @@ fn scan_database(
         certificate,
         records: parsed.records,
     })
-}
-
-fn open_root_authorized_snapshot(
-    path: &Path,
-) -> LingmaSourceBackedResultV0<(File, SqliteSourceReadSnapshot)> {
-    open_root_authorized_snapshot_with_hook(path, || {})
-}
-
-fn open_root_authorized_snapshot_with_hook(
-    path: &Path,
-    after_authorize: impl FnOnce(),
-) -> LingmaSourceBackedResultV0<(File, SqliteSourceReadSnapshot)> {
-    let root_bound_database = open_ordinary_file_without_following(path)?;
-    after_authorize();
-    let sqlite_snapshot = open_sqlite_source_snapshot(path, &root_bound_database)?;
-    let connection = sqlite_snapshot.connection()?;
-    let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
-        .map_err(|_| LingmaSourceBackedErrorV0::CountOverflow)?;
-    connection.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, value_limit);
-    connection
-        .busy_timeout(std::time::Duration::from_secs(5))
-        .map_err(CaptureError::from)?;
-    Ok((root_bound_database, sqlite_snapshot))
 }
 
 struct ParsedScan {
@@ -720,14 +772,15 @@ fn bounded_preview(text: &str) -> String {
 
 fn source_observation(
     source: SourceKey,
-    snapshot: &ProviderSqliteSourceSnapshot,
+    evidence: &SqliteSourceEvidence,
     user_version: i64,
     schema_fingerprint: &str,
     encoding: SqliteEncoding,
 ) -> LingmaSourceBackedResultV0<SourceObservation> {
     let mut revision = Sha256::new();
     revision.update(SOURCE_REVISION_DOMAIN);
-    hash_revision_field(&mut revision, snapshot.revision_component().as_bytes());
+    let revision_component = sqlite_evidence_revision_component(evidence);
+    hash_revision_field(&mut revision, revision_component.as_bytes());
     revision.update(user_version.to_be_bytes());
     hash_revision_field(&mut revision, schema_fingerprint.as_bytes());
     revision.update([match encoding {
@@ -740,6 +793,19 @@ fn source_observation(
         SOURCE_REVISION_KIND,
         revision.finalize().to_vec(),
     )?)
+}
+
+fn sqlite_evidence_revision_component(evidence: &SqliteSourceEvidence) -> String {
+    format!(
+        "identity={};length={};revision={}",
+        hex_bytes(evidence.identity()),
+        evidence.length(),
+        hex_bytes(evidence.revision()),
+    )
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn inventory_revision(sources: &[SourceKey]) -> [u8; 32] {
@@ -845,16 +911,19 @@ impl LingmaSourceBackedResolverV0 {
                 kind: LingmaExactContentFailureKindV0::SourceUnavailable,
             });
         };
-        let source_snapshot =
-            lingma_source_snapshot(path).map_err(|_| LingmaExactContentFailureV0 {
+        let root_authority =
+            LingmaRootAuthorizedSource::retain(path).map_err(|_| LingmaExactContentFailureV0 {
                 event_id,
                 kind: LingmaExactContentFailureKindV0::SourceUnavailable,
             })?;
-        let (root_bound_database, sqlite_snapshot) =
-            open_root_authorized_snapshot(path).map_err(|_| LingmaExactContentFailureV0 {
-                event_id,
-                kind: LingmaExactContentFailureKindV0::SourceUnavailable,
-            })?;
+        let sqlite_snapshot =
+            root_authority
+                .open_snapshot()
+                .map_err(|_| LingmaExactContentFailureV0 {
+                    event_id,
+                    kind: LingmaExactContentFailureKindV0::SourceUnavailable,
+                })?;
+        let source_evidence = sqlite_snapshot.evidence().clone();
         let connection = sqlite_snapshot
             .connection()
             .map_err(|_| LingmaExactContentFailureV0 {
@@ -876,8 +945,8 @@ impl LingmaSourceBackedResolverV0 {
                 event_id,
                 kind: LingmaExactContentFailureKindV0::SourceUnavailable,
             })?;
-        if !source_snapshot
-            .revalidate(path)
+        if !root_authority
+            .evidence_is_current(&source_evidence)
             .map_err(|_| LingmaExactContentFailureV0 {
                 event_id,
                 kind: LingmaExactContentFailureKindV0::SourceUnavailable,
@@ -888,7 +957,6 @@ impl LingmaSourceBackedResolverV0 {
                 kind: LingmaExactContentFailureKindV0::SourceUnavailable,
             });
         }
-        drop(root_bound_database);
         if &lingma_logical_record_sha256(&values) != locator.record_digest() {
             return Err(LingmaExactContentFailureV0 {
                 event_id,
@@ -907,7 +975,7 @@ impl LingmaSourceBackedResolverV0 {
 
 #[cfg(test)]
 mod tests {
-    use rusqlite::Connection;
+    use rusqlite::{config::DbConfig, Connection};
 
     use super::*;
 
@@ -952,7 +1020,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn source_backed_open_rejects_leaf_swap_after_authorization() {
+    fn root_handle_vfs_finish_rejects_leaf_swap_after_snapshot_open() {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let path = temp.path().join("local.db");
         let attacker = temp.path().join("attacker.db");
@@ -960,16 +1028,11 @@ mod tests {
         drop(create_database(&path));
         drop(create_database(&attacker));
 
-        let result = open_root_authorized_snapshot_with_hook(&path, || {
-            std::fs::rename(&path, &original).unwrap();
-            std::fs::rename(&attacker, &path).unwrap();
-        });
-        assert!(matches!(
-            result,
-            Err(LingmaSourceBackedErrorV0::SqliteSource(
-                SqliteSourceAccessError::ConnectionIdentityMismatch
-            ))
-        ));
+        let authority = LingmaRootAuthorizedSource::retain(&path).unwrap();
+        let snapshot = authority.open_snapshot().unwrap();
+        std::fs::rename(&path, &original).unwrap();
+        std::fs::rename(&attacker, &path).unwrap();
+        assert!(snapshot.finish().is_err());
     }
 
     fn inventory(databases: Vec<LingmaDatabaseSourceV0>) -> LingmaSourceInventoryV0 {
@@ -1050,6 +1113,83 @@ mod tests {
         first_ids.sort();
         replay_ids.sort();
         assert_eq!(first_ids, replay_ids);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn root_handle_vfs_scan_sees_committed_content_retained_in_active_wal() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let path = temp.path().join("local.db");
+        let writer = create_database(&path);
+        insert_row(
+            &writer,
+            "wal-session",
+            "wal-request",
+            "main database prompt",
+            None,
+        );
+        let mode: String = writer
+            .query_row("pragma journal_mode = wal", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        writer
+            .execute_batch("pragma wal_autocheckpoint = 0")
+            .unwrap();
+        writer
+            .execute(
+                "update chat_record
+                    set chat_prompt = 'committed Lingma WAL prompt'
+                  where request_id = 'wal-request'",
+                [],
+            )
+            .unwrap();
+        writer
+            .set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
+            .unwrap();
+        drop(writer);
+        assert!(path.with_file_name("local.db-wal").exists());
+        assert!(path.with_file_name("local.db-shm").exists());
+
+        let opening = inventory(vec![database(&path, "vscode:stable:wal")]);
+        let closing = opening.clone();
+        let scan = scan_lingma_source_backed_v0(opening, || Ok(closing)).unwrap();
+        let user = all_records(&scan)
+            .into_iter()
+            .find(|record| record.document.role.as_deref() == Some("user"))
+            .unwrap();
+        assert_eq!(user.document.body, "committed Lingma WAL prompt");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn root_handle_vfs_database_finish_precedes_source_certification() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let path = temp.path().join("local.db");
+        let replacement = temp.path().join("replacement.db");
+        let opening = create_database(&path);
+        insert_row(&opening, "session", "request", "opening body", None);
+        drop(opening);
+        let replacement_connection = create_database(&replacement);
+        insert_row(
+            &replacement_connection,
+            "session",
+            "request",
+            "replacement body",
+            None,
+        );
+        drop(replacement_connection);
+        let inventory = inventory(vec![database(&path, "vscode:stable:finish-order")]);
+        let closing = inventory.clone();
+        let replaced_path = path.clone();
+        set_before_database_certification(Some(Box::new(move || {
+            std::fs::rename(&replacement, &replaced_path).unwrap();
+        })));
+
+        let result = scan_lingma_source_backed_v0(inventory, || Ok(closing));
+        assert!(matches!(
+            result,
+            Err(LingmaSourceBackedErrorV0::SourceChangedDuringScan)
+        ));
     }
 
     #[test]

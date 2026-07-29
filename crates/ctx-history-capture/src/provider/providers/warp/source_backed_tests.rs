@@ -4,8 +4,6 @@ use ctx_history_core::{LocatorRevisionPolicy, NativeRecordCoordinate, TypedKey};
 use rusqlite::{config::DbConfig, params, Connection};
 use tempfile::tempdir;
 
-use crate::provider_sources::{SqliteSourceAccessError, SqliteSourceComponent};
-
 use super::source_backed::set_before_compound_revalidation;
 use super::{
     project_selected_warp_sources_v0, project_warp_source_backed_v0, resolve_warp_locator_v0,
@@ -186,7 +184,7 @@ fn coexisting_selected_surfaces_project_cold_without_collapsing_lineage() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn compound_projection_rejects_database_replacement_before_provider_wide_revalidation() {
+fn root_handle_vfs_finishes_before_provider_wide_publication_revalidation() {
     let directory = tempdir().unwrap();
     let gui_path = directory.path().join("gui-warp.sqlite");
     let tui_path = directory.path().join("tui-warp.sqlite");
@@ -230,7 +228,7 @@ fn compound_projection_rejects_database_replacement_before_provider_wide_revalid
 
 #[cfg(target_os = "linux")]
 #[test]
-fn source_backed_wal_fixture_fails_closed_without_copying() {
+fn root_handle_vfs_projects_committed_content_retained_in_active_wal() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("warp-wal.sqlite");
     create_source(
@@ -265,20 +263,14 @@ fn source_backed_wal_fixture_fails_closed_without_copying() {
     assert!(path.with_file_name("warp-wal.sqlite-wal").exists());
     assert!(path.with_file_name("warp-wal.sqlite-shm").exists());
 
-    let result = project_warp_source_backed_v0(
+    let snapshot = project_warp_source_backed_v0(
         WarpSourceSelectionV0::new(&path, "linux:stable:gui").unwrap(),
-    );
-    assert!(
-        matches!(
-            &result,
-            Err(WarpSourceBackedErrorV0::SqliteSourceAccess(
-                SqliteSourceAccessError::UnsupportedSidecarIdentity {
-                    component: SqliteSourceComponent::Wal,
-                    ..
-                }
-            ))
-        ),
-        "{result:?}"
+    )
+    .unwrap();
+    assert_eq!(snapshot.documents.len(), 1);
+    assert_eq!(
+        snapshot.documents[0].body,
+        "committed content retained in WAL"
     );
 }
 
