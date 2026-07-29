@@ -396,7 +396,12 @@ fn lexical_body_prefers_full_payload_over_native_preview_and_hydrates_identicall
 
 #[test]
 fn source_backed_custom_adapter_has_no_preview_or_store_body_fallback() {
-    let source = include_str!("source_backed.rs");
+    let source = [
+        include_str!("source_backed.rs"),
+        include_str!("source_backed/parser.rs"),
+        include_str!("source_backed/resolver.rs"),
+    ]
+    .concat();
     assert!(!source.contains("MAX_BODY_PREVIEW_CHARS"));
     assert!(!source.contains("ctx_history_store"));
 }
