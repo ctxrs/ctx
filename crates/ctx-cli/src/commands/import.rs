@@ -31,7 +31,6 @@ pub(crate) use explicit_source_catalog::{
     ExplicitSourceCatalogAuthority,
 };
 pub(crate) use provider_refresh::{ProviderRefreshCollector, ProviderRefreshRuntimeFacts};
-pub(crate) use report::{ImportFailureScope, ImportFailureType};
 pub(crate) use totals::ImportTotals;
 
 #[derive(Debug)]

@@ -86,10 +86,6 @@ impl SqlCompatibility {
         Self::open(projection_path)
     }
 
-    pub fn path(&self) -> &Path {
-        self.projection.path()
-    }
-
     pub fn metadata(&self) -> SqlCompatibilityResult<RelationalProjectionMetadata> {
         self.projection.metadata()
     }

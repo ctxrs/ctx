@@ -38,27 +38,4 @@ impl ImportTotals {
         self.capture_work_remaining |= summary.work_remaining;
         self.work_result = self.work_result.merge(summary.work_result());
     }
-
-    pub(crate) fn add_source_failure(&mut self, stats: &SourceStats) {
-        self.source_files += stats.files;
-        self.source_bytes = self.source_bytes.saturating_add(stats.bytes);
-        self.failed_sources += 1;
-    }
-
-    pub(crate) fn add_rejected_source(
-        &mut self,
-        summary: &ProviderImportSummary,
-        stats: &SourceStats,
-    ) {
-        self.add_source_failure(stats);
-        self.skipped_sessions = self
-            .skipped_sessions
-            .saturating_add(summary.skipped_sessions);
-        self.skipped_events = self.skipped_events.saturating_add(summary.skipped_events);
-        self.skipped_edges = self.skipped_edges.saturating_add(summary.skipped_edges);
-        self.skipped = self.skipped.saturating_add(summary.skipped);
-        self.failed = self.failed.saturating_add(summary.failed);
-        self.capture_work_remaining |= summary.work_remaining;
-        self.work_result = self.work_result.merge(summary.work_result());
-    }
 }

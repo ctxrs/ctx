@@ -10,23 +10,8 @@ use crate::analytics::{
     ProviderRefreshFailureType, ProviderRefreshResult, ProviderRefreshSourceMode,
     ProviderRefreshTrigger, ProviderRefreshWorkKind, PublicEventV1,
 };
-use crate::provider_sources::SourceInfo;
 
-use super::{ImportFailureScope, ImportFailureType, ImportTotals, SourceStats};
-
-mod resources;
-pub(crate) use resources::ProviderRefreshResourceObservation;
-use resources::ProviderRefreshResourceReceipt;
-
-#[derive(Debug)]
-pub(crate) struct ImportSourceFailure {
-    pub(crate) source: SourceInfo,
-    pub(crate) stats: SourceStats,
-    pub(crate) error: String,
-    pub(crate) failure_type: ImportFailureType,
-    pub(crate) rejected_summary: Option<ProviderImportSummary>,
-    pub(crate) runtime_facts: Option<ProviderRefreshRuntimeFacts>,
-}
+use super::{ImportTotals, SourceStats};
 
 #[derive(Debug, Default)]
 pub(crate) struct ProviderRefreshCollector {
@@ -43,9 +28,6 @@ pub(crate) struct ProviderRefreshRuntimeFacts {
     canonical_pro_result: ProviderProResult,
     output_pro_result: ProviderProResult,
     retired_records: Option<u64>,
-    failure_scope: ProviderRefreshFailureScope,
-    failure_type: ProviderRefreshFailureType,
-    resources: Option<ProviderRefreshResourceReceipt>,
 }
 
 impl ProviderRefreshRuntimeFacts {
@@ -65,23 +47,6 @@ impl ProviderRefreshRuntimeFacts {
         )
     }
 
-    pub(crate) fn observed_failure(
-        duration: Duration,
-        failure_scope: ImportFailureScope,
-        failure_type: ImportFailureType,
-    ) -> Self {
-        Self::failure(
-            duration,
-            None,
-            ProviderCoreResult::Unknown,
-            ProviderProResult::Unknown,
-            ProviderProResult::Unknown,
-            None,
-            failure_scope,
-            failure_type,
-        )
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn success(
         duration: Duration,
@@ -98,42 +63,7 @@ impl ProviderRefreshRuntimeFacts {
             canonical_pro_result,
             output_pro_result,
             retired_records,
-            failure_scope: ProviderRefreshFailureScope::None,
-            failure_type: ProviderRefreshFailureType::None,
-            resources: None,
         }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn failure(
-        duration: Duration,
-        work_kind: Option<ProviderRefreshWorkKind>,
-        core_result: ProviderCoreResult,
-        canonical_pro_result: ProviderProResult,
-        output_pro_result: ProviderProResult,
-        retired_records: Option<u64>,
-        failure_scope: ImportFailureScope,
-        failure_type: ImportFailureType,
-    ) -> Self {
-        Self {
-            duration,
-            work_kind,
-            core_result,
-            canonical_pro_result,
-            output_pro_result,
-            retired_records,
-            failure_scope: map_failure_scope(failure_scope),
-            failure_type: map_failure_type(failure_type),
-            resources: None,
-        }
-    }
-
-    pub(crate) fn with_resource_observation(
-        mut self,
-        observation: ProviderRefreshResourceObservation,
-    ) -> Self {
-        self.resources = observation.finish();
-        self
     }
 }
 
@@ -156,38 +86,9 @@ struct ProviderRefreshAggregate {
     retired_records_complete: bool,
     failure_scope: Option<ProviderRefreshFailureScope>,
     failure_type: Option<ProviderRefreshFailureType>,
-    cpu_duration: Duration,
-    cpu_duration_observed: bool,
-    observed_process_peak_rss_bytes: Option<u64>,
 }
 
 impl ProviderRefreshCollector {
-    pub(crate) fn record_import_failure(
-        &mut self,
-        trigger: ProviderRefreshTrigger,
-        source_mode: ProviderRefreshSourceMode,
-        failure: &ImportSourceFailure,
-    ) {
-        if let Some(facts) = failure.runtime_facts {
-            self.record_failure_with_facts(
-                failure.source.provider,
-                trigger,
-                source_mode,
-                &failure.stats,
-                failure.rejected_summary.as_ref(),
-                facts,
-            );
-        } else {
-            self.record_failure(
-                failure.source.provider,
-                trigger,
-                source_mode,
-                &failure.stats,
-                failure.rejected_summary.as_ref(),
-            );
-        }
-    }
-
     pub(crate) fn start_timing(&mut self) {
         if self.refresh_started.is_none() {
             self.refresh_started = Some(Instant::now());
@@ -198,36 +99,6 @@ impl ProviderRefreshCollector {
         if let Some(started) = self.refresh_started.take() {
             self.refresh_duration = self.refresh_duration.saturating_add(started.elapsed());
         }
-    }
-
-    pub(crate) fn record_combined_runtime(
-        &mut self,
-        provider: CaptureProvider,
-        trigger: ProviderRefreshTrigger,
-        source_mode: ProviderRefreshSourceMode,
-        duration: Duration,
-        resources: ProviderRefreshResourceObservation,
-    ) {
-        let aggregate = self.aggregate_mut(provider, trigger, source_mode);
-        aggregate.duration = aggregate.duration.saturating_add(duration);
-        aggregate.record_resources(resources.finish());
-    }
-
-    #[cfg(test)]
-    pub(crate) fn recorded_duration(
-        &self,
-        provider: CaptureProvider,
-        trigger: ProviderRefreshTrigger,
-        source_mode: ProviderRefreshSourceMode,
-    ) -> Option<Duration> {
-        self.aggregates
-            .iter()
-            .find(|aggregate| {
-                aggregate.provider == provider
-                    && aggregate.trigger == trigger
-                    && aggregate.source_mode == source_mode
-            })
-            .map(|aggregate| aggregate.duration)
     }
 
     pub(crate) fn record_success_with_facts(
@@ -255,88 +126,13 @@ impl ProviderRefreshCollector {
         }
     }
 
-    pub(crate) fn record_failure(
-        &mut self,
-        provider: CaptureProvider,
-        trigger: ProviderRefreshTrigger,
-        source_mode: ProviderRefreshSourceMode,
-        stats: &SourceStats,
-        rejected_summary: Option<&ProviderImportSummary>,
-    ) {
-        let aggregate = self.aggregate_mut(provider, trigger, source_mode);
-        if let Some(summary) = rejected_summary {
-            aggregate.totals.add_rejected_source(summary, stats);
-            aggregate.content_evidence =
-                merge_content_evidence(aggregate.content_evidence, content_evidence(summary));
-            aggregate.failure_scope =
-                merge_failure_scope(aggregate.failure_scope, ProviderRefreshFailureScope::Source);
-            aggregate.failure_type = merge_failure_type(
-                aggregate.failure_type,
-                ProviderRefreshFailureType::RecordRejection,
-            );
-        } else {
-            aggregate.totals.add_source_failure(stats);
-            aggregate.content_evidence = merge_content_evidence(
-                aggregate.content_evidence,
-                ProviderRefreshContentEvidence::Unknown,
-            );
-            aggregate.failure_scope = merge_failure_scope(
-                aggregate.failure_scope,
-                ProviderRefreshFailureScope::Unknown,
-            );
-            aggregate.failure_type =
-                merge_failure_type(aggregate.failure_type, ProviderRefreshFailureType::Unknown);
-        }
-        aggregate.duration_complete = false;
-        aggregate.work_kind_complete = false;
-        aggregate.retired_records_complete = false;
-        aggregate.core_result =
-            merge_core_result(aggregate.core_result, ProviderCoreResult::Unknown);
-        aggregate.canonical_pro_result =
-            merge_pro_result(aggregate.canonical_pro_result, ProviderProResult::Unknown);
-        aggregate.output_pro_result =
-            merge_pro_result(aggregate.output_pro_result, ProviderProResult::Unknown);
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn record_failure_with_facts(
-        &mut self,
-        provider: CaptureProvider,
-        trigger: ProviderRefreshTrigger,
-        source_mode: ProviderRefreshSourceMode,
-        stats: &SourceStats,
-        rejected_summary: Option<&ProviderImportSummary>,
-        facts: ProviderRefreshRuntimeFacts,
-    ) {
-        let aggregate = self.aggregate_mut(provider, trigger, source_mode);
-        if let Some(summary) = rejected_summary {
-            aggregate.totals.add_rejected_source(summary, stats);
-            aggregate.content_evidence =
-                merge_content_evidence(aggregate.content_evidence, content_evidence(summary));
-        } else {
-            aggregate.totals.add_source_failure(stats);
-            aggregate.content_evidence = merge_content_evidence(
-                aggregate.content_evidence,
-                ProviderRefreshContentEvidence::Unknown,
-            );
-        }
-        aggregate.record_facts(facts);
-    }
-
     pub(crate) fn finish(mut self) -> Vec<PublicEventV1> {
         self.stop_timing();
         let duration = self.refresh_duration;
         self.finish_for_surface(crate::analytics::Surface::Cli, duration)
     }
 
-    pub(crate) fn finish_for_daemon(mut self, duration: Duration) -> Vec<PublicEventV1> {
-        for aggregate in &mut self.aggregates {
-            aggregate.trigger = ProviderRefreshTrigger::Daemon;
-        }
-        self.finish_for_surface(crate::analytics::Surface::Daemon, duration)
-    }
-
-    pub(crate) fn finish_for_surface(
+    fn finish_for_surface(
         mut self,
         surface: crate::analytics::Surface,
         single_provider_fallback_duration: Duration,
@@ -350,11 +146,6 @@ impl ProviderRefreshCollector {
         });
         let fallback_duration =
             (self.aggregates.len() == 1).then_some(single_provider_fallback_duration);
-        // ru_maxrss and PeakWorkingSetSize are process-lifetime high-water
-        // marks. They are useful as one command/import observation, but cannot
-        // truthfully be attributed to each event in a multi-aggregate batch.
-        let emit_observed_process_peak =
-            surface == crate::analytics::Surface::Cli && self.aggregates.len() == 1;
         self.aggregates
             .into_iter()
             .map(|aggregate| {
@@ -440,14 +231,7 @@ impl ProviderRefreshCollector {
                             count_u64(totals.failed_sources),
                             totals.source_bytes,
                         ),
-                        performance: aggregate.cpu_duration_observed.then(|| {
-                            crate::analytics::ProviderRefreshPerformanceV1::new(
-                                aggregate.cpu_duration,
-                                emit_observed_process_peak
-                                    .then_some(aggregate.observed_process_peak_rss_bytes)
-                                    .flatten(),
-                            )
-                        }),
+                        performance: None,
                     },
                 );
                 event.surface = surface;
@@ -487,9 +271,6 @@ impl ProviderRefreshCollector {
             retired_records_complete: true,
             failure_scope: None,
             failure_type: None,
-            cpu_duration: Duration::ZERO,
-            cpu_duration_observed: false,
-            observed_process_peak_rss_bytes: None,
         });
         self.aggregates
             .last_mut()
@@ -514,22 +295,6 @@ impl ProviderRefreshAggregate {
         } else {
             self.retired_records_complete = false;
         }
-        self.failure_scope = merge_failure_scope(self.failure_scope, facts.failure_scope);
-        self.failure_type = merge_failure_type(self.failure_type, facts.failure_type);
-        self.record_resources(facts.resources);
-    }
-
-    fn record_resources(&mut self, resources: Option<ProviderRefreshResourceReceipt>) {
-        let Some(resources) = resources else {
-            return;
-        };
-        self.cpu_duration = self.cpu_duration.saturating_add(resources.cpu_duration);
-        self.cpu_duration_observed = true;
-        self.observed_process_peak_rss_bytes = Some(
-            self.observed_process_peak_rss_bytes
-                .unwrap_or(0)
-                .max(resources.observed_process_peak_rss_bytes),
-        );
     }
 }
 
@@ -695,28 +460,6 @@ fn refresh_result(
         ProviderRefreshResult::Partial
     } else {
         ProviderRefreshResult::Complete
-    }
-}
-
-fn map_failure_scope(scope: ImportFailureScope) -> ProviderRefreshFailureScope {
-    match scope {
-        ImportFailureScope::Source => ProviderRefreshFailureScope::Source,
-        ImportFailureScope::System => ProviderRefreshFailureScope::System,
-    }
-}
-
-fn map_failure_type(failure_type: ImportFailureType) -> ProviderRefreshFailureType {
-    match failure_type {
-        ImportFailureType::RecordRejection => ProviderRefreshFailureType::RecordRejection,
-        ImportFailureType::UnsupportedSchema => ProviderRefreshFailureType::UnsupportedSchema,
-        ImportFailureType::NotFound => ProviderRefreshFailureType::NotFound,
-        ImportFailureType::Permission => ProviderRefreshFailureType::Permission,
-        ImportFailureType::SourceDatabase => ProviderRefreshFailureType::SourceDatabase,
-        ImportFailureType::MalformedSource => ProviderRefreshFailureType::MalformedSource,
-        ImportFailureType::WorkerPanic => ProviderRefreshFailureType::WorkerPanic,
-        ImportFailureType::SystemIo => ProviderRefreshFailureType::SystemIo,
-        ImportFailureType::System => ProviderRefreshFailureType::System,
-        ImportFailureType::Other => ProviderRefreshFailureType::Other,
     }
 }
 
