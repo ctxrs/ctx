@@ -444,14 +444,18 @@ fn handle_tools_call(
             usage_invocation,
         );
     }
-    let context_target = match name {
-        "show_session" => arguments.get("ctx_session_id"),
-        "show_event" => arguments.get("ctx_event_id"),
-        _ => None,
+    let context_target = match parsed_show_context_target(name, &arguments) {
+        Ok(target) => target,
+        Err(error) => {
+            return (
+                Ok(McpHandled::plain(tool_error_result(error))),
+                usage_invocation,
+            );
+        }
     };
-    if let Some(stable_result_id) = context_target.and_then(Value::as_str) {
+    if let Some(stable_result_id) = context_target {
         if let Some(invocation) = usage_invocation.as_mut() {
-            invocation.bind_context_target(stable_result_id.to_owned());
+            invocation.bind_context_target(stable_result_id);
         }
     }
 
@@ -485,6 +489,21 @@ fn handle_tools_call(
         }),
         usage_invocation,
     )
+}
+
+fn parsed_show_context_target(name: &str, arguments: &Value) -> Result<Option<String>> {
+    let (argument, kind) = match name {
+        "show_session" => ("ctx_session_id", "session"),
+        "show_event" => ("ctx_event_id", "event"),
+        _ => return Ok(None),
+    };
+    let target = optional_string(arguments, argument)?
+        .ok_or_else(|| invalid_tool_request(format!("{argument} is required")))?;
+    if uuid::Uuid::parse_str(target.trim()).is_err() {
+        crate::transcript::normalize_uuid_prefix(&target, kind)
+            .map_err(|error| invalid_tool_request(format!("invalid {argument}: {error}")))?;
+    }
+    Ok(Some(target))
 }
 
 fn tool_status(data_root: &Path) -> Result<Value> {

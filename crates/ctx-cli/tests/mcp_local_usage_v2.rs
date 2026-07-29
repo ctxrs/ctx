@@ -357,6 +357,27 @@ fn delivered_foreground_tools_record_once_with_truthful_classification() {
         .sum::<u64>();
     client.finish();
 
+    let report = json_output(
+        ctx(&temp)
+            .args(["stats", "--detail", "--format=json"])
+            .env("CTX_LOCAL_USAGE_ENABLED", "true"),
+    );
+    let expected_context = json!({
+        "context_searches": 3,
+        "context_found": expected_context_found,
+        "context_opened": 2,
+        "context_cited": 0,
+        "validated_discoveries": 2,
+    });
+    assert_eq!(
+        report["local_usage"]["summary"]["context"], expected_context,
+        "the flushed search and show completions must reach the persisted report"
+    );
+    assert_eq!(
+        report["measured"]["history_retrieval"]["discovery_proxy"],
+        expected_context
+    );
+
     let usage_path = temp.path().join("usage.sqlite");
     let connection = Connection::open(&usage_path).unwrap();
     assert_eq!(

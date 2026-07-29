@@ -61,10 +61,8 @@ pub(crate) fn run() -> ExitCode {
 pub(crate) fn run_cli() -> Result<()> {
     let started = Instant::now();
     let cli = Cli::parse();
-    match &cli.command {
-        CommandRoot::Pro(args) => args.validate_invocation()?,
-        CommandRoot::Referral(args) => args.validate_invocation()?,
-        _ => {}
+    if let CommandRoot::Referral(args) = &cli.command {
+        args.validate_invocation()?;
     }
     let deprecated_controls = DeprecatedControls::detect();
     if command_deprecation_warning_eligible(&cli.command) {
@@ -207,7 +205,16 @@ pub(crate) fn run_cli() -> Result<()> {
             &config,
             &mut local_usage_draft,
         ),
-        CommandRoot::Pro(args) => pro::run_lifecycle(args, data_root.clone()),
+        CommandRoot::Pro(args) => {
+            let validation = args.validate_invocation();
+            if validation.is_err() && !data_root.exists() {
+                // Invalid Pro syntax is non-mutating for a missing data root.
+                // A pre-existing root remains eligible for the common local
+                // completion hook below.
+                local_usage_draft = local_usage::CliUsage::excluded();
+            }
+            validation.and_then(|()| pro::run_lifecycle(args, data_root.clone()))
+        }
         CommandRoot::Referral(args) => pro::run_referral(args, data_root.clone()),
         CommandRoot::Blame(args) => {
             crate::commands::blame::run(args, data_root.clone(), &mut local_usage_draft)
