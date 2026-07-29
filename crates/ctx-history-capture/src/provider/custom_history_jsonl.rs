@@ -9,24 +9,15 @@ use serde_json::{json, Value};
 
 use crate::stable_capture_uuid;
 
-use crate::{
-    CaptureError, ProviderAdapterContext, ProviderImportFailure, ProviderImportSummary, Result,
-};
+use crate::{CaptureError, ProviderImportFailure, ProviderImportSummary, Result};
 
 mod nativepath;
 
-// Registration is intentionally owned by the shared provider registry follow-up.
-#[allow(unused_imports)]
 pub(crate) use nativepath::{
     observe_custom_history_source_backed_explicit, revalidate_custom_history_source_backed,
-    scan_custom_history_source_backed_explicit, validate_custom_history_nativepath,
-    validate_custom_history_nativepath_reader, CustomHistoryReplacementEvidence,
-    CustomHistoryReplacementReason, CustomHistorySourceBackedDisposition,
-    CustomHistorySourceBackedError, CustomHistorySourceBackedInput,
-    CustomHistorySourceBackedInventory, CustomHistorySourceBackedOutcome,
-    CustomHistorySourceBackedPage, CustomHistorySourceBackedReceipt,
-    CustomHistorySourceBackedResolver, CustomHistorySourceBackedResult,
-    CustomHistorySourceBackedRoute,
+    scan_custom_history_source_backed_explicit, CustomHistorySourceBackedDisposition,
+    CustomHistorySourceBackedInput, CustomHistorySourceBackedOutcome,
+    CustomHistorySourceBackedResolver,
 };
 
 pub fn decode_custom_history_jsonl_v1_cursor(encoded: &str) -> Result<String> {
@@ -292,18 +283,6 @@ pub(crate) fn retain_custom_history_content_sessions(
     sessions.retain(|key, _| required.contains(key));
 }
 
-pub(crate) fn custom_history_effective_raw_source_path(
-    source: &CtxHistoryJsonlSourceRecord,
-    context: &ProviderAdapterContext,
-) -> Option<String> {
-    source.raw_source_path.clone().or_else(|| {
-        context
-            .source_path
-            .as_ref()
-            .map(|path| path.display().to_string())
-    })
-}
-
 pub(crate) fn custom_history_internal_session_id(
     provider_key: &str,
     source_id: &str,
@@ -338,18 +317,4 @@ pub fn custom_history_jsonl_v1_cursor_stream(
 
 pub(crate) fn custom_history_key(value: Value) -> String {
     serde_json::to_string(&value).expect("custom history identity key is serializable")
-}
-
-pub(crate) fn custom_history_metadata(base: Value, custom: Value) -> Value {
-    let mut map = match base {
-        Value::Object(map) => map,
-        Value::Null => serde_json::Map::new(),
-        other => {
-            let mut map = serde_json::Map::new();
-            map.insert("metadata".to_owned(), other);
-            map
-        }
-    };
-    map.insert("ctx_history_jsonl_v1".to_owned(), custom);
-    Value::Object(map)
 }
