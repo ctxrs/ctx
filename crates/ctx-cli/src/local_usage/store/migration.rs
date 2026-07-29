@@ -427,7 +427,7 @@ CREATE TABLE daily_usage (
 ) WITHOUT ROWID, STRICT;
 "#;
 
-pub(super) const MAINTENANCE_SCHEMA: &str = r#"
+pub(super) const LEGACY_MAINTENANCE_SCHEMA: &str = r#"
 CREATE TABLE maintenance (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     last_retention_day TEXT NOT NULL CHECK (
@@ -436,6 +436,19 @@ CREATE TABLE maintenance (
         AND date(last_retention_day) IS NOT NULL
         AND date(last_retention_day) = last_retention_day
     )
+) WITHOUT ROWID, STRICT;
+"#;
+
+pub(super) const MAINTENANCE_SCHEMA: &str = r#"
+CREATE TABLE maintenance (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    last_retention_day TEXT NOT NULL CHECK (
+        length(last_retention_day) = 10
+        AND last_retention_day GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+        AND date(last_retention_day) IS NOT NULL
+        AND date(last_retention_day) = last_retention_day
+    ),
+    store_generation INTEGER NOT NULL CHECK (store_generation >= 0)
 ) WITHOUT ROWID, STRICT;
 "#;
 
@@ -507,17 +520,21 @@ pub(super) fn migrate_to_current<T>(
     conn: &mut Connection,
     before_commit: impl FnOnce() -> Result<T, UsageStoreError>,
 ) -> Result<(), UsageStoreError> {
-    match verify_supported_schema(conn)? {
-        SCHEMA_VERSION => return Ok(()),
-        LEGACY_SCHEMA_VERSION => {}
-        version => return Err(UsageStoreError::SchemaVersion(version)),
+    let version = verify_supported_schema(conn)?;
+    let maintenance_is_current = maintenance_schema_is_current(conn)?;
+    if version == SCHEMA_VERSION && maintenance_is_current {
+        return Ok(());
     }
-    super::super::report::validate_rows_for_schema(conn, LEGACY_SCHEMA_VERSION)?;
+    if !matches!(version, LEGACY_SCHEMA_VERSION | SCHEMA_VERSION) {
+        return Err(UsageStoreError::SchemaVersion(version));
+    }
+    super::super::report::validate_rows_for_schema(conn, version)?;
     let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    transaction.execute_batch("ALTER TABLE daily_usage RENAME TO daily_usage_v1;")?;
-    transaction.execute_batch(DAILY_USAGE_SCHEMA)?;
-    transaction.execute_batch(
-        r#"
+    if version == LEGACY_SCHEMA_VERSION {
+        transaction.execute_batch("ALTER TABLE daily_usage RENAME TO daily_usage_v1;")?;
+        transaction.execute_batch(DAILY_USAGE_SCHEMA)?;
+        transaction.execute_batch(
+            r#"
         INSERT INTO daily_usage (
             day_utc, definition_version, ctx_version, surface, operation, outcome,
             value_class, duration_bucket, target_type, pro_outcome, result_action,
@@ -605,8 +622,22 @@ pub(super) fn migrate_to_current<T>(
             normalized_result_action;
         DROP TABLE daily_usage_v1;
         "#,
-    )?;
-    transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        )?;
+        transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    }
+    if !maintenance_is_current {
+        transaction
+            .execute_batch("ALTER TABLE maintenance RENAME TO maintenance_without_generation;")?;
+        transaction.execute_batch(MAINTENANCE_SCHEMA)?;
+        transaction.execute_batch(
+            r#"
+            INSERT INTO maintenance (singleton, last_retention_day, store_generation)
+            SELECT singleton, last_retention_day, 0
+            FROM maintenance_without_generation;
+            DROP TABLE maintenance_without_generation;
+            "#,
+        )?;
+    }
     verify_schema(&transaction)?;
     super::super::report::validate_rows(&transaction)?;
     let commit_guard = before_commit()?;
@@ -639,7 +670,7 @@ pub(in crate::local_usage) fn verify_supported_schema(
         SCHEMA_VERSION => verify_daily_schema(conn, DAILY_USAGE_SCHEMA, EXPECTED_DAILY_COLUMNS)?,
         _ => return Err(UsageStoreError::SchemaVersion(user_version)),
     }
-    verify_table_schema(conn, "maintenance", MAINTENANCE_SCHEMA)?;
+    maintenance_schema_is_current(conn)?;
     Ok(user_version)
 }
 
@@ -648,7 +679,21 @@ pub(super) fn verify_schema(conn: &Connection) -> Result<(), UsageStoreError> {
     if version != SCHEMA_VERSION {
         return Err(UsageStoreError::SchemaVersion(version));
     }
+    if !maintenance_schema_is_current(conn)? {
+        return Err(UsageStoreError::SchemaIdentity);
+    }
     Ok(())
+}
+
+fn maintenance_schema_is_current(conn: &Connection) -> Result<bool, UsageStoreError> {
+    let actual = table_schema(conn, "maintenance")?;
+    if canonical_schema(&actual) == canonical_schema(MAINTENANCE_SCHEMA) {
+        return Ok(true);
+    }
+    if canonical_schema(&actual) == canonical_schema(LEGACY_MAINTENANCE_SCHEMA) {
+        return Ok(false);
+    }
+    Err(UsageStoreError::SchemaIdentity)
 }
 
 fn verify_daily_schema_v1(conn: &Connection) -> Result<(), UsageStoreError> {
@@ -732,18 +777,6 @@ fn verify_schema_object_allowlist(conn: &Connection) -> Result<(), UsageStoreErr
         }
     }
     if !daily_usage || !maintenance {
-        return Err(UsageStoreError::SchemaIdentity);
-    }
-    Ok(())
-}
-
-fn verify_table_schema(
-    conn: &Connection,
-    table: &str,
-    expected: &str,
-) -> Result<(), UsageStoreError> {
-    let actual = table_schema(conn, table)?;
-    if canonical_schema(&actual) != canonical_schema(expected) {
         return Err(UsageStoreError::SchemaIdentity);
     }
     Ok(())

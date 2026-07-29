@@ -278,6 +278,258 @@ fn mcp_correlation_commits_with_the_store_and_rearms_after_reset() {
     assert_eq!(summary.context.validated_discoveries, 1);
 }
 
+fn assert_owned_disable_discards_correlation(disabled_config: &str) {
+    let root = private_tempdir();
+    let config_path = root.path().join("config.toml");
+    fs::write(&config_path, "[local_usage]\nenabled = true\n").unwrap();
+    let mut recorder = McpUsageRecorder::start(root.path().to_path_buf());
+    let search_response = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+            "structuredContent": {
+                "results": [{
+                    "result_scope": "event",
+                    "result_type": "event",
+                    "ctx_event_id": "event-before-opt-out"
+                }]
+            }
+        }
+    });
+    let show_response = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": {"structuredContent": {"events": [{}]}}
+    });
+    let mut show = McpInvocation::recognized("show_event").unwrap();
+    show.bind_context_target("event-before-opt-out".to_owned());
+
+    recorder.record_delivered(
+        McpInvocation::recognized("search").unwrap(),
+        &search_response,
+        Duration::ZERO,
+        200,
+    );
+    fs::write(&config_path, disabled_config).unwrap();
+    fs::write(&config_path, "[local_usage]\nenabled = true\n").unwrap();
+    recorder.record_delivered(show, &show_response, Duration::ZERO, 100);
+
+    let summary = read_report(root.path(), true, false).summary.unwrap();
+    assert_eq!(summary.calls, 2);
+    assert_eq!(summary.context.context_found, 1);
+    assert_eq!(summary.context.context_opened, 0);
+    assert_eq!(summary.context.validated_discoveries, 0);
+}
+
+#[test]
+fn persistent_explicit_disable_discards_pre_opt_out_result_identities() {
+    let _env = LocalUsageEnvGuard::unset();
+    assert_owned_disable_discards_correlation("[local_usage]\nenabled = false\n");
+}
+
+#[test]
+fn malformed_owned_config_discards_pre_opt_out_result_identities() {
+    let _env = LocalUsageEnvGuard::unset();
+    assert_owned_disable_discards_correlation("[local_usage]\nenabled = malformed\n");
+}
+
+#[test]
+fn hard_process_disable_discards_pre_opt_out_result_identities() {
+    let _env = LocalUsageEnvGuard::unset();
+    let root = private_tempdir();
+    fs::write(
+        root.path().join("config.toml"),
+        "[local_usage]\nenabled = true\n",
+    )
+    .unwrap();
+    let mut recorder = McpUsageRecorder::start(root.path().to_path_buf());
+    let search_response = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+            "structuredContent": {
+                "results": [{
+                    "result_scope": "event",
+                    "result_type": "event",
+                    "ctx_event_id": "event-before-hard-disable"
+                }]
+            }
+        }
+    });
+    let show_response = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": {"structuredContent": {"events": [{}]}}
+    });
+    let status_response = json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "result": {"structuredContent": {}}
+    });
+    let mut show = McpInvocation::recognized("show_event").unwrap();
+    show.bind_context_target("event-before-hard-disable".to_owned());
+
+    recorder.record_delivered(
+        McpInvocation::recognized("search").unwrap(),
+        &search_response,
+        Duration::ZERO,
+        200,
+    );
+    env::set_var("CTX_LOCAL_USAGE_ENABLED", "false");
+    recorder.record_delivered(
+        McpInvocation::recognized("status").unwrap(),
+        &status_response,
+        Duration::ZERO,
+        50,
+    );
+    env::set_var("CTX_LOCAL_USAGE_ENABLED", "true");
+    recorder.record_delivered(show, &show_response, Duration::ZERO, 100);
+
+    let summary = read_report(root.path(), true, false).summary.unwrap();
+    assert_eq!(summary.calls, 2);
+    assert_eq!(summary.context.context_found, 1);
+    assert_eq!(summary.context.context_opened, 0);
+    assert_eq!(summary.context.validated_discoveries, 0);
+}
+
+#[test]
+fn reset_between_generation_comparison_and_transactional_upsert_cannot_revive_old_targets() {
+    let _env = LocalUsageEnvGuard::unset();
+    let root = private_tempdir();
+    let mut recorder = McpUsageRecorder::start(root.path().to_path_buf());
+    let search_response = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+            "structuredContent": {
+                "results": [{
+                    "result_scope": "event",
+                    "result_type": "event",
+                    "ctx_event_id": "event-raced-by-reset"
+                }]
+            }
+        }
+    });
+    let show_response = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": {"structuredContent": {"events": [{}]}}
+    });
+    let mut show = McpInvocation::recognized("show_event").unwrap();
+    show.bind_context_target("event-raced-by-reset".to_owned());
+    recorder.record_delivered(
+        McpInvocation::recognized("search").unwrap(),
+        &search_response,
+        Duration::ZERO,
+        200,
+    );
+
+    let reset_root = root.path().to_path_buf();
+    let reset_thread = Arc::new(std::sync::Mutex::new(None));
+    let reset_thread_for_hook = Arc::clone(&reset_thread);
+    let (attempted_tx, attempted_rx) = std::sync::mpsc::sync_channel(0);
+    recorder.record_delivered_with_store_hook_for_test(
+        show.clone(),
+        &show_response,
+        Duration::ZERO,
+        100,
+        move || {
+            let handle = thread::spawn(move || {
+                attempted_tx.send(()).unwrap();
+                let deadline = Instant::now() + Duration::from_secs(2);
+                loop {
+                    match reset(&reset_root) {
+                        Ok(true) => break,
+                        Err(store::UsageStoreError::Sql(error))
+                            if error.sqlite_error_code() == Some(ErrorCode::DatabaseBusy) => {}
+                        Err(store::UsageStoreError::Io(error))
+                            if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(
+                            store::UsageStoreError::UnsafeReadState
+                            | store::UsageStoreError::SchemaIdentity,
+                        ) => {}
+                        other => panic!("racing reset failed unexpectedly: {other:?}"),
+                    }
+                    assert!(Instant::now() < deadline, "racing reset never committed");
+                    thread::yield_now();
+                }
+            });
+            attempted_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            *reset_thread_for_hook.lock().unwrap() = Some(handle);
+        },
+    );
+    reset_thread.lock().unwrap().take().unwrap().join().unwrap();
+
+    recorder.record_delivered(show, &show_response, Duration::ZERO, 100);
+    let summary = read_report(root.path(), true, false).summary.unwrap();
+    assert_eq!(summary.calls, 1);
+    assert_eq!(summary.context.context_found, 0);
+    assert_eq!(summary.context.context_opened, 0);
+    assert_eq!(summary.context.validated_discoveries, 0);
+}
+
+#[test]
+fn reset_generation_survives_restored_filesystem_metadata_collision() {
+    let _env = LocalUsageEnvGuard::unset();
+    let root = private_tempdir();
+    let mut recorder = McpUsageRecorder::start(root.path().to_path_buf());
+    let search_response = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+            "structuredContent": {
+                "results": [{
+                    "result_scope": "event",
+                    "result_type": "event",
+                    "ctx_event_id": "event-before-reset"
+                }]
+            }
+        }
+    });
+    let show_response = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": {"structuredContent": {"events": [{}]}}
+    });
+    let mut show = McpInvocation::recognized("show_event").unwrap();
+    show.bind_context_target("event-before-reset".to_owned());
+    recorder.record_delivered(
+        McpInvocation::recognized("search").unwrap(),
+        &search_response,
+        Duration::ZERO,
+        200,
+    );
+    let path = usage_path(root.path());
+    let before = path.metadata().unwrap();
+    let modified = before.modified().unwrap();
+    let len = before.len();
+
+    assert!(reset(root.path()).unwrap());
+    assert_eq!(path.metadata().unwrap().len(), len);
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+    assert_eq!(path.metadata().unwrap().modified().unwrap(), modified);
+
+    recorder.record_delivered(show, &show_response, Duration::ZERO, 100);
+    let summary = read_report(root.path(), true, false).summary.unwrap();
+    assert_eq!(summary.calls, 1);
+    assert_eq!(summary.context.context_opened, 0);
+    assert_eq!(summary.context.validated_discoveries, 0);
+    let generation: i64 = Connection::open(&path)
+        .unwrap()
+        .query_row(
+            "SELECT store_generation FROM maintenance WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(generation, 1);
+}
+
 #[test]
 fn mcp_blame_classification_reads_only_typed_match_fields() {
     let response = json!({

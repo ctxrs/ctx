@@ -160,18 +160,35 @@ pub(in crate::local_usage) fn validate_rows(conn: &Connection) -> Result<(), Usa
 }
 
 fn validate_maintenance(conn: &Connection) -> Result<(), UsageStoreError> {
-    let mut maintenance_statement =
-        conn.prepare("SELECT singleton, last_retention_day FROM maintenance")?;
+    let has_store_generation = conn
+        .prepare("PRAGMA table_info(maintenance)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?
+        .iter()
+        .any(|column| column == "store_generation");
+    let query = if has_store_generation {
+        "SELECT singleton, last_retention_day, store_generation FROM maintenance"
+    } else {
+        "SELECT singleton, last_retention_day, NULL FROM maintenance"
+    };
+    let mut maintenance_statement = conn.prepare(query)?;
     let maintenance_rows = maintenance_statement.query_map([], |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<i64>>(2)?,
+        ))
     })?;
     let mut maintenance_count = 0_u8;
     for row in maintenance_rows {
-        let (singleton, day) = row?;
+        let (singleton, day, store_generation) = row?;
         maintenance_count = maintenance_count
             .checked_add(1)
             .ok_or(UsageStoreError::Integrity)?;
-        if singleton != 1 || day.len() != 10 || NaiveDate::parse_from_str(&day, "%Y-%m-%d").is_err()
+        if singleton != 1
+            || day.len() != 10
+            || NaiveDate::parse_from_str(&day, "%Y-%m-%d").is_err()
+            || store_generation.is_some_and(|generation| generation < 0)
         {
             return Err(UsageStoreError::Integrity);
         }

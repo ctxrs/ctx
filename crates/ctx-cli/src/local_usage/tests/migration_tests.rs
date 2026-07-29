@@ -226,6 +226,15 @@ fn v1_writable_migration_preserves_facts_and_leaves_new_measurements_unknown() {
     assert_eq!((migrated.18, migrated.19), (2, 2));
     assert_eq!(
         conn.query_row(
+            "SELECT store_generation FROM maintenance WHERE singleton = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        conn.query_row(
             "SELECT COUNT(*) FROM daily_usage \
              WHERE operation = 'blame' AND value_class = 'empty' AND pro_outcome != 'none'",
             [],
@@ -261,6 +270,63 @@ fn v1_writable_migration_preserves_facts_and_leaves_new_measurements_unknown() {
             .approximate_avoided_context_tokens
             .coverage,
         EstimateCoverage::Partial
+    );
+}
+
+#[test]
+fn pre_generation_v2_reports_read_only_and_migrates_in_place_on_next_write() {
+    let root = private_tempdir();
+    store::create_legacy_v2_fixture_for_test(root.path()).unwrap();
+    let path = usage_path(root.path());
+    let before = sqlite_family_snapshot(&path);
+
+    let report = read_report(root.path(), true, true);
+    assert_eq!(report.state, "ready", "{:?}", report.error);
+    assert_eq!(report.summary.unwrap().calls, 1);
+    assert_eq!(sqlite_family_snapshot(&path), before);
+    let conn = Connection::open(&path).unwrap();
+    let columns = conn
+        .prepare("PRAGMA table_info(maintenance)")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(columns, ["singleton", "last_retention_day"]);
+    assert_eq!(
+        conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    conn.pragma_update(None, "journal_mode", "DELETE").unwrap();
+    drop(conn);
+
+    store::growth_policy_for_test(root.path()).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    let columns = conn
+        .prepare("PRAGMA table_info(maintenance)")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        columns,
+        ["singleton", "last_retention_day", "store_generation"]
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT store_generation FROM maintenance WHERE singleton = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        0
+    );
+    drop(conn);
+    assert_eq!(
+        read_report(root.path(), true, false).summary.unwrap().calls,
+        1
     );
 }
 
@@ -475,5 +541,14 @@ fn reset_migrates_v1_then_logically_deletes_every_aggregate() {
         conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
             .unwrap(),
         2
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT store_generation FROM maintenance WHERE singleton = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        1
     );
 }

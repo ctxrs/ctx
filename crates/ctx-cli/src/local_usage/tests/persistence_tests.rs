@@ -417,6 +417,28 @@ fn reset_logically_deletes_aggregates_without_promising_forensic_erasure() {
         .query_row("SELECT COUNT(*) FROM daily_usage", [], |row| row.get(0))
         .unwrap();
     assert_eq!(rows, 0);
+    assert_eq!(
+        conn.query_row(
+            "SELECT store_generation FROM maintenance WHERE singleton = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        1
+    );
+    drop(conn);
+    assert!(reset(root.path()).unwrap());
+    let conn = Connection::open(usage_path(root.path())).unwrap();
+    assert_eq!(
+        conn.query_row(
+            "SELECT store_generation FROM maintenance WHERE singleton = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        2
+    );
+    drop(conn);
     let wal = auxiliary(&usage_path(root.path()), "-wal");
     assert!(fs::metadata(wal).map_or(true, |metadata| metadata.len() == 0));
 }
@@ -455,7 +477,7 @@ fn atomic_upsert_is_exact_under_concurrency() {
                         SystemTime::now(),
                         Duration::from_secs(2),
                     ) {
-                        Ok(()) => break,
+                        Ok(_) => break,
                         Err(store::UsageStoreError::Sql(error))
                             if error.sqlite_error_code() == Some(ErrorCode::DatabaseBusy) => {}
                         Err(store::UsageStoreError::UnsafeReadState) => {}
@@ -752,7 +774,7 @@ fn reports_use_one_consistent_snapshot_while_writes_continue() {
                     SystemTime::now(),
                     Duration::from_secs(1),
                 ) {
-                    Ok(()) => break,
+                    Ok(_) => break,
                     Err(store::UsageStoreError::Sql(error))
                         if error.sqlite_error_code() == Some(ErrorCode::DatabaseBusy) => {}
                     Err(store::UsageStoreError::UnsafeReadState) => {}

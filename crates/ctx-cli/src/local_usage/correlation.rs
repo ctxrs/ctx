@@ -1,7 +1,5 @@
 use std::{
     collections::{hash_map::Entry, HashMap},
-    ffi::OsString,
-    fs,
     hash::Hash,
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
@@ -138,8 +136,9 @@ pub(crate) struct McpUsageRecorder {
     data_root: PathBuf,
     enabled: bool,
     control_resolver: crate::config::LocalUsageConfigResolver,
+    control_revision: Option<ControlFileRevision>,
     context: EphemeralContextCorrelation<McpContextTarget>,
-    context_store_revision: Option<UsageStoreRevision>,
+    context_generation: Option<store::StoreGeneration>,
     #[cfg(test)]
     trace: Option<std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>>,
 }
@@ -147,13 +146,16 @@ pub(crate) struct McpUsageRecorder {
 impl McpUsageRecorder {
     pub(crate) fn start(data_root: PathBuf) -> Self {
         let mut control_resolver = crate::config::LocalUsageConfigResolver::default();
+        let revision_before = ControlFileRevision::capture(&data_root);
         let enabled = control_resolver.resolve(&data_root).effective_on_startup();
+        let revision_after = ControlFileRevision::capture(&data_root);
         Self {
             data_root,
             enabled,
             control_resolver,
+            control_revision: stable_control_revision(revision_before, revision_after),
             context: EphemeralContextCorrelation::default(),
-            context_store_revision: None,
+            context_generation: None,
             #[cfg(test)]
             trace: None,
         }
@@ -166,32 +168,103 @@ impl McpUsageRecorder {
         duration: Duration,
         serialized_response_bytes: usize,
     ) {
+        self.record_delivered_with_store_hook(
+            invocation,
+            response,
+            duration,
+            serialized_response_bytes,
+            || {},
+        );
+    }
+
+    fn record_delivered_with_store_hook<T>(
+        &mut self,
+        invocation: McpInvocation,
+        response: &Value,
+        duration: Duration,
+        serialized_response_bytes: usize,
+        after_generation_check: impl FnOnce() -> T,
+    ) {
         self.refresh_control();
-        if self.enabled {
-            self.discard_context_after_store_change();
-            let mut operation = invocation.completed(response, duration, serialized_response_bytes);
-            let mut pending_context = None;
+        if !self.enabled {
+            return;
+        }
+        let operation = invocation.completed(response, duration, serialized_response_bytes);
+        let recorded =
             if operation.outcome == Outcome::Success && invocation.participates_in_correlation() {
-                let mut context = self.context.clone();
+                let is_search = invocation.operation == "search";
+                let mut matching_context = self.context.clone();
+                let mut matching_operation = operation;
                 Self::apply_delivered_correlation(
-                    &mut context,
+                    &mut matching_context,
+                    invocation.clone(),
+                    response,
+                    &mut matching_operation,
+                );
+                let mut stale_context = EphemeralContextCorrelation::default();
+                let mut stale_operation = operation;
+                Self::apply_delivered_correlation(
+                    &mut stale_context,
                     invocation,
                     response,
-                    &mut operation,
+                    &mut stale_operation,
                 );
-                pending_context = Some(context);
-            }
-            if store::record(&self.data_root, operation).is_ok() {
-                if let Some(context) = pending_context {
-                    self.context = context;
-                }
-                self.refresh_context_store_revision();
-                #[cfg(test)]
-                if let Some(trace) = &self.trace {
-                    trace.lock().unwrap().push("local_usage");
-                }
+                store::record_correlated_with_hook(
+                    &self.data_root,
+                    self.context_generation,
+                    matching_operation,
+                    stale_operation,
+                    after_generation_check,
+                )
+                .map(|commit| {
+                    if is_search {
+                        self.context = if commit.expected_generation_matched {
+                            matching_context
+                        } else {
+                            stale_context
+                        };
+                        self.context_generation =
+                            self.context.has_activity().then_some(commit.generation);
+                    } else if commit.expected_generation_matched {
+                        self.context = matching_context;
+                    } else {
+                        self.clear_context();
+                    }
+                })
+            } else {
+                store::record(&self.data_root, operation).map(|generation| {
+                    if self
+                        .context_generation
+                        .is_some_and(|expected| expected != generation)
+                    {
+                        self.clear_context();
+                    }
+                })
+            };
+        if recorded.is_ok() {
+            #[cfg(test)]
+            if let Some(trace) = &self.trace {
+                trace.lock().unwrap().push("local_usage");
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(in crate::local_usage) fn record_delivered_with_store_hook_for_test<T>(
+        &mut self,
+        invocation: McpInvocation,
+        response: &Value,
+        duration: Duration,
+        serialized_response_bytes: usize,
+        after_generation_check: impl FnOnce() -> T,
+    ) {
+        self.record_delivered_with_store_hook(
+            invocation,
+            response,
+            duration,
+            serialized_response_bytes,
+            after_generation_check,
+        );
     }
 
     #[cfg(test)]
@@ -203,41 +276,29 @@ impl McpUsageRecorder {
     }
 
     fn refresh_control(&mut self) {
-        self.enabled = self
+        let revision_before = ControlFileRevision::capture(&self.data_root);
+        let enabled = self
             .control_resolver
             .resolve(&self.data_root)
             .effective_after(Some(self.enabled));
+        let revision_after = ControlFileRevision::capture(&self.data_root);
+        let control_revision = stable_control_revision(revision_before, revision_after);
+        // A persistent opt-out can be enabled again between two delivered MCP
+        // calls. Treat every observable config-file write as a correlation
+        // barrier even if the currently resolved value is enabled again.
+        if control_revision.is_none()
+            || self.control_revision.as_ref() != control_revision.as_ref()
+            || self.enabled && !enabled
+        {
+            self.clear_context();
+        }
+        self.control_revision = control_revision;
+        self.enabled = enabled;
     }
 
-    /// A reset has no persisted generation marker. Compare only cheap file
-    /// metadata for the SQLite family before carrying transient identities
-    /// into another write. Any external change or uncertain observation is
-    /// treated conservatively as a new generation.
-    fn discard_context_after_store_change(&mut self) {
-        if !self.context.has_activity() {
-            return;
-        }
-        let revision = UsageStoreRevision::capture(&self.data_root);
-        if revision != self.context_store_revision {
-            self.context = EphemeralContextCorrelation::default();
-            self.context_store_revision = None;
-        }
-    }
-
-    /// Advance the transient revision only after the aggregate write commits.
-    /// If the post-write family cannot be observed safely, discard correlation
-    /// rather than risk validating against an uncertain persisted generation.
-    fn refresh_context_store_revision(&mut self) {
-        if !self.context.has_activity() {
-            self.context_store_revision = None;
-            return;
-        }
-        if let Some(revision) = UsageStoreRevision::capture(&self.data_root) {
-            self.context_store_revision = Some(revision);
-        } else {
-            self.context = EphemeralContextCorrelation::default();
-            self.context_store_revision = None;
-        }
+    fn clear_context(&mut self) {
+        self.context = EphemeralContextCorrelation::default();
+        self.context_generation = None;
     }
 
     #[cfg(test)]
@@ -279,77 +340,53 @@ impl McpUsageRecorder {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct UsageStoreRevision {
-    main: UsageStoreFileRevision,
-    wal: Option<UsageStoreFileRevision>,
-    shm: Option<UsageStoreFileRevision>,
+enum ControlFileRevision {
+    Missing,
+    File {
+        len: u64,
+        modified: SystemTime,
+        created: Option<SystemTime>,
+        #[cfg(unix)]
+        device: u64,
+        #[cfg(unix)]
+        inode: u64,
+        #[cfg(unix)]
+        changed_seconds: i64,
+        #[cfg(unix)]
+        changed_nanoseconds: i64,
+    },
 }
 
-impl UsageStoreRevision {
+impl ControlFileRevision {
     fn capture(data_root: &Path) -> Option<Self> {
-        let main_path = store::usage_path(data_root);
-        Some(Self {
-            main: UsageStoreFileRevision::capture_required(&main_path)?,
-            wal: UsageStoreFileRevision::capture_optional(&sqlite_auxiliary_path(
-                &main_path, "-wal",
-            ))?,
-            shm: UsageStoreFileRevision::capture_optional(&sqlite_auxiliary_path(
-                &main_path, "-shm",
-            ))?,
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct UsageStoreFileRevision {
-    len: u64,
-    modified: SystemTime,
-    created: Option<SystemTime>,
-    #[cfg(unix)]
-    device: u64,
-    #[cfg(unix)]
-    inode: u64,
-    #[cfg(unix)]
-    changed_seconds: i64,
-    #[cfg(unix)]
-    changed_nanoseconds: i64,
-}
-
-impl UsageStoreFileRevision {
-    fn capture_required(path: &Path) -> Option<Self> {
-        Self::from_metadata(path.symlink_metadata().ok()?)
-    }
-
-    fn capture_optional(path: &Path) -> Option<Option<Self>> {
-        match path.symlink_metadata() {
-            Ok(metadata) => Self::from_metadata(metadata).map(Some),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(None),
+        let path = crate::config::AppConfig::config_path(data_root);
+        match path.metadata() {
+            Ok(metadata) if metadata.is_file() => Some(Self::File {
+                len: metadata.len(),
+                modified: metadata.modified().ok()?,
+                created: metadata.created().ok(),
+                #[cfg(unix)]
+                device: metadata.dev(),
+                #[cfg(unix)]
+                inode: metadata.ino(),
+                #[cfg(unix)]
+                changed_seconds: metadata.ctime(),
+                #[cfg(unix)]
+                changed_nanoseconds: metadata.ctime_nsec(),
+            }),
+            Ok(_) => None,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(Self::Missing),
             Err(_) => None,
         }
     }
-
-    fn from_metadata(metadata: fs::Metadata) -> Option<Self> {
-        if !metadata.file_type().is_file() {
-            return None;
-        }
-        Some(Self {
-            len: metadata.len(),
-            modified: metadata.modified().ok()?,
-            created: metadata.created().ok(),
-            #[cfg(unix)]
-            device: metadata.dev(),
-            #[cfg(unix)]
-            inode: metadata.ino(),
-            #[cfg(unix)]
-            changed_seconds: metadata.ctime(),
-            #[cfg(unix)]
-            changed_nanoseconds: metadata.ctime_nsec(),
-        })
-    }
 }
 
-fn sqlite_auxiliary_path(path: &Path, suffix: &str) -> PathBuf {
-    let mut value = OsString::from(path.as_os_str());
-    value.push(suffix);
-    PathBuf::from(value)
+fn stable_control_revision(
+    before: Option<ControlFileRevision>,
+    after: Option<ControlFileRevision>,
+) -> Option<ControlFileRevision> {
+    match (before, after) {
+        (Some(before), Some(after)) if before == after => Some(after),
+        _ => None,
+    }
 }

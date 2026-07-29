@@ -68,6 +68,28 @@ fn daily_upsert_uses_closed_content_free_dimensions() {
     }
     assert!(columns.contains(&"ctx_version".to_owned()));
     assert!(columns.contains(&"citation_count".to_owned()));
+    let maintenance_columns = conn
+        .prepare("PRAGMA table_info(maintenance)")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        maintenance_columns,
+        ["singleton", "last_retention_day", "store_generation"]
+    );
+    let tables = conn
+        .prepare(
+            "SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' \
+             ORDER BY name",
+        )
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(tables, ["daily_usage", "maintenance"]);
 }
 
 #[test]
@@ -436,6 +458,7 @@ fn record_and_reset_reject_constraint_bypassed_rows_without_mutation() {
     for tamper in [
         "UPDATE daily_usage SET calls = -1",
         "UPDATE maintenance SET singleton = 2",
+        "UPDATE maintenance SET store_generation = -1",
         "UPDATE daily_usage SET operation = 'blame', value_class = 'empty', \
          target_type = 'file', pro_outcome = 'possible', result_action = 'blame'",
     ] {
