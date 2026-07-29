@@ -175,14 +175,14 @@ pub use provider::source_backed::{
     source_backed_route_constructor, source_backed_route_inventory, CrushProjectDatabaseV0,
     CrushProjectInventoryObservationV0, CrushProjectInventorySourceV0,
     SourceBackedAutomaticRegistryBuild, SourceBackedAutomaticRegistryIssue,
-    SourceBackedAutomaticUnavailableReason, SourceBackedCoordinatorError,
-    SourceBackedCoordinatorResult, SourceBackedGenerationSink, SourceBackedHydrationSupport,
-    SourceBackedProviderRegistry, SourceBackedProviderRouteMetadata, SourceBackedRefreshExecutor,
-    SourceBackedRefreshProgress, SourceBackedRefreshReceipt, SourceBackedResolverRegistry,
-    SourceBackedRevalidationTarget, SourceBackedRoute, SourceBackedRouteConstructor,
-    SourceBackedRouteDriver, SourceBackedRouteError, SourceBackedRouteErrorKind,
-    SourceBackedRouteMetadata, SourceBackedRouteResult, SourceBackedRouteSelection,
-    SourceBackedSelectorAuthority, LANDED_SOURCE_BACKED_ROUTES,
+    SourceBackedAutomaticUnavailableReason, SourceBackedCertifiedRemoval,
+    SourceBackedCoordinatorError, SourceBackedCoordinatorResult, SourceBackedGenerationSink,
+    SourceBackedHydrationSupport, SourceBackedProviderRegistry, SourceBackedProviderRouteMetadata,
+    SourceBackedRefreshExecutor, SourceBackedRefreshProgress, SourceBackedRefreshReceipt,
+    SourceBackedResolverRegistry, SourceBackedRevalidationTarget, SourceBackedRoute,
+    SourceBackedRouteConstructor, SourceBackedRouteDriver, SourceBackedRouteError,
+    SourceBackedRouteErrorKind, SourceBackedRouteMetadata, SourceBackedRouteResult,
+    SourceBackedRouteSelection, SourceBackedSelectorAuthority, LANDED_SOURCE_BACKED_ROUTES,
 };
 
 #[cfg(test)]
