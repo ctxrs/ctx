@@ -203,8 +203,6 @@ fn hydrate_task_candidate(
     builder: &mut WarpNativePageEmitter<'_>,
     counters: &mut WarpNativeCounters,
 ) -> Result<()> {
-    #[cfg(test)]
-    trace_native_task_hydration(candidate.rowid);
     let mut rows = hydration.query([candidate.rowid])?;
     let row = rows.next()?.ok_or_else(|| {
         CaptureError::InvalidPayload(format!(

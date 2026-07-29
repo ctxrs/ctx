@@ -218,31 +218,3 @@ fn authoritative_decoder_edge_payload_preserves_forward_compatible_semantics() {
     assert_eq!(snapshots[3].0["metadata"]["event_suffix"], "message");
     assert_eq!(snapshots[3].1, "tool result: read_file\nedge output");
 }
-
-#[test]
-fn result_profile_returns_explicit_fields_without_display_labels() {
-    let message = json!({"Agent": {"tool_results": {
-        "call-1": {
-            "tool_name": "shell",
-            "is_error": true,
-            "content": [
-                {"Text": "first"},
-                {"Image": {"source": "ignored"}}
-            ],
-            "output": "second"
-        }
-    }}});
-    assert_eq!(
-        zed_result_content(&message).as_deref(),
-        Some("first\nsecond")
-    );
-
-    let label_only = json!({"Agent": {"tool_results": {
-        "call-1": {"tool_name": "shell", "is_error": false}
-    }}});
-    assert_eq!(zed_result_content(&label_only), None);
-    assert_eq!(
-        zed_result_content(&json!({"User": {"content": [{"Text": "not a result"}]}})),
-        None
-    );
-}

@@ -27,13 +27,6 @@ mod model;
 mod query;
 pub(crate) mod source_backed;
 
-// Consumed by the provider registration seam once Zed is enabled there.
-#[allow(unused_imports)]
-pub(super) use source_backed::{
-    hydrate_zed_locator_v0, ZedHydratedRecordV0, ZedLocatorResolverV0, ZedSourceBackedErrorV0,
-    ZedSourceBackedResultV0,
-};
-
 const ZED_SNAPSHOT_ACQUISITION_ATTEMPTS: usize = 3;
 const ZED_SOURCE_INVALID_REASON: &str = "Zed SQLite source must be a regular non-symlink file";
 const ZED_SIDECAR_INVALID_REASON: &str = "Zed SQLite sidecar must be a regular non-symlink file";

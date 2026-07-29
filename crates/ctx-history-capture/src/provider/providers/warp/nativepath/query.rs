@@ -4,8 +4,6 @@ mod tasks;
 use conversations::{emit_sessions_and_hierarchy, scan_conversations};
 use tasks::scan_tasks;
 
-#[cfg(test)]
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use chrono::{DateTime, NaiveDateTime, Utc};
@@ -33,12 +31,6 @@ const WARP_SESSION_METADATA_MAX_BYTES: usize = 64 * 1024;
 const WARP_ORDERING_KEY_MAX_BYTES: usize = 240 * 1024;
 const WARP_NATIVE_SQLITE_CONVERSATION_ROW_OVERHEAD_BYTES: u64 = 64 * 4;
 const WARP_NATIVE_SQLITE_ROW_OVERHEAD_BYTES: u64 = 64 * 5;
-
-#[cfg(test)]
-thread_local! {
-    static WARP_NATIVE_TASK_HYDRATION_ROWIDS: RefCell<Option<Vec<i64>>> =
-        const { RefCell::new(None) };
-}
 
 #[derive(Debug)]
 struct WarpHierarchyNode {
@@ -293,27 +285,6 @@ fn hash_source_text_row<const N: usize>(
         hash_bytes(hasher, value.as_bytes())?;
     }
     Ok(())
-}
-
-#[cfg(test)]
-fn trace_native_task_hydration(rowid: i64) {
-    WARP_NATIVE_TASK_HYDRATION_ROWIDS.with(|trace| {
-        if let Some(rowids) = trace.borrow_mut().as_mut() {
-            rowids.push(rowid);
-        }
-    });
-}
-
-#[cfg(test)]
-pub(super) fn start_native_task_hydration_trace() {
-    WARP_NATIVE_TASK_HYDRATION_ROWIDS.with(|trace| *trace.borrow_mut() = Some(Vec::new()));
-}
-
-#[cfg(test)]
-pub(super) fn take_native_task_hydration_trace() -> Vec<i64> {
-    WARP_NATIVE_TASK_HYDRATION_ROWIDS
-        .with(|trace| trace.borrow_mut().take())
-        .unwrap_or_default()
 }
 
 fn merge_decode_counters(counters: &mut WarpNativeCounters, decoded: WarpDecodeCounters) {

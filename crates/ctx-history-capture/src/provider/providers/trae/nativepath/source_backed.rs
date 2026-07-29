@@ -68,17 +68,11 @@ pub(crate) type TraeSourceBackedResultV0<T> = std::result::Result<T, TraeSourceB
 #[derive(Debug, Clone)]
 pub(crate) struct TraeSourceBackedPageV0 {
     pub(crate) documents: Vec<LexicalDocument>,
-    pub(crate) rejections: Vec<ProviderImportFailure>,
-    pub(crate) complete_records: u64,
-    pub(crate) retained_records: u64,
-    pub(crate) ignored_records: u64,
-    pub(crate) terminal: bool,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct TraeSourceBackedScanV0 {
     pub(crate) source: CertifiedSource,
-    pub(crate) emitted_pages: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,8 +95,6 @@ pub(crate) fn scan_trae_source_backed_explicit_v0(
     let revision_digest = source_revision_digest(&authority.source_revision);
     let mut scanner = TraeScanner::new(&authority, TraeFrontier::default());
     let mut counts = ScannedSourceCounts::default();
-    let mut emitted_pages = 0_u64;
-
     while let Some(page) = authority
         .database
         .read(&canonical_path, |conn| scanner.next_page(conn))?
@@ -133,16 +125,7 @@ pub(crate) fn scan_trae_source_backed_explicit_v0(
         counts.rejected_records = checked_add(counts.rejected_records, rejected_records)?;
         counts.ignored_records = checked_add(counts.ignored_records, ignored_records)?;
         counts.indexed_documents = checked_add(counts.indexed_documents, retained_records)?;
-        emitted_pages = checked_add(emitted_pages, 1)?;
-
-        emit(TraeSourceBackedPageV0 {
-            documents,
-            rejections: page.rejections,
-            complete_records,
-            retained_records,
-            ignored_records,
-            terminal: page.terminal,
-        })?;
+        emit(TraeSourceBackedPageV0 { documents })?;
     }
 
     authority.database.revalidate()?;
@@ -155,10 +138,7 @@ pub(crate) fn scan_trae_source_backed_explicit_v0(
         scanner.source_content_digest(),
         counts,
     )?;
-    Ok(TraeSourceBackedScanV0 {
-        source,
-        emitted_pages,
-    })
+    Ok(TraeSourceBackedScanV0 { source })
 }
 
 pub(crate) fn hydrate_trae_source_backed_locator_v0(
@@ -441,8 +421,6 @@ mod tests {
         assert_eq!(scan.source.counts().retained_records, 2);
         assert_eq!(scan.source.counts().indexed_documents, 2);
         assert!(scan.source.counts().certified_bytes > 0);
-        assert!(scan.emitted_pages > 0);
-        assert!(pages.last().is_some_and(|page| page.terminal));
         let documents = pages
             .iter()
             .flat_map(|page| page.documents.iter())

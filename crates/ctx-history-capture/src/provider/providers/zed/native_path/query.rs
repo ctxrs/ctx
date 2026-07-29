@@ -33,7 +33,6 @@ const ZED_RELATIONSHIP_MAX_DEPTH: usize = 1_024;
 
 pub(crate) struct ZedNativeQueryResult {
     pub(crate) source_integrity_digest: String,
-    pub(crate) pages_emitted: u64,
     pub(crate) counters: ZedNativeCounters,
 }
 
@@ -493,10 +492,9 @@ pub(crate) fn scan_zed_native_snapshot(
     }
 
     let source_integrity_digest = hex_digest(source_hasher.finalize().into());
-    let pages_emitted = builder.finish()?;
+    builder.finish()?;
     Ok(ZedNativeQueryResult {
         source_integrity_digest,
-        pages_emitted,
         counters,
     })
 }
