@@ -29,9 +29,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 #[cfg(test)]
-use ctx_history_core::{database_path, utc_now};
-#[cfg(test)]
-use ctx_history_store::Store;
+use ctx_history_core::utc_now;
 
 #[cfg(test)]
 use crate::config::{AppConfig, CONFIG_FILE};
@@ -63,9 +61,7 @@ pub(crate) use reports::semantic_worker_report_configured_json;
 #[cfg(test)]
 use reports::*;
 mod document;
-pub(in crate::semantic) use document::{
-    semantic_event_document_from_store_projection, SemanticEventDocument,
-};
+pub(in crate::semantic) use document::SemanticEventDocument;
 mod vector_store;
 #[cfg(test)]
 use vector_store::*;
