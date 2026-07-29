@@ -19,7 +19,7 @@ use super::super::{
 use super::{
     journal::{
         self, InstallTransactionJournal, JournalPath, JournalPathIdentity, JournalPathKind,
-        JournalPathState, JournalPhase, LegacyInstallTransactionJournal, LegacyJournalPhase,
+        JournalPathState, JournalPhase,
     },
     ApplyResult, RecoveryOutcome,
 };
@@ -257,131 +257,6 @@ pub(super) fn recover_transaction(
             "Unix install transaction has an invalid recovery phase"
         )),
     }
-}
-
-/// Recover the exact v0.25 journal format after strict path validation.  The
-/// old format did not persist path identities, so it is never accepted as a
-/// new journal; it is consumed once from the invoking data root and removed.
-pub(super) fn recover_legacy_transaction(
-    data_root: &Path,
-    transaction: &LegacyInstallTransactionJournal,
-) -> Result<RecoveryOutcome> {
-    match transaction.phase {
-        LegacyJournalPhase::Publishing => {
-            let mut restored_executable = None;
-            for path in transaction.paths.iter().rev() {
-                let staged = legacy_present(&path.staged)?;
-                let target = legacy_present(&path.target)?;
-                let backup = legacy_present(&path.backup)?;
-                if backup {
-                    if staged {
-                        // v0.25 could crash after the old target was moved out
-                        // and before the staged path was published.  A runtime
-                        // directory has no atomic-replace hard-link behavior,
-                        // so staged+backup with no target must restore the
-                        // backup before the staged directory is discarded.
-                        // The one safe discard case is its file publication
-                        // path: both the original target and staged file are
-                        // still present, so the backup is redundant.
-                        if target {
-                            if path.kind == JournalPathKind::Directory {
-                                return Err(anyhow!(
-                                    "v0.25 interrupted {} has both target and staged directories",
-                                    path.label
-                                ));
-                            }
-                            legacy_remove(&path.backup, path.kind)?;
-                        } else {
-                            fs::rename(&path.backup, &path.target).with_context(|| {
-                                format!(
-                                    "restore v0.25 interrupted {} from {}",
-                                    path.label,
-                                    path.backup.display()
-                                )
-                            })?;
-                            if path.label == "ctx binary" {
-                                restored_executable = Some(path.target.clone());
-                            }
-                        }
-                    } else {
-                        if target {
-                            legacy_remove(&path.target, path.kind)?;
-                        }
-                        fs::rename(&path.backup, &path.target).with_context(|| {
-                            format!(
-                                "restore v0.25 interrupted {} from {}",
-                                path.label,
-                                path.backup.display()
-                            )
-                        })?;
-                        if path.label == "ctx binary" {
-                            restored_executable = Some(path.target.clone());
-                        }
-                    }
-                } else if !staged && target {
-                    legacy_remove(&path.target, path.kind)?;
-                }
-                if staged {
-                    legacy_remove(&path.staged, path.kind)?;
-                }
-                if let Some(parent) = path.target.parent() {
-                    sync_directory(parent)?;
-                }
-            }
-            journal::remove_legacy(data_root)?;
-            Ok(RecoveryOutcome::RolledBack {
-                restored_executable,
-            })
-        }
-        LegacyJournalPhase::Committed => {
-            for path in &transaction.paths {
-                if !legacy_present(&path.target)? || legacy_present(&path.staged)? {
-                    return Err(anyhow!(
-                        "v0.25 committed install transaction has incomplete {} publication",
-                        path.label
-                    ));
-                }
-            }
-            for path in &transaction.paths {
-                if !legacy_present(&path.backup)? {
-                    continue;
-                }
-                if path.label == "ctx binary" {
-                    remove_owner_regular_file(&backup_path(&transaction.install_path))?;
-                    fs::rename(&path.backup, backup_path(&transaction.install_path))?;
-                } else {
-                    legacy_remove(&path.backup, path.kind)?;
-                }
-                if let Some(parent) = path.target.parent() {
-                    sync_directory(parent)?;
-                }
-            }
-            journal::remove_legacy(data_root)?;
-            Ok(RecoveryOutcome::Committed)
-        }
-    }
-}
-
-fn legacy_present(path: &Path) -> Result<bool> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if !metadata.file_type().is_symlink() => Ok(true),
-        Ok(_) => Err(anyhow!(
-            "v0.25 journal path is a symlink: {}",
-            path.display()
-        )),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => {
-            Err(error).with_context(|| format!("inspect v0.25 journal path {}", path.display()))
-        }
-    }
-}
-
-fn legacy_remove(path: &Path, kind: JournalPathKind) -> Result<()> {
-    match kind {
-        JournalPathKind::File => fs::remove_file(path),
-        JournalPathKind::Directory => fs::remove_dir_all(path),
-    }
-    .with_context(|| format!("remove v0.25 journal path {}", path.display()))
 }
 
 #[allow(dead_code)]

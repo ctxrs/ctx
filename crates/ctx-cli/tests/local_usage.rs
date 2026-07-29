@@ -255,11 +255,8 @@ fn usage_reports_are_literal_read_only_and_never_create_or_increment_the_store()
 }
 
 #[test]
-fn usage_actions_preserve_opaque_prior_epoch_and_fail_with_stable_json_for_owned_inputs() {
+fn usage_actions_fail_with_stable_json_for_owned_inputs() {
     let temp = tempdir();
-    let prior_epoch_path = temp.path().join("work.sqlite");
-    let prior_epoch_bytes = b"opaque v0.25 prior-epoch sentinel";
-    fs::write(&prior_epoch_path, prior_epoch_bytes).unwrap();
     let enabled_action = json_output(enabled(ctx(&temp).args([
         "status",
         "--usage",
@@ -307,13 +304,6 @@ fn usage_actions_preserve_opaque_prior_epoch_and_fail_with_stable_json_for_owned
         "usage_reset_failed"
     );
     assert!(!encoded.contains("SECRET_STORE_PATH"));
-    assert_eq!(fs::read(&prior_epoch_path).unwrap(), prior_epoch_bytes);
-    for suffix in ["-wal", "-shm", "-journal"] {
-        assert!(
-            !PathBuf::from(format!("{}{suffix}", prior_epoch_path.display())).exists(),
-            "local usage action created a prior-epoch SQLite auxiliary: {suffix}"
-        );
-    }
 }
 
 #[test]
@@ -503,9 +493,6 @@ fn environment_disable_creates_no_sidecar() {
 #[test]
 fn foreground_sql_uses_fresh_projection_and_is_recorded_once_as_result_bearing() {
     let temp = tempdir();
-    let prior_epoch_path = temp.path().join("work.sqlite");
-    let prior_epoch_bytes = b"not sqlite: opaque v0.25 prior-epoch sentinel";
-    fs::write(&prior_epoch_path, prior_epoch_bytes).unwrap();
 
     let sql = json_output(enabled(ctx(&temp).args([
         "sql",
@@ -514,13 +501,6 @@ fn foreground_sql_uses_fresh_projection_and_is_recorded_once_as_result_bearing()
     ])));
     assert_eq!(sql["rows"], json!([[1]]));
     assert!(temp.path().join("relational.sqlite").is_file());
-    assert_eq!(fs::read(&prior_epoch_path).unwrap(), prior_epoch_bytes);
-    for suffix in ["-wal", "-shm", "-journal"] {
-        assert!(
-            !PathBuf::from(format!("{}{suffix}", prior_epoch_path.display())).exists(),
-            "source-backed SQL opened the opaque prior epoch and created {suffix}"
-        );
-    }
 
     let report = json_output(enabled(ctx(&temp).args([
         "stats",

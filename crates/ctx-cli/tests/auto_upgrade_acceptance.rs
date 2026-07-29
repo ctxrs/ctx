@@ -175,58 +175,9 @@ mod unix {
     }
 
     #[derive(Clone, Copy, Debug)]
-    enum RecoveryJournal {
-        CurrentPrepared,
-        LegacyV025,
-    }
-
-    #[derive(Clone, Copy, Debug)]
     enum RecoveryOwner {
         Automatic,
         Explicit,
-    }
-
-    fn write_legacy_v025_committed_journal(
-        data_root: &Path,
-        binary: &Path,
-        attempt_id: &str,
-    ) -> (PathBuf, PathBuf) {
-        let marker = install_marker_path(binary);
-        let binary_name = binary.file_name().unwrap().to_str().unwrap();
-        let marker_name = marker.file_name().unwrap().to_str().unwrap();
-        let binary_backup = binary.with_file_name(format!(
-            ".{binary_name}.ctx-upgrade-{attempt_id}.binary.previous"
-        ));
-        fs::copy(binary, &binary_backup).unwrap();
-        let journal_path = data_root.join("upgrade-install-transaction.json");
-        fs::write(
-            &journal_path,
-            serde_json::to_vec_pretty(&json!({
-                "schema_version": 1,
-                "transaction_id": attempt_id,
-                "phase": "committed",
-                "install_path": binary,
-                "paths": [
-                    {
-                        "label": "ctx binary",
-                        "staged": binary.with_file_name(format!(".ctx-upgrade-{attempt_id}.new")),
-                        "target": binary,
-                        "backup": binary_backup,
-                        "kind": "file"
-                    },
-                    {
-                        "label": "ctx install marker",
-                        "staged": marker.with_file_name(format!(".ctx-upgrade-{attempt_id}.install.json.new")),
-                        "target": marker,
-                        "backup": marker.with_file_name(format!(".{marker_name}.ctx-upgrade-{attempt_id}.marker.previous")),
-                        "kind": "file"
-                    }
-                ]
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        (journal_path, binary_backup)
     }
 
     fn acknowledgement_snapshot(binary: &Path) -> Vec<(PathBuf, Vec<u8>)> {
@@ -274,77 +225,35 @@ mod unix {
         fs::write(journal_path, replacement_bytes).unwrap();
     }
 
-    fn write_completed_attempt_state(binary: &Path, attempt_id: &str) {
-        fs::write(
-            scheduler_state_path(binary),
-            serde_json::to_vec_pretty(&json!({
-                "schema_version": 1,
-                "status": "error",
-                "attempt_id": attempt_id,
-                "attempt_source": "daemon",
-                "last_attempt_at": "2026-07-24T00:00:00Z",
-                "last_attempt_finished_at": "2026-07-24T00:00:01Z",
-                "consecutive_failures": 1,
-                "error": "attempt completed before a stale recovery claimant acquired ownership"
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-    }
-
-    fn prove_stale_recovery_observation_is_rejected(
-        journal_kind: RecoveryJournal,
-        recovery_owner: RecoveryOwner,
-    ) {
+    fn prove_stale_recovery_observation_is_rejected(recovery_owner: RecoveryOwner) {
         let installation = tempdir();
         let release = fake_release(&installation, "9.9.9");
         let binary = managed_hook_candidate(
             &installation,
-            &format!("ia_stale_recovery_{journal_kind:?}_{recovery_owner:?}"),
+            &format!("ia_stale_current_recovery_{recovery_owner:?}"),
         );
         let binary_before = fs::read(&binary).unwrap();
         let owner = tempdir();
         initialize_source_backed_epoch(owner.path());
 
-        let (attempt_id, journal_path) = match journal_kind {
-            RecoveryJournal::CurrentPrepared => {
-                let prepared = managed_daemon_with_timing(&owner, &release, &binary, 1, 1)
-                    .env("CTX_DAEMON_AUTOSTART_OFF", "1")
-                    .env("CTX_UPGRADE_FAIL_APPLYING_STATE_WRITE_FOR_TESTS", "1")
-                    .output()
-                    .unwrap();
-                assert!(prepared.status.success(), "{prepared:?}");
-                let journal_path = binary.with_file_name(".ctx.upgrade-install-transaction.json");
-                let journal: Value =
-                    serde_json::from_slice(&fs::read(&journal_path).unwrap()).unwrap();
-                assert_eq!(journal["phase"], "prepared");
-                (
-                    journal["attempt_id"].as_str().unwrap().to_owned(),
-                    journal_path,
-                )
-            }
-            RecoveryJournal::LegacyV025 => {
-                let attempt_id = format!(
-                    "stale-legacy-{}",
-                    match recovery_owner {
-                        RecoveryOwner::Automatic => "automatic",
-                        RecoveryOwner::Explicit => "explicit",
-                    }
-                );
-                let (journal_path, _) =
-                    write_legacy_v025_committed_journal(owner.path(), &binary, &attempt_id);
-                write_completed_attempt_state(&binary, &attempt_id);
-                (attempt_id, journal_path)
-            }
-        };
+        let prepared = managed_daemon_with_timing(&owner, &release, &binary, 1, 1)
+            .env("CTX_DAEMON_AUTOSTART_OFF", "1")
+            .env("CTX_UPGRADE_FAIL_APPLYING_STATE_WRITE_FOR_TESTS", "1")
+            .output()
+            .unwrap();
+        assert!(prepared.status.success(), "{prepared:?}");
+        let journal_path = binary.with_file_name(".ctx.upgrade-install-transaction.json");
+        let journal: Value = serde_json::from_slice(&fs::read(&journal_path).unwrap()).unwrap();
+        assert_eq!(journal["phase"], "prepared");
+        let attempt_id = journal["attempt_id"].as_str().unwrap().to_owned();
         let state_before = fs::read(scheduler_state_path(&binary)).unwrap();
         let acknowledgements_before = acknowledgement_snapshot(&binary);
         let pause = installation
             .path()
-            .join(format!("stale-{journal_kind:?}-{recovery_owner:?}"));
-        let stale_rejection = installation.path().join(format!(
-            "stale-rejected-{journal_kind:?}-{recovery_owner:?}"
-        ));
+            .join(format!("stale-current-{recovery_owner:?}"));
+        let stale_rejection = installation
+            .path()
+            .join(format!("stale-current-rejected-{recovery_owner:?}"));
 
         std::thread::scope(|scope| {
             let claimant = scope.spawn(|| {
@@ -379,20 +288,7 @@ mod unix {
             });
 
             let replacement_attempt_id = format!("{attempt_id}-replacement");
-            match journal_kind {
-                RecoveryJournal::CurrentPrepared => replace_current_recovery_attempt(
-                    &journal_path,
-                    &attempt_id,
-                    &replacement_attempt_id,
-                ),
-                RecoveryJournal::LegacyV025 => {
-                    write_legacy_v025_committed_journal(
-                        owner.path(),
-                        &binary,
-                        &replacement_attempt_id,
-                    );
-                }
-            }
+            replace_current_recovery_attempt(&journal_path, &attempt_id, &replacement_attempt_id);
             let replacement_journal = fs::read(&journal_path).unwrap();
             let terminal_state = fs::read(scheduler_state_path(&binary)).unwrap();
             assert_eq!(terminal_state, state_before);
@@ -435,33 +331,33 @@ mod unix {
             assert_eq!(
                 fs::read(scheduler_state_path(&binary)).unwrap(),
                 terminal_state,
-                "{journal_kind:?}/{recovery_owner:?} rewrote terminal scheduler state"
+                "{recovery_owner:?} rewrote terminal scheduler state"
             );
             assert_eq!(
                 fs::read(&journal_path).unwrap(),
                 replacement_journal,
-                "{journal_kind:?}/{recovery_owner:?} mutated replacement recovery authority"
+                "{recovery_owner:?} mutated replacement recovery authority"
             );
             assert_eq!(
                 fs::read(&binary).unwrap(),
                 binary_before,
-                "{journal_kind:?}/{recovery_owner:?} mutated the installation"
+                "{recovery_owner:?} mutated the installation"
             );
             assert_eq!(
                 acknowledgement_snapshot(&binary),
                 acknowledgements_before,
-                "{journal_kind:?}/{recovery_owner:?} began a daemon handoff from stale discovery"
+                "{recovery_owner:?} began a daemon handoff from stale discovery"
             );
         });
         assert_source_backed_epoch_remained_fresh(owner.path());
     }
 
-    fn prove_recovery_quiescence(journal_kind: RecoveryJournal, recovery_owner: RecoveryOwner) {
+    fn prove_recovery_quiescence(recovery_owner: RecoveryOwner) {
         let installation = tempdir();
         let release = fake_release(&installation, "9.9.9");
         let binary = managed_hook_candidate(
             &installation,
-            &format!("ia_recovery_{journal_kind:?}_{recovery_owner:?}"),
+            &format!("ia_current_recovery_{recovery_owner:?}"),
         );
         let binary_before = fs::read(&binary).unwrap();
         let owner = tempdir();
@@ -474,41 +370,19 @@ mod unix {
         )
         .unwrap();
 
-        let (attempt_id, journal_path, legacy_backup) = match journal_kind {
-            RecoveryJournal::CurrentPrepared => {
-                let prepared = managed_daemon_with_timing(&owner, &release, &binary, 1, 1)
-                    .env("CTX_DAEMON_AUTOSTART_OFF", "1")
-                    .env("CTX_UPGRADE_FAIL_APPLYING_STATE_WRITE_FOR_TESTS", "1")
-                    .output()
-                    .unwrap();
-                assert!(prepared.status.success(), "{prepared:?}");
-                let state: Value =
-                    serde_json::from_slice(&fs::read(scheduler_state_path(&binary)).unwrap())
-                        .unwrap();
-                assert_eq!(state["status"], "error");
-                let journal_path = binary.with_file_name(".ctx.upgrade-install-transaction.json");
-                let journal: Value =
-                    serde_json::from_slice(&fs::read(&journal_path).unwrap()).unwrap();
-                assert_eq!(journal["phase"], "prepared");
-                (
-                    journal["attempt_id"].as_str().unwrap().to_owned(),
-                    journal_path,
-                    None,
-                )
-            }
-            RecoveryJournal::LegacyV025 => {
-                let attempt_id = format!(
-                    "legacy-{}",
-                    match recovery_owner {
-                        RecoveryOwner::Automatic => "automatic",
-                        RecoveryOwner::Explicit => "explicit",
-                    }
-                );
-                let (journal_path, backup) =
-                    write_legacy_v025_committed_journal(owner.path(), &binary, &attempt_id);
-                (attempt_id, journal_path, Some(backup))
-            }
-        };
+        let prepared = managed_daemon_with_timing(&owner, &release, &binary, 1, 1)
+            .env("CTX_DAEMON_AUTOSTART_OFF", "1")
+            .env("CTX_UPGRADE_FAIL_APPLYING_STATE_WRITE_FOR_TESTS", "1")
+            .output()
+            .unwrap();
+        assert!(prepared.status.success(), "{prepared:?}");
+        let state: Value =
+            serde_json::from_slice(&fs::read(scheduler_state_path(&binary)).unwrap()).unwrap();
+        assert_eq!(state["status"], "error");
+        let journal_path = binary.with_file_name(".ctx.upgrade-install-transaction.json");
+        let journal: Value = serde_json::from_slice(&fs::read(&journal_path).unwrap()).unwrap();
+        assert_eq!(journal["phase"], "prepared");
+        let attempt_id = journal["attempt_id"].as_str().unwrap().to_owned();
         let journal_before = fs::read(&journal_path).unwrap();
         if matches!(recovery_owner, RecoveryOwner::Explicit) {
             rewrite_fake_release_metadata(&release, |metadata| {
@@ -520,7 +394,7 @@ mod unix {
         }
         let pause = installation
             .path()
-            .join(format!("recovering-{journal_kind:?}-{recovery_owner:?}"));
+            .join(format!("recovering-current-{recovery_owner:?}"));
 
         std::thread::scope(|scope| {
             let second_handle = scope.spawn(|| {
@@ -563,22 +437,16 @@ mod unix {
             assert_eq!(
                 fs::read(&binary).unwrap(),
                 binary_before,
-                "{journal_kind:?}/{recovery_owner:?} mutated the executable before quiescence"
+                "{recovery_owner:?} mutated the executable before quiescence"
             );
             assert_eq!(
                 fs::read(&journal_path).unwrap(),
                 journal_before,
-                "{journal_kind:?}/{recovery_owner:?} mutated its journal before quiescence"
+                "{recovery_owner:?} mutated its journal before quiescence"
             );
-            if let Some(backup) = legacy_backup.as_ref() {
-                assert!(
-                    backup.exists(),
-                    "{journal_kind:?}/{recovery_owner:?} consumed a legacy backup before quiescence"
-                );
-            }
             assert!(
                 second_handle.is_finished(),
-                "{journal_kind:?}/{recovery_owner:?} left the opted-out second root running"
+                "{recovery_owner:?} left the opted-out second root running"
             );
             let second_output = second_handle.join().unwrap();
             assert!(second_output.status.success(), "{second_output:?}");
@@ -588,9 +456,7 @@ mod unix {
             assert_eq!(recovering["attempt_id"], attempt_id);
             let second_ack = installation_acknowledgement(&binary, second.path(), &attempt_id)
                 .unwrap_or_else(|| {
-                    panic!(
-                        "{journal_kind:?}/{recovery_owner:?} has no second-root recovery acknowledgement"
-                    )
+                    panic!("{recovery_owner:?} has no second-root recovery acknowledgement")
                 });
             assert_eq!(second_ack["pid"], second_pid);
             let mut contender = ctx_from_binary(&owner, &binary);
@@ -601,17 +467,17 @@ mod unix {
                 .unwrap();
             assert!(
                 !contended.status.success(),
-                "{journal_kind:?}/{recovery_owner:?} allowed a second recovery owner"
+                "{recovery_owner:?} allowed a second recovery owner"
             );
             assert!(
                 String::from_utf8_lossy(&contended.stderr)
                     .contains("upgrade lock is held for interrupted recovery"),
-                "{journal_kind:?}/{recovery_owner:?}: {contended:?}"
+                "{recovery_owner:?}: {contended:?}"
             );
             assert_eq!(
                 fs::read(&journal_path).unwrap(),
                 journal_before,
-                "{journal_kind:?}/{recovery_owner:?} contender mutated recovery state"
+                "{recovery_owner:?} contender mutated recovery state"
             );
 
             let owner_pid = if matches!(recovery_owner, RecoveryOwner::Automatic) {
@@ -626,7 +492,7 @@ mod unix {
             assert!(owner_output.status.success(), "{owner_output:?}");
             assert!(
                 !journal_path.exists(),
-                "{journal_kind:?}/{recovery_owner:?} retained a recovered journal"
+                "{recovery_owner:?} retained a recovered journal"
             );
 
             let mut restarted_second = None;
@@ -657,13 +523,7 @@ mod unix {
             match recovery_owner {
                 RecoveryOwner::Automatic => {
                     assert_eq!(final_state["attempt_id"], attempt_id);
-                    assert_eq!(
-                        final_state["status"],
-                        match journal_kind {
-                            RecoveryJournal::CurrentPrepared => "error",
-                            RecoveryJournal::LegacyV025 => "applied",
-                        }
-                    );
+                    assert_eq!(final_state["status"], "error");
                 }
                 RecoveryOwner::Explicit => {
                     assert_eq!(final_state["status"], "up_to_date");
@@ -940,26 +800,16 @@ mod unix {
     }
 
     #[test]
-    fn current_and_legacy_recovery_quiesce_opted_out_second_root_before_mutation() {
-        for journal in [
-            RecoveryJournal::CurrentPrepared,
-            RecoveryJournal::LegacyV025,
-        ] {
-            for owner in [RecoveryOwner::Automatic, RecoveryOwner::Explicit] {
-                prove_recovery_quiescence(journal, owner);
-            }
+    fn current_recovery_quiesces_opted_out_second_root_before_mutation() {
+        for owner in [RecoveryOwner::Automatic, RecoveryOwner::Explicit] {
+            prove_recovery_quiescence(owner);
         }
     }
 
     #[test]
-    fn stale_current_and_legacy_recovery_discovery_cannot_claim_replacement_attempt() {
-        for journal in [
-            RecoveryJournal::CurrentPrepared,
-            RecoveryJournal::LegacyV025,
-        ] {
-            for owner in [RecoveryOwner::Automatic, RecoveryOwner::Explicit] {
-                prove_stale_recovery_observation_is_rejected(journal, owner);
-            }
+    fn stale_current_recovery_discovery_cannot_claim_replacement_attempt() {
+        for owner in [RecoveryOwner::Automatic, RecoveryOwner::Explicit] {
+            prove_stale_recovery_observation_is_rejected(owner);
         }
     }
 

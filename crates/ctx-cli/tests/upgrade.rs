@@ -633,22 +633,26 @@ fn runtime_install_honors_cli_selected_data_root() {
 
 #[cfg(unix)]
 #[test]
-fn v025_legacy_runtime_recovery_requires_and_honors_the_original_custom_root() {
+fn v025_data_root_journal_is_ignored_without_binary_or_runtime_reexecution() {
     let temp = tempdir();
     let release = fake_release(&temp, "9.9.9");
-    let custom_runtime = temp.path().join("legacy-custom-runtime");
+    let old_runtime_root = temp.path().join("old-runtime");
     let platform = test_platform_key().replace('_', "-");
-    let runtime_target = custom_runtime
+    let runtime_target = old_runtime_root
         .join("onnxruntime")
         .join("1.27.0")
         .join(&platform);
     fs::create_dir_all(&runtime_target).unwrap();
-    fs::write(runtime_target.join("VERSION_NUMBER"), b"1.27.0\n").unwrap();
-    let transaction_id = "legacy-runtime";
+    fs::write(runtime_target.join("VERSION_NUMBER"), b"old runtime\n").unwrap();
+    let transaction_id = "v025-runtime";
     let binary_name = release.target.file_name().unwrap().to_str().unwrap();
     let marker_path = install_marker_path(&release.target);
     let marker_name = marker_path.file_name().unwrap().to_str().unwrap();
     let runtime_name = runtime_target.file_name().unwrap().to_str().unwrap();
+    let binary_backup = release.target.with_file_name(format!(
+        ".{binary_name}.ctx-upgrade-{transaction_id}.binary.previous"
+    ));
+    fs::write(&binary_backup, b"v0.25 binary backup").unwrap();
     let journal = json!({
         "schema_version": 1,
         "transaction_id": transaction_id,
@@ -666,7 +670,7 @@ fn v025_legacy_runtime_recovery_requires_and_honors_the_original_custom_root() {
                 "label": "ctx binary",
                 "staged": release.target.with_file_name(format!(".ctx-upgrade-{transaction_id}.new")),
                 "target": release.target,
-                "backup": release.target.with_file_name(format!(".{binary_name}.ctx-upgrade-{transaction_id}.binary.previous")),
+                "backup": binary_backup,
                 "kind": "file"
             },
             {
@@ -679,31 +683,24 @@ fn v025_legacy_runtime_recovery_requires_and_honors_the_original_custom_root() {
         ]
     });
     let legacy_journal = temp.path().join("upgrade-install-transaction.json");
-    fs::write(
-        &legacy_journal,
-        serde_json::to_vec_pretty(&journal).unwrap(),
-    )
-    .unwrap();
+    let journal_bytes = serde_json::to_vec_pretty(&journal).unwrap();
+    fs::write(&legacy_journal, &journal_bytes).unwrap();
+    let binary_before = fs::read(&release.target).unwrap();
 
-    let missing_root = fake_release_env(
+    let checked = fake_release_env(
         ctx(&temp).args(["upgrade", "check", "--format=json"]),
         &release,
     )
     .output()
     .unwrap();
-    assert!(!missing_root.status.success(), "{missing_root:?}");
-    assert!(String::from_utf8_lossy(&missing_root.stderr).contains("invalid runtime paths"));
-    assert!(legacy_journal.exists());
-
-    let recovered = fake_release_env(
-        ctx(&temp).args(["upgrade", "check", "--format=json"]),
-        &release,
-    )
-    .env("CTX_RUNTIME_DIR", &custom_runtime)
-    .output()
-    .unwrap();
-    assert!(recovered.status.success(), "{recovered:?}");
-    assert!(!legacy_journal.exists());
+    assert!(checked.status.success(), "{checked:?}");
+    assert_eq!(fs::read(&legacy_journal).unwrap(), journal_bytes);
+    assert_eq!(fs::read(&binary_backup).unwrap(), b"v0.25 binary backup");
+    assert_eq!(fs::read(&release.target).unwrap(), binary_before);
+    assert_eq!(
+        fs::read(runtime_target.join("VERSION_NUMBER")).unwrap(),
+        b"old runtime\n"
+    );
 }
 
 #[cfg(unix)]

@@ -75,7 +75,6 @@ pub(in crate::upgrade) enum RecoveryOutcome {
 #[derive(Debug, Clone)]
 pub(in crate::upgrade) struct PendingRecovery {
     pub(in crate::upgrade) attempt_id: String,
-    pub(in crate::upgrade) journal_kind: RecoveryJournalKind,
     /// Validated origin roots from the journal.  An executable-scoped journal
     /// can be discovered by another data root, but recovery must use the
     /// validated roots that created it.
@@ -85,18 +84,6 @@ pub(in crate::upgrade) struct PendingRecovery {
     /// resumed daemon or explicit manual command still owns scheduler
     /// reconciliation and journal removal.
     pub(in crate::upgrade) terminal: Option<TerminalRecovery>,
-}
-
-impl PendingRecovery {
-    pub(in crate::upgrade) fn legacy_v025(&self) -> bool {
-        self.journal_kind == RecoveryJournalKind::LegacyV025
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::upgrade) enum RecoveryJournalKind {
-    Current,
-    LegacyV025,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -263,30 +250,16 @@ pub(in crate::upgrade) fn apply_artifact_for_attempt(
     Ok(result)
 }
 
-pub(in crate::upgrade) fn pending_recovery(data_root: &Path) -> Result<Option<PendingRecovery>> {
-    #[cfg(not(unix))]
-    let _ = data_root;
+pub(in crate::upgrade) fn pending_recovery(_data_root: &Path) -> Result<Option<PendingRecovery>> {
     let install_path = recovery_install_path()?;
     if let Some(transaction) = journal::read(&install_path)? {
         journal::validate(&transaction)?;
         let terminal = terminal_recovery(&transaction);
         return Ok(Some(PendingRecovery {
             attempt_id: transaction.attempt_id,
-            journal_kind: RecoveryJournalKind::Current,
             data_root: transaction.data_root,
             install_path: transaction.install_path,
             terminal,
-        }));
-    }
-    #[cfg(unix)]
-    if let Some(transaction) = journal::read_legacy(data_root)? {
-        journal::validate_legacy(&transaction, data_root)?;
-        return Ok(Some(PendingRecovery {
-            attempt_id: transaction.transaction_id,
-            journal_kind: RecoveryJournalKind::LegacyV025,
-            data_root: data_root.to_path_buf(),
-            install_path: transaction.install_path,
-            terminal: None,
         }));
     }
     Ok(None)
@@ -296,11 +269,8 @@ pub(in crate::upgrade) fn remove_terminal_recovery(
     expected: &PendingRecovery,
     _installation_lock: &super::InstallationLock,
 ) -> Result<()> {
-    match read_matching_recovery(expected, true)? {
-        MatchingRecovery::Current(_) => journal::remove(&expected.install_path),
-        #[cfg(unix)]
-        MatchingRecovery::Legacy(_) => Err(stale_recovery_observation()),
-    }
+    let _ = read_matching_recovery(expected, true)?;
+    journal::remove(&expected.install_path)
 }
 
 pub(in crate::upgrade) fn validate_recovery_observation(
@@ -315,47 +285,34 @@ pub(in crate::upgrade) fn recover_interrupted_install_outcome(
     expected: &PendingRecovery,
     installation_lock: &super::InstallationLock,
 ) -> Result<RecoveryOutcome> {
-    match read_matching_recovery(expected, false)? {
-        MatchingRecovery::Current(mut transaction) => {
-            #[cfg(unix)]
-            let origin_data_root = transaction.data_root.clone();
-            #[cfg(unix)]
-            {
-                let _ = installation_lock;
-                unix::recover_transaction(&origin_data_root, &mut transaction)
-            }
-            #[cfg(windows)]
-            {
-                windows::recover_transaction(&mut transaction, installation_lock)
-            }
-            #[cfg(not(any(unix, windows)))]
-            {
-                let _ = (transaction, installation_lock);
-                Err(anyhow!(
-                    "self-upgrade transaction recovery is unsupported on this platform"
-                ))
-            }
-        }
-        #[cfg(unix)]
-        MatchingRecovery::Legacy(transaction) => {
-            let _ = installation_lock;
-            unix::recover_legacy_transaction(&expected.data_root, &transaction)
-        }
+    let mut transaction = read_matching_recovery(expected, false)?;
+    #[cfg(unix)]
+    let origin_data_root = transaction.data_root.clone();
+    #[cfg(unix)]
+    {
+        let _ = installation_lock;
+        unix::recover_transaction(&origin_data_root, &mut transaction)
+    }
+    #[cfg(windows)]
+    {
+        windows::recover_transaction(&mut transaction, installation_lock)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (transaction, installation_lock);
+        Err(anyhow!(
+            "self-upgrade transaction recovery is unsupported on this platform"
+        ))
     }
 }
 
-#[allow(clippy::large_enum_variant)]
-enum MatchingRecovery {
-    Current(journal::InstallTransactionJournal),
-    #[cfg(unix)]
-    Legacy(journal::LegacyInstallTransactionJournal),
-}
-
-fn read_matching_recovery(expected: &PendingRecovery, terminal: bool) -> Result<MatchingRecovery> {
+fn read_matching_recovery(
+    expected: &PendingRecovery,
+    terminal: bool,
+) -> Result<journal::InstallTransactionJournal> {
     if let Some(transaction) = journal::read(&expected.install_path)? {
         journal::validate(&transaction)?;
-        if expected.journal_kind != RecoveryJournalKind::Current
-            || transaction.attempt_id != expected.attempt_id
+        if transaction.attempt_id != expected.attempt_id
             || transaction.data_root != expected.data_root
             || transaction.install_path != expected.install_path
             || terminal_recovery(&transaction) != expected.terminal
@@ -363,27 +320,8 @@ fn read_matching_recovery(expected: &PendingRecovery, terminal: bool) -> Result<
         {
             return Err(stale_recovery_observation());
         }
-        return Ok(MatchingRecovery::Current(transaction));
+        return Ok(transaction);
     }
-    if expected.journal_kind == RecoveryJournalKind::Current {
-        return Err(stale_recovery_observation());
-    }
-    #[cfg(unix)]
-    {
-        if terminal || expected.terminal.is_some() {
-            return Err(stale_recovery_observation());
-        }
-        let transaction =
-            journal::read_legacy(&expected.data_root)?.ok_or_else(stale_recovery_observation)?;
-        journal::validate_legacy(&transaction, &expected.data_root)?;
-        if transaction.transaction_id != expected.attempt_id
-            || transaction.install_path != expected.install_path
-        {
-            return Err(stale_recovery_observation());
-        }
-        Ok(MatchingRecovery::Legacy(transaction))
-    }
-    #[cfg(not(unix))]
     Err(stale_recovery_observation())
 }
 

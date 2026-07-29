@@ -376,11 +376,7 @@ pub(crate) fn finish_daemon_auto_upgrade(
                                 started.elapsed(),
                             );
                         }
-                        if recovery.legacy_v025() {
-                            let _ = handoff.resume_legacy_reexec_with(&path)?;
-                        } else {
-                            handoff.prepare_reexec()?;
-                        }
+                        handoff.prepare_reexec()?;
                         reexec_recovered_executable(&path, &recovery.attempt_id)
                     }
                 };
