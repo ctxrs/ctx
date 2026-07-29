@@ -1299,3 +1299,61 @@ mod tests {
         assert!(hydrate_codebuddy_source_backed_record(&root, &stale_extension).is_err());
     }
 }
+pub(crate) mod registration {
+    use chrono::{DateTime, Utc};
+    use ctx_history_core::{CaptureProvider, HydratedProviderRecord, HydrationFailureKind};
+
+    use super::{hydrate_codebuddy_source_backed_record, scan_codebuddy_source_backed_root};
+    use crate::provider::source_backed::{
+        captured_route_driver, executable_route, hydration_failure, provider_format_scope,
+        route_capture_error, SourceBackedCoordinatorResult, SourceBackedProviderRegistry,
+        SourceBackedRouteSelection, SourceBackedSelectorAuthority,
+    };
+    use crate::ProviderSource;
+
+    pub(crate) fn register(
+        registry: &mut SourceBackedProviderRegistry,
+        source: ProviderSource,
+        selection: SourceBackedRouteSelection,
+    ) -> SourceBackedCoordinatorResult<()> {
+        let root = source.path.clone();
+        let capture_root = root.clone();
+        let hydration_root = root;
+        let driver = captured_route_driver(
+            move |sink| {
+                for scan in
+                    scan_codebuddy_source_backed_root(&capture_root, DateTime::<Utc>::UNIX_EPOCH)
+                        .map_err(route_capture_error)?
+                {
+                    sink.begin(scan.source.observation().source().clone())?;
+                    for page in scan.pages {
+                        for document in page.documents {
+                            sink.document(document)?;
+                        }
+                    }
+                    sink.certify(scan.source)?;
+                }
+                Ok(())
+            },
+            provider_format_scope(CaptureProvider::CodeBuddy, "codebuddy_history_json"),
+            move |request| {
+                let hydrated =
+                    hydrate_codebuddy_source_backed_record(&hydration_root, request.locator())
+                        .map_err(|error| {
+                            hydration_failure(HydrationFailureKind::StaleRecordEvidence, error)
+                        })?;
+                Ok(HydratedProviderRecord {
+                    event_id: request.event_id(),
+                    provider_bytes: hydrated.provider_bytes,
+                })
+            },
+        );
+        registry.register(executable_route(
+            source,
+            selection,
+            SourceBackedSelectorAuthority::DiscoveredWinner,
+            driver,
+        )?);
+        Ok(())
+    }
+}

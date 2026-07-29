@@ -274,6 +274,7 @@ mod source_backed;
 use discovery::*;
 use parsing::*;
 use projection::*;
+pub(crate) use source_backed::registration::register as register_source_backed_route;
 pub(crate) use source_backed::{
     codebuddy_cli_complete_content_record, codebuddy_cli_complete_content_source_from_admitted,
     hydrate_codebuddy_source_backed_record, scan_codebuddy_source_backed_root,

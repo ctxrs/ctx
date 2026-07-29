@@ -15,6 +15,7 @@ pub(crate) use parser::{
 };
 // This is the provider-local handoff surface for the shared coordinator; its
 // caller lands separately from provider adapters.
+pub(crate) use source_backed::registration::register as register_source_backed_route;
 #[allow(unused_imports)]
 pub(crate) use source_backed::{
     hydrate_gemini_source_backed_record, GeminiHydratedSourceRecord, GeminiSourceBackedError,

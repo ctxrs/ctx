@@ -729,3 +729,57 @@ fn checked_add(left: u64, right: u64) -> KiroSourceBackedResultV0<u64> {
 #[cfg(test)]
 #[path = "source_backed_tests.rs"]
 mod tests;
+pub(crate) mod registration {
+    use ctx_history_core::{CaptureProvider, HydratedProviderRecord, HydrationFailureKind};
+
+    use super::{scan_kiro_source_backed_v0, KiroLocatorResolverV0};
+    use crate::provider::source_backed::{
+        captured_route_driver, executable_route, hydration_failure, provider_format_scope,
+        route_error, SourceBackedCoordinatorResult, SourceBackedProviderRegistry,
+        SourceBackedRouteSelection, SourceBackedSelectorAuthority,
+    };
+    use crate::ProviderSource;
+
+    pub(crate) fn register(
+        registry: &mut SourceBackedProviderRegistry,
+        source: ProviderSource,
+        selection: SourceBackedRouteSelection,
+    ) -> SourceBackedCoordinatorResult<()> {
+        let path = source.path.clone();
+        let source_format = source.source_format;
+        let capture_path = path.clone();
+        let hydration_path = path;
+        let driver = captured_route_driver(
+            move |sink| {
+                let scan = scan_kiro_source_backed_v0(&capture_path, source_format)
+                    .map_err(route_error)?;
+                sink.begin(scan.source)?;
+                for document in scan.documents {
+                    sink.document(document)?;
+                }
+                sink.certify(scan.certificate)
+            },
+            provider_format_scope(CaptureProvider::KiroCli, source_format),
+            move |request| {
+                let resolver = KiroLocatorResolverV0::discover(&hydration_path, source_format)
+                    .map_err(|error| {
+                        hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
+                    })?;
+                let hydrated = resolver.hydrate(request.locator()).map_err(|error| {
+                    hydration_failure(HydrationFailureKind::StaleRecordEvidence, error)
+                })?;
+                Ok(HydratedProviderRecord {
+                    event_id: request.event_id(),
+                    provider_bytes: hydrated.provider_bytes,
+                })
+            },
+        );
+        registry.register(executable_route(
+            source,
+            selection,
+            SourceBackedSelectorAuthority::DiscoveredWinner,
+            driver,
+        )?);
+        Ok(())
+    }
+}

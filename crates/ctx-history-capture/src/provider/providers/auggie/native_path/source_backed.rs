@@ -1031,3 +1031,78 @@ mod tests {
         assert!(unavailable.paths.is_empty());
     }
 }
+pub(crate) mod registration {
+    use chrono::{DateTime, Utc};
+    use ctx_history_core::{CaptureProvider, HydratedProviderRecord, HydrationFailureKind};
+
+    use super::{
+        discover_auggie_source_backed, hydrate_auggie_source_backed,
+        project_auggie_source_backed_inventory, AuggieSourceBackedRoot,
+    };
+    use crate::provider::source_backed::{
+        captured_route_driver, executable_route, hydration_failure, provider_format_scope,
+        route_error, SourceBackedCoordinatorResult, SourceBackedProviderRegistry,
+        SourceBackedRouteSelection, SourceBackedSelectorAuthority,
+    };
+    use crate::{ProviderAdapterContext, ProviderSource};
+
+    pub(crate) fn register(
+        registry: &mut SourceBackedProviderRegistry,
+        source: ProviderSource,
+        selection: SourceBackedRouteSelection,
+    ) -> SourceBackedCoordinatorResult<()> {
+        let root = AuggieSourceBackedRoot::explicit(source.path.clone());
+        let capture_root = root.clone();
+        let context = ProviderAdapterContext {
+            machine_id: "source-backed-auggie".to_owned(),
+            source_path: Some(source.path.clone()),
+            source_root: Some(source.path.clone()),
+            imported_at: DateTime::<Utc>::UNIX_EPOCH,
+        };
+        let capture_context = context.clone();
+        let hydration_root = root;
+        let driver = captured_route_driver(
+            move |sink| {
+                let inventory =
+                    discover_auggie_source_backed(&capture_root).map_err(route_error)?;
+                for projected in
+                    project_auggie_source_backed_inventory(&inventory, &capture_context)
+                        .map_err(route_error)?
+                {
+                    sink.begin(projected.certified_source.observation().source().clone())?;
+                    for document in projected.documents {
+                        sink.document(document)?;
+                    }
+                    sink.certify(projected.certified_source)?;
+                }
+                Ok(())
+            },
+            provider_format_scope(CaptureProvider::Auggie, "auggie_session_json"),
+            move |request| {
+                let inventory =
+                    discover_auggie_source_backed(&hydration_root).map_err(|error| {
+                        hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
+                    })?;
+                for path in inventory.paths {
+                    if let Ok(hydrated) = hydrate_auggie_source_backed(&path, request.locator()) {
+                        return Ok(HydratedProviderRecord {
+                            event_id: request.event_id(),
+                            provider_bytes: hydrated.provider_bytes,
+                        });
+                    }
+                }
+                Err(hydration_failure(
+                    HydrationFailureKind::MissingRecord,
+                    "the exact Auggie source record is absent",
+                ))
+            },
+        );
+        registry.register(executable_route(
+            source,
+            selection,
+            SourceBackedSelectorAuthority::DiscoveredWinner,
+            driver,
+        )?);
+        Ok(())
+    }
+}

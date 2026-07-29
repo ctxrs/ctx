@@ -30,6 +30,146 @@ const GEMINI_FRONTIER_KIND: &str = "gemini-nativepath-checkpoint-v0";
 const GEMINI_SOURCE_BACKED_PARSER_REVISION: &str = "gemini-nativepath-source-backed-v0-p6-p4";
 const MAX_GEMINI_LEXICAL_METADATA_CHARS: usize = 8 * 1024;
 
+pub(crate) mod registration {
+    use std::path::Path;
+
+    use ctx_history_core::{
+        CaptureProvider, CertifiedSource, EventHydrationRequest, HydratedProviderRecord,
+        HydrationFailure, HydrationFailureKind,
+    };
+
+    use super::super::{discover_gemini_transcripts, hydrate_gemini_source_backed_record};
+    use super::GeminiSourceBackedLeafReader;
+    use crate::provider::source_backed::{
+        executable_route, hydration_failure, route_capture_error, route_coordinator_error,
+        route_error, SourceBackedCoordinatorResult, SourceBackedGenerationSink,
+        SourceBackedProviderRegistry, SourceBackedRevalidationTarget, SourceBackedRouteDriver,
+        SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
+        SourceBackedRouteSelection, SourceBackedSelectorAuthority,
+    };
+    use crate::{ProviderSource, GEMINI_CLI_SOURCE_FORMAT};
+
+    pub(crate) fn register(
+        registry: &mut SourceBackedProviderRegistry,
+        source: ProviderSource,
+        selection: SourceBackedRouteSelection,
+    ) -> SourceBackedCoordinatorResult<()> {
+        let root = source.path.clone();
+        let scan_root = root.clone();
+        let revalidation_root = root.clone();
+        let hydration_root = root;
+        let driver = SourceBackedRouteDriver::new(
+            move |sink| scan(&scan_root, sink),
+            |source| {
+                source.provider() == CaptureProvider::Gemini.as_str()
+                    && source.source_format() == GEMINI_CLI_SOURCE_FORMAT
+            },
+            move |target| match target {
+                SourceBackedRevalidationTarget::Source(expected) => {
+                    revalidate(&revalidation_root, expected)
+                }
+                SourceBackedRevalidationTarget::Deletion(_) => false,
+            },
+            move |request| hydrate(&hydration_root, request),
+        );
+        registry.register(executable_route(
+            source,
+            selection,
+            SourceBackedSelectorAuthority::DiscoveredWinner,
+            driver,
+        )?);
+        Ok(())
+    }
+
+    fn scan(root: &Path, sink: &mut SourceBackedGenerationSink<'_>) -> SourceBackedRouteResult<()> {
+        let discovery = discover_gemini_transcripts(root).map_err(route_capture_error)?;
+        if !discovery.completed_inventory {
+            return Err(SourceBackedRouteError::new(
+                SourceBackedRouteErrorKind::Unavailable,
+                "Gemini discovery did not produce a complete inventory",
+            ));
+        }
+        for source in &discovery.transcripts {
+            let mut reader = GeminiSourceBackedLeafReader::open(source).map_err(route_error)?;
+            sink.begin_source(reader.source().clone())
+                .map_err(route_coordinator_error)?;
+            while let Some(page) = reader.next_page().map_err(route_error)? {
+                for document in page.documents {
+                    sink.add_document(document)
+                        .map_err(route_coordinator_error)?;
+                }
+            }
+            let leaf = reader.finish().map_err(route_error)?;
+            sink.certify_source(leaf.certificate)
+                .map_err(route_coordinator_error)?;
+        }
+        Ok(())
+    }
+
+    fn revalidate(root: &Path, expected: &CertifiedSource) -> bool {
+        let Ok(discovery) = discover_gemini_transcripts(root) else {
+            return false;
+        };
+        if !discovery.completed_inventory {
+            return false;
+        }
+        for source in &discovery.transcripts {
+            let Ok(mut reader) = GeminiSourceBackedLeafReader::open(source) else {
+                return false;
+            };
+            if !reader
+                .source()
+                .exact_descriptor_eq(expected.observation().source())
+            {
+                continue;
+            }
+            while let Ok(Some(_)) = reader.next_page() {}
+            return reader
+                .finish()
+                .is_ok_and(|leaf| leaf.certificate == *expected);
+        }
+        false
+    }
+
+    fn hydrate(
+        root: &Path,
+        request: &EventHydrationRequest,
+    ) -> Result<HydratedProviderRecord, HydrationFailure> {
+        let discovery = discover_gemini_transcripts(root).map_err(|error| {
+            hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
+        })?;
+        if !discovery.completed_inventory {
+            return Err(hydration_failure(
+                HydrationFailureKind::TemporarilyUnavailable,
+                "Gemini discovery did not complete",
+            ));
+        }
+        for source in &discovery.transcripts {
+            let reader = GeminiSourceBackedLeafReader::open(source).map_err(|error| {
+                hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
+            })?;
+            let owned = reader
+                .source()
+                .exact_descriptor_eq(request.locator().source());
+            drop(reader);
+            if owned {
+                let hydrated = hydrate_gemini_source_backed_record(source, request.locator())
+                    .map_err(|error| {
+                        hydration_failure(HydrationFailureKind::StaleRecordEvidence, error)
+                    })?;
+                return Ok(HydratedProviderRecord {
+                    event_id: request.event_id(),
+                    provider_bytes: hydrated.provider_bytes,
+                });
+            }
+        }
+        Err(hydration_failure(
+            HydrationFailureKind::ConfirmedDeleted,
+            "the exact Gemini source is absent from the complete inventory",
+        ))
+    }
+}
+
 #[derive(Debug, Error)]
 pub(crate) enum GeminiSourceBackedError {
     #[error(transparent)]

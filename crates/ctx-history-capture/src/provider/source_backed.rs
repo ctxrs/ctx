@@ -49,16 +49,6 @@ use super::providers::{
         scan_astrbot_source_backed_v0, AstrBotSourceBackedInventoryV0,
         AstrBotSourceBackedResolverV0,
     },
-    auggie::native_path::source_backed::{
-        discover_auggie_source_backed, hydrate_auggie_source_backed,
-        project_auggie_source_backed_inventory, AuggieSourceBackedRoot,
-    },
-    claude::nativepath::source_backed::{
-        discover_claude_source_backed, hydrate_claude_source_record, ClaudeSourceBackedScanner,
-    },
-    codebuddy::native_path::{
-        hydrate_codebuddy_source_backed_record, scan_codebuddy_source_backed_root,
-    },
     continue_cli::native_path::{
         discover_continue_root, hydrate_continue_source_backed_record, ContinueSourceBackedOutcome,
         ContinueSourceBackedReader,
@@ -88,10 +78,6 @@ use super::providers::{
         open_forgecode_source_backed_v0, ForgeCodeSourceBackedDiscoveryV0,
         ForgeCodeSourceBackedResolverV0, ForgeCodeSourceSelectionV0,
     },
-    gemini::nativepath::{
-        discover_gemini_transcripts, hydrate_gemini_source_backed_record,
-        GeminiSourceBackedLeafReader,
-    },
     goose::{
         GooseSourceBackedAdapterV0, GooseSourceBackedResolverV0, GooseSourceBackedSelectionV0,
         GooseSourceRouteV0,
@@ -105,7 +91,6 @@ use super::providers::{
         JunieLocatorResolverV0, JunieSourceBackedEmissionV0, JunieSourceBackedScannerV0,
     },
     kimi::native_path::source_backed::{KimiSourceBackedCatalog, KimiSourceBackedResolver},
-    kiro::native_path::{scan_kiro_source_backed_v0, KiroLocatorResolverV0},
     lingma::native_path::{
         scan_lingma_source_backed_v0, LingmaDatabaseSourceV0, LingmaSourceBackedErrorV0,
         LingmaSourceBackedResolverV0, LingmaSourceBackedResultV0, LingmaSourceInventoryV0,
@@ -117,12 +102,6 @@ use super::providers::{
     },
     nanoclaw::native_path::source_backed::{
         hydrate_nanoclaw_source_backed_exact, nanoclaw_source_key, scan_nanoclaw_source_backed,
-    },
-    native_jsonl::native_path::{
-        antigravity_source_backed_adapter, copilot_source_backed_adapter,
-        factory_droid_source_backed_adapter, qoder_source_backed_adapter,
-        qwen_code_source_backed_adapter, tabnine_source_backed_adapter,
-        windsurf_source_backed_adapter, DirectJsonlCertifiedLeaf, DirectJsonlSourceAdapter,
     },
     openclaw::openclaw_source_backed_adapter_v0,
     opencode::native_path::source_backed::{
@@ -165,7 +144,7 @@ use crate::{
     discover_provider_sources_with_context, provider_source_spec, CaptureError, DiscoveryContext,
     DiscoveryIssue, DiscoveryPlatform, ProviderAdapterContext, ProviderImportSupport,
     ProviderSource, ProviderSourceKind, ProviderSourceSpec, ProviderSourceStatus,
-    Result as CaptureResult, CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT, GEMINI_CLI_SOURCE_FORMAT,
+    Result as CaptureResult, CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
 };
 
 pub type SourceBackedCoordinatorResult<T> = Result<T, SourceBackedCoordinatorError>;
@@ -400,11 +379,32 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         ExplicitPath,
         "single-file Codex rollout source-backed discovery is not exposed to the coordinator"
     ),
-    route!(Claude, "claude_projects_jsonl_tree", true, true, DiscoveredWinner, Full),
+    route!(
+        Claude,
+        "claude_projects_jsonl_tree",
+        true,
+        true,
+        DiscoveredWinner,
+        Full
+    ),
     route!(Pi, "pi_session_jsonl", true, true, DiscoveredWinner, Full),
-    route!(OpenCode, "opencode_sqlite", true, true, DiscoveredWinner, Full),
+    route!(
+        OpenCode,
+        "opencode_sqlite",
+        true,
+        true,
+        DiscoveredWinner,
+        Full
+    ),
     route!(Kilo, "kilo_sqlite", true, true, DiscoveredWinner, Full),
-    route!(KiroCli, "kiro_cli_sqlite", true, true, DiscoveredWinner, Full),
+    route!(
+        KiroCli,
+        "kiro_cli_sqlite",
+        true,
+        true,
+        DiscoveredWinner,
+        Full
+    ),
     route!(
         Antigravity,
         "antigravity_cli_transcript_jsonl_tree",
@@ -461,7 +461,14 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         ExplicitPath,
         Full
     ),
-    route!(Zed, "zed_threads_sqlite", true, true, DiscoveredWinner, Full),
+    route!(
+        Zed,
+        "zed_threads_sqlite",
+        true,
+        true,
+        DiscoveredWinner,
+        Full
+    ),
     route!(
         CopilotCli,
         "copilot_cli_session_events_jsonl",
@@ -510,7 +517,14 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         ExplicitPath,
         Full
     ),
-    route!(Auggie, "auggie_session_json", true, true, DiscoveredWinner, Full),
+    route!(
+        Auggie,
+        "auggie_session_json",
+        true,
+        true,
+        DiscoveredWinner,
+        Full
+    ),
     route!(
         Junie,
         "junie_session_events_jsonl_tree" => "junie_session_events_jsonl_tree",
@@ -599,7 +613,14 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         DiscoveredWinner,
         Full
     ),
-    route!(Hermes, "hermes_state_sqlite", true, true, DiscoveredWinner, Full),
+    route!(
+        Hermes,
+        "hermes_state_sqlite",
+        true,
+        true,
+        DiscoveredWinner,
+        Full
+    ),
     route!(
         NanoClaw,
         "nanoclaw_project",
@@ -665,14 +686,7 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         SelectedWithRetainedExplicit,
         Full
     ),
-    route!(
-        Lingma,
-        "lingma_sqlite",
-        true,
-        true,
-        DiscoveredWinner,
-        Full
-    ),
+    route!(Lingma, "lingma_sqlite", true, true, DiscoveredWinner, Full),
     route!(
         Qoder,
         "qoder_transcript_jsonl_tree" => "qoder_transcript_jsonl",
@@ -699,7 +713,14 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         Full
     ),
     route!(Trae, "trae_state_vscdb", true, true, ExplicitPath, Full),
-    route!(MiMoCode, "mimocode_sqlite", true, true, DiscoveredWinner, Full),
+    route!(
+        MiMoCode,
+        "mimocode_sqlite",
+        true,
+        true,
+        DiscoveredWinner,
+        Full
+    ),
 ];
 
 pub fn source_backed_route_inventory() -> &'static [SourceBackedProviderRouteMetadata] {
@@ -881,7 +902,7 @@ pub enum SourceBackedRevalidationTarget<'a> {
     Deletion(&'a CertifiedSourceDeletion),
 }
 
-trait ProviderCaptureSink {
+pub(crate) trait ProviderCaptureSink {
     fn begin(&mut self, source: SourceKey) -> SourceBackedRouteResult<()>;
     fn document(&mut self, document: LexicalDocument) -> SourceBackedRouteResult<()>;
     fn certify(&mut self, certificate: CertifiedSource) -> SourceBackedRouteResult<()>;
@@ -959,7 +980,7 @@ impl ProviderCaptureSink for EvidenceCaptureSink {
 type ProviderCaptureCallback =
     dyn Fn(&mut dyn ProviderCaptureSink) -> SourceBackedRouteResult<()> + Send + Sync;
 
-fn captured_route_driver(
+pub(crate) fn captured_route_driver(
     capture: impl Fn(&mut dyn ProviderCaptureSink) -> SourceBackedRouteResult<()>
         + Send
         + Sync
@@ -2051,31 +2072,7 @@ pub fn register_gemini_source_backed_route(
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
 ) -> SourceBackedCoordinatorResult<()> {
-    let root = source.path.clone();
-    let scan_root = root.clone();
-    let revalidation_root = root.clone();
-    let hydration_root = root;
-    let driver = SourceBackedRouteDriver::new(
-        move |sink| scan_gemini_route(&scan_root, sink),
-        |source| {
-            source.provider() == CaptureProvider::Gemini.as_str()
-                && source.source_format() == GEMINI_CLI_SOURCE_FORMAT
-        },
-        move |target| match target {
-            SourceBackedRevalidationTarget::Source(expected) => {
-                revalidate_gemini_source(&revalidation_root, expected)
-            }
-            SourceBackedRevalidationTarget::Deletion(_) => false,
-        },
-        move |request| hydrate_gemini_route(&hydration_root, request),
-    );
-    registry.register(executable_route(
-        source,
-        selection,
-        SourceBackedSelectorAuthority::DiscoveredWinner,
-        driver,
-    )?);
-    Ok(())
+    super::providers::gemini::nativepath::register_source_backed_route(registry, source, selection)
 }
 
 /// Registers Cursor's sink-based adapter. Documents and its
@@ -2141,11 +2138,31 @@ pub fn register_landed_source_backed_route(
         | CaptureProvider::CopilotCli
         | CaptureProvider::FactoryAiDroid
         | CaptureProvider::QwenCode
-        | CaptureProvider::Qoder => register_direct_jsonl_route(registry, source, selection),
-        CaptureProvider::CodeBuddy => register_codebuddy_route(registry, source, selection),
-        CaptureProvider::Claude => register_claude_route(registry, source, selection),
-        CaptureProvider::KiroCli => register_kiro_route(registry, source, selection),
-        CaptureProvider::Auggie => register_auggie_route(registry, source, selection),
+        | CaptureProvider::Qoder => {
+            super::providers::native_jsonl::native_path::register_source_backed_route(
+                registry, source, selection,
+            )
+        }
+        CaptureProvider::CodeBuddy => {
+            super::providers::codebuddy::native_path::register_source_backed_route(
+                registry, source, selection,
+            )
+        }
+        CaptureProvider::Claude => {
+            super::providers::claude::nativepath::register_source_backed_route(
+                registry, source, selection,
+            )
+        }
+        CaptureProvider::KiroCli => {
+            super::providers::kiro::native_path::register_source_backed_route(
+                registry, source, selection,
+            )
+        }
+        CaptureProvider::Auggie => {
+            super::providers::auggie::native_path::register_source_backed_route(
+                registry, source, selection,
+            )
+        }
         CaptureProvider::Pi => register_pi_route(registry, source, selection),
         CaptureProvider::Junie => register_junie_route(registry, source, selection),
         CaptureProvider::KimiCodeCli => register_kimi_route(registry, source, selection),
@@ -2487,199 +2504,6 @@ fn register_zed_route(
                     hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
                 })?
                 .hydrate_event(request)
-        },
-    );
-    registry.register(executable_route(
-        source,
-        selection,
-        SourceBackedSelectorAuthority::DiscoveredWinner,
-        driver,
-    )?);
-    Ok(())
-}
-
-fn register_codebuddy_route(
-    registry: &mut SourceBackedProviderRegistry,
-    source: ProviderSource,
-    selection: SourceBackedRouteSelection,
-) -> SourceBackedCoordinatorResult<()> {
-    let root = source.path.clone();
-    let capture_root = root.clone();
-    let hydration_root = root;
-    let driver = captured_route_driver(
-        move |sink| {
-            for scan in
-                scan_codebuddy_source_backed_root(&capture_root, DateTime::<Utc>::UNIX_EPOCH)
-                    .map_err(route_capture_error)?
-            {
-                sink.begin(scan.source.observation().source().clone())?;
-                for page in scan.pages {
-                    for document in page.documents {
-                        sink.document(document)?;
-                    }
-                }
-                sink.certify(scan.source)?;
-            }
-            Ok(())
-        },
-        provider_format_scope(CaptureProvider::CodeBuddy, "codebuddy_history_json"),
-        move |request| {
-            let hydrated =
-                hydrate_codebuddy_source_backed_record(&hydration_root, request.locator())
-                    .map_err(|error| {
-                        hydration_failure(HydrationFailureKind::StaleRecordEvidence, error)
-                    })?;
-            Ok(HydratedProviderRecord {
-                event_id: request.event_id(),
-                provider_bytes: hydrated.provider_bytes,
-            })
-        },
-    );
-    registry.register(executable_route(
-        source,
-        selection,
-        SourceBackedSelectorAuthority::DiscoveredWinner,
-        driver,
-    )?);
-    Ok(())
-}
-
-fn register_claude_route(
-    registry: &mut SourceBackedProviderRegistry,
-    source: ProviderSource,
-    selection: SourceBackedRouteSelection,
-) -> SourceBackedCoordinatorResult<()> {
-    let root = source.path.clone();
-    let capture_root = root.clone();
-    let hydration_root = root;
-    let driver = captured_route_driver(
-        move |sink| {
-            let inventory = discover_claude_source_backed(&capture_root).map_err(route_error)?;
-            for leaf in inventory.leaves() {
-                let mut scanner =
-                    ClaudeSourceBackedScanner::new(leaf.clone(), None).map_err(route_error)?;
-                sink.begin(leaf.source_key().clone())?;
-                while let Some(page) = scanner.next_page().map_err(route_error)? {
-                    for document in page.documents {
-                        sink.document(document)?;
-                    }
-                }
-                let scan = scanner.finish().map_err(route_error)?;
-                sink.certify(scan.source)?;
-            }
-            inventory.certify().map_err(route_error)?;
-            Ok(())
-        },
-        provider_format_scope(CaptureProvider::Claude, "claude_projects_jsonl_tree"),
-        move |request| {
-            let hydrated = hydrate_claude_source_record(&hydration_root, request.locator())
-                .map_err(|error| {
-                    hydration_failure(HydrationFailureKind::StaleRecordEvidence, error)
-                })?;
-            Ok(HydratedProviderRecord {
-                event_id: request.event_id(),
-                provider_bytes: hydrated.provider_bytes,
-            })
-        },
-    );
-    registry.register(executable_route(
-        source,
-        selection,
-        SourceBackedSelectorAuthority::DiscoveredWinner,
-        driver,
-    )?);
-    Ok(())
-}
-
-fn register_kiro_route(
-    registry: &mut SourceBackedProviderRegistry,
-    source: ProviderSource,
-    selection: SourceBackedRouteSelection,
-) -> SourceBackedCoordinatorResult<()> {
-    let path = source.path.clone();
-    let source_format = source.source_format;
-    let capture_path = path.clone();
-    let hydration_path = path;
-    let driver = captured_route_driver(
-        move |sink| {
-            let scan =
-                scan_kiro_source_backed_v0(&capture_path, source_format).map_err(route_error)?;
-            sink.begin(scan.source)?;
-            for document in scan.documents {
-                sink.document(document)?;
-            }
-            sink.certify(scan.certificate)
-        },
-        provider_format_scope(CaptureProvider::KiroCli, source_format),
-        move |request| {
-            let resolver = KiroLocatorResolverV0::discover(&hydration_path, source_format)
-                .map_err(|error| {
-                    hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
-                })?;
-            let hydrated = resolver.hydrate(request.locator()).map_err(|error| {
-                hydration_failure(HydrationFailureKind::StaleRecordEvidence, error)
-            })?;
-            Ok(HydratedProviderRecord {
-                event_id: request.event_id(),
-                provider_bytes: hydrated.provider_bytes,
-            })
-        },
-    );
-    registry.register(executable_route(
-        source,
-        selection,
-        SourceBackedSelectorAuthority::DiscoveredWinner,
-        driver,
-    )?);
-    Ok(())
-}
-
-fn register_auggie_route(
-    registry: &mut SourceBackedProviderRegistry,
-    source: ProviderSource,
-    selection: SourceBackedRouteSelection,
-) -> SourceBackedCoordinatorResult<()> {
-    let root = AuggieSourceBackedRoot::explicit(source.path.clone());
-    let capture_root = root.clone();
-    let context = ProviderAdapterContext {
-        machine_id: "source-backed-auggie".to_owned(),
-        source_path: Some(source.path.clone()),
-        source_root: Some(source.path.clone()),
-        imported_at: DateTime::<Utc>::UNIX_EPOCH,
-    };
-    let capture_context = context.clone();
-    let hydration_root = root;
-    let driver = captured_route_driver(
-        move |sink| {
-            let inventory = discover_auggie_source_backed(&capture_root).map_err(route_error)?;
-            for projected in project_auggie_source_backed_inventory(&inventory, &capture_context)
-                .map_err(route_error)?
-            {
-                sink.begin(projected.certified_source.observation().source().clone())?;
-                for document in projected.documents {
-                    sink.document(document)?;
-                }
-                sink.certify(projected.certified_source)?;
-            }
-            Ok(())
-        },
-        provider_format_scope(CaptureProvider::Auggie, "auggie_session_json"),
-        move |request| {
-            let inventory = discover_auggie_source_backed(&hydration_root).map_err(|error| {
-                hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
-            })?;
-            for path in inventory.paths {
-                if let Ok(hydrated) = hydrate_auggie_source_backed(&path, request.locator()) {
-                    return Ok(HydratedProviderRecord {
-                        event_id: request.event_id(),
-                        provider_bytes: hydrated.provider_bytes,
-                    });
-                }
-            }
-            Err(hydration_failure(
-                HydrationFailureKind::MissingRecord,
-                "the exact Auggie source record is absent",
-            ))
         },
     );
     registry.register(executable_route(
@@ -4515,137 +4339,14 @@ fn register_mux_route(
     Ok(())
 }
 
-fn register_direct_jsonl_route(
-    registry: &mut SourceBackedProviderRegistry,
-    source: ProviderSource,
-    selection: SourceBackedRouteSelection,
-) -> SourceBackedCoordinatorResult<()> {
-    let adapter = direct_jsonl_adapter(source.provider).ok_or_else(|| {
-        invalid_route(
-            source.provider,
-            "provider is not a member of the direct native-JSONL adapter family",
-        )
-    })?;
-    let root = source.path.clone();
-    let capture_root = root.clone();
-    let hydration_root = root;
-    let provider = source.provider;
-    let certified_source_format = adapter.source_format();
-    let driver = captured_route_driver(
-        move |sink| capture_direct_jsonl(adapter, &capture_root, sink),
-        provider_format_scope(provider, certified_source_format),
-        move |request| hydrate_direct_jsonl(adapter, &hydration_root, request),
-    );
-    registry.register(executable_route(
-        source,
-        selection,
-        SourceBackedSelectorAuthority::DiscoveredWinner,
-        driver,
-    )?);
-    Ok(())
-}
-
-fn direct_jsonl_adapter(provider: CaptureProvider) -> Option<DirectJsonlSourceAdapter> {
-    match provider {
-        CaptureProvider::Antigravity => Some(antigravity_source_backed_adapter()),
-        CaptureProvider::CopilotCli => Some(copilot_source_backed_adapter()),
-        CaptureProvider::FactoryAiDroid => Some(factory_droid_source_backed_adapter()),
-        CaptureProvider::Qoder => Some(qoder_source_backed_adapter()),
-        CaptureProvider::QwenCode => Some(qwen_code_source_backed_adapter()),
-        CaptureProvider::Tabnine => Some(tabnine_source_backed_adapter()),
-        CaptureProvider::Windsurf => Some(windsurf_source_backed_adapter()),
-        _ => None,
-    }
-}
-
-fn capture_direct_jsonl(
-    adapter: DirectJsonlSourceAdapter,
-    root: &Path,
-    sink: &mut dyn ProviderCaptureSink,
-) -> SourceBackedRouteResult<()> {
-    let inventory = adapter.discover(root).map_err(route_error)?;
-    if inventory.root_missing() {
-        return Ok(());
-    }
-    if !inventory.failures().is_empty() {
-        return Err(SourceBackedRouteError::new(
-            SourceBackedRouteErrorKind::Unavailable,
-            "direct JSONL inventory contains inaccessible sources",
-        ));
-    }
-    for leaf in inventory.leaves() {
-        let mut reader = adapter
-            .open_leaf(leaf, DateTime::<Utc>::UNIX_EPOCH)
-            .map_err(route_error)?;
-        let mut began = false;
-        while let Some(page) = reader.next_page().map_err(route_error)? {
-            if !began {
-                sink.begin(page.source.clone())?;
-                began = true;
-            }
-            for document in page.documents {
-                sink.document(document)?;
-            }
-        }
-        let certified = reader.finish().map_err(route_error)?;
-        if !began {
-            sink.begin(certified.source().clone())?;
-        }
-        sink.certify(certified.certificate().clone())?;
-    }
-    Ok(())
-}
-
-fn hydrate_direct_jsonl(
-    adapter: DirectJsonlSourceAdapter,
-    root: &Path,
-    request: &EventHydrationRequest,
-) -> Result<HydratedProviderRecord, HydrationFailure> {
-    let inventory = adapter
-        .discover(root)
-        .map_err(|error| hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error))?;
-    for leaf in inventory.leaves() {
-        let mut reader = adapter
-            .open_leaf(leaf, DateTime::<Utc>::UNIX_EPOCH)
-            .map_err(|error| {
-                hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
-            })?;
-        while let Some(_) = reader.next_page().map_err(|error| {
-            hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
-        })? {}
-        let certified: DirectJsonlCertifiedLeaf = reader.finish().map_err(|error| {
-            hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
-        })?;
-        if certified
-            .source()
-            .exact_descriptor_eq(request.locator().source())
-        {
-            let provider_bytes =
-                adapter
-                    .hydrate(&certified, request.locator())
-                    .map_err(|error| {
-                        hydration_failure(HydrationFailureKind::StaleRecordEvidence, error)
-                    })?;
-            return Ok(HydratedProviderRecord {
-                event_id: request.event_id(),
-                provider_bytes,
-            });
-        }
-    }
-    Err(hydration_failure(
-        HydrationFailureKind::ConfirmedDeleted,
-        "the exact direct JSONL source is absent from the complete inventory",
-    ))
-}
-
-fn provider_format_scope(
+pub(crate) fn provider_format_scope(
     provider: CaptureProvider,
     source_format: &'static str,
 ) -> impl Fn(&SourceKey) -> bool + Send + Sync + 'static {
     move |source| source.provider() == provider.as_str() && source.source_format() == source_format
 }
 
-fn executable_route(
+pub(crate) fn executable_route(
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
     authority: SourceBackedSelectorAuthority,
@@ -4735,7 +4436,7 @@ fn landed_format_route(
         .find(|route| route.provider == provider && route.source_format == selected_source_format)
 }
 
-fn invalid_route(
+pub(crate) fn invalid_route(
     provider: CaptureProvider,
     detail: impl Into<String>,
 ) -> SourceBackedCoordinatorError {
@@ -4743,95 +4444,6 @@ fn invalid_route(
         provider,
         detail: detail.into(),
     }
-}
-
-fn scan_gemini_route(
-    root: &Path,
-    sink: &mut SourceBackedGenerationSink<'_>,
-) -> SourceBackedRouteResult<()> {
-    let discovery = discover_gemini_transcripts(root).map_err(route_capture_error)?;
-    if !discovery.completed_inventory {
-        return Err(SourceBackedRouteError::new(
-            SourceBackedRouteErrorKind::Unavailable,
-            "Gemini discovery did not produce a complete inventory",
-        ));
-    }
-    for source in &discovery.transcripts {
-        let mut reader = GeminiSourceBackedLeafReader::open(source).map_err(route_error)?;
-        sink.begin_source(reader.source().clone())
-            .map_err(route_coordinator_error)?;
-        while let Some(page) = reader.next_page().map_err(route_error)? {
-            for document in page.documents {
-                sink.add_document(document)
-                    .map_err(route_coordinator_error)?;
-            }
-        }
-        let leaf = reader.finish().map_err(route_error)?;
-        sink.certify_source(leaf.certificate)
-            .map_err(route_coordinator_error)?;
-    }
-    Ok(())
-}
-
-fn revalidate_gemini_source(root: &Path, expected: &CertifiedSource) -> bool {
-    let Ok(discovery) = discover_gemini_transcripts(root) else {
-        return false;
-    };
-    if !discovery.completed_inventory {
-        return false;
-    }
-    for source in &discovery.transcripts {
-        let Ok(mut reader) = GeminiSourceBackedLeafReader::open(source) else {
-            return false;
-        };
-        if !reader
-            .source()
-            .exact_descriptor_eq(expected.observation().source())
-        {
-            continue;
-        }
-        while let Ok(Some(_)) = reader.next_page() {}
-        return reader
-            .finish()
-            .is_ok_and(|leaf| leaf.certificate == *expected);
-    }
-    false
-}
-
-fn hydrate_gemini_route(
-    root: &Path,
-    request: &EventHydrationRequest,
-) -> Result<HydratedProviderRecord, HydrationFailure> {
-    let discovery = discover_gemini_transcripts(root)
-        .map_err(|error| hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error))?;
-    if !discovery.completed_inventory {
-        return Err(hydration_failure(
-            HydrationFailureKind::TemporarilyUnavailable,
-            "Gemini discovery did not complete",
-        ));
-    }
-    for source in &discovery.transcripts {
-        let reader = GeminiSourceBackedLeafReader::open(source).map_err(|error| {
-            hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
-        })?;
-        let owned = reader
-            .source()
-            .exact_descriptor_eq(request.locator().source());
-        drop(reader);
-        if owned {
-            let hydrated = hydrate_gemini_source_backed_record(source, request.locator()).map_err(
-                |error| hydration_failure(HydrationFailureKind::StaleRecordEvidence, error),
-            )?;
-            return Ok(HydratedProviderRecord {
-                event_id: request.event_id(),
-                provider_bytes: hydrated.provider_bytes,
-            });
-        }
-    }
-    Err(hydration_failure(
-        HydrationFailureKind::ConfirmedDeleted,
-        "the exact Gemini source is absent from the complete inventory",
-    ))
 }
 
 struct CursorGenerationBridge<'sink, 'writer> {
@@ -4987,15 +4599,17 @@ fn hydrate_cursor_route(
     })
 }
 
-fn route_capture_error(error: CaptureError) -> SourceBackedRouteError {
+pub(crate) fn route_capture_error(error: CaptureError) -> SourceBackedRouteError {
     SourceBackedRouteError::new(SourceBackedRouteErrorKind::Unavailable, error.to_string())
 }
 
-fn route_error(error: impl fmt::Display) -> SourceBackedRouteError {
+pub(crate) fn route_error(error: impl fmt::Display) -> SourceBackedRouteError {
     SourceBackedRouteError::new(SourceBackedRouteErrorKind::InvalidSource, error.to_string())
 }
 
-fn route_coordinator_error(error: SourceBackedCoordinatorError) -> SourceBackedRouteError {
+pub(crate) fn route_coordinator_error(
+    error: SourceBackedCoordinatorError,
+) -> SourceBackedRouteError {
     SourceBackedRouteError::new(SourceBackedRouteErrorKind::Internal, error.to_string())
 }
 
@@ -5043,7 +4657,10 @@ fn firebender_display_bytes(
         })
 }
 
-fn hydration_failure(kind: HydrationFailureKind, detail: impl fmt::Display) -> HydrationFailure {
+pub(crate) fn hydration_failure(
+    kind: HydrationFailureKind,
+    detail: impl fmt::Display,
+) -> HydrationFailure {
     HydrationFailure {
         kind,
         detail: detail.to_string(),
@@ -5071,6 +4688,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::GEMINI_CLI_SOURCE_FORMAT;
 
     #[test]
     fn heterogeneous_routes_publish_once_and_hydrate_exact_locators() {
