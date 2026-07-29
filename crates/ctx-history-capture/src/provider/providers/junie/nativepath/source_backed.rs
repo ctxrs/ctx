@@ -13,7 +13,7 @@ use ctx_history_core::{
     SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation, SourceRecordLocator,
     SourceResolverContractError, StableEntityId, TypedKey,
 };
-use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
+use ctx_history_index::LexicalDocument;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -55,6 +55,7 @@ const RECORD_SET_COORDINATE_KIND: &str = "junie-record-set-coordinate-v2";
 const USER_PROMPT_COORDINATE_KIND: &str = "junie-user-prompt-coordinate-v2";
 const UNAVAILABLE_COORDINATE_NAMESPACE: &str = "junie.record-set-unavailable.v2";
 const UNAVAILABLE_DIGEST_DOMAIN: &[u8] = b"ctx-junie-unavailable-record-set-v2\0";
+const METADATA_TEXT_MAX_CHARS: usize = 2_048;
 
 #[derive(Debug, Error)]
 pub(crate) enum JunieSourceBackedErrorV0 {
@@ -238,12 +239,12 @@ impl CurrentSource {
             .index_meta
             .project_dir
             .as_deref()
-            .map(|value| provider_local_preview(value, MAX_BODY_PREVIEW_CHARS).0);
+            .map(|value| provider_local_preview(value, METADATA_TEXT_MAX_CHARS).0);
         let cwd = parsed
             .after_state
             .cwd
             .as_deref()
-            .map(|value| provider_local_preview(value, MAX_BODY_PREVIEW_CHARS).0)
+            .map(|value| provider_local_preview(value, METADATA_TEXT_MAX_CHARS).0)
             .or_else(|| workspace.clone());
         let source_path = self.opening_native.canonical_path.to_string_lossy();
         let source_revision_digest = Sha256::digest(self.opening.revision()).into();

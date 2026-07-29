@@ -5067,7 +5067,7 @@ mod tests {
         NativeSessionKey, ScannedSourceCounts, SessionHydrationRequest, SessionIdentityInput,
         SourceAnchor, SourceObservation, SourceRecordLocator, TypedKey,
     };
-    use ctx_history_index::{VerifiedIndex, MAX_BODY_PREVIEW_CHARS};
+    use ctx_history_index::VerifiedIndex;
     use tempfile::tempdir;
 
     use super::*;
@@ -6013,14 +6013,12 @@ mod tests {
         )
         .unwrap();
 
-        let prompt_text = format!(
-            "fresh v0.26 prompt {}",
-            "x".repeat(MAX_BODY_PREVIEW_CHARS.saturating_add(128))
-        );
+        let prompt_tail = "full-body-tail-marker";
+        let prompt_text = format!("fresh v0.26 prompt {} {prompt_tail}", "x".repeat(8_192));
         let mut prompt_bytes = serde_json::to_vec(&serde_json::json!({
             "session_id": native_session_id,
             "ts": 1_785_139_200,
-            "text": prompt_text,
+            "text": prompt_text.clone(),
         }))
         .unwrap();
         prompt_bytes.push(b'\n');
@@ -6065,10 +6063,8 @@ mod tests {
         })
         .unwrap();
         assert_eq!(prompt_documents.len(), 1);
-        assert_eq!(
-            prompt_documents[0].body.chars().count(),
-            MAX_BODY_PREVIEW_CHARS
-        );
+        assert_eq!(prompt_documents[0].body, prompt_text);
+        assert!(prompt_documents[0].body.ends_with(prompt_tail));
         let event_request = EventHydrationRequest::new(
             prompt_documents[0].event_id,
             prompt_documents[0].locator.clone(),

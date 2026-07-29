@@ -127,7 +127,7 @@ fn cold_noop_and_append_emit_stable_ids_in_bounded_pages() {
     let path = temp.path().join("explicit.jsonl");
     let long = format!(
         "full-body-sentinel-{}-custom-tail-sentinel",
-        "x".repeat(ctx_history_index::MAX_BODY_PREVIEW_CHARS + 128)
+        "x".repeat(8_192)
     );
     let mut records = vec![
         manifest(),
@@ -379,7 +379,7 @@ fn lexical_body_prefers_full_payload_over_native_preview_and_hydrates_identicall
     let path = temp.path().join("preview.jsonl");
     let full = format!(
         "custom-full-{}-custom-preview-tail",
-        "p".repeat(ctx_history_index::MAX_BODY_PREVIEW_CHARS + 64)
+        "p".repeat(8_192)
     );
     let mut record = event(0, "event-full", "root", &full);
     record["preview"] = Value::String("native preview only".to_owned());

@@ -68,7 +68,7 @@ fn source_backed_cold_and_noop_extract_stable_bounded_documents_and_frontiers() 
     let subagent = projects.join("-project/session-1/subagents/agent-review.jsonl");
     let full_body = format!(
         "claude-full-{}-claude-tail-sentinel",
-        "c".repeat(ctx_history_index::MAX_BODY_PREVIEW_CHARS + 128)
+        "c".repeat(8_192)
     );
     write_lines(
         &primary,
