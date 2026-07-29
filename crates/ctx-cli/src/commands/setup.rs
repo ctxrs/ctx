@@ -11,7 +11,6 @@ use crate::semantic::{
     daemon_autostart_suppression_reason, semantic_query_service_supported,
     source_epoch_status_report, DaemonHandoff, SourceBackedRefreshMode,
 };
-use crate::upgrade::data_migration;
 use crate::{config, SetupArgs};
 
 pub(crate) fn run_setup(
@@ -39,7 +38,6 @@ pub(crate) fn run_setup(
         );
     }
 
-    let epoch = data_migration::prepare(&data_root, &[])?;
     config::write_default_config(&data_root)?;
 
     let json_output = args.format.is_json();
@@ -62,7 +60,6 @@ pub(crate) fn run_setup(
     } else {
         None
     };
-
     let refresh_request = request_source_refresh(
         &data_root,
         config.daemon.enabled,
@@ -71,6 +68,7 @@ pub(crate) fn run_setup(
         daemon_autostart_reason,
     );
     let source = source_epoch_status_report(&data_root, config)?;
+    let supervisor = source.report["daemon"]["supervisor"].clone();
     let lexical_status = source.report["lexical"]["status"]
         .as_str()
         .unwrap_or("unavailable");
@@ -102,15 +100,14 @@ pub(crate) fn run_setup(
         "semantic": source.report["semantic"].clone(),
         "relational": source.report["relational"].clone(),
         "pro_projection": source.report["pro_projection"].clone(),
-        "prior_epoch": source.report["prior_epoch"].clone(),
         "daemon": source.report["daemon"].clone(),
         "daemon_autostart": daemon_autostart_json(
             daemon_autostart_requested,
             daemon_autostart_reason,
             daemon_handoff.as_ref(),
+            &supervisor,
         ),
         "deprecated_catalog_only_ignored": args.catalog_only,
-        "source_rebuild_required": epoch.daemon_rebuild_required(),
         "network_required": false,
         "repo_writes": false,
     });
@@ -126,6 +123,7 @@ pub(crate) fn run_setup(
             daemon_autostart_requested,
             daemon_autostart_reason,
             daemon_handoff.as_ref(),
+            &supervisor,
         );
     }
     Ok(())
@@ -196,22 +194,44 @@ fn daemon_autostart_json(
     requested: bool,
     reason: Option<&str>,
     handoff: Option<&DaemonHandoff>,
+    supervisor: &Value,
 ) -> Value {
+    let persistently_supervised = supervisor_persistently_verified(supervisor);
     match handoff {
         Some(handoff) => json!({
-            "status": "verified",
-            "reason": Value::Null,
+            "status": if persistently_supervised { "verified" } else { "degraded" },
+            "reason": if persistently_supervised {
+                Value::Null
+            } else {
+                Value::String("native_supervisor_unavailable".to_owned())
+            },
             "requested": requested,
             "pid": handoff.pid,
+            "persistent": persistently_supervised,
+            "supervisor": supervisor,
             "status_command": "ctx daemon status",
         }),
         None => json!({
             "status": if requested { "unavailable" } else { "not_requested" },
             "reason": reason.unwrap_or("not_requested"),
             "requested": requested,
+            "persistent": false,
+            "supervisor": supervisor,
             "status_command": "ctx daemon status",
         }),
     }
+}
+
+fn supervisor_persistently_verified(supervisor: &Value) -> bool {
+    supervisor.get("status").and_then(Value::as_str) == Some("installed")
+        && supervisor
+            .get("registration_verified")
+            .and_then(Value::as_bool)
+            == Some(true)
+        && supervisor
+            .get("live_owner_verified")
+            .and_then(Value::as_bool)
+            == Some(true)
 }
 
 fn print_setup_human(
@@ -222,6 +242,7 @@ fn print_setup_human(
     daemon_autostart_requested: bool,
     daemon_autostart_reason: Option<&str>,
     daemon_handoff: Option<&DaemonHandoff>,
+    supervisor: &Value,
 ) {
     println!("ctx source-backed history epoch: {mode}");
     if let Some(generation) = source["lexical"]["generation_id"].as_str() {
@@ -237,15 +258,20 @@ fn print_setup_human(
         "Source refresh: {}",
         refresh_request["status"].as_str().unwrap_or("unavailable")
     );
-    if source["prior_epoch"]["preserved"].as_bool() == Some(true) {
-        println!(
-            "Prior v0.25-or-earlier history epoch: preserved, non-authoritative, rollback/manual recovery only."
-        );
-    }
     match daemon_handoff {
+        Some(handoff) if supervisor_persistently_verified(supervisor) => {
+            println!(
+                "Daemon is persistently supervised and running (PID {}).",
+                handoff.pid
+            )
+        }
         Some(handoff) => println!(
-            "Daemon is running (PID {}); source refresh handoff is verified.",
-            handoff.pid
+            "Daemon is running (PID {}) with degraded persistence: {}.",
+            handoff.pid,
+            supervisor
+                .get("limitation")
+                .and_then(Value::as_str)
+                .unwrap_or("native per-user supervisor unavailable")
         ),
         None if daemon_autostart_requested => {
             println!("Daemon handoff was not verified; run `ctx daemon status`.")

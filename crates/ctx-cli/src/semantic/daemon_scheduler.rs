@@ -11,9 +11,9 @@ pub(super) fn run_daemon_once_with_activity(
         source_refresh.is_some_and(SourceBackedRefreshCoordinator::has_pending_request);
     if runtime.config.daemon.mode.runs_only_source_refresh() {
         return Ok(
-            run_pending_source_backed_refresh(data_root, source_refresh)?.unwrap_or_else(|| {
-                DaemonIteration::new(false, false, DaemonCycleStateV1::unknown())
-            }),
+            run_pending_source_backed_refresh(data_root, runtime, source_refresh)?.unwrap_or_else(
+                || DaemonIteration::new(false, false, DaemonCycleStateV1::unknown()),
+            ),
         );
     }
     let query_generation = query_activity.map(|activity| activity.snapshot().1);
@@ -98,6 +98,7 @@ fn run_pending_source_backed_pro_catch_up(
 
 fn run_pending_source_backed_refresh(
     data_root: &Path,
+    runtime: &mut DaemonRuntime,
     source_refresh: Option<&SourceBackedRefreshCoordinator>,
 ) -> Result<Option<DaemonIteration>> {
     let Some(run) = source_refresh.and_then(|coordinator| coordinator.run_next(data_root)) else {
@@ -107,7 +108,8 @@ fn run_pending_source_backed_refresh(
         run.failed,
         run.job.get("status").and_then(Value::as_str) == Some("failed")
     );
-    write_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root), &run.job)?;
+    let job = record_daemon_job_retry(&mut runtime.history_retry, run.job);
+    write_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root), &job)?;
     Ok(Some(DaemonIteration::new(
         run.did_work,
         run.failed,

@@ -73,10 +73,9 @@ impl InstallationDaemonLease {
     }
 
     pub(super) fn write_status(&self, status: &str, attempt_id: Option<&str>) -> Result<()> {
-        // Keep the numeric fields readable by v0.26 during rollback. New
-        // binaries use the explicit booleans to recover the unbounded
-        // persistent contract instead of treating those compatibility values
-        // as real exit/scheduling options.
+        // Explicit booleans carry the persistent contract. Numeric values are
+        // retained only as bounded receipt fields for current forward upgrade
+        // recovery and are never interpreted as implicit production exits.
         let persistent = self.idle_exit_seconds.is_none();
         let loop_interval_explicit = self.loop_interval_seconds.is_some();
         write_private_json_file(
@@ -299,6 +298,70 @@ fn validate_installation_daemon_registration(value: &Value, path: &Path) -> Resu
             "invalid ctx daemon acknowledgement at {}",
             path.display()
         ));
+    }
+    Ok(())
+}
+
+pub(super) fn remove_installation_daemon_coordination_for(data_root: &Path) -> Result<()> {
+    let (_, root) = crate::upgrade::installation_daemon_coordination_paths()?;
+    let entries = match fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("read ctx daemon coordination {}", root.display()))
+        }
+    };
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(&path)
+            .with_context(|| format!("inspect ctx daemon coordination {}", path.display()))?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(anyhow!(
+                "ctx daemon coordination is not a regular file: {}",
+                path.display()
+            ));
+        }
+        let value = fs::read(&path)
+            .with_context(|| format!("read ctx daemon coordination {}", path.display()))
+            .and_then(|bytes| {
+                serde_json::from_slice::<Value>(&bytes)
+                    .with_context(|| format!("parse ctx daemon coordination {}", path.display()))
+            })?;
+        validate_installation_daemon_registration(&value, &path)?;
+        if value
+            .get("data_root")
+            .and_then(Value::as_str)
+            .map(Path::new)
+            != Some(data_root)
+        {
+            continue;
+        }
+        let pid = value
+            .get("pid")
+            .and_then(Value::as_u64)
+            .and_then(|pid| u32::try_from(pid).ok())
+            .unwrap_or_default();
+        if matches!(
+            process_state(pid),
+            ProcessState::Running | ProcessState::Unknown
+        ) {
+            return Err(anyhow!(
+                "ctx daemon coordination still identifies a live process after lifecycle release"
+            ));
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("remove ctx daemon coordination {}", path.display()))
+            }
+        }
     }
     Ok(())
 }

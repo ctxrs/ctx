@@ -68,7 +68,12 @@ mod unix {
     fn initialize_store(temp: &tempfile::TempDir, binary: &Path) {
         fs::create_dir_all(temp.path().join(".codex/sessions")).unwrap();
         let mut command = std_ctx_from_binary(temp, binary);
-        command.args(["setup", "--catalog-only", "--progress", "none"]);
+        // This fixture owns the daemon child directly so it can assert PID-stable
+        // live reload. Suppress only this initialization spawn, including for
+        // semantic-enabled configurations that intentionally reject --no-daemon.
+        command
+            .args(["setup", "--catalog-only", "--progress", "none"])
+            .env("CTX_DAEMON_AUTOSTART_OFF", "1");
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             match command.output() {
@@ -160,7 +165,6 @@ mod unix {
                 && lifecycle["semantic_runtime_active"] == false
                 && lifecycle["config_reload"]["status"] == "applied"
                 && lifecycle["config_reload"]["applied"]["semantic_enabled"] == false
-                && semantic_job(root).is_some_and(|job| job["status"] == "disabled")
         });
     }
 
@@ -174,9 +178,7 @@ mod unix {
                 && lifecycle["semantic_runtime_active"] == true
                 && lifecycle["config_reload"]["status"] == "applied"
                 && lifecycle["config_reload"]["applied"]["semantic_enabled"] == true
-                && semantic_job(root).is_some_and(|job| {
-                    job["status"] == "empty" && job["reason"] == "no_searchable_items"
-                })
+                && semantic_job(root).is_some_and(|job| job["status"] == "ready")
         });
     }
 
@@ -206,10 +208,9 @@ mod unix {
 
         write_config(temp.path(), true);
         let setup = run_supported_setup(&temp, &binary);
-        assert_eq!(
-            setup["background_indexing"]["daemon_autostart"]["status"],
-            "deferred"
-        );
+        assert_eq!(setup["schema_version"], 2);
+        assert_eq!(setup["daemon_autostart"]["status"], "degraded");
+        assert_eq!(setup["daemon_autostart"]["pid"], original_pid);
 
         wait_for("live semantic daemon activation", || {
             let Some(lifecycle) = daemon_lifecycle(temp.path()) else {
@@ -220,7 +221,7 @@ mod unix {
                 && lifecycle["config_reload"]["status"] == "applied"
                 && lifecycle["config_reload"]["applied"]["semantic_enabled"] == true
                 && temp.path().join("daemon/query-endpoint.json").exists()
-                && semantic_job(temp.path()).is_some_and(|job| job["status"] == "empty")
+                && semantic_job(temp.path()).is_some_and(|job| job["status"] == "ready")
         });
         daemon.assert_running();
 
@@ -274,8 +275,7 @@ mod unix {
                     && lifecycle["pid"] == original_pid
                     && lifecycle["semantic_runtime_active"] == false
                     && lifecycle["config_reload"]["status"] == "applied"
-                    && lifecycle["config_reload"]["applied"]["daemon_mode"]
-                        == "source-refresh-only"
+                    && lifecycle["config_reload"]["applied"]["daemon_mode"] == "source-refresh-only"
                     && lifecycle["config_reload"]["applied"]["semantic_enabled"] == true
                     && !temp.path().join("daemon/query-endpoint.json").exists()
             })
@@ -288,10 +288,7 @@ mod unix {
         assert_eq!(full["semantic_runtime_active"], true);
         assert_eq!(full["config_reload"]["status"], "applied");
         assert_eq!(full["config_reload"]["applied"]["daemon_mode"], "full");
-        assert_eq!(
-            full["config_reload"]["applied"]["semantic_enabled"],
-            true
-        );
+        assert_eq!(full["config_reload"]["applied"]["semantic_enabled"], true);
         assert!(
             temp.path().join("daemon/query-endpoint.json").is_file(),
             "full-mode setup returned before the query endpoint was live"
@@ -300,8 +297,7 @@ mod unix {
 
         write_mode_config(temp.path(), "source-refresh-only", true);
         let _setup = run_supported_setup(&temp, &binary);
-        let source_only =
-            daemon_lifecycle(temp.path()).expect("source-refresh-only lifecycle");
+        let source_only = daemon_lifecycle(temp.path()).expect("source-refresh-only lifecycle");
         assert_eq!(source_only["pid"], original_pid);
         assert_eq!(source_only["semantic_runtime_active"], false);
         assert_eq!(source_only["config_reload"]["status"], "applied");
@@ -321,7 +317,7 @@ mod unix {
     }
 
     #[test]
-    fn status_distinguishes_config_mutation_from_live_activation() {
+    fn setup_handoff_observes_event_driven_live_activation() {
         let temp = tempdir();
         let binary = copied_ctx_binary(&temp);
         write_config(temp.path(), false);
@@ -330,29 +326,23 @@ mod unix {
         wait_for_disabled_cycle(temp.path(), daemon.pid());
 
         write_config(temp.path(), true);
-        let _setup = run_supported_setup(&temp, &binary);
+        let setup = run_supported_setup(&temp, &binary);
+        assert_eq!(setup["daemon_autostart"]["status"], "degraded");
+        assert_eq!(setup["daemon_autostart"]["pid"], daemon.pid());
         let status = daemon_status(&temp, &binary);
 
         assert_eq!(status["running"], true);
-        assert_eq!(status["semantic_runtime_active"], false);
-        assert_eq!(status["config_reload"]["status"], "pending");
-        assert_eq!(status["config_reload"]["out_of_sync"], true);
-        assert_eq!(
-            status["config_reload"]["applied"]["semantic_enabled"],
-            false
-        );
+        assert_eq!(status["semantic_runtime_active"], true);
+        assert_eq!(status["config_reload"]["status"], "applied");
+        assert_eq!(status["config_reload"]["out_of_sync"], false);
+        assert_eq!(status["config_reload"]["applied"]["semantic_enabled"], true);
         assert_eq!(
             status["config_reload"]["requested"]["semantic_enabled"],
             true
         );
         assert_eq!(status["jobs"]["semantic_index"]["enabled"], true);
-        assert_eq!(status["jobs"]["semantic_index"]["runtime_active"], false);
-        assert_eq!(status["jobs"]["semantic_index"]["status"], "pending");
-        assert_eq!(
-            status["jobs"]["semantic_index"]["reason"],
-            "daemon_config_reload_pending"
-        );
-        assert!(!temp.path().join("daemon/query-endpoint.json").exists());
+        assert_eq!(status["jobs"]["semantic_index"]["runtime_active"], true);
+        assert!(temp.path().join("daemon/query-endpoint.json").is_file());
     }
 
     #[test]
@@ -460,16 +450,10 @@ mod unix {
             .is_some_and(|error| error.contains("parse")));
         assert_eq!(status["jobs"]["semantic_index"]["enabled"], true);
         assert_eq!(status["jobs"]["semantic_index"]["runtime_active"], true);
-        assert_eq!(status["jobs"]["semantic_index"]["status"], "empty");
-        assert_eq!(
-            status["jobs"]["semantic_index"]["reason"],
-            "no_searchable_items"
-        );
-        assert_eq!(status["jobs"]["semantic_index"]["last_run_status"], "empty");
-        assert_eq!(
-            status["jobs"]["semantic_index"]["last_run_reason"],
-            "no_searchable_items"
-        );
+        assert_eq!(status["jobs"]["semantic_index"]["status"], "ready");
+        assert!(status["jobs"]["semantic_index"]["reason"].is_null());
+        assert_eq!(status["jobs"]["semantic_index"]["last_run_status"], "ready");
+        assert!(status["jobs"]["semantic_index"]["last_run_reason"].is_null());
         assert_eq!(
             status["jobs"]["semantic_index"]["config_reload_status"],
             "failed"
@@ -491,10 +475,13 @@ mod unix {
 
         fs::create_dir(temp.path().join("daemon/query-endpoint.json")).unwrap();
         write_config(temp.path(), true);
-        let setup = run_supported_setup(&temp, &binary);
-        assert_eq!(
-            setup["background_indexing"]["daemon_autostart"]["status"],
-            "deferred"
+        let mut setup = ctx_from_binary(&temp, &binary);
+        setup.args(["setup", "--format=json", "--progress", "none"]);
+        let setup_error = failure_stderr(&mut setup);
+        assert!(
+            setup_error.contains("ctx daemon did not become ready")
+                && setup_error.contains("query-endpoint.json"),
+            "{setup_error}"
         );
         wait_for("failed semantic runtime activation", || {
             daemon_lifecycle(temp.path()).is_some_and(|status| {

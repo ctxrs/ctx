@@ -1,7 +1,6 @@
-use std::{fs, path::Path};
+use std::path::Path;
 
 use anyhow::Result;
-use ctx_history_core::database_path;
 use ctx_history_index::{
     current_source_generation_policy, current_source_generation_policy_hash, VerifiedIndex,
 };
@@ -13,7 +12,6 @@ use crate::{
     compact_json,
     config::AppConfig,
     source_sql::{sql_compatibility_path, SqlCompatibility},
-    upgrade::data_migration::{self, MigrationOrigin, MigrationPhase},
 };
 
 use super::{
@@ -21,10 +19,12 @@ use super::{
         daemon_jobs_path, daemon_report_with_disabled_status,
         daemon_source_backed_refresh_job_path, read_daemon_job_status,
     },
+    source_backed_refresh_coordinator::source_backed_lexical_artifact_is_uncommitted_schema_only,
     vector_store::{source_backed_semantic_vector_path, SemanticVectorStore},
 };
 
-const EPOCH_MARKER_FILE: &str = "activation.jsonl";
+const SEARCH_DIRECTORY: &str = "search";
+const LEXICAL_DIRECTORY: &str = "lexical";
 const SOURCE_BACKED_PRO_CATCH_UP_STATUS_FILE: &str = "pro-catch-up.json";
 
 pub(crate) struct SourceEpochStatus {
@@ -36,29 +36,21 @@ pub(crate) struct SourceEpochStatus {
     pub(crate) report: Value,
 }
 
-struct EpochObservation {
-    initialized: bool,
-    valid: bool,
-    phase: Option<MigrationPhase>,
-    report: Value,
-}
-
 pub(crate) fn source_epoch_status_report(
     data_root: &Path,
     config: &AppConfig,
 ) -> Result<SourceEpochStatus> {
     let current_policy = current_source_generation_policy();
     let current_policy_hash = current_source_generation_policy_hash()?;
-    let prior_epoch = prior_epoch_report(data_root);
-    let epoch = epoch_report(data_root);
     let refresh_job = read_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root));
     let (lexical, index) = lexical_report(
         data_root,
-        &epoch,
         refresh_job.as_ref(),
         &current_policy_hash,
         serde_json::to_value(&current_policy)?,
     );
+    let history_epoch = history_epoch_report(&lexical, index.as_ref());
+    let initialized = index.is_some();
     let generation_id = index.as_ref().map(|index| index.generation_id().to_owned());
     let daemon = source_daemon_report(data_root);
     let catalog = catalog_report(
@@ -82,17 +74,17 @@ pub(crate) fn source_epoch_status_report(
     let indexed_sessions = relational_counts.map(|counts| counts.sessions);
 
     Ok(SourceEpochStatus {
-        initialized: epoch.initialized,
+        initialized,
         indexed_items,
         indexed_sessions,
         indexed_events,
         indexed_sources,
         report: compact_json(json!({
             "schema_version": 2,
-            "initialized": epoch.initialized,
+            "initialized": initialized,
             "data_root": data_root,
             "config_path": data_root.join(crate::config::CONFIG_FILE),
-            "history_epoch": epoch.report,
+            "history_epoch": history_epoch,
             "lexical": lexical,
             "catalog": catalog,
             "resolver": resolver,
@@ -100,7 +92,6 @@ pub(crate) fn source_epoch_status_report(
             "semantic": semantic,
             "relational": relational,
             "pro_projection": pro_projection,
-            "prior_epoch": prior_epoch,
             "daemon": daemon,
             "indexed_items": indexed_items,
             "indexed_sessions": indexed_sessions,
@@ -163,90 +154,24 @@ fn refresh_report(job: Option<&Value>, generation_id: Option<&str>, daemon: &Val
     }))
 }
 
-fn epoch_report(data_root: &Path) -> EpochObservation {
-    let marker_path = data_migration::migration_directory(data_root).join(EPOCH_MARKER_FILE);
-    if !marker_path.is_file() {
-        return EpochObservation {
-            initialized: false,
-            valid: true,
-            phase: None,
-            report: compact_json(json!({
-                "name": "v0.26_source_backed",
-                "status": "unavailable",
-                "reason": "epoch_not_initialized",
-                "marker_path": marker_path,
-            })),
-        };
-    }
-
-    match data_migration::inspect(data_root) {
-        Ok(Some(marker)) => {
-            let status = match marker.phase {
-                MigrationPhase::Ready => "ready",
-                MigrationPhase::Detected | MigrationPhase::RebuildPending => "pending",
-                MigrationPhase::SourceRebuildFailed => "unavailable",
-            };
-            let reason = match marker.phase {
-                MigrationPhase::Ready => None,
-                MigrationPhase::Detected => Some("source_rebuild_not_requested"),
-                MigrationPhase::RebuildPending => Some("source_rebuild_pending"),
-                MigrationPhase::SourceRebuildFailed => Some("source_rebuild_failed"),
-            };
-            EpochObservation {
-                initialized: true,
-                valid: true,
-                phase: Some(marker.phase),
-                report: compact_json(json!({
-                    "name": "v0.26_source_backed",
-                    "status": status,
-                    "reason": reason,
-                    "origin": match marker.origin {
-                        MigrationOrigin::Fresh => "fresh",
-                        MigrationOrigin::PreviousHistoryStore => "prior_epoch_preserved",
-                    },
-                    "phase": epoch_phase_name(marker.phase),
-                    "epoch_id": marker.migration_id,
-                    "source_rebuild_required": marker.source_rebuild_required,
-                    "lexical_generation_id": marker.lexical_generation_id,
-                    "marker_path": marker_path,
-                    "last_error": marker.error,
-                })),
-            }
-        }
-        Ok(None) => EpochObservation {
-            initialized: true,
-            valid: false,
-            phase: None,
-            report: compact_json(json!({
-                "name": "v0.26_source_backed",
-                "status": "unavailable",
-                "reason": "epoch_marker_missing",
-                "marker_path": marker_path,
-            })),
-        },
-        Err(error) => EpochObservation {
-            initialized: true,
-            valid: false,
-            phase: None,
-            report: compact_json(json!({
-                "name": "v0.26_source_backed",
-                "status": "unavailable",
-                "reason": "epoch_marker_invalid",
-                "marker_path": marker_path,
-                "last_error": format!("{error:#}"),
-            })),
-        },
-    }
+fn history_epoch_report(lexical: &Value, index: Option<&VerifiedIndex>) -> Value {
+    compact_json(json!({
+        "name": "v1_source_backed",
+        "status": lexical.get("status"),
+        "reason": lexical.get("reason"),
+        "activation_authority": "verified_lexical_generation",
+        "lexical_generation_id": index.map(VerifiedIndex::generation_id),
+        "generation_path": lexical.get("path"),
+    }))
 }
 
 fn lexical_report(
     data_root: &Path,
-    epoch: &EpochObservation,
     refresh_job: Option<&Value>,
     current_policy_hash: &str,
     current_policy: Value,
 ) -> (Value, Option<VerifiedIndex>) {
-    let path = data_migration::lexical_projection_path(data_root);
+    let path = data_root.join(SEARCH_DIRECTORY).join(LEXICAL_DIRECTORY);
     let request_state = refresh_job
         .and_then(|job| job.get("request_state"))
         .and_then(Value::as_str);
@@ -254,14 +179,11 @@ fn lexical_report(
         .and_then(|job| job.get("published_generation"))
         .and_then(Value::as_str);
     if !path.join("meta.json").is_file() {
-        let (status, reason) = match epoch.phase {
-            Some(MigrationPhase::SourceRebuildFailed) => ("unavailable", "source_rebuild_failed"),
-            Some(MigrationPhase::Detected | MigrationPhase::RebuildPending) => {
-                ("pending", "generation_not_published")
-            }
-            Some(MigrationPhase::Ready) => ("unavailable", "ready_generation_missing"),
-            None if epoch.initialized => ("unavailable", "epoch_marker_invalid"),
-            None => ("unavailable", "epoch_not_initialized"),
+        let (status, reason) = match request_state {
+            Some("queued" | "running") => ("pending", "generation_not_published"),
+            Some("failed") => ("unavailable", "source_refresh_failed"),
+            Some("published") => ("unavailable", "published_generation_missing"),
+            _ => ("unavailable", "generation_not_published"),
         };
         return (
             compact_json(json!({
@@ -289,8 +211,7 @@ fn lexical_report(
             let policy_matches = manifest.policy_schema_hash == current_policy_hash;
             let generation_matches =
                 published_generation.map(|generation| generation == index.generation_id());
-            let (status, reason) =
-                lexical_state(epoch, policy_matches, request_state, generation_matches);
+            let (status, reason) = lexical_state(policy_matches);
             let value = compact_json(json!({
                 "status": status,
                 "reason": reason,
@@ -315,58 +236,52 @@ fn lexical_report(
             }));
             (value, Some(index))
         }
-        Err(error) => (
-            compact_json(json!({
-                "status": "unavailable",
-                "reason": "generation_verification_failed",
-                "path": path,
-                "generation_id": Value::Null,
-                "request_state": request_state,
-                "published_generation": published_generation,
-                "generation_matches": Value::Null,
-                "policy": {
-                    "current_hash": current_policy_hash,
-                    "current": current_policy,
-                    "published_hash": Value::Null,
-                    "matches_current": Value::Null,
-                },
-                "last_error": format!("{error:#}"),
-            })),
-            None,
-        ),
+        Err(error) => {
+            let cold_uncommitted =
+                if matches!(error, ctx_history_index::IndexError::MissingCommitPayload)
+                    && !matches!(request_state, Some("published"))
+                {
+                    source_backed_lexical_artifact_is_uncommitted_schema_only(&path)
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
+            let (status, reason) =
+                if cold_uncommitted && matches!(request_state, Some("queued" | "running")) {
+                    ("pending", "generation_not_published")
+                } else if cold_uncommitted {
+                    ("unavailable", "generation_not_published")
+                } else {
+                    ("unavailable", "generation_verification_failed")
+                };
+            (
+                compact_json(json!({
+                    "status": status,
+                    "reason": reason,
+                    "path": path,
+                    "generation_id": Value::Null,
+                    "request_state": request_state,
+                    "published_generation": published_generation,
+                    "generation_matches": Value::Null,
+                    "policy": {
+                        "current_hash": current_policy_hash,
+                        "current": current_policy,
+                        "published_hash": Value::Null,
+                        "matches_current": Value::Null,
+                    },
+                    "last_error": format!("{error:#}"),
+                })),
+                None,
+            )
+        }
     }
 }
 
-fn lexical_state(
-    epoch: &EpochObservation,
-    policy_matches: bool,
-    request_state: Option<&str>,
-    generation_matches: Option<bool>,
-) -> (&'static str, Option<&'static str>) {
-    if !epoch.valid {
-        return ("unavailable", Some("epoch_marker_invalid"));
-    }
+fn lexical_state(policy_matches: bool) -> (&'static str, Option<&'static str>) {
     if !policy_matches {
         return ("stale", Some("generation_policy_mismatch"));
     }
-    match epoch.phase {
-        Some(MigrationPhase::Detected | MigrationPhase::RebuildPending) => {
-            ("pending", Some("epoch_activation_pending"))
-        }
-        Some(MigrationPhase::SourceRebuildFailed) => ("unavailable", Some("source_rebuild_failed")),
-        Some(MigrationPhase::Ready) => match request_state {
-            Some("published") if generation_matches == Some(true) => ("ready", None),
-            Some("published") if generation_matches == Some(false) => {
-                ("stale", Some("published_generation_mismatch"))
-            }
-            Some("published") => ("unavailable", Some("published_generation_missing")),
-            Some("queued" | "running") => ("pending", Some("source_refresh_pending")),
-            Some("failed") => ("unavailable", Some("source_refresh_failed")),
-            Some(_) => ("unavailable", Some("refresh_state_unrecognized")),
-            None => ("unavailable", Some("refresh_state_missing")),
-        },
-        None => ("unavailable", Some("epoch_not_initialized")),
-    }
+    ("ready", None)
 }
 
 fn catalog_report(
@@ -818,73 +733,6 @@ fn pro_projection_report_from_job(
         "job": job,
         "status_path": status_path.as_ref(),
     }))
-}
-
-fn prior_epoch_report(data_root: &Path) -> Value {
-    let path = database_path(data_root.to_path_buf());
-    match fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            compact_json(json!({
-                "status": "unavailable",
-                "reason": "prior_epoch_path_not_regular_file",
-                "epoch": "v0.25_or_earlier",
-                "authority": "non_authoritative",
-                "present": true,
-                "preserved": false,
-                "active": false,
-                "opened": false,
-                "purpose": "rollback_or_manual_recovery_only",
-                "path": path,
-            }))
-        }
-        Ok(metadata) => compact_json(json!({
-            "status": "preserved",
-            "reason": "prior_history_epoch",
-            "epoch": "v0.25_or_earlier",
-            "authority": "non_authoritative",
-            "present": true,
-            "preserved": true,
-            "active": false,
-            "opened": false,
-            "purpose": "rollback_or_manual_recovery_only",
-            "path": path,
-            "bytes": metadata.len(),
-        })),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => compact_json(json!({
-            "status": "absent",
-            "reason": Value::Null,
-            "epoch": "v0.25_or_earlier",
-            "authority": "non_authoritative",
-            "present": false,
-            "preserved": false,
-            "active": false,
-            "opened": false,
-            "purpose": "rollback_or_manual_recovery_only",
-            "path": path,
-        })),
-        Err(error) => compact_json(json!({
-            "status": "unavailable",
-            "reason": "prior_epoch_path_inspection_failed",
-            "epoch": "v0.25_or_earlier",
-            "authority": "non_authoritative",
-            "present": Value::Null,
-            "preserved": Value::Null,
-            "active": false,
-            "opened": false,
-            "purpose": "rollback_or_manual_recovery_only",
-            "path": path,
-            "last_error": error.to_string(),
-        })),
-    }
-}
-
-fn epoch_phase_name(phase: MigrationPhase) -> &'static str {
-    match phase {
-        MigrationPhase::Detected => "detected",
-        MigrationPhase::RebuildPending => "rebuild_pending",
-        MigrationPhase::SourceRebuildFailed => "source_rebuild_failed",
-        MigrationPhase::Ready => "ready",
-    }
 }
 
 #[cfg(test)]

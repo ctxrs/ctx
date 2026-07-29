@@ -3,7 +3,7 @@ mod support;
 use support::*;
 
 #[test]
-fn mcp_status_and_tools_list_are_read_only_without_initialized_epoch() {
+fn mcp_startup_health_checks_enabled_daemon_before_status_and_tools_list() {
     let temp = tempdir();
     let responses = mcp_roundtrip(
         &temp,
@@ -114,7 +114,7 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_epoch() {
     );
     let status = &responses[2]["result"]["structuredContent"];
     assert_eq!(status["schema_version"], 2);
-    assert_eq!(status["initialized"], false);
+    assert_eq!(status["initialized"], false, "{status:#}");
     assert!(status["indexed_sessions"].is_null());
     assert!(status["indexed_events"].is_null());
     assert_eq!(status["history_epoch"]["status"], "unavailable");
@@ -125,9 +125,7 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_epoch() {
     );
     assert_eq!(status["refresh"]["status"], "unavailable");
     assert_eq!(status["relational"]["status"], "unavailable");
-    assert_eq!(status["prior_epoch"]["status"], "absent");
-    assert_eq!(status["prior_epoch"]["authority"], "non_authoritative");
-    assert_eq!(status["prior_epoch"]["opened"], false);
+    assert!(status.get("prior_epoch").is_none());
     assert_eq!(status["read_only"], true);
     assert_eq!(status["semantic"]["status"], "disabled");
     assert_eq!(
@@ -135,16 +133,22 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_epoch() {
         json!(temp.path().join("search/semantic"))
     );
     assert_eq!(status["daemon"]["enabled"], true);
+    assert_eq!(status["daemon"]["running"], true);
+    assert_eq!(
+        status["daemon"]["source_refresh_endpoint"]["available"],
+        true
+    );
+    assert_eq!(status["daemon"]["start_mode"], "auto");
+    assert_eq!(status["daemon"]["supervisor"]["status"], "fallback");
     assert_useful_mcp_text(
         &responses[2]["result"],
         &[
             "ctx status",
             "initialized: false",
-            "history_epoch: status=unavailable, reason=epoch_not_initialized",
-            "lexical: status=unavailable, reason=epoch_not_initialized",
-            "source_refresh: status=unavailable, reason=daemon_unavailable",
+            "history_epoch: status=unavailable, reason=source_refresh_failed",
+            "lexical: status=unavailable, reason=source_refresh_failed",
+            "source_refresh: status=unavailable, reason=source_refresh_failed",
             "relational: status=unavailable, reason=lexical_generation_unavailable",
-            "prior_epoch: status=absent",
             "read_only: true",
             "local_only: true",
             "semantic: status=disabled",
@@ -157,9 +161,14 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_epoch() {
             "daemon_jobs: source_backed_refresh=",
         ],
     );
+    assert!(temp.path().join("daemon/daemon.lock").is_file());
+    assert!(temp
+        .path()
+        .join("daemon/source-refresh-endpoint.json")
+        .is_file());
     assert!(
-        std::fs::read_dir(temp.path()).unwrap().next().is_none(),
-        "MCP status should not create any file in a pristine data root"
+        !temp.path().join("work.sqlite").exists(),
+        "MCP startup must not initialize the previous history epoch"
     );
 }
 
@@ -435,9 +444,9 @@ fn mcp_sql_tool_returns_structured_json_and_rejects_writes() {
 }
 
 #[test]
-fn mcp_sql_fresh_root_initializes_only_relational_projection() {
+fn mcp_sql_fresh_root_reports_missing_projection_without_initializing_storage() {
     let temp = tempdir();
-    let responses = mcp_roundtrip(
+    let responses = mcp_roundtrip_with_env(
         &temp,
         &[
             json!({
@@ -462,16 +471,20 @@ fn mcp_sql_fresh_root_initializes_only_relational_projection() {
                 }
             }),
         ],
+        &[("CTX_DAEMON_AUTOSTART_OFF", "1")],
     );
 
-    assert_eq!(
-        responses[1]["result"]["structuredContent"]["rows"],
-        json!([[1]])
-    );
-    assert!(temp.path().join("relational.sqlite").is_file());
+    let error = &responses[1]["result"];
+    assert_eq!(error["isError"], true, "{error:#}");
     assert!(
-        !temp.path().join("work.sqlite").exists(),
-        "fresh-root MCP SQL must not create prior-epoch storage"
+        error["structuredContent"]["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("source-backed SQL projection is missing")),
+        "{error:#}"
+    );
+    assert!(
+        std::fs::read_dir(temp.path()).unwrap().next().is_none(),
+        "existing-only MCP SQL must leave a pristine data root entirely empty"
     );
 }
 
@@ -479,8 +492,23 @@ fn mcp_sql_fresh_root_initializes_only_relational_projection() {
 fn mcp_search_returns_structured_json_without_refresh() {
     let temp = tempdir();
     let fixture = provider_history_fixture("codex-sessions");
-    let (_daemon, imported) = import_codex_fixture_through_daemon(&temp, &fixture);
-    assert!(imported["sources"][0]["published_generation"].is_string());
+    copy_dir_all(
+        std::path::Path::new(&fixture),
+        &temp.path().join(".codex/sessions"),
+    );
+    let mut daemon = start_mcp_source_refresh_daemon(&temp);
+    let initial = json_output(ctx(&temp).args([
+        "search",
+        "onboarding",
+        "--provider",
+        "codex",
+        "--refresh",
+        "wait",
+        "--format=json",
+    ]));
+    assert_eq!(initial["schema_version"], 1, "{initial:#}");
+    assert_eq!(initial["results"].as_array().map(Vec::len), Some(1));
+    let killed_pid = daemon.kill_and_wait();
 
     let search_responses = mcp_roundtrip(
         &temp,
@@ -527,8 +555,9 @@ fn mcp_search_returns_structured_json_without_refresh() {
             }),
         ],
     );
+    let recovered = json_output(ctx(&temp).args(["daemon", "status", "--format=json"]));
     let search = &search_responses[1]["result"]["structuredContent"];
-    assert_eq!(search["schema_version"], 1);
+    assert_eq!(search["schema_version"], 1, "{search:#}\n{recovered:#}");
     assert_eq!(search["payload_type"], "search_results");
     assert_eq!(search["query"], "onboarding");
     assert_eq!(search["freshness"]["mode"], "off");
@@ -596,6 +625,16 @@ fn mcp_search_returns_structured_json_without_refresh() {
     );
     assert!(result_window["truncation"]["candidate_pool"].is_number());
     assert!(mcp_content_text(&search_responses[2]["result"]).ends_with("More results available.\n"));
+    assert_eq!(recovered["daemon"]["running"], true, "{recovered:#}");
+    assert_eq!(
+        recovered["daemon"]["source_refresh_endpoint"]["available"], true,
+        "{recovered:#}"
+    );
+    assert_ne!(
+        recovered["daemon"]["pid"].as_u64(),
+        Some(u64::from(killed_pid)),
+        "{recovered:#}"
+    );
 }
 
 #[test]

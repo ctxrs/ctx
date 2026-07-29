@@ -9,27 +9,6 @@ fn durable_state_path_is_purpose_based() {
 }
 
 #[test]
-fn source_status_reports_prior_epoch_without_opening_it() {
-    let temp = tempfile::tempdir().unwrap();
-    let path = database_path(temp.path().to_path_buf());
-    let sentinel = b"not a sqlite database";
-    fs::write(&path, sentinel).unwrap();
-
-    let status =
-        source_epoch_status_report(temp.path(), &AppConfig::default()).expect("source status");
-    let report = &status.report["prior_epoch"];
-
-    assert_eq!(report["status"], "preserved");
-    assert_eq!(report["authority"], "non_authoritative");
-    assert_eq!(report["preserved"], true);
-    assert_eq!(report["active"], false);
-    assert_eq!(report["opened"], false);
-    assert_eq!(fs::read(&path).unwrap(), sentinel);
-    assert!(!path.with_extension("sqlite-wal").exists());
-    assert!(!path.with_extension("sqlite-shm").exists());
-}
-
-#[test]
 fn pristine_source_status_is_read_only_and_exposes_stable_paths() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("missing");
@@ -46,49 +25,15 @@ fn pristine_source_status_is_read_only_and_exposes_stable_paths() {
         status.report["semantic"]["flat_f32"]["path"],
         json!(data_root.join("search/semantic"))
     );
-    assert_eq!(status.report["prior_epoch"]["status"], "absent");
-    assert_eq!(
-        status.report["prior_epoch"]["authority"],
-        "non_authoritative"
-    );
+    assert!(status.report.get("prior_epoch").is_none());
 }
 
 #[test]
-fn lexical_state_requires_exact_current_publication_and_policy_identity() {
-    let ready = EpochObservation {
-        initialized: true,
-        valid: true,
-        phase: Some(MigrationPhase::Ready),
-        report: Value::Null,
-    };
-
+fn lexical_state_depends_only_on_verified_generation_policy_identity() {
+    assert_eq!(lexical_state(true), ("ready", None));
     assert_eq!(
-        lexical_state(&ready, true, Some("published"), Some(true)),
-        ("ready", None)
-    );
-    assert_eq!(
-        lexical_state(&ready, true, Some("published"), Some(false)),
-        ("stale", Some("published_generation_mismatch"))
-    );
-    assert_eq!(
-        lexical_state(&ready, false, Some("published"), Some(true)),
+        lexical_state(false),
         ("stale", Some("generation_policy_mismatch"))
-    );
-    assert_eq!(
-        lexical_state(&ready, true, Some("running"), None),
-        ("pending", Some("source_refresh_pending"))
-    );
-    assert_eq!(
-        lexical_state(&ready, true, Some("failed"), None),
-        ("unavailable", Some("source_refresh_failed"))
-    );
-    assert_eq!(
-        lexical_state(&ready, true, Some("published"), None),
-        ("unavailable", Some("published_generation_missing"))
-    );
-    assert_eq!(
-        lexical_state(&ready, true, None, None),
-        ("unavailable", Some("refresh_state_missing"))
     );
 }
 

@@ -30,9 +30,9 @@ use super::{
     health_search::{create_private_dir_all, secure_private_file_permissions, semantic_env_flag},
     paths_status::{
         daemon_lock_is_active, daemon_lock_is_owned_by, daemon_lock_is_stale, daemon_lock_path,
-        daemon_root_path, daemon_status_path, observe_pid_advisory_lock,
-        open_or_create_pid_lock_file, pid_from_lock_json, pid_lock_guard_path, process_state,
-        read_daemon_status, read_pid_lock_json, write_daemon_status, write_private_json_file,
+        daemon_root_path, observe_pid_advisory_lock, open_or_create_pid_lock_file,
+        pid_from_lock_json, pid_lock_guard_path, process_state, read_daemon_status,
+        read_pid_lock_json, write_daemon_status, write_private_json_file,
         PidAdvisoryLockObservation, ProcessState,
     },
     query_service::daemon_source_refresh_request,
@@ -60,8 +60,7 @@ use autostart::{
 #[cfg(test)]
 use autostart::{daemon_handoff_observation_from, wait_for_daemon_handoff_with};
 
-#[cfg(unix)]
-pub(crate) use handoff::prepare_posix_daemon_uninstall;
+pub(crate) use handoff::prepare_daemon_uninstall;
 pub(super) use handoff::{
     acknowledge_daemon_restart_requests, current_process_owns_daemon_upgrade_handoff,
     daemon_upgrade_handoff_blocks_current_process, read_daemon_restart_request,
@@ -72,9 +71,7 @@ pub(crate) use handoff::{
     complete_replacement_daemon_handoff, finish_replacement_daemon_handoff,
     mark_replacement_helper_handoff, DaemonUpgradeHandoff,
 };
-use handoff::{
-    daemon_query_endpoint_path, daemon_upgrade_handoff_is_active, remove_daemon_restart_requests,
-};
+use handoff::{daemon_upgrade_handoff_is_active, remove_daemon_restart_requests};
 #[cfg(test)]
 use handoff::{read_daemon_upgrade_handoff, write_daemon_upgrade_handoff};
 
@@ -88,14 +85,8 @@ use installation::{read_installation_daemon_restarts, wait_for_installation_daem
 
 pub(super) use recovery::resume_completed_installation_daemons;
 use recovery::{
-    clear_legacy_daemon_readiness, restart_acknowledged_installation_daemons,
-    restart_acknowledged_legacy_installation_daemons, wait_for_daemon_ready_ack,
-    wait_for_legacy_replacement_daemon, wait_for_replacement_daemon,
-};
-#[cfg(test)]
-use recovery::{
-    legacy_daemon_query_endpoint_is_ready, legacy_daemon_query_service_is_ready,
-    legacy_daemon_status_is_ready,
+    restart_acknowledged_installation_daemons, wait_for_daemon_ready_ack,
+    wait_for_replacement_daemon,
 };
 
 pub(super) fn daemon_autostart_exe() -> Result<PathBuf> {
@@ -145,6 +136,11 @@ pub(super) fn maybe_autostart_daemon_inner(
     config: &AppConfig,
     trigger: DaemonTriggerCommandArg,
 ) {
+    if daemon_autostart_suppression_reason().is_none()
+        && super::daemon_supervisor::ensure_daemon_supervisor(data_root).is_err()
+    {
+        return;
+    }
     let _ = request_daemon_autostart(data_root, config, trigger);
 }
 

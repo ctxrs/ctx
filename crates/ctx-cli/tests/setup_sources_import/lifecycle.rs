@@ -398,7 +398,10 @@ fn status_missing_source_epoch_is_read_only_and_does_not_initialize_files() {
     assert_eq!(status["local_only"], true);
     assert_eq!(status["read_only"], true);
     assert_eq!(status["history_epoch"]["status"], "unavailable");
-    assert_eq!(status["history_epoch"]["reason"], "epoch_not_initialized");
+    assert_eq!(
+        status["history_epoch"]["reason"],
+        "generation_not_published"
+    );
     assert!(status["indexed_items"].is_null());
     assert!(status["indexed_sources"].is_null());
     assert_eq!(
@@ -409,7 +412,7 @@ fn status_missing_source_epoch_is_read_only_and_does_not_initialize_files() {
         status["relational"]["path"],
         json!(data_root.join("relational.sqlite"))
     );
-    assert_eq!(status["prior_epoch"]["status"], "absent");
+    assert!(status.get("prior_epoch").is_none());
 
     let output = ctx(&temp)
         .arg("status")
@@ -1034,9 +1037,17 @@ fn machine_readable_setup_uses_v2_top_level_persistent_daemon_contract() {
     let setup = json_output(ctx(&temp).args(["setup", "--format=json", "--progress", "none"]));
     assert_eq!(setup["schema_version"], 2, "{setup:#}");
     assert!(setup.get("background_indexing").is_none(), "{setup:#}");
-    assert_eq!(setup["daemon_autostart"]["status"], "verified", "{setup:#}");
+    assert_eq!(setup["daemon_autostart"]["status"], "degraded", "{setup:#}");
     assert_eq!(setup["daemon_autostart"]["requested"], true, "{setup:#}");
-    assert!(setup["daemon_autostart"]["reason"].is_null(), "{setup:#}");
+    assert_eq!(
+        setup["daemon_autostart"]["reason"], "native_supervisor_unavailable",
+        "{setup:#}"
+    );
+    assert_eq!(setup["daemon_autostart"]["persistent"], false, "{setup:#}");
+    assert_eq!(
+        setup["daemon_autostart"]["supervisor"]["status"], "fallback",
+        "{setup:#}"
+    );
     let pid = setup["daemon_autostart"]["pid"].as_u64().unwrap() as u32;
     assert_daemon_process_running(pid);
 

@@ -468,13 +468,15 @@ fn scheduled_fence_does_not_remain_owned_by_old_parent() -> Result<()> {
 }
 
 #[test]
-fn rollback_reexec_preserves_daemon_restart_intent() -> Result<()> {
+fn reverse_epoch_reexec_is_rejected_without_consuming_forward_restart_intent() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let mut handoff =
-        begin_daemon_upgrade_handoff(temp.path(), "ua_01890f3e-2c80-7000-8000-000000000007")?;
-    handoff.restart_trigger = Some(DaemonTriggerCommandArg::Search);
-    handoff.prepare_reexec()?;
+    let attempt_id = "ua_01890f3e-2c80-7000-8000-000000000007";
+    write_daemon_restart_request(temp.path(), DaemonTriggerCommandArg::Search, attempt_id)?;
+    let error = begin_daemon_upgrade_handoff(temp.path(), attempt_id)?
+        .prepare_reexec()
+        .expect_err("reverse-epoch re-exec must fail closed");
 
+    assert!(format!("{error:#}").contains("unsupported_epoch_rollback"));
     assert_eq!(
         read_daemon_restart_request(temp.path()).map(|(_, trigger)| trigger.as_str()),
         Some("search")
@@ -483,125 +485,29 @@ fn rollback_reexec_preserves_daemon_restart_intent() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 #[test]
-fn legacy_rollback_does_not_leave_v026_restart_request() -> Result<()> {
+fn replaced_epoch_binary_is_never_launched() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
     let temp = tempfile::tempdir()?;
-    fs::write(temp.path().join(CONFIG_FILE), "[daemon]\nenabled = false\n")?;
-    fs::write(database_path(temp.path().to_path_buf()), b"")?;
-    write_daemon_restart_request(
-        temp.path(),
-        DaemonTriggerCommandArg::Setup,
-        "ua_01890f3e-2c80-7000-8000-000000000009",
+    let marker = temp.path().join("replaced-binary-ran");
+    let executable = temp.path().join("replaced-ctx");
+    fs::write(
+        &executable,
+        format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
     )?;
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))?;
+    let attempt_id = "ua_01890f3e-2c80-7000-8000-00000000000a";
+    let error = begin_daemon_upgrade_handoff(temp.path(), attempt_id)?
+        .resume_legacy_reexec_with(&executable)
+        .expect_err("replaced epoch executable must be rejected");
 
-    begin_daemon_upgrade_handoff(temp.path(), "ua_01890f3e-2c80-7000-8000-000000000009")?
-        .resume_legacy_reexec_with(Path::new("unused-while-daemon-is-disabled"))?;
-
-    assert!(read_daemon_restart_request(temp.path()).is_none());
-    assert_eq!(
-        read_daemon_upgrade_handoff(temp.path())
-            .and_then(|value| value["phase"].as_str().map(ToOwned::to_owned))
-            .as_deref(),
-        Some("completed")
-    );
-    Ok(())
-}
-
-#[test]
-fn failed_legacy_daemon_restart_does_not_block_reexec_or_restore_v026_request() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    fs::write(temp.path().join(CONFIG_FILE), "[daemon]\nenabled = true\n")?;
-    fs::write(database_path(temp.path().to_path_buf()), b"")?;
-    write_daemon_restart_request(
-        temp.path(),
-        DaemonTriggerCommandArg::Setup,
-        "ua_01890f3e-2c80-7000-8000-00000000000a",
-    )?;
-
-    let warning =
-        begin_daemon_upgrade_handoff(temp.path(), "ua_01890f3e-2c80-7000-8000-00000000000a")?
-            .resume_legacy_reexec_with(&temp.path().join("missing-v025-ctx"))?;
-
-    assert!(warning
-        .as_deref()
-        .is_some_and(|warning| warning.contains("continuing rollback recovery")));
-    assert!(read_daemon_restart_request(temp.path()).is_none());
-    assert_eq!(
-        read_daemon_upgrade_handoff(temp.path())
-            .and_then(|value| value["phase"].as_str().map(ToOwned::to_owned))
-            .as_deref(),
-        Some("aborted")
-    );
-    Ok(())
-}
-
-#[test]
-fn legacy_readiness_is_bound_to_child_status_and_optional_query_endpoint() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let child_pid = process::id();
-    write_daemon_status(
-        temp.path(),
-        &json!({
-            "schema_version": 1,
-            "status": "running",
-            "pid": child_pid,
-            "start_mode": "auto",
-            "trigger_command": "setup",
-        }),
-    )?;
-
-    assert!(legacy_daemon_status_is_ready(
-        temp.path(),
-        child_pid,
-        DaemonTriggerCommandArg::Setup
-    ));
-    assert!(!legacy_daemon_status_is_ready(
-        temp.path(),
-        child_pid.wrapping_add(1),
-        DaemonTriggerCommandArg::Setup
-    ));
-    assert!(!legacy_daemon_query_endpoint_is_ready(
-        temp.path(),
-        child_pid
-    ));
-
-    write_private_json_file(
-        &daemon_query_endpoint_path(temp.path()),
-        &json!({
-            "schema_version": 1,
-            "transport": "unix",
-            "path": "/tmp/ctx-legacy-ready.sock",
-            "token": "0123456789abcdef0123456789abcdef",
-            "pid": child_pid.wrapping_add(1),
-        }),
-    )?;
-    assert!(!legacy_daemon_query_endpoint_is_ready(
-        temp.path(),
-        child_pid
-    ));
-
-    write_private_json_file(
-        &daemon_query_endpoint_path(temp.path()),
-        &json!({
-            "schema_version": 1,
-            "transport": "unix",
-            "path": "/tmp/ctx-legacy-ready.sock",
-            "token": "0123456789abcdef0123456789abcdef",
-            "pid": child_pid,
-        }),
-    )?;
-    assert!(legacy_daemon_query_endpoint_is_ready(
-        temp.path(),
-        child_pid
-    ));
+    assert!(format!("{error:#}").contains("unsupported_epoch_rollback"));
     assert!(
-        !legacy_daemon_query_service_is_ready(temp.path(), child_pid),
-        "endpoint metadata without a live protocol response is not readiness"
+        !marker.exists(),
+        "reverse-epoch compatibility boundary executed the replaced binary"
     );
-
-    clear_legacy_daemon_readiness(temp.path())?;
-    assert!(read_daemon_status(temp.path()).is_none());
-    assert!(!daemon_query_endpoint_path(temp.path()).exists());
     Ok(())
 }
 

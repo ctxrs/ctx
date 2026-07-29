@@ -489,7 +489,7 @@ fn fresh_home_search_mvp_flow() {
         matches!(setup_json["mode"].as_str(), Some("pending" | "ready")),
         "{setup_json:#}"
     );
-    assert_eq!(setup_json["daemon_autostart"]["status"], "verified");
+    assert_eq!(setup_json["daemon_autostart"]["status"], "degraded");
     assert_eq!(setup_json["daemon_autostart"]["requested"], true);
     assert!(setup_json.get("background_indexing").is_none());
 

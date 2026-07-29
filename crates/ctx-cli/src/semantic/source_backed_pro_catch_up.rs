@@ -87,7 +87,10 @@ impl SourceBackedProCatchUpStatus {
     fn error(mut self, error: SourceBackedProCatchUpError) -> Self {
         self.status = SourceBackedProCatchUpState::Error;
         self.pending = true;
-        self.retryable = true;
+        self.retryable = error.retryable();
+        if !self.retryable {
+            self.reason = Some(error.code().to_owned());
+        }
         self.error_code = Some(error.code().to_owned());
         self.last_error = Some(error.to_string());
         self
@@ -157,6 +160,13 @@ impl SourceBackedProCatchUpError {
                 .to_owned(),
             message: error.to_string(),
         }
+    }
+
+    fn retryable(&self) -> bool {
+        !matches!(
+            self,
+            Self::Projection { code, .. } if code == "pro_not_installed"
+        )
     }
 }
 
@@ -502,7 +512,7 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_helper_is_persisted_as_independently_retryable() {
+    fn absent_helper_waits_for_external_install_without_a_retry_timer() {
         let temp = tempfile::tempdir().unwrap();
         let (generation, manifest, resolver) = empty_authority(temp.path());
 
@@ -519,7 +529,8 @@ mod tests {
         assert!(!run.did_work);
         assert_eq!(run.status["status"], "error");
         assert_eq!(run.status["pending"], true);
-        assert_eq!(run.status["retryable"], true);
+        assert_eq!(run.status["retryable"], false);
+        assert_eq!(run.status["reason"], "pro_not_installed");
         assert_eq!(run.status["error_code"], "pro_not_installed");
         assert_eq!(run.status["core_generation_id"], generation);
     }

@@ -188,8 +188,7 @@ fn assert_source_generation_ready(temp: &TempDir, expected_generation: &str) -> 
         status["indexed_sources"], status["lexical"]["certified_sources"],
         "{status:#}"
     );
-    assert_eq!(status["prior_epoch"]["present"], false, "{status:#}");
-    assert_eq!(status["prior_epoch"]["opened"], false, "{status:#}");
+    assert!(status.get("prior_epoch").is_none(), "{status:#}");
     assert!(
         !temp.path().join("work.sqlite").exists(),
         "source-backed search/status must not create the previous-epoch Store"
@@ -616,7 +615,10 @@ fn assert_daemon_refresh_failure(
         json!(retained_generation),
         "{status:#}"
     );
-    assert_eq!(job["generation_changed"], false, "{status:#}");
+    assert!(
+        job["generation_changed"].is_null(),
+        "a failed refresh has no publication receipt or generation delta: {status:#}"
+    );
     assert!(
         job["request_id"].as_str().is_some_and(|id| !id.is_empty()),
         "{status:#}"
@@ -627,7 +629,7 @@ fn assert_daemon_refresh_failure(
             .is_some_and(|error| !error.is_empty()),
         "{status:#}"
     );
-    assert_eq!(status["prior_epoch"]["opened"], false, "{status:#}");
+    assert!(status.get("prior_epoch").is_none(), "{status:#}");
     assert!(
         !temp.path().join("work.sqlite").exists(),
         "failed source-backed refresh must not create the previous-epoch Store"
@@ -973,7 +975,7 @@ fn machine_readable_search_attempts_enabled_daemon_self_healing() {
     assert!(
         stderr.contains("ctx daemon did not start")
             && stderr.contains("spawn ctx daemon")
-            && stderr.contains("missing-ctx-binary"),
+            && stderr.contains("No such file"),
         "{stderr}"
     );
     let autostart_status: Value =
@@ -1002,8 +1004,7 @@ fn machine_readable_search_attempts_enabled_daemon_self_healing() {
         status["daemon"]["source_refresh_endpoint"]["available"], false,
         "{status:#}"
     );
-    assert_eq!(status["prior_epoch"]["present"], false, "{status:#}");
-    assert_eq!(status["prior_epoch"]["opened"], false, "{status:#}");
+    assert!(status.get("prior_epoch").is_none(), "{status:#}");
 }
 
 #[test]
@@ -1092,7 +1093,6 @@ fn persistent_daemon_passively_publishes_appended_source_without_foreground_comm
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn live_daemon_prepare_uninstall_disables_stops_and_removes_coordination() {
     let temp = tempdir();
@@ -1136,7 +1136,6 @@ fn live_daemon_prepare_uninstall_disables_stops_and_removes_coordination() {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn interrupted_prepare_uninstall_is_retry_safe() {
     let temp = tempdir();
@@ -1342,7 +1341,7 @@ fn search_refresh_off_serves_published_generation_without_refreshing_sources() {
         "--format=json",
     ]));
     assert_eq!(unavailable["freshness"]["mode"], "background");
-    assert_eq!(unavailable["freshness"]["status"], "daemon_unavailable");
+    assert_eq!(unavailable["freshness"]["status"], "daemon_background");
     assert_eq!(generation_id(&unavailable), published_generation);
     assert!(
         unavailable["results"].as_array().unwrap().is_empty(),
@@ -1402,7 +1401,7 @@ fn search_refresh_wait_recovers_after_invalid_source_is_removed() {
     );
     let failed = assert_daemon_refresh_failure(&temp, 2, None);
     assert_eq!(
-        failed["history_epoch"]["reason"], "source_rebuild_failed",
+        failed["history_epoch"]["reason"], "source_refresh_failed",
         "{failed:#}"
     );
     assert_eq!(failed["lexical"]["status"], "unavailable", "{failed:#}");
@@ -1537,11 +1536,8 @@ fn search_refresh_invalid_source_failure_retains_last_published_generation() {
 
     let failed = assert_daemon_refresh_failure(&temp, 2, Some(&initial_generation));
     assert_eq!(failed["history_epoch"]["status"], "ready", "{failed:#}");
-    assert_eq!(failed["lexical"]["status"], "unavailable", "{failed:#}");
-    assert_eq!(
-        failed["lexical"]["reason"], "source_refresh_failed",
-        "{failed:#}"
-    );
+    assert_eq!(failed["lexical"]["status"], "ready", "{failed:#}");
+    assert!(failed["lexical"]["reason"].is_null(), "{failed:#}");
     assert_eq!(
         failed["lexical"]["generation_id"], initial_generation,
         "{failed:#}"
@@ -1886,10 +1882,15 @@ fn search_refresh_codex_generation_covers_full_source_lifecycle() {
         "--format=json",
     ]));
     assert!(
-        unavailable.contains("no executable source-backed routes were registered"),
+        unavailable.contains("all_provider_terminal_coverage_unavailable"),
         "{unavailable}"
     );
     let unavailable_status = assert_daemon_refresh_failure(&temp, 0, Some(&truncate_generation));
+    assert_eq!(
+        unavailable_status["daemon"]["jobs"]["source_backed_refresh"]["error_code"],
+        "all_provider_terminal_coverage_unavailable",
+        "{unavailable_status:#}"
+    );
     assert_eq!(
         unavailable_status["lexical"]["generation_id"], truncate_generation,
         "{unavailable_status:#}"
@@ -1982,6 +1983,116 @@ fn search_refresh_codex_generation_covers_full_source_lifecycle() {
     assert!(
         deleted_show.contains("was not found in the source-backed Core generation"),
         "{deleted_show}"
+    );
+}
+
+#[test]
+fn two_provider_mutation_fails_closed_when_retained_provider_is_temporarily_omitted() {
+    let temp = tempdir();
+    let codex_history = temp.path().join(".codex/history.jsonl");
+    fs::create_dir_all(codex_history.parent().unwrap()).unwrap();
+    let initial_codex_body = concat!(
+        r#"{"session_id":"terminal-coverage-codex","ts":1785326400,"text":"terminal coverage codex retained"}"#,
+        "\n"
+    );
+    fs::write(&codex_history, initial_codex_body).unwrap();
+    let claude_query = "terminal coverage claude retained";
+    install_default_claude_fixture(&temp, claude_query);
+    let _daemon = start_source_refresh_daemon(&temp);
+
+    let initial = json_output(ctx(&temp).args([
+        "search",
+        "terminal coverage codex retained",
+        "--provider",
+        "codex",
+        "--refresh",
+        "wait",
+        "--format=json",
+    ]));
+    let retained_generation = assert_published_generation(&initial, "wait");
+    let (retained_manifest, _) = generation_manifest(&temp, &retained_generation);
+    assert_eq!(retained_manifest.sources.len(), 2, "{retained_manifest:#?}");
+    let published_manifests = generation_manifest_paths(&temp);
+
+    let claude_root = temp.path().join(".claude/projects");
+    let unavailable_claude_root = temp.path().join(".claude/projects-unavailable");
+    fs::rename(&claude_root, &unavailable_claude_root).unwrap();
+    let retained_codex_history = temp.path().join("retained-codex-history.jsonl");
+    fs::rename(&codex_history, &retained_codex_history).unwrap();
+    fs::copy(&retained_codex_history, &codex_history).unwrap();
+    let mut history = fs::OpenOptions::new()
+        .append(true)
+        .open(&codex_history)
+        .unwrap();
+    writeln!(
+        history,
+        r#"{{"session_id":"terminal-coverage-codex","ts":1785326401,"text":"terminal coverage codex mutation"}}"#
+    )
+    .unwrap();
+    drop(history);
+
+    let failure = failure_stderr(ctx(&temp).args([
+        "search",
+        "terminal coverage codex mutation",
+        "--provider",
+        "codex",
+        "--refresh",
+        "wait",
+        "--format=json",
+    ]));
+    assert!(
+        failure.contains("all_provider_terminal_coverage_unavailable"),
+        "{failure}"
+    );
+    let failed = assert_daemon_refresh_failure(&temp, 0, Some(&retained_generation));
+    let job = &failed["daemon"]["jobs"]["source_backed_refresh"];
+    assert_eq!(
+        job["error_code"], "all_provider_terminal_coverage_unavailable",
+        "{failed:#}"
+    );
+    assert_eq!(
+        job["reason"], "provider_terminal_coverage_unavailable",
+        "{failed:#}"
+    );
+    assert_eq!(job["retryable"], true, "{failed:#}");
+    assert!(job["retry_not_before_at_ms"].is_number(), "{failed:#}");
+    assert_eq!(
+        generation_manifest_paths(&temp),
+        published_manifests,
+        "a partial provider refresh must not publish a mixed generation"
+    );
+    let (still_retained, _) = generation_manifest(&temp, &retained_generation);
+    assert_eq!(still_retained.sources, retained_manifest.sources);
+
+    let codex = failure_stderr(ctx(&temp).args([
+        "search",
+        "terminal coverage codex retained",
+        "--provider",
+        "codex",
+        "--refresh",
+        "off",
+        "--format=json",
+    ]));
+    assert!(
+        codex.contains("source_hydration_failed/")
+            && !codex.contains("no registered provider route owns")
+            && !codex.contains("resolver_generation_unavailable"),
+        "{codex}"
+    );
+    let claude = failure_stderr(ctx(&temp).args([
+        "search",
+        claude_query,
+        "--provider",
+        "claude",
+        "--refresh",
+        "off",
+        "--format=json",
+    ]));
+    assert!(
+        claude.contains("source_hydration_failed/")
+            && !claude.contains("no registered provider route owns")
+            && !claude.contains("resolver_generation_unavailable"),
+        "{claude}"
     );
 }
 
@@ -2210,7 +2321,7 @@ fn search_refresh_wait_reports_typed_failure_for_empty_source_inventory() {
         "{status:#}"
     );
     assert_eq!(
-        status["history_epoch"]["reason"], "source_rebuild_failed",
+        status["history_epoch"]["reason"], "source_refresh_failed",
         "{status:#}"
     );
     assert_eq!(status["lexical"]["status"], "unavailable", "{status:#}");
@@ -2219,8 +2330,7 @@ fn search_refresh_wait_reports_typed_failure_for_empty_source_inventory() {
         status["refresh"]["progress"]["phase"], "failed",
         "{status:#}"
     );
-    assert_eq!(status["prior_epoch"]["present"], false, "{status:#}");
-    assert_eq!(status["prior_epoch"]["opened"], false, "{status:#}");
+    assert!(status.get("prior_epoch").is_none(), "{status:#}");
     assert!(!temp.path().join("search/lexical/meta.json").exists());
     assert!(generation_manifest_paths(&temp).is_empty());
 }

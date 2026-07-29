@@ -39,8 +39,8 @@ mod parser_prop_tests;
 pub(crate) use cli::{
     Cli, DaemonArgs, DaemonCommand, DaemonDisableArgs, DaemonRunArgs, DaemonStartModeArg,
     DaemonTriggerCommandArg, DoctorArgs, FormatArgs, ImportArgs, LocateArgs, LocateTarget,
-    SearchArgs, SearchBackendArg, SetupArgs, ShowArgs, ShowTarget, SourcesArgs, SqlArgs,
-    StatsArgs, StatusArgs, UsageStatusMode, MAX_EVENT_WINDOW, MAX_SEARCH_LIMIT,
+    SearchArgs, SearchBackendArg, SetupArgs, ShowArgs, ShowTarget, SourcesArgs, SqlArgs, StatsArgs,
+    StatusArgs, UsageStatusMode, MAX_EVENT_WINDOW, MAX_SEARCH_LIMIT,
 };
 pub(crate) use commands::search::RefreshArg;
 pub(crate) use commands::sql::raw_sql_result_json;
