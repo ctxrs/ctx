@@ -21,8 +21,8 @@ use crate::output::print_json;
 use crate::progress::{format_bytes, format_count, plural, ProgressArg, ProgressReporter};
 use crate::provider_sources::{discovered_sources, sources_json};
 use crate::semantic::{
-    autostart_daemon_and_wait, daemon_autostart_suppression_reason,
-    semantic_query_service_supported, DaemonHandoff,
+    autostart_daemon_and_wait, daemon_autostart_can_reuse_existing,
+    daemon_autostart_suppression_reason, semantic_query_service_supported, DaemonHandoff,
 };
 use crate::{config, ImportArgs, SetupArgs};
 
@@ -160,8 +160,16 @@ pub(crate) fn run_setup(
         && !args.catalog_only
         && !foreground_import
         && (pending_inventory_units > 0 || (semantic_enabled && semantic_supported));
-    let daemon_autostart_requested =
-        daemon_backgrounding_enabled && !args.catalog_only && !machine_readable_output;
+    // Machine-readable setup must not create a background process, but it must
+    // still notify and wait for a daemon that already owns this data root.
+    // Otherwise a semantic config mutation can be reported while the live
+    // runtime remains stale until an arbitrary scheduler tick.
+    let machine_output_can_reuse_daemon = machine_readable_output
+        && daemon_suppression_reason.is_none()
+        && daemon_autostart_can_reuse_existing(&data_root);
+    let daemon_autostart_requested = daemon_backgrounding_enabled
+        && !args.catalog_only
+        && (!machine_readable_output || machine_output_can_reuse_daemon);
     let daemon_autostart_reason = if args.catalog_only {
         Some("catalog_only")
     } else if args.no_daemon {

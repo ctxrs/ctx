@@ -24,6 +24,10 @@ pub(crate) fn daemon_autostart_suppression_reason() -> Option<&'static str> {
     }
 }
 
+pub(crate) fn daemon_autostart_can_reuse_existing(data_root: &Path) -> bool {
+    daemon_lock_is_active(data_root)
+}
+
 pub(crate) fn autostart_daemon_and_wait(
     data_root: &Path,
     config: &AppConfig,
