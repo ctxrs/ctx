@@ -5,7 +5,6 @@ use crate::tests::support::assertions::{
 };
 use crate::tests::support::paths::{copy_dir_all, provider_history_fixture, tempdir};
 use crate::tests::support::provider_state::stored_provider_session_id;
-#[cfg(unix)]
 use crate::CaptureError;
 use crate::{
     discover_provider_sources_for_provider, import_auggie_history, import_firebender_sqlite,
@@ -22,137 +21,27 @@ use serde_json::json;
 use std::fs;
 
 #[test]
-fn native_openclaw_empty_session_jsonl_is_a_successful_noop() {
+fn native_openclaw_store_import_is_typed_unsupported_schema() {
     let temp = tempdir();
     let root = temp.path().join("openclaw/sessions");
     fs::create_dir_all(&root).unwrap();
     fs::write(root.join("empty.jsonl"), "").unwrap();
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
 
-    let summary = import_openclaw_history(
+    let error = import_openclaw_history(
         temp.path().join("openclaw"),
         &mut store,
         OpenClawImportOptions {
             ..OpenClawImportOptions::default()
         },
     )
-    .unwrap();
+    .unwrap_err();
 
-    assert_eq!(summary.failed, 0, "{:?}", summary.failures);
-    assert_eq!(summary.imported_sessions, 0);
-    assert_eq!(summary.imported_events, 0);
-    assert!(store.list_sessions().unwrap().is_empty());
-}
-
-#[test]
-fn native_openclaw_contentless_message_does_not_fabricate_search_text() {
-    let temp = tempdir();
-    let root = temp.path().join("openclaw/sessions");
-    fs::create_dir_all(&root).unwrap();
-    fs::write(
-        root.join("contentless.jsonl"),
-        json!({
-            "type": "message",
-            "id": "openclaw-contentless",
-            "role": "assistant"
-        })
-        .to_string()
-            + "\n",
-    )
-    .unwrap();
-    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
-
-    let summary = import_openclaw_history(
-        temp.path().join("openclaw"),
-        &mut store,
-        OpenClawImportOptions {
-            ..OpenClawImportOptions::default()
-        },
-    )
-    .unwrap();
-
-    assert_eq!(summary.failed, 0, "{:?}", summary.failures);
-    assert_eq!(summary.imported_sessions, 1);
-    assert_eq!(summary.imported_events, 1);
-    let sessions = store.list_sessions().unwrap();
-    assert_eq!(sessions.len(), 1);
-    assert_eq!(store.events_for_session(sessions[0].id).unwrap().len(), 1);
-    assert!(store
-        .search_event_hits("OpenClaw message", 10)
-        .unwrap()
-        .is_empty());
-}
-
-#[test]
-fn native_openclaw_successful_tool_output_is_absent_and_not_searchable() {
-    let temp = tempdir();
-    let root = temp.path().join("openclaw/sessions");
-    fs::create_dir_all(&root).unwrap();
-    fs::write(
-        root.join("openclaw-tool-output.jsonl"),
-        [
-            json!({
-                "type": "session",
-                "id": "openclaw-tool-output",
-                "timestamp": "2026-07-04T12:00:00Z",
-                "cwd": "/workspace/openclaw"
-            })
-            .to_string(),
-            json!({
-                "type": "message",
-                "id": "openclaw-tool-user",
-                "timestamp": "2026-07-04T12:00:01Z",
-                "message": {
-                    "role": "user",
-                    "content": "openclaw tool output policy oracle"
-                }
-            })
-            .to_string(),
-            json!({
-                "type": "message",
-                "id": "openclaw-tool-result",
-                "timestamp": "2026-07-04T12:00:02Z",
-                "message": {
-                    "role": "tool",
-                    "content": "OPENCLAW_RAW_TOOL_OUTPUT_SHOULD_NOT_SEARCH"
-                }
-            })
-            .to_string(),
-        ]
-        .join("\n")
-            + "\n",
-    )
-    .unwrap();
-    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
-
-    let summary = import_openclaw_history(
-        temp.path().join("openclaw"),
-        &mut store,
-        OpenClawImportOptions {
-            ..OpenClawImportOptions::default()
-        },
-    )
-    .unwrap();
-
-    assert_eq!(summary.failed, 0, "{:?}", summary.failures);
-    assert_eq!(summary.imported_sessions, 1);
-    assert_eq!(summary.imported_events, 1);
-    let session_id =
-        stored_provider_session_id(&store, CaptureProvider::OpenClaw, "openclaw-tool-output");
-    let events = store.events_for_session(session_id).unwrap();
-    assert_eq!(events.len(), 1);
-    assert_event_type_count(&events, EventType::ToolOutput, 0);
-    assert_events_have_provider_citations(&store, &events);
-    assert_search_hits_provider(
-        &store,
-        "openclaw tool output policy oracle",
-        CaptureProvider::OpenClaw,
-    );
-    assert_search_misses(&store, "OPENCLAW_RAW_TOOL_OUTPUT_SHOULD_NOT_SEARCH");
-    assert!(!serde_json::to_string(&events)
-        .unwrap()
-        .contains("OPENCLAW_RAW_TOOL_OUTPUT_SHOULD_NOT_SEARCH"));
-    assert!(store.runs_for_session(session_id).unwrap().is_empty());
+    assert!(matches!(
+        error,
+        CaptureError::UnsupportedSchema(ref reason)
+            if reason == "OpenClaw Store ingestion was removed; use source-backed ingestion"
+    ));
 }
 
 #[test]

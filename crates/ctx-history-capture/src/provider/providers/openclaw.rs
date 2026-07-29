@@ -1,24 +1,23 @@
 use std::{
-    fs::{self, Metadata},
+    fs::Metadata,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use ctx_history_core::EventType;
+use ctx_history_store::Store;
 use serde_json::Value;
 
-use crate::common::io::{ensure_regular_provider_transcript_file, read_text_file_limited};
 use crate::provider::normalization::{
     provider_capped_json_value, provider_output_event_is_failure, provider_result_outcome_evidence,
 };
 use crate::provider::tool_input;
 use crate::{
-    fnv1a64, CaptureError, OutputCommandContext, OutputObservationKind, OutputOutcome,
-    OutputOutcomeMetadata, Result, MAX_OPENCLAW_SESSION_INDEX_BYTES, PROVIDER_MAX_PREVIEW_CHARS,
+    fnv1a64, CaptureError, OutputObservationKind, OutputOutcome, OutputOutcomeMetadata,
+    ProviderAdapterContext, ProviderImportOptions, ProviderImportSummary, Result,
+    PROVIDER_MAX_PREVIEW_CHARS,
 };
 
-const OPENCLAW_RELEASED_CAPTURE_REVISION: u32 = 3;
-const OPENCLAW_RELEASED_POLICY_REVISION: u32 = 6;
 mod complete_content;
 pub(crate) mod native_path;
 mod normalization;
@@ -27,7 +26,6 @@ pub(crate) use complete_content::{
     message_record as openclaw_complete_content_record,
     source_from_admitted as openclaw_complete_content_source_from_admitted,
 };
-pub(crate) use native_path::import_openclaw_nativepath_tree;
 // The central source-backed registry consumes this provider-local hook after
 // provider fan-in; keep the complete typed surface available in the interim.
 #[allow(unused_imports)]
@@ -39,6 +37,17 @@ pub(crate) use native_path::{
 };
 pub(crate) use normalization::event as openclaw_event;
 
+pub(crate) fn import_openclaw_nativepath_tree(
+    _path: &Path,
+    _store: &mut Store,
+    _context: ProviderAdapterContext,
+    _options: ProviderImportOptions,
+) -> Result<ProviderImportSummary> {
+    Err(CaptureError::UnsupportedSchema(
+        "OpenClaw Store ingestion was removed; use source-backed ingestion".to_owned(),
+    ))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct OpenClawFrozenFileMetadata {
     pub(super) length: u64,
@@ -49,22 +58,6 @@ pub(super) struct OpenClawFrozenFileMetadata {
 }
 
 impl OpenClawFrozenFileMetadata {
-    pub(super) fn read(path: &Path) -> Result<Self> {
-        ensure_regular_provider_transcript_file(path)?;
-        Self::from_metadata(&fs::symlink_metadata(path)?)
-    }
-
-    pub(super) fn read_optional(path: &Path) -> Result<Option<Self>> {
-        match fs::symlink_metadata(path) {
-            Ok(metadata) if metadata.file_type().is_file() => {
-                Self::from_metadata(&metadata).map(Some)
-            }
-            Ok(_) => Ok(None),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error.into()),
-        }
-    }
-
     pub(super) fn from_metadata(metadata: &Metadata) -> Result<Self> {
         #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
@@ -143,38 +136,6 @@ impl OpenClawSessionObservation {
         })
     }
 
-    pub(super) fn read(path: &Path) -> Result<Self> {
-        let transcript = OpenClawFrozenFileMetadata::read(path)?;
-        let canonical_path = fs::canonicalize(path)?;
-        let index_path = path
-            .parent()
-            .map(|parent| parent.join("sessions.json"))
-            .unwrap_or_else(|| PathBuf::from("sessions.json"));
-        let index_file = OpenClawFrozenFileMetadata::read_optional(&index_path)?;
-        let index = if index_file.is_some() {
-            read_text_file_limited(
-                &index_path,
-                MAX_OPENCLAW_SESSION_INDEX_BYTES,
-                "OpenClaw sessions.json",
-            )
-            .ok()
-            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-            .map(|value| openclaw_session_index_for_file(path, &value))
-            .unwrap_or(Value::Null)
-        } else {
-            Value::Null
-        };
-        let index = provider_capped_json_value(&index, PROVIDER_MAX_PREVIEW_CHARS);
-        let index_revision = openclaw_index_revision(&index)?;
-        Ok(Self {
-            canonical_path,
-            transcript,
-            index_file,
-            index,
-            index_revision,
-        })
-    }
-
     pub(super) fn source_revision(&self) -> String {
         let index_file = self
             .index_file
@@ -186,17 +147,6 @@ impl OpenClawSessionObservation {
             self.transcript.revision_component(),
             self.index_revision,
         )
-    }
-
-    pub(super) fn revalidate(&self, path: &Path) -> Result<bool> {
-        match Self::read(path) {
-            Ok(current) => Ok(current == *self),
-            Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                Ok(false)
-            }
-            Err(CaptureError::InvalidProviderTranscriptPath { .. }) => Ok(false),
-            Err(error) => Err(error),
-        }
     }
 }
 
@@ -269,17 +219,10 @@ pub(super) fn openclaw_index_revision(value: &Value) -> Result<u64> {
 
 pub(super) struct OpenClawOutputMetadata {
     pub(super) kind: OutputObservationKind,
-    pub(super) native_record_id: String,
-    pub(super) call_id: Option<String>,
-    pub(super) command: Option<OutputCommandContext>,
     pub(super) outcome: OutputOutcomeMetadata,
 }
 
-pub(super) fn openclaw_output_metadata(
-    value: &Value,
-    line_number: usize,
-    session_cwd: Option<&str>,
-) -> Option<OpenClawOutputMetadata> {
+pub(super) fn openclaw_output_metadata(value: &Value) -> Option<OpenClawOutputMetadata> {
     if value
         .get("type")
         .and_then(Value::as_str)
@@ -296,23 +239,6 @@ pub(super) fn openclaw_output_metadata(
     if role != "tool" {
         return None;
     }
-    let call_id = [
-        "tool_call_id",
-        "toolCallId",
-        "call_id",
-        "callId",
-        "tool_use_id",
-        "toolUseId",
-    ]
-    .iter()
-    .find_map(|field| {
-        message
-            .get(*field)
-            .or_else(|| value.get(*field))
-            .and_then(Value::as_str)
-            .filter(|value| !value.trim().is_empty())
-            .map(str::to_owned)
-    });
     let tool_name = message
         .get("name")
         .or_else(|| message.get("tool_name"))
@@ -326,21 +252,6 @@ pub(super) fn openclaw_output_metadata(
     } else {
         OutputObservationKind::Tool
     };
-    let command = (kind == OutputObservationKind::Command).then(|| OutputCommandContext {
-        tool_name: tool_name.clone(),
-        command: message
-            .get("input")
-            .or_else(|| message.get("arguments"))
-            .or_else(|| message.get("args"))
-            .and_then(tool_input::command)
-            .unwrap_or_default(),
-        working_directory: message
-            .get("input")
-            .or_else(|| message.get("arguments"))
-            .or_else(|| message.get("args"))
-            .and_then(tool_input::working_directory)
-            .or_else(|| session_cwd.map(str::to_owned)),
-    });
     let timed_out = openclaw_value_timed_out(message);
     let exit_code = openclaw_i64_field(message, &["exit_code", "exitCode"])
         .and_then(|value| i32::try_from(value).ok());
@@ -359,14 +270,6 @@ pub(super) fn openclaw_output_metadata(
     };
     Some(OpenClawOutputMetadata {
         kind,
-        native_record_id: value
-            .get("id")
-            .and_then(Value::as_str)
-            .filter(|value| !value.trim().is_empty())
-            .map(str::to_owned)
-            .unwrap_or_else(|| format!("line-{line_number}")),
-        call_id,
-        command,
         outcome: OutputOutcomeMetadata {
             outcome,
             exit_code,
@@ -409,5 +312,31 @@ fn openclaw_i64_field(value: &Value, fields: &[&str]) -> Option<i64> {
                     .find_map(|value| openclaw_i64_field(value, fields))
             }),
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_store_import_shape_is_typed_unsupported_schema() {
+        let directory = crate::test_support_paths::tempdir().unwrap();
+        let source_path = directory.path().join("session.jsonl");
+        let mut store = Store::open(directory.path().join("store.sqlite")).unwrap();
+
+        let error = import_openclaw_nativepath_tree(
+            &source_path,
+            &mut store,
+            ProviderAdapterContext::default(),
+            ProviderImportOptions::default(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CaptureError::UnsupportedSchema(ref reason)
+                if reason == "OpenClaw Store ingestion was removed; use source-backed ingestion"
+        ));
     }
 }
