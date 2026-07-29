@@ -46,11 +46,6 @@ pub(super) struct MistralVibeFrozenFile {
 }
 
 impl MistralVibeFrozenFile {
-    fn read(path: &Path) -> Result<Self> {
-        ensure_regular_provider_transcript_file(path)?;
-        Self::from_metadata(&fs::symlink_metadata(path)?)
-    }
-
     pub(super) fn from_metadata(metadata: &Metadata) -> Result<Self> {
         #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
@@ -91,13 +86,6 @@ pub(super) struct MistralVibeSessionObservation {
 }
 
 impl MistralVibeSessionObservation {
-    pub(super) fn read(source: &MistralVibeSessionSource) -> Result<Self> {
-        Ok(Self {
-            metadata_file: MistralVibeFrozenFile::read(&source.metadata_path)?,
-            messages_file: MistralVibeFrozenFile::read(&source.messages_path)?,
-        })
-    }
-
     pub(super) fn source_revision(&self) -> String {
         self.source_revision_for_revisions(
             MISTRAL_VIBE_CAPTURE_REVISION,
@@ -118,15 +106,6 @@ impl MistralVibeSessionObservation {
         self.messages_file.revision_component(&mut input);
         format!(
             "mistral-vibe-session-v1:fnv1a64:{:016x}",
-            fnv1a64(input.as_bytes())
-        )
-    }
-
-    pub(super) fn metadata_revision(&self) -> String {
-        let mut input = "mistral-vibe-meta-v1\n".to_owned();
-        self.metadata_file.revision_component(&mut input);
-        format!(
-            "mistral-vibe-meta-v1:fnv1a64:{:016x}",
             fnv1a64(input.as_bytes())
         )
     }

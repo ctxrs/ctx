@@ -1,80 +1,21 @@
 use chrono::{DateTime, NaiveDateTime, Utc};
-use ctx_history_core::{CaptureProvider, ContentRef, EventRole, EventType};
+use ctx_history_core::EventType;
 use serde_json::{json, Value};
 
 use crate::common::time::parse_rfc3339_utc;
-use crate::complete_content::{
-    attach_verified_content_locator, verified_content_profile, CompleteContentBodyDigest,
-    CompleteContentSourceFamily, VerifiedContentLocatorV1, VerifiedContentRole,
-};
-use crate::native_source::NativeSqliteValue;
 use crate::provider::normalization::{
-    provider_capped_json, provider_json_text, provider_local_preview, provider_policy_body,
-    provider_policy_event_text, provider_result_identifier_evidence,
-    provider_result_outcome_evidence,
+    provider_capped_json, provider_policy_body, provider_policy_event_text,
+    provider_result_identifier_evidence, provider_result_outcome_evidence,
 };
-use crate::{
-    compute_payload_hash, CaptureError, OutputAssociations, OutputNativeCoordinate,
-    OutputObservationKind, OutputOutcome, OutputOutcomeMetadata, OutputSourceLocator,
-    ProOutputObservation, ProviderAdapterContext, Result, PROVIDER_MAX_PREVIEW_CHARS,
-    SHELLEY_SQLITE_SOURCE_FORMAT,
-};
+use crate::{OutputOutcome, PROVIDER_MAX_PREVIEW_CHARS, SHELLEY_SQLITE_SOURCE_FORMAT};
 
 use super::relationships::{
-    shelley_event_index, shelley_event_role, shelley_event_type, shelley_message_body,
-    shelley_message_complete_text, shelley_message_text, shelley_native_record_id,
-    shelley_verified_record_values, ShelleyConversationRow, ShelleyMessageRow,
+    shelley_event_index, shelley_event_type, shelley_message_body, shelley_message_text,
+    ShelleyMessageRow,
 };
 
-pub(super) fn shelley_core_event(
-    message: &ShelleyMessageRow,
-    conversation: &ShelleyConversationRow,
-    context: &ProviderAdapterContext,
-    parent_bearing: bool,
-) -> Result<Option<ShelleyCoreEvent>> {
-    let output_classification = shelley_output_classification(message);
-    if output_classification
-        .as_ref()
-        .is_some_and(|classification| {
-            !matches!(
-                classification.outcome.outcome,
-                OutputOutcome::Failure | OutputOutcome::Timeout
-            )
-        })
-    {
-        return Ok(None);
-    }
-
-    let started_at = shelley_timestamp(conversation.created_at.as_deref(), context.imported_at);
-    let occurred_at = shelley_timestamp(message.created_at.as_deref(), started_at);
-    let mut event = shelley_native_event(message, occurred_at);
-    if let Some(classification) = output_classification.as_ref() {
-        shelley_apply_failure_diagnostic(&mut event, message, classification)?;
-    }
-    let needs_locator = event.event_type == EventType::Message
-        && event
-            .payload
-            .pointer("/text_retention/truncated")
-            .and_then(Value::as_bool)
-            == Some(true);
-    if needs_locator {
-        let complete_text = shelley_message_complete_text(message)
-            .unwrap_or_else(|| format!("Shelley {} message", message.entry_type));
-        attach_shelley_core_content_locator(
-            &mut event,
-            message,
-            conversation,
-            parent_bearing,
-            &complete_text,
-        )?;
-    }
-    event.provider_event_hash = compute_payload_hash(&event.payload)?;
-    Ok(Some(event))
-}
-
 pub(super) struct ShelleyOutputClassification {
-    pub(super) outcome: OutputOutcomeMetadata,
-    call_id: Option<String>,
+    pub(super) outcome: OutputOutcome,
 }
 
 pub(super) fn shelley_output_classification(
@@ -103,109 +44,7 @@ pub(super) fn shelley_output_classification(
     } else {
         OutputOutcome::Unknown
     };
-    Some(ShelleyOutputClassification {
-        outcome: OutputOutcomeMetadata {
-            outcome,
-            exit_code: evidence.exit_code,
-            duration_ms: evidence.duration_ms,
-        },
-        call_id: evidence.call_id,
-    })
-}
-
-pub(super) fn shelley_output_observation(
-    message: &ShelleyMessageRow,
-    conversation: &ShelleyConversationRow,
-    parent_bearing: bool,
-    provider_event_index: u64,
-    context: &ProviderAdapterContext,
-    classification: &ShelleyOutputClassification,
-) -> Result<ProOutputObservation> {
-    let mut locator_payload = Vec::with_capacity(17);
-    locator_payload.push(if parent_bearing { 1 } else { 2 });
-    locator_payload.extend_from_slice(&(message.rowid as u64 ^ (1_u64 << 63)).to_be_bytes());
-    locator_payload.extend_from_slice(&(conversation.rowid as u64 ^ (1_u64 << 63)).to_be_bytes());
-    let started_at = shelley_timestamp(conversation.created_at.as_deref(), context.imported_at);
-    let occurred_at = shelley_timestamp(message.created_at.as_deref(), started_at);
-    Ok(ProOutputObservation {
-        kind: OutputObservationKind::Tool,
-        coordinate: OutputNativeCoordinate {
-            unit_key: format!(
-                "shelley:{}:message:{}:output",
-                message.conversation_id, message.message_id
-            ),
-            native_sequence: provider_event_index,
-            native_record_id: Some(shelley_native_record_id(message)),
-            source_record_ordinal: None,
-            source_record_subrecord_index: None,
-            byte_start: None,
-            byte_end_exclusive: None,
-        },
-        occurred_at_unix_ms: Some(occurred_at.timestamp_millis()),
-        associations: OutputAssociations {
-            direct_session_id: message.conversation_id.clone(),
-            root_session_id: conversation
-                .parent_conversation_id
-                .clone()
-                .unwrap_or_else(|| message.conversation_id.clone()),
-            parent_session_id: conversation.parent_conversation_id.clone(),
-            provider_session_id: Some(message.conversation_id.clone()),
-            agent_id: None,
-            repository: None,
-        },
-        call_id: classification.call_id.clone(),
-        command: None,
-        outcome: classification.outcome.clone(),
-        locator: OutputSourceLocator {
-            version: 1,
-            kind: "shelley-compound-message-row-v1".to_owned(),
-            payload: locator_payload,
-        },
-        content: shelley_message_complete_text(message)
-            .unwrap_or_default()
-            .into_bytes(),
-    })
-}
-
-fn shelley_apply_failure_diagnostic(
-    event: &mut ShelleyCoreEvent,
-    message: &ShelleyMessageRow,
-    classification: &ShelleyOutputClassification,
-) -> Result<()> {
-    if !matches!(
-        classification.outcome.outcome,
-        OutputOutcome::Failure | OutputOutcome::Timeout
-    ) {
-        return Ok(());
-    }
-    let payload = event
-        .payload
-        .as_object_mut()
-        .ok_or(CaptureError::SystemInvariant(
-            "Shelley failure event payload must be an object",
-        ))?;
-    payload.insert("result_outcome".to_owned(), json!("failure"));
-    payload.insert(
-        "timed_out".to_owned(),
-        json!(classification.outcome.outcome == OutputOutcome::Timeout),
-    );
-    if let Some(exit_code) = classification.outcome.exit_code {
-        payload.insert("exit_code".to_owned(), json!(exit_code));
-    }
-    if let Some(duration_ms) = classification.outcome.duration_ms {
-        payload.insert("duration_ms".to_owned(), json!(duration_ms));
-    }
-    if let Some(call_id) = classification.call_id.as_ref() {
-        payload.insert("call_id".to_owned(), Value::String(call_id.clone()));
-    }
-    if let Some(content) = shelley_message_complete_text(message) {
-        payload.insert("output_bytes".to_owned(), json!(content.len()));
-        let (preview, _) = provider_local_preview(&content, PROVIDER_MAX_PREVIEW_CHARS);
-        if !preview.trim().is_empty() {
-            payload.insert("output_preview".to_owned(), Value::String(preview));
-        }
-    }
-    Ok(())
+    Some(ShelleyOutputClassification { outcome })
 }
 
 #[derive(Default)]
@@ -214,9 +53,6 @@ struct ShelleyOutputEvidence {
     success: bool,
     failure: bool,
     timeout: bool,
-    exit_code: Option<i32>,
-    duration_ms: Option<u64>,
-    call_id: Option<String>,
 }
 
 fn shelley_collect_result_evidence(
@@ -279,23 +115,12 @@ fn shelley_collect_output_fields(
                     .flat_map(char::to_lowercase)
                     .collect::<String>();
                 match normalized.as_str() {
-                    "callid" | "toolcallid" | "toolresultid" | "tooluseid"
-                        if evidence.call_id.is_none() =>
-                    {
-                        evidence.call_id = value
-                            .as_str()
-                            .filter(|value| !value.is_empty())
-                            .map(str::to_owned);
-                    }
                     "exitcode" => {
-                        if let Some(code) = value.as_i64().and_then(|code| i32::try_from(code).ok())
-                        {
-                            evidence.exit_code = Some(code);
+                        if let Some(code) = value.as_i64() {
                             evidence.success |= code == 0;
                             evidence.failure |= code != 0;
                         }
                     }
-                    "durationms" => evidence.duration_ms = value.as_u64(),
                     "success" | "ok" => {
                         if let Some(success) = value.as_bool() {
                             evidence.success |= success;
@@ -367,150 +192,38 @@ fn shelley_error_value_is_present(value: &Value) -> bool {
     }
 }
 
-/// Returns only the migration fields needed to verify a released
-/// complete-content locator.
+/// Reconstructs the released event fields required by the shared legacy
+/// complete-content resolver. This is hydration-only and is not a publisher.
 pub(crate) fn shelley_complete_event(
     message: &ShelleyMessageRow,
-    occurred_at: DateTime<Utc>,
+    _occurred_at: DateTime<Utc>,
 ) -> (u64, String, String, EventType, Value) {
-    let event = shelley_native_event(message, occurred_at);
-    (
-        event.provider_event_index,
-        event.legacy_provider_event_hash,
-        event.cursor,
-        event.event_type,
-        event.payload,
-    )
-}
-
-#[derive(Debug)]
-pub(super) struct ShelleyCoreEvent {
-    pub(super) provider_event_index: u64,
-    pub(super) provider_event_hash: String,
-    pub(super) legacy_provider_event_hash: String,
-    pub(super) native_record_id: String,
-    pub(super) cursor: String,
-    pub(super) event_type: EventType,
-    pub(super) role: Option<EventRole>,
-    pub(super) occurred_at: DateTime<Utc>,
-    pub(super) payload: Value,
-    pub(super) metadata: Value,
-}
-
-fn shelley_native_event(
-    message: &ShelleyMessageRow,
-    occurred_at: DateTime<Utc>,
-) -> ShelleyCoreEvent {
     let body = shelley_message_body(message);
     let text = shelley_message_text(message, &body)
         .unwrap_or_else(|| format!("Shelley {} message", message.entry_type));
     let event_type = shelley_event_type(message, &body);
-    let role = shelley_event_role(&message.entry_type);
     let retained_text = provider_policy_event_text(event_type, &text, &body);
     let retained_body = provider_policy_body(event_type, &body);
     let result_evidence = provider_result_identifier_evidence(event_type, &text, &body);
     let result_outcome = provider_result_outcome_evidence(event_type, &body);
-    ShelleyCoreEvent {
-        provider_event_index: shelley_event_index(message),
-        provider_event_hash: String::new(),
-        legacy_provider_event_hash: message.message_id.clone(),
-        native_record_id: shelley_native_record_id(message),
-        cursor: format!(
+    let payload = json!({
+        "text": retained_text.text,
+        "text_retention": retained_text.retention.as_json(),
+        "result_evidence": result_evidence,
+        "result_outcome": result_outcome,
+        "source_format": SHELLEY_SQLITE_SOURCE_FORMAT,
+        "body": provider_capped_json(&retained_body, PROVIDER_MAX_PREVIEW_CHARS),
+    });
+    (
+        shelley_event_index(message),
+        message.message_id.clone(),
+        format!(
             "conversation:{}:sequence:{}:message:{}",
             message.conversation_id, message.sequence_id, message.message_id
         ),
         event_type,
-        role,
-        occurred_at,
-        payload: json!({
-            "text": retained_text.text,
-            "text_retention": retained_text.retention.as_json(),
-            "result_evidence": result_evidence,
-            "result_outcome": result_outcome,
-            "source_format": SHELLEY_SQLITE_SOURCE_FORMAT,
-            "body": provider_capped_json(&retained_body, PROVIDER_MAX_PREVIEW_CHARS),
-        }),
-        metadata: json!({
-            "source": "shelley_messages",
-            "source_format": SHELLEY_SQLITE_SOURCE_FORMAT,
-            "message_id": message.message_id,
-            "conversation_id": message.conversation_id,
-            "sequence_id": message.sequence_id,
-            "rowid": message.rowid,
-            "message_type": message.entry_type,
-            "generation": message.generation,
-            "excluded_from_context": message.excluded_from_context,
-            "usage": message.usage_data.as_deref().map(provider_json_text),
-            "llm_api_url": message.llm_api_url,
-            "model_name": message.model_name,
-            "forked_from_message_id": message.forked_from_message_id,
-        }),
-    }
-}
-
-fn attach_shelley_core_content_locator(
-    event: &mut ShelleyCoreEvent,
-    message: &ShelleyMessageRow,
-    conversation: &ShelleyConversationRow,
-    parent_bearing: bool,
-    complete_text: &str,
-) -> Result<()> {
-    if event.event_type != EventType::Message
-        || event
-            .payload
-            .pointer("/text_retention/truncated")
-            .and_then(Value::as_bool)
-            != Some(true)
-    {
-        return Ok(());
-    }
-    let mut coordinate = Vec::with_capacity(17);
-    coordinate.push(if parent_bearing { 1 } else { 2 });
-    coordinate.extend_from_slice(&(message.rowid as u64 ^ (1_u64 << 63)).to_be_bytes());
-    coordinate.extend_from_slice(&(conversation.rowid as u64 ^ (1_u64 << 63)).to_be_bytes());
-    let values = shelley_verified_record_values(message, conversation, parent_bearing);
-    let content_ref = ContentRef::from_bytes(complete_text.as_bytes()).ok_or(
-        CaptureError::SystemInvariant("Shelley content length exceeds ContentRef bounds"),
-    )?;
-    let profile = verified_content_profile(
-        CaptureProvider::Shelley,
-        SHELLEY_SQLITE_SOURCE_FORMAT,
-        CompleteContentSourceFamily::Sqlite,
-        VerifiedContentRole::MessageBody,
+        payload,
     )
-    .ok_or(CaptureError::SystemInvariant(
-        "Shelley message route must have a verified-content profile",
-    ))?;
-    let persisted = VerifiedContentLocatorV1::new(
-        VerifiedContentRole::MessageBody,
-        profile,
-        content_ref,
-        CompleteContentSourceFamily::Sqlite,
-        "shelley-compound-message-row-v1",
-        &coordinate,
-        event.native_record_id.clone(),
-        shelley_logical_record_digest(&values)?,
-    )
-    .ok_or(CaptureError::SystemInvariant(
-        "Shelley complete-content locator exceeds the bounded canonical schema",
-    ))?;
-    attach_verified_content_locator(&mut event.metadata, persisted).ok_or(
-        CaptureError::SystemInvariant("Shelley verified-content locator collection is malformed"),
-    )?;
-    Ok(())
-}
-
-fn shelley_logical_record_digest(
-    values: &[NativeSqliteValue],
-) -> Result<CompleteContentBodyDigest> {
-    let digest = super::relationships::shelley_logical_record_digest(values);
-    let encoded = digest
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    CompleteContentBodyDigest::parse(encoded).ok_or(CaptureError::SystemInvariant(
-        "Shelley SHA-256 formatting produced an invalid digest",
-    ))
 }
 
 pub(super) fn shelley_timestamp(raw: Option<&str>, fallback: DateTime<Utc>) -> DateTime<Utc> {

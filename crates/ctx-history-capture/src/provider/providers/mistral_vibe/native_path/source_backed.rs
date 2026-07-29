@@ -88,7 +88,7 @@ pub(crate) struct MistralVibeSourceResolver {
 
 #[derive(Debug)]
 struct AdmittedMistralVibeSource {
-    observation: reader::SourceObservation,
+    observation: SourceObservation,
     metadata_bytes: Vec<u8>,
     metadata: OpenedProviderSourceFile,
     messages: OpenedProviderSourceFile,
@@ -384,7 +384,7 @@ fn admit_mistral_vibe_source(
     }
     let metadata_bytes = metadata.read_all_bounded(MAX_PROVIDER_JSONL_LINE_BYTES)?;
     let metadata_sha256 = Sha256::digest(&metadata_bytes).into();
-    let observation = reader::SourceObservation {
+    let observation = SourceObservation {
         canonical_metadata_path: authority.named_path().join(metadata_relative_path),
         canonical_messages_path: authority.named_path().join(messages_relative_path),
         metadata: FileStamp::from_metadata(metadata.metadata())?,
@@ -439,11 +439,10 @@ fn lexical_document(
         Err(_) => return Ok(RecordProjection::Rejected),
     };
     let mut event_type = mistral_vibe_event_type(role, &value);
-    let output = (event_type == EventType::ToolOutput)
-        .then(|| output_metadata(&value, line_number(ordinal), role, session.cwd.as_deref()));
+    let output = (event_type == EventType::ToolOutput).then(|| output_classification(&value));
     if output.as_ref().is_some_and(|output| {
         !matches!(
-            output.outcome.outcome,
+            output.outcome,
             OutputOutcome::Failure | OutputOutcome::Timeout
         )
     }) {
@@ -501,11 +500,7 @@ fn lexical_document(
         Some(revision_digest),
         Sha256::digest(bytes).into(),
     )?;
-    let touches = collect_touches(&value)?
-        .touches
-        .into_iter()
-        .map(|touch| touch.path)
-        .collect();
+    let touches = collect_touched_paths(&value)?;
     let role = crate::provider::normalization::provider_role(Some(role));
     Ok(RecordProjection::Retained(LexicalDocument {
         event_id,
@@ -552,12 +547,6 @@ fn provider_native_event_id(value: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .map(str::to_owned)
-}
-
-fn line_number(ordinal: u64) -> usize {
-    usize::try_from(ordinal)
-        .unwrap_or(usize::MAX)
-        .saturating_add(1)
 }
 
 fn checked_increment(value: u64) -> MistralVibeSourceBackedResult<u64> {
@@ -634,7 +623,7 @@ struct CompositeRevision<'a> {
 
 fn projection_observation(
     source: &SourceKey,
-    observation: &reader::SourceObservation,
+    observation: &SourceObservation,
 ) -> MistralVibeSourceBackedResult<ProjectionSourceObservation> {
     let revision = serde_json::to_vec(&CompositeRevision {
         capture_revision: MISTRAL_VIBE_CAPTURE_REVISION,

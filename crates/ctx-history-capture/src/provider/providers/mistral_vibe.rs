@@ -1,10 +1,25 @@
-use crate::Result;
+use std::path::Path;
+
+use crate::{
+    CaptureError, ProviderAdapterContext, ProviderImportOptions, ProviderImportSummary, Result,
+};
 
 pub(crate) mod native_path;
 mod schema;
 mod source;
 
-pub(crate) use native_path::import_mistral_vibe_nativepath;
+/// Rejects the historical Store publisher while shared v0.25 dispatch still
+/// carries its signature. Mistral Vibe production ingestion is source-backed.
+pub(crate) fn import_mistral_vibe_nativepath(
+    _path: &Path,
+    _store: &mut ctx_history_store::Store,
+    _context: ProviderAdapterContext,
+    _options: ProviderImportOptions,
+) -> Result<ProviderImportSummary> {
+    Err(CaptureError::UnsupportedSchema(
+        "Mistral Vibe Store ingestion was removed; use source-backed ingestion".to_owned(),
+    ))
+}
 
 pub(super) const MISTRAL_VIBE_CAPTURE_REVISION: u32 = 4;
 pub(super) const MISTRAL_VIBE_POLICY_REVISION: u32 = 8;

@@ -14,7 +14,6 @@ use crate::MAX_PROVIDER_JSONL_LINE_BYTES;
 pub(crate) struct OpenHandsDecodedEvent {
     event_id: String,
     timestamp: DateTime<Utc>,
-    entry_type: String,
     event_type: EventType,
     role: EventRole,
     text: String,
@@ -28,10 +27,6 @@ impl OpenHandsDecodedEvent {
 
     pub(crate) fn timestamp(&self) -> DateTime<Utc> {
         self.timestamp
-    }
-
-    pub(crate) fn entry_type(&self) -> &str {
-        &self.entry_type
     }
 
     pub(crate) fn event_type(&self) -> EventType {
@@ -134,7 +129,6 @@ pub(crate) fn decode_openhands_event_value(
     Ok(OpenHandsDecodedEvent {
         event_id,
         timestamp,
-        entry_type,
         event_type,
         role,
         text,
@@ -283,44 +277,6 @@ fn openhands_event_text(value: &Value, entry_type: &str, event_type: EventType) 
     }
 }
 
-/// Returns the explicit result body selected by OpenHands' authoritative
-/// decoded event. It never substitutes an event-kind label.
-pub(crate) fn openhands_result_content(event: &OpenHandsDecodedEvent) -> Option<String> {
-    if !matches!(
-        event.event_type,
-        EventType::ToolOutput | EventType::CommandOutput
-    ) {
-        return None;
-    }
-    let value = &event.value;
-    value
-        .pointer("/observation/content")
-        .and_then(provider_value_text)
-        .or_else(|| {
-            value
-                .pointer("/observation/output")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .or_else(|| {
-            value
-                .pointer("/observation/error")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .or_else(|| {
-            value
-                .get("content")
-                .and_then(provider_explicit_result_value_text)
-        })
-        .or_else(|| {
-            value
-                .get("error")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-}
-
 #[cfg(test)]
 mod tests {
     use ctx_history_core::{EventRole, EventType};
@@ -344,7 +300,6 @@ mod tests {
         .unwrap();
         let current = decode_openhands_event(current_path, &current_bytes).unwrap();
         assert_eq!(current.event_id(), "current-id");
-        assert_eq!(current.entry_type(), "MessageEvent");
         assert_eq!(current.event_type(), EventType::Message);
         assert_eq!(current.role(), EventRole::Assistant);
         assert_eq!(current.text(), "current exact text");
@@ -365,7 +320,6 @@ mod tests {
         .unwrap();
         let legacy = decode_openhands_event(legacy_path, &legacy_bytes).unwrap();
         assert_eq!(legacy.event_id(), "0007-legacy");
-        assert_eq!(legacy.entry_type(), "ActionEvent");
         assert_eq!(legacy.event_type(), EventType::Summary);
         assert_eq!(legacy.role(), EventRole::Assistant);
         assert_eq!(legacy.text(), "legacy exact thought");
@@ -400,41 +354,5 @@ mod tests {
                 MAX_PROVIDER_JSONL_LINE_BYTES + 1
             )
         );
-    }
-
-    #[test]
-    fn result_profile_uses_explicit_observation_bytes_only() {
-        let path = Path::new("/profile/v1_conversations/session/result.json");
-        let decoded = decode_openhands_event_value(
-            path,
-            json!({
-                "id": "result-id",
-                "timestamp": "2026-07-22T12:00:00Z",
-                "kind": "ObservationEvent",
-                "source": "environment",
-                "observation": {
-                    "kind": "ExecuteBashObservation",
-                    "content": "stdout\n"
-                }
-            }),
-        )
-        .unwrap();
-        assert_eq!(
-            openhands_result_content(&decoded).as_deref(),
-            Some("stdout\n")
-        );
-
-        let no_body = decode_openhands_event_value(
-            path,
-            json!({
-                "id": "empty-result",
-                "timestamp": "2026-07-22T12:00:00Z",
-                "kind": "ObservationEvent",
-                "source": "environment",
-                "observation": {"kind": "ExecuteBashObservation"}
-            }),
-        )
-        .unwrap();
-        assert_eq!(openhands_result_content(&no_body), None);
     }
 }

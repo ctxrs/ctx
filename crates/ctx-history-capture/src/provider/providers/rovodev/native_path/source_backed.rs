@@ -2,7 +2,7 @@
 //!
 //! The existing provider discovery, bounded document parser, and verified
 //! structured-content route remain authoritative. Shared code owns lifecycle
-//! admission, projection publication, and deletion.
+//! admission, projection emission, and deletion.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -13,23 +13,39 @@ use std::{
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource,
-    CertifiedSourceInventory, EventIdentityInput, LocatorRevisionPolicy, NativeItemKey,
-    NativeRecordCoordinate, NativeSessionKey, ProjectionContractError, ScannedSourceCounts,
-    SessionIdentityInput, SourceAnchor, SourceFrontier, SourceInventoryObservation, SourceKey,
-    SourceObservation, SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
+    CertifiedSourceInventory, EventIdentityInput, EventRole, EventType, LocatorRevisionPolicy,
+    NativeItemKey, NativeRecordCoordinate, NativeSessionKey, ProjectionContractError,
+    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceFrontier,
+    SourceInventoryObservation, SourceKey, SourceObservation, SourceRecordLocator,
+    SourceResolverContractError, StableEntityId, TypedKey,
 };
 use ctx_history_index::LexicalDocument;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use super::{
-    discover_rovodev_session_sources, failure, prepare_document, prepare_page, RovoDevDiscovery,
-    RovoDevFailure, RovoDevSessionObservation, RovoDevSessionSource,
+use super::super::{
+    event::rovodev_event_type,
+    source::{
+        discover_rovodev_session_sources, RovoDevDiscovery, RovoDevSessionObservation,
+        RovoDevSessionSource,
+    },
 };
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
-    provider::normalization::{provider_block_text, provider_message_id, provider_string_field},
-    CaptureError, ProviderAdapterContext, MAX_PROVIDER_JSONL_LINE_BYTES, ROVODEV_SOURCE_FORMAT,
+    provider::{
+        file_touches::{
+            event_type_supports_structured_file_touches,
+            visit_provider_file_touch_drafts_with_limit, MAX_PROVIDER_FILE_TOUCHES_PER_EVENT,
+        },
+        normalization::{
+            provider_block_text, provider_message_id, provider_output_event_is_failure,
+            provider_result_outcome_evidence, provider_role_from_message, provider_string_field,
+            provider_timestamp_from_fields,
+        },
+        tool_input,
+    },
+    CaptureError, OutputObservationKind, OutputOutcome, ProviderAdapterContext,
+    MAX_PROVIDER_JSONL_LINE_BYTES, ROVODEV_SOURCE_FORMAT,
 };
 
 const SOURCE_ANCHOR_NAMESPACE: &str = "rovodev.session";
@@ -48,6 +64,11 @@ const PARSER_REVISION: &str = "rovodev-source-backed-v1";
 const RELATIVE_CONTEXT_FILE: &str = "session_context.json";
 const MESSAGE_OBJECT_KIND: &str = "message_history";
 const FILE_HASH_BUFFER_BYTES: usize = 64 * 1024;
+const SOURCE_BACKED_PAGE_MAX_RECORDS: usize = 64;
+const SOURCE_BACKED_PAGE_MAX_BYTES: usize = 6 * 1024 * 1024;
+const SOURCE_BACKED_MAX_JSON_DEPTH: usize = 128;
+const SOURCE_BACKED_MAX_COLLECTION_ELEMENTS: usize = 65_536;
+const SOURCE_BACKED_MAX_FAILURE_BYTES: usize = 4 * 1024;
 
 #[derive(Debug, Error)]
 pub(crate) enum RovoDevSourceBackedError {
@@ -137,13 +158,306 @@ impl FileSnapshot {
 }
 
 #[derive(Debug)]
+struct PreparedDocument {
+    metadata: serde_json::Value,
+    context_branch: Option<String>,
+    messages: Vec<serde_json::Value>,
+    provider_session_id: String,
+    parent_provider_session_id: Option<String>,
+    started_at: chrono::DateTime<chrono::Utc>,
+    cwd: Option<String>,
+    initial_failure_count: u64,
+}
+
+#[derive(Debug)]
+struct ProjectedMessage {
+    event_type: EventType,
+    role: Option<EventRole>,
+    occurred_at: chrono::DateTime<chrono::Utc>,
+    touched_files: Vec<String>,
+    touch_limit_exceeded: bool,
+}
+
+fn prepare_document(
+    source: &RovoDevSessionSource,
+    context: &ProviderAdapterContext,
+    context_bytes: &[u8],
+    metadata_bytes: Option<&[u8]>,
+    metadata_acquisition_failure: Option<String>,
+) -> std::result::Result<PreparedDocument, String> {
+    let context_json =
+        serde_json::from_slice::<serde_json::Value>(context_bytes).map_err(|error| {
+            bounded_failure(format!("invalid Rovo Dev session_context.json: {error}"))
+        })?;
+    validate_json_bounds(&context_json)
+        .map_err(|error| bounded_failure(format!("Rovo Dev session_context.json {error}")))?;
+    let messages = message_history(&context_json).cloned().ok_or_else(|| {
+        bounded_failure("Rovo Dev session_context.json is missing message_history array")
+    })?;
+    let context_branch = provider_string_field(
+        &context_json,
+        &[
+            "branch",
+            "git_branch",
+            "gitBranch",
+            "vcs_branch",
+            "vcsBranch",
+        ],
+    );
+
+    let mut initial_failure_count = u64::from(metadata_acquisition_failure.is_some());
+    let metadata = match metadata_bytes {
+        Some(bytes) => match serde_json::from_slice::<serde_json::Value>(bytes) {
+            Ok(value) => match validate_json_bounds(&value) {
+                Ok(()) => value,
+                Err(_) => {
+                    initial_failure_count = initial_failure_count.saturating_add(1);
+                    serde_json::Value::Null
+                }
+            },
+            Err(_) => {
+                initial_failure_count = initial_failure_count.saturating_add(1);
+                serde_json::Value::Null
+            }
+        },
+        None => serde_json::Value::Null,
+    };
+    let provider_session_id = provider_string_field(&metadata, &["session_id", "sessionId"])
+        .or_else(|| provider_string_field(&context_json, &["session_id", "sessionId"]))
+        .unwrap_or_else(|| source.provider_session_id.clone());
+    let parent_provider_session_id = provider_string_field(
+        &metadata,
+        &[
+            "parent_session_id",
+            "parentSessionId",
+            "forked_from_session_id",
+            "forkedFromSessionId",
+            "fork_parent_id",
+        ],
+    );
+    let started_at = provider_timestamp_from_fields(
+        &metadata,
+        &["created_at", "createdAt", "started_at", "startedAt"],
+    )
+    .or_else(|| messages.iter().find_map(message_timestamp))
+    .unwrap_or(context.imported_at);
+    let cwd = provider_string_field(
+        &metadata,
+        &[
+            "workspace_path",
+            "workspacePath",
+            "working_directory",
+            "workingDirectory",
+            "cwd",
+        ],
+    );
+    Ok(PreparedDocument {
+        metadata,
+        context_branch,
+        messages,
+        provider_session_id,
+        parent_provider_session_id,
+        started_at,
+        cwd,
+        initial_failure_count,
+    })
+}
+
+fn project_message(
+    message: &serde_json::Value,
+    index: usize,
+    document: &PreparedDocument,
+) -> std::result::Result<Option<ProjectedMessage>, String> {
+    if !message.is_object() {
+        return Err(bounded_failure(
+            "Rovo Dev message_history member must be an object",
+        ));
+    }
+    let role_text = message
+        .get("role")
+        .or_else(|| message.get("kind"))
+        .or_else(|| message.get("type"))
+        .and_then(serde_json::Value::as_str);
+    let mut event_type = rovodev_event_type(message, role_text);
+    if event_type == EventType::ToolOutput {
+        let outcome = output_outcome(message);
+        if !matches!(outcome, OutputOutcome::Failure | OutputOutcome::Timeout) {
+            return Ok(None);
+        }
+        if output_kind(message) == OutputObservationKind::Command {
+            event_type = EventType::CommandOutput;
+        }
+    }
+    let occurred_at = message_timestamp(message).unwrap_or(document.started_at);
+    let role = Some(provider_role_from_message(message, role_text));
+    let mut touched_files = Vec::new();
+    let include_structured = event_type_supports_structured_file_touches(event_type);
+    let outcome = visit_provider_file_touch_drafts_with_limit(
+        message,
+        include_structured,
+        MAX_PROVIDER_FILE_TOUCHES_PER_EVENT,
+        |(_, touch)| {
+            touched_files.push(touch.path);
+            Ok::<(), CaptureError>(())
+        },
+    )
+    .map_err(|error| bounded_failure(error.to_string()))?;
+    let _ = index;
+    Ok(Some(ProjectedMessage {
+        event_type,
+        role,
+        occurred_at,
+        touched_files,
+        touch_limit_exceeded: outcome.limit_exceeded(),
+    }))
+}
+
+fn output_kind(value: &serde_json::Value) -> OutputObservationKind {
+    let tool_name = recursive_string_field(value, &["tool_name", "toolName", "name", "tool"])
+        .unwrap_or_else(|| "tool".to_owned());
+    if tool_input::is_command_tool(&tool_name.to_ascii_lowercase()) {
+        OutputObservationKind::Command
+    } else {
+        OutputObservationKind::Tool
+    }
+}
+
+fn output_outcome(value: &serde_json::Value) -> OutputOutcome {
+    if value_timed_out(value) {
+        OutputOutcome::Timeout
+    } else if provider_output_event_is_failure(value) {
+        OutputOutcome::Failure
+    } else if provider_result_outcome_evidence(EventType::ToolOutput, value).as_str()
+        == Some("success")
+    {
+        OutputOutcome::Success
+    } else {
+        OutputOutcome::Unknown
+    }
+}
+
+fn recursive_string_field(value: &serde_json::Value, fields: &[&str]) -> Option<String> {
+    match value {
+        serde_json::Value::Array(values) => values
+            .iter()
+            .find_map(|value| recursive_string_field(value, fields)),
+        serde_json::Value::Object(values) => fields
+            .iter()
+            .find_map(|field| values.get(*field).and_then(serde_json::Value::as_str))
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                values
+                    .values()
+                    .find_map(|value| recursive_string_field(value, fields))
+            }),
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => None,
+    }
+}
+
+fn value_timed_out(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Array(values) => values.iter().any(value_timed_out),
+        serde_json::Value::Object(values) => {
+            values.iter().any(|(key, value)| {
+                matches!(key.as_str(), "timed_out" | "timedOut" | "timeout")
+                    && value.as_bool().unwrap_or(false)
+                    || matches!(key.as_str(), "status" | "state" | "outcome")
+                        && value.as_str().is_some_and(|value| {
+                            matches!(
+                                value.trim().to_ascii_lowercase().as_str(),
+                                "timeout" | "timed_out" | "timedout"
+                            )
+                        })
+            }) || values.values().any(value_timed_out)
+        }
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => false,
+    }
+}
+
+fn message_history(value: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
+    value
+        .get("message_history")
+        .or_else(|| value.pointer("/session_context/message_history"))
+        .or_else(|| value.get("messages"))
+        .or_else(|| value.pointer("/conversation/messages"))
+        .and_then(serde_json::Value::as_array)
+}
+
+fn message_timestamp(value: &serde_json::Value) -> Option<chrono::DateTime<chrono::Utc>> {
+    provider_timestamp_from_fields(
+        value,
+        &[
+            "timestamp",
+            "created_at",
+            "createdAt",
+            "updated_at",
+            "updatedAt",
+            "user_sent_time",
+        ],
+    )
+}
+
+fn validate_json_bounds(value: &serde_json::Value) -> std::result::Result<(), &'static str> {
+    let mut stack = vec![(value, 0_usize)];
+    let mut collection_elements = 0_usize;
+    while let Some((value, depth)) = stack.pop() {
+        if depth > SOURCE_BACKED_MAX_JSON_DEPTH {
+            return Err("exceeds maximum JSON depth");
+        }
+        match value {
+            serde_json::Value::Array(values) => {
+                collection_elements = collection_elements.saturating_add(values.len());
+                if collection_elements > SOURCE_BACKED_MAX_COLLECTION_ELEMENTS {
+                    return Err("exceeds JSON collection element budget");
+                }
+                stack.extend(values.iter().map(|value| (value, depth.saturating_add(1))));
+            }
+            serde_json::Value::Object(values) => {
+                collection_elements = collection_elements.saturating_add(values.len());
+                if collection_elements > SOURCE_BACKED_MAX_COLLECTION_ELEMENTS {
+                    return Err("exceeds JSON collection element budget");
+                }
+                stack.extend(
+                    values
+                        .values()
+                        .map(|value| (value, depth.saturating_add(1))),
+                );
+            }
+            serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn bounded_failure(error: impl Into<String>) -> String {
+    let mut error = error.into();
+    if error.len() > SOURCE_BACKED_MAX_FAILURE_BYTES {
+        let mut boundary = SOURCE_BACKED_MAX_FAILURE_BYTES;
+        while !error.is_char_boundary(boundary) {
+            boundary = boundary.saturating_sub(1);
+        }
+        error.truncate(boundary);
+    }
+    error
+}
+
+#[derive(Debug)]
 struct RovoDevSnapshot {
     frozen: RovoDevSessionObservation,
-    context_bytes: Option<Vec<u8>>,
     context_sha256: [u8; 32],
     source_sha256: [u8; 32],
     certified_bytes: u64,
-    document: std::result::Result<super::PreparedDocument, RovoDevFailure>,
+    document: std::result::Result<PreparedDocument, String>,
     context_file: OpenedProviderSourceFile,
     metadata_file: Option<OpenedProviderSourceFile>,
 }
@@ -199,12 +513,9 @@ impl RovoDevSnapshot {
             .ok_or(RovoDevSourceBackedError::CountMismatch)?;
         let source_sha256 = compound_source_digest(&context_file, metadata_file.as_ref());
         let document = if context_oversized {
-            Err(failure(
-                1,
-                format!(
+            Err(bounded_failure(format!(
                     "Rovo Dev session_context.json exceeds the {MAX_PROVIDER_JSONL_LINE_BYTES} byte limit"
-                ),
-            ))
+                )))
         } else {
             prepare_document(
                 source,
@@ -212,18 +523,14 @@ impl RovoDevSnapshot {
                 context_file.bytes.as_deref().unwrap_or_default(),
                 metadata_file.as_ref().and_then(|file| file.bytes.as_deref()),
                 metadata_oversized.then(|| {
-                    failure(
-                        1,
-                        format!(
+                    bounded_failure(format!(
                             "Rovo Dev metadata.json exceeds the {MAX_PROVIDER_JSONL_LINE_BYTES} byte limit"
-                        ),
-                    )
+                        ))
                 }),
             )
         };
         Ok(Self {
             frozen,
-            context_bytes: context_file.bytes,
             context_sha256: context_file.sha256,
             source_sha256,
             certified_bytes,
@@ -363,7 +670,6 @@ pub(crate) fn discover_rovodev_source_backed(
 }
 
 struct BoundInventory {
-    canonical_root: PathBuf,
     observation: SourceInventoryObservation,
     leaves: Vec<RovoDevSourceBackedLeaf>,
 }
@@ -423,7 +729,6 @@ fn bind_inventory(
     bind_session_lineage(&mut leaves)?;
     let observation = inventory_observation(&canonical_root, &leaves)?;
     Ok(BoundInventory {
-        canonical_root,
         observation,
         leaves,
     })
@@ -705,48 +1010,54 @@ impl<'a> RovoDevSourceBackedReader<'a> {
                 return Ok(Some(page));
             }
         };
-        let prepared = prepare_page(
-            &self.leaf.source,
-            &self.context,
-            document,
-            self.next_message,
-        )?;
-        let start = usize::try_from(prepared.expected_frontier.next_message_index)
-            .map_err(|_| RovoDevSourceBackedError::CoordinateOverflow)?;
+        let start = self.next_message;
+        if start > document.messages.len() {
+            return Err(RovoDevSourceBackedError::CoordinateOverflow);
+        }
         let mut documents = Vec::new();
         let mut rejected_records = if start == 0 {
-            u64::try_from(document.initial_failures.len())
-                .map_err(|_| RovoDevSourceBackedError::CountMismatch)?
+            document.initial_failure_count
         } else {
             0
         };
         let mut ignored_records = 0_u64;
-        for (offset, message) in prepared.messages.into_iter().enumerate() {
-            let index = start
-                .checked_add(offset)
-                .ok_or(RovoDevSourceBackedError::CoordinateOverflow)?;
-            if message.rejection.is_some() {
-                rejected_records = rejected_records
-                    .checked_add(1)
-                    .ok_or(RovoDevSourceBackedError::CountMismatch)?;
+        let mut retained_bytes = 0_usize;
+        let mut next = start;
+        while next < document.messages.len()
+            && next.saturating_sub(start) < SOURCE_BACKED_PAGE_MAX_RECORDS
+        {
+            let raw = &document.messages[next];
+            let serialized_bytes = serde_json::to_vec(raw)
+                .map_err(|error| RovoDevSourceBackedError::Capture(error.into()))?
+                .len();
+            if next > start
+                && retained_bytes.saturating_add(serialized_bytes) > SOURCE_BACKED_PAGE_MAX_BYTES
+            {
+                break;
             }
-            if let Some(event) = message.event {
-                let raw = document
-                    .messages
-                    .get(index)
-                    .ok_or(RovoDevSourceBackedError::CoordinateOverflow)?;
-                documents.push(lexical_document(
-                    self.leaf,
-                    document,
-                    raw,
-                    index,
-                    event,
-                    message.touches,
-                )?);
-            } else if message.rejection.is_none() {
-                ignored_records = ignored_records
-                    .checked_add(1)
-                    .ok_or(RovoDevSourceBackedError::CountMismatch)?;
+            next = next
+                .checked_add(1)
+                .ok_or(RovoDevSourceBackedError::CoordinateOverflow)?;
+            if serialized_bytes > SOURCE_BACKED_PAGE_MAX_BYTES {
+                rejected_records = checked_add(rejected_records, 1)?;
+                continue;
+            }
+            retained_bytes = retained_bytes.saturating_add(serialized_bytes);
+            match project_message(raw, next.saturating_sub(1), document) {
+                Err(_) => rejected_records = checked_add(rejected_records, 1)?,
+                Ok(None) => ignored_records = checked_add(ignored_records, 1)?,
+                Ok(Some(event)) => {
+                    if event.touch_limit_exceeded {
+                        rejected_records = checked_add(rejected_records, 1)?;
+                    }
+                    documents.push(lexical_document(
+                        self.leaf,
+                        document,
+                        raw,
+                        next.saturating_sub(1),
+                        event,
+                    )?);
+                }
             }
         }
         let retained_records =
@@ -755,16 +1066,15 @@ impl<'a> RovoDevSourceBackedReader<'a> {
             .checked_add(rejected_records)
             .and_then(|count| count.checked_add(ignored_records))
             .ok_or(RovoDevSourceBackedError::CountMismatch)?;
-        self.next_message = usize::try_from(prepared.next_frontier.next_message_index)
-            .map_err(|_| RovoDevSourceBackedError::CoordinateOverflow)?;
-        self.terminal = prepared.terminal;
+        self.next_message = next;
+        self.terminal = next == document.messages.len();
         let page = RovoDevSourceBackedPage {
             documents,
             complete_records,
             retained_records,
             rejected_records,
             ignored_records,
-            terminal: prepared.terminal,
+            terminal: self.terminal,
         };
         self.add_page_counts(&page)?;
         Ok(Some(page))
@@ -857,11 +1167,10 @@ fn final_frontier(snapshot: &RovoDevSnapshot) -> RovoDevSourceBackedResult<Sourc
 
 fn lexical_document(
     leaf: &RovoDevSourceBackedLeaf,
-    document: &super::PreparedDocument,
+    document: &PreparedDocument,
     raw_message: &serde_json::Value,
     index: usize,
-    event: super::RovoDevCoreEvent,
-    touches: Vec<super::RovoDevFileTouch>,
+    event: ProjectedMessage,
 ) -> RovoDevSourceBackedResult<LexicalDocument> {
     let native_item_key = native_item_key(leaf, raw_message, index)?;
     let event_id = derive_event_id(EventIdentityInput {
@@ -907,18 +1216,7 @@ fn lexical_document(
                 "vcsBranch",
             ],
         )
-        .or_else(|| {
-            provider_string_field(
-                &document.context_metadata,
-                &[
-                    "branch",
-                    "git_branch",
-                    "gitBranch",
-                    "vcs_branch",
-                    "vcsBranch",
-                ],
-            )
-        }),
+        .or_else(|| document.context_branch.clone()),
         source_path: Some(leaf.source.context_path.display().to_string()),
         agent_type: if document.parent_provider_session_id.is_some() {
             AgentType::Subagent
@@ -935,7 +1233,7 @@ fn lexical_document(
         body,
         workspace: document.cwd.clone(),
         cwd: document.cwd.clone(),
-        touched_files: touches.into_iter().map(|touch| touch.path).collect(),
+        touched_files: event.touched_files,
     })
 }
 
@@ -1034,16 +1332,12 @@ pub(crate) fn hydrate_rovodev_source_record(
     if observed_native_id != expected_native_id {
         return Err(RovoDevSourceBackedError::LocatorObjectChanged);
     }
-    current
-        .context_bytes
-        .as_ref()
-        .ok_or(RovoDevSourceBackedError::LocatorObjectChanged)?;
     let role_text = message
         .get("role")
         .or_else(|| message.get("kind"))
         .or_else(|| message.get("type"))
         .and_then(serde_json::Value::as_str);
-    let decoded_display_text = lexical_body(message, super::rovodev_event_type(message, role_text));
+    let decoded_display_text = lexical_body(message, rovodev_event_type(message, role_text));
     let provider_bytes = decoded_display_text.as_bytes().to_vec();
     current.revalidate(&leaf.authority)?;
     let closing = RovoDevSnapshot::read(

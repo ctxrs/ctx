@@ -4,63 +4,39 @@ use chrono::{DateTime, Utc};
 use ctx_history_core::EventType;
 use serde_json::{json, Value};
 
-use crate::common::io::read_text_file_limited;
 use crate::common::time::parse_rfc3339_utc;
-use crate::provider::custom_history_jsonl::push_provider_import_failure;
-use crate::provider::normalization::{
-    provider_capped_json, provider_explicit_result_value_text, provider_local_preview,
-    provider_value_text,
-};
-use crate::{
-    CaptureError, ProviderImportSummary, Result, MAX_PROVIDER_JSONL_LINE_BYTES,
-    PROVIDER_MAX_PREVIEW_CHARS,
-};
+use crate::provider::normalization::provider_value_text;
+use crate::{CaptureError, Result, PROVIDER_MAX_PREVIEW_CHARS};
 
 use super::source::MistralVibeSessionSource;
 use super::MISTRAL_VIBE_MAX_ID_BYTES;
-
-pub(super) fn mistral_vibe_bounded_metadata(
-    source: &MistralVibeSessionSource,
-    imported_at: DateTime<Utc>,
-) -> Result<(Value, Option<String>)> {
-    let mut summary = ProviderImportSummary::default();
-    let metadata = read_mistral_vibe_metadata(&source.metadata_path, &mut summary);
-    mistral_vibe_bounded_metadata_from_value(source, imported_at, metadata, summary)
-}
 
 pub(super) fn mistral_vibe_bounded_metadata_from_bytes(
     source: &MistralVibeSessionSource,
     imported_at: DateTime<Utc>,
     bytes: &[u8],
 ) -> Result<(Value, Option<String>)> {
-    let mut summary = ProviderImportSummary::default();
-    let metadata = match serde_json::from_slice::<Value>(bytes) {
-        Ok(value) if value.is_object() => value,
-        Ok(_) => {
-            push_provider_import_failure(
-                &mut summary,
-                0,
-                "Mistral Vibe meta.json must contain a JSON object".to_owned(),
-            );
-            Value::Null
-        }
-        Err(error) => {
-            push_provider_import_failure(
-                &mut summary,
-                0,
-                format!("invalid Mistral Vibe meta.json: {error}"),
-            );
-            Value::Null
-        }
+    let (metadata, failure) = match serde_json::from_slice::<Value>(bytes) {
+        Ok(value) if value.is_object() => (value, None),
+        Ok(_) => (
+            Value::Null,
+            Some("Mistral Vibe meta.json must contain a JSON object".to_owned()),
+        ),
+        Err(error) => (
+            Value::Null,
+            Some(bounded_metadata_text(format!(
+                "invalid Mistral Vibe meta.json: {error}"
+            ))),
+        ),
     };
-    mistral_vibe_bounded_metadata_from_value(source, imported_at, metadata, summary)
+    mistral_vibe_bounded_metadata_from_value(source, imported_at, metadata, failure)
 }
 
 fn mistral_vibe_bounded_metadata_from_value(
     source: &MistralVibeSessionSource,
     imported_at: DateTime<Utc>,
     metadata: Value,
-    summary: ProviderImportSummary,
+    failure: Option<String>,
 ) -> Result<(Value, Option<String>)> {
     let provider_session_id = bounded_mistral_vibe_identity(
         mistral_vibe_metadata_string(&metadata, "session_id").or_else(|| {
@@ -86,54 +62,30 @@ fn mistral_vibe_bounded_metadata_from_value(
     let started_at = mistral_vibe_metadata_timestamp(&metadata, "start_time")
         .unwrap_or(imported_at)
         .to_rfc3339();
-    let ended_at = mistral_vibe_metadata_timestamp(&metadata, "end_time")
-        .map(|timestamp| timestamp.to_rfc3339());
-    let bounded_text = |value: Option<String>| {
-        value.map(|text| provider_local_preview(&text, PROVIDER_MAX_PREVIEW_CHARS).0)
-    };
-    let external_agent_id = bounded_text(mistral_vibe_metadata_pointer_string(
-        &metadata,
-        &["/agent_profile/name"],
-    ));
-    let metadata_failure = summary
-        .failures
-        .first()
-        .map(|failure| provider_local_preview(&failure.error, PROVIDER_MAX_PREVIEW_CHARS).0);
     Ok((
         json!({
             "session_id": provider_session_id,
             "parent_session_id": parent_provider_session_id,
             "start_time": started_at,
-            "end_time": ended_at,
-            "title": bounded_text(mistral_vibe_metadata_string(&metadata, "title")),
-            "title_source": bounded_text(mistral_vibe_metadata_string(&metadata, "title_source")),
-            "git_branch": bounded_text(mistral_vibe_metadata_string(&metadata, "git_branch")),
-            "git_commit": bounded_text(mistral_vibe_metadata_string(&metadata, "git_commit")),
-            "total_messages": metadata.get("total_messages").and_then(Value::as_u64),
+            "git_branch": mistral_vibe_metadata_string(&metadata, "git_branch")
+                .map(bounded_metadata_text),
             "environment": {
-                "working_directory": bounded_text(mistral_vibe_metadata_pointer_string(
+                "working_directory": mistral_vibe_metadata_pointer_string(
                     &metadata,
                     &["/environment/working_directory"],
-                )),
+                )
+                .map(bounded_metadata_text),
             },
-            "agent_profile": {
-                "name": external_agent_id,
-                "preview": metadata.get("agent_profile").map(|value| {
-                    provider_capped_json(value, PROVIDER_MAX_PREVIEW_CHARS)
-                }),
-            },
-            "stats": metadata.get("stats").map(|value| {
-                provider_capped_json(value, PROVIDER_MAX_PREVIEW_CHARS)
-            }),
-            "loops": metadata.get("loops").map(|value| {
-                provider_capped_json(value, PROVIDER_MAX_PREVIEW_CHARS)
-            }),
-            "experiments": metadata.get("experiments").map(|value| {
-                provider_capped_json(value, PROVIDER_MAX_PREVIEW_CHARS)
-            }),
         }),
-        metadata_failure,
+        failure,
     ))
+}
+
+fn bounded_metadata_text(text: impl Into<String>) -> String {
+    text.into()
+        .chars()
+        .take(PROVIDER_MAX_PREVIEW_CHARS)
+        .collect()
 }
 
 fn bounded_mistral_vibe_identity(
@@ -199,27 +151,6 @@ pub(super) fn mistral_vibe_event_text(role: &str, value: &Value, event_type: Eve
     }
 }
 
-/// Returns only fields that explicitly carry a Mistral Vibe tool result.
-pub(crate) fn mistral_vibe_result_content(value: &Value) -> Option<String> {
-    let role = value
-        .get("role")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-    if mistral_vibe_event_type(role, value) != EventType::ToolOutput {
-        return None;
-    }
-    let mut parts = Vec::new();
-    for field in ["content", "reasoning_content", "images"] {
-        if let Some(text) = value
-            .get(field)
-            .and_then(provider_explicit_result_value_text)
-        {
-            parts.push(text);
-        }
-    }
-    (!parts.is_empty()).then(|| parts.join("\n"))
-}
-
 pub(super) fn mistral_vibe_tool_calls_text(value: &Value) -> Option<String> {
     let calls = value.as_array()?;
     let names = calls
@@ -246,45 +177,6 @@ pub(super) fn mistral_vibe_event_id(value: &Value, line_number: usize, role: &st
         .filter(|id| !id.trim().is_empty())
         .map(str::to_owned)
         .unwrap_or_else(|| format!("{role}:line-{line_number}"))
-}
-
-pub(super) fn read_mistral_vibe_metadata(
-    path: &Path,
-    summary: &mut ProviderImportSummary,
-) -> Value {
-    match read_text_file_limited(
-        path,
-        MAX_PROVIDER_JSONL_LINE_BYTES,
-        "Mistral Vibe meta.json",
-    ) {
-        Ok(raw) => match serde_json::from_str::<Value>(&raw) {
-            Ok(value) if value.is_object() => value,
-            Ok(_) => {
-                push_provider_import_failure(
-                    summary,
-                    0,
-                    "Mistral Vibe meta.json must contain a JSON object".to_owned(),
-                );
-                Value::Null
-            }
-            Err(err) => {
-                push_provider_import_failure(
-                    summary,
-                    0,
-                    format!("invalid Mistral Vibe meta.json: {err}"),
-                );
-                Value::Null
-            }
-        },
-        Err(err) => {
-            push_provider_import_failure(
-                summary,
-                0,
-                format!("could not read Mistral Vibe meta.json: {err}"),
-            );
-            Value::Null
-        }
-    }
 }
 
 pub(super) fn mistral_vibe_metadata_string(value: &Value, field: &str) -> Option<String> {
