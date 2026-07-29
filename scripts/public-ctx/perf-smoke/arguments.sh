@@ -30,7 +30,6 @@ Common overrides:
   CTX_PERF_SMOKE_INITIAL_REPEATS=3
   CTX_PERF_SMOKE_REPEATS=5
   CTX_PERF_SMOKE_CHANGED_FILES=5
-  CTX_PERF_SMOKE_CONCURRENT_QUERIES=5
   CTX_PERF_SMOKE_COMMAND_TIMEOUT_SECONDS=300
   CTX_PERF_SMOKE_TOTAL_TIMEOUT_SECONDS=1800
   CTX_PERF_SMOKE_COMPARISON_ORDER=both
@@ -38,16 +37,16 @@ Common overrides:
   CTX_PERF_SMOKE_MAX_PEAK_RSS_MIB=1024
   CTX_PERF_SMOKE_STATUS_P95_MS=750
   CTX_PERF_SMOKE_SEARCH_P95_MS=2500
-  CTX_PERF_SMOKE_IMPORT_NOOP_P95_MS=2500
-  CTX_PERF_SMOKE_IMPORT_CHANGED_P95_MS=3000
-  CTX_PERF_SMOKE_IMPORT_REPLACEMENT_P95_MS=3500
-  CTX_PERF_SMOKE_CONCURRENT_SEARCH_P95_MS=2500
+  CTX_PERF_SMOKE_REFRESH_NOOP_P95_MS=2500
+  CTX_PERF_SMOKE_REFRESH_APPEND_P95_MS=3000
+  CTX_PERF_SMOKE_REFRESH_REPLACEMENT_P95_MS=3500
+  CTX_PERF_SMOKE_REFRESH_DELETE_P95_MS=3500
   CTX_PERF_SMOKE_SHOW_SESSION_P95_MS=1500
   CTX_PERF_SMOKE_ENFORCE=1 (set to 0 for diagnostic-only runs)
 
 The JSON artifact records wall and CPU time, peak RSS, Linux /proc filesystem
-and device-I/O proxies, source-backed lexical/semantic/relational footprint,
-and refresh-off query latency while an idempotent source rescan is active. It
+and device-I/O proxies, source-catalog/lexical/semantic/relational footprint,
+and generation-bound refresh-off query latency against the live resolver. It
 includes per-order relative gate receipts. Every run uses a newly created
 disposable HOME, CTX_DATA_ROOT, and generated provider tree.
 
@@ -151,6 +150,8 @@ import json
 import math
 import os
 import re
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -174,10 +175,11 @@ QUERY = "perfneedle"
 PROC_IO_FIELDS = ("rchar", "wchar", "read_bytes", "write_bytes", "cancelled_write_bytes")
 HARNESS_STARTED = time.perf_counter()
 CORE_PHASES = (
-    "initial_import",
-    "noop_incremental_import",
-    "append_incremental_import",
-    "replacement_import",
+    "initial_source_refresh",
+    "noop_source_refresh",
+    "append_source_refresh",
+    "replacement_source_refresh",
+    "delete_source_refresh",
 )
 WALL_PARITY_RATIO = 1.0
 DEVICE_WRITE_PARITY_RATIO = 1.0

@@ -18,6 +18,62 @@ def prepare_work_root(base: Path) -> Path:
     return Path(tempfile.mkdtemp(prefix="run-", dir=resolved)).resolve()
 
 
+PRIOR_EPOCH_SENTINEL = b"opaque ctx v0.25 rollback sentinel; never open as sqlite\n"
+
+
+def stage_daemon_binary(ctx_bin: Path, role: str, work_root: Path) -> Path:
+    metadata = ctx_bin.lstat()
+    owner_safe = (
+        stat.S_ISREG(metadata.st_mode)
+        and not ctx_bin.is_symlink()
+        and metadata.st_uid == os.getuid()
+        and metadata.st_nlink == 1
+        and metadata.st_mode & 0o022 == 0
+    )
+    if owner_safe:
+        return ctx_bin
+    staged = work_root / "binaries" / role / "ctx"
+    staged.parent.mkdir(parents=True, exist_ok=False)
+    shutil.copyfile(ctx_bin, staged)
+    staged.chmod(0o700)
+    if binary_sha256(staged) != binary_sha256(ctx_bin):
+        raise HarnessError(f"staged {role} binary bytes differ from {ctx_bin}")
+    return staged
+
+
+def stage_run_specs(
+    run_specs: list[tuple[Path, str, str]],
+    work_root: Path,
+) -> list[tuple[Path, str, str]]:
+    return [
+        (stage_daemon_binary(ctx_bin, role, work_root), label, role)
+        for ctx_bin, label, role in run_specs
+    ]
+
+
+def install_prior_epoch_sentinel(data_root: Path) -> str:
+    path = data_root / "work.sqlite"
+    if path.exists():
+        raise HarnessError(f"prior-epoch sentinel path already exists: {path}")
+    path.write_bytes(PRIOR_EPOCH_SENTINEL)
+    return hashlib.sha256(PRIOR_EPOCH_SENTINEL).hexdigest()
+
+
+def assert_prior_epoch_sentinel(data_root: Path, expected_sha256: str) -> None:
+    path = data_root / "work.sqlite"
+    if not path.is_file():
+        raise HarnessError(f"prior-epoch rollback sentinel disappeared: {path}")
+    observed = hashlib.sha256(path.read_bytes()).hexdigest()
+    if observed != expected_sha256:
+        raise HarnessError(
+            f"prior-epoch rollback sentinel changed: {observed} != {expected_sha256}"
+        )
+    for suffix in ("-wal", "-shm", "-journal"):
+        auxiliary = Path(f"{path}{suffix}")
+        if auxiliary.exists():
+            raise HarnessError(f"source-backed refresh touched prior-epoch auxiliary: {auxiliary}")
+
+
 def json_line(value: object) -> str:
     return json.dumps(value, separators=(",", ":"), sort_keys=True) + "\n"
 
@@ -227,6 +283,33 @@ def replace_changed_sessions(
         os.utime(path, ns=(changed_at, changed_at))
         replacement_events += event_count
     return replacement_events
+
+
+def delete_sessions(
+    corpus_root: Path,
+    max_files: int,
+) -> tuple[int, int]:
+    source_paths = sorted(corpus_root.rglob("*.jsonl"))
+    deleted_sessions = min(max_files, len(source_paths) - 1)
+    if deleted_sessions <= 0:
+        raise HarnessError("delete profile requires at least two provider source files")
+    deleted_events = 0
+    for path in source_paths[-deleted_sessions:]:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        deleted_events += len(lines) - 2
+        path.unlink()
+    return deleted_sessions, deleted_events
+
+
+def corpus_counts(corpus_root: Path) -> tuple[int, int]:
+    source_paths = sorted(corpus_root.rglob("*.jsonl"))
+    events = 0
+    for path in source_paths:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        if len(lines) < 3:
+            raise HarnessError(f"generated source has too few records: {path}")
+        events += len(lines) - 2
+    return len(source_paths), events
 
 
 def command_env(home: Path, data_root: Path, temp_root: Path) -> dict[str, str]:
