@@ -5,12 +5,11 @@ mod source;
 
 #[allow(unused_imports)]
 pub(crate) use native_path::{
-    discover_mux_source_backed_sources, hydrate_mux_source_backed_record, import_mux_native_path,
-    mux_complete_content_locator, revalidate_mux_source_backed, scan_mux_source_backed,
-    MuxBoundedProjection, MuxReplacementEvidence, MuxReplacementReason, MuxSourceBackedCandidate,
-    MuxSourceBackedDisposition, MuxSourceBackedError, MuxSourceBackedPage, MuxSourceBackedRecord,
-    MuxSourceBackedResult, MuxSourceBackedScanReceipt, MuxUnaddressableReason,
-    MuxUnaddressableRecord,
+    discover_mux_source_backed_sources, import_mux_native_path, revalidate_mux_source_backed,
+    scan_mux_source_backed, MuxBoundedProjection, MuxReplacementEvidence, MuxReplacementReason,
+    MuxSourceBackedCandidate, MuxSourceBackedDisposition, MuxSourceBackedError,
+    MuxSourceBackedPage, MuxSourceBackedRecord, MuxSourceBackedResolverV0, MuxSourceBackedResult,
+    MuxSourceBackedScanReceipt, MuxUnaddressableReason, MuxUnaddressableRecord,
 };
 pub(crate) use normalization::{mux_event_id, mux_event_text, mux_event_type};
 

@@ -4,7 +4,11 @@ use std::{
     path::Path,
 };
 
-use ctx_history_core::{EventType, LocatorRevisionPolicy, NativeRecordCoordinate, TypedKey};
+use ctx_history_core::{
+    BatchHydrationRequest, ContentSourceResolver, EventHydrationRequest, EventType,
+    HydrationFailureKind, LocatorRevisionPolicy, NativeRecordCoordinate, SessionHydrationRequest,
+    SourceRecordLocator, TypedKey,
+};
 use serde_json::{json, Value};
 
 use super::*;
@@ -48,6 +52,21 @@ fn source_candidates(root: &Path) -> Vec<MuxSourceBackedCandidate> {
     discover_mux_source_backed_sources(root, "2026-07-28T12:30:00Z".parse().unwrap()).unwrap()
 }
 
+fn hydration_resolver(root: &Path) -> MuxSourceBackedResolverV0 {
+    MuxSourceBackedResolverV0::discover(root, "2026-07-28T12:30:00Z".parse().unwrap()).unwrap()
+}
+
+fn hydration_request(record: &MuxSourceBackedRecord) -> EventHydrationRequest {
+    EventHydrationRequest::new(record.document.event_id, record.document.locator.clone()).unwrap()
+}
+
+fn hydrate_exact(root: &Path, record: &MuxSourceBackedRecord) -> Vec<u8> {
+    hydration_resolver(root)
+        .hydrate_event(&hydration_request(record))
+        .unwrap()
+        .provider_bytes
+}
+
 fn collect_scan(
     candidate: &MuxSourceBackedCandidate,
     base: Option<&CertifiedSource>,
@@ -71,13 +90,259 @@ fn collect_scan(
 }
 
 #[test]
-fn cold_append_and_rewrite_keep_stable_ids_and_bounded_projection() {
+fn exact_hydration_indexes_full_body_tail_terms_and_preserves_order() {
     let temp = tempdir().unwrap();
     let root = temp.path().join("sessions");
     let session = root.join("session-1");
     fs::create_dir_all(&session).unwrap();
     write_metadata(&session, "session-1");
-    let long = "x".repeat(MAX_BODY_PREVIEW_CHARS + 200);
+    let long_message = format!("message-head-{}-message-tail", "m".repeat(4_096));
+    let long_input = format!("input-head-{}-input-tail", "i".repeat(4_096));
+    let long_output = format!("output-head-{}-output-tail", "o".repeat(4_096));
+    write_chat(
+        &session,
+        &[
+            message("message-0", "user", 0, &long_message),
+            json!({
+                "id": "tool-call",
+                "workspaceId": "session-1",
+                "role": "assistant",
+                "createdAt": "2026-07-28T12:00:01Z",
+                "parts": [{
+                    "type": "dynamic-tool",
+                    "toolCallId": "call-1",
+                    "toolName": "shell",
+                    "state": "input-available",
+                    "input": long_input.clone(),
+                }],
+                "metadata": {"historySequence": 1},
+            }),
+            json!({
+                "id": "failed-output",
+                "workspaceId": "session-1",
+                "role": "assistant",
+                "createdAt": "2026-07-28T12:00:02Z",
+                "parts": [{
+                    "type": "dynamic-tool",
+                    "toolCallId": "call-1",
+                    "toolName": "shell",
+                    "state": "output-available",
+                    "success": false,
+                    "output": long_output.clone(),
+                }],
+                "metadata": {"historySequence": 2},
+            }),
+        ],
+    );
+    let candidate = source_candidates(&root).pop().unwrap();
+    let (_, records, unaddressable) = collect_scan(&candidate, None);
+    assert!(unaddressable.is_empty());
+    assert_eq!(records.len(), 3);
+    assert!(records.iter().all(|record| {
+        record
+            .document
+            .locator
+            .certified_source_revision_digest()
+            .is_some()
+    }));
+    let expected = vec![
+        long_message.clone(),
+        format!("tool call: shell\ninput: {long_input}"),
+        long_output.clone(),
+    ];
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.document.body.clone())
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert!(records[0].document.body.contains("message-tail"));
+    assert!(records[1].document.body.contains("input-tail"));
+    assert!(records[2].document.body.contains("output-tail"));
+
+    let request_order = [2_usize, 1, 0];
+    let requests = request_order
+        .iter()
+        .map(|index| hydration_request(&records[*index]))
+        .collect::<Vec<_>>();
+    let session_request =
+        SessionHydrationRequest::new(records[0].document.session_id, requests).unwrap();
+    let hydrated = hydration_resolver(&root)
+        .hydrate_session(&session_request)
+        .unwrap()
+        .into_iter()
+        .map(|record| String::from_utf8(record.provider_bytes).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        hydrated,
+        vec![
+            long_output,
+            format!("tool call: shell\ninput: {long_input}"),
+            long_message,
+        ]
+    );
+}
+
+#[test]
+fn rewrite_digest_and_truncation_fail_with_distinct_typed_evidence() {
+    let temp = tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    let session = root.join("session-1");
+    fs::create_dir_all(&session).unwrap();
+    write_metadata(&session, "session-1");
+    let original = [
+        message("message-0", "user", 0, "before"),
+        message("message-1", "assistant", 1, "second"),
+    ];
+    write_chat(&session, &original);
+    let candidate = source_candidates(&root).pop().unwrap();
+    let (_, records, _) = collect_scan(&candidate, None);
+    let first_request = hydration_request(&records[0]);
+    let second_request = hydration_request(&records[1]);
+
+    write_chat(
+        &session,
+        &[
+            message("message-0", "user", 0, "rewrit"),
+            original[1].clone(),
+        ],
+    );
+    let stale = hydration_resolver(&root)
+        .hydrate_event(&first_request)
+        .unwrap_err();
+    assert_eq!(stale.kind, HydrationFailureKind::StaleRecordEvidence);
+
+    write_chat(&session, &original[..1]);
+    let missing = hydration_resolver(&root)
+        .hydrate_event(&second_request)
+        .unwrap_err();
+    assert_eq!(missing.kind, HydrationFailureKind::MissingRecord);
+    let batch =
+        BatchHydrationRequest::new(vec![first_request.clone(), second_request.clone()]).unwrap();
+    let failed_batch = hydration_resolver(&root).hydrate_batch(&batch).unwrap_err();
+    assert_eq!(failed_batch.kind, HydrationFailureKind::MissingRecord);
+}
+
+#[test]
+fn source_deletion_and_unavailable_root_are_not_conflated() {
+    let temp = tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    let session = root.join("session-1");
+    fs::create_dir_all(&session).unwrap();
+    write_metadata(&session, "session-1");
+    write_chat(&session, &[message("message-0", "user", 0, "present")]);
+    let candidate = source_candidates(&root).pop().unwrap();
+    let (_, records, _) = collect_scan(&candidate, None);
+    let request = hydration_request(&records[0]);
+
+    fs::remove_dir_all(&session).unwrap();
+    let deleted = hydration_resolver(&root)
+        .hydrate_event(&request)
+        .unwrap_err();
+    assert_eq!(deleted.kind, HydrationFailureKind::ConfirmedDeleted);
+
+    fs::remove_dir_all(&root).unwrap();
+    let unavailable = MuxSourceBackedResolverV0::discover_for_hydration(
+        &root,
+        "2026-07-28T12:30:00Z".parse().unwrap(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        unavailable.kind,
+        HydrationFailureKind::TemporarilyUnavailable
+    );
+}
+
+#[test]
+fn digest_matching_malformed_native_record_reports_unsupported_parser_revision() {
+    let temp = tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    let session = root.join("session-1");
+    fs::create_dir_all(&session).unwrap();
+    write_metadata(&session, "session-1");
+    write_chat(&session, &[message("message-0", "user", 0, "present")]);
+    let candidate = source_candidates(&root).pop().unwrap();
+    let (_, records, _) = collect_scan(&candidate, None);
+    let original = &records[0].document;
+    let decoded = decode_mux_coordinate(&original.locator).unwrap();
+    let malformed_payload = b"{not-json}";
+    let mut legacy_locator = vec![1_u8];
+    legacy_locator.extend_from_slice(&0_u64.to_be_bytes());
+    legacy_locator.extend_from_slice(
+        &u64::try_from(malformed_payload.len() + 1)
+            .unwrap()
+            .to_be_bytes(),
+    );
+    let locator = SourceRecordLocator::new(
+        original.source.clone(),
+        NativeRecordCoordinate::ProviderNative {
+            namespace: MUX_PROVIDER_NATIVE_LOCATOR_NAMESPACE.to_owned(),
+            coordinate: encode_mux_coordinate(
+                MuxStreamKind::Chat,
+                &legacy_locator,
+                decoded.source_record_ordinal,
+                decoded.event_sequence,
+                &decoded.native_record_id,
+            )
+            .unwrap(),
+        },
+        LocatorRevisionPolicy::StableRecordEvidence,
+        original.locator.certified_source_revision_digest().copied(),
+        Sha256::digest(malformed_payload).into(),
+    )
+    .unwrap();
+    fs::write(
+        session.join("chat.jsonl"),
+        [malformed_payload.as_slice(), b"\n"].concat(),
+    )
+    .unwrap();
+    let request = EventHydrationRequest::new(original.event_id, locator).unwrap();
+    let failure = hydration_resolver(&root)
+        .hydrate_event(&request)
+        .unwrap_err();
+    assert_eq!(
+        failure.kind,
+        HydrationFailureKind::UnsupportedParserRevision
+    );
+}
+
+#[test]
+fn source_backed_mux_has_no_preview_complete_or_legacy_store_publication_fallback() {
+    let provider_source = include_str!("../source_backed.rs");
+    let registry_source = include_str!("../../../../source_backed.rs");
+    for forbidden in [
+        ["ctx_history_", "store"].concat(),
+        ["Store", "::"].concat(),
+        ["import_mux_", "native_path("].concat(),
+        ["mux_legacy_", "bridge("].concat(),
+        ["provider_bytes: ", "projection.body"].concat(),
+        "MAX_BODY_PREVIEW_CHARS".to_owned(),
+        "provider_local_preview".to_owned(),
+    ] {
+        assert!(
+            !provider_source.contains(&forbidden),
+            "Mux source-backed route contains forbidden architecture token {forbidden:?}"
+        );
+    }
+    assert!(provider_source.contains("legacy_bridge: None"));
+    assert!(provider_source.contains("exact_mux_lexical_body"));
+    assert!(provider_source.contains("fn hydrate_batch("));
+    assert!(provider_source.contains("self.hydrate_requests(request.events())"));
+    assert!(registry_source.contains("MuxSourceBackedResolverV0::discover_for_hydration"));
+    assert!(registry_source.contains(".with_batch_hydration(move |request|"));
+    let unsupported_fallback = ["Mux exact content requires", "brokered compound-file"].concat();
+    assert!(!registry_source.contains(&unsupported_fallback));
+}
+
+#[test]
+fn cold_append_and_rewrite_keep_stable_ids_and_exact_lexical_body() {
+    let temp = tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    let session = root.join("session-1");
+    fs::create_dir_all(&session).unwrap();
+    write_metadata(&session, "session-1");
+    let long = format!("{}mux-cold-tail-term", "x".repeat(4_096));
     let first_rows = vec![
         message("message-0", "user", 0, &long),
         message("message-1", "assistant", 1, "answer"),
@@ -90,10 +355,8 @@ fn cold_append_and_rewrite_keep_stable_ids_and_bounded_projection() {
     assert!(cold_unaddressable.is_empty());
     assert_eq!(cold_records.len(), 2);
     assert_eq!(cold.emitted_documents, 2);
-    assert_eq!(
-        cold_records[0].document.body.chars().count(),
-        MAX_BODY_PREVIEW_CHARS
-    );
+    assert_eq!(cold_records[0].document.body, long);
+    assert!(cold_records[0].document.body.contains("mux-cold-tail-term"));
     let cold_ids = cold_records
         .iter()
         .map(|record| record.document.event_id)
@@ -170,8 +433,8 @@ fn partial_snapshot_uses_exact_revision_and_replacement_evidence() {
     let session = root.join("session-1");
     fs::create_dir_all(&session).unwrap();
     write_metadata(&session, "session-1");
-    let chat_body = format!("{}-chat", "c".repeat(MAX_BODY_PREVIEW_CHARS + 32));
-    let partial_body = format!("{}-partial", "p".repeat(MAX_BODY_PREVIEW_CHARS + 32));
+    let chat_body = format!("{}-chat", "c".repeat(4_096));
+    let partial_body = format!("{}-partial", "p".repeat(4_096));
     write_chat(&session, &[message("chat-0", "user", 0, &chat_body)]);
     fs::write(
         session.join("partial.json"),
@@ -198,7 +461,7 @@ fn partial_snapshot_uses_exact_revision_and_replacement_evidence() {
         .document
         .locator
         .certified_source_revision_digest()
-        .is_none());
+        .is_some());
     assert_eq!(
         partial.document.locator.revision_policy(),
         LocatorRevisionPolicy::ExactSourceRevision
@@ -208,15 +471,19 @@ fn partial_snapshot_uses_exact_revision_and_replacement_evidence() {
         .locator
         .certified_source_revision_digest()
         .is_some());
-    assert_eq!(chat.document.source_path.as_deref(), session.join("chat.jsonl").to_str());
+    assert_eq!(
+        chat.document.source_path.as_deref(),
+        session.join("chat.jsonl").to_str()
+    );
     assert_eq!(
         partial.document.source_path.as_deref(),
         session.join("partial.json").to_str()
     );
-    assert_eq!(resolve_exact(&candidate, chat).unwrap(), chat_body);
-    assert_eq!(resolve_exact(&candidate, partial).unwrap(), partial_body);
+    assert_eq!(hydrate_exact(&root, chat), chat_body.as_bytes());
+    assert_eq!(hydrate_exact(&root, partial), partial_body.as_bytes());
 
     let partial_id = partial.document.event_id;
+    let partial_request = hydration_request(partial);
     fs::write(
         session.join("partial.json"),
         serde_json::to_vec(&message(
@@ -228,10 +495,10 @@ fn partial_snapshot_uses_exact_revision_and_replacement_evidence() {
         .unwrap(),
     )
     .unwrap();
-    assert!(matches!(
-        resolve_exact(&candidate, partial).unwrap_err(),
-        MuxSourceBackedError::StaleLocator
-    ));
+    let failure = hydration_resolver(&root)
+        .hydrate_event(&partial_request)
+        .unwrap_err();
+    assert_eq!(failure.kind, HydrationFailureKind::StaleSourceEvidence);
 
     let (replacement, replacement_records, _) = collect_scan(&candidate, Some(&cold.certificate));
     let MuxSourceBackedDisposition::Replacement { evidence } = replacement.disposition else {
@@ -381,22 +648,6 @@ fn subagent_chat_is_supported_but_chat_archive_is_not() {
         .all(|candidate| candidate.provider_session_id() != "archive-only"));
 }
 
-fn resolve_exact(
-    candidate: &MuxSourceBackedCandidate,
-    record: &MuxSourceBackedRecord,
-) -> MuxSourceBackedResult<String> {
-    let locator = mux_complete_content_locator(&record.document.locator)
-        .expect("source-backed locator must bridge to the existing Mux route");
-    assert_eq!(locator, record.complete_content_locator);
-    let provider_bytes =
-        hydrate_mux_source_backed_record(candidate, &record.document.locator)?;
-    let value: Value = serde_json::from_slice(&provider_bytes)?;
-    Ok(crate::provider::providers::mux::mux_event_text(
-        &value,
-        crate::provider::providers::mux::mux_event_type(&value),
-    ))
-}
-
 #[test]
 fn provider_native_locator_is_tagged_and_rejects_foreign_coordinates() {
     let temp = tempdir().unwrap();
@@ -410,13 +661,17 @@ fn provider_native_locator_is_tagged_and_rejects_foreign_coordinates() {
     let locator = &records[0].document.locator;
     let NativeRecordCoordinate::ProviderNative {
         namespace,
-        coordinate: TypedKey::Bytes(value),
+        coordinate: TypedKey::Composite(value),
     } = locator.coordinate()
     else {
         panic!("Mux locator must be provider-native");
     };
     assert_eq!(namespace, MUX_PROVIDER_NATIVE_LOCATOR_NAMESPACE);
-    assert_eq!(value.first(), Some(&1));
+    assert_eq!(value.first(), Some(&TypedKey::U64(2)));
+    assert_eq!(
+        decode_mux_coordinate(locator).unwrap().stream_kind,
+        MuxStreamKind::Chat
+    );
     assert_eq!(records[0].document.event_type, EventType::Message.as_str());
 }
 
@@ -459,11 +714,13 @@ fn compound_authority_mux_rejects_ancestor_swap_and_stale_locator() {
     write_chat(&session, &[message("message-0", "user", 0, "hello")]);
     let candidate = source_candidates(&root).pop().unwrap();
     let (_, records, _) = collect_scan(&candidate, None);
+    let resolver = hydration_resolver(&root);
+    let request = hydration_request(&records[0]);
 
     fs::rename(&root, temp.path().join("retired-sessions")).unwrap();
     fs::create_dir_all(&session).unwrap();
     write_metadata(&session, "session-1");
     write_chat(&session, &[message("message-0", "user", 0, "hello")]);
 
-    assert!(hydrate_mux_source_backed_record(&candidate, &records[0].document.locator).is_err());
+    assert!(resolver.hydrate_event(&request).is_err());
 }

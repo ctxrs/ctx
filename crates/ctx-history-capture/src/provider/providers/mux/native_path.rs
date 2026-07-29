@@ -99,13 +99,11 @@ use publication::*;
 use source::*;
 
 pub(crate) use source_backed::{
-    discover_mux_source_backed_sources, hydrate_mux_source_backed_record,
-    mux_complete_content_locator, revalidate_mux_source_backed, scan_mux_source_backed,
-    MuxBoundedProjection,
-    MuxReplacementEvidence, MuxReplacementReason, MuxSourceBackedCandidate,
+    discover_mux_source_backed_sources, revalidate_mux_source_backed, scan_mux_source_backed,
+    MuxBoundedProjection, MuxReplacementEvidence, MuxReplacementReason, MuxSourceBackedCandidate,
     MuxSourceBackedDisposition, MuxSourceBackedError, MuxSourceBackedPage, MuxSourceBackedRecord,
-    MuxSourceBackedResult, MuxSourceBackedScanReceipt, MuxUnaddressableReason,
-    MuxUnaddressableRecord,
+    MuxSourceBackedResolverV0, MuxSourceBackedResult, MuxSourceBackedScanReceipt,
+    MuxUnaddressableReason, MuxUnaddressableRecord,
 };
 
 pub(crate) fn import_mux_native_path(

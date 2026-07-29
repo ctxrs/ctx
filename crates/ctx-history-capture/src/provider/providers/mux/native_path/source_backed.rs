@@ -7,34 +7,40 @@
 //! bounded pages without learning Mux file-layout or locator details.
 
 use std::{
+    collections::HashMap,
     io::{self, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, CertifiedSourceAppend,
-    EventIdentityInput, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
-    NativeSessionKey, ProjectionContractError, ScannedSourceCounts, SessionIdentityInput,
-    SourceAnchor, SourceFrontier, SourceKey, SourceObservation, SourceRecordLocator,
-    SourceResolverContractError, StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, BatchHydrationRequest, BatchHydrationResult,
+    CaptureProvider, CertifiedSource, CertifiedSourceAppend, ContentSourceResolver,
+    EventHydrationRequest, EventIdentityInput, EventType, HydratedProviderRecord, HydrationFailure,
+    HydrationFailureKind, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
+    NativeSessionKey, ProjectionContractError, ScannedSourceCounts, SessionHydrationRequest,
+    SessionIdentityInput, SourceAnchor, SourceFrontier, SourceKey, SourceObservation,
+    SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
 };
-use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
+use ctx_history_index::LexicalDocument;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::{
-    model::{MuxFrontier, MuxPreparedRow, MuxSourcePlan, MuxStreamKind, MuxUnaddressableOutput},
+    model::{
+        MuxFrontier, MuxPreparedRow, MuxSourcePlan, MuxStreamKind, MuxUnaddressableOutput,
+        MUX_MAX_ORDINAL, MUX_PARTIAL_NATIVE_ORDINAL,
+    },
+    mux_event_id, mux_event_text, mux_event_type, mux_output_projection, mux_partial_event_index,
+    mux_result_content,
     parse::read_core_page,
+    MuxOutputOutcome,
 };
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
-    complete_content::{
-        jsonl::{valid_mux_locator, MUX_LOCATOR_KIND},
-        CompleteContentBodyDigest, CompleteContentSourceLocator,
-    },
-    provider::normalization::provider_local_preview,
+    complete_content::CompleteContentBodyDigest,
+    provider::normalization::provider_value_text,
     CaptureError, ProviderAdapterContext, MAX_PROVIDER_JSONL_LINE_BYTES, MUX_SOURCE_FORMAT,
 };
 
@@ -48,14 +54,14 @@ use super::source::discover_sessions;
 const MUX_SOURCE_ANCHOR_NAMESPACE: &str = "mux.session";
 const MUX_NATIVE_SESSION_NAMESPACE: &str = "mux.session";
 const MUX_NATIVE_ITEM_NAMESPACE: &str = "mux.record";
-const MUX_PROVIDER_NATIVE_LOCATOR_NAMESPACE: &str = "mux.record.v1";
+const MUX_PROVIDER_NATIVE_LOCATOR_NAMESPACE: &str = "mux.logical-record.v2";
 const MUX_LOGICAL_SESSION_KIND: &str = "mux-session";
 const MUX_LOGICAL_EVENT_KIND: &str = "mux-event";
-const MUX_SOURCE_SCHEMA_VARIANT: &str = "mux-session-tree-source-backed-v1";
-const MUX_SOURCE_REVISION_KIND: &str = "mux-session-compound-observation-v1";
-const MUX_FRONTIER_KIND: &str = "mux-session-compound-frontier-v1";
-const MUX_PARSER_REVISION: &str = "mux-source-backed-v1";
-const MUX_CHECKPOINT_VERSION: u32 = 1;
+const MUX_SOURCE_SCHEMA_VARIANT: &str = "mux-session-tree-source-backed-v2";
+const MUX_SOURCE_REVISION_KIND: &str = "mux-session-compound-observation-v2";
+const MUX_FRONTIER_KIND: &str = "mux-session-compound-frontier-v2";
+const MUX_PARSER_REVISION: &str = "mux-source-backed-v2";
+const MUX_CHECKPOINT_VERSION: u32 = 2;
 
 #[derive(Debug, Error)]
 pub(crate) enum MuxSourceBackedError {
@@ -85,6 +91,10 @@ pub(crate) enum MuxSourceBackedError {
     InvalidLocator,
     #[error("Mux source-backed locator evidence is stale")]
     StaleLocator,
+    #[error("Mux native session {0:?} resolves to more than one source")]
+    DuplicateNativeSession(String),
+    #[error("Mux source-backed exact lexical projection failed: {0}")]
+    ExactLexicalProjection(String),
 }
 
 pub(crate) type MuxSourceBackedResult<T> = Result<T, MuxSourceBackedError>;
@@ -188,8 +198,6 @@ pub(crate) struct MuxSourceBackedRecord {
     pub(crate) stream_kind: MuxStreamKind,
     pub(crate) source_record_ordinal: u64,
     pub(crate) native_record_id: String,
-    pub(crate) complete_content_locator: CompleteContentSourceLocator,
-    pub(crate) complete_content_record_digest: CompleteContentBodyDigest,
     pub(crate) message_content_ref: Option<ctx_history_core::ContentRef>,
 }
 
@@ -626,113 +634,618 @@ pub(crate) fn revalidate_mux_source_backed(
         && certificate.observation().revision() == observation.revision())
 }
 
-/// Translates the provider-native envelope back into the existing exact Mux
-/// route locator.
-pub(crate) fn mux_complete_content_locator(
+#[derive(Debug)]
+pub(crate) struct MuxSourceBackedResolverV0 {
+    sources: HashMap<StableEntityId, MuxSourceBackedCandidate>,
+}
+
+#[derive(Debug)]
+struct MuxLogicalRecordCoordinate {
+    stream_kind: MuxStreamKind,
+    byte_start: u64,
+    byte_end_exclusive: u64,
+    source_record_ordinal: u64,
+    event_sequence: u64,
+    native_record_id: String,
+}
+
+impl MuxSourceBackedResolverV0 {
+    pub(crate) fn discover(root: &Path, observed_at: DateTime<Utc>) -> MuxSourceBackedResult<Self> {
+        let mut sources = HashMap::new();
+        for candidate in discover_mux_source_backed_sources(root, observed_at)? {
+            let provider_session_id = candidate.provider_session_id().to_owned();
+            if sources
+                .insert(candidate.source_key.identity(), candidate)
+                .is_some()
+            {
+                return Err(MuxSourceBackedError::DuplicateNativeSession(
+                    provider_session_id,
+                ));
+            }
+        }
+        Ok(Self { sources })
+    }
+
+    pub(crate) fn discover_for_hydration(
+        root: &Path,
+        observed_at: DateTime<Utc>,
+    ) -> Result<Self, HydrationFailure> {
+        Self::discover(root, observed_at)
+            .map_err(|error| hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error))
+    }
+
+    pub(crate) fn hydrate_requests(
+        &self,
+        requests: &[EventHydrationRequest],
+    ) -> Result<Vec<HydratedProviderRecord>, HydrationFailure> {
+        let Some(first) = requests.first() else {
+            return Ok(Vec::new());
+        };
+        let candidate = self
+            .sources
+            .get(&first.locator().source().identity())
+            .ok_or_else(|| {
+                hydration_failure(
+                    HydrationFailureKind::ConfirmedDeleted,
+                    "the exact Mux session is absent from the complete source inventory",
+                )
+            })?;
+        for request in requests {
+            validate_mux_locator(candidate, request.locator())?;
+        }
+        let opening = admit_mux_candidate(candidate).map_err(|error| {
+            hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
+        })?;
+        let current_observation = source_observation(&candidate.source_key, &opening.wire)
+            .map_err(|error| {
+                hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
+            })?;
+        let current_revision_digest: [u8; 32] =
+            Sha256::digest(current_observation.revision()).into();
+        let hydrated = requests
+            .iter()
+            .map(|request| {
+                hydrate_mux_request(candidate, &opening, current_revision_digest, request)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        opening
+            .revalidate(&candidate.authority)
+            .map_err(|error| hydration_failure(HydrationFailureKind::StaleSourceEvidence, error))?;
+        let closing = admit_mux_candidate(candidate).map_err(|error| {
+            hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
+        })?;
+        closing
+            .revalidate(&candidate.authority)
+            .map_err(|error| hydration_failure(HydrationFailureKind::StaleSourceEvidence, error))?;
+        if closing.wire != opening.wire {
+            return Err(hydration_failure(
+                HydrationFailureKind::StaleSourceEvidence,
+                "Mux compound source changed during exact hydration",
+            ));
+        }
+        Ok(hydrated)
+    }
+}
+
+impl ContentSourceResolver for MuxSourceBackedResolverV0 {
+    fn hydrate_event(
+        &self,
+        request: &EventHydrationRequest,
+    ) -> Result<HydratedProviderRecord, HydrationFailure> {
+        let mut hydrated = self.hydrate_requests(std::slice::from_ref(request))?;
+        hydrated.pop().ok_or_else(|| {
+            hydration_failure(
+                HydrationFailureKind::MissingRecord,
+                "Mux exact event hydration returned no record",
+            )
+        })
+    }
+
+    fn hydrate_batch(
+        &self,
+        request: &BatchHydrationRequest,
+    ) -> Result<BatchHydrationResult, HydrationFailure> {
+        let result = BatchHydrationResult::new(self.hydrate_requests(request.events())?).map_err(
+            |error| {
+                hydration_failure(
+                    HydrationFailureKind::InvalidLocator,
+                    format!("invalid Mux batch hydration result: {error}"),
+                )
+            },
+        )?;
+        result.validate_for_request(request)?;
+        Ok(result)
+    }
+
+    fn hydrate_session(
+        &self,
+        request: &SessionHydrationRequest,
+    ) -> Result<Vec<HydratedProviderRecord>, HydrationFailure> {
+        self.hydrate_requests(request.events())
+    }
+}
+
+fn validate_mux_locator(
+    candidate: &MuxSourceBackedCandidate,
     locator: &SourceRecordLocator,
-) -> Option<CompleteContentSourceLocator> {
+) -> Result<(), HydrationFailure> {
+    locator
+        .validate_contract()
+        .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error))?;
     if locator.source().provider() != CaptureProvider::Mux.as_str()
         || locator.source().source_format() != MUX_SOURCE_FORMAT
         || locator.source().schema_variant() != MUX_SOURCE_SCHEMA_VARIANT
+        || locator.source().provider_identity_version() != 1
+        || locator.certified_source_revision_digest().is_none()
+        || !candidate.source_key.exact_descriptor_eq(locator.source())
     {
-        return None;
+        return Err(hydration_failure(
+            HydrationFailureKind::InvalidLocator,
+            "Mux locator source descriptor is invalid",
+        ));
     }
-    let NativeRecordCoordinate::ProviderNative {
-        namespace,
-        coordinate: TypedKey::Bytes(value),
-    } = locator.coordinate()
-    else {
-        return None;
+    let coordinate = decode_mux_coordinate(locator)?;
+    let expected_policy = if coordinate.stream_kind.is_partial() {
+        LocatorRevisionPolicy::ExactSourceRevision
+    } else {
+        LocatorRevisionPolicy::StableRecordEvidence
     };
-    if namespace != MUX_PROVIDER_NATIVE_LOCATOR_NAMESPACE || !valid_mux_locator(value) {
-        return None;
+    if locator.revision_policy() != expected_policy {
+        return Err(hydration_failure(
+            HydrationFailureKind::InvalidLocator,
+            "Mux locator revision policy does not match its native stream",
+        ));
     }
-    CompleteContentSourceLocator::new(MUX_LOCATOR_KIND, value.clone())
+    Ok(())
 }
 
-pub(crate) fn hydrate_mux_source_backed_record(
+fn hydrate_mux_request(
     candidate: &MuxSourceBackedCandidate,
-    locator: &SourceRecordLocator,
-) -> MuxSourceBackedResult<Vec<u8>> {
-    if !candidate.source_key.exact_descriptor_eq(locator.source()) {
-        return Err(MuxSourceBackedError::InvalidLocator);
+    opening: &MuxObservedSource,
+    current_revision_digest: [u8; 32],
+    request: &EventHydrationRequest,
+) -> Result<HydratedProviderRecord, HydrationFailure> {
+    let coordinate = decode_mux_coordinate(request.locator())?;
+    if coordinate.stream_kind.is_partial()
+        && request.locator().certified_source_revision_digest() != Some(&current_revision_digest)
+    {
+        return Err(hydration_failure(
+            HydrationFailureKind::StaleSourceEvidence,
+            "Mux partial snapshot revision changed",
+        ));
     }
-    locator.validate_contract()?;
-    let complete =
-        mux_complete_content_locator(locator).ok_or(MuxSourceBackedError::InvalidLocator)?;
-    let value = complete.value();
-    let tag = value[0];
-    let byte_start = u64::from_be_bytes(
-        value[1..9]
-            .try_into()
-            .map_err(|_| MuxSourceBackedError::InvalidLocator)?,
-    );
-    let byte_end = u64::from_be_bytes(
-        value[9..17]
-            .try_into()
-            .map_err(|_| MuxSourceBackedError::InvalidLocator)?,
-    );
-    let byte_length = byte_end
-        .checked_sub(byte_start)
-        .ok_or(MuxSourceBackedError::InvalidLocator)?;
+    let source = match coordinate.stream_kind {
+        MuxStreamKind::Chat => opening.chat_file.as_ref(),
+        MuxStreamKind::Partial => opening.partial_file.as_ref(),
+    }
+    .ok_or_else(|| {
+        hydration_failure(
+            HydrationFailureKind::MissingRecord,
+            "Mux locator stream is absent from the current session source",
+        )
+    })?;
+    let payload = read_mux_payload(source, &coordinate)?;
+    if Sha256::digest(&payload).as_slice() != request.locator().record_digest() {
+        return Err(hydration_failure(
+            HydrationFailureKind::StaleRecordEvidence,
+            "Mux source record digest changed",
+        ));
+    }
+    let value = serde_json::from_slice::<serde_json::Value>(&payload).map_err(|error| {
+        hydration_failure(HydrationFailureKind::UnsupportedParserRevision, error)
+    })?;
+    if !value.is_object() {
+        return Err(hydration_failure(
+            HydrationFailureKind::UnsupportedParserRevision,
+            "Mux native record is not an object",
+        ));
+    }
+    validate_mux_native_identity(candidate, request, &coordinate, &payload, &value)?;
+    let provider_bytes = mux_exact_logical_content(&value)?;
+    Ok(HydratedProviderRecord {
+        event_id: request.event_id(),
+        provider_bytes: provider_bytes.into_bytes(),
+    })
+}
+
+fn read_mux_payload(
+    source: &OpenedProviderSourceFile,
+    coordinate: &MuxLogicalRecordCoordinate,
+) -> Result<Vec<u8>, HydrationFailure> {
+    let byte_length = coordinate
+        .byte_end_exclusive
+        .checked_sub(coordinate.byte_start)
+        .ok_or_else(|| {
+            hydration_failure(
+                HydrationFailureKind::InvalidLocator,
+                "Mux locator byte range moved backwards",
+            )
+        })?;
     if byte_length == 0 || byte_length > MAX_PROVIDER_JSONL_LINE_BYTES.saturating_add(2) as u64 {
-        return Err(MuxSourceBackedError::InvalidLocator);
+        return Err(hydration_failure(
+            HydrationFailureKind::InvalidLocator,
+            "Mux locator byte range exceeds the native record bound",
+        ));
     }
-    let opening = admit_mux_candidate(candidate)?;
-    let current_observation = source_observation(&candidate.source_key, &opening.wire)?;
-    let current_revision_digest: [u8; 32] = Sha256::digest(current_observation.revision()).into();
-    let source = match tag {
-        1 => opening
-            .chat_file
-            .as_ref()
-            .ok_or(MuxSourceBackedError::StaleLocator)?,
-        2 if byte_start == 0
-            && locator.certified_source_revision_digest() == Some(&current_revision_digest) =>
-        {
-            opening
-                .partial_file
-                .as_ref()
-                .ok_or(MuxSourceBackedError::StaleLocator)?
+    if coordinate.byte_end_exclusive > source.len() {
+        return Err(hydration_failure(
+            HydrationFailureKind::MissingRecord,
+            "Mux locator byte range is no longer present",
+        ));
+    }
+    if coordinate.stream_kind == MuxStreamKind::Chat && coordinate.byte_start > 0 {
+        let boundary = source
+            .read_exact_range(coordinate.byte_start - 1, 1, 1)
+            .map_err(|error| {
+                hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
+            })?;
+        if boundary != b"\n" {
+            return Err(hydration_failure(
+                HydrationFailureKind::StaleRecordEvidence,
+                "Mux chat record start boundary changed",
+            ));
         }
-        _ => return Err(MuxSourceBackedError::StaleLocator),
-    };
-    let length =
-        usize::try_from(byte_length).map_err(|_| MuxSourceBackedError::InvalidLocator)?;
+    }
+    let length = usize::try_from(byte_length).map_err(|_| {
+        hydration_failure(
+            HydrationFailureKind::InvalidLocator,
+            "Mux locator byte range exceeds platform limits",
+        )
+    })?;
     let provider_bytes = source
         .read_exact_range(
-            byte_start,
+            coordinate.byte_start,
             length,
             MAX_PROVIDER_JSONL_LINE_BYTES.saturating_add(2),
         )
-        .map_err(|_| MuxSourceBackedError::StaleLocator)?;
-    let payload = if tag == 1 {
-        let first_newline = provider_bytes.iter().position(|byte| *byte == b'\n');
-        if first_newline.is_some_and(|position| position + 1 != provider_bytes.len())
-            || (first_newline.is_none() && byte_end != source.len())
+        .map_err(|error| hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error))?;
+    if coordinate.stream_kind == MuxStreamKind::Partial {
+        if coordinate.byte_start != 0
+            || coordinate.byte_end_exclusive != source.len()
+            || coordinate.source_record_ordinal != 0
         {
-            return Err(MuxSourceBackedError::StaleLocator);
+            return Err(hydration_failure(
+                HydrationFailureKind::InvalidLocator,
+                "Mux partial locator does not address its whole snapshot",
+            ));
         }
-        provider_bytes
-            .strip_suffix(b"\n")
-            .unwrap_or(&provider_bytes)
-            .strip_suffix(b"\r")
-            .unwrap_or_else(|| provider_bytes.strip_suffix(b"\n").unwrap_or(&provider_bytes))
-    } else {
-        if byte_end != source.len() {
-            return Err(MuxSourceBackedError::StaleLocator);
-        }
-        &provider_bytes
+        return Ok(provider_bytes);
+    }
+    let first_newline = provider_bytes.iter().position(|byte| *byte == b'\n');
+    if first_newline.is_some_and(|position| position + 1 != provider_bytes.len())
+        || (first_newline.is_none() && coordinate.byte_end_exclusive != source.len())
+    {
+        return Err(hydration_failure(
+            HydrationFailureKind::StaleRecordEvidence,
+            "Mux chat record end boundary changed",
+        ));
+    }
+    Ok(strip_jsonl_record_ending(&provider_bytes).to_vec())
+}
+
+fn strip_jsonl_record_ending(record: &[u8]) -> &[u8] {
+    record
+        .strip_suffix(b"\n")
+        .unwrap_or(record)
+        .strip_suffix(b"\r")
+        .unwrap_or_else(|| record.strip_suffix(b"\n").unwrap_or(record))
+}
+
+fn encode_mux_coordinate(
+    stream_kind: MuxStreamKind,
+    legacy_locator: &[u8],
+    source_record_ordinal: u64,
+    event_sequence: u64,
+    native_record_id: &str,
+) -> MuxSourceBackedResult<TypedKey> {
+    let (tag, byte_start, byte_end_exclusive) =
+        decode_mux_legacy_range(legacy_locator).ok_or(MuxSourceBackedError::InvalidLocator)?;
+    let expected_tag = if stream_kind.is_partial() { 2 } else { 1 };
+    if tag != expected_tag {
+        return Err(MuxSourceBackedError::InvalidLocator);
+    }
+    Ok(TypedKey::composite(vec![
+        TypedKey::U64(2),
+        TypedKey::U64(tag),
+        TypedKey::U64(byte_start),
+        TypedKey::U64(byte_end_exclusive),
+        TypedKey::U64(source_record_ordinal),
+        TypedKey::U64(event_sequence),
+        TypedKey::utf8(native_record_id)?,
+    ])?)
+}
+
+fn decode_mux_legacy_range(value: &[u8]) -> Option<(u64, u64, u64)> {
+    if value.len() != 17 {
+        return None;
+    }
+    let tag = u64::from(value[0]);
+    let byte_start = u64::from_be_bytes(value[1..9].try_into().ok()?);
+    let byte_end_exclusive = u64::from_be_bytes(value[9..17].try_into().ok()?);
+    if !matches!(tag, 1 | 2) || byte_start >= byte_end_exclusive || (tag == 2 && byte_start != 0) {
+        return None;
+    }
+    Some((tag, byte_start, byte_end_exclusive))
+}
+
+fn decode_mux_coordinate(
+    locator: &SourceRecordLocator,
+) -> Result<MuxLogicalRecordCoordinate, HydrationFailure> {
+    let NativeRecordCoordinate::ProviderNative {
+        namespace,
+        coordinate,
+    } = locator.coordinate()
+    else {
+        return Err(hydration_failure(
+            HydrationFailureKind::InvalidLocator,
+            "Mux locator does not use a provider-native coordinate",
+        ));
     };
-    if Sha256::digest(payload).as_slice() != locator.record_digest() {
-        return Err(MuxSourceBackedError::StaleLocator);
+    if namespace != MUX_PROVIDER_NATIVE_LOCATOR_NAMESPACE {
+        return Err(hydration_failure(
+            if namespace.starts_with("mux.") {
+                HydrationFailureKind::UnsupportedParserRevision
+            } else {
+                HydrationFailureKind::InvalidLocator
+            },
+            "Mux locator namespace is unsupported",
+        ));
     }
-    opening.revalidate(&candidate.authority)?;
-    let closing = admit_mux_candidate(candidate)?;
-    closing.revalidate(&candidate.authority)?;
-    if closing.wire != opening.wire {
-        return Err(MuxSourceBackedError::StaleLocator);
+    let TypedKey::Composite(parts) = coordinate else {
+        return Err(hydration_failure(
+            HydrationFailureKind::InvalidLocator,
+            "Mux locator coordinate is malformed",
+        ));
+    };
+    let [TypedKey::U64(version), TypedKey::U64(tag), TypedKey::U64(byte_start), TypedKey::U64(byte_end_exclusive), TypedKey::U64(source_record_ordinal), TypedKey::U64(event_sequence), TypedKey::Utf8(native_record_id)] =
+        parts.as_slice()
+    else {
+        return Err(hydration_failure(
+            HydrationFailureKind::InvalidLocator,
+            "Mux locator coordinate is malformed",
+        ));
+    };
+    if *version != 2 {
+        return Err(hydration_failure(
+            HydrationFailureKind::UnsupportedParserRevision,
+            "Mux locator parser revision is unsupported",
+        ));
     }
-    Ok(payload.to_vec())
+    let stream_kind = match *tag {
+        1 => MuxStreamKind::Chat,
+        2 => MuxStreamKind::Partial,
+        _ => {
+            return Err(hydration_failure(
+                HydrationFailureKind::InvalidLocator,
+                "Mux locator stream tag is invalid",
+            ))
+        }
+    };
+    if byte_start >= byte_end_exclusive
+        || native_record_id.is_empty()
+        || (stream_kind.is_partial() && (*byte_start != 0 || *source_record_ordinal != 0))
+        || (!stream_kind.is_partial() && event_sequence != source_record_ordinal)
+    {
+        return Err(hydration_failure(
+            HydrationFailureKind::InvalidLocator,
+            "Mux locator coordinate is internally inconsistent",
+        ));
+    }
+    Ok(MuxLogicalRecordCoordinate {
+        stream_kind,
+        byte_start: *byte_start,
+        byte_end_exclusive: *byte_end_exclusive,
+        source_record_ordinal: *source_record_ordinal,
+        event_sequence: *event_sequence,
+        native_record_id: native_record_id.clone(),
+    })
+}
+
+fn validate_mux_native_identity(
+    candidate: &MuxSourceBackedCandidate,
+    request: &EventHydrationRequest,
+    coordinate: &MuxLogicalRecordCoordinate,
+    payload: &[u8],
+    value: &serde_json::Value,
+) -> Result<(), HydrationFailure> {
+    let line_number = usize::try_from(coordinate.source_record_ordinal)
+        .ok()
+        .and_then(|ordinal| ordinal.checked_add(1))
+        .ok_or_else(|| {
+            hydration_failure(
+                HydrationFailureKind::InvalidLocator,
+                "Mux native ordinal exceeds platform limits",
+            )
+        })?;
+    let role = value
+        .get("role")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let native_record_id = mux_event_id(
+        value,
+        line_number,
+        role,
+        coordinate.stream_kind.is_partial(),
+    );
+    if native_record_id != coordinate.native_record_id {
+        return Err(hydration_failure(
+            HydrationFailureKind::StaleRecordEvidence,
+            "Mux native record identity changed",
+        ));
+    }
+    let expected_sequence = if coordinate.stream_kind.is_partial() {
+        MUX_PARTIAL_NATIVE_ORDINAL | (mux_partial_event_index(payload) & MUX_MAX_ORDINAL)
+    } else {
+        coordinate.source_record_ordinal
+    };
+    if expected_sequence != coordinate.event_sequence {
+        return Err(hydration_failure(
+            HydrationFailureKind::StaleRecordEvidence,
+            "Mux native event sequence changed",
+        ));
+    }
+    let native_item_key = NativeItemKey::native_id(
+        MUX_NATIVE_ITEM_NAMESPACE,
+        TypedKey::utf8(&native_record_id).map_err(|error| {
+            hydration_failure(HydrationFailureKind::UnsupportedParserRevision, error)
+        })?,
+    )
+    .map_err(|error| hydration_failure(HydrationFailureKind::UnsupportedParserRevision, error))?;
+    let expected_event_id = derive_event_id(EventIdentityInput {
+        source: &candidate.source_key,
+        session_id: candidate.session_id,
+        logical_item_kind: MUX_LOGICAL_EVENT_KIND,
+        native_item_key: &native_item_key,
+        subrecord_selector: None,
+    })
+    .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error))?;
+    if expected_event_id != request.event_id() {
+        return Err(hydration_failure(
+            HydrationFailureKind::InvalidLocator,
+            "Mux event identity does not match its native coordinate",
+        ));
+    }
+    if let Some(output) = mux_output_projection(value) {
+        if !output.body_available {
+            return Err(hydration_failure(
+                HydrationFailureKind::MissingRecord,
+                "Mux native output body is unavailable",
+            ));
+        }
+        if !matches!(
+            output.outcome,
+            MuxOutputOutcome::Failure | MuxOutputOutcome::Timeout
+        ) {
+            return Err(hydration_failure(
+                HydrationFailureKind::InvalidLocator,
+                "Mux successful output is not an indexed Core event",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn mux_exact_logical_content(value: &serde_json::Value) -> Result<String, HydrationFailure> {
+    let event_type = mux_event_type(value);
+    if matches!(event_type, EventType::ToolOutput | EventType::CommandOutput) {
+        return mux_result_content(value).ok_or_else(|| {
+            hydration_failure(
+                HydrationFailureKind::MissingRecord,
+                "Mux exact output body is unavailable",
+            )
+        });
+    }
+    let mut rendered = Vec::new();
+    if let Some(parts) = value.get("parts").and_then(serde_json::Value::as_array) {
+        for part in parts {
+            match part.get("type").and_then(serde_json::Value::as_str) {
+                Some("text" | "reasoning") => {
+                    if let Some(text) = part.get("text").and_then(serde_json::Value::as_str) {
+                        rendered.push(text.to_owned());
+                    }
+                }
+                Some("dynamic-tool") => rendered.push(mux_exact_tool_part_text(part)),
+                Some("file") => {
+                    if let Some(label) = mux_exact_file_part_text(part) {
+                        rendered.push(label);
+                    }
+                }
+                _ => {
+                    if let Some(text) = part.get("text").and_then(serde_json::Value::as_str) {
+                        rendered.push(text.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    if !rendered.is_empty() {
+        return Ok(rendered.join("\n"));
+    }
+    if let Some(text) = value
+        .get("content")
+        .or_else(|| value.get("message"))
+        .and_then(provider_value_text)
+    {
+        return Ok(text);
+    }
+    Ok(mux_event_text(value, event_type))
+}
+
+fn mux_exact_tool_part_text(part: &serde_json::Value) -> String {
+    let name = part
+        .get("toolName")
+        .or_else(|| part.get("name"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("tool");
+    let state = part.get("state").and_then(serde_json::Value::as_str);
+    let prefix = if matches!(state, Some("output-available" | "output-redacted"))
+        || part.get("output").is_some()
+    {
+        "tool output"
+    } else {
+        "tool call"
+    };
+    let mut text = format!("{prefix}: {name}");
+    if let Some(input) = part.get("input") {
+        text.push_str("\ninput: ");
+        text.push_str(&mux_exact_value_text(input));
+    }
+    if let Some(output) = part.get("output") {
+        text.push_str("\noutput: ");
+        text.push_str(&mux_exact_value_text(output));
+    }
+    if let Some(nested) = part
+        .get("nestedCalls")
+        .and_then(serde_json::Value::as_array)
+    {
+        let names = nested
+            .iter()
+            .filter_map(|call| {
+                call.get("toolName")
+                    .or_else(|| call.get("name"))
+                    .and_then(serde_json::Value::as_str)
+            })
+            .collect::<Vec<_>>();
+        if !names.is_empty() {
+            text.push_str("\nnested tools: ");
+            text.push_str(&names.join(", "));
+        }
+    }
+    text
+}
+
+fn mux_exact_value_text(value: &serde_json::Value) -> String {
+    provider_value_text(value)
+        .or_else(|| serde_json::to_string(value).ok())
+        .unwrap_or_else(|| value.to_string())
+}
+
+fn mux_exact_file_part_text(part: &serde_json::Value) -> Option<String> {
+    let label = part
+        .get("filename")
+        .or_else(|| part.get("name"))
+        .or_else(|| part.get("mediaType"))
+        .or_else(|| part.get("mimeType"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            part.get("url")
+                .and_then(serde_json::Value::as_str)
+                .filter(|url| !url.starts_with("data:") && url.len() < 256)
+                .map(str::to_owned)
+        })?;
+    Some(format!("file: {label}"))
+}
+
+fn hydration_failure(
+    kind: HydrationFailureKind,
+    detail: impl std::fmt::Display,
+) -> HydrationFailure {
+    HydrationFailure {
+        kind,
+        detail: detail.to_string(),
+    }
 }
 
 fn classify_scan(
@@ -858,7 +1371,7 @@ fn scan_leaf(
             retained_records,
             u64::try_from(page.rows.len()).map_err(|_| MuxSourceBackedError::CountOverflow)?,
         )?;
-        let projected = project_page(candidate, kind, page.rows, source_revision_digest)?;
+        let projected = project_page(candidate, file, kind, page.rows, source_revision_digest)?;
         let page_documents = u64::try_from(projected.records.len())
             .map_err(|_| MuxSourceBackedError::CountOverflow)?;
         let page_unaddressable = u64::try_from(projected.unaddressable.len())
@@ -924,6 +1437,7 @@ fn source_plan(
 
 fn project_page(
     candidate: &MuxSourceBackedCandidate,
+    file: &OpenedProviderSourceFile,
     stream_kind: MuxStreamKind,
     rows: Vec<MuxPreparedRow>,
     source_revision_digest: [u8; 32],
@@ -946,7 +1460,7 @@ fn project_page(
             let bounded_projection = row
                 .event
                 .as_ref()
-                .map(|event| bounded_projection(candidate, event, &row));
+                .map(|event| bounded_projection(candidate, event, &row, None));
             unaddressable.push(MuxUnaddressableRecord {
                 event_id,
                 stream_kind,
@@ -963,19 +1477,27 @@ fn project_page(
         let Some(event) = row.event.as_ref() else {
             continue;
         };
-        let projection = bounded_projection(candidate, event, &row);
+        let exact_body =
+            exact_mux_lexical_body(file, stream_kind, &row, event.provider_event_index)?;
+        let projection = bounded_projection(candidate, event, &row, Some(exact_body));
         let locator = SourceRecordLocator::new(
             candidate.source_key.clone(),
             NativeRecordCoordinate::ProviderNative {
                 namespace: MUX_PROVIDER_NATIVE_LOCATOR_NAMESPACE.to_owned(),
-                coordinate: TypedKey::bytes(row.source_locator.value().to_vec())?,
+                coordinate: encode_mux_coordinate(
+                    stream_kind,
+                    row.source_locator.value(),
+                    row.source_record_ordinal,
+                    projection.event_sequence,
+                    &row.native_record_id,
+                )?,
             },
             if stream_kind.is_partial() {
                 LocatorRevisionPolicy::ExactSourceRevision
             } else {
                 LocatorRevisionPolicy::StableRecordEvidence
             },
-            stream_kind.is_partial().then_some(source_revision_digest),
+            Some(source_revision_digest),
             decode_record_digest(&row.source_record_digest)?,
         )?;
         let document = LexicalDocument {
@@ -1009,8 +1531,6 @@ fn project_page(
             stream_kind,
             source_record_ordinal: row.source_record_ordinal,
             native_record_id: row.native_record_id,
-            complete_content_locator: row.source_locator,
-            complete_content_record_digest: row.source_record_digest,
             message_content_ref: row.message_content_ref,
         });
     }
@@ -1027,13 +1547,13 @@ fn bounded_projection(
     candidate: &MuxSourceBackedCandidate,
     event: &super::MuxCoreEvent,
     row: &MuxPreparedRow,
+    exact_body: Option<String>,
 ) -> MuxBoundedProjection {
     let text = event
         .payload
         .get("text")
         .and_then(serde_json::Value::as_str)
         .unwrap_or_else(|| event.event_type.as_str());
-    let body = provider_local_preview(text, MAX_BODY_PREVIEW_CHARS).0;
     let touched_files = row
         .file_touches
         .iter()
@@ -1045,10 +1565,40 @@ fn bounded_projection(
         occurred_at_unix_ms: Some(event.occurred_at.timestamp_millis()),
         event_type: event.event_type.as_str().to_owned(),
         role: event.role.map(|role| role.as_str().to_owned()),
-        body,
+        body: exact_body.unwrap_or_else(|| text.to_owned()),
         cwd: candidate.metadata.cwd.clone(),
         touched_files,
     }
+}
+
+fn exact_mux_lexical_body(
+    file: &OpenedProviderSourceFile,
+    stream_kind: MuxStreamKind,
+    row: &MuxPreparedRow,
+    event_sequence: u64,
+) -> MuxSourceBackedResult<String> {
+    let (_, byte_start, byte_end_exclusive) = decode_mux_legacy_range(row.source_locator.value())
+        .ok_or(MuxSourceBackedError::InvalidLocator)?;
+    let coordinate = MuxLogicalRecordCoordinate {
+        stream_kind,
+        byte_start,
+        byte_end_exclusive,
+        source_record_ordinal: row.source_record_ordinal,
+        event_sequence,
+        native_record_id: row.native_record_id.clone(),
+    };
+    let payload = read_mux_payload(file, &coordinate).map_err(scan_projection_failure)?;
+    if Sha256::digest(&payload).as_slice() != decode_record_digest(&row.source_record_digest)? {
+        return Err(MuxSourceBackedError::ExactLexicalProjection(
+            "native source record digest changed during scan".to_owned(),
+        ));
+    }
+    let value = serde_json::from_slice::<serde_json::Value>(&payload)?;
+    mux_exact_logical_content(&value).map_err(scan_projection_failure)
+}
+
+fn scan_projection_failure(failure: HydrationFailure) -> MuxSourceBackedError {
+    MuxSourceBackedError::ExactLexicalProjection(format!("{:?}: {}", failure.kind, failure.detail))
 }
 
 fn scan_counts(
@@ -1360,9 +1910,7 @@ fn prefix_matches_checkpoint(
     Ok(<[u8; 32]>::from(hasher.finalize()) == frontier.prefix_sha256)
 }
 
-fn digest_optional_file(
-    bytes: Option<&[u8]>,
-) -> MuxSourceBackedResult<Option<MuxComponentDigest>> {
+fn digest_optional_file(bytes: Option<&[u8]>) -> MuxSourceBackedResult<Option<MuxComponentDigest>> {
     let Some(bytes) = bytes else {
         return Ok(None);
     };

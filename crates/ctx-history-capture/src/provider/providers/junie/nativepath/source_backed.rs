@@ -5,12 +5,13 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource,
-    ContentSourceResolver, EventHydrationRequest, EventIdentityInput, HydratedProviderRecord,
-    HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy, NativeItemKey,
-    NativeRecordCoordinate, NativeSessionKey, PositionStability, ProjectionContractError,
-    ScannedSourceCounts, SessionHydrationRequest, SessionIdentityInput, SourceAnchor, SourceKey,
-    SourceObservation, SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, AgentType, BatchHydrationRequest, BatchHydrationResult,
+    CaptureProvider, CertifiedSource, ContentSourceResolver, EventHydrationRequest,
+    EventIdentityInput, HydratedProviderRecord, HydrationFailure, HydrationFailureKind,
+    LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
+    PositionStability, ProjectionContractError, ScannedSourceCounts, SessionHydrationRequest,
+    SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation, SourceRecordLocator,
+    SourceResolverContractError, StableEntityId, TypedKey,
 };
 use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
 use serde_json::Value;
@@ -46,14 +47,14 @@ const NATIVE_SESSION_NAMESPACE: &str = "junie.session";
 const NATIVE_EVENT_POSITION_KIND: &str = "junie.normalized-event-index";
 const LOGICAL_SESSION_KIND: &str = "junie-session";
 const LOGICAL_EVENT_KIND: &str = "junie-event";
-const SOURCE_SCHEMA_VARIANT: &str = "junie-session-events-v1";
+const SOURCE_SCHEMA_VARIANT: &str = "junie-session-events-v2";
 const SOURCE_REVISION_KIND: &str = "junie-session-observation-v1";
-const PARSER_REVISION: &str = "junie-source-backed-v1";
+const PARSER_REVISION: &str = "junie-source-backed-v2";
 const RELATIVE_EVENTS_FILE: &str = "events.jsonl";
-const RECORD_SET_COORDINATE_KIND: &str = "junie-record-set-coordinate-v1";
-const USER_PROMPT_COORDINATE_KIND: &str = "junie-user-prompt-coordinate-v1";
-const UNAVAILABLE_COORDINATE_NAMESPACE: &str = "junie.record-set-unavailable.v1";
-const UNAVAILABLE_DIGEST_DOMAIN: &[u8] = b"ctx-junie-unavailable-record-set-v1\0";
+const RECORD_SET_COORDINATE_KIND: &str = "junie-record-set-coordinate-v2";
+const USER_PROMPT_COORDINATE_KIND: &str = "junie-user-prompt-coordinate-v2";
+const UNAVAILABLE_COORDINATE_NAMESPACE: &str = "junie.record-set-unavailable.v2";
+const UNAVAILABLE_DIGEST_DOMAIN: &[u8] = b"ctx-junie-unavailable-record-set-v2\0";
 
 #[derive(Debug, Error)]
 pub(crate) enum JunieSourceBackedErrorV0 {
@@ -73,8 +74,10 @@ pub(crate) enum JunieSourceBackedErrorV0 {
     IncompleteTrailingRecord,
     #[error("Junie native session {0:?} resolves to more than one events source")]
     DuplicateNativeSession(String),
-    #[error("Junie source-backed event has no bounded lexical text")]
-    MissingLexicalPreview,
+    #[error("Junie source-backed event has no exact lexical text")]
+    MissingLexicalBody,
+    #[error("Junie source-backed exact lexical projection failed: {0}")]
+    ExactLexicalProjection(String),
     #[error("Junie source-backed count overflow")]
     CountOverflow,
 }
@@ -243,14 +246,18 @@ impl CurrentSource {
             .map(|value| provider_local_preview(value, MAX_BODY_PREVIEW_CHARS).0)
             .or_else(|| workspace.clone());
         let source_path = self.opening_native.canonical_path.to_string_lossy();
+        let source_revision_digest = Sha256::digest(self.opening.revision()).into();
+        let events_file = self.session_path.open_events()?;
         for row in parsed.rows {
             let document = lexical_document(
                 &self.source,
                 self.session_id,
                 &self.provider_session_id,
+                source_revision_digest,
                 source_path.as_ref(),
                 workspace.as_deref(),
                 cwd.as_deref(),
+                &events_file,
                 row,
             )?;
             self.pending_documents.push_back(document);
@@ -350,9 +357,11 @@ fn lexical_document(
     source: &SourceKey,
     session_id: StableEntityId,
     provider_session_id: &str,
+    source_revision_digest: [u8; 32],
     source_path: &str,
     workspace: Option<&str>,
     cwd: Option<&str>,
+    events_file: &crate::common::io::OpenedProviderSourceFile,
     row: EventDraft,
 ) -> JunieSourceBackedResultV0<LexicalDocument> {
     let native_item_key = NativeItemKey::certified_position(
@@ -371,11 +380,13 @@ fn lexical_document(
         source,
         provider_session_id,
         row.event_index,
+        source_revision_digest,
         &row.source_backed_binding,
     )?;
-    let body = provider_local_preview(&row.text, MAX_BODY_PREVIEW_CHARS).0;
+    let body = exact_junie_lexical_body(events_file, &row.source_backed_binding)?
+        .unwrap_or_else(|| unavailable_junie_lexical_body(&row));
     if body.is_empty() {
-        return Err(JunieSourceBackedErrorV0::MissingLexicalPreview);
+        return Err(JunieSourceBackedErrorV0::MissingLexicalBody);
     }
     let touched_files = row
         .file_change
@@ -405,10 +416,79 @@ fn lexical_document(
     })
 }
 
+fn unavailable_junie_lexical_body(row: &EventDraft) -> String {
+    match &row.source_backed_binding.target {
+        SourceBackedTarget::StepOutput { .. } => row
+            .body
+            .get("details")
+            .and_then(Value::as_str)
+            .map_or_else(|| row.text.clone(), str::to_owned),
+        _ => row.text.clone(),
+    }
+}
+
+fn exact_junie_lexical_body(
+    file: &crate::common::io::OpenedProviderSourceFile,
+    binding: &SourceBackedBinding,
+) -> JunieSourceBackedResultV0<Option<String>> {
+    if binding.records.unavailable || binding.records.entries.is_empty() {
+        return Ok(None);
+    }
+    let exact = match &binding.target {
+        SourceBackedTarget::UserPrompt => {
+            let entry = binding.records.entries.first().ok_or_else(|| {
+                JunieSourceBackedErrorV0::ExactLexicalProjection(
+                    "user prompt has no native source record".to_owned(),
+                )
+            })?;
+            let payload = read_payload(
+                file,
+                entry.byte_start,
+                entry.byte_end_exclusive.saturating_sub(entry.byte_start),
+            )
+            .map_err(scan_projection_failure)?;
+            if Sha256::digest(&payload).as_slice() != entry.payload_sha256 {
+                return Err(JunieSourceBackedErrorV0::ExactLexicalProjection(
+                    "user prompt source record digest changed during scan".to_owned(),
+                ));
+            }
+            replay_user_prompt(entry.ordinal, &payload).map_err(scan_projection_failure)?
+        }
+        target => {
+            let values = read_record_set(
+                file,
+                &binding
+                    .records
+                    .entries
+                    .iter()
+                    .map(|entry| RecordSetEntry {
+                        ordinal: entry.ordinal,
+                        byte_start: entry.byte_start,
+                        byte_end_exclusive: entry.byte_end_exclusive,
+                        payload_digest: entry.payload_sha256,
+                    })
+                    .collect::<Vec<_>>(),
+                &aggregate_digest(&binding.records),
+            )
+            .map_err(scan_projection_failure)?;
+            replay_record_set(target, &values).map_err(scan_projection_failure)?
+        }
+    };
+    Ok(Some(exact))
+}
+
+fn scan_projection_failure(failure: HydrationFailure) -> JunieSourceBackedErrorV0 {
+    JunieSourceBackedErrorV0::ExactLexicalProjection(format!(
+        "{:?}: {}",
+        failure.kind, failure.detail
+    ))
+}
+
 fn source_locator(
     source: &SourceKey,
     provider_session_id: &str,
     event_sequence: u64,
+    source_revision_digest: [u8; 32],
     binding: &SourceBackedBinding,
 ) -> JunieSourceBackedResultV0<SourceRecordLocator> {
     if binding.target == SourceBackedTarget::UserPrompt
@@ -429,7 +509,7 @@ fn source_locator(
                 ])?),
             },
             LocatorRevisionPolicy::StableRecordEvidence,
-            None,
+            Some(source_revision_digest),
             entry.payload_sha256,
         )?);
     }
@@ -437,10 +517,6 @@ fn source_locator(
     if binding.records.unavailable || binding.records.entries.is_empty() {
         let target = target_key(&binding.target)?;
         let coordinate = TypedKey::composite(vec![target.clone(), TypedKey::U64(event_sequence)])?;
-        let mut digest = Sha256::new();
-        digest.update(UNAVAILABLE_DIGEST_DOMAIN);
-        digest.update(event_sequence.to_be_bytes());
-        digest.update(format!("{target:?}").as_bytes());
         return Ok(SourceRecordLocator::new(
             source.clone(),
             NativeRecordCoordinate::ProviderNative {
@@ -448,8 +524,8 @@ fn source_locator(
                 coordinate,
             },
             LocatorRevisionPolicy::StableRecordEvidence,
-            None,
-            digest.finalize().into(),
+            Some(source_revision_digest),
+            unavailable_digest(event_sequence, &target),
         )?);
     }
 
@@ -464,6 +540,7 @@ fn source_locator(
     }
     let coordinate = TypedKey::composite(vec![
         TypedKey::utf8(RECORD_SET_COORDINATE_KIND)?,
+        TypedKey::U64(event_sequence),
         target_key(&binding.target)?,
         TypedKey::composite(entries)?,
     ])?;
@@ -474,9 +551,17 @@ fn source_locator(
             record_coordinate: coordinate,
         },
         LocatorRevisionPolicy::StableRecordEvidence,
-        None,
+        Some(source_revision_digest),
         aggregate_digest(&binding.records),
     )?)
+}
+
+fn unavailable_digest(event_sequence: u64, target: &TypedKey) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(UNAVAILABLE_DIGEST_DOMAIN);
+    digest.update(event_sequence.to_be_bytes());
+    digest.update(format!("{target:?}").as_bytes());
+    digest.finalize().into()
 }
 
 fn target_key(target: &SourceBackedTarget) -> JunieSourceBackedResultV0<TypedKey> {
@@ -514,6 +599,7 @@ fn aggregate_digest(binding: &RecordSetBinding) -> [u8; 32] {
 struct ResolvedSource {
     session_path: JunieSessionPath,
     source: SourceKey,
+    session_id: StableEntityId,
     provider_session_id: String,
 }
 
@@ -532,9 +618,15 @@ impl JunieLocatorResolverV0 {
                     "Junie source-backed identity is invalid: {error}"
                 ))
             })?;
+            let session_id = session_identity(&source, &provider_session_id).map_err(|error| {
+                CaptureError::InvalidPayload(format!(
+                    "Junie source-backed session identity is invalid: {error}"
+                ))
+            })?;
             let resolved = ResolvedSource {
                 session_path,
                 source: source.clone(),
+                session_id,
                 provider_session_id: provider_session_id.clone(),
             };
             if sources.insert(source.identity(), resolved).is_some() {
@@ -552,32 +644,55 @@ impl JunieLocatorResolverV0 {
         Ok(Self { sources })
     }
 
-    fn hydrate(
+    pub(crate) fn discover_for_hydration(root: impl AsRef<Path>) -> Result<Self, HydrationFailure> {
+        Self::discover(root)
+            .map_err(|_| hydration_failure(HydrationFailureKind::TemporarilyUnavailable))
+    }
+
+    pub(crate) fn hydrate_requests(
         &self,
-        request: &EventHydrationRequest,
-    ) -> Result<HydratedProviderRecord, HydrationFailure> {
-        request
-            .locator()
-            .validate_contract()
-            .map_err(|_| hydration_failure(HydrationFailureKind::InvalidLocator))?;
+        requests: &[EventHydrationRequest],
+    ) -> Result<Vec<HydratedProviderRecord>, HydrationFailure> {
+        let Some(first) = requests.first() else {
+            return Ok(Vec::new());
+        };
         let resolved = self
             .sources
-            .get(&request.locator().source().identity())
-            .ok_or_else(|| hydration_failure(HydrationFailureKind::MissingRecord))?;
-        if !resolved
-            .source
-            .exact_descriptor_eq(request.locator().source())
-        {
-            return Err(hydration_failure(HydrationFailureKind::InvalidLocator));
+            .get(&first.locator().source().identity())
+            .ok_or_else(|| hydration_failure(HydrationFailureKind::ConfirmedDeleted))?;
+        for request in requests {
+            request
+                .locator()
+                .validate_contract()
+                .map_err(|_| hydration_failure(HydrationFailureKind::InvalidLocator))?;
+            validate_locator_source(request.locator(), resolved)?;
         }
+        let opening = JunieSessionObservation::read(&resolved.session_path)
+            .map_err(|_| hydration_failure(HydrationFailureKind::TemporarilyUnavailable))?;
+        let opening_observation = source_observation(&resolved.source, &opening)
+            .map_err(|_| hydration_failure(HydrationFailureKind::TemporarilyUnavailable))?;
+        let opening_revision_digest: [u8; 32] =
+            Sha256::digest(opening_observation.revision()).into();
+        validate_revision_policy(first.locator(), opening_revision_digest)?;
         let file = resolved
             .session_path
             .open_events()
             .map_err(|_| hydration_failure(HydrationFailureKind::TemporarilyUnavailable))?;
-        let hydrated = self.hydrate_from_file(request, resolved, &file)?;
+        let hydrated = requests
+            .iter()
+            .map(|request| {
+                validate_revision_policy(request.locator(), opening_revision_digest)?;
+                self.hydrate_from_file(request, resolved, &file)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         file.revalidate()
             .and_then(|()| resolved.session_path.revalidate_root())
+            .map_err(|_| hydration_failure(HydrationFailureKind::StaleSourceEvidence))?;
+        let closing = JunieSessionObservation::read(&resolved.session_path)
             .map_err(|_| hydration_failure(HydrationFailureKind::TemporarilyUnavailable))?;
+        if closing != opening {
+            return Err(hydration_failure(HydrationFailureKind::StaleSourceEvidence));
+        }
         Ok(hydrated)
     }
 
@@ -608,6 +723,11 @@ impl JunieLocatorResolverV0 {
                 {
                     return Err(hydration_failure(HydrationFailureKind::InvalidLocator));
                 }
+                validate_event_identity(
+                    request,
+                    resolved,
+                    request_event_sequence(native_event_key)?,
+                )?;
                 let payload = read_payload(file, *byte_offset, *byte_length)?;
                 if Sha256::digest(&payload).as_slice() != request.locator().record_digest() {
                     return Err(hydration_failure(HydrationFailureKind::StaleRecordEvidence));
@@ -621,7 +741,8 @@ impl JunieLocatorResolverV0 {
                 if relative_file_key != &TypedKey::Utf8(RELATIVE_EVENTS_FILE.to_owned()) {
                     return Err(hydration_failure(HydrationFailureKind::InvalidLocator));
                 }
-                let (target, entries) = decode_record_set(record_coordinate)?;
+                let (event_sequence, target, entries) = decode_record_set(record_coordinate)?;
+                validate_event_identity(request, resolved, event_sequence)?;
                 let values = read_record_set(file, &entries, request.locator().record_digest())?;
                 replay_record_set(&target, &values)?
             }
@@ -629,9 +750,14 @@ impl JunieLocatorResolverV0 {
                 namespace,
                 coordinate,
             } if namespace == UNAVAILABLE_COORDINATE_NAMESPACE => {
-                validate_unavailable_coordinate(coordinate)?;
+                let (target, event_sequence) = decode_unavailable_coordinate(coordinate)?;
+                validate_event_identity(request, resolved, event_sequence)?;
+                if &unavailable_digest(event_sequence, &target) != request.locator().record_digest()
+                {
+                    return Err(hydration_failure(HydrationFailureKind::StaleRecordEvidence));
+                }
                 return Err(HydrationFailure {
-                    kind: HydrationFailureKind::InvalidLocator,
+                    kind: HydrationFailureKind::UnsupportedParserRevision,
                     detail: format!(
                         "Junie exact reopening requires at most {MAX_RECORD_SET_ENTRIES} source records"
                     ),
@@ -651,34 +777,74 @@ impl ContentSourceResolver for JunieLocatorResolverV0 {
         &self,
         request: &EventHydrationRequest,
     ) -> Result<HydratedProviderRecord, HydrationFailure> {
-        self.hydrate(request)
+        let mut hydrated = self.hydrate_requests(std::slice::from_ref(request))?;
+        hydrated
+            .pop()
+            .ok_or_else(|| hydration_failure(HydrationFailureKind::MissingRecord))
+    }
+
+    fn hydrate_batch(
+        &self,
+        request: &BatchHydrationRequest,
+    ) -> Result<BatchHydrationResult, HydrationFailure> {
+        let result = BatchHydrationResult::new(self.hydrate_requests(request.events())?).map_err(
+            |error| HydrationFailure {
+                kind: HydrationFailureKind::InvalidLocator,
+                detail: format!("invalid Junie batch hydration result: {error}"),
+            },
+        )?;
+        result.validate_for_request(request)?;
+        Ok(result)
     }
 
     fn hydrate_session(
         &self,
         request: &SessionHydrationRequest,
     ) -> Result<Vec<HydratedProviderRecord>, HydrationFailure> {
-        let Some(first) = request.events().first() else {
-            return Ok(Vec::new());
-        };
-        let resolved = self
-            .sources
-            .get(&first.locator().source().identity())
-            .ok_or_else(|| hydration_failure(HydrationFailureKind::MissingRecord))?;
-        let file = resolved
-            .session_path
-            .open_events()
-            .map_err(|_| hydration_failure(HydrationFailureKind::TemporarilyUnavailable))?;
-        let records = request
-            .events()
-            .iter()
-            .map(|event| self.hydrate_from_file(event, resolved, &file))
-            .collect::<Result<Vec<_>, _>>()?;
-        file.revalidate()
-            .and_then(|()| resolved.session_path.revalidate_root())
-            .map_err(|_| hydration_failure(HydrationFailureKind::TemporarilyUnavailable))?;
-        Ok(records)
+        self.hydrate_requests(request.events())
     }
+}
+
+fn validate_revision_policy(
+    locator: &SourceRecordLocator,
+    current_revision_digest: [u8; 32],
+) -> Result<(), HydrationFailure> {
+    let expected = locator
+        .certified_source_revision_digest()
+        .copied()
+        .ok_or_else(|| hydration_failure(HydrationFailureKind::InvalidLocator))?;
+    match locator.revision_policy() {
+        LocatorRevisionPolicy::StableRecordEvidence => Ok(()),
+        LocatorRevisionPolicy::ExactSourceRevision if expected == current_revision_digest => Ok(()),
+        LocatorRevisionPolicy::ExactSourceRevision => {
+            Err(hydration_failure(HydrationFailureKind::StaleSourceEvidence))
+        }
+    }
+}
+
+fn validate_event_identity(
+    request: &EventHydrationRequest,
+    resolved: &ResolvedSource,
+    event_sequence: u64,
+) -> Result<(), HydrationFailure> {
+    let native_item_key = NativeItemKey::certified_position(
+        NATIVE_EVENT_POSITION_KIND,
+        TypedKey::U64(event_sequence),
+        PositionStability::AppendStable,
+    )
+    .map_err(|_| hydration_failure(HydrationFailureKind::InvalidLocator))?;
+    let expected = derive_event_id(EventIdentityInput {
+        source: &resolved.source,
+        session_id: resolved.session_id,
+        logical_item_kind: LOGICAL_EVENT_KIND,
+        native_item_key: &native_item_key,
+        subrecord_selector: None,
+    })
+    .map_err(|_| hydration_failure(HydrationFailureKind::InvalidLocator))?;
+    if expected != request.event_id() {
+        return Err(hydration_failure(HydrationFailureKind::InvalidLocator));
+    }
+    Ok(())
 }
 
 fn validate_locator_source(
@@ -689,6 +855,8 @@ fn validate_locator_source(
         || locator.source().source_format() != JUNIE_SESSION_EVENTS_SOURCE_FORMAT
         || locator.source().schema_variant() != SOURCE_SCHEMA_VARIANT
         || locator.source().provider_identity_version() != 1
+        || locator.revision_policy() != LocatorRevisionPolicy::StableRecordEvidence
+        || locator.certified_source_revision_digest().is_none()
         || !locator.source().exact_descriptor_eq(&resolved.source)
     {
         return Err(hydration_failure(HydrationFailureKind::InvalidLocator));
@@ -748,18 +916,21 @@ struct RecordSetEntry {
 
 fn decode_record_set(
     coordinate: &TypedKey,
-) -> Result<(SourceBackedTarget, Vec<RecordSetEntry>), HydrationFailure> {
+) -> Result<(u64, SourceBackedTarget, Vec<RecordSetEntry>), HydrationFailure> {
     let TypedKey::Composite(parts) = coordinate else {
         return Err(hydration_failure(HydrationFailureKind::InvalidLocator));
     };
-    let [TypedKey::Utf8(kind), target, TypedKey::Composite(encoded_entries)] = parts.as_slice()
+    let [TypedKey::Utf8(kind), TypedKey::U64(event_sequence), target, TypedKey::Composite(encoded_entries)] =
+        parts.as_slice()
     else {
         return Err(hydration_failure(HydrationFailureKind::InvalidLocator));
     };
-    if kind != RECORD_SET_COORDINATE_KIND
-        || encoded_entries.is_empty()
-        || encoded_entries.len() > MAX_RECORD_SET_ENTRIES
-    {
+    if kind != RECORD_SET_COORDINATE_KIND {
+        return Err(hydration_failure(
+            HydrationFailureKind::UnsupportedParserRevision,
+        ));
+    }
+    if encoded_entries.is_empty() || encoded_entries.len() > MAX_RECORD_SET_ENTRIES {
         return Err(hydration_failure(HydrationFailureKind::InvalidLocator));
     }
     let target = decode_target(target)?;
@@ -791,7 +962,7 @@ fn decode_record_set(
             payload_digest,
         });
     }
-    Ok((target, entries))
+    Ok((*event_sequence, target, entries))
 }
 
 fn decode_target(target: &TypedKey) -> Result<SourceBackedTarget, HydrationFailure> {
@@ -852,7 +1023,7 @@ fn read_record_set(
         aggregate.update(entry.byte_end_exclusive.to_be_bytes());
         aggregate.update(observed);
         let value = serde_json::from_slice(&payload)
-            .map_err(|_| hydration_failure(HydrationFailureKind::StaleRecordEvidence))?;
+            .map_err(|_| hydration_failure(HydrationFailureKind::UnsupportedParserRevision))?;
         values.push((entry.ordinal, value));
     }
     let observed: [u8; 32] = aggregate.finalize().into();
@@ -864,9 +1035,11 @@ fn read_record_set(
 
 fn replay_user_prompt(ordinal: u64, payload: &[u8]) -> Result<String, HydrationFailure> {
     let value: Value = serde_json::from_slice(payload)
-        .map_err(|_| hydration_failure(HydrationFailureKind::StaleRecordEvidence))?;
+        .map_err(|_| hydration_failure(HydrationFailureKind::UnsupportedParserRevision))?;
     if value.get("kind").and_then(Value::as_str) != Some("UserPromptEvent") {
-        return Err(hydration_failure(HydrationFailureKind::StaleRecordEvidence));
+        return Err(hydration_failure(
+            HydrationFailureKind::UnsupportedParserRevision,
+        ));
     }
     value
         .get("prompt")
@@ -874,7 +1047,7 @@ fn replay_user_prompt(ordinal: u64, payload: &[u8]) -> Result<String, HydrationF
         .map(str::to_owned)
         .ok_or_else(|| {
             let _ = ordinal;
-            hydration_failure(HydrationFailureKind::StaleRecordEvidence)
+            hydration_failure(HydrationFailureKind::MissingRecord)
         })
 }
 
@@ -885,12 +1058,14 @@ fn replay_record_set(
     let mut buffer = JunieAssistantBuffer::default();
     for (ordinal, value) in values {
         if value.get("kind").and_then(Value::as_str) != Some("SessionA2uxEvent") {
-            return Err(hydration_failure(HydrationFailureKind::StaleRecordEvidence));
+            return Err(hydration_failure(
+                HydrationFailureKind::UnsupportedParserRevision,
+            ));
         }
         let agent = value
             .get("event")
             .and_then(|event| event.get("agentEvent"))
-            .ok_or_else(|| hydration_failure(HydrationFailureKind::StaleRecordEvidence))?;
+            .ok_or_else(|| hydration_failure(HydrationFailureKind::UnsupportedParserRevision))?;
         let occurred_at = value
             .get("timestampMs")
             .and_then(Value::as_i64)
@@ -902,7 +1077,9 @@ fn replay_record_set(
             ordinal.saturating_add(1),
             occurred_at,
         ) {
-            return Err(hydration_failure(HydrationFailureKind::StaleRecordEvidence));
+            return Err(hydration_failure(
+                HydrationFailureKind::UnsupportedParserRevision,
+            ));
         }
     }
     match target {
@@ -912,7 +1089,7 @@ fn replay_record_set(
         SourceBackedTarget::AssistantMessage => {
             let text = junie_buffer_result_text(&buffer);
             if text.is_empty() {
-                Err(hydration_failure(HydrationFailureKind::StaleRecordEvidence))
+                Err(hydration_failure(HydrationFailureKind::MissingRecord))
             } else {
                 Ok(text)
             }
@@ -925,7 +1102,7 @@ fn replay_record_set(
             let step = step_by_order(&buffer, *step_order)?;
             junie_step_output_projection(step)
                 .map(|output| output.details.to_owned())
-                .ok_or_else(|| hydration_failure(HydrationFailureKind::StaleRecordEvidence))
+                .ok_or_else(|| hydration_failure(HydrationFailureKind::MissingRecord))
         }
         SourceBackedTarget::FileChange {
             step_order,
@@ -935,13 +1112,13 @@ fn replay_record_set(
             let change = step
                 .changes
                 .get(*change_index as usize)
-                .ok_or_else(|| hydration_failure(HydrationFailureKind::StaleRecordEvidence))?;
+                .ok_or_else(|| hydration_failure(HydrationFailureKind::MissingRecord))?;
             let path = change
                 .get("afterRelativePath")
                 .and_then(Value::as_str)
                 .or_else(|| change.get("beforeRelativePath").and_then(Value::as_str))
                 .filter(|path| !path.trim().is_empty())
-                .ok_or_else(|| hydration_failure(HydrationFailureKind::StaleRecordEvidence))?;
+                .ok_or_else(|| hydration_failure(HydrationFailureKind::MissingRecord))?;
             Ok(format!("Edit: {path}"))
         }
     }
@@ -954,11 +1131,11 @@ fn step_by_order(
     let step_id = buffer
         .step_ids_in_order
         .get(step_order as usize)
-        .ok_or_else(|| hydration_failure(HydrationFailureKind::StaleRecordEvidence))?;
+        .ok_or_else(|| hydration_failure(HydrationFailureKind::MissingRecord))?;
     buffer
         .steps
         .get(step_id)
-        .ok_or_else(|| hydration_failure(HydrationFailureKind::StaleRecordEvidence))
+        .ok_or_else(|| hydration_failure(HydrationFailureKind::MissingRecord))
 }
 
 fn step_call_text(step: &JunieStepAgg) -> String {
@@ -975,14 +1152,17 @@ fn step_call_text(step: &JunieStepAgg) -> String {
     }
 }
 
-fn validate_unavailable_coordinate(coordinate: &TypedKey) -> Result<(), HydrationFailure> {
+fn decode_unavailable_coordinate(
+    coordinate: &TypedKey,
+) -> Result<(TypedKey, u64), HydrationFailure> {
     let TypedKey::Composite(parts) = coordinate else {
         return Err(hydration_failure(HydrationFailureKind::InvalidLocator));
     };
-    let [target, TypedKey::U64(_)] = parts.as_slice() else {
+    let [target, TypedKey::U64(event_sequence)] = parts.as_slice() else {
         return Err(hydration_failure(HydrationFailureKind::InvalidLocator));
     };
-    decode_target(target).map(|_| ())
+    decode_target(target)?;
+    Ok((target.clone(), *event_sequence))
 }
 
 fn hydration_failure(kind: HydrationFailureKind) -> HydrationFailure {
@@ -1049,6 +1229,212 @@ mod tests {
         let request =
             EventHydrationRequest::new(document.event_id, document.locator.clone()).unwrap();
         resolver.hydrate_event(&request)
+    }
+
+    fn request(document: &LexicalDocument) -> EventHydrationRequest {
+        EventHydrationRequest::new(document.event_id, document.locator.clone()).unwrap()
+    }
+
+    #[test]
+    fn junie_exact_hydration_indexes_full_body_tail_terms_and_is_session_ordered() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let first = format!("first-head-{}-first-tail", "a".repeat(4_096));
+        let second = format!("second-head-{}-second-tail", "b".repeat(4_096));
+        write_tree(
+            temp.path(),
+            "ordered-session",
+            &[
+                serde_json::json!({
+                    "kind": "UserPromptEvent",
+                    "prompt": first.clone(),
+                }),
+                serde_json::json!({
+                    "kind": "UserPromptEvent",
+                    "prompt": second.clone(),
+                }),
+            ],
+        );
+        let documents = scan_documents(temp.path());
+        assert_eq!(documents.len(), 2);
+        assert!(documents.iter().all(|document| {
+            document
+                .locator
+                .certified_source_revision_digest()
+                .is_some()
+        }));
+        assert_eq!(documents[0].body, first);
+        assert_eq!(documents[1].body, second);
+        assert!(documents[0].body.contains("first-tail"));
+        assert!(documents[1].body.contains("second-tail"));
+
+        let session_request = SessionHydrationRequest::new(
+            documents[0].session_id,
+            vec![request(&documents[1]), request(&documents[0])],
+        )
+        .unwrap();
+        let hydrated = JunieLocatorResolverV0::discover_for_hydration(temp.path())
+            .unwrap()
+            .hydrate_session(&session_request)
+            .unwrap()
+            .into_iter()
+            .map(|record| String::from_utf8(record.provider_bytes).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(hydrated, vec![second, first]);
+    }
+
+    #[test]
+    fn junie_rewrite_digest_and_truncation_have_distinct_typed_failures() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let original = [
+            serde_json::json!({
+                "kind": "UserPromptEvent",
+                "prompt": "before",
+            }),
+            serde_json::json!({
+                "kind": "UserPromptEvent",
+                "prompt": "second",
+            }),
+        ];
+        write_tree(temp.path(), "mutable-session", &original);
+        let documents = scan_documents(temp.path());
+        let first_request = request(&documents[0]);
+        let second_request = request(&documents[1]);
+
+        write_tree(
+            temp.path(),
+            "mutable-session",
+            &[
+                serde_json::json!({
+                    "kind": "UserPromptEvent",
+                    "prompt": "rewrit",
+                }),
+                original[1].clone(),
+            ],
+        );
+        let stale = JunieLocatorResolverV0::discover_for_hydration(temp.path())
+            .unwrap()
+            .hydrate_event(&first_request)
+            .unwrap_err();
+        assert_eq!(stale.kind, HydrationFailureKind::StaleRecordEvidence);
+
+        write_tree(temp.path(), "mutable-session", &original[..1]);
+        let missing = JunieLocatorResolverV0::discover_for_hydration(temp.path())
+            .unwrap()
+            .hydrate_event(&second_request)
+            .unwrap_err();
+        assert_eq!(missing.kind, HydrationFailureKind::MissingRecord);
+        let batch = BatchHydrationRequest::new(vec![first_request.clone(), second_request.clone()])
+            .unwrap();
+        let failed_batch = JunieLocatorResolverV0::discover_for_hydration(temp.path())
+            .unwrap()
+            .hydrate_batch(&batch)
+            .unwrap_err();
+        assert_eq!(failed_batch.kind, HydrationFailureKind::MissingRecord);
+    }
+
+    #[test]
+    fn junie_source_deletion_and_unavailable_root_are_not_conflated() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        write_tree(
+            temp.path(),
+            "deleted-session",
+            &[serde_json::json!({
+                "kind": "UserPromptEvent",
+                "prompt": "present",
+            })],
+        );
+        let documents = scan_documents(temp.path());
+        let event_request = request(&documents[0]);
+
+        std::fs::remove_dir_all(temp.path().join("deleted-session")).unwrap();
+        let deleted = JunieLocatorResolverV0::discover_for_hydration(temp.path())
+            .unwrap()
+            .hydrate_event(&event_request)
+            .unwrap_err();
+        assert_eq!(deleted.kind, HydrationFailureKind::ConfirmedDeleted);
+
+        let unavailable_root = temp.path().join("unavailable-root");
+        let unavailable =
+            JunieLocatorResolverV0::discover_for_hydration(&unavailable_root).unwrap_err();
+        assert_eq!(
+            unavailable.kind,
+            HydrationFailureKind::TemporarilyUnavailable
+        );
+    }
+
+    #[test]
+    fn junie_digest_matching_malformed_native_record_is_unsupported() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        write_tree(
+            temp.path(),
+            "malformed-session",
+            &[serde_json::json!({
+                "kind": "UserPromptEvent",
+                "prompt": "present",
+            })],
+        );
+        let document = scan_documents(temp.path()).pop().unwrap();
+        let NativeRecordCoordinate::Jsonl {
+            physical_ordinal,
+            native_session_key,
+            native_event_key,
+            ..
+        } = document.locator.coordinate()
+        else {
+            panic!("Junie prompt must use a JSONL coordinate");
+        };
+        let malformed_payload = b"{not-json}";
+        let locator = SourceRecordLocator::new(
+            document.source.clone(),
+            NativeRecordCoordinate::Jsonl {
+                byte_offset: 0,
+                byte_length: u64::try_from(malformed_payload.len() + 1).unwrap(),
+                physical_ordinal: *physical_ordinal,
+                native_session_key: native_session_key.clone(),
+                native_event_key: native_event_key.clone(),
+            },
+            LocatorRevisionPolicy::StableRecordEvidence,
+            document.locator.certified_source_revision_digest().copied(),
+            Sha256::digest(malformed_payload).into(),
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("malformed-session/events.jsonl"),
+            [malformed_payload.as_slice(), b"\n"].concat(),
+        )
+        .unwrap();
+        let event_request = EventHydrationRequest::new(document.event_id, locator).unwrap();
+        let failure = JunieLocatorResolverV0::discover_for_hydration(temp.path())
+            .unwrap()
+            .hydrate_event(&event_request)
+            .unwrap_err();
+        assert_eq!(
+            failure.kind,
+            HydrationFailureKind::UnsupportedParserRevision
+        );
+    }
+
+    #[test]
+    fn junie_source_backed_has_no_preview_complete_or_legacy_store_fallback() {
+        let provider_source = include_str!("source_backed.rs");
+        let registry_source = include_str!("../../../source_backed.rs");
+        for forbidden in [
+            ["ctx_history_", "store"].concat(),
+            ["Store", "::"].concat(),
+            ["import_junie_", "nativepath("].concat(),
+            ["provider_bytes: ", "document.body"].concat(),
+            ["provider_local_preview(&", "row.text"].concat(),
+        ] {
+            assert!(
+                !provider_source.contains(&forbidden),
+                "Junie source-backed route contains forbidden architecture token {forbidden:?}"
+            );
+        }
+        assert!(provider_source.contains("exact_junie_lexical_body"));
+        assert!(provider_source.contains("fn hydrate_batch("));
+        assert!(provider_source.contains("self.hydrate_requests(request.events())"));
+        assert!(registry_source.contains("JunieLocatorResolverV0::discover_for_hydration"));
+        assert!(registry_source.contains(".with_batch_hydration(move |request|"));
     }
 
     #[test]
@@ -1145,14 +1531,16 @@ mod tests {
         let documents = scan_documents(temp.path());
         assert_eq!(documents.len(), 1);
         assert!(!documents[0].body.is_empty());
-        assert!(documents[0].body.chars().count() <= MAX_BODY_PREVIEW_CHARS);
         assert!(matches!(
             documents[0].locator.coordinate(),
             NativeRecordCoordinate::ProviderNative { namespace, .. }
                 if namespace == UNAVAILABLE_COORDINATE_NAMESPACE
         ));
         let failure = hydrate(temp.path(), &documents[0]).unwrap_err();
-        assert_eq!(failure.kind, HydrationFailureKind::InvalidLocator);
+        assert_eq!(
+            failure.kind,
+            HydrationFailureKind::UnsupportedParserRevision
+        );
         assert!(failure.detail.contains("at most 64 source records"));
     }
 }
