@@ -19,13 +19,12 @@ use ctx_history_core::{
     SessionHydrationRequest, SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation,
     SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
 };
-use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
+use ctx_history_index::LexicalDocument;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
-    provider::normalization::provider_local_preview, CaptureError, ProviderAdapterContext,
-    ProviderImportFailure, FORGECODE_SQLITE_SOURCE_FORMAT,
+    CaptureError, ProviderAdapterContext, ProviderImportFailure, FORGECODE_SQLITE_SOURCE_FORMAT,
 };
 
 use super::super::complete_content::{
@@ -370,7 +369,6 @@ fn lexical_document(
         .filter(|text| !text.trim().is_empty())
         .map(str::to_owned)
         .unwrap_or_else(|| retained.event.event_type.as_str().replace('_', " "));
-    let (body, _) = provider_local_preview(&lexical_text, MAX_BODY_PREVIEW_CHARS);
     Ok(LexicalDocument {
         event_id,
         session_id,
@@ -387,7 +385,7 @@ fn lexical_document(
         occurred_at_unix_ms: Some(retained.event.occurred_at.timestamp_millis()),
         event_type: retained.event.event_type.as_str().to_owned(),
         role: retained.event.role.map(|role| role.as_str().to_owned()),
-        body,
+        body: lexical_text,
         workspace: Some(row.workspace_id.to_string()),
         cwd: None,
         touched_files: direct_touches

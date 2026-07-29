@@ -13,12 +13,12 @@ use std::{
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
     derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, CertifiedSourceInventory,
-    EventIdentityInput, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
+    EventIdentityInput, EventType, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
     NativeSessionKey, PositionStability, ProjectionContractError, ScannedSourceCounts,
     SessionIdentityInput, SourceAnchor, SourceFrontier, SourceInventoryObservation, SourceKey,
     SourceObservation, SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
 };
-use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
+use ctx_history_index::LexicalDocument;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -30,7 +30,10 @@ use super::{
     ClaudeNativeScanner, ClaudeRetainedRow, ClaudeSessionMetadata, DiscoveredClaudeSession,
     ParseCheckpoint, SessionLayout,
 };
-use crate::{CLAUDE_PROJECTS_SOURCE_FORMAT, MAX_PROVIDER_JSONL_LINE_BYTES};
+use crate::{
+    provider::normalization::provider_policy_event_text, CLAUDE_PROJECTS_SOURCE_FORMAT,
+    MAX_PROVIDER_JSONL_LINE_BYTES,
+};
 
 const SOURCE_ANCHOR_NAMESPACE: &str = "claude.session-leaf";
 const SESSION_KEY_NAMESPACE: &str = "claude.session";
@@ -81,6 +84,8 @@ pub(crate) enum ClaudeSourceBackedError {
     LocatorRecordMissing,
     #[error("Claude locator record evidence is stale")]
     LocatorRecordChanged,
+    #[error("Claude locator record has no exact canonical logical display content")]
+    ExactDisplayUnavailable,
 }
 
 pub(crate) type ClaudeSourceBackedResult<T> = Result<T, ClaudeSourceBackedError>;
@@ -574,7 +579,7 @@ fn lexical_document(
             .map(|value| value.timestamp_millis()),
         event_type: event_kind(row.kind).to_owned(),
         role: row.role.clone(),
-        body: lexical_preview(&row),
+        body: lexical_body(&row),
         workspace: leaf.source.project_dir.to_str().map(str::to_owned),
         cwd: session.cwd.clone(),
         touched_files,
@@ -610,7 +615,7 @@ fn native_event_typed_key(row: &ClaudeRetainedRow) -> ClaudeSourceBackedResult<T
     ])?)
 }
 
-fn lexical_preview(row: &ClaudeRetainedRow) -> String {
+fn lexical_body(row: &ClaudeRetainedRow) -> String {
     let text = row
         .body
         .clone()
@@ -644,14 +649,10 @@ fn lexical_preview(row: &ClaudeRetainedRow) -> String {
             })
         })
         .unwrap_or_else(|| event_kind(row.kind).to_owned());
-    let bounded = text
-        .chars()
-        .take(MAX_BODY_PREVIEW_CHARS)
-        .collect::<String>();
-    if bounded.trim().is_empty() {
+    if text.trim().is_empty() {
         event_kind(row.kind).to_owned()
     } else {
-        bounded
+        text
     }
 }
 
@@ -739,13 +740,19 @@ pub(crate) fn hydrate_claude_source_record(
         .ok()
         .and_then(|ordinal| ordinal.checked_add(1))
         .ok_or(ClaudeSourceBackedError::LocatorRangeInvalid)?;
-    let decoded_display_text =
+    let (text, _) =
         super::super::complete_content::claude_complete_content_message_record(&value, line_number)
-            .map(|(text, _)| text);
+            .ok_or(ClaudeSourceBackedError::ExactDisplayUnavailable)?;
+    let retained = provider_policy_event_text(EventType::Message, &text, &Value::Null);
+    let decoded_display_text = if retained.text.trim().is_empty() {
+        "message".to_owned()
+    } else {
+        retained.text
+    };
     revalidate_open_file(&leaf.source, &file, &leaf.source.fingerprint)?;
     Ok(ClaudeHydratedRecord {
-        provider_bytes,
-        decoded_display_text,
+        provider_bytes: decoded_display_text.as_bytes().to_vec(),
+        decoded_display_text: Some(decoded_display_text),
     })
 }
 

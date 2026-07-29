@@ -23,7 +23,7 @@ use ctx_history_core::{
     SourceFrontier, SourceKey, SourceObservation, SourceRecordLocator, SourceResolverContractError,
     StableEntityId, TypedKey,
 };
-use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
+use ctx_history_index::LexicalDocument;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -31,7 +31,6 @@ use thiserror::Error;
 use super::PromptLine;
 use crate::{
     common::io::{open_provider_source_file, OpenedProviderSourceFile},
-    provider::normalization::provider_local_preview,
     CaptureError, MAX_PROVIDER_JSONL_LINE_BYTES,
 };
 
@@ -659,10 +658,7 @@ fn lexical_document(
         None,
         record.record_digest,
     )?;
-    let (mut body, _) = provider_local_preview(&record.line.text, MAX_BODY_PREVIEW_CHARS);
-    if body.is_empty() {
-        body = "message".to_owned();
-    }
+    let body = prompt_lexical_body(&record.line.text);
     let occurred_at_unix_ms =
         chrono::DateTime::from_timestamp(record.line.ts, 0).map(|value| value.timestamp_millis());
     Ok(LexicalDocument {
@@ -686,6 +682,14 @@ fn lexical_document(
         cwd: None,
         touched_files: Vec::new(),
     })
+}
+
+fn prompt_lexical_body(text: &str) -> String {
+    if text.is_empty() {
+        "message".to_owned()
+    } else {
+        text.to_owned()
+    }
 }
 
 fn stable_session_id(
@@ -920,7 +924,7 @@ fn hydrate_from_source(
     }
     Ok(HydratedProviderRecord {
         event_id,
-        provider_bytes,
+        provider_bytes: prompt_lexical_body(&line.text).into_bytes(),
     })
 }
 

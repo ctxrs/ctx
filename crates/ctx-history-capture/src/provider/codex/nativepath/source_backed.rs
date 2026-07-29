@@ -30,7 +30,7 @@ use thiserror::Error;
 
 use super::{
     reader::{CodexParseDisposition, CodexScanCounters},
-    rows::CodexSourceBackedRowV0,
+    rows::{source_backed_display_text, CodexSourceBackedRowV0},
     source::{CodexCatalogSource, CodexFileObservation, CodexSourceIdentity},
     CodexAppendProof, CodexCheckpointGeneration, CodexNativeCheckpoint, CodexNativeOwnedPage,
     CodexNativeScanner, CodexSessionRow,
@@ -43,7 +43,6 @@ use crate::{
         catalog::{
             discover_codex_session_catalog_retained, rediscover_codex_session_catalog_retained,
         },
-        events::codex_content_text,
         nativepath::{open_codex_source_capability, revalidate_codex_source_observation},
     },
     CaptureError, CODEX_SESSION_SOURCE_FORMAT,
@@ -93,8 +92,8 @@ pub enum CodexSourceBackedErrorV0 {
     InvalidCheckpoint,
     #[error("Codex scanner emitted a row without exact source-record evidence")]
     MissingRecordEvidence,
-    #[error("Codex scanner emitted a row without a bounded lexical preview")]
-    MissingLexicalPreview,
+    #[error("Codex scanner emitted a row without lexical body text")]
+    MissingLexicalBody,
     #[error("Codex scanner emitted a row without its native session owner")]
     MissingPageOwner,
     #[error("Codex scanner owner {actual:?} does not match catalog owner {expected:?}")]
@@ -1424,7 +1423,7 @@ fn codex_lexical_document(
         evidence.record_digest,
     )?;
     if lexical_body.is_empty() {
-        return Err(CodexSourceBackedErrorV0::MissingLexicalPreview);
+        return Err(CodexSourceBackedErrorV0::MissingLexicalBody);
     }
     Ok(LexicalDocument {
         event_id,
@@ -1635,54 +1634,7 @@ fn decode_exact_display_text(
     let Some(payload) = envelope.get("payload") else {
         return Ok(None);
     };
-    let item_type = payload.get("type").and_then(Value::as_str);
-    let display = match (record_type, item_type) {
-        (Some("response_item"), Some("message")) => {
-            payload.get("content").and_then(codex_content_text)
-        }
-        (Some("response_item"), Some("reasoning")) => payload
-            .get("summary")
-            .and_then(codex_content_text)
-            .or_else(|| {
-                payload
-                    .get("summary_text")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            }),
-        (
-            Some("response_item"),
-            Some("function_call" | "custom_tool_call" | "web_search_call" | "tool_search_call"),
-        ) => payload
-            .get("arguments")
-            .or_else(|| payload.get("input"))
-            .or_else(|| payload.get("action"))
-            .or_else(|| payload.get("execution"))
-            .and_then(exact_typed_text),
-        (
-            Some("response_item"),
-            Some(
-                "function_call_output"
-                | "custom_tool_call_output"
-                | "tool_search_output"
-                | "tool_output"
-                | "tool_result",
-            ),
-        ) => payload
-            .get("output")
-            .or_else(|| payload.get("tools"))
-            .or_else(|| payload.get("result"))
-            .and_then(exact_typed_text),
-        (Some("compacted"), _) => codex_content_text(payload),
-        _ => None,
-    };
-    Ok(display)
-}
-
-fn exact_typed_text(value: &Value) -> Option<String> {
-    value
-        .as_str()
-        .map(str::to_owned)
-        .or_else(|| codex_content_text(value))
+    Ok(source_backed_display_text(record_type, payload))
 }
 
 #[cfg(test)]
@@ -2344,10 +2296,7 @@ mod tests {
         fs::create_dir_all(&sessions).unwrap();
         let native_session_id = "019fa000-0000-7000-8000-000000000002";
         let session_path = sessions.join(format!("rollout-{native_session_id}.jsonl"));
-        let long_message = format!(
-            "long-message-sentinel {} complete-message-tail",
-            "m".repeat(crate::PROVIDER_MAX_TEXT_CHARS + 512)
-        );
+        let long_message = "long-message-sentinel complete-message-tail".to_owned();
         let tool_record = tool_call_with_patch("touch-call");
         let failed_record = failed_tool_output("touch-call");
         fs::write(
@@ -2380,22 +2329,10 @@ mod tests {
             vec![1, 2, 3]
         );
         assert_eq!(events[0].event_type, EventType::Message.as_str());
-        assert!(events[0].preview.starts_with("long-message-sentinel"));
-        assert!(
-            events[0].preview.chars().count() <= super::super::rows::CODEX_LEXICAL_PREVIEW_CHARS
-        );
-        assert!(!events[0].preview.contains("complete-message-tail"));
         assert_eq!(events[1].event_type, EventType::ToolCall.as_str());
         assert_eq!(events[1].touched_files, vec!["src/source_backed.rs"]);
         assert_eq!(events[2].event_type, EventType::ToolOutput.as_str());
         assert_eq!(events[2].role.as_deref(), Some("tool"));
-        assert!(
-            events[2]
-                .preview
-                .starts_with("apply_patch output: exit_code=7"),
-            "{}",
-            events[2].preview
-        );
         assert!(verified
             .search_event_candidates("long message sentinel", 10)
             .unwrap()
@@ -2437,7 +2374,6 @@ mod tests {
                     row.raw_ordinal,
                     row.provider_event.event_type.as_str(),
                     row.provider_event.role.map(|role| role.as_str()),
-                    row.lexical_preview().unwrap(),
                     row.file_touches
                         .iter()
                         .map(|touch| touch.path.as_str())
@@ -2450,7 +2386,6 @@ mod tests {
                     event.event_sequence,
                     event.event_type.as_str(),
                     event.role.as_deref(),
-                    event.preview.clone(),
                     event
                         .touched_files
                         .iter()
@@ -2463,7 +2398,7 @@ mod tests {
         assert_eq!(legacy_counters.scanner_legacy_row_json_serializations, 3);
         assert_eq!(legacy_counters.scanner_legacy_normalized_payload_hashes, 3);
         assert_eq!(legacy_counters.scanner_legacy_file_touch_rows, 1);
-        assert_eq!(legacy_counters.scanner_legacy_complete_content_locators, 1);
+        assert_eq!(legacy_counters.scanner_legacy_complete_content_locators, 0);
         assert_eq!(
             legacy_counters.scanner_legacy_duplicate_preview_allocations,
             3
@@ -2474,6 +2409,71 @@ mod tests {
             legacy_counters.scanner_legacy_page_identity_row_json_serializations,
             3
         );
+    }
+
+    #[test]
+    fn source_backed_scanner_keeps_full_message_tail_and_exact_display_text() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let native_session_id = "019fa000-0000-7000-8000-000000000022";
+        let full_text = format!(
+            "codex-full-{}-codex-tail-sentinel",
+            "m".repeat(crate::PROVIDER_MAX_TEXT_CHARS + 512)
+        );
+        write_session(
+            &sessions,
+            native_session_id,
+            &[message("assistant", &full_text)],
+        );
+
+        let (catalog_summary, catalog_sessions) =
+            discover_codex_session_catalog(&sessions).unwrap();
+        assert_eq!(catalog_summary.failed_sessions, 0);
+        let discovery = super::super::discover_codex_catalog_sources(&catalog_sessions);
+        assert!(discovery.rejections.is_empty());
+        let catalog_source = discovery.sources.into_iter().next().unwrap();
+        let source = codex_source_key(native_session_id).unwrap();
+        let session_id = codex_session_identity(&source, native_session_id).unwrap();
+        let mut scanner =
+            CodexNativeScanner::new_source_backed_v0(catalog_source.clone(), None).unwrap();
+        let mut documents = Vec::new();
+        while let Some(page) = scanner.next_page().unwrap() {
+            let CodexNativeOwnedPage::Core(page) = page else {
+                panic!("source-backed scanner emitted Pro output");
+            };
+            let owner = page.owner.unwrap();
+            for row in page.source_backed_rows {
+                documents.push(
+                    codex_lexical_document(&catalog_source, &source, session_id, &owner, row)
+                        .unwrap(),
+                );
+            }
+        }
+        scanner.finish().unwrap();
+
+        assert_eq!(documents.len(), 1);
+        assert_eq!(documents[0].body, full_text);
+        assert!(documents[0].body.ends_with("codex-tail-sentinel"));
+        let hydrated = hydrate_codex_locator(&sessions, &documents[0].locator).unwrap();
+        assert_eq!(
+            hydrated.decoded_display_text.as_deref(),
+            Some(documents[0].body.as_str())
+        );
+    }
+
+    #[test]
+    fn source_backed_codex_adapter_has_no_store_or_preview_body_fallback() {
+        let adapter = include_str!("source_backed.rs");
+        let rows = include_str!("rows.rs");
+        let store_dependency = ["ctx_history_", "store"].concat();
+        let preview_body = [
+            "return codex_local_preview(text, ",
+            "CODEX_LEXICAL_PREVIEW_CHARS).0",
+        ]
+        .concat();
+        assert!(!adapter.contains(&store_dependency));
+        assert!(!rows.contains(&preview_body));
     }
 
     fn assert_no_legacy_operations(counters: CodexSourceBackedCountersV0) {

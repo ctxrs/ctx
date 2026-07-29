@@ -1,7 +1,6 @@
 use ctx_history_core::{
     AgentType, CaptureProvider, LocatorRevisionPolicy, NativeRecordCoordinate, TypedKey,
 };
-use ctx_history_index::MAX_BODY_PREVIEW_CHARS;
 use sha2::{Digest, Sha256};
 
 use super::*;
@@ -10,7 +9,10 @@ use super::*;
 fn gemini_source_backed_cold_projection_is_stable_bounded_and_certified() {
     let temp = TempDir::new().unwrap();
     let root = fixture_root(&temp);
-    let long_message = format!("gemini bounded sentinel {}", "界".repeat(4_096));
+    let long_message = format!(
+        "gemini full sentinel {} gemini-tail-sentinel",
+        "界".repeat(4_096)
+    );
     let path = write_transcript(
         &root,
         &[
@@ -46,7 +48,6 @@ fn gemini_source_backed_cold_projection_is_stable_bounded_and_certified() {
         assert_ne!(page.page_identity, [0; 32]);
         for document in &page.documents {
             assert!(!document.body.is_empty());
-            assert!(document.body.chars().count() <= MAX_BODY_PREVIEW_CHARS);
             assert_eq!(document.source.identity(), source_id);
             assert_eq!(document.session_id, session_id);
         }
@@ -55,7 +56,8 @@ fn gemini_source_backed_cold_projection_is_stable_bounded_and_certified() {
     let leaf = reader.finish().unwrap();
 
     assert_eq!(documents.len(), 2);
-    assert_eq!(documents[0].body.chars().count(), MAX_BODY_PREVIEW_CHARS);
+    assert_eq!(documents[0].body, long_message);
+    assert!(documents[0].body.ends_with("gemini-tail-sentinel"));
     assert_eq!(leaf.source.identity(), source_id);
     assert_eq!(leaf.session_id, session_id);
     assert_eq!(leaf.parent_session_id, None);
@@ -217,7 +219,7 @@ fn gemini_source_backed_exact_jsonl_locator_reopens_original_record_after_append
     assert_eq!(document.locator.record_digest(), &exact_record_digest);
 
     let hydrated = hydrate_gemini_source_backed_record(&source, &document.locator).unwrap();
-    assert_eq!(hydrated.provider_bytes, exact_record);
+    assert_eq!(hydrated.provider_bytes, exact_text.as_bytes());
     assert_eq!(hydrated.decoded_display_text.as_deref(), Some(exact_text));
 
     OpenOptions::new()
@@ -234,9 +236,17 @@ fn gemini_source_backed_exact_jsonl_locator_reopens_original_record_after_append
     let appended_source = rediscover(&root, &path);
     let hydrated_after_append =
         hydrate_gemini_source_backed_record(&appended_source, &document.locator).unwrap();
-    assert_eq!(hydrated_after_append.provider_bytes, exact_record);
+    assert_eq!(hydrated_after_append.provider_bytes, exact_text.as_bytes());
     assert_eq!(
         hydrated_after_append.decoded_display_text.as_deref(),
         Some(exact_text)
     );
+}
+
+#[test]
+fn source_backed_gemini_adapter_has_no_preview_or_store_body_fallback() {
+    let source = include_str!("../source_backed.rs");
+    assert!(!source.contains("MAX_BODY_PREVIEW_CHARS"));
+    assert!(!source.contains("ctx_history_store"));
+    assert!(!source.contains("event.preview"));
 }

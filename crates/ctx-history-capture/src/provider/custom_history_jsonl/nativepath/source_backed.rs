@@ -23,7 +23,7 @@ use ctx_history_core::{
     SourceAnchor, SourceFrontier, SourceInventoryObservation, SourceKey, SourceObservation,
     SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
 };
-use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
+use ctx_history_index::LexicalDocument;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -37,7 +37,7 @@ use crate::{
     common::io::{open_provider_source_file, OpenedProviderSourceFile},
     provider::{
         custom_history_jsonl::custom_history_internal_session_id,
-        normalization::{provider_local_preview, provider_policy_event_text, provider_value_text},
+        normalization::{provider_policy_event_text, provider_value_text},
     },
     CaptureError, ProviderImportSummary, MAX_PROVIDER_JSONL_LINE_BYTES,
 };
@@ -1012,7 +1012,7 @@ fn lexical_document(
         occurred_at_unix_ms: Some(event.occurred_at.timestamp_millis()),
         event_type: event.event_type.as_str().to_owned(),
         role: event.role.map(|role| role.as_str().to_owned()),
-        body: lexical_preview(event),
+        body: lexical_body(event),
         workspace: None,
         cwd: session.cwd.as_deref().and_then(bounded_metadata),
         touched_files: touched_files.cloned().unwrap_or_default(),
@@ -1107,25 +1107,25 @@ fn custom_event_typed_key(
     )
 }
 
-fn lexical_preview(event: &CtxHistoryJsonlEventRecord) -> String {
-    let candidate = event
-        .preview
-        .as_deref()
-        .filter(|text| !text.trim().is_empty())
-        .map(str::to_owned)
-        .or_else(|| {
-            ["text", "content", "message", "summary", "command"]
-                .into_iter()
-                .find_map(|key| event.payload.get(key).and_then(provider_value_text))
-        })
+fn lexical_body(event: &CtxHistoryJsonlEventRecord) -> String {
+    let candidate = ["text", "content", "message", "summary", "command"]
+        .into_iter()
+        .find_map(|key| event.payload.get(key).and_then(provider_value_text))
         .or_else(|| provider_value_text(&event.payload))
+        .filter(|text| !text.trim().is_empty())
+        .or_else(|| {
+            event
+                .preview
+                .as_deref()
+                .filter(|text| !text.trim().is_empty())
+                .map(str::to_owned)
+        })
         .unwrap_or_default();
     let retained = provider_policy_event_text(event.event_type, &candidate, &event.payload);
-    let (preview, _) = provider_local_preview(&retained.text, MAX_BODY_PREVIEW_CHARS);
-    if preview.is_empty() {
+    if retained.text.is_empty() {
         event.event_type.as_str().to_owned()
     } else {
-        preview
+        retained.text
     }
 }
 
@@ -1358,7 +1358,7 @@ fn hydrate_from_file(
     }
     Ok(HydratedProviderRecord {
         event_id,
-        provider_bytes,
+        provider_bytes: lexical_body(&event).into_bytes(),
     })
 }
 

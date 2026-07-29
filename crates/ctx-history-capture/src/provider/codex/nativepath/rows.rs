@@ -24,6 +24,7 @@ use crate::{
     PROVIDER_MAX_PREVIEW_CHARS, PROVIDER_MAX_TEXT_CHARS,
 };
 
+#[cfg(test)]
 pub(super) const CODEX_LEXICAL_PREVIEW_CHARS: usize = 2_048;
 const OWNED_ALLOCATION_OVERHEAD_BYTES: usize = 16;
 
@@ -504,6 +505,56 @@ fn source_backed_semantic_projection(
     }
 }
 
+pub(super) fn source_backed_display_text(
+    record_type: Option<&str>,
+    payload: &Value,
+) -> Option<String> {
+    let item_type = payload.get("type").and_then(Value::as_str);
+    let (event_type, role, text) = match (record_type, item_type) {
+        (Some("response_item"), Some("message")) => {
+            let role = match payload.get("role").and_then(Value::as_str)? {
+                "user" => EventRole::User,
+                "assistant" => EventRole::Assistant,
+                "developer" | "system" => EventRole::System,
+                _ => return None,
+            };
+            (
+                EventType::Message,
+                Some(role),
+                payload.get("content").and_then(codex_content_text)?,
+            )
+        }
+        (Some("response_item"), Some("reasoning")) => (
+            EventType::Summary,
+            Some(EventRole::Assistant),
+            payload
+                .get("summary")
+                .and_then(codex_content_text)
+                .or_else(|| {
+                    payload
+                        .get("summary_text")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })?,
+        ),
+        (
+            Some("response_item"),
+            Some("function_call" | "custom_tool_call" | "web_search_call" | "tool_search_call"),
+        ) => (
+            EventType::ToolCall,
+            Some(EventRole::Assistant),
+            source_backed_tool_call_text(payload)?.0,
+        ),
+        (Some("compacted"), _) => (
+            EventType::Summary,
+            Some(EventRole::System),
+            codex_content_text(payload)?,
+        ),
+        _ => return None,
+    };
+    Some(source_backed_lexical_body(event_type, role, &text))
+}
+
 fn source_backed_message(payload: &Value) -> SourceBackedSemanticProjection {
     let role_text = payload
         .get("role")
@@ -578,9 +629,25 @@ fn source_backed_compacted(payload: &Value) -> SourceBackedSemanticProjection {
 }
 
 fn source_backed_tool_call(payload: &Value) -> SourceBackedSemanticProjection {
-    let Some(item_type) = payload.get("type").and_then(Value::as_str) else {
+    let Some((text, tool_context)) = source_backed_tool_call_text(payload) else {
         return SourceBackedSemanticProjection::Malformed("malformed retained Codex tool call");
     };
+    SourceBackedSemanticProjection::Materialized(SourceBackedSemantic {
+        event_type: EventType::ToolCall,
+        role: Some(EventRole::Assistant),
+        lexical_body: source_backed_lexical_body(
+            EventType::ToolCall,
+            Some(EventRole::Assistant),
+            &text,
+        ),
+        tool_context,
+    })
+}
+
+fn source_backed_tool_call_text(
+    payload: &Value,
+) -> Option<(String, Option<(String, CodexToolCallContext)>)> {
+    let item_type = payload.get("type").and_then(Value::as_str)?;
     let tool_name = codex_tool_name(payload, item_type);
     let call_id = payload.get("call_id").and_then(Value::as_str);
     let arguments = payload
@@ -612,26 +679,17 @@ fn source_backed_tool_call(payload: &Value) -> SourceBackedSemanticProjection {
             },
         )
     });
-    SourceBackedSemanticProjection::Materialized(SourceBackedSemantic {
-        event_type: EventType::ToolCall,
-        role: Some(EventRole::Assistant),
-        lexical_body: source_backed_lexical_body(
-            EventType::ToolCall,
-            Some(EventRole::Assistant),
-            &text,
-        ),
-        tool_context,
-    })
+    Some((text, tool_context))
 }
 
-fn source_backed_lexical_body(
+pub(super) fn source_backed_lexical_body(
     event_type: EventType,
     role: Option<EventRole>,
     text: &str,
 ) -> String {
     let text = text.trim();
     if !text.is_empty() {
-        return codex_local_preview(text, CODEX_LEXICAL_PREVIEW_CHARS).0;
+        return text.to_owned();
     }
     format!(
         "{} {}",

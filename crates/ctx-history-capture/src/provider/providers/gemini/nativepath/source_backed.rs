@@ -5,7 +5,7 @@ use ctx_history_core::{
     SourceAnchor, SourceFrontier, SourceKey, SourceObservation, SourceRecordLocator,
     SourceResolverContractError, StableEntityId, TypedKey,
 };
-use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
+use ctx_history_index::LexicalDocument;
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -17,12 +17,7 @@ use super::{
     GeminiNativePage, GeminiNativePageReader, GeminiNativePathProfile, GeminiRetainedEvent,
     GeminiScanError, GeminiSession, GeminiTranscriptSource,
 };
-use crate::{
-    provider::providers::native_jsonl::{
-        native_jsonl_entry_type, native_jsonl_event_text, native_jsonl_event_type,
-    },
-    CaptureError, GEMINI_CLI_SOURCE_FORMAT, MAX_PROVIDER_JSONL_LINE_BYTES,
-};
+use crate::{CaptureError, GEMINI_CLI_SOURCE_FORMAT, MAX_PROVIDER_JSONL_LINE_BYTES};
 
 const GEMINI_SOURCE_ANCHOR_NAMESPACE: &str = "gemini.session";
 const GEMINI_NATIVE_SESSION_NAMESPACE: &str = "gemini.session";
@@ -69,6 +64,8 @@ pub(crate) enum GeminiSourceBackedError {
     LocatorRangeMissing,
     #[error("Gemini locator record digest no longer matches provider bytes")]
     LocatorDigestMismatch,
+    #[error("Gemini locator record has no exact canonical logical display content")]
+    ExactDisplayUnavailable,
 }
 
 pub(crate) type GeminiSourceBackedResult<T> = Result<T, GeminiSourceBackedError>;
@@ -348,10 +345,11 @@ pub(crate) fn hydrate_gemini_source_backed_record(
     if &actual_digest != locator.record_digest() {
         return Err(GeminiSourceBackedError::LocatorDigestMismatch);
     }
-    let decoded_display_text = decode_display_text(&provider_bytes, physical_ordinal)?;
+    let decoded_display_text = decode_display_text(&provider_bytes, physical_ordinal)?
+        .ok_or(GeminiSourceBackedError::ExactDisplayUnavailable)?;
     Ok(GeminiHydratedSourceRecord {
-        provider_bytes,
-        decoded_display_text,
+        provider_bytes: decoded_display_text.as_bytes().to_vec(),
+        decoded_display_text: Some(decoded_display_text),
     })
 }
 
@@ -461,13 +459,10 @@ fn project_event(
 
 fn lexical_body(event: &GeminiRetainedEvent) -> String {
     if !event.searchable_text.is_empty() {
-        return bounded_chars(&event.searchable_text, MAX_BODY_PREVIEW_CHARS);
-    }
-    if !event.preview.is_empty() {
-        return bounded_chars(&event.preview, MAX_BODY_PREVIEW_CHARS);
+        return event.searchable_text.clone();
     }
     match &event.body {
-        GeminiEventBody::Message { text, .. } => bounded_chars(text, MAX_BODY_PREVIEW_CHARS),
+        GeminiEventBody::Message { text, .. } => text.clone(),
         GeminiEventBody::ToolCall { .. } => "Gemini tool call".to_owned(),
         GeminiEventBody::OutputDiagnostic {
             call_id,
@@ -475,35 +470,29 @@ fn lexical_body(event: &GeminiRetainedEvent) -> String {
             outcome,
             exit_code,
             duration_ms,
-        } => bounded_chars(
-            &format!(
-                "Gemini {} output {}{}{}{}",
-                tool_name.as_deref().unwrap_or("tool"),
-                outcome,
-                call_id
-                    .as_deref()
-                    .map(|call| format!(", call {call}"))
-                    .unwrap_or_default(),
-                exit_code
-                    .map(|code| format!(", exit code {code}"))
-                    .unwrap_or_default(),
-                duration_ms
-                    .map(|duration| format!(", duration {duration} ms"))
-                    .unwrap_or_default(),
-            ),
-            MAX_BODY_PREVIEW_CHARS,
+        } => format!(
+            "Gemini {} output {}{}{}{}",
+            tool_name.as_deref().unwrap_or("tool"),
+            outcome,
+            call_id
+                .as_deref()
+                .map(|call| format!(", call {call}"))
+                .unwrap_or_default(),
+            exit_code
+                .map(|code| format!(", exit code {code}"))
+                .unwrap_or_default(),
+            duration_ms
+                .map(|duration| format!(", duration {duration} ms"))
+                .unwrap_or_default(),
         ),
         GeminiEventBody::StateNotice { summary } => summary
             .as_deref()
             .filter(|summary| !summary.is_empty())
-            .map(|summary| bounded_chars(summary, MAX_BODY_PREVIEW_CHARS))
+            .map(str::to_owned)
             .unwrap_or_else(|| "Gemini state update".to_owned()),
         GeminiEventBody::RewindNotice {
             target_native_record_id,
-        } => bounded_chars(
-            &format!("Gemini rewind to {target_native_record_id}"),
-            MAX_BODY_PREVIEW_CHARS,
-        ),
+        } => format!("Gemini rewind to {target_native_record_id}"),
     }
 }
 
@@ -589,20 +578,61 @@ fn validate_locator(
 
 fn decode_display_text(
     provider_bytes: &[u8],
-    physical_ordinal: u64,
+    _physical_ordinal: u64,
 ) -> GeminiSourceBackedResult<Option<String>> {
     let record = provider_bytes.strip_suffix(b"\n").unwrap_or(provider_bytes);
     let record = record.strip_suffix(b"\r").unwrap_or(record);
     let value: Value = serde_json::from_slice(record)?;
-    let event_type = native_jsonl_event_type(CaptureProvider::Gemini, &value);
-    let entry_type = native_jsonl_entry_type(CaptureProvider::Gemini, &value);
-    let _line_number = physical_ordinal
-        .checked_add(1)
-        .ok_or(GeminiSourceBackedError::CountOverflow)?;
-    Ok(Some(native_jsonl_event_text(
-        CaptureProvider::Gemini,
-        &value,
-        event_type,
-        &entry_type,
-    )))
+    if matches!(
+        value.get("type").and_then(Value::as_str),
+        Some("user" | "gemini")
+    ) {
+        return Ok(value
+            .get("content")
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned));
+    }
+    if let Some(calls) = value.get("toolCalls").and_then(Value::as_array) {
+        if calls
+            .iter()
+            .any(|call| call.get("result").is_some_and(|result| !result.is_null()))
+        {
+            return Ok(None);
+        }
+        let mut text = String::new();
+        for call in calls {
+            if let Some(name) = call
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.trim().is_empty())
+            {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(name);
+            }
+            if let Some(args) = call.get("args") {
+                if let Ok(args) = serde_json::to_string(args) {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(&args);
+                }
+            }
+        }
+        return Ok((!text.is_empty()).then_some(text));
+    }
+    if let Some(summary) = value
+        .pointer("/$set/summary")
+        .and_then(Value::as_str)
+        .filter(|summary| !summary.is_empty())
+    {
+        return Ok(Some(summary.to_owned()));
+    }
+    Ok(value
+        .get("$rewindTo")
+        .and_then(Value::as_str)
+        .map(|target| format!("rewind to {}", target.trim()))
+        .filter(|text| text != "rewind to "))
 }
