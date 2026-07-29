@@ -12,6 +12,10 @@ struct SourceRefreshDaemon {
 }
 
 impl SourceRefreshDaemon {
+    fn pid(&self) -> u32 {
+        self.child.as_ref().expect("running daemon child").id()
+    }
+
     fn stop(&mut self) {
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
@@ -33,7 +37,25 @@ fn start_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
     )
     .unwrap();
     let binary = copied_ctx_binary(temp);
-    let prepared = ctx_from_binary(temp, &binary);
+    launch_source_refresh_daemon(temp, &binary)
+}
+
+fn restart_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
+    let binary = temp.path().join(if cfg!(windows) {
+        "ctx-test-copy.exe"
+    } else {
+        "ctx-test-copy"
+    });
+    assert!(
+        binary.is_file(),
+        "source-refresh restart binary is missing: {}",
+        binary.display()
+    );
+    launch_source_refresh_daemon(temp, &binary)
+}
+
+fn launch_source_refresh_daemon(temp: &TempDir, binary: &Path) -> SourceRefreshDaemon {
+    let prepared = ctx_from_binary(temp, binary);
     let mut command = StdCommand::new(prepared.get_program());
     for (name, value) in prepared.get_envs() {
         match value {
@@ -978,6 +1000,66 @@ fn search_refresh_wait_recovers_after_invalid_source_is_removed() {
     let recovered: Value = serde_json::from_slice(&recovered_output.stdout).unwrap();
     assert_source_backed_search_show_oracle(&temp, &recovered, "pi", query, 1, "message");
     let generation = assert_published_generation(&recovered, "wait");
+    assert_daemon_publication(&temp, &generation, 1, &["pi"]);
+}
+
+#[test]
+fn source_refresh_daemon_stop_start_resumes_exact_generation() {
+    let temp = tempdir();
+    let query = "pi-daemon-restart-resume-oracle";
+    install_default_pi_fixture(&temp, query);
+    let mut daemon = start_source_refresh_daemon(&temp);
+    let first_pid = daemon.pid();
+
+    let initial = json_output(ctx(&temp).args([
+        "search",
+        query,
+        "--provider",
+        "pi",
+        "--refresh",
+        "wait",
+        "--format=json",
+    ]));
+    assert_source_backed_search_show_oracle(&temp, &initial, "pi", query, 1, "message");
+    let generation = assert_published_generation(&initial, "wait");
+    assert_daemon_publication(&temp, &generation, 1, &["pi"]);
+
+    daemon.stop();
+    let stopped = wait_for_status(&temp, "stopped source-refresh daemon", |status| {
+        status["daemon"]["running"] == false
+    });
+    assert_eq!(stopped["daemon"]["running"], false, "{stopped:#}");
+    let offline = failure_stderr(ctx(&temp).args([
+        "search",
+        query,
+        "--provider",
+        "pi",
+        "--refresh",
+        "off",
+        "--format=json",
+    ]));
+    assert!(
+        offline.contains("resolver_service_unavailable/temporarily_unavailable"),
+        "{offline}"
+    );
+    assert!(
+        offline.contains("no provider rediscovery or stored preview fallback"),
+        "{offline}"
+    );
+
+    let restarted = restart_source_refresh_daemon(&temp);
+    assert_ne!(restarted.pid(), first_pid);
+    let resumed = json_output(ctx(&temp).args([
+        "search",
+        query,
+        "--provider",
+        "pi",
+        "--refresh",
+        "wait",
+        "--format=json",
+    ]));
+    assert_source_backed_search_show_oracle(&temp, &resumed, "pi", query, 1, "message");
+    assert_eq!(assert_published_generation(&resumed, "wait"), generation);
     assert_daemon_publication(&temp, &generation, 1, &["pi"]);
 }
 

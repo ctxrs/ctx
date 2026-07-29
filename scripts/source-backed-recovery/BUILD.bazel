@@ -6,6 +6,7 @@ filegroup(
     name = "local_fault_harness_sources",
     srcs = [
         "fault_shim.c",
+        "run-bounded-enospc-test.sh",
         "run-linux-fault-tests.sh",
     ],
     tags = [
@@ -88,6 +89,25 @@ sh_test(
     data = SOURCE_BACKED_RECOVERY_FAULT_RUNFILES,
     size = "medium",
     tags = SOURCE_BACKED_RECOVERY_FAULT_TAGS,
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+sh_test(
+    name = "actual_bounded_filesystem_enospc_preserves_previous_generation",
+    srcs = ["run-bounded-enospc-test.sh"],
+    args = [
+        "$(rootpath //crates/ctx-history-index:source_backed_recovery_tests)",
+    ],
+    data = ["//crates/ctx-history-index:source_backed_recovery_tests"],
+    size = "medium",
+    tags = [
+        "local",
+        "manual",
+        "no-sandbox",
+        "real-enospc",
+        "requires-sudo",
+        "source-backed-recovery",
+    ],
     target_compatible_with = ["@platforms//os:linux"],
 )
 
