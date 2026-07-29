@@ -40,7 +40,8 @@ machine-portable configuration. A contributor must not need `~/.bazelrc`,
 `~/.cargo/config.toml`, or another machine-local dotfile.
 
 The wrapper prefers `${CTX_BAZEL_SPACIOUS_ROOT:-/mnt/ctx-perf}/ctx-bazel` when
-that location is writable and otherwise uses
+that location is writable and has at least 5 GiB and 50,000 free inodes, and
+otherwise uses
 `${XDG_CACHE_HOME:-$HOME/.cache}/ctx/bazel`. Override the choice explicitly
 when needed:
 
@@ -48,6 +49,11 @@ when needed:
 export CTX_BAZEL_CACHE_ROOT=/mnt/shared/ctx-bazel
 scripts/bazelw test //:native_rust --config=test
 ```
+
+`CTX_BAZEL_SPACIOUS_MIN_FREE_KIB` and
+`CTX_BAZEL_SPACIOUS_MIN_FREE_INODES` tune only automatic spacious-root
+selection. `CTX_BAZEL_CACHE_ROOT` is an explicit operator choice and is never
+silently redirected.
 
 The layout is:
 

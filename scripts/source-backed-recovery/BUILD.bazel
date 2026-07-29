@@ -113,36 +113,30 @@ sh_test(
 )
 
 sh_test(
-    name = "reproduction_crash_orphan_survives_writer_reopen",
+    name = "writer_reopen_reclaims_abandoned_atomic_write_files",
     srcs = ["run-bazel-linux-fault-test.sh"],
     args = [
         "$(rootpath //crates/ctx-history-index:source_backed_recovery_tests)",
         "$(rootpath :libctx_source_recovery_fault.so)",
-        "reproduction_crash_orphan_survives_writer_reopen",
+        "writer_reopen_reclaims_abandoned_atomic_write_files",
     ],
     data = SOURCE_BACKED_RECOVERY_FAULT_RUNFILES,
     size = "medium",
-    tags = SOURCE_BACKED_RECOVERY_FAULT_TAGS + [
-        "manual",
-        "negative-reproduction",
-    ],
+    tags = SOURCE_BACKED_RECOVERY_FAULT_TAGS,
     target_compatible_with = ["@platforms//os:linux"],
 )
 
 sh_test(
-    name = "reproduction_reused_manifest_skips_directory_durability_fence",
+    name = "retry_resynchronizes_a_reused_manifest_before_meta_publication",
     srcs = ["run-bazel-linux-fault-test.sh"],
     args = [
         "$(rootpath //crates/ctx-history-index:source_backed_recovery_tests)",
         "$(rootpath :libctx_source_recovery_fault.so)",
-        "reproduction_reused_manifest_skips_directory_durability_fence",
+        "retry_resynchronizes_a_reused_manifest_before_meta_publication",
     ],
     data = SOURCE_BACKED_RECOVERY_FAULT_RUNFILES,
     size = "medium",
-    tags = SOURCE_BACKED_RECOVERY_FAULT_TAGS + [
-        "manual",
-        "negative-reproduction",
-    ],
+    tags = SOURCE_BACKED_RECOVERY_FAULT_TAGS,
     target_compatible_with = ["@platforms//os:linux"],
 )
 
@@ -152,25 +146,7 @@ test_suite(
         ":exact_manifest_and_tantivy_swap_process_death_matrix",
         ":injected_enospc_and_write_sync_failures_preserve_previous_generation",
         ":retry_after_pre_meta_crash_reclaims_tantivy_candidate_files",
+        ":retry_resynchronizes_a_reused_manifest_before_meta_publication",
+        ":writer_reopen_reclaims_abandoned_atomic_write_files",
     ],
-)
-
-# The full target also runs known-bug witness tests. Keep it explicit and manual
-# so those negative reproductions never masquerade as positive CI qualification.
-sh_test(
-    name = "full_fault_reproductions",
-    srcs = ["run-bazel-linux-fault-test.sh"],
-    args = [
-        "$(rootpath //crates/ctx-history-index:source_backed_recovery_tests)",
-        "$(rootpath :libctx_source_recovery_fault.so)",
-        "*",
-    ],
-    data = SOURCE_BACKED_RECOVERY_FAULT_RUNFILES,
-    size = "medium",
-    tags = SOURCE_BACKED_RECOVERY_FAULT_TAGS + [
-        "destructive-fault-injection",
-        "manual",
-        "negative-reproduction",
-    ],
-    target_compatible_with = ["@platforms//os:linux"],
 )

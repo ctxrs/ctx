@@ -31,7 +31,8 @@ ctx_default_tmpdir() {
 }
 
 ctx_bazel_cache_root() {
-  local spacious_root xdg_cache_home
+  local spacious_root xdg_cache_home available_kib available_inodes
+  local min_free_kib min_free_inodes
 
   if [[ -n "${CTX_BAZEL_CACHE_ROOT:-}" ]]; then
     printf '%s\n' "${CTX_BAZEL_CACHE_ROOT}"
@@ -39,10 +40,23 @@ ctx_bazel_cache_root() {
   fi
 
   spacious_root="${CTX_BAZEL_SPACIOUS_ROOT:-/mnt/ctx-perf}"
+  min_free_kib="${CTX_BAZEL_SPACIOUS_MIN_FREE_KIB:-5242880}"
+  min_free_inodes="${CTX_BAZEL_SPACIOUS_MIN_FREE_INODES:-50000}"
+  if ! ctx_positive_int "${min_free_kib}" || ! ctx_positive_int "${min_free_inodes}"; then
+    printf 'Bazel spacious-root capacity thresholds must be positive integers\n' >&2
+    return 1
+  fi
   if [[ -d "${spacious_root}" && -w "${spacious_root}" ]] \
     && mkdir -p "${spacious_root}/ctx-bazel" 2>/dev/null; then
-    printf '%s\n' "${spacious_root}/ctx-bazel"
-    return 0
+    available_kib="$(df -Pk "${spacious_root}" 2>/dev/null | awk 'NR == 2 { print $4; exit }')"
+    available_inodes="$(df -Pi "${spacious_root}" 2>/dev/null | awk 'NR == 2 { print $4; exit }')"
+    if ctx_positive_int "${available_kib}" \
+      && ctx_positive_int "${available_inodes}" \
+      && (( available_kib >= min_free_kib )) \
+      && (( available_inodes >= min_free_inodes )); then
+      printf '%s\n' "${spacious_root}/ctx-bazel"
+      return 0
+    fi
   fi
 
   xdg_cache_home="${XDG_CACHE_HOME:-}"
