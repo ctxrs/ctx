@@ -1,9 +1,9 @@
 //! Independent relational compatibility projection for source-backed Core.
 //!
 //! This database is a disposable consumer of a committed Core generation. It
-//! stores stable identities, relational metadata, bounded previews, and native
-//! locator/evidence envelopes; it never stores complete provider bodies and it
-//! never participates in Core lexical publication.
+//! stores stable identities, relational metadata, and native locator/evidence
+//! envelopes; it stores no provider body, search text, or preview and never
+//! participates in Core lexical publication.
 //!
 //! Integration sequence:
 //!
@@ -17,15 +17,14 @@
 //! 4. Treat the returned frontier as SQL-owned state. A projection error leaves
 //!    the prior SQL generation queryable and marks only this consumer behind.
 //!
-//! For the schema-v4 lexical seam, one source-backed event supplies event and
+//! For the schema-v5 lexical seam, one source-backed event supplies event and
 //! session identities, parent/root lineage, provider-session ID, branch,
 //! source path, agent scope, workspace/cwd, event ordering/type/role, touched
-//! paths, bounded preview, and locator evidence. The integration host emits one
-//! deduplicated session record before its events and supplies deterministic
-//! file-relation IDs plus any richer old-path/change metadata retained by the
-//! provider projector. Rebuild obtains the same records by rereading certified
-//! provider sources; it does not enumerate or hydrate complete bodies from
-//! SQLite.
+//! paths, and locator evidence. The integration host emits one deduplicated
+//! session record before its events and supplies deterministic file-relation
+//! IDs plus any richer old-path/change metadata retained by the provider
+//! projector. Rebuild obtains the same records by rereading certified provider
+//! sources; it does not enumerate or hydrate bodies from SQLite.
 //!
 //! A normal catch-up stream contains only sources whose certificates changed.
 //! A rebuild stream contains every source in the manifest. Confirmed deletion
@@ -44,8 +43,9 @@ use std::{
 };
 
 use ctx_history_core::{
-    CertifiedSource, EventRole, FileChangeKind, ProjectionContractError, SourceKey,
-    SourceResolverContractError, StableEntityId, StableEntityKind, IDENTITY_VERSION,
+    CertifiedSource, CertifiedSourceDeletion, CertifiedSourceInventory, EventRole, FileChangeKind,
+    ProjectionContractError, SourceKey, SourceResolverContractError, StableEntityId,
+    StableEntityKind, IDENTITY_VERSION,
 };
 use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
 use serde::{Deserialize, Serialize};
@@ -57,9 +57,16 @@ use crate::{
     raw_sql::{raw_sql_query_connection, RawSqlOptions, RawSqlResult},
 };
 
-const GENERATION_MANIFEST_VERSION: u32 = 1;
-const REQUIRED_LEXICAL_SCHEMA_VERSION: u32 = 4;
+pub(super) const GENERATION_MANIFEST_VERSION: u32 = 3;
+pub(super) const REQUIRED_LEXICAL_SCHEMA_VERSION: u32 = 5;
 const REQUIRED_LEXICAL_ANALYZER_VERSION: u32 = 1;
+/// Exact hash of the active manifest-v3/schema-v5 source generation policy.
+///
+/// This independent consumer intentionally pins the published compatibility
+/// boundary instead of importing the lexical implementation. Any policy change
+/// must update this hash and bump both relational projection versions.
+pub(super) const REQUIRED_SOURCE_GENERATION_POLICY_HASH: &str =
+    "255eb2b901f1dfb1c9c521c1d177dbe7a416491b5c0b8532494135bcb8b42ede";
 const MAX_GENERATION_MANIFEST_BYTES: usize = 8 * 1024 * 1024;
 const MAX_METADATA_TEXT_BYTES: usize = 64 * 1024;
 const MAX_PATH_BYTES: usize = 64 * 1024;
@@ -108,25 +115,30 @@ impl SourceBackedRelationalProjection {
 
     pub fn metadata(&self) -> Result<RelationalProjectionMetadata> {
         let row = self.conn.query_row(
-            "SELECT build_generation, active_generation_id, target_generation_id, status,
-                    source_count, session_count, event_count, file_touch_count, last_error
+            "SELECT build_generation, active_generation_id, active_manifest_version,
+                    active_lexical_schema_version, active_policy_schema_hash,
+                    target_generation_id, status, source_count, session_count,
+                    event_count, file_touch_count, last_error
              FROM source_backed_relational_state WHERE singleton = 1",
             [],
             |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, i64>(5)?,
-                    row.get::<_, i64>(6)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
                     row.get::<_, i64>(7)?,
-                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, i64>(9)?,
+                    row.get::<_, i64>(10)?,
+                    row.get::<_, Option<String>>(11)?,
                 ))
             },
         )?;
-        let status = match row.3.as_str() {
+        let status = match row.6.as_str() {
             "empty" => RelationalProjectionStatus::Empty,
             "ready" => RelationalProjectionStatus::Ready,
             "behind" => RelationalProjectionStatus::Behind,
@@ -139,13 +151,22 @@ impl SourceBackedRelationalProjection {
         Ok(RelationalProjectionMetadata {
             build_generation: sqlite_u64(row.0, "build_generation")?,
             active_core_generation_id: row.1,
-            target_core_generation_id: row.2,
+            active_manifest_version: row
+                .2
+                .map(|value| sqlite_u32(value, "active_manifest_version"))
+                .transpose()?,
+            active_lexical_schema_version: row
+                .3
+                .map(|value| sqlite_u32(value, "active_lexical_schema_version"))
+                .transpose()?,
+            active_policy_schema_hash: row.4,
+            target_core_generation_id: row.5,
             status,
-            source_count: sqlite_u64(row.4, "source_count")?,
-            session_count: sqlite_u64(row.5, "session_count")?,
-            event_count: sqlite_u64(row.6, "event_count")?,
-            file_touch_count: sqlite_u64(row.7, "file_touch_count")?,
-            last_error: row.8,
+            source_count: sqlite_u64(row.7, "source_count")?,
+            session_count: sqlite_u64(row.8, "session_count")?,
+            event_count: sqlite_u64(row.9, "event_count")?,
+            file_touch_count: sqlite_u64(row.10, "file_touch_count")?,
+            last_error: row.11,
         })
     }
 
@@ -213,21 +234,33 @@ enum BuildMode {
     CatchUp,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GenerationManifest {
     manifest_version: u32,
     identity_version: u16,
     lexical_schema_version: u32,
     lexical_analyzer_version: u32,
+    policy_schema_hash: String,
     indexed_documents: u64,
     certified_source_bytes: u64,
     sources: Vec<CertifiedSource>,
+    removals: Vec<GenerationRemoval>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GenerationRemoval {
+    deletion: CertifiedSourceDeletion,
+    inventory: CertifiedSourceInventory,
 }
 
 struct ValidatedManifest {
     digest: [u8; 32],
     sources: BTreeMap<String, ManifestSource>,
+    removal_ids: BTreeSet<String>,
     indexed_documents: u64,
+    policy_schema_hash: String,
 }
 
 struct ManifestSource {
@@ -241,18 +274,36 @@ impl ValidatedManifest {
         if commit.manifest_json.len() > MAX_GENERATION_MANIFEST_BYTES {
             return invalid_generation("manifest exceeds the relational projection limit");
         }
-        let manifest: GenerationManifest = serde_json::from_slice(&commit.manifest_json)?;
+        let manifest: GenerationManifest =
+            serde_json::from_slice(&commit.manifest_json).map_err(|error| {
+                RelationalProjectionError::InvalidCoreGeneration(format!(
+                    "manifest is not the required canonical v3 contract: {error}; \
+                     rebuild the disposable Core generation"
+                ))
+            })?;
         if serde_json::to_vec(&manifest)? != commit.manifest_json {
             return invalid_generation("manifest is not in canonical ctx JSON encoding");
         }
-        if manifest.manifest_version != GENERATION_MANIFEST_VERSION
-            || manifest.identity_version != IDENTITY_VERSION
+        if manifest.manifest_version != GENERATION_MANIFEST_VERSION {
+            return invalid_generation(
+                "Core manifest v3 is required; rebuild the disposable Core generation",
+            );
+        }
+        if manifest.identity_version != IDENTITY_VERSION
             || manifest.lexical_schema_version != REQUIRED_LEXICAL_SCHEMA_VERSION
             || manifest.lexical_analyzer_version != REQUIRED_LEXICAL_ANALYZER_VERSION
         {
             return invalid_generation(
-                "manifest, identity, or schema-v4 lexical lineage contract is unsupported",
+                "manifest identity or schema-v5 lexical lineage is unsupported; \
+                 rebuild the disposable Core generation",
             );
+        }
+        if manifest.policy_schema_hash != REQUIRED_SOURCE_GENERATION_POLICY_HASH {
+            return invalid_generation(format!(
+                "manifest policy hash {} does not match active policy {}; \
+                 rebuild the disposable Core generation",
+                manifest.policy_schema_hash, REQUIRED_SOURCE_GENERATION_POLICY_HASH
+            ));
         }
         let digest: [u8; 32] = Sha256::digest(&commit.manifest_json).into();
         if commit.generation_id != hex(&digest) {
@@ -267,6 +318,7 @@ impl ValidatedManifest {
         let mut expected_events = 0_u64;
         let mut expected_bytes = 0_u64;
         let mut prior_digest = None;
+        let mut active_source_digests = BTreeSet::new();
         let mut sources = BTreeMap::new();
         for certificate in manifest.sources {
             certificate
@@ -278,6 +330,7 @@ impl ValidatedManifest {
                 return invalid_generation("manifest sources are not strictly sorted");
             }
             prior_digest = Some(source_digest);
+            active_source_digests.insert(source_digest);
             expected_events = expected_events
                 .checked_add(certificate.counts().indexed_documents)
                 .ok_or(RelationalProjectionError::CountOverflow(
@@ -300,6 +353,35 @@ impl ValidatedManifest {
                 },
             );
         }
+        let mut prior_removal_digest = None;
+        let mut removal_ids = BTreeSet::new();
+        for removal in manifest.removals {
+            removal
+                .deletion
+                .validate_contract()
+                .map_err(contract_generation_error)?;
+            removal
+                .inventory
+                .validate_contract()
+                .map_err(contract_generation_error)?;
+            if !removal.deletion.verifies(&removal.inventory) {
+                return invalid_generation(
+                    "manifest deletion evidence does not match its certified inventory",
+                );
+            }
+            let source = removal.deletion.source();
+            let source_digest = source.identity().digest();
+            if prior_removal_digest.is_some_and(|prior| prior >= source_digest) {
+                return invalid_generation("manifest removals are not strictly sorted");
+            }
+            if active_source_digests.contains(&source_digest) {
+                return invalid_generation(
+                    "manifest source and certified removal identities overlap",
+                );
+            }
+            prior_removal_digest = Some(source_digest);
+            removal_ids.insert(source.identity().as_uuid().to_string());
+        }
         if expected_events != manifest.indexed_documents
             || expected_bytes != manifest.certified_source_bytes
         {
@@ -308,7 +390,9 @@ impl ValidatedManifest {
         Ok(Self {
             digest,
             sources,
+            removal_ids,
             indexed_documents: manifest.indexed_documents,
+            policy_schema_hash: manifest.policy_schema_hash,
         })
     }
 }
@@ -341,6 +425,11 @@ where
                 })
                 .collect::<BTreeSet<_>>();
             for source_id in prior.keys().filter(|id| !manifest_ids.contains(*id)) {
+                if !manifest.removal_ids.contains(source_id) {
+                    return invalid_generation(format!(
+                        "source {source_id} is omitted without durable certified deletion evidence"
+                    ));
+                }
                 tx.execute(
                     "DELETE FROM source_backed_sources WHERE source_id = ?1",
                     [source_id],
@@ -457,18 +546,24 @@ where
          SET build_generation = ?1,
              active_generation_id = ?2,
              active_manifest_digest = ?3,
+             active_manifest_version = ?4,
+             active_lexical_schema_version = ?5,
+             active_policy_schema_hash = ?6,
              target_generation_id = NULL,
              status = 'ready',
-             source_count = ?4,
-             session_count = ?5,
-             event_count = ?6,
-             file_touch_count = ?7,
+             source_count = ?7,
+             session_count = ?8,
+             event_count = ?9,
+             file_touch_count = ?10,
              last_error = NULL
          WHERE singleton = 1",
         params![
             build_generation,
             generation.generation_id,
             manifest.digest.as_slice(),
+            GENERATION_MANIFEST_VERSION,
+            REQUIRED_LEXICAL_SCHEMA_VERSION,
+            manifest.policy_schema_hash,
             counts.sources,
             counts.sessions,
             counts.events,
@@ -494,10 +589,8 @@ struct OpenSource {
 }
 
 #[derive(Debug, Serialize)]
-struct CompatibilityPayload<'a> {
+struct CompatibilityPayload {
     content_authority: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    body_preview: Option<&'a str>,
 }
 
 struct ProjectionCounts {
@@ -609,7 +702,6 @@ fn insert_session(
 fn insert_event(conn: &Connection, source_id: &str, event: &RelationalEventMetadata) -> Result<()> {
     let payload = serde_json::to_string(&CompatibilityPayload {
         content_authority: "provider_source",
-        body_preview: event.bounded_preview.as_deref(),
     })?;
     conn.execute(
         "INSERT INTO source_backed_events (
@@ -751,11 +843,6 @@ fn validate_event(event: &RelationalEventMetadata, source: &SourceKey) -> Result
         .map_err(resolver_record_error)?;
     if !event.locator.source().exact_descriptor_eq(source) {
         return invalid_record("event locator does not match the active source");
-    }
-    if let Some(preview) = &event.bounded_preview {
-        if preview.chars().count() > RELATIONAL_EVENT_PREVIEW_MAX_CHARS {
-            return invalid_record("event preview exceeds 2,048 characters");
-        }
     }
     Ok(())
 }
@@ -937,6 +1024,10 @@ fn sqlite_i64(value: u64, field: &'static str) -> Result<i64> {
 
 fn sqlite_u64(value: i64, field: &'static str) -> Result<u64> {
     u64::try_from(value).map_err(|_| RelationalProjectionError::CountOverflow(field))
+}
+
+fn sqlite_u32(value: i64, field: &'static str) -> Result<u32> {
+    u32::try_from(value).map_err(|_| RelationalProjectionError::CountOverflow(field))
 }
 
 fn contract_generation_error(error: ProjectionContractError) -> RelationalProjectionError {

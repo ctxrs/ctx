@@ -1,8 +1,9 @@
 use rusqlite::{Connection, OptionalExtension};
 
 use super::{
-    RelationalProjectionError, Result, RELATIONAL_PROJECTION_CONTRACT_VERSION,
-    RELATIONAL_PROJECTION_SCHEMA_VERSION,
+    hex, RelationalProjectionError, Result, RELATIONAL_PROJECTION_CONTRACT_VERSION,
+    RELATIONAL_PROJECTION_SCHEMA_VERSION, REQUIRED_LEXICAL_SCHEMA_VERSION,
+    REQUIRED_SOURCE_GENERATION_POLICY_HASH,
 };
 
 pub(super) const SCHEMA_SQL: &str = r#"
@@ -15,6 +16,9 @@ CREATE TABLE IF NOT EXISTS source_backed_relational_state (
     build_generation INTEGER NOT NULL,
     active_generation_id TEXT,
     active_manifest_digest BLOB,
+    active_manifest_version INTEGER,
+    active_lexical_schema_version INTEGER,
+    active_policy_schema_hash TEXT,
     target_generation_id TEXT,
     status TEXT NOT NULL CHECK (status IN ('empty', 'ready', 'behind')),
     source_count INTEGER NOT NULL,
@@ -23,18 +27,6 @@ CREATE TABLE IF NOT EXISTS source_backed_relational_state (
     file_touch_count INTEGER NOT NULL,
     last_error TEXT
 );
-
-INSERT OR IGNORE INTO source_backed_relational_state (
-    singleton,
-    schema_version,
-    contract_version,
-    build_generation,
-    status,
-    source_count,
-    session_count,
-    event_count,
-    file_touch_count
-) VALUES (1, 1, 1, 0, 'empty', 0, 0, 0, 0);
 
 CREATE TABLE IF NOT EXISTS source_backed_sources (
     source_id TEXT PRIMARY KEY,
@@ -248,13 +240,37 @@ SELECT
     session_count AS session_count,
     event_count AS event_count,
     file_touch_count AS file_touch_count,
-    last_error AS last_error
+    last_error AS last_error,
+    active_manifest_version AS core_manifest_version,
+    active_lexical_schema_version AS core_lexical_schema_version,
+    active_policy_schema_hash AS core_policy_schema_hash,
+    active_manifest_digest AS core_manifest_sha256
 FROM source_backed_relational_state
 WHERE singleton = 1;
 "#;
 
 pub(super) fn initialize(conn: &Connection) -> Result<()> {
+    if let Some((schema_version, contract_version)) = existing_schema_versions(conn)? {
+        if schema_version != i64::from(RELATIONAL_PROJECTION_SCHEMA_VERSION)
+            || contract_version != i64::from(RELATIONAL_PROJECTION_CONTRACT_VERSION)
+        {
+            return Err(RelationalProjectionError::UnsupportedSchema {
+                schema_version,
+                contract_version,
+            });
+        }
+    }
     conn.execute_batch(SCHEMA_SQL)?;
+    conn.execute(
+        "INSERT OR IGNORE INTO source_backed_relational_state (
+            singleton, schema_version, contract_version, build_generation, status,
+            source_count, session_count, event_count, file_touch_count
+         ) VALUES (1, ?1, ?2, 0, 'empty', 0, 0, 0, 0)",
+        [
+            i64::from(RELATIONAL_PROJECTION_SCHEMA_VERSION),
+            i64::from(RELATIONAL_PROJECTION_CONTRACT_VERSION),
+        ],
+    )?;
     verify(conn)
 }
 
@@ -277,6 +293,29 @@ pub(super) fn verify(conn: &Connection) -> Result<()> {
             contract_version: state.1,
         });
     }
+    for column in [
+        "active_manifest_digest",
+        "active_manifest_version",
+        "active_lexical_schema_version",
+        "active_policy_schema_hash",
+    ] {
+        let exists = conn
+            .query_row(
+                "SELECT 1
+                 FROM pragma_table_info('source_backed_relational_state')
+                 WHERE name = ?1",
+                [column],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !exists {
+            return Err(RelationalProjectionError::IncompatibleState(format!(
+                "required state column {column} is missing"
+            )));
+        }
+    }
+    verify_active_generation_evidence(conn)?;
     for view in [
         "ctx_sessions",
         "ctx_events",
@@ -297,6 +336,91 @@ pub(super) fn verify(conn: &Connection) -> Result<()> {
                 view.to_owned(),
             ));
         }
+    }
+    Ok(())
+}
+
+fn existing_schema_versions(conn: &Connection) -> Result<Option<(i64, i64)>> {
+    let table_exists = conn
+        .query_row(
+            "SELECT 1
+             FROM sqlite_schema
+             WHERE type = 'table' AND name = 'source_backed_relational_state'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !table_exists {
+        return Ok(None);
+    }
+    conn.query_row(
+        "SELECT schema_version, contract_version
+         FROM source_backed_relational_state
+         WHERE singleton = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()?
+    .map(Some)
+    .ok_or(RelationalProjectionError::MissingSchema)
+}
+
+fn verify_active_generation_evidence(conn: &Connection) -> Result<()> {
+    let state = conn.query_row(
+        "SELECT status, active_generation_id, active_manifest_digest,
+                active_manifest_version, active_lexical_schema_version,
+                active_policy_schema_hash
+         FROM source_backed_relational_state
+         WHERE singleton = 1",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<Vec<u8>>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        },
+    )?;
+    let (status, generation_id, digest, manifest_version, lexical_schema_version, policy_hash) =
+        state;
+    let evidence_present = digest.is_some()
+        || manifest_version.is_some()
+        || lexical_schema_version.is_some()
+        || policy_hash.is_some();
+    let Some(generation_id) = generation_id else {
+        if evidence_present || status == "ready" {
+            return Err(RelationalProjectionError::IncompatibleState(
+                "active generation evidence is incomplete".to_owned(),
+            ));
+        }
+        return Ok(());
+    };
+    let digest = digest.ok_or_else(|| {
+        RelationalProjectionError::IncompatibleState("active manifest digest is missing".to_owned())
+    })?;
+    if digest.len() != 32 || hex(&digest) != generation_id {
+        return Err(RelationalProjectionError::IncompatibleState(
+            "active generation ID does not match its manifest digest".to_owned(),
+        ));
+    }
+    if manifest_version != Some(i64::from(super::GENERATION_MANIFEST_VERSION)) {
+        return Err(RelationalProjectionError::IncompatibleState(
+            "active Core manifest version is stale".to_owned(),
+        ));
+    }
+    if lexical_schema_version != Some(i64::from(REQUIRED_LEXICAL_SCHEMA_VERSION)) {
+        return Err(RelationalProjectionError::IncompatibleState(
+            "active Core lexical schema version is stale".to_owned(),
+        ));
+    }
+    if policy_hash.as_deref() != Some(REQUIRED_SOURCE_GENERATION_POLICY_HASH) {
+        return Err(RelationalProjectionError::IncompatibleState(
+            "active Core policy hash does not match the required policy".to_owned(),
+        ));
     }
     Ok(())
 }
