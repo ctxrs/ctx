@@ -2,6 +2,7 @@
 
 use std::{
     env,
+    error::Error as StdError,
     ffi::OsStr,
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
@@ -29,6 +30,7 @@ const CHILD_ROOT_ENV: &str = "CTX_SOURCE_RECOVERY_ROOT";
 const CHILD_MARKER_ENV: &str = "CTX_SOURCE_RECOVERY_MARKER";
 const CHILD_RESULT_ENV: &str = "CTX_SOURCE_RECOVERY_RESULT";
 const FAULT_SHIM_ENV: &str = "CTX_SOURCE_RECOVERY_FAULT_SHIM";
+const REAL_ENOSPC_ENV: &str = "CTX_SOURCE_RECOVERY_REAL_ENOSPC";
 const PREVIOUS_BODY: &str = "previous baseline content";
 const CANDIDATE_BODY: &str = "candidate replacement content";
 const CHILD_TIMEOUT: Duration = Duration::from_secs(20);
@@ -60,6 +62,13 @@ fn subprocess_generation_worker() {
         }
         "commit_expect_error" => {
             let error = staged_replacement(&root).commit(|_| true).unwrap_err();
+            write_child_result(&format!("{error:?}\n{error}"));
+        }
+        "open_expect_lock_error" => {
+            let error = match GenerationWriter::open(&root, writer_options()) {
+                Ok(_) => panic!("competing process unexpectedly acquired the writer lock"),
+                Err(error) => error,
+            };
             write_child_result(&format!("{error:?}\n{error}"));
         }
         other => panic!("unknown child mode {other}"),
@@ -121,6 +130,51 @@ fn stale_writer_lock_after_sigkill_is_recoverable() {
         &fixture.baseline.generation_id,
         "previous",
         "candidate",
+    );
+}
+
+#[test]
+fn two_live_processes_contend_for_one_generation_lock_without_torn_state() {
+    let fixture = RecoveryFixture::new();
+    let mut winner = fixture.spawn_stopped_child("pause_before_commit", None);
+    wait_for_marker(&mut winner, &fixture.marker);
+
+    let _ = fs::remove_file(&fixture.result);
+    let loser = fixture
+        .child_command("open_expect_lock_error")
+        .output()
+        .unwrap();
+    assert!(
+        loser.status.success(),
+        "competing writer process failed unexpectedly:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&loser.stdout),
+        String::from_utf8_lossy(&loser.stderr)
+    );
+    let loser_error = fs::read_to_string(&fixture.result).unwrap();
+    assert!(
+        loser_error.contains("LockFailure") && loser_error.contains("LockBusy"),
+        "competing writer did not report the deterministic lock loser: {loser_error}"
+    );
+
+    winner.kill().unwrap();
+    let winner_status = winner.wait().unwrap();
+    assert!(
+        !winner_status.success(),
+        "stopped lock winner unexpectedly exited cleanly"
+    );
+    assert_generation(
+        &fixture.root,
+        &fixture.baseline.generation_id,
+        "previous",
+        "candidate",
+    );
+
+    let receipt = staged_replacement(&fixture.root).commit(|_| true).unwrap();
+    assert_generation(
+        &fixture.root,
+        &receipt.generation_id,
+        "candidate",
+        "previous",
     );
 }
 
@@ -352,6 +406,60 @@ fn injected_enospc_and_write_sync_failures_preserve_previous_generation() {
             "candidate",
         );
     }
+}
+
+#[test]
+#[ignore = "requires scripts/source-backed-recovery/run-bounded-enospc-test.sh"]
+fn actual_bounded_filesystem_enospc_preserves_previous_generation() {
+    assert_eq!(
+        env::var(REAL_ENOSPC_ENV).as_deref(),
+        Ok("1"),
+        "actual ENOSPC test must run only inside the bounded-filesystem harness"
+    );
+    let fixture = RecoveryFixture::new();
+    let fill_path = fixture.temp.path().join("actual-enospc-fill");
+    let mut fill = File::create(&fill_path).unwrap();
+    let block = vec![0_u8; 1024 * 1024];
+    let mut filled_bytes = 0_u64;
+    let fill_error = loop {
+        match fill.write_all(&block) {
+            Ok(()) => filled_bytes += block.len() as u64,
+            Err(error) => break error,
+        }
+    };
+    assert_eq!(
+        fill_error.raw_os_error(),
+        Some(28),
+        "bounded filesystem did not report actual ENOSPC after {filled_bytes} bytes: {fill_error}"
+    );
+    drop(fill);
+
+    let failure = try_staged_replacement(&fixture.root)
+        .and_then(|writer| writer.commit(|_| true).map(|_| ()))
+        .expect_err("generation publication unexpectedly succeeded on a full filesystem");
+    assert!(
+        index_error_has_enospc(&failure),
+        "generation failure did not retain actual ENOSPC: {failure:?}\n{failure}"
+    );
+
+    fs::remove_file(fill_path).unwrap();
+    assert_generation(
+        &fixture.root,
+        &fixture.baseline.generation_id,
+        "previous",
+        "candidate",
+    );
+    let receipt = staged_replacement(&fixture.root).commit(|_| true).unwrap();
+    assert_generation(
+        &fixture.root,
+        &receipt.generation_id,
+        "candidate",
+        "previous",
+    );
+    eprintln!(
+        "actual bounded-filesystem ENOSPC after {filled_bytes} fill bytes; prior generation preserved and retry published {}",
+        receipt.generation_id
+    );
 }
 
 #[test]
@@ -634,14 +742,28 @@ fn build_generation(root: &Path, revision: u8, body: &str) -> CommitReceipt {
 }
 
 fn staged_replacement(root: &Path) -> GenerationWriter {
+    try_staged_replacement(root).unwrap()
+}
+
+fn try_staged_replacement(root: &Path) -> std::result::Result<GenerationWriter, IndexError> {
     let source = source();
-    let mut writer = GenerationWriter::open(root, writer_options()).unwrap();
-    writer.begin_source(source.clone()).unwrap();
-    writer
-        .add_document(document(&source, CANDIDATE_BODY))
-        .unwrap();
-    writer.certify_source(certificate(&source, 2)).unwrap();
-    writer
+    let mut writer = GenerationWriter::open(root, writer_options())?;
+    writer.begin_source(source.clone())?;
+    writer.add_document(document(&source, CANDIDATE_BODY))?;
+    writer.certify_source(certificate(&source, 2))?;
+    Ok(writer)
+}
+
+fn index_error_has_enospc(error: &IndexError) -> bool {
+    let debug = format!("{error:?}");
+    error_chain_has_enospc(error) || (debug.contains("code: 28") && debug.contains("StorageFull"))
+}
+
+fn error_chain_has_enospc(error: &(dyn StdError + 'static)) -> bool {
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|error| error.raw_os_error() == Some(28))
+        || error.source().is_some_and(error_chain_has_enospc)
 }
 
 fn writer_options() -> WriterOptions {

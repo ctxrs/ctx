@@ -1231,6 +1231,46 @@ mod tests {
     }
 
     #[test]
+    fn arbitrary_relational_bytes_fail_closed_during_daemon_catch_up() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = source();
+        let first_generation = initial_generation(temp.path(), &source);
+        run_after_core_publication(temp.path(), &first_generation).unwrap();
+        let appended_generation = append_generation(temp.path(), &source);
+        let projection_path = sql_compatibility_path(temp.path());
+
+        fs::write(&projection_path, vec![0xa5; 4096]).unwrap();
+        let run = run_after_core_publication(temp.path(), &appended_generation).unwrap();
+
+        assert!(!run.did_work);
+        assert_eq!(run.status["status"], "error");
+        assert_eq!(run.status["pending"], true);
+        assert_eq!(run.status["retryable"], true);
+        assert_eq!(
+            run.status["error_code"],
+            "source_relational_projection_unavailable"
+        );
+        assert!(
+            run.status["last_error"]
+                .as_str()
+                .is_some_and(|error| error.contains("file is not a database")),
+            "{:#}",
+            run.status
+        );
+        let compatibility_error = SqlCompatibility::open_for_data_root(temp.path())
+            .err()
+            .expect("arbitrarily corrupted relational bytes must fail closed");
+        assert!(
+            compatibility_error
+                .to_string()
+                .contains("file is not a database"),
+            "{compatibility_error}"
+        );
+        let legacy_path = temp.path().join(["work", ".sqlite"].concat());
+        assert!(!legacy_path.exists());
+    }
+
+    #[test]
     fn generation_mismatch_is_persistent_and_never_creates_a_fallback_database() {
         let temp = tempfile::tempdir().unwrap();
         let source = source();
