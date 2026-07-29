@@ -9,16 +9,20 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    derive_event_id, derive_session_id, BatchHydrationRequest, BatchHydrationResult,
+    derive_event_id, derive_session_id, AgentType, BatchHydrationRequest, BatchHydrationResult,
     CaptureProvider, CertifiedSource, CertifiedSourceInventory, ContentSourceResolver,
-    EventHydrationRequest, EventIdentityInput, HydratedProviderRecord, HydrationFailure,
-    HydrationFailureKind, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
-    NativeSessionKey, ProjectionContractError, ScannedSourceCounts, SessionHydrationRequest,
-    SessionIdentityInput, SourceAnchor, SourceInventoryObservation, SourceKey, SourceObservation,
-    SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
+    EventHydrationRequest, EventIdentityInput, EventRole, EventType, HydratedProviderRecord,
+    HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy, NativeItemKey,
+    NativeRecordCoordinate, NativeSessionKey, ProjectionContractError, ScannedSourceCounts,
+    SessionHydrationRequest, SessionIdentityInput, SourceAnchor, SourceInventoryObservation,
+    SourceKey, SourceObservation, SourceRecordLocator, SourceResolverContractError, StableEntityId,
+    TypedKey,
 };
 use ctx_history_index::{IndexError, LexicalDocument};
+use serde::Serialize;
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
@@ -26,15 +30,27 @@ use uuid::Uuid;
 use crate::{
     common::io::ProviderSourceRoot,
     discover_provider_sources_for_provider_with_context,
+    native_source::NativeSqliteValue,
+    provider::normalization::{provider_json_text, provider_timestamp_millis, provider_value_text},
     provider::sqlite::sqlite_schema_fingerprint,
     provider_sources::{
         open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
         SqliteSourceAccessError, SqliteSourceEvidence, SqliteSourceReadSnapshot,
     },
-    DiscoveryContext, ProviderSourceStatus,
+    CaptureError, DiscoveryContext, ProviderSourceStatus, ASTRBOT_SQLITE_SOURCE_FORMAT,
+    MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
 
-use super::*;
+use super::super::{
+    model::{
+        checkpoint_id, item_id, item_is_output, item_role, item_text, provider_session_id,
+        ConversationRow, PlatformMessageLink, PlatformMessageRow,
+    },
+    source::{
+        fetch_candidate, hydrate_conversation, hydrate_platform_message, AstrBotSql, RowCandidate,
+    },
+    ASTRBOT_CAPTURE_REVISION, ASTRBOT_POLICY_REVISION,
+};
 
 const SOURCE_SCHEMA_VARIANT: &str = "astrbot-data-v4-logical-v0";
 const SOURCE_IDENTITY_VERSION: u32 = 1;
@@ -54,6 +70,26 @@ const CONVERSATION_OUTPUT_RELATION: &str = "astrbot.conversation-output-v0";
 const PLATFORM_MESSAGE_RELATION: &str = "astrbot.platform-message-v0";
 const SQLITE_SOURCE_INVALID_REASON: &str =
     "AstrBot SQLite source must have an authorized parent and database leaf";
+
+#[derive(Debug)]
+struct SessionFact {
+    provider_session_id: String,
+    started_at: DateTime<Utc>,
+}
+
+#[derive(Debug)]
+struct EventFact {
+    source_record_ordinal: u64,
+    event_type: EventType,
+    role: Option<EventRole>,
+    occurred_at: DateTime<Utc>,
+}
+
+#[derive(Debug)]
+struct CoreUnit {
+    session: SessionFact,
+    event: Option<EventFact>,
+}
 
 #[derive(Debug, Error)]
 pub(crate) enum AstrBotSourceBackedErrorV0 {
@@ -84,6 +120,121 @@ pub(crate) enum AstrBotSourceBackedErrorV0 {
 }
 
 pub(crate) type AstrBotSourceBackedResultV0<T> = std::result::Result<T, AstrBotSourceBackedErrorV0>;
+
+fn conversation_items(raw: &str) -> (Vec<Value>, bool) {
+    match provider_json_text(raw) {
+        Value::Array(items) => (items, true),
+        value => (vec![value], false),
+    }
+}
+
+fn conversation_session_fact(row: &ConversationRow) -> SessionFact {
+    SessionFact {
+        provider_session_id: provider_session_id(row),
+        started_at: timestamp(row.created_at, DateTime::<Utc>::UNIX_EPOCH),
+    }
+}
+
+fn platform_session_fact(
+    row: &PlatformMessageRow,
+    link: Option<&PlatformMessageLink>,
+) -> SessionFact {
+    let provider_session_id = link
+        .map(|link| link.provider_session_id.clone())
+        .unwrap_or_else(|| {
+            format!(
+                "platform/{}/{}",
+                row.platform_id.as_deref().unwrap_or("unknown"),
+                row.user_id.as_deref().unwrap_or("unknown")
+            )
+        });
+    let started_at = link
+        .and_then(|link| link.parent_created_at)
+        .map(|value| timestamp(Some(value), DateTime::<Utc>::UNIX_EPOCH))
+        .unwrap_or_else(|| timestamp(row.created_at, DateTime::<Utc>::UNIX_EPOCH));
+    SessionFact {
+        provider_session_id,
+        started_at,
+    }
+}
+
+fn source_backed_conversation_event(
+    row: &ConversationRow,
+    item: Option<&Value>,
+    content_is_array: bool,
+    native_ordinal: u64,
+) -> Option<EventFact> {
+    let item = item?;
+    if checkpoint_id(item).is_some() {
+        return None;
+    }
+    let text = if content_is_array {
+        item_text(item)
+    } else {
+        provider_value_text(item)
+    }?;
+    if text.trim().is_empty() {
+        return None;
+    }
+    let event_type = if item_is_output(item) {
+        EventType::ToolOutput
+    } else {
+        EventType::Message
+    };
+    Some(EventFact {
+        source_record_ordinal: native_ordinal,
+        event_type,
+        role: item_role(item),
+        occurred_at: timestamp(row.created_at, DateTime::<Utc>::UNIX_EPOCH),
+    })
+}
+
+fn serialized_hash(
+    value_domain: &[u8],
+    value: &impl Serialize,
+) -> std::result::Result<[u8; 32], CaptureError> {
+    let encoded = serde_json::to_vec(value).map_err(CaptureError::from)?;
+    let mut hash = Sha256::new();
+    hash.update(value_domain);
+    hash_field(&mut hash, &encoded);
+    Ok(hash.finalize().into())
+}
+
+fn candidate_hash(domain: &[u8], candidate: RowCandidate) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(domain);
+    hash.update(candidate.physical_rowid.to_le_bytes());
+    hash.update(candidate.retained_bytes.to_le_bytes());
+    hash.update(candidate.legacy_order.logical_id.to_le_bytes());
+    hash.update(candidate.legacy_order.timestamp.to_le_bytes());
+    hash.finalize().into()
+}
+
+fn chain_hash(prior: [u8; 32], row: [u8; 32]) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(b"ctx-astrbot-prefix-chain-v1\0");
+    hash.update(prior);
+    hash.update(row);
+    hash.finalize().into()
+}
+
+fn hash_field(hash: &mut Sha256, value: &[u8]) {
+    hash.update((value.len() as u64).to_le_bytes());
+    hash.update(value);
+}
+
+fn hex(bytes: &[u8]) -> String {
+    let mut value = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(value, "{byte:02x}");
+    }
+    value
+}
+
+fn timestamp(value: Option<i64>, fallback: DateTime<Utc>) -> DateTime<Utc> {
+    provider_timestamp_millis(value, fallback)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum AstrBotSourceIdentityV0 {
@@ -285,32 +436,19 @@ pub(crate) fn scan_astrbot_source_backed_v0(
             }
         }
         let item_count = items.len().max(1);
-        let values = super::super::model::conversation_values(row.clone());
         for item_index in 0..item_count {
             add_complete(&mut counts)?;
             let item = items.get(item_index);
-            let (event, _, rejection) = conversation_event(
-                &row,
-                candidate.physical_rowid,
-                item_index,
-                item,
-                content_is_array,
-                native_ordinal,
-                false,
-            )?;
-            if rejection.is_some() {
-                add_rejected(&mut counts)?;
-            } else if let Some(event) = event {
-                let complete_text = if event.event_type == EventType::Message {
-                    super::super::astrbot_complete_conversation_message(
-                        &values,
-                        u32::try_from(item_index)
-                            .map_err(|_| AstrBotSourceBackedErrorV0::CountOverflow)?,
-                    )?
-                    .ok_or(AstrBotSourceBackedErrorV0::ExactConversationMismatch)?
-                    .text
-                } else {
+            let event =
+                source_backed_conversation_event(&row, item, content_is_array, native_ordinal);
+            if let Some(event) = event {
+                let complete_text = if content_is_array {
                     item.and_then(item_text)
+                        .filter(|text| !text.trim().is_empty())
+                        .ok_or(AstrBotSourceBackedErrorV0::ExactConversationMismatch)?
+                } else {
+                    item.and_then(provider_value_text)
+                        .filter(|text| !text.trim().is_empty())
                         .ok_or(AstrBotSourceBackedErrorV0::ExactConversationMismatch)?
                 };
                 let session = conversation_session_fact(&row);
@@ -458,38 +596,16 @@ fn source_backed_platform_unit(
     } else {
         Some(EventRole::Assistant)
     };
-    let event_index = 1_000_000u64.saturating_add(u64::try_from(row.id).unwrap_or(0));
     let event_type = EventType::Message;
     let occurred_at = timestamp(row.created_at, session.started_at);
-    let body = json!({
-        "message_id": row.id,
-        "platform_id": row.platform_id,
-        "user_id": row.user_id,
-        "sender_id": row.sender_id,
-        "sender_name": row.sender_name,
-        "content": row.content.as_deref().map(provider_json_text),
-        "llm_checkpoint_id": row.llm_checkpoint_id,
-    });
     Ok((
         Some(CoreUnit {
             session,
             event: Some(EventFact {
-                provider_event_index: event_index,
-                legacy_provider_event_index: Some(event_index),
-                legacy_provider_event_hash: format!("platform-message:{}", row.id),
-                released_v025_payload_hash: None,
-                cursor: format!("platform_message_history:id:{}", row.id),
                 source_record_ordinal: native_ordinal,
-                source_record_subrecord_index: 0,
                 event_type,
                 role,
                 occurred_at,
-                payload: astrbot_event_payload(event_type, &text, &body),
-                metadata: json!({
-                    "source": "astrbot_platform_message_history",
-                    "source_format": ASTRBOT_SQLITE_SOURCE_FORMAT,
-                    "message_id": row.id,
-                }),
             }),
         }),
         None,
@@ -606,17 +722,13 @@ impl AstrBotSourceBackedResolverV0 {
                         content_kind,
                     } => {
                         if !conversations.contains_key(&physical_rowid) {
-                            let values = super::super::astrbot_complete_conversation_values(
+                            let row = hydrate_conversation(
                                 conn,
+                                &sql.conversation_hydration,
                                 physical_rowid,
                             )
-                            .map_err(map_capture_hydration)?
-                            .ok_or_else(|| {
-                                hydration_failure(
-                                    HydrationFailureKind::MissingRecord,
-                                    "AstrBot conversation row is missing",
-                                )
-                            })?;
+                            .map_err(map_capture_hydration)?;
+                            let values = super::super::model::conversation_values(row);
                             conversations.insert(physical_rowid, values);
                         }
                         let values = conversations.get(&physical_rowid).ok_or_else(|| {

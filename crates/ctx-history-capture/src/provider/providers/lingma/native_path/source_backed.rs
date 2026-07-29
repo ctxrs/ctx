@@ -8,11 +8,12 @@ use chrono::{DateTime, Duration, Utc};
 use ctx_history_core::{
     derive_event_id, derive_session_id, BatchHydrationRequest, BatchHydrationResult,
     CaptureProvider, CertifiedSource, CertifiedSourceInventory, ContentSourceResolver,
-    EventHydrationRequest, EventIdentityInput, HydratedProviderRecord, HydrationFailure,
-    HydrationFailureKind, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
-    NativeSessionKey, ProjectionContractError, ScannedSourceCounts, SessionHydrationRequest,
-    SessionIdentityInput, SourceAnchor, SourceInventoryObservation, SourceKey, SourceObservation,
-    SourceRecordLocator, SourceResolverContractError, StableEntityId, SubrecordSelector, TypedKey,
+    EventHydrationRequest, EventIdentityInput, EventRole, EventType, HydratedProviderRecord,
+    HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy, NativeItemKey,
+    NativeRecordCoordinate, NativeSessionKey, ProjectionContractError, ScannedSourceCounts,
+    SessionHydrationRequest, SessionIdentityInput, SourceAnchor, SourceInventoryObservation,
+    SourceKey, SourceObservation, SourceRecordLocator, SourceResolverContractError, StableEntityId,
+    SubrecordSelector, TypedKey,
 };
 use ctx_history_index::LexicalDocument;
 use sha2::{Digest, Sha256};
@@ -20,10 +21,9 @@ use thiserror::Error;
 
 use super::{
     detect_schema, hash_candidate, initial_prefix_hasher, load_candidates, load_raw_row,
-    publication::{provider_event, EventDraft},
     records::{
-        assistant_text, event_base_index, lingma_logical_record_sha256, lingma_timestamp,
-        native_values, row_from_native_values,
+        assistant_text, lingma_logical_record_sha256, lingma_timestamp, native_values,
+        row_from_native_values,
     },
     LingmaRow, SqliteEncoding,
 };
@@ -58,6 +58,12 @@ const ASSISTANT_ERROR_COORDINATE: &str = "assistant_error_result";
 const MAX_INVENTORY_DATABASES: usize = 1_024;
 const SOURCE_REVISION_DOMAIN: &[u8] = b"ctx-lingma-source-backed-revision-v0\0";
 const INVENTORY_REVISION_DOMAIN: &[u8] = b"ctx-lingma-source-backed-inventory-v0\0";
+
+struct ProjectedEvent {
+    event_type: EventType,
+    role: EventRole,
+    occurred_at: DateTime<Utc>,
+}
 
 #[derive(Debug, Error)]
 pub(crate) enum LingmaSourceBackedErrorV0 {
@@ -596,19 +602,11 @@ fn project_row(
     })?;
     let native_identity = native_item_identity(&parsed, request_counts, revision_scope)?;
     let user_sequence = parsed.ordinal.saturating_mul(2);
-    let user_event = provider_event(
-        &parsed.row,
-        EventDraft {
-            provider_event_index: event_base_index(&parsed.row),
-            role: ctx_history_core::EventRole::User,
-            event_type: ctx_history_core::EventType::Message,
-            occurred_at: lingma_timestamp(parsed.row.gmt_create, DateTime::<Utc>::UNIX_EPOCH),
-            text: parsed.row.chat_prompt.clone(),
-            body_kind: USER_PROMPT_COORDINATE,
-            fidelity: ctx_history_core::Fidelity::Imported,
-        },
-        false,
-    )?;
+    let user_event = ProjectedEvent {
+        role: EventRole::User,
+        event_type: EventType::Message,
+        occurred_at: lingma_timestamp(parsed.row.gmt_create, DateTime::<Utc>::UNIX_EPOCH),
+    };
     records.push(project_event(
         source,
         session_id,
@@ -624,7 +622,7 @@ fn project_row(
     )?);
 
     if let Some((text, body_kind, event_type)) = assistant_text(&parsed.row) {
-        let logical_text = text.clone();
+        let logical_text = text;
         let coordinate = if body_kind == "summary" {
             ASSISTANT_SUMMARY_COORDINATE
         } else {
@@ -635,19 +633,11 @@ fn project_row(
             .unwrap_or_else(|| {
                 lingma_timestamp(parsed.row.gmt_create, DateTime::<Utc>::UNIX_EPOCH)
             });
-        let assistant_event = provider_event(
-            &parsed.row,
-            EventDraft {
-                provider_event_index: event_base_index(&parsed.row).saturating_add(1),
-                role: ctx_history_core::EventRole::Assistant,
-                event_type,
-                occurred_at,
-                text,
-                body_kind,
-                fidelity: ctx_history_core::Fidelity::SummaryOnly,
-            },
-            false,
-        )?;
+        let assistant_event = ProjectedEvent {
+            role: EventRole::Assistant,
+            event_type,
+            occurred_at,
+        };
         records.push(project_event(
             source,
             session_id,
@@ -720,7 +710,7 @@ fn project_event(
     coordinate_kind: &'static str,
     source_path: &str,
     logical_text: &str,
-    event: super::LingmaCoreEvent,
+    event: ProjectedEvent,
 ) -> LingmaSourceBackedResultV0<LingmaSourceBackedRecordV0> {
     let subrecord =
         SubrecordSelector::native_id(NATIVE_SUBRECORD_NAMESPACE, TypedKey::utf8(coordinate_kind)?)?;
@@ -765,7 +755,7 @@ fn project_event(
             event_sequence,
             occurred_at_unix_ms: Some(event.occurred_at.timestamp_millis()),
             event_type: event.event_type.as_str().to_owned(),
-            role: event.role.map(|role| role.as_str().to_owned()),
+            role: Some(event.role.as_str().to_owned()),
             body: logical_text.to_owned(),
             workspace: None,
             cwd: None,
@@ -1281,15 +1271,15 @@ impl LingmaSourceBackedResolverV0 {
             let mut hydrated = Vec::with_capacity(requests.len());
             for (request, coordinate) in requests.iter().zip(coordinates) {
                 if !values_by_row.contains_key(&coordinate.rowid) {
-                    let values =
-                        super::records::lingma_complete_values(connection, coordinate.rowid)
-                            .map_err(map_capture_hydration)?
-                            .ok_or_else(|| {
-                                hydration_failure(
-                                    HydrationFailureKind::MissingRecord,
-                                    "Lingma chat_record row is missing",
-                                )
-                            })?;
+                    let raw = load_raw_row(connection, coordinate.rowid)
+                        .map_err(map_capture_hydration)?;
+                    let row = super::decode_raw_row(raw, encoding).map_err(|_| {
+                        hydration_failure(
+                            HydrationFailureKind::StaleRecordEvidence,
+                            "Lingma SQLite row is malformed for the certified parser",
+                        )
+                    })?;
+                    let values = native_values(&row);
                     values_by_row.insert(coordinate.rowid, values);
                 }
                 let values = values_by_row.get(&coordinate.rowid).ok_or_else(|| {

@@ -1,16 +1,10 @@
 use ctx_history_core::{EventRole, EventType};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::native_source::NativeSqliteValue;
-use crate::provider::normalization::{
-    provider_capped_json, provider_json_text, provider_policy_body, provider_policy_event_text,
-    provider_result_identifier_evidence, provider_result_outcome_evidence, provider_role,
-    provider_value_text,
-};
-use crate::{
-    CaptureError, OutputOutcome, Result, ASTRBOT_SQLITE_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS,
-};
+use crate::provider::normalization::{provider_role, provider_value_text};
+use crate::{CaptureError, Result};
 
 const CONVERSATION_VALUE_COUNT: usize = 11;
 
@@ -116,43 +110,6 @@ pub(super) fn item_is_output(item: &Value) -> bool {
         })
 }
 
-pub(super) fn output_outcome(item: &Value) -> OutputOutcome {
-    let explicit = item
-        .get("success")
-        .and_then(Value::as_bool)
-        .map(|success| {
-            if success {
-                OutputOutcome::Success
-            } else {
-                OutputOutcome::Failure
-            }
-        })
-        .or_else(|| {
-            item.get("exit_code")
-                .or_else(|| item.get("exitCode"))
-                .and_then(Value::as_i64)
-                .map(|code| {
-                    if code == 0 {
-                        OutputOutcome::Success
-                    } else {
-                        OutputOutcome::Failure
-                    }
-                })
-        })
-        .or_else(|| {
-            item.get("status")
-                .or_else(|| item.get("outcome"))
-                .and_then(Value::as_str)
-                .and_then(|status| match status.to_ascii_lowercase().as_str() {
-                    "success" | "succeeded" | "ok" | "completed" => Some(OutputOutcome::Success),
-                    "failure" | "failed" | "error" => Some(OutputOutcome::Failure),
-                    "timeout" | "timed_out" => Some(OutputOutcome::Timeout),
-                    _ => None,
-                })
-        });
-    explicit.unwrap_or(OutputOutcome::Unknown)
-}
-
 pub(super) fn ordered_i64(value: i64) -> u64 {
     (value as u64) ^ (1_u64 << 63)
 }
@@ -173,7 +130,8 @@ pub(super) fn conversation_values(row: ConversationRow) -> Vec<NativeSqliteValue
     ]
 }
 
-/// Migration-only fields needed to verify a released complete-content locator.
+/// Shape retained only so the untouched released complete-content wrapper can
+/// compile. Provider-local fallback construction now rejects below.
 pub(crate) struct AstrBotCompleteMessage {
     pub(crate) provider_event_index: u64,
     pub(crate) provider_event_hash: Option<String>,
@@ -185,68 +143,12 @@ pub(crate) struct AstrBotCompleteMessage {
 }
 
 pub(super) fn complete_conversation_message(
-    values: &[NativeSqliteValue],
-    item_index: u32,
+    _values: &[NativeSqliteValue],
+    _item_index: u32,
 ) -> Result<Option<AstrBotCompleteMessage>> {
-    let conversation = decode_conversation(values)?;
-    let provider_session_id = provider_session_id(&conversation);
-    let content = provider_json_text(&conversation.content);
-    let (index, text, body, hash, cursor) = if let Value::Array(items) = &content {
-        let index = usize::try_from(item_index).unwrap_or(usize::MAX);
-        let Some(item) = items.get(index) else {
-            return Ok(None);
-        };
-        if checkpoint_id(item).is_some() || item_is_output(item) {
-            return Ok(None);
-        }
-        let Some(text) = item_text(item).filter(|text| !text.trim().is_empty()) else {
-            return Ok(None);
-        };
-        (
-            u64::from(item_index),
-            text,
-            item.clone(),
-            item_id(item).map(|id| format!("conversation:{id}")),
-            format!(
-                "conversation:{}:item:{item_index}",
-                conversation.conversation_id
-            ),
-        )
-    } else {
-        if item_index != 0 {
-            return Ok(None);
-        }
-        let Some(text) = provider_value_text(&content).filter(|text| !text.trim().is_empty())
-        else {
-            return Ok(None);
-        };
-        (
-            0,
-            text,
-            content,
-            Some(format!("conversation-row:{}", conversation.row_id)),
-            format!("conversation:{}:content", conversation.conversation_id),
-        )
-    };
-    let event_type = EventType::Message;
-    let retained_text = provider_policy_event_text(event_type, &text, &body);
-    let retained_body = provider_policy_body(event_type, &body);
-    Ok(Some(AstrBotCompleteMessage {
-        provider_event_index: index,
-        provider_event_hash: hash,
-        cursor,
-        event_type,
-        payload: json!({
-            "text": retained_text.text,
-            "text_retention": retained_text.retention.as_json(),
-            "result_evidence": provider_result_identifier_evidence(event_type, &text, &body),
-            "result_outcome": provider_result_outcome_evidence(event_type, &body),
-            "source_format": ASTRBOT_SQLITE_SOURCE_FORMAT,
-            "body": provider_capped_json(&retained_body, PROVIDER_MAX_PREVIEW_CHARS),
-        }),
-        text,
-        provider_session_id,
-    }))
+    Err(CaptureError::InvalidPayload(
+        "AstrBot canonical Store hydration was removed; use source-backed hydration".to_owned(),
+    ))
 }
 
 pub(super) fn decode_conversation(values: &[NativeSqliteValue]) -> Result<ConversationRow> {
