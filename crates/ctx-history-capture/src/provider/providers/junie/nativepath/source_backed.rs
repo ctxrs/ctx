@@ -85,6 +85,9 @@ pub(crate) enum JunieSourceBackedErrorV0 {
 
 pub(crate) type JunieSourceBackedResultV0<T> = Result<T, JunieSourceBackedErrorV0>;
 
+// Emissions move source authority as bounded units. Boxing the 496-byte
+// certificate solely to match the 248-byte source key has no measured benefit.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub(crate) enum JunieSourceBackedEmissionV0 {
     BeginSource(SourceKey),
@@ -352,6 +355,9 @@ fn session_identity(
     })?)
 }
 
+// These nine arguments are the explicit certified identity and exact-hydration
+// inputs at Junie's provider-local projection boundary.
+#[allow(clippy::too_many_arguments)]
 fn lexical_document(
     source: &SourceKey,
     session_id: StableEntityId,

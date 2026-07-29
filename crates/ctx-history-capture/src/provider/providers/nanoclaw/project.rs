@@ -413,6 +413,9 @@ impl NanoClawRootBoundDatabase {
     }
 }
 
+// This RAII owner keeps SQLite handles and root-bound guards in one value.
+// Boxing the 2,024-byte root-bound state would add indirection to every read.
+#[allow(clippy::large_enum_variant)]
 pub(super) enum NanoClawDatabaseRead {
     Pathname(ReadOnlySqliteConnection),
     RootBound {

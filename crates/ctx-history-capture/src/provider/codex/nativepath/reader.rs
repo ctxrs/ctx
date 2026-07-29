@@ -257,6 +257,9 @@ impl CodexRecordProjection {
     }
 }
 
+// Produced once per decoded record: boxing the 296-byte source-backed mutation
+// to match the 24-byte removal variant would add a per-record heap allocation.
+#[allow(clippy::large_enum_variant)]
 enum CodexContextMutation {
     Remove(String),
     SourceBackedRow {

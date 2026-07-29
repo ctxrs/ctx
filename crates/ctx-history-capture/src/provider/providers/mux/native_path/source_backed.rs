@@ -167,6 +167,9 @@ pub(crate) struct MuxReplacementEvidence {
     pub(crate) replacement_content_digest: [u8; 32],
 }
 
+// Append proof is owned source authority. Boxing its 992 bytes to match the
+// 65-byte replacement evidence adds allocation without measured scan benefit.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub(crate) enum MuxSourceBackedDisposition {
     Cold,

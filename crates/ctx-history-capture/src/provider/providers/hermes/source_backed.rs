@@ -246,12 +246,15 @@ pub(crate) struct HermesSourceBackedSession {
 
 #[derive(Debug, Clone)]
 pub(crate) struct HermesSourceBackedRejection {
-    pub(crate) phase: HermesPhase,
+    phase: HermesPhase,
     pub(crate) rowid: i64,
     pub(crate) ordinal: u64,
     pub(crate) reason: String,
 }
 
+// Records are emitted in bounded provider pages. Boxing each 1,400-byte event to
+// approach the 960-byte session variant would allocate on the ingestion path.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub(crate) enum HermesSourceBackedRecord {
     Session(HermesSourceBackedSession),
@@ -492,6 +495,9 @@ struct HermesSessionContext {
     cwd: Option<String>,
 }
 
+// The eight inputs are the explicit native-row identity, authority, and cache
+// state needed at this provider projection boundary.
+#[allow(clippy::too_many_arguments)]
 fn project_native_row(
     conn: &rusqlite::Connection,
     schema: &HermesSchema,
@@ -647,6 +653,9 @@ fn project_session(
     })
 }
 
+// These nine values preserve the certified message identity and source evidence
+// explicitly; a one-use argument bundle would add indirection without reuse.
+#[allow(clippy::too_many_arguments)]
 fn project_message(
     source: &SourceKey,
     source_path: &str,

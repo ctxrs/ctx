@@ -74,6 +74,9 @@ pub(crate) enum FirebenderSourceBackedError {
 pub(crate) type FirebenderSourceBackedResult<T> =
     std::result::Result<T, FirebenderSourceBackedError>;
 
+// Both variants own source authority. Boxing the 1,072-byte replacement scanner
+// to match the 496-byte certificate adds indirection without measured benefit.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum FirebenderSourceBackedPlan {
     Exact(CertifiedSource),
     Replacement(FirebenderSourceBackedScanner),
