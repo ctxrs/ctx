@@ -102,10 +102,6 @@ pub(crate) struct ShelleySourceBackedAdapter {
 }
 
 impl ShelleySourceBackedAdapter {
-    pub(crate) fn exact_cwd(&self) -> &Path {
-        &self.exact_cwd
-    }
-
     pub(crate) fn database_path(&self) -> &Path {
         &self.database_path
     }
@@ -159,7 +155,6 @@ impl ShelleySourceBackedAdapter {
             source_exhausted: false,
             content_digest,
             counts: ScannedSourceCounts::default(),
-            emitted_pages: 0,
             session_lineages: HashMap::new(),
             validated_pages: VecDeque::new(),
             receipt: None,
@@ -288,7 +283,6 @@ pub(crate) struct ShelleySourceBackedScan {
     source_exhausted: bool,
     content_digest: Sha256,
     counts: ScannedSourceCounts,
-    emitted_pages: u64,
     session_lineages: HashMap<String, ShelleyDocumentLineage>,
     validated_pages: VecDeque<ShelleySourceBackedPage>,
     receipt: Option<ShelleySourceBackedReceipt>,
@@ -420,7 +414,6 @@ impl ShelleySourceBackedScan {
             return Ok(None);
         }
         merge_counts(&mut self.counts, page.counts)?;
-        checked_add_count(&mut self.emitted_pages, 1)?;
         Ok(Some(page))
     }
 
@@ -601,10 +594,7 @@ impl ShelleySourceBackedScan {
             content_digest.finalize().into(),
             self.counts,
         )?;
-        self.receipt = Some(ShelleySourceBackedReceipt {
-            certificate,
-            emitted_pages: self.emitted_pages,
-        });
+        self.receipt = Some(ShelleySourceBackedReceipt { certificate });
         Ok(())
     }
 
@@ -634,7 +624,6 @@ pub(crate) struct ShelleySourceBackedRejection {
 #[derive(Debug, Clone)]
 pub(crate) struct ShelleySourceBackedReceipt {
     pub(crate) certificate: CertifiedSource,
-    pub(crate) emitted_pages: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1050,7 +1039,6 @@ mod tests {
         assert_eq!(cold.source_path.as_deref(), database.to_str());
         assert_eq!(cold.agent_type, AgentType::Primary.as_str());
         assert!(cold.is_primary);
-        assert_eq!(cold_receipt.emitted_pages, 1);
         assert_eq!(
             cold_receipt.certificate.counts(),
             ScannedSourceCounts {
@@ -1235,7 +1223,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(adapter.database_path(), active_database);
-        assert_eq!(adapter.exact_cwd(), fs::canonicalize(&active).unwrap());
+        assert_eq!(
+            adapter.database_path().parent(),
+            Some(fs::canonicalize(&active).unwrap().as_path())
+        );
         assert_ne!(adapter.database_path(), past.join("shelley.db"));
         assert_ne!(adapter.database_path(), manual.join("shelley.db"));
         assert_ne!(adapter.database_path(), parent.join("shelley.db"));

@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use chrono::Duration;
 use ctx_history_core::{EventRole, EventType};
 use serde_json::Value;
@@ -15,13 +13,6 @@ use crate::{
     },
     CaptureError, ProviderAdapterContext, Result, MAX_PROVIDER_JSONL_LINE_BYTES,
 };
-
-pub(super) fn parse_auggie_source(
-    path: &Path,
-    context: &ProviderAdapterContext,
-) -> Result<ParsedAuggieSource> {
-    parse_opened_auggie_source(AuggieFileStamp::observe(path)?, context)
-}
 
 pub(super) fn parse_opened_auggie_source(
     before: AuggieFileStamp,

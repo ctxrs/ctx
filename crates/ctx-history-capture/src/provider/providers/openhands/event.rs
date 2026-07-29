@@ -74,10 +74,6 @@ impl OpenHandsEventDecodeError {
             ),
         }
     }
-
-    pub(crate) fn is_too_large(&self) -> bool {
-        self.kind == OpenHandsEventDecodeErrorKind::TooLarge
-    }
 }
 
 impl fmt::Display for OpenHandsEventDecodeError {
@@ -329,7 +325,7 @@ mod tests {
     fn decoder_fails_closed_for_malformed_and_oversized_events() {
         let path = Path::new("/profile/v1_conversations/session/malformed.json");
         let malformed = decode_openhands_event(path, b"{not-json").unwrap_err();
-        assert!(!malformed.is_too_large());
+        assert_eq!(malformed.kind, OpenHandsEventDecodeErrorKind::Invalid);
         assert!(malformed
             .to_string()
             .starts_with("invalid OpenHands event JSON:"));
@@ -346,7 +342,7 @@ mod tests {
 
         let oversized = vec![b'x'; MAX_PROVIDER_JSONL_LINE_BYTES + 1];
         let oversized = decode_openhands_event(path, &oversized).unwrap_err();
-        assert!(oversized.is_too_large());
+        assert_eq!(oversized.kind, OpenHandsEventDecodeErrorKind::TooLarge);
         assert_eq!(
             oversized.to_string(),
             format!(

@@ -1,6 +1,5 @@
 mod model;
 pub(crate) mod native_path;
-mod preferences;
 mod source;
 
 #[cfg(test)]
@@ -8,26 +7,11 @@ mod tests;
 
 use rusqlite::Connection;
 
-use crate::native_source::{NativeLocator, NativeSqliteValue};
+use crate::native_source::NativeSqliteValue;
 use crate::{CaptureError, Result};
 
 pub(super) const ASTRBOT_CAPTURE_REVISION: u32 = 4;
 pub(super) const ASTRBOT_POLICY_REVISION: u32 = 7;
-const ASTRBOT_COMPLETE_MESSAGE_LOCATOR_KIND: &str = "astrbot-conversation-message-v1";
-
-pub(crate) fn astrbot_complete_message_locator(
-    physical_rowid: i64,
-    item_index: usize,
-) -> Result<NativeLocator> {
-    let item_index = u32::try_from(item_index).map_err(|_| {
-        CaptureError::InvalidPayload("AstrBot message index exceeds u32".to_owned())
-    })?;
-    let mut value = Vec::with_capacity(12);
-    value.extend_from_slice(&model::ordered_i64(physical_rowid).to_be_bytes());
-    value.extend_from_slice(&item_index.to_be_bytes());
-    NativeLocator::new(ASTRBOT_COMPLETE_MESSAGE_LOCATOR_KIND, value)
-        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))
-}
 
 /// Compatibility seam owned by the existing complete-content resolver. It is
 /// not part of ingestion and never publishes an ingestion page.

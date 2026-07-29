@@ -31,7 +31,7 @@ use super::{
         AUGGIE_PARSER_REVISION,
     },
     normalized_auggie_authority_path,
-    parse::{parse_auggie_source, parse_opened_auggie_source},
+    parse::parse_opened_auggie_source,
     source::{invalid_source_path, AuggieFileStamp},
 };
 use crate::{
@@ -80,43 +80,18 @@ pub(crate) enum AuggieSourceBackedError {
 
 pub(crate) type AuggieSourceBackedResult<T> = Result<T, AuggieSourceBackedError>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AuggieSourceBackedRootKind {
-    DefaultHome,
-    Explicit,
-}
-
 /// One selected Auggie authority root.
 ///
-/// Automatic discovery always resolves only `~/.augment/sessions`. A one-shot
-/// `--augment-cache-dir` root is accepted only through [`Self::explicit`].
+/// Shared discovery supplies either the sessions directory itself or a
+/// one-shot cache root whose direct `sessions` child is authoritative.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AuggieSourceBackedRoot {
     path: PathBuf,
-    kind: AuggieSourceBackedRootKind,
 }
 
 impl AuggieSourceBackedRoot {
-    pub(crate) fn default_for_home(home: impl AsRef<Path>) -> Self {
-        Self {
-            path: home.as_ref().join(".augment").join("sessions"),
-            kind: AuggieSourceBackedRootKind::DefaultHome,
-        }
-    }
-
     pub(crate) fn explicit(path: impl Into<PathBuf>) -> Self {
-        Self {
-            path: path.into(),
-            kind: AuggieSourceBackedRootKind::Explicit,
-        }
-    }
-
-    pub(crate) fn configured_path(&self) -> &Path {
-        &self.path
-    }
-
-    pub(crate) fn is_explicit(&self) -> bool {
-        self.kind == AuggieSourceBackedRootKind::Explicit
+        Self { path: path.into() }
     }
 }
 
@@ -129,7 +104,6 @@ pub(crate) enum AuggieSourceBackedInventoryStatus {
 /// Provider-local inventory only. Shared code owns deletion certification.
 #[derive(Debug, Clone)]
 pub(crate) struct AuggieSourceBackedInventory {
-    pub(crate) authority_root: PathBuf,
     pub(crate) status: AuggieSourceBackedInventoryStatus,
     pub(crate) paths: Vec<PathBuf>,
     authority: Option<ProviderSourceRoot>,
@@ -157,7 +131,6 @@ impl AuggieSourceBackedInventory {
 
 #[derive(Debug, Clone)]
 pub(crate) struct AuggieSourceBackedSource {
-    pub(crate) path: PathBuf,
     pub(crate) certified_source: CertifiedSource,
     pub(crate) documents: Vec<LexicalDocument>,
 }
@@ -182,7 +155,6 @@ pub(crate) fn discover_auggie_source_backed(
         Ok(opened) => opened,
         Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(AuggieSourceBackedInventory {
-                authority_root: selected,
                 status: AuggieSourceBackedInventoryStatus::Unavailable,
                 paths: Vec::new(),
                 authority: None,
@@ -208,7 +180,6 @@ pub(crate) fn discover_auggie_source_backed(
             Vec::new()
         };
         return Ok(AuggieSourceBackedInventory {
-            authority_root: selected,
             status: AuggieSourceBackedInventoryStatus::Complete,
             paths,
             authority: Some(authority),
@@ -243,20 +214,10 @@ pub(crate) fn discover_auggie_source_backed(
     directory.revalidate()?;
     authority.revalidate()?;
     Ok(AuggieSourceBackedInventory {
-        authority_root: authority.named_path().to_path_buf(),
         status: AuggieSourceBackedInventoryStatus::Complete,
         paths,
         authority: Some(authority),
     })
-}
-
-/// Parses and projects one certified Auggie session document.
-pub(crate) fn project_auggie_source_backed(
-    path: &Path,
-    context: &ProviderAdapterContext,
-) -> AuggieSourceBackedResult<AuggieSourceBackedSource> {
-    let parsed = parse_auggie_source(path, context)?;
-    project_parsed_auggie_source_backed(parsed)
 }
 
 fn project_opened_auggie_source_backed(
@@ -307,7 +268,6 @@ fn project_parsed_auggie_source_backed(
         },
     )?;
     Ok(AuggieSourceBackedSource {
-        path: parsed.stamp.canonical_path,
         certified_source,
         documents,
     })
@@ -411,9 +371,6 @@ pub(crate) fn hydrate_auggie_source_backed(
 }
 
 fn selected_sessions_path(root: &AuggieSourceBackedRoot) -> AuggieSourceBackedResult<PathBuf> {
-    if !root.is_explicit() {
-        return normalized_auggie_authority_path(&root.path).map_err(Into::into);
-    }
     let root_path = normalized_auggie_authority_path(&root.path)?;
     let opened = match open_provider_source_path(&root_path) {
         Ok(opened) => opened,
@@ -705,6 +662,16 @@ mod tests {
         }
     }
 
+    fn project_one(
+        root: &AuggieSourceBackedRoot,
+        context: ProviderAdapterContext,
+    ) -> AuggieSourceBackedSource {
+        let inventory = discover_auggie_source_backed(root).unwrap();
+        let mut sources = project_auggie_source_backed_inventory(&inventory, &context).unwrap();
+        assert_eq!(sources.len(), 1);
+        sources.remove(0)
+    }
+
     fn write_session(path: &Path, request_text: &str, response_text: &str) {
         write_history(path, &[("request-stable-id", request_text, response_text)]);
     }
@@ -745,7 +712,7 @@ mod tests {
         let path = sessions.join("session.json");
         let request_text = format!("full-prefix-{}-auggie-tail", "x".repeat(3_000));
         write_session(&path, &request_text, "bounded response");
-        let root = AuggieSourceBackedRoot::default_for_home(temp.path().join("home"));
+        let root = AuggieSourceBackedRoot::explicit(&sessions);
         let inventory = discover_auggie_source_backed(&root).unwrap();
         assert_eq!(
             inventory.status,
@@ -753,9 +720,8 @@ mod tests {
         );
         assert_eq!(inventory.paths.len(), 1);
 
-        let first = project_auggie_source_backed(&inventory.paths[0], &context(&sessions)).unwrap();
-        let second =
-            project_auggie_source_backed(&inventory.paths[0], &context(&sessions)).unwrap();
+        let first = project_one(&root, context(&sessions));
+        let second = project_one(&root, context(&sessions));
         assert_eq!(first.certified_source, second.certified_source);
         assert_eq!(first.documents.len(), 2);
         assert_eq!(
@@ -781,7 +747,7 @@ mod tests {
             );
             assert_eq!(
                 document.source_path.as_deref(),
-                Some(first.path.to_string_lossy().as_ref())
+                fs::canonicalize(&path).unwrap().to_str()
             );
             assert_eq!(document.agent_type, "primary");
             assert!(document.is_primary);
@@ -809,15 +775,16 @@ mod tests {
         let temp = tempdir().unwrap();
         let sessions = temp.path().join("sessions");
         let path = sessions.join("session.json");
+        let root = AuggieSourceBackedRoot::explicit(&sessions);
         write_session(&path, "before replacement", "stable response");
-        let before = project_auggie_source_backed(&path, &context(&sessions)).unwrap();
+        let before = project_one(&root, context(&sessions));
         let old_request = &before.documents[0];
-        let hydrated = hydrate_auggie_source_backed(&before.path, &old_request.locator).unwrap();
+        let hydrated = hydrate_auggie_source_backed(&path, &old_request.locator).unwrap();
         assert_eq!(hydrated.decoded_display_text, "before replacement");
         assert_eq!(hydrated.provider_bytes, b"before replacement");
 
         write_session(&path, "after replacement", "stable response");
-        let after = project_auggie_source_backed(&path, &context(&sessions)).unwrap();
+        let after = project_one(&root, context(&sessions));
         assert_eq!(
             before.documents[0].session_id,
             after.documents[0].session_id
@@ -828,12 +795,12 @@ mod tests {
             after.certified_source.content_digest()
         );
         assert!(matches!(
-            hydrate_auggie_source_backed(&after.path, &old_request.locator),
+            hydrate_auggie_source_backed(&path, &old_request.locator),
             Err(AuggieSourceBackedError::SourceRevisionChanged)
                 | Err(AuggieSourceBackedError::LocatorDigestMismatch)
         ));
         assert_eq!(
-            hydrate_auggie_source_backed(&after.path, &after.documents[0].locator)
+            hydrate_auggie_source_backed(&path, &after.documents[0].locator)
                 .unwrap()
                 .decoded_display_text,
             "after replacement"
@@ -893,19 +860,12 @@ mod tests {
     }
 
     #[test]
-    fn default_inventory_excludes_one_shot_cache_roots_until_explicit() {
+    fn explicit_cache_root_selects_direct_sessions_child_without_recursing() {
         let temp = tempdir().unwrap();
-        let home = temp.path().join("home");
-        let default_sessions = home.join(".augment/sessions");
-        let cache_root = home.join("one-shot-augment-cache");
+        let cache_root = temp.path().join("one-shot-augment-cache");
         let cache_sessions = cache_root.join("sessions");
         write_session(
-            &default_sessions.join("default.json"),
-            "default request",
-            "default response",
-        );
-        write_session(
-            &default_sessions.join("nested/ignored.json"),
+            &cache_sessions.join("nested/ignored.json"),
             "nested request",
             "nested response",
         );
@@ -914,19 +874,6 @@ mod tests {
             "explicit request",
             "explicit response",
         );
-
-        let automatic =
-            discover_auggie_source_backed(&AuggieSourceBackedRoot::default_for_home(&home))
-                .unwrap();
-        assert_eq!(automatic.paths.len(), 1);
-        assert_eq!(
-            automatic.paths[0],
-            fs::canonicalize(default_sessions.join("default.json")).unwrap()
-        );
-        assert!(!automatic
-            .paths
-            .iter()
-            .any(|path| path.starts_with(&cache_root)));
 
         let explicit =
             discover_auggie_source_backed(&AuggieSourceBackedRoot::explicit(&cache_root)).unwrap();

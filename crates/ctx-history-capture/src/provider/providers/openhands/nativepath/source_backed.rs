@@ -112,35 +112,19 @@ pub(crate) enum OpenHandsSourceBackedErrorV1 {
 
 pub(crate) type OpenHandsSourceBackedResultV1<T> = Result<T, OpenHandsSourceBackedErrorV1>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct OpenHandsRejectedEventV1 {
-    pub relative_file_key: String,
-    pub reason: String,
-}
-
 #[derive(Debug)]
 pub(crate) struct OpenHandsSourceBackedProjectionV1 {
-    inventory: CertifiedSourceInventory,
     sources: Vec<CertifiedSource>,
     documents: Vec<LexicalDocument>,
-    rejections: Vec<OpenHandsRejectedEventV1>,
 }
 
 impl OpenHandsSourceBackedProjectionV1 {
-    pub(crate) fn inventory(&self) -> &CertifiedSourceInventory {
-        &self.inventory
-    }
-
     pub(crate) fn sources(&self) -> &[CertifiedSource] {
         &self.sources
     }
 
     pub(crate) fn documents(&self) -> &[LexicalDocument] {
         &self.documents
-    }
-
-    pub(crate) fn rejections(&self) -> &[OpenHandsRejectedEventV1] {
-        &self.rejections
     }
 }
 
@@ -184,14 +168,12 @@ impl OpenHandsSourceBackedAdapterV1 {
 
         let mut sources = Vec::with_capacity(plans.len());
         let mut documents = Vec::new();
-        let mut rejections = Vec::new();
         let mut witnesses = Vec::with_capacity(opening_paths.len());
 
         for plan in plans.values() {
             let projected = project_conversation(&self.inventory, plan)?;
             witnesses.extend(projected.witnesses);
             documents.extend(projected.documents);
-            rejections.extend(projected.rejections);
             sources.push(projected.source);
         }
 
@@ -204,7 +186,7 @@ impl OpenHandsSourceBackedAdapterV1 {
 
         let closing_paths = discover_required_paths(&self.inventory)?;
         let closing_inventory = inventory_observation(&self.selected_root, &closing_paths)?;
-        let inventory = CertifiedSourceInventory::certify(
+        CertifiedSourceInventory::certify(
             opening_inventory,
             closing_inventory,
             OPENHANDS_PARSER_REVISION,
@@ -212,19 +194,8 @@ impl OpenHandsSourceBackedAdapterV1 {
         )?;
         self.inventory.revalidate()?;
 
-        Ok(OpenHandsSourceBackedProjectionV1 {
-            inventory,
-            sources,
-            documents,
-            rejections,
-        })
+        Ok(OpenHandsSourceBackedProjectionV1 { sources, documents })
     }
-}
-
-pub(crate) fn project_openhands_source_backed_v1(
-    selected_root: impl AsRef<Path>,
-) -> OpenHandsSourceBackedResultV1<OpenHandsSourceBackedProjectionV1> {
-    OpenHandsSourceBackedAdapterV1::discover(selected_root)?.project()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -427,7 +398,6 @@ struct ConversationPlan {
 struct ProjectedConversation {
     source: CertifiedSource,
     documents: Vec<LexicalDocument>,
-    rejections: Vec<OpenHandsRejectedEventV1>,
     witnesses: Vec<OpenHandsObservedFile>,
 }
 
@@ -480,7 +450,6 @@ fn project_conversation(
 ) -> OpenHandsSourceBackedResultV1<ProjectedConversation> {
     let session_id = session_identity(&plan.source, &plan.conversation_id)?;
     let mut documents = Vec::new();
-    let mut rejections = Vec::new();
     let mut witnesses = Vec::with_capacity(plan.events.len());
     let mut event_ids = BTreeSet::new();
     let mut revision_digest = Sha256::new();
@@ -568,12 +537,8 @@ fn project_conversation(
                     counts.ignored_records = checked_add(counts.ignored_records, 1)?;
                 }
             }
-            Err(error) => {
+            Err(_) => {
                 counts.rejected_records = checked_add(counts.rejected_records, 1)?;
-                rejections.push(OpenHandsRejectedEventV1 {
-                    relative_file_key: event.relative_file_key.clone(),
-                    reason: bounded_reason(error.to_string()),
-                });
             }
         }
         witnesses.push(observed);
@@ -596,7 +561,6 @@ fn project_conversation(
     Ok(ProjectedConversation {
         source,
         documents,
-        rejections,
         witnesses,
     })
 }

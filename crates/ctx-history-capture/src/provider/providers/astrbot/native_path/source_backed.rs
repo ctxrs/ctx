@@ -115,8 +115,6 @@ pub(crate) enum AstrBotSourceBackedErrorV0 {
     CountOverflow,
     #[error("AstrBot conversation parser emitted a message the exact resolver cannot reopen")]
     ExactConversationMismatch,
-    #[error("AstrBot source-backed sink rejected a document")]
-    SinkRejected,
 }
 
 pub(crate) type AstrBotSourceBackedResultV0<T> = std::result::Result<T, AstrBotSourceBackedErrorV0>;
@@ -250,14 +248,6 @@ pub(crate) struct AstrBotSourceBackedSourceV0 {
 }
 
 impl AstrBotSourceBackedSourceV0 {
-    pub(crate) fn path(&self) -> &Path {
-        &self.path
-    }
-
-    pub(crate) fn identity(&self) -> &AstrBotSourceIdentityV0 {
-        &self.identity
-    }
-
     pub(crate) fn source_key(&self) -> &SourceKey {
         &self.source_key
     }
@@ -1873,11 +1863,11 @@ mod tests {
             AstrBotSourceBackedInventoryV0::discover(&discovery).expect("opening inventory");
         assert_eq!(opening.sources().len(), 3);
         assert_eq!(
-            opening.sources()[0].identity(),
+            &opening.sources()[0].identity,
             &AstrBotSourceIdentityV0::SelectedCore
         );
         assert!(opening.sources()[1..].iter().all(|source| matches!(
-            source.identity(),
+            &source.identity,
             AstrBotSourceIdentityV0::LauncherInstance(_)
         )));
 

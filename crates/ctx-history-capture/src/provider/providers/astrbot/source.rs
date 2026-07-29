@@ -1,35 +1,14 @@
-use std::{collections::BTreeSet, path::Path};
+use std::collections::BTreeSet;
 
 use rusqlite::{Connection, OptionalExtension};
 
 use crate::provider::sqlite::{
     ensure_sqlite_table_columns, optional_text_column_expr, optional_timestamp_millis_expr,
-    sqlite_table_columns, sqlite_table_exists, ProviderSqliteSourceSnapshot,
-    SqliteLengthPreflightGuard,
+    sqlite_table_columns, sqlite_table_exists, SqliteLengthPreflightGuard,
 };
 use crate::{CaptureError, Result};
 
 use super::model::{ConversationRow, LegacyOrderKey, PlatformMessageRow};
-use super::{ASTRBOT_CAPTURE_REVISION, ASTRBOT_POLICY_REVISION};
-
-pub(super) fn astrbot_source_snapshot(path: &Path) -> Result<ProviderSqliteSourceSnapshot> {
-    ProviderSqliteSourceSnapshot::read(
-        path,
-        "AstrBot SQLite source must be a regular non-symlink file",
-        "AstrBot SQLite sidecar must be a regular non-symlink file",
-    )
-}
-
-pub(super) fn astrbot_source_revision(
-    snapshot: &ProviderSqliteSourceSnapshot,
-    user_version: i64,
-    schema_fingerprint: &str,
-) -> String {
-    format!(
-        "astrbot-sqlite-snapshot-v1:capture={ASTRBOT_CAPTURE_REVISION};policy={ASTRBOT_POLICY_REVISION};user_version={user_version};schema={schema_fingerprint};{}",
-        snapshot.revision_component(),
-    )
-}
 
 pub(super) struct AstrBotSql {
     pub(super) conversation_candidate_initial: String,

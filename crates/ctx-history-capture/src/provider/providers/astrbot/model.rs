@@ -110,10 +110,6 @@ pub(super) fn item_is_output(item: &Value) -> bool {
         })
 }
 
-pub(super) fn ordered_i64(value: i64) -> u64 {
-    (value as u64) ^ (1_u64 << 63)
-}
-
 pub(super) fn conversation_values(row: ConversationRow) -> Vec<NativeSqliteValue> {
     vec![
         NativeSqliteValue::Integer(row.row_id),
