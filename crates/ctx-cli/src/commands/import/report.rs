@@ -7,6 +7,7 @@ use crate::commands::import::totals::ImportTotals;
 use crate::commands::import::{
     import_report_analytics_outcome, import_report_failure_type, ImportReport,
 };
+use crate::compact_json;
 use crate::output::print_json;
 
 pub(crate) fn print_import_report(report: &ImportReport, json_output: bool) -> Result<()> {
@@ -33,22 +34,42 @@ fn import_report_json(report: &ImportReport) -> Value {
 }
 
 fn import_totals_json(totals: &ImportTotals) -> Value {
-    json!({
-        "source_files": totals.source_files,
-        "source_bytes": totals.source_bytes,
-        "imported_sources": totals.imported_sources,
-        "sources_completed_with_rejections": totals.sources_completed_with_rejections,
-        "failed_sources": totals.failed_sources,
-        "imported_sessions": totals.imported_sessions,
-        "imported_events": totals.imported_events,
-        "imported_edges": totals.imported_edges,
-        "skipped_sessions": totals.skipped_sessions,
-        "skipped_events": totals.skipped_events,
-        "skipped_edges": totals.skipped_edges,
-        "skipped": totals.skipped,
-        "rejected_records": totals.failed,
+    let mut value = compact_json(json!({
+        "current_source_count": totals.current_source_count,
+        "current_indexed_documents": totals.current_indexed_documents,
+        "current_complete_records": totals.current_complete_records,
+        "current_retained_records": totals.current_retained_records,
+        "current_rejected_records": totals.current_rejected_records,
+        "current_ignored_records": totals.current_ignored_records,
+        "current_certified_source_bytes": totals.current_certified_source_bytes,
+        "current_sources_with_rejections": totals.current_sources_with_rejections,
+        "removed_source_count": totals.removed_source_count,
         "change": totals.work_result.as_str(),
-    })
+    }));
+    if totals.per_run_counts_available {
+        let Value::Object(output) = &mut value else {
+            unreachable!("import totals are always an object")
+        };
+        let Value::Object(per_run) = json!({
+            "source_files": totals.source_files,
+            "source_bytes": totals.source_bytes,
+            "imported_sources": totals.imported_sources,
+            "sources_completed_with_rejections": totals.sources_completed_with_rejections,
+            "failed_sources": totals.failed_sources,
+            "imported_sessions": totals.imported_sessions,
+            "imported_events": totals.imported_events,
+            "imported_edges": totals.imported_edges,
+            "skipped_sessions": totals.skipped_sessions,
+            "skipped_events": totals.skipped_events,
+            "skipped_edges": totals.skipped_edges,
+            "skipped": totals.skipped,
+            "rejected_records": totals.failed,
+        }) else {
+            unreachable!("per-run import totals are always an object")
+        };
+        output.extend(per_run);
+    }
+    value
 }
 
 fn print_import_report_human(report: &ImportReport) {
@@ -59,22 +80,51 @@ fn print_import_report_human(report: &ImportReport) {
         "failure_type: {}",
         import_report_failure_type(&report.totals)
     );
-    println!("source_files: {}", report.totals.source_files);
-    println!("source_bytes: {}", report.totals.source_bytes);
-    println!("imported_sources: {}", report.totals.imported_sources);
-    println!(
-        "sources_completed_with_rejections: {}",
-        report.totals.sources_completed_with_rejections
-    );
-    println!("failed_sources: {}", report.totals.failed_sources);
-    println!("imported_sessions: {}", report.totals.imported_sessions);
-    println!("imported_events: {}", report.totals.imported_events);
-    println!("imported_edges: {}", report.totals.imported_edges);
-    println!("skipped_sessions: {}", report.totals.skipped_sessions);
-    println!("skipped_events: {}", report.totals.skipped_events);
-    println!("skipped_edges: {}", report.totals.skipped_edges);
-    println!("skipped: {}", report.totals.skipped);
-    println!("rejected_records: {}", report.totals.failed);
+    if report.totals.per_run_counts_available {
+        println!("source_files: {}", report.totals.source_files);
+        println!("source_bytes: {}", report.totals.source_bytes);
+        println!("imported_sources: {}", report.totals.imported_sources);
+        println!(
+            "sources_completed_with_rejections: {}",
+            report.totals.sources_completed_with_rejections
+        );
+        println!("failed_sources: {}", report.totals.failed_sources);
+        println!("imported_sessions: {}", report.totals.imported_sessions);
+        println!("imported_events: {}", report.totals.imported_events);
+        println!("imported_edges: {}", report.totals.imported_edges);
+        println!("skipped_sessions: {}", report.totals.skipped_sessions);
+        println!("skipped_events: {}", report.totals.skipped_events);
+        println!("skipped_edges: {}", report.totals.skipped_edges);
+        println!("skipped: {}", report.totals.skipped);
+        println!("rejected_records: {}", report.totals.failed);
+    }
+    if let Some(value) = report.totals.current_source_count {
+        println!("current_source_count: {value}");
+    }
+    if let Some(value) = report.totals.current_indexed_documents {
+        println!("current_indexed_documents: {value}");
+    }
+    if let Some(value) = report.totals.current_complete_records {
+        println!("current_complete_records: {value}");
+    }
+    if let Some(value) = report.totals.current_retained_records {
+        println!("current_retained_records: {value}");
+    }
+    if let Some(value) = report.totals.current_rejected_records {
+        println!("current_rejected_records: {value}");
+    }
+    if let Some(value) = report.totals.current_ignored_records {
+        println!("current_ignored_records: {value}");
+    }
+    if let Some(value) = report.totals.current_certified_source_bytes {
+        println!("current_certified_source_bytes: {value}");
+    }
+    if let Some(value) = report.totals.current_sources_with_rejections {
+        println!("current_sources_with_rejections: {value}");
+    }
+    if let Some(value) = report.totals.removed_source_count {
+        println!("removed_source_count: {value}");
+    }
     println!("change: {}", report.totals.work_result.as_str());
     println!("resume: {}", report.resume);
     println!("resume_mode: {}", report.resume_mode());

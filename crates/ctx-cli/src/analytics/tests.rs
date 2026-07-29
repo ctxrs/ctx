@@ -190,9 +190,9 @@ fn durable_family_serialization_matches_public_goldens() {
                 Outcome::Success,
                 Duration::from_secs(2),
                 ForegroundProviderRefreshV1 {
-                    provider: CaptureProvider::Codex,
+                    provider: Some(CaptureProvider::Codex),
                     trigger: ProviderRefreshTrigger::Search,
-                    source_mode: ProviderRefreshSourceMode::Discovered,
+                    source_mode: Some(ProviderRefreshSourceMode::Discovered),
                     change: ProviderRefreshChange::Changed,
                     content_evidence: ProviderRefreshContentEvidence::Accepted,
                     work_kind: Some(ProviderRefreshWorkKind::Append),
@@ -204,7 +204,7 @@ fn durable_family_serialization_matches_public_goldens() {
                     failure_type: ProviderRefreshFailureType::None,
                     work_remaining: false,
                     retired_records: Some(count_bucket(0)),
-                    counts: ProviderRefreshCountsV1::new(1, 12, 3, 8, 0, 0, 0, 0, 2048),
+                    counts: Some(ProviderRefreshCountsV1::new(1, 12, 3, 8, 0, 0, 0, 0, 2048)),
                     performance: Some(ProviderRefreshPerformanceV1::new(
                         Duration::from_millis(800),
                         Some(512 * 1024 * 1024),

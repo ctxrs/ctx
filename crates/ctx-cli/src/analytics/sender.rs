@@ -210,9 +210,15 @@ fn insert_provider_refresh_properties(
     properties: &mut Map<String, Value>,
     refresh: &ForegroundProviderRefreshV1,
 ) {
-    insert_str(properties, "provider", refresh.provider.as_str());
+    if let Some(provider) = refresh.provider {
+        insert_str(properties, "provider", provider.as_str());
+    }
     insert_str(properties, "trigger", refresh.trigger.as_str());
-    insert_str(properties, "source_mode", refresh.source_mode.as_str());
+    insert_optional_str(
+        properties,
+        "source_mode",
+        refresh.source_mode.map(ProviderRefreshSourceMode::as_str),
+    );
     insert_str(properties, "change", refresh.change.as_str());
     insert_str(
         properties,
@@ -248,23 +254,17 @@ fn insert_provider_refresh_properties(
         "retired_records_bucket",
         refresh.retired_records,
     );
-    insert_optional_count(properties, "sources_bucket", Some(refresh.counts.sources));
-    insert_optional_count(
-        properties,
-        "source_files_bucket",
-        Some(refresh.counts.source_files),
-    );
-    insert_optional_count(properties, "sessions_bucket", Some(refresh.counts.sessions));
-    insert_optional_count(properties, "events_bucket", Some(refresh.counts.events));
-    insert_optional_count(properties, "edges_bucket", Some(refresh.counts.edges));
-    insert_optional_count(properties, "skips_bucket", Some(refresh.counts.skips));
-    insert_optional_count(
-        properties,
-        "rejections_bucket",
-        Some(refresh.counts.rejections),
-    );
-    insert_optional_count(properties, "failures_bucket", Some(refresh.counts.failures));
-    insert_optional_bytes(properties, "bytes_bucket", Some(refresh.counts.bytes));
+    if let Some(counts) = refresh.counts {
+        insert_optional_count(properties, "sources_bucket", Some(counts.sources));
+        insert_optional_count(properties, "source_files_bucket", Some(counts.source_files));
+        insert_optional_count(properties, "sessions_bucket", Some(counts.sessions));
+        insert_optional_count(properties, "events_bucket", Some(counts.events));
+        insert_optional_count(properties, "edges_bucket", Some(counts.edges));
+        insert_optional_count(properties, "skips_bucket", Some(counts.skips));
+        insert_optional_count(properties, "rejections_bucket", Some(counts.rejections));
+        insert_optional_count(properties, "failures_bucket", Some(counts.failures));
+        insert_optional_bytes(properties, "bytes_bucket", Some(counts.bytes));
+    }
     if let Some(performance) = refresh.performance {
         insert_optional_duration(
             properties,

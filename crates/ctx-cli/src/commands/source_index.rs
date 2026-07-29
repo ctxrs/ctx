@@ -2352,6 +2352,7 @@ mod tests {
                     request_id: None,
                     daemon_available: false,
                     source_count: 0,
+                    receipt: None,
                     pin: PinnedSourceBackedGeneration::from_index(open_index(data_root)?),
                 })
             })

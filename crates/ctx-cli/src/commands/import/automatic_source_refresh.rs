@@ -5,7 +5,8 @@ use ctx_history_capture::ProviderImportWorkResult;
 use serde_json::json;
 
 use crate::{
-    analytics::{bytes_bucket, count_bucket, ImportTelemetry},
+    analytics::{ImportTelemetry, ProviderRefreshTrigger},
+    compact_json,
     progress::ProgressReporter,
     semantic::{
         autostart_daemon_and_wait, coordinate_source_backed_refresh, SourceBackedRefreshMode,
@@ -53,84 +54,82 @@ pub(super) fn run_automatic_source_refresh_import(
     let refresh =
         coordinate_source_backed_refresh(&context.data_root, SourceBackedRefreshMode::Wait)
             .context("publish provider sources through daemon-owned source refresh")?;
+    let receipt = refresh
+        .receipt
+        .clone()
+        .context("daemon source refresh published without an authoritative terminal receipt")?;
     let request_id = refresh.request_id.clone();
     let index = refresh.pin.into_index();
     let manifest = index.manifest();
-    let generation_id = index.generation_id().to_owned();
-    let source_count = manifest.sources.len();
-    let source_bytes = manifest.certified_source_bytes;
-    let indexed_documents = manifest.indexed_documents;
-
-    let source_files = source_count;
-    let imported_events = usize::try_from(indexed_documents).unwrap_or(usize::MAX);
-    let mut totals = ImportTotals {
-        source_files,
-        source_bytes,
-        imported_sources: source_count,
-        imported_events,
-        work_result: ProviderImportWorkResult::Changed,
+    let current = receipt.current;
+    let totals = ImportTotals {
+        current_source_count: Some(current.source_count),
+        current_indexed_documents: Some(current.indexed_documents),
+        current_complete_records: Some(current.complete_records),
+        current_retained_records: Some(current.retained_records),
+        current_rejected_records: Some(current.rejected_records),
+        current_ignored_records: Some(current.ignored_records),
+        current_certified_source_bytes: Some(current.certified_source_bytes),
+        current_sources_with_rejections: Some(current.sources_with_rejections),
+        removed_source_count: Some(current.removed_source_count),
+        work_result: if receipt.generation_changed {
+            ProviderImportWorkResult::Changed
+        } else {
+            ProviderImportWorkResult::NoOp
+        },
         ..ImportTotals::default()
     };
-    if source_count == 0 {
-        totals.work_result = ProviderImportWorkResult::NoOp;
-    }
-
-    context.telemetry.sources_seen = Some(count_bucket(source_count as u64));
-    context.telemetry.source_files = Some(count_bucket(source_files as u64));
-    context.telemetry.source_bytes = Some(bytes_bucket(source_bytes));
-    context.telemetry.failed_sources = Some(count_bucket(0));
-    context.telemetry.sessions_imported = Some(count_bucket(0));
-    context.telemetry.events_imported = Some(count_bucket(indexed_documents));
-    context.telemetry.edges_imported = Some(count_bucket(0));
-    context.telemetry.skipped = Some(count_bucket(0));
-    context.telemetry.rejected_records = Some(count_bucket(0));
-    let _ = context.provider_refreshes;
+    context.provider_refreshes.record_source_backed_publication(
+        ProviderRefreshTrigger::Import,
+        receipt.generation_changed,
+    );
 
     if context.options.print_human {
         progress.finish_line();
-        println!("published_generation: {generation_id}");
+        if let Some(previous) = receipt.previous_generation.as_deref() {
+            println!("previous_generation: {previous}");
+        }
+        println!("published_generation: {}", receipt.published_generation);
+        println!("generation_changed: {}", receipt.generation_changed);
     }
     progress.done(
         "published",
-        format!("Published source-backed generation {generation_id}."),
-        source_bytes,
+        format!(
+            "Published source-backed generation {}.",
+            receipt.published_generation
+        ),
+        current.certified_source_bytes,
     );
 
     Ok(ImportReport {
         resume: context.args.resume,
         totals,
-        sources: vec![json!({
+        sources: vec![compact_json(json!({
             "status": "published",
-            "failure_scope": "none",
-            "failure_type": "none",
-            "provider": context
-                .args
-                .provider
-                .map(|provider| provider.capture_provider().as_str()),
             "source_format": "provider_authoritative_all",
-            "source_files": source_files,
-            "source_bytes": source_bytes,
-            "imported_sessions": 0,
-            "imported_events": indexed_documents,
-            "imported_edges": 0,
-            "skipped_sessions": 0,
-            "skipped_events": 0,
-            "skipped_edges": 0,
-            "skipped": 0,
-            "rejected_records": 0,
-            "rejections": [],
-            "change": if source_count == 0 { "no_op" } else { "changed" },
-            "published_generation": generation_id,
+            "change": if receipt.generation_changed { "changed" } else { "no_op" },
+            "previous_generation": receipt.previous_generation,
+            "published_generation": receipt.published_generation,
+            "generation_changed": receipt.generation_changed,
+            "current_source_count": current.source_count,
+            "current_indexed_documents": current.indexed_documents,
+            "current_complete_records": current.complete_records,
+            "current_retained_records": current.retained_records,
+            "current_rejected_records": current.rejected_records,
+            "current_ignored_records": current.ignored_records,
+            "current_certified_source_bytes": current.certified_source_bytes,
+            "current_sources_with_rejections": current.sources_with_rejections,
+            "removed_source_count": current.removed_source_count,
             "policy_schema_hash": manifest.policy_schema_hash.clone(),
-            "certified_source_count": source_count,
-            "certified_source_bytes": source_bytes,
+            "certified_source_count": current.source_count,
+            "certified_source_bytes": current.certified_source_bytes,
             "daemon_request_id": request_id,
             "daemon_request_metadata": {
                 "owner": "daemon",
                 "trigger": "import",
                 "trigger_provenance": "automatic_provider_refresh",
             },
-        })],
+        }))],
     })
 }
 

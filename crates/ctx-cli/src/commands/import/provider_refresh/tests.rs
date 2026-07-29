@@ -73,7 +73,7 @@ fn aggregates_many_source_and_record_results_once_per_provider() {
         "locations and records must not emit events"
     );
     let refresh = foreground(&events[0]);
-    assert_eq!(refresh.provider, CaptureProvider::Codex);
+    assert_eq!(refresh.provider, Some(CaptureProvider::Codex));
     assert_eq!(refresh.change, ProviderRefreshChange::Changed);
     assert_eq!(refresh.refresh_result, ProviderRefreshResult::Complete);
     assert_eq!(refresh.core_result, ProviderCoreResult::Complete);
@@ -83,16 +83,14 @@ fn aggregates_many_source_and_record_results_once_per_provider() {
     );
     assert_eq!(refresh.work_kind, None);
     assert!(refresh.work_remaining);
-    assert_eq!(refresh.counts.sources, CountBucket::TwoToFive);
-    assert_eq!(
-        refresh.counts.source_files,
-        CountBucket::TwentyOneToOneHundred
-    );
-    assert_eq!(refresh.counts.sessions, CountBucket::TwoToFive);
-    assert_eq!(refresh.counts.events, CountBucket::SixToTwenty);
-    assert_eq!(refresh.counts.edges, CountBucket::One);
-    assert_eq!(refresh.counts.skips, CountBucket::TwentyOneToOneHundred);
-    assert_eq!(refresh.counts.bytes, BytesBucket::UnderOneHundredKb);
+    let counts = refresh.counts.as_ref().expect("explicit refresh counts");
+    assert_eq!(counts.sources, CountBucket::TwoToFive);
+    assert_eq!(counts.source_files, CountBucket::TwentyOneToOneHundred);
+    assert_eq!(counts.sessions, CountBucket::TwoToFive);
+    assert_eq!(counts.events, CountBucket::SixToTwenty);
+    assert_eq!(counts.edges, CountBucket::One);
+    assert_eq!(counts.skips, CountBucket::TwentyOneToOneHundred);
+    assert_eq!(counts.bytes, BytesBucket::UnderOneHundredKb);
 }
 
 #[test]
@@ -113,12 +111,12 @@ fn distinguishes_no_op_from_changed() {
 
     assert_eq!(events.len(), 1);
     let codex = foreground(&events[0]);
-    assert_eq!(codex.provider, CaptureProvider::Codex);
+    assert_eq!(codex.provider, Some(CaptureProvider::Codex));
     assert_eq!(codex.change, ProviderRefreshChange::NoOp);
     assert_eq!(codex.work_kind, Some(ProviderRefreshWorkKind::NoOp));
     assert_eq!(codex.refresh_result, ProviderRefreshResult::Complete);
     assert_eq!(codex.core_result, ProviderCoreResult::NoOp);
-    assert_eq!(codex.counts.skips, CountBucket::TwoToFive);
+    assert_eq!(codex.counts.as_ref().unwrap().skips, CountBucket::TwoToFive);
 }
 
 #[test]
@@ -164,7 +162,7 @@ fn exact_provider_durations_are_independent_in_multi_provider_batches() {
     let event_for = |provider| {
         events
             .iter()
-            .find(|event| foreground(event).provider == provider)
+            .find(|event| foreground(event).provider == Some(provider))
             .unwrap()
     };
     let PublicEventV1::ProviderRefreshCompleted(codex) = event_for(CaptureProvider::Codex) else {
@@ -305,6 +303,32 @@ fn every_capture_provider_emits_without_usage_suppression() {
     for provider in providers {
         assert!(events
             .iter()
-            .any(|event| foreground(event).provider == provider));
+            .any(|event| foreground(event).provider == Some(provider)));
     }
+}
+
+#[test]
+fn source_backed_publication_emits_only_global_authoritative_facts() {
+    let mut collector = ProviderRefreshCollector::default();
+    collector.record_source_backed_publication(ProviderRefreshTrigger::Import, false);
+    collector.refresh_duration = Duration::from_secs(2);
+
+    let events = collector.finish();
+
+    assert_eq!(events.len(), 1);
+    let refresh = foreground(&events[0]);
+    assert_eq!(refresh.provider, None);
+    assert_eq!(refresh.trigger, ProviderRefreshTrigger::Import);
+    assert_eq!(refresh.source_mode, None);
+    assert_eq!(refresh.change, ProviderRefreshChange::NoOp);
+    assert_eq!(
+        refresh.content_evidence,
+        ProviderRefreshContentEvidence::Unknown
+    );
+    assert_eq!(refresh.work_kind, Some(ProviderRefreshWorkKind::NoOp));
+    assert_eq!(refresh.refresh_result, ProviderRefreshResult::Complete);
+    assert_eq!(refresh.core_result, ProviderCoreResult::NoOp);
+    assert_eq!(refresh.failure_scope, ProviderRefreshFailureScope::None);
+    assert_eq!(refresh.failure_type, ProviderRefreshFailureType::None);
+    assert_eq!(refresh.counts, None);
 }

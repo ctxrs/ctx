@@ -178,7 +178,8 @@ fn source_refresh_only_scheduler_runs_no_unrelated_job() -> Result<()> {
 #[test]
 fn source_refresh_only_and_full_modes_share_the_same_refresh_path() -> Result<()> {
     use super::super::source_backed_refresh_coordinator::{
-        SourceBackedRefreshExecution, SourceBackedRefreshPublication, SourceBackedRefreshTimings,
+        SourceBackedRefreshCurrent, SourceBackedRefreshExecution, SourceBackedRefreshPublication,
+        SourceBackedRefreshTimings,
     };
 
     fn run_mode(daemon_mode: DaemonMode, calls: Arc<AtomicUsize>) -> Result<serde_json::Value> {
@@ -201,6 +202,11 @@ fn source_refresh_only_and_full_modes_share_the_same_refresh_path() -> Result<()
                     unsupported_routes: 0,
                     certified_source_count: 3,
                     certified_source_bytes: 4096,
+                    current: SourceBackedRefreshCurrent {
+                        source_count: 3,
+                        certified_source_bytes: 4096,
+                        ..SourceBackedRefreshCurrent::default()
+                    },
                     timings: SourceBackedRefreshTimings {
                         discovery_us: 7,
                         scan_stage_us: 11,
@@ -258,7 +264,8 @@ fn source_refresh_only_and_full_modes_share_the_same_refresh_path() -> Result<()
 #[test]
 fn full_scheduler_periodically_runs_the_global_source_refresh_executor() -> Result<()> {
     use super::super::source_backed_refresh_coordinator::{
-        SourceBackedRefreshExecution, SourceBackedRefreshPublication, SourceBackedRefreshTimings,
+        SourceBackedRefreshCurrent, SourceBackedRefreshExecution, SourceBackedRefreshPublication,
+        SourceBackedRefreshTimings,
     };
 
     let temp = tempfile::tempdir()?;
@@ -280,6 +287,7 @@ fn full_scheduler_periodically_runs_the_global_source_refresh_executor() -> Resu
                 unsupported_routes: 0,
                 certified_source_count: 0,
                 certified_source_bytes: 0,
+                current: SourceBackedRefreshCurrent::default(),
                 timings: SourceBackedRefreshTimings::default(),
             })
         },
@@ -324,7 +332,8 @@ fn full_scheduler_periodically_runs_the_global_source_refresh_executor() -> Resu
 #[test]
 fn full_scheduler_never_runs_or_activates_legacy_history_state() -> Result<()> {
     use super::super::source_backed_refresh_coordinator::{
-        SourceBackedRefreshExecution, SourceBackedRefreshPublication, SourceBackedRefreshTimings,
+        SourceBackedRefreshCurrent, SourceBackedRefreshExecution, SourceBackedRefreshPublication,
+        SourceBackedRefreshTimings,
     };
 
     let temp = tempfile::tempdir()?;
@@ -361,6 +370,7 @@ fn full_scheduler_never_runs_or_activates_legacy_history_state() -> Result<()> {
                 unsupported_routes: 0,
                 certified_source_count: 0,
                 certified_source_bytes: 0,
+                current: SourceBackedRefreshCurrent::default(),
                 timings: SourceBackedRefreshTimings::default(),
             })
         },

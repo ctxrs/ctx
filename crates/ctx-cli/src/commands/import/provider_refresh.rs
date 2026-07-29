@@ -16,8 +16,15 @@ use super::{ImportTotals, SourceStats};
 #[derive(Debug, Default)]
 pub(crate) struct ProviderRefreshCollector {
     aggregates: Vec<ProviderRefreshAggregate>,
+    source_backed: Option<SourceBackedRefreshAnalyticsFacts>,
     refresh_started: Option<Instant>,
     refresh_duration: Duration,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SourceBackedRefreshAnalyticsFacts {
+    trigger: ProviderRefreshTrigger,
+    generation_changed: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -126,6 +133,17 @@ impl ProviderRefreshCollector {
         }
     }
 
+    pub(crate) fn record_source_backed_publication(
+        &mut self,
+        trigger: ProviderRefreshTrigger,
+        generation_changed: bool,
+    ) {
+        self.source_backed = Some(SourceBackedRefreshAnalyticsFacts {
+            trigger,
+            generation_changed,
+        });
+    }
+
     pub(crate) fn finish(mut self) -> Vec<PublicEventV1> {
         self.stop_timing();
         let duration = self.refresh_duration;
@@ -146,7 +164,8 @@ impl ProviderRefreshCollector {
         });
         let fallback_duration =
             (self.aggregates.len() == 1).then_some(single_provider_fallback_duration);
-        self.aggregates
+        let mut events = self
+            .aggregates
             .into_iter()
             .map(|aggregate| {
                 let totals = aggregate.totals;
@@ -183,9 +202,9 @@ impl ProviderRefreshCollector {
                     outcome,
                     duration,
                     ForegroundProviderRefreshV1 {
-                        provider: aggregate.provider,
+                        provider: Some(aggregate.provider),
                         trigger: aggregate.trigger,
-                        source_mode: aggregate.source_mode,
+                        source_mode: Some(aggregate.source_mode),
                         change: if aggregate.work_result == ProviderImportWorkResult::Changed {
                             ProviderRefreshChange::Changed
                         } else {
@@ -220,7 +239,7 @@ impl ProviderRefreshCollector {
                         retired_records: aggregate
                             .retired_records_complete
                             .then(|| count_bucket(aggregate.retired_records)),
-                        counts: ProviderRefreshCountsV1::new(
+                        counts: Some(ProviderRefreshCountsV1::new(
                             count_u64(source_count),
                             count_u64(totals.source_files),
                             count_u64(totals.imported_sessions),
@@ -230,14 +249,49 @@ impl ProviderRefreshCollector {
                             count_u64(totals.failed),
                             count_u64(totals.failed_sources),
                             totals.source_bytes,
-                        ),
+                        )),
                         performance: None,
                     },
                 );
                 event.surface = surface;
                 PublicEventV1::ProviderRefreshCompleted(event)
             })
-            .collect()
+            .collect::<Vec<_>>();
+        if let Some(facts) = self.source_backed {
+            let mut event = ProviderRefreshCompletedV1::foreground_bucketed(
+                Outcome::Success,
+                duration_bucket(single_provider_fallback_duration),
+                ForegroundProviderRefreshV1 {
+                    provider: None,
+                    trigger: facts.trigger,
+                    source_mode: None,
+                    change: if facts.generation_changed {
+                        ProviderRefreshChange::Changed
+                    } else {
+                        ProviderRefreshChange::NoOp
+                    },
+                    content_evidence: ProviderRefreshContentEvidence::Unknown,
+                    work_kind: (!facts.generation_changed).then_some(ProviderRefreshWorkKind::NoOp),
+                    refresh_result: ProviderRefreshResult::Complete,
+                    core_result: if facts.generation_changed {
+                        ProviderCoreResult::Complete
+                    } else {
+                        ProviderCoreResult::NoOp
+                    },
+                    canonical_pro_result: ProviderProResult::Unknown,
+                    output_pro_result: ProviderProResult::Unknown,
+                    failure_scope: ProviderRefreshFailureScope::None,
+                    failure_type: ProviderRefreshFailureType::None,
+                    work_remaining: false,
+                    retired_records: None,
+                    counts: None,
+                    performance: None,
+                },
+            );
+            event.surface = surface;
+            events.push(PublicEventV1::ProviderRefreshCompleted(event));
+        }
+        events
     }
 
     fn aggregate_mut(

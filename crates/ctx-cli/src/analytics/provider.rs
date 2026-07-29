@@ -301,9 +301,12 @@ impl ProviderRefreshPerformanceV1 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ForegroundProviderRefreshV1 {
-    pub(crate) provider: CaptureProvider,
+    /// Absent only for one provider-neutral, all-provider source publication.
+    pub(crate) provider: Option<CaptureProvider>,
     pub(crate) trigger: ProviderRefreshTrigger,
-    pub(crate) source_mode: ProviderRefreshSourceMode,
+    /// Absent when a global publication may contain discovered and explicit
+    /// catalog routes together.
+    pub(crate) source_mode: Option<ProviderRefreshSourceMode>,
     pub(crate) change: ProviderRefreshChange,
     pub(crate) content_evidence: ProviderRefreshContentEvidence,
     pub(crate) work_kind: Option<ProviderRefreshWorkKind>,
@@ -315,7 +318,9 @@ pub(crate) struct ForegroundProviderRefreshV1 {
     pub(crate) failure_type: ProviderRefreshFailureType,
     pub(crate) work_remaining: bool,
     pub(crate) retired_records: Option<CountBucket>,
-    pub(crate) counts: ProviderRefreshCountsV1,
+    /// Per-run counts are omitted when only current generation cardinalities
+    /// are authoritative.
+    pub(crate) counts: Option<ProviderRefreshCountsV1>,
     pub(crate) performance: Option<ProviderRefreshPerformanceV1>,
 }
 
@@ -383,9 +388,9 @@ mod tests {
                 Outcome::Success,
                 Duration::from_secs(2),
                 ForegroundProviderRefreshV1 {
-                    provider: CaptureProvider::Custom,
+                    provider: Some(CaptureProvider::Custom),
                     trigger: ProviderRefreshTrigger::Import,
-                    source_mode: ProviderRefreshSourceMode::HistorySourcePlugin,
+                    source_mode: Some(ProviderRefreshSourceMode::HistorySourcePlugin),
                     change: ProviderRefreshChange::Changed,
                     content_evidence: ProviderRefreshContentEvidence::Mixed,
                     work_kind: Some(ProviderRefreshWorkKind::Append),
@@ -397,7 +402,7 @@ mod tests {
                     failure_type: ProviderRefreshFailureType::RecordRejection,
                     work_remaining: true,
                     retired_records: Some(count_bucket(42)),
-                    counts: ProviderRefreshCountsV1::new(2, 12, 3, 8, 1, 5, 1, 1, 2048),
+                    counts: Some(ProviderRefreshCountsV1::new(2, 12, 3, 8, 1, 5, 1, 1, 2048)),
                     performance: Some(ProviderRefreshPerformanceV1::new(
                         Duration::from_millis(800),
                         Some(512 * 1024 * 1024),
