@@ -11,9 +11,7 @@ use ctx_history_core::{
 };
 #[cfg(test)]
 use ctx_history_core::{CaptureProvider, EventRole, EventType};
-use ctx_history_index::{
-    AgentScope, EventRecord, EventSearchCandidate, EventSearchFilters, VerifiedIndex,
-};
+use ctx_history_index::{EventRecord, EventSearchCandidate, EventSearchFilters, VerifiedIndex};
 use serde_json::{json, Value};
 use thiserror::Error;
 use uuid::Uuid;
@@ -48,7 +46,9 @@ pub(in crate::semantic) use transport::{
     DaemonQueryResponseTooLarge, DaemonSourceRefreshServiceUnavailable,
 };
 mod hydration_budget;
+mod semantic_filters;
 mod server;
+use self::semantic_filters::source_event_matches_filters;
 #[cfg(test)]
 pub(in crate::semantic) use server::*;
 #[cfg(not(test))]
@@ -900,96 +900,6 @@ fn source_semantic_diagnostics(
     }))
 }
 
-fn source_event_matches_filters(event: &EventRecord, filters: &EventSearchFilters) -> bool {
-    if !filters.matches_source_identity(event) {
-        return false;
-    }
-    if filters
-        .session_id
-        .is_some_and(|id| event.session_id.as_uuid() != id)
-        || filters
-            .parent_session_id
-            .is_some_and(|id| event.parent_session_id.map(|value| value.as_uuid()) != Some(id))
-        || filters
-            .root_session_id
-            .is_some_and(|id| event.root_session_id.as_uuid() != id)
-        || filters
-            .provider
-            .as_deref()
-            .is_some_and(|value| event.provider != value)
-        || filters
-            .source_format
-            .as_deref()
-            .is_some_and(|value| event.source_format != value)
-        || filters
-            .provider_session_id
-            .as_deref()
-            .is_some_and(|value| event.provider_session_id.as_deref() != Some(value))
-        || filters
-            .branch
-            .as_deref()
-            .is_some_and(|value| event.branch.as_deref() != Some(value))
-        || filters
-            .event_type
-            .as_deref()
-            .is_some_and(|value| event.event_type != value)
-        || filters
-            .role
-            .as_deref()
-            .is_some_and(|value| event.role.as_deref() != Some(value))
-        || filters
-            .agent_type
-            .as_deref()
-            .is_some_and(|value| event.agent_type != value)
-        || filters
-            .since_unix_ms
-            .is_some_and(|since| event.occurred_at_unix_ms.is_none_or(|value| value < since))
-    {
-        return false;
-    }
-    if filters.agent_scope == AgentScope::Primary
-        && filters.session_id.is_none()
-        && !event.is_primary
-        && event.agent_type != "primary"
-    {
-        return false;
-    }
-    if filters.workspace.as_deref().is_some_and(|needle| {
-        !event
-            .workspace
-            .as_deref()
-            .is_some_and(|value| metadata_contains(value, needle))
-    }) {
-        return false;
-    }
-    if filters.file.as_deref().is_some_and(|needle| {
-        !event
-            .touched_files
-            .iter()
-            .any(|value| metadata_contains(value, needle))
-    }) {
-        return false;
-    }
-    !filters
-        .exclude_session_tree
-        .as_ref()
-        .is_some_and(|excluded| {
-            let provider_thread = event.provider == excluded.provider
-                && event.provider_session_id.as_deref()
-                    == Some(excluded.provider_session_id.as_str());
-            provider_thread
-                || excluded.session_id.is_some_and(|session_id| {
-                    event.session_id.as_uuid() == session_id
-                        || event.parent_session_id.map(|id| id.as_uuid()) == Some(session_id)
-                        || event.root_session_id.as_uuid() == session_id
-                })
-        })
-}
-
-fn metadata_contains(value: &str, needle: &str) -> bool {
-    value.to_lowercase().contains(&needle.trim().to_lowercase())
-}
-
 fn source_semantic_not_ready(code: &'static str, detail: impl Into<String>) -> anyhow::Error {
     anyhow::Error::new(SourceBackedSemanticNotReady::new(code, detail))
 }
@@ -1015,129 +925,7 @@ pub(crate) fn semantic_query_service_supported() -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn exercise_complete_session_budget(
-        event_count: usize,
-        response_texts: &[String],
-        limit_bytes: usize,
-        daemon_calls: &mut usize,
-    ) -> Result<()> {
-        let event_id = Uuid::nil();
-        let events = (0..event_count).collect::<Vec<_>>();
-        let mut budget = SourceHydrationOperationBudget::new(limit_bytes);
-        for (batch_index, _) in events.chunks(SOURCE_HYDRATION_BATCH_MAX_ITEMS).enumerate() {
-            let _remaining = budget.remaining_response_bytes(Some(event_id))?;
-            *daemon_calls += 1;
-            let text = response_texts.get(batch_index).cloned().unwrap_or_default();
-            budget.retain_batch(&[(event_id, text)], Some(event_id))?;
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn semantic_query_pin_rejects_a_different_core_generation() {
-        let pin = SourceBackedSemanticQueryPin {
-            core_generation_id: "generation-a".to_owned(),
-            pinned: None,
-        };
-
-        let error = validate_semantic_query_generation("generation-b", &pin)
-            .expect_err("a semantic pin must not cross Core generations");
-        let not_ready = error
-            .downcast_ref::<SourceBackedSemanticNotReady>()
-            .expect("generation mismatch must retain the typed unavailable contract");
-        assert_eq!(not_ready.code(), "semantic_generation_receipt_mismatch");
-        assert!(not_ready.detail().contains("generation-a"));
-        assert!(not_ready.detail().contains("generation-b"));
-    }
-
-    #[test]
-    fn hydration_client_preserves_budget_code_and_accepts_content_too_large_kind() {
-        let unavailable = SourceHydrationUnavailable::new(
-            "hydration_budget_exceeded",
-            source_hydration_failure_kind("content_too_large").unwrap(),
-            "aggregate request budget was exceeded",
-            false,
-            None,
-        );
-
-        assert_eq!(unavailable.code(), "hydration_budget_exceeded");
-        assert_eq!(unavailable.failure_kind, "content_too_large");
-        assert!(!unavailable.retryable_after_refresh());
-    }
-
-    #[test]
-    fn complete_session_200_events_succeeds_when_multi_chunk_aggregate_is_small() {
-        let mut daemon_calls = 0;
-        exercise_complete_session_budget(
-            200,
-            &["a".repeat(512), "b".repeat(512)],
-            4 * 1024,
-            &mut daemon_calls,
-        )
-        .unwrap();
-
-        assert_eq!(daemon_calls, 2);
-    }
-
-    #[test]
-    fn complete_session_129th_event_makes_no_daemon_call_after_exact_exhaustion() {
-        let mut daemon_calls = 0;
-        let error = exercise_complete_session_budget(
-            129,
-            &["a".repeat(512), "b".to_owned()],
-            1024,
-            &mut daemon_calls,
-        )
-        .expect_err("the second chunk must stop before transport");
-
-        assert_eq!(daemon_calls, 1);
-        let unavailable = error
-            .downcast_ref::<SourceHydrationUnavailable>()
-            .expect("aggregate exhaustion remains typed");
-        assert_eq!(unavailable.code(), "hydration_budget_exceeded");
-        assert_eq!(unavailable.failure_kind, "content_too_large");
-        assert!(!unavailable.retryable_after_refresh());
-        assert!(unavailable.complete_content_error().is_some());
-    }
-
-    #[test]
-    fn complete_session_multi_chunk_overage_is_typed_and_stops_before_third_call() {
-        let mut daemon_calls = 0;
-        let error = exercise_complete_session_budget(
-            300,
-            &["a".repeat(512), "b".repeat(1200), "c".to_owned()],
-            2500,
-            &mut daemon_calls,
-        )
-        .expect_err("aggregate retained content must share one allowance");
-
-        assert_eq!(daemon_calls, 2);
-        let unavailable = error
-            .downcast_ref::<SourceHydrationUnavailable>()
-            .expect("aggregate overage remains typed");
-        assert_eq!(unavailable.code(), "hydration_budget_exceeded");
-        assert_eq!(unavailable.failure_kind, "content_too_large");
-        assert!(!unavailable.retryable_after_refresh());
-    }
-
-    #[test]
-    fn transport_overage_maps_without_parsing_error_detail() {
-        let error = map_source_hydration_request_error(
-            DaemonQueryResponseTooLarge::new(1024).into(),
-            Some(Uuid::nil()),
-        );
-
-        let unavailable = error
-            .downcast_ref::<SourceHydrationUnavailable>()
-            .expect("transport overage remains typed");
-        assert_eq!(unavailable.code(), "hydration_budget_exceeded");
-        assert_eq!(unavailable.failure_kind, "content_too_large");
-        assert!(!unavailable.retryable_after_refresh());
-    }
-}
+mod tests;
 
 pub(in crate::semantic) fn daemon_query_service_transport_supported() -> bool {
     cfg!(any(unix, windows))
