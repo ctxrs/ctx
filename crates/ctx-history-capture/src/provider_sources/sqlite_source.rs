@@ -1,33 +1,45 @@
 //! Stock SQLite snapshots for root-authorized provider databases.
 //!
 //! The ordinary provider-source layer approves and retains the database parent
-//! directory. This module keeps that directory handle, records its approved
-//! pathname, rejects obvious symlink/reparse-point and non-regular SQLite
-//! family members, and then lets stock SQLite open the approved database path.
-//! SQLite therefore owns ordinary rollback/WAL locking and shared-memory
-//! behavior on every supported platform.
+//! directory. This module keeps that directory handle, rejects symlink,
+//! reparse-point, and non-regular SQLite family members, and never asks SQLite
+//! to create or update files in the provider directory.
 //!
-//! Connections are opened `READ_ONLY`, configured `query_only`, prevented from
-//! checkpointing on close, and pinned with a short deferred read transaction.
-//! Provider SQL remains outside this seam. Native DB-family evidence and SQLite
-//! schema/source evidence are captured before provider SQL and compared again
-//! by [`SqliteSourceReadSnapshot::finish`]. Any concurrent commit or source
-//! rewrite fails closed with [`SqliteSourceAccessError::SourceChanged`]; retry
-//! remains caller policy.
+//! A certified sidecar-free database is opened through SQLite's immutable URI
+//! mode. A database with WAL or SHM state is copied once, with bounded I/O, to a
+//! private temporary directory below the ctx data root; SQLite may create its
+//! own SHM only there. Rollback journals remain typed unavailable because
+//! recovery could require database writes. Source DB/WAL identity and state,
+//! plus bounded SHM content, are captured before acquisition and revalidated
+//! after it and again before observations are published. Concurrent commits,
+//! rewrites, truncation, and sidecar creation/deletion therefore fail closed.
 
 use std::{
     ffi::{c_char, c_void, OsStr, OsString},
     fs::{self, File, Metadata, OpenOptions},
-    io::{Read, Seek, SeekFrom},
+    io::{Read, Seek, SeekFrom, Write},
+    ops::Deref,
     path::{Component, Path, PathBuf},
     ptr,
 };
 
+use ctx_history_core::default_data_root;
 use rusqlite::{config::DbConfig, ffi, Connection, OpenFlags};
 use sha2::{Digest, Sha256};
+use tempfile::TempDir;
 use thiserror::Error;
+#[cfg(target_os = "linux")]
+use url::Url;
 
-const EVIDENCE_DOMAIN: &[u8] = b"ctx-stock-sqlite-snapshot-v1\0";
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
+
+const EVIDENCE_DOMAIN: &[u8] = b"ctx-stock-sqlite-snapshot-v2\0";
+const SQLITE_SNAPSHOT_MAX_COMPONENT_BYTES: u64 = 512 * 1024 * 1024;
+const SQLITE_SNAPSHOT_MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
+const SQLITE_COPY_BUFFER_BYTES: usize = 64 * 1024;
+const SQLITE_WAL_TOKEN_BYTES: usize = 64;
+const SQLITE_SHM_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SqliteSourceComponent {
@@ -69,6 +81,14 @@ pub(crate) enum SqliteSourceAccessError {
     ConnectionIdentityMismatch,
     #[error("SQLite source file changed while its read snapshot was active")]
     SourceChanged,
+    #[error("SQLite source snapshot exceeds the bounded limit for {path:?}: {length} > {maximum}")]
+    SnapshotTooLarge {
+        path: PathBuf,
+        length: u64,
+        maximum: u64,
+    },
+    #[error("SQLite source snapshot is unavailable: {reason}")]
+    SnapshotUnavailable { reason: String },
     #[error("SQLite {component} is unavailable: {capability}")]
     UnsupportedSidecarIdentity {
         component: SqliteSourceComponent,
@@ -79,6 +99,12 @@ pub(crate) enum SqliteSourceAccessError {
 }
 
 pub(crate) type SqliteSourceAccessResult<T> = Result<T, SqliteSourceAccessError>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SqliteSourceSnapshotStrategy {
+    ImmutableMain,
+    CopiedFamily,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SqliteSourceEvidence {
@@ -177,6 +203,17 @@ pub(crate) struct SqliteSourceReadSnapshot {
     native_evidence: SqliteFamilyEvidence,
     sqlite_evidence: SqliteSnapshotEvidence,
     evidence: SqliteSourceEvidence,
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "retained for bounded snapshot observability")
+    )]
+    strategy: SqliteSourceSnapshotStrategy,
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "retained for bounded snapshot observability")
+    )]
+    copied_bytes: u64,
+    _snapshot_directory: Option<TempDir>,
 }
 
 impl SqliteSourceReadSnapshot {
@@ -191,6 +228,23 @@ impl SqliteSourceReadSnapshot {
 
     pub(crate) fn evidence(&self) -> &SqliteSourceEvidence {
         &self.evidence
+    }
+
+    #[cfg(test)]
+    pub(crate) fn strategy(&self) -> SqliteSourceSnapshotStrategy {
+        self.strategy
+    }
+
+    #[cfg(test)]
+    pub(crate) fn copied_bytes(&self) -> u64 {
+        self.copied_bytes
+    }
+
+    #[cfg(test)]
+    pub(crate) fn snapshot_directory(&self) -> Option<&Path> {
+        self._snapshot_directory
+            .as_ref()
+            .map(tempfile::TempDir::path)
     }
 
     /// Revalidates the pinned SQLite view and retained DB family without
@@ -232,6 +286,71 @@ impl Drop for SqliteSourceReadSnapshot {
     }
 }
 
+/// A pinned read-only SQLite view over a snapshot already owned by ctx.
+///
+/// The caller is responsible for proving that `path` lives in private
+/// ctx-owned storage. SQLite may create or update sidecars beside this path;
+/// it can never reach the provider directory through this API.
+#[must_use = "call finish() after complete-content queries"]
+#[derive(Debug)]
+pub(crate) struct CtxOwnedSqliteReadSnapshot {
+    connection: Option<Connection>,
+}
+
+impl CtxOwnedSqliteReadSnapshot {
+    pub(crate) fn finish(mut self) -> SqliteSourceAccessResult<()> {
+        let connection = self
+            .connection
+            .as_ref()
+            .ok_or(SqliteSourceAccessError::SnapshotNotActive)?;
+        clear_snapshot_authorizer(connection)?;
+        connection
+            .execute_batch("ROLLBACK")
+            .map_err(|source| sqlite_error("ending the ctx-owned SQLite snapshot", source))?;
+        self.connection.take();
+        Ok(())
+    }
+}
+
+impl Deref for CtxOwnedSqliteReadSnapshot {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        match self.connection.as_ref() {
+            Some(connection) => connection,
+            None => std::process::abort(),
+        }
+    }
+}
+
+impl Drop for CtxOwnedSqliteReadSnapshot {
+    fn drop(&mut self) {
+        if let Some(connection) = self.connection.as_ref() {
+            let _ = clear_snapshot_authorizer(connection);
+            let _ = connection.execute_batch("ROLLBACK");
+        }
+        self.connection.take();
+    }
+}
+
+pub(crate) fn open_ctx_owned_sqlite_read_snapshot(
+    path: &Path,
+) -> SqliteSourceAccessResult<CtxOwnedSqliteReadSnapshot> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .map_err(|source| sqlite_error("opening a ctx-owned SQLite snapshot", source))?;
+    verify_connection_read_only(&connection)?;
+    configure_and_pin_snapshot(&connection)?;
+    Ok(CtxOwnedSqliteReadSnapshot {
+        connection: Some(connection),
+    })
+}
+
 /// Retains an approved parent-directory handle together with the pathname that
 /// stock SQLite is allowed to open beneath it.
 pub(crate) fn retain_sqlite_source_directory_authority(
@@ -252,36 +371,256 @@ pub(crate) fn open_root_handle_sqlite_source_snapshot(
 fn open_root_handle_sqlite_source_snapshot_inner(
     authority: &SqliteSourceDirectoryAuthority,
     database_name: &OsStr,
-    before_sqlite_open: impl FnOnce(),
+    before_source_revalidation: impl FnOnce(),
 ) -> SqliteSourceAccessResult<SqliteSourceReadSnapshot> {
-    let mut family = SqliteSourceFamily::open(authority, database_name)?;
-    // Fence real mutations across SQLite open/pinning. Post-open admission may
-    // only normalize the stock reader's empty-WAL/SHM creation transition.
-    let admission_evidence = family.capture_evidence()?;
-    family.revalidate(&admission_evidence)?;
-    before_sqlite_open();
+    let family = SqliteSourceFamily::open(authority, database_name)?;
+    let native_evidence = family.capture_evidence()?;
+    family.revalidate(&native_evidence)?;
+
+    let acquired = acquire_sqlite_connection(&family, &native_evidence)?;
+    verify_connection_read_only(&acquired.connection)?;
+    configure_and_pin_snapshot(&acquired.connection)?;
+    before_source_revalidation();
+
+    // The source family is checked only after SQLite has pinned the selected
+    // view. No provider observation may escape if acquisition raced a commit,
+    // rewrite, truncation, replacement, or sidecar transition.
+    family.revalidate(&native_evidence)?;
+    let sqlite_evidence = capture_sqlite_evidence(&acquired.connection)?;
+    family.revalidate(&native_evidence)?;
+    let evidence = SqliteSourceEvidence::from_snapshot(&native_evidence, &sqlite_evidence);
+    Ok(SqliteSourceReadSnapshot {
+        connection: Some(acquired.connection),
+        family,
+        native_evidence,
+        sqlite_evidence,
+        evidence,
+        strategy: acquired.strategy,
+        copied_bytes: acquired.copied_bytes,
+        _snapshot_directory: acquired.snapshot_directory,
+    })
+}
+
+struct AcquiredSqliteConnection {
+    connection: Connection,
+    strategy: SqliteSourceSnapshotStrategy,
+    copied_bytes: u64,
+    snapshot_directory: Option<TempDir>,
+}
+
+fn acquire_sqlite_connection(
+    family: &SqliteSourceFamily,
+    evidence: &SqliteFamilyEvidence,
+) -> SqliteSourceAccessResult<AcquiredSqliteConnection> {
+    if family.wal.is_none() && family.shared_memory.is_none() {
+        #[cfg(target_os = "linux")]
+        if immutable_procfd_available(&family.database.file) {
+            return Ok(AcquiredSqliteConnection {
+                connection: open_immutable_main(&family.database)?,
+                strategy: SqliteSourceSnapshotStrategy::ImmutableMain,
+                copied_bytes: 0,
+                snapshot_directory: None,
+            });
+        }
+    }
+
+    enforce_snapshot_copy_bounds(family, evidence)?;
+    let (snapshot_directory, snapshot_path, copied_bytes) =
+        copy_sqlite_family_to_ctx(family, evidence)?;
     let connection = Connection::open_with_flags(
-        &family.database.path,
+        &snapshot_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY
             | OpenFlags::SQLITE_OPEN_NO_MUTEX
             | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE
             | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
-    .map_err(|source| sqlite_error("opening the approved provider database", source))?;
-    verify_connection_read_only(&connection)?;
-    configure_and_pin_snapshot(&connection)?;
-    family.admit_stock_sidecars()?;
-    let native_evidence = family.capture_evidence_after_stock_open(&admission_evidence)?;
-    let sqlite_evidence = capture_sqlite_evidence(&connection)?;
-    family.revalidate(&native_evidence)?;
-    let evidence = SqliteSourceEvidence::from_snapshot(&native_evidence, &sqlite_evidence);
-    Ok(SqliteSourceReadSnapshot {
-        connection: Some(connection),
-        family,
-        native_evidence,
-        sqlite_evidence,
-        evidence,
+    .map_err(|source| sqlite_error("opening the ctx-owned provider snapshot", source))?;
+    Ok(AcquiredSqliteConnection {
+        connection,
+        strategy: SqliteSourceSnapshotStrategy::CopiedFamily,
+        copied_bytes,
+        snapshot_directory: Some(snapshot_directory),
     })
+}
+
+#[cfg(target_os = "linux")]
+fn immutable_procfd_available(database: &File) -> bool {
+    PathBuf::from(format!("/proc/self/fd/{}", database.as_raw_fd())).exists()
+}
+
+#[cfg(target_os = "linux")]
+fn open_immutable_main(database: &SqliteFamilyMember) -> SqliteSourceAccessResult<Connection> {
+    let procfd_path = PathBuf::from(format!("/proc/self/fd/{}", database.file.as_raw_fd()));
+    let mut uri = Url::from_file_path(&procfd_path).map_err(|()| {
+        SqliteSourceAccessError::SnapshotUnavailable {
+            reason: "the retained SQLite main handle cannot be represented as a file URI"
+                .to_owned(),
+        }
+    })?;
+    uri.query_pairs_mut()
+        .append_pair("mode", "ro")
+        .append_pair("immutable", "1");
+    Connection::open_with_flags(
+        uri.as_str(),
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE
+            | OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(|source| sqlite_error("opening the retained immutable provider database", source))
+}
+
+fn enforce_snapshot_copy_bounds(
+    family: &SqliteSourceFamily,
+    evidence: &SqliteFamilyEvidence,
+) -> SqliteSourceAccessResult<()> {
+    let mut total = bounded_snapshot_component(&family.database.path, evidence.database.length)?;
+    if let (Some(wal), Some(state)) = (family.wal.as_ref(), evidence.wal.as_ref()) {
+        total = total
+            .checked_add(bounded_snapshot_component(&wal.path, state.length)?)
+            .ok_or_else(|| SqliteSourceAccessError::SnapshotTooLarge {
+                path: family.database.path.clone(),
+                length: u64::MAX,
+                maximum: SQLITE_SNAPSHOT_MAX_TOTAL_BYTES,
+            })?;
+    }
+    if total > SQLITE_SNAPSHOT_MAX_TOTAL_BYTES {
+        return Err(SqliteSourceAccessError::SnapshotTooLarge {
+            path: family.database.path.clone(),
+            length: total,
+            maximum: SQLITE_SNAPSHOT_MAX_TOTAL_BYTES,
+        });
+    }
+    Ok(())
+}
+
+fn bounded_snapshot_component(path: &Path, length: u64) -> SqliteSourceAccessResult<u64> {
+    if length > SQLITE_SNAPSHOT_MAX_COMPONENT_BYTES {
+        Err(SqliteSourceAccessError::SnapshotTooLarge {
+            path: path.to_path_buf(),
+            length,
+            maximum: SQLITE_SNAPSHOT_MAX_COMPONENT_BYTES,
+        })
+    } else {
+        Ok(length)
+    }
+}
+
+fn copy_sqlite_family_to_ctx(
+    family: &SqliteSourceFamily,
+    evidence: &SqliteFamilyEvidence,
+) -> SqliteSourceAccessResult<(TempDir, PathBuf, u64)> {
+    let data_root =
+        default_data_root().map_err(|source| SqliteSourceAccessError::SnapshotUnavailable {
+            reason: format!("the ctx data root is unavailable: {source}"),
+        })?;
+    fs::create_dir_all(&data_root).map_err(|source| SqliteSourceAccessError::Io {
+        operation: "creating the ctx data root for a provider SQLite snapshot",
+        path: data_root.clone(),
+        source,
+    })?;
+    let directory = tempfile::Builder::new()
+        .prefix("provider-sqlite-snapshot-")
+        .tempdir_in(&data_root)
+        .map_err(|source| SqliteSourceAccessError::Io {
+            operation: "creating a private provider SQLite snapshot",
+            path: data_root,
+            source,
+        })?;
+    let snapshot_path = directory.path().join("source.sqlite");
+    copy_sqlite_member(&family.database, &snapshot_path, evidence.database.length)?;
+    let mut copied_bytes = evidence.database.length;
+    if let (Some(wal), Some(state)) = (family.wal.as_ref(), evidence.wal.as_ref()) {
+        copy_sqlite_member(
+            wal,
+            &directory.path().join("source.sqlite-wal"),
+            state.length,
+        )?;
+        copied_bytes = copied_bytes
+            .checked_add(state.length)
+            .ok_or(SqliteSourceAccessError::SourceChanged)?;
+    }
+    // SHM is lock coordination, not provider content. Copying it would retain
+    // volatile reader marks. Stock SQLite rebuilds it only in this ctx-owned
+    // directory from the certified DB/WAL pair.
+    family.revalidate(evidence)?;
+    Ok((directory, snapshot_path, copied_bytes))
+}
+
+fn copy_sqlite_member(
+    member: &SqliteFamilyMember,
+    destination: &Path,
+    expected_length: u64,
+) -> SqliteSourceAccessResult<()> {
+    let mut source_file =
+        member
+            .file
+            .try_clone()
+            .map_err(|source| SqliteSourceAccessError::Io {
+                operation: "retaining a provider SQLite component for snapshot copy",
+                path: member.path.clone(),
+                source,
+            })?;
+    source_file
+        .seek(SeekFrom::Start(0))
+        .map_err(|source| SqliteSourceAccessError::Io {
+            operation: "seeking a provider SQLite component for snapshot copy",
+            path: member.path.clone(),
+            source,
+        })?;
+    let mut destination_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .map_err(|source| SqliteSourceAccessError::Io {
+            operation: "creating a ctx-owned SQLite snapshot component",
+            path: destination.to_path_buf(),
+            source,
+        })?;
+    let mut remaining = expected_length;
+    let mut buffer = [0_u8; SQLITE_COPY_BUFFER_BYTES];
+    while remaining > 0 {
+        let requested = usize::try_from(remaining.min(buffer.len() as u64))
+            .map_err(|_| SqliteSourceAccessError::SourceChanged)?;
+        let read = source_file
+            .read(&mut buffer[..requested])
+            .map_err(|source| SqliteSourceAccessError::Io {
+                operation: "reading a provider SQLite snapshot component",
+                path: member.path.clone(),
+                source,
+            })?;
+        if read == 0 {
+            return Err(SqliteSourceAccessError::SourceChanged);
+        }
+        destination_file
+            .write_all(&buffer[..read])
+            .map_err(|source| SqliteSourceAccessError::Io {
+                operation: "writing a ctx-owned SQLite snapshot component",
+                path: destination.to_path_buf(),
+                source,
+            })?;
+        remaining -= read as u64;
+    }
+    let mut extra = [0_u8; 1];
+    if source_file
+        .read(&mut extra)
+        .map_err(|source| SqliteSourceAccessError::Io {
+            operation: "certifying a provider SQLite snapshot component length",
+            path: member.path.clone(),
+            source,
+        })?
+        != 0
+    {
+        return Err(SqliteSourceAccessError::SourceChanged);
+    }
+    destination_file
+        .flush()
+        .map_err(|source| SqliteSourceAccessError::Io {
+            operation: "flushing a ctx-owned SQLite snapshot component",
+            path: destination.to_path_buf(),
+            source,
+        })?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -346,17 +685,6 @@ impl SqliteSourceFamily {
         })
     }
 
-    fn admit_stock_sidecars(&mut self) -> SqliteSourceAccessResult<()> {
-        if self.wal.is_none() {
-            self.wal = SqliteFamilyMember::open_optional(self.wal_path.clone())?;
-        }
-        if self.shared_memory.is_none() {
-            self.shared_memory =
-                SqliteFamilyMember::open_optional(self.shared_memory_path.clone())?;
-        }
-        Ok(())
-    }
-
     fn capture_evidence(&self) -> SqliteSourceAccessResult<SqliteFamilyEvidence> {
         Ok(SqliteFamilyEvidence {
             parent_identity: self.authority.identity.clone(),
@@ -371,86 +699,16 @@ impl SqliteSourceFamily {
                 .as_ref()
                 .map(SqliteFamilyMember::capture_state)
                 .transpose()?,
-            wal_digest: self
+            wal_token: self
                 .wal
                 .as_ref()
-                .map(SqliteFamilyMember::digest)
+                .map(SqliteFamilyMember::bounded_token)
                 .transpose()?,
-        })
-    }
-
-    fn capture_evidence_after_stock_open(
-        &self,
-        admission: &SqliteFamilyEvidence,
-    ) -> SqliteSourceAccessResult<SqliteFamilyEvidence> {
-        self.authority.revalidate()?;
-        if self.authority.identity != admission.parent_identity {
-            return Err(SqliteSourceAccessError::SourceChanged);
-        }
-        self.database.revalidate(&admission.database)?;
-
-        let (wal, wal_digest) = match (self.wal.as_ref(), admission.wal.as_ref()) {
-            (Some(member), Some(expected)) => {
-                member.revalidate(expected)?;
-                let digest = member.digest()?;
-                if admission.wal_digest.as_ref() != Some(&digest) {
-                    return Err(SqliteSourceAccessError::SourceChanged);
-                }
-                (Some(expected.clone()), Some(digest))
-            }
-            (Some(member), None) => {
-                // An idle WAL writer can have no WAL pathname until the first
-                // stock reader pins a snapshot. Only SQLite's empty WAL
-                // creation is a non-source-changing transition.
-                let state = member.capture_state()?;
-                let digest = member.digest()?;
-                let empty_wal_digest: [u8; 32] = Sha256::digest([]).into();
-                if state.length != 0 || digest != empty_wal_digest {
-                    return Err(SqliteSourceAccessError::SourceChanged);
-                }
-                member.revalidate(&state)?;
-                (Some(state), Some(digest))
-            }
-            (None, None) => {
-                if SqliteFamilyMember::path_exists(&self.wal_path)? {
-                    return Err(SqliteSourceAccessError::SourceChanged);
-                }
-                (None, None)
-            }
-            (None, Some(_)) => return Err(SqliteSourceAccessError::SourceChanged),
-        };
-
-        let shared_memory = match (
-            self.shared_memory.as_ref(),
-            admission.shared_memory.as_ref(),
-        ) {
-            (Some(member), Some(expected)) => {
-                member.revalidate_identity(expected)?;
-                Some(member.capture_state()?)
-            }
-            (Some(member), None) => {
-                let state = member.capture_state()?;
-                member.revalidate_identity(&state)?;
-                Some(state)
-            }
-            (None, None) => {
-                if SqliteFamilyMember::path_exists(&self.shared_memory_path)? {
-                    return Err(SqliteSourceAccessError::SourceChanged);
-                }
-                None
-            }
-            (None, Some(_)) => return Err(SqliteSourceAccessError::SourceChanged),
-        };
-
-        if SqliteFamilyMember::path_exists(&self.journal_path)? {
-            return Err(SqliteSourceAccessError::SourceChanged);
-        }
-        Ok(SqliteFamilyEvidence {
-            parent_identity: admission.parent_identity.clone(),
-            database: admission.database.clone(),
-            wal,
-            shared_memory,
-            wal_digest,
+            shared_memory_token: self
+                .shared_memory
+                .as_ref()
+                .map(SqliteFamilyMember::content_digest)
+                .transpose()?,
         })
     }
 
@@ -461,13 +719,22 @@ impl SqliteSourceFamily {
         }
         self.database.revalidate(&expected.database)?;
         revalidate_optional_member(self.wal.as_ref(), expected.wal.as_ref(), &self.wal_path)?;
-        revalidate_optional_member_identity(
+        revalidate_optional_member(
             self.shared_memory.as_ref(),
             expected.shared_memory.as_ref(),
             &self.shared_memory_path,
         )?;
-        match (self.wal.as_ref(), expected.wal_digest.as_ref()) {
-            (Some(wal), Some(expected_digest)) if wal.digest()? == *expected_digest => {}
+        match (self.wal.as_ref(), expected.wal_token.as_ref()) {
+            (Some(wal), Some(expected_token)) if wal.bounded_token()? == *expected_token => {}
+            (None, None) => {}
+            _ => return Err(SqliteSourceAccessError::SourceChanged),
+        }
+        match (
+            self.shared_memory.as_ref(),
+            expected.shared_memory_token.as_ref(),
+        ) {
+            (Some(shared_memory), Some(expected_token))
+                if shared_memory.content_digest()? == *expected_token => {}
             (None, None) => {}
             _ => return Err(SqliteSourceAccessError::SourceChanged),
         }
@@ -542,57 +809,92 @@ impl SqliteFamilyMember {
         }
     }
 
-    fn revalidate_identity(&self, expected: &NativeFileState) -> SqliteSourceAccessResult<()> {
-        let retained = self.capture_state().map_err(map_revalidation_error)?;
-        if retained.identity != expected.identity {
-            return Err(SqliteSourceAccessError::SourceChanged);
-        }
-        let named = open_nofollow(&self.path, ExpectedObjectKind::RegularFile)
-            .map_err(map_revalidation_error)?;
-        let named_state =
-            NativeFileState::read(&named, &self.path, ExpectedObjectKind::RegularFile)
-                .map_err(map_revalidation_error)?;
-        if named_state.identity == expected.identity {
-            Ok(())
-        } else {
-            Err(SqliteSourceAccessError::SourceChanged)
-        }
-    }
-
-    fn digest(&self) -> SqliteSourceAccessResult<[u8; 32]> {
+    fn bounded_token(&self) -> SqliteSourceAccessResult<[u8; 32]> {
         let state = self.capture_state()?;
         let mut file = self
             .file
             .try_clone()
             .map_err(|source| SqliteSourceAccessError::Io {
-                operation: "retaining the SQLite WAL for revision evidence",
+                operation: "retaining the SQLite WAL for bounded revision evidence",
                 path: self.path.clone(),
                 source,
             })?;
         file.seek(SeekFrom::Start(0))
             .map_err(|source| SqliteSourceAccessError::Io {
-                operation: "seeking the SQLite WAL for revision evidence",
+                operation: "seeking the SQLite WAL for bounded revision evidence",
+                path: self.path.clone(),
+                source,
+            })?;
+        let prefix_len = usize::try_from(state.length.min(SQLITE_WAL_TOKEN_BYTES as u64))
+            .map_err(|_| SqliteSourceAccessError::SourceChanged)?;
+        let mut prefix = vec![0_u8; prefix_len];
+        file.read_exact(&mut prefix)
+            .map_err(|source| SqliteSourceAccessError::Io {
+                operation: "reading the SQLite WAL prefix for bounded revision evidence",
+                path: self.path.clone(),
+                source,
+            })?;
+        let suffix_len = prefix_len;
+        let mut suffix = vec![0_u8; suffix_len];
+        if suffix_len > 0 {
+            file.seek(SeekFrom::Start(state.length - suffix_len as u64))
+                .map_err(|source| SqliteSourceAccessError::Io {
+                    operation: "seeking the SQLite WAL suffix for bounded revision evidence",
+                    path: self.path.clone(),
+                    source,
+                })?;
+            file.read_exact(&mut suffix)
+                .map_err(|source| SqliteSourceAccessError::Io {
+                    operation: "reading the SQLite WAL suffix for bounded revision evidence",
+                    path: self.path.clone(),
+                    source,
+                })?;
+        }
+        let mut digest = Sha256::new();
+        digest.update(state.length.to_le_bytes());
+        digest.update(prefix);
+        digest.update(suffix);
+        Ok(digest.finalize().into())
+    }
+
+    fn content_digest(&self) -> SqliteSourceAccessResult<[u8; 32]> {
+        let state = self.capture_state()?;
+        if state.length > SQLITE_SHM_MAX_BYTES {
+            return Err(SqliteSourceAccessError::SnapshotTooLarge {
+                path: self.path.clone(),
+                length: state.length,
+                maximum: SQLITE_SHM_MAX_BYTES,
+            });
+        }
+        let mut file = self
+            .file
+            .try_clone()
+            .map_err(|source| SqliteSourceAccessError::Io {
+                operation: "retaining SQLite SHM for bounded content evidence",
+                path: self.path.clone(),
+                source,
+            })?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|source| SqliteSourceAccessError::Io {
+                operation: "seeking SQLite SHM for bounded content evidence",
                 path: self.path.clone(),
                 source,
             })?;
         let mut remaining = state.length;
-        let mut buffer = [0_u8; 64 * 1024];
+        let mut buffer = vec![0_u8; SQLITE_COPY_BUFFER_BYTES];
         let mut digest = Sha256::new();
+        digest.update(state.length.to_le_bytes());
         while remaining > 0 {
             let requested = usize::try_from(remaining.min(buffer.len() as u64))
                 .map_err(|_| SqliteSourceAccessError::SourceChanged)?;
-            let read = file.read(&mut buffer[..requested]).map_err(|source| {
-                SqliteSourceAccessError::Io {
-                    operation: "reading the SQLite WAL for revision evidence",
+            file.read_exact(&mut buffer[..requested])
+                .map_err(|source| SqliteSourceAccessError::Io {
+                    operation: "reading SQLite SHM for bounded content evidence",
                     path: self.path.clone(),
                     source,
-                }
-            })?;
-            if read == 0 {
-                return Err(SqliteSourceAccessError::SourceChanged);
-            }
-            digest.update(&buffer[..read]);
-            remaining -= read as u64;
+                })?;
+            digest.update(&buffer[..requested]);
+            remaining -= requested as u64;
         }
         Ok(digest.finalize().into())
     }
@@ -616,31 +918,14 @@ fn revalidate_optional_member(
     }
 }
 
-fn revalidate_optional_member_identity(
-    member: Option<&SqliteFamilyMember>,
-    expected: Option<&NativeFileState>,
-    path: &Path,
-) -> SqliteSourceAccessResult<()> {
-    match (member, expected) {
-        (Some(member), Some(expected)) => member.revalidate_identity(expected),
-        (None, None) => {
-            if SqliteFamilyMember::path_exists(path).map_err(map_revalidation_error)? {
-                Err(SqliteSourceAccessError::SourceChanged)
-            } else {
-                Ok(())
-            }
-        }
-        _ => Err(SqliteSourceAccessError::SourceChanged),
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SqliteFamilyEvidence {
     parent_identity: NativeFileIdentity,
     database: NativeFileState,
     wal: Option<NativeFileState>,
     shared_memory: Option<NativeFileState>,
-    wal_digest: Option<[u8; 32]>,
+    wal_token: Option<[u8; 32]>,
+    shared_memory_token: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -691,10 +976,10 @@ impl SqliteFamilyEvidence {
         // SHM is SQLite's volatile lock coordination, not provider content.
         // Stock read-only WAL readers may update its reader marks, so source
         // revisions intentionally derive from the DB, WAL, and SQLite evidence.
-        match self.wal_digest {
-            Some(wal_digest) => {
+        match self.wal_token {
+            Some(wal_token) => {
                 digest.update([1]);
-                digest.update(wal_digest);
+                digest.update(wal_token);
             }
             None => digest.update([0]),
         }
@@ -1209,18 +1494,25 @@ fn sqlite_error(operation: &'static str, source: rusqlite::Error) -> SqliteSourc
 #[cfg(test)]
 mod tests {
     use std::{
-        ffi::OsStr,
+        collections::BTreeMap,
+        ffi::{OsStr, OsString},
         fs::{self, File, OpenOptions},
-        io::Write,
+        io::{Seek, SeekFrom, Write},
         path::Path,
+        time::{Duration, Instant},
     };
+
+    #[cfg(unix)]
+    use std::os::unix::fs::{symlink, PermissionsExt};
 
     use rusqlite::{config::DbConfig, params, Connection};
 
     use super::{
-        open_root_handle_sqlite_source_snapshot, open_root_handle_sqlite_source_snapshot_for_test,
-        retain_sqlite_source_directory_authority, SqliteSourceAccessError, SqliteSourceComponent,
-        SqliteSourceDirectoryAuthority, SqliteSourceReadSnapshot,
+        default_data_root, open_root_handle_sqlite_source_snapshot,
+        open_root_handle_sqlite_source_snapshot_for_test, retain_sqlite_source_directory_authority,
+        SqliteSourceAccessError, SqliteSourceComponent, SqliteSourceDirectoryAuthority,
+        SqliteSourceReadSnapshot, SqliteSourceSnapshotStrategy, SQLITE_SHM_MAX_BYTES,
+        SQLITE_SNAPSHOT_MAX_COMPONENT_BYTES,
     };
 
     fn create_database(path: &Path, value: &str) {
@@ -1268,6 +1560,16 @@ mod tests {
             .unwrap()
     }
 
+    fn directory_file_bytes(path: &Path) -> BTreeMap<OsString, Vec<u8>> {
+        fs::read_dir(path)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (entry.file_name(), fs::read(entry.path()).unwrap())
+            })
+            .collect()
+    }
+
     #[test]
     fn stock_sqlite_initial_snapshot_succeeds_with_idle_wal_writer() {
         let temp = tempfile::tempdir().unwrap();
@@ -1284,15 +1586,23 @@ mod tests {
             !wal.exists(),
             "the idle writer must not have materialized a WAL pathname"
         );
+        let before = directory_file_bytes(temp.path());
         let parent = retain_parent(temp.path());
 
         let snapshot =
             open_root_handle_sqlite_source_snapshot(&parent, OsStr::new("provider.sqlite"))
                 .unwrap();
         assert_eq!(read_values(&snapshot), ["before-wal"]);
-        assert_eq!(snapshot.evidence().wal_length(), Some(0));
+        assert_eq!(
+            snapshot.strategy(),
+            SqliteSourceSnapshotStrategy::ImmutableMain
+        );
+        assert_eq!(snapshot.copied_bytes(), 0);
+        assert_eq!(snapshot.evidence().wal_length(), None);
         snapshot.finish().unwrap();
-        assert_eq!(fs::metadata(&wal).unwrap().len(), 0);
+        assert!(!wal.exists());
+        assert!(!database.with_file_name("provider.sqlite-shm").exists());
+        assert_eq!(directory_file_bytes(temp.path()), before);
 
         drop(writer);
     }
@@ -1303,14 +1613,30 @@ mod tests {
         let database = temp.path().join("provider.sqlite");
         let writer = create_persistent_wal(&database);
         let wal = database.with_file_name("provider.sqlite-wal");
+        let shared_memory = database.with_file_name("provider.sqlite-shm");
         let before_database = fs::read(&database).unwrap();
         let before_wal = fs::read(&wal).unwrap();
+        let before_shared_memory = fs::read(&shared_memory).unwrap();
+        let before_directory = directory_file_bytes(temp.path());
         let parent = retain_parent(temp.path());
 
         let snapshot =
             open_root_handle_sqlite_source_snapshot(&parent, OsStr::new("provider.sqlite"))
                 .unwrap();
         assert_eq!(read_values(&snapshot), ["from-wal"]);
+        assert_eq!(
+            snapshot.strategy(),
+            SqliteSourceSnapshotStrategy::CopiedFamily
+        );
+        assert_eq!(
+            snapshot.copied_bytes(),
+            u64::try_from(before_database.len() + before_wal.len()).unwrap()
+        );
+        assert!(snapshot
+            .snapshot_directory()
+            .unwrap()
+            .starts_with(default_data_root().unwrap()));
+        let snapshot_directory = snapshot.snapshot_directory().unwrap().to_path_buf();
         assert_eq!(
             snapshot
                 .connection()
@@ -1336,8 +1662,11 @@ mod tests {
         assert!(snapshot.evidence().shared_memory_length().is_some());
         snapshot.finish().unwrap();
 
+        assert!(!snapshot_directory.exists());
         assert_eq!(fs::read(&database).unwrap(), before_database);
         assert_eq!(fs::read(&wal).unwrap(), before_wal);
+        assert_eq!(fs::read(&shared_memory).unwrap(), before_shared_memory);
+        assert_eq!(directory_file_bytes(temp.path()), before_directory);
         assert_eq!(
             writer
                 .query_row("SELECT count(*) FROM messages", [], |row| row
@@ -1348,7 +1677,7 @@ mod tests {
     }
 
     #[test]
-    fn stock_sqlite_rebuilds_missing_shm_without_persistent_source_writes() {
+    fn copied_wal_snapshot_keeps_missing_provider_shm_missing() {
         let temp = tempfile::tempdir().unwrap();
         let database = temp.path().join("provider.sqlite");
         let writer = create_persistent_wal(&database);
@@ -1364,11 +1693,207 @@ mod tests {
             open_root_handle_sqlite_source_snapshot(&parent, OsStr::new("provider.sqlite"))
                 .unwrap();
         assert_eq!(read_values(&snapshot), ["from-wal"]);
+        assert_eq!(
+            snapshot.strategy(),
+            SqliteSourceSnapshotStrategy::CopiedFamily
+        );
+        assert_eq!(
+            snapshot.copied_bytes(),
+            u64::try_from(before_database.len() + before_wal.len()).unwrap()
+        );
         snapshot.finish().unwrap();
 
-        assert!(shared_memory.is_file());
+        assert!(!shared_memory.exists());
         assert_eq!(fs::read(&database).unwrap(), before_database);
         assert_eq!(fs::read(&wal).unwrap(), before_wal);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn active_wal_snapshot_reads_a_read_only_provider_tree() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("provider.sqlite");
+        let writer = create_persistent_wal(&database);
+        drop(writer);
+        let wal = database.with_file_name("provider.sqlite-wal");
+        let shared_memory = database.with_file_name("provider.sqlite-shm");
+        for path in [&database, &wal, &shared_memory] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o444)).unwrap();
+        }
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o555)).unwrap();
+        let before = directory_file_bytes(temp.path());
+        let parent = retain_parent(temp.path());
+
+        let snapshot =
+            open_root_handle_sqlite_source_snapshot(&parent, OsStr::new("provider.sqlite"))
+                .unwrap();
+        assert_eq!(read_values(&snapshot), ["from-wal"]);
+        assert_eq!(
+            snapshot.strategy(),
+            SqliteSourceSnapshotStrategy::CopiedFamily
+        );
+        snapshot.finish().unwrap();
+        assert_eq!(directory_file_bytes(temp.path()), before);
+
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        for path in [&database, &wal, &shared_memory] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+    }
+
+    #[test]
+    fn sidecar_creation_during_immutable_open_is_fail_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("provider.sqlite");
+        let wal = database.with_file_name("provider.sqlite-wal");
+        create_database(&database, "expected");
+        let parent = retain_parent(temp.path());
+
+        let result = open_root_handle_sqlite_source_snapshot_for_test(
+            &parent,
+            OsStr::new("provider.sqlite"),
+            || fs::write(&wal, b"appeared during acquisition").unwrap(),
+        );
+
+        assert!(matches!(
+            result,
+            Err(SqliteSourceAccessError::SourceChanged)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wal_deletion_during_copied_acquisition_is_fail_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("provider.sqlite");
+        let _writer = create_persistent_wal(&database);
+        let wal = database.with_file_name("provider.sqlite-wal");
+        let parent = retain_parent(temp.path());
+
+        let result = open_root_handle_sqlite_source_snapshot_for_test(
+            &parent,
+            OsStr::new("provider.sqlite"),
+            || fs::remove_file(&wal).unwrap(),
+        );
+
+        assert!(matches!(
+            result,
+            Err(SqliteSourceAccessError::SourceChanged)
+        ));
+    }
+
+    #[test]
+    fn bounded_active_wal_copy_has_one_source_byte_pass() {
+        const PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
+
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("provider.sqlite");
+        let writer = Connection::open(&database).unwrap();
+        let mode: String = writer
+            .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        writer.execute_batch("PRAGMA wal_autocheckpoint=0").unwrap();
+        writer
+            .execute("CREATE TABLE payloads (body BLOB NOT NULL)", [])
+            .unwrap();
+        writer
+            .execute(
+                "INSERT INTO payloads (body) VALUES (zeroblob(?1))",
+                [PAYLOAD_BYTES],
+            )
+            .unwrap();
+        writer
+            .set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
+            .unwrap();
+        let wal = database.with_file_name("provider.sqlite-wal");
+        let expected_copied =
+            fs::metadata(&database).unwrap().len() + fs::metadata(&wal).unwrap().len();
+        let parent = retain_parent(temp.path());
+
+        let started = Instant::now();
+        let snapshot =
+            open_root_handle_sqlite_source_snapshot(&parent, OsStr::new("provider.sqlite"))
+                .unwrap();
+        let length: i64 = snapshot
+            .connection()
+            .unwrap()
+            .query_row("SELECT length(body) FROM payloads", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(length, PAYLOAD_BYTES as i64);
+        assert_eq!(snapshot.copied_bytes(), expected_copied);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "an 8 MiB active-WAL snapshot exceeded the focused sanity bound"
+        );
+        snapshot.finish().unwrap();
+    }
+
+    #[test]
+    fn oversized_snapshot_component_is_typed_unavailable_before_copy() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("provider.sqlite");
+        let file = File::create(&database).unwrap();
+        file.set_len(SQLITE_SNAPSHOT_MAX_COMPONENT_BYTES + 1)
+            .unwrap();
+        fs::write(
+            database.with_file_name("provider.sqlite-shm"),
+            b"force bounded copied-family acquisition",
+        )
+        .unwrap();
+        let parent = retain_parent(temp.path());
+
+        let result =
+            open_root_handle_sqlite_source_snapshot(&parent, OsStr::new("provider.sqlite"));
+        assert!(matches!(
+            result,
+            Err(SqliteSourceAccessError::SnapshotTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn shared_memory_rewrite_during_copied_acquisition_is_fail_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("provider.sqlite");
+        let shared_memory = database.with_file_name("provider.sqlite-shm");
+        create_database(&database, "expected");
+        fs::write(&shared_memory, vec![0_u8; 32 * 1024]).unwrap();
+        let parent = retain_parent(temp.path());
+
+        let result = open_root_handle_sqlite_source_snapshot_for_test(
+            &parent,
+            OsStr::new("provider.sqlite"),
+            || {
+                let mut file = OpenOptions::new().write(true).open(&shared_memory).unwrap();
+                file.seek(SeekFrom::Start(16 * 1024)).unwrap();
+                file.write_all(b"changed-shm").unwrap();
+                file.sync_all().unwrap();
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(SqliteSourceAccessError::SourceChanged)
+        ));
+    }
+
+    #[test]
+    fn oversized_shared_memory_is_typed_unavailable_before_hashing() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("provider.sqlite");
+        let shared_memory = database.with_file_name("provider.sqlite-shm");
+        create_database(&database, "expected");
+        let file = File::create(&shared_memory).unwrap();
+        file.set_len(SQLITE_SHM_MAX_BYTES + 1).unwrap();
+        let parent = retain_parent(temp.path());
+
+        let result =
+            open_root_handle_sqlite_source_snapshot(&parent, OsStr::new("provider.sqlite"));
+
+        assert!(matches!(
+            result,
+            Err(SqliteSourceAccessError::SnapshotTooLarge { .. })
+        ));
     }
 
     #[test]
@@ -1509,8 +2034,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn symlink_database_is_rejected_before_sqlite_open() {
-        use std::os::unix::fs::symlink;
-
         let temp = tempfile::tempdir().unwrap();
         let target = temp.path().join("target.sqlite");
         let link = temp.path().join("provider.sqlite");
@@ -1526,10 +2049,45 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn symlink_sidecar_is_rejected_before_sqlite_open() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("provider.sqlite");
+        let target = temp.path().join("outside-wal");
+        create_database(&database, "expected");
+        fs::write(&target, b"not a WAL").unwrap();
+        symlink(&target, database.with_file_name("provider.sqlite-wal")).unwrap();
+        let parent = retain_parent(temp.path());
+
+        let result =
+            open_root_handle_sqlite_source_snapshot(&parent, OsStr::new("provider.sqlite"));
+        assert!(matches!(
+            result,
+            Err(SqliteSourceAccessError::UnsafeFile { .. })
+        ));
+    }
+
     #[test]
     fn nonregular_database_is_rejected_before_sqlite_open() {
         let temp = tempfile::tempdir().unwrap();
         fs::create_dir(temp.path().join("provider.sqlite")).unwrap();
+        let parent = retain_parent(temp.path());
+
+        let result =
+            open_root_handle_sqlite_source_snapshot(&parent, OsStr::new("provider.sqlite"));
+        assert!(matches!(
+            result,
+            Err(SqliteSourceAccessError::UnsafeFile { .. })
+        ));
+    }
+
+    #[test]
+    fn nonregular_sidecar_is_rejected_before_sqlite_open() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("provider.sqlite");
+        create_database(&database, "expected");
+        fs::create_dir(database.with_file_name("provider.sqlite-shm")).unwrap();
         let parent = retain_parent(temp.path());
 
         let result =

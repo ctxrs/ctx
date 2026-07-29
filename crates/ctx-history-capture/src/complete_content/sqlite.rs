@@ -1,11 +1,12 @@
 //! Bounded complete-message recovery for provider SQLite sources.
 //!
-//! The resolver never opens a provider database read-write. Databases without
-//! sidecars are opened through SQLite's immutable URI mode. Databases with a
-//! WAL, SHM, or rollback journal are copied to a private temporary snapshot by
-//! the shared provider SQLite opener before SQLite sees them. Every supported
-//! request addresses one allowlisted provider row by its captured native key;
-//! capture ordinals are never used as SQL offsets.
+//! The resolver never opens a provider database read-write. Certified
+//! sidecar-free databases use the provider SQLite opener's immutable route
+//! where available. Databases with WAL or SHM state are copied with bounded I/O
+//! to a private snapshot below the ctx data root before SQLite sees them;
+//! rollback-journal recovery is unavailable. Every supported request addresses
+//! one allowlisted provider row by its captured native key; capture ordinals
+//! are never used as SQL offsets.
 
 use std::time::{Duration, Instant};
 
@@ -174,7 +175,14 @@ impl CompleteContentResolver for SqliteCompleteContentResolver {
             .map(|request| resolve_one(&conn, request))
             .collect::<Result<Vec<_>, _>>();
         conn.progress_handler(0, None::<fn() -> bool>);
-        resolved
+        let finished = first
+            .source_access
+            .finish_sqlite_snapshot(conn, first.event_id);
+        match (resolved, finished) {
+            (Ok(messages), Ok(())) => Ok(messages),
+            (Err(error), _) => Err(error),
+            (_, Err(error)) => Err(error),
+        }
     }
 }
 
