@@ -35,6 +35,7 @@ pub(crate) use qoder_parser::qoder_complete_content_message_record;
 #[allow(unused_imports)]
 pub(crate) use qwen_code::{qwen_code_file_is_selected, qwen_code_source_backed_adapter};
 pub(crate) use reader::direct_jsonl_complete_message_provider_event_hash;
+pub(crate) use source_backed::registration::register as register_source_backed_route;
 #[allow(unused_imports)]
 pub(crate) use source_backed::{
     DirectJsonlCertifiedLeaf, DirectJsonlInventoryFailure, DirectJsonlInventoryLeaf,

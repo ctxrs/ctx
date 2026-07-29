@@ -757,3 +757,64 @@ fn json_record_bytes(bytes: &[u8]) -> &[u8] {
 
 #[cfg(test)]
 mod tests;
+pub(crate) mod registration {
+    use ctx_history_core::{CaptureProvider, HydratedProviderRecord, HydrationFailureKind};
+
+    use super::{
+        discover_claude_source_backed, hydrate_claude_source_record, ClaudeSourceBackedScanner,
+    };
+    use crate::provider::source_backed::{
+        captured_route_driver, executable_route, hydration_failure, provider_format_scope,
+        route_error, SourceBackedCoordinatorResult, SourceBackedProviderRegistry,
+        SourceBackedRouteSelection, SourceBackedSelectorAuthority,
+    };
+    use crate::ProviderSource;
+
+    pub(crate) fn register(
+        registry: &mut SourceBackedProviderRegistry,
+        source: ProviderSource,
+        selection: SourceBackedRouteSelection,
+    ) -> SourceBackedCoordinatorResult<()> {
+        let root = source.path.clone();
+        let capture_root = root.clone();
+        let hydration_root = root;
+        let driver = captured_route_driver(
+            move |sink| {
+                let inventory =
+                    discover_claude_source_backed(&capture_root).map_err(route_error)?;
+                for leaf in inventory.leaves() {
+                    let mut scanner =
+                        ClaudeSourceBackedScanner::new(leaf.clone(), None).map_err(route_error)?;
+                    sink.begin(leaf.source_key().clone())?;
+                    while let Some(page) = scanner.next_page().map_err(route_error)? {
+                        for document in page.documents {
+                            sink.document(document)?;
+                        }
+                    }
+                    let scan = scanner.finish().map_err(route_error)?;
+                    sink.certify(scan.source)?;
+                }
+                inventory.certify().map_err(route_error)?;
+                Ok(())
+            },
+            provider_format_scope(CaptureProvider::Claude, "claude_projects_jsonl_tree"),
+            move |request| {
+                let hydrated = hydrate_claude_source_record(&hydration_root, request.locator())
+                    .map_err(|error| {
+                        hydration_failure(HydrationFailureKind::StaleRecordEvidence, error)
+                    })?;
+                Ok(HydratedProviderRecord {
+                    event_id: request.event_id(),
+                    provider_bytes: hydrated.provider_bytes,
+                })
+            },
+        );
+        registry.register(executable_route(
+            source,
+            selection,
+            SourceBackedSelectorAuthority::DiscoveredWinner,
+            driver,
+        )?);
+        Ok(())
+    }
+}

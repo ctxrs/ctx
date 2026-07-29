@@ -36,6 +36,154 @@ const DIRECT_JSONL_DISCOVERY_REVISION: &str = "direct-native-jsonl-discovery-v1"
 const DIRECT_JSONL_DOCUMENT_METADATA_BYTES: usize = 64 * 1024;
 const DIRECT_JSONL_MAX_TOUCHED_FILES: usize = 256;
 
+pub(crate) mod registration {
+    use std::path::Path;
+
+    use chrono::{DateTime, Utc};
+    use ctx_history_core::{
+        CaptureProvider, EventHydrationRequest, HydratedProviderRecord, HydrationFailure,
+        HydrationFailureKind,
+    };
+
+    use super::{DirectJsonlCertifiedLeaf, DirectJsonlSourceAdapter};
+    use crate::provider::source_backed::{
+        captured_route_driver, executable_route, hydration_failure, invalid_route,
+        provider_format_scope, route_error, ProviderCaptureSink, SourceBackedCoordinatorResult,
+        SourceBackedProviderRegistry, SourceBackedRouteError, SourceBackedRouteErrorKind,
+        SourceBackedRouteResult, SourceBackedRouteSelection, SourceBackedSelectorAuthority,
+    };
+    use crate::ProviderSource;
+
+    pub(crate) fn register(
+        registry: &mut SourceBackedProviderRegistry,
+        source: ProviderSource,
+        selection: SourceBackedRouteSelection,
+    ) -> SourceBackedCoordinatorResult<()> {
+        let adapter = adapter(source.provider).ok_or_else(|| {
+            invalid_route(
+                source.provider,
+                "provider is not a member of the direct native-JSONL adapter family",
+            )
+        })?;
+        let root = source.path.clone();
+        let capture_root = root.clone();
+        let hydration_root = root;
+        let provider = source.provider;
+        let certified_source_format = adapter.source_format();
+        let driver = captured_route_driver(
+            move |sink| capture(adapter, &capture_root, sink),
+            provider_format_scope(provider, certified_source_format),
+            move |request| hydrate(adapter, &hydration_root, request),
+        );
+        registry.register(executable_route(
+            source,
+            selection,
+            SourceBackedSelectorAuthority::DiscoveredWinner,
+            driver,
+        )?);
+        Ok(())
+    }
+
+    fn adapter(provider: CaptureProvider) -> Option<DirectJsonlSourceAdapter> {
+        match provider {
+            CaptureProvider::Antigravity => Some(super::super::antigravity_source_backed_adapter()),
+            CaptureProvider::CopilotCli => Some(super::super::copilot_source_backed_adapter()),
+            CaptureProvider::FactoryAiDroid => {
+                Some(super::super::factory_droid_source_backed_adapter())
+            }
+            CaptureProvider::Qoder => Some(super::super::qoder_source_backed_adapter()),
+            CaptureProvider::QwenCode => Some(super::super::qwen_code_source_backed_adapter()),
+            CaptureProvider::Tabnine => Some(super::super::tabnine_source_backed_adapter()),
+            CaptureProvider::Windsurf => Some(super::super::windsurf_source_backed_adapter()),
+            _ => None,
+        }
+    }
+
+    fn capture(
+        adapter: DirectJsonlSourceAdapter,
+        root: &Path,
+        sink: &mut dyn ProviderCaptureSink,
+    ) -> SourceBackedRouteResult<()> {
+        let inventory = adapter.discover(root).map_err(route_error)?;
+        if inventory.root_missing() {
+            return Ok(());
+        }
+        if !inventory.failures().is_empty() {
+            return Err(SourceBackedRouteError::new(
+                SourceBackedRouteErrorKind::Unavailable,
+                "direct JSONL inventory contains inaccessible sources",
+            ));
+        }
+        for leaf in inventory.leaves() {
+            let mut reader = adapter
+                .open_leaf(leaf, DateTime::<Utc>::UNIX_EPOCH)
+                .map_err(route_error)?;
+            let mut began = false;
+            while let Some(page) = reader.next_page().map_err(route_error)? {
+                if !began {
+                    sink.begin(page.source.clone())?;
+                    began = true;
+                }
+                for document in page.documents {
+                    sink.document(document)?;
+                }
+            }
+            let certified = reader.finish().map_err(route_error)?;
+            if !began {
+                sink.begin(certified.source().clone())?;
+            }
+            sink.certify(certified.certificate().clone())?;
+        }
+        Ok(())
+    }
+
+    fn hydrate(
+        adapter: DirectJsonlSourceAdapter,
+        root: &Path,
+        request: &EventHydrationRequest,
+    ) -> Result<HydratedProviderRecord, HydrationFailure> {
+        let inventory = adapter.discover(root).map_err(|error| {
+            hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
+        })?;
+        for leaf in inventory.leaves() {
+            let mut reader = adapter
+                .open_leaf(leaf, DateTime::<Utc>::UNIX_EPOCH)
+                .map_err(|error| {
+                    hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
+                })?;
+            while reader
+                .next_page()
+                .map_err(|error| {
+                    hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
+                })?
+                .is_some()
+            {}
+            let certified: DirectJsonlCertifiedLeaf = reader.finish().map_err(|error| {
+                hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
+            })?;
+            if certified
+                .source()
+                .exact_descriptor_eq(request.locator().source())
+            {
+                let provider_bytes =
+                    adapter
+                        .hydrate(&certified, request.locator())
+                        .map_err(|error| {
+                            hydration_failure(HydrationFailureKind::StaleRecordEvidence, error)
+                        })?;
+                return Ok(HydratedProviderRecord {
+                    event_id: request.event_id(),
+                    provider_bytes,
+                });
+            }
+        }
+        Err(hydration_failure(
+            HydrationFailureKind::ConfirmedDeleted,
+            "the exact direct JSONL source is absent from the complete inventory",
+        ))
+    }
+}
+
 #[derive(Debug, Error)]
 pub(crate) enum DirectJsonlSourceBackedError {
     #[error(transparent)]

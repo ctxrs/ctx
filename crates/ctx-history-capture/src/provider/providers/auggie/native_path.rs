@@ -6,6 +6,7 @@ mod model;
 mod parse;
 mod source;
 pub(crate) mod source_backed;
+pub(crate) use source_backed::registration::register as register_source_backed_route;
 
 fn normalized_auggie_authority_path(path: &Path) -> Result<PathBuf> {
     let absolute = if path.is_absolute() {
