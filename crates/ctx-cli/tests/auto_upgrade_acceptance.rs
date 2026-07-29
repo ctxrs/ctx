@@ -12,6 +12,9 @@ mod unix {
 
     use super::support::*;
 
+    const FIXTURE_TARGET_VERSION: &str = "9.9.9";
+    const FIXTURE_QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(45);
+
     fn scheduler_state_path(binary: &Path) -> PathBuf {
         binary.with_file_name(".ctx.upgrade-state.json")
     }
@@ -103,7 +106,7 @@ mod unix {
         rewrite_fake_release_metadata(release, |metadata| {
             metadata
                 .replace(
-                    &format!("CTX_RELEASE_VERSION={}\n", "9.9.9"),
+                    &format!("CTX_RELEASE_VERSION={FIXTURE_TARGET_VERSION}\n"),
                     &format!("CTX_RELEASE_VERSION={next_version}\n"),
                 )
                 .replace(&release.artifact_sha, &artifact_sha)
@@ -157,9 +160,48 @@ mod unix {
         }
     }
 
+    fn seed_authoritative_codex_source(home: &Path) {
+        let native_session_id = "019fafc5-0000-7000-8000-000000000001";
+        let sessions = home.join(".codex/sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let metadata = serde_json::json!({
+            "timestamp": "2026-07-29T12:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": native_session_id,
+                "timestamp": "2026-07-29T12:00:00Z",
+                "cwd": "/tmp/auto-upgrade-acceptance",
+                "originator": "codex_cli_rs",
+                "cli_version": env!("CARGO_PKG_VERSION"),
+                "source": "cli",
+                "model_provider": "openai"
+            }
+        });
+        let message = serde_json::json!({
+            "timestamp": "2026-07-29T12:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "authoritative source-backed auto-upgrade fixture"
+                }]
+            }
+        });
+        let mut bytes = serde_json::to_vec(&metadata).unwrap();
+        bytes.push(b'\n');
+        bytes.extend(serde_json::to_vec(&message).unwrap());
+        bytes.push(b'\n');
+        fs::write(
+            sessions.join(format!("rollout-{native_session_id}.jsonl")),
+            bytes,
+        )
+        .unwrap();
+    }
+
     fn initialize_source_backed_epoch(data_root: &Path) {
-        let fixture = PathBuf::from(provider_history_fixture("codex-sessions"));
-        copy_dir_all(&fixture, &data_root.join(".codex/sessions"));
+        seed_authoritative_codex_source(data_root);
         let generation_id = initialize_generation_only_sql_projection(data_root);
         assert!(!generation_id.is_empty());
         assert_source_backed_epoch_remained_fresh(data_root);
@@ -430,9 +472,11 @@ mod unix {
                     .output()
                     .unwrap()
             });
-            wait_for("owned recovery quiescence", Duration::from_secs(15), || {
-                pause.exists()
-            });
+            wait_for(
+                "owned recovery quiescence",
+                FIXTURE_QUIESCENCE_TIMEOUT,
+                || pause.exists(),
+            );
 
             assert_eq!(
                 fs::read(&binary).unwrap(),
@@ -625,16 +669,21 @@ mod unix {
     #[test]
     fn enabled_daemon_is_the_only_automatic_apply_authority() {
         let temp = tempdir();
-        let release = fake_release(&temp, "9.9.9");
-        let binary = managed_candidate(&temp, "ia_daemon_authority");
+        let mut release = fake_release(&temp, FIXTURE_TARGET_VERSION);
+        let binary = managed_hook_candidate(&temp, "ia_daemon_authority");
+        patch_release_artifact_with_next_ctx(&mut release, &binary, FIXTURE_TARGET_VERSION);
+        seed_authoritative_codex_source(temp.path());
 
-        managed_daemon(&temp, &release, &binary).assert().success();
+        managed_daemon(&temp, &release, &binary)
+            .env("CTX_DAEMON_AUTOSTART_OFF", "1")
+            .assert()
+            .success();
 
         let marker: Value =
             serde_json::from_slice(&fs::read(install_marker_path(&binary)).unwrap()).unwrap();
         let state: Value =
             serde_json::from_slice(&fs::read(scheduler_state_path(&binary)).unwrap()).unwrap();
-        assert_eq!(marker["version"], "9.9.9");
+        assert_eq!(marker["version"], FIXTURE_TARGET_VERSION);
         assert_eq!(state["status"], "applied");
         assert_eq!(state["attempt_source"], "daemon");
         assert!(!temp.path().join("upgrade-state.json").exists());
@@ -644,13 +693,15 @@ mod unix {
     #[test]
     fn daemon_reports_one_terminal_upgrade_event_after_durable_state() {
         let temp = tempdir();
-        let release = fake_release(&temp, "9.9.9");
-        let binary = managed_candidate(&temp, "ia_daemon_telemetry");
+        let mut release = fake_release(&temp, FIXTURE_TARGET_VERSION);
+        let binary = managed_hook_candidate(&temp, "ia_daemon_telemetry");
+        patch_release_artifact_with_next_ctx(&mut release, &binary, FIXTURE_TARGET_VERSION);
         let events_path = temp.path().join("analytics.jsonl");
         let data_root = temp.path().join("data");
         let home = temp.path().join("home");
         let state_root = temp.path().join("state");
         fs::create_dir(&home).unwrap();
+        seed_authoritative_codex_source(&home);
 
         let output = managed_daemon(&temp, &release, &binary)
             .env("CTX_DATA_ROOT", &data_root)
@@ -659,6 +710,7 @@ mod unix {
             .env("LOCALAPPDATA", &state_root)
             .env_remove("CTX_ANALYTICS_ENABLED")
             .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
+            .env("CTX_DAEMON_AUTOSTART_OFF", "1")
             .output()
             .unwrap();
         assert!(output.status.success(), "{output:?}");
@@ -695,9 +747,9 @@ mod unix {
     #[test]
     fn long_running_second_root_acknowledges_before_mutation_and_restarts() {
         let installation = tempdir();
-        let mut release = fake_release(&installation, "9.9.9");
+        let mut release = fake_release(&installation, FIXTURE_TARGET_VERSION);
         let binary = managed_hook_candidate(&installation, "ia_cross_root");
-        patch_release_artifact_with_next_ctx(&mut release, &binary, "9.99.9");
+        patch_release_artifact_with_next_ctx(&mut release, &binary, FIXTURE_TARGET_VERSION);
         let binary_before = fs::read(&binary).unwrap();
         let first = tempdir();
         let second = tempdir();
@@ -730,7 +782,7 @@ mod unix {
             });
             wait_for(
                 "installation-wide quiescence",
-                Duration::from_secs(15),
+                FIXTURE_QUIESCENCE_TIMEOUT,
                 || pause.exists(),
             );
 
@@ -787,7 +839,7 @@ mod unix {
                 serde_json::from_slice(&fs::read(install_marker_path(&binary)).unwrap()).unwrap();
             assert_eq!(final_state["status"], "applied");
             assert_eq!(final_state["attempt_source"], "daemon");
-            assert_eq!(marker["version"], "9.99.9");
+            assert_eq!(marker["version"], FIXTURE_TARGET_VERSION);
             assert_ne!(fs::read(&binary).unwrap(), binary_before);
             assert!(!first.path().join("upgrade-state.json").exists());
             assert!(!second.path().join("upgrade-state.json").exists());
@@ -816,8 +868,9 @@ mod unix {
     #[test]
     fn explicit_manual_upgrade_still_works_with_daemon_and_auto_disabled() {
         let temp = tempdir();
-        let release = fake_release(&temp, "9.9.9");
-        let binary = managed_candidate(&temp, "ia_manual_disabled");
+        let mut release = fake_release(&temp, FIXTURE_TARGET_VERSION);
+        let binary = managed_hook_candidate(&temp, "ia_manual_disabled");
+        patch_release_artifact_with_next_ctx(&mut release, &binary, FIXTURE_TARGET_VERSION);
 
         managed_release_env(
             ctx_from_binary(&temp, &binary).args(["upgrade", "--format=json"]),
@@ -831,6 +884,6 @@ mod unix {
 
         let marker: Value =
             serde_json::from_slice(&fs::read(install_marker_path(&binary)).unwrap()).unwrap();
-        assert_eq!(marker["version"], "9.9.9");
+        assert_eq!(marker["version"], FIXTURE_TARGET_VERSION);
     }
 }
