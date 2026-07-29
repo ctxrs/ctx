@@ -6,7 +6,6 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
-use ctx_history_capture::source_backed_route_inventory;
 use ctx_history_core::{CaptureProvider, EventType};
 use ctx_history_index::{
     AgentScope, EventRecord, EventSearchCandidate, EventSearchFilters, ExcludedSessionTree,
@@ -122,41 +121,6 @@ struct ResolvedIndexContent {
 
 pub(crate) fn index_is_available(data_root: &Path) -> bool {
     index_root(data_root).join("meta.json").is_file()
-}
-
-pub(crate) fn should_run_search(args: &SearchArgs, data_root: &Path) -> bool {
-    should_route_source_backed_search(
-        index_is_available(data_root),
-        args.refresh,
-        args.provider.map(|provider| provider.capture_provider()),
-        args.source_format.as_deref(),
-    )
-}
-
-fn should_route_source_backed_search(
-    index_available: bool,
-    refresh: RefreshArg,
-    provider: Option<CaptureProvider>,
-    source_format: Option<&str>,
-) -> bool {
-    index_available
-        || (refresh != RefreshArg::Off
-            && automatic_source_backed_route_supported(provider, source_format))
-}
-
-fn automatic_source_backed_route_supported(
-    provider: Option<CaptureProvider>,
-    source_format: Option<&str>,
-) -> bool {
-    source_backed_route_inventory().iter().any(|route| {
-        route.automatic
-            && route.unsupported_reason.is_none()
-            && provider.is_none_or(|provider| route.provider == provider)
-            && source_format.is_none_or(|source_format| {
-                route.source_format == source_format
-                    || route.certified_source_format == source_format
-            })
-    })
 }
 
 pub(crate) fn run_search(
@@ -1849,76 +1813,6 @@ mod tests {
             source_backed_refresh_mode(RefreshArg::Wait),
             SourceBackedRefreshMode::Wait
         );
-    }
-
-    #[test]
-    fn cold_search_routes_non_codex_automatic_provider() {
-        assert!(should_route_source_backed_search(
-            false,
-            RefreshArg::Background,
-            Some(CaptureProvider::Claude),
-            None,
-        ));
-        assert!(should_route_source_backed_search(
-            false,
-            RefreshArg::Wait,
-            Some(CaptureProvider::Warp),
-            Some("warp_sqlite"),
-        ));
-    }
-
-    #[test]
-    fn cold_search_without_provider_routes_all_automatic_providers() {
-        assert!(should_route_source_backed_search(
-            false,
-            RefreshArg::Background,
-            None,
-            None,
-        ));
-        assert!(should_route_source_backed_search(
-            false,
-            RefreshArg::Wait,
-            None,
-            Some("claude_projects_jsonl_tree"),
-        ));
-    }
-
-    #[test]
-    fn cold_search_rejects_manual_only_and_accepts_automatic_codex_history() {
-        assert!(!should_route_source_backed_search(
-            false,
-            RefreshArg::Wait,
-            Some(CaptureProvider::Custom),
-            Some("ctx_history_jsonl_v1"),
-        ));
-        assert!(should_route_source_backed_search(
-            false,
-            RefreshArg::Wait,
-            Some(CaptureProvider::Codex),
-            Some("codex_history_jsonl"),
-        ));
-    }
-
-    #[test]
-    fn refresh_off_only_routes_an_existing_source_backed_generation() {
-        assert!(!should_route_source_backed_search(
-            false,
-            RefreshArg::Off,
-            Some(CaptureProvider::Claude),
-            None,
-        ));
-        assert!(!should_route_source_backed_search(
-            false,
-            RefreshArg::Off,
-            None,
-            None,
-        ));
-        assert!(should_route_source_backed_search(
-            true,
-            RefreshArg::Off,
-            Some(CaptureProvider::Custom),
-            Some("ctx_history_jsonl_v1"),
-        ));
     }
 
     #[test]
