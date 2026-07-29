@@ -223,12 +223,18 @@ impl ProOutputImport {
 #[allow(dead_code)]
 pub(crate) mod source_backed_feed {
     use super::*;
+    use anyhow::Context as _;
     use ctx_pro_host_protocol::{
-        certified_source_revision_sha256, BeginSourceManifestRequest, DeleteSourceRequest,
+        certified_source_revision_sha256, AdmitSourceManifestPageRequest,
+        BeginSourceManifestAdmissionRequest, BeginSourceManifestRequest, DeleteSourceRequest,
+        FinishAdmittedSourceManifestRequest, FinishSourceManifestAdmissionRequest,
         FinishSourceManifestRequest, MaterializeSourcePageRequest, PrepareSourceRequest,
-        SourceDeleted, SourceDisposition, SourceManifest, SourceManifestBegan,
-        SourceManifestFinished, SourceManifestReceipt, SourcePageMaterialized, SourcePrepared,
-        SourceProgress, SourceRecord, SourceRemoval,
+        SourceDeleted, SourceDisposition, SourceManifest, SourceManifestAdmissionBegan,
+        SourceManifestAdmissionReceipt, SourceManifestAdmitted, SourceManifestBegan,
+        SourceManifestFinished, SourceManifestHeader, SourceManifestPage,
+        SourceManifestPageAdmitted, SourceManifestPageEntries, SourceManifestReceipt,
+        SourcePageMaterialized, SourcePrepared, SourceProgress, SourceRecord, SourceRemoval,
+        MAX_SOURCE_MANIFEST_PAGE_ITEMS,
     };
 
     const MAX_CANONICAL_SOURCE_PAGES: u64 = 1_000_000;
@@ -293,6 +299,28 @@ pub(crate) mod source_backed_feed {
         fn finish_source_manifest(
             &mut self,
             request: &FinishSourceManifestRequest,
+        ) -> Result<SourceManifestFinished>;
+    }
+
+    pub(crate) trait SourceBackedProAdmissionConsumer {
+        fn begin_source_manifest_admission(
+            &mut self,
+            header: &SourceManifestHeader,
+        ) -> Result<SourceManifestAdmissionBegan>;
+
+        fn admit_source_manifest_page(
+            &mut self,
+            page: &SourceManifestPage,
+        ) -> Result<SourceManifestPageAdmitted>;
+
+        fn finish_source_manifest_admission(
+            &mut self,
+            header: &SourceManifestHeader,
+        ) -> Result<SourceManifestAdmitted>;
+
+        fn finish_admitted_source_manifest(
+            &mut self,
+            request: &FinishAdmittedSourceManifestRequest,
         ) -> Result<SourceManifestFinished>;
     }
 
@@ -382,6 +410,345 @@ pub(crate) mod source_backed_feed {
                 }
             }
         }
+    }
+
+    impl SourceBackedProAdmissionConsumer for ProtocolSourceBackedProConsumer {
+        fn begin_source_manifest_admission(
+            &mut self,
+            header: &SourceManifestHeader,
+        ) -> Result<SourceManifestAdmissionBegan> {
+            let request = BeginSourceManifestAdmissionRequest {
+                header: header.clone(),
+            };
+            request
+                .validate()
+                .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
+            match self.exchange(HostMessage::BeginSourceManifestAdmission(request))? {
+                HelperMessage::SourceManifestAdmissionBegan(result) => {
+                    result
+                        .validate_for(header)
+                        .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
+                    Ok(result)
+                }
+                HelperMessage::Error(error) => Err(protocol_error(error)),
+                _ => {
+                    bail!("invalid_response: helper returned a non-source-admission-begin response")
+                }
+            }
+        }
+
+        fn admit_source_manifest_page(
+            &mut self,
+            page: &SourceManifestPage,
+        ) -> Result<SourceManifestPageAdmitted> {
+            let request = AdmitSourceManifestPageRequest { page: page.clone() };
+            request
+                .validate()
+                .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
+            match self.exchange(HostMessage::AdmitSourceManifestPage(request))? {
+                HelperMessage::SourceManifestPageAdmitted(result) => Ok(result),
+                HelperMessage::Error(error) => Err(protocol_error(error)),
+                _ => {
+                    bail!("invalid_response: helper returned a non-source-page-admission response")
+                }
+            }
+        }
+
+        fn finish_source_manifest_admission(
+            &mut self,
+            header: &SourceManifestHeader,
+        ) -> Result<SourceManifestAdmitted> {
+            let request = FinishSourceManifestAdmissionRequest {
+                header: header.clone(),
+            };
+            request
+                .validate()
+                .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
+            match self.exchange(HostMessage::FinishSourceManifestAdmission(request))? {
+                HelperMessage::SourceManifestAdmitted(result) => {
+                    result
+                        .validate()
+                        .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
+                    Ok(result)
+                }
+                HelperMessage::Error(error) => Err(protocol_error(error)),
+                _ => {
+                    bail!("invalid_response: helper returned a non-source-admitted response")
+                }
+            }
+        }
+
+        fn finish_admitted_source_manifest(
+            &mut self,
+            request: &FinishAdmittedSourceManifestRequest,
+        ) -> Result<SourceManifestFinished> {
+            request
+                .validate()
+                .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
+            match self.exchange(HostMessage::FinishAdmittedSourceManifest(request.clone()))? {
+                HelperMessage::SourceManifestFinished(result) => {
+                    validate_response(&result)?;
+                    Ok(result)
+                }
+                HelperMessage::Error(error) => Err(protocol_error(error)),
+                _ => {
+                    bail!("invalid_response: helper returned a non-source-finished response")
+                }
+            }
+        }
+    }
+
+    struct AdmittedSourceBackedConsumer<'a, C> {
+        inner: &'a mut C,
+        header: SourceManifestHeader,
+        admission: SourceManifestAdmissionReceipt,
+        materializer_revision: String,
+        progress: Vec<SourceProgress>,
+    }
+
+    impl<C> SourceBackedProConsumer for AdmittedSourceBackedConsumer<'_, C>
+    where
+        C: SourceBackedProConsumer + SourceBackedProAdmissionConsumer,
+    {
+        fn begin_source_manifest(
+            &mut self,
+            manifest: &SourceBackedProManifest,
+        ) -> Result<SourceManifestBegan> {
+            self.header
+                .validate_contents(&manifest.sources, &manifest.removals)
+                .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
+            Ok(SourceManifestBegan {
+                core_generation_id: self.header.core_generation_id.clone(),
+                materializer_revision: self.materializer_revision.clone(),
+                progress: self.progress.clone(),
+                replayed: true,
+            })
+        }
+
+        fn prepare_source(&mut self, request: &PrepareSourceRequest) -> Result<SourcePrepared> {
+            SourceBackedProConsumer::prepare_source(self.inner, request)
+        }
+
+        fn materialize_source_page(
+            &mut self,
+            request: &MaterializeSourcePageRequest,
+        ) -> Result<SourcePageMaterialized> {
+            SourceBackedProConsumer::materialize_source_page(self.inner, request)
+        }
+
+        fn delete_source(&mut self, request: &DeleteSourceRequest) -> Result<SourceDeleted> {
+            SourceBackedProConsumer::delete_source(self.inner, request)
+        }
+
+        fn finish_source_manifest(
+            &mut self,
+            request: &FinishSourceManifestRequest,
+        ) -> Result<SourceManifestFinished> {
+            self.header
+                .validate_contents(&request.manifest.sources, &request.manifest.removals)
+                .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
+            SourceBackedProAdmissionConsumer::finish_admitted_source_manifest(
+                self.inner,
+                &FinishAdmittedSourceManifestRequest {
+                    admission: self.admission.clone(),
+                    expected_progress: request.expected_progress.clone(),
+                },
+            )
+        }
+    }
+
+    pub(crate) fn sync_source_backed_pro_feed_paged<P, C>(
+        manifest: SourceBackedProManifest,
+        generation_manifest: &ctx_history_index::GenerationManifest,
+        provider: &mut P,
+        consumer: &mut C,
+    ) -> Result<SourceBackedProSyncReport>
+    where
+        P: SourceBackedProProvider,
+        C: SourceBackedProConsumer + SourceBackedProAdmissionConsumer,
+    {
+        manifest
+            .validate()
+            .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
+        let generation_id = generation_manifest
+            .generation_id()
+            .context("corrupt: hash pinned Core generation manifest")?;
+        if generation_id != manifest.core_generation_id {
+            bail!("source_changed: Pro source manifest is not the pinned Core generation");
+        }
+        let header = SourceManifestHeader::new(
+            manifest.core_generation_id.clone(),
+            generation_manifest.manifest_version,
+            generation_manifest.identity_version,
+            generation_manifest.lexical_schema_version,
+            generation_manifest.lexical_analyzer_version,
+            generation_manifest.policy_schema_hash.clone(),
+            &manifest.sources,
+            &manifest.removals,
+        )
+        .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
+        let began = consumer.begin_source_manifest_admission(&header)?;
+        began
+            .validate_for(&header)
+            .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
+        let mut cursor = began.cursor;
+
+        while cursor.next_source_index < header.source_count {
+            let page = next_source_manifest_page(&header, &cursor, &manifest.sources)?;
+            let expected = cursor_after_page(&header, &cursor, &page)?;
+            let admitted = consumer.admit_source_manifest_page(&page)?;
+            admitted
+                .validate_for(&header)
+                .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
+            if admitted.cursor != expected {
+                bail!("invalid_response: helper advanced the wrong source admission cursor");
+            }
+            cursor = admitted.cursor;
+        }
+        while cursor.next_removal_index < header.removal_count {
+            let page = next_removal_manifest_page(&header, &cursor, &manifest.removals)?;
+            let expected = cursor_after_page(&header, &cursor, &page)?;
+            let admitted = consumer.admit_source_manifest_page(&page)?;
+            admitted
+                .validate_for(&header)
+                .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
+            if admitted.cursor != expected {
+                bail!("invalid_response: helper advanced the wrong removal admission cursor");
+            }
+            cursor = admitted.cursor;
+        }
+        if !cursor.is_complete_for(&header) {
+            bail!("invalid_response: helper did not admit the exact source manifest");
+        }
+        let admitted = consumer.finish_source_manifest_admission(&header)?;
+        if admitted.receipt.header != header
+            || admitted.receipt.page_count != cursor.next_page_index
+        {
+            bail!("invalid_response: helper admitted the wrong source manifest identity");
+        }
+        let expected_aggregate = header.aggregate_sha256.clone();
+        let mut admitted_consumer = AdmittedSourceBackedConsumer {
+            inner: consumer,
+            header,
+            admission: admitted.receipt,
+            materializer_revision: admitted.materializer_revision,
+            progress: admitted.progress,
+        };
+        let report = sync_source_backed_pro_feed(manifest, provider, &mut admitted_consumer)?;
+        if report.receipt.manifest_aggregate_sha256 != expected_aggregate {
+            bail!("invalid_response: Pro activated the wrong source manifest aggregate");
+        }
+        Ok(report)
+    }
+
+    fn next_source_manifest_page(
+        header: &SourceManifestHeader,
+        cursor: &ctx_pro_host_protocol::SourceManifestAdmissionCursor,
+        sources: &[CertifiedSource],
+    ) -> Result<SourceManifestPage> {
+        let start = usize::try_from(cursor.next_source_index)
+            .map_err(|_| anyhow!("invalid_response: source admission cursor overflowed"))?;
+        fit_manifest_page(header, cursor, start, sources, |entries| {
+            SourceManifestPageEntries::Sources(entries)
+        })
+    }
+
+    fn next_removal_manifest_page(
+        header: &SourceManifestHeader,
+        cursor: &ctx_pro_host_protocol::SourceManifestAdmissionCursor,
+        removals: &[SourceRemoval],
+    ) -> Result<SourceManifestPage> {
+        let start = usize::try_from(cursor.next_removal_index)
+            .map_err(|_| anyhow!("invalid_response: removal admission cursor overflowed"))?;
+        fit_manifest_page(header, cursor, start, removals, |entries| {
+            SourceManifestPageEntries::Removals(entries)
+        })
+    }
+
+    fn fit_manifest_page<T: Clone>(
+        header: &SourceManifestHeader,
+        cursor: &ctx_pro_host_protocol::SourceManifestAdmissionCursor,
+        start: usize,
+        entries: &[T],
+        payload: impl Fn(Vec<T>) -> SourceManifestPageEntries,
+    ) -> Result<SourceManifestPage> {
+        let mut end = start
+            .saturating_add(MAX_SOURCE_MANIFEST_PAGE_ITEMS)
+            .min(entries.len());
+        if start >= end {
+            bail!("invalid_response: source admission cursor is outside its manifest entries");
+        }
+        loop {
+            match SourceManifestPage::new(
+                header,
+                cursor.next_page_index,
+                u32::try_from(start)
+                    .map_err(|_| anyhow!("invalid_request: manifest page index overflowed"))?,
+                payload(entries[start..end].to_vec()),
+            ) {
+                Ok(page) => {
+                    let request = AdmitSourceManifestPageRequest { page: page.clone() };
+                    match request.validate() {
+                        Ok(()) => return Ok(page),
+                        Err(error)
+                            if error.class == ctx_pro_host_protocol::ErrorClass::Bounds
+                                && end > start + 1 =>
+                        {
+                            end -= 1;
+                        }
+                        Err(error) => {
+                            return Err(anyhow!("invalid_request: {}", error.message));
+                        }
+                    }
+                }
+                Err(error)
+                    if error.class == ctx_pro_host_protocol::ErrorClass::Bounds
+                        && end > start + 1 =>
+                {
+                    end -= 1;
+                }
+                Err(error) => return Err(anyhow!("invalid_request: {}", error.message)),
+            }
+        }
+    }
+
+    pub(crate) fn cursor_after_page(
+        header: &SourceManifestHeader,
+        cursor: &ctx_pro_host_protocol::SourceManifestAdmissionCursor,
+        page: &SourceManifestPage,
+    ) -> Result<ctx_pro_host_protocol::SourceManifestAdmissionCursor> {
+        let count = u32::try_from(page.entries.len())
+            .map_err(|_| anyhow!("invalid_request: manifest page item count overflowed"))?;
+        let mut next = cursor.clone();
+        next.next_page_index = next
+            .next_page_index
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("invalid_request: manifest page count overflowed"))?;
+        match &page.entries {
+            SourceManifestPageEntries::Sources(_) => {
+                if page.item_index != cursor.next_source_index || cursor.next_removal_index != 0 {
+                    bail!("invalid_response: source page is outside its admission cursor");
+                }
+                next.next_source_index = next
+                    .next_source_index
+                    .checked_add(count)
+                    .ok_or_else(|| anyhow!("invalid_request: source count overflowed"))?;
+            }
+            SourceManifestPageEntries::Removals(_) => {
+                if cursor.next_source_index != header.source_count
+                    || page.item_index != cursor.next_removal_index
+                {
+                    bail!("invalid_response: removal page is outside its admission cursor");
+                }
+                next.next_removal_index = next
+                    .next_removal_index
+                    .checked_add(count)
+                    .ok_or_else(|| anyhow!("invalid_request: removal count overflowed"))?;
+            }
+        }
+        next.validate_for(header)
+            .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
+        Ok(next)
     }
 
     /// Reconciles Pro to one already-committed Core source manifest.
@@ -700,6 +1067,23 @@ pub(crate) mod source_backed_feed {
             client: Arc::new(SharedProClient::new(client)),
         };
         sync_source_backed_pro_feed(manifest, provider, &mut consumer)
+    }
+
+    pub(crate) fn sync_source_backed_pro_feed_deferred_paged<P>(
+        data_root: &Path,
+        manifest: SourceBackedProManifest,
+        generation_manifest: &ctx_history_index::GenerationManifest,
+        provider: &mut P,
+    ) -> Result<SourceBackedProSyncReport>
+    where
+        P: SourceBackedProProvider,
+    {
+        let required = source_materialization_capabilities();
+        let client = ProClient::connect(data_root, &required)?;
+        let mut consumer = ProtocolSourceBackedProConsumer {
+            client: Arc::new(SharedProClient::new(client)),
+        };
+        sync_source_backed_pro_feed_paged(manifest, generation_manifest, provider, &mut consumer)
     }
 
     pub(super) fn source_materialization_capabilities() -> BTreeSet<Capability> {
@@ -1141,10 +1525,13 @@ mod tests {
     use ctx_history_index::VerifiedIndex;
     use ctx_pro_host_protocol::{
         certified_source_revision_sha256, DeleteSourceRequest, ErrorClass,
-        FinishSourceManifestRequest, MaterializeSourcePageRequest, PrepareSourceRequest,
-        ProtocolError, SourceDeleted, SourceManifestBegan, SourceManifestFinished,
-        SourceMessageFact, SourcePageMaterialized, SourcePrepared, SourceRecordMetadata,
-        SourceSessionRelationships, TransientSourceContent, TransientSourceFact,
+        FinishAdmittedSourceManifestRequest, FinishSourceManifestRequest,
+        MaterializeSourcePageRequest, PrepareSourceRequest, ProtocolError, SourceDeleted,
+        SourceManifestAdmissionBegan, SourceManifestAdmitted, SourceManifestBegan,
+        SourceManifestFinished, SourceManifestHeader, SourceManifestPage,
+        SourceManifestPageAdmitted, SourceMessageFact, SourcePageMaterialized, SourcePrepared,
+        SourceRecordMetadata, SourceSessionRelationships, TransientSourceContent,
+        TransientSourceFact,
     };
     use sha2::{Digest, Sha256};
     use tempfile::tempdir;
@@ -1154,6 +1541,7 @@ mod tests {
     #[derive(Debug, Clone)]
     struct FixtureSourceFeed {
         generation_id: String,
+        generation_manifest: ctx_history_index::GenerationManifest,
         source: CertifiedSource,
         records: Vec<SourceBackedProRecord>,
         intermediate_frontier: SourceFrontier,
@@ -1231,6 +1619,8 @@ mod tests {
         deleted_epochs: Vec<u64>,
         finish_called: bool,
         corrupt_page_ack: bool,
+        admission_header: Option<SourceManifestHeader>,
+        admission_cursor: Option<ctx_pro_host_protocol::SourceManifestAdmissionCursor>,
     }
 
     impl FixtureConsumer {
@@ -1247,6 +1637,8 @@ mod tests {
                 deleted_epochs: Vec::new(),
                 finish_called: false,
                 corrupt_page_ack: false,
+                admission_header: None,
+                admission_cursor: None,
             }
         }
 
@@ -1364,6 +1756,91 @@ mod tests {
             Ok(SourceManifestFinished {
                 receipt: SourceBackedProReceipt {
                     core_generation_id: request.manifest.core_generation_id.clone(),
+                    manifest_aggregate_sha256: "b".repeat(64),
+                    materializer_revision: self.materializer_revision.clone(),
+                    progress: request.expected_progress.clone(),
+                },
+                replayed: false,
+            })
+        }
+    }
+
+    impl SourceBackedProAdmissionConsumer for FixtureConsumer {
+        fn begin_source_manifest_admission(
+            &mut self,
+            header: &SourceManifestHeader,
+        ) -> Result<SourceManifestAdmissionBegan> {
+            let replayed = self.admission_header.as_ref() == Some(header);
+            if !replayed {
+                self.admission_header = Some(header.clone());
+                self.admission_cursor =
+                    Some(ctx_pro_host_protocol::SourceManifestAdmissionCursor::initial(header));
+            }
+            Ok(SourceManifestAdmissionBegan {
+                cursor: self
+                    .admission_cursor
+                    .clone()
+                    .expect("fixture admission cursor"),
+                replayed,
+            })
+        }
+
+        fn admit_source_manifest_page(
+            &mut self,
+            page: &SourceManifestPage,
+        ) -> Result<SourceManifestPageAdmitted> {
+            let header = self
+                .admission_header
+                .as_ref()
+                .expect("fixture admission header");
+            let cursor = self
+                .admission_cursor
+                .as_ref()
+                .expect("fixture admission cursor");
+            let next = cursor_after_page(header, cursor, page)?;
+            self.admission_cursor = Some(next.clone());
+            Ok(SourceManifestPageAdmitted {
+                cursor: next,
+                replayed: false,
+            })
+        }
+
+        fn finish_source_manifest_admission(
+            &mut self,
+            header: &SourceManifestHeader,
+        ) -> Result<SourceManifestAdmitted> {
+            assert_eq!(self.admission_header.as_ref(), Some(header));
+            let cursor = self
+                .admission_cursor
+                .as_ref()
+                .expect("fixture admission cursor");
+            assert!(cursor.is_complete_for(header));
+            Ok(SourceManifestAdmitted {
+                receipt: ctx_pro_host_protocol::SourceManifestAdmissionReceipt {
+                    header: header.clone(),
+                    page_count: cursor.next_page_index,
+                },
+                materializer_revision: self.materializer_revision.clone(),
+                progress: self.progress.values().cloned().collect(),
+                replayed: false,
+            })
+        }
+
+        fn finish_admitted_source_manifest(
+            &mut self,
+            request: &FinishAdmittedSourceManifestRequest,
+        ) -> Result<SourceManifestFinished> {
+            self.finish_called = true;
+            self.progress = request
+                .expected_progress
+                .iter()
+                .cloned()
+                .map(|progress| (progress.source.identity().digest(), progress))
+                .collect();
+            Ok(SourceManifestFinished {
+                receipt: SourceBackedProReceipt {
+                    core_generation_id: request.admission.header.core_generation_id.clone(),
+                    manifest_aggregate_sha256: request.admission.header.aggregate_sha256.clone(),
                     materializer_revision: self.materializer_revision.clone(),
                     progress: request.expected_progress.clone(),
                 },
@@ -1428,6 +1905,39 @@ mod tests {
         assert_eq!(
             source_backed_feed::source_materialization_capabilities(),
             BTreeSet::from([Capability::SourceMaterialization])
+        );
+    }
+
+    #[test]
+    fn source_backed_pro_v026_uses_generation_pinned_paged_manifest_admission() {
+        let fixture = public_codex_fixture();
+        let mut provider = fixture.provider();
+        let mut consumer = FixtureConsumer::new(Vec::new());
+        let report = sync_source_backed_pro_feed_paged(
+            fixture.manifest(),
+            &fixture.generation_manifest,
+            &mut provider,
+            &mut consumer,
+        )
+        .expect("paged source admission and catch-up");
+
+        assert!(consumer.finish_called);
+        assert_eq!(report.receipt.core_generation_id, fixture.generation_id);
+        assert_eq!(
+            report.receipt.manifest_aggregate_sha256,
+            consumer
+                .admission_header
+                .as_ref()
+                .expect("admission header")
+                .aggregate_sha256
+        );
+        assert_eq!(
+            consumer
+                .admission_cursor
+                .as_ref()
+                .expect("admission cursor")
+                .next_source_index,
+            1
         );
     }
 
@@ -1742,6 +2252,7 @@ mod tests {
                 .expect("intermediate source frontier");
         FixtureSourceFeed {
             generation_id: index.generation_id().to_owned(),
+            generation_manifest: index.manifest().clone(),
             source,
             records,
             intermediate_frontier,

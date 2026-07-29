@@ -364,6 +364,7 @@ mod tests {
     fn receipt(generation_id: &str) -> SourceManifestReceipt {
         SourceManifestReceipt {
             core_generation_id: generation_id.to_owned(),
+            manifest_aggregate_sha256: "b".repeat(64),
             materializer_revision: "test-source-materializer".to_owned(),
             progress: Vec::new(),
         }

@@ -51,6 +51,39 @@ pub(super) fn source_manifest() -> SourceManifest {
         .expect("golden source manifest")
 }
 
+pub(super) fn source_manifest_header() -> SourceManifestHeader {
+    let manifest = source_manifest();
+    SourceManifestHeader::new(
+        manifest.core_generation_id,
+        1,
+        1,
+        1,
+        1,
+        "b".repeat(64),
+        &manifest.sources,
+        &manifest.removals,
+    )
+    .expect("golden source manifest header")
+}
+
+pub(super) fn source_manifest_page() -> SourceManifestPage {
+    let header = source_manifest_header();
+    SourceManifestPage::new(
+        &header,
+        0,
+        0,
+        SourceManifestPageEntries::Sources(vec![certified_source()]),
+    )
+    .expect("golden source manifest page")
+}
+
+pub(super) fn source_manifest_admission_receipt() -> SourceManifestAdmissionReceipt {
+    SourceManifestAdmissionReceipt {
+        header: source_manifest_header(),
+        page_count: 1,
+    }
+}
+
 pub(super) fn source_progress(terminal: bool) -> SourceProgress {
     let source = certified_source();
     SourceProgress {

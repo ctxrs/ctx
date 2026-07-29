@@ -56,7 +56,7 @@ ctx_rust_binary(
     crate_root = "examples/generate_protocol_inventory.rs",
     edition = crate_edition(),
     aliases = aliases(),
-    deps = all_crate_deps(normal = True) + [":lib"],
+    deps = all_crate_deps(normal = True) + [":lib"] + CTX_PRO_HOST_PROTOCOL_DEPS,
     proc_macro_deps = all_crate_deps(proc_macro = True),
     rustc_env = COMMON_RUSTC_ENV,
 )

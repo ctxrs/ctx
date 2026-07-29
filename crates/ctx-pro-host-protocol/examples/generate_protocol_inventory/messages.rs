@@ -5,7 +5,8 @@ use super::blame::{
 use super::fixtures::{
     authorization, blame, blame_request, checkpoint, journal_operation_requests, journal_request,
     output_cursor, output_operation_pages, output_page, output_source,
-    provider_output_blame_result, source_manifest, source_progress, source_record, source_removal,
+    provider_output_blame_result, source_manifest, source_manifest_admission_receipt,
+    source_manifest_header, source_manifest_page, source_progress, source_record, source_removal,
 };
 use super::*;
 
@@ -81,6 +82,24 @@ fn host_messages(fingerprint: &str) -> Vec<(&'static str, HostMessage)> {
             }),
         ),
         (
+            "begin_source_manifest_admission",
+            HostMessage::BeginSourceManifestAdmission(BeginSourceManifestAdmissionRequest {
+                header: source_manifest_header(),
+            }),
+        ),
+        (
+            "admit_source_manifest_page",
+            HostMessage::AdmitSourceManifestPage(AdmitSourceManifestPageRequest {
+                page: source_manifest_page(),
+            }),
+        ),
+        (
+            "finish_source_manifest_admission",
+            HostMessage::FinishSourceManifestAdmission(FinishSourceManifestAdmissionRequest {
+                header: source_manifest_header(),
+            }),
+        ),
+        (
             "prepare_source",
             HostMessage::PrepareSource(PrepareSourceRequest {
                 core_generation_id: "a".repeat(64),
@@ -113,6 +132,13 @@ fn host_messages(fingerprint: &str) -> Vec<(&'static str, HostMessage)> {
             "finish_source_manifest",
             HostMessage::FinishSourceManifest(FinishSourceManifestRequest {
                 manifest: source_manifest(),
+                expected_progress: vec![source_progress(true)],
+            }),
+        ),
+        (
+            "finish_admitted_source_manifest",
+            HostMessage::FinishAdmittedSourceManifest(FinishAdmittedSourceManifestRequest {
+                admission: source_manifest_admission_receipt(),
                 expected_progress: vec![source_progress(true)],
             }),
         ),
@@ -247,6 +273,35 @@ fn helper_messages(fingerprint: &str) -> Vec<(&'static str, HelperMessage)> {
             }),
         ),
         (
+            "source_manifest_admission_began",
+            HelperMessage::SourceManifestAdmissionBegan(SourceManifestAdmissionBegan {
+                cursor: SourceManifestAdmissionCursor::initial(&source_manifest_header()),
+                replayed: false,
+            }),
+        ),
+        (
+            "source_manifest_page_admitted",
+            HelperMessage::SourceManifestPageAdmitted(SourceManifestPageAdmitted {
+                cursor: SourceManifestAdmissionCursor {
+                    core_generation_id: "a".repeat(64),
+                    aggregate_sha256: source_manifest_header().aggregate_sha256,
+                    next_page_index: 1,
+                    next_source_index: 1,
+                    next_removal_index: 0,
+                },
+                replayed: false,
+            }),
+        ),
+        (
+            "source_manifest_admitted",
+            HelperMessage::SourceManifestAdmitted(SourceManifestAdmitted {
+                receipt: source_manifest_admission_receipt(),
+                materializer_revision: "golden-source-materializer-v1".to_owned(),
+                progress: Vec::new(),
+                replayed: false,
+            }),
+        ),
+        (
             "source_prepared",
             HelperMessage::SourcePrepared(SourcePrepared {
                 core_generation_id: "a".repeat(64),
@@ -278,6 +333,7 @@ fn helper_messages(fingerprint: &str) -> Vec<(&'static str, HelperMessage)> {
             HelperMessage::SourceManifestFinished(SourceManifestFinished {
                 receipt: SourceManifestReceipt {
                     core_generation_id: "a".repeat(64),
+                    manifest_aggregate_sha256: "b".repeat(64),
                     materializer_revision: "golden-source-materializer-v1".to_owned(),
                     progress: vec![source_progress(true)],
                 },
