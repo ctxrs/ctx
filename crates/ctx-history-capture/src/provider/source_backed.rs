@@ -15,10 +15,10 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    CaptureProvider, CertifiedSource, CertifiedSourceAppend, CertifiedSourceDeletion,
-    CertifiedSourceInventory, ContentSourceResolver, EventHydrationRequest, HydratedProviderRecord,
-    HydrationFailure, HydrationFailureKind, ScannedSourceCounts, SessionHydrationRequest,
-    SourceAnchor, SourceFrontier, SourceKey, TypedKey,
+    BatchHydrationRequest, BatchHydrationResult, CaptureProvider, CertifiedSource,
+    CertifiedSourceAppend, CertifiedSourceDeletion, CertifiedSourceInventory,
+    ContentSourceResolver, EventHydrationRequest, HydratedProviderRecord, HydrationFailure,
+    HydrationFailureKind, ScannedSourceCounts, SourceAnchor, SourceFrontier, SourceKey, TypedKey,
 };
 use ctx_history_index::{
     CommitReceipt, GenerationWriter, IndexError, LexicalDocument, RevalidationTarget,
@@ -1007,6 +1007,8 @@ type RevalidationCallback =
 type HydrationCallback = dyn Fn(&EventHydrationRequest) -> Result<HydratedProviderRecord, HydrationFailure>
     + Send
     + Sync;
+type BatchHydrationCallback =
+    dyn Fn(&BatchHydrationRequest) -> Result<BatchHydrationResult, HydrationFailure> + Send + Sync;
 
 /// Closure bundle at the coordinator boundary. This deliberately does not
 /// pretend provider scanners share a provider-local trait.
@@ -1016,6 +1018,7 @@ pub struct SourceBackedRouteDriver {
     owns_source: Arc<SourcePredicate>,
     revalidate: Arc<RevalidationCallback>,
     hydrate: Arc<HydrationCallback>,
+    hydrate_batch: Option<Arc<BatchHydrationCallback>>,
 }
 
 impl fmt::Debug for SourceBackedRouteDriver {
@@ -1042,7 +1045,41 @@ impl SourceBackedRouteDriver {
             owns_source: Arc::new(owns_source),
             revalidate: Arc::new(revalidate),
             hydrate: Arc::new(hydrate),
+            hydrate_batch: None,
         }
+    }
+
+    /// Installs a provider-native ordered batch reader without changing the
+    /// mechanically compatible event hydration constructor.
+    pub fn with_batch_hydration(
+        mut self,
+        hydrate_batch: impl Fn(&BatchHydrationRequest) -> Result<BatchHydrationResult, HydrationFailure>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        self.hydrate_batch = Some(Arc::new(hydrate_batch));
+        self
+    }
+
+    fn hydrate_batch(
+        &self,
+        request: &BatchHydrationRequest,
+    ) -> Result<BatchHydrationResult, HydrationFailure> {
+        if let Some(hydrate_batch) = &self.hydrate_batch {
+            return hydrate_batch(request);
+        }
+        let records = request
+            .events()
+            .iter()
+            .map(|event| (self.hydrate)(event))
+            .collect::<Result<Vec<_>, _>>()?;
+        BatchHydrationResult::new(records).map_err(|error| {
+            hydration_failure(
+                HydrationFailureKind::InvalidLocator,
+                format!("invalid default route batch result: {error}"),
+            )
+        })
     }
 }
 
@@ -1575,13 +1612,17 @@ pub struct SourceBackedResolverRegistry {
     routes: Vec<SourceBackedRoute>,
 }
 
-impl ContentSourceResolver for SourceBackedResolverRegistry {
-    fn hydrate_event(
-        &self,
-        request: &EventHydrationRequest,
-    ) -> Result<HydratedProviderRecord, HydrationFailure> {
-        let source = request.locator().source();
-        let mut matches = self.routes.iter().filter(|route| {
+#[derive(Debug)]
+struct ResolvedHydrationGroup {
+    route_index: usize,
+    source: SourceKey,
+    positions: Vec<usize>,
+    events: Vec<EventHydrationRequest>,
+}
+
+impl SourceBackedResolverRegistry {
+    fn resolve_route_index(&self, source: &SourceKey) -> Result<usize, HydrationFailure> {
+        let mut matches = self.routes.iter().enumerate().filter(|(_, route)| {
             route.metadata.source.provider.as_str() == source.provider()
                 && route.metadata.certified_source_format == source.source_format()
                 && route
@@ -1589,7 +1630,7 @@ impl ContentSourceResolver for SourceBackedResolverRegistry {
                     .as_ref()
                     .is_some_and(|driver| (driver.owns_source)(source))
         });
-        let Some(route) = matches.next() else {
+        let Some((route_index, _)) = matches.next() else {
             let unsupported = self.routes.iter().any(|route| {
                 route.metadata.source.provider.as_str() == source.provider()
                     && route.metadata.certified_source_format == source.source_format()
@@ -1614,24 +1655,143 @@ impl ContentSourceResolver for SourceBackedResolverRegistry {
                 "more than one provider route claimed the exact source descriptor",
             ));
         }
+        Ok(route_index)
+    }
+
+    fn hydrate_ordered_batch(
+        &self,
+        request: &BatchHydrationRequest,
+    ) -> Result<BatchHydrationResult, HydrationFailure> {
+        let mut groups = Vec::<ResolvedHydrationGroup>::new();
+        let mut group_indices = HashMap::<(usize, [u8; 32]), usize>::new();
+
+        // Resolve every event before invoking any provider callback so routing
+        // failures cannot produce a partially hydrated return value.
+        for (position, event) in request.events().iter().enumerate() {
+            let source = event.locator().source();
+            let route_index = self.resolve_route_index(source)?;
+            let key = (route_index, source.exact_descriptor_digest());
+            if let Some(group_index) = group_indices.get(&key).copied() {
+                let group = groups.get_mut(group_index).ok_or_else(|| {
+                    hydration_failure(
+                        HydrationFailureKind::InvalidLocator,
+                        "batch hydration group index was invalid",
+                    )
+                })?;
+                if !group.source.exact_descriptor_eq(source) {
+                    return Err(hydration_failure(
+                        HydrationFailureKind::InvalidLocator,
+                        "distinct exact source descriptors shared a batch grouping digest",
+                    ));
+                }
+                group.positions.push(position);
+                group.events.push(event.clone());
+            } else {
+                group_indices.insert(key, groups.len());
+                groups.push(ResolvedHydrationGroup {
+                    route_index,
+                    source: source.clone(),
+                    positions: vec![position],
+                    events: vec![event.clone()],
+                });
+            }
+        }
+
+        let mut ordered = (0..request.len())
+            .map(|_| None)
+            .collect::<Vec<Option<HydratedProviderRecord>>>();
+        for group in groups {
+            let route = self.routes.get(group.route_index).ok_or_else(|| {
+                hydration_failure(
+                    HydrationFailureKind::InvalidLocator,
+                    "resolved batch hydration route was absent",
+                )
+            })?;
+            let driver = route.driver.as_ref().ok_or_else(|| {
+                hydration_failure(
+                    HydrationFailureKind::UnsupportedParserRevision,
+                    "the provider route has no exact hydration driver",
+                )
+            })?;
+            let group_request = BatchHydrationRequest::new(group.events).map_err(|error| {
+                hydration_failure(
+                    HydrationFailureKind::InvalidLocator,
+                    format!("invalid grouped batch hydration request: {error}"),
+                )
+            })?;
+            let group_result = driver.hydrate_batch(&group_request)?;
+            group_result.validate_for_request(&group_request)?;
+
+            for (position, record) in group.positions.into_iter().zip(group_result.into_records()) {
+                let slot = ordered.get_mut(position).ok_or_else(|| {
+                    hydration_failure(
+                        HydrationFailureKind::InvalidLocator,
+                        "batch hydration produced an out-of-range result position",
+                    )
+                })?;
+                if slot.replace(record).is_some() {
+                    return Err(hydration_failure(
+                        HydrationFailureKind::InvalidLocator,
+                        "batch hydration produced a duplicate result position",
+                    ));
+                }
+            }
+        }
+
+        let records = ordered
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| {
+                hydration_failure(
+                    HydrationFailureKind::InvalidLocator,
+                    "batch hydration did not produce every requested event",
+                )
+            })?;
+        let result = BatchHydrationResult::new(records).map_err(|error| {
+            hydration_failure(
+                HydrationFailureKind::InvalidLocator,
+                format!("invalid ordered batch hydration result: {error}"),
+            )
+        })?;
+        result.validate_for_request(request)?;
+        Ok(result)
+    }
+}
+
+impl ContentSourceResolver for SourceBackedResolverRegistry {
+    fn hydrate_event(
+        &self,
+        request: &EventHydrationRequest,
+    ) -> Result<HydratedProviderRecord, HydrationFailure> {
+        let source = request.locator().source();
+        let route_index = self.resolve_route_index(source)?;
+        let route = self.routes.get(route_index).ok_or_else(|| {
+            hydration_failure(
+                HydrationFailureKind::InvalidLocator,
+                "resolved event hydration route was absent",
+            )
+        })?;
         let driver = route.driver.as_ref().ok_or_else(|| {
             hydration_failure(
                 HydrationFailureKind::UnsupportedParserRevision,
                 "the provider route has no exact hydration driver",
             )
         })?;
-        (driver.hydrate)(request)
+        let record = (driver.hydrate)(request)?;
+        if record.event_id != request.event_id() {
+            return Err(hydration_failure(
+                HydrationFailureKind::InvalidLocator,
+                "event hydration returned the wrong event identity",
+            ));
+        }
+        Ok(record)
     }
 
-    fn hydrate_session(
+    fn hydrate_batch(
         &self,
-        request: &SessionHydrationRequest,
-    ) -> Result<Vec<HydratedProviderRecord>, HydrationFailure> {
-        request
-            .events()
-            .iter()
-            .map(|event| self.hydrate_event(event))
-            .collect()
+        request: &BatchHydrationRequest,
+    ) -> Result<BatchHydrationResult, HydrationFailure> {
+        self.hydrate_ordered_batch(request)
     }
 }
 
@@ -4884,13 +5044,20 @@ fn hydration_failure(kind: HydrationFailureKind, detail: impl fmt::Display) -> H
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf};
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex,
+        },
+    };
 
     use ctx_history_core::{
-        derive_event_id, derive_session_id, EventIdentityInput, LocatorRevisionPolicy,
-        NativeItemKey, NativeRecordCoordinate, NativeSessionKey, ScannedSourceCounts,
-        SessionHydrationRequest, SessionIdentityInput, SourceAnchor, SourceObservation,
-        SourceRecordLocator, TypedKey,
+        derive_event_id, derive_session_id, BatchHydrationRequest, BatchHydrationResult,
+        EventIdentityInput, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
+        NativeSessionKey, ScannedSourceCounts, SessionHydrationRequest, SessionIdentityInput,
+        SourceAnchor, SourceObservation, SourceRecordLocator, TypedKey,
     };
     use ctx_history_index::{VerifiedIndex, MAX_BODY_PREVIEW_CHARS};
     use tempfile::tempdir;
@@ -4977,6 +5144,392 @@ mod tests {
                 .provider_bytes,
             b"hermes"
         );
+    }
+
+    #[test]
+    fn ordered_batch_groups_by_route_and_exact_source_without_store() {
+        let gemini_a = fixture_source(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 31);
+        let gemini_b = fixture_source(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 32);
+        let hermes = fixture_source(CaptureProvider::Hermes, "hermes_state_sqlite", 33);
+        let requests = vec![
+            fixture_event_request(&gemini_a, "gemini-a-1"),
+            fixture_event_request(&hermes, "hermes-1"),
+            fixture_event_request(&gemini_b, "gemini-b-1"),
+            fixture_event_request(&gemini_a, "gemini-a-2"),
+            fixture_event_request(&hermes, "hermes-2"),
+        ];
+        let expected_order = requests
+            .iter()
+            .map(EventHydrationRequest::event_id)
+            .collect::<Vec<_>>();
+
+        let gemini_batch_sources = Arc::new(Mutex::new(Vec::<[u8; 32]>::new()));
+        let gemini_event_calls = Arc::new(AtomicUsize::new(0));
+        let gemini_owned_sources = Arc::new(vec![gemini_a.clone(), gemini_b.clone()]);
+        let gemini_driver = SourceBackedRouteDriver::new(
+            |_sink| Ok(()),
+            {
+                let owned_sources = Arc::clone(&gemini_owned_sources);
+                move |candidate| {
+                    owned_sources
+                        .iter()
+                        .any(|source| source.exact_descriptor_eq(candidate))
+                }
+            },
+            |_target| false,
+            {
+                let event_calls = Arc::clone(&gemini_event_calls);
+                move |request| {
+                    event_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(fixture_hydrated_record(request))
+                }
+            },
+        )
+        .with_batch_hydration({
+            let batch_sources = Arc::clone(&gemini_batch_sources);
+            move |request| {
+                let source = request.events()[0].locator().source();
+                assert!(request
+                    .events()
+                    .iter()
+                    .all(|event| source.exact_descriptor_eq(event.locator().source())));
+                batch_sources
+                    .lock()
+                    .unwrap()
+                    .push(source.exact_descriptor_digest());
+                Ok(fixture_batch_result(request))
+            }
+        });
+
+        let hermes_batch_sources = Arc::new(Mutex::new(Vec::<[u8; 32]>::new()));
+        let hermes_event_calls = Arc::new(AtomicUsize::new(0));
+        let hermes_owned_source = hermes.clone();
+        let hermes_driver = SourceBackedRouteDriver::new(
+            |_sink| Ok(()),
+            move |candidate| hermes_owned_source.exact_descriptor_eq(candidate),
+            |_target| false,
+            {
+                let event_calls = Arc::clone(&hermes_event_calls);
+                move |request| {
+                    event_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(fixture_hydrated_record(request))
+                }
+            },
+        )
+        .with_batch_hydration({
+            let batch_sources = Arc::clone(&hermes_batch_sources);
+            move |request| {
+                let source = request.events()[0].locator().source();
+                batch_sources
+                    .lock()
+                    .unwrap()
+                    .push(source.exact_descriptor_digest());
+                Ok(fixture_batch_result(request))
+            }
+        });
+
+        let mut registry = SourceBackedProviderRegistry::new();
+        registry.register(fixture_executable_route(
+            CaptureProvider::Gemini,
+            GEMINI_CLI_SOURCE_FORMAT,
+            gemini_driver,
+        ));
+        registry.register(fixture_executable_route(
+            CaptureProvider::Hermes,
+            "hermes_state_sqlite",
+            hermes_driver,
+        ));
+
+        let request = BatchHydrationRequest::new(requests).unwrap();
+        let result = registry
+            .resolver_registry()
+            .hydrate_batch(&request)
+            .unwrap();
+        assert_eq!(
+            result
+                .records()
+                .iter()
+                .map(|record| record.event_id)
+                .collect::<Vec<_>>(),
+            expected_order
+        );
+        let mut observed_gemini = gemini_batch_sources.lock().unwrap().clone();
+        observed_gemini.sort();
+        let mut expected_gemini = vec![
+            gemini_a.exact_descriptor_digest(),
+            gemini_b.exact_descriptor_digest(),
+        ];
+        expected_gemini.sort();
+        assert_eq!(observed_gemini, expected_gemini);
+        assert_eq!(
+            hermes_batch_sources.lock().unwrap().as_slice(),
+            &[hermes.exact_descriptor_digest()]
+        );
+        assert_eq!(gemini_event_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(hermes_event_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn registry_session_hydration_uses_one_native_batch_callback() {
+        let source = fixture_source(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 34);
+        let events = vec![
+            fixture_event_request(&source, "first"),
+            fixture_event_request(&source, "second"),
+            fixture_event_request(&source, "third"),
+        ];
+        let session_request =
+            SessionHydrationRequest::new(fixture_session_id(&source), events).unwrap();
+        let event_calls = Arc::new(AtomicUsize::new(0));
+        let batch_calls = Arc::new(AtomicUsize::new(0));
+        let owned_source = source.clone();
+        let driver = SourceBackedRouteDriver::new(
+            |_sink| Ok(()),
+            move |candidate| owned_source.exact_descriptor_eq(candidate),
+            |_target| false,
+            {
+                let event_calls = Arc::clone(&event_calls);
+                move |request| {
+                    event_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(fixture_hydrated_record(request))
+                }
+            },
+        )
+        .with_batch_hydration({
+            let batch_calls = Arc::clone(&batch_calls);
+            move |request| {
+                batch_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(fixture_batch_result(request))
+            }
+        });
+        let mut registry = SourceBackedProviderRegistry::new();
+        registry.register(fixture_executable_route(
+            CaptureProvider::Gemini,
+            GEMINI_CLI_SOURCE_FORMAT,
+            driver,
+        ));
+
+        let result = registry
+            .resolver_registry()
+            .hydrate_session(&session_request)
+            .unwrap();
+        assert_eq!(result.len(), 3);
+        assert_eq!(batch_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(event_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn registry_default_batch_driver_preserves_event_loop_order() {
+        let source = fixture_source(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 35);
+        let events = vec![
+            fixture_event_request(&source, "first"),
+            fixture_event_request(&source, "second"),
+        ];
+        let expected = events
+            .iter()
+            .map(EventHydrationRequest::event_id)
+            .collect::<Vec<_>>();
+        let event_calls = Arc::new(AtomicUsize::new(0));
+        let owned_source = source.clone();
+        let driver = SourceBackedRouteDriver::new(
+            |_sink| Ok(()),
+            move |candidate| owned_source.exact_descriptor_eq(candidate),
+            |_target| false,
+            {
+                let event_calls = Arc::clone(&event_calls);
+                move |request| {
+                    event_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(fixture_hydrated_record(request))
+                }
+            },
+        );
+        let mut registry = SourceBackedProviderRegistry::new();
+        registry.register(fixture_executable_route(
+            CaptureProvider::Gemini,
+            GEMINI_CLI_SOURCE_FORMAT,
+            driver,
+        ));
+
+        let request = BatchHydrationRequest::new(events).unwrap();
+        let result = registry
+            .resolver_registry()
+            .hydrate_batch(&request)
+            .unwrap();
+        assert_eq!(
+            result
+                .records()
+                .iter()
+                .map(|record| record.event_id)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(event_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn registry_rejects_malformed_native_batch_results() {
+        let source = fixture_source(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 36);
+        let events = vec![
+            fixture_event_request(&source, "first"),
+            fixture_event_request(&source, "second"),
+        ];
+        let request = BatchHydrationRequest::new(events.clone()).unwrap();
+
+        let short = fixture_batch_resolver(&source, |_request| {
+            Ok(BatchHydrationResult::new(Vec::new()).unwrap())
+        })
+        .hydrate_batch(&request)
+        .unwrap_err();
+        assert_eq!(short.kind, HydrationFailureKind::InvalidLocator);
+        assert!(short.detail.contains("returned 0 records"));
+
+        let duplicate_record = fixture_hydrated_record(&events[0]);
+        let duplicate = fixture_batch_resolver(&source, move |_request| {
+            Ok(
+                BatchHydrationResult::new(vec![duplicate_record.clone(), duplicate_record.clone()])
+                    .unwrap(),
+            )
+        })
+        .hydrate_batch(&request)
+        .unwrap_err();
+        assert_eq!(duplicate.kind, HydrationFailureKind::InvalidLocator);
+        assert!(duplicate.detail.contains("duplicate event identity"));
+
+        let unrequested = fixture_hydrated_record(&fixture_event_request(&source, "unrequested"));
+        let wrong = fixture_batch_resolver(&source, move |request| {
+            Ok(BatchHydrationResult::new(vec![
+                fixture_hydrated_record(&request.events()[0]),
+                unrequested.clone(),
+            ])
+            .unwrap())
+        })
+        .hydrate_batch(&request)
+        .unwrap_err();
+        assert_eq!(wrong.kind, HydrationFailureKind::InvalidLocator);
+        assert!(wrong.detail.contains("unrequested event identity"));
+
+        let unordered = fixture_batch_resolver(&source, |request| {
+            Ok(BatchHydrationResult::new(
+                request
+                    .events()
+                    .iter()
+                    .rev()
+                    .map(fixture_hydrated_record)
+                    .collect(),
+            )
+            .unwrap())
+        })
+        .hydrate_batch(&request)
+        .unwrap_err();
+        assert_eq!(unordered.kind, HydrationFailureKind::InvalidLocator);
+        assert!(unordered.detail.contains("exact request order"));
+    }
+
+    #[test]
+    fn registry_returns_exact_failure_instead_of_partial_batch_success() {
+        let first_source = fixture_source(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 37);
+        let second_source = fixture_source(CaptureProvider::Hermes, "hermes_state_sqlite", 38);
+        let request = BatchHydrationRequest::new(vec![
+            fixture_event_request(&first_source, "first"),
+            fixture_event_request(&second_source, "second"),
+        ])
+        .unwrap();
+        let successful_calls = Arc::new(AtomicUsize::new(0));
+        let failed_calls = Arc::new(AtomicUsize::new(0));
+        let first_owned_source = first_source.clone();
+        let first_driver = SourceBackedRouteDriver::new(
+            |_sink| Ok(()),
+            move |candidate| first_owned_source.exact_descriptor_eq(candidate),
+            |_target| false,
+            |request| Ok(fixture_hydrated_record(request)),
+        )
+        .with_batch_hydration({
+            let successful_calls = Arc::clone(&successful_calls);
+            move |request| {
+                successful_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(fixture_batch_result(request))
+            }
+        });
+        let failure = HydrationFailure {
+            kind: HydrationFailureKind::StaleSourceEvidence,
+            detail: "exact native source failure".to_owned(),
+        };
+        let expected_failure = failure.clone();
+        let second_owned_source = second_source.clone();
+        let second_driver = SourceBackedRouteDriver::new(
+            |_sink| Ok(()),
+            move |candidate| second_owned_source.exact_descriptor_eq(candidate),
+            |_target| false,
+            |request| Ok(fixture_hydrated_record(request)),
+        )
+        .with_batch_hydration({
+            let failed_calls = Arc::clone(&failed_calls);
+            move |_request| {
+                failed_calls.fetch_add(1, Ordering::SeqCst);
+                Err(failure.clone())
+            }
+        });
+        let mut registry = SourceBackedProviderRegistry::new();
+        registry.register(fixture_executable_route(
+            CaptureProvider::Gemini,
+            GEMINI_CLI_SOURCE_FORMAT,
+            first_driver,
+        ));
+        registry.register(fixture_executable_route(
+            CaptureProvider::Hermes,
+            "hermes_state_sqlite",
+            second_driver,
+        ));
+
+        assert_eq!(
+            registry
+                .resolver_registry()
+                .hydrate_batch(&request)
+                .unwrap_err(),
+            expected_failure
+        );
+        assert_eq!(successful_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(failed_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn registry_rejects_duplicate_routes_before_batch_callbacks() {
+        let source = fixture_source(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 39);
+        let request =
+            BatchHydrationRequest::new(vec![fixture_event_request(&source, "event")]).unwrap();
+        let batch_calls = Arc::new(AtomicUsize::new(0));
+        let owned_source = source.clone();
+        let driver = SourceBackedRouteDriver::new(
+            |_sink| Ok(()),
+            move |candidate| owned_source.exact_descriptor_eq(candidate),
+            |_target| false,
+            |request| Ok(fixture_hydrated_record(request)),
+        )
+        .with_batch_hydration({
+            let batch_calls = Arc::clone(&batch_calls);
+            move |request| {
+                batch_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(fixture_batch_result(request))
+            }
+        });
+        let mut registry = SourceBackedProviderRegistry::new();
+        registry.register(fixture_executable_route(
+            CaptureProvider::Gemini,
+            GEMINI_CLI_SOURCE_FORMAT,
+            driver.clone(),
+        ));
+        registry.register(fixture_executable_route(
+            CaptureProvider::Gemini,
+            GEMINI_CLI_SOURCE_FORMAT,
+            driver,
+        ));
+
+        let failure = registry
+            .resolver_registry()
+            .hydrate_batch(&request)
+            .unwrap_err();
+        assert_eq!(failure.kind, HydrationFailureKind::InvalidLocator);
+        assert!(failure.detail.contains("more than one provider route"));
+        assert_eq!(batch_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -5629,6 +6182,117 @@ mod tests {
                 .provider_bytes,
             b"qoder"
         );
+    }
+
+    fn fixture_source(
+        provider: CaptureProvider,
+        source_format: &'static str,
+        lineage: u8,
+    ) -> SourceKey {
+        SourceKey::derive(
+            provider.as_str(),
+            source_format,
+            "ordered-batch-test-v1",
+            1,
+            SourceAnchor::CatalogLineage([lineage; 32]),
+        )
+        .unwrap()
+    }
+
+    fn fixture_session_id(source: &SourceKey) -> ctx_history_core::StableEntityId {
+        let session_key =
+            NativeSessionKey::native_id("session", TypedKey::utf8("session").unwrap()).unwrap();
+        derive_session_id(SessionIdentityInput {
+            source,
+            logical_session_kind: "session",
+            native_session_key: &session_key,
+        })
+        .unwrap()
+    }
+
+    fn fixture_event_request(source: &SourceKey, native_event_id: &str) -> EventHydrationRequest {
+        let session_id = fixture_session_id(source);
+        let item_key =
+            NativeItemKey::native_id("message", TypedKey::utf8(native_event_id).unwrap()).unwrap();
+        let event_id = derive_event_id(EventIdentityInput {
+            source,
+            session_id,
+            logical_item_kind: "message",
+            native_item_key: &item_key,
+            subrecord_selector: None,
+        })
+        .unwrap();
+        let locator = SourceRecordLocator::new(
+            source.clone(),
+            NativeRecordCoordinate::ProviderNative {
+                namespace: "ordered-batch-test".to_owned(),
+                coordinate: TypedKey::utf8(native_event_id).unwrap(),
+            },
+            LocatorRevisionPolicy::StableRecordEvidence,
+            None,
+            [41; 32],
+        )
+        .unwrap();
+        EventHydrationRequest::new(event_id, locator).unwrap()
+    }
+
+    fn fixture_hydrated_record(request: &EventHydrationRequest) -> HydratedProviderRecord {
+        HydratedProviderRecord {
+            event_id: request.event_id(),
+            provider_bytes: request.event_id().as_uuid().as_bytes().to_vec(),
+        }
+    }
+
+    fn fixture_batch_result(request: &BatchHydrationRequest) -> BatchHydrationResult {
+        BatchHydrationResult::new(
+            request
+                .events()
+                .iter()
+                .map(fixture_hydrated_record)
+                .collect(),
+        )
+        .unwrap()
+    }
+
+    fn fixture_executable_route(
+        provider: CaptureProvider,
+        selected_source_format: &'static str,
+        driver: SourceBackedRouteDriver,
+    ) -> SourceBackedRoute {
+        SourceBackedRoute::automatic(
+            fixture_provider_source(
+                provider,
+                selected_source_format,
+                ProviderImportSupport::Native,
+            ),
+            SourceBackedSelectorAuthority::DiscoveredWinner,
+            driver,
+        )
+        .unwrap()
+    }
+
+    fn fixture_batch_resolver(
+        source: &SourceKey,
+        hydrate_batch: impl Fn(&BatchHydrationRequest) -> Result<BatchHydrationResult, HydrationFailure>
+            + Send
+            + Sync
+            + 'static,
+    ) -> SourceBackedResolverRegistry {
+        let owned_source = source.clone();
+        let driver = SourceBackedRouteDriver::new(
+            |_sink| Ok(()),
+            move |candidate| owned_source.exact_descriptor_eq(candidate),
+            |_target| false,
+            |request| Ok(fixture_hydrated_record(request)),
+        )
+        .with_batch_hydration(hydrate_batch);
+        let mut registry = SourceBackedProviderRegistry::new();
+        registry.register(fixture_executable_route(
+            CaptureProvider::Gemini,
+            GEMINI_CLI_SOURCE_FORMAT,
+            driver,
+        ));
+        registry.resolver_registry()
     }
 
     fn fixture_route(

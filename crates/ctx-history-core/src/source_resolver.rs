@@ -3,16 +3,22 @@
 //! Fresh ctx projections retain stable identity, metadata, and typed native
 //! locators. Complete provider content remains in provider-owned sources.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::projection::{SourceKey, StableEntityId, StableEntityKind, TypedKey};
 
 pub const NATIVE_LOCATOR_VERSION: u16 = 1;
+/// Shared admission ceiling for ordered event batches and complete sessions.
+///
+/// This preserves the existing large-session ceiling while comfortably
+/// covering the initial 200-result search hydration path.
+pub const MAX_BATCH_HYDRATION_EVENTS: usize = 100_000;
 
 const MAX_RELATION_BYTES: usize = 256;
 const MAX_JSON_POINTER_BYTES: usize = 8 * 1024;
-const MAX_LOCATORS_PER_REQUEST: usize = 100_000;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum SourceResolverContractError {
@@ -32,6 +38,10 @@ pub enum SourceResolverContractError {
     InvalidEventIdentity,
     #[error("hydration request has too many locators")]
     TooManyLocators,
+    #[error("hydration request repeats an event identity")]
+    DuplicateEventIdentity,
+    #[error("hydration result has too many records")]
+    TooManyHydratedRecords,
     #[error("locator source identity is invalid")]
     InvalidSourceContract,
     #[error("unsupported native locator version {0}")]
@@ -166,19 +176,9 @@ impl EventHydrationRequest {
         event_id: StableEntityId,
         locator: SourceRecordLocator,
     ) -> SourceResolverContractResult<Self> {
-        event_id
-            .validate_contract()
-            .map_err(|_| SourceResolverContractError::InvalidIdentityContract)?;
-        locator.validate_contract()?;
-        if event_id.entity_kind() != StableEntityKind::Event {
-            return Err(SourceResolverContractError::InvalidEventIdentity);
-        }
-        if event_id.source_digest() != locator.source.identity().digest()
-            || event_id.source_descriptor_digest() != locator.source.exact_descriptor_digest()
-        {
-            return Err(SourceResolverContractError::IdentitySourceMismatch);
-        }
-        Ok(Self { event_id, locator })
+        let request = Self { event_id, locator };
+        request.validate_contract()?;
+        Ok(request)
     }
 
     pub fn event_id(&self) -> StableEntityId {
@@ -188,13 +188,68 @@ impl EventHydrationRequest {
     pub fn locator(&self) -> &SourceRecordLocator {
         &self.locator
     }
+
+    pub fn validate_contract(&self) -> SourceResolverContractResult<()> {
+        self.event_id
+            .validate_contract()
+            .map_err(|_| SourceResolverContractError::InvalidIdentityContract)?;
+        self.locator.validate_contract()?;
+        if self.event_id.entity_kind() != StableEntityKind::Event {
+            return Err(SourceResolverContractError::InvalidEventIdentity);
+        }
+        if self.event_id.source_digest() != self.locator.source.identity().digest()
+            || self.event_id.source_descriptor_digest()
+                != self.locator.source.exact_descriptor_digest()
+        {
+            return Err(SourceResolverContractError::IdentitySourceMismatch);
+        }
+        Ok(())
+    }
 }
 
-/// Ordered locators are grouped by source by the resolver implementation.
+/// One bounded, provider-neutral event batch in caller-requested order.
+///
+/// Events may belong to different sessions, providers, and exact sources.
+/// Duplicate event identities are rejected so every result has one
+/// unambiguous output position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchHydrationRequest {
+    events: Vec<EventHydrationRequest>,
+}
+
+impl BatchHydrationRequest {
+    pub fn new(events: Vec<EventHydrationRequest>) -> SourceResolverContractResult<Self> {
+        if events.len() > MAX_BATCH_HYDRATION_EVENTS {
+            return Err(SourceResolverContractError::TooManyLocators);
+        }
+        let mut event_ids = HashSet::with_capacity(events.len());
+        for event in &events {
+            event.validate_contract()?;
+            if !event_ids.insert(event.event_id()) {
+                return Err(SourceResolverContractError::DuplicateEventIdentity);
+            }
+        }
+        Ok(Self { events })
+    }
+
+    pub fn events(&self) -> &[EventHydrationRequest] {
+        &self.events
+    }
+
+    pub fn len(&self) -> usize {
+        self.events.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+}
+
+/// Ordered locators for one logical session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionHydrationRequest {
     session_id: StableEntityId,
-    events: Vec<EventHydrationRequest>,
+    batch: BatchHydrationRequest,
 }
 
 impl SessionHydrationRequest {
@@ -202,26 +257,28 @@ impl SessionHydrationRequest {
         session_id: StableEntityId,
         events: Vec<EventHydrationRequest>,
     ) -> SourceResolverContractResult<Self> {
+        if events.len() > MAX_BATCH_HYDRATION_EVENTS {
+            return Err(SourceResolverContractError::TooManyLocators);
+        }
         session_id
             .validate_contract()
             .map_err(|_| SourceResolverContractError::InvalidIdentityContract)?;
-        if events.len() > MAX_LOCATORS_PER_REQUEST {
-            return Err(SourceResolverContractError::TooManyLocators);
-        }
+        let batch = BatchHydrationRequest::new(events)?;
         if session_id.entity_kind() != StableEntityKind::Session
-            || events.iter().any(|event| {
+            || batch.events().iter().any(|event| {
                 event.event_id.source_descriptor_digest()
                     != event.locator.source.exact_descriptor_digest()
                     || session_id.source_descriptor_digest()
                         != event.locator.source.exact_descriptor_digest()
             })
-            || events
+            || batch
+                .events()
                 .iter()
                 .any(|event| event.event_id.source_digest() != session_id.source_digest())
         {
             return Err(SourceResolverContractError::IdentitySourceMismatch);
         }
-        Ok(Self { session_id, events })
+        Ok(Self { session_id, batch })
     }
 
     pub fn session_id(&self) -> StableEntityId {
@@ -229,7 +286,11 @@ impl SessionHydrationRequest {
     }
 
     pub fn events(&self) -> &[EventHydrationRequest] {
-        &self.events
+        self.batch.events()
+    }
+
+    pub fn batch(&self) -> &BatchHydrationRequest {
+        &self.batch
     }
 }
 
@@ -238,6 +299,78 @@ impl SessionHydrationRequest {
 pub struct HydratedProviderRecord {
     pub event_id: StableEntityId,
     pub provider_bytes: Vec<u8>,
+}
+
+/// Complete batch output in the exact order of its corresponding request.
+///
+/// Construction enforces the allocation ceiling. Resolvers must additionally
+/// call [`Self::validate_for_request`] before returning provider output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchHydrationResult {
+    records: Vec<HydratedProviderRecord>,
+}
+
+impl BatchHydrationResult {
+    pub fn new(
+        records: Vec<HydratedProviderRecord>,
+    ) -> SourceResolverContractResult<BatchHydrationResult> {
+        if records.len() > MAX_BATCH_HYDRATION_EVENTS {
+            return Err(SourceResolverContractError::TooManyHydratedRecords);
+        }
+        Ok(Self { records })
+    }
+
+    pub fn records(&self) -> &[HydratedProviderRecord] {
+        &self.records
+    }
+
+    pub fn into_records(self) -> Vec<HydratedProviderRecord> {
+        self.records
+    }
+
+    pub fn validate_for_request(
+        &self,
+        request: &BatchHydrationRequest,
+    ) -> Result<(), HydrationFailure> {
+        if self.records.len() != request.len() {
+            return Err(invalid_batch_result(format!(
+                "batch hydration returned {} records for {} requested events",
+                self.records.len(),
+                request.len()
+            )));
+        }
+
+        let expected = request
+            .events()
+            .iter()
+            .map(EventHydrationRequest::event_id)
+            .collect::<HashSet<_>>();
+        let mut observed = HashSet::with_capacity(self.records.len());
+        for record in &self.records {
+            if !observed.insert(record.event_id) {
+                return Err(invalid_batch_result(
+                    "batch hydration returned a duplicate event identity",
+                ));
+            }
+            if !expected.contains(&record.event_id) {
+                return Err(invalid_batch_result(
+                    "batch hydration returned an unrequested event identity",
+                ));
+            }
+        }
+
+        if request
+            .events()
+            .iter()
+            .zip(&self.records)
+            .any(|(event, record)| event.event_id() != record.event_id)
+        {
+            return Err(invalid_batch_result(
+                "batch hydration records are not in exact request order",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -267,10 +400,38 @@ pub trait ContentSourceResolver {
         request: &EventHydrationRequest,
     ) -> Result<HydratedProviderRecord, HydrationFailure>;
 
+    fn hydrate_batch(
+        &self,
+        request: &BatchHydrationRequest,
+    ) -> Result<BatchHydrationResult, HydrationFailure> {
+        let records = request
+            .events()
+            .iter()
+            .map(|event| self.hydrate_event(event))
+            .collect::<Result<Vec<_>, _>>()?;
+        let result = BatchHydrationResult::new(records).map_err(contract_hydration_failure)?;
+        result.validate_for_request(request)?;
+        Ok(result)
+    }
+
     fn hydrate_session(
         &self,
         request: &SessionHydrationRequest,
-    ) -> Result<Vec<HydratedProviderRecord>, HydrationFailure>;
+    ) -> Result<Vec<HydratedProviderRecord>, HydrationFailure> {
+        self.hydrate_batch(request.batch())
+            .map(BatchHydrationResult::into_records)
+    }
+}
+
+fn contract_hydration_failure(error: SourceResolverContractError) -> HydrationFailure {
+    invalid_batch_result(format!("invalid batch hydration contract: {error}"))
+}
+
+fn invalid_batch_result(detail: impl Into<String>) -> HydrationFailure {
+    HydrationFailure {
+        kind: HydrationFailureKind::InvalidLocator,
+        detail: detail.into(),
+    }
 }
 
 fn validate_coordinate(coordinate: &NativeRecordCoordinate) -> SourceResolverContractResult<()> {
@@ -318,6 +479,8 @@ fn validate_text(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use crate::projection::{
         derive_event_id, derive_session_id, EventIdentityInput, NativeItemKey, NativeSessionKey,
         SessionIdentityInput, SourceAnchor,
@@ -336,24 +499,35 @@ mod tests {
         .unwrap()
     }
 
-    fn event(source: &SourceKey) -> StableEntityId {
+    fn session(source: &SourceKey) -> StableEntityId {
         let session_key =
             NativeSessionKey::native_id("session", TypedKey::utf8("session").unwrap()).unwrap();
-        let session_id = derive_session_id(SessionIdentityInput {
+        derive_session_id(SessionIdentityInput {
             source,
             logical_session_kind: "thread",
             native_session_key: &session_key,
         })
-        .unwrap();
-        let item = NativeItemKey::native_id("message", TypedKey::utf8("event").unwrap()).unwrap();
+        .unwrap()
+    }
+
+    fn event(source: &SourceKey) -> StableEntityId {
+        event_named(source, "event")
+    }
+
+    fn event_named(source: &SourceKey, native_id: &str) -> StableEntityId {
+        let item = NativeItemKey::native_id("message", TypedKey::utf8(native_id).unwrap()).unwrap();
         derive_event_id(EventIdentityInput {
             source,
-            session_id,
+            session_id: session(source),
             logical_item_kind: "message",
             native_item_key: &item,
             subrecord_selector: None,
         })
         .unwrap()
+    }
+
+    fn request(source: &SourceKey, native_id: &str) -> EventHydrationRequest {
+        EventHydrationRequest::new(event_named(source, native_id), locator(source.clone())).unwrap()
     }
 
     fn locator(source: SourceKey) -> SourceRecordLocator {
@@ -405,5 +579,168 @@ mod tests {
     fn event_and_locator_must_share_source_lineage() {
         let error = EventHydrationRequest::new(event(&source(1)), locator(source(2))).unwrap_err();
         assert_eq!(error, SourceResolverContractError::IdentitySourceMismatch);
+    }
+
+    #[test]
+    fn ordered_batch_is_bounded_and_rejects_duplicate_event_identities() {
+        assert_eq!(MAX_BATCH_HYDRATION_EVENTS, 100_000);
+        assert!(MAX_BATCH_HYDRATION_EVENTS >= 200);
+
+        let source = source(1);
+        let event = request(&source, "event");
+        let duplicate = BatchHydrationRequest::new(vec![event.clone(), event.clone()]).unwrap_err();
+        assert_eq!(
+            duplicate,
+            SourceResolverContractError::DuplicateEventIdentity
+        );
+
+        let oversized =
+            BatchHydrationRequest::new(vec![event.clone(); MAX_BATCH_HYDRATION_EVENTS + 1])
+                .unwrap_err();
+        assert_eq!(oversized, SourceResolverContractError::TooManyLocators);
+
+        let record = HydratedProviderRecord {
+            event_id: event.event_id(),
+            provider_bytes: Vec::new(),
+        };
+        let oversized_result =
+            BatchHydrationResult::new(vec![record; MAX_BATCH_HYDRATION_EVENTS + 1]).unwrap_err();
+        assert_eq!(
+            oversized_result,
+            SourceResolverContractError::TooManyHydratedRecords
+        );
+    }
+
+    struct EchoResolver;
+
+    impl ContentSourceResolver for EchoResolver {
+        fn hydrate_event(
+            &self,
+            request: &EventHydrationRequest,
+        ) -> Result<HydratedProviderRecord, HydrationFailure> {
+            Ok(HydratedProviderRecord {
+                event_id: request.event_id(),
+                provider_bytes: request.event_id().as_uuid().as_bytes().to_vec(),
+            })
+        }
+    }
+
+    #[test]
+    fn default_batch_hydration_accepts_multiple_sources_and_preserves_order() {
+        let first = source(1);
+        let second = source(2);
+        let requests = vec![
+            request(&first, "first"),
+            request(&second, "second"),
+            request(&first, "third"),
+        ];
+        let expected = requests
+            .iter()
+            .map(EventHydrationRequest::event_id)
+            .collect::<Vec<_>>();
+        let batch = BatchHydrationRequest::new(requests).unwrap();
+
+        let result = EchoResolver.hydrate_batch(&batch).unwrap();
+        assert_eq!(
+            result
+                .records()
+                .iter()
+                .map(|record| record.event_id)
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+
+    struct ExactFailureResolver {
+        failed_event: StableEntityId,
+        failure: HydrationFailure,
+    }
+
+    impl ContentSourceResolver for ExactFailureResolver {
+        fn hydrate_event(
+            &self,
+            request: &EventHydrationRequest,
+        ) -> Result<HydratedProviderRecord, HydrationFailure> {
+            if request.event_id() == self.failed_event {
+                return Err(self.failure.clone());
+            }
+            Ok(HydratedProviderRecord {
+                event_id: request.event_id(),
+                provider_bytes: Vec::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn default_batch_hydration_preserves_exact_typed_failure() {
+        let source = source(1);
+        let first = request(&source, "first");
+        let failed = request(&source, "failed");
+        let failure = HydrationFailure {
+            kind: HydrationFailureKind::StaleRecordEvidence,
+            detail: "exact provider failure".to_owned(),
+        };
+        let resolver = ExactFailureResolver {
+            failed_event: failed.event_id(),
+            failure: failure.clone(),
+        };
+        let batch = BatchHydrationRequest::new(vec![first, failed]).unwrap();
+
+        assert_eq!(resolver.hydrate_batch(&batch).unwrap_err(), failure);
+    }
+
+    struct BatchOnlyResolver {
+        event_calls: Cell<usize>,
+        batch_calls: Cell<usize>,
+    }
+
+    impl ContentSourceResolver for BatchOnlyResolver {
+        fn hydrate_event(
+            &self,
+            _request: &EventHydrationRequest,
+        ) -> Result<HydratedProviderRecord, HydrationFailure> {
+            self.event_calls.set(self.event_calls.get() + 1);
+            Err(HydrationFailure {
+                kind: HydrationFailureKind::MissingRecord,
+                detail: "event fallback must not run".to_owned(),
+            })
+        }
+
+        fn hydrate_batch(
+            &self,
+            request: &BatchHydrationRequest,
+        ) -> Result<BatchHydrationResult, HydrationFailure> {
+            self.batch_calls.set(self.batch_calls.get() + 1);
+            BatchHydrationResult::new(
+                request
+                    .events()
+                    .iter()
+                    .map(|event| HydratedProviderRecord {
+                        event_id: event.event_id(),
+                        provider_bytes: Vec::new(),
+                    })
+                    .collect(),
+            )
+            .map_err(contract_hydration_failure)
+        }
+    }
+
+    #[test]
+    fn default_session_hydration_uses_the_ordered_batch_path() {
+        let source = source(1);
+        let request = SessionHydrationRequest::new(
+            session(&source),
+            vec![request(&source, "first"), request(&source, "second")],
+        )
+        .unwrap();
+        let resolver = BatchOnlyResolver {
+            event_calls: Cell::new(0),
+            batch_calls: Cell::new(0),
+        };
+
+        let result = resolver.hydrate_session(&request).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(resolver.batch_calls.get(), 1);
+        assert_eq!(resolver.event_calls.get(), 0);
     }
 }
