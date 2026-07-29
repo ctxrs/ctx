@@ -284,6 +284,7 @@ repository = "https://example.invalid/{name}"
     def command(self, mode: str) -> list[str]:
         command = [
             sys.executable,
+            "-I",
             str(SCRIPT),
             mode,
             "--artifact",
