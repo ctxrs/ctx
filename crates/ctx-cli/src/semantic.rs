@@ -34,10 +34,7 @@ use ctx_history_core::{database_path, utc_now};
 use ctx_history_store::{EventEmbeddingDocument, Store};
 
 #[cfg(test)]
-use crate::commands::{
-    import::{import_totals_json, ImportTotals},
-    search::RefreshArg,
-};
+use crate::commands::{import::ImportTotals, search::RefreshArg};
 #[cfg(test)]
 use crate::config::{AppConfig, CONFIG_FILE};
 #[cfg(test)]
@@ -137,6 +134,7 @@ pub(crate) use daemon_autostart::{
     mark_replacement_helper_handoff, maybe_autostart_daemon, maybe_autostart_daemon_for_search,
     DaemonHandoff, DaemonUpgradeHandoff,
 };
+#[cfg(test)]
 mod daemon_history;
 #[cfg(test)]
 use daemon_history::*;

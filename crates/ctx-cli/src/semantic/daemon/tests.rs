@@ -154,8 +154,8 @@ fn source_refresh_only_scheduler_runs_no_unrelated_job() -> Result<()> {
     assert!(!iteration.did_work);
     assert!(!iteration.failed);
     assert!(calls.borrow().is_empty());
-    assert!(!daemon_history_refresh_job_path(temp.path()).exists());
-    assert!(!daemon_semantic_job_path(temp.path()).exists());
+    assert!(!super::super::paths_status::daemon_history_refresh_job_path(temp.path()).exists());
+    assert!(!super::super::paths_status::daemon_semantic_job_path(temp.path()).exists());
     Ok(())
 }
 
@@ -167,20 +167,20 @@ fn source_refresh_only_and_full_modes_share_the_same_refresh_path() -> Result<()
 
     fn run_mode(daemon_mode: DaemonMode, calls: Arc<AtomicUsize>) -> Result<serde_json::Value> {
         let temp = tempfile::tempdir()?;
-        let prepared = crate::upgrade::data_migration::prepare(temp.path(), &[])?;
-        let generation_id = prepared
-            .marker()
-            .lexical_generation_id
-            .clone()
-            .expect("prepared lexical generation");
-        let returned_generation = generation_id.clone();
         let coordinator = SourceBackedRefreshCoordinator::with_executor(Arc::new(
             move |execution: SourceBackedRefreshExecution<'_>| {
                 calls.fetch_add(1, Ordering::SeqCst);
                 execution.report_progress("refreshing", 0, 1, Some("all-providers".to_owned()))?;
                 execution.report_progress("verifying", 1, 1, None)?;
+                let writer = ctx_history_index::GenerationWriter::open(
+                    execution.index_root,
+                    ctx_history_index::WriterOptions::default(),
+                )?;
+                let receipt = writer.commit(|_| true)?;
                 Ok(SourceBackedRefreshPublication {
-                    generation_id: returned_generation.clone(),
+                    generation_id: receipt.generation_id,
+                    source_manifest: None,
+                    resolver: None,
                     scanned_routes: 1,
                     unsupported_routes: 0,
                     certified_source_count: 3,
@@ -193,7 +193,7 @@ fn source_refresh_only_and_full_modes_share_the_same_refresh_path() -> Result<()
                 })
             },
         ));
-        coordinator.enqueue_for_test(Some(generation_id));
+        coordinator.enqueue_for_test(None);
         let mut config = AppConfig::default();
         config.daemon.mode = daemon_mode;
         let mut runtime = DaemonRuntime {
@@ -236,6 +236,151 @@ fn source_refresh_only_and_full_modes_share_the_same_refresh_path() -> Result<()
     ] {
         assert_eq!(source_only[key], full[key], "{key}");
     }
+    Ok(())
+}
+
+#[test]
+fn full_scheduler_periodically_runs_the_global_source_refresh_executor() -> Result<()> {
+    use super::super::source_backed_refresh_coordinator::{
+        SourceBackedRefreshExecution, SourceBackedRefreshPublication, SourceBackedRefreshTimings,
+    };
+
+    let temp = tempfile::tempdir()?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let executor_calls = calls.clone();
+    let coordinator = SourceBackedRefreshCoordinator::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            executor_calls.fetch_add(1, Ordering::SeqCst);
+            let writer = ctx_history_index::GenerationWriter::open(
+                execution.index_root,
+                ctx_history_index::WriterOptions::default(),
+            )?;
+            let receipt = writer.commit(|_| true)?;
+            Ok(SourceBackedRefreshPublication {
+                generation_id: receipt.generation_id,
+                source_manifest: None,
+                resolver: None,
+                scanned_routes: 1,
+                unsupported_routes: 0,
+                certified_source_count: 0,
+                certified_source_bytes: 0,
+                timings: SourceBackedRefreshTimings::default(),
+            })
+        },
+    ));
+    assert!(!coordinator.has_pending_request());
+    let mut runtime = DaemonRuntime::default();
+
+    let iteration = run_daemon_once_with_activity(
+        &test_daemon_run_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        true,
+        None,
+        Some(&coordinator),
+    )?;
+
+    assert!(iteration.did_work);
+    assert!(!iteration.failed);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let job = read_daemon_job_status(&daemon_source_backed_refresh_job_path(temp.path()))
+        .ok_or_else(|| anyhow!("periodic source refresh job was not persisted"))?;
+    assert_eq!(job["status"], "completed");
+    assert_eq!(job["daemon_mode"], "full");
+    assert_eq!(job["trigger"], "periodic");
+    assert_eq!(job["trigger_provenance"], "daemon_scheduler");
+    assert!(temp
+        .path()
+        .join("source-backed-lexical-v0/meta.json")
+        .is_file());
+    Ok(())
+}
+
+#[test]
+fn full_scheduler_never_runs_or_activates_legacy_history_state() -> Result<()> {
+    use super::super::source_backed_refresh_coordinator::{
+        SourceBackedRefreshExecution, SourceBackedRefreshPublication, SourceBackedRefreshTimings,
+    };
+
+    let temp = tempfile::tempdir()?;
+    let legacy_database = ctx_history_core::database_path(temp.path().to_path_buf());
+    let legacy_history_job =
+        super::super::paths_status::daemon_history_refresh_job_path(temp.path());
+    let legacy_semantic_job = super::super::paths_status::daemon_semantic_job_path(temp.path());
+    for (path, sentinel) in [
+        (legacy_database.as_path(), b"legacy-store".as_slice()),
+        (
+            legacy_history_job.as_path(),
+            b"legacy-history-job".as_slice(),
+        ),
+        (
+            legacy_semantic_job.as_path(),
+            b"legacy-semantic-job".as_slice(),
+        ),
+    ] {
+        fs::create_dir_all(path.parent().expect("legacy path parent"))?;
+        fs::write(path, sentinel)?;
+    }
+    let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let _hooks = install_daemon_test_job_hooks(DaemonTestJobHooks {
+        calls: calls.clone(),
+        history_refresh: Some(json!({"status": "completed"})),
+        semantic_index: Some(json!({"status": "completed"})),
+    });
+    let coordinator = SourceBackedRefreshCoordinator::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            let writer = ctx_history_index::GenerationWriter::open(
+                execution.index_root,
+                ctx_history_index::WriterOptions::default(),
+            )?;
+            let receipt = writer.commit(|_| true)?;
+            Ok(SourceBackedRefreshPublication {
+                generation_id: receipt.generation_id,
+                source_manifest: None,
+                resolver: None,
+                scanned_routes: 0,
+                unsupported_routes: 0,
+                certified_source_count: 0,
+                certified_source_bytes: 0,
+                timings: SourceBackedRefreshTimings::default(),
+            })
+        },
+    ));
+    let mut runtime = DaemonRuntime::default();
+
+    let iteration = run_daemon_once_with_activity(
+        &test_daemon_run_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        true,
+        None,
+        Some(&coordinator),
+    )?;
+
+    assert!(iteration.did_work);
+    assert!(!iteration.failed);
+    assert!(calls.borrow().is_empty());
+    assert_eq!(fs::read(&legacy_database)?, b"legacy-store");
+    assert_eq!(fs::read(&legacy_history_job)?, b"legacy-history-job");
+    assert_eq!(fs::read(&legacy_semantic_job)?, b"legacy-semantic-job");
+    let marker = crate::upgrade::data_migration::inspect(temp.path())?.expect("v0.26 epoch marker");
+    assert_eq!(
+        marker.phase,
+        crate::upgrade::data_migration::MigrationPhase::Ready
+    );
+    let semantic_report =
+        SemanticWorkerReport::unavailable(temp.path(), "source-backed semantic unavailable");
+    let report = daemon_report(temp.path(), &semantic_report);
+    assert_eq!(
+        report["jobs"]["history_refresh"]["reason"],
+        "history_epoch_source_backed"
+    );
+    assert_eq!(
+        report["jobs"]["semantic_index"]["reason"],
+        "source_backed_semantic_not_integrated"
+    );
     Ok(())
 }
 
@@ -305,7 +450,10 @@ fn source_refresh_only_status_exposes_runtime_and_certified_refresh_identity() -
         }),
     )?;
 
-    let report = daemon_report(temp.path(), &semantic_worker_report_for_daemon(temp.path()));
+    let report = daemon_report(
+        temp.path(),
+        &super::super::daemon_worker::semantic_worker_report_for_daemon(temp.path()),
+    );
 
     assert_eq!(report["mode"], "source-refresh-only");
     assert_eq!(report["live_pid"], process::id());

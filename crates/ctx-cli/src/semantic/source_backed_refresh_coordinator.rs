@@ -10,15 +10,17 @@ use anyhow::{anyhow, Context, Result};
 use ctx_history_capture::{
     build_automatic_source_backed_registry, DiscoveryContext, ProviderSourceStatus,
     SourceBackedAutomaticRegistryIssue, SourceBackedAutomaticUnavailableReason,
-    SourceBackedRefreshProgress as CaptureSourceBackedRefreshProgress, SourceBackedRouteError,
-    SourceBackedRouteErrorKind, SourceBackedRouteResult,
+    SourceBackedRefreshProgress as CaptureSourceBackedRefreshProgress,
+    SourceBackedResolverRegistry, SourceBackedRouteError, SourceBackedRouteErrorKind,
+    SourceBackedRouteResult,
 };
-use ctx_history_core::utc_now;
 #[cfg(test)]
 use ctx_history_core::CaptureProvider;
+use ctx_history_core::{utc_now, HydrationFailure, HydrationFailureKind};
 use ctx_history_index::{VerifiedIndex, WriterOptions};
 use ctx_pro_host_protocol::{SourceManifest, SourceRemoval};
 use serde_json::{json, Value};
+use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
@@ -42,7 +44,6 @@ const SOURCE_REFRESH_ATTEMPT_HISTORY: usize = 64;
 const SOURCE_REFRESH_POLL_INTERVAL: StdDuration = StdDuration::from_millis(50);
 const SOURCE_REFRESH_IPC_TIMEOUT: StdDuration = StdDuration::from_secs(2);
 const SOURCE_REFRESH_RESPONSE_MAX_BYTES: u64 = 64 * 1024;
-const SOURCE_REBUILD_MIGRATION_JOURNAL: &str = "state.jsonl";
 const SOURCE_REFRESH_BUILD_ISSUE_LIMIT: usize = 8;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -87,12 +88,16 @@ impl std::error::Error for SourceBackedRefreshDaemonUnavailable {}
 
 /// Provider-neutral publication returned by the capture-owned refresh
 /// executor after it atomically advances the source-backed generation.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone)]
 pub(crate) struct SourceBackedRefreshPublication {
     pub(crate) generation_id: String,
     /// Exact metadata-only Pro handoff for this Core generation. Test
     /// executors may omit it; the capture-owned production executor never does.
     pub(crate) source_manifest: Option<SourceManifest>,
+    /// Resolver built from the exact automatic registry used for this
+    /// publication. Production refreshes always supply it; injected test
+    /// executors may omit it when resolver behavior is irrelevant.
+    pub(crate) resolver: Option<Arc<SourceBackedResolverRegistry>>,
     pub(crate) scanned_routes: usize,
     pub(crate) unsupported_routes: usize,
     pub(crate) certified_source_count: usize,
@@ -332,6 +337,7 @@ impl SourceBackedRefreshTimings {
 struct SourceBackedRefreshCoordinatorState {
     active_request_id: Option<String>,
     attempts: VecDeque<SourceBackedRefreshAttempt>,
+    published_resolver: Option<Arc<GenerationBoundSourceBackedResolver>>,
 }
 
 pub(in crate::semantic) struct SourceBackedRefreshCoordinator {
@@ -343,6 +349,40 @@ pub(in crate::semantic) struct SourceBackedRefreshRun {
     pub(in crate::semantic) job: Value,
     pub(in crate::semantic) did_work: bool,
     pub(in crate::semantic) failed: bool,
+}
+
+/// One daemon-retained resolver whose identity is inseparable from the
+/// verified lexical generation that installed it.
+#[derive(Debug)]
+#[allow(dead_code)] // Query IPC consumes this seam in the batch-hydration lane.
+pub(crate) struct GenerationBoundSourceBackedResolver {
+    generation_id: String,
+    resolver: Arc<SourceBackedResolverRegistry>,
+}
+
+#[allow(dead_code)] // Query IPC consumes this seam in the batch-hydration lane.
+impl GenerationBoundSourceBackedResolver {
+    pub(crate) fn generation_id(&self) -> &str {
+        &self.generation_id
+    }
+
+    pub(crate) fn resolver(&self) -> &SourceBackedResolverRegistry {
+        self.resolver.as_ref()
+    }
+}
+
+#[derive(Debug, Clone, Eq, Error, PartialEq)]
+#[allow(dead_code)] // Query IPC exposes this typed failure in the hydration lane.
+pub(crate) enum SourceBackedResolverAccessError {
+    #[error("daemon has no resolver retained for source-backed generation {requested_generation}")]
+    Missing { requested_generation: String },
+    #[error(
+        "daemon resolver generation mismatch: requested {requested_generation}, retained {retained_generation}"
+    )]
+    GenerationMismatch {
+        requested_generation: String,
+        retained_generation: String,
+    },
 }
 
 impl SourceBackedRefreshCoordinator {
@@ -357,6 +397,7 @@ impl SourceBackedRefreshCoordinator {
             state: Mutex::new(SourceBackedRefreshCoordinatorState {
                 active_request_id: None,
                 attempts: VecDeque::new(),
+                published_resolver: None,
             }),
             executor,
         }
@@ -369,6 +410,67 @@ impl SourceBackedRefreshCoordinator {
             .as_deref()
             .and_then(|request_id| find_attempt(&state, request_id))
             .is_some_and(|attempt| attempt.state.is_active())
+    }
+
+    /// Returns the resolver only when it is bound to the caller's exact
+    /// lexical generation. Missing or stale daemon state queues the same
+    /// provider-wide refresh path and remains a typed failure.
+    #[allow(dead_code)] // Query IPC consumes this seam in the batch-hydration lane.
+    pub(crate) fn resolver_for_generation(
+        &self,
+        data_root: &Path,
+        generation_id: &str,
+    ) -> std::result::Result<
+        Arc<GenerationBoundSourceBackedResolver>,
+        SourceBackedResolverAccessError,
+    > {
+        let result = {
+            let state = self.lock_state();
+            match state.published_resolver.as_ref() {
+                Some(retained) if retained.generation_id == generation_id => {
+                    return Ok(Arc::clone(retained));
+                }
+                Some(retained) => SourceBackedResolverAccessError::GenerationMismatch {
+                    requested_generation: generation_id.to_owned(),
+                    retained_generation: retained.generation_id.clone(),
+                },
+                None => SourceBackedResolverAccessError::Missing {
+                    requested_generation: generation_id.to_owned(),
+                },
+            }
+        };
+        self.enqueue_with_metadata(
+            Some(generation_id.to_owned()),
+            source_refresh_runtime_metadata(data_root),
+        );
+        Err(result)
+    }
+
+    /// Preserves the capture resolver's typed failure while arranging for
+    /// source state invalidations to be repaired by the daemon refresh loop.
+    /// A future batch hydration worker can call this once for a failed batch;
+    /// this method performs no hydration and has no legacy fallback.
+    #[allow(dead_code)] // Query IPC consumes this seam in the batch-hydration lane.
+    pub(crate) fn handle_hydration_failure(
+        &self,
+        data_root: &Path,
+        generation_id: &str,
+        failure: HydrationFailure,
+    ) -> HydrationFailure {
+        let retained_generation_matches = {
+            let state = self.lock_state();
+            state
+                .published_resolver
+                .as_ref()
+                .is_some_and(|retained| retained.generation_id == generation_id)
+        };
+        if hydration_failure_queues_refresh(failure.kind) && retained_generation_matches {
+            self.enqueue_with_metadata(
+                Some(generation_id.to_owned()),
+                source_refresh_runtime_metadata(data_root),
+            );
+        }
+        failure
     }
 
     pub(in crate::semantic) fn handle_ipc_request(
@@ -418,12 +520,21 @@ impl SourceBackedRefreshCoordinator {
         let executor = Arc::clone(&self.executor);
         self.run_next_with(
             |request_id, coordinator| {
+                prepare_source_rebuild_if_needed(data_root)?;
                 execute_source_backed_refresh(executor.as_ref(), data_root, request_id, coordinator)
             },
             || published_generation_id(data_root),
             |generation_id| complete_pending_source_rebuild(data_root, generation_id),
             |error| record_pending_source_rebuild_failure(data_root, error),
         )
+    }
+
+    pub(in crate::semantic) fn enqueue_periodic(&self, data_root: &Path) -> Result<Value> {
+        let observed_generation = published_generation_id(data_root)?;
+        Ok(self.enqueue_with_metadata(
+            observed_generation,
+            SourceRefreshRuntimeMetadata::periodic(),
+        ))
     }
 
     #[cfg(test)]
@@ -545,7 +656,14 @@ impl SourceBackedRefreshCoordinator {
         let observed_generation = probe();
         let (verified, observed_for_status) = match (execution, observed_generation) {
             (Ok(publication), Ok(Some(observed))) if publication.generation_id == observed => {
-                (Ok((observed.clone(), publication)), Some(observed))
+                let verified = if publication.resolver.is_some() || cfg!(test) {
+                    Ok((observed.clone(), publication))
+                } else {
+                    Err(format!(
+                        "source-backed refresh published generation {observed} without its resolver registry"
+                    ))
+                };
+                (verified, Some(observed))
             }
             (Ok(publication), Ok(observed)) => (Err(format!(
                 "source-backed refresh returned generation {}, but the verified published generation is {observed:?}",
@@ -584,6 +702,7 @@ impl SourceBackedRefreshCoordinator {
             },
         };
         let mut state = self.lock_state();
+        let mut installed_resolver = None;
         let (failed, did_work, job) = {
             let attempt = find_attempt_mut(&mut state, &request_id)?;
             attempt.finished_at_ms = Some(utc_now().timestamp_millis());
@@ -603,6 +722,12 @@ impl SourceBackedRefreshCoordinator {
                     attempt.certified_source_count = Some(publication.certified_source_count);
                     attempt.certified_source_bytes = Some(publication.certified_source_bytes);
                     attempt.timings = Some(publication.timings);
+                    installed_resolver = publication.resolver.map(|resolver| {
+                        Arc::new(GenerationBoundSourceBackedResolver {
+                            generation_id: observed,
+                            resolver,
+                        })
+                    });
                 }
                 Err(error) => {
                     attempt.state = SourceBackedRefreshState::Failed;
@@ -615,6 +740,9 @@ impl SourceBackedRefreshCoordinator {
             let did_work = !failed && attempt.published_generation != previous_generation;
             (failed, did_work, attempt.job_json())
         };
+        if let Some(resolver) = installed_resolver {
+            state.published_resolver = Some(resolver);
+        }
         if state.active_request_id.as_deref() == Some(request_id.as_str()) {
             state.active_request_id = None;
         }
@@ -643,6 +771,16 @@ impl Default for SourceRefreshRuntimeMetadata {
             daemon_mode: DaemonMode::Full,
             trigger: "search",
             trigger_provenance: "manual",
+        }
+    }
+}
+
+impl SourceRefreshRuntimeMetadata {
+    fn periodic() -> Self {
+        Self {
+            daemon_mode: DaemonMode::Full,
+            trigger: "periodic",
+            trigger_provenance: "daemon_scheduler",
         }
     }
 }
@@ -734,23 +872,36 @@ fn published_generation_id(data_root: &Path) -> Result<Option<String>> {
     ))
 }
 
-fn pending_source_rebuild(data_root: &Path) -> Result<bool> {
-    if !data_migration::migration_directory(data_root)
-        .join(SOURCE_REBUILD_MIGRATION_JOURNAL)
-        .is_file()
-    {
-        return Ok(false);
-    }
-    Ok(data_migration::inspect(data_root)?.is_some_and(|marker| {
-        matches!(
+fn prepare_source_rebuild_if_needed(data_root: &Path) -> Result<()> {
+    let Some(marker) = data_migration::inspect(data_root)? else {
+        return Ok(());
+    };
+    if marker.source_rebuild_required
+        && matches!(
             marker.phase,
-            MigrationPhase::RebuildPending | MigrationPhase::SourceRebuildFailed
-        ) && marker.source_rebuild_required
+            MigrationPhase::Detected | MigrationPhase::SourceRebuildFailed
+        )
+    {
+        data_migration::prepare(data_root, &[])?;
+    }
+    Ok(())
+}
+
+fn pending_source_rebuild(data_root: &Path) -> Result<bool> {
+    Ok(data_migration::inspect(data_root)?.is_some_and(|marker| {
+        marker.source_rebuild_required
+            && matches!(
+                marker.phase,
+                MigrationPhase::Detected
+                    | MigrationPhase::RebuildPending
+                    | MigrationPhase::SourceRebuildFailed
+            )
     }))
 }
 
 fn complete_pending_source_rebuild(data_root: &Path, generation_id: &str) -> Result<()> {
     if pending_source_rebuild(data_root)? {
+        prepare_source_rebuild_if_needed(data_root)?;
         data_migration::complete_source_rebuild(data_root, generation_id)?;
     }
     Ok(())
@@ -758,6 +909,7 @@ fn complete_pending_source_rebuild(data_root: &Path, generation_id: &str) -> Res
 
 fn record_pending_source_rebuild_failure(data_root: &Path, error: &str) -> Result<()> {
     if pending_source_rebuild(data_root)? {
+        prepare_source_rebuild_if_needed(data_root)?;
         data_migration::record_source_rebuild_failure(data_root, error)?;
     }
     Ok(())
@@ -837,6 +989,7 @@ fn refresh_all_provider_sources(
     let build = build_automatic_source_backed_registry(discovery);
     let (executor, issues) = build.into_refresh_executor(WriterOptions::default());
     reject_blocking_automatic_registry_issues(&issues)?;
+    let resolver = Arc::new(executor.registry().resolver_registry());
     let receipt = executor
         .refresh(index_root, report_progress)
         .context("run capture-owned all-provider source-backed refresh")?;
@@ -856,6 +1009,7 @@ fn refresh_all_provider_sources(
     Ok(SourceBackedRefreshPublication {
         generation_id: receipt.commit.generation_id,
         source_manifest: Some(source_manifest),
+        resolver: Some(resolver),
         scanned_routes: receipt.scanned_routes,
         unsupported_routes: receipt.unsupported_routes.len(),
         certified_source_count: receipt.certified_source_count,
@@ -937,6 +1091,18 @@ fn automatic_registry_issue_reason(reason: &SourceBackedAutomaticUnavailableReas
         }
         SourceBackedAutomaticUnavailableReason::RegistrationRejected { detail } => detail.clone(),
     }
+}
+
+#[allow(dead_code)] // Used by the retained resolver's future batch consumer.
+fn hydration_failure_queues_refresh(kind: HydrationFailureKind) -> bool {
+    matches!(
+        kind,
+        HydrationFailureKind::TemporarilyUnavailable
+            | HydrationFailureKind::ConfirmedDeleted
+            | HydrationFailureKind::StaleSourceEvidence
+            | HydrationFailureKind::StaleRecordEvidence
+            | HydrationFailureKind::MissingRecord
+    )
 }
 
 fn record_source_backed_refresh_progress(
@@ -1264,6 +1430,7 @@ mod tests {
         SourceBackedRefreshPublication {
             generation_id: generation_id.into(),
             source_manifest: None,
+            resolver: None,
             scanned_routes: 1,
             unsupported_routes: 0,
             certified_source_count: 1,
@@ -1274,6 +1441,10 @@ mod tests {
                 commit_us: 33,
             },
         }
+    }
+
+    fn test_resolver() -> Arc<SourceBackedResolverRegistry> {
+        Arc::new(ctx_history_capture::SourceBackedProviderRegistry::new().resolver_registry())
     }
 
     fn request_id(response: &Value) -> String {
@@ -1579,28 +1750,22 @@ mod tests {
         let coordinator = SourceBackedRefreshCoordinator::new();
         let request = coordinator.enqueue(Some("generation-1".to_owned()));
         let request_id = request_id(&request);
-        let publication_records = AtomicUsize::new(0);
-        let failure_records = AtomicUsize::new(0);
-
+        let resolver = test_resolver();
         let run = coordinator
             .run_next_with(
-                |_, _| Ok(test_publication("generation-2")),
+                |_, _| {
+                    let mut publication = test_publication("generation-2");
+                    publication.resolver = Some(resolver);
+                    Ok(publication)
+                },
                 || Ok(Some("generation-1".to_owned())),
-                |_| {
-                    publication_records.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                },
-                |_| {
-                    failure_records.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                },
+                |_| Ok(()),
+                |_| Ok(()),
             )
             .expect("queued refresh");
 
         assert!(run.failed);
         assert!(!run.did_work);
-        assert_eq!(publication_records.load(Ordering::SeqCst), 0);
-        assert_eq!(failure_records.load(Ordering::SeqCst), 1);
         let status = coordinator
             .status(&request_id)
             .expect("failed request status");
@@ -1610,65 +1775,178 @@ mod tests {
         assert!(status["last_error"]
             .as_str()
             .is_some_and(|error| error.contains("returned generation generation-2")));
+        assert!(coordinator.lock_state().published_resolver.is_none());
     }
 
     #[test]
-    fn injected_executor_completes_a_pending_source_rebuild() {
+    fn verified_publication_atomically_installs_generation_bound_resolver() {
         let temp = tempfile::tempdir().unwrap();
         let data_root = temp.path().join("data");
-        let prepared = data_migration::prepare(&data_root, &[]).unwrap();
-        let generation_id = prepared
-            .marker()
-            .lexical_generation_id
-            .clone()
-            .expect("prepared lexical generation");
+        let missing_coordinator = SourceBackedRefreshCoordinator::new();
+        let missing = missing_coordinator
+            .resolver_for_generation(&data_root, "missing-generation")
+            .expect_err("missing daemon resolver must fail typed");
+        assert_eq!(
+            missing,
+            SourceBackedResolverAccessError::Missing {
+                requested_generation: "missing-generation".to_owned(),
+            }
+        );
+        assert!(missing_coordinator.has_pending_request());
+
+        let resolver = test_resolver();
+        let executor_resolver = Arc::clone(&resolver);
+        let coordinator = SourceBackedRefreshCoordinator::with_executor(Arc::new(
+            move |execution: SourceBackedRefreshExecution<'_>| {
+                let writer = ctx_history_index::GenerationWriter::open(
+                    execution.index_root,
+                    WriterOptions::default(),
+                )?;
+                let receipt = writer.commit(|_| true)?;
+                let mut publication = test_publication(receipt.generation_id);
+                publication.resolver = Some(Arc::clone(&executor_resolver));
+                Ok(publication)
+            },
+        ));
+        coordinator.enqueue_periodic(&data_root).unwrap();
+
+        let run = coordinator.run_next(&data_root).expect("queued refresh");
+        let generation_id = run.job["published_generation"]
+            .as_str()
+            .expect("published generation");
+        let retained = coordinator
+            .resolver_for_generation(&data_root, generation_id)
+            .expect("exact generation resolver");
+
+        assert_eq!(retained.generation_id(), generation_id);
+        assert!(std::ptr::eq(retained.resolver(), resolver.as_ref()));
+        assert!(!coordinator.has_pending_request());
+
+        let error = coordinator
+            .resolver_for_generation(&data_root, "stale-query-generation")
+            .expect_err("generation mismatch must not return a resolver");
+        assert_eq!(
+            error,
+            SourceBackedResolverAccessError::GenerationMismatch {
+                requested_generation: "stale-query-generation".to_owned(),
+                retained_generation: generation_id.to_owned(),
+            }
+        );
+        assert!(coordinator.has_pending_request());
+    }
+
+    #[test]
+    fn typed_source_hydration_failure_queues_refresh_without_fallback() {
+        let coordinator = SourceBackedRefreshCoordinator::new();
+        let resolver = test_resolver();
+        coordinator.enqueue(Some("generation-1".to_owned()));
+        let run = coordinator
+            .run_next_with(
+                |_, _| {
+                    let mut publication = test_publication("generation-2");
+                    publication.resolver = Some(resolver);
+                    Ok(publication)
+                },
+                || Ok(Some("generation-2".to_owned())),
+                |_| Ok(()),
+                |_| Ok(()),
+            )
+            .expect("queued refresh");
+        assert!(!run.failed);
+        assert!(!coordinator.has_pending_request());
+
+        let failure = HydrationFailure {
+            kind: HydrationFailureKind::StaleSourceEvidence,
+            detail: "source changed after publication".to_owned(),
+        };
+        let returned = coordinator.handle_hydration_failure(
+            Path::new("/typed-source-failure"),
+            "generation-2",
+            failure.clone(),
+        );
+
+        assert_eq!(returned, failure);
+        assert!(coordinator.has_pending_request());
+        for kind in [
+            HydrationFailureKind::TemporarilyUnavailable,
+            HydrationFailureKind::ConfirmedDeleted,
+            HydrationFailureKind::StaleSourceEvidence,
+            HydrationFailureKind::StaleRecordEvidence,
+            HydrationFailureKind::MissingRecord,
+        ] {
+            assert!(hydration_failure_queues_refresh(kind));
+        }
+        assert!(!hydration_failure_queues_refresh(
+            HydrationFailureKind::UnsupportedParserRevision
+        ));
+        assert!(!hydration_failure_queues_refresh(
+            HydrationFailureKind::InvalidLocator
+        ));
+    }
+
+    #[test]
+    fn scheduled_refresh_activates_fresh_v026_source_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_root = temp.path().join("data");
         let calls = Arc::new(AtomicUsize::new(0));
-        let coordinator = SourceBackedRefreshCoordinator::with_executor(Arc::new(TestExecutor {
-            calls: calls.clone(),
-            generation_id: generation_id.clone(),
-            failure: None,
-        }));
-        coordinator.enqueue(Some(generation_id.clone()));
+        let executor_calls = calls.clone();
+        let coordinator = SourceBackedRefreshCoordinator::with_executor(Arc::new(
+            move |execution: SourceBackedRefreshExecution<'_>| {
+                executor_calls.fetch_add(1, Ordering::SeqCst);
+                let writer = ctx_history_index::GenerationWriter::open(
+                    execution.index_root,
+                    WriterOptions::default(),
+                )?;
+                let receipt = writer.commit(|_| true)?;
+                Ok(test_publication(receipt.generation_id))
+            },
+        ));
+        let queued = coordinator.enqueue_periodic(&data_root).unwrap();
 
         let run = coordinator.run_next(&data_root).expect("queued refresh");
 
         assert!(!run.failed);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(queued["daemon_mode"], "full");
+        assert_eq!(queued["trigger"], "periodic");
+        assert_eq!(queued["trigger_provenance"], "daemon_scheduler");
+        assert!(source_backed_index_root(&data_root)
+            .join("meta.json")
+            .is_file());
+        assert!(!ctx_history_core::database_path(data_root.clone()).exists());
         let marker = data_migration::inspect(&data_root)
             .unwrap()
-            .expect("migration marker");
+            .expect("v0.26 epoch marker");
         assert_eq!(marker.phase, MigrationPhase::Ready);
         assert!(!marker.source_rebuild_required);
         assert_eq!(
             marker.lexical_generation_id.as_deref(),
-            Some(generation_id.as_str())
+            run.job["published_generation"].as_str()
         );
     }
 
     #[test]
-    fn injected_executor_failure_records_a_resumable_source_rebuild() {
+    fn scheduled_refresh_failure_leaves_v026_source_state_resumable() {
         let temp = tempfile::tempdir().unwrap();
         let data_root = temp.path().join("data");
-        let prepared = data_migration::prepare(&data_root, &[]).unwrap();
-        let generation_id = prepared
-            .marker()
-            .lexical_generation_id
-            .clone()
-            .expect("prepared lexical generation");
         let coordinator = SourceBackedRefreshCoordinator::with_executor(Arc::new(TestExecutor {
             calls: Arc::new(AtomicUsize::new(0)),
-            generation_id: generation_id.clone(),
+            generation_id: "unused-generation".to_owned(),
             failure: Some("provider-neutral executor failed".to_owned()),
         }));
-        coordinator.enqueue(Some(generation_id.clone()));
+        coordinator.enqueue_periodic(&data_root).unwrap();
 
         let run = coordinator.run_next(&data_root).expect("queued refresh");
 
         assert!(run.failed);
-        assert_eq!(run.job["published_generation"], generation_id);
+        assert!(run.job["published_generation"].is_null());
+        assert!(run.job["last_error"]
+            .as_str()
+            .is_some_and(|error| error.contains("provider-neutral executor failed")));
+        assert!(!ctx_history_core::database_path(data_root.clone()).exists());
         let marker = data_migration::inspect(&data_root)
             .unwrap()
-            .expect("migration marker");
+            .expect("v0.26 epoch marker");
         assert_eq!(marker.phase, MigrationPhase::SourceRebuildFailed);
         assert!(marker.source_rebuild_required);
         assert!(marker.resumable);

@@ -1,28 +1,9 @@
-#[cfg(test)]
-pub(super) fn run_daemon_once(
-    args: &DaemonRunArgs,
-    data_root: &Path,
-    runtime: &mut DaemonRuntime,
-    deadline: Option<Instant>,
-    semantic_enabled: bool,
-) -> Result<DaemonIteration> {
-    run_daemon_once_with_activity(
-        args,
-        data_root,
-        runtime,
-        deadline,
-        semantic_enabled,
-        None,
-        None,
-    )
-}
-
 pub(super) fn run_daemon_once_with_activity(
-    args: &DaemonRunArgs,
+    _args: &DaemonRunArgs,
     data_root: &Path,
     runtime: &mut DaemonRuntime,
     deadline: Option<Instant>,
-    semantic_enabled: bool,
+    _semantic_enabled: bool,
     query_activity: Option<&DaemonQueryActivity>,
     source_refresh: Option<&SourceBackedRefreshCoordinator>,
 ) -> Result<DaemonIteration> {
@@ -39,126 +20,29 @@ pub(super) fn run_daemon_once_with_activity(
     if !source_refresh_requested
         && daemon_foreground_query_preempts(query_activity, query_generation)
     {
-        write_daemon_preempted_jobs(data_root, semantic_enabled, runtime)?;
         return Ok(DaemonIteration::new(
             false,
             false,
             DaemonCycleStateV1::unknown(),
         ));
     }
-    if !source_refresh_requested
-        && semantic_enabled
-        && semantic_bootstrap_should_run_first(data_root, runtime)?
-    {
-        let mut history_refresh_job =
-            daemon_history_refresh_skipped_job("semantic_bootstrap_in_progress");
-        preserve_daemon_history_runtime_state(&mut history_refresh_job, runtime);
-        write_daemon_job_status(
-            &daemon_history_refresh_job_path(data_root),
-            &history_refresh_job,
-        )?;
-        let semantic_job = run_daemon_semantic_job_with_retry(
-            args,
-            data_root,
-            runtime,
-            deadline,
-            semantic_enabled,
-        );
-        let semantic_did_work = daemon_semantic_job_did_work(&semantic_job);
-        runtime.semantic_bootstrap_passes_since_refresh = runtime
-            .semantic_bootstrap_passes_since_refresh
-            .saturating_add(1);
-        write_daemon_job_status_unless_deadline_skip(
-            &daemon_semantic_job_path(data_root),
-            &semantic_job,
-        )?;
-        let (did_work, failed) = (semantic_did_work, daemon_job_failed(&semantic_job));
-        let semantic_report = semantic_worker_report_for_daemon(data_root);
-        let state = daemon_cycle_state(
-            runtime,
-            &history_refresh_job,
-            &semantic_job,
-            &semantic_report,
-        );
-        return Ok(DaemonIteration::new(did_work, failed, state));
-    }
     if source_refresh_requested {
-        return Ok(
-            run_pending_source_backed_refresh(data_root, source_refresh)?.unwrap_or_else(|| {
-                DaemonIteration::new(false, false, DaemonCycleStateV1::unknown())
-            }),
-        );
+        return run_full_source_backed_refresh(data_root, runtime, source_refresh, false);
     }
-
-    let mut provider_refresh_events = Vec::new();
-    let history_refresh_job = if daemon_history_retry_blocks_scheduler(runtime) {
-        daemon_history_refresh_retry_backoff_job(&runtime.history_retry)
-    } else if daemon_deadline_has_min_budget(deadline, DAEMON_MIN_REMAINING_FOR_JOB_SECS) {
-        match run_daemon_history_refresh_job(
-            data_root,
-            &mut runtime.history_source_cursor,
-            &runtime.config,
-        ) {
-            Ok(result) => {
-                provider_refresh_events = result.provider_refresh_events;
-                result.job
-            }
-            Err(error) => daemon_history_refresh_failed_job(format!("{error:#}")),
-        }
-    } else {
-        daemon_history_refresh_skipped_job("daemon_deadline")
-    };
-    let mut history_refresh_job = record_daemon_history_job_retry(runtime, history_refresh_job);
-    let history_refresh_did_work =
-        finish_daemon_history_refresh_job(runtime, &mut history_refresh_job);
-    runtime.semantic_bootstrap_passes_since_refresh = 0;
-    write_daemon_job_status_unless_deadline_skip(
-        &daemon_history_refresh_job_path(data_root),
-        &history_refresh_job,
-    )?;
-
-    let mut semantic_job = if daemon_foreground_query_preempts(query_activity, query_generation) {
-        daemon_semantic_skipped_job(data_root, semantic_enabled, "foreground_query")
-    } else if daemon_deadline_has_min_budget(deadline, DAEMON_MIN_REMAINING_FOR_JOB_SECS) {
-        run_daemon_semantic_job_with_retry(args, data_root, runtime, deadline, semantic_enabled)
-    } else {
-        daemon_semantic_deadline_skipped_job(data_root)
-    };
-    preserve_daemon_retry_state(&mut semantic_job, &runtime.semantic_retry);
-    let semantic_did_work = daemon_semantic_job_did_work(&semantic_job);
-    write_daemon_job_status_unless_deadline_skip(
-        &daemon_semantic_job_path(data_root),
-        &semantic_job,
-    )?;
-
-    let pro_materialization_did_work =
-        if !daemon_foreground_query_preempts(query_activity, query_generation)
-            && daemon_deadline_has_min_budget(deadline, DAEMON_MIN_REMAINING_FOR_JOB_SECS)
-            && daemon_history_freshness(
-                runtime,
-                &history_refresh_job,
-                daemon_job_in_retry_backoff(&history_refresh_job),
-            ) == DaemonHistoryFreshnessV1::Current
-        {
-            crate::pro::run_pending_materialization(data_root).unwrap_or(false)
-        } else {
-            false
-        };
-
-    let (did_work, failed) = (
-        history_refresh_did_work || semantic_did_work || pro_materialization_did_work,
-        daemon_history_job_failed(&history_refresh_job) || daemon_job_failed(&semantic_job),
-    );
-
-    let semantic_report = semantic_worker_report_for_daemon(data_root);
-    let state = daemon_cycle_state(
-        runtime,
-        &history_refresh_job,
-        &semantic_job,
-        &semantic_report,
-    );
-    Ok(DaemonIteration::new(did_work, failed, state)
-        .with_provider_refresh_events(provider_refresh_events))
+    if !runtime.history_retry.ready() {
+        let job = source_backed_refresh_retry_backoff_job(data_root, &runtime.history_retry);
+        write_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root), &job)?;
+        let state = daemon_source_backed_cycle_state(&job);
+        return Ok(DaemonIteration::new(false, false, state));
+    }
+    if !daemon_deadline_has_min_budget(deadline, DAEMON_MIN_REMAINING_FOR_JOB_SECS) {
+        return Ok(DaemonIteration::new(
+            false,
+            false,
+            DaemonCycleStateV1::unknown(),
+        ));
+    }
+    run_full_source_backed_refresh(data_root, runtime, source_refresh, true)
 }
 
 fn run_pending_source_backed_refresh(
@@ -180,25 +64,69 @@ fn run_pending_source_backed_refresh(
     )))
 }
 
-pub(super) fn daemon_cycle_state(
-    runtime: &DaemonRuntime,
-    history_job: &Value,
-    semantic_job: &Value,
-    semantic_report: &SemanticWorkerReport,
-) -> DaemonCycleStateV1 {
-    let history_backoff = daemon_job_in_retry_backoff(history_job);
-    let semantic_backoff = daemon_job_in_retry_backoff(semantic_job);
-    let retry_backoff = match (history_backoff, semantic_backoff) {
-        (false, false) => DaemonBackoffV1::None,
-        (true, false) => DaemonBackoffV1::History,
-        (false, true) => DaemonBackoffV1::Semantic,
-        (true, true) => DaemonBackoffV1::Both,
+fn run_full_source_backed_refresh(
+    data_root: &Path,
+    runtime: &mut DaemonRuntime,
+    source_refresh: Option<&SourceBackedRefreshCoordinator>,
+    enqueue_periodic: bool,
+) -> Result<DaemonIteration> {
+    let run = match source_refresh {
+        Some(coordinator) => {
+            if enqueue_periodic {
+                if let Err(error) = coordinator.enqueue_periodic(data_root) {
+                    return finish_full_source_backed_refresh(
+                        data_root,
+                        runtime,
+                        source_backed_refresh_failed_job(
+                            data_root,
+                            format!("schedule periodic source-backed refresh: {error:#}"),
+                        ),
+                        false,
+                    );
+                }
+            }
+            coordinator.run_next(data_root)
+        }
+        None => None,
     };
+    let Some(run) = run else {
+        return finish_full_source_backed_refresh(
+            data_root,
+            runtime,
+            source_backed_refresh_failed_job(
+                data_root,
+                "daemon source-backed refresh coordinator is unavailable".to_owned(),
+            ),
+            false,
+        );
+    };
+    finish_full_source_backed_refresh(data_root, runtime, run.job, run.did_work)
+}
+
+fn finish_full_source_backed_refresh(
+    data_root: &Path,
+    runtime: &mut DaemonRuntime,
+    job: Value,
+    did_work: bool,
+) -> Result<DaemonIteration> {
+    let job = record_daemon_job_retry(&mut runtime.history_retry, job);
+    write_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root), &job)?;
+    let failed = daemon_job_failed(&job);
+    let state = daemon_source_backed_cycle_state(&job);
+    Ok(DaemonIteration::new(did_work, failed, state))
+}
+
+fn daemon_source_backed_cycle_state(job: &Value) -> DaemonCycleStateV1 {
+    let history_backoff = daemon_job_in_retry_backoff(job);
     DaemonCycleStateV1::new(
-        daemon_history_freshness(runtime, history_job, history_backoff),
-        daemon_semantic_backlog(semantic_report),
-        daemon_semantic_coverage(semantic_report),
-        retry_backoff,
+        daemon_source_backed_freshness(job, history_backoff),
+        DaemonBacklogV1::Unknown,
+        DaemonCoverageV1::Unknown,
+        if history_backoff {
+            DaemonBackoffV1::History
+        } else {
+            DaemonBackoffV1::None
+        },
     )
 }
 
@@ -212,51 +140,17 @@ fn daemon_job_in_retry_backoff(job: &Value) -> bool {
                 > 0)
 }
 
-fn daemon_history_freshness(
-    runtime: &DaemonRuntime,
-    job: &Value,
-    backoff: bool,
-) -> DaemonHistoryFreshnessV1 {
-    if daemon_history_job_failed(job) {
+fn daemon_source_backed_freshness(job: &Value, backoff: bool) -> DaemonHistoryFreshnessV1 {
+    if daemon_job_failed(job) {
         return DaemonHistoryFreshnessV1::Failed;
     }
     if backoff {
         return DaemonHistoryFreshnessV1::Backoff;
     }
-    if job.get("capture_work_remaining").and_then(Value::as_bool) == Some(true)
-        || runtime.history_followup_passes_remaining > 0
-        || runtime.history_retry_drain_passes_remaining > 0
-    {
-        return DaemonHistoryFreshnessV1::Pending;
-    }
-    if job.get("status").and_then(Value::as_str) == Some("completed")
-        || job.get("reason").and_then(Value::as_str) == Some("no_sources")
-    {
+    if job.get("status").and_then(Value::as_str) == Some("completed") {
         return DaemonHistoryFreshnessV1::Current;
     }
     DaemonHistoryFreshnessV1::Unknown
-}
-
-fn daemon_semantic_backlog(report: &SemanticWorkerReport) -> DaemonBacklogV1 {
-    if !report.searchable_items_known {
-        return DaemonBacklogV1::Unknown;
-    }
-    DaemonBacklogV1::Bucket(count_bucket(report.queued_items_estimate as u64))
-}
-
-fn daemon_semantic_coverage(report: &SemanticWorkerReport) -> DaemonCoverageV1 {
-    if !report.searchable_items_known {
-        return DaemonCoverageV1::Unknown;
-    }
-    if report.searchable_items == 0 {
-        DaemonCoverageV1::Empty
-    } else if report.dirty_items > 0 {
-        DaemonCoverageV1::Dirty
-    } else if report.embedded_items >= report.searchable_items {
-        DaemonCoverageV1::Complete
-    } else {
-        DaemonCoverageV1::Incomplete
-    }
 }
 
 pub(super) fn daemon_foreground_query_preempts(
@@ -270,19 +164,64 @@ pub(super) fn daemon_foreground_query_preempts(
     active_requests > 0 || observed_generation.is_some_and(|observed| generation != observed)
 }
 
-pub(super) fn write_daemon_preempted_jobs(
+pub(super) fn restore_daemon_source_refresh_retry(runtime: &mut DaemonRuntime, data_root: &Path) {
+    let status = read_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root));
+    runtime.history_retry.restore(status.as_ref());
+}
+
+pub(super) fn source_refresh_retry_due(runtime: &DaemonRuntime) -> bool {
+    runtime.history_retry.consecutive_failures > 0 && runtime.history_retry.ready()
+}
+
+fn source_backed_refresh_failed_job(data_root: &Path, message: String) -> Value {
+    source_backed_scheduler_job(data_root, "failed", None, Some(message))
+}
+
+fn source_backed_refresh_retry_backoff_job(
     data_root: &Path,
-    semantic_enabled: bool,
-    runtime: &DaemonRuntime,
-) -> Result<()> {
-    let mut history_job = daemon_history_refresh_skipped_job("foreground_query");
-    preserve_daemon_history_runtime_state(&mut history_job, runtime);
-    write_daemon_job_status(&daemon_history_refresh_job_path(data_root), &history_job)?;
-    let mut semantic_job =
-        daemon_semantic_skipped_job(data_root, semantic_enabled, "foreground_query");
-    preserve_daemon_retry_state(&mut semantic_job, &runtime.semantic_retry);
-    write_daemon_job_status(&daemon_semantic_job_path(data_root), &semantic_job)?;
-    Ok(())
+    backoff: &DaemonRetryBackoff,
+) -> Value {
+    let mut job = source_backed_scheduler_job(
+        data_root,
+        "skipped",
+        Some("retry_backoff"),
+        read_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root)).and_then(|job| {
+            job.get("last_error")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        }),
+    );
+    preserve_daemon_retry_state(&mut job, backoff);
+    job
+}
+
+fn source_backed_scheduler_job(
+    data_root: &Path,
+    status: &str,
+    reason: Option<&str>,
+    last_error: Option<String>,
+) -> Value {
+    let previous = read_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root));
+    compact_json(json!({
+        "mode": "background",
+        "owner": "daemon",
+        "kind": "source_backed",
+        "status": status,
+        "reason": reason,
+        "last_run_at_ms": utc_now().timestamp_millis(),
+        "previous_generation": previous
+            .as_ref()
+            .and_then(|job| job.get("previous_generation"))
+            .cloned(),
+        "published_generation": previous
+            .as_ref()
+            .and_then(|job| job.get("published_generation"))
+            .cloned(),
+        "daemon_mode": "full",
+        "trigger": "periodic",
+        "trigger_provenance": "daemon_scheduler",
+        "last_error": last_error,
+    }))
 }
 
 pub(super) fn preserve_daemon_retry_state(job: &mut Value, backoff: &DaemonRetryBackoff) {
@@ -293,29 +232,6 @@ pub(super) fn preserve_daemon_retry_state(job: &mut Value, backoff: &DaemonRetry
     job["retry_after_ms"] = json!(backoff.retry_after_ms().unwrap_or(0));
     job["consecutive_failures"] = json!(backoff.consecutive_failures);
     job["retry_not_before_at_ms"] = json!(backoff.retry_not_before_at_ms);
-}
-
-pub(super) fn run_daemon_semantic_job_with_retry(
-    args: &DaemonRunArgs,
-    data_root: &Path,
-    runtime: &mut DaemonRuntime,
-    deadline: Option<Instant>,
-    semantic_enabled: bool,
-) -> Value {
-    if let Some(job) = runtime.semantic_blocked_job.as_ref() {
-        return job.clone();
-    }
-    if !runtime.semantic_retry.ready() {
-        return daemon_semantic_retry_backoff_job(data_root, &runtime.semantic_retry);
-    }
-    let job = run_daemon_semantic_job(args, data_root, runtime, deadline, semantic_enabled)
-        .unwrap_or_else(|error| daemon_semantic_failed_job(data_root, error));
-    let job = record_daemon_job_retry(&mut runtime.semantic_retry, job);
-    if semantic_failure_class_from_job(&job).is_some_and(SemanticFailureClass::blocks_until_restart)
-    {
-        runtime.semantic_blocked_job = Some(job.clone());
-    }
-    job
 }
 
 pub(super) fn record_daemon_job_retry(backoff: &mut DaemonRetryBackoff, mut job: Value) -> Value {
@@ -342,25 +258,6 @@ pub(super) fn daemon_job_should_backoff(job: &Value) -> bool {
                     && job.get("last_error").and_then(Value::as_str).is_some())))
 }
 
-pub(super) fn semantic_bootstrap_should_run_first(
-    data_root: &Path,
-    runtime: &mut DaemonRuntime,
-) -> Result<bool> {
-    let db_path = database_path(data_root.to_path_buf());
-    if !db_path.exists() {
-        return Ok(false);
-    }
-    if runtime.semantic_bootstrap_passes_since_refresh
-        >= DAEMON_SEMANTIC_BOOTSTRAP_PASSES_BEFORE_REFRESH
-    {
-        return Ok(false);
-    }
-    let store = Store::open(&db_path).context("open ctx store for daemon semantic bootstrap")?;
-    refresh_semantic_document_count_cache(&store)?;
-    let report = semantic_worker_report(data_root, Some(&store))?;
-    Ok(report.searchable_items > 0 && report.queued_items_estimate > 0)
-}
-
 pub(super) fn semantic_report_should_queue_recent_work(report: &SemanticWorkerReport) -> bool {
     report.searchable_items > 0
         && report.embedded_items >= report.searchable_items
@@ -372,48 +269,12 @@ pub(super) fn refresh_semantic_document_count_cache(store: &Store) -> Result<()>
     Ok(())
 }
 
-pub(super) fn daemon_semantic_job_did_work(value: &Value) -> bool {
-    value
-        .get("indexed_chunks")
-        .and_then(Value::as_u64)
-        .is_some_and(|chunks| chunks > 0)
-        || value
-            .get("source_records_scanned")
-            .and_then(Value::as_u64)
-            .is_some_and(|records| records > 0)
-}
-
 pub(super) fn daemon_run_start_mode(args: &DaemonRunArgs) -> DaemonStartModeArg {
     args.start_mode.unwrap_or(DaemonStartModeArg::Manual)
 }
 
 pub(super) fn daemon_job_failed(value: &Value) -> bool {
     value.get("status").and_then(Value::as_str) == Some("failed")
-}
-
-pub(super) fn daemon_history_job_failed(value: &Value) -> bool {
-    daemon_job_failed(value)
-        || value
-            .get("totals")
-            .and_then(|totals| totals.get("failed_sources"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0)
-            > 0
-}
-
-pub(super) fn write_daemon_job_status_unless_deadline_skip(
-    path: &Path,
-    value: &Value,
-) -> Result<()> {
-    if daemon_job_skipped_for_deadline(value) && path.exists() {
-        return Ok(());
-    }
-    write_daemon_job_status(path, value)
-}
-
-pub(super) fn daemon_job_skipped_for_deadline(value: &Value) -> bool {
-    value.get("status").and_then(Value::as_str) == Some("skipped")
-        && value.get("reason").and_then(Value::as_str) == Some("daemon_deadline")
 }
 
 pub(super) fn daemon_deadline_remaining(deadline: Option<Instant>) -> Option<StdDuration> {
@@ -431,41 +292,27 @@ use std::{
     time::{Duration as StdDuration, Instant},
 };
 
-use anyhow::{Context, Result};
-use ctx_history_core::database_path;
+use anyhow::Result;
+use ctx_history_core::utc_now;
 use ctx_history_store::Store;
 use serde_json::{json, Value};
 
 use crate::{
     analytics::{
-        count_bucket, DaemonBacklogV1, DaemonBackoffV1, DaemonCoverageV1, DaemonCycleStateV1,
+        DaemonBacklogV1, DaemonBackoffV1, DaemonCoverageV1, DaemonCycleStateV1,
         DaemonHistoryFreshnessV1,
     },
-    DaemonRunArgs, DaemonStartModeArg,
+    compact_json, DaemonRunArgs, DaemonStartModeArg,
 };
 
 use super::{
     daemon::{DaemonIteration, DaemonRuntime},
-    daemon_history::{
-        daemon_history_refresh_failed_job, daemon_history_refresh_retry_backoff_job,
-        daemon_history_refresh_skipped_job, daemon_history_retry_blocks_scheduler,
-        finish_daemon_history_refresh_job, preserve_daemon_history_runtime_state,
-        record_daemon_history_job_retry, run_daemon_history_refresh_job,
-    },
-    daemon_retry::{semantic_failure_class_from_job, DaemonRetryBackoff, SemanticFailureClass},
-    daemon_worker::{
-        daemon_semantic_deadline_skipped_job, daemon_semantic_failed_job,
-        daemon_semantic_retry_backoff_job, daemon_semantic_skipped_job, run_daemon_semantic_job,
-        semantic_worker_report_for_daemon,
-    },
+    daemon_retry::{semantic_failure_class_from_job, DaemonRetryBackoff},
     paths_status::{
-        daemon_history_refresh_job_path, daemon_semantic_job_path,
-        daemon_source_backed_refresh_job_path, semantic_worker_report, write_daemon_job_status,
+        daemon_source_backed_refresh_job_path, read_daemon_job_status, write_daemon_job_status,
     },
     query_service::DaemonQueryActivity,
     reports::SemanticWorkerReport,
-    runtime_limits::{
-        DAEMON_MIN_REMAINING_FOR_JOB_SECS, DAEMON_SEMANTIC_BOOTSTRAP_PASSES_BEFORE_REFRESH,
-    },
+    runtime_limits::DAEMON_MIN_REMAINING_FOR_JOB_SECS,
     source_backed_refresh_coordinator::SourceBackedRefreshCoordinator,
 };

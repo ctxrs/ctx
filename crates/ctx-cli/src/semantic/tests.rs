@@ -258,6 +258,3 @@ mod locking;
 mod search_daemon;
 mod vector_store;
 mod workflow;
-
-#[path = "daemon_history_followup_tests.rs"]
-mod daemon_history_followup_tests;
