@@ -455,6 +455,7 @@ pub(crate) struct DaemonRunArgs {
     pub(crate) loop_interval_seconds: Option<u64>,
     #[arg(long, value_parser = parse_semantic_worker_batch)]
     pub(crate) max_chunks: Option<usize>,
+    #[cfg(test)]
     #[arg(skip)]
     pub(crate) max_seconds: Option<u64>,
     #[arg(long, help = "Run even when daemon.enabled is false")]
@@ -573,4 +574,22 @@ fn parse_daemon_idle_exit_seconds(value: &str) -> Result<u64, String> {
         ));
     }
     Ok(parsed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn daemon_runtime_cap_is_only_an_inert_test_fixture_field() {
+        let cli = Cli::try_parse_from(["ctx", "daemon", "run", "--once"]).unwrap();
+        let CommandRoot::Daemon(DaemonArgs {
+            command: DaemonCommand::Run(args),
+        }) = cli.command
+        else {
+            panic!("expected daemon run command");
+        };
+
+        assert_eq!(args.max_seconds, None);
+    }
 }

@@ -200,14 +200,6 @@ pub(crate) enum ImportFormatArg {
     CtxHistoryJsonlV1,
 }
 
-impl ImportFormatArg {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::CtxHistoryJsonlV1 => "ctx-history-jsonl-v1",
-        }
-    }
-}
-
 impl NativeProviderArg {
     pub(crate) fn capture_provider(self) -> CaptureProvider {
         match self {

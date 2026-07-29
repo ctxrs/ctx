@@ -141,35 +141,14 @@ pub(crate) enum ProMaterializationModeV1 {
     NoOp,
     Full,
     Incremental,
-    Resume,
-    Rebuild,
 }
 
 impl ProMaterializationModeV1 {
-    pub(crate) fn from_graph_state(
-        state: ctx_pro_host_protocol::GraphState,
-        checkpoint_compatible: bool,
-        checkpoint_sequence: u64,
-    ) -> Self {
-        use ctx_pro_host_protocol::GraphState;
-
-        match state {
-            GraphState::NotMaterialized => Self::Full,
-            GraphState::NeedsRebuild => Self::Rebuild,
-            GraphState::Partial | GraphState::NeedsResume => Self::Resume,
-            GraphState::Ready if !checkpoint_compatible && checkpoint_sequence > 0 => Self::Rebuild,
-            GraphState::Ready if checkpoint_sequence == 0 => Self::Incremental,
-            GraphState::Ready => Self::Incremental,
-        }
-    }
-
     fn as_str(self) -> &'static str {
         match self {
             Self::NoOp => "no_op",
             Self::Full => "full",
             Self::Incremental => "incremental",
-            Self::Resume => "resume",
-            Self::Rebuild => "rebuild",
         }
     }
 }
