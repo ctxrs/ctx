@@ -4,6 +4,51 @@ use crate::semantic::paths_status::DaemonLock;
 use ctx_history_core::database_path;
 use std::sync::{Arc, Barrier};
 
+const DAEMON_ENV_PROBE_STAGE: &str = "CTX_DAEMON_ENV_PROBE_STAGE";
+const DAEMON_ENV_PROBE_TEST: &str =
+    "semantic::daemon_autostart::tests::daemon_child_environment_is_narrow_and_release_sanitized";
+const DAEMON_ENV_HOSTILE: &str = "CTX_UNTRUSTED_DAEMON_AMBIENT_SECRET";
+const DAEMON_ENV_ALLOWED_SENTINEL: &str = "/ctx-daemon-allowed-home";
+
+#[test]
+fn daemon_child_environment_is_narrow_and_release_sanitized() -> Result<()> {
+    match env::var(DAEMON_ENV_PROBE_STAGE).as_deref() {
+        Ok("final") => {
+            assert_eq!(env::var("HOME").as_deref(), Ok(DAEMON_ENV_ALLOWED_SENTINEL));
+            assert!(env::var_os(DAEMON_ENV_HOSTILE).is_none());
+            assert!(env::var_os("CTX_RELEASE_INHERITED_AUTHORITY").is_none());
+            assert!(env::var_os("CTX_RELEASE_CONFIGURED_AUTHORITY").is_none());
+            return Ok(());
+        }
+        Ok("inherited") => {
+            assert_eq!(env::var(DAEMON_ENV_HOSTILE).as_deref(), Ok("attacker"));
+            assert_eq!(
+                env::var("CTX_RELEASE_INHERITED_AUTHORITY").as_deref(),
+                Ok("attacker")
+            );
+            let mut descendant = Command::new(env::current_exe()?);
+            configure_narrow_daemon_environment(&mut descendant);
+            descendant
+                .args(["--exact", DAEMON_ENV_PROBE_TEST, "--nocapture"])
+                .env(DAEMON_ENV_PROBE_STAGE, "final")
+                .env("CTX_RELEASE_CONFIGURED_AUTHORITY", "attacker");
+            assert!(spawn_daemon_child(&mut descendant)?.wait()?.success());
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    let mut inherited = Command::new(env::current_exe()?);
+    inherited
+        .args(["--exact", DAEMON_ENV_PROBE_TEST, "--nocapture"])
+        .env(DAEMON_ENV_PROBE_STAGE, "inherited")
+        .env(DAEMON_ENV_HOSTILE, "attacker")
+        .env("CTX_RELEASE_INHERITED_AUTHORITY", "attacker")
+        .env("HOME", DAEMON_ENV_ALLOWED_SENTINEL);
+    assert!(inherited.status()?.success());
+    Ok(())
+}
+
 fn write_installation_registration(
     root: &Path,
     name: &str,

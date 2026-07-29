@@ -20,16 +20,15 @@ pub(super) fn restart_acknowledged_installation_daemons(
             let _ = fs::remove_file(restart.registration_path);
             continue;
         }
-        let mut child = daemon_autostart_command(
+        let mut command = daemon_autostart_command(
             executable,
             &restart.data_root,
             restart.trigger,
             restart.idle_exit_seconds,
             restart.loop_interval_seconds,
             None,
-        )
-        .spawn()
-        .with_context(|| {
+        );
+        let mut child = spawn_daemon_child(&mut command).with_context(|| {
             format!(
                 "restart ctx daemon for {} after installation upgrade",
                 restart.data_root.display()
@@ -62,16 +61,15 @@ pub(super) fn restart_acknowledged_legacy_installation_daemons(
             continue;
         }
         clear_legacy_daemon_readiness(&restart.data_root)?;
-        let mut child = daemon_autostart_command(
+        let mut command = daemon_autostart_command(
             executable,
             &restart.data_root,
             restart.trigger,
             restart.idle_exit_seconds,
             restart.loop_interval_seconds,
             None,
-        )
-        .spawn()
-        .with_context(|| {
+        );
+        let mut child = spawn_daemon_child(&mut command).with_context(|| {
             format!(
                 "restart legacy ctx daemon for {} after installation recovery",
                 restart.data_root.display()

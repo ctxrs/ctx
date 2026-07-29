@@ -1,5 +1,5 @@
 use std::{
-    env, fs,
+    env, fs, io,
     path::{Path, PathBuf},
     process::{self, Child, Command, Stdio},
     time::{Duration as StdDuration, Instant, SystemTime},
@@ -47,12 +47,15 @@ mod handoff;
 mod installation;
 mod recovery;
 
+#[cfg(test)]
+use autostart::configure_narrow_daemon_environment;
 pub(crate) use autostart::{
     autostart_daemon_and_wait, daemon_autostart_suppression_reason, maybe_autostart_daemon,
 };
 use autostart::{
     configured_daemon_autostart_command, daemon_autostart_allowed, daemon_autostart_command,
     daemon_restart_allowed, daemon_restart_trigger, parse_daemon_trigger, request_daemon_autostart,
+    spawn_daemon_child,
 };
 #[cfg(test)]
 use autostart::{daemon_handoff_observation_from, wait_for_daemon_handoff_with};

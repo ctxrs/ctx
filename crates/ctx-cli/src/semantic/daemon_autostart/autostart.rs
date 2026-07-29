@@ -132,7 +132,8 @@ pub(super) fn request_daemon_autostart(
             return Err(error);
         }
     };
-    match configured_daemon_autostart_command(&exe, data_root, trigger, None).spawn() {
+    let mut command = configured_daemon_autostart_command(&exe, data_root, trigger, None);
+    match spawn_daemon_child(&mut command) {
         Ok(child) => Ok(DaemonAutostartRequest::Spawned(child)),
         Err(error) => {
             let _ = write_daemon_autostart_status(
@@ -334,6 +335,7 @@ pub(super) fn daemon_autostart_command(
     handoff_token: Option<&str>,
 ) -> Command {
     let mut command = Command::new(exe);
+    configure_narrow_daemon_environment(&mut command);
     command
         .arg("--data-root")
         .arg(data_root)
@@ -373,6 +375,82 @@ pub(super) fn daemon_autostart_command(
         command.env(DAEMON_UPGRADE_HANDOFF_TOKEN_ENV, token);
     }
     command
+}
+
+const DAEMON_CHILD_ENV_ALLOWLIST: &[&str] = &[
+    "APPDATA",
+    "ASTRBOT_ROOT",
+    "CLAUDE_CONFIG_DIR",
+    "CODEX_HOME",
+    "COPILOT_HOME",
+    "CTX_ANALYTICS_DEBUG",
+    "CTX_ANALYTICS_DRY_RUN",
+    "CTX_ANALYTICS_ENABLED",
+    "CTX_ANALYTICS_ENDPOINT",
+    "CTX_HISTORY_PLUGIN_PATH",
+    "CTX_LOCAL_USAGE_ENABLED",
+    "CTX_MACHINE_ID",
+    "CTX_PRO_HELPER",
+    "CTX_RUNTIME_DIR",
+    "CTX_SEARCH_SEMANTIC",
+    "CTX_SEMANTIC_COREML_NATIVE_COMPUTE",
+    "CTX_SEMANTIC_MODEL_ONNX",
+    "CTX_UPGRADE_AUTO",
+    "CTX_UPGRADE_CHANNEL",
+    "CTX_UPGRADE_INTERVAL_SECONDS",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "FORGE_CONFIG",
+    "HERMES_HOME",
+    "HOME",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "KILO_DB",
+    "LANG",
+    "LC_ALL",
+    "LOCALAPPDATA",
+    "MIMOCODE_CONFIG_DIR",
+    "MIMOCODE_DB",
+    "MIMOCODE_DISABLE_CHANNEL_DB",
+    "MIMOCODE_HOME",
+    "NO_PROXY",
+    "OPENCLAW_STATE_DIR",
+    "PATH",
+    "PI_CODING_AGENT_SESSION_DIR",
+    "SHELLEY_DB",
+    "SSL_CERT_DIR",
+    "SSL_CERT_FILE",
+    "SystemRoot",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "TZ",
+    "USER",
+    "USERPROFILE",
+    "VIBE_HOME",
+    "WINDIR",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_RUNTIME_DIR",
+    "XDG_STATE_HOME",
+    "https_proxy",
+    "http_proxy",
+    "no_proxy",
+];
+
+pub(super) fn configure_narrow_daemon_environment(command: &mut Command) {
+    let inherited = DAEMON_CHILD_ENV_ALLOWLIST
+        .iter()
+        .filter_map(|name| env::var_os(name).map(|value| (*name, value)))
+        .collect::<Vec<_>>();
+    command.env_clear();
+    command.envs(inherited);
+}
+
+pub(super) fn spawn_daemon_child(command: &mut Command) -> io::Result<Child> {
+    crate::process_environment::sanitize_release_authority_env(command);
+    command.spawn()
 }
 
 pub(super) fn configured_daemon_autostart_command(
