@@ -114,6 +114,7 @@ use super::providers::{
     mistral_vibe::native_path::source_backed::scan_mistral_vibe_source_backed,
     mux::native_path::{
         discover_mux_source_backed_sources, scan_mux_source_backed, MuxSourceBackedDisposition,
+        MuxSourceBackedResolverV0,
     },
     nanoclaw::native_path::source_backed::{
         hydrate_nanoclaw_source_backed_exact, nanoclaw_source_key, scan_nanoclaw_source_backed,
@@ -511,21 +512,21 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         Full
     ),
     route!(Auggie, "auggie_session_json", true, true, DiscoveredWinner, Full),
-    partial_route!(
+    route!(
         Junie,
         "junie_session_events_jsonl_tree" => "junie_session_events_jsonl_tree",
         true,
         true,
         DiscoveredWinner,
-        "Junie exact hydration is limited to message records with provider-owned JSONL addresses"
+        Full
     ),
-    partial_route!(
+    route!(
         Junie,
         "junie_session_events_jsonl" => "junie_session_events_jsonl_tree",
         false,
         true,
         ExplicitPath,
-        "Junie exact hydration is limited to message records with provider-owned JSONL addresses"
+        Full
     ),
     route!(
         Firebender,
@@ -567,21 +568,21 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         ExplicitPath,
         Full
     ),
-    partial_route!(
+    route!(
         Mux,
         "mux_session_jsonl_tree" => "mux_session_jsonl",
         true,
         true,
         DiscoveredWinner,
-        "Mux exact hydration requires the brokered compound-file content route"
+        Full
     ),
-    partial_route!(
+    route!(
         Mux,
         "mux_session_jsonl" => "mux_session_jsonl",
         false,
         true,
         ExplicitPath,
-        "Mux exact hydration requires the brokered compound-file content route"
+        Full
     ),
     route!(
         RovoDev,
@@ -3690,7 +3691,8 @@ fn register_junie_route(
 ) -> SourceBackedCoordinatorResult<()> {
     let root = source.path.clone();
     let capture_root = root.clone();
-    let hydration_root = root;
+    let hydration_root = root.clone();
+    let batch_hydration_root = root;
     let driver = captured_route_driver(
         move |sink| {
             let mut scanner =
@@ -3713,12 +3715,14 @@ fn register_junie_route(
         },
         provider_format_scope(CaptureProvider::Junie, "junie_session_events_jsonl_tree"),
         move |request| {
-            let resolver = JunieLocatorResolverV0::discover(&hydration_root).map_err(|error| {
-                hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
-            })?;
+            let resolver = JunieLocatorResolverV0::discover_for_hydration(&hydration_root)?;
             resolver.hydrate_event(request)
         },
-    );
+    )
+    .with_batch_hydration(move |request| {
+        let resolver = JunieLocatorResolverV0::discover_for_hydration(&batch_hydration_root)?;
+        resolver.hydrate_batch(request)
+    });
     registry.register(executable_route(
         source,
         selection,
@@ -4461,7 +4465,9 @@ fn register_mux_route(
     selection: SourceBackedRouteSelection,
 ) -> SourceBackedCoordinatorResult<()> {
     let root = source.path.clone();
-    let capture_root = root;
+    let capture_root = root.clone();
+    let hydration_root = root.clone();
+    let batch_hydration_root = root;
     let driver = captured_route_driver(
         move |sink| {
             for candidate in
@@ -4491,13 +4497,21 @@ fn register_mux_route(
             Ok(())
         },
         provider_format_scope(CaptureProvider::Mux, "mux_session_jsonl"),
-        |_request| {
-            Err(hydration_failure(
-                HydrationFailureKind::UnsupportedParserRevision,
-                "Mux exact content requires its brokered compound-file resolver route",
-            ))
+        move |request| {
+            let resolver = MuxSourceBackedResolverV0::discover_for_hydration(
+                &hydration_root,
+                DateTime::<Utc>::UNIX_EPOCH,
+            )?;
+            resolver.hydrate_event(request)
         },
-    );
+    )
+    .with_batch_hydration(move |request| {
+        let resolver = MuxSourceBackedResolverV0::discover_for_hydration(
+            &batch_hydration_root,
+            DateTime::<Utc>::UNIX_EPOCH,
+        )?;
+        resolver.hydrate_batch(request)
+    });
     registry.register(executable_route(
         source,
         selection,
