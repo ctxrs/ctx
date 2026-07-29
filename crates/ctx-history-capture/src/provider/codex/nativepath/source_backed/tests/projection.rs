@@ -106,7 +106,15 @@ fn source_backed_scanner_keeps_full_message_tail_and_exact_display_text() {
 
 #[test]
 fn source_backed_codex_adapter_has_no_store_or_preview_body_fallback() {
-    let adapter = include_str!("../../source_backed.rs");
+    let adapter = [
+        include_str!("../../source_backed.rs"),
+        include_str!("../catalog.rs"),
+        include_str!("../cold.rs"),
+        include_str!("../hydration.rs"),
+        include_str!("../identity.rs"),
+        include_str!("../ingestion.rs"),
+    ]
+    .join("\n");
     let rows = include_str!("../../rows.rs");
     let store_dependency = ["ctx_history_", "store"].concat();
     let preview_body = [
