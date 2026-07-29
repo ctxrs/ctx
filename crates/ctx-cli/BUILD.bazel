@@ -408,6 +408,15 @@ ctx_cli_integration_test(
 )
 
 ctx_cli_integration_test(
+    name = "persistent_daemon_lifecycle_tests",
+    src = "tests/persistent_daemon_lifecycle.rs",
+    extra_env = {
+        "RUST_TEST_THREADS": "1",
+    },
+    tags = ["exclusive", "release-gate"],
+)
+
+ctx_cli_integration_test(
     name = "search_refresh_tests",
     src = "tests/search_refresh.rs",
 )
