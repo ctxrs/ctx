@@ -28,6 +28,7 @@
         "test:native_provider_rejections": "//crates/ctx-cli:native_provider_rejections_tests",
         "test:native_providers": "//crates/ctx-cli:native_providers_tests",
         "test:offline_default": "//crates/ctx-cli:offline_default_tests",
+        "test:persistent_daemon_lifecycle": "//crates/ctx-cli:persistent_daemon_lifecycle_tests",
         "test:pro_host": "//crates/ctx-cli:pro_host_tests",
         "test:pro_lifecycle": "//crates/ctx-cli:pro_lifecycle_tests",
         "test:pro_mcp": "//crates/ctx-cli:pro_mcp_tests",
