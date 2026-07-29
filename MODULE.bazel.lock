@@ -1608,10 +1608,10 @@
         "usagesDigest": "CXJoqFjzJjE7AK5LeFyGbSp96mj/VYNUyTFF6wkDxqc=",
         "recordedFileInputs": {
           "@@//crates/ctx-sdk/Cargo.toml": "36d7b44b8415faf5a6b81989f92d421ad145f43a8bf822a08599ebf5c56b2b2c",
-          "@@//crates/ctx-cli/Cargo.toml": "3e5bf9775797cf80c2954c4fb7327f57f75e39ee36d567baf5cd128d6d819672",
+          "@@//crates/ctx-cli/Cargo.toml": "b54bd3238c21f9a46a092822a6f7178252c2a88967a78a653ac0ef644d6ac460",
           "@@//crates/ctx-history-core/Cargo.toml": "f968b8eb395e1ec2fbc6ca0cfeb4511a18af112c8d1069d7ce2737543408d1a3",
-          "@@//Cargo.toml": "8570f10528d12f725a6b98c59e873f64e6a346ecb6ba45542ae3b58ea1b36d3b",
-          "@@//Cargo.lock": "f22928415132645c03e1d4ffb076772cf8929f6fb905ddde15673a40c665c4f6",
+          "@@//Cargo.toml": "9749304a425b7d54fabcec6cd0f62dfc35fe02e10ec7975427beb44e8fe92e35",
+          "@@//Cargo.lock": "89e0a4ff0d55e6f0775219d2aecfbd8ce1ea90bc8988da71cba125817be1ae05",
           "@@//crates/ctx-protocol/Cargo.toml": "e9e75a7c7ca116f86e58ee0e09d174612607c8c45cce0213e66825e403046bce",
           "@@//crates/ctx-history-index/Cargo.toml": "8e09d9228679f7f38d22e35c5647a3a7776d5d943311c0af07907ab671c6e7d7",
           "@@//crates/ctx-history-relational/Cargo.toml": "54f3fd0815836aaf69a1bbe953d73ab9801ca4f63833cb48d6d82eae8a3dfcfc",

@@ -82,7 +82,7 @@ version = 4
 
 [[package]]
 name = "ctx"
-version = "0.26.0"
+version = "1.0.0"
 dependencies = [
  "dependency 1.2.3 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
@@ -228,7 +228,7 @@ case "${1:-}" in
     printf 'CTX_RELEASE_BUILD_TARGET=x86_64-unknown-linux-gnu\n'
     ;;
   --version)
-    printf 'ctx 0.26.0\n'
+    printf 'ctx 1.0.0\n'
     ;;
   *)
     exit 1
@@ -349,7 +349,7 @@ path = Path(sys.argv[1])
 repo = Path(sys.argv[2])
 value = json.loads(path.read_bytes())
 value["build_system"] = "bazel"
-value["release_version"] = "0.26.0"
+value["release_version"] = "1.0.0"
 value["bazel"] = {
     "module_file_sha256": hashlib.sha256(
         (repo / "MODULE.bazel").read_bytes()
