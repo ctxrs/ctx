@@ -3,44 +3,7 @@ use std::fmt;
 use thiserror::Error;
 
 const MAX_NATIVE_KIND_BYTES: usize = 256;
-const MAX_NATIVE_POSITION_BYTES: usize = 256 * 1024;
 const MAX_NATIVE_LOCATOR_BYTES: usize = 64 * 1024;
-
-#[derive(Clone, PartialEq, Eq)]
-pub(crate) struct NativePosition {
-    kind: String,
-    value: Vec<u8>,
-}
-
-impl NativePosition {
-    pub(crate) fn new(kind: impl Into<String>, value: Vec<u8>) -> Result<Self, NativeSourceError> {
-        let position = Self {
-            kind: kind.into(),
-            value,
-        };
-        validate_text("position_kind", &position.kind, MAX_NATIVE_KIND_BYTES)?;
-        validate_bytes("position_value", &position.value, MAX_NATIVE_POSITION_BYTES)?;
-        Ok(position)
-    }
-
-    pub(crate) fn kind(&self) -> &str {
-        &self.kind
-    }
-
-    pub(crate) fn value(&self) -> &[u8] {
-        &self.value
-    }
-}
-
-impl fmt::Debug for NativePosition {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("NativePosition")
-            .field("kind", &self.kind)
-            .field("value_bytes", &self.value.len())
-            .finish()
-    }
-}
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct NativeLocator {

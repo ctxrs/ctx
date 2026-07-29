@@ -213,7 +213,7 @@ pub(super) fn opencode_normalized_message_payload(
             PROVIDER_MAX_PREVIEW_CHARS,
         ),
     });
-    crate::provider::importer::compact_provider_result_payload(event_type, &payload)
+    crate::provider::normalization::compact_provider_result_payload(event_type, &payload)
 }
 
 pub(super) fn opencode_text_value(values: &[NativeSqliteValue], index: usize) -> Result<&str> {

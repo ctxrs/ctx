@@ -14,7 +14,7 @@ use crate::{
     common::io::{ProviderSourceDirectory, ProviderSourceRoot},
     native_source::NativeSqliteValue,
     provider::{
-        importer::provider_path_identity,
+        provider_path_identity,
         native_ingestion::NATIVE_INGESTION_PAGE_MAX_BYTES,
         sqlite::{ensure_sqlite_table_columns, sqlite_table_columns, sqlite_table_exists},
     },

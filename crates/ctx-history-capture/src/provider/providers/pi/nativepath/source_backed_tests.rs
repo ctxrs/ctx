@@ -10,7 +10,7 @@ use ctx_history_core::{
 };
 
 use crate::{
-    provider::importer::provider_path_identity, test_support_paths::tempdir, ProviderAdapterContext,
+    provider::provider_path_identity, test_support_paths::tempdir, ProviderAdapterContext,
 };
 
 use super::{reader::PiSourceLifecycle, *};

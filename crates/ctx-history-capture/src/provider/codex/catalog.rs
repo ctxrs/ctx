@@ -22,7 +22,7 @@ use crate::{
 
 use crate::provider::codex::nativepath::{opened_codex_file_observation, CodexFileObservation};
 use crate::provider::codex::{CODEX_CAPTURE_REVISION, CODEX_POLICY_REVISION};
-use crate::provider::importer::provider_path_identity;
+use crate::provider::provider_path_identity;
 
 pub(crate) const CODEX_CATALOG_MAX_SOURCES: usize = 131_072;
 
