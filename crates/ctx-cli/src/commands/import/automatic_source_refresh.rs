@@ -13,10 +13,7 @@ use crate::{
     DaemonTriggerCommandArg, ImportArgs,
 };
 
-use super::{
-    CatalogTotals, ImportReport, ImportRunOptions, ImportTotals, InventoryTotals,
-    ProviderRefreshCollector,
-};
+use super::{ImportReport, ImportRunOptions, ImportTotals, ProviderRefreshCollector};
 
 pub(super) struct AutomaticSourceRefreshImportContext<'a> {
     pub(super) args: &'a ImportArgs,
@@ -102,14 +99,6 @@ pub(super) fn run_automatic_source_refresh_import(
     Ok(ImportReport {
         resume: context.args.resume,
         totals,
-        inventory: InventoryTotals {
-            sources: source_count,
-            source_files,
-            source_bytes,
-            ..InventoryTotals::default()
-        },
-        catalog: CatalogTotals::default(),
-        catalog_sources: Vec::new(),
         sources: vec![json!({
             "status": "published",
             "failure_scope": "none",

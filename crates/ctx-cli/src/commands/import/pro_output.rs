@@ -165,8 +165,6 @@ fn run_pro_materialization_import(
             progress: ProgressArg::None,
             json: false,
             print_human: false,
-            allow_empty_sources: true,
-            include_history_source_plugins: false,
             operation: "pro-materialization",
         },
         pro_output_selection,

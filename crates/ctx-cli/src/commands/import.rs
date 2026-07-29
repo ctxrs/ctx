@@ -3,7 +3,7 @@ use std::{fs, path::PathBuf};
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 
-use ctx_history_capture::{CaptureError, ProviderImportSummary};
+use ctx_history_capture::CaptureError;
 
 use crate::analytics::{ImportTelemetry, ProviderRefreshTrigger};
 use crate::progress::ProgressArg;
@@ -22,10 +22,7 @@ mod totals;
 use automatic_source_refresh::{
     run_automatic_source_refresh_import, AutomaticSourceRefreshImportContext,
 };
-pub(crate) use entry::{
-    import_report_analytics_outcome, import_report_failure_type, insert_import_error_analytics,
-    insert_import_report_analytics, run_import,
-};
+pub(crate) use entry::{import_report_analytics_outcome, import_report_failure_type, run_import};
 use explicit::{
     run_explicit_source_catalog_import, ExplicitSourceCatalogImportContext,
 };
@@ -38,23 +35,14 @@ pub(crate) use pro_output::{
     catch_up_pro_outputs, prepare_core_for_pro_materialization,
 };
 use pro_output::ProOutputSelection;
-pub(crate) use provider_refresh::{
-    ImportSourceFailure, ProviderRefreshCollector, ProviderRefreshResourceObservation,
-    ProviderRefreshRuntimeFacts,
-};
-pub(crate) use report::{
-    error_summary, import_error_scope, import_failure_type, one_line_error, ImportFailureScope,
-    ImportFailureType,
-};
+pub(crate) use provider_refresh::{ProviderRefreshCollector, ProviderRefreshRuntimeFacts};
+pub(crate) use report::{ImportFailureScope, ImportFailureType};
 pub(crate) use totals::ImportTotals;
 
 #[derive(Debug)]
 pub(crate) struct ImportReport {
     pub(crate) resume: bool,
     pub(crate) totals: ImportTotals,
-    pub(crate) inventory: InventoryTotals,
-    pub(crate) catalog: CatalogTotals,
-    pub(crate) catalog_sources: Vec<Value>,
     pub(crate) sources: Vec<Value>,
 }
 
@@ -69,8 +57,6 @@ pub(crate) struct ImportRunOptions {
     pub(crate) progress: ProgressArg,
     pub(crate) json: bool,
     pub(crate) print_human: bool,
-    pub(crate) allow_empty_sources: bool,
-    pub(crate) include_history_source_plugins: bool,
     pub(crate) operation: &'static str,
 }
 
@@ -80,63 +66,6 @@ pub(crate) fn resume_mode_name(resume: bool) -> &'static str {
     } else {
         "normal_scan"
     }
-}
-
-pub(crate) fn provider_summary_has_imported_content(summary: &ProviderImportSummary) -> bool {
-    summary.has_accepted_content()
-}
-
-#[derive(Debug)]
-pub(crate) struct RejectedSourceError {
-    message: String,
-    summary: ProviderImportSummary,
-}
-
-impl std::fmt::Display for RejectedSourceError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for RejectedSourceError {}
-
-pub(crate) fn rejected_source_error(
-    message: String,
-    summary: &ProviderImportSummary,
-) -> anyhow::Error {
-    anyhow::Error::new(RejectedSourceError {
-        message,
-        summary: summary.clone(),
-    })
-}
-
-pub(crate) fn rejected_source_summary(error: &anyhow::Error) -> Option<ProviderImportSummary> {
-    error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<RejectedSourceError>())
-        .map(|error| error.summary.clone())
-}
-
-#[derive(Debug, Clone, Default)]
-pub(crate) struct CatalogTotals {
-    pub(crate) sources: usize,
-    pub(crate) source_files: usize,
-    pub(crate) source_bytes: u64,
-    pub(crate) cataloged_sessions: usize,
-    pub(crate) cached_sessions: usize,
-    pub(crate) parsed_sessions: usize,
-    pub(crate) skipped_sessions: usize,
-    pub(crate) failed_sessions: usize,
-}
-
-#[derive(Debug, Clone, Default)]
-pub(crate) struct InventoryTotals {
-    pub(crate) sources: usize,
-    pub(crate) source_files: usize,
-    pub(crate) source_bytes: u64,
-    pub(crate) codex_catalog_sources: usize,
-    pub(crate) codex_catalog_sessions: usize,
-    pub(crate) source_import_files: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default)]

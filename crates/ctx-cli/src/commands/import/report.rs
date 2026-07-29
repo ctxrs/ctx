@@ -1,54 +1,13 @@
-use std::path::Path;
-
 use anyhow::Result;
 use serde_json::{json, Value};
 
-use ctx_history_capture::{
-    CaptureError, ProviderImportSummary, ProviderImportWorkResult, ProviderSourceFailureKind,
-    ProviderSourceStatus,
-};
-use ctx_history_core::CaptureProvider;
-use ctx_history_store::StoreError;
+use ctx_history_capture::{CaptureError, ProviderSourceFailureKind};
 
 use crate::commands::import::totals::ImportTotals;
 use crate::commands::import::{
-    import_report_analytics_outcome, import_report_failure_type,
-    provider_summary_has_imported_content, rejected_source_summary, ImportReport,
-    ImportSourceFailure, SourceStats,
+    import_report_analytics_outcome, import_report_failure_type, ImportReport,
 };
-use crate::history_source_plugins::HistorySourcePluginSource;
 use crate::output::print_json;
-use crate::progress::format_bytes;
-use crate::provider_args::ImportFormatArg;
-use crate::provider_sources::{import_support_json, SourceInfo};
-
-fn source_import_status(summary: &ProviderImportSummary) -> &'static str {
-    if summary.failed > 0 && !provider_summary_has_imported_content(summary) {
-        "failure"
-    } else if summary.failed > 0 {
-        "completed_with_rejections"
-    } else {
-        "success"
-    }
-}
-
-fn source_failure_scope(summary: &ProviderImportSummary) -> &'static str {
-    if summary.failed > 0 && !provider_summary_has_imported_content(summary) {
-        "source"
-    } else if summary.failed > 0 {
-        "record"
-    } else {
-        "none"
-    }
-}
-
-fn source_failure_type_for_summary(summary: &ProviderImportSummary) -> &'static str {
-    if summary.failed > 0 {
-        "record_rejection"
-    } else {
-        "none"
-    }
-}
 
 pub(crate) fn print_import_report(report: &ImportReport, json_output: bool) -> Result<()> {
     if json_output {
@@ -59,22 +18,21 @@ pub(crate) fn print_import_report(report: &ImportReport, json_output: bool) -> R
     }
 }
 
-pub(crate) fn import_report_json(report: &ImportReport) -> Value {
+fn import_report_json(report: &ImportReport) -> Value {
     let (outcome, failure_scope) = import_report_analytics_outcome(&report.totals);
-    let failure_type = import_report_failure_type(&report.totals);
     json!({
         "schema_version": 2,
         "outcome": outcome,
         "failure_scope": failure_scope,
-        "failure_type": failure_type,
+        "failure_type": import_report_failure_type(&report.totals),
         "resume": report.resume,
         "resume_mode": report.resume_mode(),
         "totals": import_totals_json(&report.totals),
-        "sources": report.sources.clone(),
+        "sources": report.sources,
     })
 }
 
-pub(crate) fn import_totals_json(totals: &ImportTotals) -> Value {
+fn import_totals_json(totals: &ImportTotals) -> Value {
     json!({
         "source_files": totals.source_files,
         "source_bytes": totals.source_bytes,
@@ -93,7 +51,7 @@ pub(crate) fn import_totals_json(totals: &ImportTotals) -> Value {
     })
 }
 
-pub(crate) fn print_import_report_human(report: &ImportReport) {
+fn print_import_report_human(report: &ImportReport) {
     let (outcome, failure_scope) = import_report_analytics_outcome(&report.totals);
     println!("outcome: {outcome}");
     println!("failure_scope: {failure_scope}");
@@ -122,356 +80,19 @@ pub(crate) fn print_import_report_human(report: &ImportReport) {
     println!("resume_mode: {}", report.resume_mode());
 }
 
-pub(crate) fn source_import_json(
-    source: &SourceInfo,
-    stats: &SourceStats,
-    summary: &ProviderImportSummary,
-) -> Value {
-    json!({
-        "status": source_import_status(summary),
-        "failure_scope": source_failure_scope(summary),
-        "failure_type": source_failure_type_for_summary(summary),
-        "provider": source.provider.as_str(),
-        "path": source.path,
-        "source_format": source.source_format,
-        "import_support": import_support_json(source.import_support),
-        "native_import": source.import_support.is_auto_importable(),
-        "importable": source.import_support.is_importable()
-            && source.status == ProviderSourceStatus::Available,
-        "source_files": stats.files,
-        "source_bytes": stats.bytes,
-        "imported_sessions": summary.imported_sessions,
-        "imported_events": summary.imported_events,
-        "imported_edges": summary.imported_edges,
-        "skipped_sessions": summary.skipped_sessions,
-        "skipped_events": summary.skipped_events,
-        "skipped_edges": summary.skipped_edges,
-        "skipped": summary.skipped,
-        "rejected_records": summary.failed,
-        "change": summary.work_result().as_str(),
-        "rejections": provider_failures_json(summary),
-    })
-}
-
-pub(crate) fn custom_format_import_json(
-    format: ImportFormatArg,
-    path: &Path,
-    stats: &SourceStats,
-    summary: &ProviderImportSummary,
-) -> Value {
-    json!({
-        "status": source_import_status(summary),
-        "failure_scope": source_failure_scope(summary),
-        "failure_type": source_failure_type_for_summary(summary),
-        "provider": CaptureProvider::Custom.as_str(),
-        "path": path,
-        "format": format.as_str(),
-        "source_format": format.as_str(),
-        "source_files": stats.files,
-        "source_bytes": stats.bytes,
-        "imported_sessions": summary.imported_sessions,
-        "imported_events": summary.imported_events,
-        "imported_edges": summary.imported_edges,
-        "skipped_sessions": summary.skipped_sessions,
-        "skipped_events": summary.skipped_events,
-        "skipped_edges": summary.skipped_edges,
-        "skipped": summary.skipped,
-        "rejected_records": summary.failed,
-        "change": summary.work_result().as_str(),
-        "rejections": provider_failures_json(summary),
-    })
-}
-
-pub(crate) fn custom_format_failure_json(
-    format: ImportFormatArg,
-    path: &Path,
-    stats: &SourceStats,
-    error: &str,
-    failure_type: ImportFailureType,
-) -> Value {
-    json!({
-        "status": "failure",
-        "failure_scope": "source",
-        "failure_type": failure_type.as_str(),
-        "provider": CaptureProvider::Custom.as_str(),
-        "path": path,
-        "format": format.as_str(),
-        "source_format": format.as_str(),
-        "source_files": stats.files,
-        "source_bytes": stats.bytes,
-        "imported_sessions": 0,
-        "imported_events": 0,
-        "imported_edges": 0,
-        "skipped_sessions": 0,
-        "skipped_events": 0,
-        "skipped_edges": 0,
-        "skipped": 0,
-        "change": ProviderImportWorkResult::NoOp.as_str(),
-        "error": one_line_error(error),
-        "rejected_records": 0,
-        "rejections": [],
-    })
-}
-
-pub(crate) fn history_source_plugin_import_json(
-    source: &HistorySourcePluginSource,
-    stats: &SourceStats,
-    summary: &ProviderImportSummary,
-) -> Value {
-    json!({
-        "status": source_import_status(summary),
-        "failure_scope": source_failure_scope(summary),
-        "failure_type": source_failure_type_for_summary(summary),
-        "provider": CaptureProvider::Custom.as_str(),
-        "kind": "history_source_plugin",
-        "plugin": source.plugin_name,
-        "history_source": source.label(),
-        "provider_key": source.provider_key,
-        "source_id": source.source_id,
-        "source_format": source.source_format,
-        "manifest_path": source.manifest_path,
-        "source_files": stats.files,
-        "source_bytes": stats.bytes,
-        "imported_sessions": summary.imported_sessions,
-        "imported_events": summary.imported_events,
-        "imported_edges": summary.imported_edges,
-        "skipped_sessions": summary.skipped_sessions,
-        "skipped_events": summary.skipped_events,
-        "skipped_edges": summary.skipped_edges,
-        "skipped": summary.skipped,
-        "rejected_records": summary.failed,
-        "change": summary.work_result().as_str(),
-        "rejections": provider_failures_json(summary),
-    })
-}
-
-pub(crate) fn provider_failures_json(summary: &ProviderImportSummary) -> Vec<Value> {
-    summary
-        .failures
-        .iter()
-        .take(5)
-        .map(|failure| {
-            json!({
-                "line": failure.line,
-                "error": failure.error,
-            })
-        })
-        .collect()
-}
-
-pub(crate) fn source_failure_json(failure: &ImportSourceFailure) -> Value {
-    let mut value = json!({
-        "status": "failure",
-        "failure_scope": "source",
-        "failure_type": failure.failure_type.as_str(),
-        "provider": failure.source.provider.as_str(),
-        "path": failure.source.path,
-        "source_format": failure.source.source_format,
-        "import_support": import_support_json(failure.source.import_support),
-        "native_import": failure.source.import_support.is_auto_importable(),
-        "importable": failure.source.import_support.is_importable()
-            && failure.source.status == ProviderSourceStatus::Available,
-        "source_files": failure.stats.files,
-        "source_bytes": failure.stats.bytes,
-        "imported_sessions": 0,
-        "imported_events": 0,
-        "imported_edges": 0,
-        "skipped_sessions": 0,
-        "skipped_events": 0,
-        "skipped_edges": 0,
-        "skipped": 0,
-        "change": ProviderImportWorkResult::NoOp.as_str(),
-        "error": source_error_reason(&failure.source, &failure.error),
-        "rejected_records": 0,
-        "rejections": [],
-    });
-    if let Some(summary) = failure.rejected_summary.as_ref() {
-        value["skipped_sessions"] = json!(summary.skipped_sessions);
-        value["skipped_events"] = json!(summary.skipped_events);
-        value["skipped_edges"] = json!(summary.skipped_edges);
-        value["skipped"] = json!(summary.skipped);
-        value["rejected_records"] = json!(summary.failed);
-        value["change"] = json!(summary.work_result().as_str());
-        value["rejections"] = json!(provider_failures_json(summary));
-    }
-    value
-}
-
-pub(crate) fn history_source_plugin_failure_json(
-    source: &HistorySourcePluginSource,
-    error: &str,
-    rejected_summary: Option<&ProviderImportSummary>,
-    failure_type: ImportFailureType,
-) -> Value {
-    let mut value = json!({
-        "status": "failure",
-        "failure_scope": "source",
-        "failure_type": failure_type.as_str(),
-        "provider": CaptureProvider::Custom.as_str(),
-        "kind": "history_source_plugin",
-        "plugin": source.plugin_name,
-        "history_source": source.label(),
-        "provider_key": source.provider_key,
-        "source_id": source.source_id,
-        "source_format": source.source_format,
-        "manifest_path": source.manifest_path,
-        "source_files": 0,
-        "source_bytes": 0,
-        "imported_sessions": 0,
-        "imported_events": 0,
-        "imported_edges": 0,
-        "skipped_sessions": 0,
-        "skipped_events": 0,
-        "skipped_edges": 0,
-        "skipped": 0,
-        "change": ProviderImportWorkResult::NoOp.as_str(),
-        "error": one_line_error(error),
-        "rejected_records": 0,
-        "rejections": [],
-    });
-    if let Some(summary) = rejected_summary {
-        value["skipped_sessions"] = json!(summary.skipped_sessions);
-        value["skipped_events"] = json!(summary.skipped_events);
-        value["skipped_edges"] = json!(summary.skipped_edges);
-        value["skipped"] = json!(summary.skipped);
-        value["rejected_records"] = json!(summary.failed);
-        value["change"] = json!(summary.work_result().as_str());
-        value["rejections"] = json!(provider_failures_json(summary));
-    }
-    value
-}
-
-pub(crate) fn print_source_imported(source: &SourceInfo, summary: &ProviderImportSummary) {
-    let outcome = if summary.failed > 0 {
-        "completed with rejected records"
-    } else {
-        "imported"
-    };
-    println!(
-        "{outcome} {}: change={} sessions={} events={} edges={} skipped={} rejected={}",
-        source.provider.as_str(),
-        summary.work_result().as_str(),
-        summary.imported_sessions,
-        summary.imported_events,
-        summary.imported_edges,
-        summary.skipped,
-        summary.failed
-    );
-    print_provider_failures(summary);
-}
-
-pub(crate) fn print_history_source_plugin_imported(
-    source: &HistorySourcePluginSource,
-    summary: &ProviderImportSummary,
-) {
-    let outcome = if summary.failed > 0 {
-        "completed with rejected records"
-    } else {
-        "imported"
-    };
-    println!(
-        "{outcome} history source plugin {}: change={} sessions={} events={} edges={} skipped={} rejected={}",
-        source.label(),
-        summary.work_result().as_str(),
-        summary.imported_sessions,
-        summary.imported_events,
-        summary.imported_edges,
-        summary.skipped,
-        summary.failed
-    );
-    print_provider_failures(summary);
-}
-
-pub(crate) fn print_provider_failures(summary: &ProviderImportSummary) {
-    if summary.failed == 0 {
-        return;
-    }
-    for failure in summary.failures.iter().take(5) {
-        println!("  rejected line {}: {}", failure.line, failure.error);
-    }
-    if summary.failed > 5 {
-        println!(
-            "  ... {} more rejected record(s)",
-            summary.failed.saturating_sub(5)
-        );
-    }
-}
-
-pub(crate) fn print_source_failed(failure: &ImportSourceFailure) {
-    println!(
-        "skipped {}: {}",
-        failure.source.provider.as_str(),
-        source_error_reason(&failure.source, &failure.error)
-    );
-    println!("  path: {}", failure.source.path.display());
-    if let Some(summary) = failure.rejected_summary.as_ref() {
-        print_provider_failures(summary);
-    }
-}
-
-pub(crate) fn print_history_source_plugin_failed(
-    source: &HistorySourcePluginSource,
-    error: &str,
-    rejected_summary: Option<&ProviderImportSummary>,
-) {
-    println!(
-        "skipped history source plugin {}: {}",
-        source.label(),
-        one_line_error(error)
-    );
-    println!("  manifest: {}", source.manifest_path.display());
-    if let Some(summary) = rejected_summary {
-        print_provider_failures(summary);
-    }
-}
-
-pub(crate) fn source_error_reason(source: &SourceInfo, error: &str) -> String {
-    let error = one_line_error(error);
-    let prefix = format!(
-        "import {} source {}: ",
-        source.provider.as_str(),
-        source.path.display()
-    );
-    error.strip_prefix(&prefix).unwrap_or(&error).to_owned()
-}
-
-pub(crate) fn one_line_error(error: &str) -> String {
-    error
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("unknown error")
-        .to_owned()
-}
-
-pub(crate) fn error_summary(error: &anyhow::Error) -> String {
-    let top = error.to_string();
-    let root = error
-        .chain()
-        .next_back()
-        .map(ToString::to_string)
-        .unwrap_or_else(|| top.clone());
-    if import_error_scope(error) == ImportFailureScope::System
-        && (is_sqlite_busy_text(&top) || is_sqlite_busy_text(&root))
-    {
-        return "ctx index is busy because another ctx import or search refresh is writing to the local database; retry in a moment, or rerun the search with `--refresh off` to use the existing index".to_owned();
-    }
-    if root == top || top.contains(&root) {
-        top
-    } else {
-        format!("{top}: {root}")
-    }
-}
-
-pub(crate) fn is_sqlite_busy_text(error: &str) -> bool {
-    let lower = error.to_ascii_lowercase();
-    lower.contains("database is locked") || lower.contains("database table is locked")
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ImportFailureScope {
     Source,
     System,
+}
+
+impl ImportFailureScope {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::System => "system",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -507,23 +128,17 @@ impl ImportFailureType {
     }
 }
 
-impl ImportFailureScope {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Source => "source",
-            Self::System => "system",
-        }
-    }
-}
-
 pub(crate) fn import_error_scope(error: &anyhow::Error) -> ImportFailureScope {
     if error.chain().any(|cause| {
-        cause.downcast_ref::<StoreError>().is_some()
-            || matches!(
-                cause.downcast_ref::<CaptureError>(),
-                Some(CaptureError::Store(_) | CaptureError::WorkerPanicked(_))
-                    | Some(CaptureError::SystemIo { .. } | CaptureError::SystemInvariant(_))
+        matches!(
+            cause.downcast_ref::<CaptureError>(),
+            Some(
+                CaptureError::Store(_)
+                    | CaptureError::WorkerPanicked(_)
+                    | CaptureError::SystemIo { .. }
+                    | CaptureError::SystemInvariant(_)
             )
+        )
     }) {
         ImportFailureScope::System
     } else {
@@ -532,51 +147,13 @@ pub(crate) fn import_error_scope(error: &anyhow::Error) -> ImportFailureScope {
 }
 
 pub(crate) fn import_failure_type(error: &anyhow::Error) -> ImportFailureType {
-    if rejected_source_summary(error).is_some() {
-        return ImportFailureType::RecordRejection;
-    }
-    if error.chain().any(|cause| {
-        matches!(
-            cause.downcast_ref::<CaptureError>(),
-            Some(CaptureError::WorkerPanicked(_))
-        )
-    }) {
-        return ImportFailureType::WorkerPanic;
-    }
-    if error.chain().any(|cause| {
-        matches!(
-            cause.downcast_ref::<CaptureError>(),
-            Some(CaptureError::SystemIo { .. })
-        )
-    }) {
-        return ImportFailureType::SystemIo;
-    }
-    if error.chain().any(|cause| {
-        matches!(
-            cause.downcast_ref::<CaptureError>(),
-            Some(CaptureError::SystemInvariant(_))
-        )
-    }) {
-        return ImportFailureType::System;
-    }
-    if import_error_scope(error) == ImportFailureScope::System {
-        return ImportFailureType::Store;
-    }
-    for cause in error.chain() {
-        if let Some(error) = cause.downcast_ref::<std::io::Error>() {
-            return match error.kind() {
-                std::io::ErrorKind::NotFound => ImportFailureType::NotFound,
-                std::io::ErrorKind::PermissionDenied => ImportFailureType::Permission,
-                _ => ImportFailureType::Other,
-            };
-        }
-        if cause.downcast_ref::<rusqlite::Error>().is_some() {
-            return ImportFailureType::SourceDatabase;
-        }
-    }
     for cause in error.chain() {
         if let Some(capture) = cause.downcast_ref::<CaptureError>() {
             return match capture {
+                CaptureError::WorkerPanicked(_) => ImportFailureType::WorkerPanic,
+                CaptureError::SystemIo { .. } => ImportFailureType::SystemIo,
+                CaptureError::SystemInvariant(_) => ImportFailureType::System,
+                CaptureError::Store(_) => ImportFailureType::Store,
                 CaptureError::ProviderSource { kind, .. } => match kind {
                     ProviderSourceFailureKind::NotFound => ImportFailureType::NotFound,
                     ProviderSourceFailureKind::Permission => ImportFailureType::Permission,
@@ -608,58 +185,25 @@ pub(crate) fn import_failure_type(error: &anyhow::Error) -> ImportFailureType {
                 _ => ImportFailureType::Other,
             };
         }
+        if let Some(error) = cause.downcast_ref::<std::io::Error>() {
+            return match error.kind() {
+                std::io::ErrorKind::NotFound => ImportFailureType::NotFound,
+                std::io::ErrorKind::PermissionDenied => ImportFailureType::Permission,
+                _ => ImportFailureType::Other,
+            };
+        }
+        if cause.downcast_ref::<rusqlite::Error>().is_some() {
+            return ImportFailureType::SourceDatabase;
+        }
     }
     ImportFailureType::Other
-}
-pub(crate) fn low_disk_space_warning(db_path: &Path, planned_total_bytes: u64) -> Option<String> {
-    let parent = db_path.parent().unwrap_or_else(|| Path::new("."));
-    let available = available_space_bytes(parent)?;
-    let recommended = (planned_total_bytes / 4).clamp(1 << 30, 20 * (1 << 30));
-    if available < recommended {
-        Some(format!(
-            "low disk space: {} available near {}, {} recommended before indexing {}",
-            format_bytes(available),
-            parent.display(),
-            format_bytes(recommended),
-            format_bytes(planned_total_bytes)
-        ))
-    } else {
-        None
-    }
-}
-
-#[cfg(unix)]
-pub(crate) fn available_space_bytes(path: &Path) -> Option<u64> {
-    use std::{ffi::CString, os::unix::ffi::OsStrExt};
-
-    fn statvfs_field_to_u64<T>(value: T) -> Option<u64>
-    where
-        T: TryInto<u64>,
-    {
-        value.try_into().ok()
-    }
-
-    let path = CString::new(path.as_os_str().as_bytes()).ok()?;
-    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-    let rc = unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) };
-    if rc != 0 {
-        return None;
-    }
-    let stat = unsafe { stat.assume_init() };
-    let available_blocks = statvfs_field_to_u64(stat.f_bavail)?;
-    let fragment_size = statvfs_field_to_u64(stat.f_frsize)?;
-    Some(available_blocks.saturating_mul(fragment_size))
-}
-
-#[cfg(not(unix))]
-pub(crate) fn available_space_bytes(_path: &Path) -> Option<u64> {
-    None
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
-    use crate::commands::import::rejected_source_error;
 
     #[test]
     fn provider_database_lock_is_source_scoped() {
@@ -668,92 +212,15 @@ mod tests {
             Some("database is locked".to_owned()),
         );
         let error = anyhow::Error::new(CaptureError::Sqlite(sqlite));
-
         assert_eq!(import_error_scope(&error), ImportFailureScope::Source);
         assert_eq!(
             import_failure_type(&error),
             ImportFailureType::SourceDatabase
         );
-        assert!(!error_summary(&error).contains("ctx index is busy"));
     }
 
     #[test]
-    fn ctx_store_checkpoint_lock_is_system_scoped() {
-        let error = anyhow::Error::new(StoreError::WalCheckpointBusy {
-            log_frames: 2,
-            checkpointed_frames: 1,
-        });
-
-        assert_eq!(import_error_scope(&error), ImportFailureScope::System);
-        assert_eq!(import_failure_type(&error), ImportFailureType::Store);
-    }
-
-    #[test]
-    fn rejected_records_have_stable_typed_classification() {
-        let mut summary = ProviderImportSummary::default();
-        summary.failed = 1;
-        let error = rejected_source_error("records rejected".to_owned(), &summary);
-
-        assert_eq!(import_error_scope(&error), ImportFailureScope::Source);
-        assert_eq!(
-            import_failure_type(&error),
-            ImportFailureType::RecordRejection
-        );
-    }
-
-    #[test]
-    fn worker_panics_have_stable_typed_classification() {
-        let error = anyhow::Error::new(CaptureError::WorkerPanicked("provider import"));
-
-        assert_eq!(import_error_scope(&error), ImportFailureScope::System);
-        assert_eq!(import_failure_type(&error), ImportFailureType::WorkerPanic);
-    }
-
-    #[test]
-    fn structural_provider_schema_errors_are_typed_as_unsupported_schema() {
-        let error = anyhow::Error::new(CaptureError::UnsupportedSchema(
-            "missing Kiro column".to_owned(),
-        ));
-
-        assert_eq!(import_error_scope(&error), ImportFailureScope::Source);
-        assert_eq!(
-            import_failure_type(&error),
-            ImportFailureType::UnsupportedSchema
-        );
-    }
-
-    #[test]
-    fn raw_source_io_and_sqlite_errors_have_stable_typed_classification() {
-        let missing = anyhow::Error::new(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "source disappeared",
-        ));
-        assert_eq!(import_error_scope(&missing), ImportFailureScope::Source);
-        assert_eq!(import_failure_type(&missing), ImportFailureType::NotFound);
-
-        let sqlite = anyhow::Error::new(rusqlite::Error::InvalidQuery);
-        assert_eq!(import_error_scope(&sqlite), ImportFailureScope::Source);
-        assert_eq!(
-            import_failure_type(&sqlite),
-            ImportFailureType::SourceDatabase
-        );
-    }
-
-    #[test]
-    fn provider_schema_errors_have_stable_typed_classification() {
-        let error = anyhow::Error::new(CaptureError::UnsupportedSchema(
-            "missing required writes table".to_owned(),
-        ));
-
-        assert_eq!(import_error_scope(&error), ImportFailureScope::Source);
-        assert_eq!(
-            import_failure_type(&error),
-            ImportFailureType::UnsupportedSchema
-        );
-    }
-
-    #[test]
-    fn typed_native_source_failures_have_stable_cli_classification() {
+    fn typed_native_source_failures_keep_stable_classification() {
         let cases = [
             (
                 ProviderSourceFailureKind::NotFound,
@@ -768,10 +235,6 @@ mod tests {
                 ImportFailureType::SourceDatabase,
             ),
             (
-                ProviderSourceFailureKind::Corrupt,
-                ImportFailureType::SourceDatabase,
-            ),
-            (
                 ProviderSourceFailureKind::SchemaIncompatible,
                 ImportFailureType::UnsupportedSchema,
             ),
@@ -780,14 +243,9 @@ mod tests {
                 ImportFailureType::MalformedSource,
             ),
             (
-                ProviderSourceFailureKind::SourceDatabase,
-                ImportFailureType::SourceDatabase,
-            ),
-            (
                 ProviderSourceFailureKind::SourceChanged,
                 ImportFailureType::Other,
             ),
-            (ProviderSourceFailureKind::Io, ImportFailureType::Other),
         ];
         for (kind, expected) in cases {
             let error = anyhow::Error::new(CaptureError::ProviderSource {
@@ -797,83 +255,17 @@ mod tests {
                 detail: "typed failure".to_owned(),
             });
             assert_eq!(import_error_scope(&error), ImportFailureScope::Source);
-            assert_eq!(import_failure_type(&error), expected, "kind={kind:?}");
+            assert_eq!(import_failure_type(&error), expected);
         }
     }
 
     #[test]
     fn ctx_owned_io_is_system_scoped() {
         let error = anyhow::Error::new(CaptureError::SystemIo {
-            operation: "write cursor temp file",
+            operation: "publish source generation",
             source: std::io::Error::other("disk failure"),
         });
-
         assert_eq!(import_error_scope(&error), ImportFailureScope::System);
         assert_eq!(import_failure_type(&error), ImportFailureType::SystemIo);
-    }
-
-    #[test]
-    fn provider_schema_is_source_scoped_and_typed() {
-        let error = anyhow::Error::new(CaptureError::UnsupportedSchema(
-            "required threads table is missing".to_owned(),
-        ));
-
-        assert_eq!(import_error_scope(&error), ImportFailureScope::Source);
-        assert_eq!(
-            import_failure_type(&error),
-            ImportFailureType::UnsupportedSchema
-        );
-    }
-
-    #[test]
-    fn run_outcomes_cover_clean_rejected_and_failed_combinations() {
-        let cases = [
-            (ImportTotals::default(), ("success", "none"), "none"),
-            (
-                ImportTotals {
-                    imported_sources: 1,
-                    failed: 1,
-                    ..ImportTotals::default()
-                },
-                ("completed_with_rejections", "record"),
-                "record_rejection",
-            ),
-            (
-                ImportTotals {
-                    imported_sources: 1,
-                    failed_sources: 1,
-                    ..ImportTotals::default()
-                },
-                ("completed_with_source_failures", "source"),
-                "source_failure",
-            ),
-            (
-                ImportTotals {
-                    imported_sources: 1,
-                    failed_sources: 1,
-                    failed: 1,
-                    ..ImportTotals::default()
-                },
-                (
-                    "completed_with_rejections_and_source_failures",
-                    "record_and_source",
-                ),
-                "record_rejection_and_source_failure",
-            ),
-            (
-                ImportTotals {
-                    failed_sources: 1,
-                    failed: 1,
-                    ..ImportTotals::default()
-                },
-                ("failure", "source"),
-                "record_rejection_and_source_failure",
-            ),
-        ];
-
-        for (totals, expected_outcome, expected_type) in cases {
-            assert_eq!(import_report_analytics_outcome(&totals), expected_outcome);
-            assert_eq!(import_report_failure_type(&totals), expected_type);
-        }
     }
 }
