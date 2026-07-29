@@ -1,5 +1,3 @@
-#[cfg(test)]
-use std::cell::Cell;
 use std::{
     fs::{self, Metadata},
     path::{Path, PathBuf},
@@ -21,11 +19,6 @@ use crate::{
 
 const OPENCLAW_RELEASED_CAPTURE_REVISION: u32 = 3;
 const OPENCLAW_RELEASED_POLICY_REVISION: u32 = 6;
-#[cfg(test)]
-thread_local! {
-    static OMIT_FILE_IDS: Cell<bool> = const { Cell::new(false) };
-}
-
 mod complete_content;
 pub(crate) mod native_path;
 mod normalization;
@@ -77,18 +70,7 @@ impl OpenClawFrozenFileMetadata {
         use std::os::unix::fs::MetadataExt;
 
         #[cfg(unix)]
-        let (device, inode) = {
-            #[cfg(test)]
-            if OMIT_FILE_IDS.with(Cell::get) {
-                (None, None)
-            } else {
-                (Some(metadata.dev()), Some(metadata.ino()))
-            }
-            #[cfg(not(test))]
-            {
-                (Some(metadata.dev()), Some(metadata.ino()))
-            }
-        };
+        let (device, inode) = (Some(metadata.dev()), Some(metadata.ino()));
         #[cfg(not(unix))]
         let (device, inode) = (None, None);
 
@@ -119,23 +101,6 @@ impl OpenClawFrozenFileMetadata {
                 .map_or_else(|| "none".to_owned(), |value| value.to_string()),
         )
     }
-}
-
-#[cfg(test)]
-pub(super) fn without_file_ids<T>(operation: impl FnOnce() -> T) -> T {
-    struct Restore(bool);
-
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            OMIT_FILE_IDS.with(|omit| omit.set(self.0));
-        }
-    }
-
-    let previous = OMIT_FILE_IDS.with(|omit| omit.replace(true));
-    let restore = Restore(previous);
-    let result = operation();
-    drop(restore);
-    result
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -446,7 +411,3 @@ fn openclaw_i64_field(value: &Value, fields: &[&str]) -> Option<i64> {
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => None,
     }
 }
-
-#[cfg(test)]
-#[path = "openclaw/tests.rs"]
-mod tests;

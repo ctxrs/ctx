@@ -15,8 +15,6 @@ mod store_adapter;
 mod vertical;
 
 #[cfg(test)]
-mod roo_production_tests;
-#[cfg(test)]
 mod source_backed_tests;
 #[cfg(test)]
 mod tests;

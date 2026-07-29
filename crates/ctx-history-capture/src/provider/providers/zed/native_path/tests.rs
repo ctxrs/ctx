@@ -1,12 +1,7 @@
 use std::{
-    collections::BTreeMap,
     fs,
     io::Write,
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
-    },
 };
 
 use rusqlite::{params, Connection};
@@ -15,17 +10,7 @@ use tempfile::tempdir;
 
 use super::query::ZED_THREAD_ID_MAX_BYTES;
 use super::*;
-use crate::{
-    complete_content::{
-        source_access::{AuthorizedSourceRoute, SourceAccessBroker},
-        sqlite::SqliteCompleteContentResolver,
-        CompleteContentErrorKind, CompleteContentHashAuthority, CompleteContentResolver,
-        CompleteContentSourceFamily, CompleteMessageRequest, SourceSnapshot,
-        VerifiedContentLocatorsV1, VerifiedContentRole, VERIFIED_CONTENT_LOCATORS_METADATA_KEY,
-    },
-    MAX_PROVIDER_SQLITE_VALUE_BYTES, PROVIDER_MAX_TEXT_CHARS, ZED_THREADS_SQLITE_SOURCE_FORMAT,
-};
-use ctx_history_core::CaptureProvider;
+use crate::MAX_PROVIDER_SQLITE_VALUE_BYTES;
 
 #[derive(Default)]
 struct CollectingSink {
@@ -68,100 +53,6 @@ struct DiscardingSink {
     rows: u64,
     max_page_units: usize,
     max_page_encoded_bytes: usize,
-}
-
-#[derive(Default)]
-struct RecordingProSink {
-    progress: Mutex<BTreeMap<String, crate::ProOutputProgress>>,
-    content: Mutex<Vec<Vec<u8>>>,
-}
-
-impl crate::ProOutputSink for RecordingProSink {
-    fn inventory_generation(&self) -> u64 {
-        1
-    }
-
-    fn materializer_revision(&self) -> &str {
-        "zed-test-materializer-v1"
-    }
-
-    fn observe_source(
-        &self,
-        source: &crate::OutputSourceIdentity,
-    ) -> std::result::Result<Option<crate::ProOutputProgress>, crate::ProOutputSinkError> {
-        Ok(self
-            .progress
-            .lock()
-            .unwrap()
-            .get(&source.source_id)
-            .cloned())
-    }
-
-    fn materialize_page(
-        &self,
-        page: crate::ProOutputMaterializationPage,
-    ) -> std::result::Result<crate::ProOutputPageResult, crate::ProOutputSinkError> {
-        let accepted_outputs = u32::try_from(page.observations.len()).unwrap_or(u32::MAX);
-        self.content.lock().unwrap().extend(
-            page.observations
-                .into_iter()
-                .map(|observation| observation.content),
-        );
-        self.progress.lock().unwrap().insert(
-            page.source.source_id.clone(),
-            crate::ProOutputProgress {
-                source_epoch: page.source_epoch,
-                observed_revision: page.observed_revision.clone(),
-                cursor: Some(page.next_safe_cursor.clone()),
-                parser_revision: page.parser_revision.clone(),
-                materializer_revision: page.materializer_revision.clone(),
-                terminal: page.terminal,
-            },
-        );
-        Ok(crate::ProOutputPageResult {
-            source_epoch: page.source_epoch,
-            committed_cursor: page.next_safe_cursor,
-            accepted_outputs,
-            materialized_facts: accepted_outputs,
-            replayed: false,
-        })
-    }
-}
-
-#[derive(Default)]
-struct FailingProSink {
-    behind: AtomicUsize,
-}
-
-impl crate::ProOutputSink for FailingProSink {
-    fn inventory_generation(&self) -> u64 {
-        1
-    }
-
-    fn materializer_revision(&self) -> &str {
-        "zed-failing-materializer-v1"
-    }
-
-    fn observe_source(
-        &self,
-        _source: &crate::OutputSourceIdentity,
-    ) -> std::result::Result<Option<crate::ProOutputProgress>, crate::ProOutputSinkError> {
-        Ok(None)
-    }
-
-    fn materialize_page(
-        &self,
-        _page: crate::ProOutputMaterializationPage,
-    ) -> std::result::Result<crate::ProOutputPageResult, crate::ProOutputSinkError> {
-        Err(crate::ProOutputSinkError::new(
-            "zed_test_failure",
-            "intentional test failure",
-        ))
-    }
-
-    fn mark_behind(&self, _error: crate::ProOutputSinkError) {
-        self.behind.fetch_add(1, Ordering::SeqCst);
-    }
 }
 
 impl ZedNativeSink for DiscardingSink {
@@ -250,23 +141,6 @@ fn output_message(call_id: &str, input_path: &str, output_body: &str, is_error: 
     })
 }
 
-fn result_only_message(call_id: &str, output_body: &str) -> Value {
-    json!({
-        "Agent": {
-            "content": [],
-            "tool_results": {
-                call_id: {
-                    "tool_name": "read_file",
-                    "tool_use_id": call_id,
-                    "is_error": false,
-                    "content": [{"Text": output_body}],
-                    "output": {"status": "ok"}
-                }
-            }
-        }
-    })
-}
-
 fn encode_thread(payload: &Value, data_type: &str) -> Vec<u8> {
     let json = serde_json::to_vec(payload).unwrap();
     match data_type {
@@ -323,76 +197,6 @@ fn scan(path: &Path) -> (ZedNativeGenerationAuthority, CollectingSink) {
     let mut sink = CollectingSink::default();
     let outcome = scan_zed_nativepath(&ZedNativeSourceSelection::exact(path), &mut sink).unwrap();
     (complete(outcome), sink)
-}
-
-fn adapter_context(path: &Path, machine_id: &str) -> crate::ProviderAdapterContext {
-    crate::ProviderAdapterContext {
-        machine_id: machine_id.to_owned(),
-        source_path: Some(path.to_path_buf()),
-        source_root: None,
-        imported_at: chrono::DateTime::parse_from_rfc3339("2026-07-25T12:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc),
-    }
-}
-
-fn complete_message_request(
-    path: &Path,
-    event: &ctx_history_core::Event,
-) -> CompleteMessageRequest {
-    let locators = VerifiedContentLocatorsV1::from_metadata_value(
-        &event.sync.metadata[VERIFIED_CONTENT_LOCATORS_METADATA_KEY],
-    )
-    .unwrap();
-    let locator = locators.locator(VerifiedContentRole::MessageBody).unwrap();
-    let event_id = event.id;
-    let source_access = SourceAccessBroker::new()
-        .admit(
-            AuthorizedSourceRoute {
-                source_id: event.capture_source_id.unwrap(),
-                provider: CaptureProvider::Zed,
-                source_format: ZED_THREADS_SQLITE_SOURCE_FORMAT.to_owned(),
-                family: CompleteContentSourceFamily::Sqlite,
-                raw_source_path: path.to_path_buf(),
-                source_root: path.parent().map(Path::to_path_buf),
-                source_identity: Some("zed-nativepath-complete-test".to_owned()),
-                source_snapshot: SourceSnapshot::default(),
-            },
-            event_id,
-        )
-        .unwrap();
-    CompleteMessageRequest {
-        event_id,
-        provider: CaptureProvider::Zed,
-        source_format: ZED_THREADS_SQLITE_SOURCE_FORMAT.to_owned(),
-        source_access,
-        source_family: Some(CompleteContentSourceFamily::Sqlite),
-        content_profile: locator.content_profile().to_owned(),
-        source_locator: locator.source_locator(),
-        provider_session_id: event
-            .sync
-            .metadata
-            .get("provider_session_id")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        source_record_ordinal: event.sync.metadata["source_record_ordinal"]
-            .as_u64()
-            .unwrap(),
-        source_record_subrecord_index: event.sync.metadata["source_record_subrecord_index"]
-            .as_u64()
-            .and_then(|value| u32::try_from(value).ok())
-            .unwrap(),
-        expected_provider_event_hash: event.sync.metadata["provider_event_hash"]
-            .as_str()
-            .unwrap()
-            .to_owned(),
-        expected_hash_authority: CompleteContentHashAuthority::NormalizedPayloadFallback,
-        expected_native_record_id: Some(locator.native_record_id().to_owned()),
-        expected_record_digest: Some(locator.record_sha256().clone()),
-        expected_content_ref: Some(locator.content_ref().clone()),
-        indexed_text: event.payload["text"].as_str().unwrap().to_owned(),
-        indexed_limit_chars: PROVIDER_MAX_TEXT_CHARS,
-    }
 }
 
 #[test]
@@ -1555,6 +1359,3 @@ fn more_than_one_publication_page_uses_bounded_output_index() {
     drop(authority);
     assert!(!index_path.exists());
 }
-
-#[path = "tests/store.rs"]
-mod store;

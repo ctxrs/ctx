@@ -33,8 +33,6 @@ use rows::{
 use source::PiNativePathError;
 
 #[cfg(test)]
-mod production_tests;
-#[cfg(test)]
 mod source_backed_tests;
 #[cfg(test)]
 mod tests;

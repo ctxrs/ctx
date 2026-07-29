@@ -30,9 +30,6 @@ use crate::{
     PROVIDER_MAX_TEXT_CHARS, WINDSURF_CASCADE_HOOK_TRANSCRIPT_SOURCE_FORMAT,
 };
 
-#[cfg(test)]
-use crate::ProOutputSinkError;
-
 use super::{
     committed_direct_jsonl_replay_authority, decode_direct_jsonl_native_cursor,
     direct_jsonl_checkpoint_is_covered_by, encode_direct_jsonl_cursor,

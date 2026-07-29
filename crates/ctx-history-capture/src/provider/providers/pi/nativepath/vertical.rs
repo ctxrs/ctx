@@ -55,8 +55,6 @@ mod publication;
 use lifecycle::*;
 use publication::*;
 
-#[cfg(test)]
-pub(super) use lifecycle::released_cursor_for_test;
 pub(super) use lifecycle::{map_native_error, source_cursor_stream};
 
 const PI_STORE_CURSOR_VERSION: u32 = 1;

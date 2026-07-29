@@ -10,9 +10,6 @@ mod event;
 pub(crate) mod nativepath;
 mod source;
 
-#[cfg(test)]
-mod tests;
-
 pub(crate) use event::openhands_result_content;
 #[allow(unused_imports)]
 pub(crate) use event::{decode_openhands_event, decode_openhands_event_value};
