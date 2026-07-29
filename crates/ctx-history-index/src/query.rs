@@ -4,7 +4,7 @@ use std::{
     ops::Bound,
 };
 
-use ctx_history_core::{SourceRecordLocator, StableEntityId, StableEntityKind};
+use ctx_history_core::{SourceKey, SourceRecordLocator, StableEntityId, StableEntityKind};
 use serde::{Deserialize, Serialize};
 use tantivy::{
     collector::{DocSetCollector, TopDocs},
@@ -28,6 +28,49 @@ const EVENT_IDENTITY_DIGEST_FIELD: &str = "event_identity_digest";
 
 /// Maximum number of semantic event records materialized in one page.
 pub const MAX_SEMANTIC_EVENT_PAGE_ITEMS: usize = 64;
+
+/// Maximum number of records materialized for one exact provider source page.
+pub const MAX_SOURCE_EVENT_PAGE_ITEMS: usize = 4_096;
+
+/// Exclusive full-identity keyset cursor for one source in one generation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceEventCursor {
+    generation_id: String,
+    source: SourceKey,
+    after: StableEntityId,
+}
+
+impl SourceEventCursor {
+    pub fn new(generation_id: impl Into<String>, source: SourceKey, after: StableEntityId) -> Self {
+        Self {
+            generation_id: generation_id.into(),
+            source,
+            after,
+        }
+    }
+
+    pub fn generation_id(&self) -> &str {
+        &self.generation_id
+    }
+
+    pub fn source(&self) -> &SourceKey {
+        &self.source
+    }
+
+    pub fn after(&self) -> StableEntityId {
+        self.after
+    }
+}
+
+/// One deterministic page of existing bounded records for an exact source.
+#[derive(Debug, Clone)]
+pub struct SourceEventPage {
+    pub generation_id: String,
+    pub source: SourceKey,
+    pub items: Vec<EventRecord>,
+    pub next_cursor: Option<SourceEventCursor>,
+    pub terminal: bool,
+}
 
 /// Stable eligibility policy used by the source-backed semantic projection.
 ///
@@ -183,6 +226,49 @@ pub struct SessionRecord {
 }
 
 impl VerifiedIndex {
+    /// Enumerates one exact source in strict full `StableEntityId` order.
+    ///
+    /// The cursor is exclusive and bound to both this immutable generation
+    /// and the source's exact descriptor. Only `limit + 1` records are
+    /// materialized; the additional record is the terminal lookahead.
+    pub fn source_event_page(
+        &self,
+        source: &SourceKey,
+        cursor: Option<&SourceEventCursor>,
+        limit: usize,
+    ) -> Result<SourceEventPage> {
+        if !(1..=MAX_SOURCE_EVENT_PAGE_ITEMS).contains(&limit) {
+            return Err(IndexError::InvalidSourceEventPageSize {
+                requested: limit,
+                maximum: MAX_SOURCE_EVENT_PAGE_ITEMS,
+            });
+        }
+        source.validate_contract()?;
+        let after = cursor
+            .map(|cursor| self.validate_source_event_cursor(source, cursor))
+            .transpose()?;
+        self.validate_source_event_source(source)?;
+        let mut items = self.source_event_records_after(source, after, limit.saturating_add(1))?;
+        let terminal = items.len() <= limit;
+        if !terminal {
+            items.truncate(limit);
+        }
+        let next_cursor = if terminal {
+            None
+        } else {
+            items.last().map(|event| {
+                SourceEventCursor::new(self.generation_id.clone(), source.clone(), event.event_id)
+            })
+        };
+        Ok(SourceEventPage {
+            generation_id: self.generation_id.clone(),
+            source: source.clone(),
+            items,
+            next_cursor,
+            terminal,
+        })
+    }
+
     /// Returns semantic-eligible events in strict full `StableEntityId` order.
     ///
     /// The cursor is an exclusive keyset bound to this pinned generation.
@@ -439,6 +525,121 @@ impl VerifiedIndex {
         Ok(cursor.after)
     }
 
+    fn validate_source_event_source(&self, source: &SourceKey) -> Result<()> {
+        let retained = self
+            .manifest
+            .sources
+            .iter()
+            .find(|candidate| candidate.observation().source() == source)
+            .ok_or_else(|| {
+                IndexError::SourceEventSourceNotRetained(source.identity().to_string())
+            })?;
+        if !retained.observation().source().exact_descriptor_eq(source) {
+            return Err(IndexError::SourceEventSourceDescriptorMismatch(
+                source.identity().to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_source_event_cursor(
+        &self,
+        source: &SourceKey,
+        cursor: &SourceEventCursor,
+    ) -> Result<StableEntityId> {
+        if cursor.generation_id != self.generation_id {
+            return Err(IndexError::SourceEventCursorGenerationMismatch {
+                cursor_generation: cursor.generation_id.clone(),
+                pinned_generation: self.generation_id.clone(),
+            });
+        }
+        cursor.source.validate_contract()?;
+        if !cursor.source.exact_descriptor_eq(source) {
+            return Err(IndexError::SourceEventCursorSourceMismatch);
+        }
+        cursor.after.validate_contract()?;
+        if cursor.after.entity_kind() != StableEntityKind::Event
+            || cursor.after.source_digest() != source.identity().digest()
+            || cursor.after.source_descriptor_digest() != source.exact_descriptor_digest()
+        {
+            return Err(IndexError::InvalidSourceEventCursorIdentity);
+        }
+        Ok(cursor.after)
+    }
+
+    fn source_event_records_after(
+        &self,
+        source: &SourceKey,
+        after: Option<StableEntityId>,
+        capacity: usize,
+    ) -> Result<Vec<EventRecord>> {
+        let fields = fields_from_schema(self.searcher.schema())?;
+        let source_term = Term::from_field_text(fields.source_key, &source_token(source));
+        let after_digest = after.map(|identity| hex(&identity.digest()));
+        let mut candidates = BinaryHeap::with_capacity(capacity);
+
+        for (segment_ord, segment) in self.searcher.segment_readers().iter().enumerate() {
+            let source_inverted = segment.inverted_index(fields.source_key)?;
+            let Some(source_postings) =
+                source_inverted.read_postings(&source_term, IndexRecordOption::Basic)?
+            else {
+                continue;
+            };
+            let identity_inverted = segment.inverted_index(fields.event_identity_digest)?;
+            let terms = identity_inverted.terms();
+            let mut stream = match after_digest.as_deref() {
+                Some(digest) => terms.range().gt(digest.as_bytes()).into_stream()?,
+                None => terms.stream()?,
+            };
+            while stream.advance() {
+                if candidates.len() == capacity
+                    && candidates
+                        .peek()
+                        .is_some_and(|largest: &EventIdentityCandidate| {
+                            stream.key() > largest.digest_term.as_bytes()
+                        })
+                {
+                    break;
+                }
+                let mut identity_postings = identity_inverted
+                    .read_postings_from_terminfo(stream.value(), IndexRecordOption::Basic)?;
+                let mut doc_id = identity_postings.doc();
+                while doc_id != TERMINATED {
+                    if !segment.is_deleted(doc_id) {
+                        let mut source_membership = source_postings.clone();
+                        let source_doc = source_membership.doc();
+                        let matches_source = source_doc == doc_id
+                            || (source_doc < doc_id && source_membership.seek(doc_id) == doc_id);
+                        if matches_source {
+                            let address = DocAddress::new(segment_ord as u32, doc_id);
+                            let event = self.event_record(address, fields)?;
+                            let digest_term = hex(&event.event_id.digest());
+                            if digest_term.as_bytes() != stream.key()
+                                || !event.locator.source().exact_descriptor_eq(source)
+                            {
+                                return Err(IndexError::InvalidStoredDocumentField(
+                                    EVENT_IDENTITY_DIGEST_FIELD,
+                                ));
+                            }
+                            candidates.push(EventIdentityCandidate::new(event, digest_term)?);
+                            if candidates.len() > capacity {
+                                candidates.pop();
+                            }
+                        }
+                    }
+                    doc_id = identity_postings.advance();
+                }
+            }
+        }
+
+        let mut candidates = candidates.into_vec();
+        candidates.sort_by(|left, right| left.identity.cmp(&right.identity));
+        Ok(candidates
+            .into_iter()
+            .map(|candidate| candidate.event)
+            .collect())
+    }
+
     fn semantic_event_records_after(
         &self,
         after: Option<StableEntityId>,
@@ -460,7 +661,7 @@ impl VerifiedIndex {
                 if candidates.len() == capacity
                     && candidates
                         .peek()
-                        .is_some_and(|largest: &SemanticEventCandidate| {
+                        .is_some_and(|largest: &EventIdentityCandidate| {
                             stream.key() > largest.digest_term.as_bytes()
                         })
                 {
@@ -480,7 +681,7 @@ impl VerifiedIndex {
                             ));
                         }
                         if eligibility.includes(&event) {
-                            candidates.push(SemanticEventCandidate::new(event, digest_term)?);
+                            candidates.push(EventIdentityCandidate::new(event, digest_term)?);
                             if candidates.len() > capacity {
                                 candidates.pop();
                             }
@@ -646,13 +847,13 @@ pub(super) fn stored_event_record(
     })
 }
 
-struct SemanticEventCandidate {
+struct EventIdentityCandidate {
     identity: [u8; StableEntityId::CANONICAL_LEN],
     digest_term: String,
     event: EventRecord,
 }
 
-impl SemanticEventCandidate {
+impl EventIdentityCandidate {
     fn new(event: EventRecord, digest_term: String) -> Result<Self> {
         Ok(Self {
             identity: event.event_id.encode_canonical()?,
@@ -662,21 +863,21 @@ impl SemanticEventCandidate {
     }
 }
 
-impl PartialEq for SemanticEventCandidate {
+impl PartialEq for EventIdentityCandidate {
     fn eq(&self, other: &Self) -> bool {
         self.identity == other.identity
     }
 }
 
-impl Eq for SemanticEventCandidate {}
+impl Eq for EventIdentityCandidate {}
 
-impl PartialOrd for SemanticEventCandidate {
+impl PartialOrd for EventIdentityCandidate {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for SemanticEventCandidate {
+impl Ord for EventIdentityCandidate {
     fn cmp(&self, other: &Self) -> Ordering {
         self.identity.cmp(&other.identity)
     }
