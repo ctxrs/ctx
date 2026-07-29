@@ -1,13 +1,6 @@
 use super::*;
 
 impl FlatSegmentStore {
-    pub(in crate::semantic) fn recover(&mut self) -> FlatResult<FlatRecoveryReport> {
-        self.require_writable()?;
-        let report = self.recover_internal()?;
-        self.recovery = report.clone();
-        Ok(report)
-    }
-
     pub(in crate::semantic) fn compact(&self) -> FlatResult<FlatPublishOutcome> {
         self.require_writable()?;
         let _guard = self.lock_exclusive()?;

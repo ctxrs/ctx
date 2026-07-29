@@ -1,3 +1,4 @@
+#[cfg(test)]
 use super::{validation::validate_norm_squared, FlatScanError, FlatScanInput};
 
 #[derive(Debug, Clone, Copy)]
@@ -89,6 +90,7 @@ pub(super) unsafe fn exact_dot_product_f32_avx(query: &[f32], vector: &[f32]) ->
     similarity
 }
 
+#[cfg(test)]
 pub(super) fn validate_and_dot_le_bytes(
     query: &[f32],
     vector: &[u8],
@@ -121,6 +123,7 @@ pub(super) fn validate_and_dot_le_bytes(
 }
 
 #[inline(always)]
+#[cfg(test)]
 fn exact_dot_product_le_bytes(query: &[f32], vector: &[u8]) -> f32 {
     let value_at = |dimension: usize| {
         let offset = dimension * std::mem::size_of::<f32>();

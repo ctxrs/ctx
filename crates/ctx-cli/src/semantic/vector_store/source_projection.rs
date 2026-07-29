@@ -4,8 +4,10 @@ use std::{
 };
 
 use anyhow::{anyhow, Result};
+#[cfg(test)]
+use ctx_history_core::StableEntityKind;
 use ctx_history_core::{
-    EventHydrationRequest, HydrationFailure, HydrationFailureKind, StableEntityId, StableEntityKind,
+    EventHydrationRequest, HydrationFailure, HydrationFailureKind, StableEntityId,
 };
 use ctx_history_index::{
     EventRecord, SemanticEventCursor, VerifiedIndex, LEXICAL_SCHEMA_VERSION,
@@ -135,8 +137,6 @@ pub(in crate::semantic) struct SourceBackedSemanticOutcome {
 struct StoredSourceDocument {
     stable_event_identity: Vec<u8>,
     locator_json: Vec<u8>,
-    source_text_sha256: String,
-    core_generation_id: String,
 }
 
 impl SemanticVectorStore {
@@ -337,6 +337,7 @@ impl SemanticVectorStore {
         })())
     }
 
+    #[cfg(test)]
     pub(in crate::semantic) fn source_backed_generation_ready(
         &self,
         core_generation_id: &str,
@@ -440,6 +441,7 @@ impl SemanticVectorStore {
         })()
     }
 
+    #[cfg(test)]
     pub(super) fn source_backed_frontier_generation(&self) -> Result<Option<String>> {
         semantic_owned_sidecar_result(
             self.source_frontier()
@@ -447,6 +449,7 @@ impl SemanticVectorStore {
         )
     }
 
+    #[cfg(test)]
     pub(super) fn source_backed_hashes_for_generation(
         &self,
         core_generation_id: &str,
@@ -582,11 +585,13 @@ impl SemanticVectorStore {
                  FROM semantic_source_documents WHERE event_id = ?1",
                 [event_id.to_string()],
                 |row| {
+                    let stable_event_identity = row.get(0)?;
+                    let locator_json = row.get(1)?;
+                    let _source_text_sha256 = row.get::<_, String>(2)?;
+                    let _core_generation_id = row.get::<_, String>(3)?;
                     Ok(StoredSourceDocument {
-                        stable_event_identity: row.get(0)?,
-                        locator_json: row.get(1)?,
-                        source_text_sha256: row.get(2)?,
-                        core_generation_id: row.get(3)?,
+                        stable_event_identity,
+                        locator_json,
                     })
                 },
             )

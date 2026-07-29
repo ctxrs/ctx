@@ -46,7 +46,6 @@ pub(in crate::semantic) struct PinnedScanSegment {
 }
 
 struct PinnedScanSegmentInner {
-    generation: u64,
     vector_count: usize,
     dimensions: usize,
     stride_bytes: usize,
@@ -64,18 +63,11 @@ struct FlatScoringChunk {
 }
 
 impl PinnedScanSegment {
-    pub(in crate::semantic) fn generation(&self) -> u64 {
-        self.inner.generation
-    }
-
     pub(in crate::semantic) fn vector_count(&self) -> usize {
         self.inner.vector_count
     }
 
-    pub(in crate::semantic) fn dimensions(&self) -> usize {
-        self.inner.dimensions
-    }
-
+    #[cfg(test)]
     pub(in crate::semantic) fn active_chunk_count(&self) -> usize {
         self.inner.scoring_chunks.len()
     }
@@ -132,7 +124,6 @@ impl PinnedScanSegment {
     fn chunk_ref(&self, ordinal: usize) -> FlatScanChunkRef<'_> {
         let metadata = self.metadata(ordinal);
         FlatScanChunkRef {
-            ordinal,
             event_id: metadata.event_id,
             seq: metadata.seq,
             source_text_hash: metadata.source_text_hash,
@@ -198,7 +189,6 @@ impl<'a> Iterator for FlatScanChunkIter<'a> {
 }
 
 pub(in crate::semantic) struct FlatScanChunkRef<'a> {
-    pub(in crate::semantic) ordinal: usize,
     pub(in crate::semantic) event_id: Uuid,
     pub(in crate::semantic) seq: u64,
     pub(in crate::semantic) source_text_hash: FlatSourceHash,
@@ -298,7 +288,6 @@ pub(super) fn load_pinned_generation(
         }
         scan_segments.push(PinnedScanSegment {
             inner: Arc::new(PinnedScanSegmentInner {
-                generation: segment.descriptor.generation,
                 vector_count,
                 dimensions: usize_from_u32(manifest.model.dimensions, "dimensions")?,
                 stride_bytes: segment.stride_bytes,

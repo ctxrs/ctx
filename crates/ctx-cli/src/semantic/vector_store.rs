@@ -1,13 +1,17 @@
 pub(super) struct SemanticVectorHit {
     pub(super) event_id: Uuid,
     pub(super) similarity: f32,
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(super) source_text_hash: String,
+    #[expect(dead_code)]
     pub(super) start_char: usize,
+    #[expect(dead_code)]
     pub(super) end_char: usize,
 }
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct SemanticVectorSearchStats {
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(super) backend: Option<&'static str>,
     pub(super) scan_ms: u64,
     pub(super) chunks_scanned: usize,
@@ -35,7 +39,9 @@ pub(super) struct SemanticChunkDocument {
 #[derive(Debug, Clone)]
 pub(super) struct SemanticStoredEvent {
     pub(super) event_id: Uuid,
+    #[expect(dead_code)]
     pub(super) source_text_hash: String,
+    #[expect(dead_code)]
     pub(super) seq: u64,
 }
 

@@ -26,10 +26,9 @@ mod validation;
 use artifacts::*;
 use manifest::*;
 use pinned::load_pinned_generation;
-pub(in crate::semantic) use pinned::{
-    FlatScanChunkIter, FlatScanChunkRef, FlatScoringChunkIter, FlatScoringChunkRef,
-    PinnedFlatGeneration, PinnedScanSegment,
-};
+pub(in crate::semantic) use pinned::PinnedFlatGeneration;
+#[cfg(test)]
+pub(in crate::semantic) use pinned::PinnedScanSegment;
 use recovery::*;
 use validation::*;
 
@@ -161,6 +160,7 @@ pub(in crate::semantic) struct FlatSegmentStore {
     mode: StoreMode,
     validated: Mutex<Option<ValidatedGeneration>>,
     pinned: Mutex<Option<PinnedFlatGeneration>>,
+    #[cfg(test)]
     recovery: FlatRecoveryReport,
 }
 
@@ -179,15 +179,24 @@ impl FlatSegmentStore {
         validate_model_contract(&contract)?;
         let root = root.as_ref().to_path_buf();
         ensure_store_directories(&root)?;
-        let mut store = Self {
+        let store = Self {
             root,
             contract,
             mode: StoreMode::ReadWrite,
             validated: Mutex::new(None),
             pinned: Mutex::new(None),
+            #[cfg(test)]
             recovery: FlatRecoveryReport::default(),
         };
-        store.recovery = store.recover_internal()?;
+        let recovery = store.recover_internal()?;
+        #[cfg(test)]
+        let store = {
+            let mut store = store;
+            store.recovery = recovery;
+            store
+        };
+        #[cfg(not(test))]
+        let _ = recovery;
         Ok(store)
     }
 
@@ -205,6 +214,7 @@ impl FlatSegmentStore {
             mode: StoreMode::ReadOnly,
             validated: Mutex::new(None),
             pinned: Mutex::new(None),
+            #[cfg(test)]
             recovery: FlatRecoveryReport::default(),
         };
         let _guard = store.lock_shared()?;
@@ -214,10 +224,7 @@ impl FlatSegmentStore {
         Ok(store)
     }
 
-    pub(in crate::semantic) fn root(&self) -> &Path {
-        &self.root
-    }
-
+    #[cfg(test)]
     pub(in crate::semantic) fn recovery_report(&self) -> &FlatRecoveryReport {
         &self.recovery
     }
@@ -239,6 +246,7 @@ impl FlatSegmentStore {
             .unwrap_or_default())
     }
 
+    #[cfg(test)]
     pub(in crate::semantic) fn active_hash(&self) -> FlatResult<Option<String>> {
         Ok(self
             .pin_generation()?
