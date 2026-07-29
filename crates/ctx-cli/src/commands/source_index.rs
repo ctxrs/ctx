@@ -106,7 +106,7 @@ impl From<&SearchArgs> for SourceSearchRequest {
 
 #[derive(Debug)]
 struct SearchCollection {
-    hits: Vec<SearchHit>,
+    result_window: SearchResultWindow,
     candidate_pool: usize,
     candidate_pool_truncated: bool,
     requested_backend: SearchBackendArg,
@@ -115,6 +115,13 @@ struct SearchCollection {
     semantic_status: &'static str,
     semantic_fallback: Option<SemanticFallbackDiagnostics>,
     semantic_diagnostics: Option<Value>,
+}
+
+#[derive(Debug)]
+struct SearchResultWindow {
+    limit: usize,
+    hits: Vec<SearchHit>,
+    more_available: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -201,9 +208,9 @@ pub(crate) fn run_search(
     telemetry.backend_requested = Some(collection.requested_backend);
     telemetry.backend_effective = Some(collection.effective_backend);
     telemetry.has_indexed_content_after = Some(index.document_count() > 0);
-    telemetry.result_count = Some(count_bucket(collection.hits.len() as u64));
-    telemetry.citation_count = Some(count_bucket(collection.hits.len() as u64));
-    telemetry.zero_result = Some(collection.hits.is_empty());
+    telemetry.result_count = Some(count_bucket(collection.result_window.hits.len() as u64));
+    telemetry.citation_count = Some(count_bucket(collection.result_window.hits.len() as u64));
+    telemetry.zero_result = Some(collection.result_window.hits.is_empty());
 
     let render_started = Instant::now();
     if args.format == JsonOutputFormat::Json {
@@ -710,6 +717,7 @@ where
         collect_search_hits_with_backend(request, &index, data_root, semantic_weight, &filters)?;
     let query_duration = query_started.elapsed();
     let events = collection
+        .result_window
         .hits
         .iter()
         .map(|hit| &hit.event)
@@ -1045,9 +1053,10 @@ where
         fuse_source_candidates(lexical_candidates, semantic_candidates, semantic_weight)
     };
     let candidate_pool = candidates.len();
-    let hits = shape_search_hits(candidates.iter(), request.limit, request.events);
+    let result_window =
+        shape_search_result_window(candidates.iter(), request.limit, request.events);
     Ok(SearchCollection {
-        hits,
+        result_window,
         candidate_pool,
         candidate_pool_truncated: candidate_pool >= SOURCE_FUSION_CANDIDATES,
         requested_backend,
@@ -1097,11 +1106,11 @@ fn collect_search_hits(
             index.search_event_candidates_any_with_filters(queries, filters, candidate_limit)?
         };
         let exhausted = candidates.len() < candidate_limit || candidate_limit >= document_count;
-        let hits = shape_search_hits(candidates.iter(), limit, event_results);
-        let enough = hits.len() >= limit;
+        let result_window = shape_search_result_window(candidates.iter(), limit, event_results);
+        let enough = result_window.more_available;
         if enough || exhausted {
             return Ok(SearchCollection {
-                hits,
+                result_window,
                 candidate_pool: candidates.len(),
                 candidate_pool_truncated: false,
                 requested_backend: SearchBackendArg::Lexical,
@@ -1114,7 +1123,7 @@ fn collect_search_hits(
         }
         if candidate_limit >= maximum {
             return Ok(SearchCollection {
-                hits,
+                result_window,
                 candidate_pool: candidates.len(),
                 candidate_pool_truncated: true,
                 requested_backend: SearchBackendArg::Lexical,
@@ -1208,44 +1217,52 @@ fn weighted_rrf_score(
     ((1.0 - semantic_weight) * lexical) + (semantic_weight * semantic)
 }
 
-fn shape_search_hits<'a>(
+fn shape_search_result_window<'a>(
     candidates: impl IntoIterator<Item = &'a EventSearchCandidate>,
     limit: usize,
     event_results: bool,
-) -> Vec<SearchHit> {
-    if event_results {
-        return candidates
+) -> SearchResultWindow {
+    let shape_limit = limit.saturating_add(1);
+    let mut hits = if event_results {
+        candidates
             .into_iter()
-            .take(limit)
+            .take(shape_limit)
             .map(|candidate| SearchHit {
                 event: candidate.event.clone(),
                 score: candidate.score,
                 more_matches_in_session: 0,
             })
-            .collect();
-    }
-
-    let mut positions = BTreeMap::<Uuid, usize>::new();
-    let mut hits = Vec::<SearchHit>::new();
-    for candidate in candidates {
-        let session_id = candidate.event.session_id.as_uuid();
-        if let Some(position) = positions.get(&session_id).copied() {
-            if let Some(hit) = hits.get_mut(position) {
-                hit.more_matches_in_session = hit.more_matches_in_session.saturating_add(1);
+            .collect()
+    } else {
+        let mut positions = BTreeMap::<Uuid, usize>::new();
+        let mut hits = Vec::<SearchHit>::new();
+        for candidate in candidates {
+            let session_id = candidate.event.session_id.as_uuid();
+            if let Some(position) = positions.get(&session_id).copied() {
+                if let Some(hit) = hits.get_mut(position) {
+                    hit.more_matches_in_session = hit.more_matches_in_session.saturating_add(1);
+                }
+                continue;
             }
-            continue;
+            if hits.len() == shape_limit {
+                continue;
+            }
+            positions.insert(session_id, hits.len());
+            hits.push(SearchHit {
+                event: candidate.event.clone(),
+                score: candidate.score,
+                more_matches_in_session: 0,
+            });
         }
-        if hits.len() == limit {
-            continue;
-        }
-        positions.insert(session_id, hits.len());
-        hits.push(SearchHit {
-            event: candidate.event.clone(),
-            score: candidate.score,
-            more_matches_in_session: 0,
-        });
+        hits
+    };
+    let more_available = hits.len() > limit;
+    hits.truncate(limit);
+    SearchResultWindow {
+        limit,
+        hits,
+        more_available,
     }
-    hits
 }
 
 fn search_json(
@@ -1260,6 +1277,7 @@ fn search_json(
 ) -> Result<Value> {
     let result_scope = if request.events { "event" } else { "session" };
     let results = collection
+        .result_window
         .hits
         .iter()
         .map(|hit| {
@@ -1320,9 +1338,10 @@ fn search_json(
         },
         "phase_attribution": phase_attribution,
         "results": results,
-        "pagination": {
-            "limit": request.limit,
+        "result_window": {
+            "limit": collection.result_window.limit,
             "returned": results.len(),
+            "more_available": collection.result_window.more_available,
         },
         "truncation": {
             "candidate_pool": collection.candidate_pool,
@@ -1462,6 +1481,9 @@ fn render_search_text(value: &Value, verbose: bool) -> String {
         output.push_str(
             "warning: source-backed session diversity was bounded by the current index query API\n",
         );
+    }
+    if value["result_window"]["more_available"] == true {
+        output.push_str("More results available.\n");
     }
     output
 }
@@ -2265,6 +2287,52 @@ mod tests {
     }
 
     #[test]
+    fn result_window_requires_one_additional_shaped_session() {
+        let candidates = [
+            EventSearchCandidate {
+                event: fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 1, 1),
+                score: 3.0,
+            },
+            EventSearchCandidate {
+                event: fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 1, 2),
+                score: 2.0,
+            },
+            EventSearchCandidate {
+                event: fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 2, 1),
+                score: 1.0,
+            },
+        ];
+
+        let duplicates_only = shape_search_result_window(candidates[..2].iter(), 1, false);
+        assert_eq!(duplicates_only.hits.len(), 1);
+        assert_eq!(duplicates_only.hits[0].more_matches_in_session, 1);
+        assert!(!duplicates_only.more_available);
+
+        let additional_session = shape_search_result_window(candidates.iter(), 1, false);
+        assert_eq!(additional_session.limit, 1);
+        assert_eq!(additional_session.hits.len(), 1);
+        assert_eq!(additional_session.hits[0].more_matches_in_session, 1);
+        assert!(additional_session.more_available);
+    }
+
+    #[test]
+    fn event_result_window_returns_limit_and_records_only_one_extra_hit() {
+        let candidates = (1..=4)
+            .map(|sequence| EventSearchCandidate {
+                event: fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 1, sequence),
+                score: 5.0 - sequence as f32,
+            })
+            .collect::<Vec<_>>();
+
+        let window = shape_search_result_window(candidates.iter(), 2, true);
+        assert_eq!(window.limit, 2);
+        assert_eq!(window.hits.len(), 2);
+        assert!(window.more_available);
+        assert_eq!(window.hits[0].event.event_sequence, 1);
+        assert_eq!(window.hits[1].event.event_sequence, 2);
+    }
+
+    #[test]
     fn show_provider_session_resolution_is_ambiguous_until_provider_qualified() {
         let temp = tempdir().unwrap();
         write_test_generation(temp.path());
@@ -2384,7 +2452,7 @@ mod tests {
 
         assert_eq!(index.generation_id(), generation);
         assert_eq!(value["retrieval"]["generation_id"], generation);
-        assert_eq!(collection.hits.len(), 1);
+        assert_eq!(collection.result_window.hits.len(), 1);
     }
 
     #[test]
@@ -2500,7 +2568,7 @@ mod tests {
             collect_search_hits_with_backend(&lexical_request, &index, temp.path(), 0.35, &filters)
                 .unwrap();
         assert_eq!(lexical.effective_backend, SearchBackendArg::Lexical);
-        assert_eq!(lexical.hits.len(), 1);
+        assert_eq!(lexical.result_window.hits.len(), 1);
 
         let mut hybrid_request = request(RefreshArg::Off);
         hybrid_request.backend = Some(SearchBackendArg::Hybrid);
@@ -2516,7 +2584,7 @@ mod tests {
             fallback.semantic_fallback.as_ref().map(|value| value.code),
             Some("semantic_store_missing")
         );
-        assert_eq!(fallback.hits.len(), 1);
+        assert_eq!(fallback.result_window.hits.len(), 1);
 
         let mut semantic_request = request(RefreshArg::Off);
         semantic_request.backend = Some(SearchBackendArg::Semantic);
@@ -2586,7 +2654,7 @@ mod tests {
             assert_eq!(collection.requested_backend, backend);
             assert_eq!(collection.effective_backend, backend);
             assert_eq!(collection.semantic_status, "ready");
-            assert_eq!(collection.hits.len(), 1);
+            assert_eq!(collection.result_window.hits.len(), 1);
             let diagnostics = collection.semantic_diagnostics.unwrap();
             assert_eq!(diagnostics["query_count"], 1);
             let query_diagnostics = &diagnostics["queries"][0]["diagnostics"];
@@ -2633,7 +2701,7 @@ mod tests {
         assert_eq!(collection.semantic_weight, 0.0);
         assert_eq!(collection.semantic_status, "skipped");
         assert!(collection.semantic_fallback.is_none());
-        assert_eq!(collection.hits.len(), 1);
+        assert_eq!(collection.result_window.hits.len(), 1);
         assert!(!temp.path().join("search").join("semantic").exists());
         assert!(!database_path(temp.path().to_path_buf()).exists());
     }
