@@ -44,8 +44,8 @@ use errors::protocol_error;
 pub(crate) use errors::stable_error_code;
 
 #[path = "client_output.rs"]
-mod output;
-pub(crate) use output::ProOutputImport;
+mod source_manifest;
+pub(crate) use source_manifest::sync_source_manifest_materialization;
 
 #[path = "client_status.rs"]
 mod client_status;
