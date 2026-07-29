@@ -9,21 +9,52 @@ pub(crate) fn blame(
     // Blame is generation-sensitive: a healthy but older Pro receipt is not
     // authoritative for the currently published Core generation. The
     // materialization path is a no-op when both generations already match.
-    let mut materialization = ProMaterializationTelemetryV1::started();
-    materialize(data_root, &mut materialization)?;
-    let first = blame_once(data_root, target.clone(), limit, cursor.clone());
+    let expected_generation = prepare_blame_generation(data_root)?;
+    let first = blame_once(
+        data_root,
+        target.clone(),
+        limit,
+        cursor.clone(),
+        &expected_generation,
+    );
     let should_catch_up = first.as_ref().is_err_and(|error| {
         matches!(
             stable_error_code(error),
-            Some("not_materialized" | "needs_rebuild" | "partial" | "needs_resume")
+            Some(
+                "not_materialized"
+                    | "needs_rebuild"
+                    | "partial"
+                    | "needs_resume"
+                    | "stale_source"
+                    | "stale_snapshot"
+            )
         )
     });
     if !should_catch_up {
         return first;
     }
+    let expected_generation = prepare_blame_generation(data_root)?;
+    blame_once(data_root, target, limit, cursor, &expected_generation)
+}
+
+fn prepare_blame_generation(data_root: &Path) -> Result<String> {
     let mut materialization = ProMaterializationTelemetryV1::started();
     materialize(data_root, &mut materialization)?;
-    blame_once(data_root, target, limit, cursor)
+
+    let mut expected = crate::semantic::pin_active_verified_generation(data_root)?
+        .generation_id()
+        .to_owned();
+    for _ in 0..3 {
+        crate::semantic::wait_for_source_backed_pro_generation(data_root, &expected)?;
+        let active = crate::semantic::pin_active_verified_generation(data_root)?
+            .generation_id()
+            .to_owned();
+        if active == expected {
+            return Ok(expected);
+        }
+        expected = active;
+    }
+    bail!("stale_source: active verified Core generation advanced repeatedly while preparing blame")
 }
 
 pub(super) fn blame_once(
@@ -31,11 +62,18 @@ pub(super) fn blame_once(
     target: BlameTarget,
     limit: u32,
     cursor: Option<String>,
+    expected_core_generation_id: &str,
 ) -> Result<BlameResult> {
     let capabilities = required_blame_capabilities(&target);
     let mut client = ProClient::connect(data_root, &capabilities)?;
     let status = helper_status(&mut client)?;
-    let request = support::current_blame_request(target, limit, cursor, &status)?;
+    let request = support::current_blame_request(
+        target,
+        limit,
+        cursor,
+        &status,
+        expected_core_generation_id,
+    )?;
     request
         .validate()
         .map_err(|error| anyhow!("invalid_request: {}", error.message))?;

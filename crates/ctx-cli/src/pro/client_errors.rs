@@ -44,6 +44,7 @@ pub(crate) fn stable_error_code(error: &anyhow::Error) -> Option<&'static str> {
         "needs_resume" => Some("needs_resume"),
         "protocol_mismatch" => Some("protocol_mismatch"),
         "source_unavailable" => Some("source_unavailable"),
+        "stale_source" => Some("stale_source"),
         "repository_unavailable" => Some("repository_unavailable"),
         "stale_fact" => Some("stale_fact"),
         "line_out_of_range" => Some("line_out_of_range"),

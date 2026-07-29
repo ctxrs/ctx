@@ -1867,6 +1867,14 @@ pub(super) fn pin_published_generation(
     Ok(open_published_generation(data_root)?.map(|index| PinnedSourceBackedGeneration { index }))
 }
 
+pub(crate) fn pin_active_verified_generation(
+    data_root: &Path,
+) -> Result<PinnedSourceBackedGeneration> {
+    pin_published_generation(data_root)
+        .context("source_unavailable: verify active Core generation")?
+        .ok_or_else(|| anyhow!("source_unavailable: active verified Core generation is missing"))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{
@@ -2596,6 +2604,16 @@ mod tests {
     }
 
     #[test]
+    fn active_generation_pin_fails_closed_when_core_state_is_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let error = match pin_active_verified_generation(temp.path()) {
+            Ok(_) => panic!("missing Core state must not fall back to a helper receipt"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").starts_with("source_unavailable:"));
+    }
+
+    #[test]
     fn activated_generation_missing_commit_payload_remains_typed_corruption() {
         let temp = tempfile::tempdir().unwrap();
         let data_root = temp.path().join("data");
@@ -2626,5 +2644,11 @@ mod tests {
             Some(IndexError::MissingCommitPayload)
         ));
         assert!(!coordinator.has_pending_request());
+
+        let error = match pin_active_verified_generation(&data_root) {
+            Ok(_) => panic!("corrupt active Core state must fail closed before blame"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").starts_with("source_unavailable:"));
     }
 }
