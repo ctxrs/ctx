@@ -90,7 +90,6 @@ impl DaemonCycleResultV1 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DaemonHistoryFreshnessV1 {
     Current,
-    Pending,
     Backoff,
     Failed,
     Unknown,
@@ -100,7 +99,6 @@ impl DaemonHistoryFreshnessV1 {
     fn as_str(self) -> &'static str {
         match self {
             Self::Current => "current",
-            Self::Pending => "pending",
             Self::Backoff => "backoff",
             Self::Failed => "failed",
             Self::Unknown => "unknown",
@@ -110,6 +108,7 @@ impl DaemonHistoryFreshnessV1 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DaemonBacklogV1 {
+    #[cfg(test)]
     Bucket(CountBucket),
     Unknown,
 }
@@ -117,6 +116,7 @@ pub(crate) enum DaemonBacklogV1 {
 impl DaemonBacklogV1 {
     fn as_str(self) -> &'static str {
         match self {
+            #[cfg(test)]
             Self::Bucket(bucket) => bucket.as_str(),
             Self::Unknown => "unknown",
         }
@@ -125,9 +125,9 @@ impl DaemonBacklogV1 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DaemonCoverageV1 {
-    Empty,
+    #[cfg(test)]
     Complete,
-    Incomplete,
+    #[cfg(test)]
     Dirty,
     Unknown,
 }
@@ -135,9 +135,9 @@ pub(crate) enum DaemonCoverageV1 {
 impl DaemonCoverageV1 {
     fn as_str(self) -> &'static str {
         match self {
-            Self::Empty => "empty",
+            #[cfg(test)]
             Self::Complete => "complete",
-            Self::Incomplete => "incomplete",
+            #[cfg(test)]
             Self::Dirty => "dirty",
             Self::Unknown => "unknown",
         }
@@ -148,8 +148,6 @@ impl DaemonCoverageV1 {
 pub(crate) enum DaemonBackoffV1 {
     None,
     History,
-    Semantic,
-    Both,
 }
 
 impl DaemonBackoffV1 {
@@ -157,8 +155,6 @@ impl DaemonBackoffV1 {
         match self {
             Self::None => "none",
             Self::History => "history",
-            Self::Semantic => "semantic",
-            Self::Both => "both",
         }
     }
 }

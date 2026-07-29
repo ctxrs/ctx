@@ -1,26 +1,34 @@
+#[cfg(test)]
 use std::time::Duration;
 
 use ctx_history_core::CaptureProvider;
 
+#[cfg(test)]
+use super::duration_bucket;
 use super::{
-    bytes_bucket, count_bucket, duration_bucket, BytesBucket, CountBucket, DurationBucket, Outcome,
-    Surface,
+    bytes_bucket, count_bucket, BytesBucket, CountBucket, DurationBucket, Outcome, Surface,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProviderRefreshTrigger {
+    #[cfg(test)]
     Setup,
     Import,
+    #[cfg(test)]
     Search,
+    #[cfg(test)]
     Daemon,
 }
 
 impl ProviderRefreshTrigger {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
+            #[cfg(test)]
             Self::Setup => "setup",
             Self::Import => "import",
+            #[cfg(test)]
             Self::Search => "search",
+            #[cfg(test)]
             Self::Daemon => "daemon",
         }
     }
@@ -28,6 +36,7 @@ impl ProviderRefreshTrigger {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProviderRefreshSourceMode {
+    #[cfg(test)]
     Discovered,
     ExplicitPath,
     ExplicitFormat,
@@ -37,6 +46,7 @@ pub(crate) enum ProviderRefreshSourceMode {
 impl ProviderRefreshSourceMode {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
+            #[cfg(test)]
             Self::Discovered => "discovered",
             Self::ExplicitPath => "explicit_path",
             Self::ExplicitFormat => "explicit_format",
@@ -80,17 +90,19 @@ impl ProviderRefreshContentEvidence {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(
-    dead_code,
-    reason = "the public telemetry vocabulary retains privacy-safe work kinds even when the current NativePath runtime cannot distinguish every kind"
-)]
 pub(crate) enum ProviderRefreshWorkKind {
     NoOp,
+    #[cfg(test)]
     Fresh,
+    #[cfg(test)]
     Append,
+    #[cfg(test)]
     Rewrite,
+    #[cfg(test)]
     Truncate,
+    #[cfg(test)]
     Replace,
+    #[cfg(test)]
     Retire,
     Mixed,
 }
@@ -99,11 +111,17 @@ impl ProviderRefreshWorkKind {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::NoOp => "no_op",
+            #[cfg(test)]
             Self::Fresh => "fresh",
+            #[cfg(test)]
             Self::Append => "append",
+            #[cfg(test)]
             Self::Rewrite => "rewrite",
+            #[cfg(test)]
             Self::Truncate => "truncate",
+            #[cfg(test)]
             Self::Replace => "replace",
+            #[cfg(test)]
             Self::Retire => "retire",
             Self::Mixed => "mixed",
         }
@@ -183,7 +201,9 @@ impl ProviderProResult {
 pub(crate) enum ProviderRefreshFailureScope {
     None,
     Record,
+    #[cfg(test)]
     Source,
+    #[cfg(test)]
     System,
     Mixed,
     Unknown,
@@ -194,7 +214,9 @@ impl ProviderRefreshFailureScope {
         match self {
             Self::None => "none",
             Self::Record => "record",
+            #[cfg(test)]
             Self::Source => "source",
+            #[cfg(test)]
             Self::System => "system",
             Self::Mixed => "mixed",
             Self::Unknown => "unknown",
@@ -206,15 +228,25 @@ impl ProviderRefreshFailureScope {
 pub(crate) enum ProviderRefreshFailureType {
     None,
     RecordRejection,
+    #[cfg(test)]
     UnsupportedSchema,
+    #[cfg(test)]
     NotFound,
+    #[cfg(test)]
     Permission,
+    #[cfg(test)]
     SourceDatabase,
+    #[cfg(test)]
     MalformedSource,
+    #[cfg(test)]
     Store,
+    #[cfg(test)]
     WorkerPanic,
+    #[cfg(test)]
     SystemIo,
+    #[cfg(test)]
     System,
+    #[cfg(test)]
     Other,
     Mixed,
     Unknown,
@@ -225,15 +257,25 @@ impl ProviderRefreshFailureType {
         match self {
             Self::None => "none",
             Self::RecordRejection => "record_rejection",
+            #[cfg(test)]
             Self::UnsupportedSchema => "unsupported_schema",
+            #[cfg(test)]
             Self::NotFound => "not_found",
+            #[cfg(test)]
             Self::Permission => "permission",
+            #[cfg(test)]
             Self::SourceDatabase => "source_database",
+            #[cfg(test)]
             Self::MalformedSource => "malformed_source",
+            #[cfg(test)]
             Self::Store => "store",
+            #[cfg(test)]
             Self::WorkerPanic => "worker_panic",
+            #[cfg(test)]
             Self::SystemIo => "system_io",
+            #[cfg(test)]
             Self::System => "system",
+            #[cfg(test)]
             Self::Other => "other",
             Self::Mixed => "mixed",
             Self::Unknown => "unknown",
@@ -288,6 +330,7 @@ pub(crate) struct ProviderRefreshPerformanceV1 {
 }
 
 impl ProviderRefreshPerformanceV1 {
+    #[cfg(test)]
     pub(crate) fn new(
         cpu_duration: Duration,
         observed_process_peak_rss_bytes: Option<u64>,
@@ -343,10 +386,7 @@ impl ProviderRefreshCompletedV1 {
         }
     }
 
-    #[allow(
-        dead_code,
-        reason = "kept as the exact-duration constructor used by telemetry contract tests"
-    )]
+    #[cfg(test)]
     pub(crate) fn foreground(
         outcome: Outcome,
         duration: Duration,

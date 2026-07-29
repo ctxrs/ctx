@@ -192,7 +192,6 @@ impl ImportTelemetry {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SetupMode {
-    CatalogOnly,
     Ready,
     Background,
 }
@@ -200,7 +199,6 @@ pub(crate) enum SetupMode {
 impl SetupMode {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
-            Self::CatalogOnly => "catalog_only",
             Self::Ready => "ready",
             Self::Background => "background",
         }

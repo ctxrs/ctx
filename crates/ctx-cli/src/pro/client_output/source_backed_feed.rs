@@ -15,6 +15,7 @@ use ctx_pro_host_protocol::{
 const MAX_CANONICAL_SOURCE_PAGES: u64 = 1_000_000;
 
 pub(super) type SourceBackedProManifest = SourceManifest;
+#[cfg(test)]
 pub(super) type SourceBackedProRemoval = SourceRemoval;
 pub(super) type SourceBackedProProgress = SourceProgress;
 pub(super) type SourceBackedProRecord = SourceRecord;
@@ -34,10 +35,15 @@ pub(super) struct SourceBackedProviderPage {
 #[derive(Debug, Clone)]
 pub(super) struct SourceBackedProSyncReport {
     pub(super) receipt: SourceBackedProReceipt,
+    #[cfg(test)]
     pub(super) prepared_sources: u64,
+    #[cfg(test)]
     pub(super) rewritten_sources: u64,
+    #[cfg(test)]
     pub(super) deleted_sources: u64,
+    #[cfg(test)]
     pub(super) reread_pages: u64,
+    #[cfg(test)]
     pub(super) reread_records: u64,
 }
 
@@ -536,6 +542,7 @@ where
         .filter(|source_id| !current_source_ids.contains(*source_id))
         .copied()
         .collect::<Vec<_>>();
+    #[cfg(test)]
     let mut deleted_sources = 0_u64;
     for source_id in stale_source_ids {
         let prior = progress_by_source
@@ -567,13 +574,20 @@ where
             bail!("invalid_response: Pro acknowledged the wrong source deletion CAS");
         }
         progress_by_source.remove(&source_id);
-        deleted_sources = deleted_sources.saturating_add(1);
+        #[cfg(test)]
+        {
+            deleted_sources = deleted_sources.saturating_add(1);
+        }
     }
 
     let mut final_sources = Vec::with_capacity(manifest.sources.len());
+    #[cfg(test)]
     let mut prepared_sources = 0_u64;
+    #[cfg(test)]
     let mut rewritten_sources = 0_u64;
+    #[cfg(test)]
     let mut reread_pages = 0_u64;
+    #[cfg(test)]
     let mut reread_records = 0_u64;
     for source in &manifest.sources {
         let source_key = source.observation().source();
@@ -603,9 +617,12 @@ where
         let prepared = consumer.prepare_source(&prepare)?;
         validate_prepared_source(&prepare, &prepared)?;
         let mut prepared = prepared.progress;
-        prepared_sources = prepared_sources.saturating_add(1);
-        if disposition == SourceBackedProDisposition::Rewrite {
-            rewritten_sources = rewritten_sources.saturating_add(1);
+        #[cfg(test)]
+        {
+            prepared_sources = prepared_sources.saturating_add(1);
+            if disposition == SourceBackedProDisposition::Rewrite {
+                rewritten_sources = rewritten_sources.saturating_add(1);
+            }
         }
 
         let mut source_pages = 0_u64;
@@ -631,8 +648,11 @@ where
             let materialized = consumer.materialize_source_page(&request)?;
             validate_materialized_page(&request, &materialized, accepted_records)?;
             prepared = materialized.progress;
-            reread_pages = reread_pages.saturating_add(1);
-            reread_records = reread_records.saturating_add(u64::from(accepted_records));
+            #[cfg(test)]
+            {
+                reread_pages = reread_pages.saturating_add(1);
+                reread_records = reread_records.saturating_add(u64::from(accepted_records));
+            }
         }
         if prepared.frontier.as_ref() != source.frontier() {
             bail!("invalid_response: Pro terminated at the wrong certified source frontier");
@@ -667,10 +687,15 @@ where
     )?;
     Ok(SourceBackedProSyncReport {
         receipt,
+        #[cfg(test)]
         prepared_sources,
+        #[cfg(test)]
         rewritten_sources,
+        #[cfg(test)]
         deleted_sources,
+        #[cfg(test)]
         reread_pages,
+        #[cfg(test)]
         reread_records,
     })
 }

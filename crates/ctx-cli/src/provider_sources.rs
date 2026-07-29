@@ -5,8 +5,8 @@ use serde_json::{json, Value};
 
 use ctx_history_capture::{
     discover_provider_sources_for_provider_report, discover_provider_sources_report,
-    provider_source_for_path, DiscoveryIssue, DiscoveryIssueKind, DiscoveryReport,
-    ProviderImportSupport, ProviderSource, ProviderSourceStatus,
+    DiscoveryIssue, DiscoveryIssueKind, DiscoveryReport, ProviderImportSupport, ProviderSource,
+    ProviderSourceStatus,
 };
 use ctx_history_core::CaptureProvider;
 
@@ -27,10 +27,6 @@ pub(crate) fn discovered_plugin_sources_json(data_root: &Path) -> Result<Vec<Val
     values.extend(plugin_manifest_failures_json(&plugin_discovery.failures));
     Ok(values)
 }
-pub(crate) fn discovered_sources() -> Vec<SourceInfo> {
-    discovered_sources_report().sources
-}
-
 pub(crate) fn discovered_sources_report() -> DiscoveryReport {
     home_dir()
         .as_deref()
@@ -75,14 +71,6 @@ pub(crate) fn manual_path_guidance(provider: CaptureProvider) -> String {
         "ctx import --provider {} --path <path>",
         provider_cli_name(provider)
     )
-}
-
-pub(crate) fn explicit_path_source(provider: CaptureProvider, path: PathBuf) -> SourceInfo {
-    source_for_path(provider, path)
-}
-
-pub(crate) fn source_for_path(provider: CaptureProvider, path: PathBuf) -> SourceInfo {
-    provider_source_for_path(provider, path)
 }
 
 pub(crate) fn sources_json(sources: &[SourceInfo]) -> Vec<Value> {
