@@ -44,9 +44,10 @@ use crate::semantic::{
 use crate::semantic::paths_status::daemon_query_socket_path;
 
 use super::hydration_budget::{
-    provider_body_is_admitted, provider_read_reservation_bytes, retained_response_item_charge,
-    successful_response_envelope_charge, HydrationBudgetError, HydrationBudgetSnapshot,
-    HydrationByteBudget, SOURCE_HYDRATION_MAX_BYTES,
+    provider_body_is_admitted, provider_read_reservation_bytes, provider_read_size_is_exact,
+    retained_response_item_content_charge, retained_response_items_metadata_charge,
+    successful_response_envelope_charge, unknown_provider_read_reservation_bytes,
+    HydrationBudgetError, HydrationBudgetSnapshot, HydrationByteBudget, SOURCE_HYDRATION_MAX_BYTES,
 };
 #[cfg(unix)]
 use super::transport::read_daemon_query_request_unix;
@@ -900,6 +901,7 @@ enum SourceHydrationMode {
 }
 
 struct SourceHydrationGroup {
+    exact_read_size: bool,
     first_position: usize,
     positions: Vec<usize>,
     requests: Vec<EventHydrationRequest>,
@@ -909,13 +911,25 @@ struct SourceHydrationWork {
     first_position: usize,
     positions: Vec<usize>,
     requests: Vec<EventHydrationRequest>,
-    reservation_bytes: usize,
+}
+
+struct SourceHydrationPlan {
+    exact_work: Vec<SourceHydrationWork>,
+    unknown_work: Vec<SourceHydrationWork>,
+    retained_preflight_bytes: usize,
+    preflight_reservation_bytes: usize,
+    unknown_item_reservation_bytes: usize,
 }
 
 struct HydratedSourceItem {
     position: usize,
     event_id: StableEntityId,
     text: String,
+}
+
+struct HydratedSourceWork {
+    items: Vec<HydratedSourceItem>,
+    retained_bytes: usize,
 }
 
 enum SourceHydrationWorkFailure {
@@ -1091,18 +1105,14 @@ where
                 )
             }
         };
-        let envelope_charge = match successful_response_envelope_charge(retained_generation_id) {
-            Ok(charge) => charge,
-            Err(error) => return source_hydration_budget_failure(error),
-        };
-        if let Err(error) = budget.charge_retained(envelope_charge) {
-            return source_hydration_budget_failure(error);
-        }
-
         let mut grouped =
-            BTreeMap::<[u8; 32], (usize, Vec<usize>, Vec<EventHydrationRequest>)>::new();
+            BTreeMap::<([u8; 32], bool), (usize, Vec<usize>, Vec<EventHydrationRequest>)>::new();
         for (position, request) in batch.events().iter().enumerate() {
-            let key = request.locator().source().exact_descriptor_digest();
+            let exact_read_size = provider_read_size_is_exact(request);
+            let key = (
+                request.locator().source().exact_descriptor_digest(),
+                exact_read_size,
+            );
             let group = grouped
                 .entry(key)
                 .or_insert_with(|| (position, Vec::new(), Vec::new()));
@@ -1113,50 +1123,37 @@ where
             .into_values()
             .map(
                 |(first_position, positions, requests)| SourceHydrationGroup {
+                    exact_read_size: provider_read_size_is_exact(&requests[0]),
                     first_position,
                     positions,
                     requests,
                 },
             )
             .collect::<Vec<_>>();
-        let work = match plan_source_hydration_work(groups, mode, &budget) {
-            Ok(work) => work,
+        let envelope_charge = match successful_response_envelope_charge(retained_generation_id) {
+            Ok(charge) => charge,
             Err(error) => return source_hydration_budget_failure(error),
         };
-        let next = AtomicUsize::new(0);
-        let results = Mutex::new(Vec::<(
-            usize,
-            std::result::Result<Vec<HydratedSourceItem>, SourceHydrationWorkFailure>,
-        )>::with_capacity(work.len()));
-        std::thread::scope(|scope| {
-            for _ in 0..work.len().min(DAEMON_SOURCE_HYDRATION_MAX_WORKERS) {
-                scope.spawn(|| loop {
-                    if budget.is_cancelled() {
-                        break;
-                    }
-                    let index = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(item) = work.get(index) else {
-                        break;
-                    };
-                    if budget.is_cancelled() {
-                        break;
-                    }
-                    let result = hydrate_source_work(resolver, item, mode, &budget);
-                    if result.is_err() {
-                        budget.cancel();
-                    }
-                    results
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner())
-                        .push((item.first_position, result));
-                });
-            }
-        });
-        let mut results = results
-            .into_inner()
-            .unwrap_or_else(|error| error.into_inner());
-        results.sort_by_key(|(position, _)| *position);
-        if let Some(failure) = results.iter().find_map(|(_, result)| match result {
+        let plan = match plan_source_hydration_work(groups, mode, envelope_charge, batch.len()) {
+            Ok(plan) => plan,
+            Err(error) => return source_hydration_budget_failure(error),
+        };
+        // Fixed response charges and every certified JSONL range are admitted
+        // as one request before any resolver or result collection is entered.
+        let preflight_reservation = match budget.reserve(plan.preflight_reservation_bytes) {
+            Ok(reservation) => reservation,
+            Err(error) => return source_hydration_budget_failure(error),
+        };
+        let SourceHydrationPlan {
+            exact_work,
+            mut unknown_work,
+            retained_preflight_bytes,
+            unknown_item_reservation_bytes,
+            ..
+        } = plan;
+        let exact_work_len = exact_work.len();
+        let exact_results = hydrate_source_work_batch(resolver, &exact_work, mode, &budget);
+        if let Some(failure) = exact_results.iter().find_map(|(_, result)| match result {
             Err(SourceHydrationWorkFailure::Resolver(failure)) => Some(failure),
             _ => None,
         }) {
@@ -1168,26 +1165,105 @@ where
                 refresh_scheduled,
             );
         }
-        let budget_failed = results.iter().any(|(_, result)| {
-            matches!(
-                result,
-                Err(SourceHydrationWorkFailure::Budget(
-                    HydrationBudgetError::Cancelled | HydrationBudgetError::Exhausted
-                ))
-            )
-        });
-        if budget_failed || results.len() != work.len() || budget.snapshot().exhausted {
+        if source_hydration_work_budget_failed(&exact_results, exact_work_len, &budget) {
             return source_hydration_budget_failure(HydrationBudgetError::Exhausted);
+        }
+        let (exact_retained_bytes, exact_items) = match hydrated_source_work_totals(&exact_results)
+        {
+            Ok(totals) => totals,
+            Err(error) => {
+                budget.cancel_exhausted();
+                return source_hydration_budget_failure(error);
+            }
+        };
+        let retained_bytes = match retained_preflight_bytes.checked_add(exact_retained_bytes) {
+            Some(bytes) => bytes,
+            None => {
+                budget.cancel_exhausted();
+                return source_hydration_budget_failure(HydrationBudgetError::Exhausted);
+            }
+        };
+        if let Err(error) = preflight_reservation.commit(retained_bytes, exact_items) {
+            return source_hydration_budget_failure(error);
+        }
+        let mut hydrated_work = exact_results
+            .into_iter()
+            .filter_map(|(_, result)| result.ok())
+            .collect::<Vec<_>>();
+
+        // Unknown-size coordinates cannot be admitted request-wide at their
+        // 16 MiB ceiling without rejecting ordinary batches. Join each wave,
+        // commit its actual retained content, then size the next wave from the
+        // remaining shared budget. Performance residual: a same-source group
+        // is split into at-most-three-item resolver batches, so SQLite may use
+        // multiple short snapshots. Removing that cost would require a later
+        // budget-aware streaming provider batch, not a wider provider API here.
+        while !unknown_work.is_empty() {
+            let max_wave_items = budget.available_when_idle() / unknown_item_reservation_bytes;
+            if max_wave_items == 0 {
+                budget.cancel_exhausted();
+                return source_hydration_budget_failure(HydrationBudgetError::Exhausted);
+            }
+            let wave = take_unknown_source_hydration_wave(&mut unknown_work, max_wave_items);
+            let wave_items = wave.iter().try_fold(0_usize, |items, work| {
+                items.checked_add(work.requests.len())
+            });
+            let Some(wave_items) = wave_items.filter(|items| *items > 0) else {
+                budget.cancel_exhausted();
+                return source_hydration_budget_failure(HydrationBudgetError::Exhausted);
+            };
+            let wave_reservation_bytes =
+                match unknown_item_reservation_bytes.checked_mul(wave_items) {
+                    Some(bytes) => bytes,
+                    None => {
+                        budget.cancel_exhausted();
+                        return source_hydration_budget_failure(HydrationBudgetError::Exhausted);
+                    }
+                };
+            let wave_reservation = match budget.reserve(wave_reservation_bytes) {
+                Ok(reservation) => reservation,
+                Err(error) => return source_hydration_budget_failure(error),
+            };
+            let wave_work_len = wave.len();
+            let wave_results = hydrate_source_work_batch(resolver, &wave, mode, &budget);
+            if let Some(failure) = wave_results.iter().find_map(|(_, result)| match result {
+                Err(SourceHydrationWorkFailure::Resolver(failure)) => Some(failure),
+                _ => None,
+            }) {
+                let refresh_scheduled = refresh(failure);
+                return source_hydration_protocol_failure(
+                    "source_hydration_failed",
+                    hydration_failure_kind_name(failure.kind),
+                    &failure.detail,
+                    refresh_scheduled,
+                );
+            }
+            if source_hydration_work_budget_failed(&wave_results, wave_work_len, &budget) {
+                return source_hydration_budget_failure(HydrationBudgetError::Exhausted);
+            }
+            let (wave_retained_bytes, committed_items) =
+                match hydrated_source_work_totals(&wave_results) {
+                    Ok(totals) => totals,
+                    Err(error) => {
+                        budget.cancel_exhausted();
+                        return source_hydration_budget_failure(error);
+                    }
+                };
+            if let Err(error) = wave_reservation.commit(wave_retained_bytes, committed_items) {
+                return source_hydration_budget_failure(error);
+            }
+            hydrated_work.extend(
+                wave_results
+                    .into_iter()
+                    .filter_map(|(_, result)| result.ok()),
+            );
         }
 
         let mut ordered = (0..batch.len())
             .map(|_| None)
             .collect::<Vec<Option<HydratedSourceItem>>>();
-        for (_, result) in results {
-            let Ok(items) = result else {
-                continue;
-            };
-            for item in items {
+        for hydrated in hydrated_work {
+            for item in hydrated.items {
                 let Some(slot) = ordered.get_mut(item.position) else {
                     return source_hydration_protocol_failure(
                         "invalid_resolver_response",
@@ -1245,67 +1321,199 @@ where
 fn plan_source_hydration_work(
     groups: Vec<SourceHydrationGroup>,
     mode: SourceHydrationMode,
-    budget: &HydrationByteBudget,
-) -> std::result::Result<Vec<SourceHydrationWork>, HydrationBudgetError> {
+    envelope_charge: usize,
+    item_count: usize,
+) -> std::result::Result<SourceHydrationPlan, HydrationBudgetError> {
     let display_copy_bytes = match mode {
         SourceHydrationMode::SearchDisplay { max_chars } => max_chars
             .checked_mul(4)
             .ok_or(HydrationBudgetError::Exhausted)?,
         SourceHydrationMode::Complete => 0,
     };
-    let max_reservation = budget.available_when_idle();
-    let mut work = Vec::new();
+    let retained_preflight_bytes = envelope_charge
+        .checked_add(retained_response_items_metadata_charge(item_count)?)
+        .ok_or(HydrationBudgetError::Exhausted)?;
+    let mut preflight_reservation_bytes = retained_preflight_bytes;
+    let mut exact_work = Vec::with_capacity(groups.len());
+    let mut unknown_work = Vec::with_capacity(groups.len());
     for group in groups {
-        let mut positions = Vec::new();
-        let mut requests = Vec::new();
-        let mut reservation_bytes = 0_usize;
-        for (position, request) in group.positions.into_iter().zip(group.requests) {
-            let item_bytes = provider_read_reservation_bytes(&request, display_copy_bytes)?;
-            if item_bytes > max_reservation {
-                return Err(HydrationBudgetError::Exhausted);
+        let work = SourceHydrationWork {
+            first_position: group.first_position,
+            positions: group.positions,
+            requests: group.requests,
+        };
+        if group.exact_read_size {
+            for request in &work.requests {
+                let item_bytes = provider_read_reservation_bytes(request, display_copy_bytes)?;
+                preflight_reservation_bytes = preflight_reservation_bytes
+                    .checked_add(item_bytes)
+                    .ok_or(HydrationBudgetError::Exhausted)?;
             }
-            let next = reservation_bytes
-                .checked_add(item_bytes)
-                .ok_or(HydrationBudgetError::Exhausted)?;
-            if !requests.is_empty() && next > max_reservation {
-                work.push(SourceHydrationWork {
-                    first_position: positions[0],
-                    positions,
-                    requests,
-                    reservation_bytes,
-                });
-                positions = Vec::new();
-                requests = Vec::new();
-                reservation_bytes = 0;
-            }
-            reservation_bytes = reservation_bytes
-                .checked_add(item_bytes)
-                .ok_or(HydrationBudgetError::Exhausted)?;
-            positions.push(position);
-            requests.push(request);
-        }
-        if !requests.is_empty() {
-            work.push(SourceHydrationWork {
-                first_position: positions.first().copied().unwrap_or(group.first_position),
-                positions,
-                requests,
-                reservation_bytes,
-            });
+            exact_work.push(work);
+        } else {
+            unknown_work.push(work);
         }
     }
-    work.sort_by_key(|item| item.first_position);
-    Ok(work)
+    exact_work.sort_by_key(|item| item.first_position);
+    unknown_work.sort_by_key(|item| item.first_position);
+    Ok(SourceHydrationPlan {
+        exact_work,
+        unknown_work,
+        retained_preflight_bytes,
+        preflight_reservation_bytes,
+        unknown_item_reservation_bytes: unknown_provider_read_reservation_bytes(
+            display_copy_bytes,
+        )?,
+    })
+}
+
+fn hydrate_source_work_batch<R>(
+    resolver: &R,
+    work: &[SourceHydrationWork],
+    mode: SourceHydrationMode,
+    budget: &HydrationByteBudget,
+) -> Vec<(
+    usize,
+    std::result::Result<HydratedSourceWork, SourceHydrationWorkFailure>,
+)>
+where
+    R: ContentSourceResolver + Sync,
+{
+    let next = AtomicUsize::new(0);
+    let results = Mutex::new(Vec::with_capacity(work.len()));
+    std::thread::scope(|scope| {
+        for _ in 0..work.len().min(DAEMON_SOURCE_HYDRATION_MAX_WORKERS) {
+            scope.spawn(|| loop {
+                if budget.is_cancelled() {
+                    break;
+                }
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                let Some(item) = work.get(index) else {
+                    break;
+                };
+                if budget.is_cancelled() {
+                    break;
+                }
+                let result = hydrate_source_work(resolver, item, mode);
+                match &result {
+                    Err(SourceHydrationWorkFailure::Budget(HydrationBudgetError::Exhausted)) => {
+                        budget.cancel_exhausted()
+                    }
+                    Err(_) => budget.cancel(),
+                    Ok(_) => {}
+                }
+                results
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push((item.first_position, result));
+            });
+        }
+    });
+    let mut results = results
+        .into_inner()
+        .unwrap_or_else(|error| error.into_inner());
+    results.sort_by_key(|(position, _)| *position);
+    results
+}
+
+fn source_hydration_work_budget_failed(
+    results: &[(
+        usize,
+        std::result::Result<HydratedSourceWork, SourceHydrationWorkFailure>,
+    )],
+    expected_work: usize,
+    budget: &HydrationByteBudget,
+) -> bool {
+    results.iter().any(|(_, result)| {
+        matches!(
+            result,
+            Err(SourceHydrationWorkFailure::Budget(
+                HydrationBudgetError::Cancelled | HydrationBudgetError::Exhausted
+            ))
+        )
+    }) || results.len() != expected_work
+        || budget.snapshot().exhausted
+}
+
+fn hydrated_source_work_totals(
+    results: &[(
+        usize,
+        std::result::Result<HydratedSourceWork, SourceHydrationWorkFailure>,
+    )],
+) -> std::result::Result<(usize, usize), HydrationBudgetError> {
+    results.iter().try_fold(
+        (0_usize, 0_usize),
+        |(retained_bytes, items), (_, result)| {
+            let Ok(hydrated) = result else {
+                return Err(HydrationBudgetError::Exhausted);
+            };
+            Ok((
+                retained_bytes
+                    .checked_add(hydrated.retained_bytes)
+                    .ok_or(HydrationBudgetError::Exhausted)?,
+                items
+                    .checked_add(hydrated.items.len())
+                    .ok_or(HydrationBudgetError::Exhausted)?,
+            ))
+        },
+    )
+}
+
+fn take_unknown_source_hydration_wave(
+    pending: &mut Vec<SourceHydrationWork>,
+    max_items: usize,
+) -> Vec<SourceHydrationWork> {
+    let mut counts = vec![0_usize; pending.len()];
+    let mut remaining = max_items;
+    for (count, work) in counts.iter_mut().zip(pending.iter()) {
+        if remaining == 0 {
+            break;
+        }
+        if !work.requests.is_empty() {
+            *count = 1;
+            remaining -= 1;
+        }
+    }
+    while remaining > 0 {
+        let mut advanced = false;
+        for (count, work) in counts.iter_mut().zip(pending.iter()) {
+            if remaining == 0 {
+                break;
+            }
+            if *count > 0 && *count < work.requests.len() {
+                *count += 1;
+                remaining -= 1;
+                advanced = true;
+            }
+        }
+        if !advanced {
+            break;
+        }
+    }
+
+    let mut wave = Vec::new();
+    for (work, count) in pending.iter_mut().zip(counts) {
+        if count == 0 {
+            continue;
+        }
+        let positions = work.positions.drain(..count).collect::<Vec<_>>();
+        let requests = work.requests.drain(..count).collect::<Vec<_>>();
+        wave.push(SourceHydrationWork {
+            first_position: positions[0],
+            positions,
+            requests,
+        });
+    }
+    pending.retain(|work| !work.requests.is_empty());
+    wave.sort_by_key(|work| work.first_position);
+    wave
 }
 
 fn hydrate_source_work(
     resolver: &impl ContentSourceResolver,
     work: &SourceHydrationWork,
     mode: SourceHydrationMode,
-    budget: &HydrationByteBudget,
-) -> std::result::Result<Vec<HydratedSourceItem>, SourceHydrationWorkFailure> {
-    let reservation = budget
-        .reserve(work.reservation_bytes)
-        .map_err(SourceHydrationWorkFailure::Budget)?;
+) -> std::result::Result<HydratedSourceWork, SourceHydrationWorkFailure> {
     let request = BatchHydrationRequest::new(work.requests.clone()).map_err(|error| {
         SourceHydrationWorkFailure::Resolver(HydrationFailure {
             kind: HydrationFailureKind::InvalidLocator,
@@ -1371,7 +1579,7 @@ fn hydrate_source_work(
             };
             retained_bytes = retained_bytes
                 .checked_add(
-                    retained_response_item_charge(&text)
+                    retained_response_item_content_charge(&text)
                         .map_err(SourceHydrationWorkFailure::Budget)?,
                 )
                 .ok_or(SourceHydrationWorkFailure::Budget(
@@ -1384,10 +1592,10 @@ fn hydrate_source_work(
             })
         })
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    reservation
-        .commit(retained_bytes, items.len())
-        .map_err(SourceHydrationWorkFailure::Budget)?;
-    Ok(items)
+    Ok(HydratedSourceWork {
+        items,
+        retained_bytes,
+    })
 }
 
 fn bounded_search_display_text(text: String, max_chars: usize) -> String {
@@ -1401,12 +1609,15 @@ fn bounded_search_display_text(text: String, max_chars: usize) -> String {
 }
 
 fn source_hydration_budget_failure(_error: HydrationBudgetError) -> Value {
-    source_hydration_protocol_failure(
-        "response_limit",
-        "temporarily_unavailable",
-        "source hydration response exceeds the daemon byte cap",
-        false,
-    )
+    compact_json(json!({
+        "ok": false,
+        "schema_version": 1,
+        "code": "hydration_budget_exceeded",
+        "failure_kind": "content_too_large",
+        "detail": "source hydration request exceeds the daemon byte budget",
+        "refresh_scheduled": false,
+        "retryable": false,
+    }))
 }
 
 fn source_hydration_mode(request: &Value) -> Result<SourceHydrationMode> {
@@ -1794,6 +2005,31 @@ mod source_hydration_tests {
         })
     }
 
+    fn assert_typed_budget_failure(response: &Value, snapshot: HydrationBudgetSnapshot) {
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["code"], "hydration_budget_exceeded");
+        assert_eq!(response["failure_kind"], "content_too_large");
+        assert_eq!(
+            response["detail"],
+            "source hydration request exceeds the daemon byte budget"
+        );
+        assert_eq!(response["retryable"], false);
+        assert_eq!(response["refresh_scheduled"], false);
+        assert!(response.get("generation_id").is_none());
+        assert!(response.get("items").is_none());
+        assert_eq!(snapshot.in_flight_bytes, 0);
+        assert!(snapshot.peak_bytes <= snapshot.limit_bytes);
+        assert!(snapshot.cancelled);
+        assert!(snapshot.exhausted);
+    }
+
+    fn assert_preflight_budget_failure(response: &Value, snapshot: HydrationBudgetSnapshot) {
+        assert_typed_budget_failure(response, snapshot);
+        assert_eq!(snapshot.retained_bytes, 0);
+        assert_eq!(snapshot.committed_items, 0);
+        assert_eq!(snapshot.reservations, 0);
+    }
+
     #[derive(Default)]
     struct MockResolver {
         bodies: HashMap<StableEntityId, Vec<u8>>,
@@ -1895,6 +2131,64 @@ mod source_hydration_tests {
         }
     }
 
+    fn assert_tiny_unknown_batch_succeeds(items: Vec<FixtureLocator>, body_bytes: usize) {
+        let expected_ids = items
+            .iter()
+            .map(|item| item.event_id.as_uuid().to_string())
+            .collect::<Vec<_>>();
+        let resolver = items
+            .iter()
+            .fold(MockResolver::default(), |resolver, item| {
+                resolver.with_body_size(item, body_bytes)
+            });
+        let references = items.iter().collect::<Vec<_>>();
+        let (response, snapshot) = handle_source_hydration_batch_with_budget(
+            &request(&references, "complete", None),
+            GENERATION,
+            &resolver,
+            |_| false,
+            DAEMON_SOURCE_HYDRATION_MAX_RESPONSE_BYTES,
+        );
+
+        assert_eq!(response["ok"], true);
+        assert_eq!(
+            response["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["event_id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            expected_ids
+        );
+        assert!(serde_json::to_vec(&response).unwrap().len() <= snapshot.retained_bytes);
+        assert_eq!(resolver.allocated_items.load(Ordering::SeqCst), items.len());
+        assert_eq!(
+            resolver.allocated_bytes.load(Ordering::SeqCst),
+            items.len() * body_bytes
+        );
+        let call_sizes = resolver
+            .batch_calls
+            .into_inner()
+            .unwrap()
+            .into_iter()
+            .map(|call| call.len())
+            .collect::<Vec<_>>();
+        assert_eq!(call_sizes.iter().sum::<usize>(), items.len());
+        assert!(call_sizes.iter().all(|size| (1..=3).contains(size)));
+        assert_eq!(call_sizes.len(), items.len().div_ceil(3));
+        assert_eq!(snapshot.reservations, call_sizes.len() + 1);
+        assert_eq!(snapshot.committed_items, items.len());
+        assert_eq!(snapshot.in_flight_bytes, 0);
+        assert!(snapshot.peak_bytes <= snapshot.limit_bytes);
+        assert!(!snapshot.cancelled);
+        assert!(!snapshot.exhausted);
+        eprintln!(
+            "tiny unknown-size hydration evidence: items={}, calls={}, snapshot={snapshot:?}",
+            items.len(),
+            call_sizes.len(),
+        );
+    }
+
     #[test]
     fn source_hydration_groups_by_exact_source_and_restores_request_order() {
         let first = fixture(1, 1);
@@ -1962,7 +2256,36 @@ mod source_hydration_tests {
     }
 
     #[test]
-    fn source_hydration_unknown_size_workers_share_one_aggregate_budget() {
+    fn source_hydration_mixed_sqlite_jsonl_workers_use_bounded_phases() {
+        let mut items = (1..=3)
+            .map(|lineage| sqlite_fixture(lineage, 1))
+            .collect::<Vec<_>>();
+        items.extend((4..=9).map(|lineage| jsonl_fixture(lineage, 1, 64)));
+        let resolver = items
+            .iter()
+            .fold(MockResolver::default().with_delay(), |resolver, item| {
+                resolver.with_body(item, format!("source {}", item.event_id))
+            });
+        let references = items.iter().collect::<Vec<_>>();
+        let (response, snapshot) = handle_source_hydration_batch_with_budget(
+            &request(&references, "complete", None),
+            GENERATION,
+            &resolver,
+            |_| false,
+            DAEMON_SOURCE_HYDRATION_MAX_RESPONSE_BYTES,
+        );
+
+        assert_eq!(response["ok"], true);
+        assert!((2..=DAEMON_SOURCE_HYDRATION_MAX_WORKERS)
+            .contains(&resolver.max_active.load(Ordering::SeqCst)));
+        assert_eq!(resolver.batch_calls.into_inner().unwrap().len(), 9);
+        assert!(snapshot.peak_bytes <= snapshot.limit_bytes);
+        assert_eq!(snapshot.committed_items, 9);
+        assert_eq!(snapshot.reservations, 2);
+    }
+
+    #[test]
+    fn source_hydration_unknown_size_workers_share_three_item_waves() {
         let items = (1..=9)
             .map(|lineage| fixture(lineage, 1))
             .collect::<Vec<_>>();
@@ -1983,8 +2306,35 @@ mod source_hydration_tests {
         assert_eq!(response["ok"], true);
         assert!((2..=3).contains(&resolver.max_active.load(Ordering::SeqCst)));
         assert_eq!(resolver.batch_calls.into_inner().unwrap().len(), 9);
-        assert!(snapshot.peak_bytes <= snapshot.limit_bytes);
+        assert_eq!(snapshot.reservations, 4);
         assert_eq!(snapshot.committed_items, 9);
+        assert!(snapshot.peak_bytes <= snapshot.limit_bytes);
+    }
+
+    #[test]
+    fn source_hydration_20_tiny_native_and_sqlite_items_succeed_in_bounded_waves() {
+        let native = (0..20)
+            .map(|sequence| fixture(30, sequence))
+            .collect::<Vec<_>>();
+        assert_tiny_unknown_batch_succeeds(native, 32);
+
+        let sqlite = (0..20)
+            .map(|sequence| sqlite_fixture(31, sequence))
+            .collect::<Vec<_>>();
+        assert_tiny_unknown_batch_succeeds(sqlite, 32);
+    }
+
+    #[test]
+    fn source_hydration_128_tiny_native_and_sqlite_items_succeed_in_bounded_waves() {
+        let native = (0..DAEMON_SOURCE_HYDRATION_MAX_ITEMS as u64)
+            .map(|sequence| fixture(32, sequence))
+            .collect::<Vec<_>>();
+        assert_tiny_unknown_batch_succeeds(native, 32);
+
+        let sqlite = (0..DAEMON_SOURCE_HYDRATION_MAX_ITEMS as u64)
+            .map(|sequence| sqlite_fixture(33, sequence))
+            .collect::<Vec<_>>();
+        assert_tiny_unknown_batch_succeeds(sqlite, 32);
     }
 
     #[test]
@@ -2063,7 +2413,7 @@ mod source_hydration_tests {
     }
 
     #[test]
-    fn source_hydration_ordinary_jsonl_and_grouped_sqlite_batch_preserves_parity() {
+    fn source_hydration_ordinary_jsonl_and_sqlite_preserves_results_with_wave_counter() {
         let jsonl = (0..64)
             .map(|sequence| jsonl_fixture(20, sequence, 64))
             .collect::<Vec<_>>();
@@ -2111,10 +2461,22 @@ mod source_hydration_tests {
             .map(|call| call.len())
             .collect::<Vec<_>>();
         assert!(call_sizes.contains(&64));
-        assert!(call_sizes.iter().filter(|size| **size <= 3).count() >= 22);
+        let sqlite_call_sizes = call_sizes
+            .iter()
+            .copied()
+            .filter(|size| *size <= 3)
+            .collect::<Vec<_>>();
+        assert_eq!(sqlite_call_sizes.iter().sum::<usize>(), 64);
+        assert_eq!(sqlite_call_sizes.len(), 64_usize.div_ceil(3));
+        assert!(sqlite_call_sizes.iter().all(|size| (1..=3).contains(size)));
         assert_eq!(snapshot.committed_items, 128);
+        assert_eq!(snapshot.reservations, 23);
         assert!(snapshot.peak_bytes <= snapshot.limit_bytes);
         assert_eq!(snapshot.in_flight_bytes, 0);
+        eprintln!(
+            "same-source SQLite wave receipt: items=64, resolver_calls={}, call_sizes={sqlite_call_sizes:?}, snapshot={snapshot:?}",
+            sqlite_call_sizes.len(),
+        );
     }
 
     #[test]
@@ -2141,6 +2503,7 @@ mod source_hydration_tests {
         let exact_request =
             EventHydrationRequest::new(exact.event_id, exact.locator.clone()).unwrap();
         let budget_limit = successful_response_envelope_charge(GENERATION).unwrap()
+            + retained_response_items_metadata_charge(1).unwrap()
             + provider_read_reservation_bytes(&exact_request, 0).unwrap();
         let exact_resolver = MockResolver::default().with_body(&exact, "x");
         let (exact_response, exact_snapshot) = handle_source_hydration_batch_with_budget(
@@ -2153,10 +2516,12 @@ mod source_hydration_tests {
 
         assert_eq!(exact_response["ok"], true);
         assert_eq!(exact_snapshot.peak_bytes, budget_limit);
+        assert_eq!(exact_snapshot.reservations, 1);
+        assert_eq!(exact_snapshot.committed_items, 1);
         assert_eq!(exact_resolver.batch_calls.into_inner().unwrap().len(), 1);
 
         let over = jsonl_fixture(27, 0, 101);
-        let over_resolver = MockResolver::default().with_body(&over, "x");
+        let over_resolver = MockResolver::default().with_body_size(&over, 1);
         let (over_response, over_snapshot) = handle_source_hydration_batch_with_budget(
             &request(&[&over], "complete", None),
             GENERATION,
@@ -2165,14 +2530,82 @@ mod source_hydration_tests {
             budget_limit,
         );
 
-        assert_eq!(over_response["ok"], false);
-        assert_eq!(over_response["code"], "response_limit");
+        assert_preflight_budget_failure(&over_response, over_snapshot);
         assert!(over_resolver.batch_calls.into_inner().unwrap().is_empty());
-        assert_eq!(over_snapshot.reservations, 0);
+        assert_eq!(over_resolver.allocated_items.load(Ordering::SeqCst), 0);
+        assert_eq!(over_resolver.allocated_bytes.load(Ordering::SeqCst), 0);
     }
 
     #[test]
-    fn source_hydration_128_near_limit_jsonl_items_stop_after_one_bounded_group() {
+    fn source_hydration_valid_policy_near_limit_bounds_value_and_transport_coexistence() {
+        let probe = jsonl_fixture(28, 0, 1);
+        let probe_request =
+            EventHydrationRequest::new(probe.event_id, probe.locator.clone()).unwrap();
+        let read_overhead = provider_read_reservation_bytes(&probe_request, 0).unwrap() - 1;
+        let envelope_charge = successful_response_envelope_charge(GENERATION).unwrap();
+        let metadata_charge = retained_response_items_metadata_charge(4).unwrap();
+        let body_bytes =
+            (DAEMON_SOURCE_HYDRATION_MAX_RESPONSE_BYTES - envelope_charge - metadata_charge) / 4
+                - read_overhead;
+        let items = (0..4)
+            .map(|sequence| jsonl_fixture(28, sequence, body_bytes))
+            .collect::<Vec<_>>();
+        let resolver = items
+            .iter()
+            .fold(MockResolver::default(), |resolver, item| {
+                resolver.with_body_size(item, body_bytes)
+            });
+        let references = items.iter().collect::<Vec<_>>();
+        let expected_reservation =
+            items
+                .iter()
+                .try_fold(envelope_charge + metadata_charge, |total, item| {
+                    let request =
+                        EventHydrationRequest::new(item.event_id, item.locator.clone()).unwrap();
+                    total.checked_add(provider_read_reservation_bytes(&request, 0).unwrap())
+                });
+        let expected_reservation = expected_reservation.unwrap();
+        let (response, snapshot) = handle_source_hydration_batch_with_budget(
+            &request(&references, "complete", None),
+            GENERATION,
+            &resolver,
+            |_| false,
+            DAEMON_SOURCE_HYDRATION_MAX_RESPONSE_BYTES,
+        );
+
+        assert_eq!(response["ok"], true);
+        assert_eq!(snapshot.peak_bytes, expected_reservation);
+        assert!(
+            DAEMON_SOURCE_HYDRATION_MAX_RESPONSE_BYTES - snapshot.peak_bytes < 4,
+            "{snapshot:?}"
+        );
+        assert_eq!(snapshot.reservations, 1);
+        assert_eq!(snapshot.committed_items, 4);
+        assert_eq!(resolver.allocated_items.load(Ordering::SeqCst), 4);
+        assert_eq!(
+            resolver.allocated_bytes.load(Ordering::SeqCst),
+            body_bytes * 4
+        );
+        assert_eq!(resolver.batch_calls.into_inner().unwrap().len(), 1);
+
+        let transport = serde_json::to_string(&response).unwrap();
+        assert!(transport.len() <= DAEMON_SOURCE_HYDRATION_MAX_RESPONSE_BYTES);
+        assert!(transport.capacity() <= DAEMON_SOURCE_HYDRATION_MAX_RESPONSE_BYTES);
+        assert!(transport.len() <= snapshot.retained_bytes);
+        let coexistence_peak = snapshot
+            .retained_bytes
+            .checked_add(transport.capacity())
+            .unwrap();
+        assert!(coexistence_peak <= DAEMON_SOURCE_HYDRATION_MAX_RESPONSE_BYTES.saturating_mul(2));
+        eprintln!(
+            "near-limit serialization evidence: hydration={snapshot:?}, transport_len={}, transport_capacity={}, coexistence_peak={coexistence_peak}",
+            transport.len(),
+            transport.capacity(),
+        );
+    }
+
+    #[test]
+    fn source_hydration_128_near_limit_jsonl_items_fail_before_resolver_work() {
         let body_bytes = SOURCE_HYDRATION_MAX_ITEM_BYTES - 4 * 1024;
         let items = (0..DAEMON_SOURCE_HYDRATION_MAX_ITEMS as u64)
             .map(|sequence| jsonl_fixture(22, sequence, body_bytes))
@@ -2191,24 +2624,16 @@ mod source_hydration_tests {
             DAEMON_SOURCE_HYDRATION_MAX_RESPONSE_BYTES,
         );
 
-        assert_eq!(response["ok"], false);
-        assert_eq!(response["code"], "response_limit");
-        assert_eq!(resolver.allocated_items.load(Ordering::SeqCst), 4);
-        assert_eq!(
-            resolver.allocated_bytes.load(Ordering::SeqCst),
-            body_bytes * 4
-        );
-        assert_eq!(resolver.batch_calls.into_inner().unwrap().len(), 1);
-        assert_eq!(snapshot.committed_items, 4);
-        assert!(snapshot.exhausted);
-        assert!(snapshot.peak_bytes <= snapshot.limit_bytes);
-        assert_eq!(snapshot.in_flight_bytes, 0);
+        assert_preflight_budget_failure(&response, snapshot);
+        assert_eq!(resolver.allocated_items.load(Ordering::SeqCst), 0);
+        assert_eq!(resolver.allocated_bytes.load(Ordering::SeqCst), 0);
+        assert!(resolver.batch_calls.into_inner().unwrap().is_empty());
         eprintln!("jsonl near-limit budget evidence: {snapshot:?}");
     }
 
     #[test]
-    fn source_hydration_128_near_limit_sqlite_items_use_the_same_group_budget() {
-        let body_bytes = SOURCE_HYDRATION_MAX_ITEM_BYTES - 4 * 1024;
+    fn source_hydration_unknown_huge_sqlite_items_stop_before_the_next_wave() {
+        let body_bytes = 10 * 1024 * 1024;
         let items = (0..DAEMON_SOURCE_HYDRATION_MAX_ITEMS as u64)
             .map(|sequence| sqlite_fixture(23, sequence))
             .collect::<Vec<_>>();
@@ -2226,23 +2651,24 @@ mod source_hydration_tests {
             DAEMON_SOURCE_HYDRATION_MAX_RESPONSE_BYTES,
         );
 
-        assert_eq!(response["ok"], false);
-        assert_eq!(response["code"], "response_limit");
-        assert_eq!(resolver.allocated_items.load(Ordering::SeqCst), 3);
+        assert_typed_budget_failure(&response, snapshot);
+        assert_eq!(resolver.allocated_items.load(Ordering::SeqCst), 5);
         assert_eq!(
             resolver.allocated_bytes.load(Ordering::SeqCst),
-            body_bytes * 3
+            body_bytes * 5
         );
-        assert_eq!(resolver.batch_calls.into_inner().unwrap().len(), 1);
-        assert_eq!(snapshot.committed_items, 3);
-        assert!(snapshot.exhausted);
-        assert!(snapshot.peak_bytes <= snapshot.limit_bytes);
-        assert_eq!(snapshot.in_flight_bytes, 0);
-        eprintln!("sqlite near-limit budget evidence: {snapshot:?}");
+        let calls = resolver.batch_calls.into_inner().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].len(), 3);
+        assert_eq!(calls[1].len(), 2);
+        assert_eq!(snapshot.committed_items, 5);
+        assert_eq!(snapshot.reservations, 3);
+        assert!(snapshot.retained_bytes > body_bytes * 4);
+        eprintln!("unknown huge-item budget evidence: {snapshot:?}");
     }
 
     #[test]
-    fn source_hydration_mixed_small_and_huge_items_cancel_without_late_allocation() {
+    fn source_hydration_mixed_small_and_huge_items_fail_before_resolver_work() {
         let huge_bytes = SOURCE_HYDRATION_MAX_ITEM_BYTES - 4 * 1024;
         let mut items = Vec::with_capacity(DAEMON_SOURCE_HYDRATION_MAX_ITEMS);
         items.push(jsonl_fixture(24, 0, 32));
@@ -2275,18 +2701,10 @@ mod source_hydration_tests {
             DAEMON_SOURCE_HYDRATION_MAX_RESPONSE_BYTES,
         );
 
-        assert_eq!(response["ok"], false);
-        assert_eq!(response["code"], "response_limit");
-        assert_eq!(resolver.allocated_items.load(Ordering::SeqCst), 29);
-        assert_eq!(
-            resolver.allocated_bytes.load(Ordering::SeqCst),
-            huge_bytes * 4 + 32 * 25
-        );
-        assert_eq!(resolver.batch_calls.into_inner().unwrap().len(), 1);
-        assert_eq!(snapshot.committed_items, 29);
-        assert!(snapshot.cancelled);
-        assert!(snapshot.peak_bytes <= snapshot.limit_bytes);
-        assert_eq!(snapshot.in_flight_bytes, 0);
+        assert_preflight_budget_failure(&response, snapshot);
+        assert_eq!(resolver.allocated_items.load(Ordering::SeqCst), 0);
+        assert_eq!(resolver.allocated_bytes.load(Ordering::SeqCst), 0);
+        assert!(resolver.batch_calls.into_inner().unwrap().is_empty());
         eprintln!("mixed-size budget evidence: {snapshot:?}");
     }
 }
