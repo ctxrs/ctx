@@ -34,6 +34,13 @@ pub enum RelationalProjectionError {
     },
     #[error("source-backed relational projection is missing stable view {0}")]
     MissingStableView(String),
+    #[error(
+        "source-backed SQL projection is missing at {projection_path} while a committed source generation exists at {generation_path}; rebuild the relational projection from that generation"
+    )]
+    MissingSourceBackedSqlProjection {
+        projection_path: std::path::PathBuf,
+        generation_path: std::path::PathBuf,
+    },
     #[error("invalid committed Core generation: {0}")]
     InvalidCoreGeneration(String),
     #[error("invalid source-backed relational record: {0}")]

@@ -98,12 +98,10 @@ fn search_excludes_active_codex_session_by_default_when_available() {
 }
 
 #[test]
-fn sql_reads_existing_store_and_supports_formats_and_input_sources() {
+fn sql_reads_generation_only_projection_and_supports_formats_and_input_sources() {
     let temp = tempdir();
-    ctx(&temp)
-        .args(["setup", "--catalog-only", "--progress", "none"])
-        .assert()
-        .success();
+    let generation_id = initialize_generation_only_sql_projection(temp.path());
+    assert!(!temp.path().join("work.sqlite").exists());
 
     let json =
         json_output(ctx(&temp).args(["sql", "SELECT 1 AS one, 'two' AS two", "--format=json"]));
@@ -114,6 +112,13 @@ fn sql_reads_existing_store_and_supports_formats_and_input_sources() {
     assert_eq!(json["columns"], json!(["one", "two"]));
     assert_eq!(json["rows"], json!([[1, "two"]]));
     assert_eq!(json["returned_rows"], 1);
+
+    let metadata = json_output(ctx(&temp).args([
+        "sql",
+        "SELECT core_generation_id, status FROM ctx_projection_metadata",
+        "--format=json",
+    ]));
+    assert_eq!(metadata["rows"], json!([[generation_id, "ready"]]));
 
     let query_file = temp.path().join("query.sql");
     fs::write(&query_file, "SELECT 'a,b' AS value, 2 AS n").unwrap();
@@ -167,23 +172,26 @@ fn sql_reads_existing_store_and_supports_formats_and_input_sources() {
         .stdout
         .clone();
     assert_eq!(String::from_utf8(raw_output).unwrap(), "abc\n");
+
+    let unsupported = failure_stderr(ctx(&temp).args(["sql", "SELECT * FROM events"]));
+    assert!(
+        unsupported.contains("no such table: events"),
+        "{unsupported}"
+    );
+    assert!(!temp.path().join("work.sqlite").exists());
 }
 
 #[test]
-fn sql_is_read_only_and_does_not_initialize_store() {
+fn fresh_sql_is_read_only_and_initializes_no_legacy_store() {
     let temp = tempdir();
-    let stderr = failure_stderr(ctx(&temp).args(["sql", "SELECT 1"]));
-    assert!(stderr.contains("ctx store is not initialized"));
+    let json = json_output(ctx(&temp).args(["sql", "SELECT 1 AS one", "--format=json"]));
+    assert_eq!(json["rows"], json!([[1]]));
     assert!(!temp.path().join("work.sqlite").exists());
-
-    ctx(&temp)
-        .args(["setup", "--catalog-only", "--progress", "none"])
-        .assert()
-        .success();
+    assert!(temp.path().join("relational.sqlite").is_file());
 
     let stderr = failure_stderr(ctx(&temp).args(["sql", "CREATE TABLE nope(x INTEGER)"]));
     assert!(stderr.contains("SQL query must be read-only"));
-    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
+    let conn = Connection::open(temp.path().join("relational.sqlite")).unwrap();
     assert_eq!(
         sqlite_count(
             &conn,
@@ -191,6 +199,7 @@ fn sql_is_read_only_and_does_not_initialize_store() {
         ),
         0
     );
+    assert!(!temp.path().join("work.sqlite").exists());
 
     let stderr = failure_stderr(ctx(&temp).args(["sql", "SELECT 1; SELECT 2"]));
     assert!(stderr.contains("Multiple statements provided"));

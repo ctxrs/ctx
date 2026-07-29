@@ -3,14 +3,13 @@ use std::{fs, io::Read, path::PathBuf, time::Duration as StdDuration};
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Number, Value};
 
-use ctx_history_core::database_path;
+use ctx_history_search::SqlCompatibility;
 use ctx_history_store::{
     RawSqlOptions, RawSqlResult, RawSqlValue, RAW_SQL_MAX_SQL_BYTES_CAP, RAW_SQL_MAX_TIMEOUT,
 };
 
 use crate::analytics::{count_bucket, duration_bucket, SqlTelemetry};
 use crate::output::{compact_json, print_json, SqlFormat};
-use crate::store_util::open_existing_store_read_only;
 use crate::SqlArgs;
 
 pub(crate) fn parse_sql_timeout(value: &str) -> std::result::Result<StdDuration, String> {
@@ -49,9 +48,8 @@ pub(crate) fn run_sql(
     telemetry: &mut SqlTelemetry,
 ) -> Result<()> {
     let sql = read_sql_input(&args)?;
-    let db_path = database_path(data_root);
-    let store = open_existing_store_read_only(&db_path, "ctx sql")?;
-    let result = store.raw_sql_query(
+    let compatibility = SqlCompatibility::open_for_data_root(data_root)?;
+    let result = compatibility.query(
         &sql,
         RawSqlOptions {
             max_rows: args.max_rows,
