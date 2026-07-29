@@ -27,7 +27,7 @@ mod text;
 use arguments::{
     allowed_tool_arguments, duration_millis_u64, optional_bool, optional_f32, optional_provider,
     optional_search_backend, optional_string, optional_transcript_mode, optional_usize,
-    validate_argument_keys,
+    validate_argument_keys, validate_search_filter_arguments,
 };
 use input::{read_mcp_input_line, McpInputLine};
 use pro::{
@@ -536,6 +536,13 @@ fn tool_search(arguments: &Value, data_root: &Path) -> Result<Value> {
     }) {
         return Err(invalid_tool_request("search needs a query or file"));
     }
+    validate_search_filter_arguments(
+        provider.as_ref(),
+        &source_identity,
+        session.as_deref(),
+        since.as_deref(),
+        event_type.as_deref(),
+    )?;
     crate::commands::source_index::mcp_search(
         crate::commands::source_index::SourceSearchRequest {
             query,
