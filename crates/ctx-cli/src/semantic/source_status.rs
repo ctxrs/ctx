@@ -26,7 +26,7 @@ use super::{
 };
 
 const EPOCH_MARKER_FILE: &str = "activation.jsonl";
-const SOURCE_BACKED_PRO_CATCH_UP_STATUS_FILE: &str = "source-backed-pro-catch-up.json";
+const SOURCE_BACKED_PRO_CATCH_UP_STATUS_FILE: &str = "pro-catch-up.json";
 
 pub(crate) struct SourceEpochStatus {
     pub(crate) initialized: bool,
@@ -879,6 +879,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn durable_state_path_is_purpose_based() {
+        assert_eq!(
+            daemon_jobs_path(Path::new("ctx-data")).join(SOURCE_BACKED_PRO_CATCH_UP_STATUS_FILE),
+            Path::new("ctx-data/daemon/jobs/pro-catch-up.json")
+        );
+    }
+
+    #[test]
     fn source_status_reports_prior_epoch_without_opening_it() {
         let temp = tempfile::tempdir().unwrap();
         let path = database_path(temp.path().to_path_buf());
@@ -998,16 +1006,10 @@ mod tests {
             "attempts": 1,
         });
 
-        let ready = pro_projection_report_from_job(
-            Some("generation-1"),
-            &ready_job,
-            "source-backed-pro-catch-up.json",
-        );
-        let stale = pro_projection_report_from_job(
-            Some("generation-1"),
-            &stale_job,
-            "source-backed-pro-catch-up.json",
-        );
+        let ready =
+            pro_projection_report_from_job(Some("generation-1"), &ready_job, "pro-catch-up.json");
+        let stale =
+            pro_projection_report_from_job(Some("generation-1"), &stale_job, "pro-catch-up.json");
 
         assert_eq!(ready["authority"], "source_manifest");
         assert_eq!(ready["receipt"]["status"], "ready");

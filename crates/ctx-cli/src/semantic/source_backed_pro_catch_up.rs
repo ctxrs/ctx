@@ -25,7 +25,7 @@ use super::{
     },
 };
 
-const SOURCE_BACKED_PRO_CATCH_UP_STATUS_FILE: &str = "source-backed-pro-catch-up.json";
+const SOURCE_BACKED_PRO_CATCH_UP_STATUS_FILE: &str = "pro-catch-up.json";
 const SOURCE_BACKED_PRO_CATCH_UP_SCHEMA_VERSION: u16 = 1;
 const SOURCE_BACKED_PRO_CATCH_UP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const SOURCE_BACKED_PRO_CATCH_UP_WAIT_TIMEOUT: Duration = Duration::from_secs(60 * 60);
@@ -398,6 +398,14 @@ mod tests {
     use ctx_history_index::{GenerationWriter, WriterOptions};
 
     use super::*;
+
+    #[test]
+    fn durable_state_path_is_purpose_based() {
+        assert_eq!(
+            status_path(Path::new("ctx-data")),
+            Path::new("ctx-data/daemon/jobs/pro-catch-up.json")
+        );
+    }
 
     fn empty_authority(
         data_root: &Path,

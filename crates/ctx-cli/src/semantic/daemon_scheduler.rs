@@ -536,13 +536,10 @@ mod tests {
 
         assert!(!iteration.did_work);
         assert!(!iteration.failed);
+        assert!(!temp.path().join("daemon/jobs/pro-catch-up.json").exists());
         assert!(!temp
             .path()
-            .join("daemon/jobs/source-backed-pro-catch-up.json")
-            .exists());
-        assert!(!temp
-            .path()
-            .join("daemon/jobs/source-backed-relational-catch-up.json")
+            .join("daemon/jobs/relational-catch-up.json")
             .exists());
         assert!(!super::daemon_semantic_job_path(temp.path()).exists());
     }
