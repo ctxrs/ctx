@@ -75,6 +75,7 @@ use super::reports::SemanticRetrievalDiagnostics;
 
 mod source_projection;
 pub(super) use source_projection::{
+    semantic_hydrated_source_is_control, source_backed_semantic_vector_path,
     SourceBackedSemanticEmbedder, SourceBackedSemanticOutcome, SourceBackedSemanticResolver,
 };
 pub(super) mod control;

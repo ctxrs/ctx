@@ -1089,9 +1089,9 @@ fn semantic_only_search_does_not_reject_a_running_worker() -> Result<()> {
         RefreshArg::Off,
         false,
     )
-    .expect_err("fixture has no daemon query service");
+    .expect_err("legacy semantic route must require a fresh source generation");
     let message = format!("{err:#}");
-    assert!(message.contains(&DaemonQueryServiceUnavailable.to_string()));
+    assert!(message.contains("fresh source-backed Core generation"));
     assert!(!message.contains("semantic worker is currently indexing"));
     Ok(())
 }

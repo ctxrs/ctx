@@ -1,16 +1,13 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
-use ctx_history_capture::{
-    build_automatic_source_backed_registry, source_backed_route_inventory, DiscoveryContext,
-    SourceBackedHydrationSupport, SourceBackedResolverRegistry,
-};
-use ctx_history_core::{CaptureProvider, ContentSourceResolver, EventHydrationRequest, EventType};
+use ctx_history_capture::source_backed_route_inventory;
+use ctx_history_core::{CaptureProvider, EventType};
 use ctx_history_index::{
     AgentScope, EventRecord, EventSearchCandidate, EventSearchFilters, ExcludedSessionTree,
     SessionRecord, VerifiedIndex,
@@ -28,7 +25,6 @@ use crate::{
         ContentPolicy, CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
     },
     output::{compact_json, print_json, JsonOutputFormat, OutputFormat},
-    provider_sources::home_dir,
     search_filters::parse_since_filter,
     semantic::{
         coordinate_source_backed_refresh, PinnedSourceBackedGeneration, SourceBackedRefreshMode,
@@ -44,8 +40,9 @@ const LEGACY_ACTIVE_SESSION_PROVIDER: CaptureProvider = CaptureProvider::Codex;
 const MAX_SESSION_DIVERSITY_CANDIDATES: usize = 64 * 1024;
 const MIN_CANDIDATE_BATCH: usize = 256;
 const CANDIDATE_OVERSAMPLE: usize = 8;
+const SOURCE_FUSION_CANDIDATES: usize = 1_600;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct SourceSearchRequest {
     pub(crate) query: String,
     pub(crate) terms: Vec<String>,
@@ -99,6 +96,10 @@ struct SearchCollection {
     hits: Vec<SearchHit>,
     candidate_pool: usize,
     candidate_pool_truncated: bool,
+    requested_backend: SearchBackendArg,
+    effective_backend: SearchBackendArg,
+    semantic_weight: f32,
+    semantic_diagnostics: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -117,9 +118,6 @@ struct RefreshOutcome {
 #[derive(Debug)]
 struct ResolvedIndexContent {
     text: String,
-    complete_content_available: bool,
-    complete: bool,
-    source_verified: bool,
 }
 
 pub(crate) fn index_is_available(data_root: &Path) -> bool {
@@ -166,22 +164,22 @@ pub(crate) fn run_search(
     data_root: PathBuf,
     telemetry: &mut SearchTelemetry,
 ) -> Result<()> {
+    let semantic_weight = args.semantic_weight;
     let request = SourceSearchRequest::from(&args);
     let refresh_started = Instant::now();
     let refresh = refresh_for_search(&request, &data_root)?;
-    telemetry.refresh_duration = Some(duration_bucket(refresh_started.elapsed()));
+    let initial_refresh_duration = refresh_started.elapsed();
     telemetry.refresh_mode = Some(request.refresh);
-    telemetry.refresh_status = Some(RefreshStatus::from_safe_summary(refresh.status));
-    telemetry.refresh_source_count = Some(count_bucket(refresh.source_count as u64));
 
     let query_started = Instant::now();
-    let (value, collection, index) = search_existing_generation(
-        &request,
-        refresh.pin.into_index(),
-        refresh.status,
-        refresh.source_count,
-    )?;
+    let (value, collection, index, refresh_status, refresh_source_count, retry_refresh_duration) =
+        search_with_hydration_retry(&request, &data_root, semantic_weight, refresh)?;
     let query_duration = query_started.elapsed();
+    telemetry.refresh_duration = Some(duration_bucket(
+        initial_refresh_duration.saturating_add(retry_refresh_duration),
+    ));
+    telemetry.refresh_status = Some(RefreshStatus::from_safe_summary(refresh_status));
+    telemetry.refresh_source_count = Some(count_bucket(refresh_source_count as u64));
     telemetry.query_duration = Some(duration_bucket(query_duration));
     telemetry.query_length = Some(text_length_bucket(request.query.chars().count()));
     telemetry.query_term_count = Some(count_bucket(
@@ -191,8 +189,8 @@ pub(crate) fn run_search(
             .filter(|term| !term.is_empty())
             .count() as u64,
     ));
-    telemetry.backend_requested = Some(SearchBackendArg::Lexical);
-    telemetry.backend_effective = Some(SearchBackendArg::Lexical);
+    telemetry.backend_requested = Some(collection.requested_backend);
+    telemetry.backend_effective = Some(collection.effective_backend);
     telemetry.has_indexed_content_after = Some(index.document_count() > 0);
     telemetry.result_count = Some(count_bucket(collection.hits.len() as u64));
     telemetry.citation_count = Some(count_bucket(collection.hits.len() as u64));
@@ -209,8 +207,8 @@ pub(crate) fn run_search(
 }
 
 pub(crate) fn mcp_search(request: SourceSearchRequest, data_root: &Path) -> Result<Value> {
-    let (value, _, _) =
-        search_existing_generation(&request, open_index(data_root)?, "existing_generation", 0)?;
+    let refresh = refresh_for_search(&request, data_root)?;
+    let (value, _, _, _, _, _) = search_with_hydration_retry(&request, data_root, 0.35, refresh)?;
     Ok(value)
 }
 
@@ -226,6 +224,8 @@ pub(crate) fn run_show(
             let events = event_window(&index, &selected, args.before, args.after, args.window)?;
             telemetry.events_returned = Some(count_bucket(events.len() as u64));
             let value = event_window_json(
+                &index,
+                &data_root,
                 &selected,
                 &events,
                 args.content,
@@ -265,6 +265,7 @@ pub(crate) fn run_show(
             }
             let value = session_json(
                 &index,
+                &data_root,
                 &session,
                 args.mode,
                 args.content,
@@ -298,6 +299,7 @@ pub(crate) fn mcp_show_session(
     let session = resolve_session(&index, id)?;
     let value = session_json(
         &index,
+        data_root,
         &session,
         mode,
         content,
@@ -328,6 +330,8 @@ pub(crate) fn mcp_show_event(
     let selected = resolve_event(&index, id)?;
     let events = event_window(&index, &selected, before, after, window)?;
     let value = event_window_json(
+        &index,
+        data_root,
         &selected,
         &events,
         content,
@@ -386,43 +390,168 @@ fn source_backed_refresh_mode(refresh: RefreshArg) -> SourceBackedRefreshMode {
     }
 }
 
+fn search_with_hydration_retry(
+    request: &SourceSearchRequest,
+    data_root: &Path,
+    semantic_weight: f32,
+    refresh: RefreshOutcome,
+) -> Result<(
+    Value,
+    SearchCollection,
+    VerifiedIndex,
+    &'static str,
+    usize,
+    Duration,
+)> {
+    search_with_hydration_retry_with(
+        request,
+        data_root,
+        semantic_weight,
+        refresh,
+        search_existing_generation,
+        |request, data_root| {
+            let mut wait_request = request.clone();
+            wait_request.refresh = RefreshArg::Wait;
+            refresh_for_search(&wait_request, data_root)
+        },
+    )
+}
+
+#[allow(clippy::type_complexity)]
+fn search_with_hydration_retry_with<Run, Refresh>(
+    request: &SourceSearchRequest,
+    data_root: &Path,
+    semantic_weight: f32,
+    refresh: RefreshOutcome,
+    mut run: Run,
+    mut wait_refresh: Refresh,
+) -> Result<(
+    Value,
+    SearchCollection,
+    VerifiedIndex,
+    &'static str,
+    usize,
+    Duration,
+)>
+where
+    Run: FnMut(
+        &SourceSearchRequest,
+        VerifiedIndex,
+        &Path,
+        f32,
+        &'static str,
+        usize,
+    ) -> Result<(Value, SearchCollection, VerifiedIndex)>,
+    Refresh: FnMut(&SourceSearchRequest, &Path) -> Result<RefreshOutcome>,
+{
+    let RefreshOutcome {
+        pin,
+        status,
+        source_count,
+    } = refresh;
+    match run(
+        request,
+        pin.into_index(),
+        data_root,
+        semantic_weight,
+        status,
+        source_count,
+    ) {
+        Ok((value, collection, index)) => Ok((
+            value,
+            collection,
+            index,
+            status,
+            source_count,
+            Duration::ZERO,
+        )),
+        Err(error)
+            if request.refresh != RefreshArg::Off
+                && PinnedSourceBackedGeneration::source_hydration_retryable(&error) =>
+        {
+            let retry_started = Instant::now();
+            let retry = wait_refresh(request, data_root)?;
+            let retry_duration = retry_started.elapsed();
+            let (value, collection, index) = run(
+                request,
+                retry.pin.into_index(),
+                data_root,
+                semantic_weight,
+                retry.status,
+                retry.source_count,
+            )?;
+            Ok((
+                value,
+                collection,
+                index,
+                retry.status,
+                retry.source_count,
+                retry_duration,
+            ))
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn search_existing_generation(
     request: &SourceSearchRequest,
     index: VerifiedIndex,
+    data_root: &Path,
+    semantic_weight: f32,
     refresh_status: &str,
     refresh_source_count: usize,
 ) -> Result<(Value, SearchCollection, VerifiedIndex)> {
+    search_existing_generation_with_hydrator(
+        request,
+        index,
+        data_root,
+        semantic_weight,
+        refresh_status,
+        refresh_source_count,
+        |index, data_root, events| {
+            PinnedSourceBackedGeneration::hydrate_source_search_page(index, data_root, events)
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn search_existing_generation_with_hydrator<Hydrate>(
+    request: &SourceSearchRequest,
+    index: VerifiedIndex,
+    data_root: &Path,
+    semantic_weight: f32,
+    refresh_status: &str,
+    refresh_source_count: usize,
+    hydrate: Hydrate,
+) -> Result<(Value, SearchCollection, VerifiedIndex)>
+where
+    Hydrate: FnOnce(&VerifiedIndex, &Path, &[&EventRecord]) -> Result<HashMap<Uuid, String>>,
+{
     validate_search_request(request)?;
     let filters = index_search_filters(request, &index)?;
     let query_started = Instant::now();
-    let collection = collect_search_hits(
-        &index,
-        &request.query,
-        request.limit,
-        request.events,
-        &filters,
-    )?;
+    let collection =
+        collect_search_hits_with_backend(request, &index, data_root, semantic_weight, &filters)?;
     let query_duration = query_started.elapsed();
+    let events = collection
+        .hits
+        .iter()
+        .map(|hit| &hit.event)
+        .collect::<Vec<_>>();
+    let snippets = hydrate(&index, data_root, &events)?;
     let value = search_json(
         request,
         &index,
         &collection,
+        &snippets,
         refresh_status,
         refresh_source_count,
         query_duration,
-    );
+    )?;
     Ok((value, collection, index))
 }
 
 fn validate_search_request(request: &SourceSearchRequest) -> Result<()> {
-    if matches!(
-        request.backend,
-        Some(SearchBackendArg::Hybrid | SearchBackendArg::Semantic)
-    ) {
-        return Err(anyhow!(
-            "the source-backed Core generation currently supports lexical retrieval only; no legacy backend was used"
-        ));
-    }
     if request.terms.iter().any(|term| !term.trim().is_empty()) {
         return Err(anyhow!(
             "OR-composed --term search is not yet exposed by the source-backed index query API"
@@ -502,6 +631,110 @@ fn index_search_filters(
     })
 }
 
+fn collect_search_hits_with_backend(
+    request: &SourceSearchRequest,
+    index: &VerifiedIndex,
+    data_root: &Path,
+    semantic_weight: f32,
+    filters: &EventSearchFilters,
+) -> Result<SearchCollection> {
+    collect_search_hits_with_backend_using(
+        request,
+        index,
+        data_root,
+        semantic_weight,
+        filters,
+        |index, data_root, query, filters, candidate_limit| {
+            PinnedSourceBackedGeneration::semantic_candidates_for_source_generation(
+                index,
+                data_root,
+                query,
+                filters,
+                candidate_limit,
+            )
+        },
+    )
+}
+
+fn collect_search_hits_with_backend_using<SemanticSearch>(
+    request: &SourceSearchRequest,
+    index: &VerifiedIndex,
+    data_root: &Path,
+    semantic_weight: f32,
+    filters: &EventSearchFilters,
+    semantic_search: SemanticSearch,
+) -> Result<SearchCollection>
+where
+    SemanticSearch: FnOnce(
+        &VerifiedIndex,
+        &Path,
+        &str,
+        &EventSearchFilters,
+        usize,
+    ) -> Result<(Vec<EventSearchCandidate>, Value)>,
+{
+    let requested_backend = request.backend.unwrap_or(SearchBackendArg::Lexical);
+    if !semantic_weight.is_finite() || !(0.0..=1.0).contains(&semantic_weight) {
+        return Err(anyhow!(
+            "semantic weight must be finite and between 0.0 and 1.0"
+        ));
+    }
+    if requested_backend == SearchBackendArg::Lexical
+        || (requested_backend == SearchBackendArg::Hybrid && semantic_weight == 0.0)
+    {
+        let mut collection = collect_search_hits(
+            index,
+            &request.query,
+            request.limit,
+            request.events,
+            filters,
+        )?;
+        collection.requested_backend = requested_backend;
+        collection.semantic_weight = 0.0;
+        return Ok(collection);
+    }
+
+    let (semantic_candidates, semantic_diagnostics) = semantic_search(
+        index,
+        data_root,
+        &request.query,
+        filters,
+        SOURCE_FUSION_CANDIDATES,
+    )
+    .with_context(|| {
+            format!(
+                "{} search requires a complete flat-F32 projection of the pinned source-backed generation",
+                requested_backend.as_str()
+            )
+        })?;
+
+    let candidates = if requested_backend == SearchBackendArg::Semantic {
+        semantic_candidates
+    } else {
+        let lexical_candidates = index.search_event_candidates_with_filters(
+            request.query.trim(),
+            filters,
+            SOURCE_FUSION_CANDIDATES,
+        )?;
+        fuse_source_candidates(lexical_candidates, semantic_candidates, semantic_weight)
+    };
+    let candidate_pool = candidates.len();
+    let hits = shape_search_hits(candidates.iter(), request.limit, request.events);
+    Ok(SearchCollection {
+        hits,
+        candidate_pool,
+        candidate_pool_truncated: candidate_pool >= SOURCE_FUSION_CANDIDATES,
+        requested_backend,
+        effective_backend: requested_backend,
+        semantic_weight: if requested_backend == SearchBackendArg::Semantic {
+            1.0
+        } else {
+            semantic_weight
+        },
+        semantic_diagnostics: Some(semantic_diagnostics),
+    })
+}
+
 fn collect_search_hits(
     index: &VerifiedIndex,
     query: &str,
@@ -527,6 +760,10 @@ fn collect_search_hits(
                 hits,
                 candidate_pool: candidates.len(),
                 candidate_pool_truncated: false,
+                requested_backend: SearchBackendArg::Lexical,
+                effective_backend: SearchBackendArg::Lexical,
+                semantic_weight: 0.0,
+                semantic_diagnostics: None,
             });
         }
         if candidate_limit >= maximum {
@@ -534,6 +771,10 @@ fn collect_search_hits(
                 hits,
                 candidate_pool: candidates.len(),
                 candidate_pool_truncated: true,
+                requested_backend: SearchBackendArg::Lexical,
+                effective_backend: SearchBackendArg::Lexical,
+                semantic_weight: 0.0,
+                semantic_diagnostics: None,
             });
         }
         candidate_limit = candidate_limit
@@ -541,6 +782,82 @@ fn collect_search_hits(
             .min(maximum)
             .max(candidate_limit.saturating_add(1));
     }
+}
+
+struct SourceFusionEvidence {
+    event: EventRecord,
+    lexical_rank: Option<usize>,
+    semantic_rank: Option<usize>,
+}
+
+fn fuse_source_candidates(
+    lexical: Vec<EventSearchCandidate>,
+    semantic: Vec<EventSearchCandidate>,
+    semantic_weight: f32,
+) -> Vec<EventSearchCandidate> {
+    let mut evidence = BTreeMap::<Uuid, SourceFusionEvidence>::new();
+    for (rank, candidate) in lexical.into_iter().enumerate() {
+        evidence.insert(
+            candidate.event.event_id.as_uuid(),
+            SourceFusionEvidence {
+                event: candidate.event,
+                lexical_rank: Some(rank.saturating_add(1)),
+                semantic_rank: None,
+            },
+        );
+    }
+    for (rank, candidate) in semantic.into_iter().enumerate() {
+        let semantic_rank = rank.saturating_add(1);
+        evidence
+            .entry(candidate.event.event_id.as_uuid())
+            .and_modify(|entry| entry.semantic_rank = Some(semantic_rank))
+            .or_insert(SourceFusionEvidence {
+                event: candidate.event,
+                lexical_rank: None,
+                semantic_rank: Some(semantic_rank),
+            });
+    }
+    let mut candidates = evidence
+        .into_values()
+        .map(|evidence| EventSearchCandidate {
+            score: weighted_rrf_score(
+                evidence.lexical_rank,
+                evidence.semantic_rank,
+                semantic_weight,
+            ),
+            event: evidence.event,
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| {
+                right
+                    .event
+                    .occurred_at_unix_ms
+                    .cmp(&left.event.occurred_at_unix_ms)
+            })
+            .then_with(|| right.event.event_sequence.cmp(&left.event.event_sequence))
+            .then_with(|| {
+                left.event
+                    .event_id
+                    .as_uuid()
+                    .cmp(&right.event.event_id.as_uuid())
+            })
+    });
+    candidates
+}
+
+fn weighted_rrf_score(
+    lexical_rank: Option<usize>,
+    semantic_rank: Option<usize>,
+    semantic_weight: f32,
+) -> f32 {
+    let reciprocal_rank = |rank: usize| 1.0 / (60.0 + rank.max(1) as f32);
+    let lexical = lexical_rank.map(reciprocal_rank).unwrap_or(0.0);
+    let semantic = semantic_rank.map(reciprocal_rank).unwrap_or(0.0);
+    ((1.0 - semantic_weight) * lexical) + (semantic_weight * semantic)
 }
 
 fn shape_search_hits<'a>(
@@ -587,18 +904,35 @@ fn search_json(
     request: &SourceSearchRequest,
     index: &VerifiedIndex,
     collection: &SearchCollection,
+    snippets: &HashMap<Uuid, String>,
     refresh_status: &str,
     refresh_source_count: usize,
     query_duration: Duration,
-) -> Value {
+) -> Result<Value> {
     let result_scope = if request.events { "event" } else { "session" };
     let results = collection
         .hits
         .iter()
-        .map(|hit| search_result_json(hit, result_scope, &request.query))
-        .collect::<Vec<_>>();
+        .map(|hit| {
+            let snippet = snippets
+                .get(&hit.event.event_id.as_uuid())
+                .filter(|snippet| !snippet.is_empty())
+                .ok_or_else(|| {
+                    anyhow!(
+                        "generation-bound source hydration omitted search event {}",
+                        hit.event.event_id
+                    )
+                })?;
+            Ok(search_result_json(
+                hit,
+                snippet,
+                result_scope,
+                &request.query,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let phase_attribution = phase_attribution(query_duration);
-    compact_json(json!({
+    Ok(compact_json(json!({
         "schema_version": 1,
         "payload_type": "search_results",
         "query": request.query.trim(),
@@ -620,8 +954,10 @@ fn search_json(
             "source_count": refresh_source_count,
         },
         "retrieval": {
-            "requested_mode": "lexical",
-            "effective_mode": "lexical",
+            "requested_mode": collection.requested_backend.as_str(),
+            "effective_mode": collection.effective_backend.as_str(),
+            "semantic_weight": collection.semantic_weight,
+            "semantic_diagnostics": collection.semantic_diagnostics,
             "index": "source_backed",
             "generation_id": index.generation_id(),
             "indexed_documents": index.document_count(),
@@ -637,10 +973,10 @@ fn search_json(
             "candidate_pool": collection.candidate_pool,
             "candidate_pool_truncated": collection.candidate_pool_truncated,
         },
-    }))
+    })))
 }
 
-fn search_result_json(hit: &SearchHit, result_scope: &str, query: &str) -> Value {
+fn search_result_json(hit: &SearchHit, snippet: &str, result_scope: &str, query: &str) -> Value {
     let event = &hit.event;
     let event_id = event.event_id.as_uuid();
     let session_id = event.session_id.as_uuid();
@@ -670,7 +1006,7 @@ fn search_result_json(hit: &SearchHit, result_scope: &str, query: &str) -> Value
         "event_id": event_id,
         "event_seq": event.event_sequence,
         "title": title,
-        "snippet": event.preview,
+        "snippet": snippet,
         "rank": hit.score,
         "result_scope": result_scope,
         "session_importance": (result_scope == "session").then_some(hit.score),
@@ -777,6 +1113,7 @@ fn render_search_text(value: &Value, verbose: bool) -> String {
 
 fn session_json(
     index: &VerifiedIndex,
+    data_root: &Path,
     session: &SessionRecord,
     mode: TranscriptMode,
     content: ContentPolicy,
@@ -790,7 +1127,7 @@ fn session_json(
         events.truncate(limit);
     }
     let selected = select_session_events(&events, mode);
-    let rendered = render_event_values(&selected, content, output_limit_bytes)?;
+    let rendered = render_event_values(index, data_root, &selected, content, output_limit_bytes)?;
     Ok(compact_json(json!({
         "schema_version": 1,
         "target": "session",
@@ -824,6 +1161,8 @@ fn session_json(
 }
 
 fn event_window_json(
+    index: &VerifiedIndex,
+    data_root: &Path,
     selected: &EventRecord,
     events: &[EventRecord],
     content: ContentPolicy,
@@ -831,7 +1170,7 @@ fn event_window_json(
     output_limit_bytes: usize,
 ) -> Result<Value> {
     let references = events.iter().collect::<Vec<_>>();
-    let rendered = render_event_values(&references, content, output_limit_bytes)?;
+    let rendered = render_event_values(index, data_root, &references, content, output_limit_bytes)?;
     let selected_value = rendered
         .iter()
         .find(|event| {
@@ -853,11 +1192,13 @@ fn event_window_json(
 }
 
 fn render_event_values(
+    index: &VerifiedIndex,
+    data_root: &Path,
     events: &[&EventRecord],
     policy: ContentPolicy,
     output_limit_bytes: usize,
 ) -> Result<Vec<Value>> {
-    let resolved = resolve_contents(events, policy, output_limit_bytes)?;
+    let resolved = resolve_contents(index, data_root, events, output_limit_bytes)?;
     events
         .iter()
         .zip(resolved)
@@ -883,15 +1224,15 @@ fn render_event_values(
                 "workspace": event.workspace,
                 "cwd": event.cwd,
                 "touched_files": event.touched_files,
-                "preview": event.preview,
+                "preview": resolved.text.chars().take(2_048).collect::<String>(),
                 "text": resolved.text,
                 "content": {
                     "requested": policy.as_str(),
-                    "complete": resolved.complete,
-                    "origin": if resolved.source_verified { "provider_source" } else { "ctx_index" },
-                    "stored_truncated": true,
-                    "source_verified": resolved.source_verified,
-                    "complete_content_available": resolved.complete_content_available,
+                    "complete": true,
+                    "origin": "provider_source",
+                    "stored_truncated": false,
+                    "source_verified": true,
+                    "complete_content_available": true,
                 },
             })))
         })
@@ -899,63 +1240,36 @@ fn render_event_values(
 }
 
 fn resolve_contents(
+    index: &VerifiedIndex,
+    data_root: &Path,
     events: &[&EventRecord],
-    policy: ContentPolicy,
     output_limit_bytes: usize,
 ) -> Result<Vec<ResolvedIndexContent>> {
-    if policy == ContentPolicy::Indexed {
-        return Ok(events
-            .iter()
-            .map(|event| ResolvedIndexContent {
-                text: event.preview.clone(),
-                complete_content_available: exact_route_supported(event),
-                complete: false,
-                source_verified: false,
-            })
-            .collect());
-    }
     if events.is_empty() {
         return Ok(Vec::new());
     }
-
-    let registry = automatic_exact_content_resolver_registry()?;
-    resolve_complete_contents(events, output_limit_bytes, &registry)
+    let hydrated =
+        PinnedSourceBackedGeneration::hydrate_source_complete_events(index, data_root, events)?;
+    resolved_contents_from_map(events, output_limit_bytes, hydrated)
 }
 
-fn resolve_complete_contents(
+fn resolved_contents_from_map(
     events: &[&EventRecord],
     output_limit_bytes: usize,
-    resolver: &dyn ContentSourceResolver,
+    mut hydrated: HashMap<Uuid, String>,
 ) -> Result<Vec<ResolvedIndexContent>> {
     let mut output_bytes = 0usize;
     let mut resolved = Vec::with_capacity(events.len());
     for event in events {
-        let request = EventHydrationRequest::new(event.event_id, event.locator.clone())
-            .with_context(|| format!("validate typed locator for event {}", event.event_id))?;
-        let hydrated = resolver.hydrate_event(&request).map_err(|failure| {
-            anyhow!(
-                "hydrate source-backed {} event {} through the provider registry: {:?}: {}",
-                event.provider,
-                event.event_id,
-                failure.kind,
-                failure.detail
-            )
-        })?;
-        if hydrated.event_id != event.event_id {
-            return Err(anyhow!(
-                "provider registry returned event {} while hydrating event {}",
-                hydrated.event_id,
-                event.event_id
-            ));
-        }
-        let text = String::from_utf8(hydrated.provider_bytes).map_err(|error| {
-            anyhow!(
-                "provider registry returned non-UTF-8 exact content for {} event {}: {}",
-                event.provider,
-                event.event_id,
-                error.utf8_error()
-            )
-        })?;
+        let text = hydrated
+            .remove(&event.event_id.as_uuid())
+            .filter(|text| !text.is_empty())
+            .ok_or_else(|| {
+                anyhow!(
+                    "generation-bound source hydration omitted complete event {}",
+                    event.event_id
+                )
+            })?;
         output_bytes = output_bytes.saturating_add(text.len());
         if output_bytes > output_limit_bytes {
             return Err(anyhow!(
@@ -963,39 +1277,57 @@ fn resolve_complete_contents(
                 event.event_id
             ));
         }
-        resolved.push(ResolvedIndexContent {
-            text,
-            complete_content_available: true,
-            complete: true,
-            source_verified: true,
-        });
+        resolved.push(ResolvedIndexContent { text });
+    }
+    if !hydrated.is_empty() {
+        return Err(anyhow!(
+            "generation-bound source hydration returned unrequested events"
+        ));
     }
     Ok(resolved)
 }
 
-fn automatic_exact_content_resolver_registry() -> Result<SourceBackedResolverRegistry> {
-    let home = home_dir().ok_or_else(|| {
-        anyhow!("cannot discover provider sources because the user home directory is unavailable")
+#[cfg(test)]
+fn resolve_complete_contents(
+    events: &[&EventRecord],
+    output_limit_bytes: usize,
+    resolver: &dyn ctx_history_core::ContentSourceResolver,
+) -> Result<Vec<ResolvedIndexContent>> {
+    use ctx_history_core::{BatchHydrationRequest, EventHydrationRequest};
+
+    let requests = events
+        .iter()
+        .map(|event| EventHydrationRequest::new(event.event_id, event.locator.clone()))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let request = BatchHydrationRequest::new(requests)?;
+    let result = resolver.hydrate_batch(&request).map_err(|failure| {
+        anyhow!(
+            "hydrate ordered generation-bound source batch: {:?}: {}",
+            failure.kind,
+            failure.detail
+        )
     })?;
-    let build = build_automatic_source_backed_registry(&DiscoveryContext::from_process(home));
-    Ok(build.registry.resolver_registry())
-}
-
-fn exact_route_supported(event: &EventRecord) -> bool {
-    exact_route_supported_for(&event.provider, &event.source_format)
-}
-
-fn exact_route_supported_for(provider: &str, source_format: &str) -> bool {
-    source_backed_route_inventory().iter().any(|route| {
-        route.provider.as_str() == provider
-            && route.certified_source_format == source_format
-            && route.automatic
-            && route.unsupported_reason.is_none()
-            && matches!(
-                route.exact_hydration,
-                SourceBackedHydrationSupport::Full | SourceBackedHydrationSupport::Partial
+    result
+        .validate_for_request(&request)
+        .map_err(|failure| anyhow!("validate generation-bound source batch: {}", failure.detail))?;
+    let mut hydrated = HashMap::with_capacity(events.len());
+    for (event, record) in events.iter().zip(result.into_records()) {
+        let text = String::from_utf8(record.provider_bytes).map_err(|error| {
+            anyhow!(
+                "provider registry returned non-UTF-8 exact content for {} event {}: {}",
+                event.provider,
+                event.event_id,
+                error.utf8_error()
             )
-    })
+        })?;
+        if hydrated.insert(event.event_id.as_uuid(), text).is_some() {
+            return Err(anyhow!(
+                "generation-bound source batch duplicated event {}",
+                event.event_id
+            ));
+        }
+    }
+    resolved_contents_from_map(events, output_limit_bytes, hydrated)
 }
 
 fn write_show_value(
@@ -1298,9 +1630,10 @@ mod tests {
 
     use ctx_history_capture::ingest_codex_source_backed_v0;
     use ctx_history_core::{
-        derive_event_id, derive_session_id, EventIdentityInput, HydratedProviderRecord,
-        HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy, NativeItemKey,
-        NativeRecordCoordinate, NativeSessionKey, SessionHydrationRequest, SessionIdentityInput,
+        database_path, derive_event_id, derive_session_id, BatchHydrationRequest,
+        BatchHydrationResult, ContentSourceResolver, EventHydrationRequest, EventIdentityInput,
+        HydratedProviderRecord, HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy,
+        NativeItemKey, NativeRecordCoordinate, NativeSessionKey, SessionIdentityInput,
         SourceAnchor, SourceKey, SourceRecordLocator, StableEntityId, TypedKey,
     };
     use serde_json::json;
@@ -1317,6 +1650,7 @@ mod tests {
     struct MockContentResolver {
         bodies: HashMap<StableEntityId, Vec<u8>>,
         calls: RefCell<Vec<(String, String)>>,
+        batch_calls: Cell<usize>,
     }
 
     impl MockContentResolver {
@@ -1349,15 +1683,23 @@ mod tests {
             })
         }
 
-        fn hydrate_session(
+        fn hydrate_batch(
             &self,
-            request: &SessionHydrationRequest,
-        ) -> std::result::Result<Vec<HydratedProviderRecord>, HydrationFailure> {
-            request
+            request: &BatchHydrationRequest,
+        ) -> std::result::Result<BatchHydrationResult, HydrationFailure> {
+            self.batch_calls
+                .set(self.batch_calls.get().saturating_add(1));
+            let records = request
                 .events()
                 .iter()
                 .map(|event| self.hydrate_event(event))
-                .collect()
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let result = BatchHydrationResult::new(records).map_err(|error| HydrationFailure {
+                kind: HydrationFailureKind::InvalidLocator,
+                detail: error.to_string(),
+            })?;
+            result.validate_for_request(request)?;
+            Ok(result)
         }
     }
 
@@ -1366,7 +1708,6 @@ mod tests {
         source_format: &str,
         lineage: u8,
         sequence: u64,
-        preview: &str,
     ) -> EventRecord {
         let source = SourceKey::derive(
             provider.as_str(),
@@ -1424,7 +1765,7 @@ mod tests {
             occurred_at_unix_ms: None,
             event_type: "message".to_owned(),
             role: Some("assistant".to_owned()),
-            preview: preview.to_owned(),
+            preview: String::new(),
             workspace: None,
             cwd: None,
             touched_files: Vec::new(),
@@ -1478,12 +1819,11 @@ mod tests {
                 "type": "response_item",
                 "payload": {
                     "type": "message",
-                    "role": "assistant",
+                    "role": "user",
                     "content": [{
-                        "type": "output_text",
+                        "type": "input_text",
                         "text": format!("{TEST_QUERY} sentinel")
-                    }],
-                    "phase": "final_answer"
+                    }]
                 }
             }),
         ];
@@ -1544,14 +1884,14 @@ mod tests {
     }
 
     #[test]
-    fn cold_search_rejects_manual_only_and_unsupported_routes() {
+    fn cold_search_rejects_manual_only_and_accepts_automatic_codex_history() {
         assert!(!should_route_source_backed_search(
             false,
             RefreshArg::Wait,
             Some(CaptureProvider::Custom),
             Some("ctx_history_jsonl_v1"),
         ));
-        assert!(!should_route_source_backed_search(
+        assert!(should_route_source_backed_search(
             false,
             RefreshArg::Wait,
             Some(CaptureProvider::Codex),
@@ -1616,11 +1956,24 @@ mod tests {
         let generation = outcome.pin.generation_id().to_owned();
 
         fs::remove_file(index_root(temp.path()).join("meta.json")).unwrap();
-        let (value, collection, index) = search_existing_generation(
+        let (value, collection, index) = search_existing_generation_with_hydrator(
             &request(RefreshArg::Off),
             outcome.pin.into_index(),
+            temp.path(),
+            0.35,
             outcome.status,
             outcome.source_count,
+            |_index, _data_root, events| {
+                Ok(events
+                    .iter()
+                    .map(|event| {
+                        (
+                            event.event_id.as_uuid(),
+                            "exact injected search body".to_owned(),
+                        )
+                    })
+                    .collect())
+            },
         )
         .unwrap();
 
@@ -1630,33 +1983,201 @@ mod tests {
     }
 
     #[test]
-    fn exact_route_support_comes_from_automatic_provider_metadata() {
-        assert!(exact_route_supported_for("codex", "codex_session_jsonl"));
-        assert!(exact_route_supported_for("warp", "warp_sqlite"));
-        assert!(exact_route_supported_for("mux", "mux_session_jsonl"));
-        assert!(!exact_route_supported_for("codex", "codex_history_jsonl"));
-        assert!(!exact_route_supported_for(
-            "unknown",
-            "unknown_source_format"
+    fn refresh_off_surfaces_typed_resolver_unavailable_without_retrying() {
+        let temp = tempdir().unwrap();
+        write_test_generation(temp.path());
+        let wait_calls = Cell::new(0);
+        let error = match search_with_hydration_retry_with(
+            &request(RefreshArg::Off),
+            temp.path(),
+            0.35,
+            RefreshOutcome {
+                pin: PinnedSourceBackedGeneration::from_index(open_index(temp.path()).unwrap()),
+                status: "existing_generation",
+                source_count: 0,
+            },
+            search_existing_generation,
+            |_request, _data_root| {
+                wait_calls.set(wait_calls.get() + 1);
+                panic!("refresh off must not retry source discovery")
+            },
+        ) {
+            Ok(_) => panic!("refresh-off hydration unexpectedly succeeded"),
+            Err(error) => error,
+        };
+
+        assert!(PinnedSourceBackedGeneration::source_hydration_retryable(
+            &error
         ));
+        assert!(format!("{error:#}").contains("resolver_service_unavailable"));
+        assert_eq!(wait_calls.get(), 0);
+    }
+
+    #[test]
+    fn background_search_retries_hydration_once_after_daemon_wait_repin() {
+        let temp = tempdir().unwrap();
+        write_test_generation(temp.path());
+        let run_calls = Cell::new(0);
+        let wait_calls = Cell::new(0);
+        let outcome = search_with_hydration_retry_with(
+            &request(RefreshArg::Background),
+            temp.path(),
+            0.35,
+            RefreshOutcome {
+                pin: PinnedSourceBackedGeneration::from_index(open_index(temp.path()).unwrap()),
+                status: "daemon_background",
+                source_count: 1,
+            },
+            |request, index, data_root, semantic_weight, status, source_count| {
+                run_calls.set(run_calls.get() + 1);
+                if run_calls.get() == 1 {
+                    search_existing_generation(
+                        request,
+                        index,
+                        data_root,
+                        semantic_weight,
+                        status,
+                        source_count,
+                    )
+                } else {
+                    search_existing_generation_with_hydrator(
+                        request,
+                        index,
+                        data_root,
+                        semantic_weight,
+                        status,
+                        source_count,
+                        |_index, _data_root, events| {
+                            Ok(events
+                                .iter()
+                                .map(|event| {
+                                    (
+                                        event.event_id.as_uuid(),
+                                        "exact source after daemon repin".to_owned(),
+                                    )
+                                })
+                                .collect())
+                        },
+                    )
+                }
+            },
+            |_request, data_root| {
+                wait_calls.set(wait_calls.get() + 1);
+                Ok(RefreshOutcome {
+                    pin: PinnedSourceBackedGeneration::from_index(open_index(data_root)?),
+                    status: "published",
+                    source_count: 1,
+                })
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome.3, "published");
+        assert_eq!(
+            outcome.0["results"][0]["snippet"],
+            "exact source after daemon repin"
+        );
+        assert_eq!(run_calls.get(), 2);
+        assert_eq!(wait_calls.get(), 1);
+    }
+
+    #[test]
+    fn generation_only_semantic_and_hybrid_require_the_exact_flat_projection() {
+        let temp = tempdir().unwrap();
+        write_test_generation(temp.path());
+        let index = open_index(temp.path()).unwrap();
+        assert!(!database_path(temp.path().to_path_buf()).exists());
+
+        let mut lexical_request = request(RefreshArg::Off);
+        lexical_request.backend = Some(SearchBackendArg::Lexical);
+        let filters = index_search_filters(&lexical_request, &index).unwrap();
+        let lexical =
+            collect_search_hits_with_backend(&lexical_request, &index, temp.path(), 0.35, &filters)
+                .unwrap();
+        assert_eq!(lexical.effective_backend, SearchBackendArg::Lexical);
+        assert_eq!(lexical.hits.len(), 1);
+
+        let mut hybrid_request = request(RefreshArg::Off);
+        hybrid_request.backend = Some(SearchBackendArg::Hybrid);
+        let filters = index_search_filters(&hybrid_request, &index).unwrap();
+        let missing =
+            collect_search_hits_with_backend(&hybrid_request, &index, temp.path(), 0.35, &filters)
+                .unwrap_err();
+        assert!(format!("{missing:#}").contains("flat-F32"));
+
+        let mut embedding = vec![0.0; 384];
+        embedding[0] = 1.0;
+        let exact_source_texts = index
+            .semantic_event_page(None, ctx_history_index::MAX_SEMANTIC_EVENT_PAGE_ITEMS)
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|event| {
+                (
+                    event.event_id.as_uuid(),
+                    format!("exact provider fixture text containing {TEST_QUERY}"),
+                )
+            })
+            .collect();
+        PinnedSourceBackedGeneration::install_source_generation_flat_fixture(
+            &index,
+            temp.path(),
+            &embedding,
+            exact_source_texts,
+        )
+        .unwrap();
+        assert!(temp
+            .path()
+            .join("source-backed-semantic-flat-f32-v0")
+            .is_dir());
+        assert!(
+            !temp.path().join("semantic-vectors").exists(),
+            "the fresh source epoch must not open or reuse the legacy vector root"
+        );
+
+        for backend in [SearchBackendArg::Semantic, SearchBackendArg::Hybrid] {
+            let mut source_request = request(RefreshArg::Off);
+            source_request.backend = Some(backend);
+            let filters = index_search_filters(&source_request, &index).unwrap();
+            let collection = collect_search_hits_with_backend_using(
+                &source_request,
+                &index,
+                temp.path(),
+                0.35,
+                &filters,
+                |index, data_root, _query, filters, candidate_limit| {
+                    PinnedSourceBackedGeneration::semantic_candidates_for_source_generation_with_embedding(
+                        index,
+                        data_root,
+                        filters,
+                        candidate_limit,
+                        &embedding,
+                    )
+                },
+            )
+            .unwrap();
+            assert_eq!(collection.requested_backend, backend);
+            assert_eq!(collection.effective_backend, backend);
+            assert_eq!(collection.hits.len(), 1);
+            let diagnostics = collection.semantic_diagnostics.unwrap();
+            assert_eq!(diagnostics["vector_backend"], "flat_f32");
+            assert_eq!(diagnostics["core_generation_id"], index.generation_id());
+            assert!(diagnostics["flat_generation"].as_u64().unwrap() > 0);
+            assert!(diagnostics["flat_generation_hash"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()));
+        }
+
+        assert!(
+            !database_path(temp.path().to_path_buf()).exists(),
+            "generation-only semantic/hybrid must not create or open the legacy Store"
+        );
     }
 
     #[test]
     fn complete_content_hydrates_typed_locators_for_multiple_providers() {
-        let codex = fixture_event(
-            CaptureProvider::Codex,
-            "codex_session_jsonl",
-            1,
-            1,
-            "stored Codex preview",
-        );
-        let warp = fixture_event(
-            CaptureProvider::Warp,
-            "warp_sqlite",
-            2,
-            2,
-            "stored Warp preview",
-        );
+        let codex = fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 1, 1);
+        let warp = fixture_event(CaptureProvider::Warp, "warp_sqlite", 2, 2);
         let resolver = MockContentResolver::default()
             .with_body(&codex, "complete Codex source")
             .with_body(&warp, "complete Warp source");
@@ -1664,9 +2185,7 @@ mod tests {
 
         assert_eq!(resolved[0].text, "complete Codex source");
         assert_eq!(resolved[1].text, "complete Warp source");
-        assert!(resolved.iter().all(|content| {
-            content.complete && content.source_verified && content.complete_content_available
-        }));
+        assert_eq!(resolver.batch_calls.get(), 1);
         assert_eq!(
             resolver.calls.into_inner(),
             vec![
@@ -1677,14 +2196,8 @@ mod tests {
     }
 
     #[test]
-    fn complete_content_never_falls_back_to_the_index_preview() {
-        let event = fixture_event(
-            CaptureProvider::Warp,
-            "warp_sqlite",
-            3,
-            3,
-            "indexed fallback must not be returned",
-        );
+    fn complete_content_fails_when_exact_source_is_unavailable() {
+        let event = fixture_event(CaptureProvider::Warp, "warp_sqlite", 3, 3);
         let error =
             resolve_complete_contents(&[&event], usize::MAX, &MockContentResolver::default())
                 .unwrap_err();
@@ -1694,13 +2207,7 @@ mod tests {
 
     #[test]
     fn complete_content_rejects_non_utf8_provider_bytes() {
-        let event = fixture_event(
-            CaptureProvider::Warp,
-            "warp_sqlite",
-            4,
-            4,
-            "bounded preview",
-        );
+        let event = fixture_event(CaptureProvider::Warp, "warp_sqlite", 4, 4);
         let resolver = MockContentResolver::default().with_body(&event, vec![b'o', b'k', 0x80]);
         let error = resolve_complete_contents(&[&event], usize::MAX, &resolver).unwrap_err();
 
@@ -1709,20 +2216,8 @@ mod tests {
 
     #[test]
     fn complete_content_preserves_the_cumulative_output_limit() {
-        let first = fixture_event(
-            CaptureProvider::Codex,
-            "codex_session_jsonl",
-            5,
-            5,
-            "bounded preview",
-        );
-        let second = fixture_event(
-            CaptureProvider::Warp,
-            "warp_sqlite",
-            6,
-            6,
-            "bounded preview",
-        );
+        let first = fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 5, 5);
+        let second = fixture_event(CaptureProvider::Warp, "warp_sqlite", 6, 6);
         let resolver = MockContentResolver::default()
             .with_body(&first, "four")
             .with_body(&second, "five");

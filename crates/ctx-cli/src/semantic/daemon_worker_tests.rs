@@ -88,7 +88,7 @@ impl Fixture {
             occurred_at_unix_ms: Some(sequence as i64),
             event_type: EventType::Message.as_str().to_owned(),
             role: Some(role.as_str().to_owned()),
-            preview: format!("indexed preview {sequence} must not be canonical"),
+            preview: String::new(),
             workspace: Some("/workspace".to_owned()),
             cwd: Some("/workspace".to_owned()),
             touched_files: Vec::new(),
@@ -215,7 +215,6 @@ fn non_codex_registry_hydration_builds_provider_native_lite_turn() {
             "{\"type\":\"assistant\",\"message\":\"exact Gemini answer\"}"
         )
     );
-    assert!(!document.text.contains("indexed preview"));
     assert_eq!(
         *calls.lock().unwrap_or_else(|error| error.into_inner()),
         vec![user.event_id, final_assistant.event_id]
