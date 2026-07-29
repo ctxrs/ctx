@@ -351,6 +351,7 @@ fn public_transport_exposes_only_the_paged_source_manifest_path() {
     let source = [
         include_str!("../client_output.rs"),
         include_str!("source_backed_feed.rs"),
+        include_str!("source_backed_feed/admission.rs"),
     ]
     .join("\n");
     for forbidden in [
