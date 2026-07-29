@@ -847,6 +847,37 @@ impl SourceManifestReceipt {
     }
 }
 
+/// Compact, exact identity of one completed source-materialization receipt.
+///
+/// Status returns the complete receipt so the public host can validate it.
+/// Queries carry this identity instead of repeating the receipt's potentially
+/// large per-source progress set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceManifestReceiptIdentity {
+    pub core_generation_id: String,
+    pub materializer_revision: String,
+    pub receipt_sha256: String,
+}
+
+impl SourceManifestReceiptIdentity {
+    pub fn from_receipt(receipt: &SourceManifestReceipt) -> Result<Self, ProtocolError> {
+        receipt.validate()?;
+        Ok(Self {
+            core_generation_id: receipt.core_generation_id.clone(),
+            materializer_revision: receipt.materializer_revision.clone(),
+            receipt_sha256: source_manifest_receipt_sha256(receipt)?,
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        validate_sha256(&self.core_generation_id, "Core generation ID")?;
+        validate_identity(&self.materializer_revision, "source materializer revision")?;
+        validate_sha256(&self.receipt_sha256, "source manifest receipt")?;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceManifestFinished {
@@ -868,6 +899,19 @@ pub fn certified_source_revision_sha256(source: &CertifiedSource) -> Result<Stri
         ProtocolError::new(
             ErrorClass::Internal,
             "certified source revision encoding failed",
+        )
+    })?;
+    Ok(sha256_hex(&bytes))
+}
+
+pub fn source_manifest_receipt_sha256(
+    receipt: &SourceManifestReceipt,
+) -> Result<String, ProtocolError> {
+    receipt.validate()?;
+    let bytes = serde_json::to_vec(receipt).map_err(|_| {
+        ProtocolError::new(
+            ErrorClass::Internal,
+            "source manifest receipt encoding failed",
         )
     })?;
     Ok(sha256_hex(&bytes))

@@ -7,8 +7,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use ctx_history_core::database_path;
 use ctx_history_store::Store;
 use ctx_pro_host_protocol::{
-    BlameRequest, BlameTarget, JournalCheckpoint, JournalPosition, ProFilesystemLayout,
-    QuerySnapshotExpectation, PROTOCOL_FINGERPRINT,
+    BlameRequest, BlameTarget, JournalCheckpoint, JournalPosition, MaterializationAuthority,
+    ProFilesystemLayout, QuerySnapshotExpectation, SourceManifestReceiptIdentity, StatusResult,
+    PROTOCOL_FINGERPRINT,
 };
 
 use crate::pro::verified_executable::VerifiedHelperExecutable;
@@ -29,7 +30,29 @@ pub(super) fn current_blame_request(
     target: BlameTarget,
     limit: u32,
     cursor: Option<String>,
+    status: &StatusResult,
 ) -> Result<BlameRequest> {
+    status
+        .validate()
+        .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
+    if status.authority == MaterializationAuthority::Source {
+        let receipt = status.source_receipt.as_ref().ok_or_else(|| {
+            anyhow!(
+                "source_unavailable: source-backed Pro graph is not ready ({})",
+                graph_state_name(status.state)
+            )
+        })?;
+        return Ok(BlameRequest {
+            target,
+            limit,
+            cursor,
+            expected_snapshot: QuerySnapshotExpectation::Source {
+                receipt: SourceManifestReceiptIdentity::from_receipt(receipt)
+                    .map_err(|error| anyhow!("invalid_response: {}", error.message))?,
+            },
+        });
+    }
+
     let db_path = database_path(data_root.to_path_buf());
     if !db_path.exists() {
         bail!(
@@ -53,7 +76,7 @@ pub(super) fn current_blame_request(
         target,
         limit,
         cursor,
-        expected_snapshot: QuerySnapshotExpectation {
+        expected_snapshot: QuerySnapshotExpectation::Journal {
             checkpoint: JournalCheckpoint {
                 position: JournalPosition {
                     generation: snapshot.frozen_through.position.generation,
@@ -65,6 +88,18 @@ pub(super) fn current_blame_request(
             projection_pending: false,
         },
     })
+}
+
+fn graph_state_name(state: ctx_pro_host_protocol::GraphState) -> &'static str {
+    use ctx_pro_host_protocol::GraphState;
+
+    match state {
+        GraphState::NotMaterialized => "not_materialized",
+        GraphState::NeedsRebuild => "needs_rebuild",
+        GraphState::Partial => "partial",
+        GraphState::NeedsResume => "needs_resume",
+        GraphState::Ready => "ready",
+    }
 }
 
 pub(crate) fn default_helper_path(data_root: &Path) -> PathBuf {

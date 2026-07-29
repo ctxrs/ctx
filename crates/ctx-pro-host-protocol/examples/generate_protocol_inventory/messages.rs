@@ -169,7 +169,9 @@ fn helper_messages(fingerprint: &str) -> Vec<(&'static str, HelperMessage)> {
             "status",
             HelperMessage::Status(StatusResult {
                 state: GraphState::NotMaterialized,
+                authority: MaterializationAuthority::Journal,
                 checkpoint: None,
+                source_receipt: None,
             }),
         ),
         (
@@ -497,7 +499,9 @@ fn helper_operation_messages(fingerprint: &str) -> Vec<(&'static str, HelperMess
     let status = |state| {
         HelperMessage::Status(StatusResult {
             state,
+            authority: MaterializationAuthority::Journal,
             checkpoint: matches!(state, GraphState::Ready).then(|| checkpoint(fingerprint)),
+            source_receipt: None,
         })
     };
     let source_observed = |availability| {

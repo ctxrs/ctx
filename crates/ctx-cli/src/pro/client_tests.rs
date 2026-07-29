@@ -271,7 +271,9 @@ fn nativepath_sync_stops_and_prunes_at_the_receipt_then_retries_idempotently() {
         sync_nativepath_group_through(&store, &target, &mut |message, _| match message {
             HostMessage::Status(_) => Ok(HelperMessage::Status(StatusResult {
                 state: GraphState::Ready,
+                authority: ctx_pro_host_protocol::MaterializationAuthority::Journal,
                 checkpoint: Some(helper_prior.clone()),
+                source_receipt: None,
             })),
             HostMessage::SyncJournal(request) => {
                 sent_pages.set(sent_pages.get() + 1);
@@ -305,7 +307,9 @@ fn nativepath_sync_stops_and_prunes_at_the_receipt_then_retries_idempotently() {
     let retry = sync_nativepath_group_through(&store, &target, &mut |message, _| match message {
         HostMessage::Status(_) => Ok(HelperMessage::Status(StatusResult {
             state: GraphState::Ready,
+            authority: ctx_pro_host_protocol::MaterializationAuthority::Journal,
             checkpoint: Some(protocol_checkpoint(target.clone())),
+            source_receipt: None,
         })),
         HostMessage::SyncJournal(_) => {
             retry_sync_called.set(true);
@@ -320,7 +324,9 @@ fn nativepath_sync_stops_and_prunes_at_the_receipt_then_retries_idempotently() {
     let beyond = sync_nativepath_group_through(&store, &target, &mut |message, _| match message {
         HostMessage::Status(_) => Ok(HelperMessage::Status(StatusResult {
             state: GraphState::Ready,
+            authority: ctx_pro_host_protocol::MaterializationAuthority::Journal,
             checkpoint: Some(protocol_checkpoint(later_checkpoint.clone())),
+            source_receipt: None,
         })),
         HostMessage::SyncJournal(_) => bail!("verified later helper checkpoint must not replay"),
         _ => bail!("unexpected helper request"),
@@ -353,7 +359,9 @@ fn core_only_can_remain_inactive_and_later_activation_builds_the_exact_baseline(
         prepare_nativepath_projection_journal(&store, &mut |message, _| match message {
             HostMessage::Status(_) => Ok(HelperMessage::Status(StatusResult {
                 state: GraphState::NotMaterialized,
+                authority: ctx_pro_host_protocol::MaterializationAuthority::Journal,
                 checkpoint: None,
+                source_receipt: None,
             })),
             HostMessage::SyncJournal(request) => {
                 pages.set(pages.get() + 1);
@@ -527,7 +535,9 @@ fn acknowledged_pages_supply_exact_transient_context_to_the_next_request() {
         prepare_nativepath_projection_journal(&store, &mut |message, _| match message {
             HostMessage::Status(_) => Ok(HelperMessage::Status(StatusResult {
                 state: GraphState::NotMaterialized,
+                authority: ctx_pro_host_protocol::MaterializationAuthority::Journal,
                 checkpoint: None,
+                source_receipt: None,
             })),
             HostMessage::SyncJournal(request) => {
                 request.validate().expect("valid context request");
@@ -580,7 +590,9 @@ fn many_near_maximum_records_never_coalesce_beyond_one_bounded_store_page() {
         prepare_nativepath_projection_journal(&store, &mut |message, _| match message {
             HostMessage::Status(_) => Ok(HelperMessage::Status(StatusResult {
                 state: GraphState::NotMaterialized,
+                authority: ctx_pro_host_protocol::MaterializationAuthority::Journal,
                 checkpoint: None,
+                source_receipt: None,
             })),
             HostMessage::SyncJournal(request) => {
                 request.validate().expect("valid bounded request");
@@ -736,22 +748,81 @@ fn blame_capabilities_require_git_only_for_file_targets() {
             repository: None,
             lines: None,
         }),
-        BTreeSet::from([Capability::Query, Capability::GitRead])
+        BTreeSet::from([Capability::Status, Capability::Query, Capability::GitRead])
     );
     assert_eq!(
         required_blame_capabilities(&BlameTarget::Commit {
             oid: "0123456789abcdef".to_owned(),
             repository: None,
         }),
-        BTreeSet::from([Capability::Query])
+        BTreeSet::from([Capability::Status, Capability::Query])
     );
     assert_eq!(
         required_blame_capabilities(&BlameTarget::PullRequest {
             selector: "https://github.com/ctxrs/ctx/pull/42".to_owned(),
             repository: None,
         }),
-        BTreeSet::from([Capability::Query])
+        BTreeSet::from([Capability::Status, Capability::Query])
     );
+}
+
+#[test]
+fn source_authority_blame_request_does_not_open_legacy_store() {
+    let data_root = tempdir().expect("empty data root");
+    let receipt = ctx_pro_host_protocol::SourceManifestReceipt {
+        core_generation_id: "a".repeat(64),
+        materializer_revision: "materializer-v1".to_owned(),
+        progress: Vec::new(),
+    };
+    let status = StatusResult {
+        state: GraphState::Ready,
+        authority: ctx_pro_host_protocol::MaterializationAuthority::Source,
+        checkpoint: None,
+        source_receipt: Some(receipt.clone()),
+    };
+    let request = support::current_blame_request(
+        data_root.path(),
+        BlameTarget::Commit {
+            oid: "0123456789abcdef".to_owned(),
+            repository: None,
+        },
+        10,
+        None,
+        &status,
+    )
+    .expect("source-backed request without ctx.db");
+
+    let ctx_pro_host_protocol::QuerySnapshotExpectation::Source { receipt: identity } =
+        request.expected_snapshot
+    else {
+        panic!("source status must select source query authority");
+    };
+    assert_eq!(identity.core_generation_id, receipt.core_generation_id);
+    assert_eq!(
+        identity.receipt_sha256,
+        ctx_pro_host_protocol::source_manifest_receipt_sha256(&receipt).unwrap()
+    );
+    assert!(!ctx_history_core::database_path(data_root.path().to_path_buf()).exists());
+
+    let pending = StatusResult {
+        state: GraphState::NeedsResume,
+        authority: ctx_pro_host_protocol::MaterializationAuthority::Source,
+        checkpoint: None,
+        source_receipt: None,
+    };
+    let error = support::current_blame_request(
+        data_root.path(),
+        BlameTarget::Commit {
+            oid: "0123456789abcdef".to_owned(),
+            repository: None,
+        },
+        10,
+        None,
+        &pending,
+    )
+    .expect_err("incomplete source authority must fail without legacy fallback");
+    assert!(format!("{error:#}").starts_with("source_unavailable:"));
+    assert!(!ctx_history_core::database_path(data_root.path().to_path_buf()).exists());
 }
 
 #[test]
@@ -763,7 +834,7 @@ fn blame_client_binds_responses_to_the_original_request_context() {
         },
         limit: 10,
         cursor: None,
-        expected_snapshot: ctx_pro_host_protocol::QuerySnapshotExpectation {
+        expected_snapshot: ctx_pro_host_protocol::QuerySnapshotExpectation::Journal {
             checkpoint: JournalCheckpoint {
                 position: JournalPosition {
                     generation: 1,

@@ -6,14 +6,14 @@ use uuid::Uuid;
 use crate::{
     AuthorizationRequest, AuthorizationResult, BeginOutputInventoryRequest,
     BeginSourceManifestRequest, BlameRequest, BlameResult, ConfirmGraphKeyDeletionRequest,
-    DeleteSourceRequest, FinishOutputInventoryRequest, FinishSourceManifestRequest,
+    DeleteSourceRequest, ErrorClass, FinishOutputInventoryRequest, FinishSourceManifestRequest,
     GraphKeyDeleted, GraphKeyDeletionPrepared, JournalCheckpoint, JournalSyncRequest,
     JournalSyncResult, MaterializeSourcePageRequest, ObserveOutputSourceRequest,
     OutputInventoryBegan, OutputInventoryFinished, OutputPageMaterialized, OutputProgressRequest,
     OutputProgressResult, OutputSourceObserved, PrepareGraphKeyDeletionRequest,
     PrepareSourceRequest, ProOutputMaterializationPage, ProtocolError, SourceDeleted,
-    SourceManifestBegan, SourceManifestFinished, SourcePageMaterialized, SourcePrepared,
-    PROTOCOL_FINGERPRINT, PROTOCOL_VERSION,
+    SourceManifestBegan, SourceManifestFinished, SourceManifestReceipt, SourcePageMaterialized,
+    SourcePrepared, PROTOCOL_FINGERPRINT, PROTOCOL_VERSION,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -210,9 +210,66 @@ pub enum GraphState {
     Ready,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaterializationAuthority {
+    Journal,
+    Source,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StatusResult {
     pub state: GraphState,
+    pub authority: MaterializationAuthority,
     pub checkpoint: Option<JournalCheckpoint>,
+    pub source_receipt: Option<SourceManifestReceipt>,
+}
+
+impl StatusResult {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if let Some(checkpoint) = &self.checkpoint {
+            checkpoint.validate()?;
+        }
+        if let Some(receipt) = &self.source_receipt {
+            receipt.validate()?;
+        }
+        match self.authority {
+            MaterializationAuthority::Journal => {
+                if self.source_receipt.is_some() {
+                    return Err(ProtocolError::new(
+                        ErrorClass::Sequence,
+                        "journal status cannot report source authority",
+                    ));
+                }
+                if self.state == GraphState::Ready && self.checkpoint.is_none() {
+                    return Err(ProtocolError::new(
+                        ErrorClass::Sequence,
+                        "ready journal status requires a completed checkpoint",
+                    ));
+                }
+            }
+            MaterializationAuthority::Source => {
+                if self.checkpoint.is_some() {
+                    return Err(ProtocolError::new(
+                        ErrorClass::Sequence,
+                        "source status cannot report journal authority",
+                    ));
+                }
+                if self.state == GraphState::Ready && self.source_receipt.is_none() {
+                    return Err(ProtocolError::new(
+                        ErrorClass::Sequence,
+                        "ready source status requires a completed receipt",
+                    ));
+                }
+                if self.state != GraphState::Ready && self.source_receipt.is_some() {
+                    return Err(ProtocolError::new(
+                        ErrorClass::Sequence,
+                        "incomplete source status cannot report a completed receipt",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
 }

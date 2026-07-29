@@ -489,7 +489,7 @@ pub(super) fn blame_request(
         target,
         limit: 10,
         cursor,
-        expected_snapshot: QuerySnapshotExpectation {
+        expected_snapshot: QuerySnapshotExpectation::Journal {
             checkpoint: checkpoint(fingerprint),
             projection_pending: false,
         },

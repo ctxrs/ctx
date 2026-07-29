@@ -203,11 +203,89 @@ fn blame_request(target: BlameTarget) -> BlameRequest {
         target,
         limit: 10,
         cursor: None,
-        expected_snapshot: QuerySnapshotExpectation {
+        expected_snapshot: QuerySnapshotExpectation::Journal {
             checkpoint: full_request(Vec::new()).frozen_through,
             projection_pending: false,
         },
     }
+}
+
+fn empty_source_receipt() -> SourceManifestReceipt {
+    SourceManifestReceipt {
+        core_generation_id: "a".repeat(64),
+        materializer_revision: "materializer-v1".to_owned(),
+        progress: Vec::new(),
+    }
+}
+
+#[test]
+fn query_snapshot_authority_is_explicit_and_source_identity_is_exact() {
+    let receipt = empty_source_receipt();
+    let identity = SourceManifestReceiptIdentity::from_receipt(&receipt).unwrap();
+    assert_eq!(
+        identity.receipt_sha256,
+        source_manifest_receipt_sha256(&receipt).unwrap()
+    );
+
+    let source = QuerySnapshotExpectation::Source { receipt: identity };
+    source.validate().unwrap();
+    assert_eq!(
+        serde_json::to_value(&source).unwrap()["kind"],
+        serde_json::json!("source")
+    );
+
+    let journal = QuerySnapshotExpectation::Journal {
+        checkpoint: full_request(Vec::new()).frozen_through,
+        projection_pending: false,
+    };
+    journal.validate().unwrap();
+    assert_eq!(
+        serde_json::to_value(&journal).unwrap()["kind"],
+        serde_json::json!("journal")
+    );
+}
+
+#[test]
+fn status_source_receipt_is_completed_ready_authority() {
+    StatusResult {
+        state: GraphState::Ready,
+        authority: MaterializationAuthority::Source,
+        checkpoint: None,
+        source_receipt: Some(empty_source_receipt()),
+    }
+    .validate()
+    .unwrap();
+
+    StatusResult {
+        state: GraphState::NeedsResume,
+        authority: MaterializationAuthority::Source,
+        checkpoint: None,
+        source_receipt: None,
+    }
+    .validate()
+    .unwrap();
+
+    let ambiguous = StatusResult {
+        state: GraphState::Ready,
+        authority: MaterializationAuthority::Source,
+        checkpoint: Some(full_request(Vec::new()).frozen_through),
+        source_receipt: Some(empty_source_receipt()),
+    };
+    assert_eq!(
+        ambiguous.validate().unwrap_err().class,
+        ErrorClass::Sequence
+    );
+
+    let incomplete = StatusResult {
+        state: GraphState::NeedsResume,
+        authority: MaterializationAuthority::Source,
+        checkpoint: None,
+        source_receipt: Some(empty_source_receipt()),
+    };
+    assert_eq!(
+        incomplete.validate().unwrap_err().class,
+        ErrorClass::Sequence
+    );
 }
 
 fn cited_commit_blame_result() -> BlameResult {
@@ -693,7 +771,7 @@ fn fake_journal_ack_is_idempotent_and_queries_require_exact_checkpoint() {
         },
         limit: 10,
         cursor: None,
-        expected_snapshot: QuerySnapshotExpectation {
+        expected_snapshot: QuerySnapshotExpectation::Journal {
             checkpoint,
             projection_pending: false,
         },

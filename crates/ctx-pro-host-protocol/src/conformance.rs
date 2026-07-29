@@ -364,7 +364,7 @@ fn blame() -> BlameRequest {
         },
         limit: 10,
         cursor: None,
-        expected_snapshot: QuerySnapshotExpectation {
+        expected_snapshot: QuerySnapshotExpectation::Journal {
             checkpoint: checkpoint(),
             projection_pending: false,
         },
@@ -750,7 +750,9 @@ fn helper_messages() -> Vec<HelperMessage> {
         HelperMessage::GraphKeyDeleted(GraphKeyDeleted { deleted: true }),
         HelperMessage::Status(StatusResult {
             state: GraphState::NotMaterialized,
+            authority: MaterializationAuthority::Journal,
             checkpoint: None,
+            source_receipt: None,
         }),
         HelperMessage::JournalSynced(JournalSyncResult {
             committed_through: checkpoint(),
