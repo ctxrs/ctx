@@ -162,15 +162,15 @@ mod unix {
         copy_dir_all(&fixture, &data_root.join(".codex/sessions"));
         let generation_id = initialize_generation_only_sql_projection(data_root);
         assert!(!generation_id.is_empty());
-        assert_source_backed_epoch_remained_store_free(data_root);
+        assert_source_backed_epoch_remained_fresh(data_root);
     }
 
-    fn assert_source_backed_epoch_remained_store_free(data_root: &Path) {
+    fn assert_source_backed_epoch_remained_fresh(data_root: &Path) {
         assert!(data_root.join("relational.sqlite").is_file());
         assert!(data_root.join("search/lexical").is_dir());
         assert!(
             !data_root.join("work.sqlite").exists(),
-            "v0.26 upgrade fixtures must not open or recreate the legacy Store"
+            "v0.26 upgrade fixtures must not open or recreate prior-epoch history storage"
         );
     }
 
@@ -453,7 +453,7 @@ mod unix {
                 "{journal_kind:?}/{recovery_owner:?} began a daemon handoff from stale discovery"
             );
         });
-        assert_source_backed_epoch_remained_store_free(owner.path());
+        assert_source_backed_epoch_remained_fresh(owner.path());
     }
 
     fn prove_recovery_quiescence(journal_kind: RecoveryJournal, recovery_owner: RecoveryOwner) {
@@ -671,8 +671,8 @@ mod unix {
                 }
             }
         });
-        assert_source_backed_epoch_remained_store_free(owner.path());
-        assert_source_backed_epoch_remained_store_free(second.path());
+        assert_source_backed_epoch_remained_fresh(owner.path());
+        assert_source_backed_epoch_remained_fresh(second.path());
     }
 
     #[test]
@@ -935,8 +935,8 @@ mod unix {
             stop_daemon(restarted_first.unwrap());
             stop_daemon(restarted_second.unwrap());
         });
-        assert_source_backed_epoch_remained_store_free(first.path());
-        assert_source_backed_epoch_remained_store_free(second.path());
+        assert_source_backed_epoch_remained_fresh(first.path());
+        assert_source_backed_epoch_remained_fresh(second.path());
     }
 
     #[test]
