@@ -22,11 +22,6 @@ filegroup(
 )
 
 filegroup(
-    name = "native_dispatch_source",
-    srcs = ["src/commands/import/native/dispatch.rs"],
-)
-
-filegroup(
     name = "provider_import_architecture_sources",
     srcs = glob(
         ["src/commands/import/**/*.rs"],
