@@ -10,15 +10,15 @@ use std::{
 };
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, CertifiedSourceInventory,
-    ContentSourceResolver, EventHydrationRequest, EventIdentityInput, HydratedProviderRecord,
-    HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy, NativeItemKey,
-    NativeRecordCoordinate, NativeSessionKey, ProjectionContractError, ScannedSourceCounts,
-    SessionHydrationRequest, SessionIdentityInput, SourceAnchor, SourceInventoryObservation,
-    SourceKey, SourceObservation, SourceRecordLocator, SourceResolverContractError, StableEntityId,
-    TypedKey,
+    derive_event_id, derive_session_id, BatchHydrationRequest, BatchHydrationResult,
+    CaptureProvider, CertifiedSource, CertifiedSourceInventory, ContentSourceResolver,
+    EventHydrationRequest, EventIdentityInput, HydratedProviderRecord, HydrationFailure,
+    HydrationFailureKind, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
+    NativeSessionKey, ProjectionContractError, ScannedSourceCounts, SessionHydrationRequest,
+    SessionIdentityInput, SourceAnchor, SourceInventoryObservation, SourceKey, SourceObservation,
+    SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
 };
-use ctx_history_index::{IndexError, LexicalDocument, MAX_BODY_PREVIEW_CHARS};
+use ctx_history_index::{IndexError, LexicalDocument};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
@@ -358,7 +358,7 @@ pub(crate) fn scan_astrbot_source_backed_v0(
                 );
                 add_rejected(&mut counts)?;
             } else {
-                let (unit, rejection, row_digest) = source_backed_platform_unit(
+                let (unit, rejection, row_digest, complete_text) = source_backed_platform_unit(
                     conn,
                     &sql,
                     candidate,
@@ -378,6 +378,9 @@ pub(crate) fn scan_astrbot_source_backed_v0(
                             row_digest,
                             &unit.session,
                             &event,
+                            complete_text
+                                .as_deref()
+                                .ok_or(AstrBotSourceBackedErrorV0::ExactConversationMismatch)?,
                         )?;
                         pending_documents.push(document);
                         add_retained(&mut counts)?;
@@ -426,7 +429,7 @@ fn source_backed_platform_unit(
     candidate: RowCandidate,
     native_ordinal: u64,
     checkpoint_links: &BTreeMap<String, PlatformMessageLink>,
-) -> AstrBotSourceBackedResultV0<(Option<CoreUnit>, Option<String>, [u8; 32])> {
+) -> AstrBotSourceBackedResultV0<(Option<CoreUnit>, Option<String>, [u8; 32], Option<String>)> {
     let hydration =
         sql.platform_message_hydration
             .as_deref()
@@ -447,7 +450,7 @@ fn source_backed_platform_unit(
         .and_then(provider_value_text)
         .filter(|text| !text.trim().is_empty())
     else {
-        return Ok((None, None, row_sha256));
+        return Ok((None, None, row_sha256, None));
     };
     let session = platform_session_fact(&row, link);
     let role = if row.sender_id.as_deref() == row.user_id.as_deref() {
@@ -491,6 +494,7 @@ fn source_backed_platform_unit(
         }),
         None,
         row_sha256,
+        Some(text),
     ))
 }
 
@@ -512,7 +516,7 @@ impl AstrBotSourceBackedResolverV0 {
         Ok(Self { sources })
     }
 
-    fn hydrate_requests(
+    pub(crate) fn hydrate_requests(
         &self,
         requests: &[EventHydrationRequest],
     ) -> std::result::Result<Vec<HydratedProviderRecord>, HydrationFailure> {
@@ -521,19 +525,24 @@ impl AstrBotSourceBackedResolverV0 {
         }
         let mut coordinates = Vec::with_capacity(requests.len());
         for request in requests {
-            coordinates.push(decode_conversation_locator(request.locator())?);
+            coordinates.push(decode_locator(request.locator())?);
         }
         let source_key = requests[0].locator().source();
         let source = self
             .sources
             .get(&source_key.identity().digest())
-            .filter(|source| source.source_key.exact_descriptor_eq(source_key))
             .ok_or_else(|| {
                 hydration_failure(
-                    HydrationFailureKind::TemporarilyUnavailable,
-                    "AstrBot source is not present in the admitted inventory",
+                    HydrationFailureKind::ConfirmedDeleted,
+                    "AstrBot source is absent from the complete admitted inventory",
                 )
             })?;
+        if !source.source_key.exact_descriptor_eq(source_key) {
+            return Err(hydration_failure(
+                HydrationFailureKind::InvalidLocator,
+                "AstrBot source descriptor does not match the admitted source identity",
+            ));
+        }
         if requests
             .iter()
             .any(|request| !request.locator().source().exact_descriptor_eq(source_key))
@@ -546,77 +555,135 @@ impl AstrBotSourceBackedResolverV0 {
 
         let (source_root, sqlite_snapshot) =
             open_root_authorized_snapshot(&source.path).map_err(map_source_hydration)?;
-        let conn = sqlite_snapshot.connection().map_err(map_source_hydration)?;
-        let user_version: i64 = conn
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .map_err(CaptureError::from)
-            .map_err(map_capture_hydration)?;
-        let schema_fingerprint = sqlite_schema_fingerprint(&conn).map_err(map_capture_hydration)?;
-        let observation = source_observation(
-            &source.source_key,
-            sqlite_snapshot.evidence(),
-            user_version,
-            &schema_fingerprint,
-        )
-        .map_err(|_| {
-            hydration_failure(
-                HydrationFailureKind::InvalidLocator,
-                "AstrBot source observation is invalid",
+        let hydration = (|| {
+            let conn = sqlite_snapshot.connection().map_err(map_sqlite_hydration)?;
+            let sql = AstrBotSql::new(conn).map_err(map_parser_hydration)?;
+            let user_version: i64 = conn
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .map_err(CaptureError::from)
+                .map_err(map_capture_hydration)?;
+            let schema_fingerprint =
+                sqlite_schema_fingerprint(conn).map_err(map_capture_hydration)?;
+            let observation = source_observation(
+                &source.source_key,
+                sqlite_snapshot.evidence(),
+                user_version,
+                &schema_fingerprint,
             )
-        })?;
-        let observed_revision = revision_digest(&observation);
-        if requests.iter().any(|request| {
-            request.locator().certified_source_revision_digest() != Some(&observed_revision)
-        }) {
-            return Err(hydration_failure(
-                HydrationFailureKind::StaleSourceEvidence,
-                "AstrBot SQLite snapshot no longer matches the certified revision",
-            ));
-        }
-
-        let mut hydrated = Vec::with_capacity(requests.len());
-        for (request, coordinate) in requests.iter().zip(coordinates) {
-            let values = super::super::astrbot_complete_conversation_values(
-                &conn,
-                coordinate.physical_rowid,
-            )
-            .map_err(map_capture_hydration)?
-            .ok_or_else(|| {
+            .map_err(|_| {
                 hydration_failure(
-                    HydrationFailureKind::MissingRecord,
-                    "AstrBot conversation row is missing",
+                    HydrationFailureKind::InvalidLocator,
+                    "AstrBot source observation is invalid",
                 )
             })?;
-            if logical_values_digest(&values) != coordinate.row_digest {
+            let observed_revision = revision_digest(&observation);
+            if requests.iter().any(|request| {
+                request.locator().certified_source_revision_digest() != Some(&observed_revision)
+            }) {
                 return Err(hydration_failure(
-                    HydrationFailureKind::StaleRecordEvidence,
-                    "AstrBot conversation row version no longer matches",
+                    HydrationFailureKind::StaleSourceEvidence,
+                    "AstrBot SQLite snapshot no longer matches the certified revision",
                 ));
             }
-            let message =
-                super::super::astrbot_complete_conversation_message(&values, coordinate.item_index)
-                    .map_err(map_capture_hydration)?
-                    .ok_or_else(|| {
-                        hydration_failure(
-                            HydrationFailureKind::MissingRecord,
-                            "AstrBot conversation message is missing",
-                        )
-                    })?;
-            let provider_bytes = message.text.into_bytes();
-            if Sha256::digest(&provider_bytes).as_slice() != request.locator().record_digest() {
-                return Err(hydration_failure(
-                    HydrationFailureKind::StaleRecordEvidence,
-                    "AstrBot conversation message digest no longer matches",
-                ));
+
+            let checkpoint_links = coordinates
+                .iter()
+                .any(AstrBotCoordinate::is_platform)
+                .then(|| load_checkpoint_links(conn, &sql))
+                .transpose()?
+                .unwrap_or_default();
+            let revision_scope = TypedKey::bytes(observed_revision.to_vec()).map_err(|error| {
+                hydration_failure(HydrationFailureKind::InvalidLocator, error.to_string())
+            })?;
+            let mut hydrated = Vec::with_capacity(requests.len());
+            let mut conversations = BTreeMap::new();
+            for (request, coordinate) in requests.iter().zip(coordinates) {
+                let provider_bytes = match coordinate {
+                    AstrBotCoordinate::Conversation {
+                        physical_rowid,
+                        item_index,
+                        row_digest,
+                        content_kind,
+                    } => {
+                        if !conversations.contains_key(&physical_rowid) {
+                            let values = super::super::astrbot_complete_conversation_values(
+                                conn,
+                                physical_rowid,
+                            )
+                            .map_err(map_capture_hydration)?
+                            .ok_or_else(|| {
+                                hydration_failure(
+                                    HydrationFailureKind::MissingRecord,
+                                    "AstrBot conversation row is missing",
+                                )
+                            })?;
+                            conversations.insert(physical_rowid, values);
+                        }
+                        let values = conversations.get(&physical_rowid).ok_or_else(|| {
+                            hydration_failure(
+                                HydrationFailureKind::MissingRecord,
+                                "AstrBot conversation row is missing",
+                            )
+                        })?;
+                        if logical_values_digest(values) != row_digest {
+                            return Err(hydration_failure(
+                                HydrationFailureKind::StaleRecordEvidence,
+                                "AstrBot conversation row version no longer matches",
+                            ));
+                        }
+                        hydrate_conversation_coordinate(
+                            &source.source_key,
+                            request,
+                            values,
+                            physical_rowid,
+                            item_index,
+                            content_kind,
+                            &revision_scope,
+                        )?
+                    }
+                    AstrBotCoordinate::Platform {
+                        physical_rowid,
+                        logical_id,
+                        row_digest,
+                    } => hydrate_platform_coordinate(
+                        &source.source_key,
+                        request,
+                        conn,
+                        &sql,
+                        physical_rowid,
+                        logical_id,
+                        row_digest,
+                        &checkpoint_links,
+                    )?,
+                };
+                hydrated.push(HydratedProviderRecord {
+                    event_id: request.event_id(),
+                    provider_bytes,
+                });
             }
-            hydrated.push(HydratedProviderRecord {
-                event_id: request.event_id(),
-                provider_bytes,
-            });
-        }
-        sqlite_snapshot.finish().map_err(map_source_hydration)?;
-        source_root.revalidate().map_err(map_capture_hydration)?;
-        Ok(hydrated)
+            Ok(hydrated)
+        })();
+        let finished = sqlite_snapshot.finish().map_err(map_sqlite_hydration);
+        let root_current = source_root.revalidate().map_err(map_capture_hydration);
+        finished?;
+        root_current?;
+        hydration
+    }
+
+    pub(crate) fn hydrate_batch_request(
+        &self,
+        request: &BatchHydrationRequest,
+    ) -> std::result::Result<BatchHydrationResult, HydrationFailure> {
+        let result = BatchHydrationResult::new(self.hydrate_requests(request.events())?).map_err(
+            |error| {
+                hydration_failure(
+                    HydrationFailureKind::InvalidLocator,
+                    format!("invalid AstrBot batch hydration result: {error}"),
+                )
+            },
+        )?;
+        result.validate_for_request(request)?;
+        Ok(result)
     }
 }
 
@@ -677,6 +744,13 @@ impl ContentSourceResolver for AstrBotSourceBackedResolverV0 {
             })
     }
 
+    fn hydrate_batch(
+        &self,
+        request: &BatchHydrationRequest,
+    ) -> std::result::Result<BatchHydrationResult, HydrationFailure> {
+        self.hydrate_batch_request(request)
+    }
+
     fn hydrate_session(
         &self,
         request: &SessionHydrationRequest,
@@ -685,16 +759,36 @@ impl ContentSourceResolver for AstrBotSourceBackedResolverV0 {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct ConversationCoordinate {
-    physical_rowid: i64,
-    item_index: u32,
-    row_digest: [u8; 32],
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConversationContentKind {
+    Message,
+    Output,
 }
 
-fn decode_conversation_locator(
+#[derive(Debug, Clone, Copy)]
+enum AstrBotCoordinate {
+    Conversation {
+        physical_rowid: i64,
+        item_index: u32,
+        row_digest: [u8; 32],
+        content_kind: ConversationContentKind,
+    },
+    Platform {
+        physical_rowid: i64,
+        logical_id: i64,
+        row_digest: [u8; 32],
+    },
+}
+
+impl AstrBotCoordinate {
+    const fn is_platform(&self) -> bool {
+        matches!(self, Self::Platform { .. })
+    }
+}
+
+fn decode_locator(
     locator: &SourceRecordLocator,
-) -> std::result::Result<ConversationCoordinate, HydrationFailure> {
+) -> std::result::Result<AstrBotCoordinate, HydrationFailure> {
     if locator.revision_policy() != LocatorRevisionPolicy::ExactSourceRevision {
         return Err(hydration_failure(
             HydrationFailureKind::InvalidLocator,
@@ -712,30 +806,46 @@ fn decode_conversation_locator(
             "AstrBot locator is not a provider SQLite coordinate",
         ));
     };
-    if matches!(
-        logical_relation.as_str(),
-        PLATFORM_MESSAGE_RELATION | CONVERSATION_OUTPUT_RELATION
-    ) {
-        return Err(hydration_failure(
-            HydrationFailureKind::UnsupportedParserRevision,
-            if logical_relation == PLATFORM_MESSAGE_RELATION {
-                "AstrBot platform-message rows have no verified exact-content resolver"
-            } else {
-                "AstrBot conversation output rows have no verified exact-content resolver"
-            },
-        ));
-    }
-    if logical_relation != CONVERSATION_MESSAGE_RELATION {
+    let Some(TypedKey::Bytes(row_digest)) = row_version else {
         return Err(hydration_failure(
             HydrationFailureKind::InvalidLocator,
-            "AstrBot logical relation is unsupported",
+            "AstrBot SQLite locator has no typed row version",
         ));
-    }
+    };
+    let row_digest: [u8; 32] = row_digest.as_slice().try_into().map_err(|_| {
+        hydration_failure(
+            HydrationFailureKind::InvalidLocator,
+            "AstrBot SQLite row version has an invalid length",
+        )
+    })?;
     let TypedKey::Composite(parts) = primary_key else {
         return Err(hydration_failure(
             HydrationFailureKind::InvalidLocator,
-            "AstrBot conversation key is not composite",
+            "AstrBot SQLite key is not composite",
         ));
+    };
+    if logical_relation == PLATFORM_MESSAGE_RELATION {
+        let [TypedKey::I64(physical_rowid), TypedKey::I64(logical_id)] = parts.as_slice() else {
+            return Err(hydration_failure(
+                HydrationFailureKind::InvalidLocator,
+                "AstrBot platform-message key has an invalid shape",
+            ));
+        };
+        return Ok(AstrBotCoordinate::Platform {
+            physical_rowid: *physical_rowid,
+            logical_id: *logical_id,
+            row_digest,
+        });
+    }
+    let content_kind = match logical_relation.as_str() {
+        CONVERSATION_MESSAGE_RELATION => ConversationContentKind::Message,
+        CONVERSATION_OUTPUT_RELATION => ConversationContentKind::Output,
+        _ => {
+            return Err(hydration_failure(
+                HydrationFailureKind::InvalidLocator,
+                "AstrBot logical relation is unsupported",
+            ));
+        }
     };
     let [TypedKey::I64(physical_rowid), TypedKey::U64(item_index)] = parts.as_slice() else {
         return Err(hydration_failure(
@@ -743,19 +853,7 @@ fn decode_conversation_locator(
             "AstrBot conversation key has an invalid shape",
         ));
     };
-    let Some(TypedKey::Bytes(row_digest)) = row_version else {
-        return Err(hydration_failure(
-            HydrationFailureKind::InvalidLocator,
-            "AstrBot conversation locator has no row version",
-        ));
-    };
-    let row_digest: [u8; 32] = row_digest.as_slice().try_into().map_err(|_| {
-        hydration_failure(
-            HydrationFailureKind::InvalidLocator,
-            "AstrBot conversation row version has an invalid length",
-        )
-    })?;
-    Ok(ConversationCoordinate {
+    Ok(AstrBotCoordinate::Conversation {
         physical_rowid: *physical_rowid,
         item_index: u32::try_from(*item_index).map_err(|_| {
             hydration_failure(
@@ -764,7 +862,221 @@ fn decode_conversation_locator(
             )
         })?,
         row_digest,
+        content_kind,
     })
+}
+
+fn hydrate_conversation_coordinate(
+    source: &SourceKey,
+    request: &EventHydrationRequest,
+    values: &[NativeSqliteValue],
+    physical_rowid: i64,
+    item_index: u32,
+    content_kind: ConversationContentKind,
+    revision_scope: &TypedKey,
+) -> std::result::Result<Vec<u8>, HydrationFailure> {
+    let row = super::super::model::decode_conversation(values).map_err(map_capture_hydration)?;
+    let (items, content_is_array) = conversation_items(&row.content);
+    let item = items
+        .get(usize::try_from(item_index).unwrap_or(usize::MAX))
+        .ok_or_else(|| {
+            hydration_failure(
+                HydrationFailureKind::MissingRecord,
+                "AstrBot conversation subrecord is missing",
+            )
+        })?;
+    if checkpoint_id(item).is_some() {
+        return Err(hydration_failure(
+            HydrationFailureKind::InvalidLocator,
+            "AstrBot locator addresses a non-indexed checkpoint",
+        ));
+    }
+    let is_output = item_is_output(item);
+    if matches!(
+        (content_kind, is_output),
+        (ConversationContentKind::Message, true) | (ConversationContentKind::Output, false)
+    ) {
+        return Err(hydration_failure(
+            HydrationFailureKind::InvalidLocator,
+            "AstrBot locator relation does not match the native subrecord kind",
+        ));
+    }
+    let text = if content_is_array {
+        item_text(item)
+    } else {
+        provider_value_text(item)
+    }
+    .filter(|text| !text.trim().is_empty())
+    .ok_or_else(|| {
+        hydration_failure(
+            HydrationFailureKind::MissingRecord,
+            "AstrBot conversation subrecord has no meaningful display text",
+        )
+    })?;
+    let session_id =
+        stable_session_id(source, &provider_session_id(&row)).map_err(invalid_locator)?;
+    let native_item_key = conversation_native_item_key(
+        physical_rowid,
+        usize::try_from(item_index).unwrap_or(usize::MAX),
+        Some(item),
+        revision_scope,
+    )
+    .map_err(invalid_locator)?;
+    let expected_event_id = derive_event_id(EventIdentityInput {
+        source,
+        session_id,
+        logical_item_kind: LOGICAL_EVENT_KIND,
+        native_item_key: &native_item_key,
+        subrecord_selector: None,
+    })
+    .map_err(invalid_locator)?;
+    if expected_event_id != request.event_id() {
+        return Err(hydration_failure(
+            HydrationFailureKind::InvalidLocator,
+            "AstrBot conversation native key does not derive the requested event identity",
+        ));
+    }
+    verify_record_digest(request.locator(), text.as_bytes(), "conversation subrecord")?;
+    Ok(text.into_bytes())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hydrate_platform_coordinate(
+    source: &SourceKey,
+    request: &EventHydrationRequest,
+    conn: &rusqlite::Connection,
+    sql: &AstrBotSql,
+    physical_rowid: i64,
+    logical_id: i64,
+    row_digest: [u8; 32],
+    checkpoint_links: &BTreeMap<String, PlatformMessageLink>,
+) -> std::result::Result<Vec<u8>, HydrationFailure> {
+    let hydration = sql.platform_message_hydration.as_deref().ok_or_else(|| {
+        hydration_failure(
+            HydrationFailureKind::UnsupportedParserRevision,
+            "AstrBot source has no supported platform-message relation",
+        )
+    })?;
+    let row =
+        hydrate_platform_message(conn, hydration, physical_rowid).map_err(map_capture_hydration)?;
+    if row.id != logical_id {
+        return Err(hydration_failure(
+            HydrationFailureKind::InvalidLocator,
+            "AstrBot platform-message logical key does not match the reopened row",
+        ));
+    }
+    let observed_row_digest =
+        serialized_hash(b"astrbot-platform-row-v1\0", &row).map_err(map_capture_hydration)?;
+    if observed_row_digest != row_digest {
+        return Err(hydration_failure(
+            HydrationFailureKind::StaleRecordEvidence,
+            "AstrBot platform-message row version no longer matches",
+        ));
+    }
+    let text = row
+        .content
+        .as_deref()
+        .map(provider_json_text)
+        .as_ref()
+        .and_then(provider_value_text)
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(|| {
+            hydration_failure(
+                HydrationFailureKind::MissingRecord,
+                "AstrBot platform-message row has no meaningful display text",
+            )
+        })?;
+    let link = row
+        .llm_checkpoint_id
+        .as_ref()
+        .and_then(|checkpoint| checkpoint_links.get(checkpoint));
+    let session = platform_session_fact(&row, link);
+    let session_id =
+        stable_session_id(source, &session.provider_session_id).map_err(invalid_locator)?;
+    let native_item_key =
+        NativeItemKey::native_id("astrbot.platform-message", TypedKey::I64(logical_id))
+            .map_err(invalid_locator)?;
+    let expected_event_id = derive_event_id(EventIdentityInput {
+        source,
+        session_id,
+        logical_item_kind: LOGICAL_EVENT_KIND,
+        native_item_key: &native_item_key,
+        subrecord_selector: None,
+    })
+    .map_err(invalid_locator)?;
+    if expected_event_id != request.event_id() {
+        return Err(hydration_failure(
+            HydrationFailureKind::InvalidLocator,
+            "AstrBot platform-message native key does not derive the requested event identity",
+        ));
+    }
+    verify_record_digest(
+        request.locator(),
+        text.as_bytes(),
+        "platform-message display text",
+    )?;
+    Ok(text.into_bytes())
+}
+
+fn load_checkpoint_links(
+    conn: &rusqlite::Connection,
+    sql: &AstrBotSql,
+) -> std::result::Result<BTreeMap<String, PlatformMessageLink>, HydrationFailure> {
+    let mut links = BTreeMap::new();
+    let mut after = None;
+    loop {
+        let Some(candidate) = fetch_candidate(
+            conn,
+            &sql.conversation_candidate_initial,
+            &sql.conversation_candidate_after,
+            after,
+        )
+        .map_err(map_capture_hydration)?
+        else {
+            break;
+        };
+        after = Some(candidate.physical_rowid);
+        if candidate.observed_bytes().map_err(map_capture_hydration)?
+            > u64::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES).unwrap_or(u64::MAX)
+        {
+            continue;
+        }
+        let row = hydrate_conversation(conn, &sql.conversation_hydration, candidate.physical_rowid)
+            .map_err(map_capture_hydration)?;
+        let provider_session_id = provider_session_id(&row);
+        for item in conversation_items(&row.content).0 {
+            if let Some(checkpoint) = checkpoint_id(&item) {
+                links.insert(
+                    checkpoint,
+                    PlatformMessageLink {
+                        provider_session_id: provider_session_id.clone(),
+                        parent_created_at: row.created_at,
+                    },
+                );
+            }
+        }
+    }
+    Ok(links)
+}
+
+fn verify_record_digest(
+    locator: &SourceRecordLocator,
+    provider_bytes: &[u8],
+    label: &str,
+) -> std::result::Result<(), HydrationFailure> {
+    let digest: [u8; 32] = Sha256::digest(provider_bytes).into();
+    if &digest == locator.record_digest() {
+        Ok(())
+    } else {
+        Err(hydration_failure(
+            HydrationFailureKind::StaleRecordEvidence,
+            format!("AstrBot {label} digest no longer matches"),
+        ))
+    }
+}
+
+fn invalid_locator(error: impl std::fmt::Display) -> HydrationFailure {
+    hydration_failure(HydrationFailureKind::InvalidLocator, error.to_string())
 }
 
 fn source_key(identity: &AstrBotSourceIdentityV0) -> AstrBotSourceBackedResultV0<SourceKey> {
@@ -783,6 +1095,32 @@ fn source_key(identity: &AstrBotSourceIdentityV0) -> AstrBotSourceBackedResultV0
         SOURCE_IDENTITY_VERSION,
         SourceAnchor::provider_native(namespace, key)?,
     )?)
+}
+
+fn conversation_native_item_key(
+    physical_rowid: i64,
+    item_index: usize,
+    item: Option<&Value>,
+    revision_scope: &TypedKey,
+) -> AstrBotSourceBackedResultV0<NativeItemKey> {
+    if let Some(native_id) = item.and_then(item_id) {
+        Ok(NativeItemKey::composite(
+            "astrbot.conversation-item",
+            vec![TypedKey::I64(physical_rowid), TypedKey::utf8(native_id)?],
+        )?)
+    } else {
+        Ok(NativeItemKey::revision_scoped_position(
+            "astrbot.conversation-position",
+            TypedKey::composite(vec![
+                TypedKey::I64(physical_rowid),
+                TypedKey::U64(
+                    u64::try_from(item_index)
+                        .map_err(|_| AstrBotSourceBackedErrorV0::CountOverflow)?,
+                ),
+            ])?,
+            revision_scope.clone(),
+        )?)
+    }
 }
 
 fn launcher_instance_identity(home: &Path, path: &Path) -> Option<String> {
@@ -899,24 +1237,8 @@ fn conversation_document(
     complete_text: &str,
 ) -> AstrBotSourceBackedResultV0<LexicalDocument> {
     let session_id = stable_session_id(&source.source_key, &session.provider_session_id)?;
-    let native_item_key = if let Some(native_id) = item.and_then(item_id) {
-        NativeItemKey::composite(
-            "astrbot.conversation-item",
-            vec![TypedKey::I64(physical_rowid), TypedKey::utf8(native_id)?],
-        )?
-    } else {
-        NativeItemKey::revision_scoped_position(
-            "astrbot.conversation-position",
-            TypedKey::composite(vec![
-                TypedKey::I64(physical_rowid),
-                TypedKey::U64(
-                    u64::try_from(item_index)
-                        .map_err(|_| AstrBotSourceBackedErrorV0::CountOverflow)?,
-                ),
-            ])?,
-            revision_scope.clone(),
-        )?
-    };
+    let native_item_key =
+        conversation_native_item_key(physical_rowid, item_index, item, revision_scope)?;
     let event_id = derive_event_id(EventIdentityInput {
         source: &source.source_key,
         session_id,
@@ -962,7 +1284,7 @@ fn conversation_document(
         occurred_at_unix_ms: Some(event.occurred_at.timestamp_millis()),
         event_type: event.event_type.as_str().to_owned(),
         role: event.role.map(|role| role.as_str().to_owned()),
-        body: provider_local_preview(complete_text, MAX_BODY_PREVIEW_CHARS).0,
+        body: complete_text.to_owned(),
         workspace: None,
         cwd: None,
         touched_files: Vec::new(),
@@ -977,6 +1299,7 @@ fn platform_document(
     row_digest: [u8; 32],
     session: &SessionFact,
     event: &EventFact,
+    complete_text: &str,
 ) -> AstrBotSourceBackedResultV0<LexicalDocument> {
     let session_id = stable_session_id(&source.source_key, &session.provider_session_id)?;
     let native_item_key =
@@ -1000,13 +1323,8 @@ fn platform_document(
         },
         LocatorRevisionPolicy::ExactSourceRevision,
         Some(*source_revision_digest),
-        row_digest,
+        Sha256::digest(complete_text.as_bytes()).into(),
     )?;
-    let text = event
-        .payload
-        .get("text")
-        .and_then(Value::as_str)
-        .ok_or(AstrBotSourceBackedErrorV0::ExactConversationMismatch)?;
     Ok(LexicalDocument {
         event_id,
         session_id,
@@ -1023,7 +1341,7 @@ fn platform_document(
         occurred_at_unix_ms: Some(event.occurred_at.timestamp_millis()),
         event_type: event.event_type.as_str().to_owned(),
         role: event.role.map(|role| role.as_str().to_owned()),
-        body: provider_local_preview(text, MAX_BODY_PREVIEW_CHARS).0,
+        body: complete_text.to_owned(),
         workspace: None,
         cwd: None,
         touched_files: Vec::new(),
@@ -1103,15 +1421,25 @@ fn map_capture_hydration(error: CaptureError) -> HydrationFailure {
             HydrationFailureKind::StaleSourceEvidence,
             "AstrBot source changed during reopening",
         ),
-        CaptureError::Io(cause) if cause.kind() == std::io::ErrorKind::NotFound => {
-            hydration_failure(
-                HydrationFailureKind::ConfirmedDeleted,
-                "AstrBot source is missing",
-            )
-        }
         CaptureError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => hydration_failure(
             HydrationFailureKind::MissingRecord,
             "AstrBot source record is missing",
+        ),
+        CaptureError::UnsupportedSchema(_) | CaptureError::UnsupportedSchemaVersion(_) => {
+            hydration_failure(
+                HydrationFailureKind::UnsupportedParserRevision,
+                "AstrBot SQLite schema is unsupported",
+            )
+        }
+        CaptureError::InvalidPayload(_)
+        | CaptureError::Json(_)
+        | CaptureError::Sqlite(
+            rusqlite::Error::FromSqlConversionFailure(..)
+            | rusqlite::Error::IntegralValueOutOfRange(..)
+            | rusqlite::Error::InvalidColumnType(..),
+        ) => hydration_failure(
+            HydrationFailureKind::StaleRecordEvidence,
+            "AstrBot SQLite row is malformed for the certified parser",
         ),
         _ => hydration_failure(
             HydrationFailureKind::TemporarilyUnavailable,
@@ -1120,11 +1448,52 @@ fn map_capture_hydration(error: CaptureError) -> HydrationFailure {
     }
 }
 
-fn map_source_hydration(error: impl std::fmt::Display) -> HydrationFailure {
-    hydration_failure(
-        HydrationFailureKind::TemporarilyUnavailable,
-        error.to_string(),
-    )
+fn map_parser_hydration(error: CaptureError) -> HydrationFailure {
+    match error {
+        CaptureError::InvalidPayload(_)
+        | CaptureError::UnsupportedSchema(_)
+        | CaptureError::UnsupportedSchemaVersion(_) => hydration_failure(
+            HydrationFailureKind::UnsupportedParserRevision,
+            "AstrBot SQLite schema is unsupported",
+        ),
+        error => map_capture_hydration(error),
+    }
+}
+
+fn map_sqlite_hydration(error: SqliteSourceAccessError) -> HydrationFailure {
+    match error {
+        SqliteSourceAccessError::SourceChanged
+        | SqliteSourceAccessError::ConnectionIdentityMismatch => hydration_failure(
+            HydrationFailureKind::StaleSourceEvidence,
+            "AstrBot SQLite source changed during reopening",
+        ),
+        SqliteSourceAccessError::Io { source, .. }
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            hydration_failure(
+                HydrationFailureKind::ConfirmedDeleted,
+                "AstrBot database leaf is absent beneath the admitted source root",
+            )
+        }
+        error => hydration_failure(
+            HydrationFailureKind::TemporarilyUnavailable,
+            error.to_string(),
+        ),
+    }
+}
+
+fn map_source_hydration(error: AstrBotSourceBackedErrorV0) -> HydrationFailure {
+    match error {
+        AstrBotSourceBackedErrorV0::Capture(error) => map_capture_hydration(error),
+        AstrBotSourceBackedErrorV0::SqliteSource(error) => map_sqlite_hydration(error),
+        AstrBotSourceBackedErrorV0::Projection(error) => invalid_locator(error),
+        AstrBotSourceBackedErrorV0::Resolver(error) => invalid_locator(error),
+        AstrBotSourceBackedErrorV0::Index(error) => invalid_locator(error),
+        error => hydration_failure(
+            HydrationFailureKind::TemporarilyUnavailable,
+            error.to_string(),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -1236,21 +1605,16 @@ mod tests {
             )
             .unwrap();
         let before = sqlite_persistent_bytes(&path);
-        let identity = AstrBotSourceIdentityV0::SelectedCore;
-        let source = AstrBotSourceBackedSourceV0 {
-            path: path.clone(),
-            source_key: source_key(&identity).unwrap(),
-            identity,
-        };
-        let mut documents = Vec::new();
-        scan_astrbot_source_backed_v0(&source, &mut |document| {
-            documents.push(document);
-            Ok(())
-        })
-        .unwrap();
-        assert!(documents
+        let source = selected_source(&path);
+        let documents = scan_documents(&source);
+        let document = documents
             .iter()
-            .any(|document| document.body.contains("AstrBot active WAL sentinel")));
+            .find(|document| document.body.contains("AstrBot active WAL sentinel"))
+            .unwrap();
+        let hydrated = resolver_for(&source)
+            .hydrate_event(&event_request(document))
+            .unwrap();
+        assert_eq!(hydrated.provider_bytes, b"AstrBot active WAL sentinel");
         assert_eq!(sqlite_persistent_bytes(&path), before);
         drop(writer);
     }
@@ -1283,6 +1647,76 @@ mod tests {
                 fs::read(PathBuf::from(component)).unwrap()
             })
             .collect()
+    }
+
+    fn selected_source(path: &Path) -> AstrBotSourceBackedSourceV0 {
+        let identity = AstrBotSourceIdentityV0::SelectedCore;
+        AstrBotSourceBackedSourceV0 {
+            path: path.to_path_buf(),
+            source_key: source_key(&identity).unwrap(),
+            identity,
+        }
+    }
+
+    fn resolver_for(source: &AstrBotSourceBackedSourceV0) -> AstrBotSourceBackedResolverV0 {
+        AstrBotSourceBackedResolverV0 {
+            sources: BTreeMap::from([(source.source_key.identity().digest(), source.clone())]),
+        }
+    }
+
+    fn scan_documents(source: &AstrBotSourceBackedSourceV0) -> Vec<LexicalDocument> {
+        let mut documents = Vec::new();
+        scan_astrbot_source_backed_v0(source, &mut |document| {
+            documents.push(document);
+            Ok(())
+        })
+        .unwrap();
+        documents
+    }
+
+    fn event_request(document: &LexicalDocument) -> EventHydrationRequest {
+        EventHydrationRequest::new(document.event_id, document.locator.clone()).unwrap()
+    }
+
+    fn current_source_revision(source: &AstrBotSourceBackedSourceV0) -> [u8; 32] {
+        let (source_root, snapshot) = open_root_authorized_snapshot(&source.path).unwrap();
+        let digest = {
+            let connection = snapshot.connection().unwrap();
+            AstrBotSql::new(connection).unwrap();
+            let user_version = connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap();
+            let schema_fingerprint = sqlite_schema_fingerprint(connection).unwrap();
+            revision_digest(
+                &source_observation(
+                    &source.source_key,
+                    snapshot.evidence(),
+                    user_version,
+                    &schema_fingerprint,
+                )
+                .unwrap(),
+            )
+        };
+        snapshot.finish().unwrap();
+        source_root.revalidate().unwrap();
+        digest
+    }
+
+    fn request_with_locator_evidence(
+        document: &LexicalDocument,
+        source_revision: [u8; 32],
+        coordinate: NativeRecordCoordinate,
+        record_digest: [u8; 32],
+    ) -> EventHydrationRequest {
+        let locator = SourceRecordLocator::new(
+            document.source.clone(),
+            coordinate,
+            LocatorRevisionPolicy::ExactSourceRevision,
+            Some(source_revision),
+            record_digest,
+        )
+        .unwrap();
+        EventHydrationRequest::new(document.event_id, locator).unwrap()
     }
 
     #[test]
@@ -1377,24 +1811,50 @@ mod tests {
     }
 
     #[test]
-    fn astrbot_source_backed_reopens_conversation_exactly_and_typed_fails_platform_rows() {
+    fn astrbot_source_backed_reopens_full_conversation_and_platform_text_exactly() {
         let temp = tempdir().expect("tempdir");
         let home = temp.path().join("home");
         let cwd = temp.path().join("core");
         let database = cwd.join("data/data_v4.db");
         let exact_text = format!(
-            "astrbot-exact-content-{}",
-            "x".repeat(MAX_BODY_PREVIEW_CHARS + 64)
+            "astrbot-exact-content-{}-full-body-tail-sentinel",
+            "x".repeat(4_096)
+        );
+        let exact_output = format!(
+            "astrbot-tool-output-{}-output-tail-sentinel",
+            "o".repeat(4_096)
+        );
+        let platform_text = format!(
+            "astrbot-platform-content-{}-platform-tail-sentinel",
+            "p".repeat(4_096)
         );
         create_database(&database, "exact-session", &exact_text);
         let conn = Connection::open(&database).expect("open platform fixture");
         conn.execute(
+            "update conversations set content = ?1 where id = 1",
+            [json!([
+                {
+                    "id": "message-exact-session",
+                    "role": "user",
+                    "content": exact_text,
+                },
+                {
+                    "id": "tool-exact-session",
+                    "role": "tool",
+                    "content": exact_output,
+                    "status": "success",
+                }
+            ])
+            .to_string()],
+        )
+        .expect("conversation message and output");
+        conn.execute(
             "insert into platform_message_history (
                  id, platform_id, user_id, sender_id, sender_name, content,
                  llm_checkpoint_id, created_at
-             ) values (7, 'webchat', 'platform-user', 'platform-user', 'User',
-                       'platform-searchable-content', null, 1780000002000)",
-            [],
+             ) values (7, 'webchat', 'platform-user', 'platform-user', 'User', ?1,
+                       null, 1780000002000)",
+            [&platform_text],
         )
         .expect("platform message");
         drop(conn);
@@ -1408,13 +1868,14 @@ mod tests {
             Ok(())
         })
         .expect("source scan");
-        assert_eq!(documents.len(), 2);
+        assert_eq!(documents.len(), 3);
 
         let conversation = documents
             .iter()
             .find(|document| relation(document) == CONVERSATION_MESSAGE_RELATION)
             .expect("conversation document");
-        assert_eq!(conversation.body.chars().count(), MAX_BODY_PREVIEW_CHARS);
+        assert_eq!(conversation.body, exact_text);
+        assert!(conversation.body.ends_with("full-body-tail-sentinel"));
         assert_eq!(conversation.parent_session_id, None);
         assert_eq!(conversation.root_session_id, conversation.session_id);
         assert_eq!(
@@ -1428,31 +1889,288 @@ mod tests {
         );
         assert_eq!(conversation.agent_type, AgentType::Primary.as_str());
         assert!(conversation.is_primary);
+        assert_eq!(
+            conversation.locator.revision_policy(),
+            LocatorRevisionPolicy::ExactSourceRevision
+        );
+        assert!(conversation
+            .locator
+            .certified_source_revision_digest()
+            .is_some());
+        assert!(matches!(
+            conversation.locator.coordinate(),
+            NativeRecordCoordinate::ProviderSqlite {
+                primary_key: TypedKey::Composite(parts),
+                row_version: Some(TypedKey::Bytes(row_digest)),
+                ..
+            } if matches!(
+                parts.as_slice(),
+                [TypedKey::I64(1), TypedKey::U64(0)]
+            ) && row_digest.len() == 32
+        ));
         let resolver = AstrBotSourceBackedResolverV0::from_inventory(&inventory).expect("resolver");
-        let request =
-            EventHydrationRequest::new(conversation.event_id, conversation.locator.clone())
-                .expect("conversation request");
+        let request = event_request(conversation);
         let hydrated = resolver
             .hydrate_event(&request)
             .expect("exact conversation hydration");
         assert_eq!(hydrated.provider_bytes, exact_text.as_bytes());
 
+        let output = documents
+            .iter()
+            .find(|document| relation(document) == CONVERSATION_OUTPUT_RELATION)
+            .expect("conversation output document");
+        assert_eq!(output.body, exact_output);
+        assert!(output.body.ends_with("output-tail-sentinel"));
+        let hydrated = resolver
+            .hydrate_event(&event_request(output))
+            .expect("exact conversation-output hydration");
+        assert_eq!(hydrated.provider_bytes, exact_output.as_bytes());
+
         let platform = documents
             .iter()
             .find(|document| relation(document) == PLATFORM_MESSAGE_RELATION)
             .expect("platform document");
-        assert!(platform.body.contains("platform-searchable-content"));
-        let request = EventHydrationRequest::new(platform.event_id, platform.locator.clone())
-            .expect("platform request");
-        let failure = resolver
+        assert_eq!(platform.body, platform_text);
+        assert!(platform.body.ends_with("platform-tail-sentinel"));
+        let request = event_request(platform);
+        let hydrated = resolver
             .hydrate_event(&request)
-            .expect_err("platform exact reopening must fail");
+            .expect("exact platform-message hydration");
+        assert_eq!(hydrated.provider_bytes, platform_text.as_bytes());
+
+        let requested = vec![
+            event_request(platform),
+            event_request(output),
+            event_request(conversation),
+        ];
+        let batch = BatchHydrationRequest::new(requested.clone()).unwrap();
+        let hydrated = resolver.hydrate_batch_request(&batch).unwrap();
+        assert_eq!(
+            hydrated
+                .records()
+                .iter()
+                .map(|record| record.event_id)
+                .collect::<Vec<_>>(),
+            requested
+                .iter()
+                .map(EventHydrationRequest::event_id)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            hydrated.records()[0].provider_bytes,
+            platform_text.as_bytes()
+        );
+        assert_eq!(
+            hydrated.records()[1].provider_bytes,
+            exact_output.as_bytes()
+        );
+        assert_eq!(hydrated.records()[2].provider_bytes, exact_text.as_bytes());
+    }
+
+    #[test]
+    fn astrbot_hydration_types_stale_source_and_record_digest() {
+        let temp = tempdir().unwrap();
+        let stale_path = temp.path().join("stale.db");
+        create_database(&stale_path, "stale-session", "original AstrBot body");
+        let stale_source = selected_source(&stale_path);
+        let documents = scan_documents(&stale_source);
+        let document = &documents[0];
+        Connection::open(&stale_path)
+            .unwrap()
+            .execute(
+                "update conversations set content = ?1 where id = 1",
+                [json!([{
+                    "id": "message-stale-session",
+                    "role": "user",
+                    "content": "rewritten AstrBot body with a different length",
+                }])
+                .to_string()],
+            )
+            .unwrap();
+        let failure = resolver_for(&stale_source)
+            .hydrate_event(&event_request(document))
+            .unwrap_err();
+        assert_eq!(failure.kind, HydrationFailureKind::StaleSourceEvidence);
+
+        let digest_path = temp.path().join("digest.db");
+        create_database(&digest_path, "digest-session", "digest AstrBot body");
+        let digest_source = selected_source(&digest_path);
+        let documents = scan_documents(&digest_source);
+        let document = &documents[0];
+        let NativeRecordCoordinate::ProviderSqlite {
+            logical_relation,
+            primary_key,
+            ..
+        } = document.locator.coordinate()
+        else {
+            panic!("expected provider SQLite locator");
+        };
+        let coordinate = NativeRecordCoordinate::ProviderSqlite {
+            logical_relation: logical_relation.clone(),
+            primary_key: primary_key.clone(),
+            row_version: Some(TypedKey::bytes(vec![0x6b; 32]).unwrap()),
+        };
+        let request = request_with_locator_evidence(
+            document,
+            *document.locator.certified_source_revision_digest().unwrap(),
+            coordinate,
+            *document.locator.record_digest(),
+        );
+        let failure = resolver_for(&digest_source)
+            .hydrate_event(&request)
+            .unwrap_err();
+        assert_eq!(failure.kind, HydrationFailureKind::StaleRecordEvidence);
+        let request = request_with_locator_evidence(
+            document,
+            *document.locator.certified_source_revision_digest().unwrap(),
+            document.locator.coordinate().clone(),
+            [0xb6; 32],
+        );
+        let failure = resolver_for(&digest_source)
+            .hydrate_event(&request)
+            .unwrap_err();
+        assert_eq!(failure.kind, HydrationFailureKind::StaleRecordEvidence);
+    }
+
+    #[test]
+    fn astrbot_hydration_distinguishes_missing_row_deletion_and_unavailable_root() {
+        let temp = tempdir().unwrap();
+        let missing_path = temp.path().join("missing-row.db");
+        create_database(&missing_path, "missing-session", "missing AstrBot body");
+        let missing_source = selected_source(&missing_path);
+        let documents = scan_documents(&missing_source);
+        Connection::open(&missing_path)
+            .unwrap()
+            .execute("delete from conversations", [])
+            .unwrap();
+        let request = request_with_locator_evidence(
+            &documents[0],
+            current_source_revision(&missing_source),
+            documents[0].locator.coordinate().clone(),
+            *documents[0].locator.record_digest(),
+        );
+        let failure = resolver_for(&missing_source)
+            .hydrate_event(&request)
+            .unwrap_err();
+        assert_eq!(failure.kind, HydrationFailureKind::MissingRecord);
+
+        let deleted_path = temp.path().join("deleted.db");
+        create_database(&deleted_path, "deleted-session", "deleted AstrBot body");
+        let deleted_source = selected_source(&deleted_path);
+        let request = event_request(&scan_documents(&deleted_source)[0]);
+        fs::remove_file(&deleted_path).unwrap();
+        let failure = resolver_for(&deleted_source)
+            .hydrate_event(&request)
+            .unwrap_err();
+        assert_eq!(failure.kind, HydrationFailureKind::ConfirmedDeleted);
+
+        let available_root = temp.path().join("available-root");
+        let unavailable_path = available_root.join("data_v4.db");
+        create_database(
+            &unavailable_path,
+            "unavailable-session",
+            "unavailable AstrBot body",
+        );
+        let unavailable_source = selected_source(&unavailable_path);
+        let request = event_request(&scan_documents(&unavailable_source)[0]);
+        fs::rename(&available_root, temp.path().join("offline-root")).unwrap();
+        let failure = resolver_for(&unavailable_source)
+            .hydrate_event(&request)
+            .unwrap_err();
+        assert_eq!(failure.kind, HydrationFailureKind::TemporarilyUnavailable);
+    }
+
+    #[test]
+    fn astrbot_hydration_types_malformed_rows_schema_and_locator_without_fallbacks() {
+        let temp = tempdir().unwrap();
+        let malformed_path = temp.path().join("malformed.db");
+        create_database(&malformed_path, "malformed-session", "valid AstrBot body");
+        let malformed_source = selected_source(&malformed_path);
+        let documents = scan_documents(&malformed_source);
+        Connection::open(&malformed_path)
+            .unwrap()
+            .execute(
+                "update conversations set content = cast(x'80' as text) where id = 1",
+                [],
+            )
+            .unwrap();
+        let request = request_with_locator_evidence(
+            &documents[0],
+            current_source_revision(&malformed_source),
+            documents[0].locator.coordinate().clone(),
+            *documents[0].locator.record_digest(),
+        );
+        let failure = resolver_for(&malformed_source)
+            .hydrate_event(&request)
+            .unwrap_err();
+        assert_eq!(failure.kind, HydrationFailureKind::StaleRecordEvidence);
+
+        let unsupported_path = temp.path().join("unsupported.db");
+        create_database(
+            &unsupported_path,
+            "unsupported-session",
+            "valid AstrBot body",
+        );
+        let unsupported_source = selected_source(&unsupported_path);
+        let request = event_request(&scan_documents(&unsupported_source)[0]);
+        Connection::open(&unsupported_path)
+            .unwrap()
+            .execute_batch("drop table conversations;")
+            .unwrap();
+        let failure = resolver_for(&unsupported_source)
+            .hydrate_event(&request)
+            .unwrap_err();
         assert_eq!(
             failure.kind,
             HydrationFailureKind::UnsupportedParserRevision
         );
-        assert!(failure
-            .detail
-            .contains("no verified exact-content resolver"));
+
+        let invalid_path = temp.path().join("invalid.db");
+        create_database(&invalid_path, "invalid-session", "valid AstrBot body");
+        let invalid_source = selected_source(&invalid_path);
+        let documents = scan_documents(&invalid_source);
+        let malformed_coordinate = NativeRecordCoordinate::ProviderSqlite {
+            logical_relation: CONVERSATION_MESSAGE_RELATION.to_owned(),
+            primary_key: TypedKey::I64(1),
+            row_version: Some(TypedKey::bytes(vec![0; 32]).unwrap()),
+        };
+        let request = request_with_locator_evidence(
+            &documents[0],
+            *documents[0]
+                .locator
+                .certified_source_revision_digest()
+                .unwrap(),
+            malformed_coordinate,
+            *documents[0].locator.record_digest(),
+        );
+        let failure = resolver_for(&invalid_source)
+            .hydrate_event(&request)
+            .unwrap_err();
+        assert_eq!(failure.kind, HydrationFailureKind::InvalidLocator);
+
+        let provider_source = include_str!("source_backed.rs");
+        for forbidden in [
+            ["work", ".sqlite"].concat(),
+            ["ctx_history_", "store"].concat(),
+            ["MAX_BODY_", "PREVIEW_CHARS"].concat(),
+            ["provider_local_", "preview"].concat(),
+        ] {
+            assert!(
+                !provider_source.contains(&forbidden),
+                "AstrBot source-backed path contains forbidden fallback {forbidden}"
+            );
+        }
+        let route_source = include_str!("../../../source_backed.rs");
+        let route = route_source
+            .split_once("pub fn register_astrbot_source_backed_route")
+            .unwrap()
+            .1
+            .split_once("/// Registers Shelley")
+            .unwrap()
+            .0;
+        assert!(route.contains("with_batch_hydration"));
+        assert!(route.contains("AstrBotSourceBackedResolverV0"));
+        assert!(!route.contains(&["work", ".sqlite"].concat()));
+        assert!(!route.contains(&["ctx_history_", "store"].concat()));
     }
 }

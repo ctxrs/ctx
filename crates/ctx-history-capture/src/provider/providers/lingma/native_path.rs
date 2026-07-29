@@ -70,10 +70,8 @@ use records::{hash_bytes, hash_optional_bytes, hash_optional_i64, hash_optional_
 pub(super) use records::{lingma_complete_user_message, lingma_complete_values};
 pub(crate) use source_backed::{
     scan_lingma_source_backed_v0, LingmaDatabaseScanV0, LingmaDatabaseSourceV0,
-    LingmaExactContentCapabilityV0, LingmaExactContentFailureKindV0, LingmaExactContentFailureV0,
-    LingmaHydratedContentV0, LingmaSourceBackedErrorV0, LingmaSourceBackedRecordV0,
-    LingmaSourceBackedResolverV0, LingmaSourceBackedResultV0, LingmaSourceBackedScanV0,
-    LingmaSourceInventoryV0,
+    LingmaSourceBackedErrorV0, LingmaSourceBackedRecordV0, LingmaSourceBackedResolverV0,
+    LingmaSourceBackedResultV0, LingmaSourceBackedScanV0, LingmaSourceInventoryV0,
 };
 
 const CORE_CURSOR_VERSION: u32 = 1;
