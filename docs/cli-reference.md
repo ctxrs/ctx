@@ -318,10 +318,11 @@ as `relational.sqlite`; semantic catch-up is daemon-owned. It does not write
 `config.toml` for implicit defaults.
 
 History-source plugin import is explicit and single-source in 1.0. A selected
-manifest command emits `ctx-history-jsonl-v1`; ctx validates and merges that
-delta into a private managed provider export, registers the custom route, and
-waits for daemon-owned source-backed publication before committing its cursor.
-Plugin commands are not executed by `import --all`, setup, or search refresh.
+manifest command emits `ctx-history-jsonl-v1`; the importer validates and
+merges that delta into a private managed provider export, registers the custom
+route, and waits for daemon-owned source-backed publication before committing
+its cursor. Plugin commands are not executed by `import --all`, setup, or
+search refresh.
 
 Imports always commit valid records and report rejected records. An unreadable
 or structurally incompatible input fails that source, while ctx-owned storage
@@ -386,9 +387,9 @@ The ordinary anonymous trial remains 14 days. A first setup using exactly
 accepts the bounded ASCII codename. This is the sole attribution input: the
 codename is sent only with the first trial challenge, the resulting attribution
 is immutable, and only the service-issued opaque referral claim may be stored
-in the native key store after activation. An existing nonreferred trial cannot
-attach a code later. `ctx pro setup`, `manage`, `uninstall`, Core commands,
-websites, and cookies do not accept or change referral attribution.
+in the selected credential store after activation. An existing nonreferred
+trial cannot attach a code later. `ctx pro setup`, `manage`, `uninstall`, Core
+commands, websites, and cookies do not accept or change referral attribution.
 
 Paid conversion uses browser-based WorkOS sign-in and Stripe Checkout. Pro is
 $20 USD per month; conversion does not add a second trial.
@@ -411,54 +412,60 @@ and blame citations never include conversion copy.
 
 The anonymous trial credential, optional WorkOS session material, the
 installation signing key, and the signed entitlement are kept only in the
-operating system key store. They have
-no plaintext-file or secret-environment-variable fallback. Entitlements renew
-quietly before their seven-day grant expires; a failed refresh does not block a
-still-valid offline grant and is retried with a bounded backoff.
+selected credential store. The platform-native store is preferred; on a
+pristine root, an exact native-unavailable result may instead select a sticky
+owner-private local file store. Those local bytes are protected from other OS
+users but are not encrypted against the same OS user or root. Locked, denied,
+corrupt, ambiguous, canceled, and other native-store failures do not downgrade
+to files. Neither credential namespace accepts an environment-supplied key,
+universal key, or binary-embedded pepper, and the Pro graph has no plaintext
+database mode. Entitlements renew quietly before their seven-day grant expires;
+a failed refresh does not block a still-valid offline grant and is retried with
+a bounded backoff.
 
 `--keep-data` is a local helper removal that preserves local Pro data so setup
 can restore access later. It does not require commercial configuration,
-network access, or an available native key store. `--delete-data` removes and
-verifies local Pro data through the public delete-only adapter. It works after
-an earlier plain uninstall and does not evaluate subscription or entitlement
-expiry. It reports `local_pro_data: "deleted"` only after the authoritative
-local inventory is absent and fails closed before removing the helper if that
-inventory cannot be verified. A successful operation prints or returns
-`ctx pro` as the next action only when graph data was actually preserved or
-deleted. A never-Pro or already-empty root instead reports
+network access, or credential-store access. `--delete-data` removes and verifies
+local Pro data through the public delete-only adapter. It works after an earlier
+plain uninstall and does not evaluate subscription or entitlement expiry. It
+reports `local_pro_data: "deleted"` only after the authoritative local inventory
+is absent and fails closed before removing the helper if that inventory cannot
+be verified. A successful operation prints or returns `ctx pro` as the next
+action only when graph data was actually preserved or deleted. A never-Pro or
+already-empty root instead reports
 `local_pro_data: "absent"` and has no next action. Setup records root-scoped
-initialization before its first native-vault write, so `--delete-data` also
+initialization before its first credential-store write, so `--delete-data` also
 cleans and verifies credentials and recorded graph keys after an interrupted
 artifact fetch or helper start, even if no graph database exists. The `absent`
-result describes that filesystem graph state, not whether vault cleanup work
-was required. Before deleting a graph key, uninstall durably records the exact
-installation identity and bounded thumbprints in a nonsecret local cleanup
-phase. Corrupt inventory fails before deletion; late failures retain that phase
-so the next `--delete-data` can verify already-absent keys and credentials
-without enumerating another installation. Setup and `--keep-data` refuse to
-proceed until an interrupted deletion is completed.
+result describes that filesystem graph state, not whether credential-store
+cleanup work was required. Before deleting a graph key, uninstall durably
+records the exact installation identity and bounded thumbprints in a nonsecret
+local cleanup phase. Corrupt inventory fails before deletion; late failures
+retain that phase so the next `--delete-data` can verify already-absent keys and
+credentials without enumerating another installation. Setup and `--keep-data`
+refuse to proceed until an interrupted deletion is completed.
 
 Subscription lock does not delete `ctx.db`, the encrypted graph, or its key.
 After renewal or resubscription, `ctx pro` refreshes authorization and restores
 access to the preserved graph. Only explicit
 `ctx pro uninstall --delete-data` removes Pro data and key material.
 Run it before manually deleting the ctx data root so the root-local installation
-identity remains available for native key-store cleanup. A small
+identity remains available for selected credential-store cleanup. A small
 installation-bound anti-rollback watermark may remain afterward; it contains no
 graph key, transcript content, account token, or entitlement body. A failed
 deletion may also leave root-local initialization and cleanup-phase metadata;
 successful `--delete-data` removes both. The nonsecret lifecycle-lock file may
 remain as local coordination metadata, in addition to the disclosed
-native-vault watermark.
+selected-store watermark.
 
 Materialization is internal and idempotent. Setup, daemon freshness, and blame
 invoke it as needed. Repository and worktree roots come from canonical
 activity; there is no `setup --repo` option.
 
-Each absolute ctx data root and production/staging environment is an independent
-Local Pro installation and key-store namespace. Moving a data root is
-not currently automatic; relocate it only through a future explicit migration
-flow rather than copying `ctx-pro.db` alone.
+Each root-local installation identity and production/staging environment is an
+independent Local Pro credential-store namespace. Moving or renaming a complete
+ctx data root preserves that identity and its selected backend; copying
+`ctx-pro.db` alone does not.
 
 The public Pro query surface is:
 
@@ -505,8 +512,8 @@ Stable Pro failure codes include `pro_not_installed`, `commercial_unavailable`,
 `helper_crashed`, and `helper_timeout`.
 
 `key_store_locked` and `key_store_unavailable` are the only stable public names
-for native key-store failures. Pre-release `credential_vault_*` spellings were
-never shipped and have no compatibility alias.
+for selected credential-store failures. Pre-release `credential_vault_*`
+spellings were never shipped and have no compatibility alias.
 
 The helper materializes deterministic repository/worktree/branch/remote,
 commit, file, command/check, forge-reference/action, and agent relationship
@@ -514,7 +521,7 @@ facts. Public blame exposes only file, commit, and PR targets. It does not claim
 universal shell-wrapper, forge, or provider accuracy; unknown or contradictory
 evidence remains referenced, attempted, or ambiguous.
 Deployments and ask/brief generation are outside this local work-graph surface.
-Credential material is held by the native platform key store.
+Credential material is held by the selected credential store.
 
 Materialization uses a frozen canonical `(mutation_epoch,
 event_seq_high_water)` frontier. A pure tail append raises only the high-water

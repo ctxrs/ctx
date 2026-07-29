@@ -3,7 +3,7 @@
 History source plugins let local tools export their history into ctx without
 ctx owning those tools' storage schemas. The stable 1.0 route is intentionally
 narrow: a user explicitly selects one manifest source, the source command emits
-`ctx-history-jsonl-v1`, and ctx publishes that provider export through the
+`ctx-history-jsonl-v1`, and the CLI publishes that provider export through the
 normal daemon-owned source-backed generation path.
 
 ctx does not load plugin code in-process and does not provide a second history
@@ -85,8 +85,9 @@ with the normal provider refresh behavior.
 An accepted import has one authority path:
 
 1. ctx runs the selected command with bounded stdout, stderr, and runtime.
-2. ctx validates one `ctx-history-jsonl-v1` manifest and source record, source
-   identity, cursor identity, record references, and parent relationships.
+2. The importer validates one `ctx-history-jsonl-v1` manifest and source
+   record, source identity, cursor identity, record references, and parent
+   relationships.
 3. Incremental records are merged idempotently into a private managed
    provider-export JSONL source under
    `$CTX_DATA_ROOT/history-source-plugin-sources`.
