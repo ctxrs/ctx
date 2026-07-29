@@ -242,9 +242,34 @@ ctx_rust_test(
 )
 
 ctx_cli_integration_test(
+    name = "test_targets_minimal_fixture",
+    src = "tests/build_support/minimal.rs",
+    extra_crates = ["serde_yaml"],
+    tags = ["manual"],
+    test_support = [],
+)
+
+ctx_cli_integration_test(
+    name = "test_targets_capabilities_fixture",
+    src = "tests/build_support/capabilities.rs",
+    tags = ["manual"],
+    test_support = [
+        "base",
+        "fixtures",
+        "pro",
+        "upgrade",
+    ],
+)
+
+ctx_cli_integration_test(
     name = "analytics_tests",
     binary = ":ctx_upgrade_test_harness",
     src = "tests/analytics.rs",
+    test_support = [
+        "base",
+        "fixtures",
+        "upgrade",
+    ],
 )
 
 ctx_cli_integration_test(
@@ -260,18 +285,28 @@ ctx_cli_integration_test(
 ctx_cli_integration_test(
     name = "auto_upgrade_acceptance_tests",
     src = "tests/auto_upgrade_acceptance.rs",
+    extra_crates = ["libc"],
     extra_data = [":ctx_auto_upgrade_acceptance_fixture"],
     extra_env = {
         "CTX_AUTO_UPGRADE_ACCEPTANCE_FIXTURE": "$(rootpath :ctx_auto_upgrade_acceptance_fixture)",
         "RUST_TEST_THREADS": "1",
     },
     tags = ["release-gate"],
+    test_support = [
+        "base",
+        "fixtures",
+        "upgrade",
+    ],
 )
 
 ctx_cli_integration_test(
     name = "cli_public_help_docs_tests",
     src = "tests/cli_public_help_docs.rs",
     tags = ["cli-contract"],
+    test_support = [
+        "base",
+        "fixtures",
+    ],
 )
 
 ctx_cli_integration_test(
@@ -284,11 +319,16 @@ ctx_cli_integration_test(
 ctx_cli_integration_test(
     name = "custom_root_discovery_tests",
     src = "tests/custom_root_discovery.rs",
+    test_support = [
+        "base",
+        "fixtures",
+    ],
 )
 
 ctx_cli_integration_test(
     name = "daemon_config_reload_tests",
     src = "tests/daemon_config_reload.rs",
+    extra_crates = ["libc"],
 )
 
 ctx_cli_integration_test(
@@ -309,6 +349,10 @@ ctx_cli_integration_test(
 ctx_cli_integration_test(
     name = "index_tests",
     src = "tests/index.rs",
+    test_support = [
+        "base",
+        "fixtures",
+    ],
 )
 
 ctx_cli_integration_test(
@@ -324,6 +368,7 @@ ctx_cli_integration_test(
 ctx_cli_integration_test(
     name = "local_usage_tests",
     src = "tests/local_usage.rs",
+    extra_crates = ["rusqlite"],
     tags = ["privacy"],
 )
 
@@ -331,11 +376,19 @@ ctx_cli_integration_test(
     name = "mcp_local_usage_v2_tests",
     src = "tests/mcp_local_usage_v2.rs",
     tags = ["privacy"],
+    test_support = [
+        "base",
+        "fixtures",
+    ],
 )
 
 ctx_cli_integration_test(
     name = "mcp_tests",
     src = "tests/mcp.rs",
+    test_support = [
+        "base",
+        "fixtures",
+    ],
 )
 
 ctx_cli_integration_test(
@@ -346,22 +399,42 @@ ctx_cli_integration_test(
 ctx_cli_integration_test(
     name = "mcp_integration_e2e_tests",
     src = "tests/mcp_integration_e2e.rs",
+    extra_crates = [
+        "serde_yaml",
+        "toml_edit",
+    ],
     tags = ["integration"],
 )
 
 ctx_cli_integration_test(
     name = "native_provider_real_shapes_tests",
     src = "tests/native_provider_real_shapes.rs",
+    test_support = [
+        "base",
+        "fixtures",
+    ],
 )
 
 ctx_cli_integration_test(
     name = "native_provider_rejections_tests",
     src = "tests/native_provider_rejections.rs",
+    test_support = [
+        "base",
+        "fixtures",
+    ],
 )
 
 ctx_cli_integration_test(
     name = "native_providers_tests",
     src = "tests/native_providers.rs",
+    extra_srcs = [
+        "tests/support/native_providers/sqlite_sources.rs",
+        "tests/support/native_providers/workspace_sources.rs",
+    ],
+    test_support = [
+        "base",
+        "fixtures",
+    ],
 )
 
 ctx_cli_integration_test(
@@ -375,11 +448,25 @@ ctx_cli_integration_test(
     src = "tests/pro_host.rs",
     binary = ":ctx_pro_test_host",
     tags = ["protocol"],
+    test_support = [
+        "base",
+        "fixtures",
+        "pro",
+    ],
 )
 
 ctx_cli_integration_test(
     name = "pro_lifecycle_tests",
     src = "tests/pro_lifecycle.rs",
+    extra_crates = [
+        "assert_cmd",
+        "predicates",
+        "rusqlite",
+        "serde_json",
+        "tempfile",
+    ],
+    extra_deps = ["//crates/ctx-history-core:lib"],
+    test_support = [],
 )
 
 ctx_cli_integration_test(
@@ -387,29 +474,55 @@ ctx_cli_integration_test(
     src = "tests/pro_mcp.rs",
     binary = ":ctx_pro_test_host",
     tags = ["protocol"],
+    test_support = [
+        "base",
+        "fixtures",
+        "pro",
+    ],
 )
 
 ctx_cli_integration_test(
     name = "pro_qualification_tests",
     src = "tests/pro_qualification.rs",
     binary = ":ctx_pro_qualification",
+    extra_crates = ["sha2"],
     tags = ["qualification", "security"],
+    test_support = [
+        "base",
+        "fixtures",
+        "pro",
+    ],
 )
 
 ctx_cli_integration_test(
     name = "pro_release_helper_tests",
     src = "tests/pro_release_helper.rs",
+    extra_crates = [
+        "assert_cmd",
+        "serde_json",
+        "tempfile",
+    ],
+    extra_deps = ["//crates/ctx-pro-host-protocol:lib"],
     tags = ["release-gate"],
+    test_support = [],
 )
 
 ctx_cli_integration_test(
     name = "pro_test_support_tests",
     src = "tests/pro_test_support.rs",
+    test_support = [
+        "base",
+        "pro",
+    ],
 )
 
 ctx_cli_integration_test(
     name = "persistent_daemon_lifecycle_tests",
     src = "tests/persistent_daemon_lifecycle.rs",
+    extra_crates = [
+        "libc",
+        "windows-sys",
+    ],
     extra_env = {
         "RUST_TEST_THREADS": "1",
     },
@@ -419,22 +532,45 @@ ctx_cli_integration_test(
 ctx_cli_integration_test(
     name = "search_refresh_tests",
     src = "tests/search_refresh.rs",
+    extra_srcs = [
+        "tests/support/search_refresh/core_behaviors.rs",
+        "tests/support/search_refresh/generation_lifecycle.rs",
+    ],
+    test_support = [
+        "base",
+        "fixtures",
+    ],
 )
 
 ctx_cli_integration_test(
     name = "search_source_identity_filters_tests",
     src = "tests/search_source_identity_filters.rs",
     tags = ["cli-contract"],
+    test_support = [
+        "base",
+        "fixtures",
+    ],
 )
 
 ctx_cli_integration_test(
     name = "search_show_locate_sql_tests",
     src = "tests/search_show_locate_sql.rs",
+    extra_crates = ["libc"],
+    extra_srcs = [
+        "tests/support/search_show_locate_sql/import_paths.rs",
+        "tests/support/search_show_locate_sql/pi_flow.rs",
+        "tests/support/search_show_locate_sql/search_filters.rs",
+    ],
+    test_support = [
+        "base",
+        "fixtures",
+    ],
 )
 
 ctx_cli_integration_test(
     name = "source_backed_content_tests",
     src = "tests/source_backed_content.rs",
+    extra_deps = ["//crates/ctx-history-capture:lib"],
 )
 
 ctx_cli_integration_test(
@@ -445,6 +581,7 @@ ctx_cli_integration_test(
 ctx_cli_integration_test(
     name = "stats_tests",
     src = "tests/stats.rs",
+    extra_crates = ["rusqlite"],
     tags = ["cli-contract", "privacy"],
 )
 
@@ -455,12 +592,18 @@ ctx_cli_integration_test(
         "tests/setup_sources_import/import_orchestration.rs",
         "tests/setup_sources_import/lifecycle.rs",
         "tests/setup_sources_import/source_inventory.rs",
+        "tests/support/setup_sources_import/lifecycle_helpers.rs",
+    ],
+    test_support = [
+        "base",
+        "fixtures",
     ],
 )
 
 ctx_cli_integration_test(
     name = "skill_tests",
     src = "tests/skill.rs",
+    extra_crates = ["sha2"],
 )
 
 ctx_cli_integration_test(
@@ -473,6 +616,7 @@ ctx_cli_integration_test(
     name = "upgrade_tests",
     src = "tests/upgrade.rs",
     binary = ":ctx_upgrade_test_harness",
+    extra_crates = ["libc"],
     extra_data = [":ctx"],
     extra_env = {
         "CTX_ORDINARY_RELEASE_BINARY": "$(rootpath :ctx)",
@@ -481,12 +625,21 @@ ctx_cli_integration_test(
         "src/upgrade/install.rs",
         "//:upgrade_extractor_contract",
     ],
+    extra_srcs = ["tests/support/upgrade/runtime_publication.rs"],
+    test_support = [
+        "base",
+        "upgrade",
+    ],
 )
 
 ctx_cli_integration_test(
     name = "upgrade_analytics_tests",
     binary = ":ctx_upgrade_test_harness",
     src = "tests/upgrade_analytics.rs",
+    test_support = [
+        "base",
+        "upgrade",
+    ],
 )
 
 test_suite(
