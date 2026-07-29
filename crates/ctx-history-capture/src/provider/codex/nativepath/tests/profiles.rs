@@ -56,7 +56,7 @@ fn raw_ordinals_include_headers_outputs_malformed_and_ignored_records() {
     assert_eq!(scan.counters.complete_records, 7);
     assert_eq!(scan.counters.native_result_records, 1);
     assert_eq!(scan.counters.malformed_records, 1);
-    assert_eq!(scan.rejections[0].raw_ordinal, 3);
+    assert_eq!(scan.counters.rejected_complete_records, 1);
 }
 
 #[test]
@@ -86,14 +86,14 @@ fn valid_retained_records_without_indexable_text_are_ignored_not_rejected() {
     let (scan, sink) = scan_collect(discover_one(&path, "unmaterialized-owner"), None);
 
     assert!(sink.rows.is_empty());
-    assert!(scan.rejections.is_empty());
+    assert_eq!(scan.counters.rejected_complete_records, 0);
     assert_eq!(scan.counters.complete_records, 3);
     assert_eq!(scan.counters.ignored_records, 2);
     assert_eq!(scan.counters.malformed_records, 0);
 }
 
 #[test]
-fn malformed_retained_shapes_remain_exact_ordinal_rejections() {
+fn malformed_retained_shapes_remain_rejected_without_hiding_later_records() {
     let contents = [
         session_meta("malformed-retained-owner"),
         jsonl(json!({
@@ -142,20 +142,7 @@ fn malformed_retained_shapes_remain_exact_ordinal_rejections() {
     assert_eq!(scan.counters.complete_records, 7);
     assert_eq!(scan.counters.ignored_records, 0);
     assert_eq!(scan.counters.malformed_records, 6);
-    assert_eq!(
-        scan.rejections
-            .iter()
-            .map(|rejection| (rejection.raw_ordinal, rejection.reason))
-            .collect::<Vec<_>>(),
-        vec![
-            (1, "malformed retained Codex message"),
-            (2, "malformed retained Codex message"),
-            (3, "malformed retained Codex reasoning"),
-            (4, "malformed retained Codex reasoning"),
-            (5, "malformed retained Codex compacted record"),
-            (6, "malformed retained Codex compacted record"),
-        ]
-    );
+    assert_eq!(scan.counters.rejected_complete_records, 6);
 }
 
 #[test]
@@ -168,7 +155,7 @@ fn source_backed_row_preserves_full_lexical_text_and_exact_record_evidence() {
     let (_temp, path) = write_source(&contents);
     let (scan, sink) = scan_collect(discover_one(&path, "locator-owner"), None);
 
-    assert!(scan.rejections.is_empty());
+    assert_eq!(scan.counters.rejected_complete_records, 0);
     assert_eq!(sink.rows.len(), 1);
     let row = &sink.rows[0];
     assert_eq!(row.raw_ordinal, 1);
@@ -226,8 +213,7 @@ fn source_backed_projection_prefilters_with_exact_scan_accounting() {
     let (scan, sink) = scan_collect(discover_one(&path, "source-backed-prefilter-owner"), None);
 
     assert_eq!(sink.rows.len(), 1);
-    assert_eq!(sink.core_receipts.len(), 1);
-    assert_eq!(sink.core_receipts[0].accepted_core_rows, 1);
+    assert_eq!(sink.pages.len(), 1);
     assert_eq!(scan.counters.complete_records, 4);
     assert_eq!(scan.counters.retained_records, 1);
     assert_eq!(scan.counters.ignored_records, 1);
@@ -347,7 +333,10 @@ fn pending_call_checkpoint_keeps_fresh_and_append_source_backed_outputs_identica
             .collect::<Vec<_>>(),
         vec![6, 7]
     );
-    assert_eq!(append_scan.rejections, fresh_scan.rejections);
+    assert_eq!(
+        append_scan.counters.rejected_complete_records,
+        fresh_scan.counters.rejected_complete_records
+    );
     assert_eq!(append_scan.counters.bytes_read, complete.len() as u64);
     assert_eq!(
         append_scan.counters.checkpoint_validation_bytes,

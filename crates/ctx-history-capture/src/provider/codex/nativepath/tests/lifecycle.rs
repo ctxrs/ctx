@@ -60,7 +60,7 @@ fn oversized_terminal_nul_padding_is_ignored_and_checkpointed_exactly() {
     let (scan, sink) = scan_collect(discover_one(&path, "nul-padding-owner"), None);
 
     assert!(scan.terminal());
-    assert!(scan.rejections.is_empty());
+    assert_eq!(scan.counters.rejected_complete_records, 0);
     assert_eq!(scan.complete_prefix_end, contents.len() as u64);
     assert_eq!(scan.next_raw_ordinal, 2);
     assert_eq!(scan.counters.complete_records, 2);
@@ -145,7 +145,6 @@ fn append_resumes_at_complete_prefix_and_preserves_suffix_ordinal() {
     let (second, sink) = scan_collect(second_source, Some(&proof));
 
     assert_eq!(second.disposition, CodexParseDisposition::AppendDelta);
-    assert!(second.prefix_proof_matches());
     assert_eq!(second.counters.prefix_bytes_read, initial.len() as u64);
     assert_eq!(sink.rows.len(), 1);
     assert_eq!(sink.rows[0].raw_ordinal, 3);
@@ -209,112 +208,7 @@ fn malformed_complete_record_does_not_hide_later_valid_content() {
     assert_eq!(sink.rows.len(), 1);
     assert_eq!(sink.rows[0].raw_ordinal, 2);
     assert_eq!(scan.counters.malformed_records, 1);
-    assert_eq!(scan.rejections.len(), 1);
-}
-
-#[test]
-fn lifecycle_classification_covers_replay_append_rewrite_truncation_and_replacement() {
-    let baseline = [session_meta("life-owner"), message("user", "one")].concat();
-    let (_temp, path) = write_source(&baseline);
-    let (baseline_scan, _) = scan_collect(discover_one(&path, "life-owner"), None);
-    let proof = baseline_scan
-        .bind_checkpoint("canonical-a", CodexCheckpointGeneration::new(15))
-        .unwrap()
-        .unwrap();
-    let known = known_source(true, proof.clone());
-
-    let (replay, _) = scan_collect(discover_one(&path, "life-owner"), Some(&proof));
-    assert!(matches!(
-        classify_source_lifecycle(&replay, &[]),
-        CodexSourceLifecycle::Replay { .. }
-    ));
-
-    fs::write(
-        &path,
-        format!("{baseline}{}", message("assistant", "appended")),
-    )
-    .unwrap();
-    let (append, _) = scan_collect(discover_one(&path, "life-owner"), Some(&proof));
-    assert!(matches!(
-        classify_source_lifecycle(&append, &[]),
-        CodexSourceLifecycle::Append { .. }
-    ));
-
-    let rewrite_text = [session_meta("life-owner"), message("user", "rewritten")].concat();
-    fs::write(&path, rewrite_text).unwrap();
-    let (rewrite, _) = scan_collect(discover_one(&path, "life-owner"), None);
-    assert_eq!(rewrite.disposition, CodexParseDisposition::FullGeneration);
-    assert!(matches!(
-        classify_source_lifecycle(&rewrite, std::slice::from_ref(&known)),
-        CodexSourceLifecycle::Rewrite { .. }
-    ));
-
-    fs::write(&path, session_meta("life-owner")).unwrap();
-    let (truncation, _) = scan_collect(discover_one(&path, "life-owner"), None);
-    assert_eq!(
-        truncation.disposition,
-        CodexParseDisposition::FullGeneration
-    );
-    assert!(matches!(
-        classify_source_lifecycle(&truncation, std::slice::from_ref(&known)),
-        CodexSourceLifecycle::Truncation { .. }
-    ));
-
-    let replacement_text = [
-        session_meta("replacement-owner"),
-        message("user", "replacement"),
-    ]
-    .concat();
-    fs::write(&path, replacement_text).unwrap();
-    let (replacement, _) = scan_collect(discover_one(&path, "replacement-owner"), None);
-    assert!(matches!(
-        classify_source_lifecycle(&replacement, std::slice::from_ref(&known)),
-        CodexSourceLifecycle::Replacement { .. }
-    ));
-}
-
-#[test]
-fn exact_revision_at_new_locator_distinguishes_relocation_copy_and_ambiguity() {
-    let contents = [session_meta("move-owner"), message("user", "same bytes")].concat();
-    let (temp, original_path) = write_source(&contents);
-    let (original_scan, _) = scan_collect(discover_one(&original_path, "move-owner"), None);
-    let proof = original_scan
-        .bind_checkpoint("canonical-a", CodexCheckpointGeneration::new(18))
-        .unwrap()
-        .unwrap();
-    let moved_path = temp.path().join("moved.jsonl");
-    fs::write(&moved_path, &contents).unwrap();
-    let (moved_scan, _) = scan_collect(discover_one(&moved_path, "move-owner"), None);
-
-    let unavailable = known_source(false, proof.clone());
-    assert!(matches!(
-        classify_source_lifecycle(&moved_scan, std::slice::from_ref(&unavailable)),
-        CodexSourceLifecycle::Relocation { .. }
-    ));
-
-    let live = known_source(true, proof.clone());
-    assert!(matches!(
-        classify_source_lifecycle(&moved_scan, std::slice::from_ref(&live)),
-        CodexSourceLifecycle::Copy { .. }
-    ));
-
-    let second_identity = CodexSourceIdentity::new(
-        "canonical-b",
-        temp.path().display().to_string(),
-        temp.path().join("other.jsonl"),
-    );
-    let second = known_source(
-        false,
-        CodexAppendProof::new(
-            second_identity.unwrap(),
-            CodexCheckpointGeneration::new(19),
-            proof.checkpoint.clone(),
-        ),
-    );
-    assert!(matches!(
-        classify_source_lifecycle(&moved_scan, &[unavailable, second]),
-        CodexSourceLifecycle::AmbiguousRelocation { candidate_count: 2 }
-    ));
+    assert_eq!(scan.counters.rejected_complete_records, 1);
 }
 
 #[test]

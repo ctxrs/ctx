@@ -44,7 +44,8 @@ fn collect(
 ) {
     let mut documents = Vec::new();
     let mut pages = Vec::new();
-    let scan = scan_codex_prompt_history_source_backed_explicit_v0(input, prior, |page| {
+    let source = observe_codex_prompt_history_source_backed_explicit_v0(input).unwrap();
+    let scan = scan_codex_prompt_history_source_backed_v0(source, prior, |page| {
         assert_eq!(page.source, input.source_key().unwrap());
         pages.push((page.documents.len(), page.retained_bytes));
         documents.extend(page.documents);
@@ -58,10 +59,7 @@ fn collect(
 fn cold_noop_append_and_exact_hydration_keep_stable_bounded_identity() {
     let temp = tempdir().unwrap();
     let path = temp.path().join("history.jsonl");
-    let long = format!(
-        "full-prompt-{}-prompt-tail-sentinel",
-        "x".repeat(8_192)
-    );
+    let long = format!("full-prompt-{}-prompt-tail-sentinel", "x".repeat(8_192));
     let mut lines = (0..70)
         .map(|index| {
             prompt_line(
@@ -131,7 +129,7 @@ fn cold_noop_append_and_exact_hydration_keep_stable_bounded_identity() {
     let (appended_scan, appended_documents, _) = collect(&input, Some(&noop.certificate));
     assert!(matches!(
         appended_scan.disposition,
-        CodexPromptHistorySourceBackedDispositionV0::Append { .. }
+        CodexPromptHistorySourceBackedDispositionV0::Append
     ));
     assert_eq!(appended_documents.len(), 1);
     assert_eq!(appended_documents[0].event_sequence, 70);
@@ -140,10 +138,12 @@ fn cold_noop_append_and_exact_hydration_keep_stable_bounded_identity() {
         appended_documents[0].session_id,
         cold_documents[0].session_id
     );
-    assert!(
-        revalidate_codex_prompt_history_source_backed_v0(&input, &appended_scan.certificate)
-            .unwrap()
-    );
+    let (revalidated, revalidated_documents, _) = collect(&input, Some(&appended_scan.certificate));
+    assert!(matches!(
+        revalidated.disposition,
+        CodexPromptHistorySourceBackedDispositionV0::Unchanged
+    ));
+    assert!(revalidated_documents.is_empty());
 
     let (_, rebuilt, _) = collect(&input, None);
     assert_eq!(rebuilt[0].event_id, cold_documents[0].event_id);
@@ -184,7 +184,7 @@ fn malformed_incomplete_tail_is_not_certified_until_append_completes_it() {
     let (after, appended_documents, _) = collect(&input, Some(&before.certificate));
     assert!(matches!(
         after.disposition,
-        CodexPromptHistorySourceBackedDispositionV0::Append { .. }
+        CodexPromptHistorySourceBackedDispositionV0::Append
     ));
     assert!(after.terminal);
     assert_eq!(after.certificate.counts().complete_records, 2);

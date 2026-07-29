@@ -121,10 +121,6 @@ impl CodexNativeCheckpoint {
         Ok(checkpoint)
     }
 
-    pub(crate) fn terminal(&self) -> bool {
-        matches!(self.boundary, CodexCheckpointBoundary::Terminal { .. })
-    }
-
     pub(crate) fn complete_prefix_end(&self) -> u64 {
         match self.boundary {
             CodexCheckpointBoundary::Terminal { complete_eof } => complete_eof,

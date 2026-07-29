@@ -159,7 +159,6 @@ struct CollectingSink {
     pages: Vec<(usize, usize)>,
     physical_records: Vec<u64>,
     frontiers: Vec<(CodexNativeFrontier, CodexNativeFrontier)>,
-    core_receipts: Vec<CodexNativePageReceipt>,
     owner_ids: BTreeSet<String>,
 }
 
@@ -184,13 +183,11 @@ fn scan_collect(
         if let Some(owner) = page.owner.as_ref() {
             collected.owner_ids.insert(owner.native_session_id.clone());
         }
-        let receipt = page.receipt();
         collected.pages.push((units, page.serialized_bytes));
         collected.physical_records.push(page.physical_records);
         collected
             .frontiers
             .push((page.expected_frontier, page.next_safe_frontier));
-        collected.core_receipts.push(receipt);
         collected.rows.extend(page.source_backed_rows);
     }
     let scan = scanner.finish().unwrap();
@@ -264,8 +261,4 @@ fn assert_checkpoint_replay_rejected(
     )
     .unwrap_err();
     assert!(format!("{error}").contains("invalid Codex append proof"));
-}
-
-fn known_source(route_live: bool, proof: CodexAppendProof) -> CodexKnownSource {
-    CodexKnownSource { proof, route_live }
 }

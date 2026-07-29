@@ -136,7 +136,7 @@ pub(super) fn decode_pending_tool_authority(
         Ok(row) => row,
         Err(
             CodexRetainedNonMaterialized::ValidUnmaterializable
-            | CodexRetainedNonMaterialized::Malformed(_),
+            | CodexRetainedNonMaterialized::Malformed,
         ) => {
             return Err(invalid_checkpoint_proof(
                 "pending tool-call authority cannot be projected",
@@ -332,17 +332,6 @@ pub(super) fn invalid_checkpoint_proof(reason: &str) -> CaptureError {
     CaptureError::InvalidPayload(format!("invalid Codex append proof: {reason}"))
 }
 
-pub(super) fn observed_file(source: &CodexCatalogSource) -> Result<CodexFileObservation> {
-    let opened = match source.opened.as_ref() {
-        Some(opened) => Arc::clone(opened),
-        None => {
-            let authority_path = std::path::absolute(&source.source_path)?;
-            Arc::new(open_provider_source_file(&authority_path)?)
-        }
-    };
-    observed_opened_file(source, &opened)
-}
-
 pub(super) fn observed_opened_file(
     source: &CodexCatalogSource,
     opened: &OpenedProviderSourceFile,
@@ -388,17 +377,6 @@ pub(crate) fn open_codex_source_capability(
             "Codex source route authority is incomplete",
         )),
     }
-}
-
-pub(super) fn validate_open_file_metadata(
-    path: &Path,
-    file: &File,
-    observation: &CodexFileObservation,
-) -> Result<()> {
-    if opened_file_observation(path, file)? != *observation {
-        return Err(source_changed_during_scan());
-    }
-    Ok(())
 }
 
 pub(crate) fn opened_file_observation(path: &Path, file: &File) -> Result<CodexFileObservation> {

@@ -12,14 +12,14 @@
 //!
 //! # Why the walk is still complete
 //!
-//! A record that fails [`super::classify_codex_record`] is rejected as
-//! `malformed Codex JSON record`, and rejections are published state. A
-//! prefilter that skipped a malformed record would silently drop that
-//! rejection. So the prefilter is not a prefix matcher: it validates the whole
-//! record against a deliberately *strict subset* of the structural probe's
-//! grammar and reports [`CodexRecordAdmission::Probe`] the moment anything is
-//! unusual. Every skip therefore carries a proof that the structural probe
-//! would have succeeded, and every non-proof falls back to the unchanged path.
+//! A record that fails [`super::classify_codex_record`] contributes to the
+//! scanner's malformed and rejected-record counters. A prefilter that skipped
+//! a malformed record would silently misclassify it. So the prefilter is not a
+//! prefix matcher: it validates the whole record against a deliberately
+//! *strict subset* of the structural probe's grammar and reports
+//! [`CodexRecordAdmission::Probe`] the moment anything is unusual. Every skip
+//! therefore carries a proof that the structural probe would have succeeded,
+//! and every non-proof falls back to the unchanged path.
 //!
 //! The class itself is decided by [`super::codex_record_class`] — the same
 //! function the structural probe uses — so the skip set cannot drift away from

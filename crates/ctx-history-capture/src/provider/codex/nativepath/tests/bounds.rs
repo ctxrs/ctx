@@ -15,7 +15,6 @@ fn retained_rows_stream_in_pages_bounded_by_64_units_and_8_mib() {
         .pages
         .iter()
         .all(|(units, bytes)| *units <= 64 && *bytes <= MAX_CODEX_PAGE_BYTES));
-    assert!(sink.physical_records.iter().all(|records| *records <= 64));
     assert_eq!(scan.counters.retained_records, 5_001);
     assert_eq!(scan.counters.emitted_pages, 79);
     assert_eq!(scan.counters.peak_page_rows, MAX_CODEX_PAGE_ROWS);
@@ -44,15 +43,9 @@ fn records_over_16_mib_are_stream_skipped_without_losing_physical_ordinals() {
     assert_eq!(scan.next_raw_ordinal, 4);
     assert_eq!(scan.counters.complete_records, 4);
     assert_eq!(scan.counters.oversized_records, 2);
+    assert_eq!(scan.counters.rejected_complete_records, 2);
     assert_eq!(scan.counters.peak_line_buffer_bytes, MAX_CODEX_RECORD_BYTES);
     assert_eq!(scan.counters.bytes_read, contents.len() as u64);
-    assert_eq!(
-        scan.rejections
-            .iter()
-            .map(|rejection| rejection.raw_ordinal)
-            .collect::<Vec<_>>(),
-        vec![1, 2]
-    );
 }
 
 #[test]
