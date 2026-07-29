@@ -12,16 +12,15 @@ use crate::{
         bytes_bucket, count_bucket, ImportTelemetry, ProviderRefreshSourceMode,
         ProviderRefreshTrigger,
     },
-    progress::{format_bytes, format_count, plural, ProgressReporter},
+    progress::{format_bytes, ProgressReporter},
     semantic::{autostart_daemon_and_wait, SourceBackedRefreshMode},
-    DaemonTriggerCommandArg, ImportArgs, LARGE_IMPORT_SOURCE_BYTES_WARNING,
-    LARGE_IMPORT_SOURCE_FILES_WARNING,
+    DaemonTriggerCommandArg, ImportArgs,
 };
 
 use super::{
     catalog::source_stats, explicit_source_for_import, upsert_explicit_source, CatalogTotals,
-    ImportReport, ImportRunOptions, ImportTotals, InventoryTotals, PlannedImportSource,
-    ProviderRefreshCollector, ProviderRefreshRuntimeFacts,
+    ImportReport, ImportRunOptions, ImportTotals, InventoryTotals, ProviderRefreshCollector,
+    ProviderRefreshRuntimeFacts,
 };
 
 pub(crate) struct ExplicitSourceCatalogImportContext<'a> {
@@ -151,27 +150,6 @@ pub(crate) fn run_explicit_source_catalog_import(
     })
 }
 
-pub(super) fn large_import_notice(
-    planned_sources: &[PlannedImportSource],
-    planned_total_bytes: u64,
-) -> Option<String> {
-    let planned_total_files = planned_sources
-        .iter()
-        .map(|plan| plan.stats.files)
-        .sum::<usize>();
-    if planned_total_files < LARGE_IMPORT_SOURCE_FILES_WARNING
-        && planned_total_bytes < LARGE_IMPORT_SOURCE_BYTES_WARNING
-    {
-        return None;
-    }
-    Some(format!(
-        "Large first import: scanning {} existing history {} ({}). This may take a while.",
-        format_count(planned_total_files),
-        plural(planned_total_files, "file", "files"),
-        format_bytes(planned_total_bytes)
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
@@ -194,15 +172,7 @@ mod tests {
         }
 
         let dispatch = include_str!("../import.rs");
-        let catalog_branch = dispatch
-            .find("if args.path.is_some()")
-            .expect("explicit catalog dispatch");
-        let legacy_database = dispatch
-            .find("let db_path = database_path")
-            .expect("legacy automatic-import database");
-        assert!(
-            catalog_branch < legacy_database,
-            "explicit imports must return before the legacy database path is resolved"
-        );
+        assert!(!dispatch.contains("database_path"));
+        assert!(!dispatch.contains("Store::open"));
     }
 }
