@@ -1,15 +1,14 @@
 use std::{ffi::OsString, path::PathBuf, process::ExitCode};
 
-use chrono::{DateTime, Utc};
-use ctx_history_capture::{qualify_codex_native_session_root, CodexSessionImportOptions};
-use ctx_history_store::Store;
+use ctx_history_capture::{
+    ingest_codex_source_backed_v0, CodexSourceBackedCountersV0, CodexSourceBackedIngestReceiptV0,
+};
+use serde_json::json;
 
 #[derive(Debug)]
 struct QualificationArgs {
     source_root: PathBuf,
-    store_path: PathBuf,
-    machine_id: String,
-    imported_at: DateTime<Utc>,
+    index_root: PathBuf,
 }
 
 fn main() -> ExitCode {
@@ -19,7 +18,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("Codex NativePath qualification failed: {error}");
+            eprintln!("Codex source-backed qualification failed: {error}");
             ExitCode::FAILURE
         }
     }
@@ -27,19 +26,79 @@ fn main() -> ExitCode {
 
 fn run(args: impl IntoIterator<Item = OsString>) -> Result<String, String> {
     let args = parse_args(args)?;
-    let mut store = Store::open(&args.store_path).map_err(|error| error.to_string())?;
-    let evidence = qualify_codex_native_session_root(
-        &args.source_root,
-        &mut store,
-        CodexSessionImportOptions {
-            machine_id: args.machine_id,
-            source_path: Some(args.source_root.clone()),
-            imported_at: args.imported_at,
-            ..CodexSessionImportOptions::default()
+    let receipt = ingest_codex_source_backed_v0(&args.source_root, &args.index_root)
+        .map_err(|error| error.to_string())?;
+    qualification_json(&receipt)
+}
+
+fn qualification_json(receipt: &CodexSourceBackedIngestReceiptV0) -> Result<String, String> {
+    let counters = receipt.counters;
+    let legacy_operations = legacy_operation_count(counters);
+    if legacy_operations != 0 {
+        return Err(format!(
+            "source-backed qualification observed {legacy_operations} legacy publication operations"
+        ));
+    }
+    let changed_sources = [
+        counters.cold_sources,
+        counters.appended_sources,
+        counters.replaced_sources,
+        counters.deleted_sources,
+    ]
+    .into_iter()
+    .fold(0_u64, u64::saturating_add);
+    serde_json::to_string_pretty(&json!({
+        "schema_version": 1,
+        "source_epoch": "v0.26",
+        "authority": "provider_sources",
+        "legacy_store_fallback": false,
+        "work_result": if changed_sources == 0 { "no_op" } else { "changed" },
+        "input": {
+            "catalog_sources": counters.catalog_sources,
+            "catalog_source_bytes": counters.catalog_source_bytes,
         },
-    )
-    .map_err(|error| error.to_string())?;
-    evidence.to_json().map_err(|error| error.to_string())
+        "lifecycle": {
+            "cold_sources": counters.cold_sources,
+            "appended_sources": counters.appended_sources,
+            "replaced_sources": counters.replaced_sources,
+            "replayed_sources": counters.replayed_sources,
+            "deleted_sources": counters.deleted_sources,
+        },
+        "scanner": {
+            "workers": counters.scanner_workers,
+            "staged_documents": counters.staged_documents,
+            "complete_records": counters.complete_records_scanned,
+            "retained_records": counters.retained_records_scanned,
+            "rejected_records": counters.rejected_records_scanned,
+            "ignored_records": counters.ignored_records_scanned,
+            "bytes_read": counters.scanner_bytes_read,
+            "legacy_operations": legacy_operations,
+        },
+        "generation": {
+            "generation_id": receipt.commit.generation_id,
+            "indexed_documents": receipt.commit.indexed_documents,
+            "certified_sources": receipt.commit.certified_sources,
+            "certified_source_bytes": receipt.commit.certified_source_bytes,
+        },
+    }))
+    .map_err(|error| error.to_string())
+}
+
+fn legacy_operation_count(counters: CodexSourceBackedCountersV0) -> u64 {
+    [
+        counters.scanner_legacy_body_json_serializations,
+        counters.scanner_legacy_row_json_serializations,
+        counters.scanner_legacy_json_serialized_bytes,
+        counters.scanner_legacy_normalized_payload_hashes,
+        counters.scanner_legacy_file_touch_rows,
+        counters.scanner_legacy_complete_content_locators,
+        counters.scanner_legacy_duplicate_preview_allocations,
+        counters.scanner_legacy_page_owner_json_serializations,
+        counters.scanner_legacy_page_identity_owner_json_serializations,
+        counters.scanner_legacy_page_identity_row_json_serializations,
+    ]
+    .into_iter()
+    .fold(0_u64, u64::saturating_add)
 }
 
 fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<QualificationArgs, String> {
@@ -49,31 +108,18 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<QualificationA
         .unwrap_or_else(|| OsString::from("codex_nativepath_qualification"));
     let usage = || {
         format!(
-            "usage: {} SOURCE_ROOT STORE_PATH MACHINE_ID IMPORTED_AT_RFC3339",
+            "usage: {} SOURCE_ROOT INDEX_ROOT",
             program.to_string_lossy()
         )
     };
     let source_root = args.next().map(PathBuf::from).ok_or_else(&usage)?;
-    let store_path = args.next().map(PathBuf::from).ok_or_else(&usage)?;
-    let machine_id = args
-        .next()
-        .and_then(|value| value.into_string().ok())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(&usage)?;
-    let imported_at = args
-        .next()
-        .and_then(|value| value.into_string().ok())
-        .ok_or_else(&usage)?
-        .parse::<DateTime<Utc>>()
-        .map_err(|_| usage())?;
+    let index_root = args.next().map(PathBuf::from).ok_or_else(&usage)?;
     if args.next().is_some() {
         return Err(usage());
     }
     Ok(QualificationArgs {
         source_root,
-        store_path,
-        machine_id,
-        imported_at,
+        index_root,
     })
 }
 
@@ -85,17 +131,8 @@ mod tests {
 
     use super::*;
 
-    fn fixture_options(source_root: &std::path::Path) -> CodexSessionImportOptions {
-        CodexSessionImportOptions {
-            machine_id: "codex-nativepath-qualification-test".to_owned(),
-            source_path: Some(source_root.to_path_buf()),
-            imported_at: "2026-07-26T12:00:00Z".parse().unwrap(),
-            ..CodexSessionImportOptions::default()
-        }
-    }
-
     fn write_changed_fixture(source_root: &std::path::Path) -> PathBuf {
-        fs::create_dir(source_root).unwrap();
+        fs::create_dir_all(source_root).unwrap();
         let source = source_root
             .join("rollout-2026-07-26T12-00-00-00000000-0000-0000-0000-000000000026.jsonl");
         let records = [
@@ -129,7 +166,7 @@ mod tests {
                     "role": "assistant",
                     "content": [{
                         "type": "output_text",
-                        "text": "typed receipts came from the normal importer"
+                        "text": "typed receipts came from the source-backed importer"
                     }]
                 }
             }),
@@ -144,107 +181,120 @@ mod tests {
         source
     }
 
-    fn qualify(
-        source_root: &std::path::Path,
-        store_path: &std::path::Path,
-    ) -> ctx_history_capture::CodexNativePathQualificationEvidence {
-        let mut store = Store::open(store_path).unwrap();
-        qualify_codex_native_session_root(source_root, &mut store, fixture_options(source_root))
-            .unwrap()
+    fn qualify(source_root: &std::path::Path, index_root: &std::path::Path) -> Value {
+        let json = run([
+            OsString::from("qualify"),
+            source_root.as_os_str().to_owned(),
+            index_root.as_os_str().to_owned(),
+        ])
+        .unwrap();
+        serde_json::from_str(&json).unwrap()
     }
 
     #[test]
-    fn changed_import_emits_deterministic_typed_runtime_counters() {
+    fn fresh_source_ingest_emits_deterministic_typed_runtime_counters() {
         let temp = tempfile::tempdir().unwrap();
         let source_root = temp.path().join("sessions");
         let source = write_changed_fixture(&source_root);
+        let first_root = temp.path().join("first");
+        let second_root = temp.path().join("second");
+        fs::create_dir_all(&first_root).unwrap();
+        let legacy_path = first_root.join("work.sqlite");
+        let legacy_bytes = b"opaque v0.25 Store rollback sentinel\n";
+        fs::write(&legacy_path, legacy_bytes).unwrap();
 
-        let first = qualify(&source_root, &temp.path().join("first.sqlite"));
-        let second = qualify(&source_root, &temp.path().join("second.sqlite"));
+        let first = qualify(&source_root, &first_root.join("search/lexical"));
+        let second = qualify(&source_root, &second_root.join("search/lexical"));
 
         assert_eq!(first, second);
-        assert_eq!(first.summary().imported_sessions, 1);
-        assert_eq!(first.summary().imported_events, 2);
-        assert_eq!(first.input().catalog_sources(), 1);
+        assert_eq!(first["schema_version"], 1);
+        assert_eq!(first["source_epoch"], "v0.26");
+        assert_eq!(first["authority"], "provider_sources");
+        assert_eq!(first["legacy_store_fallback"], false);
+        assert_eq!(first["work_result"], "changed");
+        assert_eq!(first["input"]["catalog_sources"], 1);
         assert_eq!(
-            first.input().catalog_bytes(),
+            first["input"]["catalog_source_bytes"],
             source.metadata().unwrap().len()
         );
-        assert_eq!(first.input().observation_sha256().len(), 64);
-        assert_eq!(first.producer().worker_count(), 1);
-        assert_eq!(first.producer().peak_overlap(), 1);
-        assert!(first.producer().peak_preparation_bytes() > 0);
-        assert!(first.store().groups() > 0);
-        assert!(first.store().mutation_units() > 0);
-        assert!(first.store().core_bound_bytes() > 0);
-        assert!(first.store().journal_records() > 0);
-        assert!(first.store().journal_bytes() > 0);
-        assert_eq!(first.store().checkpoint_receipts(), first.store().groups());
-        assert!(first.store().checkpoint_advances() > 0);
-        assert!(first.store().first_checkpoint().is_some());
-        assert!(first.store().last_checkpoint().is_some());
-
-        let json = first.to_json().unwrap();
-        let value: Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(value["schema_version"], 1);
-        assert_eq!(value["work_result"], "changed");
-        assert_eq!(value["producer"]["blocked_reservations"], 0);
-        assert_eq!(value["build"]["source_commit"].as_str().unwrap().len(), 40);
+        assert_eq!(first["lifecycle"]["cold_sources"], 1);
+        assert_eq!(first["scanner"]["workers"], 1);
+        assert_eq!(first["scanner"]["staged_documents"], 2);
+        assert_eq!(first["scanner"]["complete_records"], 3);
+        assert_eq!(first["scanner"]["retained_records"], 2);
+        assert_eq!(first["scanner"]["legacy_operations"], 0);
+        assert_eq!(first["generation"]["indexed_documents"], 2);
+        assert_eq!(first["generation"]["certified_sources"], 1);
         assert_eq!(
-            value["build"]["cargo_lock_sha256"].as_str().unwrap().len(),
-            64
+            first["generation"]["certified_source_bytes"],
+            source.metadata().unwrap().len()
         );
         assert_eq!(
-            value["build"]["importer_source_sha256"]
-                .as_str()
-                .unwrap()
-                .len(),
+            first["generation"]["generation_id"].as_str().unwrap().len(),
             64
         );
+        assert_eq!(fs::read(&legacy_path).unwrap(), legacy_bytes);
     }
 
     #[test]
-    fn empty_root_records_true_noop_as_zero_producer_and_store_work() {
+    fn provider_source_replacement_is_authority_and_replay_is_noop() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_root = temp.path().join("sessions");
+        let source = write_changed_fixture(&source_root);
+        let index_root = temp.path().join("search/lexical");
+
+        let initial = qualify(&source_root, &index_root);
+        let initial_generation = initial["generation"]["generation_id"].clone();
+        let replacement = fs::read_to_string(&source).unwrap().replace(
+            "qualification changed fixture",
+            "qualification revised fixture",
+        );
+        fs::write(&source, replacement).unwrap();
+
+        let replaced = qualify(&source_root, &index_root);
+        assert_eq!(replaced["work_result"], "changed");
+        assert_eq!(replaced["lifecycle"]["replaced_sources"], 1);
+        assert_ne!(replaced["generation"]["generation_id"], initial_generation);
+
+        let replay = qualify(&source_root, &index_root);
+        assert_eq!(replay["work_result"], "no_op");
+        assert_eq!(replay["lifecycle"]["replayed_sources"], 1);
+        assert_eq!(
+            replay["generation"]["generation_id"],
+            replaced["generation"]["generation_id"]
+        );
+        assert_eq!(replay["scanner"]["staged_documents"], 0);
+        assert_eq!(replay["scanner"]["bytes_read"], 0);
+    }
+
+    #[test]
+    fn empty_root_records_true_source_backed_noop() {
         let temp = tempfile::tempdir().unwrap();
         let source_root = temp.path().join("empty");
         fs::create_dir(&source_root).unwrap();
 
-        let evidence = qualify(&source_root, &temp.path().join("noop.sqlite"));
+        let evidence = qualify(&source_root, &temp.path().join("search/lexical"));
 
-        assert_eq!(evidence.summary().imported, 0);
-        assert_eq!(evidence.summary().skipped, 0);
-        assert_eq!(evidence.producer().worker_count(), 0);
-        assert_eq!(evidence.producer().peak_overlap(), 0);
-        assert_eq!(evidence.producer().peak_preparation_bytes(), 0);
-        assert_eq!(evidence.producer().blocked_reservations(), 0);
-        assert_eq!(evidence.store().groups(), 0);
-        assert_eq!(evidence.store().mutation_units(), 0);
-        assert_eq!(evidence.store().core_bound_bytes(), 0);
-        assert_eq!(evidence.store().journal_records(), 0);
-        assert_eq!(evidence.store().journal_bytes(), 0);
-        assert_eq!(evidence.store().checkpoint_receipts(), 0);
-        assert_eq!(evidence.store().checkpoint_advances(), 0);
-        assert!(evidence.store().first_checkpoint().is_none());
-        assert!(evidence.store().last_checkpoint().is_none());
-
-        let value: Value = serde_json::from_str(&evidence.to_json().unwrap()).unwrap();
-        assert_eq!(value["work_result"], "no_op");
-        assert_eq!(value["input"]["catalog_sources"], 0);
+        assert_eq!(evidence["work_result"], "no_op");
+        assert_eq!(evidence["input"]["catalog_sources"], 0);
+        assert_eq!(evidence["scanner"]["workers"], 0);
+        assert_eq!(evidence["scanner"]["staged_documents"], 0);
+        assert_eq!(evidence["scanner"]["legacy_operations"], 0);
+        assert_eq!(evidence["generation"]["indexed_documents"], 0);
+        assert_eq!(evidence["generation"]["certified_sources"], 0);
     }
 
     #[test]
     fn caller_supplied_counter_document_is_rejected_at_process_boundary() {
-        let forged = r#"{"producer":{"worker_count":999},"store":{"groups":999}}"#;
+        let forged = r#"{"scanner":{"workers":999}}"#;
         let result = parse_args([
             OsString::from("qualify"),
             OsString::from("/sessions"),
-            OsString::from("/store.sqlite"),
-            OsString::from("machine"),
-            OsString::from("2026-07-26T12:00:00Z"),
+            OsString::from("/index"),
             OsString::from(forged),
         ]);
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().starts_with("usage: qualify "));
+        assert_eq!(result.unwrap_err(), "usage: qualify SOURCE_ROOT INDEX_ROOT");
     }
 }

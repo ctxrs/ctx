@@ -157,6 +157,23 @@ mod unix {
         }
     }
 
+    fn initialize_source_backed_epoch(data_root: &Path) {
+        let fixture = PathBuf::from(provider_history_fixture("codex-sessions"));
+        copy_dir_all(&fixture, &data_root.join(".codex/sessions"));
+        let generation_id = initialize_generation_only_sql_projection(data_root);
+        assert!(!generation_id.is_empty());
+        assert_source_backed_epoch_remained_store_free(data_root);
+    }
+
+    fn assert_source_backed_epoch_remained_store_free(data_root: &Path) {
+        assert!(data_root.join("relational.sqlite").is_file());
+        assert!(data_root.join("search/lexical").is_dir());
+        assert!(
+            !data_root.join("work.sqlite").exists(),
+            "v0.26 upgrade fixtures must not open or recreate the legacy Store"
+        );
+    }
+
     #[derive(Clone, Copy, Debug)]
     enum RecoveryJournal {
         CurrentPrepared,
@@ -287,7 +304,7 @@ mod unix {
         );
         let binary_before = fs::read(&binary).unwrap();
         let owner = tempdir();
-        drop(ctx_history_store::Store::open(owner.path().join("work.sqlite")).unwrap());
+        initialize_source_backed_epoch(owner.path());
 
         let (attempt_id, journal_path) = match journal_kind {
             RecoveryJournal::CurrentPrepared => {
@@ -436,6 +453,7 @@ mod unix {
                 "{journal_kind:?}/{recovery_owner:?} began a daemon handoff from stale discovery"
             );
         });
+        assert_source_backed_epoch_remained_store_free(owner.path());
     }
 
     fn prove_recovery_quiescence(journal_kind: RecoveryJournal, recovery_owner: RecoveryOwner) {
@@ -448,8 +466,8 @@ mod unix {
         let binary_before = fs::read(&binary).unwrap();
         let owner = tempdir();
         let second = tempdir();
-        drop(ctx_history_store::Store::open(owner.path().join("work.sqlite")).unwrap());
-        drop(ctx_history_store::Store::open(second.path().join("work.sqlite")).unwrap());
+        initialize_source_backed_epoch(owner.path());
+        initialize_source_backed_epoch(second.path());
         fs::write(
             second.path().join("config.toml"),
             "[upgrade]\nauto = \"off\"\n",
@@ -653,6 +671,8 @@ mod unix {
                 }
             }
         });
+        assert_source_backed_epoch_remained_store_free(owner.path());
+        assert_source_backed_epoch_remained_store_free(second.path());
     }
 
     #[test]
@@ -821,8 +841,8 @@ mod unix {
         let binary_before = fs::read(&binary).unwrap();
         let first = tempdir();
         let second = tempdir();
-        drop(ctx_history_store::Store::open(first.path().join("work.sqlite")).unwrap());
-        drop(ctx_history_store::Store::open(second.path().join("work.sqlite")).unwrap());
+        initialize_source_backed_epoch(first.path());
+        initialize_source_backed_epoch(second.path());
         let pause = installation.path().join("installation-quiesced");
 
         std::thread::scope(|scope| {
@@ -915,6 +935,8 @@ mod unix {
             stop_daemon(restarted_first.unwrap());
             stop_daemon(restarted_second.unwrap());
         });
+        assert_source_backed_epoch_remained_store_free(first.path());
+        assert_source_backed_epoch_remained_store_free(second.path());
     }
 
     #[test]
