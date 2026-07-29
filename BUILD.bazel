@@ -1,8 +1,9 @@
-load("@rules_python//python:defs.bzl", "py_test")
+load("@rules_python//python:defs.bzl", "py_binary", "py_test")
 load("@rules_rust//rust:defs.bzl", "rustfmt_test")
 load("//tools/bazel:gates.bzl", "loc_check_inputs", "non_rust_gate", "real_harness_gate")
 load(
     "//tools/bazel:release_routes.bzl",
+    "public_cli_release_advisory_gates",
     "public_cli_release_route",
 )
 load(
@@ -158,6 +159,18 @@ filegroup(
 filegroup(
     name = "release_cargo_lock",
     srcs = ["Cargo.lock"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "release_advisory_policy",
+    srcs = ["security/release-advisory-policy-v1.json"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "release_advisory_exceptions",
+    srcs = ["security/release-advisory-exceptions-v1.json"],
     visibility = ["//visibility:public"],
 )
 
@@ -431,6 +444,29 @@ py_test(
     tags = ["release-gate"],
 )
 
+py_test(
+    name = "dependency_advisory_gate_tests",
+    srcs = [
+        "scripts/dependency-advisory-gate.py",
+        "scripts/tests/dependency-advisory-gate-test.py",
+    ],
+    data = glob(["scripts/tests/fixtures/dependency-advisory/**"]),
+    main = "scripts/tests/dependency-advisory-gate-test.py",
+    tags = ["release-gate", "security"],
+)
+
+py_binary(
+    name = "release_advisory_database_update",
+    srcs = ["scripts/update-release-advisory-db.py"],
+    main = "scripts/update-release-advisory-db.py",
+    tags = [
+        "manual",
+        "release-tool",
+        "requires-network",
+        "security",
+    ],
+)
+
 sh_binary(
     name = "ctx_release_packager",
     srcs = ["scripts/package-public-cli-bazel-release.sh"],
@@ -455,6 +491,7 @@ sh_binary(
         "scripts/public-cli-runtime-authority.sh",
         "scripts/release/linux-bazel-release.Dockerfile",
         "scripts/release/public-cli-bazel-build-info.py",
+        "scripts/dependency-advisory-gate.py",
         "scripts/release-sbom.py",
         "scripts/run-macos-release-signing.sh",
         "scripts/run-native-candidate-smoke.ps1",
@@ -464,6 +501,9 @@ sh_binary(
         "scripts/verify-macos-signed-cli.sh",
         "scripts/write-public-cli-build-info.py",
         "tests/fixtures/custom-history-jsonl/basic.jsonl",
+        "security/release-advisory-exceptions-v1.json",
+        "security/release-advisory-policy-v1.json",
+        "sdks/typescript/package-lock.json",
         "//crates/ctx-cli:Cargo.toml",
     ] + CARGO_WORKSPACE_PACKAGE_DATA,
     tags = [
@@ -493,6 +533,11 @@ configured_license_materials(
         "//crates/ctx-protocol:Cargo.toml",
         "//crates/ctx-sdk:Cargo.toml",
     ],
+)
+
+public_cli_release_advisory_gates(
+    name_prefix = "ctx_release_advisory",
+    inventory = ":ctx_release_dependency_inventory",
 )
 
 public_cli_release_route(
@@ -580,6 +625,7 @@ sh_test(
         "contracts/release-targets-v1.json",
         "scripts/check-public-cli-build-info.py",
         "scripts/check-release-target-matrix.py",
+        "scripts/dependency-advisory-gate.py",
         "scripts/install-public-cli-candidate.py",
         "scripts/package-public-cli-bazel-release.sh",
         "scripts/public-cli-release-targets.py",
@@ -870,6 +916,7 @@ test_suite(
         ":cli_build_cfg_parity_check",
         ":cli_contract_tests",
         ":docs_check",
+        ":dependency_advisory_gate_tests",
         ":freebsd_ort_exit_contract",
         ":freebsd_ort_exit_contract_mutation_tests",
         ":installer_path_smoke",

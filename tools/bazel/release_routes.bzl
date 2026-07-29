@@ -201,3 +201,125 @@ def public_cli_release_route(
         target_matrix = "//:release_target_matrix",
         tags = ["manual", "release-gate", "release-tool"],
     )
+
+def _advisory_launcher_content(target_id):
+    return """#!/usr/bin/env bash
+set -euo pipefail
+
+: "${{BUILD_WORKSPACE_DIRECTORY:?release advisory gate requires a source workspace}}"
+: "${{CTX_RELEASE_ADVISORY_RECEIPT_DIR:?set CTX_RELEASE_ADVISORY_RECEIPT_DIR}}"
+: "${{CTX_OSV_SCANNER:?set CTX_OSV_SCANNER to the pinned scanner executable}}"
+: "${{CTX_OSV_DATABASE_DIR:?set CTX_OSV_DATABASE_DIR}}"
+: "${{CTX_OSV_DATABASE_METADATA:?set CTX_OSV_DATABASE_METADATA}}"
+
+runfiles_root="${{RUNFILES_DIR:-$0.runfiles}}"
+workspace="${{TEST_WORKSPACE:-_main}}"
+
+resolve_main_runfile() {{
+  local key="$1"
+  local candidate
+  for candidate in \
+    "${{runfiles_root}}/${{workspace}}/${{key}}" \
+    "${{runfiles_root}}/_main/${{key}}"; do
+    if [[ -e "${{candidate}}" ]]; then
+      printf '%s\\n' "${{candidate}}"
+      return 0
+    fi
+  done
+  if [[ -n "${{RUNFILES_MANIFEST_FILE:-}}" ]]; then
+    local logical physical
+    while IFS=' ' read -r logical physical; do
+      case "${{logical}}" in
+        "${{workspace}}/${{key}}"|"_main/${{key}}")
+          printf '%s\\n' "${{physical}}"
+          return 0
+          ;;
+      esac
+    done <"${{RUNFILES_MANIFEST_FILE}}"
+  fi
+  printf 'error: declared advisory runfile is unavailable: %s\\n' "${{key}}" >&2
+  return 1
+}}
+
+route_root="ctx_release_advisory/{target_id}"
+script="$(resolve_main_runfile "${{route_root}}/gate.py")"
+inventory="$(resolve_main_runfile "${{route_root}}/cargo-inventory.txt")"
+policy="$(resolve_main_runfile "${{route_root}}/policy.json")"
+exceptions="$(resolve_main_runfile "${{route_root}}/exceptions.json")"
+exec python3 -I "${{script}}" \
+  --repo-root "${{BUILD_WORKSPACE_DIRECTORY}}" \
+  --policy "${{policy}}" \
+  --exceptions "${{exceptions}}" \
+  --database-root "${{CTX_OSV_DATABASE_DIR}}" \
+  --database-metadata "${{CTX_OSV_DATABASE_METADATA}}" \
+  --scanner "${{CTX_OSV_SCANNER}}" \
+  --cargo-inventory "${{inventory}}" \
+  --target-id "{target_id}" \
+  --output "${{CTX_RELEASE_ADVISORY_RECEIPT_DIR}}/public-{target_id}.json"
+""".format(target_id = target_id)
+
+def _release_advisory_gate_impl(ctx):
+    launcher = ctx.actions.declare_file(ctx.label.name)
+    ctx.actions.write(
+        output = launcher,
+        content = _advisory_launcher_content(ctx.attr.target_id),
+        is_executable = True,
+    )
+    route_root = "ctx_release_advisory/{}".format(ctx.attr.target_id)
+    return [DefaultInfo(
+        executable = launcher,
+        runfiles = ctx.runfiles(
+            files = [
+                ctx.file.exceptions,
+                ctx.file.inventory,
+                ctx.file.policy,
+                ctx.file.script,
+            ],
+            symlinks = {
+                "{}/cargo-inventory.txt".format(route_root): ctx.file.inventory,
+                "{}/exceptions.json".format(route_root): ctx.file.exceptions,
+                "{}/gate.py".format(route_root): ctx.file.script,
+                "{}/policy.json".format(route_root): ctx.file.policy,
+            },
+        ),
+    )]
+
+_release_advisory_gate = rule(
+    implementation = _release_advisory_gate_impl,
+    executable = True,
+    attrs = {
+        "exceptions": attr.label(allow_single_file = True, mandatory = True),
+        "inventory": attr.label(
+            allow_single_file = True,
+            cfg = _route_transition,
+            mandatory = True,
+        ),
+        "policy": attr.label(allow_single_file = True, mandatory = True),
+        "script": attr.label(allow_single_file = True, mandatory = True),
+        "target_id": attr.string(mandatory = True, values = sorted(_ROUTES.keys())),
+        "_allowlist_function_transition": attr.label(
+            default = "@bazel_tools//tools/allowlists/function_transition_allowlist",
+        ),
+    },
+)
+
+def public_cli_release_advisory_gate(name, target_id, inventory):
+    """Declares one target-configured, offline dependency-advisory gate."""
+    _release_advisory_gate(
+        name = name,
+        exceptions = "//:release_advisory_exceptions",
+        inventory = inventory,
+        policy = "//:release_advisory_policy",
+        script = "//:scripts/dependency-advisory-gate.py",
+        target_id = target_id,
+        tags = ["manual", "release-gate", "release-tool"],
+    )
+
+def public_cli_release_advisory_gates(name_prefix, inventory):
+    """Declares the advisory gate for every owned public release route."""
+    for target_id in sorted(_ROUTES.keys()):
+        public_cli_release_advisory_gate(
+            name = "{}_{}".format(name_prefix, target_id.replace("-", "_")),
+            inventory = inventory,
+            target_id = target_id,
+        )

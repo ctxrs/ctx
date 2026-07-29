@@ -318,6 +318,7 @@ reserved_leaves=(
   "${binary_name}.candidate.json"
   "${binary_name}.cdx.json"
   "${binary_name}.cdx.json.sha256"
+  "${binary_name}.dependency-advisory.json"
   "${binary_name}.expected-version"
   "${binary_name}.sha256"
   "${binary_name}.size.json"
@@ -354,6 +355,18 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+
+staged_advisory="${stage_dir}/${binary_name}.dependency-advisory.json"
+python3 -I "${repo_root}/scripts/dependency-advisory-gate.py" \
+  --repo-root "${source_repo}" \
+  --policy "${repo_root}/security/release-advisory-policy-v1.json" \
+  --exceptions "${repo_root}/security/release-advisory-exceptions-v1.json" \
+  --database-root "${CTX_OSV_DATABASE_DIR:-}" \
+  --database-metadata "${CTX_OSV_DATABASE_METADATA:-}" \
+  --scanner "${CTX_OSV_SCANNER:-}" \
+  --cargo-inventory "${sbom_inventory}" \
+  --target-id "${target_id}" \
+  --output "${staged_advisory}"
 
 staged="${stage_dir}/${binary_name}"
 install -m 0755 "${artifact}" "${staged}"

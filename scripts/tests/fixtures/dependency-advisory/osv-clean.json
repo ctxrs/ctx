@@ -1,0 +1,19 @@
+{
+  "results": [
+    {
+      "source": {
+        "path": "Cargo.lock",
+        "type": "lockfile"
+      },
+      "packages": [
+        {
+          "package": {
+            "ecosystem": "crates.io",
+            "name": "safe-crate",
+            "version": "1.0.0"
+          }
+        }
+      ]
+    }
+  ]
+}

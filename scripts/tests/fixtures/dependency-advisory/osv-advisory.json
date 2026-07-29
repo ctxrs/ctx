@@ -1,0 +1,33 @@
+{
+  "results": [
+    {
+      "source": {
+        "path": "Cargo.lock",
+        "type": "lockfile"
+      },
+      "packages": [
+        {
+          "package": {
+            "ecosystem": "crates.io",
+            "name": "unsafe-crate",
+            "version": "1.2.3"
+          },
+          "groups": [
+            {
+              "ids": [
+                "RUSTSEC-2099-0001"
+              ],
+              "max_severity": "9.8"
+            }
+          ],
+          "vulnerabilities": [
+            {
+              "id": "RUSTSEC-2099-0001",
+              "summary": "Hermetic fixture vulnerability"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
