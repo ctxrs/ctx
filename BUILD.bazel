@@ -67,7 +67,6 @@ CARGO_WORKSPACE_PACKAGE_DATA = [
     "//crates/ctx-history-capture:cargo_package_data",
     "//crates/ctx-history-core:cargo_package_data",
     "//crates/ctx-history-index:cargo_package_data",
-    "//crates/ctx-history-search:cargo_package_data",
     "//crates/ctx-history-store:cargo_package_data",
     "//crates/ctx-pro-host-protocol:cargo_package_data",
     "//crates/ctx-protocol:cargo_package_data",
@@ -82,7 +81,6 @@ LOC_CHECK_DATA = [
     "//crates/ctx-history-capture:loc_check_inputs",
     "//crates/ctx-history-core:loc_check_inputs",
     "//crates/ctx-history-index:loc_check_inputs",
-    "//crates/ctx-history-search:loc_check_inputs",
     "//crates/ctx-history-store:loc_check_inputs",
     "//crates/ctx-pro-host-protocol:loc_check_inputs",
     "//crates/ctx-protocol:loc_check_inputs",
@@ -101,7 +99,6 @@ RELEASE_PACKAGE_AUDIT_DATA = NON_RUST_GATE_DATA + [
     "//crates/ctx-history-capture:cargo_package_data",
     "//crates/ctx-history-core:cargo_package_data",
     "//crates/ctx-history-index:cargo_package_data",
-    "//crates/ctx-history-search:cargo_package_data",
     "//crates/ctx-history-store:cargo_package_data",
 ]
 
@@ -237,7 +234,6 @@ RUST_FORMAT_TARGETS = [
     "//crates/ctx-history-core:unit_tests",
     "//crates/ctx-history-index:source_backed_recovery_tests",
     "//crates/ctx-history-index:unit_tests",
-    "//crates/ctx-history-search:unit_tests",
     "//crates/ctx-history-store:unit_tests",
     "//crates/ctx-pro-host-protocol:generate_protocol_inventory",
     "//crates/ctx-pro-host-protocol:unit_tests",
@@ -495,7 +491,6 @@ configured_license_materials(
         "//crates/ctx-history-capture:Cargo.toml",
         "//crates/ctx-history-core:Cargo.toml",
         "//crates/ctx-history-index:Cargo.toml",
-        "//crates/ctx-history-search:Cargo.toml",
         "//crates/ctx-history-store:Cargo.toml",
         "//crates/ctx-pro-host-protocol:Cargo.toml",
         "//crates/ctx-protocol:Cargo.toml",
@@ -779,7 +774,6 @@ test_suite(name = "provider_fixture_e2e", tests = [
     "//crates/ctx-cli:search_show_locate_sql_tests",
 ])
 test_suite(name = "local_transcript_oracle", tests = ["//crates/ctx-cli:search_show_locate_sql_tests"])
-test_suite(name = "search_determinism_tests", tests = ["//crates/ctx-history-search:determinism_tests"])
 test_suite(name = "show_complete_content_tests", tests = [
     "//crates/ctx-cli:complete_content_tests",
     "//crates/ctx-history-capture:complete_content_tests",
@@ -834,8 +828,6 @@ NATIVE_RUST_TESTS = [
     "//crates/ctx-history-core:unit_tests",
     "//crates/ctx-history-index:source_backed_recovery_tests",
     "//crates/ctx-history-index:unit_tests",
-    "//crates/ctx-history-search:determinism_tests",
-    "//crates/ctx-history-search:unit_tests",
     "//crates/ctx-history-store:unit_tests",
     "//crates/ctx-pro-host-protocol:conformance_tests",
     "//crates/ctx-pro-host-protocol:unit_tests",

@@ -738,7 +738,6 @@ dependencies = [
  "ctx-history-capture",
  "ctx-history-core",
  "ctx-history-index",
- "ctx-history-search",
  "ctx-history-store",
  "ctx-pro-host-protocol",
  "ed25519-dalek",
@@ -836,22 +835,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "tantivy",
- "tempfile",
- "thiserror 1.0.69",
- "uuid",
-]
-
-[[package]]
-name = "ctx-history-search"
-version = "0.26.0"
-dependencies = [
- "chrono",
- "ctx-history-core",
- "ctx-history-index",
- "ctx-history-store",
- "regex",
- "serde",
- "serde_json",
  "tempfile",
  "thiserror 1.0.69",
  "uuid",

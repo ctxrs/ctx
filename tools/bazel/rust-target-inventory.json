@@ -77,12 +77,6 @@
       "targets": {"lib:ctx_history_store": "//crates/ctx-history-store:lib"},
       "native_unit": "//crates/ctx-history-store:unit_tests"
     },
-    "ctx-history-search": {
-      "manifest": "crates/ctx-history-search/Cargo.toml",
-      "targets": {"lib:ctx_history_search": "//crates/ctx-history-search:lib"},
-      "native_unit": "//crates/ctx-history-search:unit_tests",
-      "focused_tests": ["//crates/ctx-history-search:determinism_tests"]
-    },
     "ctx-pro-host-protocol": {
       "manifest": "crates/ctx-pro-host-protocol/Cargo.toml",
       "targets": {
