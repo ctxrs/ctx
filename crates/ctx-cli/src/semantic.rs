@@ -31,16 +31,14 @@ use uuid::Uuid;
 #[cfg(test)]
 use ctx_history_core::{database_path, utc_now};
 #[cfg(test)]
-use ctx_history_store::{EventEmbeddingDocument, Store};
+use ctx_history_store::Store;
 
-#[cfg(test)]
-use crate::commands::{import::ImportTotals, search::RefreshArg};
 #[cfg(test)]
 use crate::config::{AppConfig, CONFIG_FILE};
 #[cfg(test)]
 use crate::output::compact_json;
 #[cfg(test)]
-use crate::{DaemonRunArgs, DaemonStartModeArg, DaemonTriggerCommandArg, SearchBackendArg};
+use crate::{DaemonRunArgs, DaemonStartModeArg, DaemonTriggerCommandArg};
 
 mod model_contract;
 #[cfg(test)]
@@ -61,9 +59,13 @@ pub(crate) use runtime_limits::{
     SEMANTIC_WORKER_MAX_SECONDS_CAP,
 };
 mod reports;
+pub(crate) use reports::semantic_worker_report_configured_json;
 #[cfg(test)]
 use reports::*;
-pub(crate) use reports::{semantic_worker_report_configured_json, SemanticRetrievalReport};
+mod document;
+pub(in crate::semantic) use document::{
+    semantic_event_document_from_store_projection, SemanticEventDocument,
+};
 mod vector_store;
 #[cfg(test)]
 use vector_store::*;
@@ -71,8 +73,7 @@ mod query_service;
 #[cfg(test)]
 use query_service::*;
 pub(crate) use query_service::{
-    search_packet_with_backend, semantic_query_service_supported, wait_for_daemon_query_service,
-    SourceBackedSemanticNotReady,
+    semantic_query_service_supported, wait_for_daemon_query_service, SourceBackedSemanticNotReady,
 };
 #[cfg(any(target_os = "macos", test))]
 mod model_acquisition;
@@ -193,5 +194,3 @@ mod fastembed_policy_tests;
 mod query_service_transport_tests;
 #[cfg(all(test, ctx_semantic_fastembed))]
 mod tests;
-#[cfg(all(test, not(ctx_semantic_fastembed)))]
-mod unsupported_platform_tests;

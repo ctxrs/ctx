@@ -12,7 +12,6 @@ use ctx_history_index::{
     EventRecord, SemanticEventCursor, VerifiedIndex, LEXICAL_SCHEMA_VERSION,
     MAX_SEMANTIC_EVENT_PAGE_ITEMS,
 };
-use ctx_history_store::EventEmbeddingDocument;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -24,6 +23,7 @@ use crate::semantic::{
     indexing::{semantic_chunks_for_document, semantic_document_hash, semantic_source_text},
     model_contract::{semantic_model_key, SEMANTIC_DIMENSIONS},
     vector_store_schema::{semantic_owned_sidecar_result, SemanticVectorStoreError},
+    SemanticEventDocument,
 };
 
 const SOURCE_FRONTIER_STATE: &str = "source_backed_semantic_frontier_v1";
@@ -109,7 +109,7 @@ pub(in crate::semantic) trait SourceBackedSemanticResolver {
         &mut self,
         event: &EventRecord,
         request: &EventHydrationRequest,
-    ) -> std::result::Result<EventEmbeddingDocument, HydrationFailure>;
+    ) -> std::result::Result<SemanticEventDocument, HydrationFailure>;
 }
 
 pub(in crate::semantic) trait SourceBackedSemanticEmbedder {
@@ -868,10 +868,7 @@ fn validate_page(
     Ok(())
 }
 
-fn validate_resolved_document(
-    event: &EventRecord,
-    document: &EventEmbeddingDocument,
-) -> Result<()> {
+fn validate_resolved_document(event: &EventRecord, document: &SemanticEventDocument) -> Result<()> {
     if document.event_id != event.event_id.as_uuid()
         || document.seq != event.event_sequence
         || document.text.trim().is_empty()
@@ -976,7 +973,7 @@ mod tests {
             &mut self,
             event: &EventRecord,
             request: &EventHydrationRequest,
-        ) -> std::result::Result<EventEmbeddingDocument, HydrationFailure> {
+        ) -> std::result::Result<SemanticEventDocument, HydrationFailure> {
             assert_eq!(request.event_id(), event.event_id);
             assert_eq!(request.locator(), &event.locator);
             self.calls.push(event.event_id.as_uuid());
@@ -994,7 +991,7 @@ mod tests {
                     kind: HydrationFailureKind::MissingRecord,
                     detail: "fixture record missing".to_owned(),
                 })?;
-            Ok(EventEmbeddingDocument {
+            Ok(SemanticEventDocument {
                 event_id: event.event_id.as_uuid(),
                 history_record_id: None,
                 session_id: Some(event.session_id.as_uuid()),
@@ -1063,7 +1060,7 @@ mod tests {
                 native_session_key: &session_key,
             })?;
             Ok(Self {
-                path: temp.path().join("semantic-vectors"),
+                path: source_backed_semantic_vector_path(temp.path()),
                 _temp: temp,
                 source,
                 session_id,

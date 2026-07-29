@@ -379,7 +379,7 @@ fn daemon_acquisition_failure_is_explicit_retryable_and_fail_closed() -> Result<
     assert_eq!(value["model_cache_available"], false);
     assert!(value["retry_after_ms"].is_null());
     assert!(
-        !semantic_vector_path(temp.path()).exists(),
+        !source_backed_semantic_vector_path(temp.path()).exists(),
         "failed model acquisition must not claim a semantic projection"
     );
     Ok(())
@@ -645,7 +645,7 @@ fn accelerator_only_signed_cache_admits_index_queue() -> Result<()> {
         queue_recent_semantic_work(temp.path(), &store, "accelerator_signed_cache")?,
         1
     );
-    assert!(semantic_vector_path(temp.path()).is_file());
+    assert!(source_backed_semantic_vector_path(temp.path()).is_dir());
     Ok(())
 }
 
@@ -666,12 +666,16 @@ fn daemon_recent_queue_marks_user_anchor_dirty_when_assistant_changes() -> Resul
     store.upsert_event(&user)?;
     store.upsert_event(&assistant)?;
     store.refresh_event_embedding_document_count_cache()?;
-    let docs = store.event_embedding_documents_by_ids(&[user.id])?;
+    let docs = store
+        .event_embedding_documents_by_ids(&[user.id])?
+        .into_iter()
+        .map(|document| semantic_event_document_from_store_projection!(document))
+        .collect::<Vec<_>>();
     let doc = docs.first().expect("user lite-turn document");
     let source_text = semantic_source_text(&doc.text);
     let source_hash = semantic_document_hash(doc, &source_text);
 
-    let vector_path = semantic_vector_path(data_root);
+    let vector_path = source_backed_semantic_vector_path(data_root);
     let mut vector_store = SemanticVectorStore::open(&vector_path)?;
     vector_store.upsert_chunk_embeddings(&[(
         test_chunk(user.id, user.seq, &source_hash),
@@ -710,11 +714,15 @@ fn daemon_restart_reconciles_commit_that_missed_semantic_handoff() -> Result<()>
     );
     store.upsert_event(&user)?;
     store.upsert_event(&assistant)?;
-    let docs = store.event_embedding_documents_by_ids(&[user.id])?;
+    let docs = store
+        .event_embedding_documents_by_ids(&[user.id])?
+        .into_iter()
+        .map(|document| semantic_event_document_from_store_projection!(document))
+        .collect::<Vec<_>>();
     let doc = docs.first().expect("user lite-turn document");
     let source_text = semantic_source_text(&doc.text);
     let source_hash = semantic_document_hash(doc, &source_text);
-    let vector_path = semantic_vector_path(data_root);
+    let vector_path = source_backed_semantic_vector_path(data_root);
     let mut vector_store = SemanticVectorStore::open(&vector_path)?;
     vector_store.upsert_chunk_embeddings(&[(
         test_chunk(user.id, user.seq, &source_hash),
@@ -747,9 +755,10 @@ fn completed_reconciliation_rearms_for_second_store_assistant_append() -> Result
         .event_embedding_documents_by_ids(&[user.id])?
         .pop()
         .expect("searchable user anchor");
+    let document = semantic_event_document_from_store_projection!(document);
     let source = semantic_source_text(&document.text);
     let source_hash = semantic_document_hash(&document, &source);
-    let vector_path = semantic_vector_path(temp.path());
+    let vector_path = source_backed_semantic_vector_path(temp.path());
     let mut vector_store = SemanticVectorStore::open(&vector_path)?;
     vector_store.upsert_chunk_embeddings(&[(
         test_chunk(user.id, user.seq, &source_hash),
@@ -800,8 +809,11 @@ fn redaction_and_deletion_rearm_and_prune_stale_vectors() -> Result<()> {
     let deleted_event = test_searchable_event(2);
     store.upsert_event(&redacted_event)?;
     store.upsert_event(&deleted_event)?;
-    let documents =
-        store.event_embedding_documents_by_ids(&[redacted_event.id, deleted_event.id])?;
+    let documents = store
+        .event_embedding_documents_by_ids(&[redacted_event.id, deleted_event.id])?
+        .into_iter()
+        .map(|document| semantic_event_document_from_store_projection!(document))
+        .collect::<Vec<_>>();
     let chunks = documents
         .iter()
         .map(|document| {
@@ -813,7 +825,7 @@ fn redaction_and_deletion_rearm_and_prune_stale_vectors() -> Result<()> {
             )
         })
         .collect::<Vec<_>>();
-    let vector_path = semantic_vector_path(temp.path());
+    let vector_path = source_backed_semantic_vector_path(temp.path());
     let mut vector_store = SemanticVectorStore::open(&vector_path)?;
     vector_store.upsert_chunk_embeddings(&chunks)?;
     drop(vector_store);
@@ -850,7 +862,7 @@ fn mutation_during_multipage_sweep_finishes_then_runs_successor() -> Result<()> 
     let temp = tempfile::tempdir()?;
     let document_count = SEMANTIC_DIRTY_QUEUE_RECENT_LIMIT + 1;
     let documents = write_late_activity_searchable_store(temp.path(), document_count)?;
-    let vector_path = semantic_vector_path(temp.path());
+    let vector_path = source_backed_semantic_vector_path(temp.path());
     drop(SemanticVectorStore::open(&vector_path)?);
     let store_path = database_path(temp.path().to_path_buf());
     let store = Store::open(&store_path)?;
@@ -910,9 +922,10 @@ fn equal_epoch_store_replacement_rearms_reconciliation() -> Result<()> {
         .event_embedding_documents_by_ids(&[original_event.id])?
         .pop()
         .expect("original searchable event");
+    let original_document = semantic_event_document_from_store_projection!(original_document);
     let original_source = semantic_source_text(&original_document.text);
     let original_hash = semantic_document_hash(&original_document, &original_source);
-    let vector_path = semantic_vector_path(original_root.path());
+    let vector_path = source_backed_semantic_vector_path(original_root.path());
     let mut vector_store = SemanticVectorStore::open(&vector_path)?;
     vector_store.upsert_chunk_embeddings(&[(
         test_chunk(original_event.id, original_event.seq, &original_hash),
@@ -983,7 +996,7 @@ fn daemon_restart_finds_old_store_event_beyond_reordered_activity_page() -> Resu
             test_embedding(1.0, 0.0),
         ));
     }
-    let vector_path = semantic_vector_path(temp.path());
+    let vector_path = source_backed_semantic_vector_path(temp.path());
     let mut vector_store = SemanticVectorStore::open(&vector_path)?;
     vector_store.upsert_chunk_embeddings(&embedded)?;
     drop(vector_store);
@@ -1056,42 +1069,5 @@ fn foreground_query_preempts_daemon_background_jobs() -> Result<()> {
     assert!(!iteration.failed);
     assert!(calls.borrow().is_empty());
     assert!(!daemon_source_backed_refresh_job_path(temp.path()).exists());
-    Ok(())
-}
-
-#[test]
-fn semantic_only_search_does_not_reject_a_running_worker() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    write_test_semantic_cache(&temp.path().join("semantic-model-cache"))?;
-    let docs = write_searchable_store(temp.path(), 1)?;
-    let doc = docs.first().expect("searchable fixture doc");
-    let source_text = semantic_source_text(&doc.text);
-    let source_hash = semantic_document_hash(doc, &source_text);
-    let mut vector_store = SemanticVectorStore::open(&semantic_vector_path(temp.path()))?;
-    vector_store.upsert_chunk_embeddings(&[(
-        test_chunk(doc.event_id, doc.seq, &source_hash),
-        test_embedding(1.0, 0.0),
-    )])?;
-    drop(vector_store);
-
-    let _lock = SemanticWorkerLock::acquire(temp.path())?
-        .expect("test should acquire semantic worker lock");
-    let store = Store::open(database_path(temp.path().to_path_buf()))?;
-    let err = search_packet_with_backend(
-        &store,
-        temp.path(),
-        "semantic daemon scheduling fixture",
-        &[],
-        &ctx_history_search::PacketOptions::default(),
-        SearchBackendArg::Semantic,
-        true,
-        1.0,
-        RefreshArg::Off,
-        false,
-    )
-    .expect_err("legacy semantic route must require a fresh source generation");
-    let message = format!("{err:#}");
-    assert!(message.contains("fresh source-backed Core generation"));
-    assert!(!message.contains("semantic worker is currently indexing"));
     Ok(())
 }

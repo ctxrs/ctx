@@ -13,28 +13,22 @@ use ctx_history_core::{CaptureProvider, EventRole, EventType};
 use ctx_history_index::{
     AgentScope, EventRecord, EventSearchCandidate, EventSearchFilters, VerifiedIndex,
 };
-#[cfg(test)]
-use ctx_history_store::EventEmbeddingDocument;
-use ctx_history_store::Store;
 use serde_json::{json, Value};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::{commands::search::RefreshArg, compact_json, SearchBackendArg};
+use crate::compact_json;
 
 use super::{
-    health_search::{daemon_query_embedding, semantic_filters_need_overfetch},
-    reports::SemanticRetrievalReport,
-    runtime_limits::{
-        SEMANTIC_EXACT_TOP_K_MAX, SEMANTIC_SEARCH_CANDIDATES,
-        SEMANTIC_SOFT_FILTER_SEARCH_CANDIDATES,
-    },
+    health_search::daemon_query_embedding,
+    runtime_limits::SEMANTIC_EXACT_TOP_K_MAX,
     source_backed_refresh_coordinator::PinnedSourceBackedGeneration,
     vector_store::{
         flat_segments::PinnedFlatGeneration, source_backed_semantic_vector_path,
         SemanticVectorSearchStats, SemanticVectorStore,
     },
     vector_store_search::scan_exact_generation,
+    SemanticEventDocument,
 };
 #[cfg(test)]
 use super::{
@@ -60,36 +54,6 @@ pub(in crate::semantic) use server::{
     daemon_can_begin_idle_shutdown, observe_daemon_query_activity, start_daemon_query_service,
     start_daemon_source_refresh_service, DaemonQueryActivity, DaemonQueryService,
 };
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn search_packet_with_backend(
-    store: &Store,
-    _data_root: &Path,
-    query: &str,
-    terms: &[String],
-    options: &ctx_history_search::PacketOptions,
-    requested_backend: SearchBackendArg,
-    _semantic_enabled: bool,
-    _semantic_weight: f32,
-    _refresh_mode: RefreshArg,
-    _emit_warnings: bool,
-) -> Result<(ctx_history_search::SearchPacket, SemanticRetrievalReport)> {
-    let uses_composed_terms = terms.iter().any(|term| !term.trim().is_empty());
-    if requested_backend != SearchBackendArg::Lexical {
-        return Err(anyhow!(
-            "semantic and hybrid search require a fresh source-backed Core generation; the legacy Store is available only for explicit lexical rollback/recovery"
-        ));
-    }
-    let packet = if uses_composed_terms {
-        ctx_history_search::search_packet_terms(store, query, terms, options)?
-    } else {
-        ctx_history_search::search_packet(store, query, options)?
-    };
-    Ok((
-        packet,
-        SemanticRetrievalReport::lexical(SearchBackendArg::Lexical, 0),
-    ))
-}
 
 #[derive(Debug, Error)]
 #[error("source-backed semantic search is not ready ({code}): {detail}")]
@@ -291,16 +255,7 @@ impl PinnedSourceBackedGeneration {
         candidate_limit: usize,
         pin: &SourceBackedSemanticQueryPin,
     ) -> Result<(Vec<EventSearchCandidate>, Value)> {
-        if pin.core_generation_id != index.generation_id() {
-            return Err(source_semantic_not_ready(
-                "semantic_generation_receipt_mismatch",
-                format!(
-                    "flat-F32 query pin belongs to Core generation {}, not {}",
-                    pin.core_generation_id,
-                    index.generation_id()
-                ),
-            ));
-        }
+        validate_semantic_query_generation(index.generation_id(), pin)?;
         let Some(pinned) = pin.pinned.as_ref() else {
             return Ok((
                 Vec::new(),
@@ -600,7 +555,7 @@ impl SourceBackedSemanticResolver for ExactSourceFixtureResolver {
         &mut self,
         event: &EventRecord,
         request: &EventHydrationRequest,
-    ) -> std::result::Result<EventEmbeddingDocument, HydrationFailure> {
+    ) -> std::result::Result<SemanticEventDocument, HydrationFailure> {
         if request.event_id() != event.event_id || request.locator() != &event.locator {
             return Err(HydrationFailure {
                 kind: HydrationFailureKind::InvalidLocator,
@@ -615,7 +570,7 @@ impl SourceBackedSemanticResolver for ExactSourceFixtureResolver {
                 kind: HydrationFailureKind::MissingRecord,
                 detail: "fixture exact provider content is absent".to_owned(),
             })?;
-        Ok(EventEmbeddingDocument {
+        Ok(SemanticEventDocument {
             event_id: event.event_id.as_uuid(),
             history_record_id: None,
             session_id: Some(event.session_id.as_uuid()),
@@ -870,17 +825,46 @@ fn source_semantic_not_ready(code: &'static str, detail: impl Into<String>) -> a
     anyhow::Error::new(SourceBackedSemanticNotReady::new(code, detail))
 }
 
-pub(super) fn semantic_candidate_limit(options: &ctx_history_search::PacketOptions) -> usize {
-    let overfetch = if semantic_filters_need_overfetch(&options.filters) {
-        SEMANTIC_SOFT_FILTER_SEARCH_CANDIDATES.max(options.limit.saturating_mul(100))
-    } else {
-        SEMANTIC_SEARCH_CANDIDATES.max(options.limit.saturating_mul(8))
-    };
-    overfetch.min(SEMANTIC_EXACT_TOP_K_MAX)
+fn validate_semantic_query_generation(
+    core_generation_id: &str,
+    pin: &SourceBackedSemanticQueryPin,
+) -> Result<()> {
+    if pin.core_generation_id == core_generation_id {
+        return Ok(());
+    }
+    Err(source_semantic_not_ready(
+        "semantic_generation_receipt_mismatch",
+        format!(
+            "flat-F32 query pin belongs to Core generation {}, not {}",
+            pin.core_generation_id, core_generation_id
+        ),
+    ))
 }
 
 pub(crate) fn semantic_query_service_supported() -> bool {
     cfg!(ctx_semantic_fastembed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn semantic_query_pin_rejects_a_different_core_generation() {
+        let pin = SourceBackedSemanticQueryPin {
+            core_generation_id: "generation-a".to_owned(),
+            pinned: None,
+        };
+
+        let error = validate_semantic_query_generation("generation-b", &pin)
+            .expect_err("a semantic pin must not cross Core generations");
+        let not_ready = error
+            .downcast_ref::<SourceBackedSemanticNotReady>()
+            .expect("generation mismatch must retain the typed unavailable contract");
+        assert_eq!(not_ready.code(), "semantic_generation_receipt_mismatch");
+        assert!(not_ready.detail().contains("generation-a"));
+        assert!(not_ready.detail().contains("generation-b"));
+    }
 }
 
 pub(in crate::semantic) fn daemon_query_service_transport_supported() -> bool {

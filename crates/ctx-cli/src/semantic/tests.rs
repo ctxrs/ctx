@@ -119,7 +119,7 @@ fn test_session_message(seq: u64, session_id: Uuid, role: EventRole, text: &str)
     event
 }
 
-fn write_searchable_store(data_root: &Path, count: usize) -> Result<Vec<EventEmbeddingDocument>> {
+fn write_searchable_store(data_root: &Path, count: usize) -> Result<Vec<SemanticEventDocument>> {
     fs::create_dir_all(data_root)?;
     let store = Store::open(database_path(data_root.to_path_buf()))?;
     for seq in 1..=count {
@@ -128,13 +128,16 @@ fn write_searchable_store(data_root: &Path, count: usize) -> Result<Vec<EventEmb
     store.refresh_event_embedding_document_count_cache()?;
     let docs = store.recent_event_embedding_documents(None, count)?;
     assert_eq!(docs.len(), count);
-    Ok(docs)
+    Ok(docs
+        .into_iter()
+        .map(|document| semantic_event_document_from_store_projection!(document))
+        .collect())
 }
 
 fn write_late_activity_searchable_store(
     data_root: &Path,
     count: usize,
-) -> Result<Vec<EventEmbeddingDocument>> {
+) -> Result<Vec<SemanticEventDocument>> {
     fs::create_dir_all(data_root)?;
     let store = Store::open(database_path(data_root.to_path_buf()))?;
     let base = utc_now() - chrono::Duration::days(30);
@@ -168,7 +171,10 @@ fn write_late_activity_searchable_store(
     assert!(docs
         .iter()
         .all(|doc| doc.occurred_at_ms == late_activity.timestamp_millis()));
-    Ok(docs)
+    Ok(docs
+        .into_iter()
+        .map(|document| semantic_event_document_from_store_projection!(document))
+        .collect())
 }
 
 fn daemon_history_completed_test_job() -> Value {

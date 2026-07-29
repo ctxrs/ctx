@@ -32,7 +32,7 @@ pub(crate) fn semantic_health_findings(data_root: &Path) -> Vec<String> {
             findings.push(format!("daemon last failed: {error}"));
         }
     }
-    let vector_path = semantic_vector_path(data_root);
+    let vector_path = source_backed_semantic_vector_path(data_root);
     if vector_path.exists() {
         match SemanticVectorStore::open_read_only(&vector_path) {
             Ok(Some(vector_store)) => match vector_store.plaintext_value_count() {
@@ -188,34 +188,6 @@ pub(super) fn semantic_query_text(query: &str, terms: &[String]) -> String {
     parts.join(" ")
 }
 
-pub(super) fn semantic_filters_need_overfetch(filters: &ctx_history_search::SearchFilters) -> bool {
-    semantic_filters_require_lexical_fallback(filters)
-        || !filters.include_subagents
-        || filters.exclude_provider_session.is_some()
-}
-
-pub(super) fn semantic_filters_require_lexical_fallback(
-    filters: &ctx_history_search::SearchFilters,
-) -> bool {
-    filters.session.is_some()
-        || filters.provider.is_some()
-        || filters.history_source.is_some()
-        || filters.provider_key.is_some()
-        || filters.source_id.is_some()
-        || filters.source_format.is_some()
-        || filters
-            .repo
-            .as_ref()
-            .is_some_and(|value| !value.trim().is_empty())
-        || filters.since.is_some()
-        || filters.primary_only
-        || filters.event_type.is_some()
-        || filters
-            .file
-            .as_ref()
-            .is_some_and(|value| !value.trim().is_empty())
-}
-
 pub(super) fn semantic_hybrid_coverage_ready(
     embedded_items: usize,
     searchable_items: usize,
@@ -236,25 +208,6 @@ pub(super) fn semantic_status_needs_exact_sidecar_stats(
         return false;
     }
     stats.embedded_items >= searchable_items
-}
-
-pub(super) fn semantic_hits_for_text_query(
-    data_root: &Path,
-    store: &Store,
-    vector_store: &SemanticVectorStore,
-    semantic_text: &str,
-    limit: usize,
-) -> Result<(
-    Vec<ctx_history_search::SemanticEventHit>,
-    SemanticRetrievalDiagnostics,
-)> {
-    let (query_embedding, query_embed_ms) = daemon_query_embedding(data_root, semantic_text)?
-        .ok_or_else(|| anyhow!("daemon semantic query service is not available"))?;
-    let semantic_hit_search =
-        semantic_hits_for_query(store, vector_store, &query_embedding, limit)?;
-    let mut diagnostics = semantic_hit_search.diagnostics;
-    diagnostics.query_embed_ms = Some(query_embed_ms);
-    Ok((semantic_hit_search.hits, diagnostics))
 }
 
 pub(super) fn daemon_query_embedding(
@@ -650,12 +603,10 @@ use std::os::unix::fs::OpenOptionsExt;
 use crate::compact_json;
 use anyhow::{anyhow, Context, Result};
 use ctx_history_core::platform_security::{restrict_private_directory, restrict_private_file};
-use ctx_history_store::Store;
 use serde_json::{json, Value};
 
 use super::{
     cache_paths,
-    indexing::semantic_hits_for_query,
     model_contract::{
         semantic_model_key, SemanticCpuModelIntegrityError, SemanticOrtModelVariant,
         SEMANTIC_DIMENSIONS, SEMANTIC_MODEL_REVISION,
@@ -663,13 +614,12 @@ use super::{
     model_runtime::SemanticEmbedder,
     paths_status::{
         daemon_lock_path, pid_lock_file_is_orphaned, read_daemon_status,
-        read_semantic_worker_status, semantic_vector_path, semantic_worker_lock_path,
+        read_semantic_worker_status, semantic_worker_lock_path,
     },
     query_service::daemon_query_request,
-    reports::SemanticRetrievalDiagnostics,
     resource_policy::{semantic_quiet_policy, SemanticComputeClass, SemanticSystemResources},
     runtime_limits::{SEMANTIC_EMBED_BATCH_MAX, SEMANTIC_EMBED_THREADS_MAX},
-    vector_store::{SemanticSidecarStats, SemanticVectorStore},
+    vector_store::{source_backed_semantic_vector_path, SemanticSidecarStats, SemanticVectorStore},
 };
 
 #[cfg(any(target_os = "macos", test))]

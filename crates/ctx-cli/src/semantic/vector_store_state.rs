@@ -5,11 +5,12 @@ use std::{
 
 use anyhow::Result;
 use ctx_history_core::utc_now;
-use ctx_history_store::{EventEmbeddingDocument, Store};
+use ctx_history_store::Store;
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
 use super::{
+    document::semantic_event_document_from_store_projection,
     indexing::{semantic_document_hash, semantic_source_text},
     model_contract::SEMANTIC_DIMENSIONS,
     runtime_limits::SEMANTIC_PRUNE_EVENTS_PER_PASS,
@@ -19,6 +20,7 @@ use super::{
         SemanticVectorStore,
     },
     vector_store_schema::{semantic_owned_sidecar_result, SemanticVectorStoreError},
+    SemanticEventDocument,
 };
 
 const BACKFILL_CURSOR: &str = "backfill_cursor_before";
@@ -156,7 +158,7 @@ impl SemanticVectorStore {
 
     pub(super) fn enqueue_dirty_documents(
         &mut self,
-        documents: &[EventEmbeddingDocument],
+        documents: &[SemanticEventDocument],
         reason: &str,
     ) -> Result<usize> {
         semantic_owned_sidecar_result((|| {
@@ -169,7 +171,7 @@ impl SemanticVectorStore {
 
     fn enqueue_dirty_in_transaction(
         transaction: &rusqlite::Transaction<'_>,
-        documents: &[EventEmbeddingDocument],
+        documents: &[SemanticEventDocument],
         reason: &str,
     ) -> Result<usize> {
         if documents.is_empty() {
@@ -318,7 +320,10 @@ impl SemanticVectorStore {
         let current = store
             .event_embedding_documents_by_ids(&ids)?
             .into_iter()
-            .map(|document| (document.event_id, document))
+            .map(|document| {
+                let document = semantic_event_document_from_store_projection!(document);
+                (document.event_id, document)
+            })
             .collect::<HashMap<_, _>>();
         let mut delete = Vec::new();
         let mut stale = Vec::new();
