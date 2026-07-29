@@ -26,7 +26,6 @@ use crate::semantic::{
 };
 use crate::{config, ImportArgs, SetupArgs};
 
-mod migration;
 
 pub(crate) fn run_setup(
     args: SetupArgs,
