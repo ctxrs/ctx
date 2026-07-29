@@ -213,6 +213,7 @@ fn sqlite_wal_last_frame_header(
     Ok(Some(header))
 }
 
+#[cfg(test)]
 fn hex_token(token: &[u8; 32]) -> String {
     token.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -237,6 +238,7 @@ impl ProviderSqliteSourceSnapshot {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn revision_component(&self) -> String {
         format!(
             "identity={};length={};revision={}",

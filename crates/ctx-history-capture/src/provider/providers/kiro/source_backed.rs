@@ -123,6 +123,7 @@ impl KiroLocatorResolverV0 {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn source(&self) -> &SourceKey {
         &self.source
     }

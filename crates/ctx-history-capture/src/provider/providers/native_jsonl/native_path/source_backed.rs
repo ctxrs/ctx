@@ -32,6 +32,9 @@ const DIRECT_JSONL_SOURCE_BACKED_PARSER_REVISION: &str = "direct-native-jsonl-so
 const DIRECT_JSONL_SOURCE_FRONTIER_KIND: &str = "direct-native-jsonl-checkpoint-v1";
 const DIRECT_JSONL_INVENTORY_AUTHORITY_NAMESPACE: &str = "direct-native-jsonl-provider-root-v1";
 const DIRECT_JSONL_INVENTORY_REVISION_KIND: &str = "direct-native-jsonl-inventory-sha256-v1";
+// Retained as the inventory certification protocol revision for deletion and
+// release-evidence checks.
+#[allow(dead_code)]
 const DIRECT_JSONL_DISCOVERY_REVISION: &str = "direct-native-jsonl-discovery-v1";
 const DIRECT_JSONL_DOCUMENT_METADATA_BYTES: usize = 64 * 1024;
 const DIRECT_JSONL_MAX_TOUCHED_FILES: usize = 256;
@@ -197,6 +200,7 @@ pub(crate) enum DirectJsonlSourceBackedError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("direct JSONL inventory is incomplete and cannot certify deletion")]
+    #[allow(dead_code)]
     IncompleteInventory,
     #[error("direct JSONL leaf {0:?} has no provider-native session identity")]
     MissingNativeSession(PathBuf),
@@ -244,6 +248,7 @@ impl DirectJsonlSourceAdapter {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn provider(self) -> CaptureProvider {
         self.provider
     }
@@ -474,7 +479,11 @@ impl DirectJsonlSourceAdapter {
 
 #[derive(Debug)]
 pub(crate) struct DirectJsonlSourceInventory {
+    // Adapter and opening observation remain coupled to inventory authority for
+    // fail-closed certification, even when Core consumes only admitted leaves.
+    #[allow(dead_code)]
     adapter: DirectJsonlSourceAdapter,
+    #[allow(dead_code)]
     observation: SourceInventoryObservation,
     root_missing: bool,
     leaves: Vec<DirectJsonlInventoryLeaf>,
@@ -494,6 +503,8 @@ impl DirectJsonlSourceInventory {
         &self.failures
     }
 
+    // Retain complete-inventory certification for deletion/release evidence.
+    #[allow(dead_code)]
     pub(crate) fn certify_against(
         &self,
         closing: &Self,

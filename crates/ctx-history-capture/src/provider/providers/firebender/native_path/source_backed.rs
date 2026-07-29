@@ -78,6 +78,9 @@ pub(crate) type FirebenderSourceBackedResult<T> =
 // to match the 496-byte certificate adds indirection without measured benefit.
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum FirebenderSourceBackedPlan {
+    // The exact certificate remains source authority even when the caller
+    // already owns the matching prior certificate.
+    #[allow(dead_code)]
     Exact(CertifiedSource),
     Replacement(FirebenderSourceBackedScanner),
 }
@@ -89,6 +92,8 @@ pub(crate) struct FirebenderSourceBackedPage {
 }
 
 impl FirebenderSourceBackedPage {
+    // Read-only page evidence is retained for bounded scanner verification.
+    #[allow(dead_code)]
     pub(crate) fn documents(&self) -> &[LexicalDocument] {
         &self.documents
     }
@@ -97,6 +102,7 @@ impl FirebenderSourceBackedPage {
         self.documents
     }
 
+    #[allow(dead_code)]
     pub(crate) fn retained_bytes(&self) -> usize {
         self.retained_bytes
     }
@@ -110,6 +116,8 @@ pub(crate) struct FirebenderHydratedSourceRow {
 }
 
 impl FirebenderHydratedSourceRow {
+    // Provider session identity is provenance for the hydrated native row.
+    #[allow(dead_code)]
     pub(crate) fn provider_session_id(&self) -> &str {
         &self.provider_session_id
     }

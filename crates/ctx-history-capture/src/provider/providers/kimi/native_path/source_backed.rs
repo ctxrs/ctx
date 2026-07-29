@@ -286,6 +286,8 @@ impl KimiSourceBackedCatalog {
         })
     }
 
+    // Exposes certified inventory evidence to release verification.
+    #[allow(dead_code)]
     pub(crate) fn inventory(&self) -> &CertifiedSourceInventory {
         &self.inventory
     }
@@ -315,6 +317,7 @@ impl KimiSourceBackedCatalog {
     }
 
     /// Final precommit source witness for the shared generation coordinator.
+    #[allow(dead_code)]
     pub(crate) fn revalidate_source(
         &self,
         certificate: &CertifiedSource,

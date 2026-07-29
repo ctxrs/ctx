@@ -86,6 +86,8 @@ pub(crate) struct KiroNativeEvent {
     pub(crate) role: Option<EventRole>,
     pub(crate) occurred_at: DateTime<Utc>,
     pub(crate) payload: Value,
+    // Native row identity remains provenance alongside the normalized payload.
+    #[allow(dead_code)]
     pub(crate) metadata: Value,
 }
 

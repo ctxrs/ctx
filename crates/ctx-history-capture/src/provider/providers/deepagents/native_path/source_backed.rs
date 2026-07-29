@@ -95,7 +95,11 @@ pub(crate) type DeepAgentsSourceBackedResultV0<T> = Result<T, DeepAgentsSourceBa
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DeepAgentsDatabaseRouteV0 {
+    // Current/legacy remain explicit to preserve the no-fallback selection
+    // contract exercised by platform-independent route checks.
+    #[allow(dead_code)]
     Current,
+    #[allow(dead_code)]
     Legacy,
     Explicit,
 }
@@ -121,6 +125,9 @@ pub(crate) struct DeepAgentsDatabaseSelectionV0 {
 }
 
 impl DeepAgentsDatabaseSelectionV0 {
+    // Home selection is retained as the authoritative current-over-legacy,
+    // fail-closed route policy even when release capture supplies an explicit path.
+    #[allow(dead_code)]
     pub(crate) fn from_home(home: &Path) -> Self {
         let current = home.join(".deepagents/.state/sessions.db");
         let legacy = home.join(".deepagents/sessions.db");
@@ -160,6 +167,8 @@ impl DeepAgentsDatabaseSelectionV0 {
         &self.path
     }
 
+    // Route identity is retained with the selected path as provenance evidence.
+    #[allow(dead_code)]
     pub(crate) fn route(&self) -> DeepAgentsDatabaseRouteV0 {
         self.route
     }
@@ -180,9 +189,13 @@ struct PendingWriteV0 {
 
 #[derive(Debug)]
 pub(crate) struct DeepAgentsSourceBackedScanV0 {
+    // Terminal source/path/route provenance remains coupled to certification.
+    #[allow(dead_code)]
     pub(crate) source: SourceKey,
     pub(crate) certificate: CertifiedSource,
+    #[allow(dead_code)]
     pub(crate) selected_path: PathBuf,
+    #[allow(dead_code)]
     pub(crate) selected_route: DeepAgentsDatabaseRouteV0,
 }
 
@@ -261,6 +274,8 @@ impl DeepAgentsSourceBackedScannerV0 {
         &self.source
     }
 
+    // Exposed for exact-locator/release evidence checks without recomputation.
+    #[allow(dead_code)]
     pub(crate) fn source_revision_digest(&self) -> &[u8; 32] {
         &self.source_revision_digest
     }
@@ -531,6 +546,9 @@ pub(crate) struct DeepAgentsLocatorResolverV0 {
 }
 
 impl DeepAgentsLocatorResolverV0 {
+    // Retain the home-route resolver to enforce the same no-fallback selection
+    // policy at the hydration boundary.
+    #[allow(dead_code)]
     pub(crate) fn from_home(home: &Path) -> Self {
         Self {
             selection: DeepAgentsDatabaseSelectionV0::from_home(home),

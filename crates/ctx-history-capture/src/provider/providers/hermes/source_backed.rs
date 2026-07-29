@@ -107,7 +107,10 @@ pub(crate) enum HermesSourceSelection {
 pub(crate) struct HermesSourceCandidate {
     path: PathBuf,
     source: SourceKey,
+    // Selection and status remain discovery provenance for release reporting.
+    #[allow(dead_code)]
     selection: HermesSourceSelection,
+    #[allow(dead_code)]
     status: ProviderSourceStatus,
 }
 
@@ -120,10 +123,12 @@ impl HermesSourceCandidate {
         &self.source
     }
 
+    #[allow(dead_code)]
     pub(crate) fn selection(&self) -> &HermesSourceSelection {
         &self.selection
     }
 
+    #[allow(dead_code)]
     pub(crate) fn status(&self) -> ProviderSourceStatus {
         self.status
     }
@@ -151,6 +156,9 @@ impl HermesSourceCandidate {
 }
 
 #[derive(Debug, Clone)]
+// The bounded inventory shape remains the authoritative automatic-discovery
+// evidence even while production registration supplies explicit candidates.
+#[allow(dead_code)]
 pub(crate) struct HermesSourceInventory {
     pub(crate) sources: Vec<HermesSourceCandidate>,
     pub(crate) issues: Vec<DiscoveryIssue>,
@@ -158,6 +166,7 @@ pub(crate) struct HermesSourceInventory {
 
 /// Inventories only the selected ordinary profile or the bounded Gateway
 /// multiplex set admitted by the existing Hermes discovery resolver.
+#[allow(dead_code)]
 pub(crate) fn discover_hermes_source_backed(
     context: &DiscoveryContext,
 ) -> HermesSourceBackedResult<HermesSourceInventory> {
@@ -228,7 +237,10 @@ fn hermes_source_key(anchor: SourceAnchor) -> HermesSourceBackedResult<SourceKey
 
 #[derive(Debug, Clone)]
 pub(crate) struct HermesSourceBackedSession {
+    // Stable lineage remains part of the exact session materialization record.
+    #[allow(dead_code)]
     pub(crate) session_id: StableEntityId,
+    #[allow(dead_code)]
     pub(crate) parent_session_id: Option<StableEntityId>,
     // Root identity, primary classification, and source timestamps remain part
     // of the exact session record used by non-Core materializers.
@@ -275,6 +287,8 @@ pub(crate) enum HermesSourceBackedRecord {
 #[derive(Debug, Clone)]
 pub(crate) struct HermesSourceBackedPage {
     pub(crate) records: Vec<HermesSourceBackedRecord>,
+    // Provider-owned bytes remain bounded-page accounting evidence.
+    #[allow(dead_code)]
     pub(crate) owned_bytes: usize,
 }
 

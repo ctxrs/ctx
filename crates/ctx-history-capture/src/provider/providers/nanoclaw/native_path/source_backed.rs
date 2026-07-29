@@ -72,6 +72,8 @@ pub(crate) struct NanoClawSourceBackedPage {
 #[derive(Debug)]
 pub(crate) struct NanoClawSourceBackedReceipt {
     pub(crate) source: CertifiedSource,
+    // Emitted-page accounting remains part of the release scan receipt.
+    #[allow(dead_code)]
     pub(crate) emitted_pages: u64,
 }
 

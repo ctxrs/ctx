@@ -51,6 +51,9 @@ pub(crate) struct CodeBuddySourceBackedRejection {
 pub(crate) struct CodeBuddySourceBackedScan {
     pub(crate) source: CertifiedSource,
     pub(crate) pages: Vec<CodeBuddySourceBackedPage>,
+    // Bounded rejection details remain attached to the certified scan for
+    // release evidence even when the Core coordinator consumes only pages.
+    #[allow(dead_code)]
     pub(crate) rejections: Vec<CodeBuddySourceBackedRejection>,
 }
 
