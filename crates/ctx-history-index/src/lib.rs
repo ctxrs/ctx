@@ -601,6 +601,7 @@ pub struct GenerationWriter {
     writer: IndexWriter<TantivyDocument>,
     fields: Fields,
     base_manifest: Option<GenerationManifest>,
+    base_opstamp: u64,
     base_searcher: Option<Searcher>,
     pending: HashMap<String, PendingSource>,
     deletions: HashMap<SourceKey, GenerationRemoval>,
@@ -709,6 +710,7 @@ impl GenerationWriter {
             writer,
             fields,
             base_manifest,
+            base_opstamp: base_metas.opstamp,
             base_searcher,
             pending: HashMap::new(),
             deletions: HashMap::new(),
@@ -1083,6 +1085,40 @@ impl GenerationWriter {
     where
         F: FnMut(RevalidationTarget<'_>) -> bool,
     {
+        let exact_replay = self.deletions.is_empty()
+            && self.base_manifest.is_some()
+            && self.pending.values().all(|pending| {
+                matches!(
+                    (&pending.mode, &pending.certificate),
+                    (PendingSourceMode::Append { base }, Some(current))
+                        if pending.staged_documents == 0 && current == base
+                )
+            });
+        if exact_replay {
+            for pending in self.pending.values() {
+                let certificate = pending
+                    .certificate
+                    .as_ref()
+                    .expect("exact replay requires a certificate");
+                if !revalidate(RevalidationTarget::Source(certificate)) {
+                    return Err(IndexError::SourceInvalidated(
+                        pending.source.identity().to_string(),
+                    ));
+                }
+            }
+            let base = self
+                .base_manifest
+                .as_ref()
+                .expect("exact replay requires a base manifest");
+            return Ok(CommitReceipt {
+                generation_id: base.generation_id()?,
+                opstamp: self.base_opstamp,
+                indexed_documents: base.indexed_documents,
+                certified_sources: base.sources.len(),
+                certified_source_bytes: base.certified_source_bytes,
+            });
+        }
+
         for pending in self.pending.values() {
             if pending.certificate.is_none() {
                 return Err(IndexError::SourceNotCertified(
@@ -2186,6 +2222,89 @@ mod tests {
         assert_eq!(index.generation_id(), receipt.generation_id);
         assert_eq!(index.manifest().indexed_documents, 1);
         assert_eq!(index.count_term("atomic").unwrap(), 1);
+    }
+
+    #[test]
+    fn unchanged_commit_returns_the_verified_base_without_republication() {
+        let temp = tempdir().unwrap();
+        let source = source("session.jsonl");
+        let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        initial.begin_source(source.clone()).unwrap();
+        initial
+            .add_document(document(&source, 1, "stable generation"))
+            .unwrap();
+        initial
+            .certify_source(appendable_certificate(&source, 1, 1, 10))
+            .unwrap();
+        let initial_receipt = initial.commit(|_| true).unwrap();
+
+        let meta_path = temp.path().join("meta.json");
+        let manifest_path = manifest_path(temp.path(), &initial_receipt.generation_id);
+        let meta_before = fs::read(&meta_path).unwrap();
+        let meta_metadata_before = fs::metadata(&meta_path).unwrap();
+        let manifest_before = fs::read(&manifest_path).unwrap();
+        let manifest_metadata_before = fs::metadata(&manifest_path).unwrap();
+
+        let mut unchanged_writer =
+            GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        let base = unchanged_writer
+            .begin_source_append(source.clone())
+            .unwrap()
+            .clone();
+        let base_frontier = base.frontier().unwrap();
+        let replay = CertifiedSourceAppend::certify(
+            &base,
+            base.clone(),
+            base_frontier.certified_prefix_bytes(),
+            *base_frontier.certified_prefix_digest(),
+        )
+        .unwrap();
+        unchanged_writer.certify_source_append(replay).unwrap();
+        let mut revalidations = 0;
+        let unchanged = unchanged_writer
+            .commit(|target| {
+                revalidations += 1;
+                matches!(
+                    target,
+                    RevalidationTarget::Source(certificate) if certificate == &base
+                )
+            })
+            .unwrap();
+
+        assert_eq!(revalidations, 1);
+        assert_eq!(unchanged.generation_id, initial_receipt.generation_id);
+        assert_eq!(unchanged.opstamp, initial_receipt.opstamp);
+        assert_eq!(unchanged.indexed_documents, 1);
+        assert_eq!(unchanged.certified_sources, 1);
+        assert_eq!(unchanged.certified_source_bytes, 10);
+        assert_eq!(fs::read(&meta_path).unwrap(), meta_before);
+        assert_eq!(
+            fs::metadata(&meta_path).unwrap().modified().unwrap(),
+            meta_metadata_before.modified().unwrap()
+        );
+        assert_eq!(fs::read(&manifest_path).unwrap(), manifest_before);
+        assert_eq!(
+            fs::metadata(&manifest_path).unwrap().modified().unwrap(),
+            manifest_metadata_before.modified().unwrap()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+
+            assert_eq!(
+                fs::metadata(&meta_path).unwrap().ino(),
+                meta_metadata_before.ino()
+            );
+            assert_eq!(
+                fs::metadata(&manifest_path).unwrap().ino(),
+                manifest_metadata_before.ino()
+            );
+        }
+
+        let verified = VerifiedIndex::open(temp.path()).unwrap();
+        assert_eq!(verified.generation_id(), unchanged.generation_id);
+        assert_eq!(verified.document_count(), 1);
+        assert_eq!(verified.count_term("stable").unwrap(), 1);
     }
 
     #[test]

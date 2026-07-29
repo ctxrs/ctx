@@ -4,6 +4,7 @@ use ctx_history_index::GenerationManifest;
 use std::{
     io::Read,
     process::{Child, Command as StdCommand, Stdio},
+    time::SystemTime,
 };
 use support::*;
 
@@ -421,6 +422,71 @@ fn generation_manifest_paths(temp: &TempDir) -> Vec<PathBuf> {
     paths
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct PublishedFileState {
+    bytes: Vec<u8>,
+    modified: SystemTime,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+fn published_file_state(path: &Path) -> PublishedFileState {
+    let metadata = fs::metadata(path)
+        .unwrap_or_else(|error| panic!("read publication metadata {}: {error}", path.display()));
+    PublishedFileState {
+        bytes: fs::read(path)
+            .unwrap_or_else(|error| panic!("read publication file {}: {error}", path.display())),
+        modified: metadata.modified().unwrap(),
+        #[cfg(unix)]
+        inode: {
+            use std::os::unix::fs::MetadataExt as _;
+
+            metadata.ino()
+        },
+    }
+}
+
+fn assert_published_file_unchanged(path: &Path, expected: &PublishedFileState) {
+    let actual = published_file_state(path);
+    assert_eq!(
+        actual.bytes,
+        expected.bytes,
+        "publication bytes changed at {}",
+        path.display()
+    );
+    assert_eq!(
+        actual.modified,
+        expected.modified,
+        "publication mtime changed at {}",
+        path.display()
+    );
+    #[cfg(unix)]
+    assert_eq!(
+        actual.inode,
+        expected.inode,
+        "publication inode changed at {}",
+        path.display()
+    );
+}
+
+fn tantivy_meta_facts(state: &PublishedFileState) -> (u64, Vec<String>) {
+    let value: Value = serde_json::from_slice(&state.bytes).unwrap();
+    let opstamp = value["opstamp"].as_u64().expect("Tantivy meta opstamp");
+    let mut segments = value["segments"]
+        .as_array()
+        .expect("Tantivy meta segments")
+        .iter()
+        .map(|segment| {
+            segment["segment_id"]
+                .as_str()
+                .expect("Tantivy segment ID")
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    segments.sort();
+    (opstamp, segments)
+}
+
 fn assert_daemon_publication(
     temp: &TempDir,
     expected_generation: &str,
@@ -621,6 +687,149 @@ fn write_codex_session(path: &Path, native_session_id: &str, messages: &[(&str, 
         );
     }
     fs::write(path, lines.join("\n") + "\n").unwrap();
+}
+
+#[test]
+fn search_refresh_exact_noop_skips_publication_and_tiny_append_is_one_document() {
+    let temp = tempdir();
+    let fixture = PathBuf::from(provider_history_fixture("codex-sessions"));
+    let sessions = temp.path().join(".codex/sessions");
+    copy_dir_all(&fixture, &sessions);
+    let appended_source = sessions.join("2026/06/23/root.jsonl");
+    let _daemon = start_source_refresh_daemon(&temp);
+
+    let initial = json_output(ctx(&temp).args([
+        "search",
+        "onboarding",
+        "--provider",
+        "codex",
+        "--refresh",
+        "wait",
+        "--format=json",
+    ]));
+    assert_source_backed_search_show_oracle(&temp, &initial, "codex", "onboarding", 1, "message");
+    let initial_generation = assert_published_generation(&initial, "wait");
+    let initial_documents = initial["retrieval"]["indexed_documents"].as_u64().unwrap();
+    let initial_status =
+        assert_daemon_publication(&temp, &initial_generation, 1, &["codex", "codex"]);
+    let initial_job = &initial_status["daemon"]["jobs"]["source_backed_refresh"];
+    assert_eq!(initial_job["generation_changed"], true, "{initial_job:#}");
+    let initial_current = initial_job["receipt"]["current"].clone();
+
+    let index_root = temp.path().join("search/lexical");
+    let meta_path = index_root.join("meta.json");
+    let manifest_path = index_root
+        .join("ctx-generations")
+        .join(format!("{initial_generation}.json"));
+    let initial_meta = published_file_state(&meta_path);
+    let initial_manifest = published_file_state(&manifest_path);
+    let initial_manifests = generation_manifest_paths(&temp);
+    let (initial_opstamp, initial_segments) = tantivy_meta_facts(&initial_meta);
+    assert!(!initial_segments.is_empty());
+
+    let unchanged = json_output(ctx(&temp).args([
+        "search",
+        "onboarding",
+        "--provider",
+        "codex",
+        "--refresh",
+        "wait",
+        "--format=json",
+    ]));
+    assert_eq!(generation_id(&unchanged), initial_generation);
+    assert_eq!(
+        unchanged["retrieval"]["indexed_documents"], initial_documents,
+        "{unchanged:#}"
+    );
+    let unchanged_status =
+        assert_daemon_publication(&temp, &initial_generation, 1, &["codex", "codex"]);
+    let unchanged_job = &unchanged_status["daemon"]["jobs"]["source_backed_refresh"];
+    assert_eq!(
+        unchanged_job["generation_changed"], false,
+        "{unchanged_job:#}"
+    );
+    assert_eq!(
+        unchanged_job["receipt"]["current"], initial_current,
+        "{unchanged_job:#}"
+    );
+    assert_published_file_unchanged(&meta_path, &initial_meta);
+    assert_published_file_unchanged(&manifest_path, &initial_manifest);
+    assert_eq!(generation_manifest_paths(&temp), initial_manifests);
+    assert_eq!(
+        tantivy_meta_facts(&published_file_state(&meta_path)),
+        (initial_opstamp, initial_segments.clone())
+    );
+
+    let source_bytes_before = fs::metadata(&appended_source).unwrap().len();
+    let append_query = "canonical tiny append refresh oracle";
+    append_codex_message(
+        &appended_source,
+        "2026-06-23T15:00:08.000Z",
+        "assistant",
+        append_query,
+    );
+    let appended_bytes = fs::metadata(&appended_source).unwrap().len() - source_bytes_before;
+    assert!(appended_bytes > 0);
+
+    let appended = json_output(ctx(&temp).args([
+        "search",
+        append_query,
+        "--provider",
+        "codex",
+        "--refresh",
+        "wait",
+        "--format=json",
+    ]));
+    assert_source_backed_search_show_oracle(&temp, &appended, "codex", append_query, 1, "message");
+    let append_generation = assert_published_generation(&appended, "wait");
+    assert_ne!(append_generation, initial_generation);
+    assert_eq!(
+        appended["retrieval"]["indexed_documents"],
+        initial_documents + 1,
+        "{appended:#}"
+    );
+    let append_status =
+        assert_daemon_publication(&temp, &append_generation, 1, &["codex", "codex"]);
+    let append_job = &append_status["daemon"]["jobs"]["source_backed_refresh"];
+    assert_eq!(append_job["generation_changed"], true, "{append_job:#}");
+    let append_current = &append_job["receipt"]["current"];
+    assert_eq!(
+        append_current["current_indexed_documents"].as_u64(),
+        initial_current["current_indexed_documents"]
+            .as_u64()
+            .map(|count| count + 1)
+    );
+    assert_eq!(
+        append_current["current_complete_records"].as_u64(),
+        initial_current["current_complete_records"]
+            .as_u64()
+            .map(|count| count + 1)
+    );
+    assert_eq!(
+        append_current["current_retained_records"].as_u64(),
+        initial_current["current_retained_records"]
+            .as_u64()
+            .map(|count| count + 1)
+    );
+    assert_eq!(
+        append_current["current_certified_source_bytes"].as_u64(),
+        initial_current["current_certified_source_bytes"]
+            .as_u64()
+            .map(|bytes| bytes + appended_bytes)
+    );
+
+    let append_meta = published_file_state(&meta_path);
+    let (append_opstamp, append_segments) = tantivy_meta_facts(&append_meta);
+    assert!(append_opstamp > initial_opstamp);
+    assert!(
+        append_segments.len() < initial_segments.len(),
+        "the existing Tantivy merge policy should coalesce the fixture's tiny append: \
+         before={initial_segments:?}, after={append_segments:?}"
+    );
+    assert_eq!(
+        generation_manifest_paths(&temp).len(),
+        initial_manifests.len() + 1
+    );
 }
 
 #[test]
