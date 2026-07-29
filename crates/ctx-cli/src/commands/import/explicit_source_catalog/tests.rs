@@ -216,12 +216,15 @@ mod tests {
         let rollout = temp.path().join("rollout.jsonl");
         fs::write(
             &rollout,
-            r#"{"timestamp":"2026-07-28T12:00:00Z","type":"event_msg","payload":{}}"#,
+            r#"{"timestamp":"2026-07-28T12:00:00Z","type":"session_meta","payload":{"id":"supported"}}"#,
         )
         .unwrap();
-        let source = provider_source_for_path(CaptureProvider::Codex, rollout);
+        let mut source = provider_source_for_path(CaptureProvider::Codex, rollout);
+        source.source_format = "unlanded_test_format";
         let error = upsert_explicit_source(temp.path(), &source).unwrap_err();
-        assert!(error.to_string().contains("not source-backed"));
+        assert!(error
+            .to_string()
+            .contains("has no landed source-backed adapter"));
         assert!(!catalog_root(temp.path()).exists());
     }
 
