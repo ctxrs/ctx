@@ -23,56 +23,30 @@ fn scheduler_state_path_is_installation_scoped() {
 }
 
 #[test]
-fn status_reads_legacy_schema_one_state_without_moving_or_rewriting_it() -> Result<()> {
+fn status_reads_current_installation_state() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let install_path = temp.path().join("bin").join("ctx");
-    let data_root = temp.path().join("data");
-    fs::create_dir_all(&data_root)?;
-    let legacy_path = data_root.join(STATE_FILE);
-    let legacy = serde_json::to_vec_pretty(&json!({
-        "schema_version": 1,
-        "status": "available",
-        "checked_at": "2026-07-10T12:00:00Z",
-        "last_checked_unix_s": 1778500000_u64,
-        "metadata_url": "https://releases.example/stable.json",
-        "artifact_url": "https://releases.example/ctx",
-    }))?;
-    fs::write(&legacy_path, &legacy)?;
-
-    let bridged = read_state_json_for_paths(&install_path, &data_root)
-        .ok_or_else(|| anyhow!("legacy state was not bridged"))?;
-
-    assert_eq!(bridged["schema_version"], 1);
-    assert_eq!(bridged["checked_at"], "2026-07-10T12:00:00Z");
-    assert_eq!(bridged["last_checked_unix_s"], 1778500000_u64);
-    assert_eq!(
-        bridged["metadata_url"],
-        "https://releases.example/stable.json"
-    );
-    assert_eq!(bridged["artifact_url"], "https://releases.example/ctx");
-    assert_eq!(fs::read(&legacy_path)?, legacy);
-    assert!(!state_path(&install_path).exists());
-    Ok(())
-}
-
-#[test]
-fn installation_state_wins_over_legacy_status_bridge() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let install_path = temp.path().join("bin").join("ctx");
-    let data_root = temp.path().join("data");
-    fs::create_dir_all(&data_root)?;
-    atomic_write_json(
-        &data_root.join(STATE_FILE),
-        &json!({"schema_version": 1, "status": "legacy"}),
-    )?;
     atomic_write_json(
         &state_path(&install_path),
-        &json!({"schema_version": 1, "status": "installation"}),
+        &json!({
+            "schema_version": STATE_SCHEMA_VERSION,
+            "status": "up_to_date",
+            "attempt_source": "daemon",
+            "checked_at": "2026-07-10T12:00:00Z",
+            "last_checked_unix_s": 1778499900_u64,
+            "next_check_unix_s": 1778500000_u64,
+        }),
     )?;
 
-    let current = read_state_json_for_paths(&install_path, &data_root)
-        .ok_or_else(|| anyhow!("installation state was not read"))?;
-    assert_eq!(current["status"], "installation");
+    let current = read_state_json_for_path(&install_path)
+        .ok_or_else(|| anyhow!("current installation state was not read"))?;
+
+    assert_eq!(current["schema_version"], STATE_SCHEMA_VERSION);
+    assert_eq!(current["status"], "up_to_date");
+    assert_eq!(current["attempt_source"], "daemon");
+    assert_eq!(current["checked_at"], "2026-07-10T12:00:00Z");
+    assert_eq!(current["last_checked_unix_s"], 1778499900_u64);
+    assert_eq!(current["next_check_unix_s"], 1778500000_u64);
     Ok(())
 }
 

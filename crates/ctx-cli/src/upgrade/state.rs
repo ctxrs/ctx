@@ -472,18 +472,13 @@ fn read_state_object(install_path: &Path) -> UpgradeState {
         .unwrap_or_default()
 }
 
-pub(super) fn read_state_json(data_root: &Path) -> Option<Value> {
+pub(super) fn read_state_json() -> Option<Value> {
     let install_path = super::install::current_install_path().ok()?;
-    read_state_json_for_paths(&install_path, data_root)
+    read_state_json_for_path(&install_path)
 }
 
-fn read_state_json_for_paths(install_path: &Path, data_root: &Path) -> Option<Value> {
-    read_json_file(&state_path(install_path)).or_else(|| {
-        read_json_file(&data_root.join(STATE_FILE)).filter(|value| {
-            value.get("schema_version").and_then(Value::as_u64) == Some(STATE_SCHEMA_VERSION)
-                && value.is_object()
-        })
-    })
+fn read_state_json_for_path(install_path: &Path) -> Option<Value> {
+    read_json_file(&state_path(install_path))
 }
 
 fn write_state_object_locked(lock: &UpgradeLock, state: UpgradeState) -> Result<()> {

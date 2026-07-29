@@ -285,6 +285,11 @@ fn upgrade_status_check_and_apply_support_managed_installs() {
     assert_eq!(check["managed"], true);
     let checked_state: Value =
         serde_json::from_slice(&fs::read(scheduler_state_path(&release.target)).unwrap()).unwrap();
+    assert_eq!(checked_state["schema_version"], 1);
+    assert_eq!(checked_state["status"], "available");
+    assert_eq!(checked_state["attempt_source"], "upgrade_check");
+    assert!(checked_state["last_attempt_at"].as_str().is_some());
+    assert!(checked_state["last_attempt_finished_at"].as_str().is_some());
     assert!(checked_state["checked_at"].as_str().is_some());
     assert!(checked_state["last_checked_unix_s"].as_u64().is_some());
     assert_eq!(checked_state["metadata_url"], file_url(&release.metadata));
@@ -739,6 +744,7 @@ fn cross_root_recovery_uses_one_installation_state_and_the_validated_origin_root
         .with_file_name(".ctx.upgrade-install-transaction.json")
         .exists());
     let state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    assert_eq!(state["schema_version"], 1);
     assert_eq!(state["attempt_source"], "upgrade_check");
     assert_eq!(state["status"], "available");
     assert!(!origin_root.path().join("upgrade-state.json").exists());
@@ -886,7 +892,7 @@ fn upgrade_status_text_output_shows_error_details() {
 
 #[cfg(unix)]
 #[test]
-fn upgrade_status_bridges_v025_data_root_state_read_only() {
+fn upgrade_status_ignores_v025_data_root_state() {
     let temp = tempdir();
     let release = fake_release(&temp, "9.9.9");
     let legacy_path = temp.path().join("upgrade-state.json");
@@ -914,13 +920,9 @@ fn upgrade_status_bridges_v025_data_root_state_read_only() {
     ));
 
     assert_eq!(status["state"]["schema_version"], 1);
-    assert_eq!(status["state"]["checked_at"], "2026-07-10T12:00:00Z");
-    assert_eq!(status["state"]["last_checked_unix_s"], 1778500000_u64);
-    assert_eq!(status["state"]["metadata_url"], file_url(&release.metadata));
-    assert_eq!(
-        status["state"]["artifact_url"],
-        file_url(&release.metadata.parent().unwrap().join("ctx"))
-    );
+    assert_eq!(status["state"]["status"], "never_checked");
+    assert!(status["state"].get("current_version").is_none());
+    assert!(status["state"].get("update_available").is_none());
     assert_eq!(fs::read(&legacy_path).unwrap(), legacy);
     assert!(!scheduler_state_path(&release.target).exists());
 }
