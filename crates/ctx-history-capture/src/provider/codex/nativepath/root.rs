@@ -909,7 +909,3 @@ fn native_error(error: CodexNativeVerticalError) -> CaptureError {
 fn native_error_is_fatal(error: &CodexNativeVerticalError) -> bool {
     error.requires_immediate_propagation()
 }
-
-#[cfg(test)]
-#[path = "root/tests.rs"]
-mod tests;

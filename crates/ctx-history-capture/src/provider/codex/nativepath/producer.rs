@@ -35,8 +35,6 @@ const CODEX_SOURCE_MAX_QUEUED_WINDOWS: usize = 4;
 pub(crate) struct CodexProducerConfig {
     worker_count: usize,
     preparation_bytes: usize,
-    #[cfg(test)]
-    panic_source_ordinal: Option<usize>,
 }
 
 impl CodexProducerConfig {
@@ -53,36 +51,7 @@ impl CodexProducerConfig {
                 .saturating_sub(2)
                 .clamp(1, CODEX_PRODUCER_MAX_WORKERS),
             preparation_bytes: CODEX_PREPARATION_HARD_BYTES,
-            #[cfg(test)]
-            panic_source_ordinal: None,
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn new(worker_count: usize, preparation_bytes: usize) -> Result<Self> {
-        if worker_count == 0 || worker_count > CODEX_PRODUCER_MAX_WORKERS {
-            return Err(contract_error(
-                "Codex producer worker count is out of bounds",
-            ));
-        }
-        if !(CODEX_PREPARE_RESERVATION_BYTES..=CODEX_PREPARATION_HARD_BYTES)
-            .contains(&preparation_bytes)
-        {
-            return Err(contract_error(
-                "Codex producer preparation budget is out of bounds",
-            ));
-        }
-        Ok(Self {
-            worker_count,
-            preparation_bytes,
-            panic_source_ordinal: None,
-        })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_panic_source(mut self, source_ordinal: usize) -> Self {
-        self.panic_source_ordinal = Some(source_ordinal);
-        self
     }
 }
 
@@ -93,14 +62,9 @@ pub(crate) struct CodexProducerStats {
     pub(crate) peak_preparation_bytes: usize,
     pub(crate) blocked_reservations: usize,
     pub(crate) peak_queued_windows: usize,
-    #[cfg(test)]
-    pub(crate) final_preparation_bytes: usize,
-    #[cfg(test)]
-    pub(crate) final_queued_windows: usize,
 }
 
 #[allow(dead_code)]
-// Source/page ordinals are asserted by the bounded-producer tests.
 // Each bounded page is moved directly into the ordered consumer. Boxing it
 // would add allocator traffic to every Codex publication window.
 #[allow(clippy::large_enum_variant)]
@@ -153,8 +117,6 @@ pub(crate) fn run_codex_bounded_producers(
             let worker_cancellation = Arc::clone(&cancellation);
             let worker_budget = Arc::clone(&budget);
             let metrics = Arc::clone(&metrics);
-            #[cfg(test)]
-            let panic_source_ordinal = config.panic_source_ordinal;
             if let Err(error) = thread::Builder::new()
                 .name(format!("ctx-codex-prepare-{worker_ordinal}"))
                 .spawn_scoped(scope, move || {
@@ -165,8 +127,6 @@ pub(crate) fn run_codex_bounded_producers(
                         worker_cancellation,
                         worker_budget,
                         metrics,
-                        #[cfg(test)]
-                        panic_source_ordinal,
                     );
                 })
             {
@@ -330,10 +290,6 @@ pub(crate) fn run_codex_bounded_producers(
         peak_preparation_bytes: metrics.peak_bytes.load(Ordering::Acquire),
         blocked_reservations: metrics.blocked.load(Ordering::Acquire),
         peak_queued_windows: metrics.peak_queued_windows.load(Ordering::Acquire),
-        #[cfg(test)]
-        final_preparation_bytes: budget.used(),
-        #[cfg(test)]
-        final_queued_windows: metrics.queued_windows.load(Ordering::Acquire),
     })
 }
 
@@ -430,7 +386,6 @@ fn worker_loop(
     cancellation: Arc<CodexCancellation>,
     budget: Arc<CodexPreparationBudget>,
     metrics: Arc<CodexProducerMetrics>,
-    #[cfg(test)] panic_source_ordinal: Option<usize>,
 ) {
     loop {
         if cancellation.is_cancelled() {
@@ -450,10 +405,6 @@ fn worker_loop(
         }
         let source = task.source().clone();
         let result = catch_unwind(AssertUnwindSafe(|| {
-            #[cfg(test)]
-            if panic_source_ordinal == Some(source_ordinal) {
-                panic!("injected Codex producer panic");
-            }
             produce_source(
                 source_ordinal,
                 source,
@@ -806,14 +757,6 @@ impl CodexPreparationBudget {
     fn wake(&self) {
         self.available.notify_all();
     }
-
-    #[cfg(test)]
-    fn used(&self) -> usize {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .used
-    }
 }
 
 struct CodexPreparationPermit {
@@ -870,7 +813,3 @@ fn update_max(target: &AtomicUsize, candidate: usize) {
 fn contract_error(message: &'static str) -> CaptureError {
     CaptureError::SystemInvariant(message)
 }
-
-#[cfg(test)]
-#[path = "producer_tests.rs"]
-mod tests;

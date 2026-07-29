@@ -19,9 +19,6 @@ mod publication;
 pub(super) mod source;
 pub(crate) mod source_backed;
 
-#[cfg(test)]
-pub(in crate::provider::providers::forgecode) use publication::legacy_source_revision;
-
 use self::{
     output::ForgeCodeOutputReplay,
     publication::{

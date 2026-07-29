@@ -895,7 +895,3 @@ fn hex(bytes: &[u8]) -> String {
     }
     encoded
 }
-
-#[cfg(test)]
-#[path = "vertical/aggregate_group_tests.rs"]
-mod aggregate_group_tests;

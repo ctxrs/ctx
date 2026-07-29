@@ -152,7 +152,6 @@ pub(super) fn digest_source(
         if count == 0 {
             break;
         }
-        note_prompt_history_bytes_read(count);
         full.update(&bytes[..count]);
         if let Some(target) = prior_len {
             let remaining = target.saturating_sub(read);
@@ -197,7 +196,6 @@ pub(super) fn read_record(
             .position(|byte| *byte == b'\n')
             .map_or(available.len(), |index| index.saturating_add(1));
         let chunk = &available[..take];
-        note_prompt_history_bytes_read(chunk.len());
         hasher.update(chunk);
         observed = observed.saturating_add(chunk.len());
         if bytes.len() <= MAX_PROVIDER_JSONL_LINE_BYTES {
@@ -242,7 +240,6 @@ pub(super) fn hash_prefix_and_seek(
                 "Codex prompt-history cursor exceeds its source".to_owned(),
             ));
         }
-        note_prompt_history_bytes_read(count);
         hasher.update(&bytes[..count]);
         remaining = remaining.saturating_sub(u64::try_from(count).unwrap_or(u64::MAX));
     }
