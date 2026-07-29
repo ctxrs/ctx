@@ -485,6 +485,20 @@ mod tests {
         assert_eq!(run.status["core_generation_id"], generation);
         assert_eq!(run.status["receipt_core_generation_id"], generation);
         assert_eq!(read_status(temp.path()).unwrap().attempts, 1);
+
+        let exact_no_op = run_with(
+            temp.path(),
+            &generation,
+            &generation,
+            &manifest,
+            resolver.as_ref(),
+            |_, _, _, _| panic!("exact completed generation must not invoke Pro again"),
+        )
+        .unwrap();
+        assert!(!exact_no_op.did_work);
+        assert_eq!(exact_no_op.status["status"], "completed");
+        assert_eq!(exact_no_op.status["core_generation_id"], generation);
+        assert_eq!(exact_no_op.status["attempts"], 1);
     }
 
     #[test]

@@ -27,6 +27,7 @@ pub(super) fn current_blame_request(
     limit: u32,
     cursor: Option<String>,
     status: &StatusResult,
+    expected_core_generation_id: &str,
 ) -> Result<BlameRequest> {
     if status.authority != MaterializationAuthority::Source {
         bail!(
@@ -42,6 +43,13 @@ pub(super) fn current_blame_request(
             graph_state_name(status.state)
         )
     })?;
+    if receipt.core_generation_id != expected_core_generation_id {
+        bail!(
+            "stale_source: Pro helper generation {} does not match active verified Core generation {}",
+            receipt.core_generation_id,
+            expected_core_generation_id
+        );
+    }
     Ok(BlameRequest {
         target,
         limit,

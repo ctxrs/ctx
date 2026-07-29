@@ -52,6 +52,7 @@ fn blame_request_requires_source_manifest_authority() {
         10,
         None,
         &status,
+        &receipt.core_generation_id,
     )
     .expect("source-backed request");
     let ctx_pro_host_protocol::QuerySnapshotExpectation::Source { receipt: identity } =
@@ -78,9 +79,32 @@ fn incomplete_source_authority_fails_closed() {
         10,
         None,
         &status,
+        &"a".repeat(64),
     )
     .expect_err("incomplete source authority must fail without fallback");
     assert_eq!(stable_error_code(&error), Some("source_unavailable"));
+}
+
+#[test]
+fn blame_request_rejects_g1_cursor_after_core_publishes_g2() {
+    let receipt = source_receipt('a');
+    let status = StatusResult {
+        state: GraphState::Ready,
+        authority: ctx_pro_host_protocol::MaterializationAuthority::Source,
+        source_receipt: Some(receipt),
+    };
+    let error = support::current_blame_request(
+        BlameTarget::Commit {
+            oid: "0123456789abcdef".to_owned(),
+            repository: None,
+        },
+        10,
+        Some("g1-cursor".to_owned()),
+        &status,
+        &"b".repeat(64),
+    )
+    .expect_err("G1 helper authority and cursor must be rejected after verified Core G2");
+    assert_eq!(stable_error_code(&error), Some("stale_source"));
 }
 
 #[test]
