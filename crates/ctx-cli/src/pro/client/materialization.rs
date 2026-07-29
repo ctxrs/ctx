@@ -1,5 +1,92 @@
 use super::*;
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) enum BlameFreshnessPolicy {
+    LatestCommitted,
+    WaitForCurrent,
+}
+
+pub(super) const DEFAULT_BLAME_FRESHNESS_POLICY: BlameFreshnessPolicy =
+    BlameFreshnessPolicy::LatestCommitted;
+
+pub(super) fn prepare_blame_generation(
+    data_root: &Path,
+    policy: BlameFreshnessPolicy,
+) -> Result<String> {
+    prepare_blame_generation_with(
+        policy,
+        || latest_committed_blame_generation(data_root),
+        || wait_for_current_blame_generation(data_root),
+    )
+}
+
+pub(super) fn prepare_blame_generation_with(
+    policy: BlameFreshnessPolicy,
+    latest_committed: impl FnOnce() -> Result<String>,
+    wait_for_current: impl FnOnce() -> Result<String>,
+) -> Result<String> {
+    match policy {
+        BlameFreshnessPolicy::LatestCommitted => latest_committed(),
+        BlameFreshnessPolicy::WaitForCurrent => wait_for_current(),
+    }
+}
+
+fn latest_committed_blame_generation(data_root: &Path) -> Result<String> {
+    latest_committed_blame_generation_with(
+        || {
+            crate::semantic::coordinate_source_backed_refresh(
+                data_root,
+                crate::semantic::SourceBackedRefreshMode::Background,
+            )
+            .map(|_| ())
+        },
+        || {
+            Ok(crate::semantic::pin_active_verified_generation(data_root)?
+                .generation_id()
+                .to_owned())
+        },
+    )
+}
+
+pub(super) fn latest_committed_blame_generation_with(
+    wake_daemon: impl FnOnce() -> Result<()>,
+    pin_active_generation: impl FnOnce() -> Result<String>,
+) -> Result<String> {
+    // Waking the daemon is best effort. Its availability must not hide an
+    // independently valid committed Core generation from the reader.
+    let wake_error = wake_daemon().err();
+    match pin_active_generation() {
+        Ok(generation) => Ok(generation),
+        Err(pin_error) => match wake_error {
+            Some(wake_error) => Err(pin_error).context(format!(
+                "source_unavailable: bounded daemon wake failed before reading the latest committed Core generation: {wake_error:#}"
+            )),
+            None => Err(pin_error),
+        },
+    }
+}
+
+fn wait_for_current_blame_generation(data_root: &Path) -> Result<String> {
+    let mut materialization = ProMaterializationTelemetryV1::started();
+    materialize(data_root, &mut materialization)?;
+
+    let mut expected = crate::semantic::pin_active_verified_generation(data_root)?
+        .generation_id()
+        .to_owned();
+    for _ in 0..3 {
+        crate::semantic::wait_for_source_backed_pro_generation(data_root, &expected)?;
+        let active = crate::semantic::pin_active_verified_generation(data_root)?
+            .generation_id()
+            .to_owned();
+        if active == expected {
+            return Ok(expected);
+        }
+        expected = active;
+    }
+    bail!("stale_source: active verified Core generation advanced repeatedly while preparing blame")
+}
+
 pub(crate) fn materialize(
     data_root: &Path,
     telemetry: &mut ProMaterializationTelemetryV1,
