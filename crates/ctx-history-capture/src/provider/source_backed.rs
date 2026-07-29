@@ -172,7 +172,6 @@ pub enum SourceBackedSelectorAuthority {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceBackedHydrationSupport {
     Full,
-    Partial,
     Unsupported,
 }
 
@@ -222,41 +221,6 @@ macro_rules! route {
             selector_authority: SourceBackedSelectorAuthority::$authority,
             exact_hydration: SourceBackedHydrationSupport::$hydration,
             hydration_limitation: None,
-            unsupported_reason: None,
-        }
-    };
-}
-
-macro_rules! partial_route {
-    (
-        $provider:ident, $selected_format:literal => $certified_format:literal,
-        $automatic:literal, $explicit:literal, $authority:ident, $reason:literal
-    ) => {
-        SourceBackedProviderRouteMetadata {
-            provider: CaptureProvider::$provider,
-            source_format: $selected_format,
-            certified_source_format: $certified_format,
-            automatic: $automatic,
-            explicit_manual: $explicit,
-            selector_authority: SourceBackedSelectorAuthority::$authority,
-            exact_hydration: SourceBackedHydrationSupport::Partial,
-            hydration_limitation: Some($reason),
-            unsupported_reason: None,
-        }
-    };
-    (
-        $provider:ident, $format:literal, $automatic:literal, $explicit:literal,
-        $authority:ident, $reason:literal
-    ) => {
-        SourceBackedProviderRouteMetadata {
-            provider: CaptureProvider::$provider,
-            source_format: $format,
-            certified_source_format: $format,
-            automatic: $automatic,
-            explicit_manual: $explicit,
-            selector_authority: SourceBackedSelectorAuthority::$authority,
-            exact_hydration: SourceBackedHydrationSupport::Partial,
-            hydration_limitation: Some($reason),
             unsupported_reason: None,
         }
     };
@@ -5256,10 +5220,6 @@ mod tests {
             match route.exact_hydration {
                 SourceBackedHydrationSupport::Full => {
                     assert!(route.hydration_limitation.is_none());
-                    assert!(route.unsupported_reason.is_none());
-                }
-                SourceBackedHydrationSupport::Partial => {
-                    assert!(route.hydration_limitation.is_some());
                     assert!(route.unsupported_reason.is_none());
                 }
                 SourceBackedHydrationSupport::Unsupported => {
