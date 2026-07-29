@@ -45,11 +45,15 @@ pub(super) struct KimiFrozenFileMetadata {
 }
 
 impl KimiFrozenFileMetadata {
+    // Direct reads remain a safety oracle for the admitted-handle path and its
+    // cross-platform metadata revalidation tests.
+    #[allow(dead_code)]
     fn read(path: &Path) -> Result<Self> {
         ensure_regular_provider_transcript_file(path)?;
         Self::from_metadata(&fs::symlink_metadata(path)?)
     }
 
+    #[allow(dead_code)]
     fn read_optional(path: &Path) -> Result<Option<Self>> {
         match fs::symlink_metadata(path) {
             Ok(metadata) if metadata.file_type().is_file() => {
@@ -102,6 +106,7 @@ impl KimiFrozenFileMetadata {
         )
     }
 
+    #[allow(dead_code)]
     fn revalidate(&self, path: &Path) -> Result<bool> {
         match Self::read(path) {
             Ok(current) => Ok(current == *self),
@@ -113,6 +118,7 @@ impl KimiFrozenFileMetadata {
         }
     }
 
+    #[allow(dead_code)]
     fn revalidate_optional(expected: &Option<Self>, path: &Path) -> Result<bool> {
         match Self::read_optional(path) {
             Ok(current) => Ok(current == *expected),
@@ -200,6 +206,9 @@ pub(super) struct KimiWireLayout {
 }
 
 impl KimiWireLayout {
+    // Retain the path-based oracle for parity checks against production's
+    // already-admitted file-handle construction.
+    #[allow(dead_code)]
     pub(super) fn read(path: &Path) -> Result<Self> {
         let wire = KimiFrozenFileMetadata::read(path)?;
         let canonical_wire_path = fs::canonicalize(path)?;
@@ -302,6 +311,7 @@ impl KimiWireLayout {
         self.index_entry.take()
     }
 
+    #[allow(dead_code)]
     pub(super) fn revalidate(&self, path: &Path) -> Result<bool> {
         let canonical_path = match fs::canonicalize(path) {
             Ok(path) => path,
@@ -347,6 +357,7 @@ pub(super) fn canonical_source_root_for_wire(path: &Path) -> Result<PathBuf> {
     }
 }
 
+#[allow(dead_code)]
 fn read_kimi_state(path: &Path, file: &KimiFrozenFileMetadata) -> Result<Value> {
     if file.length > KIMI_WIRE_LAYOUT_MAX_AGGREGATE_BYTES_U64 {
         return Err(CaptureError::InvalidPayload(format!(
@@ -362,6 +373,7 @@ fn read_kimi_state(path: &Path, file: &KimiFrozenFileMetadata) -> Result<Value> 
     Ok(serde_json::from_str::<Value>(&raw).unwrap_or(Value::Null))
 }
 
+#[allow(dead_code)]
 fn read_kimi_session_index_entry(
     path: &Path,
     file: &KimiFrozenFileMetadata,

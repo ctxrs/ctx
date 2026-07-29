@@ -124,7 +124,11 @@ impl ForgeCodeSourceSelectionV0 {
 // route; boxing it to match the 24-byte missing path adds an avoidable allocation.
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum ForgeCodeSourceBackedDiscoveryV0 {
-    Missing { preferred_path: PathBuf },
+    Missing {
+        // Preserve the selected missing path for fail-closed route diagnostics.
+        #[allow(dead_code)]
+        preferred_path: PathBuf,
+    },
     Live(ForgeCodeSourceBackedScanV0),
 }
 
@@ -139,6 +143,7 @@ impl ForgeCodeSourceBackedSourceV0 {
         &self.source
     }
 
+    #[cfg(test)]
     pub(crate) fn canonical_path(&self) -> &Path {
         &self.canonical_path
     }
@@ -146,9 +151,15 @@ impl ForgeCodeSourceBackedSourceV0 {
 
 pub(crate) struct ForgeCodeSourceBackedPageV0 {
     pub(crate) documents: Vec<LexicalDocument>,
+    // Rejection and page-bound accounting remain attached to emitted pages as
+    // release evidence even when Core consumes only lexical documents.
+    #[allow(dead_code)]
     pub(crate) failures: Vec<ProviderImportFailure>,
+    #[allow(dead_code)]
     pub(crate) retained_bytes: usize,
+    #[allow(dead_code)]
     pub(crate) ignored_records: u64,
+    #[allow(dead_code)]
     pub(crate) terminal: bool,
 }
 

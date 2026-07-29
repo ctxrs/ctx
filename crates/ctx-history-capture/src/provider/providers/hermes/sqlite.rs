@@ -14,7 +14,11 @@ use super::layout::{
     HermesSqliteValue,
 };
 
+// These constants remain the authority for the persisted Hermes frontier and
+// locator wire contracts exercised at the serialization boundary.
+#[allow(dead_code)]
 pub(super) const HERMES_FRONTIER_VERSION: u32 = 1;
+#[allow(dead_code)]
 pub(super) const HERMES_LOCATOR_KIND: &str = "hermes-sqlite-row-v1";
 const HERMES_FRONTIER_BYTES: usize = 1 + 8 + 8;
 const HERMES_SQLITE_VALUE_OVERHEAD_BYTES: u64 = 64 * 9;
@@ -26,6 +30,7 @@ pub(super) enum HermesPhase {
 }
 
 impl HermesPhase {
+    #[allow(dead_code)]
     fn tag(self) -> u8 {
         match self {
             Self::Sessions => 1,
@@ -33,6 +38,7 @@ impl HermesPhase {
         }
     }
 
+    #[allow(dead_code)]
     fn from_tag(tag: u8) -> Result<Self> {
         match tag {
             1 => Ok(Self::Sessions),
@@ -60,6 +66,9 @@ impl HermesFrontier {
         }
     }
 
+    // Keep the codec local to the frontier type so persisted cursor shape stays
+    // explicit even when the current scanner transfers the typed frontier.
+    #[allow(dead_code)]
     pub(super) fn encode(self) -> Vec<u8> {
         let mut value = Vec::with_capacity(HERMES_FRONTIER_BYTES);
         value.push(self.phase.tag());
@@ -68,6 +77,7 @@ impl HermesFrontier {
         value
     }
 
+    #[allow(dead_code)]
     pub(super) fn decode(value: &[u8]) -> Result<Self> {
         if value.len() != HERMES_FRONTIER_BYTES {
             return Err(CaptureError::InvalidPayload(
@@ -461,6 +471,7 @@ fn storage_error_reason(schema: &HermesSchema, phase: HermesPhase, code: i64) ->
     ))
 }
 
+#[allow(dead_code)]
 fn decode_u64(bytes: &[u8]) -> Result<u64> {
     let bytes: [u8; 8] = bytes.try_into().map_err(|_| {
         CaptureError::InvalidPayload("Hermes cursor integer has an invalid width".to_owned())
@@ -468,10 +479,12 @@ fn decode_u64(bytes: &[u8]) -> Result<u64> {
     Ok(u64::from_be_bytes(bytes))
 }
 
+#[allow(dead_code)]
 fn hermes_ordered_i64(value: i64) -> u64 {
     (value as u64) ^ (1_u64 << 63)
 }
 
+#[allow(dead_code)]
 fn hermes_unordered_i64(value: u64) -> i64 {
     (value ^ (1_u64 << 63)) as i64
 }

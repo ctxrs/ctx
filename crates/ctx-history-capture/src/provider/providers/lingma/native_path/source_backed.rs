@@ -1163,6 +1163,7 @@ impl LingmaSourceBackedResolverV0 {
         Ok(Self { sources })
     }
 
+    #[cfg(test)]
     pub(crate) fn hydrate_record(
         &self,
         record: &LingmaSourceBackedRecordV0,

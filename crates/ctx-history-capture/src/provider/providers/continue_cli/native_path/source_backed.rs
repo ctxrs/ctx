@@ -100,6 +100,8 @@ pub(crate) struct ContinueSourceBackedPage {
     pub(crate) next_history_ordinal: u64,
     #[allow(dead_code)]
     pub(crate) logical_units: usize,
+    // The provider-owned byte estimate remains part of bounded-page evidence.
+    #[allow(dead_code)]
     pub(crate) estimated_bytes: usize,
     pub(crate) documents: Vec<LexicalDocument>,
     pub(crate) terminal: Option<ContinueSourceBackedLeaf>,
@@ -114,12 +116,15 @@ pub(crate) struct ContinueSourceBackedLeaf {
     // and exact-hydration consumers can evolve without changing page shape.
     #[allow(dead_code)]
     pub(crate) session: ContinueSessionRow,
+    // Stable identity and exclusion accounting remain terminal source evidence.
+    #[allow(dead_code)]
     pub(crate) session_id: StableEntityId,
     pub(crate) certificate: CertifiedSource,
     #[allow(dead_code)]
     pub(crate) source_observation: ContinueSourceObservation,
     #[allow(dead_code)]
     pub(crate) index_dependency: ContinueIndexObservation,
+    #[allow(dead_code)]
     pub(crate) output_exclusion: ContinueOutputExclusionStats,
 }
 
@@ -132,6 +137,8 @@ pub(crate) enum ContinueSourceBackedOutcome {
     // Preserve the bounded provider-owned diagnostic payload.
     #[allow(dead_code)]
     Incomplete(Box<ContinueIncompleteSource>),
+    // Preserve the bounded provider diagnostic for fail-closed route handling.
+    #[allow(dead_code)]
     Failed(ContinueSourceFailure),
 }
 

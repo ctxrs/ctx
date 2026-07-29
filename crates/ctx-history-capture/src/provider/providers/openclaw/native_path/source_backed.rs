@@ -238,9 +238,15 @@ impl AdmittedOpenClawSource {
 #[derive(Debug)]
 pub(crate) struct OpenClawSourceBackedPageV0 {
     pub(crate) documents: Vec<LexicalDocument>,
+    // Page classification and certified-prefix accounting remain scanner
+    // evidence for append/replacement release verification.
+    #[allow(dead_code)]
     pub(crate) complete_records: u64,
+    #[allow(dead_code)]
     pub(crate) retained_records: u64,
+    #[allow(dead_code)]
     pub(crate) rejected_records: u64,
+    #[allow(dead_code)]
     pub(crate) certified_prefix_bytes: u64,
     // Terminal page state remains explicit for cross-target scanner consumers.
     #[allow(dead_code)]
@@ -264,7 +270,10 @@ pub(crate) struct OpenClawSourceBackedVerifiedPrefixV0 {
 #[derive(Debug)]
 pub(crate) struct OpenClawSourceBackedScanV0 {
     pub(crate) certified_source: CertifiedSource,
+    // Mutation classification and verified append base remain terminal evidence.
+    #[allow(dead_code)]
     pub(crate) disposition: OpenClawSourceBackedDispositionV0,
+    #[allow(dead_code)]
     pub(crate) verified_base_prefix: Option<OpenClawSourceBackedVerifiedPrefixV0>,
 }
 

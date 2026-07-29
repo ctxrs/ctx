@@ -4,10 +4,11 @@ use serde_json::{json, Value};
 
 use crate::native_source::NativeSqliteValue;
 use crate::provider::normalization::compact_provider_result_payload;
+#[cfg(test)]
+use crate::provider::normalization::provider_normalized_result_value;
 use crate::provider::normalization::{
-    provider_capped_json, provider_line_from_index, provider_normalized_result_value,
-    provider_policy_body, provider_policy_event_text, provider_role, provider_timestamp_millis,
-    provider_value_text,
+    provider_capped_json, provider_line_from_index, provider_policy_body,
+    provider_policy_event_text, provider_role, provider_timestamp_millis, provider_value_text,
 };
 use crate::{
     compute_payload_hash, fnv1a64, CaptureError, OutputCommandContext, OutputObservationKind,
@@ -668,6 +669,7 @@ fn parts_text(parts: &Value) -> Option<String> {
 /// Returns complete normalized result bodies from Crush result parts in their
 /// native order. Only schema-owned part kinds and fields are considered; the
 /// function never searches arbitrary descendants. The caller owns any bound.
+#[cfg(test)]
 pub(crate) fn crush_normalized_result_content(parts: &Value) -> Option<String> {
     let items = parts.as_array()?;
     let mut results = Vec::new();

@@ -211,8 +211,12 @@ pub(crate) type GeminiSourceBackedResult<T> = Result<T, GeminiSourceBackedError>
 /// One provider-owned, independently bounded page for the shared coordinator.
 #[derive(Debug)]
 pub(crate) struct GeminiSourceBackedPage {
+    // Paging identity and prefix bounds remain provider-owned resume evidence.
+    #[allow(dead_code)]
     pub(crate) page_identity: [u8; 32],
+    #[allow(dead_code)]
     pub(crate) expected_prefix_bytes: u64,
+    #[allow(dead_code)]
     pub(crate) next_prefix_bytes: u64,
     pub(crate) documents: Vec<LexicalDocument>,
 }
@@ -221,10 +225,17 @@ pub(crate) struct GeminiSourceBackedPage {
 /// coordinator responsibilities.
 #[derive(Debug)]
 pub(crate) struct GeminiSourceBackedLeaf {
+    // Terminal source/session lineage remains coupled to the certificate for
+    // exact hydration and non-Core materialization.
+    #[allow(dead_code)]
     pub(crate) source: SourceKey,
+    #[allow(dead_code)]
     pub(crate) session: GeminiSession,
+    #[allow(dead_code)]
     pub(crate) session_id: StableEntityId,
+    #[allow(dead_code)]
     pub(crate) parent_session_id: Option<StableEntityId>,
+    #[allow(dead_code)]
     pub(crate) root_session_id: StableEntityId,
     pub(crate) certificate: CertifiedSource,
 }
@@ -293,10 +304,12 @@ impl<'a> GeminiSourceBackedLeafReader<'a> {
         &self.source
     }
 
+    #[cfg(test)]
     pub(crate) fn session(&self) -> &GeminiSession {
         &self.session
     }
 
+    #[cfg(test)]
     pub(crate) fn session_id(&self) -> StableEntityId {
         self.session_id
     }

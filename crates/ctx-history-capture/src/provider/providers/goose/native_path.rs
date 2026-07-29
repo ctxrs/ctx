@@ -78,6 +78,7 @@ impl GooseNativeSourceSelection {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn with_inventory_observation_token(
         mut self,
         inventory_observation_token: Option<String>,
@@ -104,6 +105,9 @@ pub(super) struct GooseNativePage {
 
 #[derive(Clone, Debug)]
 pub(super) struct GooseNativeScanSummary {
+    // Authority, completion, and inventory remain terminal native-scan
+    // evidence for exact rebuild and non-Core materializers.
+    #[allow(dead_code)]
     pub(super) source_authority: GooseNativeSourceAuthority,
     // Generation, capability, semantic, and physical-position evidence is
     // retained for exact rebuild/Pro consumers beyond the Core summary.
@@ -115,10 +119,13 @@ pub(super) struct GooseNativeScanSummary {
     pub(super) semantic_digest: String,
     #[allow(dead_code)]
     pub(super) physical_source_identity: GooseNativePhysicalSourceIdentity,
+    #[allow(dead_code)]
     pub(super) completed_inventory_token: Option<String>,
+    #[allow(dead_code)]
     pub(super) complete: bool,
     #[allow(dead_code)]
     pub(super) position: GooseNativeScanPosition,
+    #[allow(dead_code)]
     pub(super) inventory: GooseNativeInventorySummary,
     #[cfg(test)]
     pub(super) metrics: GooseNativeMetrics,
@@ -172,6 +179,8 @@ impl GooseNativePathReader {
         GooseNativeScanner::new(&self.schema, &self.snapshot, self.authority.clone(), limits)
     }
 
+    // Retained for the source-backed precommit safety boundary.
+    #[allow(dead_code)]
     pub(super) fn revalidate_live(&self) -> Result<bool> {
         self.snapshot.revalidate_live()
     }

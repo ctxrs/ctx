@@ -16,6 +16,8 @@ use super::source::DeepAgentsWriteKey;
 
 pub(crate) const DEEPAGENTS_CONTENT_LOCATOR_KIND: &str = "deepagents-write-message-v1";
 const DEEPAGENTS_CONTENT_LOCATOR_VERSION: u8 = 1;
+// Kept beside the decoder as the authoritative locator wire-size contract.
+#[allow(dead_code)]
 const DEEPAGENTS_CONTENT_LOCATOR_FIXED_BYTES: usize = 1 + 2 + 2 + 2 + 8 + 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +30,9 @@ pub(crate) struct DeepAgentsContentAddress {
 }
 
 impl DeepAgentsContentAddress {
+    // The encoder documents and verifies the persisted locator boundary even
+    // though production ingestion currently writes this coordinate inline.
+    #[allow(dead_code)]
     pub(crate) fn encode(&self) -> Option<Vec<u8>> {
         let thread = self.thread_id.as_bytes();
         let checkpoint = self.checkpoint_id.as_bytes();

@@ -241,6 +241,9 @@ impl OpenCodeSourceBackedRegistration {
         self.dialect.source_format
     }
 
+    // Retain provider-scoped discovery on the registration boundary even while
+    // the shared registry supplies the selected source directly.
+    #[allow(dead_code)]
     pub(crate) fn discover(self, context: &DiscoveryContext) -> DiscoveryReport {
         discover_provider_sources_for_provider_with_context(context, self.provider())
     }
@@ -263,6 +266,8 @@ impl OpenCodeSourceBackedRegistration {
         }
     }
 
+    // Replacement-only mutation policy is explicit release lifecycle evidence.
+    #[allow(dead_code)]
     pub(crate) const fn mutation_policy(self) -> OpenCodeSourceMutationPolicy {
         OpenCodeSourceMutationPolicy::Replace
     }
@@ -280,6 +285,8 @@ pub(crate) const fn mimocode_source_backed_registration() -> OpenCodeSourceBacke
     OpenCodeSourceBackedRegistration::new(&super::super::MIMOCODE_SQLITE_DIALECT)
 }
 
+// This family aggregate is retained for cross-provider conformance checks.
+#[allow(dead_code)]
 pub(crate) const fn opencode_family_source_backed_registrations(
 ) -> [OpenCodeSourceBackedRegistration; 3] {
     [
@@ -290,6 +297,7 @@ pub(crate) const fn opencode_family_source_backed_registrations(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 pub(crate) enum OpenCodeSourceMutationPolicy {
     /// No append frontier is asserted. Any observed mutation replaces the source.
     Replace,
@@ -299,7 +307,10 @@ pub(crate) enum OpenCodeSourceMutationPolicy {
 pub(crate) struct OpenCodeSourceBackedScan {
     pub(crate) source: SourceKey,
     pub(crate) certificate: CertifiedSource,
+    // Schema and page-count evidence remain attached to release scan receipts.
+    #[allow(dead_code)]
     pub(crate) schema_family: &'static str,
+    #[allow(dead_code)]
     pub(crate) emitted_pages: u64,
 }
 

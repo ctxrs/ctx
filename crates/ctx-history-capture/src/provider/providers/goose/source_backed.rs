@@ -96,6 +96,7 @@ impl GooseSourceRouteV0 {
         &self.selected_database
     }
 
+    #[cfg(test)]
     pub(crate) fn platform_root(&self) -> &Path {
         &self.platform_root
     }
@@ -144,6 +145,7 @@ impl GooseSourceBackedSelectionV0 {
         &self.selected
     }
 
+    #[cfg(test)]
     pub(crate) fn retained(&self) -> &[GooseSourceRouteV0] {
         &self.retained
     }
@@ -208,6 +210,7 @@ impl GooseSourceBackedAdapterV0 {
     }
 
     /// Revalidates the exact selected route used by a completed scan.
+    #[allow(dead_code)]
     pub(crate) fn revalidate(&self, snapshot: &GooseSourceBackedSnapshotV0) -> bool {
         self.selection == snapshot.selection
             && self
@@ -234,6 +237,8 @@ pub(crate) struct GooseSourceBackedPageV0 {
 }
 
 impl GooseSourceBackedPageV0 {
+    // Read-only accessors retain provider accounting for release verification.
+    #[allow(dead_code)]
     pub(crate) fn documents(&self) -> &[LexicalDocument] {
         &self.documents
     }
@@ -242,18 +247,22 @@ impl GooseSourceBackedPageV0 {
         self.documents
     }
 
+    #[allow(dead_code)]
     pub(crate) fn complete_records(&self) -> u64 {
         self.complete_records
     }
 
+    #[allow(dead_code)]
     pub(crate) fn retained_records(&self) -> u64 {
         self.retained_records
     }
 
+    #[allow(dead_code)]
     pub(crate) fn rejected_records(&self) -> u64 {
         self.rejected_records
     }
 
+    #[allow(dead_code)]
     pub(crate) fn ignored_records(&self) -> u64 {
         self.ignored_records
     }
@@ -378,6 +387,8 @@ pub(crate) struct GooseSourceBackedSnapshotV0 {
 }
 
 impl GooseSourceBackedSnapshotV0 {
+    // The selected route is terminal provenance for exact revalidation.
+    #[allow(dead_code)]
     pub(crate) fn selection(&self) -> &GooseSourceBackedSelectionV0 {
         &self.selection
     }
