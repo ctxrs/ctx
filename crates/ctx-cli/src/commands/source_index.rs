@@ -246,28 +246,12 @@ pub(crate) fn run_show(
             write_show_value(value, args.format, None, selected.event_id.as_uuid())
         }
         ShowTarget::Session(args) => {
-            if args.provider_session.is_some() {
-                return Err(anyhow!(
-                    "provider-session lookup is not yet exposed by the source-backed index; pass a ctx session ID or prefix"
-                ));
-            }
-            let id = args.id.as_deref().ok_or_else(|| {
-                anyhow!(
-                    "source-backed session lookup requires a ctx session ID or unambiguous prefix"
-                )
-            })?;
-            let session = resolve_session(&index, id)?;
-            if let Some(provider) = args.provider {
-                let requested = provider.capture_provider().as_str();
-                if session.provider != requested {
-                    return Err(anyhow!(
-                        "source-backed session {} belongs to provider {}, not {}",
-                        session.session_id,
-                        session.provider,
-                        requested
-                    ));
-                }
-            }
+            let session = resolve_show_session(
+                &index,
+                args.id.as_deref(),
+                args.provider_session.as_deref(),
+                args.provider.map(ProviderArg::capture_provider),
+            )?;
             let value = session_json(
                 &index,
                 &data_root,
@@ -289,6 +273,62 @@ pub(crate) fn run_show(
                 .unwrap_or_else(|| session.session_id.as_uuid());
             write_show_value(value, args.format, args.out, event_id)
         }
+    }
+}
+
+fn resolve_show_session(
+    index: &VerifiedIndex,
+    id: Option<&str>,
+    provider_session_id: Option<&str>,
+    provider: Option<CaptureProvider>,
+) -> Result<SessionRecord> {
+    let session = match (id, provider_session_id) {
+        (Some(id), None) => resolve_session(index, id)?,
+        (None, Some(provider_session_id)) => select_show_provider_session(
+            provider_session_id,
+            index.sessions_by_provider_session_id(
+                provider_session_id,
+                provider.map(CaptureProvider::as_str),
+            )?,
+        )?,
+        (Some(_), Some(_)) => {
+            return Err(anyhow!(
+                "pass either a ctx session ID or --provider-session, not both"
+            ));
+        }
+        (None, None) => {
+            return Err(anyhow!(
+                "source-backed session lookup requires a ctx session ID or --provider-session"
+            ));
+        }
+    };
+    if let Some(provider) = provider {
+        if session.provider != provider.as_str() {
+            return Err(anyhow!(
+                "source-backed session {} belongs to provider {}, not {}",
+                session.session_id,
+                session.provider,
+                provider
+            ));
+        }
+    }
+    Ok(session)
+}
+
+fn select_show_provider_session(
+    provider_session_id: &str,
+    matches: Vec<SessionRecord>,
+) -> Result<SessionRecord> {
+    match matches.as_slice() {
+        [] => Err(anyhow!(
+            "provider session {provider_session_id:?} was not found in the source-backed Core generation"
+        )),
+        [session] => Ok(session.clone()),
+        matches => Err(anyhow!(
+            "provider session {provider_session_id:?} is ambiguous; first matches are {} and {}; pass --provider or a ctx session ID",
+            matches[0].session_id,
+            matches[1].session_id
+        )),
     }
 }
 
@@ -1934,11 +1974,13 @@ mod tests {
     };
     use ctx_history_core::{
         database_path, derive_event_id, derive_session_id, BatchHydrationRequest,
-        BatchHydrationResult, ContentSourceResolver, EventHydrationRequest, EventIdentityInput,
-        HydratedProviderRecord, HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy,
-        NativeItemKey, NativeRecordCoordinate, NativeSessionKey, SessionIdentityInput,
-        SourceAnchor, SourceKey, SourceRecordLocator, StableEntityId, TypedKey,
+        BatchHydrationResult, CertifiedSource, ContentSourceResolver, EventHydrationRequest,
+        EventIdentityInput, HydratedProviderRecord, HydrationFailure, HydrationFailureKind,
+        LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
+        ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation,
+        SourceRecordLocator, StableEntityId, TypedKey,
     };
+    use ctx_history_index::{GenerationWriter, LexicalDocument, WriterOptions};
     use serde_json::json;
     use tempfile::tempdir;
 
@@ -2137,6 +2179,108 @@ mod tests {
             .collect::<String>();
         fs::write(source, body).unwrap();
         ingest_codex_source_backed_v0(&sessions, index_root(data_root)).unwrap();
+    }
+
+    fn append_fixture_event(data_root: &Path, event: EventRecord, revision: u8) {
+        let source = event.locator.source().clone();
+        let mut writer = GenerationWriter::open(
+            index_root(data_root),
+            WriterOptions {
+                indexer_threads: 1,
+                memory_bytes: 32 * 1024 * 1024,
+            },
+        )
+        .unwrap();
+        writer.begin_source(source.clone()).unwrap();
+        writer
+            .add_document(LexicalDocument {
+                event_id: event.event_id,
+                session_id: event.session_id,
+                parent_session_id: event.parent_session_id,
+                root_session_id: event.root_session_id,
+                source: source.clone(),
+                locator: event.locator,
+                provider_session_id: event.provider_session_id,
+                branch: event.branch,
+                source_path: event.source_path,
+                agent_type: event.agent_type,
+                is_primary: event.is_primary,
+                event_sequence: event.event_sequence,
+                occurred_at_unix_ms: event.occurred_at_unix_ms,
+                event_type: event.event_type,
+                role: event.role,
+                body: "ambiguous provider session fixture".to_owned(),
+                workspace: event.workspace,
+                cwd: event.cwd,
+                touched_files: event.touched_files,
+            })
+            .unwrap();
+        let observation =
+            SourceObservation::new(source, "fixture-revision-v1", vec![revision]).unwrap();
+        writer
+            .certify_source(
+                CertifiedSource::certify(
+                    observation.clone(),
+                    observation,
+                    "fixture-parser-v1",
+                    [revision; 32],
+                    ScannedSourceCounts {
+                        complete_records: 1,
+                        retained_records: 1,
+                        indexed_documents: 1,
+                        certified_bytes: 1,
+                        ..ScannedSourceCounts::default()
+                    },
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        writer.commit(|_| true).unwrap();
+    }
+
+    #[test]
+    fn show_provider_session_resolution_is_ambiguous_until_provider_qualified() {
+        let temp = tempdir().unwrap();
+        write_test_generation(temp.path());
+        let mut warp = fixture_event(CaptureProvider::Warp, "warp_sqlite", 2, 2);
+        warp.provider_session_id = Some(TEST_SESSION_ID.to_owned());
+        append_fixture_event(temp.path(), warp, 2);
+        let index = open_index(temp.path()).unwrap();
+
+        let matches = index
+            .sessions_by_provider_session_id(TEST_SESSION_ID, None)
+            .unwrap();
+        assert_eq!(matches.len(), 2);
+        let error = resolve_show_session(&index, None, Some(TEST_SESSION_ID), None).unwrap_err();
+        let detail = error.to_string();
+        assert!(detail.contains("is ambiguous"), "{detail}");
+        for session in matches {
+            assert!(detail.contains(&session.session_id.to_string()), "{detail}");
+        }
+        assert!(
+            detail.contains("pass --provider or a ctx session ID"),
+            "{detail}"
+        );
+
+        let codex = resolve_show_session(
+            &index,
+            None,
+            Some(TEST_SESSION_ID),
+            Some(CaptureProvider::Codex),
+        )
+        .unwrap();
+        assert_eq!(codex.provider, "codex");
+        assert_eq!(codex.provider_session_id.as_deref(), Some(TEST_SESSION_ID));
+
+        let warp = resolve_show_session(
+            &index,
+            None,
+            Some(TEST_SESSION_ID),
+            Some(CaptureProvider::Warp),
+        )
+        .unwrap();
+        assert_eq!(warp.provider, "warp");
+        assert_eq!(warp.provider_session_id.as_deref(), Some(TEST_SESSION_ID));
     }
 
     #[test]
