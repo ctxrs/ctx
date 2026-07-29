@@ -57,6 +57,14 @@ pub(super) enum AutoUpgradeClaim {
     Contended,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InstallationUpgradeObservation {
+    Active,
+    Inactive,
+    Missing,
+    Untrusted,
+}
+
 /// One scheduler record beside the installed executable. The live
 /// executable-scoped OS lock, not a persisted lease or generation, is the
 /// authority for an in-progress attempt.
@@ -181,19 +189,46 @@ pub(super) fn claim_daemon_auto_upgrade(interval: Duration) -> Result<AutoUpgrad
 
 pub(crate) fn installation_upgrade_is_active() -> Result<bool> {
     let install_path = super::install::current_install_path()?;
-    let state = fs::read(state_path(&install_path))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<UpgradeState>(&bytes).ok())
-        .filter(|state| state.schema_version == STATE_SCHEMA_VERSION);
-    if state
-        .as_ref()
-        .is_some_and(|state| !is_active_upgrade_status(&state.status))
-    {
+    installation_upgrade_is_active_for(&install_path)
+}
+
+fn installation_upgrade_is_active_for(install_path: &Path) -> Result<bool> {
+    if observe_installation_upgrade(install_path) == InstallationUpgradeObservation::Active {
+        return Ok(true);
+    }
+    if InstallationLock::try_acquire(install_path)?.is_some() {
         return Ok(false);
     }
-    // A missing, unreadable, or unknown scheduler record cannot safely prove
-    // that a contended installation lock is only performing a check.
-    Ok(InstallationLock::try_acquire(&install_path)?.is_none())
+    // Close the state/lock race with one observation after contention. A
+    // current-format owner publishes an active phase while holding this lock
+    // before daemon quiescence or installation mutation. A record that remains
+    // absent therefore describes either that pre-mutation window or another
+    // read-only checker, while malformed and unknown records remain fail-closed.
+    Ok(matches!(
+        observe_installation_upgrade(install_path),
+        InstallationUpgradeObservation::Active | InstallationUpgradeObservation::Untrusted
+    ))
+}
+
+fn observe_installation_upgrade(install_path: &Path) -> InstallationUpgradeObservation {
+    let bytes = match fs::read(state_path(install_path)) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return InstallationUpgradeObservation::Missing;
+        }
+        Err(_) => return InstallationUpgradeObservation::Untrusted,
+    };
+    let Ok(state) = serde_json::from_slice::<UpgradeState>(&bytes) else {
+        return InstallationUpgradeObservation::Untrusted;
+    };
+    if state.schema_version != STATE_SCHEMA_VERSION {
+        return InstallationUpgradeObservation::Untrusted;
+    }
+    if is_active_upgrade_status(&state.status) {
+        InstallationUpgradeObservation::Active
+    } else {
+        InstallationUpgradeObservation::Inactive
+    }
 }
 
 pub(crate) fn active_installation_upgrade_attempt_id() -> Result<Option<String>> {
