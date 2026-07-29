@@ -2,9 +2,11 @@ pub(super) const SEMANTIC_SEARCH_CANDIDATES: usize = 200;
 pub(super) const SEMANTIC_SOFT_FILTER_SEARCH_CANDIDATES: usize = 1_000;
 pub(super) const SEMANTIC_EXACT_TOP_K_MAX: usize = 4_096;
 pub(super) const SEMANTIC_EXACT_QUERY_CONCURRENCY: usize = 2;
-pub(super) const SEMANTIC_CHUNK_TARGET_CHARS: usize = 1_200;
-pub(crate) const SEMANTIC_CHUNK_OVERLAP_CHARS: usize = 200;
-pub(super) const SEMANTIC_SOURCE_MAX_CHARS: usize = 64 * 1024;
+pub(super) const SEMANTIC_CHUNK_TARGET_CHARS: usize =
+    ctx_history_index::SEMANTIC_CHUNK_TARGET_CHARS;
+pub(crate) const SEMANTIC_CHUNK_OVERLAP_CHARS: usize =
+    ctx_history_index::SEMANTIC_CHUNK_OVERLAP_CHARS;
+pub(super) const SEMANTIC_SOURCE_MAX_CHARS: usize = ctx_history_index::SEMANTIC_SOURCE_MAX_CHARS;
 #[cfg(ctx_semantic_fastembed)]
 pub(super) const SEMANTIC_EMBED_THREADS_MAX: usize = 8;
 #[cfg(ctx_semantic_fastembed)]
