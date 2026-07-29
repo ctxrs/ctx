@@ -32,7 +32,6 @@ impl ClineNativeReader {
         active: &ActiveArray,
     ) -> Result<Option<ClineComponentFailure>, ClineNativePathError> {
         let observation = active.task.component(active.component.source_component());
-        self.run_before_exposure(&observation.path, observation.component);
         if !match active.scanner.descriptor_matches_observation() {
             Ok(matches) => matches,
             Err(ClineLocalReadError::Local(failure)) => return Ok(Some(failure)),
@@ -199,7 +198,6 @@ impl ClineNativeReader {
                 })));
             }
             ClineObservedFileState::Missing => {
-                self.run_before_exposure(&observation.path, observation.component);
                 if let Some(failure) = component_authority_failure(observation, false)?
                     .or(directory_authority_failure(task, observation)?)
                 {
@@ -219,7 +217,7 @@ impl ClineNativeReader {
                 } else {
                     ClineComponentTransition::Cold
                 };
-                let page = self.build_metadata_page(checkpoint.clone(), prior, transition)?;
+                let page = self.build_metadata_page(checkpoint.clone())?;
                 self.outcomes.push(ClineComponentReadOutcome {
                     component: observation.component,
                     path: observation.path.clone(),
@@ -253,7 +251,6 @@ impl ClineNativeReader {
         };
         merge_task_identity_authority(&mut checkpoint.session, previous);
         let mut content_authority = Some(hydrated.into_pinned_authority(observation));
-        self.run_before_exposure(&observation.path, observation.component);
         if let Some(failure) = component_authority_failure(observation, true)?
             .or(directory_authority_failure(task, observation)?)
         {
@@ -279,7 +276,7 @@ impl ClineNativeReader {
             }
             Some(_) => ClineComponentTransition::Rewrite,
         };
-        let page = self.build_metadata_page(checkpoint.clone(), prior, transition)?;
+        let page = self.build_metadata_page(checkpoint.clone())?;
         self.outcomes.push(ClineComponentReadOutcome {
             component: observation.component,
             path: observation.path.clone(),

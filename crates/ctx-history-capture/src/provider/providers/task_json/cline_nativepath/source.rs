@@ -78,86 +78,6 @@ impl TaskJsonNativeDialect {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ClineInjectedIoOperation {
-    InventoryComponentStat,
-    ComponentStat,
-    ComponentOpen,
-    ComponentRead,
-    ComponentPostParseStat,
-    RootAuthorityStat,
-}
-
-#[cfg(test)]
-struct ClineInjectedIoFailure {
-    operation: ClineInjectedIoOperation,
-    path: PathBuf,
-    kind: io::ErrorKind,
-    raw_os_error: Option<i32>,
-    message: String,
-    remaining: usize,
-}
-
-#[cfg(test)]
-std::thread_local! {
-    static CLINE_INJECTED_IO_FAILURE: std::cell::RefCell<Option<ClineInjectedIoFailure>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(test)]
-pub(crate) fn inject_cline_io_failure(
-    operation: ClineInjectedIoOperation,
-    path: PathBuf,
-    error: io::Error,
-    repetitions: usize,
-) {
-    CLINE_INJECTED_IO_FAILURE.with(|failure| {
-        *failure.borrow_mut() = Some(ClineInjectedIoFailure {
-            operation,
-            path,
-            kind: error.kind(),
-            raw_os_error: error.raw_os_error(),
-            message: error.to_string(),
-            remaining: repetitions,
-        });
-    });
-}
-
-#[cfg(test)]
-pub(crate) fn clear_cline_io_failure() {
-    CLINE_INJECTED_IO_FAILURE.with(|failure| {
-        failure.borrow_mut().take();
-    });
-}
-
-#[cfg(test)]
-pub(super) fn injected_io_failure(
-    operation: ClineInjectedIoOperation,
-    path: &Path,
-) -> Option<io::Error> {
-    CLINE_INJECTED_IO_FAILURE.with(|failure| {
-        let mut failure = failure.borrow_mut();
-        let configured = failure.as_mut()?;
-        if configured.operation != operation || configured.path != path || configured.remaining == 0
-        {
-            return None;
-        }
-        configured.remaining -= 1;
-        configured.raw_os_error.map_or_else(
-            || Some(io::Error::new(configured.kind, configured.message.clone())),
-            |raw| Some(io::Error::from_raw_os_error(raw)),
-        )
-    })
-}
-
-#[cfg(not(test))]
-pub(super) fn injected_io_failure(
-    _operation: ClineInjectedIoOperation,
-    _path: &Path,
-) -> Option<io::Error> {
-    None
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub(crate) enum ClineComponent {
@@ -262,10 +182,6 @@ impl ClineComponentObservation {
         }
     }
 
-    pub(crate) fn is_missing(&self) -> bool {
-        matches!(self.state, ClineObservedFileState::Missing)
-    }
-
     pub(crate) fn revalidate(&self) -> Result<bool, ClineNativePathError> {
         let (Some(authority), Some(relative)) =
             (self.authority.as_ref(), self.relative_path.as_deref())
@@ -285,11 +201,6 @@ impl ClineComponentObservation {
     }
 
     pub(super) fn post_parse_revalidate(&self) -> Result<bool, ClineNativePathError> {
-        if let Some(error) =
-            injected_io_failure(ClineInjectedIoOperation::ComponentPostParseStat, &self.path)
-        {
-            return Err(source_io(&self.path, "post-parse component stat", error));
-        }
         self.revalidate()
     }
 }
@@ -478,17 +389,12 @@ struct ClineRootInventory {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ClineDiscovery {
-    dialect: TaskJsonNativeDialect,
     root_authority: ClineRootAuthority,
     root_index: ClineComponentObservation,
     task_routes: Box<[ClineLiveTaskObservation]>,
 }
 
 impl ClineDiscovery {
-    pub(crate) fn dialect(&self) -> TaskJsonNativeDialect {
-        self.dialect
-    }
-
     pub(crate) fn root_authority(&self) -> &ClineRootAuthority {
         &self.root_authority
     }
@@ -514,18 +420,8 @@ fn discover_task_json_root(
     root: &Path,
     dialect: TaskJsonNativeDialect,
 ) -> Result<ClineDiscovery, ClineNativePathError> {
-    let (data_root, authority) = resolve_data_root(root, dialect)?;
+    let (_, authority) = resolve_data_root(root, dialect)?;
     let tasks_root = authority.named_path().join("tasks");
-    if let Some(error) =
-        injected_io_failure(ClineInjectedIoOperation::RootAuthorityStat, &data_root)
-    {
-        return Err(source_io(&data_root, "stat root authority", error));
-    }
-    if let Some(error) =
-        injected_io_failure(ClineInjectedIoOperation::RootAuthorityStat, &tasks_root)
-    {
-        return Err(source_io(&tasks_root, "stat root authority", error));
-    }
     authority
         .open_directory(Path::new("tasks"))
         .and_then(|directory| directory.revalidate())
@@ -563,24 +459,10 @@ fn discover_task_json_root(
     }
     routes.sort_by(|left, right| left.requested_task_path.cmp(&right.requested_task_path));
     Ok(ClineDiscovery {
-        dialect,
         root_authority,
         root_index,
         task_routes: routes.into_boxed_slice(),
     })
-}
-
-pub(crate) fn revalidate_cline_component_source(
-    observation: &ClineComponentObservation,
-    expected_stamp_token: &str,
-) -> Result<bool, ClineNativePathError> {
-    let current_token = observation
-        .stamp()
-        .map_or_else(|| "missing".to_owned(), ClineFileStamp::token);
-    if current_token != expected_stamp_token || !observation.revalidate()? {
-        return Ok(false);
-    }
-    Ok(true)
 }
 
 fn observe_live_task(
@@ -649,9 +531,6 @@ fn observe_component_optional(
     path: &Path,
     component: ClineComponent,
 ) -> Result<ClineComponentObservation, ClineNativePathError> {
-    if let Some(error) = injected_io_failure(ClineInjectedIoOperation::ComponentStat, path) {
-        return Err(source_io(path, "stat component", error));
-    }
     let opened = match authority.open_path(relative_path) {
         Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(ClineComponentObservation {
@@ -823,15 +702,6 @@ fn inventory_component_state(
     name: &str,
     path: &Path,
 ) -> Result<(Vec<u8>, bool), ClineNativePathError> {
-    if let Some(error) = injected_io_failure(ClineInjectedIoOperation::InventoryComponentStat, path)
-    {
-        let classified = source_io(path, "inventory component stat", error);
-        return if is_component_local_error(&classified) {
-            Ok((vec![3], true))
-        } else {
-            Err(classified)
-        };
-    }
     match directory.open_child(std::ffi::OsStr::new(name)) {
         Ok(OpenedProviderSourcePath::File(file)) => {
             let mut state = vec![1];

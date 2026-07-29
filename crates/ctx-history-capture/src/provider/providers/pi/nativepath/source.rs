@@ -13,8 +13,8 @@ use thiserror::Error;
 
 use crate::{
     common::io::{
-        open_provider_source_file, open_provider_source_path, OpenedProviderSourceFile,
-        OpenedProviderSourcePath, ProviderSourceDirectory, ProviderSourceRoot,
+        open_provider_source_path, OpenedProviderSourceFile, OpenedProviderSourcePath,
+        ProviderSourceDirectory, ProviderSourceRoot,
     },
     provider::provider_path_identity,
     CaptureError,
@@ -97,14 +97,6 @@ impl PartialEq for PiFrozenSource {
 impl Eq for PiFrozenSource {}
 
 impl PiFrozenSource {
-    pub(super) fn open(path: &Path) -> Result<(File, Self), PiNativePathError> {
-        let path = absolute_lexical_path(path)?;
-        let opened = Arc::new(
-            open_provider_source_file(&path).map_err(|error| map_capture_error(&path, error))?,
-        );
-        Self::from_opened(&path, opened)
-    }
-
     pub(super) fn from_opened(
         path: &Path,
         opened: Arc<OpenedProviderSourceFile>,
@@ -205,21 +197,6 @@ impl PiFrozenSource {
     pub(super) fn opened(&self) -> Arc<OpenedProviderSourceFile> {
         Arc::clone(&self.opened)
     }
-}
-
-pub(crate) fn revalidate_pi_source_revision(
-    path: &Path,
-    expected_revision: &str,
-) -> Result<bool, PiNativePathError> {
-    let (_, observed) = match PiFrozenSource::open(path) {
-        Ok(observed) => observed,
-        Err(PiNativePathError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
-            return Ok(false);
-        }
-        Err(PiNativePathError::InvalidSource { .. }) => return Ok(false),
-        Err(error) => return Err(error),
-    };
-    Ok(observed.source_revision() == expected_revision)
 }
 
 fn physical_file_id(metadata: &Metadata) -> Option<PiPhysicalFileId> {

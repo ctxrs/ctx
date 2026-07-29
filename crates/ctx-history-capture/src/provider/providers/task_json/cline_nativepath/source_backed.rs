@@ -672,36 +672,6 @@ impl TaskJsonSourceBackedResolver {
         })
     }
 
-    pub(crate) fn hydrate_locator(
-        &self,
-        locator: &SourceRecordLocator,
-    ) -> Result<Vec<u8>, HydrationFailure> {
-        let _ = self.validate_locator_bytes(locator)?;
-        let mut adapter = TaskJsonSourceBackedAdapter::new(self.dialect, &self.selected);
-        let mut provider_bytes = None;
-        while let Some(page) = adapter
-            .next_page()
-            .map_err(|error| hydration_failure(HydrationFailureKind::StaleSourceEvidence, error))?
-        {
-            if provider_bytes.is_none() {
-                provider_bytes = page
-                    .documents
-                    .iter()
-                    .find(|document| &document.locator == locator)
-                    .map(|document| document.body.as_bytes().to_vec());
-            }
-        }
-        adapter
-            .finish()
-            .map_err(|error| hydration_failure(HydrationFailureKind::StaleSourceEvidence, error))?;
-        provider_bytes.ok_or_else(|| {
-            hydration_failure(
-                HydrationFailureKind::MissingRecord,
-                "task locator no longer projects a retained lexical event",
-            )
-        })
-    }
-
     fn validate_locator_bytes(
         &self,
         locator: &SourceRecordLocator,

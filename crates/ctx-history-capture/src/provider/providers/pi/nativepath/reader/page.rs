@@ -196,8 +196,8 @@ impl PiNativeScanner {
                 .saturating_add(expected.bytes.len())
                 .saturating_add(next.bytes.len()),
         };
-        let page = NativeIngestionPage::new(expected, next, terminal, accounting, core)
-            .map_err(page_error)?;
+        let page =
+            NativeIngestionPage::new(expected, next, accounting, core).map_err(page_error)?;
         self.stats.core_pages = self.stats.core_pages.saturating_add(1);
         self.stats.peak_core_page_units = self
             .stats

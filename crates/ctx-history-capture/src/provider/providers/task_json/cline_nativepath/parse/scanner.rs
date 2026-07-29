@@ -50,15 +50,6 @@ impl ClineArrayScanner {
                 true,
             ));
         };
-        if let Some(error) =
-            injected_io_failure(ClineInjectedIoOperation::ComponentOpen, &observation.path)
-        {
-            return Err(classify_io_error(
-                observation,
-                "open component stream",
-                error,
-            ));
-        }
         let opened = expected.opened();
         let declared_len = opened.len();
         if declared_len != expected.len() {
@@ -121,16 +112,6 @@ impl ClineArrayScanner {
                 ClineNativePathError::Invariant {
                     message: "Cline array scanner advanced after its terminal boundary".to_owned(),
                 },
-            ));
-        }
-        if let Some(error) = injected_io_failure(
-            ClineInjectedIoOperation::ComponentRead,
-            &self.observation.path,
-        ) {
-            return Err(classify_io_error(
-                &self.observation,
-                "read component stream",
-                error,
             ));
         }
         if !self.started {
@@ -429,7 +410,6 @@ pub(in super::super) fn parse_scanned_item(
             max_item_units,
         },
         scanned.native_index,
-        scanned.byte_start,
         native_id_occurrences,
         stats,
     );

@@ -1,50 +1,5 @@
 use super::*;
 
-pub(in super::super) fn page_identity(
-    source: &ClineFileSourceIdentity,
-    revision: &ClineCertifiedRevision,
-    expected: &ClinePageFrontier,
-    next: &ClinePageFrontier,
-    terminal: bool,
-    core_fingerprint: &[u8; 32],
-) -> ClineNativePageIdentity {
-    let mut hasher = Sha256::new();
-    hasher.update(PAGE_IDENTITY_DOMAIN);
-    hash_field(&mut hasher, source.provider.as_bytes());
-    hash_field(&mut hasher, source.stable_id.as_bytes());
-    hash_field(&mut hasher, &revision.revision_sha256);
-    hash_frontier(&mut hasher, expected);
-    hash_frontier(&mut hasher, next);
-    hash_field(&mut hasher, core_fingerprint);
-    hasher.update([u8::from(terminal)]);
-    ClineNativePageIdentity(hasher.finalize().into())
-}
-
-pub(in super::super) fn core_payload_fingerprint(
-    component: ClineComponent,
-    transition: ClineComponentTransition,
-    session: Option<&ClineSessionRow>,
-    items: &[ClineItemCheckpoint],
-    rejections: &[ClineItemRejection],
-    terminal: bool,
-) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(b"ctx-cline-nativepath-core-payload-v1\0");
-    hasher.update([component as u8, transition_tag(transition)]);
-    if let Some(session) = session {
-        hasher.update(session.metadata_hash);
-    }
-    for item in items {
-        hasher.update(item.semantic_hash);
-    }
-    for rejection in rejections {
-        hasher.update([rejection.kind as u8]);
-        hasher.update(rejection.native_index.to_le_bytes());
-    }
-    hasher.update([u8::from(terminal)]);
-    hasher.finalize().into()
-}
-
 pub(in super::super) fn estimated_event_bytes(row: &ClineEventRow) -> usize {
     // This is the exact size of the provider-owned length-prefixed page
     // encoding. Strings and byte arrays carry an eight-byte length. Optional
@@ -108,14 +63,6 @@ pub(in super::super) fn estimated_session_bytes(session: &ClineSessionRow) -> us
         .saturating_add(32)
 }
 
-pub(in super::super) fn estimated_metadata_checkpoint_bytes(
-    checkpoint: &ClineMetadataCheckpoint,
-) -> usize {
-    estimated_observation_bytes(&checkpoint.observation)
-        .saturating_add(1 + usize::from(checkpoint.content_sha256.is_some()) * 32)
-        .saturating_add(estimated_session_bytes(&checkpoint.session))
-}
-
 pub(in super::super) fn estimated_rejection_bytes(rejection: &ClineItemRejection) -> usize {
     1_usize
         .saturating_add(8)
@@ -125,51 +72,10 @@ pub(in super::super) fn estimated_rejection_bytes(rejection: &ClineItemRejection
         .saturating_add(encoded_str(&rejection.detail))
 }
 
-pub(in super::super) fn estimated_observation_bytes(
-    observation: &ClineComponentObservation,
-) -> usize {
-    1_usize
-        .saturating_add(encoded_bytes(
-            observation.path.as_os_str().as_encoded_bytes(),
-        ))
-        .saturating_add(1)
-        .saturating_add(match &observation.state {
-            super::super::source::ClineObservedFileState::Missing => 0,
-            super::super::source::ClineObservedFileState::Present(stamp) => {
-                8_usize.saturating_add(encoded_str(&stamp.token()))
-            }
-            super::super::source::ClineObservedFileState::Unavailable(message) => {
-                encoded_str(message)
-            }
-        })
-}
-
 pub(in super::super) fn estimated_source_bytes(source: &ClineFileSourceIdentity) -> usize {
-    encoded_str(source.provider)
-        .saturating_add(encoded_str(source.task.as_str()))
-        .saturating_add(1)
-        .saturating_add(8)
-        .saturating_add(
-            source
-                .task_aliases
-                .iter()
-                .map(|alias| encoded_str(alias.as_str()))
-                .sum::<usize>(),
-        )
-        .saturating_add(1)
-        .saturating_add(encoded_bytes(
-            source.canonical_path.as_os_str().as_encoded_bytes(),
-        ))
-        .saturating_add(encoded_str(&source.stable_id))
-        .saturating_add(8)
-}
-
-pub(in super::super) fn estimated_revision_bytes(revision: &ClineCertifiedRevision) -> usize {
-    32_usize.saturating_add(encoded_str(&revision.observed_stamp_token))
-}
-
-pub(in super::super) fn estimated_frontier_bytes(_frontier: &ClinePageFrontier) -> usize {
-    4 + 8 + 32
+    1_usize.saturating_add(encoded_bytes(
+        source.canonical_path.as_os_str().as_encoded_bytes(),
+    ))
 }
 
 fn estimated_native_key_bytes(key: &ClineNativeItemKey) -> usize {
@@ -208,27 +114,9 @@ fn encoded_option_u64(value: Option<u64>) -> usize {
     1 + usize::from(value.is_some()) * 8
 }
 
-fn transition_tag(transition: ClineComponentTransition) -> u8 {
-    match transition {
-        ClineComponentTransition::Cold => 0,
-        ClineComponentTransition::Unchanged => 1,
-        ClineComponentTransition::Append { .. } => 2,
-        ClineComponentTransition::Rewrite => 3,
-        ClineComponentTransition::ControlOnlyRewrite => 5,
-        ClineComponentTransition::LogicalEmpty => 6,
-        ClineComponentTransition::MissingPhysical => 7,
-    }
-}
-
 pub(super) fn hash_field(hasher: &mut Sha256, bytes: &[u8]) {
     hasher.update((bytes.len() as u64).to_le_bytes());
     hasher.update(bytes);
-}
-
-fn hash_frontier(hasher: &mut Sha256, frontier: &ClinePageFrontier) {
-    hasher.update(frontier.version.to_le_bytes());
-    hasher.update(frontier.next_native_index.to_le_bytes());
-    hasher.update(frontier.prefix_semantic_sha256);
 }
 
 pub(super) fn hash_native_key(hasher: &mut Sha256, key: &ClineNativeItemKey) {

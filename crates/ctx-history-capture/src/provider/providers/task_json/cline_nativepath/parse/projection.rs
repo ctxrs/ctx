@@ -8,13 +8,11 @@ pub(super) struct ParsedProjection<'a> {
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn parse_api_projection<'a>(
-    raw_item: &'a RawValue,
     envelope: &RawEnvelope<'a>,
     component: ClineEventComponent,
     identity: &ClineTaskIdentity,
     native_key: &ClineNativeItemKey,
     native_index: u64,
-    item_byte_start: u64,
 ) -> Result<ParsedProjection<'a>, (ClineItemRejectionKind, String)> {
     let discriminators = envelope.normalized_discriminators().collect::<Vec<_>>();
     let top_result = discriminators
@@ -47,26 +45,20 @@ pub(super) fn parse_api_projection<'a>(
         {
             let content = envelope.content.expect("checked Cline result content");
             push_explicit_result_blocks(
-                raw_item,
                 content,
                 OutputObservationKind::Tool,
                 envelope,
-                item_byte_start,
                 &mut projection.outputs,
             )?;
             return Ok(projection);
         }
         push_explicit_outputs(
-            raw_item,
             envelope.direct_result_body(),
             OutputCandidateContext {
                 kind: OutputObservationKind::Tool,
                 base_sub_index: 0,
                 call_id: envelope.call_id.clone(),
                 outcome: envelope.outcome(),
-                occurred_at_millis: envelope.occurred_at_millis,
-                item_start: item_byte_start,
-                fallback_start: item_byte_start,
             },
             &mut projection.outputs,
         )?;
@@ -96,11 +88,9 @@ pub(super) fn parse_api_projection<'a>(
         for (index, block) in blocks.into_iter().enumerate() {
             let sub_index = u32::try_from(index).unwrap_or(u32::MAX);
             parse_api_block(
-                raw_item,
                 block,
                 context,
                 sub_index,
-                item_byte_start,
                 positive_conversation,
                 envelope,
                 &mut projection,
@@ -110,11 +100,9 @@ pub(super) fn parse_api_projection<'a>(
     }
     if content_text.starts_with('{') {
         parse_api_block(
-            raw_item,
             content,
             context,
             0,
-            item_byte_start,
             positive_conversation,
             envelope,
             &mut projection,
@@ -127,13 +115,10 @@ pub(super) fn parse_api_projection<'a>(
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn parse_api_block<'a>(
-    raw_item: &'a RawValue,
     raw_block: &'a RawValue,
     context: ClineEventContext<'_>,
     sub_index: u32,
-    item_byte_start: u64,
     retain_text: bool,
     outer: &RawEnvelope<'a>,
     projection: &mut ParsedProjection<'a>,
@@ -180,10 +165,6 @@ pub(super) fn parse_api_block<'a>(
     let is_call = discriminators
         .iter()
         .any(|value| matches!(value.as_str(), "tooluse" | "functioncall" | "toolcall"));
-    let block_start = (raw_block.get().as_ptr() as usize)
-        .checked_sub(raw_item.get().as_ptr() as usize)
-        .and_then(|offset| item_byte_start.checked_add(offset as u64))
-        .unwrap_or(item_byte_start);
     if is_result {
         let block_outcome = block.outcome();
         let outcome = if block_outcome.outcome == OutputOutcome::Unknown
@@ -195,16 +176,12 @@ pub(super) fn parse_api_block<'a>(
             block_outcome
         };
         push_explicit_outputs(
-            raw_item,
             block.block_result_body(),
             OutputCandidateContext {
                 kind: OutputObservationKind::Tool,
                 base_sub_index: sub_index.saturating_mul(1_024),
                 call_id: block.call_id.clone().or_else(|| outer.call_id.clone()),
                 outcome,
-                occurred_at_millis: block.occurred_at_millis.or(context.occurred_at_millis),
-                item_start: item_byte_start,
-                fallback_start: block_start,
             },
             &mut projection.outputs,
         )?;
@@ -265,12 +242,10 @@ pub(super) fn extract_file_touches(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn parse_ui_projection<'a>(
-    raw_item: &'a RawValue,
     envelope: &RawEnvelope<'a>,
     identity: &ClineTaskIdentity,
     native_key: &ClineNativeItemKey,
     native_index: u64,
-    byte_start: u64,
 ) -> Result<ParsedProjection<'a>, (ClineItemRejectionKind, String)> {
     let discriminators = envelope.normalized_discriminators().collect::<Vec<_>>();
     let command = discriminators.iter().any(|value| {
@@ -297,25 +272,19 @@ pub(super) fn parse_ui_projection<'a>(
             .filter(|content| content.get().trim_start().starts_with('['))
         {
             push_explicit_result_blocks(
-                raw_item,
                 content,
                 OutputObservationKind::Command,
                 envelope,
-                byte_start,
                 &mut projection.outputs,
             )?;
         } else {
             push_explicit_outputs(
-                raw_item,
                 envelope.direct_result_body(),
                 OutputCandidateContext {
                     kind: OutputObservationKind::Command,
                     base_sub_index: 0,
                     call_id: envelope.call_id.clone(),
                     outcome: envelope.outcome(),
-                    occurred_at_millis: envelope.occurred_at_millis,
-                    item_start: byte_start,
-                    fallback_start: byte_start,
                 },
                 &mut projection.outputs,
             )?;

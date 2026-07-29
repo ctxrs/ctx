@@ -3,10 +3,8 @@ use super::*;
 impl ClineNativeReader {
     /// Metadata-only construction. No provider component is opened or parsed.
     pub(crate) fn new(discovery: ClineDiscovery, previous: &[ClineTaskCheckpoint]) -> Self {
-        let dialect = discovery.dialect();
         Self {
             discovery,
-            dialect,
             previous_by_path: previous
                 .iter()
                 .cloned()
@@ -20,27 +18,7 @@ impl ClineNativeReader {
             live_checkpoints: Vec::new(),
             stats: ClinePublicationStats::default(),
             catalog_finished: false,
-            #[cfg(test)]
-            before_exposure: None,
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_before_exposure_hook(
-        &mut self,
-        hook: impl FnMut(&Path, ClineComponent) + 'static,
-    ) {
-        self.before_exposure = Some(Box::new(hook));
-    }
-
-    #[cfg(test)]
-    pub(crate) fn stats(&self) -> ClinePublicationStats {
-        self.stats
-    }
-
-    #[cfg(test)]
-    pub(crate) fn outcomes(&self) -> &[ClineComponentReadOutcome] {
-        &self.outcomes
     }
 
     /// Advances at most one bounded native item into one certified page.
@@ -114,7 +92,6 @@ impl ClineNativeReader {
                     Ok(hydrated) => {
                         let parsed =
                             parse_root_index(&hydrated, &root_observation, &mut self.stats);
-                        self.run_before_exposure(&root_observation.path, ClineComponent::RootIndex);
                         match root_observation.post_parse_revalidate() {
                             Ok(true) => match parsed {
                                 Ok(entries) => ClineCatalogIndex::Parsed {

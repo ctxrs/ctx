@@ -35,8 +35,8 @@ use super::{
         CLINE_NATIVE_PAGE_MAX_UNITS,
     },
     source::{
-        capture_source_error, injected_io_failure, is_component_local_error, source_io,
-        ClineComponent, ClineComponentObservation, ClineInjectedIoOperation,
+        capture_source_error, is_component_local_error, source_io, ClineComponent,
+        ClineComponentObservation,
     },
     ClineNativePathError,
 };
@@ -78,16 +78,6 @@ impl ClinePinnedContentAuthority {
         };
         if length > maximum_bytes {
             return Ok(false);
-        }
-        if let Some(error) = injected_io_failure(
-            ClineInjectedIoOperation::ComponentRead,
-            &self.observation.path,
-        ) {
-            return Err(classify_io_error(
-                &self.observation,
-                "certify pinned metadata component",
-                error,
-            ));
         }
         let bytes = self
             .file
@@ -153,11 +143,6 @@ pub(super) fn hydrate_component(
             false,
         ));
     }
-    if let Some(error) =
-        injected_io_failure(ClineInjectedIoOperation::ComponentOpen, &observation.path)
-    {
-        return Err(classify_io_error(observation, "open component", error));
-    }
     let file = expected.opened();
     let declared_len = file.len();
     if declared_len != expected.len() {
@@ -173,11 +158,6 @@ pub(super) fn hydrate_component(
             false,
         )
     })?;
-    if let Some(error) =
-        injected_io_failure(ClineInjectedIoOperation::ComponentRead, &observation.path)
-    {
-        return Err(classify_io_error(observation, "read component", error));
-    }
     let bytes = file
         .read_exact_range(0, length, max_bytes)
         .map_err(|error| classify_capture_error(observation, "read component", error))?;
@@ -202,15 +182,6 @@ pub(super) fn pin_component_content(
             observation,
         )));
     };
-    if let Some(error) =
-        injected_io_failure(ClineInjectedIoOperation::ComponentOpen, &observation.path)
-    {
-        return Err(classify_io_error(
-            observation,
-            "pin metadata component authority",
-            error,
-        ));
-    }
     let file = expected.opened();
     if file.len() != expected.len() || file.revalidate().is_err() {
         return Err(ClineLocalReadError::Local(source_changed_failure(
