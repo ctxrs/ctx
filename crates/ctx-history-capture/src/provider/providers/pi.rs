@@ -12,7 +12,6 @@ pub(crate) const PI_SOURCE_FORMAT: &str = "pi_session_jsonl";
 pub(crate) mod nativepath;
 mod text;
 
-pub(crate) use nativepath::import_pi_nativepath_history;
 use text::{pi_entry_text, pi_message_has_tool_call};
 
 pub(crate) fn pi_complete_content_message_record(

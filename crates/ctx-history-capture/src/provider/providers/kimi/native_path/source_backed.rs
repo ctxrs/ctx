@@ -7,19 +7,20 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::{Read, Seek, SeekFrom},
+    fs::{self, File},
+    io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CertifiedSource, CertifiedSourceInventory,
-    ContentSourceResolver, EventHydrationRequest, EventIdentityInput, HydratedProviderRecord,
-    HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy, NativeItemKey,
-    NativeRecordCoordinate, NativeSessionKey, PositionStability, ProjectionContractError,
-    ScannedSourceCounts, SessionHydrationRequest, SessionIdentityInput, SourceAnchor,
-    SourceInventoryObservation, SourceKey, SourceObservation, SourceRecordLocator,
-    SourceResolverContractError, StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource,
+    CertifiedSourceInventory, ContentSourceResolver, EventHydrationRequest, EventIdentityInput,
+    EventType, HydratedProviderRecord, HydrationFailure, HydrationFailureKind,
+    LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
+    PositionStability, ProjectionContractError, ScannedSourceCounts, SessionHydrationRequest,
+    SessionIdentityInput, SourceAnchor, SourceInventoryObservation, SourceKey, SourceObservation,
+    SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
 };
 use ctx_history_index::{IndexError, LexicalDocument};
 use serde_json::Value;
@@ -28,13 +29,32 @@ use thiserror::Error;
 
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
-    provider::normalization::provider_local_preview,
-    CaptureError, KIMI_CODE_CLI_SOURCE_FORMAT, MAX_PROVIDER_JSONL_LINE_BYTES,
-    PROVIDER_MAX_TEXT_CHARS,
+    provider::{
+        file_touches::{
+            event_type_supports_structured_file_touches,
+            visit_provider_file_touch_drafts_with_limit, MAX_PROVIDER_FILE_TOUCHES_PER_EVENT,
+        },
+        normalization::{
+            provider_local_preview, provider_output_event_is_failure,
+            provider_result_outcome_evidence,
+        },
+        tool_input,
+    },
+    CaptureError, OutputObservationKind, OutputOutcome, KIMI_CODE_CLI_SOURCE_FORMAT,
+    MAX_PROVIDER_JSONL_LINE_BYTES, PROVIDER_MAX_TEXT_CHARS,
 };
 
-use super::super::event::kimi_event_role;
-use super::*;
+use super::super::{
+    event::{
+        kimi_event_role, kimi_event_text, kimi_event_type, kimi_legacy_provider_event_hash,
+        kimi_output_content, kimi_record_timestamp,
+    },
+    layout::{
+        canonical_source_root_for_wire, complete_content_auxiliary_paths, KimiFrozenFileMetadata,
+        KimiWireRoute, KIMI_WIRE_LAYOUT_MAX_AGGREGATE_BYTES,
+    },
+    source::KimiWireObservation,
+};
 
 const KIMI_SOURCE_SCHEMA_VARIANT: &str = "compound-wire-tree-v1";
 const KIMI_SOURCE_ANCHOR_NAMESPACE: &str = "kimi-code-cli-wire-lineage-v1";
@@ -52,6 +72,26 @@ const KIMI_REVISION_DOMAIN: &[u8] = b"ctx.kimi.source-backed.revision.v1\0";
 const KIMI_CONTENT_DOMAIN: &[u8] = b"ctx.kimi.source-backed.content.v1\0";
 const KIMI_ABSENT_AUXILIARY_DIGEST: [u8; 32] = [0; 32];
 const MAX_KIMI_HYDRATED_RECORD_BYTES: u64 = MAX_PROVIDER_JSONL_LINE_BYTES as u64 + 2;
+const KIMI_DISCOVERY_MAX_DEPTH: usize = 16;
+const KIMI_DISCOVERY_MAX_ENTRIES: usize = 65_536;
+
+struct RawLine {
+    bytes: Vec<u8>,
+    observed_bytes: u64,
+    terminated: bool,
+    oversized: bool,
+}
+
+struct KimiInventory {
+    paths: BTreeSet<PathBuf>,
+    source_root: PathBuf,
+    root_missing: bool,
+}
+
+struct KimiOutputClassification {
+    kind: OutputObservationKind,
+    outcome: OutputOutcome,
+}
 
 #[derive(Debug, Error)]
 pub(crate) enum KimiSourceBackedError {
@@ -442,6 +482,153 @@ struct DecodedKimiLocator {
     native_event_id: String,
 }
 
+fn discover_kimi_wire_files(root: &Path) -> KimiSourceBackedResult<KimiInventory> {
+    let metadata = match fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let source_root = canonical_source_root_for_wire(root)
+                .or_else(|_| std::path::absolute(root).map_err(CaptureError::from))?;
+            return Ok(KimiInventory {
+                paths: BTreeSet::new(),
+                source_root,
+                root_missing: true,
+            });
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: root.to_path_buf(),
+            reason: "Kimi transcript roots must not be symbolic links",
+        }
+        .into());
+    }
+    if metadata.is_file() {
+        KimiWireRoute::parse(root)?;
+        let canonical = fs::canonicalize(root)?;
+        return Ok(KimiInventory {
+            paths: BTreeSet::from([canonical.clone()]),
+            source_root: canonical_source_root_for_wire(&canonical)?,
+            root_missing: false,
+        });
+    }
+    if !metadata.is_dir() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: root.to_path_buf(),
+            reason: "Kimi transcript root is neither a file nor directory",
+        }
+        .into());
+    }
+    let mut paths = BTreeSet::new();
+    let mut source_roots = BTreeSet::new();
+    let mut entries = 0_usize;
+    discover_kimi_directory(root, 0, &mut entries, &mut paths, &mut source_roots)?;
+    if source_roots.len() > 1 {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: root.to_path_buf(),
+            reason: "Kimi transcript selection spans multiple canonical layout roots",
+        }
+        .into());
+    }
+    Ok(KimiInventory {
+        paths,
+        source_root: source_roots
+            .into_iter()
+            .next()
+            .unwrap_or(fs::canonicalize(root)?),
+        root_missing: false,
+    })
+}
+
+fn discover_kimi_directory(
+    directory: &Path,
+    depth: usize,
+    entries: &mut usize,
+    paths: &mut BTreeSet<PathBuf>,
+    source_roots: &mut BTreeSet<PathBuf>,
+) -> KimiSourceBackedResult<()> {
+    if depth > KIMI_DISCOVERY_MAX_DEPTH {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: directory.to_path_buf(),
+            reason: "Kimi transcript tree exceeds the discovery depth bound",
+        }
+        .into());
+    }
+    let mut children = fs::read_dir(directory)?.collect::<std::result::Result<Vec<_>, _>>()?;
+    children.sort_by_key(fs::DirEntry::file_name);
+    for child in children {
+        *entries = entries.saturating_add(1);
+        if *entries > KIMI_DISCOVERY_MAX_ENTRIES {
+            return Err(CaptureError::InvalidProviderTranscriptPath {
+                path: directory.to_path_buf(),
+                reason: "Kimi transcript tree exceeds the discovery entry bound",
+            }
+            .into());
+        }
+        let path = child.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
+            discover_kimi_directory(&path, depth.saturating_add(1), entries, paths, source_roots)?;
+        } else if metadata.is_file() && KimiWireRoute::parse(&path).is_ok() {
+            let canonical = fs::canonicalize(path)?;
+            KimiWireRoute::parse(&canonical)?;
+            source_roots.insert(canonical_source_root_for_wire(&canonical)?);
+            paths.insert(canonical);
+        }
+    }
+    Ok(())
+}
+
+fn read_bounded_line(
+    reader: &mut BufReader<File>,
+    hasher: &mut Sha256,
+    max_bytes: usize,
+) -> KimiSourceBackedResult<RawLine> {
+    let mut bytes = Vec::new();
+    let mut observed_bytes = 0_u64;
+    let mut terminated = false;
+    let mut oversized = false;
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            break;
+        }
+        let take = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |index| index.saturating_add(1));
+        let chunk = &available[..take];
+        hasher.update(chunk);
+        observed_bytes = observed_bytes
+            .checked_add(chunk.len() as u64)
+            .ok_or(KimiSourceBackedError::CountOverflow)?;
+        if bytes.len() < max_bytes.saturating_add(2) {
+            let remaining = max_bytes.saturating_add(2).saturating_sub(bytes.len());
+            bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        }
+        oversized |= observed_bytes > max_bytes as u64;
+        terminated = chunk.last() == Some(&b'\n');
+        reader.consume(take);
+        if terminated {
+            break;
+        }
+    }
+    Ok(RawLine {
+        bytes,
+        observed_bytes,
+        terminated,
+        oversized,
+    })
+}
+
+fn json_record_bytes(bytes: &[u8]) -> &[u8] {
+    let bytes = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+    bytes.strip_suffix(b"\r").unwrap_or(bytes)
+}
+
 fn bind_snapshot(
     inventory: KimiInventory,
     authority: &ProviderSourceRoot,
@@ -508,8 +695,7 @@ fn admit_compound_leaf(
 ) -> KimiSourceBackedResult<AdmittedKimiCompound> {
     let wire = authority.open_file(relative_path)?;
     let display_path = authority.named_path().join(relative_path);
-    let (state_path, index_path) =
-        super::super::layout::complete_content_auxiliary_paths(&display_path)?;
+    let (state_path, index_path) = complete_content_auxiliary_paths(&display_path)?;
     let state_relative = state_path
         .strip_prefix(authority.named_path())
         .map_err(|_| KimiSourceBackedError::SourceChanged)?;
@@ -587,15 +773,15 @@ fn read_auxiliary_bytes(
     let Some(file) = file else {
         return Ok(None);
     };
-    if file.len() > super::super::layout::KIMI_WIRE_LAYOUT_MAX_AGGREGATE_BYTES as u64 {
+    if file.len() > KIMI_WIRE_LAYOUT_MAX_AGGREGATE_BYTES as u64 {
         return Err(CaptureError::InvalidPayload(
             "Kimi source-backed auxiliary file exceeds its bounded layout limit".to_owned(),
         )
         .into());
     }
-    Ok(Some(file.read_all_bounded(
-        super::super::layout::KIMI_WIRE_LAYOUT_MAX_AGGREGATE_BYTES,
-    )?))
+    Ok(Some(
+        file.read_all_bounded(KIMI_WIRE_LAYOUT_MAX_AGGREGATE_BYTES)?,
+    ))
 }
 
 fn auxiliary_snapshot(
@@ -839,12 +1025,9 @@ fn lexical_document(
         Some(source_revision_digest),
         Sha256::digest(record_bytes).into(),
     )?;
-    let touches = kimi_file_touches(
+    let touched_files = kimi_touched_paths(
         value,
         event_type,
-        occurred_at,
-        Some(ordinal),
-        ordinal << 16,
         event_type_supports_structured_file_touches(event_type),
     )?;
     let parent_session_id = compound
@@ -888,18 +1071,14 @@ fn lexical_document(
         body,
         workspace,
         cwd: compound.native.session.cwd.clone(),
-        touched_files: touches
-            .touches
-            .into_iter()
-            .map(|touch| touch.path)
-            .collect(),
+        touched_files,
     }))
 }
 
 fn kimi_lexical_body(
     value: &Value,
-    ordinal: u64,
-    cwd: Option<&str>,
+    _ordinal: u64,
+    _cwd: Option<&str>,
 ) -> KimiSourceBackedResult<Option<(EventType, String)>> {
     let record_type = value
         .get("type")
@@ -907,16 +1086,9 @@ fn kimi_lexical_body(
         .unwrap_or("unknown");
     let mut event_type = kimi_event_type(record_type, value);
     let body = if event_type == EventType::ToolOutput {
-        let output = kimi_output_metadata(
-            value,
-            usize::try_from(ordinal)
-                .ok()
-                .and_then(|value| value.checked_add(1))
-                .ok_or(KimiSourceBackedError::CountOverflow)?,
-            cwd,
-        );
+        let output = kimi_output_classification(value);
         if !matches!(
-            output.outcome.outcome,
+            output.outcome,
             OutputOutcome::Failure | OutputOutcome::Timeout
         ) {
             return Ok(None);
@@ -933,6 +1105,81 @@ fn kimi_lexical_body(
         return Ok(None);
     }
     Ok(Some((event_type, body)))
+}
+
+fn kimi_touched_paths(
+    value: &Value,
+    event_type: EventType,
+    include_structured_touches: bool,
+) -> KimiSourceBackedResult<Vec<String>> {
+    if !matches!(
+        event_type,
+        EventType::ToolCall
+            | EventType::ToolOutput
+            | EventType::CommandOutput
+            | EventType::FileTouched
+    ) {
+        return Ok(Vec::new());
+    }
+    let mut paths = Vec::new();
+    visit_provider_file_touch_drafts_with_limit(
+        value,
+        include_structured_touches,
+        MAX_PROVIDER_FILE_TOUCHES_PER_EVENT,
+        |(_, draft)| {
+            paths.push(draft.path);
+            Ok::<(), CaptureError>(())
+        },
+    )?;
+    Ok(paths)
+}
+
+fn kimi_output_classification(value: &Value) -> KimiOutputClassification {
+    let event = value.get("event").unwrap_or(value);
+    let tool_name = event
+        .get("toolName")
+        .or_else(|| event.get("tool_name"))
+        .or_else(|| event.get("name"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("tool");
+    let kind = if tool_input::is_command_tool(&tool_name.to_ascii_lowercase()) {
+        OutputObservationKind::Command
+    } else {
+        OutputObservationKind::Tool
+    };
+    let outcome = if kimi_value_timed_out(event) {
+        OutputOutcome::Timeout
+    } else if provider_output_event_is_failure(event) {
+        OutputOutcome::Failure
+    } else if provider_result_outcome_evidence(EventType::ToolOutput, event).as_str()
+        == Some("success")
+    {
+        OutputOutcome::Success
+    } else {
+        OutputOutcome::Unknown
+    };
+    KimiOutputClassification { kind, outcome }
+}
+
+fn kimi_value_timed_out(value: &Value) -> bool {
+    match value {
+        Value::Array(values) => values.iter().any(kimi_value_timed_out),
+        Value::Object(values) => {
+            values.iter().any(|(key, value)| {
+                matches!(key.as_str(), "timed_out" | "timedOut" | "timeout")
+                    && value.as_bool().unwrap_or(false)
+                    || matches!(key.as_str(), "status" | "state" | "outcome")
+                        && value.as_str().is_some_and(|value| {
+                            matches!(
+                                value.trim().to_ascii_lowercase().as_str(),
+                                "timeout" | "timed_out" | "timedout"
+                            )
+                        })
+            }) || values.values().any(kimi_value_timed_out)
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
+    }
 }
 
 fn decode_locator(

@@ -104,8 +104,7 @@ pub(super) struct KiroFileTouch {
 }
 
 /// Core may retain prompts, assistant prose, and tool-call inputs, but never
-/// provider output/result bodies. Output-Pro replays those independently from
-/// the native SQLite row when the schema carries them.
+/// provider output/result bodies.
 pub(super) fn kiro_core_value(value: &Value) -> Value {
     match value {
         Value::Array(values) => Value::Array(values.iter().map(kiro_core_value).collect()),

@@ -5,14 +5,15 @@ use std::{
 };
 
 use ctx_history_core::{
-    EventHydrationRequest, LocatorRevisionPolicy, NativeRecordCoordinate, TypedKey,
+    EventHydrationRequest, HydrationFailureKind, LocatorRevisionPolicy, NativeRecordCoordinate,
+    TypedKey,
 };
 
 use crate::{
     provider::importer::provider_path_identity, test_support_paths::tempdir, ProviderAdapterContext,
 };
 
-use super::*;
+use super::{reader::PiSourceLifecycle, *};
 
 fn context(root: &Path) -> ProviderAdapterContext {
     ProviderAdapterContext {
@@ -259,4 +260,101 @@ fn historical_omp_root_is_explicit_only() {
     .unwrap();
     assert_eq!(projection.inventory.observed_sources(), 1);
     assert_eq!(documents.len(), 1);
+}
+
+#[test]
+fn source_backed_rewrite_truncate_delete_unavailable_and_stale_evidence_fail_closed() {
+    let temp = tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    fs::create_dir_all(&root).unwrap();
+    let path = root.join("lifecycle.jsonl");
+    let session_id = "pi-lifecycle-session";
+    write_session(
+        &path,
+        session_id,
+        None,
+        &[
+            message("stable-message", "original body", 1),
+            message("removed-message", "removed by truncate", 2),
+        ],
+    );
+
+    let winning = PiSourceBackedRoot::winning(&root).unwrap();
+    let mut cold_documents = Vec::new();
+    let cold = project_pi_source_backed_root_cold(&winning, context(&root), |page| {
+        cold_documents.extend(page.documents)
+    })
+    .unwrap();
+    let cold_source = cold.sources.into_iter().next().unwrap();
+    let original = cold_documents
+        .into_iter()
+        .find(|document| document.body == "original body")
+        .unwrap();
+    let original_request =
+        EventHydrationRequest::new(original.event_id, original.locator.clone()).unwrap();
+
+    write_session(
+        &path,
+        session_id,
+        None,
+        &[
+            message("stable-message", "rewritten full body", 1),
+            message("removed-message", "removed by truncate", 2),
+        ],
+    );
+    let mut rewrite_scanner =
+        PiSourceBackedScanner::open(&path, context(&root), Some(cold_source.certificate.clone()))
+            .unwrap();
+    let mut rewrite_documents = Vec::new();
+    while let Some(page) = rewrite_scanner.next_page().unwrap() {
+        rewrite_documents.extend(page.documents);
+    }
+    let rewritten = rewrite_scanner.finish().unwrap();
+    assert_eq!(rewritten.lifecycle, PiSourceLifecycle::Rewrite);
+    let rewritten_stable = rewrite_documents
+        .iter()
+        .find(|document| document.body == "rewritten full body")
+        .unwrap();
+    assert_eq!(rewritten_stable.event_id, original.event_id);
+    assert_eq!(rewritten_stable.session_id, original.session_id);
+    assert_eq!(rewritten_stable.source, original.source);
+
+    let rewritten_resolver = PiSourceBackedResolver::new([rewritten.route]).unwrap();
+    let stale = rewritten_resolver
+        .hydrate_message(&original_request)
+        .unwrap_err();
+    assert_eq!(stale.kind, HydrationFailureKind::StaleRecordEvidence);
+
+    write_session(
+        &path,
+        session_id,
+        None,
+        &[message("stable-message", "short", 1)],
+    );
+    let mut truncate_scanner =
+        PiSourceBackedScanner::open(&path, context(&root), Some(cold_source.certificate)).unwrap();
+    let mut truncated_documents = Vec::new();
+    while let Some(page) = truncate_scanner.next_page().unwrap() {
+        truncated_documents.extend(page.documents);
+    }
+    let truncated = truncate_scanner.finish().unwrap();
+    assert_eq!(truncated.lifecycle, PiSourceLifecycle::Truncate);
+    assert_eq!(truncated_documents.len(), 1);
+    assert_eq!(truncated_documents[0].event_id, original.event_id);
+    assert_eq!(truncated_documents[0].body, "short");
+
+    fs::remove_file(&path).unwrap();
+    assert!(matches!(
+        PiSourceBackedScanner::open(&path, context(&root), Some(truncated.certificate)),
+        Err(PiSourceBackedError::SourceDeleted(deleted)) if deleted == path
+    ));
+
+    let unavailable = PiSourceBackedResolver::new([])
+        .unwrap()
+        .hydrate_message(&original_request)
+        .unwrap_err();
+    assert_eq!(
+        unavailable.kind,
+        HydrationFailureKind::TemporarilyUnavailable
+    );
 }

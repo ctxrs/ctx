@@ -2,7 +2,6 @@ use super::*;
 
 pub(super) struct PrefixVerification {
     pub(super) core_valid: bool,
-    pub(super) output_valid: bool,
     pub(super) states: Vec<(u64, Sha256)>,
     pub(super) headers: Vec<(u64, PiNativeSessionHeader)>,
 }
@@ -11,12 +10,10 @@ pub(super) fn verify_planned_prefixes(
     reader: &mut BufReader<fs::File>,
     source: &PiFrozenSource,
     core: Option<&LanePlan>,
-    output: Option<&LanePlan>,
     stats: &mut PiNativeScanStats,
 ) -> Result<PrefixVerification, PiNativePathError> {
-    let targets = [core, output]
+    let targets = core
         .into_iter()
-        .flatten()
         .filter(|plan| plan.verify_prefix)
         .map(|plan| plan.checkpoint.complete_offset)
         .collect::<Vec<_>>();
@@ -76,7 +73,6 @@ pub(super) fn verify_planned_prefixes(
     };
     Ok(PrefixVerification {
         core_valid: core.is_none() || valid(core),
-        output_valid: output.is_none() || valid(output),
         states,
         headers,
     })
@@ -285,120 +281,6 @@ pub(super) fn might_be_session_header(bytes: &[u8]) -> bool {
     bytes
         .windows(b"session".len())
         .any(|window| window == b"session")
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn output_observation(
-    header: &PiNativeSessionHeader,
-    entry: &Value,
-    event_type: EventType,
-    ordinal: u64,
-    line_number: u64,
-    byte_start: u64,
-    byte_end_exclusive: u64,
-    locator_source_item: &[u8],
-    occurred_at: chrono::DateTime<Utc>,
-    command: Option<crate::provider::importer::OutputCommandContext>,
-    outcome: crate::provider::importer::OutputOutcomeMetadata,
-    content: &str,
-) -> Result<ProOutputObservation, PiNativePathError> {
-    let line_number_usize =
-        usize::try_from(line_number).map_err(|_| PiNativePathError::PositionOverflow)?;
-    let source_item_len = u32::try_from(locator_source_item.len())
-        .map_err(|_| PiNativePathError::PositionOverflow)?;
-    let mut locator = Vec::with_capacity(20_usize.saturating_add(locator_source_item.len()));
-    locator.extend_from_slice(&source_item_len.to_be_bytes());
-    locator.extend_from_slice(locator_source_item);
-    locator.extend_from_slice(&byte_start.to_be_bytes());
-    locator.extend_from_slice(&byte_end_exclusive.to_be_bytes());
-    Ok(ProOutputObservation {
-        kind: if event_type == EventType::CommandOutput {
-            OutputObservationKind::Command
-        } else {
-            OutputObservationKind::Tool
-        },
-        coordinate: OutputNativeCoordinate {
-            unit_key: format!("line-{line_number}:output"),
-            native_sequence: ordinal,
-            native_record_id: Some(pi_output_native_record_id(entry, line_number_usize)),
-            source_record_ordinal: Some(ordinal),
-            source_record_subrecord_index: Some(0),
-            byte_start: Some(byte_start),
-            byte_end_exclusive: Some(byte_end_exclusive),
-        },
-        occurred_at_unix_ms: Some(occurred_at.timestamp_millis()),
-        associations: OutputAssociations {
-            direct_session_id: header.id.clone(),
-            root_session_id: header.id.clone(),
-            parent_session_id: None,
-            provider_session_id: Some(header.id.clone()),
-            agent_id: None,
-            repository: None,
-        },
-        call_id: pi_output_call_id(entry),
-        command,
-        outcome,
-        locator: OutputSourceLocator {
-            version: 1,
-            kind: PI_OUTPUT_LOCATOR_KIND.to_owned(),
-            payload: locator,
-        },
-        content: content.as_bytes().to_vec(),
-    })
-}
-
-pub(super) fn output_estimated_bytes_for(output: &ProOutputObservation) -> usize {
-    let associations = &output.associations;
-    let repository_bytes = associations.repository.as_ref().map_or(0, |repository| {
-        repository
-            .repository_id
-            .len()
-            .saturating_add(repository.checkout_id.as_ref().map_or(0, String::len))
-            .saturating_add(repository.worktree_id.as_ref().map_or(0, String::len))
-            .saturating_add(repository.object_format.as_ref().map_or(0, String::len))
-    });
-    let command_bytes = output.command.as_ref().map_or(0, |command| {
-        command
-            .tool_name
-            .len()
-            .saturating_add(command.command.len())
-            .saturating_add(command.working_directory.as_ref().map_or(0, String::len))
-    });
-    let text_bytes = output
-        .coordinate
-        .unit_key
-        .len()
-        .saturating_add(
-            output
-                .coordinate
-                .native_record_id
-                .as_ref()
-                .map_or(0, String::len),
-        )
-        .saturating_add(associations.direct_session_id.len())
-        .saturating_add(associations.root_session_id.len())
-        .saturating_add(
-            associations
-                .parent_session_id
-                .as_ref()
-                .map_or(0, String::len),
-        )
-        .saturating_add(
-            associations
-                .provider_session_id
-                .as_ref()
-                .map_or(0, String::len),
-        )
-        .saturating_add(associations.agent_id.as_ref().map_or(0, String::len))
-        .saturating_add(repository_bytes)
-        .saturating_add(output.call_id.as_ref().map_or(0, String::len))
-        .saturating_add(command_bytes)
-        .saturating_add(output.locator.kind.len())
-        .saturating_add(output.locator.payload.len());
-    text_bytes
-        .saturating_mul(6)
-        .saturating_add(1_024)
-        .saturating_add(output.content.len())
 }
 
 pub(super) fn event_row_occurred_at(

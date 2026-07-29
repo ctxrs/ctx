@@ -1,9 +1,5 @@
-use std::path::Path;
-
-use ctx_history_store::Store;
-
 use crate::native_source::NativeSqliteValue;
-use crate::{ProviderAdapterContext, ProviderImportOptions, ProviderImportSummary, Result};
+use crate::Result;
 
 mod capture;
 pub(crate) mod native_path;
@@ -44,13 +40,4 @@ pub(crate) fn crush_complete_message(
     values: &[NativeSqliteValue],
 ) -> Result<(String, String, String, String)> {
     projection::crush_complete_message(values)
-}
-
-pub(crate) fn import_crush_nativepath(
-    path: &Path,
-    store: &mut Store,
-    context: ProviderAdapterContext,
-    import_options: ProviderImportOptions,
-) -> Result<ProviderImportSummary> {
-    native_path::import_crush_native_path(path, store, context, import_options)
 }

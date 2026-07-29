@@ -9,8 +9,6 @@ mod layout;
 pub(crate) mod native_path;
 mod source;
 
-pub(crate) use native_path::import_kimi_nativepath_tree;
-
 #[cfg(test)]
 mod tests;
 

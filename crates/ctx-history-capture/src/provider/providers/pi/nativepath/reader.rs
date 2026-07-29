@@ -23,20 +23,14 @@ use crate::{
         file_touches::{
             visit_provider_file_touch_drafts_with_limit, MAX_PACKED_PROVIDER_EVENT_INDEX,
         },
-        importer::{provider_path_identity, provider_source_cursor_stream_for_path},
-        native_ingestion::{
-            NativeIngestionPage, NativePageAccounting, NativeProOutputPage, NativeProReplayPage,
-            NativeSafeFrontier, NativeSourceIdentity,
-        },
+        native_ingestion::{NativeIngestionPage, NativePageAccounting},
         normalization::{
             provider_capped_json, provider_policy_body, provider_policy_event_text,
             provider_result_identifier_evidence, provider_result_outcome_evidence,
         },
     },
-    CaptureError, OutputAssociations, OutputCommandContext, OutputNativeCoordinate,
-    OutputObservationKind, OutputOutcome, OutputOutcomeMetadata, OutputSourceIdentity,
-    OutputSourceLocator, ProOutputObservation, ProOutputSourceDisposition, ProviderAdapterContext,
-    MAX_PROVIDER_JSONL_LINE_BYTES, PROVIDER_MAX_PREVIEW_CHARS, PROVIDER_MAX_TEXT_CHARS,
+    CaptureError, ProviderAdapterContext, MAX_PROVIDER_JSONL_LINE_BYTES,
+    PROVIDER_MAX_PREVIEW_CHARS, PROVIDER_MAX_TEXT_CHARS,
 };
 
 use super::{
@@ -64,12 +58,7 @@ mod support;
 
 use support::*;
 
-const PI_OUTPUT_PAGE_ENCODING_RESERVE: usize = 64 * 1024;
-const PI_OUTPUT_BODY_MAX_BYTES: usize =
-    PI_NATIVE_PAGE_MAX_BYTES - (2 * PI_OUTPUT_PAGE_ENCODING_RESERVE);
 const PI_CORE_TOUCH_LIMIT: usize = PI_NATIVE_PAGE_MAX_UNITS - 1;
-const PI_OUTPUT_MATERIALIZER_REVISION: &str = "pi-output-materializer-v1";
-const PI_OUTPUT_LOCATOR_KIND: &str = "jsonl-source-item-byte-range-v1";
 
 #[derive(Clone, Debug)]
 struct PiNativeSessionHeader {
@@ -172,7 +161,22 @@ fn pi_native_event_payload(entry: &Value, event_type: EventType) -> Value {
     })
 }
 
-fn pi_output_outcome(entry: &Value, event_type: EventType) -> OutputOutcomeMetadata {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PiResultOutcome {
+    Success,
+    Failure,
+    Timeout,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PiResultOutcomeMetadata {
+    outcome: PiResultOutcome,
+    exit_code: Option<i32>,
+    duration_ms: Option<u64>,
+}
+
+fn pi_result_outcome(entry: &Value, event_type: EventType) -> PiResultOutcomeMetadata {
     let message = entry.get("message").unwrap_or(entry);
     let exit_code = message
         .get("exitCode")
@@ -197,65 +201,33 @@ fn pi_output_outcome(entry: &Value, event_type: EventType) -> OutputOutcomeMetad
             });
     let classified = provider_result_outcome_evidence(event_type, entry);
     let outcome = if timed_out {
-        OutputOutcome::Timeout
+        PiResultOutcome::Timeout
     } else {
         match classified.as_str() {
-            Some("success") => OutputOutcome::Success,
-            Some("failure") => OutputOutcome::Failure,
-            _ => OutputOutcome::Unknown,
+            Some("success") => PiResultOutcome::Success,
+            Some("failure") => PiResultOutcome::Failure,
+            _ => PiResultOutcome::Unknown,
         }
     };
-    OutputOutcomeMetadata {
+    PiResultOutcomeMetadata {
         outcome,
         exit_code,
         duration_ms,
     }
 }
 
-fn pi_output_native_record_id(entry: &Value, line_number: usize) -> String {
-    entry
-        .get("id")
-        .and_then(Value::as_str)
-        .filter(|value| valid_pi_output_token(value, 4 * 1024))
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("line-{line_number}"))
-}
-
-fn pi_output_call_id(entry: &Value) -> Option<String> {
-    entry
-        .get("message")
-        .and_then(|message| message.get("toolCallId").or_else(|| message.get("callId")))
-        .and_then(Value::as_str)
-        .filter(|value| valid_pi_output_token(value, 256))
-        .map(str::to_owned)
-}
-
-fn pi_output_command_context(
-    entry: &Value,
-    header: &PiNativeSessionHeader,
-) -> Option<OutputCommandContext> {
-    let message = entry.get("message")?;
+fn pi_command_output_is_supported(entry: &Value) -> bool {
+    let Some(message) = entry.get("message") else {
+        return false;
+    };
     if message.get("role").and_then(Value::as_str) != Some("bashExecution") {
-        return None;
+        return false;
     }
-    let command = message
+    message
         .get("command")
         .and_then(Value::as_str)
         .filter(|command| !command.is_empty() && command.len() <= 64 * 1024)
-        .filter(|command| !command.contains('\0'))?;
-    Some(OutputCommandContext {
-        tool_name: "bash".to_owned(),
-        command: command.to_owned(),
-        working_directory: header.cwd.clone(),
-    })
-}
-
-fn valid_pi_output_token(value: &str, max_bytes: usize) -> bool {
-    !value.is_empty()
-        && value.len() <= max_bytes
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':' | b'/')
-        })
+        .is_some_and(|command| !command.contains('\0'))
 }
 
 fn pi_provider_event_identity_index(header: &PiNativeSessionHeader, entry: &Value) -> Option<u64> {
@@ -279,57 +251,22 @@ fn pi_event_idempotency_key(
         .unwrap_or_else(|| format!("provider-event:pi:{}:{line_number}", header.id))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PiNativeProfile {
-    CoreOnly,
-    CoreAndPro,
-    #[allow(dead_code)]
-    ProReplayOnly,
-}
-
-impl PiNativeProfile {
-    fn includes_core(self) -> bool {
-        matches!(self, Self::CoreOnly | Self::CoreAndPro)
-    }
-
-    fn includes_output(self) -> bool {
-        matches!(self, Self::CoreAndPro | Self::ProReplayOnly)
-    }
-}
-
 #[derive(Clone, Debug, Default)]
 pub(crate) struct PiNativeResume {
     pub(crate) core: Option<PiNativeCheckpoint>,
-    pub(crate) output: Option<PiNativeCheckpoint>,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct PiNativeScanOptions {
     pub(crate) context: ProviderAdapterContext,
-    pub(crate) profile: PiNativeProfile,
     pub(crate) resume: PiNativeResume,
-    pub(crate) inventory_generation: u64,
-    pub(crate) output_source_epoch: u64,
-    pub(crate) rewrite_output_source_epoch: u64,
-    pub(crate) expected_prior_output_source_epoch: Option<u64>,
-    pub(crate) expected_prior_output_frontier: Option<NativeSafeFrontier>,
-    pub(crate) force_output_rewrite: bool,
-    pub(crate) output_materializer_revision: String,
 }
 
 impl PiNativeScanOptions {
-    pub(crate) fn new(context: ProviderAdapterContext, profile: PiNativeProfile) -> Self {
+    pub(crate) fn new(context: ProviderAdapterContext) -> Self {
         Self {
             context,
-            profile,
             resume: PiNativeResume::default(),
-            inventory_generation: 0,
-            output_source_epoch: 0,
-            rewrite_output_source_epoch: 0,
-            expected_prior_output_source_epoch: None,
-            expected_prior_output_frontier: None,
-            force_output_rewrite: false,
-            output_materializer_revision: PI_OUTPUT_MATERIALIZER_REVISION.to_owned(),
         }
     }
 }
@@ -365,18 +302,9 @@ pub(crate) struct PiNativeScanStats {
     pub(crate) native_result_timeout: u64,
     pub(crate) native_result_unknown: u64,
     pub(crate) result_body_extractions: u64,
-    pub(crate) pro_result_body_bytes: u64,
-    pub(crate) successful_or_unknown_core_bodies: u64,
-    pub(crate) successful_or_unknown_core_hashes: u64,
-    pub(crate) successful_or_unknown_core_previews: u64,
-    pub(crate) successful_or_unknown_core_touches: u64,
-    pub(crate) successful_or_unknown_core_fts_documents: u64,
     pub(crate) core_pages: u64,
-    pub(crate) output_pages: u64,
     pub(crate) peak_core_page_units: usize,
     pub(crate) peak_core_page_bytes: usize,
-    pub(crate) peak_output_page_units: usize,
-    pub(crate) peak_output_page_bytes: usize,
     pub(crate) peak_ready_page_bytes: usize,
 }
 
@@ -384,21 +312,13 @@ pub(crate) struct PiNativeScanStats {
 pub(crate) struct PiNativeScanOutcome {
     pub(crate) complete: bool,
     pub(crate) core_lifecycle: Option<PiSourceLifecycle>,
-    pub(crate) output_lifecycle: Option<PiSourceLifecycle>,
     pub(crate) core_checkpoint: Option<PiNativeCheckpoint>,
-    pub(crate) output_checkpoint: Option<PiNativeCheckpoint>,
     pub(crate) stats: PiNativeScanStats,
 }
 
 pub(crate) enum PiNativeOpenOutcome {
     Ready(Box<PiNativeScanner>),
     Deleted,
-}
-
-#[derive(Debug)]
-pub(crate) enum PiNativeOwnedPage {
-    Core(NativeIngestionPage<PiNativeCorePage>),
-    Output(Box<NativeProReplayPage>),
 }
 
 struct LanePlan {
@@ -408,7 +328,7 @@ struct LanePlan {
 }
 
 struct CoreLane {
-    published: PiNativeCheckpoint,
+    emitted: PiNativeCheckpoint,
     current: PiNativeCheckpoint,
     activate_at: u64,
     active: bool,
@@ -416,24 +336,9 @@ struct CoreLane {
     builder: PiCorePageBuilder,
 }
 
-struct OutputLane {
-    published: PiNativeCheckpoint,
-    current: PiNativeCheckpoint,
-    activate_at: u64,
-    active: bool,
-    lifecycle: PiSourceLifecycle,
-    observations: Vec<ProOutputObservation>,
-    estimated_bytes: usize,
-    disposition: ProOutputSourceDisposition,
-    expected_prior_source_epoch: Option<u64>,
-    expected_prior_frontier: Option<NativeSafeFrontier>,
-}
-
 struct PendingRecord {
     core_units: Vec<PiNativeCoreUnit>,
     core_encoded_bytes: usize,
-    output: Option<ProOutputObservation>,
-    output_estimated_bytes: usize,
     checkpoint: PiNativeCheckpoint,
 }
 
@@ -449,27 +354,17 @@ pub(crate) struct PiNativeScanner {
     source: PiFrozenSource,
     context: ProviderAdapterContext,
     source_revision: String,
-    native_source_identity: NativeSourceIdentity,
-    output_source_identity: OutputSourceIdentity,
-    locator_source_item: Vec<u8>,
     core: Option<CoreLane>,
-    output: Option<OutputLane>,
     header: Option<PiNativeSessionHeader>,
     stream_hasher: Sha256,
     scan_offset: u64,
     scan_ordinal: u64,
     pending: Option<PendingRecord>,
     ready_core: Option<NativeIngestionPage<PiNativeCorePage>>,
-    ready_output: Option<NativeProReplayPage>,
     eof: bool,
     complete: bool,
     finished: bool,
-    inventory_generation: u64,
-    output_source_epoch: u64,
-    output_materializer_revision: String,
     stats: PiNativeScanStats,
-    #[cfg(test)]
-    before_exposure: Option<Box<dyn FnMut()>>,
 }
 
 pub(crate) fn open_pi_native_session(
@@ -507,68 +402,23 @@ fn open_pi_native_session_from_frozen(
     options: PiNativeScanOptions,
 ) -> Result<PiNativeOpenOutcome, PiNativePathError> {
     let source_revision = source.source_revision();
-    let cursor_path = options.context.source_path.as_deref().unwrap_or(path);
-    let cursor_path_identity = provider_path_identity(cursor_path)?;
-    let cursor_stream = provider_source_cursor_stream_for_path(
-        CaptureProvider::Pi,
-        PI_SOURCE_FORMAT,
-        &cursor_path_identity,
-    );
-    let canonical_identity = provider_path_identity(&source.canonical_path)?;
-    let locator_source_item = canonical_identity.as_bytes().to_vec();
-    let source_identity = format!("pi-jsonl-file:{canonical_identity}");
-    let native_source_identity =
-        NativeSourceIdentity::new(CaptureProvider::Pi.as_str(), source_identity.clone());
-    let output_source_identity = OutputSourceIdentity {
-        provider: CaptureProvider::Pi.as_str().to_owned(),
-        namespace_id: cursor_stream,
-        source_id: source_identity,
-    };
-
-    let mut core_plan = options
-        .profile
-        .includes_core()
-        .then(|| plan_lane(options.resume.core.as_ref(), &source));
-    let mut output_plan = options
-        .profile
-        .includes_output()
-        .then(|| plan_lane(options.resume.output.as_ref(), &source));
+    let mut core_plan = Some(plan_lane(options.resume.core.as_ref(), &source));
     let mut reader = BufReader::new(file);
     let mut stats = PiNativeScanStats {
         source_file_opens: 1,
         ..PiNativeScanStats::default()
     };
-    let verification = verify_planned_prefixes(
-        &mut reader,
-        &source,
-        core_plan.as_ref(),
-        output_plan.as_ref(),
-        &mut stats,
-    )?;
+    let verification =
+        verify_planned_prefixes(&mut reader, &source, core_plan.as_ref(), &mut stats)?;
     apply_prefix_verification(core_plan.as_mut(), verification.core_valid, &source);
-    apply_prefix_verification(output_plan.as_mut(), verification.output_valid, &source);
 
     let scan_offset = core_plan
         .as_ref()
         .map(|plan| plan.checkpoint.complete_offset)
-        .into_iter()
-        .chain(
-            output_plan
-                .as_ref()
-                .map(|plan| plan.checkpoint.complete_offset),
-        )
-        .min()
         .unwrap_or(0);
     let scan_ordinal = core_plan
         .as_ref()
-        .filter(|plan| plan.checkpoint.complete_offset == scan_offset)
         .map(|plan| plan.checkpoint.next_ordinal)
-        .or_else(|| {
-            output_plan
-                .as_ref()
-                .filter(|plan| plan.checkpoint.complete_offset == scan_offset)
-                .map(|plan| plan.checkpoint.next_ordinal)
-        })
         .unwrap_or(0);
     let stream_hasher = verification
         .states
@@ -594,64 +444,10 @@ fn open_pi_native_session_from_frozen(
         CoreLane {
             activate_at: plan.checkpoint.complete_offset,
             active: plan.checkpoint.complete_offset == scan_offset,
-            published: plan.checkpoint,
+            emitted: plan.checkpoint,
             current,
             lifecycle: plan.lifecycle,
             builder: PiCorePageBuilder::default(),
-        }
-    });
-    let output_lifecycle = output_plan.as_ref().map(|plan| plan.lifecycle);
-    let output_rewrite = options.force_output_rewrite
-        || output_lifecycle.is_some_and(|lifecycle| {
-            matches!(
-                lifecycle,
-                PiSourceLifecycle::Rewrite
-                    | PiSourceLifecycle::Truncate
-                    | PiSourceLifecycle::Replace
-                    | PiSourceLifecycle::Copy
-            )
-        });
-    let output_source_epoch = if output_rewrite {
-        options.rewrite_output_source_epoch
-    } else {
-        options.output_source_epoch
-    };
-    let output = output_plan.map(|plan| {
-        let expected_prior_frontier =
-            options.expected_prior_output_frontier.clone().or_else(|| {
-                options
-                    .resume
-                    .output
-                    .as_ref()
-                    .and_then(|checkpoint| checkpoint.safe_frontier().ok())
-            });
-        let disposition = if options.force_output_rewrite {
-            ProOutputSourceDisposition::Rewrite
-        } else {
-            match plan.lifecycle {
-                PiSourceLifecycle::Fresh | PiSourceLifecycle::Copy => {
-                    ProOutputSourceDisposition::NewSource
-                }
-                PiSourceLifecycle::Rewrite
-                | PiSourceLifecycle::Truncate
-                | PiSourceLifecycle::Replace => ProOutputSourceDisposition::Rewrite,
-                PiSourceLifecycle::NoOp
-                | PiSourceLifecycle::Append
-                | PiSourceLifecycle::Relocate => ProOutputSourceDisposition::AppendOrResume,
-            }
-        };
-        let current = current_checkpoint_for_plan(&plan, &source);
-        OutputLane {
-            activate_at: plan.checkpoint.complete_offset,
-            active: plan.checkpoint.complete_offset == scan_offset,
-            published: plan.checkpoint,
-            current,
-            lifecycle: plan.lifecycle,
-            observations: Vec::new(),
-            estimated_bytes: 0,
-            disposition,
-            expected_prior_source_epoch: options.expected_prior_output_source_epoch,
-            expected_prior_frontier,
         }
     });
 
@@ -660,27 +456,17 @@ fn open_pi_native_session_from_frozen(
         source,
         context: options.context,
         source_revision,
-        native_source_identity,
-        output_source_identity,
-        locator_source_item,
         core,
-        output,
         header,
         stream_hasher,
         scan_offset,
         scan_ordinal,
         pending: None,
         ready_core: None,
-        ready_output: None,
         eof: false,
         complete: false,
         finished: false,
-        inventory_generation: options.inventory_generation,
-        output_source_epoch,
-        output_materializer_revision: options.output_materializer_revision,
         stats,
-        #[cfg(test)]
-        before_exposure: None,
     })))
 }
 
@@ -695,10 +481,6 @@ impl PiNativeScanner {
 
     pub(crate) fn revalidate_source(&self) -> Result<(), PiNativePathError> {
         self.source.fence(self.reader.get_ref())
-    }
-
-    pub(crate) fn core_lifecycle(&self) -> Option<PiSourceLifecycle> {
-        self.core.as_ref().map(|lane| lane.lifecycle)
     }
 
     pub(crate) fn provider_session_id(&self) -> Option<&str> {
@@ -717,17 +499,15 @@ impl PiNativeScanner {
             .and_then(|header| header.parent_session.as_deref())
     }
 
-    pub(crate) fn next_page(&mut self) -> Result<Option<PiNativeOwnedPage>, PiNativePathError> {
+    pub(crate) fn next_page(
+        &mut self,
+    ) -> Result<Option<NativeIngestionPage<PiNativeCorePage>>, PiNativePathError> {
         loop {
-            if self.ready_core.is_some() || self.ready_output.is_some() {
+            if self.ready_core.is_some() {
                 self.fence_before_exposure()?;
                 if let Some(page) = self.ready_core.take() {
                     self.observe_ready_bytes();
-                    return Ok(Some(PiNativeOwnedPage::Core(page)));
-                }
-                if let Some(page) = self.ready_output.take() {
-                    self.observe_ready_bytes();
-                    return Ok(Some(PiNativeOwnedPage::Output(Box::new(page))));
+                    return Ok(Some(page));
                 }
             }
             if self.finished {
@@ -745,15 +525,10 @@ impl PiNativeScanner {
             if self.eof {
                 self.queue_terminal_pages()?;
                 self.finished = self.ready_core.is_none()
-                    && self.ready_output.is_none()
                     && self
                         .core
                         .as_ref()
-                        .is_none_or(|lane| lane.published == lane.current)
-                    && self
-                        .output
-                        .as_ref()
-                        .is_none_or(|lane| lane.published == lane.current);
+                        .is_none_or(|lane| lane.emitted == lane.current);
                 continue;
             }
             self.activate_lanes_at_current_offset()?;
@@ -832,28 +607,13 @@ impl PiNativeScanner {
         self.finished.then(|| PiNativeScanOutcome {
             complete: self.complete,
             core_lifecycle: self.core.as_ref().map(|lane| lane.lifecycle),
-            output_lifecycle: self.output.as_ref().map(|lane| lane.lifecycle),
-            core_checkpoint: self.core.as_ref().map(|lane| lane.published.clone()),
-            output_checkpoint: self.output.as_ref().map(|lane| lane.published.clone()),
+            core_checkpoint: self.core.as_ref().map(|lane| lane.emitted.clone()),
             stats: self.stats.clone(),
         })
     }
 
-    #[cfg(test)]
-    pub(super) fn set_before_exposure(&mut self, hook: impl FnMut() + 'static) {
-        self.before_exposure = Some(Box::new(hook));
-    }
-
     fn activate_lanes_at_current_offset(&mut self) -> Result<(), PiNativePathError> {
         if let Some(lane) = self.core.as_mut() {
-            if !lane.active && lane.activate_at == self.scan_offset {
-                if lane.current.committed_prefix_sha256 != prefix_digest(&self.stream_hasher) {
-                    return Err(PiNativePathError::SourceChanged);
-                }
-                lane.active = true;
-            }
-        }
-        if let Some(lane) = self.output.as_mut() {
             if !lane.active && lane.activate_at == self.scan_offset {
                 if lane.current.committed_prefix_sha256 != prefix_digest(&self.stream_hasher) {
                     return Err(PiNativePathError::SourceChanged);

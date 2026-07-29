@@ -1,90 +1,25 @@
-use super::event_projection::attach_crush_complete_content_locator;
-use super::*;
+use rusqlite::{types::ValueRef, Connection, OptionalExtension};
 
-pub(super) fn read_core_page(
-    source: &CrushNativeSource,
-    context: &ProviderAdapterContext,
-    current: &CrushNativeCursor,
-) -> Result<CrushNativePage> {
-    if current.terminal {
-        return Err(CaptureError::SystemInvariant(
-            "Crush NativePath attempted to read beyond its terminal frontier",
-        ));
-    }
-    if !source.snapshot.revalidate(&source.canonical_path)? {
-        return Err(CaptureError::SourceChangedDuringCapture);
-    }
-    let mut frontier = current.frontier.clone();
-    let row = loop {
-        let candidate = next_candidate(&source.connection, &source.schema, &frontier)?;
-        let Some(candidate) = candidate else {
-            let Some(next_phase) = frontier.phase.next() else {
-                break None;
-            };
-            frontier.phase = next_phase;
-            frontier.after_rowid = None;
-            continue;
-        };
-        let rowid = candidate.rowid;
-        let ordinal = frontier.next_ordinal;
-        frontier.after_rowid = Some(rowid);
-        frontier.next_ordinal =
-            frontier
-                .next_ordinal
-                .checked_add(1)
-                .ok_or(CaptureError::SystemInvariant(
-                    "Crush NativePath ordinal exhausted",
-                ))?;
-        if candidate.observed_bytes > CRUSH_NATIVE_MAX_ROW_BYTES {
-            break Some(CrushNativeRow::Rejection {
-                line: provider_line_from_index(ordinal.saturating_add(1)),
-                reason: format!(
-                    "Crush {} row {rowid} exceeds the NativePath retained-row bound",
-                    frontier.phase.label()
-                ),
-                retained_bytes: CRUSH_NATIVE_PAGE_OVERHEAD_BYTES,
-            });
-        }
-        break Some(
-            match hydrate_row(source, frontier.phase, rowid, candidate.observed_bytes)
-                .and_then(|row| prepare_native_row(source, context, row))
-            {
-                Ok(row) => row,
-                Err(error) if row_decode_error_is_local(&error) => CrushNativeRow::Rejection {
-                    line: provider_line_from_index(ordinal.saturating_add(1)),
-                    reason: format!(
-                        "Crush {} row {rowid} could not be decoded: {error}",
-                        frontier.phase.label()
-                    ),
-                    retained_bytes: CRUSH_NATIVE_PAGE_OVERHEAD_BYTES,
-                },
-                Err(error) => return Err(error),
-            },
-        );
-    };
-    if !source.snapshot.revalidate(&source.canonical_path)? {
-        return Err(CaptureError::SourceChangedDuringCapture);
-    }
-    let mut next = current.clone();
-    next.frontier = frontier;
-    next.terminal = row.is_none();
-    if let Some(row) = row.as_ref() {
-        if matches!(
-            row,
-            CrushNativeRow::Message { projection, .. } if projection.event.is_some()
-        ) {
-            next.retained_events = next.retained_events.saturating_add(1);
-        }
-        for failure in row.rejections() {
-            next.record_rejection(failure)?;
-        }
-    }
-    Ok(CrushNativePage {
-        expected: current.clone(),
-        next,
-        row,
-    })
-}
+use crate::{
+    native_source::NativeSqliteValue, provider::sqlite::SqliteLengthPreflightGuard, CaptureError,
+    Result,
+};
+
+use super::super::{
+    capture::CRUSH_SQLITE_VALUE_OVERHEAD_BYTES,
+    projection::{
+        decode_file, decode_message_child, decode_read_file, decode_session, optional_text,
+        CrushChildMessageRow, CrushSessionRow,
+    },
+    source::{
+        file_projection, message_projection, message_session_join, optional_session_column,
+        read_file_projection, retained_length_expr, session_projection,
+    },
+};
+use super::{
+    CrushHydratedRow, CrushNativeFrontier, CrushNativePhase, CrushNativeSchema,
+    CRUSH_NATIVE_PAGE_OVERHEAD_BYTES,
+};
 
 pub(super) fn row_decode_error_is_local(error: &CaptureError) -> bool {
     match error {
@@ -225,21 +160,6 @@ pub(super) fn next_candidate(
     }))
 }
 
-pub(super) fn hydrate_row(
-    source: &CrushNativeSource,
-    phase: CrushNativePhase,
-    rowid: i64,
-    observed_bytes: u64,
-) -> Result<CrushHydratedRow> {
-    hydrate_row_from_connection(
-        &source.connection,
-        &source.schema,
-        phase,
-        rowid,
-        observed_bytes,
-    )
-}
-
 pub(super) fn hydrate_row_from_connection(
     connection: &Connection,
     schema: &CrushNativeSchema,
@@ -327,165 +247,10 @@ pub(super) fn hydrate_row_from_connection(
     }
 }
 
-fn prepare_native_row(
-    source: &CrushNativeSource,
-    context: &ProviderAdapterContext,
-    row: CrushHydratedRow,
-) -> Result<CrushNativeRow> {
-    match row {
-        CrushHydratedRow::Session {
-            row,
-            retained_bytes,
-        } => Ok(CrushNativeRow::Session {
-            row,
-            retained_bytes,
-        }),
-        CrushHydratedRow::Message {
-            row,
-            session,
-            digest_values,
-            retained_bytes,
-        } => match project_message(&row, session.as_ref(), context)? {
-            CrushRecordProjection::Rejection {
-                line_number,
-                reason,
-            } => Ok(CrushNativeRow::Rejection {
-                line: line_number,
-                reason,
-                retained_bytes,
-            }),
-            CrushRecordProjection::Message(mut projection) => {
-                if projection.output.is_none() {
-                    let event = projection
-                        .event
-                        .as_mut()
-                        .ok_or(CaptureError::SystemInvariant(
-                            "Crush non-output projection has no event",
-                        ))?;
-                    let complete_text = projection.complete_text.as_deref().ok_or(
-                        CaptureError::SystemInvariant(
-                            "Crush non-output projection has no complete text",
-                        ),
-                    )?;
-                    attach_crush_complete_content_locator(
-                        event,
-                        &projection.native_record_id,
-                        row.rowid,
-                        &digest_values,
-                        complete_text,
-                    )?;
-                }
-                let mut touches = Vec::new();
-                let outcome = visit_provider_file_touch_drafts_with_limit(
-                    &projection.raw_parts,
-                    event_type_supports_structured_file_touches(projection.event_type),
-                    CRUSH_NATIVE_MAX_EVENT_TOUCHES,
-                    |(touch_ordinal, touch)| {
-                        let provider_touch_index =
-                            if projection.provider_event_index > MAX_PACKED_PROVIDER_EVENT_INDEX {
-                                touch_ordinal
-                            } else {
-                                (projection.provider_event_index << 16) | touch_ordinal
-                            };
-                        touches.push(CrushFileTouchDraft {
-                            provider_session_id: projection.provider_session_id.clone(),
-                            provider_touch_index,
-                            provider_event_index: Some(projection.provider_event_index),
-                            path: touch.path,
-                            change_kind: touch.change_kind,
-                            old_path: touch.old_path,
-                            line_count_delta: None,
-                            confidence: touch.confidence,
-                            occurred_at: projection.occurred_at,
-                            metadata: touch.metadata,
-                        });
-                        Ok::<(), CaptureError>(())
-                    },
-                )?;
-                let rejections = outcome.limit_exceeded().then(|| ProviderImportFailure {
-                    line: projection.line_number,
-                    error: PROVIDER_FILE_TOUCH_LIMIT_REJECTION.to_owned(),
-                });
-                Ok(CrushNativeRow::Message {
-                    projection,
-                    touches,
-                    rejections: rejections.into_iter().collect(),
-                    retained_bytes,
-                })
-            }
-        },
-        CrushHydratedRow::File {
-            row,
-            retained_bytes,
-        } => {
-            let line = provider_line_from_index(
-                0x0100_0000_0000_u64.saturating_add(row.rowid.max(0) as u64),
-            );
-            let Some(touch) = file_touch(row, context.imported_at) else {
-                return Ok(CrushNativeRow::Rejection {
-                    line,
-                    reason: "Crush file row has no provider session id".to_owned(),
-                    retained_bytes,
-                });
-            };
-            if !provider_session_exists(&source.connection, &touch.provider_session_id)? {
-                return Ok(CrushNativeRow::Rejection {
-                    line,
-                    reason: format!(
-                        "Crush file row references missing session {}",
-                        touch.provider_session_id
-                    ),
-                    retained_bytes,
-                });
-            }
-            Ok(CrushNativeRow::File {
-                touch,
-                retained_bytes,
-            })
-        }
-        CrushHydratedRow::ReadFile {
-            row,
-            retained_bytes,
-        } => {
-            let line = provider_line_from_index(
-                0x0200_0000_0000_u64.saturating_add(row.rowid.max(0) as u64),
-            );
-            let touch = read_file_touch(row, context.imported_at);
-            if !provider_session_exists(&source.connection, &touch.provider_session_id)? {
-                return Ok(CrushNativeRow::Rejection {
-                    line,
-                    reason: format!(
-                        "Crush read-file row references missing session {}",
-                        touch.provider_session_id
-                    ),
-                    retained_bytes,
-                });
-            }
-            Ok(CrushNativeRow::ReadFile {
-                touch,
-                retained_bytes,
-            })
-        }
-    }
-}
-
-fn provider_session_exists(conn: &Connection, provider_session_id: &str) -> Result<bool> {
-    conn.query_row(
-        "select exists(
-            select 1 from sessions
-            where typeof(id) = 'text'
-              and id collate binary = ?1 collate binary
-         )",
-        [provider_session_id],
-        |row| row.get::<_, bool>(0),
-    )
-    .map_err(CaptureError::from)
-}
-
 fn message_parent_session(
     conn: &Connection,
-    columns: &BTreeSet<String>,
-    child: &super::super::projection::CrushChildMessageRow,
+    columns: &std::collections::BTreeSet<String>,
+    child: &CrushChildMessageRow,
 ) -> Result<Option<CrushSessionRow>> {
     let Some(parent_rowid) = child.parent_rowid else {
         return Ok(None);
