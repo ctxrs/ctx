@@ -129,15 +129,29 @@ impl DaemonUpgradeHandoff {
             .or_else(|| read_daemon_restart_request(&self.data_root).map(|(_, trigger)| trigger));
         if daemon_restart_allowed(&self.data_root)? {
             if let Some(trigger) = restart_trigger {
-                let mut command = configured_daemon_autostart_command(
-                    executable,
-                    &self.data_root,
-                    trigger,
-                    Some(&self.handoff_id),
-                );
-                let mut child =
-                    spawn_daemon_child(&mut command).context("restart ctx daemon after upgrade")?;
-                wait_for_replacement_daemon(&self.data_root, &mut child)?;
+                let data_root = self.data_root.clone();
+                let supervisor_resume =
+                    super::super::daemon_supervisor::resume_daemon_supervisor_after_upgrade(
+                        &data_root,
+                        executable,
+                        || self.complete_release(),
+                    )?;
+                match supervisor_resume {
+                    super::super::daemon_supervisor::DaemonSupervisorUpgradeResume::Native => {
+                        wait_for_daemon_ready_ack(&self.data_root)?;
+                    }
+                    super::super::daemon_supervisor::DaemonSupervisorUpgradeResume::Fallback => {
+                        let mut command = configured_daemon_autostart_command(
+                            executable,
+                            &self.data_root,
+                            trigger,
+                            Some(&self.handoff_id),
+                        );
+                        let mut child = spawn_daemon_child(&mut command)
+                            .context("restart ctx daemon after upgrade")?;
+                        wait_for_replacement_daemon(&self.data_root, &mut child)?;
+                    }
+                }
             }
         }
         remove_daemon_restart_requests(&self.data_root);
@@ -146,8 +160,9 @@ impl DaemonUpgradeHandoff {
             &self.handoff_id,
             Some(&self.data_root),
         )?;
-        self.release("completed", None)?;
-        self.release_on_drop = false;
+        if self.release_on_drop {
+            self.complete_release()?;
+        }
         Ok(())
     }
 
@@ -182,6 +197,12 @@ impl DaemonUpgradeHandoff {
             return Ok(());
         }
         write_daemon_upgrade_handoff(&self.data_root, &self.handoff_id, phase, helper_pid)
+    }
+
+    fn complete_release(&mut self) -> Result<()> {
+        self.release("completed", None)?;
+        self.release_on_drop = false;
+        Ok(())
     }
 }
 
@@ -339,8 +360,9 @@ fn terminate_identity_verified_residual_daemon(
         .ok_or_else(|| anyhow!("active ctx daemon lock has no readable identity"))?;
     let pid = pid_from_lock_json(&value)
         .ok_or_else(|| anyhow!("active ctx daemon lock has no process identity"))?;
+    let signal_target = UnixSignalTarget::open(pid)?;
     verify_residual_daemon_identity(data_root, expected_executable, pid, &value)?;
-    signal_verified_process(pid, libc::SIGTERM)?;
+    signal_target.signal(data_root, expected_executable, libc::SIGTERM)?;
     let term_deadline = Instant::now() + DAEMON_UPGRADE_RESTART_TIMEOUT;
     while daemon_lock_is_active(data_root) && Instant::now() < term_deadline {
         std::thread::sleep(DAEMON_UPGRADE_POLL_INTERVAL);
@@ -349,16 +371,120 @@ fn terminate_identity_verified_residual_daemon(
         return Ok(());
     }
 
-    let current = read_pid_lock_json(&lock_path)
-        .ok_or_else(|| anyhow!("ctx daemon identity disappeared before forced termination"))?;
-    if pid_from_lock_json(&current) != Some(pid) {
+    signal_target.signal(data_root, expected_executable, libc::SIGKILL)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+enum UnixSignalTarget {
+    #[cfg(target_os = "linux")]
+    PidFd(LinuxPidFd),
+    ReverifiedPid(u32),
+}
+
+#[cfg(unix)]
+impl UnixSignalTarget {
+    fn open(pid: u32) -> Result<Self> {
+        #[cfg(target_os = "linux")]
+        if let Some(pidfd) = LinuxPidFd::open(pid)? {
+            return Ok(Self::PidFd(pidfd));
+        }
+        Ok(Self::ReverifiedPid(pid))
+    }
+
+    fn signal(
+        &self,
+        data_root: &Path,
+        expected_executable: &Path,
+        signal: libc::c_int,
+    ) -> Result<()> {
+        let pid = match self {
+            #[cfg(target_os = "linux")]
+            Self::PidFd(pidfd) => pidfd.pid,
+            Self::ReverifiedPid(pid) => *pid,
+        };
+        reverify_residual_daemon_identity(data_root, expected_executable, pid)?;
+        match self {
+            #[cfg(target_os = "linux")]
+            Self::PidFd(pidfd) => pidfd.signal(signal),
+            Self::ReverifiedPid(pid) => signal_verified_process(*pid, signal),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct LinuxPidFd {
+    fd: std::os::fd::OwnedFd,
+    pid: u32,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxPidFd {
+    fn open(pid: u32) -> Result<Option<Self>> {
+        use std::os::fd::FromRawFd as _;
+
+        let raw_fd = unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_open,
+                libc::pid_t::try_from(pid)
+                    .map_err(|_| anyhow!("invalid daemon process identity"))?,
+                0_u32,
+            )
+        };
+        if raw_fd >= 0 {
+            let raw_fd = i32::try_from(raw_fd).context("convert Linux pidfd")?;
+            return Ok(Some(Self {
+                fd: unsafe { std::os::fd::OwnedFd::from_raw_fd(raw_fd) },
+                pid,
+            }));
+        }
+        let error = std::io::Error::last_os_error();
+        if matches!(
+            error.raw_os_error(),
+            Some(libc::ENOSYS) | Some(libc::EINVAL) | Some(libc::EPERM)
+        ) {
+            return Ok(None);
+        }
+        Err(error).context("open stable Linux pidfd for residual ctx daemon")
+    }
+
+    fn signal(&self, signal: libc::c_int) -> Result<()> {
+        use std::os::fd::AsRawFd as _;
+
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                self.fd.as_raw_fd(),
+                signal,
+                std::ptr::null::<libc::siginfo_t>(),
+                0_u32,
+            )
+        };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            return Ok(());
+        }
+        Err(error).context("signal residual ctx daemon through Linux pidfd")
+    }
+}
+
+#[cfg(unix)]
+fn reverify_residual_daemon_identity(
+    data_root: &Path,
+    expected_executable: &Path,
+    expected_pid: u32,
+) -> Result<()> {
+    let current = read_pid_lock_json(&daemon_lock_path(data_root))
+        .ok_or_else(|| anyhow!("ctx daemon identity disappeared before termination signal"))?;
+    if pid_from_lock_json(&current) != Some(expected_pid) {
         return Err(anyhow!(
-            "ctx daemon ownership changed before forced termination; refusing to signal"
+            "ctx daemon ownership changed before termination signal; refusing to signal"
         ));
     }
-    verify_residual_daemon_identity(data_root, expected_executable, pid, &current)?;
-    signal_verified_process(pid, libc::SIGKILL)?;
-    Ok(())
+    verify_residual_daemon_identity(data_root, expected_executable, expected_pid, &current)
 }
 
 #[cfg(unix)]
@@ -770,26 +896,40 @@ pub(crate) fn complete_replacement_daemon_handoff(
             if read_daemon_restart_request(data_root).is_none() {
                 write_daemon_restart_request(data_root, trigger, handoff_id)?;
             }
-            let mut command = if let Some((_trigger, idle_exit, loop_interval)) = captured_restart {
-                daemon_autostart_command(
-                    executable,
+            let supervisor_resume =
+                super::super::daemon_supervisor::resume_daemon_supervisor_after_upgrade(
                     data_root,
-                    trigger,
-                    (idle_exit != DAEMON_IDLE_EXIT_SECONDS_CAP).then_some(idle_exit),
-                    Some(loop_interval),
-                    Some(handoff_id),
-                )
-            } else {
-                configured_daemon_autostart_command(
                     executable,
-                    data_root,
-                    trigger,
-                    Some(handoff_id),
-                )
-            };
-            let mut child =
-                spawn_daemon_child(&mut command).context("restart ctx daemon after replacement")?;
-            wait_for_replacement_daemon(data_root, &mut child)?;
+                    || write_daemon_upgrade_handoff(data_root, handoff_id, "completed", None),
+                )?;
+            match supervisor_resume {
+                super::super::daemon_supervisor::DaemonSupervisorUpgradeResume::Native => {
+                    wait_for_daemon_ready_ack(data_root)?;
+                }
+                super::super::daemon_supervisor::DaemonSupervisorUpgradeResume::Fallback => {
+                    let mut command =
+                        if let Some((_trigger, idle_exit, loop_interval)) = captured_restart {
+                            daemon_autostart_command(
+                                executable,
+                                data_root,
+                                trigger,
+                                (idle_exit != DAEMON_IDLE_EXIT_SECONDS_CAP).then_some(idle_exit),
+                                Some(loop_interval),
+                                Some(handoff_id),
+                            )
+                        } else {
+                            configured_daemon_autostart_command(
+                                executable,
+                                data_root,
+                                trigger,
+                                Some(handoff_id),
+                            )
+                        };
+                    let mut child = spawn_daemon_child(&mut command)
+                        .context("restart ctx daemon after replacement")?;
+                    wait_for_replacement_daemon(data_root, &mut child)?;
+                }
+            }
         } else {
             wait_for_daemon_ready_ack(data_root)?;
         }
@@ -833,6 +973,31 @@ pub(super) fn write_daemon_upgrade_handoff(
             "updated_at_ms": utc_now().timestamp_millis(),
         })),
     )
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod pidfd_tests {
+    use super::*;
+
+    #[test]
+    fn linux_pidfd_signals_the_opened_process_handle() -> Result<()> {
+        let mut child = Command::new("sleep").arg("30").spawn()?;
+        let Some(pidfd) = LinuxPidFd::open(child.id())? else {
+            child.kill()?;
+            child.wait()?;
+            eprintln!("Linux pidfd unavailable; exercised the explicit fallback branch");
+            return Ok(());
+        };
+        eprintln!("Linux pidfd available; exercising stable-handle signaling");
+        if let Err(error) = pidfd.signal(libc::SIGTERM) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+        let status = child.wait()?;
+        assert!(!status.success());
+        Ok(())
+    }
 }
 
 pub(in crate::semantic) fn write_daemon_restart_request(

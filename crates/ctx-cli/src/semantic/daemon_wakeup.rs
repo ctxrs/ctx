@@ -45,7 +45,6 @@ struct DaemonWakeupState {
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct DaemonWake {
     pub(super) filesystem: bool,
-    pub(super) ipc: bool,
     pub(super) shutdown: bool,
     pub(super) timed_out: bool,
 }
@@ -101,7 +100,6 @@ impl DaemonWakeup {
         let pending = std::mem::take(&mut state.pending);
         DaemonWake {
             filesystem: pending & WAKE_FILESYSTEM != 0,
-            ipc: pending & WAKE_IPC != 0,
             shutdown: pending & WAKE_SHUTDOWN != 0,
             timed_out,
         }
@@ -514,9 +512,9 @@ mod tests {
         wakeup.signal_ipc();
         let wake = wakeup.wait(Duration::from_secs(1));
         assert!(wake.filesystem);
-        assert!(wake.ipc);
         assert!(!wake.shutdown);
         assert!(!wake.timed_out);
+        assert_eq!(wakeup.snapshot()["ipc_signals"], 1);
     }
 
     #[test]

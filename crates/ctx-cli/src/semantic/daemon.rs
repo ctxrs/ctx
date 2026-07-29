@@ -93,6 +93,7 @@ impl DaemonIteration {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn with_provider_refresh_events(mut self, events: Vec<PublicEventV1>) -> Self {
         self.provider_refresh_events = events;
         self
