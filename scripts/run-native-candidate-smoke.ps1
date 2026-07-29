@@ -68,6 +68,8 @@ if (-not (Test-Path -LiteralPath $Fixture -PathType Leaf)) {
 if ($ExpectedVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$') {
     Fail "expected version is invalid: $ExpectedVersion"
 }
+$versionParts = (($ExpectedVersion -split '[+-]', 2)[0]).Split(".")
+$freshEpochRequired = [int]$versionParts[0] -gt 0 -or [int]$versionParts[1] -ge 26
 
 $resultParent = Split-Path -Parent $ResultPath
 if ([string]::IsNullOrWhiteSpace($resultParent)) {
@@ -116,6 +118,8 @@ $isolation = [ordered]@{
     CTX_ANALYTICS_ENABLED = "false"
     CTX_UPGRADE_AUTO = "off"
     CTX_DAEMON_AUTOSTART_OFF = "1"
+    CTX_DAEMON_AUTOSTART_IDLE_EXIT_SECONDS = "1"
+    CTX_DAEMON_AUTOSTART_LOOP_INTERVAL_SECONDS = "1"
     CTX_DAEMON_ENABLED = "false"
     CTX_SEARCH_SEMANTIC = "0"
     CTX_SEMANTIC_CACHE_DIR = (Join-Path $root "semantic-cache")
@@ -224,12 +228,40 @@ try {
     }
 
     [void](Invoke-Ctx @("setup", "--catalog-only", "--no-daemon", "--progress", "none"))
-    $import = Invoke-Ctx @(
+    $importArguments = @(
         "import", "--input-format", "ctx-history-jsonl-v1", "--path", $Fixture,
         "--no-daemon", "--format=json", "--progress", "none"
     )
-    if ($import -notmatch '"imported_events"\s*:\s*[1-9][0-9]*') {
-        Fail "fixture import did not import events"
+    $importResult = Invoke-CtxRaw $importArguments
+    $sourceManifestRequired = $freshEpochRequired
+    if ($importResult.ExitCode -eq 0) {
+        $import = $importResult.Text
+    } else {
+        if ($importResult.Text -notmatch 'no foreground writer was started') {
+            Fail ("ctx {0} failed: {1}" -f ($importArguments -join " "), $importResult.Text)
+        }
+        $sourceManifestRequired = $true
+        $env:CTX_DAEMON_ENABLED = "true"
+        $env:CTX_DAEMON_AUTOSTART_OFF = "0"
+        try {
+            $import = Invoke-Ctx @(
+                "import", "--input-format", "ctx-history-jsonl-v1", "--path", $Fixture,
+                "--format=json", "--progress", "none"
+            )
+        } finally {
+            $env:CTX_DAEMON_ENABLED = "false"
+            $env:CTX_DAEMON_AUTOSTART_OFF = "1"
+        }
+    }
+    if ($freshEpochRequired) {
+        if ($import -notmatch '"imported_sources"\s*:\s*[1-9][0-9]*' -or
+            $import -notmatch '"published_generation"\s*:\s*"[0-9a-f]{64}"') {
+            Fail "fixture import did not publish source-manifest authority"
+        }
+    } elseif ($import -notmatch '"imported_events"\s*:\s*[1-9][0-9]*' -and
+            ($import -notmatch '"imported_sources"\s*:\s*[1-9][0-9]*' -or
+             $import -notmatch '"published_generation"\s*:\s*"[0-9a-f]{64}"')) {
+        Fail "fixture import did not report imported data"
     }
 
     $search = Invoke-Ctx @("search", "parser test", "--backend", "lexical", "--refresh", "off", "--format=json")
@@ -237,6 +269,23 @@ try {
         $search -notmatch '"effective_mode"\s*:\s*"lexical"' -or
         $search -notmatch [regex]::Escape("Add a parser test.")) {
         Fail "lexical search did not return the expected fixture result"
+    }
+    # Import and search execute in separate candidate processes. The expected
+    # hit plus the absence of the old Store proves fresh source-manifest
+    # authority carried the fixture across that boundary.
+    if (Test-Path -LiteralPath (Join-Path $dataRoot "work.sqlite")) {
+        Fail "candidate created or opened the pre-v0.26 Store"
+    }
+    if ($sourceManifestRequired) {
+        $lexicalRoot = Join-Path $dataRoot "search\lexical"
+        if (-not (Test-Path -LiteralPath (Join-Path $lexicalRoot "meta.json") -PathType Leaf)) {
+            Fail "candidate did not publish the fresh lexical generation"
+        }
+        $manifestRoot = Join-Path $lexicalRoot "ctx-generations"
+        $sourceManifests = @(Get-ChildItem -LiteralPath $manifestRoot -Filter "*.json" -File -ErrorAction SilentlyContinue)
+        if ($sourceManifests.Count -eq 0) {
+            Fail "candidate did not publish source-manifest authority"
+        }
     }
 
     $env:CTX_SEARCH_SEMANTIC = $null
@@ -280,7 +329,7 @@ try {
     if ($capabilityExit -eq 0) {
         Fail "semantic-only search unexpectedly succeeded"
     }
-    if ($capabilityText -notmatch 'semantic-only search will not initialize or download') {
+    if ($capabilityText -notmatch 'semantic_store_missing|semantic-only search will not initialize or download') {
         Fail "semantic-only search did not report the fail-closed capability contract"
     }
     if ($capabilityText -match '"effective_mode"\s*:\s*"lexical"') {
@@ -289,21 +338,23 @@ try {
     foreach ($unexpected in @(
         (Join-Path $root "semantic-cache"),
         (Join-Path $root "huggingface"),
-        (Join-Path $dataRoot "vectors.sqlite"),
-        (Join-Path $dataRoot "daemon")
+        (Join-Path $dataRoot "search\semantic")
     )) {
         if (Test-Path -LiteralPath $unexpected) {
-            Fail "semantic-only search created semantic or daemon state"
+            Fail "semantic-only search created semantic state"
         }
     }
 
-    Start-Sleep -Milliseconds 200
-    $remaining = @(Candidate-ProcessIds | Where-Object { $baseline -notcontains $_ })
+    $shutdownDeadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        $remaining = @(Candidate-ProcessIds | Where-Object { $baseline -notcontains $_ })
+        if ($remaining.Count -eq 0 -or [DateTime]::UtcNow -ge $shutdownDeadline) {
+            break
+        }
+        Start-Sleep -Milliseconds 200
+    } while ($true)
     if ($remaining.Count -ne 0) {
         Fail ("candidate left background processes running: " + ($remaining -join ","))
-    }
-    if (Test-Path -LiteralPath (Join-Path $dataRoot "daemon\daemon.lock")) {
-        Fail "candidate left a daemon lock behind"
     }
 
     $result = [ordered]@{

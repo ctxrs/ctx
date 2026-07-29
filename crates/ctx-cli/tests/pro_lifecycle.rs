@@ -5,6 +5,60 @@ use predicates::prelude::*;
 use rusqlite::Connection;
 use tempfile::tempdir;
 
+const SOURCE_MANIFEST_AUTHORITY_SENTINEL: &[u8] =
+    b"v0.26 source-manifest authority; provider sources remain canonical";
+const SEMANTIC_INDEX_SENTINEL: &[u8] = b"v0.26 disposable semantic index";
+const OLD_EPOCH_STORE_SENTINEL: &[u8] =
+    b"opaque pre-v0.26 Store preserved only for rollback; never open";
+
+struct EpochStorageFixture {
+    source_manifest_authority: std::path::PathBuf,
+    semantic_index: std::path::PathBuf,
+    old_epoch_store: std::path::PathBuf,
+}
+
+impl EpochStorageFixture {
+    fn write(data_root: &std::path::Path) -> Self {
+        let source_manifest_authority = data_root
+            .join("search/lexical")
+            .join("ctx-generations")
+            .join("source-manifest-authority.sentinel");
+        let semantic_index = data_root
+            .join("search/semantic")
+            .join("fresh-epoch.sentinel");
+        let old_epoch_store = data_root.join("work.sqlite");
+        fs::create_dir_all(source_manifest_authority.parent().unwrap()).unwrap();
+        fs::create_dir_all(semantic_index.parent().unwrap()).unwrap();
+        fs::write(
+            &source_manifest_authority,
+            SOURCE_MANIFEST_AUTHORITY_SENTINEL,
+        )
+        .unwrap();
+        fs::write(&semantic_index, SEMANTIC_INDEX_SENTINEL).unwrap();
+        fs::write(&old_epoch_store, OLD_EPOCH_STORE_SENTINEL).unwrap();
+        Self {
+            source_manifest_authority,
+            semantic_index,
+            old_epoch_store,
+        }
+    }
+
+    fn assert_preserved(&self) {
+        assert_eq!(
+            fs::read(&self.source_manifest_authority).unwrap(),
+            SOURCE_MANIFEST_AUTHORITY_SENTINEL
+        );
+        assert_eq!(
+            fs::read(&self.semantic_index).unwrap(),
+            SEMANTIC_INDEX_SENTINEL
+        );
+        assert_eq!(
+            fs::read(&self.old_epoch_store).unwrap(),
+            OLD_EPOCH_STORE_SENTINEL
+        );
+    }
+}
+
 fn helper_name() -> &'static str {
     if cfg!(windows) {
         "ctx-pro.exe"
@@ -131,7 +185,7 @@ fn never_pro_uninstall_is_a_truthful_noop_for_missing_and_empty_roots() {
         for choice in ["--delete-data", "--keep-data"] {
             let parent = tempdir().unwrap();
             let data_root = parent.path().join(root_kind);
-            if create_root {
+            let epoch = if create_root {
                 ctx_history_core::platform_security::create_private_directory_all(&data_root)
                     .unwrap();
                 fs::write(
@@ -143,8 +197,10 @@ fn never_pro_uninstall_is_a_truthful_noop_for_missing_and_empty_roots() {
 }"#,
                 )
                 .unwrap();
-                fs::write(data_root.join("work.sqlite"), b"canonical history").unwrap();
-            }
+                Some(EpochStorageFixture::write(&data_root))
+            } else {
+                None
+            };
 
             let output = Command::cargo_bin("ctx")
                 .unwrap()
@@ -183,11 +239,8 @@ fn never_pro_uninstall_is_a_truthful_noop_for_missing_and_empty_roots() {
                 .unwrap();
             assert_eq!(operation, "pro_uninstall");
             assert_eq!(calls, 1);
-            if create_root {
-                assert_eq!(
-                    fs::read(data_root.join("work.sqlite")).unwrap(),
-                    b"canonical history"
-                );
+            if let Some(epoch) = epoch {
+                epoch.assert_preserved();
             } else {
                 assert!(data_root.is_dir());
             }

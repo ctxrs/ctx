@@ -64,6 +64,14 @@ if ! printf '%s\n' "${expected_version}" \
   printf 'candidate smoke expected version is invalid: %s\n' "${expected_version}" >&2
   exit 1
 fi
+version_core="${expected_version%%[-+]*}"
+version_major="${version_core%%.*}"
+version_remainder="${version_core#*.}"
+version_minor="${version_remainder%%.*}"
+fresh_epoch_required=false
+if [ "${version_major}" -gt 0 ] || [ "${version_minor}" -ge 26 ]; then
+  fresh_epoch_required=true
+fi
 
 result_dir="$(dirname "${result_path}")"
 mkdir -p "${result_dir}"
@@ -104,6 +112,8 @@ clean_env() {
     XDG_STATE_HOME="${state_root}" \
     CTX_DATA_ROOT="${data_root}" \
     CTX_DAEMON_AUTOSTART_OFF=1 \
+    CTX_DAEMON_AUTOSTART_IDLE_EXIT_SECONDS=1 \
+    CTX_DAEMON_AUTOSTART_LOOP_INTERVAL_SECONDS=1 \
     CTX_SEMANTIC_CACHE_DIR="${root}/semantic-cache" \
     HF_HOME="${root}/huggingface" \
     HF_HUB_OFFLINE=1 \
@@ -117,6 +127,16 @@ ctx() {
     CTX_UPGRADE_AUTO=off \
     CTX_DAEMON_ENABLED=false \
     CTX_SEARCH_SEMANTIC=0 \
+    "${binary}" "$@"
+}
+
+ctx_source_refresh() {
+  clean_env \
+    CTX_ANALYTICS_ENABLED=false \
+    CTX_UPGRADE_AUTO=off \
+    CTX_DAEMON_ENABLED=true \
+    CTX_SEARCH_SEMANTIC=0 \
+    CTX_DAEMON_AUTOSTART_OFF=0 \
     "${binary}" "$@"
 }
 
@@ -245,19 +265,39 @@ run_bounded "${root}/setup.out" "${root}/setup.err" \
   cat "${root}/setup.err" >&2
   exit 1
 }
-run_bounded "${root}/import.json" "${root}/import.err" ctx import \
+source_manifest_required="${fresh_epoch_required}"
+if ! run_bounded "${root}/import.json" "${root}/import.err" ctx import \
   --input-format ctx-history-jsonl-v1 \
   --path "${fixture}" \
   --no-daemon \
   --format json \
-  --progress none || {
-  cat "${root}/import.err" >&2
-  exit 1
-}
-grep -Eq '"imported_events"[[:space:]]*:[[:space:]]*[1-9][0-9]*' "${root}/import.json" || {
-  printf 'candidate fixture import did not import events\n' >&2
-  exit 1
-}
+  --progress none; then
+  if ! grep -Fq 'no foreground writer was started' "${root}/import.err"; then
+    cat "${root}/import.err" >&2
+    exit 1
+  fi
+  source_manifest_required=true
+  run_bounded "${root}/import.json" "${root}/import.err" ctx_source_refresh import \
+    --input-format ctx-history-jsonl-v1 \
+    --path "${fixture}" \
+    --format json \
+    --progress none || {
+    cat "${root}/import.err" >&2
+    exit 1
+  }
+fi
+if [ "${fresh_epoch_required}" = true ]; then
+  if ! grep -Eq '"imported_sources"[[:space:]]*:[[:space:]]*[1-9][0-9]*' "${root}/import.json" \
+    || ! grep -Eq '"published_generation"[[:space:]]*:[[:space:]]*"[0-9a-f]{64}"' "${root}/import.json"; then
+    printf 'candidate fixture import did not publish source-manifest authority\n' >&2
+    exit 1
+  fi
+elif ! grep -Eq '"imported_events"[[:space:]]*:[[:space:]]*[1-9][0-9]*' "${root}/import.json" \
+  && { ! grep -Eq '"imported_sources"[[:space:]]*:[[:space:]]*[1-9][0-9]*' "${root}/import.json" \
+    || ! grep -Eq '"published_generation"[[:space:]]*:[[:space:]]*"[0-9a-f]{64}"' "${root}/import.json"; }; then
+    printf 'candidate fixture import did not report imported data\n' >&2
+    exit 1
+fi
 
 run_bounded "${root}/search.json" "${root}/search.err" ctx search "parser test" \
   --backend lexical \
@@ -272,6 +312,30 @@ grep -Eq '"effective_mode"[[:space:]]*:[[:space:]]*"lexical"' "${root}/search.js
   || { printf 'candidate search did not remain lexical\n' >&2; exit 1; }
 grep -Fq 'Add a parser test.' "${root}/search.json" \
   || { printf 'candidate search did not return the fixture event\n' >&2; exit 1; }
+# Import and search execute in separate candidate processes. The expected hit
+# plus the absence of the old Store proves that the fresh source manifest, not
+# pre-v0.26 SQLite authority, carried the fixture across that boundary.
+if [ -e "${data_root}/work.sqlite" ]; then
+  printf 'candidate created or opened the pre-v0.26 Store\n' >&2
+  exit 1
+fi
+if [ "${source_manifest_required}" = true ]; then
+  if [ ! -f "${data_root}/search/lexical/meta.json" ]; then
+    printf 'candidate did not publish the fresh lexical generation\n' >&2
+    exit 1
+  fi
+  source_manifest_found=false
+  for source_manifest in "${data_root}/search/lexical/ctx-generations/"*.json; do
+    if [ -f "${source_manifest}" ]; then
+      source_manifest_found=true
+      break
+    fi
+  done
+  if [ "${source_manifest_found}" != true ]; then
+    printf 'candidate did not publish source-manifest authority\n' >&2
+    exit 1
+  fi
+fi
 
 analytics_default="$(inventory_default_field "analytics delivery" "value")"
 upgrade_default="$(inventory_default_field "automatic upgrade mode" "value")"
@@ -398,7 +462,7 @@ if run_bounded "${root}/semantic.out" "${root}/semantic.err" clean_env \
   printf 'semantic-only search unexpectedly succeeded\n' >&2
   exit 1
 fi
-if ! grep -Fq 'semantic-only search will not initialize or download' \
+if ! grep -Eq 'semantic_store_missing|semantic-only search will not initialize or download' \
   "${root}/semantic.err"; then
   printf 'semantic-only search did not report the fail-closed capability contract\n' >&2
   exit 1
@@ -409,19 +473,23 @@ if grep -Eq '"effective_mode"[[:space:]]*:[[:space:]]*"lexical"' \
   exit 1
 fi
 if [ -e "${root}/semantic-cache" ] || [ -e "${root}/huggingface" ] \
-  || [ -e "${data_root}/vectors.sqlite" ] || [ -e "${data_root}/daemon" ]; then
-  printf 'semantic-only search created semantic or daemon state\n' >&2
+  || [ -e "${data_root}/search/semantic" ]; then
+  printf 'semantic-only search created semantic state\n' >&2
   exit 1
 fi
 
-process_ids_for_binary > "${final_processes}"
-survivors="$(comm -13 "${baseline_processes}" "${final_processes}")"
+shutdown_attempts=0
+while :; do
+  process_ids_for_binary > "${final_processes}"
+  survivors="$(comm -13 "${baseline_processes}" "${final_processes}")"
+  if [ -z "${survivors}" ] || [ "${shutdown_attempts}" -ge 10 ]; then
+    break
+  fi
+  shutdown_attempts=$((shutdown_attempts + 1))
+  sleep 1
+done
 if [ -n "${survivors}" ]; then
   printf 'candidate left a background process running: %s\n' "${survivors}" >&2
-  exit 1
-fi
-if [ -e "${data_root}/daemon/daemon.lock" ]; then
-  printf 'candidate left a daemon lock behind\n' >&2
   exit 1
 fi
 
