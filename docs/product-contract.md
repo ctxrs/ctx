@@ -164,13 +164,14 @@ research agent.
   autostart reports semantic status read-only; explicit `ctx daemon run` is the
   path that may perform semantic catch-up.
 - `ctx status` and `ctx doctor` report ctx-owned daemon coordinator state.
-- `ctx status` reports bounded local usage/value aggregates from the separate
+- `ctx stats` reports bounded local usage/value aggregates from the separate
   owner-private `usage.sqlite` sidecar. This default-on product state is
   independent of remote event reporting, has no network path or identity, keeps
   only daily UTC content-free aggregates for approximately 400 days, and fails
-  open at foreground recording boundaries. Detail, enable, disable, and logical
-  reset remain options on the existing status surface rather than new top-level
-  commands.
+  open at foreground recording boundaries. The stats report is read-only,
+  uncounted, and separates measured facts from versioned estimates. Detail is
+  an option on `ctx stats`; enable, disable, and logical reset remain under
+  `ctx status --usage`.
 - JSON output supports local agents and scripts without daemon-start or
   daemon-nudge side effects. A daemon already running independently continues
   its own maintenance and automatic-upgrade cadence.

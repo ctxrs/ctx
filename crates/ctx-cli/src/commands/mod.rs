@@ -10,4 +10,5 @@ pub(crate) mod show;
 pub(crate) mod source_index;
 pub(crate) mod sources;
 pub(crate) mod sql;
+pub(crate) mod stats;
 pub(crate) mod status;

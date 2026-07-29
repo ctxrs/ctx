@@ -34,7 +34,9 @@ ctx setup --format json
 ctx setup --progress json --format json
 ctx status
 ctx status --format json
-ctx status --usage detail
+ctx stats
+ctx stats --detail
+ctx stats --format json
 ctx status --usage enable
 ctx status --usage disable
 ctx status --usage reset
@@ -67,16 +69,23 @@ ctx daemon enable
 - `status` reports the ctx root, source epoch, lexical generation and policy,
   generation-bound catalog/resolver state, semantic generation and coverage,
   relational projection state, prior-epoch preservation state, daemon state,
-  initialization state, compact local usage/value aggregates, local-only
-  marker, and read-only marker. It does not initialize or repair derived Core
-  storage and never opens prior-epoch history.
-- `status --usage detail` expands the usage report by ctx version, surface,
-  operation, and duration bucket. `status --usage disable` and `enable` write
-  the canonical `[local_usage] enabled` override; `status --usage reset`
-  atomically clears the usage aggregates. These three control invocations are
-  not themselves counted. Summary and detail are also uncounted, literal
-  read-only reports and do not create the sidecar. Controls are action-focused
-  and do not depend on a successful Core status read. Local usage is default-on
+  initialization state, compact local usage health, local-only marker, and
+  read-only marker. It does not include usage counts or estimates, initialize
+  or repair derived Core storage, or open prior-epoch history.
+- `stats` is the read-only, local, offline report for History retrieval, Code
+  provenance, Measured delivery, and Estimated savings. Measured facts and
+  model-based estimates are separate in JSON; the estimate model and
+  coefficients are versioned. Delivery keeps exact CLI output, MCP transport,
+  and one-copy semantic/context byte channels separate; transport bytes never
+  drive context-token or savings estimates. Byte-derived token values include
+  coverage and remain unavailable for unmeasured legacy rows rather than
+  becoming false zeros. `stats --detail` adds CLI/MCP operation and latency
+  breakdowns. Reporting is uncounted and does not create `usage.sqlite` on a
+  pristine root.
+- `status --usage disable` and `enable` write the canonical `[local_usage]
+  enabled` override; `status --usage reset` atomically clears the usage
+  aggregates. These controls are not counted and remain action-focused so they
+  do not depend on a successful Core status read. Local usage is default-on
   product state in the separate owner-private `usage.sqlite` sidecar, has no
   network path or network-delivery identity, and remains independent of remote
   reporting controls.

@@ -312,6 +312,7 @@ local upsert as described above.
 | --- | --- | --- |
 | `ctx setup` | provider transcript files and bounded path metadata for source discovery | data root, source catalog/epoch metadata, `search/lexical`, `relational.sqlite`, and optional daemon lock/status/job files when eligible human-readable daemon autostart runs; it neither opens nor creates prior-epoch storage |
 | `ctx status` | data root metadata, source epoch, lexical/semantic generation metadata, relational projection metadata, daemon state, and Pro authorization state when installed | may advance nonsecret anti-clock-rollback security metadata during Pro entitlement authorization; does not mutate provider history, Core generations, or local Pro graph data |
+| `ctx stats` | owner-private aggregate `usage.sqlite` when present | none; does not create pristine usage state or count itself |
 | `ctx sources` | bounded provider path metadata, allowlisted persistent selector files, and local history-source plugin manifests | none |
 | `ctx import` | provider transcript files and path metadata, the explicit custom history JSONL file passed with `--input-format ctx-history-jsonl-v1 --path`, or stdout from an explicit history-source plugin command | immutable candidate lexical generation and atomic publication, catalog/epoch metadata, relational catch-up, and optional daemon files; semantic catch-up is daemon-owned |
 | `ctx show session` / `ctx show event` | active lexical metadata plus exact provider records selected by typed locators | selected `--out` path for `show session` when provided |
@@ -394,11 +395,12 @@ persistent disable wins over `CTX_LOCAL_USAGE_ENABLED=true`. Disabled commands
 do not create `usage.sqlite`. The equivalent durable controls are
 `ctx status --usage disable` and `ctx status --usage enable`; use
 `ctx status --usage reset` to clear all aggregates without deleting canonical
-history or the Pro graph. `ctx status --usage detail` expands the local report.
+history or the Pro graph. `ctx stats --detail` expands the read-only local
+report with CLI/MCP operation and latency breakdowns.
 Reset is logical SQLite deletion followed by a best-effort truncate checkpoint;
 it is not a claim of forensic secure erasure on SSDs or other storage. The
 enable, disable, and reset control invocations are not themselves counted.
-Summary and detail are also uncounted and do not create the sidecar.
+Stats reporting is also uncounted and does not create the sidecar.
 
 The p99/unit bounds in this repository exercise 1,000 samples of the warm
 aggregate path (at most 10 ms p99 in an optimized release build), content

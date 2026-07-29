@@ -4,7 +4,8 @@ ctx JSON is for local agents and scripts. It can include prompts, command
 arguments, typed result identifiers, and local paths. Treat it as private until
 a user reviews it.
 
-Command result JSON uses `schema_version: 1` except for `ctx import --format json`.
+Command result JSON uses `schema_version: 1` except for
+`ctx stats --format json` and `ctx import --format json`.
 The Pro status object embedded by `ctx status --format json` and exposed through MCP
 uses its own version 2 contract, described below. Progress-event JSON is stderr
 progress output and does not include `schema_version`.
@@ -105,8 +106,8 @@ Reads local storage state and returns:
 - `daemon`;
 - `upgrade`;
 - `pro`, using the path-safe Local Pro status shape;
-- `local_usage`;
-- `local_usage_action`, null unless `--usage enable|disable|reset` was used;
+- compact `local_usage` health (`enabled`, state, and a content-free error when
+  unavailable), without aggregates, estimates, or operation details;
 - `local_only: true`;
 - `read_only: true`.
 
@@ -114,41 +115,8 @@ For status, `read_only: true` means the command does not mutate canonical
 history or local Pro graph data. When Pro is installed, entitlement
 authorization may advance nonsecret anti-clock-rollback security metadata in
 the operating-system key store; that metadata is outside both data stores and
-does not change this stable field. Usage `summary` and `detail` are also excluded
-from local usage counting: they do not create or update `usage.sqlite`.
-Usage control modes return a separate action-focused JSON shape with
-`read_only: false` and do not read Core status.
-
-`local_usage` has `schema_version: 1`, `enabled`, `state`,
-`definition_version`, and `retention_days: 400`. `state` is `disabled`, `empty`,
-`ready`, or `error`. Ready/empty reports include `summary`:
-
-- `first_day_utc` and `last_day_utc`;
-- `active_days` and the bounded `ctx_versions` dimension;
-- `calls`, `successful_calls`, and `failed_calls`;
-- `result_bearing_calls`, `empty_calls`, and `not_applicable_calls`;
-- content-free `result_count` and `citation_count`;
-- `mcp_response_bytes`, the exact serialized delivered JSON-RPC line bytes,
-  including its newline;
-- `pro_blame`, with `produced_attribution_requests`,
-  `possible_or_reference_only_requests`,
-  `no_confident_attribution_requests`, and `error_requests`, plus exact typed
-  `file`/`commit`/`pull_request` breakdowns.
-
-The three result classes reconcile to `calls`; failures are currently
-`not_applicable`. `mcp_response_bytes` is transport volume, never tokens,
-savings, or model context. `ctx status --usage detail --format json` also includes
-`details.by_operation[]`, grouped by `ctx_version`, `surface`, and closed
-`operation`, plus `details.duration_buckets[]`.
-
-An unavailable store omits `summary` and returns only stable content-free
-`error.code`/`error.message` values; it never returns zero as a substitute and
-never serializes the raw SQLite/config cause or data-root path. Disabled
-operation creates no sidecar. Successful enable/disable controls report
-`persisted_enabled`, `effective_enabled`, and `environment_override`; reset
-reports `store_state: "cleared"|"missing"`. A failed JSON control exits nonzero
-with a parseable, content-free `usage_control_failed` or `usage_reset_failed`
-error. Reset is logical deletion, not forensic secure erasure.
+does not change this stable field. Usage control modes return a separate
+action-focused JSON shape with `read_only: false` and do not read Core status.
 
 `semantic` reports semantic sidecar and background-worker state. Fields listed
 as nullable may be omitted when unavailable:
@@ -260,6 +228,55 @@ Source-level failures remain terminal and are reported separately.
 `ctx doctor --format json` returns `schema_version`, `ok`, `findings`, and the
 same top-level `daemon` object used by status so callers can inspect daemon
 lifecycle and job state without parsing human findings.
+
+## Stats
+
+```bash
+ctx stats --format json
+ctx stats --detail --format json
+```
+
+Stats is local, offline, read-only, and excluded from its own counts. It does
+not create `usage.sqlite` on a pristine root. Its top-level
+`schema_version` is 2. The top-level object contains:
+
+- `schema_version`;
+- `local_usage`, including `enabled` and state (`disabled`, `empty`, `ready`,
+  or `error`);
+- `measured`, with `history_retrieval`, `code_provenance`, and `delivery`;
+- `estimated`, separate from measured facts and carrying the authoritative
+  estimate model/coefficient version when estimates are available;
+- `local_only: true`;
+- `read_only: true`.
+
+History retrieval reports searches, sessions/events opened, and records
+located. Code provenance reports blame investigations, origins identified,
+possible leads, no-attribution outcomes, errors, and citations. Measured
+delivery reports results, citations, output bytes, response transport bytes,
+one-copy semantic/context bytes, the result-bearing search byte subset,
+approximate context tokens, latency, and active days according to their
+explicit coverage. Approximate context tokens use semantic/context bytes.
+Transport response bytes are never used as context bytes, search-result bytes,
+or the basis for token savings.
+
+JSON includes the CLI/MCP and operation breakdown; human output shows that
+breakdown only with `--detail`. Estimated token savings consume the
+authoritative versioned model and apply its avoided-token coefficient only to
+the result-bearing search byte subset. Estimated time uses the same model. An
+unavailable store returns stable content-free error fields rather than
+fabricated zeros.
+
+Byte-derived token values are nullable and carry `complete`, `partial`, or
+`unavailable_legacy` coverage plus measured/eligible sample counts. Migrated
+rows without byte samples never become zero-token measurements. Count-derived
+time estimates may remain available when token estimates are unavailable.
+
+Enable, disable, and reset remain explicit `ctx status --usage` controls.
+Successful enable/disable controls report `persisted_enabled`,
+`effective_enabled`, and `environment_override`; reset reports
+`store_state: "cleared"|"missing"`. A failed JSON control exits nonzero with a
+parseable, content-free `usage_control_failed` or `usage_reset_failed` error.
+Reset is logical deletion, not forensic secure erasure.
 
 ## Sources
 

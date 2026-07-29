@@ -22,6 +22,7 @@ fn help_exposes_session_retrieval_commands() {
     for expected in [
         "setup",
         "status",
+        "stats",
         "index",
         "sources",
         "import",
@@ -79,23 +80,41 @@ fn help_exposes_session_retrieval_commands() {
 }
 
 #[test]
-fn status_help_exposes_one_bounded_local_usage_control() {
+fn status_and_stats_help_keep_health_controls_separate_from_read_only_reporting() {
     let temp = tempdir();
-    let output = ctx(&temp)
+    let status_output = ctx(&temp)
         .args(["status", "--help"])
         .assert()
         .success()
         .get_output()
         .stdout
         .clone();
-    let help = String::from_utf8(output).unwrap();
-
-    assert!(help.contains("--usage <USAGE>"), "{help}");
-    for value in ["summary", "detail", "enable", "disable", "reset"] {
-        assert!(help.contains(value), "missing {value} in\n{help}");
+    let status_help = String::from_utf8(status_output).unwrap();
+    assert!(status_help.contains("--usage <USAGE>"), "{status_help}");
+    for value in ["enable", "disable", "reset"] {
+        assert!(
+            status_help.contains(value),
+            "missing {value} in\n{status_help}"
+        );
     }
-    assert!(!help.contains("dashboard"), "{help}");
-    assert!(!help.contains("tokens saved"), "{help}");
+    for removed in ["summary", "detail", "methodology"] {
+        assert!(!status_help.contains(removed), "{status_help}");
+    }
+
+    let stats_output = ctx(&temp)
+        .args(["stats", "--help"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stats_help = String::from_utf8(stats_output).unwrap();
+    assert!(stats_help.contains("Usage: ctx stats"), "{stats_help}");
+    assert!(stats_help.contains("--detail"), "{stats_help}");
+    assert!(stats_help.contains("--format <FORMAT>"), "{stats_help}");
+    for forbidden in ["--usage", "--control", "--methodology", "dashboard"] {
+        assert!(!stats_help.contains(forbidden), "{stats_help}");
+    }
 }
 
 #[test]
@@ -399,6 +418,16 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
         ),
         ("status", vec!["Usage: ctx status", "--format <FORMAT>"]),
         (
+            "stats",
+            vec![
+                "Usage: ctx stats",
+                "--detail",
+                "Show CLI/MCP operation and latency breakdowns",
+                "--format <FORMAT>",
+                "Show local history retrieval and value statistics",
+            ],
+        ),
+        (
             "index",
             vec![
                 "Usage: ctx index",
@@ -538,6 +567,7 @@ fn machine_readable_output_uses_format_without_a_json_alias() {
     for args in [
         &["setup", "--help"][..],
         &["status", "--help"],
+        &["stats", "--help"],
         &["index", "status", "--help"],
         &["index", "watch", "--help"],
         &["index", "wait", "--help"],
@@ -779,6 +809,17 @@ fn docs_commands_expose_embedded_docs_and_man_pages() {
     let man = String::from_utf8(man).unwrap();
     assert!(man.contains(".TH ctx"));
     assert!(man.contains("Search local agent history"));
+
+    let stats_man = ctx(&temp)
+        .args(["docs", "man", "--print", "ctx-stats"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stats_man = String::from_utf8(stats_man).unwrap();
+    assert!(stats_man.contains(".TH ctx-stats"));
+    assert!(stats_man.contains("--detail"));
 }
 
 #[test]

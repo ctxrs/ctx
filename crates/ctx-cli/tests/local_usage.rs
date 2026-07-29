@@ -22,16 +22,15 @@ fn default_on_usage_is_independent_of_analytics_and_reports_stable_json() {
     assert!(!temp.path().join("install.json").exists());
 
     let report = json_output(enabled(ctx(&temp).args([
-        "status",
-        "--usage",
-        "detail",
+        "stats",
+        "--detail",
         "--format=json",
     ])));
     let usage = &report["local_usage"];
-    assert_eq!(usage["schema_version"], 1);
+    assert_eq!(usage["schema_version"], 2);
     assert_eq!(usage["enabled"], true);
     assert_eq!(usage["state"], "ready");
-    assert_eq!(usage["definition_version"], 1);
+    assert_eq!(usage["definition_version"], 2);
     assert_eq!(usage["retention_days"], 400);
     assert_eq!(usage["summary"]["calls"], 1);
     assert_eq!(usage["summary"]["successful_calls"], 1);
@@ -59,10 +58,14 @@ fn default_on_usage_is_independent_of_analytics_and_reports_stable_json() {
     assert!(usage.get("store_path").is_none());
     assert!(usage.get("tokens_saved").is_none());
     assert!(usage.get("dollars_saved").is_none());
+    assert_eq!(usage["estimates"]["model"]["version"], 1);
+    assert!(usage["estimates"]["approximate_context_tokens"]
+        .get("coverage")
+        .is_some());
 }
 
 #[test]
-fn local_usage_report_is_content_free_and_absent_from_status_analytics() {
+fn stats_report_is_content_free_and_emits_no_analytics() {
     let temp = tempdir();
     let path_marker = "PRIVATE_USAGE_PATH_7d31";
     let content_marker = "PRIVATE_USAGE_CONTENT_62af";
@@ -99,7 +102,7 @@ fn local_usage_report_is_content_free_and_absent_from_status_analytics() {
 
     let output = enabled(
         ctx(&temp)
-            .args(["status", "--usage", "detail", "--format=json"])
+            .args(["stats", "--detail", "--format=json"])
             .env("CTX_DATA_ROOT", &data_root)
             .env("HOME", &home)
             .env("XDG_STATE_HOME", &state)
@@ -112,23 +115,17 @@ fn local_usage_report_is_content_free_and_absent_from_status_analytics() {
     .get_output()
     .stdout
     .clone();
-    let status: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    let local_usage = &status["local_usage"];
+    let stats: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let local_usage = &stats["local_usage"];
     assert_eq!(local_usage["state"], "ready");
 
-    let install: serde_json::Value =
-        serde_json::from_slice(&fs::read(data_root.join("install.json")).unwrap()).unwrap();
-    let device: serde_json::Value =
-        serde_json::from_slice(&fs::read(expected_device_path(&home, &state)).unwrap()).unwrap();
     let forbidden_values = [
         data_root.to_string_lossy().into_owned(),
         path_marker.to_owned(),
         content_marker.to_owned(),
         raw_id_marker.to_owned(),
-        install["install_id"].as_str().unwrap().to_owned(),
-        device["device_id"].as_str().unwrap().to_owned(),
     ];
-    let encoded_usage = serde_json::to_string(local_usage).unwrap();
+    let encoded_usage = serde_json::to_string(&stats).unwrap();
     for forbidden in &forbidden_values {
         assert!(
             !encoded_usage.contains(forbidden),
@@ -152,37 +149,9 @@ fn local_usage_report_is_content_free_and_absent_from_status_analytics() {
         );
     }
 
-    let payloads = read_analytics_events(&events_path);
-    assert_eq!(payloads.len(), 1);
-    assert_operation_event(&payloads[0], "status", "success");
-    let properties = analytics_event_properties(&payloads[0]);
-    assert_analytics_properties_are_allowlisted(properties);
-    let encoded_properties = serde_json::to_string(properties).unwrap();
-    for forbidden in &forbidden_values {
-        assert!(
-            !encoded_properties.contains(forbidden),
-            "status analytics properties leaked local usage data {forbidden:?}: \
-             {encoded_properties}"
-        );
-    }
-    for usage_key in [
-        "local_usage",
-        "usage_calls",
-        "active_days",
-        "ctx_versions",
-        "result_bearing_calls",
-        "empty_calls",
-        "not_applicable_calls",
-        "result_count",
-        "citation_count",
-        "mcp_response_bytes",
-        "pro_blame",
-    ] {
-        assert!(
-            !properties.contains_key(usage_key),
-            "status analytics attached local usage field {usage_key}: {properties:#?}"
-        );
-    }
+    assert!(!events_path.exists(), "ctx stats emitted remote analytics");
+    assert!(!data_root.join("install.json").exists());
+    assert!(!expected_device_path(&home, &state).exists());
 }
 
 #[test]
@@ -243,13 +212,11 @@ fn disable_enable_and_reset_are_explicit_and_do_not_record_the_control() {
 #[test]
 fn usage_reports_are_literal_read_only_and_never_create_or_increment_the_store() {
     let temp = tempdir();
-    for mode in ["summary", "detail"] {
-        let report = json_output(enabled(ctx(&temp).args([
-            "status",
-            "--usage",
-            mode,
-            "--format=json",
-        ])));
+    for args in [
+        &["stats", "--format=json"][..],
+        &["stats", "--detail", "--format=json"],
+    ] {
+        let report = json_output(enabled(ctx(&temp).args(args)));
         assert_eq!(report["read_only"], true);
         assert_eq!(report["local_usage"]["state"], "empty");
         assert!(!temp.path().join("usage.sqlite").exists());
@@ -264,18 +231,12 @@ fn usage_reports_are_literal_read_only_and_never_create_or_increment_the_store()
     let before_auxiliaries = (wal_path.exists(), shm_path.exists());
     for _ in 0..3 {
         json_output(enabled(ctx(&temp).args([
-            "status",
-            "--usage",
-            "detail",
+            "stats",
+            "--detail",
             "--format=json",
         ])));
     }
-    let report = json_output(enabled(ctx(&temp).args([
-        "status",
-        "--usage",
-        "summary",
-        "--format=json",
-    ])));
+    let report = json_output(enabled(ctx(&temp).args(["stats", "--format=json"])));
     assert_eq!(report["local_usage"]["summary"]["calls"], 1);
     assert_eq!(fs::read(&usage_path).unwrap(), before_bytes);
     assert_eq!(
@@ -385,7 +346,7 @@ fn reset_rejects_constraint_bypassed_rows_without_deleting_them() {
 }
 
 #[test]
-fn malformed_status_config_has_one_content_free_parseable_json_error() {
+fn malformed_status_config_has_one_content_free_parseable_usage_health_error() {
     let temp = tempdir();
     let marker = "SECRET_CONFIG_PATH_71af";
     fs::write(
@@ -558,9 +519,8 @@ fn foreground_sql_uses_fresh_projection_and_is_recorded_once_as_not_applicable()
     }
 
     let report = json_output(enabled(ctx(&temp).args([
-        "status",
-        "--usage",
-        "detail",
+        "stats",
+        "--detail",
         "--format=json",
     ])));
     let usage = &report["local_usage"];
@@ -585,64 +545,79 @@ fn human_report_uses_utc_classification_and_conservative_attribution_wording() {
         INSERT INTO daily_usage (
             day_utc, definition_version, ctx_version, surface, operation,
             outcome, value_class, duration_bucket, target_type, pro_outcome,
-            calls, result_count, citation_count, response_bytes
+            result_action, calls, result_count, citation_count,
+            latency_ms, latency_samples, response_bytes, response_byte_samples,
+            output_bytes, output_byte_samples, context_bytes, context_byte_samples,
+            search_result_bytes, search_result_byte_samples, context_searches,
+            context_found, context_opened, context_cited, validated_discoveries
         ) VALUES (
-            '2026-07-25', 1, '0.26.0', 'mcp', 'blame', 'success',
+            '2026-07-25', 2, '0.26.0', 'mcp', 'blame', 'success',
             'result_bearing', 'under_10_ms', 'file', 'produced',
-            1, 1, 1, 100
+            'blame', 1, 1, 1, 0, 0, 100, 1, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0
         );
         INSERT INTO daily_usage (
             day_utc, definition_version, ctx_version, surface, operation,
             outcome, value_class, duration_bucket, target_type, pro_outcome,
-            calls, result_count, citation_count, response_bytes
+            result_action, calls, result_count, citation_count,
+            latency_ms, latency_samples, response_bytes, response_byte_samples,
+            output_bytes, output_byte_samples, context_bytes, context_byte_samples,
+            search_result_bytes, search_result_byte_samples, context_searches,
+            context_found, context_opened, context_cited, validated_discoveries
         ) VALUES (
-            '2026-07-25', 1, '0.26.0', 'mcp', 'blame', 'success',
+            '2026-07-25', 2, '0.26.0', 'mcp', 'blame', 'success',
             'result_bearing', 'under_10_ms', 'commit', 'possible',
-            1, 1, 0, 100
+            'blame', 1, 1, 0, 0, 0, 100, 1, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0
         );
         INSERT INTO daily_usage (
             day_utc, definition_version, ctx_version, surface, operation,
             outcome, value_class, duration_bucket, target_type, pro_outcome,
-            calls, result_count, citation_count, response_bytes
+            result_action, calls, result_count, citation_count,
+            latency_ms, latency_samples, response_bytes, response_byte_samples,
+            output_bytes, output_byte_samples, context_bytes, context_byte_samples,
+            search_result_bytes, search_result_byte_samples, context_searches,
+            context_found, context_opened, context_cited, validated_discoveries
         ) VALUES (
-            '2026-07-25', 1, '0.26.0', 'mcp', 'blame', 'success',
+            '2026-07-25', 2, '0.26.0', 'mcp', 'blame', 'success',
             'empty', 'under_10_ms', 'pull_request', 'none',
-            1, 0, 0, 100
+            'blame', 1, 0, 0, 0, 0, 100, 1, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0
         );
         INSERT INTO daily_usage (
             day_utc, definition_version, ctx_version, surface, operation,
             outcome, value_class, duration_bucket, target_type, pro_outcome,
-            calls, result_count, citation_count, response_bytes
+            result_action, calls, result_count, citation_count,
+            latency_ms, latency_samples, response_bytes, response_byte_samples,
+            output_bytes, output_byte_samples, context_bytes, context_byte_samples,
+            search_result_bytes, search_result_byte_samples, context_searches,
+            context_found, context_opened, context_cited, validated_discoveries
         ) VALUES (
-            '2026-07-25', 1, '0.26.0', 'mcp', 'blame', 'failure',
+            '2026-07-25', 2, '0.26.0', 'mcp', 'blame', 'failure',
             'not_applicable', 'under_10_ms', 'not_applicable', 'error',
-            1, 0, 0, 100
+            'not_applicable', 1, 0, 0, 0, 0, 100, 1, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0
         );
         "#,
     )
     .unwrap();
     drop(conn);
 
-    enabled(ctx(&temp).args(["status", "--usage", "summary"]))
+    enabled(ctx(&temp).args(["stats"]))
         .assert()
         .success()
-        .stdout(predicates::str::contains("usage_active_utc_days:"))
-        .stdout(predicates::str::contains(
-            "usage_mcp_pro_result_classification: 2 nonempty, 1 empty",
-        ))
-        .stdout(predicates::str::contains(
-            "usage_mcp_pro_result_classification_not_applicable: 2 calls",
-        ))
-        .stdout(predicates::str::contains("usage_classified_result_sets").not())
-        .stdout(predicates::str::contains("usage_no_result_set_classification").not())
-        .stdout(predicates::str::contains(
-            "Pro returned produced attribution in 1 of 4 blame requests.",
-        ))
-        .stdout(predicates::str::contains(
-            "pro_blame_outcomes: produced-attribution 1, possible-only 1, none 1, error 1",
-        ))
-        .stdout(predicates::str::contains("produced-attribution 1"))
-        .stdout(predicates::str::contains("cited provenance").not());
+        .stdout(predicates::str::contains("History retrieval"))
+        .stdout(predicates::str::contains("Code provenance"))
+        .stdout(predicates::str::contains("Blame investigations: 4"))
+        .stdout(predicates::str::contains("Origins identified: 1"))
+        .stdout(predicates::str::contains("Possible leads: 1"))
+        .stdout(predicates::str::contains("No attribution: 1"))
+        .stdout(predicates::str::contains("Errors: 1"))
+        .stdout(predicates::str::contains("Citations: 1"))
+        .stdout(predicates::str::contains("Measured delivery"))
+        .stdout(predicates::str::contains("Active days:"))
+        .stdout(predicates::str::contains("Estimated savings"))
+        .stdout(predicates::str::contains("50× raw-search benchmark"));
 }
 
 #[test]
@@ -661,7 +636,7 @@ fn detailed_usage_operations_are_complete_deterministic_and_at_most_eighty_colum
         .unwrap();
     drop(connection);
 
-    let output = enabled(ctx(&temp).args(["status", "--usage", "detail"]))
+    let output = enabled(ctx(&temp).args(["stats", "--detail"]))
         .assert()
         .success()
         .get_output()
@@ -776,7 +751,7 @@ fn mcp_counts_only_recognized_flushed_tool_responses() {
 
     let report = json_output(
         ctx(&temp)
-            .args(["status", "--usage", "detail", "--format=json"])
+            .args(["stats", "--detail", "--format=json"])
             .env("CTX_LOCAL_USAGE_ENABLED", "true"),
     );
     let usage = &report["local_usage"];
@@ -789,8 +764,11 @@ fn mcp_counts_only_recognized_flushed_tool_responses() {
     );
     assert_eq!(usage["details"]["by_operation"][0]["surface"], "mcp");
     assert_eq!(usage["details"]["by_operation"][0]["operation"], "status");
-    assert!(!serde_json::to_string(usage).unwrap().contains("tokens"));
-    assert!(!serde_json::to_string(usage).unwrap().contains("savings"));
+    assert_eq!(usage["summary"]["semantic_search_result_bytes"], 0);
+    assert_eq!(
+        usage["estimates"]["approximate_avoided_context_tokens"]["approximate_tokens"], 0,
+        "MCP transport bytes must never become token savings"
+    );
 }
 
 #[test]
@@ -874,7 +852,7 @@ fn malformed_store_is_an_explicit_content_free_report_error() {
     )
     .unwrap();
 
-    let report = json_output(enabled(ctx(&temp).args(["status", "--format=json"])));
+    let report = json_output(enabled(ctx(&temp).args(["stats", "--format=json"])));
     let encoded = serde_json::to_string(&report["local_usage"]).unwrap();
     assert_eq!(report["local_usage"]["state"], "error");
     assert_eq!(
