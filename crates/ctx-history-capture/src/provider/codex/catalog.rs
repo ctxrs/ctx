@@ -6,7 +6,6 @@ use std::{
 };
 
 use ctx_history_core::{AgentType, CaptureProvider};
-use ctx_history_store::CatalogSession;
 use serde_json::{json, Value};
 
 use crate::common::io::{
@@ -26,6 +25,25 @@ use crate::provider::codex::{CODEX_CAPTURE_REVISION, CODEX_POLICY_REVISION};
 use crate::provider::importer::provider_path_identity;
 
 pub(crate) const CODEX_CATALOG_MAX_SOURCES: usize = 131_072;
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CatalogSession {
+    pub(crate) provider: CaptureProvider,
+    pub(crate) source_format: String,
+    pub(crate) source_root: String,
+    pub(crate) source_path: String,
+    pub(crate) external_session_id: Option<String>,
+    pub(crate) parent_external_session_id: Option<String>,
+    pub(crate) agent_type: AgentType,
+    pub(crate) role_hint: Option<String>,
+    pub(crate) external_agent_id: Option<String>,
+    pub(crate) cwd: Option<String>,
+    pub(crate) session_started_at_ms: Option<i64>,
+    pub(crate) file_size_bytes: u64,
+    pub(crate) file_modified_at_ms: i64,
+    pub(crate) cataloged_at_ms: i64,
+    pub(crate) metadata: Value,
+}
 
 fn authority_path(path: &Path) -> Result<PathBuf> {
     use std::path::Component;

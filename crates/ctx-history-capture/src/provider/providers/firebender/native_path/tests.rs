@@ -5,7 +5,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use ctx_history_store::NATIVE_PATH_MAX_RETAINED_PAGE_BYTES;
 use rusqlite::{config::DbConfig, params, Connection};
 use serde_json::{json, Value};
 
@@ -71,7 +70,7 @@ fn drain_source_backed_plan(
     let mut documents = Vec::new();
     let mut page_sizes = Vec::new();
     while let Some(page) = scanner.next_page().unwrap() {
-        assert!(page.retained_bytes() <= NATIVE_PATH_MAX_RETAINED_PAGE_BYTES);
+        assert!(page.retained_bytes() <= FIREBENDER_SOURCE_BACKED_PAGE_MAX_BYTES);
         page_sizes.push(page.documents().len());
         documents.extend(page.into_documents());
     }

@@ -18,7 +18,6 @@ mod nativepath;
 // Registration is intentionally owned by the shared provider registry follow-up.
 #[allow(unused_imports)]
 pub(crate) use nativepath::{
-    import_custom_history_nativepath, import_custom_history_nativepath_reader,
     observe_custom_history_source_backed_explicit, revalidate_custom_history_source_backed,
     scan_custom_history_source_backed_explicit, validate_custom_history_nativepath,
     validate_custom_history_nativepath_reader, CustomHistoryReplacementEvidence,

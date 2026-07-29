@@ -6,7 +6,6 @@ use std::{
 };
 
 use ctx_history_core::CaptureProvider;
-use ctx_history_store::NATIVE_PATH_MAX_RETAINED_PAGE_BYTES;
 use rusqlite::Connection;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -16,6 +15,7 @@ use crate::{
     native_source::NativeSqliteValue,
     provider::{
         importer::provider_path_identity,
+        native_ingestion::NATIVE_INGESTION_PAGE_MAX_BYTES,
         sqlite::{ensure_sqlite_table_columns, sqlite_table_columns, sqlite_table_exists},
     },
     provider_sources::{
@@ -43,6 +43,7 @@ const FIREBENDER_NATIVE_FRONTIER_VERSION: u32 = 1;
 const FIREBENDER_NATIVE_PARSER_REVISION: u32 = 1;
 const FIREBENDER_NATIVE_POLICY_REVISION: u32 = 1;
 const FIREBENDER_SOURCE_BACKED_PAGE_MAX_MESSAGES: usize = 60;
+const FIREBENDER_SOURCE_BACKED_PAGE_MAX_BYTES: usize = NATIVE_INGESTION_PAGE_MAX_BYTES;
 const FIREBENDER_PAGE_OVERHEAD_BYTES: usize = 4 * 1024;
 const FIREBENDER_INITIAL_PREFIX_DOMAIN: &[u8] = b"ctx-firebender-native-prefix-v1\0";
 
