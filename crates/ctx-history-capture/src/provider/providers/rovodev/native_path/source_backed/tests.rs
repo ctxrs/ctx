@@ -110,7 +110,7 @@ fn cold_scan_emits_stable_full_documents_tree_coordinates_and_exact_counts() {
     assert_eq!(inventory.certify().unwrap().observed_sources(), 1);
 
     let leaf = &inventory.leaves()[0];
-    let (cold, documents, pages) = collect_scan(leaf, context.clone(), None);
+    let (cold, documents, _) = collect_scan(leaf, context.clone(), None);
     assert_eq!(cold.disposition, RovoDevSourceBackedDisposition::Cold);
     assert_eq!(documents.len(), 1);
     assert_eq!(cold.source.counts().complete_records, 3);
@@ -118,12 +118,11 @@ fn cold_scan_emits_stable_full_documents_tree_coordinates_and_exact_counts() {
     assert_eq!(cold.source.counts().rejected_records, 1);
     assert_eq!(cold.source.counts().ignored_records, 1);
     assert_eq!(cold.source.counts().indexed_documents, 1);
-    assert!(pages.last().is_some_and(|page| page.terminal));
     assert_eq!(documents[0].body, full_body);
     assert!(documents[0].body.ends_with("rovodev-tail"));
-    assert_eq!(documents[0].session_id, leaf.session_id());
+    assert_eq!(documents[0].session_id, leaf.session_id);
     assert_eq!(documents[0].parent_session_id, None);
-    assert_eq!(documents[0].root_session_id, leaf.session_id());
+    assert_eq!(documents[0].root_session_id, leaf.session_id);
     assert_eq!(documents[0].source, *leaf.source_key());
     assert_eq!(
         documents[0].provider_session_id.as_deref(),
@@ -206,7 +205,7 @@ fn lineage_fields_bind_parent_root_thread_and_agent_semantics() {
         let document = leaf_documents.pop().unwrap();
         documents.insert(
             document.provider_session_id.clone().unwrap(),
-            (leaf.session_id(), document),
+            (leaf.session_id, document),
         );
     }
 

@@ -603,10 +603,6 @@ impl RovoDevSourceBackedLeaf {
         &self.source_key
     }
 
-    pub(crate) fn session_id(&self) -> StableEntityId {
-        self.session_id
-    }
-
     pub(crate) fn provider_session_id(&self) -> &str {
         self.snapshot
             .document
@@ -928,7 +924,6 @@ pub(crate) struct RovoDevSourceBackedPage {
     pub(crate) retained_records: u64,
     pub(crate) rejected_records: u64,
     pub(crate) ignored_records: u64,
-    pub(crate) terminal: bool,
 }
 
 #[derive(Debug)]
@@ -1004,7 +999,6 @@ impl<'a> RovoDevSourceBackedReader<'a> {
                     retained_records: 0,
                     rejected_records: 1,
                     ignored_records: 0,
-                    terminal: true,
                 };
                 self.add_page_counts(&page)?;
                 return Ok(Some(page));
@@ -1074,7 +1068,6 @@ impl<'a> RovoDevSourceBackedReader<'a> {
             retained_records,
             rejected_records,
             ignored_records,
-            terminal: self.terminal,
         };
         self.add_page_counts(&page)?;
         Ok(Some(page))

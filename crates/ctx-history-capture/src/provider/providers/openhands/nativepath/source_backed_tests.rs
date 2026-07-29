@@ -4,8 +4,13 @@ use ctx_history_core::{HydrationFailureKind, NativeRecordCoordinate, TypedKey};
 use serde_json::{json, Value};
 
 use super::source_backed::{
-    project_openhands_source_backed_v1, OpenHandsLocatorResolverV1, OpenHandsSourceBackedErrorV1,
+    OpenHandsLocatorResolverV1, OpenHandsSourceBackedAdapterV1, OpenHandsSourceBackedErrorV1,
+    OpenHandsSourceBackedProjectionV1, OpenHandsSourceBackedResultV1,
 };
+
+fn project(root: &Path) -> OpenHandsSourceBackedResultV1<OpenHandsSourceBackedProjectionV1> {
+    OpenHandsSourceBackedAdapterV1::discover(root)?.project()
+}
 
 #[test]
 fn source_backed_cold_projection_is_stable_and_retains_full_lexical_body() {
@@ -33,10 +38,9 @@ fn source_backed_cold_projection_is_stable_and_retains_full_lexical_body() {
     )
     .unwrap();
 
-    let first = project_openhands_source_backed_v1(&root).unwrap();
-    let second = project_openhands_source_backed_v1(&root).unwrap();
+    let first = project(&root).unwrap();
+    let second = project(&root).unwrap();
 
-    assert_eq!(first.inventory().observed_sources(), 1);
     assert_eq!(first.sources().len(), 1);
     assert_eq!(first.sources()[0].counts().complete_records, 3);
     assert_eq!(first.sources()[0].counts().retained_records, 1);
@@ -64,8 +68,6 @@ fn source_backed_cold_projection_is_stable_and_retains_full_lexical_body() {
         .is_some_and(|path| path.ends_with("event-a.json")));
     assert_eq!(first.documents()[0].agent_type, "primary");
     assert!(first.documents()[0].is_primary);
-    assert_eq!(first.rejections().len(), 1);
-
     assert_eq!(
         first.sources()[0].observation().source().identity(),
         second.sources()[0].observation().source().identity()
@@ -102,7 +104,7 @@ fn new_event_preserves_existing_ids_and_exact_leaf_hydration() {
         message("event-a", "first exact body"),
     );
 
-    let cold = project_openhands_source_backed_v1(&root).unwrap();
+    let cold = project(&root).unwrap();
     let old_event_id = cold.documents()[0].event_id;
     let old_session_id = cold.documents()[0].session_id;
     let old_source_id = cold.sources()[0].observation().source().identity();
@@ -114,7 +116,7 @@ fn new_event_preserves_existing_ids_and_exact_leaf_hydration() {
         "event-b.json",
         message("event-b", "second exact body"),
     );
-    let appended = project_openhands_source_backed_v1(&root).unwrap();
+    let appended = project(&root).unwrap();
     assert_eq!(appended.documents().len(), 2);
     let old_after = appended
         .documents()
@@ -142,7 +144,7 @@ fn replacement_keeps_native_ids_but_invalidates_old_leaf_evidence() {
         "event.json",
         message("stable-event-id", "before replacement"),
     );
-    let before = project_openhands_source_backed_v1(&root).unwrap();
+    let before = project(&root).unwrap();
     let before_id = before.documents()[0].event_id;
     let before_session = before.documents()[0].session_id;
     let before_locator = before.documents()[0].locator.clone();
@@ -152,7 +154,7 @@ fn replacement_keeps_native_ids_but_invalidates_old_leaf_evidence() {
         serde_json::to_vec(&message("stable-event-id", "after replacement")).unwrap(),
     )
     .unwrap();
-    let after = project_openhands_source_backed_v1(&root).unwrap();
+    let after = project(&root).unwrap();
     assert_eq!(after.documents()[0].event_id, before_id);
     assert_eq!(after.documents()[0].session_id, before_session);
     assert_eq!(after.documents()[0].body, "after replacement");
@@ -180,7 +182,7 @@ fn retained_resolver_rejects_leaf_swap() {
         "event.json",
         message("stable-event-id", "trusted body"),
     );
-    let projection = project_openhands_source_backed_v1(&root).unwrap();
+    let projection = project(&root).unwrap();
     let locator = projection.documents()[0].locator.clone();
     let resolver = OpenHandsLocatorResolverV1::discover(&root).unwrap();
 
@@ -207,7 +209,7 @@ fn retained_resolver_rejects_selected_root_swap() {
         "event.json",
         message("stable-event-id", "trusted body"),
     );
-    let projection = project_openhands_source_backed_v1(&root).unwrap();
+    let projection = project(&root).unwrap();
     let locator = projection.documents()[0].locator.clone();
     let resolver = OpenHandsLocatorResolverV1::discover(&root).unwrap();
 
@@ -229,7 +231,7 @@ fn unavailable_selected_root_fails_closed() {
     let missing = temp.path().join("missing-profile");
 
     assert!(matches!(
-        project_openhands_source_backed_v1(&missing),
+        project(&missing),
         Err(OpenHandsSourceBackedErrorV1::NoV1EventFiles { .. })
     ));
     assert!(matches!(
@@ -252,7 +254,7 @@ fn exact_locator_uses_relative_leaf_and_native_object_coordinate() {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path, &bytes).unwrap();
 
-    let projection = project_openhands_source_backed_v1(&root).unwrap();
+    let projection = project(&root).unwrap();
     let document = &projection.documents()[0];
     let NativeRecordCoordinate::TreeRecord {
         relative_file_key,
@@ -289,7 +291,7 @@ fn current_cli_conversation_events_remain_detected_but_unsupported() {
     fs::write(&event, b"{}").unwrap();
 
     assert!(matches!(
-        project_openhands_source_backed_v1(&conversation),
+        project(&conversation),
         Err(OpenHandsSourceBackedErrorV1::UnsupportedCurrentCliFormat { .. })
     ));
     assert!(matches!(
