@@ -67,7 +67,7 @@ use ctx_history_core::{
 use tantivy::{
     directory::{Directory, DirectoryLock, Lock, INDEX_WRITER_LOCK},
     indexer::LogMergePolicy,
-    Index, IndexSettings, IndexWriter, ReloadPolicy, Searcher, TantivyDocument, Term,
+    Index, IndexMeta, IndexSettings, IndexWriter, ReloadPolicy, Searcher, TantivyDocument, Term,
 };
 use uuid::Uuid;
 
@@ -86,6 +86,30 @@ struct PendingSource {
 enum PendingSourceMode {
     Replace,
     Append { base: CertifiedSource },
+}
+
+fn reclaim_orphaned_managed_files(index: &mut Index, base_metas: &IndexMeta) -> Result<()> {
+    let mut living_files = base_metas
+        .segments
+        .iter()
+        .flat_map(|segment| segment.list_files())
+        .collect::<HashSet<_>>();
+    living_files.insert(PathBuf::from("meta.json"));
+
+    let has_orphaned_managed_files = index
+        .directory()
+        .list_managed_files()
+        .iter()
+        .any(|path| !living_files.contains(path));
+    if !has_orphaned_managed_files {
+        return Ok(());
+    }
+
+    // Use Tantivy's managed-file ledger so an interrupted or failed cleanup is
+    // retried safely. The live set comes only from the verified active
+    // meta.json, so recovery cannot remove any file in the pinned generation.
+    let _ = index.directory_mut().garbage_collect(|| living_files)?;
+    Ok(())
 }
 
 /// A structurally exact replay paired with separately certified current
@@ -149,7 +173,7 @@ impl GenerationWriter {
                         Some("failed to acquire ctx index initialization lock".to_owned()),
                     )
                 })?;
-        let index = if Index::exists(&directory).map_err(tantivy::TantivyError::from)? {
+        let mut index = if Index::exists(&directory).map_err(tantivy::TantivyError::from)? {
             Index::open(directory.clone())?
         } else {
             Index::create(
@@ -195,13 +219,13 @@ impl GenerationWriter {
         } else {
             return Err(IndexError::UnboundIndexState);
         };
-        // Base verification above and this reclamation both run while holding
-        // Tantivy's real writer lock. Interrupted ctx atomic publications are
-        // safe to remove only after the visible base has been proven, and
-        // reclaiming them must not require constructing IndexWriter. Tantivy
-        // managed-file garbage collection remains lazy on the mutation path.
+        // Base verification above and both reclamation paths run while holding
+        // Tantivy's real writer lock. Interrupted publications are safe to
+        // remove only after the visible base has been proven. The managed-file
+        // path remains completely idle for a healthy exact replay.
         reclaim_abandoned_atomic_writes(&root)?;
         reclaim_abandoned_atomic_writes(&root.join(MANIFEST_DIRECTORY))?;
+        reclaim_orphaned_managed_files(&mut index, &base_metas)?;
         let mut source_identities = HashMap::new();
         if let Some(manifest) = &base_manifest {
             for source in &manifest.sources {

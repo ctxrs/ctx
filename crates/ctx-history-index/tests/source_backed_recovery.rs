@@ -1,6 +1,7 @@
 #![cfg(target_os = "linux")]
 
 use std::{
+    collections::HashSet,
     env,
     error::Error as StdError,
     ffi::OsStr,
@@ -14,10 +15,11 @@ use std::{
 };
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CertifiedSource, EventIdentityInput, LocatorRevisionPolicy,
-    NativeItemKey, NativeRecordCoordinate, NativeSessionKey, ScannedSourceCounts,
-    SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation, SourceRecordLocator,
-    TypedKey,
+    derive_event_id, derive_session_id, CertifiedSource, CertifiedSourceAppend,
+    CertifiedSourceInventory, EventIdentityInput, LocatorRevisionPolicy, NativeItemKey,
+    NativeRecordCoordinate, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput,
+    SourceAnchor, SourceFrontier, SourceInventoryObservation, SourceKey, SourceObservation,
+    SourceRecordLocator, TypedKey,
 };
 use ctx_history_index::{
     CommitReceipt, GenerationWriter, IndexError, LexicalDocument, VerifiedIndex, WriterOptions,
@@ -329,7 +331,7 @@ fn exact_manifest_and_tantivy_swap_process_death_matrix() {
 }
 
 #[test]
-#[ignore = "release blocker reproduction; requires the Linux fault shim"]
+#[ignore = "requires scripts/source-backed-recovery/run-linux-fault-tests.sh"]
 fn retry_after_pre_meta_crash_reclaims_tantivy_candidate_files() {
     let shim = required_fault_shim();
     let fixture = RecoveryFixture::new();
@@ -343,9 +345,11 @@ fn retry_after_pre_meta_crash_reclaims_tantivy_candidate_files() {
     );
     let mut child = fixture.spawn_stopped_child("commit", Some((&shim, case)));
     fixture.kill_at_marker(&mut child);
+    let orphaned_before = orphaned_managed_files(&fixture.root);
+    let orphaned_bytes_before = managed_file_bytes(&fixture.root, &orphaned_before);
     assert!(
-        !atomic_temporary_files(&fixture.root).is_empty(),
-        "the pre-meta crash did not leave its expected atomic-write witness"
+        orphaned_bytes_before > 0,
+        "the pre-meta crash left no orphaned managed bytes: {orphaned_before:?}"
     );
     assert_generation(
         &fixture.root,
@@ -354,14 +358,40 @@ fn retry_after_pre_meta_crash_reclaims_tantivy_candidate_files() {
         "candidate",
     );
 
-    let receipt = staged_replacement(&fixture.root)
-        .commit(|_| true)
-        .expect("retry after a pre-meta crash must reclaim candidate files");
+    let meta_path = fixture.root.join("meta.json");
+    let meta_before = fs::read(&meta_path).unwrap();
+    let opstamp_before = Index::open_in_dir(&fixture.root)
+        .unwrap()
+        .load_metas()
+        .unwrap()
+        .opstamp;
+    let inventory = complete_inventory(&source(), 1, vec![source()]);
+    let mut replay = GenerationWriter::open(&fixture.root, writer_options())
+        .expect("preflight recovery must reclaim candidate files");
+    replay
+        .certify_complete_inventory(inventory.clone())
+        .unwrap();
+    stage_exact_replay(&mut replay);
+    let receipt = replay
+        .commit_with_complete_inventory_revalidation(|_| true, |current| current == &inventory)
+        .expect("restored base source must remain an exact replay");
     assert_generation(
         &fixture.root,
         &receipt.generation_id,
-        "candidate",
         "previous",
+        "candidate",
+    );
+    assert_eq!(receipt.generation_id, fixture.baseline.generation_id);
+    assert_eq!(receipt.opstamp, fixture.baseline.opstamp);
+    assert_eq!(receipt.opstamp, opstamp_before);
+    assert_eq!(fs::read(meta_path).unwrap(), meta_before);
+    assert!(
+        orphaned_managed_files(&fixture.root).is_empty(),
+        "exact replay left orphaned managed files"
+    );
+    assert!(
+        orphaned_before.iter().all(|path| !path.exists()),
+        "exact replay did not reclaim every candidate file: {orphaned_before:?}"
     );
     assert!(
         atomic_temporary_files(&fixture.root).is_empty(),
@@ -745,6 +775,19 @@ fn staged_replacement(root: &Path) -> GenerationWriter {
     try_staged_replacement(root).unwrap()
 }
 
+fn stage_exact_replay(writer: &mut GenerationWriter) {
+    let base = writer.begin_source_append(source()).unwrap().clone();
+    let frontier = base.frontier().unwrap();
+    let replay = CertifiedSourceAppend::certify(
+        &base,
+        base.clone(),
+        frontier.certified_prefix_bytes(),
+        *frontier.certified_prefix_digest(),
+    )
+    .unwrap();
+    writer.certify_source_append(replay).unwrap();
+}
+
 fn try_staged_replacement(root: &Path) -> std::result::Result<GenerationWriter, IndexError> {
     let source = source();
     let mut writer = GenerationWriter::open(root, writer_options())?;
@@ -752,6 +795,57 @@ fn try_staged_replacement(root: &Path) -> std::result::Result<GenerationWriter, 
     writer.add_document(document(&source, CANDIDATE_BODY))?;
     writer.certify_source(certificate(&source, 2))?;
     Ok(writer)
+}
+
+fn complete_inventory(
+    authority_source: &SourceKey,
+    revision: u8,
+    sources: Vec<SourceKey>,
+) -> CertifiedSourceInventory {
+    let observation = SourceInventoryObservation::new(
+        authority_source.provider(),
+        "provider-root",
+        TypedKey::utf8("root-lineage").unwrap(),
+        "tree-inventory-v1",
+        vec![revision],
+    )
+    .unwrap();
+    CertifiedSourceInventory::certify(observation.clone(), observation, "discovery-v1", sources)
+        .unwrap()
+}
+
+fn orphaned_managed_files(root: &Path) -> Vec<PathBuf> {
+    let index = Index::open_in_dir(root).unwrap();
+    let metas = index.load_metas().unwrap();
+    let mut living = metas
+        .segments
+        .iter()
+        .flat_map(|segment| segment.list_files())
+        .collect::<HashSet<_>>();
+    living.insert(PathBuf::from("meta.json"));
+    let mut orphaned = index
+        .directory()
+        .list_managed_files()
+        .into_iter()
+        .filter(|path| !living.contains(path))
+        .map(|path| root.join(path))
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    orphaned.sort();
+    orphaned
+}
+
+fn managed_file_bytes(root: &Path, files: &[PathBuf]) -> u64 {
+    files
+        .iter()
+        .map(|path| {
+            assert!(
+                path.starts_with(root),
+                "managed file escaped the index root: {path:?}"
+            );
+            fs::metadata(path).unwrap().len()
+        })
+        .sum()
 }
 
 fn index_error_has_enospc(error: &IndexError) -> bool {
@@ -791,7 +885,7 @@ fn source() -> SourceKey {
 fn certificate(source: &SourceKey, revision: u8) -> CertifiedSource {
     let observation =
         SourceObservation::new(source.clone(), "regular-file-v1", vec![revision]).unwrap();
-    CertifiedSource::certify(
+    CertifiedSource::certify_with_frontier(
         observation.clone(),
         observation,
         "codex-parser-v1",
@@ -803,6 +897,10 @@ fn certificate(source: &SourceKey, revision: u8) -> CertifiedSource {
             certified_bytes: 100,
             ..ScannedSourceCounts::default()
         },
+        Some(
+            SourceFrontier::new("jsonl-byte-offset", TypedKey::U64(100), 100, [revision; 32])
+                .unwrap(),
+        ),
     )
     .unwrap()
 }

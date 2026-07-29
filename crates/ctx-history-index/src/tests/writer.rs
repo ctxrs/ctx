@@ -1,4 +1,6 @@
 use super::*;
+use std::io::Write as _;
+use tantivy::directory::TerminatingWrite as _;
 
 #[test]
 fn commit_binds_manifest_and_searchable_documents() {
@@ -33,9 +35,12 @@ fn unchanged_commit_returns_the_verified_base_without_republication() {
     let initial_receipt = initial.commit(|_| true).unwrap();
 
     let meta_path = temp.path().join("meta.json");
+    let managed_path = temp.path().join(".managed.json");
     let manifest_path = manifest_path(temp.path(), &initial_receipt.generation_id);
     let meta_before = fs::read(&meta_path).unwrap();
     let meta_metadata_before = fs::metadata(&meta_path).unwrap();
+    let managed_before = fs::read(&managed_path).unwrap();
+    let managed_metadata_before = fs::metadata(&managed_path).unwrap();
     let manifest_before = fs::read(&manifest_path).unwrap();
     let manifest_metadata_before = fs::metadata(&manifest_path).unwrap();
 
@@ -102,6 +107,11 @@ fn unchanged_commit_returns_the_verified_base_without_republication() {
         fs::metadata(&meta_path).unwrap().modified().unwrap(),
         meta_metadata_before.modified().unwrap()
     );
+    assert_eq!(fs::read(&managed_path).unwrap(), managed_before);
+    assert_eq!(
+        fs::metadata(&managed_path).unwrap().modified().unwrap(),
+        managed_metadata_before.modified().unwrap()
+    );
     assert_eq!(fs::read(&manifest_path).unwrap(), manifest_before);
     assert_eq!(
         fs::metadata(&manifest_path).unwrap().modified().unwrap(),
@@ -114,6 +124,10 @@ fn unchanged_commit_returns_the_verified_base_without_republication() {
         assert_eq!(
             fs::metadata(&meta_path).unwrap().ino(),
             meta_metadata_before.ino()
+        );
+        assert_eq!(
+            fs::metadata(&managed_path).unwrap().ino(),
+            managed_metadata_before.ino()
         );
         assert_eq!(
             fs::metadata(&manifest_path).unwrap().ino(),
@@ -512,6 +526,58 @@ fn writer_exposes_the_base_manifest_captured_under_its_lock() {
         writer.base_manifest().unwrap().generation_id().unwrap(),
         receipt.generation_id
     );
+}
+
+#[test]
+fn orphaned_managed_files_are_reclaimed_before_exact_noop_without_index_writer() {
+    let temp = tempdir().unwrap();
+    let source = source("session.jsonl");
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    initial.begin_source(source.clone()).unwrap();
+    initial
+        .add_document(document(&source, 1, "stable generation"))
+        .unwrap();
+    initial
+        .certify_source(appendable_certificate(&source, 1, 1, 10))
+        .unwrap();
+    let initial_receipt = initial.commit(|_| true).unwrap();
+    let pinned = VerifiedIndex::open(temp.path()).unwrap();
+
+    let orphan_relative =
+        Path::new("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.store");
+    let orphan_path = temp.path().join(orphan_relative);
+    let directory = DurableMmapDirectory::open(temp.path()).unwrap();
+    let index = Index::open(directory).unwrap();
+    let mut orphan = index.directory().open_write(orphan_relative).unwrap();
+    orphan.write_all(b"abandoned candidate segment").unwrap();
+    orphan.terminate().unwrap();
+    drop(index);
+    assert!(orphan_path.is_file());
+
+    let mut replay = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    assert!(
+        !orphan_path.exists(),
+        "preflight recovery left an orphaned managed file"
+    );
+    let constructions = std::sync::Arc::clone(&replay.index_writer_constructions);
+    let inventory = complete_inventory(&source, 1, vec![source.clone()]);
+    replay
+        .certify_complete_inventory(inventory.clone())
+        .unwrap();
+    stage_exact_replay(&mut replay, &source);
+    let receipt = replay
+        .commit_with_complete_inventory_revalidation(|_| true, |current| current == &inventory)
+        .unwrap();
+
+    assert_eq!(
+        constructions.load(Ordering::SeqCst),
+        0,
+        "orphan recovery plus exact replay must not construct IndexWriter"
+    );
+    assert_eq!(receipt.generation_id, initial_receipt.generation_id);
+    assert_eq!(receipt.opstamp, initial_receipt.opstamp);
+    assert_eq!(pinned.generation_id(), initial_receipt.generation_id);
+    assert_eq!(pinned.count_term("stable").unwrap(), 1);
 }
 
 #[test]
