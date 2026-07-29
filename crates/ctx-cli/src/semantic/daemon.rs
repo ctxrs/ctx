@@ -316,9 +316,6 @@ fn reload_daemon_analytics_config(data_root: &Path) -> Option<AppConfig> {
 #[derive(Default)]
 pub(super) struct DaemonRuntime {
     pub(super) semantic_runtime: SharedSemanticRuntime,
-    pub(super) semantic_reconciliation_sweep:
-        super::daemon_worker::SemanticReconciliationSweepState,
-    pub(super) semantic_bootstrap_passes_since_refresh: usize,
     pub(super) history_retry: DaemonRetryBackoff,
     pub(super) semantic_retry: DaemonRetryBackoff,
     pub(super) semantic_blocked_job: Option<Value>,

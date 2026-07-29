@@ -5,17 +5,6 @@ use ctx_history_core::{
 };
 use sha2::{Digest, Sha256};
 
-fn reconcile_committed_semantic_work(
-    data_root: &Path,
-    store: &Store,
-) -> Result<SemanticReconciliationOutcome> {
-    reconcile_committed_semantic_work_with_state(
-        data_root,
-        store,
-        &mut SemanticReconciliationSweepState::default(),
-    )
-}
-
 fn test_embedding(first: f32, second: f32) -> Vec<f32> {
     let mut embedding = vec![0.0; SEMANTIC_DIMENSIONS];
     let norm = first.mul_add(first, second * second).sqrt();

@@ -92,7 +92,6 @@ pub(crate) use model_runtime::{
     SemanticNativeAcceleratorTarget,
 };
 mod paths_status;
-mod vector_store_reconciliation;
 mod vector_store_schema;
 #[cfg(test)]
 use vector_store_schema::{SemanticVectorStoreError, SEMANTIC_VECTOR_SCHEMA_VERSION};

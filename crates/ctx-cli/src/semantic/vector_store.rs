@@ -45,20 +45,6 @@ pub(super) struct SemanticStoredEvent {
     pub(super) seq: u64,
 }
 
-#[derive(Debug, Default)]
-pub(super) struct SemanticIndexOutcome {
-    pub(super) indexed_chunks: usize,
-    pub(super) consumed_event_ids: Vec<Uuid>,
-}
-
-#[derive(Debug, Default)]
-pub(super) struct SemanticPruneOutcome {
-    pub(super) scanned_events: usize,
-    pub(super) deleted_chunks: usize,
-    pub(super) queued_stale_events: usize,
-    pub(super) scan_complete: bool,
-}
-
 pub(super) struct SemanticVectorStore {
     pub(super) conn: Connection,
     pub(super) flat: flat_segments::FlatSegmentStore,
