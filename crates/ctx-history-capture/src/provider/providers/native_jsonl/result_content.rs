@@ -50,24 +50,6 @@ pub(super) fn enumerate_native_jsonl_result_subrecords<'a>(
     }
 }
 
-#[cfg(test)]
-pub(crate) fn gemini_result_subrecord_oracle_for_tests(
-    value: &Value,
-) -> Result<Vec<(u32, Option<String>, OutputOutcomeMetadata)>, NativeJsonlResultExtractionError> {
-    enumerate_native_jsonl_result_subrecords(GEMINI_RESULT_PROFILE, value).map(|subrecords| {
-        subrecords
-            .into_iter()
-            .map(|subrecord| {
-                (
-                    subrecord.subrecord_index,
-                    subrecord.content.map(str::to_owned),
-                    subrecord.outcome,
-                )
-            })
-            .collect()
-    })
-}
-
 fn result_type_is_allowed(value: &Value, expected_types: &[&str]) -> bool {
     value
         .get("type")

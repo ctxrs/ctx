@@ -361,14 +361,6 @@ impl OutcomeAggregate {
             0
         }
     }
-
-    fn has_signal(&self) -> bool {
-        self.timeout
-            || self.failure
-            || self.success
-            || self.exit_code.is_some()
-            || self.duration_ms.is_some()
-    }
 }
 
 fn collect_outcome(value: &Value) -> OutcomeAggregate {

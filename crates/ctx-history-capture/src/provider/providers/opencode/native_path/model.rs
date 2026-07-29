@@ -31,16 +31,6 @@ impl OpenCodeNativeSchemaFamily {
         }
     }
 
-    pub(super) const fn ordering_semantics(self) -> &'static str {
-        match self {
-            Self::SessionMessageSeq => "session-id,explicit-seq,message-id",
-            Self::SessionMessageSynthesizedSeq | Self::SessionEntry | Self::LegacyMessage => {
-                "session-id,time-created,message-id"
-            }
-            Self::MessagePart => "session-id,message-time,message-id,part-time,part-id",
-        }
-    }
-
     pub(super) const fn event_table(self) -> &'static str {
         match self {
             Self::SessionMessageSeq | Self::SessionMessageSynthesizedSeq => "session_message",

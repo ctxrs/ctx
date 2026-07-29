@@ -89,8 +89,6 @@ pub(crate) enum MuxSourceBackedError {
     InvalidRecordDigest,
     #[error("Mux source-backed locator is malformed or belongs to another source")]
     InvalidLocator,
-    #[error("Mux source-backed locator evidence is stale")]
-    StaleLocator,
     #[error("Mux native session {0:?} resolves to more than one source")]
     DuplicateNativeSession(String),
     #[error("Mux source-backed exact lexical projection failed: {0}")]

@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use ctx_history_core::{Confidence, EventRole, EventType, FileChangeKind};
+use ctx_history_core::{EventRole, EventType};
 use serde_json::{json, Value};
 
 use crate::provider::normalization::{
@@ -87,20 +87,6 @@ pub(crate) struct KiroNativeEvent {
     pub(crate) occurred_at: DateTime<Utc>,
     pub(crate) payload: Value,
     pub(crate) metadata: Value,
-}
-
-pub(super) struct KiroFileTouch {
-    pub(super) provider_touch_index: u64,
-    pub(super) provider_event_index: Option<u64>,
-    pub(super) raw_source_path: Option<String>,
-    pub(super) source_root: Option<String>,
-    pub(super) path: String,
-    pub(super) change_kind: Option<FileChangeKind>,
-    pub(super) old_path: Option<String>,
-    pub(super) line_count_delta: Option<i64>,
-    pub(super) confidence: Confidence,
-    pub(super) occurred_at: DateTime<Utc>,
-    pub(super) metadata: Value,
 }
 
 /// Core may retain prompts, assistant prose, and tool-call inputs, but never

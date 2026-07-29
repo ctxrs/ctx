@@ -2,7 +2,7 @@ use std::path::Path;
 
 use ctx_history_core::CaptureProvider;
 
-use crate::{stable_capture_uuid, ProviderAdapterContext, Result, KIMI_CODE_CLI_SOURCE_FORMAT};
+use crate::{stable_capture_uuid, Result, KIMI_CODE_CLI_SOURCE_FORMAT};
 
 mod event;
 mod layout;
@@ -13,10 +13,6 @@ mod source;
 mod tests;
 
 use source::KimiWireObservation;
-
-fn kimi_admission_scope_revision(context: &ProviderAdapterContext) -> String {
-    kimi_admission_scope_revision_for_display(context.source_root_display())
-}
 
 fn kimi_admission_scope_revision_for_display(source_root: Option<String>) -> String {
     stable_capture_uuid(

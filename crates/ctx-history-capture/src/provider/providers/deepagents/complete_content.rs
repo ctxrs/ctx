@@ -28,16 +28,6 @@ pub(crate) struct DeepAgentsContentAddress {
 }
 
 impl DeepAgentsContentAddress {
-    pub(super) fn from_write(key: &DeepAgentsWriteKey, message_offset: usize) -> Option<Self> {
-        Some(Self {
-            thread_id: key.thread_id.clone(),
-            checkpoint_id: key.checkpoint_id.clone(),
-            task_id: key.task_id.clone(),
-            write_idx: key.idx,
-            message_offset: u32::try_from(message_offset).ok()?,
-        })
-    }
-
     pub(crate) fn encode(&self) -> Option<Vec<u8>> {
         let thread = self.thread_id.as_bytes();
         let checkpoint = self.checkpoint_id.as_bytes();

@@ -102,10 +102,6 @@ impl KimiFrozenFileMetadata {
         )
     }
 
-    pub(super) fn physical_identity(&self) -> (Option<u64>, Option<u64>) {
-        (self.device, self.inode)
-    }
-
     fn revalidate(&self, path: &Path) -> Result<bool> {
         match Self::read(path) {
             Ok(current) => Ok(current == *self),

@@ -132,8 +132,6 @@ pub enum CodexSourceBackedErrorV0 {
     #[cfg(test)]
     #[error("injected Codex cold scanner failure for source {source_index}")]
     InjectedColdWorkerFailure { source_index: usize },
-    #[error("Codex Core-only scanner emitted a Pro page")]
-    UnexpectedProPage,
     #[error("Codex source-backed scanner emitted a legacy Core publication row")]
     UnexpectedLegacyRow,
     #[error("locator is not a Codex NativePath JSONL record")]
@@ -1018,9 +1016,7 @@ pub(crate) fn ingest_codex_sources_serial_v0(
             let Some(page) = page else {
                 break;
             };
-            let CodexNativeOwnedPage::Core(page) = page else {
-                return Err(CodexSourceBackedErrorV0::UnexpectedProPage);
-            };
+            let CodexNativeOwnedPage::Core(page) = page;
             if !page.core_rows.is_empty() {
                 return Err(CodexSourceBackedErrorV0::UnexpectedLegacyRow);
             }
@@ -1286,9 +1282,7 @@ fn run_cold_scan_lane_v0(
                 break;
             };
             let busy_started = Instant::now();
-            let CodexNativeOwnedPage::Core(page) = page else {
-                return Err(CodexSourceBackedErrorV0::UnexpectedProPage);
-            };
+            let CodexNativeOwnedPage::Core(page) = page;
             if !page.core_rows.is_empty() {
                 return Err(CodexSourceBackedErrorV0::UnexpectedLegacyRow);
             }
@@ -3271,9 +3265,7 @@ mod tests {
             CodexNativeScanner::new_source_backed_v0(catalog_source.clone(), None).unwrap();
         let mut documents = Vec::new();
         while let Some(page) = scanner.next_page().unwrap() {
-            let CodexNativeOwnedPage::Core(page) = page else {
-                panic!("source-backed scanner emitted Pro output");
-            };
+            let CodexNativeOwnedPage::Core(page) = page;
             let owner = page.owner.unwrap();
             for row in page.source_backed_rows {
                 documents.push(

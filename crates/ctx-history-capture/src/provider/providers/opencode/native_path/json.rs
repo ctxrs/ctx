@@ -43,7 +43,6 @@ const TAG_UNKNOWN_TYPE: u8 = 10;
 const TAG_OUTPUT: u8 = 11;
 const TAG_INVALID_TIMESTAMP: u8 = 12;
 
-pub(super) const OVERSIZED_PROJECTION: &[u8] = &[TAG_OVERSIZED];
 pub(super) const MISSING_SESSION_PROJECTION: &[u8] = &[TAG_MISSING_SESSION];
 pub(super) const MISSING_MESSAGE_PROJECTION: &[u8] = &[TAG_MISSING_MESSAGE];
 pub(super) const RELATIONSHIP_MISMATCH_PROJECTION: &[u8] = &[TAG_RELATIONSHIP_MISMATCH];
@@ -406,26 +405,4 @@ fn encode_output(wire: OutputWire) -> Vec<u8> {
         Ok(()) => encoded,
         Err(_) => tag(TAG_MALFORMED_RESULT_JSON),
     }
-}
-
-pub(super) fn encode_retained_projection(retained: &OpenCodeRetainedJson) -> Result<Vec<u8>> {
-    let mut encoded = vec![TAG_RETAINED];
-    serde_json::to_writer(
-        &mut encoded,
-        &RetainedWire {
-            effective_type: retained.effective_type.clone(),
-            role: retained.role.clone(),
-            body: retained.body.clone(),
-        },
-    )
-    .map_err(|error| {
-        CaptureError::InvalidPayload(format!(
-            "OpenCode retained projection cannot be encoded: {error}"
-        ))
-    })?;
-    Ok(encoded)
-}
-
-pub(super) fn excluded_output_projection() -> Vec<u8> {
-    tag(TAG_EXCLUDED_OUTPUT)
 }

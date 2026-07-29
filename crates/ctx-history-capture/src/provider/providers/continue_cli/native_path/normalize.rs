@@ -558,10 +558,6 @@ fn numeric_timestamp(value: f64) -> Option<DateTime<Utc>> {
     DateTime::<Utc>::from_timestamp_millis(millis as i64)
 }
 
-fn slice_is_empty<T>(values: &&[T]) -> bool {
-    values.is_empty()
-}
-
 fn option_string_bytes(value: &Option<String>) -> usize {
     value.as_ref().map_or(0, String::len)
 }
