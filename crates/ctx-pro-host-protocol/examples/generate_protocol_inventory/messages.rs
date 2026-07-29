@@ -3,9 +3,8 @@ use super::blame::{
     pull_request_membership_result,
 };
 use super::fixtures::{
-    authorization, blame, blame_request, source_manifest, source_manifest_admission_receipt,
-    source_manifest_header, source_manifest_page, source_progress, source_receipt, source_record,
-    source_removal,
+    authorization, blame, blame_request, source_manifest_admission_receipt, source_manifest_header,
+    source_manifest_page, source_progress, source_receipt, source_record, source_removal,
 };
 use super::*;
 
@@ -45,12 +44,6 @@ fn host_messages(fingerprint: &str) -> Vec<(&'static str, HostMessage)> {
             }),
         ),
         ("status", HostMessage::Status(StatusRequest {})),
-        (
-            "begin_source_manifest",
-            HostMessage::BeginSourceManifest(BeginSourceManifestRequest {
-                manifest: source_manifest(),
-            }),
-        ),
         (
             "begin_source_manifest_admission",
             HostMessage::BeginSourceManifestAdmission(BeginSourceManifestAdmissionRequest {
@@ -96,13 +89,6 @@ fn host_messages(fingerprint: &str) -> Vec<(&'static str, HostMessage)> {
                 core_generation_id: "a".repeat(64),
                 removal: source_removal(),
                 expected_prior: source_progress(true),
-            }),
-        ),
-        (
-            "finish_source_manifest",
-            HostMessage::FinishSourceManifest(FinishSourceManifestRequest {
-                manifest: source_manifest(),
-                expected_progress: vec![source_progress(true)],
             }),
         ),
         (
@@ -157,15 +143,6 @@ fn helper_messages(fingerprint: &str) -> Vec<(&'static str, HelperMessage)> {
                 state: GraphState::NotMaterialized,
                 authority: MaterializationAuthority::Source,
                 source_receipt: None,
-            }),
-        ),
-        (
-            "source_manifest_began",
-            HelperMessage::SourceManifestBegan(SourceManifestBegan {
-                core_generation_id: "a".repeat(64),
-                materializer_revision: "golden-source-materializer-v1".to_owned(),
-                progress: Vec::new(),
-                replayed: false,
             }),
         ),
         (

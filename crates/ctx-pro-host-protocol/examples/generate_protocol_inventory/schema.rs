@@ -72,15 +72,15 @@ pub(super) fn inventory() -> Value {
         "host_message_kinds": [
             "hello", "authorize", "prepare_graph_key_deletion",
             "confirm_graph_key_deletion", "status",
-            "begin_source_manifest", "begin_source_manifest_admission",
+            "begin_source_manifest_admission",
             "admit_source_manifest_page",
             "finish_source_manifest_admission", "prepare_source", "materialize_source_page",
-            "delete_source", "finish_source_manifest", "finish_admitted_source_manifest", "blame"
+            "delete_source", "finish_admitted_source_manifest", "blame"
         ],
         "helper_message_kinds": [
             "hello", "authorized", "graph_key_deletion_prepared", "graph_key_deleted",
             "status",
-            "source_manifest_began", "source_manifest_admission_began",
+            "source_manifest_admission_began",
             "source_manifest_page_admitted", "source_manifest_admitted",
             "source_prepared", "source_page_materialized", "source_deleted",
             "source_manifest_finished",
@@ -336,12 +336,13 @@ pub(super) fn inventory() -> Value {
             "contract_version": SOURCE_MATERIALIZATION_CONTRACT_VERSION,
             "authority": "certified_public_source_manifest_and_provider_reread_are_the_sole_body_authority",
             "lifecycle": [
-                "begin_source_manifest", "prepare_source", "materialize_source_page",
-                "delete_source", "finish_source_manifest"
+                "begin_source_manifest_admission", "admit_source_manifest_page",
+                "finish_source_manifest_admission", "prepare_source", "materialize_source_page",
+                "delete_source", "finish_admitted_source_manifest"
             ],
             "progress": "independent_per_source_epoch_certified_revision_and_frontier_compare_and_swap",
             "materializer_upgrade": "begin_may_return_prior_revision_progress_which_prepare_rewrite_invalidates",
-            "finish": "one_bounded_request_contains_the_exact_manifest_and_expected_terminal_progress",
+            "finish": "requires_the_admitted_manifest_receipt_and_expected_terminal_progress",
             "deletion": "requires_certified_source_deletion_paired_with_its_complete_inventory_witness",
             "detector_input": "normalized_transient_message_command_and_result_facts_with_call_outcome_session_and_repository_context",
             "relationships": "root_and_parent_session_ids_may_reference_other_source_lineages",
