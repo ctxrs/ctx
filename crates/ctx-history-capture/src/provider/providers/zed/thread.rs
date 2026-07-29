@@ -8,7 +8,6 @@ use crate::native_source::NativeSqliteValue;
 use crate::{CaptureError, Result, MAX_PROVIDER_SQLITE_VALUE_BYTES};
 
 pub(crate) struct ZedThreadRow {
-    pub(crate) rowid: i64,
     pub(crate) id: String,
     pub(crate) updated_at: String,
     pub(crate) data_type: String,
@@ -16,7 +15,7 @@ pub(crate) struct ZedThreadRow {
 }
 
 pub(super) fn decode_zed_thread(values: &[NativeSqliteValue]) -> Result<ZedThreadRow> {
-    let [NativeSqliteValue::Integer(rowid), NativeSqliteValue::Text(id), _, _, _, NativeSqliteValue::Text(_), NativeSqliteValue::Text(updated_at), NativeSqliteValue::Text(data_type), NativeSqliteValue::Blob(data), _] =
+    let [NativeSqliteValue::Integer(_), NativeSqliteValue::Text(id), _, _, _, NativeSqliteValue::Text(_), NativeSqliteValue::Text(updated_at), NativeSqliteValue::Text(data_type), NativeSqliteValue::Blob(data), _] =
         values
     else {
         return Err(CaptureError::SystemInvariant(
@@ -24,7 +23,6 @@ pub(super) fn decode_zed_thread(values: &[NativeSqliteValue]) -> Result<ZedThrea
         ));
     };
     Ok(ZedThreadRow {
-        rowid: *rowid,
         id: id.clone(),
         updated_at: updated_at.clone(),
         data_type: data_type.clone(),

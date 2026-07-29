@@ -29,10 +29,8 @@ pub use lingma::{
 };
 #[cfg(test)]
 pub(crate) use ordinary_file::forbid_ordinary_file_content_open;
+pub(crate) use ordinary_file::open_ordinary_file_without_following;
 pub use ordinary_file::{observe_ordinary_file, OrdinaryFileObservation};
-pub(crate) use ordinary_file::{
-    observe_ordinary_file_strong_metadata, open_ordinary_file_without_following,
-};
 pub(crate) use resolvers::{
     CrushDiscoveredProjectInventory, CrushProjectInventorySelector,
     CrushProjectInventorySelectorError,

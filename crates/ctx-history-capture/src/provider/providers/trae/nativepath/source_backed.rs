@@ -19,7 +19,7 @@ use super::scanner::{
     absolute_trae_path, acquire_source, packed_native_index, TraeCoreRecord, TraeFrontier,
     TraeScanner, TraeSourceAuthority,
 };
-use crate::{CaptureError, ProviderImportFailure};
+use crate::CaptureError;
 
 use super::super::{TRAE_CHAT_KEYS, TRAE_STATE_VSCDB_SOURCE_FORMAT};
 

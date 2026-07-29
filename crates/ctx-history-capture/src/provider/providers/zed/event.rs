@@ -36,10 +36,6 @@ impl ZedDecodedThread {
             .expect("validated Zed thread must retain its messages array")
     }
 
-    pub(crate) fn event_occurred_at(&self) -> DateTime<Utc> {
-        self.event_occurred_at
-    }
-
     pub(crate) fn native_events<'a>(&'a self, provider_session_id: &'a str) -> ZedNativeEvents<'a> {
         ZedNativeEvents {
             provider_session_id,
@@ -47,7 +43,6 @@ impl ZedDecodedThread {
             occurred_at: self.event_occurred_at,
             message_index: 0,
             next_split_index: 0,
-            source_record_subrecord_index: 0,
         }
     }
 }
@@ -78,24 +73,9 @@ pub(crate) struct ZedNativeEvent<'a> {
     pub(crate) event_type: EventType,
     event_suffix: &'static str,
     split_index: u64,
-    pub(crate) source_record_subrecord_index: u32,
 }
 
 impl<'a> ZedNativeEvent<'a> {
-    pub(crate) fn cursor(&self) -> String {
-        if self.split_index == 0 && self.event_suffix == "message" {
-            format!(
-                "thread:{}:message:{}",
-                self.provider_session_id, self.message_index
-            )
-        } else {
-            format!(
-                "thread:{}:message:{}:{}",
-                self.provider_session_id, self.message_index, self.event_suffix
-            )
-        }
-    }
-
     pub(crate) fn decode(self) -> Result<ZedDecodedEvent> {
         zed_message_event(
             self.provider_session_id,
@@ -119,7 +99,6 @@ pub(crate) struct ZedNativeEvents<'a> {
     occurred_at: DateTime<Utc>,
     message_index: usize,
     next_split_index: u64,
-    source_record_subrecord_index: u32,
 }
 
 impl<'a> Iterator for ZedNativeEvents<'a> {
@@ -142,8 +121,6 @@ impl<'a> Iterator for ZedNativeEvents<'a> {
             self.message_index += 1;
             (zed_message_event_type(kind, message), "message", 0)
         };
-        let source_record_subrecord_index = self.source_record_subrecord_index;
-        self.source_record_subrecord_index = self.source_record_subrecord_index.saturating_add(1);
         Some(ZedNativeEvent {
             provider_session_id: self.provider_session_id,
             message,
@@ -152,7 +129,6 @@ impl<'a> Iterator for ZedNativeEvents<'a> {
             event_type,
             event_suffix,
             split_index,
-            source_record_subrecord_index,
         })
     }
 }

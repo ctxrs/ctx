@@ -208,45 +208,6 @@ pub(super) fn optional_column<'a>(
     }
 }
 
-/// Adds the bounded local-only locator only when the canonical message text was
-/// actually truncated. NativePath publishers call this while the exact logical
-/// SQLite row and complete text are still available.
-// These arguments are the persisted locator contract and should remain explicit.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn attach_sqlite_complete_content_locator(
-    provider: CaptureProvider,
-    source_format: &str,
-    native_record_id: &str,
-    payload: &Value,
-    metadata: &mut Value,
-    locator: &NativeLocator,
-    digest_values: &[NativeSqliteValue],
-    complete_text: impl FnOnce() -> String,
-) -> crate::Result<()> {
-    if payload
-        .pointer("/text_retention/truncated")
-        .and_then(Value::as_bool)
-        != Some(true)
-    {
-        return Ok(());
-    }
-    let complete_text = complete_text();
-    let record_digest = sqlite_logical_record_digest(digest_values);
-    let content_ref = ContentRef::from_bytes(complete_text.as_bytes()).ok_or(
-        CaptureError::SystemInvariant("SQLite content length exceeds ContentRef bounds"),
-    )?;
-    attach_sqlite_complete_content_locator_with_ref(
-        provider,
-        source_format,
-        native_record_id,
-        payload,
-        metadata,
-        locator,
-        record_digest,
-        content_ref,
-    )
-}
-
 /// Adds a verified message locator from evidence computed while the immutable
 /// source row was hydrated. This lets bounded NativePath staging retain only
 /// the digest and content reference instead of a second copy of the full text.

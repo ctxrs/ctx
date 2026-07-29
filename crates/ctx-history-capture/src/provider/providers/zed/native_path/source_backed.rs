@@ -190,13 +190,6 @@ impl ContentSourceResolver for ZedLocatorResolverV0 {
     }
 }
 
-pub(crate) fn hydrate_zed_locator_v0(
-    selected_database_path: impl Into<PathBuf>,
-    locator: &SourceRecordLocator,
-) -> ZedSourceBackedResultV0<ZedHydratedRecordV0> {
-    ZedLocatorResolverV0::new(selected_database_path)?.hydrate(locator)
-}
-
 pub(crate) struct ZedSourceBackedSinkV0<'writer, 'connection> {
     writer: &'writer mut GenerationWriter,
     lineage: ZedThreadLineageResolver<'connection>,
@@ -472,9 +465,7 @@ pub(crate) fn acquire_snapshot(
 ) -> ZedSourceBackedResultV0<super::ZedImmutableSqliteSnapshot> {
     match acquire_immutable_snapshot(path)? {
         ZedSnapshotAcquisition::Acquired(snapshot) => Ok(*snapshot),
-        ZedSnapshotAcquisition::Incomplete { .. } => {
-            Err(ZedSourceBackedErrorV0::SnapshotAcquisitionRace)
-        }
+        ZedSnapshotAcquisition::Incomplete => Err(ZedSourceBackedErrorV0::SnapshotAcquisitionRace),
     }
 }
 
@@ -624,7 +615,6 @@ fn hydration_failure(error: ZedSourceBackedErrorV0) -> HydrationFailure {
     let kind = match &error {
         ZedSourceBackedErrorV0::SnapshotAcquisitionRace
         | ZedSourceBackedErrorV0::Native(ZedNativePathError::Io(_))
-        | ZedSourceBackedErrorV0::Native(ZedNativePathError::SystemIo { .. })
         | ZedSourceBackedErrorV0::Capture(CaptureError::Io(_)) => {
             HydrationFailureKind::TemporarilyUnavailable
         }
@@ -691,12 +681,13 @@ mod tests {
                 row_version: Some(TypedKey::Composite(_)),
             } if logical_relation == "threads" && thread_id == "thread-1"
         ));
-        let hydrated = hydrate_zed_locator_v0(&database, &event.locator).unwrap();
+        let resolver = ZedLocatorResolverV0::new(&database).unwrap();
+        let hydrated = resolver.hydrate(&event.locator).unwrap();
         assert_eq!(hydrated.decoded_display_text, "cold exact sentinel");
         assert_eq!(hydrated.provider_bytes, b"cold exact sentinel");
 
         replace_thread(&database, "replacement exact sentinel");
-        let stale = hydrate_zed_locator_v0(&database, &event.locator).unwrap_err();
+        let stale = resolver.hydrate(&event.locator).unwrap_err();
         assert!(matches!(
             stale,
             ZedSourceBackedErrorV0::LocatorSourceRevisionMismatch

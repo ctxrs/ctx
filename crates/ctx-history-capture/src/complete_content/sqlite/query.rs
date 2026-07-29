@@ -120,17 +120,6 @@ impl CompleteContentSqliteQueryBudget {
         }
     }
 
-    #[cfg(test)]
-    // Retain the deterministic interruption seam for focused budget tests.
-    #[allow(dead_code)]
-    pub(crate) fn interrupted_for_test() -> Self {
-        Self {
-            deadline: Instant::now() + SQLITE_RESOLVE_TIMEOUT,
-            progress_instructions: 1,
-            force_interrupt: true,
-        }
-    }
-
     fn remaining(self) -> Duration {
         self.deadline.saturating_duration_since(Instant::now())
     }
