@@ -80,6 +80,10 @@ impl<'de> Deserialize<'de> for HelperEnvelope {
     }
 }
 
+// `AdmitSourceManifestPage` is 1,080 bytes versus 736 bytes for the next-largest
+// variant. Boxing it would add a heap allocation per page at this serialization
+// boundary without changing the protocol representation, so retain it by value.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
