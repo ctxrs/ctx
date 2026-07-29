@@ -214,9 +214,6 @@ fn render_evidence(out: &mut String, value: &Value) {
             "  ",
         );
     }
-    if citation.get("provider_output").is_some() {
-        out.push_str("  provider_output: see structuredContent\n");
-    }
 }
 
 fn push_resource(out: &mut String, label: &str, value: Option<&Value>, indent: &str) {
@@ -324,51 +321,4 @@ mod tests {
         assert!(!rendered.contains("omitted"));
     }
 
-    #[test]
-    fn fallback_keeps_provider_output_locator_only_in_structured_content() {
-        let value = json!({
-            "target": {
-                "kind": "commit",
-                "commit": {"id": "commit:abc", "kind": "commit", "display": "abc"},
-                "repository": {"id": "repo:ctx", "kind": "repository", "display": "ctxrs/ctx"}
-            },
-            "matches": [{
-                "kind": "commit",
-                "value": {
-                    "fact_id": "fact:1",
-                    "fact_type": "git.commit.produced",
-                    "predicate": "produced_by",
-                    "subject": {"id": "commit:abc", "kind": "commit", "display": "abc"},
-                    "object": {"id": "session:full", "kind": "session", "display": "session:full"},
-                    "confidence": "explicit",
-                    "state": "asserted",
-                    "evidence_numbers": [1]
-                }
-            }],
-            "evidence": [{
-                "number": 1,
-                "citation": {
-                    "provider_output": {
-                        "source_id": "source",
-                        "source_epoch": 7,
-                        "locator": {
-                            "version": 1,
-                            "kind": "native",
-                            "payload_base64": "private-locator-payload"
-                        },
-                        "coordinate": {
-                            "unit_key": "unit",
-                            "native_sequence": 9
-                        },
-                        "availability": "available"
-                    }
-                }
-            }],
-            "next": null
-        });
-
-        let rendered = render_blame_text(&value);
-        assert!(rendered.contains("provider_output: see structuredContent"));
-        assert!(!rendered.contains("private-locator-payload"));
-    }
 }

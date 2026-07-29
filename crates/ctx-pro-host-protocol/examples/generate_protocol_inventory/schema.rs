@@ -9,8 +9,6 @@ pub(super) fn inventory() -> Value {
         Capability::EntitlementAuthorization,
         Capability::GraphKeyDeletion,
         Capability::Status,
-        Capability::JournalSync,
-        Capability::OutputMaterialization,
         Capability::SourceMaterialization,
         Capability::Query,
         Capability::GitRead,
@@ -32,7 +30,6 @@ pub(super) fn inventory() -> Value {
     json!({
         "inventory_schema": 1,
         "protocol_version": PROTOCOL_VERSION,
-        "projection_contract_version": PROJECTION_CONTRACT_VERSION,
         "fingerprint": {
             "algorithm": "sha256",
             "encoding": "lowercase_hex",
@@ -49,24 +46,6 @@ pub(super) fn inventory() -> Value {
             "maximum_payload_bytes": MAX_FRAME_PAYLOAD_BYTES
         },
         "bounds": {
-            "journal_records_per_batch": MAX_JOURNAL_RECORDS_PER_BATCH,
-            "journal_context_records": MAX_JOURNAL_CONTEXT_RECORDS,
-            "journal_context_bytes": MAX_JOURNAL_CONTEXT_BYTES,
-            "journal_payload_bytes": MAX_JOURNAL_PAYLOAD_BYTES,
-            "journal_evidence_per_record": MAX_JOURNAL_EVIDENCE_PER_RECORD,
-            "journal_identity_bytes": MAX_JOURNAL_IDENTITY_BYTES,
-            "authorized_repository_roots": MAX_AUTHORIZED_REPOSITORY_ROOTS,
-            "authorized_repository_root_bytes": MAX_AUTHORIZED_REPOSITORY_ROOT_BYTES,
-            "authorized_repository_roots_total_bytes": MAX_AUTHORIZED_REPOSITORY_ROOTS_TOTAL_BYTES,
-            "journal_sync_envelope_bytes": MAX_JOURNAL_SYNC_ENVELOPE_BYTES,
-            "output_observations_per_page": MAX_OUTPUT_OBSERVATIONS_PER_PAGE,
-            "output_content_bytes": MAX_OUTPUT_CONTENT_BYTES,
-            "output_content_bytes_per_page": MAX_OUTPUT_CONTENT_BYTES_PER_PAGE,
-            "output_cursor_bytes": MAX_OUTPUT_CURSOR_BYTES,
-            "output_locator_bytes": MAX_OUTPUT_LOCATOR_BYTES,
-            "output_identity_bytes": MAX_OUTPUT_IDENTITY_BYTES,
-            "output_command_bytes": MAX_OUTPUT_COMMAND_BYTES,
-            "output_progress_sources": MAX_OUTPUT_PROGRESS_SOURCES,
             "source_manifest_sources": MAX_SOURCE_MANIFEST_SOURCES,
             "source_manifest_removals": MAX_SOURCE_MANIFEST_REMOVALS,
             "source_inventory_sources": MAX_SOURCE_INVENTORY_SOURCES,
@@ -92,9 +71,7 @@ pub(super) fn inventory() -> Value {
         },
         "host_message_kinds": [
             "hello", "authorize", "prepare_graph_key_deletion",
-            "confirm_graph_key_deletion", "status", "sync_journal",
-            "begin_output_inventory", "observe_output_source", "materialize_output_page",
-            "finish_output_inventory", "get_output_progress",
+            "confirm_graph_key_deletion", "status",
             "begin_source_manifest", "begin_source_manifest_admission",
             "admit_source_manifest_page",
             "finish_source_manifest_admission", "prepare_source", "materialize_source_page",
@@ -102,8 +79,7 @@ pub(super) fn inventory() -> Value {
         ],
         "helper_message_kinds": [
             "hello", "authorized", "graph_key_deletion_prepared", "graph_key_deleted",
-            "status", "journal_synced", "output_inventory_began", "output_source_observed",
-            "output_page_materialized", "output_inventory_finished", "output_progress",
+            "status",
             "source_manifest_began", "source_manifest_admission_began",
             "source_manifest_page_admitted", "source_manifest_admitted",
             "source_prepared", "source_page_materialized", "source_deleted",
@@ -137,15 +113,8 @@ pub(super) fn inventory() -> Value {
             "fact_confidence": ["explicit", "high", "medium", "low", "ambiguous", "unknown"],
             "fact_state": ["asserted", "ambiguous", "contradicted", "superseded"],
             "graph_state": ["not_materialized", "needs_rebuild", "partial", "needs_resume", "ready"],
-            "journal_entity_kind": ["event", "file_touch", "vcs_change"],
-            "journal_operation": ["upsert", "delete"],
-            "journal_sync_mode": ["full_baseline", "incremental"],
-            "materialization_authority": ["journal", "source"],
+            "materialization_authority": ["source"],
             "observation_kind": ["event", "file_touch", "vcs_change"],
-            "output_observation_kind": ["command", "tool"],
-            "output_outcome": ["success", "failure", "timeout", "unknown"],
-            "output_source_availability": ["available", "unavailable", "error"],
-            "output_source_disposition": ["append_or_resume", "new_source", "rewrite"],
             "source_disposition": ["new_source", "resume", "rewrite"],
             "source_outcome": ["success", "failure", "timeout", "unknown"],
             "transient_source_fact_kind": ["message", "command", "result"],
@@ -163,7 +132,7 @@ pub(super) fn inventory() -> Value {
             ],
             "pull_request_commit_relationship": ["contains_commit", "merged_as"],
             "pull_request_relationship_kind": ["activity", "commit"],
-            "query_snapshot_expectation_kind": ["journal", "source"],
+            "query_snapshot_expectation_kind": ["source"],
             "resource_kind": ResourceKind::ALL.map(ResourceKind::wire_name),
             "worktree_status": ["clean", "differs"]
         },
@@ -178,7 +147,6 @@ pub(super) fn inventory() -> Value {
                 "grace_deadline_unix", "capabilities"
             ], &[]),
             "ByteRange": fields(&["start", "end_exclusive"], &[]),
-            "BeginOutputInventoryRequest": fields(&["generation"], &[]),
             "BeginSourceManifestRequest": fields(&["manifest"], &[]),
             "BeginSourceManifestAdmissionRequest": fields(&["header"], &[]),
             "AdmitSourceManifestPageRequest": fields(&["page"], &[]),
@@ -213,7 +181,7 @@ pub(super) fn inventory() -> Value {
             "EvidenceCitation": fields(&[], &[
                 "observation_id", "observation_seq", "observation_kind", "session_id", "event_id",
                 "event_seq", "source_path", "fixture_line", "source_record_ordinal",
-                "source_record_subrecord_index", "byte_range", "source_sha256", "provider_output"
+                "source_record_subrecord_index", "byte_range", "source_sha256"
             ]),
             "FileBlameMatch": fields(
                 &["id", "lines", "commit", "line_evidence_numbers", "production"], &[]),
@@ -227,85 +195,13 @@ pub(super) fn inventory() -> Value {
             ], &[]),
             "HelperEnvelope": fields(&["sequence", "request_id", "message"], &[]),
             "HostEnvelope": fields(&["sequence", "request_id", "message"], &[]),
-            "JournalCheckpoint": fields(&["position", "contract_fingerprint", "cumulative_digest"], &[]),
-            "JournalContextWindow": fields(&["base_checkpoint", "records"], &[]),
-            "JournalEvidenceIdentity": fields(&["event_id"], &[
-                "source_id", "source_path", "source_record_ordinal", "source_record_subrecord_index",
-                "byte_start", "byte_end_exclusive"
-            ]),
-            "JournalPosition": fields(&["generation", "sequence"], &[]),
-            "JournalProvenanceIdentity": fields(&["entity_kind", "stable_entity_id"], &[
-                "capture_source_id", "provider", "provider_external_id"
-            ]),
-            "JournalRecord": fields(&[
-                "generation", "sequence", "projection_contract_version", "entity_kind",
-                "stable_entity_id", "entity_revision", "operation", "payload_sha256",
-                "evidence", "provenance", "cumulative_digest"
-            ], &["canonical_payload"]),
-            "JournalSyncRequest": fields(&[
-                "mode", "canonical_schema_version", "canonical_schema_identity",
-                "projection_contract_version", "contract_fingerprint", "prior_checkpoint",
-                "context", "frozen_through", "authorized_repository_roots", "records"
-            ], &[]),
-            "JournalSyncResult": fields(&[
-                "committed_through", "accepted_records", "replayed", "frozen_complete"
-            ], &[]),
             "LineRange": fields(&["start", "end"], &[]),
             "NumberedEvidence": fields(&["number", "citation"], &[]),
-            "FinishOutputInventoryRequest": fields(&["generation"], &[]),
             "FinishSourceManifestRequest": fields(&["manifest", "expected_progress"], &[]),
             "FinishSourceManifestAdmissionRequest": fields(&["header"], &[]),
             "FinishAdmittedSourceManifestRequest": fields(
                 &["admission", "expected_progress"], &[]),
-            "ObserveOutputSourceRequest": fields(
-                &["generation", "source", "availability"], &[]),
-            "OutputAssociations": fields(
-                &["direct_session_id", "root_session_id"],
-                &["parent_session_id", "provider_session_id", "agent_id", "repository"]),
-            "OutputCommandContext": fields(
-                &["tool_name", "command"], &["working_directory"]),
-            "OutputInventoryBegan": fields(
-                &["generation", "materializer_revision"], &[]),
-            "OutputInventoryFinished": fields(
-                &["generation", "observed_sources", "unavailable_sources"], &[]),
-            "OutputNativeCoordinate": fields(
-                &["unit_key", "native_sequence"],
-                &["native_record_id", "source_record_ordinal",
-                  "source_record_subrecord_index", "byte_start", "byte_end_exclusive"]),
-            "OutputNativeCursor": fields(&["version", "payload_base64"], &[]),
-            "OutputOutcomeMetadata": fields(
-                &["outcome"], &["exit_code", "duration_ms"]),
-            "OutputPageMaterialized": fields(&[
-                "inventory_generation", "source", "source_epoch", "committed_cursor",
-                "accepted_outputs", "materialized_facts", "materialized_evidence", "replayed"
-            ], &[]),
-            "OutputProgressRequest": fields(&["sources"], &[]),
-            "OutputProgressResult": fields(
-                &["inventory_generation", "inventory_complete", "sources"], &[]),
-            "OutputRepositoryContext": fields(
-                &["repository_id"], &["checkout_id", "worktree_id", "object_format"]),
-            "OutputSourceIdentity": fields(
-                &["provider", "namespace_id", "source_id"], &[]),
-            "OutputSourceLocator": fields(
-                &["version", "kind", "payload_base64"], &[]),
-            "OutputSourceObserved": fields(
-                &["generation", "source", "availability"], &[]),
-            "OutputSourceProgress": fields(&[
-                "source", "source_epoch", "observed_revision", "parser_revision",
-                "materializer_revision", "terminal", "availability"
-            ], &["cursor", "last_seen_inventory"]),
             "PrepareGraphKeyDeletionRequest": fields(&["installation_key_thumbprint"], &[]),
-            "ProOutputMaterializationPage": fields(&[
-                "contract_version", "inventory_generation", "source", "source_epoch",
-                "observed_revision", "parser_revision", "materializer_revision", "disposition",
-                "next_safe_cursor", "terminal", "observations"
-            ], &["expected_prior_source_epoch", "expected_prior_cursor"]),
-            "ProOutputObservation": fields(&[
-                "kind", "coordinate", "associations", "outcome", "locator", "content"
-            ], &["occurred_at_unix_ms", "call_id", "command"]),
-            "ProviderOutputEvidence": fields(&[
-                "source_id", "source_epoch", "locator", "coordinate", "availability"
-            ], &[]),
             "ProtocolError": fields(&["class", "message", "retryable"], &[]),
             "PullRequestActivity": fields(&[
                 "fact_id", "action", "session", "confidence", "state", "evidence_numbers"
@@ -313,8 +209,6 @@ pub(super) fn inventory() -> Value {
             "PullRequestBlameMatch": fields(&["pull_request", "relationship"], &[]),
             "PullRequestCommit": fields(
                 &["fact_id", "relationship", "commit", "production", "evidence_numbers"], &[]),
-            "QuerySnapshotExpectation.journal": fields(
-                &["kind", "checkpoint", "projection_pending"], &[]),
             "QuerySnapshotExpectation.source": fields(&["kind", "receipt"], &[]),
             "ResourceRef": fields(&["id", "kind", "display"], &[]),
             "ResolvedBlameTarget.commit": fields(&["kind", "commit", "repository"], &[]),
@@ -416,7 +310,7 @@ pub(super) fn inventory() -> Value {
             ], &[]),
             "StatusRequest": fields(&[], &[]),
             "StatusResult": fields(
-                &["state", "authority"], &["checkpoint", "source_receipt"]),
+                &["state", "authority"], &["source_receipt"]),
             "PrepareSourceRequest": fields(
                 &[
                     "core_generation_id", "source", "certified_revision_sha256",
@@ -429,10 +323,6 @@ pub(super) fn inventory() -> Value {
             "DeleteSourceRequest": fields(&[
                 "core_generation_id", "removal", "expected_prior"
             ], &[]),
-            "TransientOutputContent": {
-                "wire_type": "canonical_base64_string",
-                "debug": "redacted"
-            },
             "TransientSourceContent": {
                 "wire_type": "canonical_base64_string",
                 "debug": "redacted"
@@ -441,82 +331,6 @@ pub(super) fn inventory() -> Value {
                 "wire_type": "internally_tagged_kind_with_body",
                 "variants": ["message", "command", "result"]
             }
-        },
-        "canonical_payload": {
-            "wire_type": "optional_json_value",
-            "encoding": "compact_json_with_recursively_sorted_object_keys_and_integer_only_numbers",
-            "digest": "sha256_of_canonical_compact_utf8_bytes_or_empty_bytes_for_delete",
-            "tombstone": "delete_requires_absent_payload_and_positive_entity_revision"
-        },
-        "canonical_payload_schema": {
-            "root": "CanonicalObservation",
-            "dto_fields": {
-                "CanonicalObservation": fields(&[
-                    "observation_id", "observation_seq", "observation_kind", "event_id",
-                    "event_seq", "occurred_at_ms", "history_record_id", "event_type", "role",
-                    "payload", "metadata", "result", "actor", "run", "source", "typed_event",
-                    "file_touch", "vcs_change", "citation", "semantic_digest"
-                ], &[]),
-                "CanonicalActor": fields(&[
-                    "direct_session_id", "root_session_id", "parent_session_id",
-                    "external_session_id", "external_agent_id", "agent_type", "role_hint",
-                    "is_primary"
-                ], &[]),
-                "CanonicalRun": fields(&[
-                    "id", "run_type", "status", "started_at_ms", "ended_at_ms", "exit_code",
-                    "cwd", "command_preview"
-                ], &[]),
-                "CanonicalSource": fields(&[
-                    "id", "provider", "path", "format", "root", "identity", "cwd",
-                    "imported_observation", "permitted_bytes"
-                ], &[]),
-                "CanonicalSourceObservation": fields(
-                    &["byte_size", "modified_at_ms", "sha256"], &[]),
-                "CanonicalFileTouch": fields(&[
-                    "id", "history_record_id", "run_id", "event_id", "vcs_workspace_id", "path",
-                    "change_kind", "old_path", "line_count_delta", "confidence", "source_id"
-                ], &[]),
-                "CanonicalVcsChange": fields(&[
-                    "id", "vcs_workspace_id", "kind", "change_id", "parent_change_ids",
-                    "branch_or_bookmark", "tree_hash", "author_time_ms", "confidence", "source_id"
-                ], &[]),
-                "CanonicalCitation": fields(&[
-                    "observation_id", "observation_seq", "observation_kind", "event_id", "event_seq",
-                    "source_path", "fixture_line", "source_record_ordinal",
-                    "source_record_subrecord_index", "byte_range", "source_sha256"
-                ], &[]),
-                "CanonicalResultEvidence": fields(&["outcome", "identifiers"], &[]),
-                "CanonicalResultIdentifier": fields(&["kind", "value"], &[])
-            },
-            "enums": {
-                "typed_event_kind": ["file_touched", "vcs_change"],
-                "file_change_kind": ["read", "created", "modified", "deleted", "renamed", "unknown"],
-                "confidence": ["explicit", "high", "medium", "low", "unknown"],
-                "vcs_change_kind": ["git_commit", "git_branch", "git_worktree", "jj_change", "jj_bookmark", "patch", "working_copy"],
-                "result_outcome": ["success", "failure", "unknown"],
-                "result_evidence_kind": ["call_id", "git_commit_summary_id", "git_oid", "git_abbrev_oid", "forge_url"]
-            },
-            "identity_rules": {
-                "uuid": "non_nil_uuid",
-                "optional_identity_bytes": MAX_JOURNAL_IDENTITY_BYTES,
-                "source_reads": "forbidden; source root/cwd/imported observation/permitted bytes are absent or null",
-                "subrecord": "source_record_subrecord_index_requires_source_record_ordinal"
-            }
-        },
-        "journal_chain": {
-            "initial_domain_hex": hex(b"ctx-pro-journal-initial-v1\0"),
-            "record_domain_hex": hex(b"ctx-pro-journal-record-v1\0"),
-            "new_generation": "full_baseline_starts_at_sequence_1_after_sequence_0_checkpoint",
-            "ordering": "strictly_contiguous",
-            "frozen_terminal": "position_and_cumulative_digest_captured_with_records",
-            "checkpoint_commit": "only_after_private_graph_transaction_commits"
-        },
-        "output_materialization": {
-            "contract_version": OUTPUT_MATERIALIZATION_CONTRACT_VERSION,
-            "durability": "complete_output_content_is_request_only_and_never_part_of_journal_sync",
-            "ordering": "strict_native_sequence_then_unit_key",
-            "commit": "page_sent_only_after_core_safe_group_commit_and_source_revalidation",
-            "progress": "independent_per_source_epoch_and_native_cursor_compare_and_swap"
         },
         "source_materialization": {
             "contract_version": SOURCE_MATERIALIZATION_CONTRACT_VERSION,
@@ -532,8 +346,7 @@ pub(super) fn inventory() -> Value {
             "detector_input": "normalized_transient_message_command_and_result_facts_with_call_outcome_session_and_repository_context",
             "relationships": "root_and_parent_session_ids_may_reference_other_source_lineages",
             "durability": "transient_detector_content_is_request_only_and_not_retained_as_full_body_after_page_handling",
-            "failure": "core_is_already_published_and_pro_remains_retryable_from_committed_progress",
-            "legacy_output_inventory_authority": "forbidden"
+            "failure": "core_is_already_published_and_pro_remains_retryable_from_committed_progress"
         },
         "evidence_citation": {
             "branches": {
@@ -542,12 +355,9 @@ pub(super) fn inventory() -> Value {
                     "event_id", "event_seq", "source_path", "fixture_line",
                     "source_record_ordinal", "source_record_subrecord_index", "byte_range",
                     "source_sha256"
-                ],
-                "provider_output": ["provider_output"]
+                ]
             },
-            "selection": "exactly_one_usable_branch",
-            "provider_output_coordinates": "typed_source_epoch_locator_and_native_coordinate",
-            "provider_output_availability": "available_unavailable_or_error_is_preserved"
+            "selection": "canonical_or_source_coordinates_must_be_usable"
         },
         "representative_frames": {
             "host_status": frame_hex(&status),

@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::{
-    ErrorClass, EvidenceCitation, JournalCheckpoint, ProtocolError, ResourceKind, ResourceRef,
+    ErrorClass, EvidenceCitation, ProtocolError, ResourceKind, ResourceRef,
     SourceManifestReceiptIdentity, MAX_BLAME_ATTRIBUTIONS_PER_MATCH, MAX_BLAME_CURSOR_BYTES,
     MAX_BLAME_EVIDENCE, MAX_BLAME_RESULTS, MAX_BLAME_TARGET_BYTES, MAX_CITATIONS_PER_FACT,
 };
@@ -12,10 +12,6 @@ use super::{
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum QuerySnapshotExpectation {
-    Journal {
-        checkpoint: JournalCheckpoint,
-        projection_pending: bool,
-    },
     Source {
         receipt: SourceManifestReceiptIdentity,
     },
@@ -24,7 +20,6 @@ pub enum QuerySnapshotExpectation {
 impl QuerySnapshotExpectation {
     pub fn validate(&self) -> Result<(), ProtocolError> {
         match self {
-            Self::Journal { checkpoint, .. } => checkpoint.validate(),
             Self::Source { receipt } => receipt.validate(),
         }
     }

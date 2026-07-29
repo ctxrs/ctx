@@ -42,7 +42,6 @@ fn blame_request_requires_source_manifest_authority() {
     let status = StatusResult {
         state: GraphState::Ready,
         authority: ctx_pro_host_protocol::MaterializationAuthority::Source,
-        checkpoint: None,
         source_receipt: Some(receipt.clone()),
     };
     let request = support::current_blame_request(
@@ -56,33 +55,13 @@ fn blame_request_requires_source_manifest_authority() {
     )
     .expect("source-backed request");
     let ctx_pro_host_protocol::QuerySnapshotExpectation::Source { receipt: identity } =
-        request.expected_snapshot
-    else {
-        panic!("source status must select source query authority");
-    };
+        request.expected_snapshot;
     assert_eq!(identity.core_generation_id, receipt.core_generation_id);
     assert_eq!(
         identity.receipt_sha256,
         ctx_pro_host_protocol::source_manifest_receipt_sha256(&receipt).unwrap()
     );
 
-    let legacy = StatusResult {
-        state: GraphState::Ready,
-        authority: ctx_pro_host_protocol::MaterializationAuthority::Journal,
-        checkpoint: None,
-        source_receipt: None,
-    };
-    let error = support::current_blame_request(
-        BlameTarget::Commit {
-            oid: "0123456789abcdef".to_owned(),
-            repository: None,
-        },
-        10,
-        None,
-        &legacy,
-    )
-    .expect_err("legacy authority must not be used as a fallback");
-    assert_eq!(stable_error_code(&error), Some("not_materialized"));
 }
 
 #[test]
@@ -90,7 +69,6 @@ fn incomplete_source_authority_fails_closed() {
     let status = StatusResult {
         state: GraphState::NeedsResume,
         authority: ctx_pro_host_protocol::MaterializationAuthority::Source,
-        checkpoint: None,
         source_receipt: None,
     };
     let error = support::current_blame_request(

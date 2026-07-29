@@ -5,18 +5,15 @@ use uuid::Uuid;
 
 use crate::{
     AdmitSourceManifestPageRequest, AuthorizationRequest, AuthorizationResult,
-    BeginOutputInventoryRequest, BeginSourceManifestAdmissionRequest, BeginSourceManifestRequest,
-    BlameRequest, BlameResult, ConfirmGraphKeyDeletionRequest, DeleteSourceRequest, ErrorClass,
-    FinishAdmittedSourceManifestRequest, FinishOutputInventoryRequest,
-    FinishSourceManifestAdmissionRequest, FinishSourceManifestRequest, GraphKeyDeleted,
-    GraphKeyDeletionPrepared, JournalCheckpoint, JournalSyncRequest, JournalSyncResult,
-    MaterializeSourcePageRequest, ObserveOutputSourceRequest, OutputInventoryBegan,
-    OutputInventoryFinished, OutputPageMaterialized, OutputProgressRequest, OutputProgressResult,
-    OutputSourceObserved, PrepareGraphKeyDeletionRequest, PrepareSourceRequest,
-    ProOutputMaterializationPage, ProtocolError, SourceDeleted, SourceManifestAdmissionBegan,
-    SourceManifestAdmitted, SourceManifestBegan, SourceManifestFinished,
-    SourceManifestPageAdmitted, SourceManifestReceipt, SourcePageMaterialized, SourcePrepared,
-    PROTOCOL_FINGERPRINT, PROTOCOL_VERSION,
+    BeginSourceManifestAdmissionRequest, BeginSourceManifestRequest, BlameRequest, BlameResult,
+    ConfirmGraphKeyDeletionRequest, DeleteSourceRequest, ErrorClass,
+    FinishAdmittedSourceManifestRequest, FinishSourceManifestAdmissionRequest,
+    FinishSourceManifestRequest, GraphKeyDeleted, GraphKeyDeletionPrepared,
+    MaterializeSourcePageRequest, PrepareGraphKeyDeletionRequest, PrepareSourceRequest,
+    ProtocolError, SourceDeleted, SourceManifestAdmissionBegan, SourceManifestAdmitted,
+    SourceManifestBegan, SourceManifestFinished, SourceManifestPageAdmitted,
+    SourceManifestReceipt, SourcePageMaterialized, SourcePrepared, PROTOCOL_FINGERPRINT,
+    PROTOCOL_VERSION,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -96,12 +93,6 @@ pub enum HostMessage {
     PrepareGraphKeyDeletion(PrepareGraphKeyDeletionRequest),
     ConfirmGraphKeyDeletion(ConfirmGraphKeyDeletionRequest),
     Status(StatusRequest),
-    SyncJournal(JournalSyncRequest),
-    BeginOutputInventory(BeginOutputInventoryRequest),
-    ObserveOutputSource(ObserveOutputSourceRequest),
-    MaterializeOutputPage(ProOutputMaterializationPage),
-    FinishOutputInventory(FinishOutputInventoryRequest),
-    GetOutputProgress(OutputProgressRequest),
     BeginSourceManifest(BeginSourceManifestRequest),
     BeginSourceManifestAdmission(BeginSourceManifestAdmissionRequest),
     AdmitSourceManifestPage(AdmitSourceManifestPageRequest),
@@ -127,12 +118,6 @@ pub enum HelperMessage {
     GraphKeyDeletionPrepared(GraphKeyDeletionPrepared),
     GraphKeyDeleted(GraphKeyDeleted),
     Status(StatusResult),
-    JournalSynced(JournalSyncResult),
-    OutputInventoryBegan(OutputInventoryBegan),
-    OutputSourceObserved(OutputSourceObserved),
-    OutputPageMaterialized(OutputPageMaterialized),
-    OutputInventoryFinished(OutputInventoryFinished),
-    OutputProgress(OutputProgressResult),
     SourceManifestBegan(SourceManifestBegan),
     SourceManifestAdmissionBegan(SourceManifestAdmissionBegan),
     SourceManifestPageAdmitted(SourceManifestPageAdmitted),
@@ -152,8 +137,6 @@ pub enum Capability {
     EntitlementAuthorization,
     GraphKeyDeletion,
     Status,
-    JournalSync,
-    OutputMaterialization,
     SourceMaterialization,
     Query,
     GitRead,
@@ -165,8 +148,6 @@ impl Capability {
             Self::EntitlementAuthorization => "entitlement_authorization",
             Self::GraphKeyDeletion => "graph_key_deletion",
             Self::Status => "status",
-            Self::JournalSync => "journal_sync",
-            Self::OutputMaterialization => "output_materialization",
             Self::SourceMaterialization => "source_materialization",
             Self::Query => "query",
             Self::GitRead => "git_read",
@@ -223,7 +204,6 @@ pub enum GraphState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MaterializationAuthority {
-    Journal,
     Source,
 }
 
@@ -232,40 +212,16 @@ pub enum MaterializationAuthority {
 pub struct StatusResult {
     pub state: GraphState,
     pub authority: MaterializationAuthority,
-    pub checkpoint: Option<JournalCheckpoint>,
     pub source_receipt: Option<SourceManifestReceipt>,
 }
 
 impl StatusResult {
     pub fn validate(&self) -> Result<(), ProtocolError> {
-        if let Some(checkpoint) = &self.checkpoint {
-            checkpoint.validate()?;
-        }
         if let Some(receipt) = &self.source_receipt {
             receipt.validate()?;
         }
         match self.authority {
-            MaterializationAuthority::Journal => {
-                if self.source_receipt.is_some() {
-                    return Err(ProtocolError::new(
-                        ErrorClass::Sequence,
-                        "journal status cannot report source authority",
-                    ));
-                }
-                if self.state == GraphState::Ready && self.checkpoint.is_none() {
-                    return Err(ProtocolError::new(
-                        ErrorClass::Sequence,
-                        "ready journal status requires a completed checkpoint",
-                    ));
-                }
-            }
             MaterializationAuthority::Source => {
-                if self.checkpoint.is_some() {
-                    return Err(ProtocolError::new(
-                        ErrorClass::Sequence,
-                        "source status cannot report journal authority",
-                    ));
-                }
                 if self.state == GraphState::Ready && self.source_receipt.is_none() {
                     return Err(ProtocolError::new(
                         ErrorClass::Sequence,

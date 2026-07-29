@@ -364,15 +364,6 @@ fn citation_text(citation: &EvidenceCitation) -> String {
         }
         return path.clone();
     }
-    if let Some(output) = &citation.provider_output {
-        return format!(
-            "provider output {} epoch {} unit {} sequence {}",
-            output.source_id,
-            output.source_epoch,
-            output.coordinate.unit_key,
-            output.coordinate.native_sequence
-        );
-    }
     if let Some(observation_id) = citation.observation_id {
         return format!("observation {observation_id}");
     }
@@ -530,7 +521,6 @@ mod tests {
                 source_record_subrecord_index: None,
                 byte_range: None,
                 source_sha256: None,
-                provider_output: None,
             },
         }
     }

@@ -2,7 +2,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use base64::Engine as _;
 use ctx_pro_host_protocol::*;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};

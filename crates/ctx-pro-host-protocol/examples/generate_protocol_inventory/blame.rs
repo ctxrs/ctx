@@ -1,4 +1,3 @@
-use super::fixtures::structured_pr_provider_output_citation;
 use super::*;
 
 fn resource(kind: ResourceKind, suffix: &str, display: &str) -> ResourceRef {
@@ -26,7 +25,6 @@ fn canonical_citation(seed: u32, observation_kind: ObservationKind) -> EvidenceC
             end_exclusive: u64::from(seed) * 100 + 80,
         }),
         source_sha256: Some(format!("{seed:064x}")),
-        provider_output: None,
     }
 }
 
@@ -307,7 +305,7 @@ pub(super) fn pull_request_membership_result() -> BlameResult {
     );
     let membership_evidence = NumberedEvidence {
         number: 1,
-        citation: structured_pr_provider_output_citation(),
+        citation: canonical_citation(1, ObservationKind::Event),
     };
     let contains = PullRequestCommit {
         fact_id: "pr-contains-commit".to_owned(),
