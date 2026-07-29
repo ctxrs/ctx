@@ -1,6 +1,4 @@
-mod error;
 pub mod source_backed_relational;
-pub use error::{Result, StoreError};
 pub use source_backed_relational::{
     CommittedCoreGeneration, RawSqlColumn, RawSqlLimits, RawSqlOptions, RawSqlResult,
     RawSqlTruncation, RawSqlValue, RelationalEventMetadata, RelationalFileTouchMetadata,

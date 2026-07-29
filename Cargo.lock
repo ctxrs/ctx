@@ -787,7 +787,6 @@ dependencies = [
  "chrono",
  "ctx-history-core",
  "ctx-history-index",
- "ctx-history-store",
  "ctx-pro-host-protocol",
  "directories",
  "json5",

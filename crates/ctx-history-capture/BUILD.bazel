@@ -38,7 +38,6 @@ PROD_SRCS = glob(
 CTX_HISTORY_CAPTURE_DEPS = [
     "//crates/ctx-history-core:lib",
     "//crates/ctx-history-index:lib",
-    "//crates/ctx-history-store:lib",
     "//crates/ctx-pro-host-protocol:lib",
 ]
 
@@ -84,7 +83,6 @@ ctx_rust_binary(
     aliases = aliases(),
     deps = all_crate_deps(normal = True) + [
         ":qualification_lib",
-        "//crates/ctx-history-store:lib",
     ],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     tags = [
@@ -110,7 +108,6 @@ ctx_rust_test(
         normal_dev = True,
     ) + [
         ":qualification_lib",
-        "//crates/ctx-history-store:lib",
     ],
     proc_macro_deps = all_crate_deps(
         proc_macro = True,
@@ -172,7 +169,6 @@ ctx_rust_test(
     ) + [
         ":lib",
         "//crates/ctx-history-core:lib",
-        "//crates/ctx-history-store:lib",
     ],
     proc_macro_deps = all_crate_deps(
         proc_macro = True,
@@ -197,7 +193,6 @@ ctx_rust_test(
     ) + [
         ":lib",
         "//crates/ctx-history-core:lib",
-        "//crates/ctx-history-store:lib",
     ],
     proc_macro_deps = all_crate_deps(
         proc_macro = True,
@@ -224,7 +219,6 @@ ctx_rust_test(
     ) + [
         ":lib",
         "//crates/ctx-history-core:lib",
-        "//crates/ctx-history-store:lib",
     ],
     proc_macro_deps = all_crate_deps(
         proc_macro = True,
@@ -250,7 +244,6 @@ ctx_rust_test(
     ) + [
         ":lib",
         "//crates/ctx-history-core:lib",
-        "//crates/ctx-history-store:lib",
     ],
     proc_macro_deps = all_crate_deps(
         proc_macro = True,
@@ -275,7 +268,6 @@ ctx_rust_test(
     ) + [
         ":lib",
         "//crates/ctx-history-core:lib",
-        "//crates/ctx-history-store:lib",
     ],
     proc_macro_deps = all_crate_deps(
         proc_macro = True,

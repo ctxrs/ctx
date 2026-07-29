@@ -325,10 +325,6 @@ fn active_core_complete_content_sources_forbid_result_hydration_surfaces() {
             "mistral writer",
             include_str!("../provider/providers/mistral_vibe/native_path.rs"),
         ),
-        (
-            "canonical projection",
-            include_str!("../../../ctx-history-store/src/canonical_observations/projection.rs"),
-        ),
     ];
     for (name, source) in SOURCES {
         for forbidden in [

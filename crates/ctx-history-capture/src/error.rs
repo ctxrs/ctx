@@ -56,8 +56,6 @@ pub enum CaptureError {
     Io(#[from] std::io::Error),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("store error: {0}")]
-    Store(#[from] ctx_history_store::StoreError),
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error("time parse error: {0}")]
