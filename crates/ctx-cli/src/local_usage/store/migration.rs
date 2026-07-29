@@ -172,7 +172,7 @@ CREATE TABLE daily_usage (
             AND date(day_utc) IS NOT NULL
             AND date(day_utc) = day_utc
         ),
-    definition_version INTEGER NOT NULL CHECK (definition_version = 2),
+    definition_version INTEGER NOT NULL CHECK (definition_version IN (1, 2)),
     ctx_version TEXT NOT NULL
         CHECK (
             length(ctx_version) BETWEEN 1 AND 64
@@ -181,12 +181,25 @@ CREATE TABLE daily_usage (
     surface TEXT NOT NULL CHECK (surface IN ('cli', 'mcp')),
     operation TEXT NOT NULL CHECK (
         (
-            surface = 'cli'
+            definition_version = 1
+            AND surface = 'cli'
             AND operation IN (
                 'setup', 'index', 'sources', 'import', 'show',
                 'locate', 'search', 'pro_setup', 'pro_manage', 'pro_uninstall',
                 'blame', 'sql', 'docs', 'integrations', 'daemon_status',
                 'daemon_enable', 'daemon_disable', 'upgrade', 'doctor'
+            )
+        )
+        OR
+        (
+            definition_version = 2
+            AND surface = 'cli'
+            AND operation IN (
+                'setup', 'index', 'sources', 'import', 'show_session',
+                'show_event', 'locate', 'search', 'pro_setup', 'pro_manage',
+                'pro_uninstall', 'blame', 'sql', 'docs', 'integrations',
+                'daemon_status', 'daemon_enable', 'daemon_disable', 'upgrade',
+                'doctor'
             )
         )
         OR
@@ -223,51 +236,21 @@ CREATE TABLE daily_usage (
             )
             OR (operation != 'blame' AND pro_outcome = 'not_applicable')
         ),
-    result_action TEXT NOT NULL CHECK (
-        result_action IN (
-            'search', 'open_session', 'open_event', 'locate',
-            'sources', 'sql', 'blame', 'not_applicable'
-        )
-    ),
+    context_coverage TEXT NOT NULL
+        CHECK (context_coverage IN ('complete', 'unavailable', 'not_applicable')),
     calls INTEGER NOT NULL CHECK (calls > 0),
     result_count INTEGER NOT NULL CHECK (result_count >= 0),
     citation_count INTEGER NOT NULL CHECK (citation_count >= 0),
-    latency_ms INTEGER NOT NULL CHECK (latency_ms >= 0),
-    latency_samples INTEGER NOT NULL
-        CHECK (latency_samples BETWEEN 0 AND calls),
-    response_bytes INTEGER NOT NULL CHECK (response_bytes >= 0),
-    response_byte_samples INTEGER NOT NULL
-        CHECK (response_byte_samples BETWEEN 0 AND calls),
-    output_bytes INTEGER NOT NULL CHECK (output_bytes >= 0),
-    output_byte_samples INTEGER NOT NULL
-        CHECK (output_byte_samples BETWEEN 0 AND calls),
-    context_bytes INTEGER NOT NULL CHECK (context_bytes >= 0),
-    context_byte_samples INTEGER NOT NULL
-        CHECK (context_byte_samples BETWEEN 0 AND calls),
-    search_result_bytes INTEGER NOT NULL CHECK (search_result_bytes >= 0),
-    search_result_byte_samples INTEGER NOT NULL
-        CHECK (search_result_byte_samples BETWEEN 0 AND calls),
-    context_searches INTEGER NOT NULL CHECK (context_searches >= 0),
-    context_found INTEGER NOT NULL CHECK (context_found >= 0),
-    context_opened INTEGER NOT NULL CHECK (context_opened >= 0),
-    context_cited INTEGER NOT NULL CHECK (context_cited >= 0),
-    validated_discoveries INTEGER NOT NULL CHECK (validated_discoveries >= 0),
+    delivered_output_bytes INTEGER NOT NULL CHECK (delivered_output_bytes >= 0),
+    delivered_context_bytes INTEGER NOT NULL CHECK (delivered_context_bytes >= 0),
+    matched_normalized_session_bytes INTEGER NOT NULL
+        CHECK (matched_normalized_session_bytes >= 0),
     CHECK (
         (
             outcome = 'failure'
             AND value_class = 'not_applicable'
-            AND result_action = 'not_applicable'
             AND result_count = 0
             AND citation_count = 0
-            AND context_bytes = 0
-            AND context_byte_samples = 0
-            AND search_result_bytes = 0
-            AND search_result_byte_samples = 0
-            AND context_searches = 0
-            AND context_found = 0
-            AND context_opened = 0
-            AND context_cited = 0
-            AND validated_discoveries = 0
         )
         OR outcome = 'success'
     ),
@@ -280,79 +263,8 @@ CREATE TABLE daily_usage (
         )
     ),
     CHECK (
-        (latency_samples = 0 AND latency_ms = 0)
-        OR latency_samples > 0
-    ),
-    CHECK (
-        (context_byte_samples = 0 AND context_bytes = 0)
-        OR context_byte_samples > 0
-    ),
-    CHECK (
-        (
-            surface = 'mcp'
-            AND response_byte_samples = calls
-            AND response_bytes > 0
-            AND output_byte_samples = 0
-            AND output_bytes = 0
-        )
-        OR (
-            surface = 'cli'
-            AND response_byte_samples = 0
-            AND response_bytes = 0
-            AND (
-                (output_byte_samples = 0 AND output_bytes = 0)
-                OR output_byte_samples > 0
-            )
-        )
-    ),
-    CHECK (
-        (
-            search_result_byte_samples = 0
-            AND search_result_bytes = 0
-        )
-        OR search_result_byte_samples > 0
-    ),
-    CHECK (
-        (
-            operation = 'search'
-            AND outcome = 'success'
-            AND value_class = 'result_bearing'
-            AND search_result_bytes <= context_bytes
-            AND search_result_byte_samples <= context_byte_samples
-        )
-        OR (
-            search_result_bytes = 0
-            AND search_result_byte_samples = 0
-        )
-    ),
-    CHECK (
-        (
-            outcome = 'success'
-            AND result_action = 'search'
-            AND context_searches BETWEEN 0 AND calls
-            AND context_found BETWEEN 0 AND result_count
-            AND (context_found = 0 OR context_searches > 0)
-            AND context_opened = 0
-            AND context_cited = 0
-            AND validated_discoveries = 0
-        )
-        OR (
-            outcome = 'success'
-            AND result_action IN ('open_session', 'open_event')
-            AND context_searches = 0
-            AND context_found = 0
-            AND context_opened BETWEEN 0 AND calls
-            AND context_cited = 0
-            AND validated_discoveries BETWEEN 0 AND calls
-            AND validated_discoveries <= context_opened + context_cited
-        )
-        OR (
-            context_searches = 0
-            AND context_found = 0
-            AND context_opened = 0
-            AND context_cited = 0
-            AND validated_discoveries = 0
-        )
+        citation_count = 0
+        OR (operation = 'blame' AND outcome = 'success')
     ),
     CHECK (
         operation = 'blame'
@@ -369,7 +281,8 @@ CREATE TABLE daily_usage (
         )
     ),
     CHECK (
-        operation != 'blame'
+        definition_version = 1
+        OR operation != 'blame'
         OR outcome = 'failure'
         OR (
             (pro_outcome NOT IN ('produced', 'possible') OR value_class = 'result_bearing')
@@ -377,52 +290,77 @@ CREATE TABLE daily_usage (
         )
     ),
     CHECK (
-        result_action = 'not_applicable'
-        OR (result_action = 'search' AND operation = 'search')
-        OR (
-            result_action = 'open_session'
-            AND (
-                (surface = 'cli' AND operation = 'show')
-                OR (surface = 'mcp' AND operation = 'show_session')
-            )
-        )
-        OR (
-            result_action = 'open_event'
-            AND (
-                (surface = 'cli' AND operation = 'show')
-                OR (surface = 'mcp' AND operation = 'show_event')
-            )
-        )
-        OR (result_action = 'locate' AND surface = 'cli' AND operation = 'locate')
-        OR (result_action = 'sources' AND operation = 'sources')
-        OR (result_action = 'sql' AND operation = 'sql')
-        OR (result_action = 'blame' AND operation = 'blame')
-    ),
-    CHECK (
-        value_class = 'not_applicable'
-        OR result_action != 'not_applicable'
-    ),
-    CHECK (
         outcome = 'failure'
-        OR surface = 'cli'
         OR (
-            surface = 'mcp'
-            AND operation IN (
-                'sources', 'search', 'sql', 'show_session', 'show_event', 'blame'
+            surface = 'cli'
+            AND (
+                (
+                    definition_version = 1
+                    AND (
+                        (operation = 'blame' AND value_class IN ('result_bearing', 'empty'))
+                        OR (operation != 'blame' AND value_class = 'not_applicable')
+                    )
+                )
+                OR (
+                    definition_version = 2
+                    AND (
+                        (
+                            operation IN ('search', 'blame')
+                            AND value_class IN ('result_bearing', 'empty')
+                        )
+                        OR (
+                            operation NOT IN ('search', 'blame')
+                            AND value_class = 'not_applicable'
+                        )
+                    )
+                )
             )
-            AND value_class IN ('result_bearing', 'empty')
-            AND result_action != 'not_applicable'
         )
         OR (
             surface = 'mcp'
-            AND operation IN ('status', 'pro_status')
-            AND value_class = 'not_applicable'
-            AND result_action = 'not_applicable'
+            AND (
+                (
+                    operation IN (
+                        'sources', 'search', 'sql', 'show_session', 'show_event', 'blame'
+                    )
+                    AND value_class IN ('result_bearing', 'empty')
+                )
+                OR (
+                    operation IN ('status', 'pro_status')
+                    AND value_class = 'not_applicable'
+                )
+            )
+        )
+    ),
+    CHECK (
+        (
+            definition_version = 2
+            AND operation = 'search'
+            AND outcome = 'success'
+            AND value_class = 'result_bearing'
+            AND (
+                (
+                    context_coverage = 'complete'
+                    AND delivered_context_bytes > 0
+                    AND matched_normalized_session_bytes > 0
+                    AND matched_normalized_session_bytes >= delivered_context_bytes
+                )
+                OR (
+                    context_coverage = 'unavailable'
+                    AND delivered_context_bytes = 0
+                    AND matched_normalized_session_bytes = 0
+                )
+            )
+        )
+        OR (
+            context_coverage = 'not_applicable'
+            AND delivered_context_bytes = 0
+            AND matched_normalized_session_bytes = 0
         )
     ),
     PRIMARY KEY (
         day_utc, definition_version, ctx_version, surface, operation, outcome,
-        value_class, duration_bucket, target_type, pro_outcome, result_action
+        value_class, duration_bucket, target_type, pro_outcome, context_coverage
     )
 ) WITHOUT ROWID, STRICT;
 "#;
@@ -439,18 +377,7 @@ CREATE TABLE maintenance (
 ) WITHOUT ROWID, STRICT;
 "#;
 
-pub(super) const MAINTENANCE_SCHEMA: &str = r#"
-CREATE TABLE maintenance (
-    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    last_retention_day TEXT NOT NULL CHECK (
-        length(last_retention_day) = 10
-        AND last_retention_day GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
-        AND date(last_retention_day) IS NOT NULL
-        AND date(last_retention_day) = last_retention_day
-    ),
-    store_generation INTEGER NOT NULL CHECK (store_generation >= 0)
-) WITHOUT ROWID, STRICT;
-"#;
+pub(super) const MAINTENANCE_SCHEMA: &str = LEGACY_MAINTENANCE_SCHEMA;
 
 const EXPECTED_DAILY_COLUMNS: &[&str] = &[
     "day_utc",
@@ -463,25 +390,13 @@ const EXPECTED_DAILY_COLUMNS: &[&str] = &[
     "duration_bucket",
     "target_type",
     "pro_outcome",
-    "result_action",
+    "context_coverage",
     "calls",
     "result_count",
     "citation_count",
-    "latency_ms",
-    "latency_samples",
-    "response_bytes",
-    "response_byte_samples",
-    "output_bytes",
-    "output_byte_samples",
-    "context_bytes",
-    "context_byte_samples",
-    "search_result_bytes",
-    "search_result_byte_samples",
-    "context_searches",
-    "context_found",
-    "context_opened",
-    "context_cited",
-    "validated_discoveries",
+    "delivered_output_bytes",
+    "delivered_context_bytes",
+    "matched_normalized_session_bytes",
 ];
 
 const EXPECTED_DAILY_COLUMNS_V1: &[&str] = &[
@@ -521,123 +436,35 @@ pub(super) fn migrate_to_current<T>(
     before_commit: impl FnOnce() -> Result<T, UsageStoreError>,
 ) -> Result<(), UsageStoreError> {
     let version = verify_supported_schema(conn)?;
-    let maintenance_is_current = maintenance_schema_is_current(conn)?;
-    if version == SCHEMA_VERSION && maintenance_is_current {
+    if version == SCHEMA_VERSION {
         return Ok(());
     }
-    if !matches!(version, LEGACY_SCHEMA_VERSION | SCHEMA_VERSION) {
+    if version != LEGACY_SCHEMA_VERSION {
         return Err(UsageStoreError::SchemaVersion(version));
     }
     super::super::report::validate_rows_for_schema(conn, version)?;
     let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    if version == LEGACY_SCHEMA_VERSION {
-        transaction.execute_batch("ALTER TABLE daily_usage RENAME TO daily_usage_v1;")?;
-        transaction.execute_batch(DAILY_USAGE_SCHEMA)?;
-        transaction.execute_batch(
-            r#"
+    transaction.execute_batch("ALTER TABLE daily_usage RENAME TO daily_usage_v1;")?;
+    transaction.execute_batch(DAILY_USAGE_SCHEMA)?;
+    transaction.execute_batch(
+        r#"
         INSERT INTO daily_usage (
             day_utc, definition_version, ctx_version, surface, operation, outcome,
-            value_class, duration_bucket, target_type, pro_outcome, result_action,
-            calls, result_count, citation_count, latency_ms, latency_samples,
-            response_bytes, response_byte_samples, output_bytes, output_byte_samples,
-            context_bytes, context_byte_samples, search_result_bytes,
-            search_result_byte_samples, context_searches, context_found,
-            context_opened, context_cited, validated_discoveries
-        )
-        WITH normalized AS (
-            SELECT
-                day_utc,
-                ctx_version,
-                surface,
-                operation,
-                outcome,
-                value_class,
-                duration_bucket,
-                target_type,
-                CASE
-                    WHEN operation = 'blame'
-                        AND pro_outcome IN ('produced', 'possible')
-                        AND value_class != 'result_bearing'
-                        THEN 'none'
-                    ELSE pro_outcome
-                END AS normalized_pro_outcome,
-                CASE
-                    WHEN outcome != 'success' OR value_class = 'not_applicable'
-                        THEN 'not_applicable'
-                    WHEN operation = 'search' THEN 'search'
-                    WHEN surface = 'mcp' AND operation = 'show_session' THEN 'open_session'
-                    WHEN surface = 'mcp' AND operation = 'show_event' THEN 'open_event'
-                    WHEN operation = 'sources' THEN 'sources'
-                    WHEN operation = 'sql' THEN 'sql'
-                    WHEN operation = 'blame' THEN 'blame'
-                    ELSE 'not_applicable'
-                END AS normalized_result_action,
-                calls,
-                result_count,
-                citation_count,
-                response_bytes
-            FROM daily_usage_v1
+            value_class, duration_bucket, target_type, pro_outcome, context_coverage,
+            calls, result_count, citation_count, delivered_output_bytes,
+            delivered_context_bytes, matched_normalized_session_bytes
         )
         SELECT
-            day_utc,
-            2,
-            ctx_version,
-            surface,
-            operation,
-            outcome,
-            value_class,
-            duration_bucket,
-            target_type,
-            normalized_pro_outcome,
-            normalized_result_action,
-            SUM(calls),
-            SUM(result_count),
-            SUM(citation_count),
-            0,
-            0,
-            SUM(response_bytes),
-            CASE WHEN surface = 'mcp' THEN SUM(calls) ELSE 0 END,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0
-        FROM normalized
-        GROUP BY
-            day_utc,
-            ctx_version,
-            surface,
-            operation,
-            outcome,
-            value_class,
-            duration_bucket,
-            target_type,
-            normalized_pro_outcome,
-            normalized_result_action;
+            day_utc, 1, ctx_version, surface, operation, outcome, value_class,
+            duration_bucket, target_type, pro_outcome, 'not_applicable',
+            calls, result_count, citation_count,
+            CASE WHEN surface = 'mcp' THEN response_bytes ELSE 0 END,
+            0, 0
+        FROM daily_usage_v1;
         DROP TABLE daily_usage_v1;
         "#,
-        )?;
-        transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-    }
-    if !maintenance_is_current {
-        transaction
-            .execute_batch("ALTER TABLE maintenance RENAME TO maintenance_without_generation;")?;
-        transaction.execute_batch(MAINTENANCE_SCHEMA)?;
-        transaction.execute_batch(
-            r#"
-            INSERT INTO maintenance (singleton, last_retention_day, store_generation)
-            SELECT singleton, last_retention_day, 0
-            FROM maintenance_without_generation;
-            DROP TABLE maintenance_without_generation;
-            "#,
-        )?;
-    }
+    )?;
+    transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     verify_schema(&transaction)?;
     super::super::report::validate_rows(&transaction)?;
     let commit_guard = before_commit()?;
@@ -667,33 +494,31 @@ pub(in crate::local_usage) fn verify_supported_schema(
     verify_schema_object_allowlist(conn)?;
     match user_version {
         LEGACY_SCHEMA_VERSION => verify_daily_schema_v1(conn)?,
-        SCHEMA_VERSION => verify_daily_schema(conn, DAILY_USAGE_SCHEMA, EXPECTED_DAILY_COLUMNS)?,
+        SCHEMA_VERSION => {
+            verify_daily_schema(conn, DAILY_USAGE_SCHEMA, EXPECTED_DAILY_COLUMNS)?;
+        }
         _ => return Err(UsageStoreError::SchemaVersion(user_version)),
     }
-    maintenance_schema_is_current(conn)?;
+    verify_maintenance_schema(conn)?;
     Ok(user_version)
 }
 
 pub(super) fn verify_schema(conn: &Connection) -> Result<(), UsageStoreError> {
     let version = verify_supported_schema(conn)?;
-    if version != SCHEMA_VERSION {
-        return Err(UsageStoreError::SchemaVersion(version));
+    if version == SCHEMA_VERSION {
+        Ok(())
+    } else {
+        Err(UsageStoreError::SchemaVersion(version))
     }
-    if !maintenance_schema_is_current(conn)? {
-        return Err(UsageStoreError::SchemaIdentity);
-    }
-    Ok(())
 }
 
-fn maintenance_schema_is_current(conn: &Connection) -> Result<bool, UsageStoreError> {
+fn verify_maintenance_schema(conn: &Connection) -> Result<(), UsageStoreError> {
     let actual = table_schema(conn, "maintenance")?;
     if canonical_schema(&actual) == canonical_schema(MAINTENANCE_SCHEMA) {
-        return Ok(true);
+        Ok(())
+    } else {
+        Err(UsageStoreError::SchemaIdentity)
     }
-    if canonical_schema(&actual) == canonical_schema(LEGACY_MAINTENANCE_SCHEMA) {
-        return Ok(false);
-    }
-    Err(UsageStoreError::SchemaIdentity)
 }
 
 fn verify_daily_schema_v1(conn: &Connection) -> Result<(), UsageStoreError> {
@@ -730,13 +555,14 @@ fn verify_daily_schema_variants(
         return Err(UsageStoreError::SchemaIdentity);
     }
     let actual = table_schema(conn, "daily_usage")?;
-    if !expected_schemas
+    if expected_schemas
         .iter()
         .any(|expected| canonical_schema(&actual) == canonical_schema(expected))
     {
-        return Err(UsageStoreError::SchemaIdentity);
+        Ok(())
+    } else {
+        Err(UsageStoreError::SchemaIdentity)
     }
-    Ok(())
 }
 
 pub(in crate::local_usage) fn v1_uses_legacy_blame_schema(
@@ -768,18 +594,16 @@ fn verify_schema_object_allowlist(conn: &Connection) -> Result<(), UsageStoreErr
             ("table", "maintenance", "maintenance", Some(_)) if !maintenance => {
                 maintenance = true;
             }
-            // SQLite may own implicit indexes. WITHOUT ROWID currently needs
-            // none, but permit only SQLite-internal, SQL-less indexes attached
-            // to one of the two exact tables.
             ("index", name, "daily_usage" | "maintenance", None) if name.starts_with("sqlite_") => {
             }
             _ => return Err(UsageStoreError::SchemaIdentity),
         }
     }
-    if !daily_usage || !maintenance {
-        return Err(UsageStoreError::SchemaIdentity);
+    if daily_usage && maintenance {
+        Ok(())
+    } else {
+        Err(UsageStoreError::SchemaIdentity)
     }
-    Ok(())
 }
 
 fn table_schema(conn: &Connection, table: &str) -> Result<String, UsageStoreError> {

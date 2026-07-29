@@ -1,166 +1,170 @@
 use serde::Serialize;
 
-pub(crate) const ESTIMATE_MODEL: EstimateModel = EstimateModel {
-    version: 1,
-    approximate_bytes_per_token: 4,
-    avoided_search_token_multiplier: 49,
-    result_bearing_search_seconds: 60,
-    discovered_record_open_seconds: 15,
-    produced_blame_seconds: 300,
-    possible_blame_seconds: 120,
-};
+use super::store::UsageStoreError;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub(crate) struct EstimateModel {
-    pub(crate) version: u32,
-    pub(crate) approximate_bytes_per_token: u64,
-    pub(crate) avoided_search_token_multiplier: u64,
-    pub(crate) result_bearing_search_seconds: u64,
-    pub(crate) discovered_record_open_seconds: u64,
-    pub(crate) produced_blame_seconds: u64,
-    pub(crate) possible_blame_seconds: u64,
-}
+pub(crate) const ESTIMATE_MODEL_VERSION: &str = "matched_normalized_sessions_v1";
+pub(crate) const COEFFICIENT_VERSION: &str = "utf8_token_equivalent_range_v1";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct EstimateFacts {
-    pub(crate) result_bearing_searches: u64,
-    pub(crate) semantic_context_eligible_samples: u64,
-    pub(crate) semantic_context_bytes: u64,
-    pub(crate) semantic_context_byte_samples: u64,
-    pub(crate) semantic_search_result_bytes: u64,
-    pub(crate) semantic_search_result_byte_samples: u64,
-    pub(crate) discovered_record_opens: u64,
-    pub(crate) produced_blame_requests: u64,
-    pub(crate) possible_blame_requests: u64,
+    pub(crate) complete_calls: u64,
+    pub(crate) unavailable_calls: u64,
+    pub(crate) delivered_context_bytes: u64,
+    pub(crate) matched_normalized_session_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub(crate) struct TokenEquivalentRange {
+    pub(crate) low: u64,
+    pub(crate) central: u64,
+    pub(crate) high: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) struct ApproximateContextTokens {
+    pub(crate) coefficient_version: &'static str,
+    pub(crate) delivered_context_bytes: u64,
+    #[serde(flatten)]
+    pub(crate) token_equivalents: TokenEquivalentRange,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) struct EstimatedContextReduction {
+    pub(crate) estimate_model_version: &'static str,
+    pub(crate) coefficient_version: &'static str,
+    pub(crate) covered_calls: u64,
+    pub(crate) unavailable_calls: u64,
+    pub(crate) comparison_baseline_bytes: u64,
+    pub(crate) observed_delivered_context_bytes: u64,
+    pub(crate) estimated_avoided_context_bytes: u64,
+    #[serde(flatten)]
+    pub(crate) approximate_token_equivalents: TokenEquivalentRange,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) struct UsageEstimates {
-    pub(crate) model: EstimateModel,
-    pub(crate) approximate_context_tokens: CoveredTokenEstimate,
-    pub(crate) approximate_avoided_context_tokens: CoveredTokenEstimate,
-    pub(crate) estimated_time_saved_seconds: u64,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum EstimateCoverage {
-    #[default]
-    Complete,
-    Partial,
-    UnavailableLegacy,
-}
-
-impl EstimateCoverage {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Complete => "complete",
-            Self::Partial => "partial",
-            Self::UnavailableLegacy => "unavailable_legacy",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
-pub(crate) struct CoveredTokenEstimate {
-    pub(crate) approximate_tokens: Option<u64>,
-    pub(crate) coverage: EstimateCoverage,
-    pub(crate) measured_samples: u64,
-    pub(crate) eligible_samples: u64,
-}
-
-impl Default for EstimateModel {
-    fn default() -> Self {
-        ESTIMATE_MODEL
-    }
+    pub(crate) approximate_context_tokens: ApproximateContextTokens,
+    pub(crate) estimated_context_reduction: EstimatedContextReduction,
 }
 
 pub(crate) fn estimate_usage(
     facts: EstimateFacts,
-) -> Result<UsageEstimates, super::store::UsageStoreError> {
-    let approximate_context_tokens = covered_token_estimate(
-        facts.semantic_context_bytes,
-        facts.semantic_context_byte_samples,
-        facts.semantic_context_eligible_samples,
-        1,
-    )?;
-    let approximate_avoided_context_tokens = covered_token_estimate(
-        facts.semantic_search_result_bytes,
-        facts.semantic_search_result_byte_samples,
-        facts.result_bearing_searches,
-        ESTIMATE_MODEL.avoided_search_token_multiplier,
-    )?;
-    let search_seconds = facts
-        .result_bearing_searches
-        .checked_mul(ESTIMATE_MODEL.result_bearing_search_seconds)
-        .ok_or(super::store::UsageStoreError::Integrity)?;
-    let open_seconds = facts
-        .discovered_record_opens
-        .checked_mul(ESTIMATE_MODEL.discovered_record_open_seconds)
-        .ok_or(super::store::UsageStoreError::Integrity)?;
-    let produced_seconds = facts
-        .produced_blame_requests
-        .checked_mul(ESTIMATE_MODEL.produced_blame_seconds)
-        .ok_or(super::store::UsageStoreError::Integrity)?;
-    let possible_seconds = facts
-        .possible_blame_requests
-        .checked_mul(ESTIMATE_MODEL.possible_blame_seconds)
-        .ok_or(super::store::UsageStoreError::Integrity)?;
-    let estimated_time_saved_seconds = [
-        search_seconds,
-        open_seconds,
-        produced_seconds,
-        possible_seconds,
-    ]
-    .into_iter()
-    .try_fold(0_u64, |total, value| {
-        total
-            .checked_add(value)
-            .ok_or(super::store::UsageStoreError::Integrity)
-    })?;
-    Ok(UsageEstimates {
-        model: ESTIMATE_MODEL,
-        approximate_context_tokens,
-        approximate_avoided_context_tokens,
-        estimated_time_saved_seconds,
-    })
-}
-
-fn covered_token_estimate(
-    bytes: u64,
-    measured_samples: u64,
-    eligible_samples: u64,
-    multiplier: u64,
-) -> Result<CoveredTokenEstimate, super::store::UsageStoreError> {
-    let coverage = if measured_samples == eligible_samples {
-        EstimateCoverage::Complete
-    } else if measured_samples == 0 {
-        EstimateCoverage::UnavailableLegacy
-    } else {
-        EstimateCoverage::Partial
-    };
-    let approximate_tokens = if coverage == EstimateCoverage::UnavailableLegacy {
-        None
-    } else {
-        Some(
-            divide_rounding_up(bytes, ESTIMATE_MODEL.approximate_bytes_per_token)?
-                .checked_mul(multiplier)
-                .ok_or(super::store::UsageStoreError::Integrity)?,
-        )
-    };
-    Ok(CoveredTokenEstimate {
-        approximate_tokens,
-        coverage,
-        measured_samples,
-        eligible_samples,
-    })
-}
-
-fn divide_rounding_up(value: u64, divisor: u64) -> Result<u64, super::store::UsageStoreError> {
-    if divisor == 0 {
-        return Err(super::store::UsageStoreError::Integrity);
+) -> Result<Option<UsageEstimates>, UsageStoreError> {
+    if facts.complete_calls == 0 {
+        return Ok(None);
     }
-    (value / divisor)
-        .checked_add(u64::from(value % divisor != 0))
-        .ok_or(super::store::UsageStoreError::Integrity)
+    let estimated_avoided_context_bytes = facts
+        .matched_normalized_session_bytes
+        .checked_sub(facts.delivered_context_bytes)
+        .ok_or(UsageStoreError::Integrity)?;
+    Ok(Some(UsageEstimates {
+        approximate_context_tokens: ApproximateContextTokens {
+            coefficient_version: COEFFICIENT_VERSION,
+            delivered_context_bytes: facts.delivered_context_bytes,
+            token_equivalents: token_equivalent_range(facts.delivered_context_bytes)?,
+        },
+        estimated_context_reduction: EstimatedContextReduction {
+            estimate_model_version: ESTIMATE_MODEL_VERSION,
+            coefficient_version: COEFFICIENT_VERSION,
+            covered_calls: facts.complete_calls,
+            unavailable_calls: facts.unavailable_calls,
+            comparison_baseline_bytes: facts.matched_normalized_session_bytes,
+            observed_delivered_context_bytes: facts.delivered_context_bytes,
+            estimated_avoided_context_bytes,
+            approximate_token_equivalents: token_equivalent_range(estimated_avoided_context_bytes)?,
+        },
+    }))
+}
+
+fn token_equivalent_range(bytes: u64) -> Result<TokenEquivalentRange, UsageStoreError> {
+    Ok(TokenEquivalentRange {
+        low: bytes / 5,
+        central: bytes / 4,
+        high: multiply_then_floor_divide(bytes, 2, 5)?,
+    })
+}
+
+fn multiply_then_floor_divide(
+    value: u64,
+    multiplier: u64,
+    divisor: u64,
+) -> Result<u64, UsageStoreError> {
+    if divisor == 0 {
+        return Err(UsageStoreError::Integrity);
+    }
+    let whole = value
+        .checked_div(divisor)
+        .and_then(|value| value.checked_mul(multiplier))
+        .ok_or(UsageStoreError::Integrity)?;
+    let remainder = value
+        .checked_rem(divisor)
+        .and_then(|value| value.checked_mul(multiplier))
+        .and_then(|value| value.checked_div(divisor))
+        .ok_or(UsageStoreError::Integrity)?;
+    whole
+        .checked_add(remainder)
+        .ok_or(UsageStoreError::Integrity)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coefficient_range_uses_floor_math() {
+        assert_eq!(
+            token_equivalent_range(19).unwrap(),
+            TokenEquivalentRange {
+                low: 3,
+                central: 4,
+                high: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn estimate_uses_only_complete_definition_two_facts() {
+        let estimate = estimate_usage(EstimateFacts {
+            complete_calls: 2,
+            unavailable_calls: 3,
+            delivered_context_bytes: 400,
+            matched_normalized_session_bytes: 1_000,
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            estimate.approximate_context_tokens.token_equivalents,
+            TokenEquivalentRange {
+                low: 80,
+                central: 100,
+                high: 160,
+            }
+        );
+        assert_eq!(
+            estimate
+                .estimated_context_reduction
+                .estimated_avoided_context_bytes,
+            600
+        );
+        assert_eq!(
+            estimate
+                .estimated_context_reduction
+                .approximate_token_equivalents,
+            TokenEquivalentRange {
+                low: 120,
+                central: 150,
+                high: 240,
+            }
+        );
+    }
+
+    #[test]
+    fn estimate_is_absent_without_complete_coverage() {
+        assert!(estimate_usage(EstimateFacts {
+            unavailable_calls: 5,
+            ..EstimateFacts::default()
+        })
+        .unwrap()
+        .is_none());
+    }
 }

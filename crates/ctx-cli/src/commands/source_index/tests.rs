@@ -36,7 +36,10 @@ mod tests {
     use super::{
         locate::{locate_event_value, locate_session_value, validate_locate_target},
         render::{render_locate_event_availability_text, render_search_text, search_json},
-        search::{NormalizedSearchQuery, SearchCollection, SearchHit, SearchResultWindow},
+        search::{
+            search_context_observation_with_hydrator, NormalizedSearchQuery, SearchCollection,
+            SearchHit, SearchResultWindow,
+        },
         shared::session_source_json,
         show::{
             event_window_value, render_event_value, session_transcript_value, validate_show_target,
@@ -953,6 +956,60 @@ mod tests {
     }
 
     #[test]
+    fn search_context_bytes_use_snippets_and_deduplicated_complete_sessions_not_json() {
+        let temp = tempdir().unwrap();
+        write_test_generation(temp.path());
+        let (value, collection, index) = search_existing_generation_with_hydrator(
+            &request(RefreshArg::Off),
+            open_index(temp.path()).unwrap(),
+            temp.path(),
+            0.35,
+            "existing_generation",
+            1,
+            |_index, _data_root, events| {
+                Ok(events
+                    .iter()
+                    .map(|event| (event.event_id.as_uuid(), "short snippet".to_owned()))
+                    .collect())
+            },
+        )
+        .unwrap();
+        let complete_event_count = Cell::new(0_usize);
+        let observation = search_context_observation_with_hydrator(
+            &value,
+            &collection,
+            &index,
+            temp.path(),
+            |_index, _data_root, events| {
+                complete_event_count.set(events.len());
+                Ok(events
+                    .iter()
+                    .map(|event| (event.event_id.as_uuid(), "x".repeat(100)))
+                    .collect())
+            },
+        );
+        let delivered = value["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|result| result["snippet"].as_str().unwrap().len())
+            .sum::<usize>();
+        assert_eq!(
+            observation.metadata_for_test(),
+            (
+                crate::local_usage::ContextCoverage::Complete,
+                delivered as u64,
+                (complete_event_count.get() * 100) as u64,
+            )
+        );
+        assert_ne!(
+            delivered,
+            serde_json::to_vec(&value["results"]).unwrap().len(),
+            "JSON keys and framing must not enter canonical context bytes"
+        );
+    }
+
+    #[test]
     fn refresh_off_surfaces_typed_resolver_unavailable_without_retrying() {
         let temp = tempdir().unwrap();
         write_test_generation(temp.path());
@@ -1211,12 +1268,12 @@ mod tests {
         source_request.query = "query-with-no-fixture-match".to_owned();
         source_request.backend = None;
 
-        let lexical = mcp_search(source_request.clone(), temp.path()).unwrap();
+        let (lexical, _) = mcp_search(source_request.clone(), temp.path()).unwrap();
         assert_eq!(lexical["retrieval"]["requested_mode"], "lexical");
         assert_eq!(lexical["retrieval"]["effective_mode"], "lexical");
 
         config::set_semantic_search_enabled(temp.path(), true).unwrap();
-        let hybrid = mcp_search(source_request, temp.path()).unwrap();
+        let (hybrid, _) = mcp_search(source_request, temp.path()).unwrap();
         assert_eq!(hybrid["retrieval"]["requested_mode"], "hybrid");
         assert_eq!(hybrid["retrieval"]["effective_mode"], "lexical");
         assert_eq!(
@@ -1228,7 +1285,7 @@ mod tests {
         file_only.query.clear();
         file_only.backend = None;
         file_only.file = Some(PathBuf::from("/fixture/no-match.rs"));
-        let file_only = mcp_search(file_only, temp.path()).unwrap();
+        let (file_only, _) = mcp_search(file_only, temp.path()).unwrap();
         assert_eq!(file_only["retrieval"]["requested_mode"], "lexical");
         assert_eq!(file_only["retrieval"]["effective_mode"], "lexical");
         assert!(!database_path(temp.path().to_path_buf()).exists());

@@ -454,25 +454,28 @@ fn handle_tools_call(
             usage_invocation,
         );
     }
-    let context_target = match parsed_show_context_target(name, &arguments) {
-        Ok(target) => target,
+    match parsed_show_context_target(name, &arguments) {
+        Ok(_) => {}
         Err(error) => {
             return (
                 Ok(McpHandled::plain(tool_error_result(error))),
                 usage_invocation,
             );
         }
-    };
-    if let Some(stable_result_id) = context_target {
-        if let Some(invocation) = usage_invocation.as_mut() {
-            invocation.bind_context_target(stable_result_id);
-        }
     }
 
     let handled = match name {
         "status" => McpHandled::plain(tool_status(data_root)),
         "sources" => McpHandled::plain(tool_sources(data_root)),
-        "search" => McpHandled::plain(tool_search(&arguments, data_root)),
+        "search" => match tool_search(&arguments, data_root) {
+            Ok((value, observation)) => {
+                if let Some(invocation) = usage_invocation.as_mut() {
+                    invocation.bind_search_context(observation);
+                }
+                McpHandled::plain(Ok(value))
+            }
+            Err(error) => McpHandled::plain(Err(error)),
+        },
         "sql" => McpHandled::plain(tool_sql(&arguments, data_root)),
         "show_session" => McpHandled::plain(tool_show_session(&arguments, data_root)),
         "show_event" => McpHandled::plain(tool_show_event(&arguments, data_root)),
@@ -535,7 +538,10 @@ fn tool_sources(data_root: &Path) -> Result<Value> {
     }))
 }
 
-fn tool_search(arguments: &Value, data_root: &Path) -> Result<Value> {
+fn tool_search(
+    arguments: &Value,
+    data_root: &Path,
+) -> Result<(Value, crate::local_usage::SearchContextObservation)> {
     let query = optional_string(arguments, "query")?.unwrap_or_default();
     let limit = optional_usize(arguments, "limit")?.unwrap_or(20);
     if !(1..=MAX_SEARCH_LIMIT).contains(&limit) {

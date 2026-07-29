@@ -734,16 +734,10 @@ fn foreground_core_observations_are_truthful_and_recorded_once_after_output() {
         ]));
     let search_results = search["results"].as_array().unwrap();
     let search_result_count = search_results.len();
-    let search_citation_count = search_results
+    let delivered_context_bytes = search_results
         .iter()
-        .map(|result| {
-            result["citations"]
-                .as_array()
-                .map(Vec::len)
-                .unwrap_or_default()
-        })
+        .map(|result| result["snippet"].as_str().unwrap().len())
         .sum::<usize>();
-    let search_result_bytes = serde_json::to_vec(&search["results"]).unwrap().len();
     let ctx_event_id = search_results[0]["ctx_event_id"]
         .as_str()
         .unwrap()
@@ -772,7 +766,7 @@ fn foreground_core_observations_are_truthful_and_recorded_once_after_output() {
             &ctx_session_id,
             "--format=json",
         ]));
-    let shown_session_events = shown_session["events"].as_array().unwrap().len();
+    assert!(!shown_session["events"].as_array().unwrap().is_empty());
 
     let (shown_event, show_event_output_bytes) =
         measured_json_output(ctx(&temp).env_remove("CTX_LOCAL_USAGE_ENABLED").args([
@@ -781,7 +775,7 @@ fn foreground_core_observations_are_truthful_and_recorded_once_after_output() {
             &ctx_event_id,
             "--format=json",
         ]));
-    let shown_event_events = shown_event["events"].as_array().unwrap().len();
+    assert!(!shown_event["events"].as_array().unwrap().is_empty());
 
     let (_, locate_session_output_bytes) =
         measured_json_output(ctx(&temp).env_remove("CTX_LOCAL_USAGE_ENABLED").args([
@@ -803,7 +797,7 @@ fn foreground_core_observations_are_truthful_and_recorded_once_after_output() {
             .env_remove("CTX_LOCAL_USAGE_ENABLED")
             .args(["sources", "--format=json"]),
     );
-    let source_count = sources["sources"].as_array().unwrap().len();
+    assert!(!sources["sources"].as_array().unwrap().is_empty());
 
     let (sql, sql_output_bytes) =
         measured_json_output(ctx(&temp).env_remove("CTX_LOCAL_USAGE_ENABLED").args([
@@ -811,7 +805,7 @@ fn foreground_core_observations_are_truthful_and_recorded_once_after_output() {
             "SELECT 1 AS value UNION ALL SELECT 2",
             "--format=json",
         ]));
-    let sql_returned_rows = sql["returned_rows"].as_u64().unwrap() as usize;
+    assert_eq!(sql["returned_rows"], 2);
 
     let blocked_parent = temp.path().join("blocked-show-output");
     fs::write(&blocked_parent, "not a directory").unwrap();
@@ -827,7 +821,7 @@ fn foreground_core_observations_are_truthful_and_recorded_once_after_output() {
         .failure();
 
     let connection = Connection::open(temp.path().join("usage.sqlite")).unwrap();
-    let totals = |operation: &str, result_action: &str, outcome: &str| {
+    let totals = |operation: &str, outcome: &str, value_class: &str| {
         connection
             .query_row(
                 r#"
@@ -835,16 +829,16 @@ fn foreground_core_observations_are_truthful_and_recorded_once_after_output() {
                     SUM(calls),
                     SUM(result_count),
                     SUM(citation_count),
-                    SUM(output_bytes),
-                    SUM(output_byte_samples),
-                    SUM(search_result_bytes)
+                    SUM(delivered_output_bytes),
+                    SUM(delivered_context_bytes),
+                    SUM(matched_normalized_session_bytes)
                 FROM daily_usage
                 WHERE surface = 'cli'
                   AND operation = ?1
-                  AND result_action = ?2
-                  AND outcome = ?3
+                  AND outcome = ?2
+                  AND value_class = ?3
                 "#,
-                params![operation, result_action, outcome],
+                params![operation, outcome, value_class],
                 |row| {
                     Ok((
                         row.get::<_, i64>(0)?,
@@ -859,67 +853,62 @@ fn foreground_core_observations_are_truthful_and_recorded_once_after_output() {
             .unwrap()
     };
 
+    let search_complete: (String, i64) = connection
+        .query_row(
+            "SELECT context_coverage, matched_normalized_session_bytes \
+             FROM daily_usage \
+             WHERE surface = 'cli' AND operation = 'search' \
+               AND value_class = 'result_bearing'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(search_complete.0, "complete");
+    assert!(search_complete.1 >= delivered_context_bytes as i64);
     assert_eq!(
-        totals("search", "search", "success"),
+        totals("search", "success", "result_bearing"),
         (
-            2,
+            1,
             search_result_count as i64,
-            search_citation_count as i64,
-            search_output_bytes.saturating_add(empty_search_output_bytes) as i64,
-            2,
-            search_result_bytes as i64,
+            0,
+            search_output_bytes as i64,
+            delivered_context_bytes as i64,
+            search_complete.1,
         )
     );
     assert_eq!(
-        totals("show", "open_session", "success"),
-        (
-            1,
-            shown_session_events as i64,
-            0,
-            show_session_output_bytes as i64,
-            1,
-            0,
-        )
+        totals("search", "success", "empty"),
+        (1, 0, 0, empty_search_output_bytes as i64, 0, 0)
     );
     assert_eq!(
-        totals("show", "open_event", "success"),
-        (
-            1,
-            shown_event_events as i64,
-            0,
-            show_event_output_bytes as i64,
-            1,
-            0,
-        )
+        totals("show_session", "success", "not_applicable"),
+        (1, 0, 0, show_session_output_bytes as i64, 0, 0)
     );
     assert_eq!(
-        totals("locate", "locate", "success"),
+        totals("show_event", "success", "not_applicable"),
+        (1, 0, 0, show_event_output_bytes as i64, 0, 0)
+    );
+    assert_eq!(
+        totals("locate", "success", "not_applicable"),
         (
             2,
-            2,
+            0,
             0,
             locate_session_output_bytes.saturating_add(locate_event_output_bytes) as i64,
-            2,
+            0,
             0,
         )
     );
     assert_eq!(
-        totals("sources", "sources", "success"),
-        (1, source_count as i64, 0, sources_output_bytes as i64, 1, 0)
+        totals("sources", "success", "not_applicable"),
+        (1, 0, 0, sources_output_bytes as i64, 0, 0)
     );
     assert_eq!(
-        totals("sql", "sql", "success"),
-        (
-            1,
-            sql_returned_rows as i64,
-            0,
-            sql_output_bytes as i64,
-            1,
-            0
-        )
+        totals("sql", "success", "not_applicable"),
+        (1, 0, 0, sql_output_bytes as i64, 0, 0)
     );
     assert_eq!(
-        totals("show", "not_applicable", "failure"),
+        totals("show_session", "failure", "not_applicable"),
         (1, 0, 0, 0, 0, 0)
     );
 }

@@ -1,7 +1,7 @@
 mod query;
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -16,7 +16,7 @@ use crate::{
         count_bucket, duration_bucket, text_length_bucket, RefreshStatus, SearchTelemetry,
     },
     config,
-    local_usage::{CliUsage, ResultObservationAction},
+    local_usage::{CliUsage, ResultObservationAction, SearchContextObservation},
     output::{print_json, JsonOutputFormat},
     semantic::{
         coordinate_source_backed_refresh, semantic_query_service_supported,
@@ -144,16 +144,7 @@ pub(crate) fn run_search(
         .map(Vec::as_slice)
         .unwrap_or(&[]);
     let result_count = results.len();
-    let citation_count = results
-        .iter()
-        .map(|result| {
-            result["citations"]
-                .as_array()
-                .map(Vec::len)
-                .unwrap_or_default()
-        })
-        .sum();
-    let content_bytes = serde_json::to_vec(&value["results"])?.len();
+    let search_context = search_context_observation(&value, &collection, &index, &data_root);
     let render_started = Instant::now();
     let output_bytes = if args.format == JsonOutputFormat::Json {
         let output_bytes = pretty_json_stdout_bytes(&value)?;
@@ -166,25 +157,98 @@ pub(crate) fn run_search(
         output_bytes
     };
     telemetry.render_duration = Some(duration_bucket(render_started.elapsed()));
-    local_usage.set_result_observation(
-        ResultObservationAction::Search,
-        result_count,
-        citation_count,
-        content_bytes,
-    );
+    local_usage.set_result_observation(ResultObservationAction::Search, result_count, 0, 0);
+    local_usage.set_search_context_observation(search_context);
     local_usage.set_measured_output_bytes(output_bytes);
     Ok(())
 }
 
-pub(crate) fn mcp_search(mut request: SourceSearchRequest, data_root: &Path) -> Result<Value> {
+pub(crate) fn mcp_search(
+    mut request: SourceSearchRequest,
+    data_root: &Path,
+) -> Result<(Value, SearchContextObservation)> {
     let config = config::AppConfig::load(data_root)?;
     request.backend = Some(resolve_source_search_backend(&request, &config)?);
     request.semantic_enabled = config.semantic_search_enabled();
     let semantic_weight = request.semantic_weight;
     let refresh = refresh_for_search(&request, data_root)?;
-    let (value, _, _, _, _, _) =
+    let (value, collection, index, _, _, _) =
         search_with_hydration_retry(&request, data_root, semantic_weight, refresh)?;
-    Ok(value)
+    let observation = search_context_observation(&value, &collection, &index, data_root);
+    Ok((value, observation))
+}
+
+fn search_context_observation(
+    value: &Value,
+    collection: &SearchCollection,
+    index: &VerifiedIndex,
+    data_root: &Path,
+) -> SearchContextObservation {
+    search_context_observation_with_hydrator(
+        value,
+        collection,
+        index,
+        data_root,
+        |index, data_root, events| {
+            PinnedSourceBackedGeneration::hydrate_source_complete_events(index, data_root, events)
+        },
+    )
+}
+
+pub(super) fn search_context_observation_with_hydrator<Hydrate>(
+    value: &Value,
+    collection: &SearchCollection,
+    index: &VerifiedIndex,
+    data_root: &Path,
+    hydrate: Hydrate,
+) -> SearchContextObservation
+where
+    Hydrate: FnOnce(&VerifiedIndex, &Path, &[&EventRecord]) -> Result<HashMap<Uuid, String>>,
+{
+    if collection.result_window.hits.is_empty() {
+        return SearchContextObservation::unavailable();
+    }
+    let Some(delivered_context_bytes) =
+        value
+            .get("results")
+            .and_then(Value::as_array)
+            .and_then(|results| {
+                results.iter().try_fold(0_usize, |total, result| {
+                    total.checked_add(result.get("snippet")?.as_str()?.len())
+                })
+            })
+    else {
+        return SearchContextObservation::unavailable();
+    };
+    let session_ids = collection
+        .result_window
+        .hits
+        .iter()
+        .map(|hit| hit.event.session_id.as_uuid())
+        .collect::<BTreeSet<_>>();
+    let mut session_events = Vec::new();
+    for session_id in session_ids {
+        let Ok(events) = index.events_for_session(session_id) else {
+            return SearchContextObservation::unavailable();
+        };
+        if events.is_empty() {
+            return SearchContextObservation::unavailable();
+        }
+        session_events.extend(events);
+    }
+    let event_refs = session_events.iter().collect::<Vec<_>>();
+    let Ok(contents) = hydrate(index, data_root, &event_refs) else {
+        return SearchContextObservation::unavailable();
+    };
+    let Some(matched_normalized_session_bytes) =
+        session_events.iter().try_fold(0_usize, |total, event| {
+            total.checked_add(contents.get(&event.event_id.as_uuid())?.len())
+        })
+    else {
+        return SearchContextObservation::unavailable();
+    };
+    SearchContextObservation::complete(delivered_context_bytes, matched_normalized_session_bytes)
+        .unwrap_or_else(SearchContextObservation::unavailable)
 }
 
 pub(super) fn refresh_for_search(

@@ -36,7 +36,7 @@ use migration::{initialize_schema, migrate_to_current, reject_future_daily_dates
 #[cfg(test)]
 use migration::{legacy_daily_usage_schema_v1, DAILY_USAGE_SCHEMA_V1, LEGACY_MAINTENANCE_SCHEMA};
 pub(super) use migration::{v1_uses_legacy_blame_schema, verify_supported_schema};
-use write::record_correlated_at_with_hook;
+use write::record_at as write_record_at;
 
 pub(crate) const USAGE_FILE: &str = "usage.sqlite";
 const APPLICATION_ID: i64 = 0x4354_5855;
@@ -50,16 +50,6 @@ const WAL_AUTOCHECKPOINT_PAGES: i64 = 64;
 const JOURNAL_SIZE_LIMIT_BYTES: i64 = 1024 * 1024;
 const STALE_INIT_AGE: Duration = Duration::from_secs(60 * 60);
 const INIT_SLOT_COUNT: usize = 8;
-
-/// Content-free reset generation. It contains no result or caller identity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct StoreGeneration(i64);
-
-#[derive(Debug, Clone, Copy)]
-pub(super) struct CorrelationCommit {
-    pub(super) generation: StoreGeneration,
-    pub(super) expected_generation_matched: bool,
-}
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum UsageStoreError {
@@ -129,27 +119,8 @@ pub(crate) fn usage_store_exists(data_root: &Path) -> Result<bool, UsageStoreErr
 pub(crate) fn record(
     data_root: &Path,
     operation: CompletedOperation,
-) -> Result<StoreGeneration, UsageStoreError> {
+) -> Result<(), UsageStoreError> {
     record_at(data_root, operation, SystemTime::now(), BUSY_TIMEOUT)
-}
-
-pub(super) fn record_correlated_with_hook<T>(
-    data_root: &Path,
-    expected_generation: Option<StoreGeneration>,
-    matching_operation: CompletedOperation,
-    stale_operation: CompletedOperation,
-    after_generation_check: impl FnOnce() -> T,
-) -> Result<CorrelationCommit, UsageStoreError> {
-    record_correlated_at_with_hook(
-        data_root,
-        expected_generation,
-        matching_operation,
-        stale_operation,
-        SystemTime::now(),
-        BUSY_TIMEOUT,
-        CTX_VERSION,
-        after_generation_check,
-    )
 }
 
 fn record_at(
@@ -157,7 +128,7 @@ fn record_at(
     operation: CompletedOperation,
     now: SystemTime,
     busy_timeout: Duration,
-) -> Result<StoreGeneration, UsageStoreError> {
+) -> Result<(), UsageStoreError> {
     record_at_with_ctx_version(data_root, operation, now, busy_timeout, CTX_VERSION)
 }
 
@@ -167,18 +138,8 @@ fn record_at_with_ctx_version(
     now: SystemTime,
     busy_timeout: Duration,
     ctx_version: &str,
-) -> Result<StoreGeneration, UsageStoreError> {
-    record_correlated_at_with_hook(
-        data_root,
-        None,
-        operation,
-        operation,
-        now,
-        busy_timeout,
-        ctx_version,
-        || {},
-    )
-    .map(|commit| commit.generation)
+) -> Result<(), UsageStoreError> {
+    write_record_at(data_root, operation, now, busy_timeout, ctx_version)
 }
 
 #[cfg(test)]
@@ -187,7 +148,7 @@ pub(super) fn record_at_for_test(
     operation: CompletedOperation,
     now: SystemTime,
     busy_timeout: Duration,
-) -> Result<StoreGeneration, UsageStoreError> {
+) -> Result<(), UsageStoreError> {
     record_at(data_root, operation, now, busy_timeout)
 }
 
@@ -217,16 +178,13 @@ pub(super) fn fill_to_capacity_for_test(data_root: &Path) -> Result<String, Usag
         INSERT INTO daily_usage (
             day_utc, definition_version, ctx_version, surface, operation,
             outcome, value_class, duration_bucket, target_type, pro_outcome,
-            result_action, calls, result_count, citation_count, latency_ms,
-            latency_samples, response_bytes, response_byte_samples, output_bytes,
-            output_byte_samples, context_bytes, context_byte_samples,
-            search_result_bytes, search_result_byte_samples, context_searches,
-            context_found, context_opened, context_cited, validated_discoveries
+            context_coverage, calls, result_count, citation_count,
+            delivered_output_bytes, delivered_context_bytes,
+            matched_normalized_session_bytes
         ) VALUES (
             ?1, 2, ?2, 'cli', 'doctor', 'success',
             'not_applicable', 'under_10_ms', 'not_applicable',
-            'not_applicable', 'not_applicable', 1, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+            'not_applicable', 'not_applicable', 1, 0, 0, 0, 0, 0
         )
     "#;
     let mut next = 0_u64;
@@ -271,7 +229,7 @@ pub(super) fn record_with_ctx_version_for_test(
     data_root: &Path,
     operation: CompletedOperation,
     ctx_version: &str,
-) -> Result<StoreGeneration, UsageStoreError> {
+) -> Result<(), UsageStoreError> {
     record_at_with_ctx_version(
         data_root,
         operation,
@@ -463,43 +421,6 @@ fn create_v1_fixture_for_test(
 }
 
 #[cfg(test)]
-pub(super) fn create_legacy_v2_fixture_for_test(data_root: &Path) -> Result<(), UsageStoreError> {
-    record(
-        data_root,
-        CompletedOperation::cli("doctor", true, Duration::ZERO),
-    )?;
-    let path = usage_path(data_root);
-    let mut conn = Connection::open_with_flags(
-        &path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )?;
-    conn.pragma_update(None, "journal_mode", "DELETE")?;
-    let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    transaction.execute_batch("ALTER TABLE maintenance RENAME TO maintenance_with_generation;")?;
-    transaction.execute_batch(LEGACY_MAINTENANCE_SCHEMA)?;
-    transaction.execute_batch(
-        r#"
-        INSERT INTO maintenance (singleton, last_retention_day)
-        SELECT singleton, last_retention_day
-        FROM maintenance_with_generation;
-        DROP TABLE maintenance_with_generation;
-        "#,
-    )?;
-    transaction.commit()?;
-    conn.pragma_update(None, "journal_mode", "WAL")?;
-    let _ = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, i64>(2)?,
-        ))
-    });
-    drop(conn);
-    protect_sqlite_files(&path)?;
-    Ok(())
-}
-
-#[cfg(test)]
 pub(super) fn fail_v1_migration_before_commit_for_test(
     data_root: &Path,
 ) -> Result<(), UsageStoreError> {
@@ -566,11 +487,10 @@ fn reset_with_post_commit<T>(
     let day = utc_day(SystemTime::now());
     transaction.execute(
         r#"
-        INSERT INTO maintenance (singleton, last_retention_day, store_generation)
-        VALUES (1, ?1, 1)
+        INSERT INTO maintenance (singleton, last_retention_day)
+        VALUES (1, ?1)
         ON CONFLICT (singleton) DO UPDATE SET
-            last_retention_day = excluded.last_retention_day,
-            store_generation = store_generation + 1
+            last_retention_day = excluded.last_retention_day
         "#,
         [day],
     )?;
