@@ -1,11 +1,5 @@
-use std::path::Path;
-
-use ctx_history_store::Store;
-
 use crate::native_source::{NativeLocator, NativeSqliteValue};
-use crate::{
-    CaptureError, ProviderAdapterContext, ProviderImportOptions, ProviderImportSummary, Result,
-};
+use crate::{CaptureError, Result};
 
 mod complete_content;
 mod content_locator;
@@ -126,16 +120,4 @@ pub(crate) fn decode_opencode_message_locator(
     locator: &NativeLocator,
 ) -> Result<(OpenCodeCapturedShape, i64)> {
     content_locator::decode_opencode_message_locator(locator)
-}
-
-pub(crate) fn import_opencode_nativepath(
-    _path: &Path,
-    _store: &mut Store,
-    _context: ProviderAdapterContext,
-    _import_options: ProviderImportOptions,
-    _dialect: &OpenCodeSqliteDialect,
-) -> Result<ProviderImportSummary> {
-    Err(CaptureError::UnsupportedSchema(
-        "OpenCode-family Store ingestion was removed; use source-backed ingestion".to_owned(),
-    ))
 }

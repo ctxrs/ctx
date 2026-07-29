@@ -32,7 +32,7 @@ pub(super) fn build_page(
         });
     };
     let retained_bytes = candidate.retained_bytes()?;
-    if retained_bytes > NATIVE_PATH_MAX_RETAINED_PAGE_BYTES {
+    if retained_bytes > FIREBENDER_SOURCE_BACKED_PAGE_MAX_BYTES {
         let oversize_authority = format!(
             "oversize:{}:{}:{}:{}",
             candidate.id_bytes,
@@ -53,7 +53,7 @@ pub(super) fn build_page(
             message_start: 0,
             message_end: 0,
             rejection: Some(format!(
-                "Firebender session rowid {} exceeds the {NATIVE_PATH_MAX_RETAINED_PAGE_BYTES} byte NativePath page bound",
+                "Firebender session rowid {} exceeds the {FIREBENDER_SOURCE_BACKED_PAGE_MAX_BYTES} byte source-backed page bound",
                 candidate.rowid
             )),
             retained_bytes: FIREBENDER_PAGE_OVERHEAD_BYTES,

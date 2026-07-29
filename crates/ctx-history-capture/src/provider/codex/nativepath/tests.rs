@@ -8,7 +8,7 @@ use std::{
 };
 
 use ctx_history_core::{AgentType, CaptureProvider, EventType};
-use ctx_history_store::CatalogSession;
+use crate::provider::codex::catalog::CatalogSession;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;

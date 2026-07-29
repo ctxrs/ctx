@@ -40,36 +40,10 @@ pub(crate) use source_backed::{
 
 use std::{
     io,
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
-use ctx_history_store::Store;
 use thiserror::Error;
-
-use crate::{
-    CaptureError, ClineTaskJsonImportOptions, ProviderImportSummary, Result,
-    RooTaskJsonImportOptions,
-};
-
-pub(crate) fn import_cline_nativepath_history(
-    _path: &Path,
-    _store: &mut Store,
-    _options: ClineTaskJsonImportOptions,
-) -> Result<ProviderImportSummary> {
-    Err(CaptureError::UnsupportedSchema(
-        "Cline Store ingestion was removed; use source-backed ingestion".to_owned(),
-    ))
-}
-
-pub(crate) fn import_roo_nativepath_history(
-    _path: &Path,
-    _store: &mut Store,
-    _options: RooTaskJsonImportOptions,
-) -> Result<ProviderImportSummary> {
-    Err(CaptureError::UnsupportedSchema(
-        "Roo Code Store ingestion was removed; use source-backed ingestion".to_owned(),
-    ))
-}
 
 #[derive(Debug, Error)]
 pub(crate) enum ClineNativePathError {

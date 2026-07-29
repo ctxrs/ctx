@@ -9,7 +9,6 @@ use ctx_history_core::{
     StableEntityId, TypedKey,
 };
 use ctx_history_index::LexicalDocument;
-use ctx_history_store::NATIVE_PATH_MAX_RETAINED_PAGE_BYTES;
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -21,7 +20,7 @@ use super::super::{
 use super::{
     firebender_path_identity, firebender_raw_row_digest, firebender_source_revision,
     scan::build_page, validate_schema, FirebenderFrontier, FirebenderPage, FirebenderRow,
-    FirebenderSqliteDatabase, SqliteSourceEvidence,
+    FirebenderSqliteDatabase, SqliteSourceEvidence, FIREBENDER_SOURCE_BACKED_PAGE_MAX_BYTES,
 };
 use crate::{
     native_source::NativeSqliteValue,
@@ -597,7 +596,7 @@ fn load_exact_row(conn: &Connection, rowid: i64) -> CaptureResult<Option<Fireben
     };
     if retained_bytes < 0
         || usize::try_from(retained_bytes)
-            .map_or(true, |bytes| bytes > NATIVE_PATH_MAX_RETAINED_PAGE_BYTES)
+            .map_or(true, |bytes| bytes > FIREBENDER_SOURCE_BACKED_PAGE_MAX_BYTES)
     {
         return Err(CaptureError::InvalidPayload(
             FirebenderSourceBackedError::HydrationTooLarge.to_string(),

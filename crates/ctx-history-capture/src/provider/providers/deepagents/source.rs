@@ -73,7 +73,8 @@ impl DeepAgentsWriteCandidate {
 }
 
 pub(super) fn deepagents_oversize_limit() -> Result<u64> {
-    let bounded = ctx_history_store::NATIVE_PATH_MAX_RETAINED_PAGE_BYTES.saturating_sub(256 * 1024);
+    let bounded =
+        crate::provider::native_ingestion::NATIVE_INGESTION_PAGE_MAX_BYTES.saturating_sub(256 * 1024);
     u64::try_from(bounded)
         .map_err(|_| CaptureError::SystemInvariant("Deep Agents byte limit exceeds u64"))
 }

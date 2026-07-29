@@ -6,13 +6,13 @@ use std::{
 };
 
 use ctx_history_core::CaptureProvider;
-use ctx_history_store::CatalogSession;
 use serde::{Deserialize, Serialize};
 
 use super::{checkpoint::CodexNativeCheckpoint, reader::CodexSourceScan};
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
     common::time::system_time_ms,
+    provider::codex::catalog::CatalogSession,
     CaptureError, Result as CaptureResult, CODEX_SESSION_SOURCE_FORMAT,
 };
 
