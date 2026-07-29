@@ -694,6 +694,55 @@ fn ordinary_record_failure_is_silent_and_does_not_change_command_success() {
 }
 
 #[test]
+fn parsed_pro_semantic_failure_records_once_through_cli_completion() {
+    let temp = tempdir();
+    enabled(ctx(&temp).args(["pro", "--referral", "agent-smith", "setup", "--format=json"]))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--referral is accepted only by bare `ctx pro`",
+        ));
+
+    let report = json_output(enabled(ctx(&temp).args([
+        "stats",
+        "--detail",
+        "--format=json",
+    ])));
+    let usage = &report["local_usage"];
+    assert_eq!(usage["summary"]["calls"], 1);
+    assert_eq!(usage["summary"]["successful_calls"], 0);
+    assert_eq!(usage["summary"]["failed_calls"], 1);
+    assert_eq!(
+        usage["details"]["by_operation"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(
+        usage["details"]["by_operation"][0]["operation"],
+        "pro_setup"
+    );
+    assert_eq!(usage["details"]["by_operation"][0]["calls"], 1);
+    assert_eq!(usage["details"]["by_operation"][0]["failed_calls"], 1);
+}
+
+#[test]
+fn clap_help_version_and_parse_errors_never_enter_cli_completion() {
+    let temp = tempdir();
+    enabled(ctx(&temp).arg("--help")).assert().success();
+    enabled(ctx(&temp).arg("--version")).assert().success();
+    enabled(ctx(&temp).args(["pro", "--help"]))
+        .assert()
+        .success();
+    enabled(ctx(&temp).args(["pro", "setup", "--unknown-option"]))
+        .assert()
+        .failure();
+
+    assert!(
+        !temp.path().join("usage.sqlite").exists(),
+        "Clap exits must happen before local-usage completion"
+    );
+}
+
+#[test]
 fn mcp_counts_only_recognized_flushed_tool_responses() {
     let temp = tempdir();
     let responses = mcp_roundtrip_with_env(

@@ -1845,6 +1845,76 @@ fn mcp_correlation_uses_one_scope_key_and_never_validates_more_than_found() {
 }
 
 #[test]
+fn mcp_correlation_commits_with_the_store_and_rearms_after_reset() {
+    let root = private_tempdir();
+    let mut recorder = McpUsageRecorder::start(root.path().to_path_buf());
+    let search_response = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+            "structuredContent": {
+                "results": [{
+                    "result_scope": "event",
+                    "result_type": "event",
+                    "ctx_event_id": "event-1"
+                }]
+            }
+        }
+    });
+    let show_response = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": {"structuredContent": {"events": [{}]}}
+    });
+    let status_response = json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "result": {"structuredContent": {}}
+    });
+    let search = McpInvocation::recognized("search").unwrap();
+    let mut show = McpInvocation::recognized("show_event").unwrap();
+    show.bind_context_target("event-1".to_owned());
+
+    fs::create_dir(usage_path(root.path())).unwrap();
+    recorder.record_delivered(search.clone(), &search_response, Duration::ZERO, 200);
+    fs::remove_dir(usage_path(root.path())).unwrap();
+    recorder.record_delivered(show.clone(), &show_response, Duration::ZERO, 100);
+    let summary = read_report(root.path(), true, false).summary.unwrap();
+    assert_eq!(summary.calls, 1);
+    assert_eq!(summary.context.context_searches, 0);
+    assert_eq!(summary.context.context_found, 0);
+    assert_eq!(summary.context.context_opened, 0);
+    assert_eq!(summary.context.validated_discoveries, 0);
+
+    recorder.record_delivered(search.clone(), &search_response, Duration::ZERO, 200);
+    let summary = read_report(root.path(), true, false).summary.unwrap();
+    assert_eq!(summary.context.context_searches, 1);
+    assert_eq!(summary.context.context_found, 1);
+
+    assert!(reset(root.path()).unwrap());
+    recorder.record_delivered(
+        McpInvocation::recognized("status").unwrap(),
+        &status_response,
+        Duration::ZERO,
+        50,
+    );
+    recorder.record_delivered(show.clone(), &show_response, Duration::ZERO, 100);
+    let summary = read_report(root.path(), true, false).summary.unwrap();
+    assert_eq!(summary.calls, 2);
+    assert_eq!(summary.context.context_opened, 0);
+    assert_eq!(summary.context.validated_discoveries, 0);
+
+    recorder.record_delivered(search, &search_response, Duration::ZERO, 200);
+    recorder.record_delivered(show, &show_response, Duration::ZERO, 100);
+    let summary = read_report(root.path(), true, false).summary.unwrap();
+    assert_eq!(summary.calls, 4);
+    assert_eq!(summary.context.context_searches, 1);
+    assert_eq!(summary.context.context_found, 1);
+    assert_eq!(summary.context.context_opened, 1);
+    assert_eq!(summary.context.validated_discoveries, 1);
+}
+
+#[test]
 fn mcp_blame_classification_reads_only_typed_match_fields() {
     let response = json!({
         "jsonrpc": "2.0",

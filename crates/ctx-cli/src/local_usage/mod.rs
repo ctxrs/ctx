@@ -1,9 +1,14 @@
 use std::{
     collections::{hash_map::Entry, HashMap},
+    ffi::OsString,
+    fs,
     hash::Hash,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
+
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt as _;
 
 use ctx_pro_host_protocol::{
     BlameMatch, BlameResult, BlameTarget, CommitPredicate, FactState, ProductionRelationship,
@@ -141,7 +146,7 @@ struct ContextRecordState {
 ///
 /// Keys are never exposed to the persisted DTO. Consuming `finish` drops every
 /// key and returns only aggregate counters.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct EphemeralContextCorrelation<K> {
     records: HashMap<K, ContextRecordState>,
     usage: ContextUsage,
@@ -159,6 +164,10 @@ impl<K> Default for EphemeralContextCorrelation<K> {
 }
 
 impl<K: Eq + Hash> EphemeralContextCorrelation<K> {
+    fn has_activity(&self) -> bool {
+        !self.records.is_empty() || self.usage != ContextUsage::default()
+    }
+
     pub(crate) fn record_search(&mut self) {
         self.usage.context_searches = self.usage.context_searches.saturating_add(1);
     }
@@ -592,6 +601,7 @@ pub(crate) struct McpUsageRecorder {
     enabled: bool,
     control_resolver: crate::config::LocalUsageConfigResolver,
     context: EphemeralContextCorrelation<McpContextTarget>,
+    context_store_revision: Option<UsageStoreRevision>,
     #[cfg(test)]
     trace: Option<std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>>,
 }
@@ -605,6 +615,7 @@ impl McpUsageRecorder {
             enabled,
             control_resolver,
             context: EphemeralContextCorrelation::default(),
+            context_store_revision: None,
             #[cfg(test)]
             trace: None,
         }
@@ -619,12 +630,28 @@ impl McpUsageRecorder {
     ) {
         self.refresh_control();
         if self.enabled {
+            self.discard_context_after_store_change();
             let mut operation = invocation.completed(response, duration, serialized_response_bytes);
-            self.correlate_delivered(invocation, response, &mut operation);
-            record_best_effort(&self.data_root, true, operation);
-            #[cfg(test)]
-            if let Some(trace) = &self.trace {
-                trace.lock().unwrap().push("local_usage");
+            let mut pending_context = None;
+            if operation.outcome == Outcome::Success && invocation.participates_in_correlation() {
+                let mut context = self.context.clone();
+                Self::apply_delivered_correlation(
+                    &mut context,
+                    invocation,
+                    response,
+                    &mut operation,
+                );
+                pending_context = Some(context);
+            }
+            if store::record(&self.data_root, operation).is_ok() {
+                if let Some(context) = pending_context {
+                    self.context = context;
+                }
+                self.refresh_context_store_revision();
+                #[cfg(test)]
+                if let Some(trace) = &self.trace {
+                    trace.lock().unwrap().push("local_usage");
+                }
             }
         }
     }
@@ -644,8 +671,49 @@ impl McpUsageRecorder {
             .effective_after(Some(self.enabled));
     }
 
+    /// A reset has no persisted generation marker. Compare only cheap file
+    /// metadata for the SQLite family before carrying transient identities
+    /// into another write. Any external change or uncertain observation is
+    /// treated conservatively as a new generation.
+    fn discard_context_after_store_change(&mut self) {
+        if !self.context.has_activity() {
+            return;
+        }
+        let revision = UsageStoreRevision::capture(&self.data_root);
+        if revision != self.context_store_revision {
+            self.context = EphemeralContextCorrelation::default();
+            self.context_store_revision = None;
+        }
+    }
+
+    /// Advance the transient revision only after the aggregate write commits.
+    /// If the post-write family cannot be observed safely, discard correlation
+    /// rather than risk validating against an uncertain persisted generation.
+    fn refresh_context_store_revision(&mut self) {
+        if !self.context.has_activity() {
+            self.context_store_revision = None;
+            return;
+        }
+        if let Some(revision) = UsageStoreRevision::capture(&self.data_root) {
+            self.context_store_revision = Some(revision);
+        } else {
+            self.context = EphemeralContextCorrelation::default();
+            self.context_store_revision = None;
+        }
+    }
+
+    #[cfg(test)]
     fn correlate_delivered(
         &mut self,
+        invocation: McpInvocation,
+        response: &Value,
+        operation: &mut CompletedOperation,
+    ) {
+        Self::apply_delivered_correlation(&mut self.context, invocation, response, operation);
+    }
+
+    fn apply_delivered_correlation(
+        context: &mut EphemeralContextCorrelation<McpContextTarget>,
         invocation: McpInvocation,
         response: &Value,
         operation: &mut CompletedOperation,
@@ -654,10 +722,10 @@ impl McpUsageRecorder {
             return;
         }
         if invocation.operation == "search" {
-            self.context.record_search();
+            context.record_search();
             operation.context.context_searches = 1;
             for target in mcp_search_context_targets(response) {
-                if self.context.record_found(target) {
+                if context.record_found(target) {
                     operation.context.context_found =
                         operation.context.context_found.saturating_add(1);
                 }
@@ -667,9 +735,85 @@ impl McpUsageRecorder {
         if let Some(target) = invocation.context_target {
             operation
                 .context
-                .saturating_add(self.context.record_opened(&target));
+                .saturating_add(context.record_opened(&target));
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UsageStoreRevision {
+    main: UsageStoreFileRevision,
+    wal: Option<UsageStoreFileRevision>,
+    shm: Option<UsageStoreFileRevision>,
+}
+
+impl UsageStoreRevision {
+    fn capture(data_root: &Path) -> Option<Self> {
+        let main_path = store::usage_path(data_root);
+        Some(Self {
+            main: UsageStoreFileRevision::capture_required(&main_path)?,
+            wal: UsageStoreFileRevision::capture_optional(&sqlite_auxiliary_path(
+                &main_path, "-wal",
+            ))?,
+            shm: UsageStoreFileRevision::capture_optional(&sqlite_auxiliary_path(
+                &main_path, "-shm",
+            ))?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UsageStoreFileRevision {
+    len: u64,
+    modified: SystemTime,
+    created: Option<SystemTime>,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(unix)]
+    changed_seconds: i64,
+    #[cfg(unix)]
+    changed_nanoseconds: i64,
+}
+
+impl UsageStoreFileRevision {
+    fn capture_required(path: &Path) -> Option<Self> {
+        Self::from_metadata(path.symlink_metadata().ok()?)
+    }
+
+    fn capture_optional(path: &Path) -> Option<Option<Self>> {
+        match path.symlink_metadata() {
+            Ok(metadata) => Self::from_metadata(metadata).map(Some),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(None),
+            Err(_) => None,
+        }
+    }
+
+    fn from_metadata(metadata: fs::Metadata) -> Option<Self> {
+        if !metadata.file_type().is_file() {
+            return None;
+        }
+        Some(Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok()?,
+            created: metadata.created().ok(),
+            #[cfg(unix)]
+            device: metadata.dev(),
+            #[cfg(unix)]
+            inode: metadata.ino(),
+            #[cfg(unix)]
+            changed_seconds: metadata.ctime(),
+            #[cfg(unix)]
+            changed_nanoseconds: metadata.ctime_nsec(),
+        })
+    }
+}
+
+fn sqlite_auxiliary_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = OsString::from(path.as_os_str());
+    value.push(suffix);
+    PathBuf::from(value)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -711,6 +855,10 @@ impl McpInvocation {
             "show_event" => Some(McpContextTarget::Event(stable_result_id)),
             _ => None,
         };
+    }
+
+    fn participates_in_correlation(&self) -> bool {
+        self.operation == "search" || self.context_target.is_some()
     }
 
     pub(crate) fn bind_blame_target(&mut self, target: &BlameTarget) {
