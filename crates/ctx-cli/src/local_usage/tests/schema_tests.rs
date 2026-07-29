@@ -110,6 +110,23 @@ fn value_classes_reconcile_successes_and_failures() {
 }
 
 #[test]
+fn v1_schema_rejects_impossible_blame_value_classifications() {
+    let root = private_tempdir();
+    store::create_mixed_v1_fixture_for_test(root.path()).unwrap();
+    let conn = Connection::open(usage_path(root.path())).unwrap();
+    assert_constraint_rejected(
+        &conn,
+        "UPDATE daily_usage SET pro_outcome = 'possible' \
+         WHERE operation = 'blame' AND value_class = 'empty'",
+    );
+    assert_constraint_rejected(
+        &conn,
+        "UPDATE daily_usage SET value_class = 'empty', result_count = 0, citation_count = 0 \
+         WHERE operation = 'blame' AND pro_outcome = 'produced'",
+    );
+}
+
+#[test]
 fn sqlite_rejects_unknown_and_cross_surface_operations() {
     let root = private_tempdir();
     store::record(root.path(), operation("doctor")).unwrap();
@@ -153,6 +170,14 @@ fn sqlite_enforces_counter_and_dimension_applicability_invariants() {
     open.context.context_opened = 1;
     open.context.validated_discoveries = 1;
     store::record(root.path(), open).unwrap();
+    let mut produced_blame = mcp_operation("blame", true, ValueClass::ResultBearing, 1);
+    produced_blame.target_type = TargetType::Commit;
+    produced_blame.pro_outcome = ProOutcome::Produced;
+    store::record(root.path(), produced_blame).unwrap();
+    let mut empty_blame = mcp_operation("blame", true, ValueClass::Empty, 0);
+    empty_blame.target_type = TargetType::File;
+    empty_blame.pro_outcome = ProOutcome::None;
+    store::record(root.path(), empty_blame).unwrap();
     let conn = Connection::open(usage_path(root.path())).unwrap();
     let invalid_updates = [
         // Failures are N/A and cannot retain result or citation counts.
@@ -179,6 +204,12 @@ fn sqlite_enforces_counter_and_dimension_applicability_invariants() {
         "UPDATE daily_usage SET operation = 'blame', value_class = 'empty', \
          result_action = 'blame', pro_outcome = 'none' \
          WHERE surface = 'mcp' AND operation = 'status'",
+        // Produced/possible outcomes require results, while an empty blame
+        // response can only classify as no attribution.
+        "UPDATE daily_usage SET value_class = 'empty', result_count = 0 \
+         WHERE surface = 'mcp' AND operation = 'blame' AND pro_outcome = 'produced'",
+        "UPDATE daily_usage SET pro_outcome = 'possible' \
+         WHERE surface = 'mcp' AND operation = 'blame' AND value_class = 'empty'",
         // Transport bytes apply only to delivered MCP responses.
         "UPDATE daily_usage SET response_bytes = 1, response_byte_samples = 1 \
          WHERE surface = 'cli' AND operation = 'doctor'",
@@ -405,6 +436,8 @@ fn record_and_reset_reject_constraint_bypassed_rows_without_mutation() {
     for tamper in [
         "UPDATE daily_usage SET calls = -1",
         "UPDATE maintenance SET singleton = 2",
+        "UPDATE daily_usage SET operation = 'blame', value_class = 'empty', \
+         target_type = 'file', pro_outcome = 'possible', result_action = 'blame'",
     ] {
         let root = private_tempdir();
         store::record(root.path(), operation("doctor")).unwrap();
@@ -416,6 +449,7 @@ fn record_and_reset_reject_constraint_bypassed_rows_without_mutation() {
         drop(conn);
 
         let before = sqlite_family_snapshot(&path);
+        assert_eq!(read_report(root.path(), true, false).state, "error");
         assert!(matches!(
             store::record(root.path(), operation("docs")),
             Err(store::UsageStoreError::Integrity)

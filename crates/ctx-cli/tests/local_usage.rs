@@ -37,6 +37,11 @@ fn default_on_usage_is_independent_of_analytics_and_reports_stable_json() {
     assert_eq!(usage["summary"]["result_bearing_calls"], 0);
     assert_eq!(usage["summary"]["empty_calls"], 0);
     assert_eq!(usage["summary"]["not_applicable_calls"], 1);
+    assert!(usage["summary"]["context"].get("context_cited").is_none());
+    assert_eq!(
+        usage["summary"]["context"]["context_cited_coverage"],
+        "unsupported"
+    );
     assert_eq!(
         usage["summary"]["pro_blame"]["produced_attribution_requests"],
         0
