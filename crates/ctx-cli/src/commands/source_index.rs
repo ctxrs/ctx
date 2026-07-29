@@ -739,7 +739,31 @@ fn resolve_source_search_backend(
     {
         return Ok(SearchBackendArg::Lexical);
     }
-    crate::commands::search::resolve_search_backend(request.backend, config)
+    let semantic_enabled = config.semantic_search_enabled();
+    match request.backend {
+        Some(SearchBackendArg::Semantic) if !semantic_enabled => Err(anyhow!(
+            "semantic search is disabled. Set [search] semantic = true in ctx config to enable local semantic search"
+        )),
+        Some(SearchBackendArg::Semantic) if !semantic_query_service_supported() => Err(anyhow!(
+            "local semantic search is not supported on this platform yet. Set [search] semantic = false or use --backend lexical"
+        )),
+        Some(SearchBackendArg::Semantic) if !config.daemon.enabled => Err(anyhow!(
+            "local semantic search requires the ctx daemon. Set [daemon] enabled = true, set [search] semantic = false, or use --backend lexical"
+        )),
+        value
+            if semantic_enabled
+                && semantic_query_service_supported()
+                && !config.daemon.enabled
+                && !matches!(value, Some(SearchBackendArg::Lexical)) =>
+        {
+            Err(anyhow!(
+                "local semantic search requires the ctx daemon. Set [daemon] enabled = true, set [search] semantic = false, or use --backend lexical"
+            ))
+        }
+        Some(value) => Ok(value),
+        None if semantic_enabled => Ok(SearchBackendArg::Hybrid),
+        None => Ok(SearchBackendArg::Lexical),
+    }
 }
 
 fn index_search_filters(
