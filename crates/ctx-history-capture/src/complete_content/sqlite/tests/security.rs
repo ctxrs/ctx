@@ -1,425 +1,171 @@
 use super::*;
 
 #[test]
-fn source_move_under_current_root_and_append_only_growth_preserve_exact_row() {
+fn active_wal_scan_and_hydration_are_read_only_and_recover_committed_content() {
     let temp = crate::test_support_paths::tempdir().unwrap();
-    let original_root = temp.path().join("original");
-    let moved_root = temp.path().join("moved");
-    fs::create_dir(&original_root).unwrap();
-    fs::create_dir(&moved_root).unwrap();
-    let original = original_root.join("chat_history.db");
-    let moved = moved_root.join("chat_history.db");
-    let body = long_body("moved body");
-    let (values, event) = create_firebender_database(&original, &body);
-    let mut request = firebender_request(&original, &body, &values, &event);
-    let original_snapshot = source_snapshot(&original);
+    let path = temp.path().join("active-wal.sqlite");
+    create_opencode_session_message_database(&path, &["before WAL"]);
 
-    fs::rename(&original, &moved).unwrap();
-    readmit_sqlite(&mut request, &moved, original_snapshot.clone()).unwrap();
-    let messages = SqliteCompleteContentResolver::new()
-        .resolve(&[request.clone()])
+    let writer = Connection::open(&path).unwrap();
+    writer.pragma_update(None, "journal_mode", "wal").unwrap();
+    writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+    writer
+        .execute_batch("pragma wal_checkpoint(truncate)")
         .unwrap();
-    assert_eq!(messages[0].text, body);
-
-    let conn = Connection::open(&moved).unwrap();
-    let other_messages = serde_json::to_string(&json!([{
-        "id": "unrelated",
-        "role": "user",
-        "content": "append"
-    }]))
-    .unwrap();
-    conn.execute(
-        "insert into chat_sessions values (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            "other",
-            "Other",
-            CREATED_AT,
-            CREATED_AT,
-            other_messages,
-            "{}"
-        ],
-    )
-    .unwrap();
-    drop(conn);
-    assert!(fs::metadata(&moved).unwrap().len() >= original_snapshot.size_bytes.unwrap());
-    readmit_sqlite(&mut request, &moved, original_snapshot).unwrap();
-    let messages = SqliteCompleteContentResolver::new()
-        .resolve(&[request])
+    let body = long_body("committed active WAL body");
+    writer
+        .execute(
+            "update session_message
+             set data = ?1, time_updated = time_updated + 1
+             where id = 'message-0'",
+            [json!({"role": "user", "text": body}).to_string()],
+        )
         .unwrap();
-    assert_eq!(messages[0].text, body);
-}
-#[test]
-fn wal_snapshot_reads_committed_append_without_mutating_provider_components() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let path = temp.path().join("wal.db");
-    let conn = Connection::open(&path).unwrap();
-    conn.pragma_update(None, "journal_mode", "wal").unwrap();
-    conn.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
-    conn.execute_batch(
-        "create table chat_sessions (
-            id text not null, name text not null, created_at integer not null,
-            updated_at integer not null, messages_json text not null,
-            metadata_json text not null
-        );",
-    )
-    .unwrap();
-    let body = long_body("WAL body");
-    let message = json!({
-        "id": "native-message-1", "role": "user", "timestamp": CREATED_AT,
-        "content": { "type": "text", "text": body }
-    });
-    let messages_json = serde_json::to_string(&json!([message.clone()])).unwrap();
-    conn.execute(
-        "insert into chat_sessions values (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            SESSION_ID,
-            "Complete content fixture",
-            CREATED_AT,
-            CREATED_AT + 1,
-            messages_json,
-            "{}"
-        ],
-    )
-    .unwrap();
-    conn.execute(
-        "insert into chat_sessions values ('append', 'Append', 1, 1, '[]', '{}')",
-        [],
-    )
-    .unwrap();
-    let values = firebender_values(&messages_json);
-    let event = firebender_event(
-        SESSION_ID,
-        0,
-        &message,
-        DateTime::<Utc>::from_timestamp_millis(CREATED_AT).unwrap(),
-    );
-    let request = firebender_request(&path, &body, &values, &event);
-    let before = sqlite_components(&path);
+    let before = sqlite_persistent_bytes(&path);
     assert!(before
         .iter()
         .any(|(path, _)| path.to_string_lossy().ends_with("-wal")));
 
-    let messages = SqliteCompleteContentResolver::new()
-        .resolve(&[request])
+    let registration = opencode::opencode_source_backed_registration();
+    let documents = collect_opencode_documents(registration, &path);
+    assert_eq!(documents[0].body, body);
+    let hydrated = registration
+        .exact_resolver(&path)
+        .hydrate_event(&event_request(&documents[0]))
         .unwrap();
-    assert_eq!(messages[0].text, body);
-    assert_eq!(sqlite_components(&path), before);
-    drop(conn);
+    assert_eq!(hydrated.provider_bytes, body.as_bytes());
+    assert_eq!(sqlite_persistent_bytes(&path), before);
+    drop(writer);
 }
 
 #[test]
-fn rollback_journal_snapshot_never_recovers_into_provider_database() {
+fn typed_native_key_row_version_and_digest_are_all_verified() {
     let temp = crate::test_support_paths::tempdir().unwrap();
-    let path = temp.path().join("rollback.db");
-    let body = long_body("rollback body");
-    let (values, event) = create_firebender_database(&path, &body);
-    let request = firebender_request(&path, &body, &values, &event);
-    let writer = Connection::open(&path).unwrap();
-    writer
-        .pragma_update(None, "journal_mode", "delete")
-        .unwrap();
-    writer.execute_batch("begin immediate").unwrap();
-    writer
-        .execute(
-            "update chat_sessions set name = 'uncommitted' where rowid = 1",
-            [],
-        )
-        .unwrap();
-    let before = sqlite_components(&path);
-    assert!(before
-        .iter()
-        .any(|(path, _)| path.to_string_lossy().ends_with("-journal")));
+    let path = temp.path().join("typed-evidence.sqlite");
+    let body = long_body("typed evidence body");
+    create_opencode_session_message_database(&path, &[&body]);
+    let registration = opencode::opencode_source_backed_registration();
+    let documents = collect_opencode_documents(registration, &path);
+    let document = &documents[0];
+    let resolver = registration.exact_resolver(&path);
+    let NativeRecordCoordinate::ProviderSqlite {
+        logical_relation,
+        primary_key,
+        row_version,
+    } = document.locator.coordinate()
+    else {
+        panic!("expected provider SQLite locator")
+    };
 
-    let messages = SqliteCompleteContentResolver::new()
-        .resolve(&[request])
-        .unwrap();
-    assert_eq!(messages[0].text, body);
-    assert_eq!(sqlite_components(&path), before);
-    writer.execute_batch("rollback").unwrap();
-}
-
-#[test]
-fn wrong_coordinates_and_digests_fail_without_plausible_content() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let path = temp.path().join("wrong.db");
-    let body = long_body("wrong identity body");
-    let (values, event) = create_firebender_database(&path, &body);
-    let request = firebender_request(&path, &body, &values, &event);
-
-    let mut wrong_row = request.clone();
-    wrong_row.source_locator =
-        CompleteContentSourceLocator::new(FIREBENDER_LOCATOR_KIND, 99_i64.to_be_bytes().to_vec());
-    assert_error_kind(&wrong_row, CompleteContentErrorKind::SourceRecordMissing);
-
-    let mut wrong_kind = request.clone();
-    wrong_kind.source_locator =
-        CompleteContentSourceLocator::new("arbitrary-table-row-v1", 1_i64.to_be_bytes().to_vec());
-    assert_error_kind(
-        &wrong_kind,
-        CompleteContentErrorKind::ContentVerificationFailed,
+    let wrong_key = locator_with_evidence(
+        document,
+        NativeRecordCoordinate::ProviderSqlite {
+            logical_relation: logical_relation.clone(),
+            primary_key: TypedKey::utf8("missing-message").unwrap(),
+            row_version: row_version.clone(),
+        },
+        *document.locator.record_digest(),
     );
-
-    let mut wrong_native = request.clone();
-    wrong_native.expected_native_record_id = Some("other-native-id".to_owned());
-    assert_error_kind(
-        &wrong_native,
-        CompleteContentErrorKind::ContentVerificationFailed,
-    );
-
-    let mut wrong_record = request.clone();
-    wrong_record.expected_record_digest = Some(CompleteContentBodyDigest::from_text("other row"));
-    assert_error_kind(
-        &wrong_record,
-        CompleteContentErrorKind::ContentVerificationFailed,
-    );
-
-    let mut wrong_body = request.clone();
-    wrong_body.expected_content_ref = ContentRef::from_bytes(b"other body");
-    assert_error_kind(
-        &wrong_body,
-        CompleteContentErrorKind::ContentVerificationFailed,
-    );
-
-    let mut wrong_subrecord = request.clone();
-    wrong_subrecord.source_record_subrecord_index = 1;
-    assert_error_kind(
-        &wrong_subrecord,
-        CompleteContentErrorKind::SourceRecordMissing,
-    );
-
-    let mut wrong_family = request;
-    wrong_family.source_family = Some(CompleteContentSourceFamily::Jsonl);
-    assert_error_kind(
-        &wrong_family,
-        CompleteContentErrorKind::ContentVerificationFailed,
-    );
-}
-
-#[test]
-fn mutation_replacement_deletion_and_permission_loss_are_typed() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let path = temp.path().join("mutable.db");
-    let body = long_body("mutable body");
-    let (values, event) = create_firebender_database(&path, &body);
-    let request = firebender_request(&path, &body, &values, &event);
-
-    let changed_body = body.replacen("mutable", "mutated", 1);
-    let changed_message = json!({
-        "id": "native-message-1", "role": "user", "timestamp": CREATED_AT,
-        "content": { "type": "text", "text": changed_body }
-    });
-    let changed_json = serde_json::to_string(&json!([changed_message])).unwrap();
-    let conn = Connection::open(&path).unwrap();
-    conn.execute(
-        "update chat_sessions set messages_json = ?1 where rowid = 1",
-        [changed_json],
-    )
-    .unwrap();
-    drop(conn);
-    let mut request = request;
-    readmit_sqlite(&mut request, &path, SourceSnapshot::default()).unwrap();
-    assert_error_kind(
-        &request,
-        CompleteContentErrorKind::ContentVerificationFailed,
-    );
-
-    fs::remove_file(&path).unwrap();
-    let error = readmit_sqlite(&mut request, &path, SourceSnapshot::default()).unwrap_err();
-    assert_eq!(error.kind, CompleteContentErrorKind::SourceMissing);
-
-    let (values, event) = create_firebender_database(&path, &body);
-    let mut replacement_request = firebender_request(&path, &body, &values, &event);
-    let replacement_snapshot = source_snapshot(&path);
-    let replacement = temp.path().join("replacement.db");
-    create_firebender_database(&replacement, &body.replacen("mutable", "replaced", 1));
-    fs::rename(&replacement, &path).unwrap();
-    let error = readmit_sqlite(&mut replacement_request, &path, replacement_snapshot).unwrap_err();
-    assert_eq!(error.kind, CompleteContentErrorKind::SourceChanged);
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        let mut permissions = fs::metadata(&path).unwrap().permissions();
-        permissions.set_mode(0o000);
-        fs::set_permissions(&path, permissions).unwrap();
-        let mut permission_request = replacement_request;
-        let error =
-            readmit_sqlite(&mut permission_request, &path, SourceSnapshot::default()).unwrap_err();
-        assert_eq!(error.kind, CompleteContentErrorKind::SourceUnreadable);
-    }
-}
-
-#[test]
-fn symlink_schema_and_request_bounds_are_enforced_before_hydration() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let path = temp.path().join("real.db");
-    let body = long_body("bounded body");
-    let (values, event) = create_firebender_database(&path, &body);
-    let request = firebender_request(&path, &body, &values, &event);
-
-    let mut oversized_batch = Vec::new();
-    for index in 0..=MAX_SQLITE_COMPLETE_REQUESTS {
-        let mut item = request.clone();
-        item.event_id = Uuid::new_v4();
-        item.source_record_ordinal = index as u64;
-        oversized_batch.push(item);
-    }
-    let error = SqliteCompleteContentResolver::new()
-        .resolve(&oversized_batch)
+    let failure = resolver
+        .hydrate_event(&EventHydrationRequest::new(document.event_id, wrong_key).unwrap())
         .unwrap_err();
-    assert_eq!(error.kind, CompleteContentErrorKind::ContentTooLarge);
+    assert_eq!(failure.kind, HydrationFailureKind::MissingRecord);
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::symlink;
-
-        let link = temp.path().join("leaf-link.db");
-        symlink(&path, &link).unwrap();
-        let mut linked = request.clone();
-        let error = readmit_sqlite(&mut linked, &link, SourceSnapshot::default()).unwrap_err();
-        assert_eq!(error.kind, CompleteContentErrorKind::SourceUnreadable);
-
-        let real_parent = temp.path().join("real-parent");
-        fs::create_dir(&real_parent).unwrap();
-        let parent_db = real_parent.join("nested.db");
-        fs::copy(&path, &parent_db).unwrap();
-        let linked_parent = temp.path().join("linked-parent");
-        symlink(&real_parent, &linked_parent).unwrap();
-        let mut parent_linked = request.clone();
-        let error = readmit_sqlite(
-            &mut parent_linked,
-            &linked_parent.join("nested.db"),
-            SourceSnapshot::default(),
-        )
-        .unwrap_err();
-        assert_eq!(error.kind, CompleteContentErrorKind::SourceUnreadable);
-    }
-
-    let invalid_schema = temp.path().join("invalid-schema.db");
-    Connection::open(&invalid_schema)
-        .unwrap()
-        .execute("create table unrelated (value text)", [])
-        .unwrap();
-    let mut invalid = request;
-    readmit_sqlite(&mut invalid, &invalid_schema, SourceSnapshot::default()).unwrap();
-    assert_error_kind(
-        &invalid,
-        CompleteContentErrorKind::ContentVerificationFailed,
+    let wrong_version = locator_with_evidence(
+        document,
+        NativeRecordCoordinate::ProviderSqlite {
+            logical_relation: logical_relation.clone(),
+            primary_key: primary_key.clone(),
+            row_version: Some(
+                TypedKey::composite(vec![
+                    TypedKey::I64(99),
+                    TypedKey::utf8("wrong-semantic-digest").unwrap(),
+                ])
+                .unwrap(),
+            ),
+        },
+        *document.locator.record_digest(),
     );
-}
+    let failure = resolver
+        .hydrate_event(&EventHydrationRequest::new(document.event_id, wrong_version).unwrap())
+        .unwrap_err();
+    assert_eq!(failure.kind, HydrationFailureKind::StaleRecordEvidence);
 
-fn replace_sqlite_route_from_thread(named: PathBuf, moved: PathBuf, replacement: PathBuf) {
-    std::thread::spawn(move || {
-        fs::rename(&named, moved).unwrap();
-        fs::rename(replacement, named).unwrap();
-    })
-    .join()
-    .unwrap();
+    let wrong_digest =
+        locator_with_evidence(document, document.locator.coordinate().clone(), [0x5a; 32]);
+    let failure = resolver
+        .hydrate_event(&EventHydrationRequest::new(document.event_id, wrong_digest).unwrap())
+        .unwrap_err();
+    assert_eq!(failure.kind, HydrationFailureKind::StaleRecordEvidence);
 }
 
 #[test]
-fn source_root_safety_sqlite_snapshot_stays_exact_after_leaf_replacement() {
+fn mutation_and_concurrent_leaf_replacement_fail_closed() {
     let temp = crate::test_support_paths::tempdir().unwrap();
-    let path = temp.path().join("source.db");
-    let moved = temp.path().join("moved-source.db");
-    let replacement = temp.path().join("replacement.db");
-    let body = long_body("inside SQLite leaf");
-    let outside = long_body("OUTSIDE_SQLITE_LEAF_MUST_NOT_ESCAPE");
-    let (values, event) = create_firebender_database(&path, &body);
-    let request = firebender_request(&path, &body, &values, &event);
-    create_firebender_database(&replacement, &outside);
+    let path = temp.path().join("mutable.sqlite");
+    let moved = temp.path().join("moved.sqlite");
+    let replacement = temp.path().join("replacement.sqlite");
+    let body = long_body("source before replacement");
+    let attacker = long_body("attacker replacement must not hydrate");
+    create_opencode_session_message_database(&path, &[&body]);
+    create_opencode_session_message_database(&replacement, &[&attacker]);
 
-    std::thread::spawn({
+    let registration = opencode::opencode_source_backed_registration();
+    let documents = collect_opencode_documents(registration, &path);
+    let request = event_request(&documents[0]);
+    let resolver = registration.exact_resolver(&path);
+    let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let replacement_thread = std::thread::spawn({
         let path = path.clone();
+        let start = std::sync::Arc::clone(&start);
         move || {
+            start.wait();
             fs::rename(&path, moved).unwrap();
             fs::rename(replacement, path).unwrap();
         }
-    })
-    .join()
-    .unwrap();
+    });
 
-    let resolved = SqliteCompleteContentResolver::new()
-        .resolve(&[request])
-        .unwrap();
-    assert_eq!(resolved[0].text, body);
-    assert!(!resolved[0].text.contains("OUTSIDE_SQLITE_LEAF"));
+    start.wait();
+    match resolver.hydrate_event(&request) {
+        Ok(hydrated) => assert_eq!(hydrated.provider_bytes, body.as_bytes()),
+        Err(failure) => {
+            assert!(matches!(
+                failure.kind,
+                HydrationFailureKind::StaleSourceEvidence
+                    | HydrationFailureKind::TemporarilyUnavailable
+            ));
+            assert!(!failure.detail.contains(&attacker));
+        }
+    }
+    replacement_thread.join().unwrap();
+
+    let failure = resolver.hydrate_event(&request).unwrap_err();
+    assert!(matches!(
+        failure.kind,
+        HydrationFailureKind::StaleSourceEvidence | HydrationFailureKind::TemporarilyUnavailable
+    ));
+    assert!(!failure.detail.contains(&attacker));
 }
 
+#[cfg(unix)]
 #[test]
-fn source_root_safety_sqlite_snapshot_stays_exact_after_ancestor_replacement() {
+fn symlinked_leaf_and_ancestor_routes_are_rejected_before_projection() {
+    use std::os::unix::fs::symlink;
+
     let temp = crate::test_support_paths::tempdir().unwrap();
-    let parent = temp.path().join("parent");
-    let moved_parent = temp.path().join("moved-parent");
-    let root = parent.join("root");
-    let replacement_parent = temp.path().join("replacement-parent");
-    fs::create_dir_all(&root).unwrap();
-    fs::create_dir_all(replacement_parent.join("root")).unwrap();
-    let path = root.join("source.db");
-    let replacement_path = replacement_parent.join("root/source.db");
-    let body = long_body("inside SQLite ancestor");
-    let outside = long_body("OUTSIDE_SQLITE_ANCESTOR_MUST_NOT_ESCAPE");
-    let (values, event) = create_firebender_database(&path, &body);
-    let request = firebender_request(&path, &body, &values, &event);
-    create_firebender_database(&replacement_path, &outside);
+    let real_parent = temp.path().join("real-parent");
+    fs::create_dir(&real_parent).unwrap();
+    let path = real_parent.join("source.sqlite");
+    create_opencode_session_message_database(&path, &["inside source root"]);
+    let registration = opencode::opencode_source_backed_registration();
 
-    replace_sqlite_route_from_thread(parent, moved_parent, replacement_parent);
+    let leaf_link = temp.path().join("leaf-link.sqlite");
+    symlink(&path, &leaf_link).unwrap();
+    assert!(registration.scan(&leaf_link, &mut |_| Ok(())).is_err());
 
-    let resolved = SqliteCompleteContentResolver::new()
-        .resolve(&[request])
-        .unwrap();
-    assert_eq!(resolved[0].text, body);
-    assert!(!resolved[0].text.contains("OUTSIDE_SQLITE_ANCESTOR"));
-}
-
-#[test]
-fn source_root_safety_sqlite_prepared_admission_rejects_root_swap() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let root = temp.path().join("root");
-    let moved = temp.path().join("moved-root");
-    let replacement = temp.path().join("replacement-root");
-    fs::create_dir(&root).unwrap();
-    fs::create_dir(&replacement).unwrap();
-    let path = root.join("source.db");
-    let replacement_path = replacement.join("source.db");
-    let body = long_body("prepared inside");
-    create_firebender_database(&path, &body);
-    create_firebender_database(
-        &replacement_path,
-        &long_body("OUTSIDE_PREPARED_MUST_NOT_ESCAPE"),
-    );
-    let replacement_connection = Connection::open(&replacement_path).unwrap();
-    replacement_connection
-        .execute_batch(
-            "create table outside_padding (value blob);
-             insert into outside_padding values (zeroblob(65536));",
-        )
-        .unwrap();
-    drop(replacement_connection);
-    let event_id = Uuid::new_v4();
-    let broker = SourceAccessBroker::new();
-    let prepared = broker
-        .prepare(
-            AuthorizedSourceRoute {
-                source_id: Uuid::new_v4(),
-                provider: CaptureProvider::Firebender,
-                source_format: FIREBENDER_SQLITE_SOURCE_FORMAT.to_owned(),
-                family: CompleteContentSourceFamily::Sqlite,
-                raw_source_path: path,
-                source_root: Some(root.clone()),
-                source_identity: Some("prepared-root-swap".to_owned()),
-                source_snapshot: SourceSnapshot::default(),
-            },
-            event_id,
-        )
-        .unwrap();
-
-    replace_sqlite_route_from_thread(root, moved, replacement);
-
-    let error = broker
-        .admit_prepared_for_source_locators(prepared, &[])
-        .unwrap_err();
-    assert_eq!(error.kind, CompleteContentErrorKind::SourceChanged);
-    assert_eq!(error.event_id, event_id);
+    let parent_link = temp.path().join("parent-link");
+    symlink(&real_parent, &parent_link).unwrap();
+    assert!(registration
+        .scan(&parent_link.join("source.sqlite"), &mut |_| Ok(()))
+        .is_err());
 }

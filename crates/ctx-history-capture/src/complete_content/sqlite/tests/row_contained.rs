@@ -1,446 +1,94 @@
 use super::*;
 
 #[test]
-fn kiro_and_zed_row_contained_cohorts_recover_exact_message_text() {
+fn kiro_source_backed_row_hydrates_each_typed_event_and_rejects_rewrite() {
     let temp = crate::test_support_paths::tempdir().unwrap();
-    let kiro_path = temp.path().join("kiro.db");
-    let kiro_user_body = long_body("Kiro user body");
-    let kiro_assistant_body = long_body("Kiro assistant body");
-    let kiro_tool_fallback_body = long_body("Kiro tool fallback body");
-    let kiro_value = json!({
+    let path = temp.path().join("kiro.db");
+    let user_body = long_body("Kiro source-backed user");
+    let assistant_body = long_body("Kiro source-backed assistant");
+    let value = json!({
         "history": [
-            {"unrecognized": true},
-            {
-                "assistant": {
-                    "ToolUse": {"tool_uses": [{"name": "shell"}]},
-                    "timestamp": "2026-07-21T11:59:59Z"
-                }
-            },
             {
                 "user": {
                     "timestamp": "2026-07-21T12:00:00Z",
-                    "content": { "Prompt": { "prompt": kiro_user_body } }
-                },
-                "assistant": {
-                    "timestamp": "2026-07-21T12:00:01Z",
-                    "Response": {"content": kiro_assistant_body}
+                    "content": {"Prompt": {"prompt": user_body}},
                 }
             },
             {
-                "user": {"content": {"Prompt": {"prompt": "   "}}},
-                "assistant": {"ToolUse": {"content": kiro_tool_fallback_body}}
+                "assistant": {
+                    "timestamp": "2026-07-21T12:00:01Z",
+                    "Response": {"content": assistant_body},
+                }
             }
         ]
-    });
-    let kiro_json = serde_json::to_string(&kiro_value).unwrap();
-    let conn = Connection::open(&kiro_path).unwrap();
+    })
+    .to_string();
+    let conn = Connection::open(&path).unwrap();
     conn.execute_batch(
         "create table conversations_v2 (
-            key text not null, conversation_id text not null, value text not null,
-            created_at integer, updated_at integer
-        );",
+             key text not null,
+             conversation_id text not null,
+             value text not null,
+             created_at integer,
+             updated_at integer
+         );",
     )
     .unwrap();
     conn.execute(
-        "insert into conversations_v2 values (?1, ?2, ?3, ?4, ?5)",
-        params![
-            "/workspace",
-            "kiro-session",
-            kiro_json,
-            CREATED_AT,
-            CREATED_AT + 1
-        ],
+        "insert into conversations_v2 values (
+             '/workspace', 'kiro-session', ?1, 1783653514000, 1783653514001
+         )",
+        [value],
     )
     .unwrap();
     drop(conn);
-    let kiro_values = vec![
-        NativeSqliteValue::Integer(1),
-        NativeSqliteValue::Text("/workspace".to_owned()),
-        NativeSqliteValue::Text("kiro-session".to_owned()),
-        NativeSqliteValue::Text(kiro_json),
-        NativeSqliteValue::Integer(CREATED_AT),
-        NativeSqliteValue::Integer(CREATED_AT + 1),
-    ];
-    let kiro_row =
-        kiro::decode_kiro_conversation_for_complete("conversations_v2", &kiro_values).unwrap();
-    let started_at =
-        kiro::kiro_session_started_at(&kiro_row, &kiro_value, DateTime::<Utc>::UNIX_EPOCH);
-    let decoded = kiro::kiro_history_events(&kiro_row, "kiro-session", &kiro_value, started_at)
-        .map(|decoded| {
-            let text = decoded.complete_text();
-            (decoded.event, text)
-        })
-        .collect::<Vec<_>>();
+
+    let scan =
+        kiro::native_path::scan_kiro_source_backed_v0(&path, KIRO_SQLITE_SOURCE_FORMAT).unwrap();
+    assert_eq!(scan.certificate.counts().indexed_documents, 2);
     assert_eq!(
-        decoded
+        scan.documents
             .iter()
-            .map(|(event, _)| (event.provider_event_index, event.event_type))
+            .map(|document| document.body.chars().count())
             .collect::<Vec<_>>(),
-        vec![
-            (3, EventType::ToolCall),
-            (4, EventType::Message),
-            (5, EventType::Message),
-            (7, EventType::Message),
-        ]
+        vec![PROVIDER_MAX_TEXT_CHARS, PROVIDER_MAX_TEXT_CHARS]
     );
-    let mut kiro_locator = vec![1_u8];
-    kiro_locator.extend_from_slice(&(1_u64 ^ (1_u64 << 63)).to_be_bytes());
-    let tool_call_request = request_for(
-        &kiro_path,
-        CaptureProvider::KiroCli,
-        KIRO_SQLITE_SOURCE_FORMAT,
-        "kiro-session",
-        0,
-        KIRO_LOCATOR_KIND,
-        kiro_locator.clone(),
-        &kiro_values,
-        &decoded[0].0,
-        &decoded[0].1,
-    );
-    assert_error_kind(
-        &tool_call_request,
-        CompleteContentErrorKind::HydrationUnsupported,
-    );
-    let mut kiro_requests = decoded
-        .iter()
-        .enumerate()
-        .skip(1)
-        .map(|(subrecord, (event, body))| {
-            assert_eq!(event.payload["text_retention"]["truncated"], true);
-            request_for(
-                &kiro_path,
-                CaptureProvider::KiroCli,
-                KIRO_SQLITE_SOURCE_FORMAT,
-                "kiro-session",
-                u32::try_from(subrecord).unwrap(),
-                KIRO_LOCATOR_KIND,
-                kiro_locator.clone(),
-                &kiro_values,
-                event,
-                body,
-            )
-        })
-        .collect::<Vec<_>>();
-    if let Some(first) = kiro_requests
-        .first()
-        .map(|request| request.source_access.clone())
-    {
-        for request in &mut kiro_requests {
-            request.source_access = first.clone();
-        }
+    assert!(user_body.starts_with(&scan.documents[0].body));
+    assert!(assistant_body.starts_with(&scan.documents[1].body));
+    assert!(scan.documents.iter().all(|document| matches!(
+        document.locator.coordinate(),
+        NativeRecordCoordinate::ProviderSqlite {
+            logical_relation,
+            primary_key: TypedKey::Composite(parts),
+            row_version: None,
+        } if logical_relation == "conversations_v2" && parts.len() == 2
+    )));
+
+    let resolver =
+        kiro::native_path::KiroLocatorResolverV0::discover(&path, KIRO_SQLITE_SOURCE_FORMAT)
+            .unwrap();
+    for (document, expected) in scan.documents.iter().zip([&user_body, &assistant_body]) {
+        let hydrated = resolver.hydrate(&document.locator).unwrap();
+        assert_eq!(hydrated.decoded_display_text, *expected);
+        assert_eq!(hydrated.provider_bytes, expected.as_bytes());
     }
-    let result = SqliteCompleteContentResolver::new()
-        .resolve(&kiro_requests)
-        .unwrap();
-    assert_eq!(
-        result
-            .iter()
-            .map(|message| message.text.as_str())
-            .collect::<Vec<_>>(),
-        vec![
-            kiro_user_body.as_str(),
-            kiro_assistant_body.as_str(),
-            kiro_tool_fallback_body.as_str(),
-        ]
-    );
 
-    let zed_path = temp.path().join("zed.db");
-    let zed_body = long_body("Zed body");
-    let zed_message = json!({ "User": { "content": [{ "Text": zed_body }] } });
-    let zed_thread = json!({
-        "messages": [zed_message.clone()],
-        "updated_at": "2026-07-21T12:00:00Z"
-    });
-    let zed_data = serde_json::to_vec(&zed_thread).unwrap();
-    let conn = Connection::open(&zed_path).unwrap();
-    conn.execute_batch(
-        "create table threads (
-            id text not null, summary text not null, updated_at text not null,
-            data_type text not null, data blob not null
-        );",
-    )
-    .unwrap();
-    conn.execute(
-        "insert into threads values (?1, ?2, ?3, ?4, ?5)",
-        params![
-            "zed-session",
-            "Zed fixture",
-            "2026-07-21T12:00:00Z",
-            "json",
-            zed_data
-        ],
-    )
-    .unwrap();
-    drop(conn);
-    let zed_values = vec![
-        NativeSqliteValue::Integer(1),
-        NativeSqliteValue::Text("zed-session".to_owned()),
-        NativeSqliteValue::Null,
-        NativeSqliteValue::Null,
-        NativeSqliteValue::Null,
-        NativeSqliteValue::Text("Zed fixture".to_owned()),
-        NativeSqliteValue::Text("2026-07-21T12:00:00Z".to_owned()),
-        NativeSqliteValue::Text("json".to_owned()),
-        NativeSqliteValue::Blob(zed_data),
-        NativeSqliteValue::Null,
-    ];
-    let zed_row = zed::decode_zed_thread_for_complete(&zed_values).unwrap();
-    let zed_decoded = zed::decode_zed_thread_events(&zed_row).unwrap();
-    let zed_event = zed_decoded
-        .event_at("zed-session", 0)
+    Connection::open(&path)
         .unwrap()
-        .unwrap()
-        .event;
-    let zed_event = test_provider_event(
-        zed_event.provider_event_index,
-        zed_event.provider_event_hash,
-        zed_event.cursor,
-        zed_event.event_type,
-        zed_event.payload,
-        json!({}),
-    );
-    let zed_request = request_for(
-        &zed_path,
-        CaptureProvider::Zed,
-        ZED_THREADS_SQLITE_SOURCE_FORMAT,
-        "zed-session",
-        0,
-        ZED_LOCATOR_KIND,
-        1_i64.to_be_bytes().to_vec(),
-        &zed_values,
-        &zed_event,
-        &zed_body,
-    );
-    let result = SqliteCompleteContentResolver::new()
-        .resolve(&[zed_request])
+        .execute(
+            "update conversations_v2 set value = ?1 where key = '/workspace'",
+            [json!({
+                "history": [{
+                    "user": {
+                        "content": {"Prompt": {"prompt": "rewritten Kiro body"}}
+                    }
+                }]
+            })
+            .to_string()],
+        )
         .unwrap();
-    assert_eq!(result[0].text, zed_body);
-}
-
-#[test]
-fn malformed_and_truncated_kiro_records_fail_closed() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let path = temp.path().join("malformed-kiro.db");
-    let conn = Connection::open(&path).unwrap();
-    conn.execute_batch(
-        "create table conversations_v2 (
-            key text not null, conversation_id text not null, value text not null,
-            created_at integer, updated_at integer
-        );",
-    )
-    .unwrap();
-    let truncated_json = r#"{"history":["#;
-    let malformed_history = r#"{"history":{"not":"an array"}}"#;
-    conn.execute(
-        "insert into conversations_v2 values (?1, ?2, ?3, ?4, ?5)",
-        params![
-            "/truncated",
-            "kiro-truncated",
-            truncated_json,
-            CREATED_AT,
-            CREATED_AT
-        ],
-    )
-    .unwrap();
-    conn.execute(
-        "insert into conversations_v2 values (?1, ?2, ?3, ?4, ?5)",
-        params![
-            "/malformed-history",
-            "kiro-malformed-history",
-            malformed_history,
-            CREATED_AT,
-            CREATED_AT
-        ],
-    )
-    .unwrap();
-    drop(conn);
-
-    for (rowid, key, session_id, stored_value, expected) in [
-        (
-            1,
-            "/truncated",
-            "kiro-truncated",
-            truncated_json,
-            CompleteContentErrorKind::ContentVerificationFailed,
-        ),
-        (
-            2,
-            "/malformed-history",
-            "kiro-malformed-history",
-            malformed_history,
-            CompleteContentErrorKind::SourceRecordMissing,
-        ),
-    ] {
-        let values = vec![
-            NativeSqliteValue::Integer(rowid),
-            NativeSqliteValue::Text(key.to_owned()),
-            NativeSqliteValue::Text(session_id.to_owned()),
-            NativeSqliteValue::Text(stored_value.to_owned()),
-            NativeSqliteValue::Integer(CREATED_AT),
-            NativeSqliteValue::Integer(CREATED_AT),
-        ];
-        let row = kiro::decode_kiro_conversation_for_complete("conversations_v2", &values).unwrap();
-        let body = long_body("untrusted fallback must not be returned");
-        let reference = json!({
-            "history": [{"user": {"content": {"Prompt": {"prompt": body}}}}]
-        });
-        let decoded =
-            kiro::kiro_history_events(&row, session_id, &reference, DateTime::<Utc>::UNIX_EPOCH)
-                .next()
-                .unwrap();
-        let mut locator = vec![1_u8];
-        locator.extend_from_slice(&((rowid as u64) ^ (1_u64 << 63)).to_be_bytes());
-        let request = request_for(
-            &path,
-            CaptureProvider::KiroCli,
-            KIRO_SQLITE_SOURCE_FORMAT,
-            session_id,
-            0,
-            KIRO_LOCATOR_KIND,
-            locator,
-            &values,
-            &decoded.event,
-            &body,
-        );
-        assert_error_kind(&request, expected);
-    }
-}
-
-#[test]
-fn legacy_kiro_row_preserves_decoder_identity_locator_and_content() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let path = temp.path().join("legacy-kiro.db");
-    let body = long_body("Legacy Kiro body");
-    let value = json!({
-        "conversation_id": "kiro-legacy-session",
-        "history": [{
-            "user": {
-                "timestamp": "2026-07-21T12:00:00Z",
-                "content": {"Prompt": {"prompt": body}}
-            }
-        }]
-    });
-    let encoded = serde_json::to_string(&value).unwrap();
-    let conn = Connection::open(&path).unwrap();
-    conn.execute_batch("create table conversations (key text not null, value text not null);")
-        .unwrap();
-    conn.execute(
-        "insert into conversations values (?1, ?2)",
-        params!["/legacy", encoded],
-    )
-    .unwrap();
-    drop(conn);
-    let values = vec![
-        NativeSqliteValue::Integer(1),
-        NativeSqliteValue::Text("/legacy".to_owned()),
-        NativeSqliteValue::Text(encoded),
-    ];
-    let row = kiro::decode_kiro_conversation_for_complete("conversations", &values).unwrap();
-    let provider_session_id = kiro::kiro_provider_session_id(&row, &value);
-    let started_at = kiro::kiro_session_started_at(&row, &value, DateTime::<Utc>::UNIX_EPOCH);
-    let decoded = kiro::kiro_history_events(&row, &provider_session_id, &value, started_at)
-        .next()
-        .unwrap();
-    assert!(decoded.event.provider_event_hash.is_none());
-    assert_eq!(
-        decoded.event.metadata["legacy_provider_event_hash"],
-        "conversations:kiro-legacy-session:0:user"
-    );
-    assert_eq!(
-        decoded.event.cursor,
-        "conversations:kiro-legacy-session:history:0:user"
-    );
-    let mut locator = vec![2_u8];
-    locator.extend_from_slice(&(1_u64 ^ (1_u64 << 63)).to_be_bytes());
-    let request = request_for(
-        &path,
-        CaptureProvider::KiroCli,
-        KIRO_SQLITE_SOURCE_FORMAT,
-        &provider_session_id,
-        0,
-        KIRO_LOCATOR_KIND,
-        locator,
-        &values,
-        &decoded.event,
-        &body,
-    );
-    let message = SqliteCompleteContentResolver::new()
-        .resolve(&[request])
-        .unwrap()
-        .pop()
-        .unwrap();
-    assert_eq!(message.text, body);
-}
-
-#[test]
-fn oversized_kiro_record_fails_before_json_decode() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let path = temp.path().join("oversized-kiro.db");
-    let oversized_value = "x".repeat(COMPLETE_CONTENT_MAX_BODY_BYTES + 1);
-    let conn = Connection::open(&path).unwrap();
-    conn.execute_batch(
-        "create table conversations_v2 (
-            key text not null, conversation_id text not null, value text not null,
-            created_at integer, updated_at integer
-        );",
-    )
-    .unwrap();
-    conn.execute(
-        "insert into conversations_v2 values (?1, ?2, ?3, ?4, ?5)",
-        params![
-            "/oversized",
-            "kiro-oversized",
-            oversized_value,
-            CREATED_AT,
-            CREATED_AT
-        ],
-    )
-    .unwrap();
-    drop(conn);
-    let values = vec![
-        NativeSqliteValue::Integer(1),
-        NativeSqliteValue::Text("/oversized".to_owned()),
-        NativeSqliteValue::Text("kiro-oversized".to_owned()),
-        NativeSqliteValue::Text(oversized_value),
-        NativeSqliteValue::Integer(CREATED_AT),
-        NativeSqliteValue::Integer(CREATED_AT),
-    ];
-    let row = kiro::decode_kiro_conversation_for_complete("conversations_v2", &values).unwrap();
-    let body = long_body("oversized row fallback");
-    let reference = json!({
-        "history": [{"user": {"content": {"Prompt": {"prompt": body}}}}]
-    });
-    let decoded = kiro::kiro_history_events(
-        &row,
-        "kiro-oversized",
-        &reference,
-        DateTime::<Utc>::UNIX_EPOCH,
-    )
-    .next()
-    .unwrap();
-    let mut locator = vec![1_u8];
-    locator.extend_from_slice(&(1_u64 ^ (1_u64 << 63)).to_be_bytes());
-    let request = request_for(
-        &path,
-        CaptureProvider::KiroCli,
-        KIRO_SQLITE_SOURCE_FORMAT,
-        "kiro-oversized",
-        0,
-        KIRO_LOCATOR_KIND,
-        locator,
-        &values,
-        &decoded.event,
-        &body,
-    );
-    assert_error_kind(&request, CompleteContentErrorKind::ContentTooLarge);
-}
-
-#[test]
-fn oversized_sqlite_record_returns_content_too_large() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let path = temp.path().join("oversized.db");
-    let body = "z".repeat(COMPLETE_CONTENT_MAX_BODY_BYTES + 1);
-    let (values, event) = create_firebender_database(&path, &body);
-    let request = firebender_request(&path, &body, &values, &event);
-    assert_error_kind(&request, CompleteContentErrorKind::ContentTooLarge);
+    assert!(matches!(
+        resolver.hydrate(&scan.documents[0].locator),
+        Err(kiro::native_path::KiroSourceBackedErrorV0::ConversationRowDigestMismatch)
+    ));
 }

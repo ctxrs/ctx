@@ -1,89 +1,21 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    time::UNIX_EPOCH,
 };
 
-use chrono::{DateTime, Utc};
-use ctx_history_core::{compute_payload_hash, CaptureProvider, ContentRef, EventType};
-use ctx_history_store::Store;
-use rmpv::{encode::write_value as write_msgpack_value, Value as MsgpackValue};
+use ctx_history_core::{
+    BatchHydrationRequest, ContentSourceResolver, EventHydrationRequest, HydrationFailureKind,
+    LocatorRevisionPolicy, NativeRecordCoordinate, SourceRecordLocator, TypedKey,
+};
+use ctx_history_index::LexicalDocument;
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
-use uuid::Uuid;
 
-use super::*;
 use crate::{
-    complete_content::{
-        AuthorizedSourceRoute, BrokeredSourceAccess, CompleteContentHashAuthority,
-        CompleteContentSourceLocator, SourceAccessBroker, SourceSnapshot,
-        VerifiedContentLocatorsV1, VerifiedContentRouteStatus, COMPLETE_CONTENT_MAX_BODY_BYTES,
-        VERIFIED_CONTENT_LOCATORS_METADATA_KEY, VERIFIED_CONTENT_ROUTES,
-    },
-    provider::providers::{
-        astrbot, crush, deepagents, firebender, forgecode, goose, hermes, kiro, lingma, opencode,
-        trae, trae::TRAE_STATE_VSCDB_SOURCE_FORMAT, zed,
-    },
-    ProviderAdapterContext, ProviderImportOptions, ASTRBOT_SQLITE_SOURCE_FORMAT,
-    LINGMA_SQLITE_SOURCE_FORMAT, PROVIDER_MAX_TEXT_CHARS,
+    provider::providers::{astrbot, firebender, kiro, lingma, opencode, trae},
+    DiscoveryContext, DiscoveryPlatform, DiscoveryPlatformDirs, KIRO_SQLITE_SOURCE_FORMAT,
+    PROVIDER_MAX_TEXT_CHARS,
 };
-
-const SESSION_ID: &str = "sqlite-complete-session";
-const CREATED_AT: i64 = 1_783_653_514_000;
-
-#[derive(serde::Serialize)]
-struct TestProviderEvent {
-    provider_event_index: u64,
-    provider_event_hash: Option<String>,
-    cursor: Option<String>,
-    event_type: EventType,
-    payload: Value,
-    metadata: Value,
-}
-
-trait TestProviderEventFields {
-    fn provider_event_index(&self) -> u64;
-    fn provider_event_hash(&self) -> Option<&str>;
-    fn cursor(&self) -> Option<&str>;
-    fn payload(&self) -> &Value;
-}
-
-impl TestProviderEventFields for TestProviderEvent {
-    fn provider_event_index(&self) -> u64 {
-        self.provider_event_index
-    }
-
-    fn provider_event_hash(&self) -> Option<&str> {
-        self.provider_event_hash.as_deref()
-    }
-
-    fn cursor(&self) -> Option<&str> {
-        self.cursor.as_deref()
-    }
-
-    fn payload(&self) -> &Value {
-        &self.payload
-    }
-}
-
-impl TestProviderEventFields for kiro::KiroNativeEvent {
-    fn provider_event_index(&self) -> u64 {
-        self.provider_event_index
-    }
-
-    fn provider_event_hash(&self) -> Option<&str> {
-        self.provider_event_hash.as_deref()
-    }
-
-    fn cursor(&self) -> Option<&str> {
-        Some(self.cursor.as_str())
-    }
-
-    fn payload(&self) -> &Value {
-        &self.payload
-    }
-}
 
 mod compound;
 mod firebender_warp;
@@ -94,365 +26,247 @@ mod security;
 fn long_body(label: &str) -> String {
     format!(
         "{label}\nUnicode: 🦀 café 東京\nEscaped: \"quoted\" \\ slash\n{}",
-        "x".repeat(PROVIDER_MAX_TEXT_CHARS + 64)
+        "x".repeat(PROVIDER_MAX_TEXT_CHARS + 1_024)
     )
 }
 
-fn sqlite_source_access(
-    path: &Path,
-    provider: CaptureProvider,
-    source_format: &str,
-    event_id: Uuid,
-) -> BrokeredSourceAccess {
-    SourceAccessBroker::new()
-        .admit(
-            AuthorizedSourceRoute {
-                source_id: Uuid::new_v4(),
-                provider,
-                source_format: source_format.to_owned(),
-                family: CompleteContentSourceFamily::Sqlite,
-                raw_source_path: path.to_path_buf(),
-                source_root: path.parent().map(Path::to_path_buf),
-                source_identity: Some("stable-result-source".to_owned()),
-                source_snapshot: SourceSnapshot::default(),
-            },
-            event_id,
-        )
-        .unwrap()
+fn event_request(document: &LexicalDocument) -> EventHydrationRequest {
+    EventHydrationRequest::new(document.event_id, document.locator.clone()).unwrap()
 }
 
-fn test_provider_event(
-    provider_event_index: u64,
-    provider_event_hash: Option<String>,
-    cursor: Option<String>,
-    event_type: EventType,
-    payload: Value,
-    metadata: Value,
-) -> TestProviderEvent {
-    TestProviderEvent {
-        provider_event_index,
-        provider_event_hash,
-        cursor,
-        event_type,
-        payload,
-        metadata,
-    }
-}
-
-fn firebender_event(
-    provider_session_id: &str,
-    provider_event_index: u64,
-    message: &Value,
-    occurred_at: DateTime<Utc>,
-) -> TestProviderEvent {
-    let event = firebender::firebender_native_event(
-        provider_session_id,
-        provider_event_index,
-        message,
-        occurred_at,
-    );
-    test_provider_event(
-        event.provider_event_index,
-        event.provider_event_hash,
-        Some(event.cursor),
-        event.event_type,
-        event.payload,
-        event.metadata,
+fn locator_with_evidence(
+    document: &LexicalDocument,
+    coordinate: NativeRecordCoordinate,
+    record_digest: [u8; 32],
+) -> SourceRecordLocator {
+    SourceRecordLocator::new(
+        document.source.clone(),
+        coordinate,
+        document.locator.revision_policy(),
+        document.locator.certified_source_revision_digest().copied(),
+        record_digest,
     )
+    .unwrap()
 }
 
-fn attach_test_sqlite_message_locator(
-    event: &mut TestProviderEvent,
-    provider: CaptureProvider,
-    source_format: &str,
-    locator: &NativeLocator,
-    values: &[NativeSqliteValue],
-    complete_text: impl FnOnce() -> String,
-) -> crate::Result<()> {
-    let native_record_id = native_record_id(
-        event.provider_event_index,
-        event.provider_event_hash.as_deref(),
-        event.cursor.as_deref(),
-    );
-    attach_sqlite_complete_content_locator(
-        provider,
-        source_format,
-        &native_record_id,
-        &event.payload,
-        &mut event.metadata,
-        locator,
-        values,
-        complete_text,
-    )
-}
-
-fn attach_sqlite_native_content_locator(
-    event: &mut TestProviderEvent,
-    provider: CaptureProvider,
-    source_format: &str,
-    locator: &NativeLocator,
-    record_digest: &CompleteContentBodyDigest,
-    complete_text: &str,
-) -> crate::Result<()> {
-    if event.event_type != EventType::Message
-        || event
-            .payload
-            .pointer("/text_retention/truncated")
-            .and_then(Value::as_bool)
-            != Some(true)
-    {
-        return Ok(());
-    }
-    let content_ref = ContentRef::from_bytes(complete_text.as_bytes()).ok_or(
-        CaptureError::SystemInvariant("SQLite content length exceeds ContentRef bounds"),
-    )?;
-    let profile = verified_content_profile(
-        provider,
-        source_format,
-        CompleteContentSourceFamily::Sqlite,
-        VerifiedContentRole::MessageBody,
-    )
-    .ok_or(CaptureError::SystemInvariant(
-        "supported SQLite message route must have a verified-content profile",
-    ))?;
-    let persisted = VerifiedContentLocatorV1::new(
-        VerifiedContentRole::MessageBody,
-        profile,
-        content_ref,
-        CompleteContentSourceFamily::Sqlite,
-        locator.kind(),
-        locator.value(),
-        native_record_id(
-            event.provider_event_index,
-            event.provider_event_hash.as_deref(),
-            event.cursor.as_deref(),
-        ),
-        record_digest.clone(),
-    )
-    .ok_or(CaptureError::SystemInvariant(
-        "SQLite complete-content locator exceeds the bounded canonical schema",
-    ))?;
-    attach_verified_content_locator(&mut event.metadata, persisted).ok_or(
-        CaptureError::SystemInvariant("verified-content locator collection is malformed"),
-    )?;
-    Ok(())
-}
-
-fn create_firebender_database(
-    path: &Path,
-    body: &str,
-) -> (Vec<NativeSqliteValue>, TestProviderEvent) {
+fn create_opencode_session_message_database(path: &Path, bodies: &[&str]) {
     let conn = Connection::open(path).unwrap();
     conn.execute_batch(
-        "create table chat_sessions (
-            id text not null,
-            name text not null,
-            created_at integer not null,
-            updated_at integer not null,
-            messages_json text not null,
-            metadata_json text not null
-        );",
+        "create table session (
+             id text primary key,
+             parent_id text,
+             title text,
+             directory text,
+             branch text,
+             agent text,
+             time_created integer not null,
+             time_updated integer not null
+         );
+         create table session_message (
+             id text primary key,
+             session_id text not null,
+             type text not null,
+             seq integer not null,
+             time_created integer not null,
+             time_updated integer not null,
+             data text not null
+         );
+         insert into session (
+             id, parent_id, title, directory, branch, agent, time_created, time_updated
+         ) values (
+             'session-root', null, 'Root', '/workspace/root', 'main', 'primary', 1, 2
+         );",
     )
     .unwrap();
-    let message = json!({
-        "id": "native-message-1",
-        "role": "user",
-        "timestamp": CREATED_AT,
-        "content": { "type": "text", "text": body },
-    });
-    let messages_json = serde_json::to_string(&json!([message.clone()])).unwrap();
-    conn.execute(
-        "insert into chat_sessions values (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            SESSION_ID,
-            "Complete content fixture",
-            CREATED_AT,
-            CREATED_AT + 1,
-            messages_json,
-            "{}",
-        ],
-    )
-    .unwrap();
-    drop(conn);
-
-    let values = firebender_values(&messages_json);
-    let event = firebender_event(
-        SESSION_ID,
-        0,
-        &message,
-        DateTime::<Utc>::from_timestamp_millis(CREATED_AT).unwrap(),
-    );
-    (values, event)
-}
-
-fn firebender_values(messages_json: &str) -> Vec<NativeSqliteValue> {
-    vec![
-        NativeSqliteValue::Text(SESSION_ID.to_owned()),
-        NativeSqliteValue::Text("Complete content fixture".to_owned()),
-        NativeSqliteValue::Integer(CREATED_AT),
-        NativeSqliteValue::Integer(CREATED_AT + 1),
-        NativeSqliteValue::Text(messages_json.to_owned()),
-        NativeSqliteValue::Text("{}".to_owned()),
-    ]
-}
-
-#[allow(clippy::too_many_arguments)]
-fn request_for(
-    path: &Path,
-    provider: CaptureProvider,
-    source_format: &str,
-    provider_session_id: &str,
-    subrecord: u32,
-    locator_kind: &str,
-    locator_value: Vec<u8>,
-    values: &[NativeSqliteValue],
-    event: &impl TestProviderEventFields,
-    body: &str,
-) -> CompleteMessageRequest {
-    let event_id = Uuid::new_v4();
-    let (expected_provider_event_hash, expected_hash_authority) =
-        if let Some(provider_event_hash) = event.provider_event_hash() {
-            (
-                provider_event_hash.to_owned(),
-                CompleteContentHashAuthority::ProviderSupplied,
-            )
-        } else {
-            (
-                compute_payload_hash(event.payload()).unwrap(),
-                CompleteContentHashAuthority::NormalizedPayloadFallback,
-            )
-        };
-    let source_access = SourceAccessBroker::new()
-        .admit(
-            AuthorizedSourceRoute {
-                source_id: Uuid::new_v4(),
-                provider,
-                source_format: source_format.to_owned(),
-                family: CompleteContentSourceFamily::Sqlite,
-                raw_source_path: path.to_path_buf(),
-                source_root: path.parent().map(Path::to_path_buf),
-                source_identity: Some("stable-source-identity".to_owned()),
-                source_snapshot: SourceSnapshot::default(),
-            },
-            event_id,
+    for (sequence, body) in bodies.iter().enumerate() {
+        let sequence = i64::try_from(sequence).unwrap();
+        conn.execute(
+            "insert into session_message (
+                 id, session_id, type, seq, time_created, time_updated, data
+             ) values (?1, 'session-root', 'message', ?2, ?3, ?3, ?4)",
+            params![
+                format!("message-{sequence}"),
+                sequence,
+                1_800_000_000_000_i64 + sequence,
+                json!({
+                    "role": if sequence % 2 == 0 { "user" } else { "assistant" },
+                    "text": body,
+                })
+                .to_string(),
+            ],
         )
         .unwrap();
-    CompleteMessageRequest {
-        event_id,
-        provider,
-        source_format: source_format.to_owned(),
-        source_access,
-        source_family: Some(CompleteContentSourceFamily::Sqlite),
-        content_profile: verified_content_profile(
-            provider,
-            source_format,
-            CompleteContentSourceFamily::Sqlite,
-            VerifiedContentRole::MessageBody,
-        )
-        .unwrap()
-        .to_owned(),
-        source_locator: CompleteContentSourceLocator::new(locator_kind, locator_value),
-        provider_session_id: Some(provider_session_id.to_owned()),
-        source_record_ordinal: 0,
-        source_record_subrecord_index: subrecord,
-        expected_provider_event_hash,
-        expected_hash_authority,
-        expected_native_record_id: Some(native_record_id(
-            event.provider_event_index(),
-            event.provider_event_hash(),
-            event.cursor(),
-        )),
-        expected_record_digest: Some(sqlite_logical_record_digest(values)),
-        expected_content_ref: ContentRef::from_bytes(body.as_bytes()),
-        indexed_text: body.chars().take(PROVIDER_MAX_TEXT_CHARS).collect(),
-        indexed_limit_chars: PROVIDER_MAX_TEXT_CHARS,
     }
 }
 
-fn readmit_sqlite(
-    request: &mut CompleteMessageRequest,
+fn collect_opencode_documents(
+    registration: opencode::OpenCodeSourceBackedRegistration,
     path: &Path,
-    snapshot: SourceSnapshot,
-) -> Result<(), CompleteContentError> {
-    request.source_access = SourceAccessBroker::new().admit(
-        AuthorizedSourceRoute {
-            source_id: Uuid::new_v4(),
-            provider: request.provider,
-            source_format: request.source_format.clone(),
-            family: CompleteContentSourceFamily::Sqlite,
-            raw_source_path: path.to_path_buf(),
-            source_root: path.parent().map(Path::to_path_buf),
-            source_identity: Some("stable-source-identity".to_owned()),
-            source_snapshot: snapshot,
-        },
-        request.event_id,
-    )?;
-    Ok(())
+) -> Vec<LexicalDocument> {
+    let mut documents = Vec::new();
+    registration
+        .scan(path, &mut |page| {
+            documents.extend(page);
+            Ok(())
+        })
+        .unwrap();
+    documents
 }
 
-fn firebender_request(
-    path: &Path,
-    body: &str,
-    values: &[NativeSqliteValue],
-    event: &TestProviderEvent,
-) -> CompleteMessageRequest {
-    request_for(
-        path,
-        CaptureProvider::Firebender,
-        FIREBENDER_SQLITE_SOURCE_FORMAT,
-        SESSION_ID,
-        0,
-        FIREBENDER_LOCATOR_KIND,
-        1_i64.to_be_bytes().to_vec(),
-        values,
-        event,
-        body,
-    )
-}
-
-fn assert_error_kind(request: &CompleteMessageRequest, expected: CompleteContentErrorKind) {
-    let error = SqliteCompleteContentResolver::new()
-        .resolve(std::slice::from_ref(request))
-        .unwrap_err();
-    assert_eq!(error.kind, expected);
-    assert_eq!(error.event_id, request.event_id);
-}
-
-fn source_snapshot(path: &Path) -> SourceSnapshot {
-    let bytes = fs::read(path).unwrap();
-    let metadata = fs::metadata(path).unwrap();
-    let modified_at_ms = metadata
-        .modified()
-        .unwrap()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
-    SourceSnapshot {
-        size_bytes: Some(metadata.len()),
-        modified_at_ms: Some(modified_at_ms),
-        sha256: Some(format!("{:x}", Sha256::digest(bytes))),
-    }
-}
-
-fn sqlite_components(path: &Path) -> Vec<(PathBuf, Vec<u8>)> {
-    let mut paths = vec![path.to_path_buf()];
-    for suffix in ["-wal", "-shm", "-journal"] {
-        let mut component = path.as_os_str().to_os_string();
-        component.push(suffix);
-        paths.push(PathBuf::from(component));
-    }
-    paths
+fn sqlite_persistent_bytes(path: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    ["", "-wal"]
         .into_iter()
-        .filter_map(|component| fs::read(&component).ok().map(|bytes| (component, bytes)))
+        .filter_map(|suffix| {
+            let mut component = path.as_os_str().to_os_string();
+            component.push(suffix);
+            let component = PathBuf::from(component);
+            fs::read(&component).ok().map(|bytes| (component, bytes))
+        })
         .collect()
 }
 
-fn create_event_without_database(body: &str) -> (Value, TestProviderEvent) {
-    let message = json!({
-        "id": "native-short-message",
-        "role": "user",
-        "content": { "type": "text", "text": body },
-    });
-    let event = firebender_event(SESSION_ID, 0, &message, DateTime::<Utc>::UNIX_EPOCH);
-    (message, event)
+fn create_astrbot_database(path: &Path, session: &str, body: &str) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let conn = Connection::open(path).unwrap();
+    conn.execute_batch(
+        "pragma user_version = 4;
+         create table conversations (
+             id integer primary key,
+             inner_conversation_id text,
+             conversation_id text,
+             platform_id text,
+             user_id text,
+             content text not null,
+             title text,
+             persona_id text,
+             token_usage text,
+             created_at integer,
+             updated_at integer
+         );
+         create table platform_message_history (
+             id integer primary key,
+             platform_id text,
+             user_id text,
+             sender_id text,
+             sender_name text,
+             content text,
+             llm_checkpoint_id text,
+             created_at integer
+         );",
+    )
+    .unwrap();
+    conn.execute(
+        "insert into conversations (
+             id, inner_conversation_id, conversation_id, platform_id, user_id,
+             content, title, persona_id, token_usage, created_at, updated_at
+         ) values (
+             1, ?1, ?2, 'webchat', 'user', ?3, 'title', 'persona',
+             '{\"prompt\":1,\"completion\":2}', 1780000000000, 1780000001000
+         )",
+        params![
+            session,
+            format!("conversation-{session}"),
+            json!([{
+                "id": format!("message-{session}"),
+                "role": "user",
+                "content": body,
+            }])
+            .to_string(),
+        ],
+    )
+    .unwrap();
+}
+
+fn astrbot_discovery_context(home: &Path, cwd: &Path) -> DiscoveryContext {
+    DiscoveryContext::new(
+        home,
+        cwd,
+        DiscoveryPlatform::Linux,
+        DiscoveryPlatformDirs::default(),
+    )
+}
+
+fn create_lingma_database(path: &Path, body: &str) {
+    let conn = Connection::open(path).unwrap();
+    conn.execute_batch(
+        "create table chat_record (
+             session_id text not null,
+             request_id text,
+             chat_prompt text,
+             summary text,
+             error_result text,
+             gmt_create integer,
+             extra text
+         );",
+    )
+    .unwrap();
+    conn.execute(
+        "insert into chat_record (
+             session_id, request_id, chat_prompt, summary, error_result, gmt_create, extra
+         ) values ('lingma-session', 'lingma-request', ?1, 'assistant summary', null,
+                   1700000000, null)",
+        [body],
+    )
+    .unwrap();
+}
+
+fn create_trae_database(path: &Path, body: &str) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let conn = Connection::open(path).unwrap();
+    conn.execute_batch("create table ItemTable (key text primary key, value);")
+        .unwrap();
+    conn.execute(
+        "insert into ItemTable (key, value) values (?1, ?2)",
+        params![
+            trae::TRAE_CHAT_KEYS[0],
+            json!({
+                "list": [{
+                    "id": "native-session",
+                    "messages": [{
+                        "id": "native-message",
+                        "role": "user",
+                        "content": body,
+                        "createdAt": "2026-07-28T12:00:00Z",
+                    }],
+                }],
+            })
+            .to_string(),
+        ],
+    )
+    .unwrap();
+}
+
+fn replace_trae_value(path: &Path, body: &str) {
+    Connection::open(path)
+        .unwrap()
+        .execute(
+            "update ItemTable set value = ?1 where key = ?2",
+            params![
+                json!({
+                    "list": [{
+                        "id": "native-session",
+                        "messages": [{
+                            "id": "native-message",
+                            "role": "user",
+                            "content": body,
+                            "createdAt": "2026-07-28T12:00:00Z",
+                        }],
+                    }],
+                })
+                .to_string(),
+                trae::TRAE_CHAT_KEYS[0],
+            ],
+        )
+        .unwrap();
+}
+
+fn firebender_message_from_hydrated_row(
+    hydrated: &firebender::native_path::FirebenderHydratedSourceRow,
+) -> String {
+    let messages: Value = serde_json::from_slice(hydrated.messages_json()).unwrap();
+    let message = messages
+        .as_array()
+        .and_then(|messages| messages.get(hydrated.message_index() as usize))
+        .unwrap();
+    firebender::firebender_message_text(message).unwrap()
 }
