@@ -13,10 +13,16 @@ use crate::{
         send_pro_operation, Outcome, ProBlameTargetV1, ProBlameTelemetryV1, ProFailureBucketV1,
         ProHostOperationV1, ProSurfaceV1,
     },
-    local_usage::ResultObservationAction,
     output::JsonOutputFormat,
     pro::{print_blame_result, DEFAULT_BLAME_LIMIT},
 };
+
+// Keep byte accounting coupled to the one human renderer without widening the
+// public Pro module surface. This compiles the pure renderer in this command's
+// ownership so the measured string and the emitted string share one source.
+#[path = "../pro/render.rs"]
+#[allow(dead_code)]
+mod local_usage_blame_render;
 
 #[derive(Debug, Args)]
 pub(crate) struct BlameArgs {
@@ -199,28 +205,15 @@ fn emit_blame_result(
     local_usage: &mut crate::local_usage::CliUsage,
     emit: impl FnOnce(&ctx_pro_host_protocol::BlameResult, bool) -> Result<()>,
 ) -> Result<()> {
-    let content_bytes = blame_content_bytes(result)?;
     let measured_output_bytes = if json {
-        Some(blame_json_output_bytes(result)?)
+        blame_json_output_bytes(result)?
     } else {
-        None
+        local_usage_blame_render::render_blame_text(result).len()
     };
     emit(result, json)?;
-    local_usage.set_result_observation(
-        ResultObservationAction::Blame,
-        result.matches.len(),
-        result.evidence.len(),
-        content_bytes,
-    );
     local_usage.set_blame_result(result);
-    if let Some(output_bytes) = measured_output_bytes {
-        local_usage.set_measured_output_bytes(output_bytes);
-    }
+    local_usage.set_measured_output_bytes(measured_output_bytes);
     Ok(())
-}
-
-fn blame_content_bytes(result: &ctx_pro_host_protocol::BlameResult) -> Result<usize> {
-    Ok(serde_json::to_vec(result)?.len())
 }
 
 fn blame_json_output_bytes(result: &ctx_pro_host_protocol::BlameResult) -> Result<usize> {
@@ -399,8 +392,13 @@ mod tests {
             completed.result_metadata_for_test(),
             (crate::local_usage::ValueClass::ResultBearing, 1, 0)
         );
-        assert!(blame_content_bytes(&result).unwrap() > 0);
-        assert!(blame_json_output_bytes(&result).unwrap() > blame_content_bytes(&result).unwrap());
+        assert_eq!(
+            completed.delivered_output_bytes_for_test(),
+            blame_json_output_bytes(&result).unwrap() as u64
+        );
+        assert!(
+            blame_json_output_bytes(&result).unwrap() > serde_json::to_vec(&result).unwrap().len()
+        );
 
         result.matches.clear();
         let mut usage = crate::local_usage::CliUsage::from_command(&cli.command);
@@ -409,6 +407,10 @@ mod tests {
         assert_eq!(
             completed.result_metadata_for_test(),
             (crate::local_usage::ValueClass::Empty, 0, 0)
+        );
+        assert_eq!(
+            completed.delivered_output_bytes_for_test(),
+            local_usage_blame_render::render_blame_text(&result).len() as u64
         );
     }
 

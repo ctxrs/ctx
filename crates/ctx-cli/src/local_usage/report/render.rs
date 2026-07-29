@@ -2,154 +2,129 @@ use serde_json::{json, Value};
 
 use crate::pro::PRO_MONTHLY_PRICE_DISPLAY;
 
-use super::super::CoveredTokenEstimate;
 use super::UsageReport;
 
-const HUMAN_OUTPUT_WIDTH: usize = 80;
-
 pub(crate) fn render_human_summary(report: &UsageReport, detailed: bool) {
-    println!("local_usage: {}", report.state);
-    let Some(summary) = &report.summary else {
-        if let Some(error) = &report.error {
-            println!("local_usage_error: {} ({})", error.code, error.message);
-        }
+    println!("Local usage: {}", report.state);
+    if let Some(error) = &report.error {
+        println!("{} ({})", error.code, error.message);
+        return;
+    }
+    let Some(definitions) = &report.definitions else {
         return;
     };
-    println!("usage_calls: {}", summary.calls);
-    println!("usage_active_utc_days: {}", summary.active_days);
-    println!(
-        "usage_measured_latency_ms: {} samples={}",
-        summary.measured_latency_ms, summary.measured_latency_samples
-    );
-    println!(
-        "usage_cli_output_bytes: {} samples={}",
-        summary.cli_output_bytes, summary.cli_output_byte_samples
-    );
-    println!(
-        "usage_mcp_transport_bytes: {} samples={}",
-        summary.mcp_response_bytes, summary.mcp_response_byte_samples
-    );
-    println!(
-        "usage_semantic_context_bytes: {} samples={}",
-        summary.semantic_context_bytes, summary.semantic_context_byte_samples
-    );
-    println!(
-        "usage_semantic_search_result_bytes: {} samples={}",
-        summary.semantic_search_result_bytes, summary.semantic_search_result_byte_samples
-    );
-    println!(
-        "usage_context_proxies: searches={} found={} opened={} cited={} validated={}",
-        summary.context.context_searches,
-        summary.context.context_found,
-        summary.context.context_opened,
-        summary.context.context_cited_coverage,
-        summary.context.validated_discoveries
-    );
-    if let Some(estimates) = &report.estimates {
-        println!("usage_estimate_model: {}", estimates.model.version);
-        print_token_estimate(
-            "usage_approximate_context_tokens",
-            estimates.approximate_context_tokens,
-        );
-        print_token_estimate(
-            "usage_approximate_avoided_context_tokens",
-            estimates.approximate_avoided_context_tokens,
+    for definition in definitions {
+        let summary = &definition.summary;
+        println!();
+        println!(
+            "Measured local facts — definition {}",
+            definition.definition_version
         );
         println!(
-            "usage_estimated_time_saved_seconds: {}",
-            estimates.estimated_time_saved_seconds
+            "  Active UTC days: {} ({} through {})",
+            definition.active_days, definition.first_day_utc, definition.last_day_utc
         );
-    }
-    println!(
-        "usage_mcp_pro_result_classification: {} nonempty, {} empty",
-        summary.result_bearing_calls, summary.empty_calls
-    );
-    println!(
-        "usage_mcp_pro_result_classification_not_applicable: {} calls",
-        summary.not_applicable_calls
-    );
-    let blame = &summary.pro_blame;
-    if blame.requests > 0 {
+        println!("  ctx versions: {}", definition.ctx_versions.join(", "));
         println!(
-            "Pro returned produced attribution in {} of {} blame requests.",
-            blame.produced_attribution_requests, blame.requests
+            "  Calls: {} ({} success, {} failure)",
+            summary.calls, summary.successful_calls, summary.failed_calls
         );
         println!(
-            "pro_blame_outcomes: produced-attribution {}, possible-only {}, none {}, error {}",
-            blame.produced_attribution_requests,
-            blame.possible_or_reference_only_requests,
-            blame.no_confident_attribution_requests,
-            blame.error_requests
+            "  Classified result sets: {} nonempty, {} empty",
+            summary.result_bearing_calls, summary.empty_calls
         );
-        for target in &blame.by_target {
+        println!(
+            "  No result-set classification: {} calls",
+            summary.not_applicable_calls
+        );
+        println!(
+            "  Results: {}; unique blame citations: {}",
+            summary.result_count, summary.citation_count
+        );
+        println!(
+            "  Delivered output bytes: {}",
+            summary.delivered_output_bytes
+        );
+        println!(
+            "  Covered delivered context bytes: {}",
+            summary.delivered_context_bytes
+        );
+        println!(
+            "  Matched normalized session bytes: {}",
+            summary.matched_normalized_session_bytes
+        );
+        println!(
+            "  Eligible search coverage: {} complete, {} unavailable",
+            summary.complete_context_eligible_calls, summary.unavailable_context_eligible_calls
+        );
+        let blame = &summary.pro_blame;
+        if blame.requests > 0 {
             println!(
-                "  {}: produced-attribution {}, possible-only/reference-only {}, none {}, error {}",
-                target.target_type,
-                target.produced,
-                target.possible_or_reference_only,
-                target.none,
-                target.error
+                "  Blame outcomes: {} produced-attribution, {} possible-only, {} none, {} error",
+                blame.produced_attribution_requests,
+                blame.possible_only_requests,
+                blame.none_requests,
+                blame.error_requests
             );
         }
-    }
-    if detailed {
-        if let Some(details) = &report.details {
-            for operation in &details.by_operation {
+        if detailed {
+            for operation in &definition.by_operation {
                 println!(
-                    "usage_operation: {}/{}",
-                    operation.surface, operation.operation
+                    "  {}/{} {}: calls={} success={} failure={} nonempty={} empty={} n/a={} output_bytes={} context_bytes={} complete={} unavailable={}",
+                    operation.surface,
+                    operation.operation,
+                    operation.ctx_version,
+                    operation.calls,
+                    operation.successful_calls,
+                    operation.failed_calls,
+                    operation.result_bearing_calls,
+                    operation.empty_calls,
+                    operation.not_applicable_calls,
+                    operation.delivered_output_bytes,
+                    operation.delivered_context_bytes,
+                    operation.complete_context_eligible_calls,
+                    operation.unavailable_context_eligible_calls,
                 );
-                print_wrapped_fields([
-                    format!("ctx_version={}", operation.ctx_version),
-                    format!("calls={}", operation.calls),
-                    format!("success={}", operation.successful_calls),
-                    format!("failure={}", operation.failed_calls),
-                    format!("result={}", operation.result_bearing_calls),
-                    format!("empty={}", operation.empty_calls),
-                    format!("not-applicable={}", operation.not_applicable_calls),
-                ]);
             }
-            for duration in &details.duration_buckets {
+            for duration in &definition.duration_buckets {
                 println!(
-                    "usage_duration: {} calls={}",
+                    "  Duration {}: {} calls",
                     duration.duration_bucket, duration.calls
                 );
             }
         }
     }
-}
-
-fn print_token_estimate(label: &str, estimate: CoveredTokenEstimate) {
-    match estimate.approximate_tokens {
-        Some(tokens) => println!(
-            "{label}: {tokens} coverage={} samples={}/{}",
-            estimate.coverage.as_str(),
-            estimate.measured_samples,
-            estimate.eligible_samples
-        ),
-        None => println!(
-            "{label}: unavailable coverage={} samples={}/{}",
-            estimate.coverage.as_str(),
-            estimate.measured_samples,
-            estimate.eligible_samples
-        ),
-    }
-}
-
-fn print_wrapped_fields(fields: impl IntoIterator<Item = String>) {
-    let mut line = String::from("  ");
-    for field in fields {
-        let separator_width = usize::from(line.len() > 2);
-        if line.len() + separator_width + field.len() > HUMAN_OUTPUT_WIDTH {
-            println!("{line}");
-            line.truncate(2);
-        } else if separator_width > 0 {
-            line.push(' ');
-        }
-        line.push_str(&field);
-    }
-    if line.len() > 2 {
-        println!("{line}");
+    if let Some(estimates) = &report.estimates {
+        let tokens = estimates.approximate_context_tokens;
+        println!();
+        println!("Approximate token-equivalents");
+        println!(
+            "  Covered context: {} bytes; low={} central={} high={} ({})",
+            tokens.delivered_context_bytes,
+            tokens.token_equivalents.low,
+            tokens.token_equivalents.central,
+            tokens.token_equivalents.high,
+            tokens.coefficient_version
+        );
+        let reduction = estimates.estimated_context_reduction;
+        println!();
+        println!("Estimated context reduction");
+        println!(
+            "  Baseline={} bytes, observed={} bytes, estimated reduction={} bytes",
+            reduction.comparison_baseline_bytes,
+            reduction.observed_delivered_context_bytes,
+            reduction.estimated_avoided_context_bytes
+        );
+        println!(
+            "  Approximate reduction: low={} central={} high={} ({}; {}; covered={} unavailable={})",
+            reduction.approximate_token_equivalents.low,
+            reduction.approximate_token_equivalents.central,
+            reduction.approximate_token_equivalents.high,
+            reduction.estimate_model_version,
+            reduction.coefficient_version,
+            reduction.covered_calls,
+            reduction.unavailable_calls
+        );
     }
 }
 

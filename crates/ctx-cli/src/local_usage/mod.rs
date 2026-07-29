@@ -1,4 +1,4 @@
-use std::{path::Path, time::Duration};
+use std::{collections::BTreeSet, path::Path, time::Duration};
 
 use ctx_pro_host_protocol::{
     BlameMatch, BlameResult, BlameTarget, CommitPredicate, FactState, ProductionRelationship,
@@ -6,7 +6,7 @@ use ctx_pro_host_protocol::{
 };
 use serde_json::Value;
 
-use crate::cli::{CommandRoot, DaemonCommand};
+use crate::cli::{CommandRoot, DaemonCommand, ShowTarget};
 
 mod correlation;
 mod estimate;
@@ -16,15 +16,8 @@ mod store;
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
-use correlation::CONTEXT_CORRELATION_MAX_RECORDS;
-#[allow(unused_imports)]
-pub(crate) use correlation::{ContextUsage, EphemeralContextCorrelation, McpUsageRecorder};
-#[allow(unused_imports)]
-pub(crate) use estimate::{
-    estimate_usage, CoveredTokenEstimate, EstimateCoverage, EstimateFacts, EstimateModel,
-    UsageEstimates, ESTIMATE_MODEL,
-};
+pub(crate) use correlation::McpUsageRecorder;
+pub(crate) use estimate::{estimate_usage, EstimateFacts, UsageEstimates};
 pub(crate) use report::{pro_conversion_action, read_report, render_human_summary, UsageReport};
 pub(crate) use store::{reset, UsageStoreError};
 
@@ -79,11 +72,11 @@ impl ValueClass {
     }
 }
 
-/// Closed, content-free classification for a foreground result observation.
+/// Closed adapter vocabulary retained at the public result boundary.
 ///
-/// The action is checked against the invocation's recorded operation before it
-/// can influence estimates, so a show, blame, or unrelated result cannot be
-/// mislabeled as a search by a caller.
+/// Definition 2 persists the public operation itself, not this adapter hint.
+/// The hint lets existing command adapters classify their canonical result
+/// collections without accepting content or an open-ended operation string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResultObservationAction {
     Search,
@@ -93,20 +86,6 @@ pub(crate) enum ResultObservationAction {
     Sources,
     Sql,
     Blame,
-}
-
-impl ResultObservationAction {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Search => "search",
-            Self::OpenSession => "open_session",
-            Self::OpenEvent => "open_event",
-            Self::Locate => "locate",
-            Self::Sources => "sources",
-            Self::Sql => "sql",
-            Self::Blame => "blame",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,6 +125,66 @@ impl ProOutcome {
             Self::Error => "error",
             Self::NotApplicable => "not_applicable",
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ContextCoverage {
+    Complete,
+    Unavailable,
+    NotApplicable,
+}
+
+impl ContextCoverage {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Unavailable => "unavailable",
+            Self::NotApplicable => "not_applicable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SearchContextObservation {
+    coverage: ContextCoverage,
+    delivered_context_bytes: u64,
+    matched_normalized_session_bytes: u64,
+}
+
+impl SearchContextObservation {
+    pub(crate) const fn unavailable() -> Self {
+        Self {
+            coverage: ContextCoverage::Unavailable,
+            delivered_context_bytes: 0,
+            matched_normalized_session_bytes: 0,
+        }
+    }
+
+    pub(crate) fn complete(
+        delivered_context_bytes: usize,
+        matched_normalized_session_bytes: usize,
+    ) -> Option<Self> {
+        let delivered_context_bytes = u64::try_from(delivered_context_bytes).ok()?;
+        let matched_normalized_session_bytes =
+            u64::try_from(matched_normalized_session_bytes).ok()?;
+        (delivered_context_bytes > 0
+            && matched_normalized_session_bytes > 0
+            && matched_normalized_session_bytes >= delivered_context_bytes)
+            .then_some(Self {
+                coverage: ContextCoverage::Complete,
+                delivered_context_bytes,
+                matched_normalized_session_bytes,
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn metadata_for_test(self) -> (ContextCoverage, u64, u64) {
+        (
+            self.coverage,
+            self.delivered_context_bytes,
+            self.matched_normalized_session_bytes,
+        )
     }
 }
 
@@ -195,20 +234,12 @@ pub(crate) struct CompletedOperation {
     duration: DurationBucket,
     target_type: TargetType,
     pro_outcome: ProOutcome,
+    context_coverage: ContextCoverage,
     result_count: u64,
     citation_count: u64,
-    result_action: Option<ResultObservationAction>,
-    latency_ms: u64,
-    latency_samples: u64,
-    response_bytes: u64,
-    response_byte_samples: u64,
-    output_bytes: u64,
-    output_byte_samples: u64,
-    context_bytes: u64,
-    context_byte_samples: u64,
-    search_result_bytes: u64,
-    search_result_byte_samples: u64,
-    context: ContextUsage,
+    delivered_output_bytes: u64,
+    delivered_context_bytes: u64,
+    matched_normalized_session_bytes: u64,
 }
 
 impl CompletedOperation {
@@ -225,23 +256,16 @@ impl CompletedOperation {
             duration: DurationBucket::from_duration(duration),
             target_type: TargetType::NotApplicable,
             pro_outcome: ProOutcome::NotApplicable,
+            context_coverage: ContextCoverage::NotApplicable,
             result_count: 0,
             citation_count: 0,
-            result_action: None,
-            latency_ms: duration_millis(duration),
-            latency_samples: 1,
-            response_bytes: 0,
-            response_byte_samples: 0,
-            output_bytes: 0,
-            output_byte_samples: 0,
-            context_bytes: 0,
-            context_byte_samples: 0,
-            search_result_bytes: 0,
-            search_result_byte_samples: 0,
-            context: ContextUsage::default(),
+            delivered_output_bytes: 0,
+            delivered_context_bytes: 0,
+            matched_normalized_session_bytes: 0,
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn with_value(mut self, value_class: ValueClass) -> Self {
         self.value_class = value_class;
         self
@@ -253,7 +277,21 @@ impl CompletedOperation {
     }
 
     #[cfg(test)]
-    pub(crate) fn target_type_for_test(self) -> TargetType {
+    pub(crate) const fn context_metadata_for_test(self) -> (ContextCoverage, u64, u64) {
+        (
+            self.context_coverage,
+            self.delivered_context_bytes,
+            self.matched_normalized_session_bytes,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn delivered_output_bytes_for_test(self) -> u64 {
+        self.delivered_output_bytes
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn target_type_for_test(self) -> TargetType {
         self.target_type
     }
 }
@@ -265,12 +303,10 @@ pub(crate) struct CliUsage {
     pro_outcome: ProOutcome,
     result_count: usize,
     citation_count: usize,
-    semantic_context_bytes: usize,
-    semantic_context_bytes_measured: bool,
     output_bytes: usize,
     output_bytes_measured: bool,
     result_action: Option<ResultObservationAction>,
-    context: ContextUsage,
+    search_context: Option<SearchContextObservation>,
     value_class: ValueClass,
 }
 
@@ -278,12 +314,17 @@ impl CliUsage {
     pub(crate) fn from_command(command: &CommandRoot) -> Self {
         let (operation, target_type) = match command {
             CommandRoot::Setup(_) => (Some("setup"), TargetType::NotApplicable),
-            CommandRoot::Status(_) => (None, TargetType::NotApplicable),
-            CommandRoot::Stats(_) => (None, TargetType::NotApplicable),
+            CommandRoot::Status(_) | CommandRoot::Stats(_) => (None, TargetType::NotApplicable),
             CommandRoot::Index(_) => (Some("index"), TargetType::NotApplicable),
             CommandRoot::Sources(_) => (Some("sources"), TargetType::NotApplicable),
             CommandRoot::Import(_) => (Some("import"), TargetType::NotApplicable),
-            CommandRoot::Show(_) => (Some("show"), TargetType::NotApplicable),
+            CommandRoot::Show(args) => (
+                Some(match &args.target {
+                    ShowTarget::Session(_) => "show_session",
+                    ShowTarget::Event(_) => "show_event",
+                }),
+                TargetType::NotApplicable,
+            ),
             CommandRoot::Locate(_) => (Some("locate"), TargetType::NotApplicable),
             CommandRoot::Search(_) => (Some("search"), TargetType::NotApplicable),
             CommandRoot::Pro(args) => (
@@ -314,20 +355,14 @@ impl CliUsage {
             pro_outcome: ProOutcome::NotApplicable,
             result_count: 0,
             citation_count: 0,
-            semantic_context_bytes: 0,
-            semantic_context_bytes_measured: false,
             output_bytes: 0,
             output_bytes_measured: false,
             result_action: None,
-            context: ContextUsage::default(),
+            search_context: None,
             value_class: ValueClass::NotApplicable,
         }
     }
 
-    /// Explicitly represents a foreground command that must not be recorded.
-    ///
-    /// The stats command lane can use this once it owns `CommandRoot::Stats`;
-    /// no storage DTO can be produced from this value.
     pub(crate) fn excluded() -> Self {
         Self {
             operation: None,
@@ -335,32 +370,32 @@ impl CliUsage {
             pro_outcome: ProOutcome::NotApplicable,
             result_count: 0,
             citation_count: 0,
-            semantic_context_bytes: 0,
-            semantic_context_bytes_measured: false,
             output_bytes: 0,
             output_bytes_measured: false,
             result_action: None,
-            context: ContextUsage::default(),
+            search_context: None,
             value_class: ValueClass::NotApplicable,
         }
     }
 
-    /// Adds only bounded numeric observations from a final foreground result.
+    /// Accepts only bounded numeric observations from the canonical result.
     ///
-    /// No query, path, content, result identity, or caller identity is accepted
-    /// by this boundary. Background work has no `CliUsage` completion boundary
-    /// and therefore cannot call this method through the supported API.
+    /// `content_bytes` is intentionally ignored by definition 2. Historical
+    /// adapters supplied JSON framing or non-search payload bytes here; only
+    /// the dedicated complete-search observation can populate context facts.
     pub(crate) fn set_result_observation(
         &mut self,
         action: ResultObservationAction,
         result_count: usize,
         citation_count: usize,
-        content_bytes: usize,
+        _content_bytes: usize,
     ) {
         self.result_count = result_count;
-        self.citation_count = citation_count;
-        self.semantic_context_bytes = content_bytes;
-        self.semantic_context_bytes_measured = true;
+        self.citation_count = if action == ResultObservationAction::Blame {
+            citation_count
+        } else {
+            0
+        };
         self.result_action = Some(action);
         self.value_class = if result_count == 0 {
             ValueClass::Empty
@@ -369,90 +404,60 @@ impl CliUsage {
         };
     }
 
-    /// Records exact bytes written by the foreground CLI command.
-    ///
-    /// This is deliberately separate from `content_bytes` on
-    /// `set_result_observation`: rendered output can contain framing and other
-    /// fields that are not semantic search-result content.
     pub(crate) fn set_measured_output_bytes(&mut self, output_bytes: usize) {
         self.output_bytes = output_bytes;
         self.output_bytes_measured = true;
     }
 
-    /// Records one exact, non-duplicated semantic payload byte count.
-    ///
-    /// Callers may use exact output bytes when output is itself the semantic
-    /// payload, or provide a separately measured semantic representation.
-    pub(crate) fn set_semantic_context_bytes(&mut self, context_bytes: usize) {
-        self.semantic_context_bytes = context_bytes;
-        self.semantic_context_bytes_measured = true;
-    }
-
-    pub(crate) fn add_context_usage(&mut self, context: ContextUsage) {
-        self.context.saturating_add(context);
+    pub(crate) fn set_search_context_observation(&mut self, observation: SearchContextObservation) {
+        self.search_context = Some(observation);
     }
 
     pub(crate) fn set_blame_result(&mut self, result: &BlameResult) {
-        let semantic_context_bytes_measured = self.semantic_context_bytes_measured;
         self.set_result_observation(
             ResultObservationAction::Blame,
             result.matches.len(),
-            result.evidence.len(),
-            self.semantic_context_bytes,
+            unique_blame_citation_count(result),
+            0,
         );
-        self.semantic_context_bytes_measured = semantic_context_bytes_measured;
         self.pro_outcome = classify_blame(result);
     }
 
     pub(crate) fn bind_blame_target(&mut self, target: &BlameTarget) {
-        self.target_type = match target {
-            BlameTarget::File { .. } => TargetType::File,
-            BlameTarget::Commit { .. } => TargetType::Commit,
-            BlameTarget::PullRequest { .. } => TargetType::PullRequest,
-        };
+        self.target_type = target_type(target);
     }
 
     pub(crate) fn completed(self, success: bool, duration: Duration) -> Option<CompletedOperation> {
         let operation = self.operation?;
-        let mut completed =
-            CompletedOperation::cli(operation, success, duration).with_value(if success {
-                self.value_class
-            } else {
-                ValueClass::NotApplicable
-            });
+        let mut completed = CompletedOperation::cli(operation, success, duration);
         completed.target_type = self.target_type;
-        if operation == "blame" {
-            completed.pro_outcome = if success {
-                self.pro_outcome
-            } else {
-                ProOutcome::Error
-            };
-            if success {
-                completed.result_count = u64::try_from(self.result_count).unwrap_or(u64::MAX);
-                completed.citation_count = u64::try_from(self.citation_count).unwrap_or(u64::MAX);
+        completed.delivered_output_bytes = if self.output_bytes_measured {
+            u64::try_from(self.output_bytes).unwrap_or(u64::MAX)
+        } else {
+            0
+        };
+        if !success {
+            if operation == "blame" {
+                completed.pro_outcome = ProOutcome::Error;
             }
+            return Some(completed);
         }
-        if success && self.result_action.is_some() {
+        if matches!(operation, "search" | "blame") {
+            completed.value_class = self.value_class;
             completed.result_count = u64::try_from(self.result_count).unwrap_or(u64::MAX);
+        }
+        if operation == "blame" {
+            completed.pro_outcome = self.pro_outcome;
             completed.citation_count = u64::try_from(self.citation_count).unwrap_or(u64::MAX);
-            completed.result_action = self.result_action;
         }
-        completed.output_bytes = u64::try_from(self.output_bytes).unwrap_or(u64::MAX);
-        completed.output_byte_samples = u64::from(self.output_bytes_measured);
-        if success {
-            completed.context = self.context;
-            completed.context_bytes =
-                u64::try_from(self.semantic_context_bytes).unwrap_or(u64::MAX);
-            completed.context_byte_samples = u64::from(self.semantic_context_bytes_measured);
-        }
-        if success
-            && self.result_action == Some(ResultObservationAction::Search)
-            && operation == "search"
-            && self.value_class == ValueClass::ResultBearing
-        {
-            completed.search_result_bytes =
-                u64::try_from(self.semantic_context_bytes).unwrap_or(u64::MAX);
-            completed.search_result_byte_samples = u64::from(self.semantic_context_bytes_measured);
+        if operation == "search" && self.value_class == ValueClass::ResultBearing {
+            let observation = self
+                .search_context
+                .unwrap_or_else(SearchContextObservation::unavailable);
+            completed.context_coverage = observation.coverage;
+            completed.delivered_context_bytes = observation.delivered_context_bytes;
+            completed.matched_normalized_session_bytes =
+                observation.matched_normalized_session_bytes;
         }
         Some(completed)
     }
@@ -483,7 +488,7 @@ enum McpContextTarget {
 pub(crate) struct McpInvocation {
     operation: &'static str,
     target_type: TargetType,
-    context_target: Option<McpContextTarget>,
+    search_context: Option<SearchContextObservation>,
 }
 
 impl McpInvocation {
@@ -502,28 +507,18 @@ impl McpInvocation {
         Some(Self {
             operation,
             target_type: TargetType::NotApplicable,
-            context_target: None,
+            search_context: None,
         })
     }
 
-    pub(crate) fn bind_context_target(&mut self, stable_result_id: String) {
-        self.context_target = match self.operation {
-            "show_session" => Some(McpContextTarget::Session(stable_result_id)),
-            "show_event" => Some(McpContextTarget::Event(stable_result_id)),
-            _ => None,
-        };
-    }
-
-    fn participates_in_correlation(&self) -> bool {
-        self.operation == "search" || self.context_target.is_some()
+    pub(crate) fn bind_search_context(&mut self, observation: SearchContextObservation) {
+        if self.operation == "search" {
+            self.search_context = Some(observation);
+        }
     }
 
     pub(crate) fn bind_blame_target(&mut self, target: &BlameTarget) {
-        self.target_type = match target {
-            BlameTarget::File { .. } => TargetType::File,
-            BlameTarget::Commit { .. } => TargetType::Commit,
-            BlameTarget::PullRequest { .. } => TargetType::PullRequest,
-        };
+        self.target_type = target_type(target);
     }
 
     #[cfg(test)]
@@ -555,54 +550,47 @@ impl McpInvocation {
             } else {
                 ProOutcome::NotApplicable
             },
+            context_coverage: ContextCoverage::NotApplicable,
             result_count: 0,
             citation_count: 0,
-            result_action: None,
-            latency_ms: duration_millis(duration),
-            latency_samples: 1,
-            response_bytes: u64::try_from(response_bytes).unwrap_or(u64::MAX),
-            response_byte_samples: 1,
-            output_bytes: 0,
-            output_byte_samples: 0,
-            context_bytes: 0,
-            context_byte_samples: 0,
-            search_result_bytes: 0,
-            search_result_byte_samples: 0,
-            context: ContextUsage::default(),
+            delivered_output_bytes: u64::try_from(response_bytes).unwrap_or(u64::MAX),
+            delivered_context_bytes: 0,
+            matched_normalized_session_bytes: 0,
         };
-        if !failed {
-            let structured = response.pointer("/result/structuredContent");
-            operation.result_action = result_observation_action(self.operation);
-            if operation.result_action.is_some() {
-                if let Some(context_bytes) = mcp_semantic_context_bytes(response) {
-                    operation.context_bytes = context_bytes;
-                    operation.context_byte_samples = 1;
-                }
-            }
-            let count = mcp_result_count(self.operation, structured);
-            if let Some(count) = count {
-                operation.value_class = if count == 0 {
-                    ValueClass::Empty
-                } else {
-                    ValueClass::ResultBearing
-                };
-                operation.result_count = u64::try_from(count).unwrap_or(u64::MAX);
-                if self.operation == "search" && count > 0 {
-                    if let Some(search_result_bytes) = mcp_search_content_bytes(structured) {
-                        operation.search_result_bytes = search_result_bytes;
-                        operation.search_result_byte_samples = 1;
-                    }
-                }
-            }
-            if self.operation == "blame" {
-                operation.citation_count = structured
-                    .and_then(|value| value.get("evidence"))
-                    .and_then(Value::as_array)
-                    .map_or(0, |values| u64::try_from(values.len()).unwrap_or(u64::MAX));
-                operation.pro_outcome = classify_blame_json(structured);
-            }
+        if failed {
+            return operation;
+        }
+        let structured = response.pointer("/result/structuredContent");
+        if let Some(count) = mcp_result_count(self.operation, structured) {
+            operation.value_class = if count == 0 {
+                ValueClass::Empty
+            } else {
+                ValueClass::ResultBearing
+            };
+            operation.result_count = u64::try_from(count).unwrap_or(u64::MAX);
+        }
+        if self.operation == "search" && operation.value_class == ValueClass::ResultBearing {
+            let observation = self
+                .search_context
+                .unwrap_or_else(SearchContextObservation::unavailable);
+            operation.context_coverage = observation.coverage;
+            operation.delivered_context_bytes = observation.delivered_context_bytes;
+            operation.matched_normalized_session_bytes =
+                observation.matched_normalized_session_bytes;
+        }
+        if self.operation == "blame" {
+            operation.citation_count = unique_blame_json_citation_count(structured);
+            operation.pro_outcome = classify_blame_json(structured);
         }
         operation
+    }
+}
+
+fn target_type(target: &BlameTarget) -> TargetType {
+    match target {
+        BlameTarget::File { .. } => TargetType::File,
+        BlameTarget::Commit { .. } => TargetType::Commit,
+        BlameTarget::PullRequest { .. } => TargetType::PullRequest,
     }
 }
 
@@ -634,36 +622,19 @@ fn mcp_search_context_targets(response: &Value) -> Vec<McpContextTarget> {
         .unwrap_or_default()
 }
 
-fn duration_millis(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
-}
-
-fn result_observation_action(operation: &str) -> Option<ResultObservationAction> {
+fn resolved_mcp_context_target(operation: &str, response: &Value) -> Option<McpContextTarget> {
+    let structured = response.pointer("/result/structuredContent")?;
     match operation {
-        "search" => Some(ResultObservationAction::Search),
-        "show_session" => Some(ResultObservationAction::OpenSession),
-        "show_event" => Some(ResultObservationAction::OpenEvent),
-        "sources" => Some(ResultObservationAction::Sources),
-        "sql" => Some(ResultObservationAction::Sql),
-        "blame" => Some(ResultObservationAction::Blame),
+        "show_session" => structured
+            .get("ctx_session_id")
+            .and_then(Value::as_str)
+            .map(|id| McpContextTarget::Session(id.to_owned())),
+        "show_event" => structured
+            .get("ctx_event_id")
+            .and_then(Value::as_str)
+            .map(|id| McpContextTarget::Event(id.to_owned())),
         _ => None,
     }
-}
-
-fn mcp_search_content_bytes(structured: Option<&Value>) -> Option<u64> {
-    structured
-        .and_then(|value| value.get("results"))
-        .and_then(|results| serde_json::to_vec(results).ok())
-        .and_then(|bytes| u64::try_from(bytes.len()).ok())
-}
-
-fn mcp_semantic_context_bytes(response: &Value) -> Option<u64> {
-    let payload = response
-        .pointer("/result/structuredContent")
-        .or_else(|| response.get("result"))?;
-    serde_json::to_vec(payload)
-        .ok()
-        .and_then(|bytes| u64::try_from(bytes.len()).ok())
 }
 
 fn mcp_result_count(operation: &str, structured: Option<&Value>) -> Option<usize> {
@@ -680,6 +651,29 @@ fn mcp_result_count(operation: &str, structured: Option<&Value>) -> Option<usize
         .get(field)
         .and_then(Value::as_array)
         .map(Vec::len)
+}
+
+fn unique_blame_citation_count(result: &BlameResult) -> usize {
+    result
+        .evidence
+        .iter()
+        .map(|evidence| evidence.number)
+        .collect::<BTreeSet<_>>()
+        .len()
+}
+
+fn unique_blame_json_citation_count(structured: Option<&Value>) -> u64 {
+    structured
+        .and_then(|value| value.get("evidence"))
+        .and_then(Value::as_array)
+        .map(|evidence| {
+            evidence
+                .iter()
+                .filter_map(|value| value.get("number").and_then(Value::as_u64))
+                .collect::<BTreeSet<_>>()
+        })
+        .and_then(|numbers| u64::try_from(numbers.len()).ok())
+        .unwrap_or(0)
 }
 
 pub(crate) fn classify_blame(result: &BlameResult) -> ProOutcome {
@@ -704,8 +698,6 @@ pub(crate) fn classify_blame(result: &BlameResult) -> ProOutcome {
             }
             BlameMatch::PullRequest(value) => match &value.relationship {
                 PullRequestBlameRelationship::Commit(commit) => {
-                    // Commit membership is a reference-only result even when no
-                    // asserted production attribution is present.
                     possible = true;
                     for production in &commit.production {
                         match classify_production(production.relationship, production.state) {

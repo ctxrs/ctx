@@ -1,29 +1,83 @@
-use std::time::SystemTime;
+use rusqlite::{Connection, Transaction, TransactionBehavior};
 
-use rusqlite::{Connection, TransactionBehavior};
-
-use super::super::{
-    store::verify_report_dates, EstimateFacts, UsageStoreError, DEFINITION_VERSION,
-};
+use super::super::{EstimateFacts, UsageStoreError, DEFINITION_VERSION};
+use super::validation::{checked_count, reconcile_definition};
 use super::{
-    validation::{checked_count, checked_sum, reconcile_report, reconcile_summary, validate_rows},
-    ContextProxySummary, DurationSummary, OperationSummary, ProBlameSummary, ProBlameTargetSummary,
-    ResultActionSummary, UsageDetails, UsageSummary, CONTEXT_CITED_COVERAGE_UNSUPPORTED,
+    DurationSummary, OperationSummary, ProBlameSummary, ProBlameTargetSummary, UsageDefinition,
+    UsageSummary,
 };
 
 pub(super) fn query_report(
     conn: &mut Connection,
-    detailed: bool,
-) -> Result<(UsageSummary, Option<UsageDetails>), UsageStoreError> {
+    _detailed: bool,
+) -> Result<(Vec<UsageDefinition>, EstimateFacts), UsageStoreError> {
     let transaction = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
-    verify_report_dates(&transaction, SystemTime::now())?;
-    validate_rows(&transaction)?;
-    let raw = transaction.query_row(
+    super::super::store::verify_report_dates(&transaction, std::time::SystemTime::now())?;
+    let versions = {
+        let mut statement = transaction.prepare(
+            "SELECT DISTINCT definition_version FROM daily_usage ORDER BY definition_version",
+        )?;
+        let values = statement
+            .query_map([], |row| row.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        values
+    };
+    let mut definitions = Vec::with_capacity(versions.len());
+    let mut estimate_facts = EstimateFacts::default();
+    for definition_version in versions {
+        let definition = query_definition(&transaction, definition_version)?;
+        if definition_version == DEFINITION_VERSION {
+            estimate_facts = EstimateFacts {
+                complete_calls: definition.summary.complete_context_eligible_calls,
+                unavailable_calls: definition.summary.unavailable_context_eligible_calls,
+                delivered_context_bytes: definition.summary.delivered_context_bytes,
+                matched_normalized_session_bytes: definition
+                    .summary
+                    .matched_normalized_session_bytes,
+            };
+        }
+        definitions.push(definition);
+    }
+    transaction.commit()?;
+    Ok((definitions, estimate_facts))
+}
+
+fn query_definition(
+    conn: &Transaction<'_>,
+    definition_version: i64,
+) -> Result<UsageDefinition, UsageStoreError> {
+    let (first_day_utc, last_day_utc, active_days) = conn.query_row(
+        r#"
+        SELECT MIN(day_utc), MAX(day_utc), COUNT(DISTINCT day_utc)
+        FROM daily_usage
+        WHERE definition_version = ?1
+        "#,
+        [definition_version],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        },
+    )?;
+    let ctx_versions = {
+        let mut statement = conn.prepare(
+            r#"
+            SELECT DISTINCT ctx_version
+            FROM daily_usage
+            WHERE definition_version = ?1
+            ORDER BY ctx_version
+            "#,
+        )?;
+        let values = statement
+            .query_map([definition_version], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        values
+    };
+    let raw = conn.query_row(
         r#"
         SELECT
-            MIN(day_utc),
-            MAX(day_utc),
-            COUNT(DISTINCT day_utc),
             COALESCE(SUM(calls), 0),
             COALESCE(SUM(CASE WHEN outcome = 'success' THEN calls ELSE 0 END), 0),
             COALESCE(SUM(CASE WHEN outcome = 'failure' THEN calls ELSE 0 END), 0),
@@ -32,29 +86,19 @@ pub(super) fn query_report(
             COALESCE(SUM(CASE WHEN value_class = 'not_applicable' THEN calls ELSE 0 END), 0),
             COALESCE(SUM(result_count), 0),
             COALESCE(SUM(citation_count), 0),
-            COALESCE(SUM(response_bytes), 0),
-            COALESCE(SUM(response_byte_samples), 0),
-            COALESCE(SUM(output_bytes), 0),
-            COALESCE(SUM(output_byte_samples), 0),
-            COALESCE(SUM(latency_ms), 0),
-            COALESCE(SUM(latency_samples), 0),
-            COALESCE(SUM(context_bytes), 0),
-            COALESCE(SUM(context_byte_samples), 0),
-            COALESCE(SUM(search_result_bytes), 0),
-            COALESCE(SUM(search_result_byte_samples), 0),
-            COALESCE(SUM(context_searches), 0),
-            COALESCE(SUM(context_found), 0),
-            COALESCE(SUM(context_opened), 0),
-            COALESCE(SUM(context_cited), 0),
-            COALESCE(SUM(validated_discoveries), 0)
+            COALESCE(SUM(delivered_output_bytes), 0),
+            COALESCE(SUM(delivered_context_bytes), 0),
+            COALESCE(SUM(matched_normalized_session_bytes), 0),
+            COALESCE(SUM(CASE WHEN context_coverage = 'complete' THEN calls ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN context_coverage = 'unavailable' THEN calls ELSE 0 END), 0)
         FROM daily_usage
         WHERE definition_version = ?1
         "#,
-        [DEFINITION_VERSION],
+        [definition_version],
         |row| {
             Ok((
-                row.get::<_, Option<String>>(0)?,
-                row.get::<_, Option<String>>(1)?,
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
                 row.get::<_, i64>(2)?,
                 row.get::<_, i64>(3)?,
                 row.get::<_, i64>(4)?,
@@ -66,103 +110,81 @@ pub(super) fn query_report(
                 row.get::<_, i64>(10)?,
                 row.get::<_, i64>(11)?,
                 row.get::<_, i64>(12)?,
-                row.get::<_, i64>(13)?,
-                row.get::<_, i64>(14)?,
-                row.get::<_, i64>(15)?,
-                row.get::<_, i64>(16)?,
-                row.get::<_, i64>(17)?,
-                row.get::<_, i64>(18)?,
-                row.get::<_, i64>(19)?,
-                row.get::<_, i64>(20)?,
-                row.get::<_, i64>(21)?,
-                row.get::<_, i64>(22)?,
-                row.get::<_, i64>(23)?,
-                row.get::<_, i64>(24)?,
-                row.get::<_, i64>(25)?,
             ))
         },
     )?;
-    let mut summary = UsageSummary {
-        first_day_utc: raw.0,
-        last_day_utc: raw.1,
-        active_days: checked_count(raw.2)?,
-        ctx_versions: Vec::new(),
-        calls: checked_count(raw.3)?,
-        successful_calls: checked_count(raw.4)?,
-        failed_calls: checked_count(raw.5)?,
-        result_bearing_calls: checked_count(raw.6)?,
-        empty_calls: checked_count(raw.7)?,
-        not_applicable_calls: checked_count(raw.8)?,
-        result_count: checked_count(raw.9)?,
-        citation_count: checked_count(raw.10)?,
-        mcp_response_bytes: checked_count(raw.11)?,
-        mcp_response_byte_samples: checked_count(raw.12)?,
-        cli_output_bytes: checked_count(raw.13)?,
-        cli_output_byte_samples: checked_count(raw.14)?,
-        measured_latency_ms: checked_count(raw.15)?,
-        measured_latency_samples: checked_count(raw.16)?,
-        semantic_context_bytes: checked_count(raw.17)?,
-        semantic_context_byte_samples: checked_count(raw.18)?,
-        semantic_search_result_bytes: checked_count(raw.19)?,
-        semantic_search_result_byte_samples: checked_count(raw.20)?,
-        context: ContextProxySummary {
-            context_searches: checked_count(raw.21)?,
-            context_found: checked_count(raw.22)?,
-            context_opened: checked_count(raw.23)?,
-            context_cited: checked_count(raw.24)?,
-            context_cited_coverage: CONTEXT_CITED_COVERAGE_UNSUPPORTED,
-            validated_discoveries: checked_count(raw.25)?,
-        },
-        result_actions: ResultActionSummary::default(),
-        pro_blame: ProBlameSummary::default(),
+    let summary = UsageSummary {
+        calls: checked_count(raw.0)?,
+        successful_calls: checked_count(raw.1)?,
+        failed_calls: checked_count(raw.2)?,
+        result_bearing_calls: checked_count(raw.3)?,
+        empty_calls: checked_count(raw.4)?,
+        not_applicable_calls: checked_count(raw.5)?,
+        result_count: checked_count(raw.6)?,
+        citation_count: checked_count(raw.7)?,
+        delivered_output_bytes: checked_count(raw.8)?,
+        delivered_context_bytes: checked_count(raw.9)?,
+        matched_normalized_session_bytes: checked_count(raw.10)?,
+        complete_context_eligible_calls: checked_count(raw.11)?,
+        unavailable_context_eligible_calls: checked_count(raw.12)?,
+        pro_blame: query_pro_blame(conn, definition_version)?,
     };
-    let mut version_statement = transaction.prepare(
-        "SELECT DISTINCT ctx_version FROM daily_usage \
-         WHERE definition_version = ?1 ORDER BY ctx_version",
-    )?;
-    summary.ctx_versions = version_statement
-        .query_map([DEFINITION_VERSION], |row| row.get(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    summary.pro_blame = query_pro_blame(&transaction)?;
-    summary.result_actions = query_result_actions(&transaction)?;
-    reconcile_summary(&summary)?;
-    let all_details = query_details(&transaction)?;
-    reconcile_report(&summary, &all_details)?;
-    drop(version_statement);
-    transaction.commit()?;
-    Ok((summary, detailed.then_some(all_details)))
+    let by_operation = query_operations(conn, definition_version)?;
+    let duration_buckets = query_durations(conn, definition_version)?;
+    let definition = UsageDefinition {
+        definition_version,
+        ctx_versions,
+        first_day_utc,
+        last_day_utc,
+        active_days: checked_count(active_days)?,
+        summary,
+        by_operation,
+        duration_buckets,
+    };
+    reconcile_definition(&definition)?;
+    Ok(definition)
 }
 
-fn query_pro_blame(conn: &Connection) -> Result<ProBlameSummary, UsageStoreError> {
-    let mut result = conn.query_row(
+fn query_pro_blame(
+    conn: &Transaction<'_>,
+    definition_version: i64,
+) -> Result<ProBlameSummary, UsageStoreError> {
+    let raw = conn.query_row(
         r#"
         SELECT
             COALESCE(SUM(calls), 0),
-            COALESCE(SUM(CASE
-                WHEN result_action = 'blame' THEN citation_count ELSE 0 END
-            ), 0),
             COALESCE(SUM(CASE WHEN pro_outcome = 'produced' THEN calls ELSE 0 END), 0),
             COALESCE(SUM(CASE WHEN pro_outcome = 'possible' THEN calls ELSE 0 END), 0),
             COALESCE(SUM(CASE WHEN pro_outcome = 'none' THEN calls ELSE 0 END), 0),
             COALESCE(SUM(CASE WHEN pro_outcome = 'error' THEN calls ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN target_type = 'not_applicable' THEN calls ELSE 0 END), 0)
+            COALESCE(SUM(CASE
+                WHEN target_type = 'not_applicable' AND pro_outcome = 'error'
+                THEN calls ELSE 0 END
+            ), 0)
         FROM daily_usage
         WHERE definition_version = ?1 AND operation = 'blame'
         "#,
-        [DEFINITION_VERSION],
+        [definition_version],
         |row| {
-            Ok(ProBlameSummary {
-                requests: row.get(0)?,
-                citation_count: row.get(1)?,
-                produced_attribution_requests: row.get(2)?,
-                possible_or_reference_only_requests: row.get(3)?,
-                no_confident_attribution_requests: row.get(4)?,
-                error_requests: row.get(5)?,
-                by_target: Vec::new(),
-                unclassified_target_errors: row.get(6)?,
-            })
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
         },
     )?;
+    let mut result = ProBlameSummary {
+        requests: checked_count(raw.0)?,
+        produced_attribution_requests: checked_count(raw.1)?,
+        possible_only_requests: checked_count(raw.2)?,
+        none_requests: checked_count(raw.3)?,
+        error_requests: checked_count(raw.4)?,
+        by_target: Vec::new(),
+        not_applicable_target_errors: checked_count(raw.5)?,
+    };
     let mut statement = conn.prepare(
         r#"
         SELECT
@@ -178,15 +200,15 @@ fn query_pro_blame(conn: &Connection) -> Result<ProBlameSummary, UsageStoreError
           AND target_type IN ('file', 'commit', 'pull_request')
         GROUP BY target_type
         ORDER BY CASE target_type
-            WHEN 'file' THEN 1 WHEN 'commit' THEN 2 WHEN 'pull_request' THEN 3 ELSE 4 END
+            WHEN 'file' THEN 1 WHEN 'commit' THEN 2 ELSE 3 END
         "#,
     )?;
-    let rows = statement.query_map([DEFINITION_VERSION], |row| {
+    let rows = statement.query_map([definition_version], |row| {
         Ok(ProBlameTargetSummary {
             target_type: row.get(0)?,
             requests: row.get(1)?,
             produced: row.get(2)?,
-            possible_or_reference_only: row.get(3)?,
+            possible: row.get(3)?,
             none: row.get(4)?,
             error: row.get(5)?,
         })
@@ -197,98 +219,31 @@ fn query_pro_blame(conn: &Connection) -> Result<ProBlameSummary, UsageStoreError
     Ok(result)
 }
 
-fn query_result_actions(conn: &Connection) -> Result<ResultActionSummary, UsageStoreError> {
-    let raw = conn.query_row(
-        r#"
-        SELECT
-            COALESCE(SUM(CASE WHEN result_action = 'search' THEN calls ELSE 0 END), 0),
-            COALESCE(SUM(CASE
-                WHEN result_action = 'search' AND value_class = 'result_bearing'
-                THEN calls ELSE 0 END
-            ), 0),
-            COALESCE(SUM(CASE WHEN result_action = 'open_session' THEN calls ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN result_action = 'open_event' THEN calls ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN result_action = 'locate' THEN calls ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN result_action = 'locate' THEN result_count ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN result_action = 'sources' THEN calls ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN result_action = 'sql' THEN calls ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN result_action = 'blame' THEN calls ELSE 0 END), 0)
-        FROM daily_usage
-        WHERE definition_version = ?1
-        "#,
-        [DEFINITION_VERSION],
-        |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, i64>(5)?,
-                row.get::<_, i64>(6)?,
-                row.get::<_, i64>(7)?,
-                row.get::<_, i64>(8)?,
-            ))
-        },
-    )?;
-    Ok(ResultActionSummary {
-        searches: checked_count(raw.0)?,
-        result_bearing_searches: checked_count(raw.1)?,
-        sessions_opened: checked_count(raw.2)?,
-        events_opened: checked_count(raw.3)?,
-        locate_requests: checked_count(raw.4)?,
-        records_located: checked_count(raw.5)?,
-        sources_requests: checked_count(raw.6)?,
-        sql_requests: checked_count(raw.7)?,
-        blame_requests: checked_count(raw.8)?,
-    })
-}
-
-pub(super) fn estimate_facts(summary: &UsageSummary) -> Result<EstimateFacts, UsageStoreError> {
-    let actions = &summary.result_actions;
-    let semantic_context_eligible_samples = checked_sum([
-        actions.searches,
-        actions.sessions_opened,
-        actions.events_opened,
-        actions.locate_requests,
-        actions.sources_requests,
-        actions.sql_requests,
-        actions.blame_requests,
-    ])?;
-    Ok(EstimateFacts {
-        result_bearing_searches: actions.result_bearing_searches,
-        semantic_context_eligible_samples,
-        semantic_context_bytes: summary.semantic_context_bytes,
-        semantic_context_byte_samples: summary.semantic_context_byte_samples,
-        semantic_search_result_bytes: summary.semantic_search_result_bytes,
-        semantic_search_result_byte_samples: summary.semantic_search_result_byte_samples,
-        discovered_record_opens: summary.context.context_opened,
-        produced_blame_requests: summary.pro_blame.produced_attribution_requests,
-        possible_blame_requests: summary.pro_blame.possible_or_reference_only_requests,
-    })
-}
-
-fn query_details(conn: &Connection) -> Result<UsageDetails, UsageStoreError> {
-    let mut by_operation = Vec::new();
+fn query_operations(
+    conn: &Transaction<'_>,
+    definition_version: i64,
+) -> Result<Vec<OperationSummary>, UsageStoreError> {
     let mut statement = conn.prepare(
         r#"
         SELECT
-            ctx_version,
-            surface,
-            operation,
+            ctx_version, surface, operation,
             SUM(calls),
             SUM(CASE WHEN outcome = 'success' THEN calls ELSE 0 END),
             SUM(CASE WHEN outcome = 'failure' THEN calls ELSE 0 END),
             SUM(CASE WHEN value_class = 'result_bearing' THEN calls ELSE 0 END),
             SUM(CASE WHEN value_class = 'empty' THEN calls ELSE 0 END),
-            SUM(CASE WHEN value_class = 'not_applicable' THEN calls ELSE 0 END)
+            SUM(CASE WHEN value_class = 'not_applicable' THEN calls ELSE 0 END),
+            SUM(result_count), SUM(citation_count), SUM(delivered_output_bytes),
+            SUM(delivered_context_bytes), SUM(matched_normalized_session_bytes),
+            SUM(CASE WHEN context_coverage = 'complete' THEN calls ELSE 0 END),
+            SUM(CASE WHEN context_coverage = 'unavailable' THEN calls ELSE 0 END)
         FROM daily_usage
         WHERE definition_version = ?1
         GROUP BY ctx_version, surface, operation
         ORDER BY ctx_version, surface, operation
         "#,
     )?;
-    let rows = statement.query_map([DEFINITION_VERSION], |row| {
+    let rows = statement.query_map([definition_version], |row| {
         Ok(OperationSummary {
             ctx_version: row.get(0)?,
             surface: row.get(1)?,
@@ -299,13 +254,23 @@ fn query_details(conn: &Connection) -> Result<UsageDetails, UsageStoreError> {
             result_bearing_calls: row.get(6)?,
             empty_calls: row.get(7)?,
             not_applicable_calls: row.get(8)?,
+            result_count: row.get(9)?,
+            citation_count: row.get(10)?,
+            delivered_output_bytes: row.get(11)?,
+            delivered_context_bytes: row.get(12)?,
+            matched_normalized_session_bytes: row.get(13)?,
+            complete_context_eligible_calls: row.get(14)?,
+            unavailable_context_eligible_calls: row.get(15)?,
         })
     })?;
-    for row in rows {
-        by_operation.push(row?);
-    }
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(UsageStoreError::from)
+}
 
-    let mut duration_buckets = Vec::new();
+fn query_durations(
+    conn: &Transaction<'_>,
+    definition_version: i64,
+) -> Result<Vec<DurationSummary>, UsageStoreError> {
     let mut statement = conn.prepare(
         r#"
         SELECT duration_bucket, SUM(calls)
@@ -318,17 +283,12 @@ fn query_details(conn: &Connection) -> Result<UsageDetails, UsageStoreError> {
             WHEN '1_to_4_s' THEN 5 WHEN '5_to_29_s' THEN 6 ELSE 7 END
         "#,
     )?;
-    let rows = statement.query_map([DEFINITION_VERSION], |row| {
+    let rows = statement.query_map([definition_version], |row| {
         Ok(DurationSummary {
             duration_bucket: row.get(0)?,
             calls: row.get(1)?,
         })
     })?;
-    for row in rows {
-        duration_buckets.push(row?);
-    }
-    Ok(UsageDetails {
-        by_operation,
-        duration_buckets,
-    })
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(UsageStoreError::from)
 }
