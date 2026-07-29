@@ -448,7 +448,6 @@ mod native {
 
     #[cfg(target_os = "linux")]
     #[test]
-    #[ignore = "blocked: non-upgrade install-lock contention is misclassified as installation_upgrade_active and suppresses dead-daemon recovery"]
     fn concurrent_dead_daemon_triggers_all_join_the_replacement_owner() {
         let _serial = TEST_SERIAL
             .lock()
