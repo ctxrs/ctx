@@ -10,8 +10,8 @@ mod query;
 
 pub use query::{
     AgentScope, EventRecord, EventSearchCandidate, EventSearchFilters, ExcludedSessionTree,
-    SemanticEligibility, SemanticEventCursor, SemanticEventPage, SessionRecord,
-    MAX_SEMANTIC_EVENT_PAGE_ITEMS,
+    SemanticEligibility, SemanticEventCursor, SemanticEventPage, SessionRecord, SourceEventCursor,
+    SourceEventPage, MAX_SEMANTIC_EVENT_PAGE_ITEMS, MAX_SOURCE_EVENT_PAGE_ITEMS,
 };
 
 use std::{
@@ -22,9 +22,9 @@ use std::{
 };
 
 use ctx_history_core::{
-    CertifiedSource, CertifiedSourceAppend, CertifiedSourceDeletion, ProjectionContractError,
-    SourceKey, SourceRecordLocator, SourceResolverContractError, StableEntityId, StableEntityKind,
-    IDENTITY_VERSION,
+    CertifiedSource, CertifiedSourceAppend, CertifiedSourceDeletion, CertifiedSourceInventory,
+    ProjectionContractError, SourceKey, SourceRecordLocator, SourceResolverContractError,
+    StableEntityId, StableEntityKind, IDENTITY_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -43,7 +43,7 @@ use uuid::Uuid;
 
 use durable_directory::{reclaim_abandoned_atomic_writes, DurableMmapDirectory};
 
-pub const GENERATION_MANIFEST_VERSION: u32 = 1;
+pub const GENERATION_MANIFEST_VERSION: u32 = 2;
 pub const LEXICAL_SCHEMA_VERSION: u32 = 4;
 pub const LEXICAL_ANALYZER_VERSION: u32 = 1;
 pub const MAX_BODY_PREVIEW_CHARS: usize = 2_048;
@@ -98,6 +98,12 @@ pub enum IndexError {
     NonCanonicalManifest,
     #[error("generation manifest sources are not strictly sorted and unique")]
     NonCanonicalManifestSources,
+    #[error("generation manifest removals are not strictly sorted and unique")]
+    NonCanonicalManifestRemovals,
+    #[error("generation manifest retains and removes source {0}")]
+    ManifestSourceRemovalOverlap(String),
+    #[error("certified removal for source {0} does not match its complete inventory")]
+    InvalidGenerationRemoval(String),
     #[error(
         "generation manifest totals do not match its source certificates: \
          documents {documents}/{expected_documents}, bytes {bytes}/{expected_bytes}"
@@ -156,6 +162,24 @@ pub enum IndexError {
         "semantic event page size must be between 1 and {maximum} items, requested {requested}"
     )]
     InvalidSemanticEventPageSize { requested: usize, maximum: usize },
+    #[error("source event page size must be between 1 and {maximum} items, requested {requested}")]
+    InvalidSourceEventPageSize { requested: usize, maximum: usize },
+    #[error("source {0} is not retained by the pinned generation")]
+    SourceEventSourceNotRetained(String),
+    #[error("source {0} has a different descriptor in the pinned generation")]
+    SourceEventSourceDescriptorMismatch(String),
+    #[error(
+        "source event cursor belongs to generation {cursor_generation}, \
+         not pinned generation {pinned_generation}"
+    )]
+    SourceEventCursorGenerationMismatch {
+        cursor_generation: String,
+        pinned_generation: String,
+    },
+    #[error("source event cursor belongs to a different exact source")]
+    SourceEventCursorSourceMismatch,
+    #[error("source event cursor does not contain a valid event identity for its exact source")]
+    InvalidSourceEventCursorIdentity,
     #[error(
         "semantic event cursor belongs to generation {cursor_generation}, \
          not pinned generation {pinned_generation}"
@@ -314,6 +338,51 @@ impl LexicalDocument {
     }
 }
 
+/// Metadata-only proof that one source lineage was authoritatively absent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GenerationRemoval {
+    deletion: CertifiedSourceDeletion,
+    inventory: CertifiedSourceInventory,
+}
+
+impl GenerationRemoval {
+    pub fn new(
+        deletion: CertifiedSourceDeletion,
+        inventory: CertifiedSourceInventory,
+    ) -> Result<Self> {
+        let removal = Self {
+            deletion,
+            inventory,
+        };
+        removal.validate_contract()?;
+        Ok(removal)
+    }
+
+    pub fn deletion(&self) -> &CertifiedSourceDeletion {
+        &self.deletion
+    }
+
+    pub fn inventory(&self) -> &CertifiedSourceInventory {
+        &self.inventory
+    }
+
+    pub fn source(&self) -> &SourceKey {
+        self.deletion.source()
+    }
+
+    fn validate_contract(&self) -> Result<()> {
+        self.deletion.validate_contract()?;
+        self.inventory.validate_contract()?;
+        if !self.deletion.verifies(&self.inventory) {
+            return Err(IndexError::InvalidGenerationRemoval(
+                self.deletion.source().identity().to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenerationManifest {
     pub manifest_version: u32,
@@ -323,10 +392,19 @@ pub struct GenerationManifest {
     pub indexed_documents: u64,
     pub certified_source_bytes: u64,
     pub sources: Vec<CertifiedSource>,
+    pub removals: Vec<GenerationRemoval>,
 }
 
 impl GenerationManifest {
-    fn from_sources(mut sources: Vec<CertifiedSource>) -> Result<Self> {
+    #[cfg(test)]
+    fn from_sources(sources: Vec<CertifiedSource>) -> Result<Self> {
+        Self::from_parts(sources, Vec::new())
+    }
+
+    fn from_parts(
+        mut sources: Vec<CertifiedSource>,
+        mut removals: Vec<GenerationRemoval>,
+    ) -> Result<Self> {
         sources.sort_by(|left, right| {
             source_sort_key(left.observation().source())
                 .cmp(&source_sort_key(right.observation().source()))
@@ -336,6 +414,15 @@ impl GenerationManifest {
                 >= source_sort_key(pair[1].observation().source())
         }) {
             return Err(IndexError::NonCanonicalManifestSources);
+        }
+        removals.sort_by(|left, right| {
+            source_sort_key(left.source()).cmp(&source_sort_key(right.source()))
+        });
+        if removals
+            .windows(2)
+            .any(|pair| source_sort_key(pair[0].source()) >= source_sort_key(pair[1].source()))
+        {
+            return Err(IndexError::NonCanonicalManifestRemovals);
         }
         let mut indexed_documents = 0_u64;
         let mut certified_source_bytes = 0_u64;
@@ -355,6 +442,7 @@ impl GenerationManifest {
             indexed_documents,
             certified_source_bytes,
             sources,
+            removals,
         };
         manifest.validate_contract()?;
         Ok(manifest)
@@ -370,6 +458,34 @@ impl GenerationManifest {
                 >= source_sort_key(pair[1].observation().source())
         }) {
             return Err(IndexError::NonCanonicalManifestSources);
+        }
+        if self
+            .removals
+            .windows(2)
+            .any(|pair| source_sort_key(pair[0].source()) >= source_sort_key(pair[1].source()))
+        {
+            return Err(IndexError::NonCanonicalManifestRemovals);
+        }
+        let mut source_index = 0;
+        for removal in &self.removals {
+            removal.validate_contract()?;
+            let removal_key = source_sort_key(removal.source());
+            while self
+                .sources
+                .get(source_index)
+                .is_some_and(|source| source_sort_key(source.observation().source()) < removal_key)
+            {
+                source_index += 1;
+            }
+            if self
+                .sources
+                .get(source_index)
+                .is_some_and(|source| source_sort_key(source.observation().source()) == removal_key)
+            {
+                return Err(IndexError::ManifestSourceRemovalOverlap(
+                    removal.source().identity().to_string(),
+                ));
+            }
         }
         let mut expected_documents = 0_u64;
         let mut expected_bytes = 0_u64;
@@ -472,7 +588,7 @@ pub struct GenerationWriter {
     base_manifest: Option<GenerationManifest>,
     base_searcher: Option<Searcher>,
     pending: HashMap<String, PendingSource>,
-    deletions: HashMap<SourceKey, CertifiedSourceDeletion>,
+    deletions: HashMap<SourceKey, GenerationRemoval>,
     source_identities: HashMap<Uuid, [u8; 32]>,
     checked_base_sessions: HashSet<Uuid>,
     staged_event_identities: HashMap<Uuid, [u8; 32]>,
@@ -559,6 +675,14 @@ impl GenerationWriter {
                 register_compact_identity(
                     &mut source_identities,
                     source.observation().source().identity(),
+                    "source",
+                    false,
+                )?;
+            }
+            for removal in &manifest.removals {
+                register_compact_identity(
+                    &mut source_identities,
+                    removal.source().identity(),
                     "source",
                     false,
                 )?;
@@ -913,15 +1037,26 @@ impl GenerationWriter {
         Ok(())
     }
 
-    pub fn delete_source(&mut self, proof: CertifiedSourceDeletion) -> Result<()> {
-        let source = proof.source();
+    pub fn delete_source(
+        &mut self,
+        proof: CertifiedSourceDeletion,
+        inventory: CertifiedSourceInventory,
+    ) -> Result<()> {
+        let removal = GenerationRemoval::new(proof, inventory)?;
+        let source = removal.source();
+        register_compact_identity(
+            &mut self.source_identities,
+            source.identity(),
+            "source",
+            false,
+        )?;
         let token = source_token(source);
         if self.pending.contains_key(&token) {
             return Err(IndexError::DuplicateSource(source.identity().to_string()));
         }
         self.writer
             .delete_term(Term::from_field_text(self.fields.source_key, &token));
-        self.deletions.insert(source.clone(), proof);
+        self.deletions.insert(source.clone(), removal);
         Ok(())
     }
 
@@ -959,9 +1094,9 @@ impl GenerationWriter {
                 return Err(IndexError::SourceInvalidated(source));
             }
         }
-        for deletion in self.deletions.values() {
-            if !revalidate(RevalidationTarget::Deletion(deletion)) {
-                let source = deletion.source().identity().to_string();
+        for removal in self.deletions.values() {
+            if !revalidate(RevalidationTarget::Deletion(removal.deletion())) {
+                let source = removal.source().identity().to_string();
                 prepared.abort()?;
                 return Err(IndexError::SourceInvalidated(source));
             }
@@ -1033,21 +1168,30 @@ impl GenerationWriter {
 
     fn next_manifest(&self) -> Result<GenerationManifest> {
         let mut sources = HashMap::<SourceKey, CertifiedSource>::new();
+        let mut removals = HashMap::<SourceKey, GenerationRemoval>::new();
         if let Some(base) = &self.base_manifest {
             for source in &base.sources {
                 sources.insert(source.observation().source().clone(), source.clone());
             }
+            for removal in &base.removals {
+                removals.insert(removal.source().clone(), removal.clone());
+            }
         }
-        for source in self.deletions.keys() {
+        for (source, removal) in &self.deletions {
             sources.remove(source);
+            removals.insert(source.clone(), removal.clone());
         }
         for pending in self.pending.values() {
             let certificate = pending.certificate.as_ref().ok_or_else(|| {
                 IndexError::SourceNotCertified(pending.source.identity().to_string())
             })?;
             sources.insert(pending.source.clone(), certificate.clone());
+            removals.remove(&pending.source);
         }
-        GenerationManifest::from_sources(sources.into_values().collect())
+        GenerationManifest::from_parts(
+            sources.into_values().collect(),
+            removals.into_values().collect(),
+        )
     }
 }
 
@@ -1774,7 +1918,10 @@ mod tests {
         ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceFrontier,
         SourceInventoryObservation, SourceObservation, TypedKey,
     };
-    use tantivy::{collector::DocSetCollector, query::AllQuery, schema::Value as TantivyValue};
+    use tantivy::{
+        collector::DocSetCollector, indexer::NoMergePolicy, query::AllQuery,
+        schema::Value as TantivyValue,
+    };
     use tempfile::tempdir;
 
     use super::*;
@@ -1846,7 +1993,10 @@ mod tests {
         .unwrap()
     }
 
-    fn deletion(source: &SourceKey, revision: u8) -> CertifiedSourceDeletion {
+    fn deletion_evidence(
+        source: &SourceKey,
+        revision: u8,
+    ) -> (CertifiedSourceDeletion, CertifiedSourceInventory) {
         let inventory = SourceInventoryObservation::new(
             source.provider(),
             "provider-root",
@@ -1858,7 +2008,8 @@ mod tests {
         let inventory =
             CertifiedSourceInventory::certify(inventory.clone(), inventory, "discovery-v1", vec![])
                 .unwrap();
-        CertifiedSourceDeletion::from_inventory(source.clone(), &inventory).unwrap()
+        let deletion = CertifiedSourceDeletion::from_inventory(source.clone(), &inventory).unwrap();
+        (deletion, inventory)
     }
 
     fn document(source: &SourceKey, sequence: u64, body: &str) -> LexicalDocument {
@@ -1943,6 +2094,26 @@ mod tests {
     fn sorted_uuids(mut ids: Vec<Uuid>) -> Vec<Uuid> {
         ids.sort();
         ids
+    }
+
+    fn collect_source_pages(
+        index: &VerifiedIndex,
+        source: &SourceKey,
+        limit: usize,
+    ) -> Vec<EventRecord> {
+        let mut cursor = None;
+        let mut records = Vec::new();
+        loop {
+            let page = index
+                .source_event_page(source, cursor.as_ref(), limit)
+                .unwrap();
+            records.extend(page.items);
+            if page.terminal {
+                assert!(page.next_cursor.is_none());
+                return records;
+            }
+            cursor = Some(page.next_cursor.unwrap());
+        }
     }
 
     fn publish_unchecked_generation(
@@ -2184,6 +2355,231 @@ mod tests {
     }
 
     #[test]
+    fn source_event_pages_order_across_segments_isolate_and_do_not_duplicate() {
+        let temp = tempdir().unwrap();
+        let target = source("paged-source.jsonl");
+        let other = source("other-source.jsonl");
+        let target_first = document(&target, 1, "target first");
+        let target_second = document(&target, 2, "target second");
+        let target_third = document(&target, 3, "target third");
+        let target_fourth = document(&target, 4, "target fourth");
+        let other_first = document(&other, 1, "other first");
+        let other_second = document(&other, 2, "other second");
+
+        let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        first
+            .writer
+            .set_merge_policy(Box::<NoMergePolicy>::default());
+        first.begin_source(target.clone()).unwrap();
+        first.add_document(target_fourth.clone()).unwrap();
+        first.add_document(target_first.clone()).unwrap();
+        first
+            .certify_source(appendable_certificate(&target, 1, 2, 20))
+            .unwrap();
+        first.begin_source(other.clone()).unwrap();
+        first.add_document(other_second.clone()).unwrap();
+        first.add_document(other_first.clone()).unwrap();
+        first.certify_source(certificate(&other, 1, 2)).unwrap();
+        first.commit(|_| true).unwrap();
+
+        let mut append = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        append
+            .writer
+            .set_merge_policy(Box::<NoMergePolicy>::default());
+        let base = append.begin_source_append(target.clone()).unwrap().clone();
+        append.add_document(target_third.clone()).unwrap();
+        append.add_document(target_second.clone()).unwrap();
+        let proof = CertifiedSourceAppend::certify(
+            &base,
+            appendable_certificate(&target, 2, 4, 40),
+            20,
+            [1; 32],
+        )
+        .unwrap();
+        append.certify_source_append(proof).unwrap();
+        append.commit(|_| true).unwrap();
+
+        let index = VerifiedIndex::open(temp.path()).unwrap();
+        assert!(
+            index.searcher.segment_readers().len() >= 2,
+            "test requires a multi-segment generation"
+        );
+        let mut expected = vec![
+            target_first.event_id,
+            target_second.event_id,
+            target_third.event_id,
+            target_fourth.event_id,
+        ];
+        expected.sort_by_key(|identity| identity.encode_canonical().unwrap());
+
+        let first_page = index.source_event_page(&target, None, 2).unwrap();
+        assert_eq!(first_page.generation_id, index.generation_id());
+        assert!(first_page.source.exact_descriptor_eq(&target));
+        assert!(!first_page.terminal);
+        assert_eq!(
+            first_page
+                .items
+                .iter()
+                .map(|event| event.event_id)
+                .collect::<Vec<_>>(),
+            expected[..2]
+        );
+        assert!(first_page
+            .items
+            .iter()
+            .all(|event| event.locator.source().exact_descriptor_eq(&target)));
+
+        let serialized = serde_json::to_vec(first_page.next_cursor.as_ref().unwrap()).unwrap();
+        let cursor: SourceEventCursor = serde_json::from_slice(&serialized).unwrap();
+        assert_eq!(cursor.generation_id(), index.generation_id());
+        assert!(cursor.source().exact_descriptor_eq(&target));
+        assert_eq!(cursor.after(), expected[1]);
+        let final_page = index.source_event_page(&target, Some(&cursor), 2).unwrap();
+        assert!(final_page.terminal);
+        assert!(final_page.next_cursor.is_none());
+        assert_eq!(
+            final_page
+                .items
+                .iter()
+                .map(|event| event.event_id)
+                .collect::<Vec<_>>(),
+            expected[2..]
+        );
+
+        let all = collect_source_pages(&index, &target, 1);
+        assert_eq!(
+            all.iter().map(|event| event.event_id).collect::<Vec<_>>(),
+            expected
+        );
+        let unique = all
+            .iter()
+            .map(|event| event.event_id)
+            .collect::<HashSet<_>>();
+        assert_eq!(unique.len(), expected.len());
+        assert!(all
+            .iter()
+            .all(|event| event.locator.source().exact_descriptor_eq(&target)));
+
+        let other_page = index.source_event_page(&other, None, 10).unwrap();
+        let mut expected_other = vec![other_first.event_id, other_second.event_id];
+        expected_other.sort_by_key(|identity| identity.encode_canonical().unwrap());
+        assert_eq!(
+            other_page
+                .items
+                .iter()
+                .map(|event| event.event_id)
+                .collect::<Vec<_>>(),
+            expected_other
+        );
+        assert!(matches!(
+            index.source_event_page(&other, Some(&cursor), 1),
+            Err(IndexError::SourceEventCursorSourceMismatch)
+        ));
+        let invalid_identity =
+            SourceEventCursor::new(index.generation_id(), target.clone(), other_first.event_id);
+        assert!(matches!(
+            index.source_event_page(&target, Some(&invalid_identity), 1),
+            Err(IndexError::InvalidSourceEventCursorIdentity)
+        ));
+    }
+
+    #[test]
+    fn source_event_pages_bind_generation_descriptor_and_bounds() {
+        assert!(MAX_SOURCE_EVENT_PAGE_ITEMS <= 4_096);
+        let temp = tempdir().unwrap();
+        let source = source("rewrite-delete-pages.jsonl");
+        let old_first = document(&source, 1, "old first");
+        let old_second = document(&source, 2, "old second");
+        let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        first.begin_source(source.clone()).unwrap();
+        first.add_document(old_second.clone()).unwrap();
+        first.add_document(old_first.clone()).unwrap();
+        first.certify_source(certificate(&source, 1, 2)).unwrap();
+        first.commit(|_| true).unwrap();
+        let old_pin = VerifiedIndex::open(temp.path()).unwrap();
+        let old_cursor = old_pin
+            .source_event_page(&source, None, 1)
+            .unwrap()
+            .next_cursor
+            .unwrap();
+
+        assert!(matches!(
+            old_pin.source_event_page(&source, None, 0),
+            Err(IndexError::InvalidSourceEventPageSize { .. })
+        ));
+        assert!(matches!(
+            old_pin.source_event_page(&source, None, MAX_SOURCE_EVENT_PAGE_ITEMS + 1),
+            Err(IndexError::InvalidSourceEventPageSize { .. })
+        ));
+        assert!(
+            old_pin
+                .source_event_page(&source, None, MAX_SOURCE_EVENT_PAGE_ITEMS)
+                .unwrap()
+                .terminal
+        );
+
+        let mut rewritten_first = document(&source, 1, "rewritten first");
+        rewritten_first.workspace = Some("rewritten".to_owned());
+        let replacement = document(&source, 3, "replacement");
+        let mut rewriting = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        rewriting.begin_source(source.clone()).unwrap();
+        rewriting.add_document(replacement.clone()).unwrap();
+        rewriting.add_document(rewritten_first.clone()).unwrap();
+        rewriting
+            .certify_source(certificate(&source, 2, 2))
+            .unwrap();
+        rewriting.commit(|_| true).unwrap();
+        let rewritten_pin = VerifiedIndex::open(temp.path()).unwrap();
+
+        assert!(matches!(
+            rewritten_pin.source_event_page(&source, Some(&old_cursor), 1),
+            Err(IndexError::SourceEventCursorGenerationMismatch { .. })
+        ));
+        let rewritten = collect_source_pages(&rewritten_pin, &source, 1);
+        assert_eq!(rewritten.len(), 2);
+        assert!(rewritten
+            .iter()
+            .any(|event| event.preview == "rewritten first"));
+        assert!(rewritten
+            .iter()
+            .any(|event| event.event_id == replacement.event_id));
+        assert!(rewritten
+            .iter()
+            .all(|event| event.event_id != old_second.event_id));
+        let old = collect_source_pages(&old_pin, &source, 1);
+        assert_eq!(old.len(), 2);
+        assert!(old.iter().any(|event| event.preview == "old first"));
+
+        let changed_descriptor = source_for_provider(
+            "codex",
+            "codex_prompt_history_jsonl",
+            "rewrite-delete-pages.jsonl",
+        );
+        assert_eq!(changed_descriptor, source);
+        assert!(!changed_descriptor.exact_descriptor_eq(&source));
+        assert!(matches!(
+            rewritten_pin.source_event_page(&changed_descriptor, None, 1),
+            Err(IndexError::SourceEventSourceDescriptorMismatch(_))
+        ));
+
+        let (deletion, inventory) = deletion_evidence(&source, 3);
+        let mut deleting = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        deleting.delete_source(deletion, inventory).unwrap();
+        deleting.commit(|_| true).unwrap();
+        let deleted_pin = VerifiedIndex::open(temp.path()).unwrap();
+        assert!(matches!(
+            deleted_pin.source_event_page(&source, Some(&old_cursor), 1),
+            Err(IndexError::SourceEventCursorGenerationMismatch { .. })
+        ));
+        assert!(matches!(
+            deleted_pin.source_event_page(&source, None, 1),
+            Err(IndexError::SourceEventSourceNotRetained(_))
+        ));
+        assert_eq!(collect_source_pages(&old_pin, &source, 1).len(), 2);
+        assert_eq!(collect_source_pages(&rewritten_pin, &source, 1).len(), 2);
+    }
+
+    #[test]
     fn semantic_event_pages_follow_full_identity_order_and_explicit_eligibility() {
         let temp = tempdir().unwrap();
         let source = source("semantic-pages.jsonl");
@@ -2420,7 +2816,8 @@ mod tests {
 
         let mut deletion_writer =
             GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-        deletion_writer.delete_source(deletion(&source, 3)).unwrap();
+        let (deletion, inventory) = deletion_evidence(&source, 3);
+        deletion_writer.delete_source(deletion, inventory).unwrap();
         deletion_writer.commit(|_| true).unwrap();
         let deleted_pin = VerifiedIndex::open(temp.path()).unwrap();
 
@@ -2699,7 +3096,8 @@ mod tests {
         first.commit(|_| true).unwrap();
 
         let mut rejected = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-        rejected.delete_source(deletion(&source, 2)).unwrap();
+        let (deletion, inventory) = deletion_evidence(&source, 2);
+        rejected.delete_source(deletion, inventory).unwrap();
         let error = rejected
             .commit(|target| matches!(target, RevalidationTarget::Source(_)))
             .unwrap_err();
@@ -2713,11 +3111,141 @@ mod tests {
         );
 
         let mut accepted = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-        accepted.delete_source(deletion(&source, 3)).unwrap();
+        let (deletion, inventory) = deletion_evidence(&source, 3);
+        accepted.delete_source(deletion, inventory).unwrap();
         accepted.commit(|_| true).unwrap();
         let current = VerifiedIndex::open(temp.path()).unwrap();
         assert_eq!(current.count_term("retained").unwrap(), 0);
         assert!(current.manifest().sources.is_empty());
+        assert_eq!(current.manifest().removals.len(), 1);
+        assert_eq!(current.manifest().removals[0].source(), &source);
+        assert!(current.manifest().removals[0]
+            .deletion()
+            .verifies(current.manifest().removals[0].inventory()));
+    }
+
+    #[test]
+    fn generation_removals_persist_until_the_exact_lineage_returns() {
+        let temp = tempdir().unwrap();
+        let removed = source("removed.jsonl");
+        let retained = source("retained.jsonl");
+        let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        first.begin_source(removed.clone()).unwrap();
+        first
+            .add_document(document(&removed, 1, "removed body"))
+            .unwrap();
+        first.certify_source(certificate(&removed, 1, 1)).unwrap();
+        first.begin_source(retained.clone()).unwrap();
+        first
+            .add_document(document(&retained, 1, "retained body"))
+            .unwrap();
+        first.certify_source(certificate(&retained, 1, 1)).unwrap();
+        first.commit(|_| true).unwrap();
+
+        let (deletion, inventory) = deletion_evidence(&removed, 2);
+        let mut deleting = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        deleting.delete_source(deletion, inventory).unwrap();
+        let deleted_receipt = deleting.commit(|_| true).unwrap();
+        let deleted = VerifiedIndex::open(temp.path()).unwrap();
+        assert_eq!(deleted.manifest().sources.len(), 1);
+        assert_eq!(
+            deleted.manifest().sources[0].observation().source(),
+            &retained
+        );
+        assert_eq!(deleted.manifest().removals.len(), 1);
+        let durable_removal = deleted.manifest().removals[0].clone();
+        assert_eq!(durable_removal.source(), &removed);
+
+        let mut unrelated = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        unrelated.begin_source(retained.clone()).unwrap();
+        unrelated
+            .add_document(document(&retained, 2, "rewritten retained body"))
+            .unwrap();
+        unrelated
+            .certify_source(certificate(&retained, 3, 1))
+            .unwrap();
+        let unrelated_receipt = unrelated.commit(|_| true).unwrap();
+        let carried = VerifiedIndex::open(temp.path()).unwrap();
+        assert_ne!(
+            deleted_receipt.generation_id,
+            unrelated_receipt.generation_id
+        );
+        assert_eq!(carried.manifest().removals, vec![durable_removal]);
+
+        let returning = source_for_provider("codex", "codex_prompt_history_jsonl", "removed.jsonl");
+        assert_eq!(returning, removed);
+        assert!(!returning.exact_descriptor_eq(&removed));
+        let mut republishing =
+            GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        republishing.begin_source(returning.clone()).unwrap();
+        republishing
+            .add_document(document(&returning, 4, "returned body"))
+            .unwrap();
+        republishing
+            .certify_source(certificate(&returning, 4, 1))
+            .unwrap();
+        republishing.commit(|_| true).unwrap();
+
+        let returned = VerifiedIndex::open(temp.path()).unwrap();
+        assert!(returned.manifest().removals.is_empty());
+        assert!(returned.manifest().sources.iter().any(|source| source
+            .observation()
+            .source()
+            .exact_descriptor_eq(&returning)));
+    }
+
+    #[test]
+    fn generation_removal_validation_binds_inventory_order_and_membership() {
+        let first = source("first-removed.jsonl");
+        let second = source("second-removed.jsonl");
+        let (first_deletion, first_inventory) = deletion_evidence(&first, 1);
+        let (_, wrong_inventory) = deletion_evidence(&first, 2);
+        assert!(matches!(
+            GenerationRemoval::new(first_deletion.clone(), wrong_inventory),
+            Err(IndexError::InvalidGenerationRemoval(_))
+        ));
+
+        let first_removal = GenerationRemoval::new(first_deletion, first_inventory).unwrap();
+        let (second_deletion, second_inventory) = deletion_evidence(&second, 3);
+        let second_removal = GenerationRemoval::new(second_deletion, second_inventory).unwrap();
+        let canonical = GenerationManifest::from_parts(
+            Vec::new(),
+            vec![second_removal.clone(), first_removal.clone()],
+        )
+        .unwrap();
+        assert!(canonical
+            .removals
+            .windows(2)
+            .all(|pair| { source_sort_key(pair[0].source()) < source_sort_key(pair[1].source()) }));
+        assert_ne!(
+            GenerationManifest::from_sources(Vec::new())
+                .unwrap()
+                .generation_id()
+                .unwrap(),
+            canonical.generation_id().unwrap()
+        );
+
+        let mut duplicate = canonical.clone();
+        duplicate.removals.push(duplicate.removals[0].clone());
+        duplicate
+            .removals
+            .sort_by_key(|removal| source_sort_key(removal.source()));
+        assert!(matches!(
+            duplicate.validate_contract(),
+            Err(IndexError::NonCanonicalManifestRemovals)
+        ));
+
+        let mut out_of_order = canonical.clone();
+        out_of_order.removals.reverse();
+        assert!(matches!(
+            out_of_order.validate_contract(),
+            Err(IndexError::NonCanonicalManifestRemovals)
+        ));
+
+        assert!(matches!(
+            GenerationManifest::from_parts(vec![certificate(&first, 1, 0)], vec![first_removal]),
+            Err(IndexError::ManifestSourceRemovalOverlap(_))
+        ));
     }
 
     #[test]
