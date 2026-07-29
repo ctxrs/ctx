@@ -5,6 +5,7 @@ use clap::ValueEnum;
 
 use crate::analytics::SearchTelemetry;
 use crate::commands::import::ProviderRefreshCollector;
+use crate::local_usage::CliUsage;
 use crate::{config, SearchArgs};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -30,6 +31,7 @@ pub(crate) fn run_search(
     telemetry: &mut SearchTelemetry,
     _provider_refreshes: &mut ProviderRefreshCollector,
     _config: &config::AppConfig,
+    local_usage: &mut CliUsage,
 ) -> Result<()> {
-    crate::commands::source_index::run_search(args, data_root, telemetry)
+    crate::commands::source_index::run_search(args, data_root, telemetry, local_usage)
 }

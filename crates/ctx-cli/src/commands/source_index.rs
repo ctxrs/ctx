@@ -24,6 +24,7 @@ use crate::{
         ContentPolicy, CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
     },
     config,
+    local_usage::{CliUsage, ResultObservationAction},
     output::{compact_json, print_json, JsonOutputFormat, OutputFormat},
     provider_args::ProviderArg,
     search_filters::{
@@ -152,6 +153,7 @@ pub(crate) fn run_search(
     args: SearchArgs,
     data_root: PathBuf,
     telemetry: &mut SearchTelemetry,
+    local_usage: &mut CliUsage,
 ) -> Result<()> {
     let config = config::AppConfig::load(&data_root)?;
     let mut request = SourceSearchRequest::from(&args);
@@ -212,13 +214,40 @@ pub(crate) fn run_search(
     telemetry.citation_count = Some(count_bucket(collection.result_window.hits.len() as u64));
     telemetry.zero_result = Some(collection.result_window.hits.is_empty());
 
+    let results = value["results"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let result_count = results.len();
+    let citation_count = results
+        .iter()
+        .map(|result| {
+            result["citations"]
+                .as_array()
+                .map(Vec::len)
+                .unwrap_or_default()
+        })
+        .sum();
+    let content_bytes = serde_json::to_vec(&value["results"])?.len();
     let render_started = Instant::now();
-    if args.format == JsonOutputFormat::Json {
+    let output_bytes = if args.format == JsonOutputFormat::Json {
+        let output_bytes = pretty_json_stdout_bytes(&value)?;
         print_json(value)?;
+        output_bytes
     } else {
-        write_output(render_search_text(&value, args.verbose), None)?;
-    }
+        let body = render_search_text(&value, args.verbose);
+        let output_bytes = stdout_body_bytes(&body);
+        write_output(body, None)?;
+        output_bytes
+    };
     telemetry.render_duration = Some(duration_bucket(render_started.elapsed()));
+    local_usage.set_result_observation(
+        ResultObservationAction::Search,
+        result_count,
+        citation_count,
+        content_bytes,
+    );
+    local_usage.set_measured_output_bytes(output_bytes);
     Ok(())
 }
 
@@ -237,6 +266,7 @@ pub(crate) fn run_show(
     args: ShowArgs,
     data_root: PathBuf,
     telemetry: &mut ShowTelemetry,
+    local_usage: &mut CliUsage,
 ) -> Result<()> {
     let index = open_index(&data_root)?;
     match args.target {
@@ -253,7 +283,19 @@ pub(crate) fn run_show(
                 args.format,
                 CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
             )?;
-            write_show_value(value, args.format, None, selected.event_id.as_uuid())
+            let events = value["events"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+            let result_count = events.len();
+            let content_bytes = serde_json::to_vec(&value["events"])?.len();
+            let output_bytes =
+                write_show_value(value, args.format, None, selected.event_id.as_uuid())?;
+            local_usage.set_result_observation(
+                ResultObservationAction::OpenEvent,
+                result_count,
+                0,
+                content_bytes,
+            );
+            local_usage.set_measured_output_bytes(output_bytes);
+            Ok(())
         }
         ShowTarget::Session(args) => {
             let session = resolve_show_session(
@@ -281,7 +323,18 @@ pub(crate) fn run_show(
                 .and_then(|event| event["ctx_event_id"].as_str())
                 .and_then(|id| Uuid::parse_str(id).ok())
                 .unwrap_or_else(|| session.session_id.as_uuid());
-            write_show_value(value, args.format, args.out, event_id)
+            let events = value["events"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+            let result_count = events.len();
+            let content_bytes = serde_json::to_vec(&value["events"])?.len();
+            let output_bytes = write_show_value(value, args.format, args.out, event_id)?;
+            local_usage.set_result_observation(
+                ResultObservationAction::OpenSession,
+                result_count,
+                0,
+                content_bytes,
+            );
+            local_usage.set_measured_output_bytes(output_bytes);
+            Ok(())
         }
     }
 }
@@ -397,7 +450,11 @@ pub(crate) fn mcp_show_event(
     Ok(value)
 }
 
-pub(crate) fn run_locate(args: LocateArgs, data_root: PathBuf) -> Result<()> {
+pub(crate) fn run_locate(
+    args: LocateArgs,
+    data_root: PathBuf,
+    local_usage: &mut CliUsage,
+) -> Result<()> {
     let index = open_index(&data_root)?;
     let (value, json_output) = match args.target {
         LocateTarget::Session(args) => {
@@ -455,13 +512,23 @@ pub(crate) fn run_locate(args: LocateArgs, data_root: PathBuf) -> Result<()> {
             (value, args.format.is_json())
         }
     };
-    if json_output {
-        print_json(value)
+    let content_bytes = serde_json::to_vec(&value)?.len();
+    let output_bytes = if json_output {
+        let output_bytes = pretty_json_stdout_bytes(&value)?;
+        print_json(value)?;
+        output_bytes
     } else if value["target"] == "session" {
-        print_locate_session_text(&value)
+        let output_bytes = locate_session_text_output_bytes(&value);
+        print_locate_session_text(&value)?;
+        output_bytes
     } else {
-        print_locate_event_text(&value)
-    }
+        let output_bytes = locate_event_text_output_bytes(&value);
+        print_locate_event_text(&value)?;
+        output_bytes
+    };
+    local_usage.set_result_observation(ResultObservationAction::Locate, 1, 0, content_bytes);
+    local_usage.set_measured_output_bytes(output_bytes);
+    Ok(())
 }
 
 fn locate_session_value(session: &SessionRecord) -> Value {
@@ -528,6 +595,80 @@ fn locate_event_value(event: &EventRecord) -> Value {
         },
         "resume": provider_resume_json(provider, event.provider_session_id.as_deref()),
     }))
+}
+
+fn pretty_json_stdout_bytes(value: &Value) -> Result<usize> {
+    Ok(serde_json::to_string_pretty(value)?.len().saturating_add(1))
+}
+
+fn stdout_body_bytes(body: &str) -> usize {
+    body.len()
+        .saturating_add(usize::from(!body.ends_with('\n')))
+}
+
+fn locate_session_text_output_bytes(value: &Value) -> usize {
+    let mut bytes = format!(
+        "ctx_session_id: {}\n",
+        value["ctx_session_id"].as_str().unwrap_or("")
+    )
+    .len();
+    bytes = bytes
+        .saturating_add(optional_json_text_line_bytes(value, "provider"))
+        .saturating_add(optional_json_text_line_bytes(value, "provider_session_id"));
+    if let Some(source) = value.get("source") {
+        bytes = bytes
+            .saturating_add(optional_json_text_line_bytes(source, "path"))
+            .saturating_add(optional_json_text_line_bytes(source, "source_format"));
+        if let Some(exists) = source.get("exists").and_then(Value::as_bool) {
+            bytes = bytes.saturating_add(format!("source_exists: {exists}\n").len());
+        }
+    }
+    if let Some(command) = value
+        .get("resume")
+        .and_then(|resume| resume.get("command"))
+        .and_then(Value::as_str)
+    {
+        bytes = bytes.saturating_add(format!("resume_command: {command}\n").len());
+    }
+    bytes
+}
+
+fn locate_event_text_output_bytes(value: &Value) -> usize {
+    let mut bytes = format!(
+        "ctx_event_id: {}\n",
+        value["ctx_event_id"].as_str().unwrap_or("")
+    )
+    .len();
+    for key in [
+        "ctx_session_id",
+        "provider",
+        "provider_session_id",
+        "event_type",
+        "role",
+        "cursor",
+    ] {
+        bytes = bytes.saturating_add(optional_json_text_line_bytes(value, key));
+    }
+    if let Some(source) = value.get("source") {
+        bytes = bytes.saturating_add(optional_json_text_line_bytes(source, "path"));
+    }
+    if let Some(source_record) = value.get("source_record") {
+        if let Some(ordinal) = source_record.get("ordinal").and_then(Value::as_u64) {
+            bytes = bytes.saturating_add(format!("source_record_ordinal: {ordinal}\n").len());
+        }
+        if let Some(index) = source_record.get("subrecord_index").and_then(Value::as_u64) {
+            bytes = bytes.saturating_add(format!("source_record_subrecord_index: {index}\n").len());
+        }
+    }
+    bytes
+}
+
+fn optional_json_text_line_bytes(value: &Value, key: &str) -> usize {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(|text| format!("{key}: {text}\n").len())
+        .unwrap_or_default()
 }
 
 fn refresh_for_search(request: &SourceSearchRequest, data_root: &Path) -> Result<RefreshOutcome> {
@@ -1710,7 +1851,7 @@ fn write_show_value(
     format: OutputFormat,
     out: Option<PathBuf>,
     event_id: Uuid,
-) -> Result<()> {
+) -> Result<usize> {
     let body = match format {
         OutputFormat::Json => serde_json::to_string_pretty(&value)?,
         OutputFormat::Jsonl => render_show_jsonl(&value)?,
@@ -1724,7 +1865,12 @@ fn write_show_value(
         CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
         event_id,
     )?;
-    write_output(body, out)
+    let output_bytes = if out.is_some() {
+        body.len()
+    } else {
+        stdout_body_bytes(&body)
+    };
+    write_output(body, out).map(|()| output_bytes)
 }
 
 fn render_show_jsonl(value: &Value) -> Result<String> {
@@ -2808,5 +2954,69 @@ mod tests {
             assert_eq!(typed.kind, CompleteContentErrorKind::ContentTooLarge);
             assert_eq!(typed.event_id, event.event_id.as_uuid());
         }
+    }
+
+    #[test]
+    fn measured_output_byte_helpers_match_existing_renderers() {
+        let session = json!({
+            "target": "session",
+            "ctx_session_id": "session-1",
+            "provider": "codex",
+            "provider_session_id": "provider-1",
+            "source": {
+                "path": "/tmp/session.jsonl",
+                "source_format": "codex_session_jsonl",
+                "exists": true,
+            },
+            "resume": {
+                "command": "codex resume provider-1",
+            },
+        });
+        let session_text = "ctx_session_id: session-1\n\
+provider: codex\n\
+provider_session_id: provider-1\n\
+path: /tmp/session.jsonl\n\
+source_format: codex_session_jsonl\n\
+source_exists: true\n\
+resume_command: codex resume provider-1\n";
+        assert_eq!(
+            locate_session_text_output_bytes(&session),
+            session_text.len()
+        );
+
+        let event = json!({
+            "target": "event",
+            "ctx_event_id": "event-1",
+            "ctx_session_id": "session-1",
+            "provider": "codex",
+            "provider_session_id": "provider-1",
+            "event_type": "message",
+            "role": "assistant",
+            "cursor": "cursor-1",
+            "source": {
+                "path": "/tmp/session.jsonl",
+            },
+            "source_record": {
+                "ordinal": 4,
+                "subrecord_index": 2,
+            },
+        });
+        let event_text = "ctx_event_id: event-1\n\
+ctx_session_id: session-1\n\
+provider: codex\n\
+provider_session_id: provider-1\n\
+event_type: message\n\
+role: assistant\n\
+cursor: cursor-1\n\
+path: /tmp/session.jsonl\n\
+source_record_ordinal: 4\n\
+source_record_subrecord_index: 2\n";
+        assert_eq!(locate_event_text_output_bytes(&event), event_text.len());
+        assert_eq!(
+            pretty_json_stdout_bytes(&event).unwrap(),
+            serde_json::to_string_pretty(&event).unwrap().len() + 1
+        );
+        assert_eq!(stdout_body_bytes("body"), 5);
+        assert_eq!(stdout_body_bytes("body\n"), 5);
     }
 }

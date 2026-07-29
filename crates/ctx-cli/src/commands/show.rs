@@ -5,6 +5,7 @@ use clap::Args;
 
 use crate::analytics::ShowTelemetry;
 use crate::complete_content::ContentPolicy;
+use crate::local_usage::CliUsage;
 use crate::output::OutputFormat;
 use crate::provider_args::ProviderArg;
 use crate::transcript::TranscriptMode;
@@ -58,6 +59,7 @@ pub(crate) fn run_show(
     args: ShowArgs,
     data_root: PathBuf,
     telemetry: &mut ShowTelemetry,
+    local_usage: &mut CliUsage,
 ) -> Result<()> {
-    crate::commands::source_index::run_show(args, data_root, telemetry)
+    crate::commands::source_index::run_show(args, data_root, telemetry, local_usage)
 }
