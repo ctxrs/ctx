@@ -46,7 +46,7 @@ pub(crate) fn actionable_error(error: anyhow::Error) -> anyhow::Error {
             "the Pro graph needs repair; run `ctx pro`"
         }
         "key_store_unavailable" | "key_store_locked" => {
-            "configure and unlock a persistent platform key store (not an ephemeral session collection), then run `ctx pro`; plaintext key fallback is not supported"
+            "unlock or repair the already selected secure key store, then run `ctx pro`; a fresh installation can select the owner-private local vault only when the native store is genuinely unavailable, and ctx never downgrades existing state"
         }
         _ => return error,
     };

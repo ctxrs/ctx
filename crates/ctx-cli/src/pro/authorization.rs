@@ -16,9 +16,11 @@ use super::credential_vault::{
 
 /// Supplies a challenge-bound authorization request to the Pro helper.
 ///
-/// Implementations are expected to obtain the signed grant and installation
-/// key through the platform key store. The OSS client deliberately has
-/// no environment-variable or plaintext-file fallback for installation keys.
+/// Implementations obtain the signed grant and installation key through the
+/// selected secure credential backend. The native platform vault is preferred;
+/// a pristine installation may durably select the owner-private local vault
+/// when the native adapter is genuinely unavailable. Environment-supplied,
+/// universal, and ephemeral keys are never accepted.
 pub(crate) trait AuthorizationProvider {
     fn authorization_for_challenge(
         &self,

@@ -65,7 +65,7 @@ pub(crate) fn run_doctor(
             pro["error_code"].as_str()
         {
             findings.push(format!(
-                "ctx Pro key store is unavailable ({code}); configure and unlock a persistent platform key store (not an ephemeral session collection), then run `ctx pro`; plaintext key fallback is not supported"
+                "ctx Pro key store is unavailable ({code}); unlock or repair the already selected secure key store, then run `ctx pro`; a fresh installation can select the owner-private local vault only when the native store is genuinely unavailable, and ctx never downgrades existing state"
             ));
         } else if pro["error_code"].as_str() == Some("corrupt_graph") {
             findings.push(
