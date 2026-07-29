@@ -2402,8 +2402,14 @@ fn codex_locator_hydration_failure(error: CodexSourceBackedErrorV0) -> Hydration
             CaptureError::SourceChangedDuringCapture
             | CaptureError::InvalidProviderTranscriptPath { .. },
         ) => HydrationFailureKind::StaleSourceEvidence,
+        // A generation-bound locator can outlive a temporarily missing source
+        // between refreshes. Only an authoritative refresh may certify
+        // deletion, so absence from the current provider catalog is
+        // unavailable rather than an invalid locator.
+        CodexSourceBackedErrorV0::LocatorSourceNotFound(_) => {
+            HydrationFailureKind::TemporarilyUnavailable
+        }
         CodexSourceBackedErrorV0::InvalidCodexLocator
-        | CodexSourceBackedErrorV0::LocatorSourceNotFound(_)
         | CodexSourceBackedErrorV0::LocatorRangeTooLarge
         | CodexSourceBackedErrorV0::LocatorEventMismatch => HydrationFailureKind::InvalidLocator,
         CodexSourceBackedErrorV0::LocatorRecordNotDisplayable => {
@@ -4824,6 +4830,16 @@ mod tests {
 
     use super::*;
     use crate::GEMINI_CLI_SOURCE_FORMAT;
+
+    #[test]
+    fn missing_codex_catalog_source_is_temporarily_unavailable_until_refresh() {
+        let failure = codex_locator_hydration_failure(
+            CodexSourceBackedErrorV0::LocatorSourceNotFound("session-1".to_owned()),
+        );
+
+        assert_eq!(failure.kind, HydrationFailureKind::TemporarilyUnavailable);
+        assert!(failure.detail.contains("session-1"));
+    }
 
     #[test]
     fn heterogeneous_routes_publish_once_and_hydrate_exact_locators() {
