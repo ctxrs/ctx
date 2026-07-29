@@ -1,9 +1,7 @@
 //! Atomic source-backed lexical generations.
 //!
-//! A Tantivy commit payload names an immutable manifest containing the exact
-//! provider source revisions represented by that commit. The manifest is
-//! durably written before Tantivy publishes `meta.json`, so readers observe
-//! either the previous complete generation or the new complete generation.
+//! A Tantivy commit names a durable immutable source-revision manifest, so
+//! readers observe either the previous complete generation or the next one.
 
 mod contracts;
 mod durable_directory;
@@ -13,6 +11,7 @@ mod publication;
 mod query;
 mod reader;
 mod schema;
+mod staging;
 
 pub(crate) use contracts::{
     CommitPayload, COMMIT_PAYLOAD_VERSION, INDEX_MEMORY_MIN_PER_THREAD, MANIFEST_DIRECTORY,
@@ -75,6 +74,7 @@ use tantivy::{
 use uuid::Uuid;
 
 use durable_directory::{reclaim_abandoned_atomic_writes, DurableMmapDirectory};
+use staging::finish_identical_staging;
 
 struct PendingSource {
     source: SourceKey,
@@ -83,8 +83,7 @@ struct PendingSource {
     certificate: Option<CertifiedSource>,
 }
 
-// Append validation consults the base certificate throughout staged ingestion.
-// Boxing it would add allocation and indirection without measured product benefit.
+// Keep the append base inline to avoid allocation and indirection.
 #[allow(clippy::large_enum_variant)]
 enum PendingSourceMode {
     Replace,
@@ -115,8 +114,7 @@ fn reclaim_orphaned_managed_files(index: &mut Index, base_metas: &IndexMeta) -> 
     Ok(())
 }
 
-/// A structurally exact replay paired with separately certified current
-/// complete inventories. The prior manifest is comparison state only.
+/// Exact replay plus current inventories; the prior manifest is comparison state only.
 struct ExactReplayInventoryWitness<'a> {
     base: &'a GenerationManifest,
 }
@@ -855,8 +853,17 @@ impl GenerationWriter {
             }
         }
 
-        self.writer_mut()?;
         let manifest = self.next_manifest()?;
+        if let Some(receipt) = finish_identical_staging(
+            &mut self,
+            &manifest,
+            &mut revalidate,
+            &mut revalidate_inventory,
+        )? {
+            return Ok(receipt);
+        }
+
+        self.writer_mut()?;
         let previous_generation_id = self
             .base_manifest
             .as_ref()
