@@ -186,16 +186,8 @@ impl OpenClawSourceBackedSourceV0 {
         })
     }
 
-    pub(crate) fn path(&self) -> &Path {
-        &self.path
-    }
-
     pub(crate) fn source_key(&self) -> &SourceKey {
         &self.source
-    }
-
-    pub(crate) fn native_session_id(&self) -> &str {
-        &self.native_session_id
     }
 
     fn admit(&self) -> OpenClawSourceBackedResultV0<AdmittedOpenClawSource> {
@@ -302,9 +294,6 @@ impl OpenClawSourceBackedReaderV0 {
         let inner = open_pages_from_admitted(
             source.path.clone(),
             imported_at,
-            false,
-            None,
-            false,
             previous_checkpoint.as_ref(),
             admitted.observation,
             admitted.transcript,
@@ -468,7 +457,7 @@ impl OpenClawSourceBackedReaderV0 {
         session: &OpenClawLexicalSessionV0,
         touched_files: Vec<String>,
     ) -> OpenClawSourceBackedResultV0<Option<LexicalDocument>> {
-        let body = openclaw_lexical_body(event.event_type, &event.lexical_text);
+        let body = openclaw_lexical_body(&event.lexical_text);
         if body.trim().is_empty() {
             return Ok(None);
         }
@@ -540,9 +529,9 @@ impl OpenClawSourceBackedReaderV0 {
         &self,
         session: &super::SessionFact,
     ) -> OpenClawSourceBackedResultV0<OpenClawLexicalSessionV0> {
-        let provider_session_id = session.cursor.provider_session_id.clone();
+        let provider_session_id = session.state.provider_session_id.clone();
         let parent_session_id = session
-            .cursor
+            .state
             .parent_provider_session_id
             .as_deref()
             .map(|parent_provider_session_id| {
@@ -554,7 +543,7 @@ impl OpenClawSourceBackedReaderV0 {
             })
             .transpose()?;
         let root_session_id = session
-            .cursor
+            .state
             .root_provider_session_id
             .as_deref()
             .map(|root_provider_session_id| {
@@ -572,17 +561,13 @@ impl OpenClawSourceBackedReaderV0 {
             parent_session_id,
             root_session_id,
             branch: explicit_branch(&session.index).or_else(|| explicit_branch(&session.header)),
-            cwd: session.cursor.cwd.clone(),
+            cwd: session.state.cwd.clone(),
         })
     }
 }
 
-fn openclaw_lexical_body(event_type: EventType, text: &str) -> String {
-    if text.trim().is_empty() {
-        format!("OpenClaw {}", event_type.as_str())
-    } else {
-        text.to_owned()
-    }
+fn openclaw_lexical_body(text: &str) -> String {
+    text.to_owned()
 }
 
 struct OpenClawLexicalSessionV0 {
@@ -675,12 +660,12 @@ fn hydrate_locator(
         &value,
         DateTime::<Utc>::UNIX_EPOCH,
     );
-    if let Some(output) = openclaw_output_metadata(&value, line_number, None) {
+    if let Some(output) = openclaw_output_metadata(&value) {
         if output.kind == OutputObservationKind::Command {
             event.event_type = EventType::CommandOutput;
         }
     }
-    let decoded_display_text = openclaw_lexical_body(event.event_type, &event.lexical_text);
+    let decoded_display_text = openclaw_lexical_body(&event.lexical_text);
     Ok(OpenClawHydratedRecordV0 {
         provider_bytes: decoded_display_text.as_bytes().to_vec(),
         decoded_display_text: Some(decoded_display_text),
@@ -949,6 +934,210 @@ mod tests {
     }
 
     #[test]
+    fn openclaw_source_backed_indexes_only_meaningful_core_bodies() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("openclaw");
+        let transcript = transcript_path(&root);
+        write_fixture(
+            &transcript,
+            &[
+                header("session-1"),
+                message("message-1", "user", "meaningful user body"),
+                json!({
+                    "type": "message",
+                    "id": "contentless",
+                    "message": {"role": "assistant"},
+                }),
+                json!({
+                    "type": "message",
+                    "id": "successful-tool-output",
+                    "message": {
+                        "role": "tool",
+                        "status": "success",
+                        "content": "successful raw tool output must not be indexed",
+                    },
+                }),
+            ],
+        );
+        let adapter = openclaw_source_backed_adapter_v0();
+        let source = adapter.discover_selected(&root).unwrap().remove(0);
+        let (documents, scan) = extract(&adapter, &source);
+
+        assert_eq!(documents.len(), 1);
+        assert_eq!(documents[0].body, "meaningful user body");
+        assert!(!documents[0].body.contains("successful raw tool output"));
+        assert_eq!(scan.certified_source.counts().indexed_documents, 1);
+    }
+
+    #[test]
+    fn openclaw_source_backed_certifies_noop_append_rewrite_and_truncate() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("openclaw");
+        let transcript = transcript_path(&root);
+        write_fixture(
+            &transcript,
+            &[
+                header("session-1"),
+                message("message-1", "user", "first body"),
+            ],
+        );
+        let adapter = openclaw_source_backed_adapter_v0();
+        let source = adapter.discover_selected(&root).unwrap().remove(0);
+
+        let (cold_documents, cold) = extract(&adapter, &source);
+        assert_eq!(cold_documents.len(), 1);
+        assert_eq!(cold.disposition, OpenClawSourceBackedDispositionV0::Cold);
+
+        let (noop_documents, noop) =
+            extract_with_previous(&adapter, &source, Some(&cold.certified_source));
+        assert!(noop_documents.is_empty());
+        assert_eq!(noop.disposition, OpenClawSourceBackedDispositionV0::Noop);
+        assert_eq!(
+            noop.certified_source.content_digest(),
+            cold.certified_source.content_digest()
+        );
+
+        append_record(
+            &transcript,
+            &message("message-2", "assistant", "appended exact body"),
+        );
+        let (append_documents, append) =
+            extract_with_previous(&adapter, &source, Some(&noop.certified_source));
+        assert_eq!(
+            append_documents
+                .iter()
+                .map(|document| document.body.as_str())
+                .collect::<Vec<_>>(),
+            vec!["appended exact body"]
+        );
+        assert_eq!(
+            append.disposition,
+            OpenClawSourceBackedDispositionV0::Append
+        );
+        assert_eq!(
+            append
+                .verified_base_prefix
+                .expect("append must certify its base")
+                .bytes,
+            noop.certified_source
+                .frontier()
+                .expect("noop certificate must retain a frontier")
+                .certified_prefix_bytes()
+        );
+
+        let rewritten = format!("rewritten {} tail", "complete body ".repeat(220));
+        write_fixture(
+            &transcript,
+            &[
+                header("session-1"),
+                message("message-3", "user", &rewritten),
+            ],
+        );
+        let (rewrite_documents, rewrite) =
+            extract_with_previous(&adapter, &source, Some(&append.certified_source));
+        assert_eq!(rewrite_documents.len(), 1);
+        assert_eq!(rewrite_documents[0].body, rewritten);
+        assert_eq!(
+            rewrite.disposition,
+            OpenClawSourceBackedDispositionV0::Replacement
+        );
+
+        write_fixture(
+            &transcript,
+            &[
+                header("session-1"),
+                message("message-4", "assistant", "short after truncation"),
+            ],
+        );
+        let (truncate_documents, truncate) =
+            extract_with_previous(&adapter, &source, Some(&rewrite.certified_source));
+        assert_eq!(truncate_documents.len(), 1);
+        assert_eq!(truncate_documents[0].body, "short after truncation");
+        assert_eq!(
+            truncate.disposition,
+            OpenClawSourceBackedDispositionV0::Replacement
+        );
+        assert!(truncate.verified_base_prefix.is_none());
+    }
+
+    #[test]
+    fn openclaw_source_backed_discovery_distinguishes_delete_from_unavailable_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("openclaw");
+        let transcript = transcript_path(&root);
+        write_fixture(
+            &transcript,
+            &[header("session-1"), message("message-1", "user", "hello")],
+        );
+        let adapter = openclaw_source_backed_adapter_v0();
+        assert_eq!(adapter.discover_selected(&root).unwrap().len(), 1);
+
+        fs::remove_file(&transcript).unwrap();
+        assert!(adapter.discover_selected(&root).unwrap().is_empty());
+
+        fs::remove_dir_all(&root).unwrap();
+        assert!(adapter.discover_selected(&root).is_err());
+    }
+
+    #[test]
+    fn openclaw_source_backed_final_revalidation_rejects_transcript_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("openclaw");
+        let transcript = transcript_path(&root);
+        write_fixture(
+            &transcript,
+            &[header("session-1"), message("message-1", "user", "hello")],
+        );
+        let adapter = openclaw_source_backed_adapter_v0();
+        let source = adapter.discover_selected(&root).unwrap().remove(0);
+        let mut reader = adapter
+            .open_source(&source, "2026-07-28T12:00:00Z".parse().unwrap(), None)
+            .unwrap();
+        while reader.next_page().unwrap().is_some() {}
+
+        append_record(
+            &transcript,
+            &message("message-2", "assistant", "late mutation"),
+        );
+        assert!(reader.finish().is_err());
+    }
+
+    #[test]
+    fn openclaw_source_backed_hydrates_typed_content_exactly() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("openclaw");
+        let transcript = transcript_path(&root);
+        let typed_body = "first typed block\nsecond typed block";
+        write_fixture(
+            &transcript,
+            &[
+                header("session-1"),
+                json!({
+                    "type": "message",
+                    "id": "typed-message",
+                    "timestamp": "2026-07-28T12:00:01Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "text", "text": "first typed block"},
+                            {"type": "text", "text": "second typed block"},
+                        ],
+                    },
+                }),
+            ],
+        );
+        let adapter = openclaw_source_backed_adapter_v0();
+        let source = adapter.discover_selected(&root).unwrap().remove(0);
+        let (documents, _) = extract(&adapter, &source);
+        assert_eq!(documents.len(), 1);
+        assert_eq!(documents[0].body, typed_body);
+
+        let hydrated = adapter.hydrate(&source, &documents[0].locator).unwrap();
+        assert_eq!(hydrated.provider_bytes, typed_body.as_bytes());
+        assert_eq!(hydrated.decoded_display_text.as_deref(), Some(typed_body));
+    }
+
+    #[test]
     fn openclaw_source_backed_exact_hydration_returns_source_bytes_and_fails_after_append() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("openclaw");
@@ -1005,7 +1194,7 @@ mod tests {
     }
 
     #[test]
-    fn compound_authority_openclaw_rejects_missing_auxiliary_appearing_before_publication() {
+    fn compound_authority_openclaw_rejects_missing_auxiliary_before_final_revalidation() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("openclaw");
         let transcript = transcript_path(&root);
@@ -1048,8 +1237,16 @@ mod tests {
         adapter: &OpenClawSourceBackedAdapterV0,
         source: &OpenClawSourceBackedSourceV0,
     ) -> (Vec<LexicalDocument>, OpenClawSourceBackedScanV0) {
+        extract_with_previous(adapter, source, None)
+    }
+
+    fn extract_with_previous(
+        adapter: &OpenClawSourceBackedAdapterV0,
+        source: &OpenClawSourceBackedSourceV0,
+        previous: Option<&CertifiedSource>,
+    ) -> (Vec<LexicalDocument>, OpenClawSourceBackedScanV0) {
         let mut reader = adapter
-            .open_source(source, "2026-07-28T12:00:00Z".parse().unwrap(), None)
+            .open_source(source, "2026-07-28T12:00:00Z".parse().unwrap(), previous)
             .unwrap();
         let mut documents = Vec::new();
         while let Some(page) = reader.next_page().unwrap() {
@@ -1060,6 +1257,12 @@ mod tests {
             documents.extend(page.documents);
         }
         (documents, reader.finish().unwrap())
+    }
+
+    fn append_record(path: &Path, record: &Value) {
+        let mut file = OpenOptions::new().append(true).open(path).unwrap();
+        serde_json::to_writer(&mut file, record).unwrap();
+        file.write_all(b"\n").unwrap();
     }
 
     fn transcript_path(root: &Path) -> PathBuf {

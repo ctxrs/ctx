@@ -13,13 +13,11 @@ use crate::{
 pub(crate) struct OpenClawEventFact {
     pub(crate) provider_event_index: u64,
     pub(crate) provider_event_hash: Option<String>,
-    pub(crate) cursor: String,
     pub(crate) event_type: EventType,
     pub(crate) role: Option<EventRole>,
     pub(crate) occurred_at: DateTime<Utc>,
     pub(crate) lexical_text: String,
     pub(crate) payload: Value,
-    pub(crate) metadata: Value,
 }
 
 pub(crate) fn event(
@@ -34,7 +32,7 @@ pub(crate) fn event(
 
 pub(super) fn event_fact(
     event_index: u64,
-    line_number: usize,
+    _line_number: usize,
     row: &Value,
     occurred_at: DateTime<Utc>,
 ) -> OpenClawEventFact {
@@ -63,7 +61,6 @@ pub(super) fn event_fact(
     OpenClawEventFact {
         provider_event_index: event_index,
         provider_event_hash: row.get("id").and_then(Value::as_str).map(str::to_owned),
-        cursor: format!("line:{line_number}"),
         event_type,
         role,
         occurred_at,
@@ -74,13 +71,6 @@ pub(super) fn event_fact(
             "result_evidence": provider_result_identifier_evidence(event_type, &text, row),
             "result_outcome": provider_result_outcome_evidence(event_type, row),
             "source_format": OPENCLAW_SOURCE_FORMAT,
-        }),
-        metadata: json!({
-            "source": "openclaw_jsonl",
-            "source_format": OPENCLAW_SOURCE_FORMAT,
-            "row_type": row_type,
-            "message_id": row.get("id").and_then(Value::as_str),
-            "parent_id": row.get("parentId").or_else(|| row.get("parent_id")).cloned(),
         }),
     }
 }
