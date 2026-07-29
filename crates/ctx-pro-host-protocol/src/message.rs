@@ -5,13 +5,12 @@ use uuid::Uuid;
 
 use crate::{
     AdmitSourceManifestPageRequest, AuthorizationRequest, AuthorizationResult,
-    BeginSourceManifestAdmissionRequest, BeginSourceManifestRequest, BlameRequest, BlameResult,
-    ConfirmGraphKeyDeletionRequest, DeleteSourceRequest, ErrorClass,
-    FinishAdmittedSourceManifestRequest, FinishSourceManifestAdmissionRequest,
-    FinishSourceManifestRequest, GraphKeyDeleted, GraphKeyDeletionPrepared,
+    BeginSourceManifestAdmissionRequest, BlameRequest, BlameResult, ConfirmGraphKeyDeletionRequest,
+    DeleteSourceRequest, ErrorClass, FinishAdmittedSourceManifestRequest,
+    FinishSourceManifestAdmissionRequest, GraphKeyDeleted, GraphKeyDeletionPrepared,
     MaterializeSourcePageRequest, PrepareGraphKeyDeletionRequest, PrepareSourceRequest,
     ProtocolError, SourceDeleted, SourceManifestAdmissionBegan, SourceManifestAdmitted,
-    SourceManifestBegan, SourceManifestFinished, SourceManifestPageAdmitted, SourceManifestReceipt,
+    SourceManifestFinished, SourceManifestPageAdmitted, SourceManifestReceipt,
     SourcePageMaterialized, SourcePrepared, PROTOCOL_FINGERPRINT, PROTOCOL_VERSION,
 };
 
@@ -96,14 +95,12 @@ pub enum HostMessage {
     PrepareGraphKeyDeletion(PrepareGraphKeyDeletionRequest),
     ConfirmGraphKeyDeletion(ConfirmGraphKeyDeletionRequest),
     Status(StatusRequest),
-    BeginSourceManifest(BeginSourceManifestRequest),
     BeginSourceManifestAdmission(BeginSourceManifestAdmissionRequest),
     AdmitSourceManifestPage(AdmitSourceManifestPageRequest),
     FinishSourceManifestAdmission(FinishSourceManifestAdmissionRequest),
     PrepareSource(PrepareSourceRequest),
     MaterializeSourcePage(MaterializeSourcePageRequest),
     DeleteSource(DeleteSourceRequest),
-    FinishSourceManifest(FinishSourceManifestRequest),
     FinishAdmittedSourceManifest(FinishAdmittedSourceManifestRequest),
     Blame(BlameRequest),
 }
@@ -121,7 +118,6 @@ pub enum HelperMessage {
     GraphKeyDeletionPrepared(GraphKeyDeletionPrepared),
     GraphKeyDeleted(GraphKeyDeleted),
     Status(StatusResult),
-    SourceManifestBegan(SourceManifestBegan),
     SourceManifestAdmissionBegan(SourceManifestAdmissionBegan),
     SourceManifestPageAdmitted(SourceManifestPageAdmitted),
     SourceManifestAdmitted(SourceManifestAdmitted),

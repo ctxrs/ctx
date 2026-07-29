@@ -217,6 +217,7 @@ mod tests {
         installation_public_key_base64url: String,
         challenge_base64url: String,
         canonical_grant_hex: String,
+        canonical_grant_sha256: String,
         grant_signature_base64url: String,
         installation_proof_signature_base64url: String,
     }
@@ -242,6 +243,11 @@ mod tests {
                 .unwrap_or_else(|_| panic!("golden entitlement"));
         let canonical = canonical_grant_bytes(&vector.grant);
         assert_eq!(hex(&canonical), vector.canonical_grant_hex);
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&canonical)),
+            vector.canonical_grant_sha256
+        );
+        assert_eq!(vector.grant.issuer, "https://pro-staging.ctx.rs");
 
         let issuer = key(&vector.issuer_public_key_base64url);
         issuer
@@ -263,6 +269,21 @@ mod tests {
                 &signature(&vector.installation_proof_signature_base64url),
             )
             .unwrap_or_else(|_| panic!("installation proof"));
+    }
+
+    #[test]
+    fn current_staging_key_fixture_excludes_the_retired_issuer() {
+        let document: serde_json::Value = serde_json::from_str(include_str!(
+            "../testdata/entitlement/v1/verification-keys.json"
+        ))
+        .unwrap_or_else(|_| panic!("staging verification keys"));
+        let keys = document["keys"]
+            .as_array()
+            .unwrap_or_else(|| panic!("staging verification key list"));
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0]["key_id"], "staging-2026-07-v3");
+        assert_eq!(keys[0]["issuer"], "https://pro-staging.ctx.rs");
+        assert_ne!(keys[0]["issuer"], "https://commercial.staging.ctx.rs");
     }
 
     fn key(value: &str) -> VerifyingKey {

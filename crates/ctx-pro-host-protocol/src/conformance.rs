@@ -41,14 +41,12 @@ fn host_kind(message: &HostMessage) -> &'static str {
         HostMessage::PrepareGraphKeyDeletion(_) => "prepare_graph_key_deletion",
         HostMessage::ConfirmGraphKeyDeletion(_) => "confirm_graph_key_deletion",
         HostMessage::Status(_) => "status",
-        HostMessage::BeginSourceManifest(_) => "begin_source_manifest",
         HostMessage::BeginSourceManifestAdmission(_) => "begin_source_manifest_admission",
         HostMessage::AdmitSourceManifestPage(_) => "admit_source_manifest_page",
         HostMessage::FinishSourceManifestAdmission(_) => "finish_source_manifest_admission",
         HostMessage::PrepareSource(_) => "prepare_source",
         HostMessage::MaterializeSourcePage(_) => "materialize_source_page",
         HostMessage::DeleteSource(_) => "delete_source",
-        HostMessage::FinishSourceManifest(_) => "finish_source_manifest",
         HostMessage::FinishAdmittedSourceManifest(_) => "finish_admitted_source_manifest",
         HostMessage::Blame(_) => "blame",
     }
@@ -61,7 +59,6 @@ fn helper_kind(message: &HelperMessage) -> &'static str {
         HelperMessage::GraphKeyDeletionPrepared(_) => "graph_key_deletion_prepared",
         HelperMessage::GraphKeyDeleted(_) => "graph_key_deleted",
         HelperMessage::Status(_) => "status",
-        HelperMessage::SourceManifestBegan(_) => "source_manifest_began",
         HelperMessage::SourceManifestAdmissionBegan(_) => "source_manifest_admission_began",
         HelperMessage::SourceManifestPageAdmitted(_) => "source_manifest_page_admitted",
         HelperMessage::SourceManifestAdmitted(_) => "source_manifest_admitted",
@@ -76,14 +73,12 @@ fn helper_kind(message: &HelperMessage) -> &'static str {
 
 fn validate_host(message: &HostMessage) {
     match message {
-        HostMessage::BeginSourceManifest(request) => request.validate().unwrap(),
         HostMessage::BeginSourceManifestAdmission(request) => request.validate().unwrap(),
         HostMessage::AdmitSourceManifestPage(request) => request.validate().unwrap(),
         HostMessage::FinishSourceManifestAdmission(request) => request.validate().unwrap(),
         HostMessage::PrepareSource(request) => request.validate().unwrap(),
         HostMessage::MaterializeSourcePage(request) => request.validate().unwrap(),
         HostMessage::DeleteSource(request) => request.validate().unwrap(),
-        HostMessage::FinishSourceManifest(request) => request.validate().unwrap(),
         HostMessage::FinishAdmittedSourceManifest(request) => request.validate().unwrap(),
         HostMessage::Blame(request) => request.validate().unwrap(),
         HostMessage::Hello(_)
@@ -98,7 +93,6 @@ fn validate_helper(message: &HelperMessage) {
     match message {
         HelperMessage::Status(result) => result.validate().unwrap(),
         HelperMessage::Blame(result) => result.validate().unwrap(),
-        HelperMessage::SourceManifestBegan(result) => result.validate().unwrap(),
         HelperMessage::SourceManifestAdmitted(result) => result.validate().unwrap(),
         HelperMessage::SourcePrepared(result) => result.validate().unwrap(),
         HelperMessage::SourcePageMaterialized(result) => result.validate().unwrap(),
@@ -166,13 +160,11 @@ fn inventory_freezes_current_capabilities_and_message_kinds() {
         BTreeSet::from([
             "admit_source_manifest_page",
             "authorize",
-            "begin_source_manifest",
             "begin_source_manifest_admission",
             "blame",
             "confirm_graph_key_deletion",
             "delete_source",
             "finish_admitted_source_manifest",
-            "finish_source_manifest",
             "finish_source_manifest_admission",
             "hello",
             "materialize_source_page",
@@ -193,7 +185,6 @@ fn inventory_freezes_current_capabilities_and_message_kinds() {
             "source_deleted",
             "source_manifest_admission_began",
             "source_manifest_admitted",
-            "source_manifest_began",
             "source_manifest_finished",
             "source_manifest_page_admitted",
             "source_page_materialized",

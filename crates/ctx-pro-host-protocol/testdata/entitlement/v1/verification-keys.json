@@ -2,20 +2,12 @@
   "schema_version": 1,
   "keys": [
     {
-      "key_id": "staging-2026-07-v1",
-      "issuer": "https://commercial.staging.ctx.rs",
-      "public_key_base64url": "19-FkIsQlRMT_S6PBfAFW6CYItOckV62KBo9DXtOOX4",
-      "valid_from_unix": 1784674800,
-      "issue_until_unix": 1784678187,
-      "verify_until_unix": 1816815600
-    },
-    {
-      "key_id": "staging-2026-07-v2",
-      "issuer": "https://commercial.staging.ctx.rs",
-      "public_key_base64url": "LMzH4NV-mfOJB8k9UA8dkEnqCHC80o-yk1NrDdy6ELc",
-      "valid_from_unix": 1784678187,
-      "issue_until_unix": 1816210800,
-      "verify_until_unix": 1816815600
+      "key_id": "staging-2026-07-v3",
+      "issuer": "https://pro-staging.ctx.rs",
+      "public_key_base64url": "U2UW7tIwwlFNvEDZGYXWG94hI9zeYdocY1lwI5bjHzc",
+      "valid_from_unix": 1785192537,
+      "issue_until_unix": 1816728537,
+      "verify_until_unix": 1817333337
     }
   ]
 }

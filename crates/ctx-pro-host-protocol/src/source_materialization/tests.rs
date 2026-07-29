@@ -228,13 +228,10 @@ fn removal() -> SourceRemoval {
 }
 
 #[test]
-fn source_backed_pro_five_lifecycle_variants_have_exact_tags_and_round_trip() {
+fn source_backed_pro_active_lifecycle_variants_have_exact_tags_and_round_trip() {
     let manifest = manifest();
     let prepared = progress(false);
     let requests = vec![
-        HostMessage::BeginSourceManifest(BeginSourceManifestRequest {
-            manifest: manifest.clone(),
-        }),
         HostMessage::PrepareSource(PrepareSourceRequest {
             core_generation_id: manifest.core_generation_id.clone(),
             source: prepared.source.clone(),
@@ -255,18 +252,8 @@ fn source_backed_pro_five_lifecycle_variants_have_exact_tags_and_round_trip() {
             removal: removal(),
             expected_prior: progress(true),
         }),
-        HostMessage::FinishSourceManifest(FinishSourceManifestRequest {
-            manifest: manifest.clone(),
-            expected_progress: vec![progress(true)],
-        }),
     ];
-    let tags = [
-        "begin_source_manifest",
-        "prepare_source",
-        "materialize_source_page",
-        "delete_source",
-        "finish_source_manifest",
-    ];
+    let tags = ["prepare_source", "materialize_source_page", "delete_source"];
     for (index, (message, tag)) in requests.into_iter().zip(tags).enumerate() {
         let envelope = HostEnvelope {
             sequence: index as u64,
@@ -286,12 +273,6 @@ fn source_backed_pro_five_lifecycle_variants_have_exact_tags_and_round_trip() {
     }
 
     let responses = vec![
-        HelperMessage::SourceManifestBegan(SourceManifestBegan {
-            core_generation_id: manifest.core_generation_id.clone(),
-            materializer_revision: "fixture-materializer-v1".to_owned(),
-            progress: Vec::new(),
-            replayed: false,
-        }),
         HelperMessage::SourcePrepared(SourcePrepared {
             core_generation_id: manifest.core_generation_id.clone(),
             progress: prepared.clone(),
@@ -321,7 +302,6 @@ fn source_backed_pro_five_lifecycle_variants_have_exact_tags_and_round_trip() {
         }),
     ];
     let tags = [
-        "source_manifest_began",
         "source_prepared",
         "source_page_materialized",
         "source_deleted",
@@ -344,6 +324,20 @@ fn source_backed_pro_five_lifecycle_variants_have_exact_tags_and_round_trip() {
             envelope
         );
     }
+}
+
+#[test]
+fn retired_whole_manifest_wire_kinds_are_rejected() {
+    for kind in ["begin_source_manifest", "finish_source_manifest"] {
+        assert!(
+            serde_json::from_value::<HostMessage>(json!({"kind": kind, "body": {}})).is_err(),
+            "retired host message kind {kind} must be rejected"
+        );
+    }
+    assert!(serde_json::from_value::<HelperMessage>(
+        json!({"kind": "source_manifest_began", "body": {}})
+    )
+    .is_err());
 }
 
 #[test]
