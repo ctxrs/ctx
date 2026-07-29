@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::native_source::NativeSqliteValue;
 use crate::provider::sqlite::{
@@ -642,6 +643,36 @@ pub(super) fn nanoclaw_message_digest_values(
         nanoclaw_optional_text_value(message.source_session_id.clone()),
         nanoclaw_optional_i64_value(message.on_wake),
     ]
+}
+
+pub(super) fn nanoclaw_logical_record_digest_bytes(values: &[NativeSqliteValue]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"ctx-complete-content-sqlite-logical-row-v1\0");
+    digest.update((values.len() as u64).to_be_bytes());
+    for value in values {
+        match value {
+            NativeSqliteValue::Null => digest.update([0]),
+            NativeSqliteValue::Integer(value) => {
+                digest.update([1]);
+                digest.update(value.to_be_bytes());
+            }
+            NativeSqliteValue::RealBits(value) => {
+                digest.update([2]);
+                digest.update(value.to_be_bytes());
+            }
+            NativeSqliteValue::Text(value) => {
+                digest.update([3]);
+                digest.update((value.len() as u64).to_be_bytes());
+                digest.update(value.as_bytes());
+            }
+            NativeSqliteValue::Blob(value) => {
+                digest.update([4]);
+                digest.update((value.len() as u64).to_be_bytes());
+                digest.update(value);
+            }
+        }
+    }
+    digest.finalize().into()
 }
 
 fn nanoclaw_optional_text_value(value: Option<String>) -> NativeSqliteValue {
