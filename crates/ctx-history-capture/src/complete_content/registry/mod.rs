@@ -2,11 +2,11 @@ mod routes;
 
 use ctx_history_core::CaptureProvider;
 
+use super::jsonl;
 use super::locator::{
     CompleteContentSourceFamily, VerifiedContentRole, COMPLETE_CONTENT_MAX_LOCATOR_KIND_BYTES,
     VERIFIED_CONTENT_PROFILE_MAX_BYTES,
 };
-use super::{jsonl, structured};
 
 pub use routes::VERIFIED_CONTENT_ROUTES;
 
@@ -269,9 +269,6 @@ pub(super) fn valid_opaque_locator(
             jsonl::valid_junie_record_set_locator(value)
         }
         (CompleteContentSourceFamily::Jsonl, "mux-record-v1") => jsonl::valid_mux_locator(value),
-        (CompleteContentSourceFamily::Structured, "structured-message-v1") => {
-            structured::decode_structured_locator(value).is_some()
-        }
         (CompleteContentSourceFamily::Sqlite, "firebender-chat-session-row-v1")
         | (CompleteContentSourceFamily::Sqlite, "zed-thread-row-v1")
         | (CompleteContentSourceFamily::Sqlite, "lingma-chat-record-v1")

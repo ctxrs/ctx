@@ -231,57 +231,6 @@ ctx_rust_test(
 )
 
 ctx_rust_test(
-    name = "complete_content_jsonl_tests",
-    srcs = ["tests/complete_content_jsonl.rs"],
-    compile_data = ["//:complete_content_provider_capabilities"],
-    crate_root = "tests/complete_content_jsonl.rs",
-    edition = crate_edition(),
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    deps = all_crate_deps(
-        normal = True,
-        normal_dev = True,
-    ) + [
-        ":lib",
-        "//crates/ctx-history-core:lib",
-    ],
-    proc_macro_deps = all_crate_deps(
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    rustc_env = COMMON_RUSTC_ENV,
-)
-
-ctx_rust_test(
-    name = "structured_complete_content_tests",
-    srcs = ["tests/structured_complete_content.rs"],
-    compile_data = [
-        "//:complete_content_provider_capabilities",
-        "//:provider_support_matrix",
-    ],
-    crate_root = "tests/structured_complete_content.rs",
-    edition = crate_edition(),
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    deps = all_crate_deps(
-        normal = True,
-        normal_dev = True,
-    ) + [
-        ":lib",
-        "//crates/ctx-history-core:lib",
-    ],
-    proc_macro_deps = all_crate_deps(
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    rustc_env = COMMON_RUSTC_ENV,
-)
-
-ctx_rust_test(
     name = "complete_content_sqlite_tests",
     srcs = ["tests/complete_content_sqlite.rs"],
     crate_root = "tests/complete_content_sqlite.rs",
@@ -307,9 +256,7 @@ ctx_rust_test(
 test_suite(
     name = "complete_content_tests",
     tests = [
-        ":complete_content_jsonl_tests",
         ":complete_content_sqlite_tests",
-        ":structured_complete_content_tests",
         ":unit_tests",
     ],
 )

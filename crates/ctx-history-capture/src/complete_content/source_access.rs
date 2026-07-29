@@ -147,10 +147,10 @@ impl SourceAccessBroker {
     /// Returns the bytes that must be reserved before admitting this source.
     ///
     /// Ordinary SQLite sources report the exact currently named database and
-    /// sidecar bytes. Compound and structured sources reserve their complete
-    /// family bound because discovering their selected files is itself
-    /// admission work. Single-file JSONL retains a handle and reserves no
-    /// copied snapshot bytes.
+    /// sidecar bytes. Compound SQLite sources reserve their complete family
+    /// bound because discovering their selected files is itself admission
+    /// work. Single-file JSONL retains a handle and reserves no copied snapshot
+    /// bytes.
     pub fn prepare(
         &self,
         route: AuthorizedSourceRoute,
@@ -203,11 +203,10 @@ fn snapshot_reservation_bytes_platform(
             let selected = selected_source_path(route, event_id)?;
             sqlite_snapshot_reservation_bytes(route, &selected, event_id)
         }
-        CompleteContentSourceFamily::Structured => {
-            u64::try_from(super::structured::verification::STRUCTURED_MAX_TOTAL_READ_BYTES).map_err(
-                |_| CompleteContentError::new(CompleteContentErrorKind::ContentTooLarge, event_id),
-            )
-        }
+        CompleteContentSourceFamily::Structured => Err(CompleteContentError::new(
+            CompleteContentErrorKind::HydrationUnsupported,
+            event_id,
+        )),
         #[cfg(test)]
         CompleteContentSourceFamily::Fixture => Ok(0),
     }
@@ -349,7 +348,6 @@ impl BrokeredSourceAccess {
             BrokeredSource::Jsonl(_) => CompleteContentSourceFamily::Jsonl,
             BrokeredSource::Sqlite(_) => CompleteContentSourceFamily::Sqlite,
             BrokeredSource::NanoClaw(_) => CompleteContentSourceFamily::Sqlite,
-            BrokeredSource::Structured(_) => CompleteContentSourceFamily::Structured,
             #[cfg(test)]
             BrokeredSource::Fixture => CompleteContentSourceFamily::Fixture,
         }
@@ -382,20 +380,6 @@ impl BrokeredSourceAccess {
             ));
         };
         source.open(locators, query_budget, event_id)
-    }
-
-    pub(crate) fn structured_snapshot(
-        &self,
-        event_id: Uuid,
-    ) -> Result<&super::structured::source_access::StructuredSourceSnapshot, CompleteContentError>
-    {
-        let BrokeredSource::Structured(source) = self.inner.as_ref() else {
-            return Err(CompleteContentError::new(
-                CompleteContentErrorKind::HydrationUnsupported,
-                event_id,
-            ));
-        };
-        Ok(source)
     }
 
     #[cfg(test)]
@@ -439,7 +423,6 @@ enum BrokeredSource {
     Jsonl(jsonl::BrokeredJsonlSource),
     Sqlite(BrokeredSqliteSource),
     NanoClaw(BrokeredNanoClawSource),
-    Structured(super::structured::source_access::StructuredSourceSnapshot),
     #[cfg(test)]
     Fixture,
 }
@@ -497,15 +480,10 @@ fn admit_platform(
             }
         }
         CompleteContentSourceFamily::Structured => {
-            validate_fixed_snapshot_reservation(
-                reserved_snapshot_bytes,
-                u64::try_from(super::structured::verification::STRUCTURED_MAX_TOTAL_READ_BYTES)
-                    .unwrap_or(u64::MAX),
+            return Err(CompleteContentError::new(
+                CompleteContentErrorKind::HydrationUnsupported,
                 event_id,
-            )?;
-            BrokeredSource::Structured(super::structured::source_access::admit_structured_source(
-                &route, locators, event_id,
-            )?)
+            ));
         }
         #[cfg(test)]
         CompleteContentSourceFamily::Fixture => {
