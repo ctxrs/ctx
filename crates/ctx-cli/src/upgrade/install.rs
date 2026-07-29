@@ -9,7 +9,11 @@ mod runtime;
 mod transaction;
 
 use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 
+#[cfg(unix)]
+use anyhow::Context;
 use anyhow::{bail, Result};
 
 pub(crate) use marker::is_valid_install_attempt_id;
@@ -20,6 +24,7 @@ pub(super) use runtime::semantic_install_required;
 pub(super) use transaction::ApplyResult;
 #[cfg(windows)]
 pub(in crate::upgrade) use transaction::HelperOutcome;
+#[cfg(unix)]
 pub(super) use transaction::RECOVERY_REEXEC_ENV;
 pub(super) use transaction::{PendingRecovery, TerminalRecovery};
 
@@ -59,12 +64,50 @@ pub(in crate::upgrade) fn capture_install_snapshot(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(in crate::upgrade) enum InstallRecovery {
     None,
-    Recovered { committed: bool },
-    Scheduled { attempt_id: String, helper_pid: u32 },
-    ReexecRequired(std::path::PathBuf),
+    Recovered {
+        committed: bool,
+    },
+    #[cfg(windows)]
+    Scheduled {
+        attempt_id: String,
+        helper_pid: u32,
+    },
+    #[cfg(unix)]
+    ReexecCurrentFormat(CurrentFormatRecoveryReexec),
+}
+
+/// An executable restored from a schema-2 transaction after its journal and
+/// filesystem identity were revalidated under the installation lock.
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::upgrade) struct CurrentFormatRecoveryReexec {
+    executable: PathBuf,
+    attempt_id: String,
+}
+
+#[cfg(unix)]
+impl CurrentFormatRecoveryReexec {
+    fn validated(
+        expected: &PendingRecovery,
+        restored: &Path,
+        _installation_lock: &InstallationLock,
+    ) -> Result<Self> {
+        let executable = canonical_executable(restored)
+            .context("validate executable restored by schema-2 install recovery")?;
+        if restored != expected.install_path || executable != expected.install_path {
+            bail!(
+                "schema-2 install recovery restored unexpected executable {}; expected {}; refusing re-exec and requiring a fix-forward reinstall or upgrade",
+                executable.display(),
+                expected.install_path.display()
+            );
+        }
+        Ok(Self {
+            executable,
+            attempt_id: expected.attempt_id.clone(),
+        })
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -161,7 +204,9 @@ pub(in crate::upgrade) fn recover_interrupted_install(
         let outcome =
             transaction::recover_interrupted_install_outcome(expected, installation_lock)?;
         if let Some(path) = outcome.restored_executable() {
-            return Ok(InstallRecovery::ReexecRequired(path.to_path_buf()));
+            return Ok(InstallRecovery::ReexecCurrentFormat(
+                CurrentFormatRecoveryReexec::validated(expected, path, installation_lock)?,
+            ));
         }
         Ok(if outcome.recovered() {
             InstallRecovery::Recovered {
@@ -205,8 +250,17 @@ pub(in crate::upgrade) fn recover_interrupted_install(
     }
 }
 
-pub(in crate::upgrade) fn reexec_recovered_executable(path: &Path, attempt_id: &str) -> Result<()> {
-    transaction::reexec_restored_executable(path, attempt_id)
+#[cfg(unix)]
+pub(in crate::upgrade) fn reexec_current_format_recovery(
+    recovery: CurrentFormatRecoveryReexec,
+) -> Result<()> {
+    transaction::reexec_restored_executable(&recovery.executable, &recovery.attempt_id)
+        .with_context(|| {
+            format!(
+                "schema-2 recovery safely restored {}, but current-format re-exec failed; rerun `ctx upgrade` or reinstall from https://ctx.rs/install to fix forward",
+                recovery.executable.display()
+            )
+        })
 }
 
 #[cfg(windows)]

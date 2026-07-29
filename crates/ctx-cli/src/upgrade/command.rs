@@ -23,9 +23,12 @@ use crate::{
 use super::download::DownloadedArtifact;
 use super::install::{
     apply_artifact, capture_install_snapshot, current_install_path, pending_recovery,
-    recover_interrupted_install, reexec_recovered_executable, remove_terminal_recovery,
-    semantic_install_required, ApplyResult, InstallRecovery, PendingRecovery, TerminalRecovery,
-    RECOVERY_REEXEC_ENV,
+    recover_interrupted_install, remove_terminal_recovery, semantic_install_required, ApplyResult,
+    InstallRecovery, PendingRecovery, TerminalRecovery,
+};
+#[cfg(unix)]
+use super::install::{
+    reexec_current_format_recovery, CurrentFormatRecoveryReexec, RECOVERY_REEXEC_ENV,
 };
 use super::metadata::{
     metadata_signature_url, metadata_url, parse_release_metadata, validate_artifact_url,
@@ -55,6 +58,19 @@ const SEMANTIC_MODEL_ARCHIVE_MAX_BYTES: u64 = 768 * 1024 * 1024;
 const SEMANTIC_CPU_ARCHIVE_MAX_BYTES: u64 = 256 * 1024 * 1024;
 const SEMANTIC_ACCELERATOR_ARCHIVE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const RELEASE_ARTIFACT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+const CURRENT_FORMAT_ROLLBACK_DETAIL: &str =
+    "schema-2 interrupted ctx installation was rolled back to its identity-validated current-format executable; recovery must fix forward";
+
+#[cfg(unix)]
+fn continue_current_format_recovery_reexec(
+    handoff: crate::semantic::DaemonUpgradeHandoff,
+    recovery: CurrentFormatRecoveryReexec,
+) -> Result<()> {
+    handoff
+        .release_for_current_format_reexec()
+        .context("preserve daemon restart intent for current-format recovery re-exec")?;
+    reexec_current_format_recovery(recovery)
+}
 
 #[derive(Debug, Args)]
 pub struct UpgradeArgs {
@@ -399,26 +415,23 @@ fn check_upgrade(
                             &recovery_lock,
                             &recovery.attempt_id,
                             committed,
-                            (!committed).then_some("interrupted ctx installation was rolled back"),
+                            (!committed).then_some(CURRENT_FORMAT_ROLLBACK_DETAIL),
                             config.upgrade.interval,
                         )?;
                         drop(recovery_lock);
                         handoff.resume_with(&current_install_path()?)?;
                     }
-                    InstallRecovery::Scheduled { .. } => {
-                        return Err(anyhow!("interrupted install recovery is still active"));
-                    }
-                    InstallRecovery::ReexecRequired(path) => {
+                    #[cfg(unix)]
+                    InstallRecovery::ReexecCurrentFormat(reexec) => {
                         reconcile_replacement_terminal_locked(
                             &recovery_lock,
                             &recovery.attempt_id,
                             false,
-                            Some("interrupted ctx installation was rolled back"),
+                            Some(CURRENT_FORMAT_ROLLBACK_DETAIL),
                             config.upgrade.interval,
                         )?;
                         drop(recovery_lock);
-                        handoff.prepare_reexec()?;
-                        reexec_recovered_executable(&path, &recovery.attempt_id)?;
+                        continue_current_format_recovery_reexec(handoff, reexec)?;
                         unreachable!("successful recovery re-exec does not return");
                     }
                 }
@@ -514,7 +527,7 @@ fn apply_upgrade(
                         &recovery_lock,
                         &recovery_attempt_id,
                         committed,
-                        (!committed).then_some("interrupted ctx installation was rolled back"),
+                        (!committed).then_some(CURRENT_FORMAT_ROLLBACK_DETAIL),
                         config.upgrade.interval,
                     )?;
                     drop(recovery_lock);
@@ -544,6 +557,7 @@ fn apply_upgrade(
                         return Err(anyhow!("stopped after interrupted install recovery"));
                     }
                 }
+                #[cfg(windows)]
                 InstallRecovery::Scheduled {
                     attempt_id,
                     helper_pid,
@@ -563,22 +577,23 @@ fn apply_upgrade(
                     attempt_id: Some(attempt_id),
                 });
                 }
-                InstallRecovery::ReexecRequired(path) => {
+                #[cfg(unix)]
+                InstallRecovery::ReexecCurrentFormat(reexec) => {
                     reconcile_replacement_terminal_locked(
                         &recovery_lock,
                         &recovery_attempt_id,
                         false,
-                        Some("interrupted ctx installation was rolled back"),
+                        Some(CURRENT_FORMAT_ROLLBACK_DETAIL),
                         config.upgrade.interval,
                     )?;
                     drop(recovery_lock);
-                    daemon_handoff.prepare_reexec()?;
-                    reexec_recovered_executable(&path, &recovery_attempt_id)?;
+                    continue_current_format_recovery_reexec(daemon_handoff, reexec)?;
                     unreachable!("successful recovery re-exec does not return");
                 }
             }
         }
     }
+    #[cfg(unix)]
     if env::var(RECOVERY_REEXEC_ENV)
         .ok()
         .is_some_and(|attempt_id| is_valid_upgrade_attempt_id(&attempt_id))

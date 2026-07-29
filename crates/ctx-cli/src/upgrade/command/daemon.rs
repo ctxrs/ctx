@@ -323,8 +323,7 @@ pub(crate) fn finish_daemon_auto_upgrade(
                         "interrupted ctx installation recovery disappeared while owned"
                     )),
                     InstallRecovery::Recovered { committed } => {
-                        let detail =
-                            (!committed).then_some("interrupted ctx installation was rolled back");
+                        let detail = (!committed).then_some(CURRENT_FORMAT_ROLLBACK_DETAIL);
                         let automatic = reconcile_replacement_terminal_locked(
                             &lock,
                             &recovery.attempt_id,
@@ -352,18 +351,19 @@ pub(crate) fn finish_daemon_auto_upgrade(
                         }
                         resumed
                     }
+                    #[cfg(windows)]
                     InstallRecovery::Scheduled { helper_pid, .. } => {
                         handoff.transfer_to_replacement_helper(helper_pid)
                     }
-                    InstallRecovery::ReexecRequired(path) => {
+                    #[cfg(unix)]
+                    InstallRecovery::ReexecCurrentFormat(reexec) => {
                         let automatic = reconcile_replacement_terminal_locked(
                             &lock,
                             &recovery.attempt_id,
                             false,
-                            Some("interrupted ctx installation was rolled back"),
+                            Some(CURRENT_FORMAT_ROLLBACK_DETAIL),
                             interval,
                         )?;
-                        drop(lock);
                         if automatic {
                             send_daemon_upgrade_terminal(
                                 &recovery.data_root,
@@ -376,8 +376,8 @@ pub(crate) fn finish_daemon_auto_upgrade(
                                 started.elapsed(),
                             );
                         }
-                        handoff.prepare_reexec()?;
-                        reexec_recovered_executable(&path, &recovery.attempt_id)
+                        drop(lock);
+                        super::continue_current_format_recovery_reexec(handoff, reexec)
                     }
                 };
             }

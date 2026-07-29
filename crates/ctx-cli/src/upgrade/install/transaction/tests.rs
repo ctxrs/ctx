@@ -362,14 +362,14 @@ fn attempt_identity_rejects_path_syntax_and_accepts_state_ids() {
 
 #[cfg(unix)]
 #[test]
-fn unix_rollback_restores_old_executable_and_reports_reexec_target() {
+fn schema_two_rollback_restores_current_format_executable_and_reports_reexec_target() {
     let temp = tempdir().unwrap();
     let target = temp.path().join("ctx");
     let staged = temp.path().join(".ctx-upgrade-attempt.new");
     let backup = temp.path().join(".ctx-upgrade-attempt.previous");
-    fs::write(&target, b"old").unwrap();
-    fs::write(&staged, b"new").unwrap();
-    let old_identity = super::unix::path_identity_for_test(&target).unwrap();
+    fs::write(&target, b"current-format").unwrap();
+    fs::write(&staged, b"replacement").unwrap();
+    let current_format_identity = super::unix::path_identity_for_test(&target).unwrap();
     let staged_identity = super::unix::path_identity_for_test(&staged).unwrap();
     fs::hard_link(&target, &backup).unwrap();
     fs::rename(&staged, &target).unwrap();
@@ -382,13 +382,139 @@ fn unix_rollback_restores_old_executable_and_reports_reexec_target() {
         target_preexisted: true,
         state: JournalPathState::Published,
         staged_identity: Some(staged_identity),
-        original_target_identity: Some(old_identity),
-        backup_identity: Some(old_identity),
+        original_target_identity: Some(current_format_identity),
+        backup_identity: Some(current_format_identity),
     };
 
     let restored = super::unix::rollback_paths_for_test(&[path], &target).unwrap();
     assert_eq!(restored.as_deref(), Some(target.as_path()));
-    assert_eq!(fs::read(&target).unwrap(), b"old");
+    assert_eq!(fs::read(&target).unwrap(), b"current-format");
+
+    let recovery_lock = super::super::InstallationLock::try_acquire_for_recovery(&target)
+        .unwrap()
+        .expect("recovery lock");
+    assert!(
+        super::super::InstallationLock::try_acquire(&target)
+            .unwrap()
+            .is_none(),
+        "restored target must remain fenced until recovery releases its lock"
+    );
+    drop(recovery_lock);
+    assert!(
+        super::super::InstallationLock::try_acquire(&target)
+            .unwrap()
+            .is_some(),
+        "re-executed target must be able to reacquire its installation lock"
+    );
+}
+
+#[cfg(unix)]
+fn interrupted_schema_two_binary_publication(
+    root: &std::path::Path,
+    phase: JournalPhase,
+) -> (
+    InstallTransactionJournal,
+    std::path::PathBuf,
+    std::path::PathBuf,
+) {
+    let attempt_id = "current-format-attempt";
+    let target = root.join("ctx");
+    let marker = root.join("ctx.install.json");
+    let staged = root.join(format!(".ctx-upgrade-{attempt_id}.new"));
+    let marker_staged = root.join(format!(".ctx-upgrade-{attempt_id}.install.json.new"));
+    let backup = journal::transaction_backup_path(&target, attempt_id, "binary");
+    let marker_backup = journal::transaction_backup_path(&marker, attempt_id, "marker");
+
+    fs::write(&target, b"current-format").unwrap();
+    fs::write(&marker, b"current-format-marker").unwrap();
+    fs::write(&staged, b"replacement").unwrap();
+    fs::write(&marker_staged, b"replacement-marker").unwrap();
+
+    let current_format_identity = super::unix::path_identity_for_test(&target).unwrap();
+    let current_marker_identity = super::unix::path_identity_for_test(&marker).unwrap();
+    let staged_identity = super::unix::path_identity_for_test(&staged).unwrap();
+    let staged_marker_identity = super::unix::path_identity_for_test(&marker_staged).unwrap();
+
+    fs::hard_link(&target, &backup).unwrap();
+    fs::rename(&staged, &target).unwrap();
+    fs::hard_link(&marker, &marker_backup).unwrap();
+    fs::rename(&marker_staged, &marker).unwrap();
+
+    let mut transaction = InstallTransactionJournal::new(
+        attempt_id.to_owned(),
+        root.to_path_buf(),
+        root.join("runtime"),
+        target.clone(),
+        vec![
+            JournalPath {
+                label: "ctx binary".to_owned(),
+                staged,
+                target: target.clone(),
+                backup,
+                kind: JournalPathKind::File,
+                target_preexisted: true,
+                state: JournalPathState::Published,
+                staged_identity: Some(staged_identity),
+                original_target_identity: Some(current_format_identity),
+                backup_identity: Some(current_format_identity),
+            },
+            JournalPath {
+                label: "ctx install marker".to_owned(),
+                staged: marker_staged,
+                target: marker.clone(),
+                backup: marker_backup,
+                kind: JournalPathKind::File,
+                target_preexisted: true,
+                state: JournalPathState::Published,
+                staged_identity: Some(staged_marker_identity),
+                original_target_identity: Some(current_marker_identity),
+                backup_identity: Some(current_marker_identity),
+            },
+        ],
+        None,
+    );
+    transaction.phase = phase;
+    journal::write(&transaction).unwrap();
+    (transaction, target, marker)
+}
+
+#[cfg(unix)]
+#[test]
+fn schema_two_interrupted_publication_recovers_by_rolling_back_current_format_install() {
+    let temp = tempdir().unwrap();
+    let (mut transaction, target, marker) =
+        interrupted_schema_two_binary_publication(temp.path(), JournalPhase::Publishing);
+
+    let outcome = super::unix::recover_transaction(temp.path(), &mut transaction).unwrap();
+
+    assert_eq!(
+        outcome,
+        RecoveryOutcome::RolledBack {
+            restored_executable: Some(target.clone()),
+        }
+    );
+    assert_eq!(fs::read(&target).unwrap(), b"current-format");
+    assert_eq!(fs::read(&marker).unwrap(), b"current-format-marker");
+    assert!(!journal::install_transaction_path(&target).exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn schema_two_interrupted_commit_keeps_published_install_and_finishes_cleanup() {
+    let temp = tempdir().unwrap();
+    let (mut transaction, target, marker) =
+        interrupted_schema_two_binary_publication(temp.path(), JournalPhase::Committed);
+
+    let outcome = super::unix::recover_transaction(temp.path(), &mut transaction).unwrap();
+
+    assert_eq!(outcome, RecoveryOutcome::Committed);
+    assert_eq!(fs::read(&target).unwrap(), b"replacement");
+    assert_eq!(fs::read(&marker).unwrap(), b"replacement-marker");
+    assert_eq!(
+        fs::read(temp.path().join("ctx.previous")).unwrap(),
+        b"current-format"
+    );
+    assert!(!journal::install_transaction_path(&target).exists());
 }
 
 #[cfg(unix)]

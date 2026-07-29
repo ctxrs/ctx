@@ -1,5 +1,4 @@
 use super::*;
-use anyhow::bail;
 
 fn daemon_upgrade_handoff_path(data_root: &Path) -> PathBuf {
     daemon_root_path(data_root).join(DAEMON_UPGRADE_HANDOFF_FILE)
@@ -108,13 +107,18 @@ impl DaemonUpgradeHandoff {
         ))
     }
 
-    /// Compatibility boundary for upgrade callers that have not yet removed
-    /// their historical reverse-epoch branch. A clean source-rebuild epoch can
-    /// only fix forward and must never execute the replaced binary.
-    pub(crate) fn prepare_reexec(self) -> Result<()> {
-        bail!(
-            "unsupported_epoch_rollback: ctx 1.0 history epochs recover only by forward reinstall or upgrade"
-        )
+    /// Preserve daemon restart intent while schema-2 recovery re-executes the
+    /// identity-validated current-format executable restored at the install
+    /// path. The restored process consumes this request while fixing forward.
+    pub(crate) fn release_for_current_format_reexec(mut self) -> Result<()> {
+        if read_daemon_restart_request(&self.data_root).is_none() {
+            if let Some(trigger) = self.restart_trigger {
+                write_daemon_restart_request(&self.data_root, trigger, &self.handoff_id)?;
+            }
+        }
+        self.release("aborted", None)?;
+        self.release_on_drop = false;
+        Ok(())
     }
 
     /// Release the upgrade fence and restart the current auto-daemon after a
@@ -145,14 +149,6 @@ impl DaemonUpgradeHandoff {
         self.release("completed", None)?;
         self.release_on_drop = false;
         Ok(())
-    }
-
-    /// Compatibility boundary for reverse-epoch upgrade callers. The supplied
-    /// executable is deliberately never inspected or launched.
-    pub(crate) fn resume_legacy_reexec_with(self, _executable: &Path) -> Result<Option<String>> {
-        bail!(
-            "unsupported_epoch_rollback: ctx 1.0 never relaunches a replaced history-epoch binary"
-        )
     }
 
     /// Keep the fence owned by a platform replacement helper after apply
