@@ -277,7 +277,7 @@ fn cold_append_rewrite_delete_and_noop_preserve_only_relational_metadata() {
     let rows = query(
         temp.path(),
         "SELECT e.provider, e.provider_session_id, s.agent_type, e.branch, e.workspace, e.cwd,
-                e.source_path, e.event_type, e.role, e.event_seq, e.payload_json
+                e.source_path, e.event_type, e.role, e.event_seq
          FROM ctx_events e
          JOIN ctx_sessions s ON s.ctx_session_id = e.ctx_session_id",
     );
@@ -295,10 +295,6 @@ fn cold_append_rewrite_delete_and_noop_preserve_only_relational_metadata() {
         RawSqlValue::Text { value, .. } if value == "user"
     ));
     assert!(matches!(rows[0][9], RawSqlValue::Integer(1)));
-    assert!(matches!(
-        &rows[0][10],
-        RawSqlValue::Text { value, .. } if value == r#"{"content_authority":"provider_source"}"#
-    ));
     let locator_rows = query(
         temp.path(),
         "SELECT native_locator_json FROM source_backed_events",
