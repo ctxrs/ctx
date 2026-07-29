@@ -275,6 +275,15 @@ pub(crate) fn run_cli() -> Result<()> {
                     serde_json::to_string(&complete_content::complete_content_error_json(error))?
                 );
                 Some(RenderedJsonError.into())
+            } else if let Some(error) = error
+                .downcast_ref::<semantic::SourceHydrationUnavailable>()
+                .and_then(semantic::SourceHydrationUnavailable::complete_content_error)
+            {
+                eprintln!(
+                    "{}",
+                    serde_json::to_string(&complete_content::complete_content_error_json(&error))?
+                );
+                Some(RenderedJsonError.into())
             } else {
                 eprintln!("Error: {error:?}");
                 Some(RenderedCliError.into())
