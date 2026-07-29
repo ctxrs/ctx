@@ -53,9 +53,10 @@ ctx daemon enable
 - `setup` creates the data root, discovers known provider history locations,
   inventories current sources, builds and atomically publishes the
   source-backed lexical generation, catches up the relational projection, and
-  prints next steps. It does not open, migrate, or create the pre-v0.26
-  `work.sqlite` Store. If that prior-epoch file exists, setup preserves it
-  untouched for rollback or manual recovery and rebuilds from provider sources.
+  prints next steps. It never opens or migrates pre-v0.26 history. After a
+  source-backed Tantivy generation is verified and active, setup deletes old
+  history artifacts; a failed build leaves cleanup for the next successful
+  fix-forward setup.
   Setup does not write `config.toml` for implicit defaults or execute
   history-source plugin commands. When `[daemon].enabled` is true, setup may
   opportunistically start the ctx-owned background daemon after foreground
@@ -68,10 +69,10 @@ ctx daemon enable
   prints errors on failure.
 - `status` reports the ctx root, source epoch, lexical generation and policy,
   generation-bound catalog/resolver state, semantic generation and coverage,
-  relational projection state, prior-epoch preservation state, daemon state,
-  initialization state, compact local usage health, local-only marker, and
-  read-only marker. It does not include usage counts or estimates, initialize
-  or repair derived Core storage, or open prior-epoch history.
+  relational projection state, daemon state, initialization state, compact
+  local usage health, local-only marker, and read-only marker. It does not
+  include usage counts or estimates, initialize or repair derived Core storage,
+  or open old history.
 - `stats` is the read-only, local, offline report for History retrieval, Code
   provenance, Measured delivery, and Estimated savings. Measured facts and
   model-based estimates are separate in JSON; the estimate model and
@@ -804,8 +805,8 @@ Default daemon maintenance owns provider/plugin refresh, immutable candidate
 construction, atomic lexical publication, generation-bound resolver/catalog
 lifetime, relational projection catch-up, and semantic catch-up. Use
 `ctx daemon run` for explicit foreground maintenance. JSON status exposes
-`lexical`, `catalog`, `resolver`, `semantic`, `relational`, `prior_epoch`, and
-`daemon` objects. `ctx doctor` is the diagnostic surface for those components.
+`lexical`, `catalog`, `resolver`, `semantic`, `relational`, and `daemon`
+objects. `ctx doctor` is the diagnostic surface for those components.
 
 ## SQL
 

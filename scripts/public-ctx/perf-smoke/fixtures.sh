@@ -17,10 +17,6 @@ def prepare_work_root(base: Path) -> Path:
     resolved.mkdir(parents=True, exist_ok=True)
     return Path(tempfile.mkdtemp(prefix="run-", dir=resolved)).resolve()
 
-
-PRIOR_EPOCH_SENTINEL = b"opaque ctx v0.25 rollback sentinel; never open as sqlite\n"
-
-
 def stage_daemon_binary(ctx_bin: Path, role: str, work_root: Path) -> Path:
     metadata = ctx_bin.lstat()
     owner_safe = (
@@ -49,30 +45,6 @@ def stage_run_specs(
         (stage_daemon_binary(ctx_bin, role, work_root), label, role)
         for ctx_bin, label, role in run_specs
     ]
-
-
-def install_prior_epoch_sentinel(data_root: Path) -> str:
-    path = data_root / "work.sqlite"
-    if path.exists():
-        raise HarnessError(f"prior-epoch sentinel path already exists: {path}")
-    path.write_bytes(PRIOR_EPOCH_SENTINEL)
-    return hashlib.sha256(PRIOR_EPOCH_SENTINEL).hexdigest()
-
-
-def assert_prior_epoch_sentinel(data_root: Path, expected_sha256: str) -> None:
-    path = data_root / "work.sqlite"
-    if not path.is_file():
-        raise HarnessError(f"prior-epoch rollback sentinel disappeared: {path}")
-    observed = hashlib.sha256(path.read_bytes()).hexdigest()
-    if observed != expected_sha256:
-        raise HarnessError(
-            f"prior-epoch rollback sentinel changed: {observed} != {expected_sha256}"
-        )
-    for suffix in ("-wal", "-shm", "-journal"):
-        auxiliary = Path(f"{path}{suffix}")
-        if auxiliary.exists():
-            raise HarnessError(f"source-backed refresh touched prior-epoch auxiliary: {auxiliary}")
-
 
 def json_line(value: object) -> str:
     return json.dumps(value, separators=(",", ":"), sort_keys=True) + "\n"

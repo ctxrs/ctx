@@ -20,13 +20,10 @@ use super::*;
 const SOURCE_MANIFEST_AUTHORITY_SENTINEL: &[u8] =
     b"v0.26 source-manifest authority; provider sources remain canonical";
 const SEMANTIC_INDEX_SENTINEL: &[u8] = b"v0.26 disposable semantic index";
-const OLD_EPOCH_STORE_SENTINEL: &[u8] =
-    b"opaque pre-v0.26 Store preserved only for rollback; never open";
 
 struct EpochStorageFixture {
     source_manifest_authority: PathBuf,
     semantic_index: PathBuf,
-    old_epoch_store: PathBuf,
 }
 
 impl EpochStorageFixture {
@@ -38,7 +35,6 @@ impl EpochStorageFixture {
         let semantic_index = data_root
             .join("search/semantic")
             .join("fresh-epoch.sentinel");
-        let old_epoch_store = data_root.join("work.sqlite");
         fs::create_dir_all(source_manifest_authority.parent().unwrap()).unwrap();
         fs::create_dir_all(semantic_index.parent().unwrap()).unwrap();
         fs::write(
@@ -47,11 +43,9 @@ impl EpochStorageFixture {
         )
         .unwrap();
         fs::write(&semantic_index, SEMANTIC_INDEX_SENTINEL).unwrap();
-        fs::write(&old_epoch_store, OLD_EPOCH_STORE_SENTINEL).unwrap();
         Self {
             source_manifest_authority,
             semantic_index,
-            old_epoch_store,
         }
     }
 
@@ -63,10 +57,6 @@ impl EpochStorageFixture {
         assert_eq!(
             fs::read(&self.semantic_index).unwrap(),
             SEMANTIC_INDEX_SENTINEL
-        );
-        assert_eq!(
-            fs::read(&self.old_epoch_store).unwrap(),
-            OLD_EPOCH_STORE_SENTINEL
         );
     }
 }

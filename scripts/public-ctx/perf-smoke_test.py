@@ -27,7 +27,7 @@ HELPERS = (
 )
 REPO_ROOT = SCRIPT.parents[2]
 FROZEN_PYTHON_SOURCE_SHA256 = (
-    "c1454956576446fd5f3958fb64c37fc4502cdaf13a00f326f58676ed605e64ab"
+    "baf0bb0cf16940085091bbec37e7ad6097532a82bce013f58e597235aaa942cf"
 )
 PHASES = (
     "initial_source_refresh",
@@ -263,7 +263,7 @@ if args and args[0] == "status":
         "history_epoch": {
             "name": "v0.26_source_backed",
             "status": "ready",
-            "origin": "prior_epoch_preserved",
+            "origin": "fresh",
             "phase": "ready",
         },
         "lexical": {
@@ -295,13 +295,6 @@ if args and args[0] == "status":
             "path": str(relational_path),
             "session_count": session_count,
             "event_count": event_count,
-        },
-        "prior_epoch": {
-            "status": "preserved",
-            "authority": "non_authoritative",
-            "preserved": True,
-            "active": False,
-            "opened": False,
         },
     })
 elif args and args[0] == "search":
@@ -353,7 +346,6 @@ class PerfSmokePolicyTests(unittest.TestCase):
         ):
             self.assertNotIn(obsolete, source)
         self.assertIn("source_refresh_command()", source)
-        self.assertIn("prior_epoch_negative_assertion", source)
 
     def test_shell_argument_contract(self) -> None:
         help_result = subprocess.run(
@@ -394,7 +386,7 @@ class PerfSmokePolicyTests(unittest.TestCase):
         with self.assertRaises(harness_error):
             effective_role("candidate", "ctx 0.25.0")
 
-    def test_storage_footprint_excludes_prior_epoch_sentinel(self) -> None:
+    def test_storage_footprint_counts_current_artifacts(self) -> None:
         footprint = self.module["source_backed_storage_footprint"]
         with tempfile.TemporaryDirectory(prefix="ctx-perf-footprint-") as temp:
             root = Path(temp)
@@ -405,7 +397,6 @@ class PerfSmokePolicyTests(unittest.TestCase):
             (root / "search/lexical/meta.json").write_bytes(b"lexical")
             (root / "search/semantic/vectors").write_bytes(b"semantic")
             (root / "relational.sqlite").write_bytes(b"relational")
-            (root / "work.sqlite").write_bytes(b"x" * 10_000)
             sizes = footprint(root)
         self.assertEqual(
             sizes,
@@ -591,9 +582,6 @@ class PerfSmokeEndToEndTests(unittest.TestCase):
             self.assertTrue(
                 run["corpus"]["source_path"].endswith("/home/.codex/sessions")
             )
-            self.assertTrue(run["prior_epoch_negative_assertion"]["untouched"])
-            self.assertFalse(run["prior_epoch_negative_assertion"]["opened"])
-            self.assertNotIn("work.sqlite", run["storage"]["files"])
             self.assertEqual(
                 set(run["storage"]["files"]),
                 {
@@ -625,7 +613,6 @@ class PerfSmokeEndToEndTests(unittest.TestCase):
             self.assertEqual(initial["catalog"]["status"], "ready")
             self.assertEqual(initial["semantic"]["status"], "disabled")
             self.assertEqual(initial["relational"]["status"], "ready")
-            self.assertEqual(initial["prior_epoch"]["status"], "preserved")
 
 
 if __name__ == "__main__":

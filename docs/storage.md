@@ -173,10 +173,11 @@ resolver bound to the active lexical generation. A missing, changed, stale, or
 unsupported source fails with typed source availability rather than falling
 back to a stored text copy.
 
-A pre-v0.26 `work.sqlite` file is prior-epoch, non-authoritative data. v0.26
-leaves its bytes untouched for rollback or manual recovery only. Setup,
-refresh, search, show, SQL, and MCP never open it as live storage, migrate it,
-or use it as fallback; setup also does not create it.
+Pre-v0.26 history is never opened, migrated, or used as fallback. After a
+source-backed Tantivy generation is verified and active, ctx deletes old
+history artifacts safely and idempotently. A failed source build does not
+delete them; the next successful setup or refresh completes the fix-forward
+cleanup.
 
 ## Local Pro Storage
 
@@ -312,7 +313,7 @@ local upsert as described above.
 
 | Command | Reads | Writes |
 | --- | --- | --- |
-| `ctx setup` | provider transcript files and bounded path metadata for source discovery | data root, source catalog/epoch metadata, `search/lexical`, `relational.sqlite`, and optional daemon lock/status/job files when eligible human-readable daemon autostart runs; it neither opens nor creates prior-epoch storage |
+| `ctx setup` | provider transcript files and bounded path metadata for source discovery | data root, source catalog/epoch metadata, `search/lexical`, `relational.sqlite`, and optional daemon lock/status/job files when eligible human-readable daemon autostart runs; after verified activation it deletes old history artifacts without opening them |
 | `ctx status` | data root metadata, source epoch, lexical/semantic generation metadata, relational projection metadata, daemon state, and Pro authorization state when installed | may advance nonsecret anti-clock-rollback security metadata during Pro entitlement authorization; does not mutate provider history, Core generations, or local Pro graph data |
 | `ctx stats` | owner-private aggregate `usage.sqlite` when present | none; does not create pristine usage state or count itself |
 | `ctx sources` | bounded provider path metadata, allowlisted persistent selector files, and local history-source plugin manifests | none |
@@ -505,10 +506,10 @@ treated as fixed provider homes.
 ## v0.26 epoch transition
 
 v0.26 starts a fresh source-backed history epoch. It does not migrate or read
-the deleted legacy canonical Store. If an old `work.sqlite` family is present,
-ctx reports it as a preserved, non-authoritative prior epoch for rollback or
-manual recovery only and leaves all family members byte-for-byte untouched.
-No live command uses it as fallback.
+the legacy canonical Store or use it as fallback. Once a rebuilt Tantivy
+generation is verified and active, ctx deletes the old `work.sqlite` family.
+Cleanup is idempotent and never runs before verified activation; an interrupted
+or failed rebuild is recovered by completing the next forward setup or refresh.
 
 Setup discovers current provider sources and builds new derived generations.
 If a source needed for rebuilding no longer exists, ctx reports that source as
@@ -567,9 +568,7 @@ ctx setup
 ```
 
 This removes only derived Core search and SQL consumers and recreates them from
-provider history. It does not delete provider transcripts. If a prior-epoch
-database is present, leave it untouched unless you have separately decided to
-discard rollback/manual-recovery data.
+provider history. It does not delete provider transcripts.
 
 Inspect storage size:
 
@@ -596,8 +595,8 @@ or graph keys in the operating-system key store because their opaque record IDs
 depend on that identity.
 
 The final directory removal deletes ctx's derived indexes/projections, config,
-logs, lifecycle lock, preserved prior-epoch files, and remaining root-local
-metadata. It does not remove provider-owned history such as
+logs, lifecycle lock, and remaining root-local metadata. It does not remove
+provider-owned history such as
 `~/.codex/sessions`. The small installation-bound anti-rollback watermark
 described above may remain in the native key store after verified Pro deletion;
 it is security metadata outside the user-deletable Pro inventory.

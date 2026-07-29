@@ -206,11 +206,8 @@ fn assert_source_backed_codex_search(search: &Value, query: &str) {
 }
 
 #[test]
-fn explicit_codex_source_revision_republishes_without_legacy_store_fallback() {
+fn explicit_codex_source_revision_republishes_source_backed_generation() {
     let temp = tempdir();
-    let legacy_path = temp.path().join("work.sqlite");
-    let legacy_bytes = b"opaque prior-epoch Store sentinel\n";
-    fs::write(&legacy_path, legacy_bytes).unwrap();
     let _daemon = start_source_refresh_daemon(&temp);
     let source = temp.path().join("explicit-codex-source.jsonl");
     write_codex_session(&source, "explicit source revision before");
@@ -261,7 +258,6 @@ fn explicit_codex_source_revision_republishes_without_legacy_store_fallback() {
         superseded["results"].as_array().unwrap().is_empty(),
         "{superseded:#}"
     );
-    assert_eq!(fs::read(&legacy_path).unwrap(), legacy_bytes);
 }
 
 #[cfg(target_os = "windows")]

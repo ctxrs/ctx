@@ -982,21 +982,14 @@ fn mixed_setup_publishes_each_provider_once() {
 }
 
 #[test]
-fn setup_preserves_opaque_prior_epoch_while_rebuilding_from_provider_sources() {
+fn setup_adds_provider_without_changing_unchanged_source_ids() {
     let temp = tempdir();
-    let prior_epoch_path = temp.path().join("work.sqlite");
-    let prior_epoch_bytes = b"opaque v0.25 rollback sentinel\n";
-    fs::write(&prior_epoch_path, prior_epoch_bytes).unwrap();
-
-    let pi_query = "prior epoch pi authority rebuilt from source";
+    let pi_query = "pi authority retained across provider addition";
     install_default_pi_fixture(&temp, pi_query);
     let _daemon = start_full_source_refresh_daemon(&temp);
-    let initial = ready_setup(&temp);
-    assert_eq!(initial["prior_epoch"]["status"], "preserved", "{initial:#}");
-    assert_eq!(initial["prior_epoch"]["opened"], false, "{initial:#}");
+    ready_setup(&temp);
     let pi_before = provider_projection_snapshot(&temp, "pi");
     let pi_ids_before = assert_searchable_and_showable(&temp, "pi", pi_query);
-    assert_eq!(fs::read(&prior_epoch_path).unwrap(), prior_epoch_bytes);
 
     write_codex_setup_session(&temp);
     let setup = ready_setup(&temp);
@@ -1015,13 +1008,6 @@ fn setup_preserves_opaque_prior_epoch_while_rebuilding_from_provider_sources() {
         pi_ids_before
     );
     assert_searchable_and_showable(&temp, "codex", "setup should import");
-    assert_eq!(fs::read(&prior_epoch_path).unwrap(), prior_epoch_bytes);
-    for suffix in ["-wal", "-shm", "-journal"] {
-        assert!(
-            !PathBuf::from(format!("{}{suffix}", prior_epoch_path.display())).exists(),
-            "setup opened the opaque prior epoch and created {suffix}"
-        );
-    }
 }
 
 #[test]
