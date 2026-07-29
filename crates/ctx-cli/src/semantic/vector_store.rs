@@ -32,12 +32,6 @@ pub(super) struct SemanticChunkDocument {
     pub(super) end_char: usize,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(super) struct SemanticSidecarStats {
-    pub(super) embedded_items: usize,
-    pub(super) embedded_chunks: usize,
-}
-
 #[derive(Debug, Clone)]
 pub(super) struct SemanticStoredEvent {
     pub(super) event_id: Uuid,

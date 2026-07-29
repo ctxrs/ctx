@@ -39,7 +39,7 @@ fn write_test_semantic_cache_variant(root: &Path, variant: SemanticOrtModelVaria
 }
 
 #[test]
-fn accelerator_only_model_cache_is_available_and_reported() -> Result<()> {
+fn accelerator_only_model_cache_is_available() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let cache = temp.path().join("accelerator-cache");
     write_test_semantic_cache_variant(
@@ -50,13 +50,6 @@ fn accelerator_only_model_cache_is_available_and_reported() -> Result<()> {
     assert!(semantic_model_cache_snapshot_dir(&cache).is_none());
     assert!(semantic_accelerator_model_cache_available(&cache));
     assert!(semantic_model_cache_available(&cache));
-    let status = semantic_model_acquisition_status_json(&cache);
-    assert_eq!(status["cpu"]["cache_status"], "missing");
-    assert_eq!(status["accelerator"]["cache_status"], "present");
-    assert_eq!(
-        status["accelerator"]["model_variant"],
-        "accelerator-o4-fp16"
-    );
     Ok(())
 }
 

@@ -40,10 +40,7 @@ fn daemon_report_marks_orphaned_running_status_recoverable() -> Result<()> {
     };
     write_daemon_lifecycle_status(temp.path(), &args, "running", 123, None, None)?;
 
-    let daemon = daemon_report(
-        temp.path(),
-        &semantic_worker_report_best_effort(temp.path()),
-    );
+    let daemon = paths_status::daemon_report(temp.path());
 
     assert_eq!(daemon["status"], "stale_lock");
     assert_eq!(daemon["running"], false);
@@ -92,10 +89,7 @@ fn daemon_report_preserves_terminal_status_when_advisory_metadata_is_unreleased(
             &lock_path,
         ))?);
 
-        let daemon = daemon_report(
-            temp.path(),
-            &semantic_worker_report_best_effort(temp.path()),
-        );
+        let daemon = paths_status::daemon_report(temp.path());
 
         assert_eq!(daemon["status"], status);
         assert_eq!(daemon["running"], false);

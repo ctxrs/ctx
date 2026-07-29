@@ -60,93 +60,6 @@ fn fixed_batch_padding_preserves_complete_batches() -> Result<()> {
 }
 
 #[test]
-fn semantic_worker_report_preserves_embed_policy_from_status() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    write_semantic_worker_status(
-        temp.path(),
-        &json!({
-            "schema_version": 1,
-            "status": "budget_exhausted",
-            "model_key": semantic_model_key(),
-            "pid": 1234,
-            "searchable_items": 10,
-            "embedded_items": 2,
-            "embedded_chunks": 4,
-            "dirty_items": 1,
-            "embed_policy": {
-                "source": "fixture",
-                "threads": 7,
-                "batch_size": 96,
-                "memory_budget_bytes": 123,
-            },
-        }),
-    )?;
-
-    let report = semantic_worker_report_best_effort(temp.path()).to_json();
-    assert_eq!(report["embed_policy"]["source"], "fixture");
-    assert_eq!(report["embed_policy"]["threads"], 7);
-    assert_eq!(report["coverage"]["embedded_chunks"], 4);
-    Ok(())
-}
-
-#[test]
-fn semantic_worker_report_ignores_status_from_old_model_key() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    write_semantic_worker_status(
-        temp.path(),
-        &json!({
-            "schema_version": 1,
-            "status": "ready",
-            "model_key": "fastembed:old-model-key",
-            "pid": 999,
-            "last_error": "old failure",
-            "searchable_items": 10,
-            "embedded_items": 10,
-            "embedded_chunks": 20,
-            "dirty_items": 0,
-            "embed_policy": {
-                "source": "old-fixture"
-            },
-        }),
-    )?;
-
-    let report = semantic_worker_report_best_effort(temp.path()).to_json();
-    assert_eq!(report["status"], "unknown");
-    assert_eq!(report["pid"], Value::Null);
-    assert_eq!(report["last_error"], Value::Null);
-    assert_ne!(report["embed_policy"]["source"], "old-fixture");
-    assert_eq!(report["coverage"]["searchable_items"], 0);
-    assert_eq!(report["coverage"]["searchable_items_known"], false);
-    assert_eq!(report["coverage"]["embedded_items"], 0);
-    Ok(())
-}
-
-#[test]
-fn ready_index_requests_daemon_model_load_with_or_without_cache() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let mut report = SemanticWorkerReport::unavailable(temp.path(), "test");
-    report.status = "ready".to_owned();
-    report.searchable_items = 10;
-    report.searchable_items_known = true;
-    report.embedded_items = 10;
-    report.queued_items_estimate = 0;
-    report.model_cache_available = false;
-    report.embedding_runtime = Some(json!({
-        "backend": "cpu",
-        "compute_class": "cpu",
-    }));
-
-    assert!(semantic_daemon_model_load_needed(&report, false));
-    assert!(!semantic_daemon_model_load_needed(&report, true));
-    report.model_cache_available = true;
-    assert!(semantic_daemon_model_load_needed(&report, false));
-    let status = daemon_semantic_job_report(temp.path(), &report, true);
-    assert_eq!(status["embedding_runtime"]["backend"], "cpu");
-    assert_eq!(status["embedding_runtime"]["compute_class"], "cpu");
-    Ok(())
-}
-
-#[test]
 fn daemon_job_json_keeps_outcomes_without_live_worker_snapshots() {
     let job = daemon_semantic_job_json("budget_exhausted", None, 1234, Some(7), None);
 
@@ -169,68 +82,16 @@ fn daemon_job_json_keeps_outcomes_without_live_worker_snapshots() {
 }
 
 #[test]
-fn disabled_semantic_status_is_read_only_and_write_free() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let config = AppConfig::default();
-
-    let worker = semantic_worker_report_best_effort(temp.path());
-    let configured = semantic_worker_report_configured_json(&config, &worker);
-    let daemon = daemon_report(temp.path(), &worker);
-
-    assert_eq!(configured["status"], "disabled");
-    assert_eq!(configured["reason"], "semantic_disabled");
-    assert_eq!(daemon["jobs"]["semantic_index"]["status"], "disabled");
-    assert!(fs::read_dir(temp.path())?.next().is_none());
-    Ok(())
-}
-
-#[test]
-fn daemon_status_reports_retryable_memory_deferral() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    write_semantic_enabled_config(temp.path())?;
-    let mut report = SemanticWorkerReport::unavailable(temp.path(), "test");
-    report.status = "model_load_deferred".to_owned();
-    report.searchable_items = 10;
-    report.searchable_items_known = true;
-    report.queued_items_estimate = 10;
-    write_daemon_job_status(
-        &daemon_semantic_job_path(temp.path()),
-        &compact_json(json!({
-            "schema_version": 1,
-            "model_key": semantic_model_key(),
-            "status": "skipped",
-            "reason": "memory_pressure",
-            "retryable": true,
-            "available_memory_bytes": 1_610_612_736_u64,
-            "required_available_memory_bytes": 2_147_483_648_u64,
-        })),
-    )?;
-
-    let value = daemon_semantic_job_report(temp.path(), &report, true);
-    assert_eq!(value["status"], "skipped");
-    assert_eq!(value["reason"], "memory_pressure");
-    assert_eq!(value["worker_status"], "model_load_deferred");
-    assert_eq!(value["retryable"], true);
-    assert_eq!(value["available_memory_bytes"], 1_610_612_736_u64);
-    assert_eq!(value["required_available_memory_bytes"], 2_147_483_648_u64);
-    Ok(())
-}
-
-#[test]
 fn daemon_acquisition_failure_is_explicit_retryable_and_fail_closed() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    write_semantic_enabled_config(temp.path())?;
 
     let startup = run_daemon_semantic_model_startup_with(
-        temp.path(),
         1234,
         || Err(anyhow!("signed model input unavailable")),
         |_| -> Result<SemanticDaemonModelAcquisition> {
             unreachable!("failed initial acquisition must not request CPU fallback")
         },
-        |_| -> Result<(Option<Value>, Value)> {
-            unreachable!("failed acquisition must never initialize the runtime")
-        },
+        |_| -> Result<()> { unreachable!("failed acquisition must never initialize the runtime") },
     )?;
     let DaemonSemanticModelStartup::Finished(job) = startup else {
         panic!("failed acquisition must stop daemon model startup");
@@ -240,18 +101,11 @@ fn daemon_acquisition_failure_is_explicit_retryable_and_fail_closed() -> Result<
 
     let mut backoff = DaemonRetryBackoff::default();
     let job = record_daemon_job_retry(&mut backoff, job);
-    write_daemon_job_status(&daemon_semantic_job_path(temp.path()), &job)?;
-
-    let report = semantic_worker_report(temp.path())?;
-    let value = daemon_semantic_job_report(temp.path(), &report, true);
-    assert_eq!(value["status"], "skipped");
-    assert_eq!(value["reason"], "model_acquisition_failed");
-    assert_eq!(value["last_run_status"], "skipped");
-    assert_eq!(value["last_run_reason"], "model_acquisition_failed");
-    assert_eq!(value["failure_class"], "retryable");
-    assert_eq!(value["retryable"], true);
-    assert_eq!(value["model_cache_available"], false);
-    assert!(value["retry_after_ms"].is_null());
+    assert_eq!(job["failure_class"], "retryable");
+    assert_eq!(job["retryable"], true);
+    assert!(job["retry_after_ms"]
+        .as_u64()
+        .is_some_and(|delay| delay > 0));
     assert!(
         !source_backed_semantic_vector_path(temp.path()).exists(),
         "failed model acquisition must not claim a semantic projection"
@@ -261,32 +115,19 @@ fn daemon_acquisition_failure_is_explicit_retryable_and_fail_closed() -> Result<
 
 #[cfg(ctx_semantic_fastembed)]
 #[test]
-fn verified_cache_missing_runtime_reports_model_load_failed_compatibly() -> Result<()> {
+fn verified_cache_missing_runtime_reports_model_load_failed() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    write_semantic_enabled_config(temp.path())?;
     let cache_dir = temp.path().join("semantic-model-cache");
     write_test_semantic_cache(&cache_dir)?;
     let missing_runtime = temp.path().join("missing-libonnxruntime.so");
 
     let startup = run_daemon_semantic_model_startup_with(
-        temp.path(),
         1234,
-        || {
-            let status =
-                read_semantic_worker_status(temp.path()).expect("acquisition phase status");
-            assert_eq!(status["status"], "acquiring_model");
-            Ok(SemanticDaemonModelAcquisition::verified_cpu_cache_for_test())
-        },
+        || Ok(SemanticDaemonModelAcquisition::verified_cpu_cache_for_test()),
         |_| -> Result<SemanticDaemonModelAcquisition> {
             unreachable!("CPU runtime load failure must not request Core ML fallback")
         },
-        |_| -> Result<(Option<Value>, Value)> {
-            let status = read_semantic_worker_status(temp.path()).expect("loading phase status");
-            assert_eq!(status["status"], "loading_model");
-            assert_eq!(
-                status["model_acquisition"]["cpu"]["cache_status"],
-                "present"
-            );
+        |_| -> Result<()> {
             load_missing_semantic_onnxruntime_for_test(&cache_dir, &missing_runtime)?;
             unreachable!("missing explicit runtime must fail deterministically")
         },
@@ -297,29 +138,10 @@ fn verified_cache_missing_runtime_reports_model_load_failed_compatibly() -> Resu
     assert_eq!(job["status"], "skipped");
     assert_eq!(job["reason"], "model_load_failed");
     assert_eq!(job["failure_class"], "retryable");
-
-    let mut backoff = DaemonRetryBackoff::default();
-    let job = record_daemon_job_retry(&mut backoff, job);
-    write_daemon_job_status(&daemon_semantic_job_path(temp.path()), &job)?;
-
-    let worker_status =
-        read_semantic_worker_status(temp.path()).expect("model load failure status");
-    assert_eq!(worker_status["status"], "model_load_failed");
-    assert_eq!(
-        worker_status["model_acquisition"]["cpu"]["cache_status"], "present",
-        "runtime initialization failure must preserve verified-cache state"
-    );
-    assert!(worker_status["last_error"]
+    assert!(job["last_error"]
         .as_str()
         .is_some_and(|message| message.contains("failed to load ONNX Runtime")));
-
-    let report = semantic_worker_report(temp.path())?;
-    let value = daemon_semantic_job_report(temp.path(), &report, true);
-    assert_eq!(value["status"], "skipped");
-    assert_eq!(value["reason"], "model_load_failed");
-    assert_eq!(value["last_run_status"], "skipped");
-    assert_eq!(value["last_run_reason"], "model_load_failed");
-    assert_eq!(value["model_cache_available"], true);
+    assert!(semantic_model_cache_available(&cache_dir));
     Ok(())
 }
 
@@ -334,17 +156,10 @@ fn auto_coreml_load_failure_acquires_cpu_and_preserves_fallback_metadata() -> Re
     let load_attempts = std::cell::Cell::new(0_u8);
 
     let startup = run_daemon_semantic_model_startup_with(
-        temp.path(),
         1234,
-        || {
-            let status = read_semantic_worker_status(temp.path()).expect("Core ML acquire status");
-            assert_eq!(status["status"], "acquiring_model");
-            Ok(SemanticDaemonModelAcquisition::verified_coreml_cache_for_test())
-        },
+        || Ok(SemanticDaemonModelAcquisition::verified_coreml_cache_for_test()),
         |fallback| {
             assert_eq!(fallback, "coreml_load_error");
-            let status = read_semantic_worker_status(temp.path()).expect("CPU acquire status");
-            assert_eq!(status["status"], "acquiring_model");
             assert!(
                 !cpu_cache.exists(),
                 "forced Core ML load failure must precede CPU acquisition"
@@ -355,8 +170,6 @@ fn auto_coreml_load_failure_acquires_cpu_and_preserves_fallback_metadata() -> Re
         },
         |acquisition| {
             load_attempts.set(load_attempts.get() + 1);
-            let status = read_semantic_worker_status(temp.path()).expect("model loading status");
-            assert_eq!(status["status"], "loading_model");
             if acquisition.fallback().is_none() {
                 return Err(map_daemon_coreml_load_error(
                     acquisition,
@@ -367,31 +180,15 @@ fn auto_coreml_load_failure_acquires_cpu_and_preserves_fallback_metadata() -> Re
                 cpu_acquired.get(),
                 "cache-only CPU load must follow daemon-authorized acquisition"
             );
-            Ok((
-                Some(json!({
-                    "backend": "cpu",
-                    "acquisition_source": acquisition.source(),
-                    "acquisition_fallback": acquisition.fallback(),
-                })),
-                json!({"compute_class": "cpu"}),
-            ))
+            assert_eq!(acquisition.source(), "download");
+            assert_eq!(acquisition.fallback(), Some("coreml_load_error"));
+            Ok(())
         },
     )?;
 
     assert!(matches!(startup, DaemonSemanticModelStartup::Loaded));
     assert!(cpu_acquired.get());
     assert_eq!(load_attempts.get(), 2);
-    let status = read_semantic_worker_status(temp.path()).expect("model loaded status");
-    assert_eq!(status["status"], "model_loaded");
-    assert_eq!(status["embedding_runtime"]["backend"], "cpu");
-    assert_eq!(
-        status["embedding_runtime"]["acquisition_source"],
-        "download"
-    );
-    assert_eq!(
-        status["embedding_runtime"]["acquisition_fallback"],
-        "coreml_load_error"
-    );
     Ok(())
 }
 
@@ -458,45 +255,6 @@ fn semantic_failure_classes_control_retry_backoff() {
         );
         assert_eq!(daemon_job_should_backoff(&job), should_backoff);
     }
-}
-
-#[test]
-fn legacy_semantic_job_report_ignores_job_from_old_model_key() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    write_semantic_enabled_config(temp.path())?;
-    write_daemon_job_status(
-        &daemon_semantic_job_path(temp.path()),
-        &json!({
-            "schema_version": 1,
-            "status": "ready",
-            "model_key": "fastembed:old-model-key",
-            "last_run_at_ms": 1234,
-            "indexed_chunks": 99,
-        }),
-    )?;
-
-    let semantic = daemon_semantic_job_report(
-        temp.path(),
-        &semantic_worker_report_best_effort(temp.path()),
-        true,
-    );
-    assert_eq!(semantic["status"], "unknown");
-    assert_eq!(semantic["reason"], "searchable_items_unknown");
-    assert_eq!(semantic["last_run_status"], Value::Null);
-    assert_eq!(semantic["indexed_chunks"], Value::Null);
-    Ok(())
-}
-
-#[test]
-fn hybrid_semantic_readiness_requires_complete_coverage() {
-    assert!(semantic_hybrid_coverage_ready(0, 0, 0));
-    assert!(semantic_hybrid_coverage_ready(10, 10, 0));
-    assert!(semantic_hybrid_coverage_ready(11, 10, 0));
-
-    assert!(!semantic_hybrid_coverage_ready(0, 10, 0));
-    assert!(!semantic_hybrid_coverage_ready(1_000, 100_000, 0));
-    assert!(!semantic_hybrid_coverage_ready(99_999, 100_000, 0));
-    assert!(!semantic_hybrid_coverage_ready(10, 10, 1));
 }
 
 #[cfg(ctx_semantic_fastembed)]

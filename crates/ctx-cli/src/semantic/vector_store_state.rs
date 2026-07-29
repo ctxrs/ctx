@@ -7,7 +7,7 @@ use super::{
     model_contract::SEMANTIC_DIMENSIONS,
     vector_store::{
         flat_segments::{FlatChunk, FlatEventReplacement, FlatSourceHash, PinnedFlatGeneration},
-        SemanticChunkDocument, SemanticSidecarStats, SemanticStoredEvent, SemanticVectorStore,
+        SemanticChunkDocument, SemanticStoredEvent, SemanticVectorStore,
     },
     vector_store_schema::{semantic_owned_sidecar_result, SemanticVectorStoreError},
 };
@@ -15,26 +15,6 @@ use super::{
 const COMPACT_SEGMENT_THRESHOLD: usize = 16;
 
 impl SemanticVectorStore {
-    pub(super) fn cached_stats(&self) -> Result<Option<SemanticSidecarStats>> {
-        semantic_owned_sidecar_result(self.flat_stats().map(Some))
-    }
-
-    pub(super) fn cached_or_exact_stats(&self) -> Result<SemanticSidecarStats> {
-        semantic_owned_sidecar_result(self.flat_stats())
-    }
-
-    pub(super) fn exact_stats(&self) -> Result<SemanticSidecarStats> {
-        semantic_owned_sidecar_result(self.flat_stats())
-    }
-
-    pub(super) fn dirty_event_count(&self) -> Result<usize> {
-        Ok(0)
-    }
-
-    pub(super) fn plaintext_value_count(&self) -> Result<usize> {
-        Ok(0)
-    }
-
     pub(super) fn existing_hashes_for_event_ids(
         &self,
         event_ids: &[Uuid],
@@ -85,24 +65,8 @@ impl SemanticVectorStore {
         })())
     }
 
-    #[cfg(test)]
-    pub(super) fn delete_embedding_chunks_for_event_ids(
-        &mut self,
-        event_ids: &[Uuid],
-    ) -> Result<usize> {
-        self.delete_events(event_ids)
-    }
-
     pub(super) fn flat_pin_generation(&self) -> Result<Option<PinnedFlatGeneration>> {
         self.flat.pin_generation().map_err(anyhow::Error::new)
-    }
-
-    fn flat_stats(&self) -> Result<SemanticSidecarStats> {
-        let stats = self.flat.active_stats().map_err(anyhow::Error::new)?;
-        Ok(SemanticSidecarStats {
-            embedded_items: stats.active_events,
-            embedded_chunks: stats.active_chunks,
-        })
     }
 
     fn flat_existing_hashes(&self, event_ids: &[Uuid]) -> Result<HashMap<Uuid, String>> {

@@ -68,7 +68,6 @@ pub(in crate::semantic) fn acquire_ort_backend(
             _windows_ml_registration: windows_ml_registration,
         },
         batch_size: policy.batch_size,
-        policy,
         preference,
         acquisition_source: "cache",
         acquisition_fallback: None,

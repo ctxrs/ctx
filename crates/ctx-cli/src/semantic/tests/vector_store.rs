@@ -25,6 +25,13 @@ fn exact_search(
     )
 }
 
+fn active_counts(store: &SemanticVectorStore) -> Result<(usize, usize)> {
+    let pinned = store
+        .flat_pin_generation()?
+        .expect("fixture must publish a flat generation");
+    Ok((pinned.stats().active_events, pinned.stats().active_chunks))
+}
+
 #[test]
 fn flat_store_control_catalog_has_no_vectors_or_plaintext() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -51,7 +58,6 @@ fn flat_store_control_catalog_has_no_vectors_or_plaintext() -> Result<()> {
     assert!(!schema.contains("event_embedding"));
     assert!(!schema.contains("chunk_text"));
     assert!(!schema.contains("USING vec"));
-    assert_eq!(store.plaintext_value_count()?, 0);
     Ok(())
 }
 
@@ -134,13 +140,7 @@ fn flat_rewrite_truncation_delete_and_restart_do_not_resurrect_chunks() -> Resul
             ),
         ])?;
         store.upsert_chunk_embeddings(&[(rewritten_chunk, test_embedding(0.0, 1.0))])?;
-        assert_eq!(
-            store.cached_or_exact_stats()?,
-            SemanticSidecarStats {
-                embedded_items: 2,
-                embedded_chunks: 2,
-            }
-        );
+        assert_eq!(active_counts(&store)?, (2, 2));
         let rewritten_hit = exact_search(&store, &test_embedding(1.0, 0.0), 2)?
             .hits
             .into_iter()
@@ -148,17 +148,11 @@ fn flat_rewrite_truncation_delete_and_restart_do_not_resurrect_chunks() -> Resul
             .expect("rewritten event");
         assert_eq!(rewritten_hit.similarity, 0.0);
         assert_eq!(rewritten_hit.source_text_hash, rewritten_hash);
-        assert_eq!(store.delete_embedding_chunks_for_event_ids(&[deleted])?, 1);
+        assert_eq!(store.delete_events(&[deleted])?, 1);
     }
 
     let store = SemanticVectorStore::open(&root)?;
-    assert_eq!(
-        store.cached_or_exact_stats()?,
-        SemanticSidecarStats {
-            embedded_items: 1,
-            embedded_chunks: 1,
-        }
-    );
+    assert_eq!(active_counts(&store)?, (1, 1));
     let hits = exact_search(&store, &test_embedding(1.0, 0.0), 10)?.hits;
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].event_id, rewritten);

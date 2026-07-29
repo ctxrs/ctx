@@ -171,7 +171,6 @@ fn source_refresh_only_scheduler_runs_no_unrelated_job() -> Result<()> {
     assert!(!iteration.did_work);
     assert!(!iteration.failed);
     assert!(calls.borrow().is_empty());
-    assert!(!super::super::paths_status::daemon_history_refresh_job_path(temp.path()).exists());
     assert!(!super::super::paths_status::daemon_semantic_job_path(temp.path()).exists());
     Ok(())
 }
@@ -330,15 +329,9 @@ fn full_scheduler_never_runs_or_activates_legacy_history_state() -> Result<()> {
 
     let temp = tempfile::tempdir()?;
     let legacy_database = ctx_history_core::database_path(temp.path().to_path_buf());
-    let legacy_history_job =
-        super::super::paths_status::daemon_history_refresh_job_path(temp.path());
     let legacy_semantic_job = super::super::paths_status::daemon_semantic_job_path(temp.path());
     for (path, sentinel) in [
         (legacy_database.as_path(), b"legacy-store".as_slice()),
-        (
-            legacy_history_job.as_path(),
-            b"legacy-history-job".as_slice(),
-        ),
         (
             legacy_semantic_job.as_path(),
             b"legacy-semantic-job".as_slice(),
@@ -388,16 +381,13 @@ fn full_scheduler_never_runs_or_activates_legacy_history_state() -> Result<()> {
     assert!(!iteration.failed);
     assert!(calls.borrow().is_empty());
     assert_eq!(fs::read(&legacy_database)?, b"legacy-store");
-    assert_eq!(fs::read(&legacy_history_job)?, b"legacy-history-job");
     assert_eq!(fs::read(&legacy_semantic_job)?, b"legacy-semantic-job");
     let marker = crate::upgrade::data_migration::inspect(temp.path())?.expect("v0.26 epoch marker");
     assert_eq!(
         marker.phase,
         crate::upgrade::data_migration::MigrationPhase::Ready
     );
-    let semantic_report =
-        SemanticWorkerReport::unavailable(temp.path(), "source-backed semantic unavailable");
-    let report = daemon_report(temp.path(), &semantic_report);
+    let report = daemon_report(temp.path());
     assert_eq!(
         report["jobs"]["history_refresh"]["reason"],
         "history_epoch_source_backed"
@@ -475,10 +465,7 @@ fn source_refresh_only_status_exposes_runtime_and_certified_refresh_identity() -
         }),
     )?;
 
-    let report = daemon_report(
-        temp.path(),
-        &super::super::daemon_worker::semantic_worker_report_for_daemon(temp.path()),
-    );
+    let report = daemon_report(temp.path());
 
     assert_eq!(report["mode"], "source-refresh-only");
     assert_eq!(report["live_pid"], process::id());

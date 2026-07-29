@@ -79,7 +79,6 @@ pub(super) fn acquire_coreml_backend(
     Ok(SemanticEmbedder {
         batch_size: model.document.batch_size.min(policy.batch_size).max(1),
         backend: SemanticEmbeddingBackend::CoreMl(model),
-        policy,
         preference,
         acquisition_source,
         acquisition_fallback: fallback,

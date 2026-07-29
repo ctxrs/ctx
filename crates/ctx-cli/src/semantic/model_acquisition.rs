@@ -7,9 +7,9 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
-use serde_json::{json, Value};
 
-use crate::output::compact_json;
+#[cfg(test)]
+use serde_json::json;
 
 use super::model_bundle::{
     cached_signed_bundle, create_signed_bundle_staging_directory,
@@ -84,37 +84,6 @@ pub(crate) fn coreml_bundle_cache_available(cache_root: &Path) -> bool {
     descriptor_cache_complete(cache_root, &COREML_BUNDLE_CONTRACT)
 }
 
-pub(crate) fn coreml_acquisition_status_json(cache_root: &Path) -> Value {
-    let descriptor = &COREML_BUNDLE_CONTRACT;
-    let provisioned = descriptor_provisioned(descriptor);
-    let cache_status = if !provisioned {
-        "descriptor_unprovisioned"
-    } else {
-        descriptor_cache_status(cache_root, descriptor)
-    };
-    compact_json(json!({
-        "artifact_name": descriptor.artifact_name,
-        "bundle_id": descriptor.bundle_id,
-        "bundle_version": descriptor.bundle_version,
-        "schema_version": descriptor.schema_version,
-        "source_revision": descriptor.source_revision,
-        "minimum_macos": descriptor.minimum_macos,
-        "tensor_contract": {
-            "document_batch_size": descriptor.document_batch_size,
-            "query_batch_size": descriptor.query_batch_size,
-            "max_sequence_length": descriptor.max_sequence_length,
-            "embedding_dimensions": descriptor.embedding_dimensions,
-            "document_prefix": descriptor.document_prefix,
-            "query_prefix": descriptor.query_prefix,
-            "pooling": descriptor.pooling,
-            "normalization": descriptor.normalization,
-        },
-        "descriptor_provisioned": provisioned,
-        "cache_status": cache_status,
-        "network_scope": "daemon_only",
-    }))
-}
-
 pub(crate) fn cached_coreml_bundle(cache_root: &Path) -> Result<Option<VerifiedModelBundle>> {
     cached_coreml_bundle_for(cache_root, &COREML_BUNDLE_CONTRACT)
 }
@@ -169,17 +138,6 @@ fn descriptor_cache_complete(cache_root: &Path, descriptor: &CoreMlBundleContrac
         return false;
     }
     signed_bundle_cache_status(cache_root, descriptor) == SignedBundleCacheStatus::Available
-}
-
-fn descriptor_cache_status(
-    cache_root: &Path,
-    descriptor: &CoreMlBundleContract<'_>,
-) -> &'static str {
-    match signed_bundle_cache_status(cache_root, descriptor) {
-        SignedBundleCacheStatus::Missing => "missing",
-        SignedBundleCacheStatus::Available => "available",
-        SignedBundleCacheStatus::IntegrityError => "integrity_error",
-    }
 }
 
 fn cached_coreml_bundle_for(
