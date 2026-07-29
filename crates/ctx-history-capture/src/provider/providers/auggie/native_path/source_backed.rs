@@ -1,7 +1,7 @@
 //! Thin source-backed projection for Auggie's whole-session JSON documents.
 //!
 //! Auggie owns the complete content in `sessions/*.json`. This adapter emits
-//! bounded lexical records plus exact document coordinates; lifecycle and
+//! policy-selected lexical records plus exact document coordinates; lifecycle and
 //! publication remain shared coordinator responsibilities.
 
 use std::{
@@ -20,7 +20,7 @@ use ctx_history_core::{
     ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation,
     SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
 };
-use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
+use ctx_history_index::LexicalDocument;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -401,7 +401,7 @@ pub(crate) fn hydrate_auggie_source_backed(
     .ok_or(AuggieSourceBackedError::LocatorRecordMissing)?;
 
     Ok(AuggieHydratedSourceRecord {
-        provider_bytes,
+        provider_bytes: decoded_display_text.as_bytes().to_vec(),
         decoded_display_text,
     })
 }
@@ -533,11 +533,7 @@ fn auggie_lexical_document(
         .payload
         .get("text")
         .and_then(Value::as_str)
-        .map(|text| {
-            text.chars()
-                .take(MAX_BODY_PREVIEW_CHARS)
-                .collect::<String>()
-        })
+        .map(str::to_owned)
         .filter(|text| !text.is_empty())
         .ok_or(AuggieSourceBackedError::MissingLexicalText)?;
     Ok(LexicalDocument {
@@ -733,18 +729,12 @@ mod tests {
     }
 
     #[test]
-    fn cold_projection_is_stable_bounded_and_document_located() {
+    fn cold_projection_is_stable_full_body_and_document_located() {
         let temp = tempdir().unwrap();
         let sessions = temp.path().join("home/.augment/sessions");
         let path = sessions.join("session.json");
-        write_session(
-            &path,
-            &format!(
-                "bounded-prefix-{}",
-                "x".repeat(MAX_BODY_PREVIEW_CHARS + 512)
-            ),
-            "bounded response",
-        );
+        let request_text = format!("full-prefix-{}-auggie-tail", "x".repeat(3_000));
+        write_session(&path, &request_text, "bounded response");
         let root = AuggieSourceBackedRoot::default_for_home(temp.path().join("home"));
         let inventory = discover_auggie_source_backed(&root).unwrap();
         assert_eq!(
@@ -770,10 +760,8 @@ mod tests {
                 .map(|document| document.event_id)
                 .collect::<Vec<_>>()
         );
-        assert_eq!(
-            first.documents[0].body.chars().count(),
-            MAX_BODY_PREVIEW_CHARS
-        );
+        assert_eq!(first.documents[0].body, request_text);
+        assert!(first.documents[0].body.ends_with("auggie-tail"));
         for document in &first.documents {
             assert_eq!(document.parent_session_id, None);
             assert_eq!(document.root_session_id, document.session_id);
@@ -816,6 +804,7 @@ mod tests {
         let old_request = &before.documents[0];
         let hydrated = hydrate_auggie_source_backed(&before.path, &old_request.locator).unwrap();
         assert_eq!(hydrated.decoded_display_text, "before replacement");
+        assert_eq!(hydrated.provider_bytes, b"before replacement");
 
         write_session(&path, "after replacement", "stable response");
         let after = project_auggie_source_backed(&path, &context(&sessions)).unwrap();
@@ -839,6 +828,58 @@ mod tests {
                 .decoded_display_text,
             "after replacement"
         );
+    }
+
+    #[test]
+    fn provider_b_source_backed_body_architecture_has_no_preview_or_store_contract() {
+        let forbidden_preview_cap = ["MAX_BODY_PREVIEW", "_CHARS"].concat();
+        let forbidden_legacy_field = ["lexical_", "preview"].concat();
+        let forbidden_store = ["ctx_history_", "store::Store"].concat();
+        let sources = [
+            ("auggie", include_str!("source_backed.rs")),
+            (
+                "codebuddy",
+                include_str!("../../codebuddy/native_path/source_backed.rs"),
+            ),
+            (
+                "continue_cli",
+                include_str!("../../continue_cli/native_path/source_backed.rs"),
+            ),
+            (
+                "crush",
+                include_str!("../../crush/native_path/source_backed.rs"),
+            ),
+            ("cursor", include_str!("../../cursor/source_backed.rs")),
+            (
+                "deepagents",
+                include_str!("../../deepagents/native_path/source_backed.rs"),
+            ),
+            (
+                "firebender",
+                include_str!("../../firebender/native_path/source_backed.rs"),
+            ),
+            ("goose", include_str!("../../goose/source_backed.rs")),
+            ("hermes", include_str!("../../hermes/source_backed.rs")),
+            (
+                "kimi",
+                include_str!("../../kimi/native_path/source_backed.rs"),
+            ),
+            ("kiro", include_str!("../../kiro/source_backed.rs")),
+        ];
+        for (provider, source) in sources {
+            assert!(
+                !source.contains(&forbidden_preview_cap),
+                "{provider} restored the index preview cap"
+            );
+            assert!(
+                !source.contains(&forbidden_legacy_field),
+                "{provider} restored lexical-preview construction"
+            );
+            assert!(
+                !source.contains(&forbidden_store),
+                "{provider} restored the legacy Store path"
+            );
+        }
     }
 
     #[test]

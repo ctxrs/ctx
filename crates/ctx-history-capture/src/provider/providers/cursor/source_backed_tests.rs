@@ -204,7 +204,11 @@ fn cursor_source_backed_exact_locator_hydrates_and_rejects_root_or_source_mutati
     let temp = tempdir();
     let data_dir = temp.path().join("cursor-data");
     let projects = data_dir.join("projects");
-    let complete_text = format!("{}tail", "x".repeat(PROVIDER_MAX_TEXT_CHARS + 41));
+    let complete_text = format!(
+        "{}cursor-tail-term{}",
+        "x".repeat(3_000),
+        "y".repeat(PROVIDER_MAX_TEXT_CHARS)
+    );
     let transcript = write_transcript(&projects, "project", "long-session", [user(&complete_text)]);
     let mut sink = CollectingSink::default();
     extract_cursor_source_backed_cold(&data_dir, &mut sink).unwrap();
@@ -215,8 +219,17 @@ fn cursor_source_backed_exact_locator_hydrates_and_rejects_root_or_source_mutati
         complete_text
     );
     assert_eq!(
-        record.lexical_preview.as_deref().unwrap().chars().count(),
-        ctx_history_index::MAX_BODY_PREVIEW_CHARS
+        record.lexical_body.as_deref().unwrap().chars().count(),
+        PROVIDER_MAX_TEXT_CHARS
+    );
+    assert!(record
+        .lexical_body
+        .as_deref()
+        .unwrap()
+        .contains("cursor-tail-term"));
+    assert_eq!(
+        record.lexical_body.as_deref(),
+        record.verified_content_indexed_text.as_deref()
     );
     let verified_locator = record
         .verified_content_locator

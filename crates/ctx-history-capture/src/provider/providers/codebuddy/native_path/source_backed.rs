@@ -11,7 +11,7 @@ use ctx_history_core::{
     SessionIdentityInput, SourceAnchor, SourceFrontier, SourceKey, SourceObservation,
     SourceRecordLocator, TypedKey,
 };
-use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
+use ctx_history_index::LexicalDocument;
 
 use crate::provider::provider_safe_path_segment;
 
@@ -416,9 +416,12 @@ fn bind_codebuddy_capability(
 }
 
 fn revalidate_codebuddy_capability(source: &CodeBuddySource) -> Result<()> {
-    let capability = source.capability.as_ref().ok_or(CaptureError::SystemInvariant(
-        "CodeBuddy source-backed source lost its authority capability",
-    ))?;
+    let capability = source
+        .capability
+        .as_ref()
+        .ok_or(CaptureError::SystemInvariant(
+            "CodeBuddy source-backed source lost its authority capability",
+        ))?;
     capability.revalidate()?;
     let mut closing = source.clone();
     closing.capability = None;
@@ -618,7 +621,7 @@ fn codebuddy_lexical_document(
         occurred_at_unix_ms: Some(core.event.occurred_at.timestamp_millis()),
         event_type: core.event.event_type.as_str().to_owned(),
         role: Some(core.event.role.as_str().to_owned()),
-        body: lexical_preview(&core.event)?,
+        body: lexical_body(&core.event)?,
         workspace: None,
         cwd: core.session.cwd.clone(),
         touched_files: Vec::new(),
@@ -719,7 +722,7 @@ fn extension_locator(
     )
 }
 
-fn lexical_preview(event: &CodeBuddyEventDraft) -> Result<String> {
+fn lexical_body(event: &CodeBuddyEventDraft) -> Result<String> {
     let text = event
         .payload
         .get("text")
@@ -735,7 +738,7 @@ fn lexical_preview(event: &CodeBuddyEventDraft) -> Result<String> {
         })
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| event.event_type.as_str().to_owned());
-    Ok(text.chars().take(MAX_BODY_PREVIEW_CHARS).collect())
+    Ok(text)
 }
 
 fn hydrate_cli(
@@ -817,7 +820,7 @@ fn hydrate_cli(
         ));
     }
     Ok(CodeBuddyHydratedSourceRecord {
-        provider_bytes,
+        provider_bytes: text.as_bytes().to_vec(),
         decoded_display_text: text,
     })
 }
@@ -884,7 +887,7 @@ fn hydrate_extension(
     }
     let _ = ordinal;
     Ok(CodeBuddyHydratedSourceRecord {
-        provider_bytes,
+        provider_bytes: text.as_bytes().to_vec(),
         decoded_display_text: text,
     })
 }
@@ -1084,7 +1087,7 @@ mod tests {
     }
 
     #[test]
-    fn dual_format_cold_scan_emits_independent_bounded_exact_records() {
+    fn dual_format_cold_scan_emits_independent_full_body_exact_records() {
         let temp = tempdir().unwrap();
         let root = temp.path().join("codebuddy");
         let cli_text = format!("cli exact head {} cli exact tail", "c".repeat(3_000));
@@ -1111,7 +1114,8 @@ mod tests {
 
         let documents = documents(&scans);
         let cli = documents.get(CODEBUDDY_CLI_SCHEMA_VARIANT).unwrap();
-        assert_eq!(cli.body.chars().count(), MAX_BODY_PREVIEW_CHARS);
+        assert_eq!(cli.body, cli_text);
+        assert!(cli.body.ends_with("cli exact tail"));
         let NativeRecordCoordinate::Jsonl {
             native_event_key, ..
         } = cli.locator.coordinate()
@@ -1125,14 +1129,17 @@ mod tests {
         ));
         let hydrated_cli = hydrate_codebuddy_source_backed_record(&root, &cli.locator).unwrap();
         assert_eq!(hydrated_cli.decoded_display_text, cli_text);
+        assert_eq!(hydrated_cli.provider_bytes, cli_text.as_bytes());
 
         let extension = documents.get(CODEBUDDY_EXTENSION_SCHEMA_VARIANT).unwrap();
-        assert_eq!(extension.body.chars().count(), MAX_BODY_PREVIEW_CHARS);
+        assert_eq!(extension.body, extension_text);
+        assert!(extension.body.ends_with("extension exact tail"));
         let (_, _, native_id) = structured_coordinate(extension.locator.coordinate()).unwrap();
         assert_eq!(native_id, "shared-project/shared-session:extension-message");
         let hydrated_extension =
             hydrate_codebuddy_source_backed_record(&root, &extension.locator).unwrap();
         assert_eq!(hydrated_extension.decoded_display_text, extension_text);
+        assert_eq!(hydrated_extension.provider_bytes, extension_text.as_bytes());
     }
 
     #[test]

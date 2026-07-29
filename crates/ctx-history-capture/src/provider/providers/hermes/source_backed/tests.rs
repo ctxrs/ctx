@@ -127,6 +127,32 @@ fn active_wal_scan_reads_latest_rows_without_persistent_source_writes() {
     drop(writer);
 }
 
+#[test]
+fn hermes_source_backed_indexes_full_policy_body_and_hydrates_display_bytes() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.db");
+    let text = format!("hermes-head-{}-hermes-tail", "x".repeat(3_000));
+    create_state_db(&path, "full", &text);
+    let candidate = hermes_source_backed_explicit(
+        &path,
+        SourceAnchor::provider_native(
+            HERMES_SOURCE_ANCHOR_NAMESPACE,
+            TypedKey::utf8("full").unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let (_, records) = scan_candidate(&candidate);
+    let document = event(&records);
+    assert_eq!(document.body, text);
+    assert!(document.body.ends_with("hermes-tail"));
+
+    let hydrated =
+        hydrate_hermes_source_backed_message(candidate.path(), &document.locator).unwrap();
+    assert_eq!(hydrated.text, text);
+    assert_eq!(hydrated.provider_bytes, text.as_bytes());
+}
+
 fn sqlite_persistent_bytes(path: &Path) -> Vec<Vec<u8>> {
     // Stock WAL readers may update volatile SHM reader marks.
     ["", "-wal"]
@@ -292,7 +318,7 @@ fn hermes_source_backed_gateway_inventory_scans_multiple_profiles_and_hydrates_e
         );
         assert_eq!(hydrated.provider_event_hash, "message:7");
         assert!(hydrated.text.contains("gateway exact sentinel"));
-        assert!(!hydrated.provider_bytes.is_empty());
+        assert_eq!(hydrated.provider_bytes, hydrated.text.as_bytes());
     }
     source_ids.sort_by_key(|identity| identity.as_uuid());
     source_ids.dedup();

@@ -7,7 +7,7 @@ use ctx_history_core::{
     SourceAnchor, SourceKey, SourceObservation, SourceRecordLocator, SourceResolverContractError,
     StableEntityId, TypedKey,
 };
-use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
+use ctx_history_index::LexicalDocument;
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -32,6 +32,7 @@ use super::{
 };
 use crate::{
     provider::providers::continue_cli::continue_history_item_text, CONTINUE_CLI_SOURCE_FORMAT,
+    PROVIDER_MAX_TEXT_CHARS,
 };
 
 const CONTINUE_SOURCE_ANCHOR_NAMESPACE: &str = "continue.session";
@@ -495,10 +496,7 @@ fn continue_session_id(
 
 fn continue_lexical_body(event: &ContinueEventRow) -> String {
     if !event.search_text.trim().is_empty() {
-        return bounded_chars(&event.search_text, MAX_BODY_PREVIEW_CHARS);
-    }
-    if !event.preview.trim().is_empty() {
-        return bounded_chars(&event.preview, MAX_BODY_PREVIEW_CHARS);
+        return bounded_chars(&event.search_text, PROVIDER_MAX_TEXT_CHARS);
     }
     match event.kind {
         ContinueEventKind::Message => "Continue message".to_owned(),
@@ -601,9 +599,11 @@ pub(crate) fn hydrate_continue_source_backed_record(
         return Err(ContinueSourceBackedError::LocatorDigestMismatch);
     }
     let value: Value = serde_json::from_slice(&provider_bytes)?;
+    let decoded_display_text = continue_history_item_text(&value)
+        .ok_or(ContinueSourceBackedError::LocatorRecordMissing)?;
     Ok(ContinueHydratedSourceRecord {
-        decoded_display_text: continue_history_item_text(&value),
-        provider_bytes,
+        provider_bytes: decoded_display_text.as_bytes().to_vec(),
+        decoded_display_text: Some(decoded_display_text),
     })
 }
 
@@ -854,7 +854,7 @@ mod tests {
     }
 
     #[test]
-    fn continue_source_backed_exact_resolver_returns_verified_native_record() {
+    fn continue_source_backed_exact_resolver_returns_verified_display_content() {
         const SECRET: &str = "CONTINUE-EXACT-OUTPUT-SECRET";
 
         let temp = tempdir().unwrap();
@@ -868,11 +868,6 @@ mod tests {
         let scanned = scan(&sessions);
         let document = scanned.documents()[0];
         let hydrated = hydrate_continue_source_backed_record(&sessions, &document.locator).unwrap();
-        assert_eq!(
-            serde_json::from_slice::<Value>(&hydrated.provider_bytes).unwrap(),
-            history_item
-        );
-        assert!(String::from_utf8_lossy(&hydrated.provider_bytes).contains(SECRET));
         assert!(!hydrated
             .decoded_display_text
             .as_deref()
@@ -883,6 +878,41 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("status: done"));
+        assert_eq!(
+            hydrated.provider_bytes,
+            hydrated.decoded_display_text.unwrap().as_bytes()
+        );
+        assert!(!String::from_utf8_lossy(&hydrated.provider_bytes).contains(SECRET));
+    }
+
+    #[test]
+    fn continue_source_backed_indexes_the_full_selected_message_body() {
+        let temp = tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        let text = format!(
+            "{}continue-tail-term{}",
+            "x".repeat(3_000),
+            "y".repeat(PROVIDER_MAX_TEXT_CHARS)
+        );
+        write_session(
+            &sessions,
+            "full-body.json",
+            &session(
+                "continue-full-body",
+                vec![message(Some("full-body-message"), &text)],
+            ),
+        );
+
+        let scanned = scan(&sessions);
+        let document = scanned.documents()[0];
+        assert_eq!(document.body.chars().count(), PROVIDER_MAX_TEXT_CHARS);
+        assert!(document.body.contains("continue-tail-term"));
+        let hydrated = hydrate_continue_source_backed_record(&sessions, &document.locator).unwrap();
+        assert_eq!(hydrated.provider_bytes, text.as_bytes());
+        assert_eq!(
+            hydrated.decoded_display_text.as_deref(),
+            Some(text.as_str())
+        );
     }
 
     #[test]

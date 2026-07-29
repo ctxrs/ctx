@@ -4,7 +4,7 @@ use ctx_history_core::{
     ContentSourceResolver, EventHydrationRequest, HydrationFailureKind, LocatorRevisionPolicy,
     NativeRecordCoordinate, SourceRecordLocator, TypedKey,
 };
-use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
+use ctx_history_index::LexicalDocument;
 use rusqlite::Connection;
 
 use super::super::{
@@ -12,6 +12,7 @@ use super::super::{
     GooseSourceRouteV0,
 };
 use super::{create_goose_tables, insert_message, insert_session};
+use crate::PROVIDER_MAX_TEXT_CHARS;
 
 fn create_database(path: &Path) -> Connection {
     let connection = Connection::open(path).unwrap();
@@ -47,10 +48,7 @@ fn goose_source_backed_cold_scan_is_bounded_stable_and_exactly_selected() {
     std::fs::create_dir_all(selected_database.parent().unwrap()).unwrap();
     let selected = create_database(&selected_database);
     insert_session(&selected, "selected-session");
-    let complete_text = format!(
-        "selected source text {}",
-        "x".repeat(MAX_BODY_PREVIEW_CHARS + 64)
-    );
+    let complete_text = format!("selected source text {} goose-tail", "x".repeat(3_000));
     insert_message(&selected, 1, "selected-session", &complete_text);
     drop(selected);
 
@@ -79,7 +77,8 @@ fn goose_source_backed_cold_scan_is_bounded_stable_and_exactly_selected() {
     assert!(!documents[0]
         .body
         .contains("EXPLICIT_RETAINED_ROUTE_MUST_NOT_BE_SCANNED"));
-    assert_eq!(documents[0].body.chars().count(), MAX_BODY_PREVIEW_CHARS);
+    assert_eq!(documents[0].body, complete_text);
+    assert!(documents[0].body.ends_with("goose-tail"));
     assert_eq!(
         documents[0].provider_session_id.as_deref(),
         Some("selected-session")
@@ -154,8 +153,9 @@ fn goose_source_backed_exact_row_resolver_reopens_complete_content() {
     let connection = create_database(&database);
     insert_session(&connection, "exact-session");
     let complete_text = format!(
-        "complete Goose row {}",
-        "z".repeat(MAX_BODY_PREVIEW_CHARS + 512)
+        "{}goose-exact-tail-term{}",
+        "z".repeat(3_000),
+        "y".repeat(PROVIDER_MAX_TEXT_CHARS)
     );
     insert_message(&connection, 7, "exact-session", &complete_text);
     drop(connection);
@@ -163,7 +163,8 @@ fn goose_source_backed_exact_row_resolver_reopens_complete_content() {
     let selection = GooseSourceBackedSelectionV0::exact(&database, &root);
     let (documents, _) = collect(selection.clone());
     let document = &documents[0];
-    assert_eq!(document.body.chars().count(), MAX_BODY_PREVIEW_CHARS);
+    assert_eq!(document.body.chars().count(), PROVIDER_MAX_TEXT_CHARS);
+    assert!(document.body.contains("goose-exact-tail-term"));
     let request = EventHydrationRequest::new(document.event_id, document.locator.clone()).unwrap();
     let resolver = super::super::GooseSourceBackedResolverV0::new(selection).unwrap();
     let hydrated = resolver.hydrate_event(&request).unwrap();

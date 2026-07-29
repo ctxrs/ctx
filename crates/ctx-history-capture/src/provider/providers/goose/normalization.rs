@@ -541,12 +541,13 @@ pub(super) fn normalize_goose_native_output_diagnostic(
         } else {
             ("Goose tool response failed".to_owned(), None, None, None)
         };
-    let preview = provider_local_preview(&diagnostic, PROVIDER_MAX_PREVIEW_CHARS).0;
+    let searchable_text = provider_local_preview(&diagnostic, PROVIDER_MAX_TEXT_CHARS).0;
+    let output_preview = provider_local_preview(&searchable_text, PROVIDER_MAX_PREVIEW_CHARS).0;
     let body = json!({
         "message_id": message.provider_message_identity,
         "row_id": message.native_order,
         "role": message.role,
-        "output_preview": preview,
+        "output_preview": output_preview,
         "result_outcome": goose_output_outcome_label(outcome),
         "exit_code": exit_code,
         "duration_ms": duration_ms,
@@ -571,7 +572,7 @@ pub(super) fn normalize_goose_native_output_diagnostic(
         kind: GooseNativeEventKind::ToolOutput,
         role: message.role.clone(),
         content: body,
-        searchable_text: preview,
+        searchable_text,
         created_timestamp: message.created_timestamp,
         timestamp: message.timestamp.clone(),
         tokens_json: None,

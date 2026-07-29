@@ -12,7 +12,7 @@ use ctx_history_core::{
     SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation, SourceRecordLocator,
     SourceResolverContractError, StableEntityId, TypedKey,
 };
-use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
+use ctx_history_index::LexicalDocument;
 use thiserror::Error;
 
 use super::{
@@ -33,7 +33,7 @@ use super::{
 };
 use crate::{
     provider::normalization::{provider_local_preview, provider_role, provider_timestamp_seconds},
-    CaptureError, GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
+    CaptureError, GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT, PROVIDER_MAX_TEXT_CHARS,
 };
 
 const GOOSE_SOURCE_ANCHOR_NAMESPACE: &str = "goose.installed-sessions";
@@ -59,8 +59,8 @@ pub(crate) enum GooseSourceBackedErrorV0 {
     Resolver(#[from] SourceResolverContractError),
     #[error("Goose source-backed count overflow")]
     CountOverflow,
-    #[error("Goose source-backed projection emitted an empty lexical preview")]
-    EmptyLexicalPreview,
+    #[error("Goose source-backed projection emitted an empty lexical body")]
+    EmptyLexicalBody,
     #[error("Goose source-backed selection has too many explicit retained routes")]
     TooManyRetainedRoutes,
     #[error("Goose source-backed selection contains a duplicate database route")]
@@ -462,14 +462,14 @@ fn goose_lexical_document(
                 "Goose source-backed event omitted exact logical-row evidence",
             ))?,
     )?;
-    let body = provider_local_preview(&event.searchable_text, MAX_BODY_PREVIEW_CHARS).0;
+    let body = provider_local_preview(&event.searchable_text, PROVIDER_MAX_TEXT_CHARS).0;
     let body = if body.is_empty() {
         format!("{} {}", event_type(&event).as_str(), event.role)
     } else {
         body
     };
     if body.is_empty() {
-        return Err(GooseSourceBackedErrorV0::EmptyLexicalPreview);
+        return Err(GooseSourceBackedErrorV0::EmptyLexicalBody);
     }
     let event_sequence = (event.native_order as u64) ^ (1_u64 << 63);
     let occurred_at_unix_ms = event.created_timestamp.map_or_else(

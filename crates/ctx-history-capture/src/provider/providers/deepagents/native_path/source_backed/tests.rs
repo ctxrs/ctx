@@ -229,7 +229,7 @@ fn bounded_cold_scan_emits_compound_exact_row_locators() {
     let path = temp.path().join("sessions.db");
     let conn = create_database(&path);
     insert_checkpoint(&conn, b"opaque checkpoint state");
-    let long_message = "exact message ".repeat(300);
+    let long_message = format!("deepagents-head-{}-deepagents-tail", "x".repeat(3_000));
     let mut messages = vec![message("human", &long_message, "message-0")];
     messages.extend((1..130).map(|index| {
         message(
@@ -276,7 +276,8 @@ fn bounded_cold_scan_emits_compound_exact_row_locators() {
     assert_eq!(result.certificate.counts().indexed_documents, 130);
     assert_eq!(result.selected_path, path);
     assert_eq!(result.selected_route, DeepAgentsDatabaseRouteV0::Explicit);
-    assert_eq!(documents[0].body.chars().count(), MAX_BODY_PREVIEW_CHARS);
+    assert_eq!(documents[0].body, long_message);
+    assert!(documents[0].body.ends_with("deepagents-tail"));
     assert_eq!(documents[0].parent_session_id, None);
     assert_eq!(documents[0].root_session_id, documents[0].session_id);
     assert_eq!(

@@ -20,7 +20,7 @@ use ctx_history_core::{
     SourceAnchor, SourceInventoryObservation, SourceKey, SourceObservation, SourceRecordLocator,
     SourceResolverContractError, StableEntityId, TypedKey,
 };
-use ctx_history_index::{GenerationWriter, IndexError, LexicalDocument, MAX_BODY_PREVIEW_CHARS};
+use ctx_history_index::{GenerationWriter, IndexError, LexicalDocument};
 use rusqlite::{limits::Limit, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -425,7 +425,7 @@ impl CrushLocatorResolverV0 {
                 .ok_or(CrushSourceBackedErrorV0::StaleRecordEvidence)?;
             (
                 Some(event.provider_event_hash.clone()),
-                Some(lexical_preview(&projection)),
+                Some(lexical_body(&projection, event)),
             )
         };
         let finished = finish_source(source)?;
@@ -799,7 +799,7 @@ fn lexical_document(
         occurred_at_unix_ms: Some(event.occurred_at.timestamp_millis()),
         event_type: event.event_type.as_str().to_owned(),
         role: event.role.map(|role| role.as_str().to_owned()),
-        body: lexical_preview(projection),
+        body: lexical_body(projection, event),
         workspace: None,
         cwd: None,
         touched_files: touched_paths(projection)?,
@@ -882,9 +882,17 @@ fn crush_session_id(
     })?)
 }
 
-fn lexical_preview(projection: &CrushMessageProjection) -> String {
-    let text = if let Some(text) = projection.complete_text.as_deref() {
-        text.to_owned()
+fn lexical_body(
+    projection: &CrushMessageProjection,
+    event: &super::super::projection::CrushEventDraft,
+) -> String {
+    let text = if projection.output.is_none() {
+        event
+            .payload
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(projection.event_type.as_str())
+            .to_owned()
     } else if let Some(output) = projection.output.as_ref() {
         let outcome = match output.outcome.outcome {
             OutputOutcome::Success => "success",
@@ -906,14 +914,10 @@ fn lexical_preview(projection: &CrushMessageProjection) -> String {
     } else {
         projection.event_type.as_str().to_owned()
     };
-    let bounded = text
-        .chars()
-        .take(MAX_BODY_PREVIEW_CHARS)
-        .collect::<String>();
-    if bounded.is_empty() {
+    if text.is_empty() {
         "crush event".to_owned()
     } else {
-        bounded
+        text
     }
 }
 
@@ -1196,6 +1200,33 @@ mod tests {
             &projection,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn source_backed_message_indexes_the_full_policy_body_and_hydrates_it() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let path = temp.path().join("full-body.db");
+        let text = format!("crush-head-{}-crush-tail", "x".repeat(3_000));
+        write_database(&path, "session", "message", &text);
+        let inventory = TestInventory::new(inventory(
+            b"full-body-inventory",
+            vec![database("full-body-project", &path)],
+        ));
+        let frozen = bind_inventory(inventory.observe().unwrap()).unwrap();
+        let source = open_source(frozen.databases.into_iter().next().unwrap()).unwrap();
+        let document = document_for_only_message(&source);
+        assert_eq!(document.body, text);
+        assert!(document.body.ends_with("crush-tail"));
+        assert!(finish_opened_source(source).unwrap());
+
+        let hydrated = CrushLocatorResolverV0::discover(&inventory)
+            .unwrap()
+            .hydrate(&document.locator)
+            .unwrap();
+        assert_eq!(
+            hydrated.decoded_display_text.as_deref(),
+            Some(text.as_str())
+        );
     }
 
     #[test]

@@ -21,15 +21,16 @@ use ctx_history_core::{
     SourceInventoryObservation, SourceKey, SourceObservation, SourceRecordLocator,
     SourceResolverContractError, StableEntityId, TypedKey,
 };
-use ctx_history_index::{IndexError, LexicalDocument, MAX_BODY_PREVIEW_CHARS};
+use ctx_history_index::{IndexError, LexicalDocument};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
-    provider::normalization::provider_local_preview, CaptureError, KIMI_CODE_CLI_SOURCE_FORMAT,
-    MAX_PROVIDER_JSONL_LINE_BYTES,
+    provider::normalization::provider_local_preview,
+    CaptureError, KIMI_CODE_CLI_SOURCE_FORMAT, MAX_PROVIDER_JSONL_LINE_BYTES,
+    PROVIDER_MAX_TEXT_CHARS,
 };
 
 use super::super::event::kimi_event_role;
@@ -366,11 +367,30 @@ impl KimiSourceBackedResolver {
             .map_err(|error| map_hydration_error(KimiSourceBackedError::Io(error)))?;
         let mut hydrated = Vec::with_capacity(requests.len());
         for (request, coordinate) in requests.iter().zip(decoded) {
-            let provider_bytes = read_exact_record(&mut file, request.locator(), &coordinate)
+            let provider_record = read_exact_record(&mut file, request.locator(), &coordinate)
                 .map_err(map_hydration_error)?;
+            let value = serde_json::from_slice::<Value>(json_record_bytes(&provider_record))
+                .map_err(|_| {
+                    hydration_failure(
+                        HydrationFailureKind::StaleRecordEvidence,
+                        "Kimi exact record no longer decodes as JSON",
+                    )
+                })?;
+            let (_, body) = kimi_lexical_body(
+                &value,
+                coordinate.physical_ordinal,
+                opening.compound.native.session.cwd.as_deref(),
+            )
+            .map_err(map_hydration_error)?
+            .ok_or_else(|| {
+                hydration_failure(
+                    HydrationFailureKind::UnsupportedParserRevision,
+                    "Kimi exact record has no policy-selected display text",
+                )
+            })?;
             hydrated.push(HydratedProviderRecord {
                 event_id: request.event_id(),
-                provider_bytes,
+                provider_bytes: body.into_bytes(),
             });
         }
         opening
@@ -588,7 +608,9 @@ fn auxiliary_snapshot(
     Ok(AuxiliarySnapshot {
         length: file.len(),
         digest: Sha256::digest(&bytes).into(),
-        revision: Some(KimiFrozenFileMetadata::from_metadata(file.metadata())?.revision_component()),
+        revision: Some(
+            KimiFrozenFileMetadata::from_metadata(file.metadata())?.revision_component(),
+        ),
     })
 }
 
@@ -775,37 +797,19 @@ fn lexical_document(
         .get("type")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
-    let mut event_type = kimi_event_type(record_type, value);
+    let Some((event_type, body)) =
+        kimi_lexical_body(value, ordinal, compound.native.session.cwd.as_deref())?
+    else {
+        return Ok(None);
+    };
     let role = kimi_event_role(record_type, value, event_type);
     let occurred_at =
         kimi_record_timestamp(value, fallback_timestamp).unwrap_or(fallback_timestamp);
-    let body = if event_type == EventType::ToolOutput {
-        let output = kimi_output_metadata(
-            value,
-            usize::try_from(ordinal)
-                .ok()
-                .and_then(|value| value.checked_add(1))
-                .ok_or(KimiSourceBackedError::CountOverflow)?,
-            compound.native.session.cwd.as_deref(),
-        );
-        if !matches!(
-            output.outcome.outcome,
-            OutputOutcome::Failure | OutputOutcome::Timeout
-        ) {
-            return Ok(None);
-        }
-        if output.kind == OutputObservationKind::Command {
-            event_type = EventType::CommandOutput;
-        }
-        kimi_output_content(value).unwrap_or_default()
-    } else {
-        kimi_event_text(record_type, value, event_type)
-    };
-    let body = provider_local_preview(&body, MAX_BODY_PREVIEW_CHARS).0;
-    if body.is_empty() {
-        return Ok(None);
-    }
-
+    let line_number = usize::try_from(ordinal)
+        .ok()
+        .and_then(|value| value.checked_add(1))
+        .ok_or(KimiSourceBackedError::CountOverflow)?;
+    let native_event_id = kimi_legacy_provider_event_hash(record_type, value, line_number);
     let event_key = NativeItemKey::certified_position(
         KIMI_NATIVE_EVENT_POSITION_KIND,
         TypedKey::U64(ordinal),
@@ -818,11 +822,6 @@ fn lexical_document(
         native_item_key: &event_key,
         subrecord_selector: None,
     })?;
-    let line_number = usize::try_from(ordinal)
-        .ok()
-        .and_then(|value| value.checked_add(1))
-        .ok_or(KimiSourceBackedError::CountOverflow)?;
-    let native_event_id = kimi_legacy_provider_event_hash(record_type, value, line_number);
     let coordinate = TypedKey::composite(vec![
         TypedKey::U64(byte_offset),
         TypedKey::U64(byte_length),
@@ -895,6 +894,45 @@ fn lexical_document(
             .map(|touch| touch.path)
             .collect(),
     }))
+}
+
+fn kimi_lexical_body(
+    value: &Value,
+    ordinal: u64,
+    cwd: Option<&str>,
+) -> KimiSourceBackedResult<Option<(EventType, String)>> {
+    let record_type = value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let mut event_type = kimi_event_type(record_type, value);
+    let body = if event_type == EventType::ToolOutput {
+        let output = kimi_output_metadata(
+            value,
+            usize::try_from(ordinal)
+                .ok()
+                .and_then(|value| value.checked_add(1))
+                .ok_or(KimiSourceBackedError::CountOverflow)?,
+            cwd,
+        );
+        if !matches!(
+            output.outcome.outcome,
+            OutputOutcome::Failure | OutputOutcome::Timeout
+        ) {
+            return Ok(None);
+        }
+        if output.kind == OutputObservationKind::Command {
+            event_type = EventType::CommandOutput;
+        }
+        kimi_output_content(value).unwrap_or_default()
+    } else {
+        kimi_event_text(record_type, value, event_type)
+    };
+    let body = provider_local_preview(&body, PROVIDER_MAX_TEXT_CHARS).0;
+    if body.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some((event_type, body)))
 }
 
 fn decode_locator(
@@ -1026,7 +1064,7 @@ mod tests {
 
     use super::*;
 
-    fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    fn fixture(prompt: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
         let temp = tempdir().unwrap();
         let root = temp.path().join(".kimi-code");
         let session = root.join("sessions/work/session-1");
@@ -1061,7 +1099,7 @@ mod tests {
             json!({
                 "type": "turn.prompt",
                 "time": 1_784_289_600_001_i64,
-                "input": "cold exact message"
+                "input": prompt
             }),
             json!({
                 "type": "context.append_loop_event",
@@ -1091,7 +1129,7 @@ mod tests {
 
     #[test]
     fn kimi_source_backed_compound_cold_scan_and_exact_hydration() {
-        let (_temp, root, _wire) = fixture();
+        let (_temp, root, _wire) = fixture("cold exact message");
         let catalog = KimiSourceBackedCatalog::discover(&root).unwrap();
         assert_eq!(catalog.inventory().observed_sources(), 1);
         assert!(catalog.revalidate_inventory().unwrap());
@@ -1137,14 +1175,37 @@ mod tests {
         let resolver = KimiSourceBackedResolver::new(catalog);
         let hydrated = resolver.hydrate_event(&request).unwrap();
         assert_eq!(hydrated.event_id, documents[0].event_id);
-        let value: Value =
-            serde_json::from_slice(json_record_bytes(&hydrated.provider_bytes)).unwrap();
-        assert_eq!(value["input"], "cold exact message");
+        assert_eq!(hydrated.provider_bytes, b"cold exact message");
+    }
+
+    #[test]
+    fn kimi_source_backed_indexes_and_hydrates_the_full_policy_body() {
+        let prompt = format!("kimi-head-{}-kimi-tail", "x".repeat(3_000));
+        let (_temp, root, _wire) = fixture(&prompt);
+        let catalog = KimiSourceBackedCatalog::discover(&root).unwrap();
+        let source = catalog.source_keys().next().unwrap().clone();
+        let mut documents = Vec::new();
+        catalog
+            .scan_source(&source, |document| {
+                documents.push(document);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(documents[0].body, prompt);
+        assert!(documents[0].body.ends_with("kimi-tail"));
+
+        let request =
+            EventHydrationRequest::new(documents[0].event_id, documents[0].locator.clone())
+                .unwrap();
+        let hydrated = KimiSourceBackedResolver::new(catalog)
+            .hydrate_event(&request)
+            .unwrap();
+        assert_eq!(hydrated.provider_bytes, prompt.as_bytes());
     }
 
     #[test]
     fn kimi_source_backed_auxiliary_mutation_invalidates_exact_revision_not_identity() {
-        let (_temp, root, _wire) = fixture();
+        let (_temp, root, _wire) = fixture("cold exact message");
         let initial = KimiSourceBackedCatalog::discover(&root).unwrap();
         let source = initial.source_keys().next().unwrap().clone();
         let mut initial_documents = Vec::new();
@@ -1213,7 +1274,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn compound_authority_kimi_rejects_missing_auxiliary_sibling_and_ancestor_swaps() {
-        let (_temp, root, _wire) = fixture();
+        let (_temp, root, _wire) = fixture("cold exact message");
         let state = root.join("sessions/work/session-1/state.json");
         fs::remove_file(&state).unwrap();
         let missing = KimiSourceBackedCatalog::discover(&root).unwrap();

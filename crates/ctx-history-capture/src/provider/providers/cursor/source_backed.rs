@@ -11,7 +11,7 @@ use ctx_history_core::{
     ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceFrontier, SourceKey,
     SourceObservation, SourceRecordLocator, StableEntityId, SubrecordSelector, TypedKey,
 };
-use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
+use ctx_history_index::LexicalDocument;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -66,7 +66,7 @@ pub(crate) struct CursorSourceBackedRecord {
     pub(crate) occurred_at: Option<DateTime<Utc>>,
     pub(crate) event_type: EventType,
     pub(crate) role: EventRole,
-    pub(crate) lexical_preview: Option<String>,
+    pub(crate) lexical_body: Option<String>,
     pub(crate) touched_files: Vec<String>,
     pub(crate) provider_event_hash: String,
     pub(crate) provider_session_id: String,
@@ -93,7 +93,7 @@ impl CursorSourceBackedRecord {
             occurred_at_unix_ms: self.occurred_at.map(|value| value.timestamp_millis()),
             event_type: self.event_type.as_str().to_owned(),
             role: Some(self.role.as_str().to_owned()),
-            body: self.lexical_preview.clone()?,
+            body: self.lexical_body.clone()?,
             workspace: None,
             cwd: None,
             touched_files: self.touched_files.clone(),
@@ -271,9 +271,9 @@ pub(crate) fn hydrate_cursor_source_backed_message(
             "Cursor source-backed message hydration received a non-message event".to_owned(),
         ));
     }
-    record.lexical_preview.as_deref().ok_or_else(|| {
+    record.lexical_body.as_deref().ok_or_else(|| {
         CaptureError::InvalidPayload(
-            "Cursor source-backed message hydration is missing its lexical preview".to_owned(),
+            "Cursor source-backed message hydration is missing its lexical body".to_owned(),
         )
     })?;
     let verified_locator = record.verified_content_locator.as_ref().ok_or_else(|| {
@@ -554,7 +554,7 @@ impl<'a> CursorProjectionBridge<'a> {
                 "Cursor source-backed native-record count overflowed",
             )?;
         }
-        if record.lexical_preview.is_some() {
+        if record.lexical_body.is_some() {
             self.counts.indexed_documents = checked_add(
                 self.counts.indexed_documents,
                 1,
@@ -691,7 +691,7 @@ fn source_backed_record(
         .ok_or(CaptureError::SystemInvariant(
             "Cursor source-backed event sequence overflowed",
         ))?;
-    let (lexical_preview, touched_files) = lexical_projection(body);
+    let (lexical_body, touched_files) = lexical_projection(body);
     let source_path = plan
         .source_path
         .to_str()
@@ -712,7 +712,7 @@ fn source_backed_record(
         occurred_at,
         event_type,
         role,
-        lexical_preview,
+        lexical_body,
         touched_files,
         provider_event_hash,
         provider_session_id: plan.native_session_id.clone(),
@@ -796,44 +796,35 @@ fn cursor_verified_content_locator(
 fn lexical_projection(body: CursorEventBody) -> (Option<String>, Vec<String>) {
     match body {
         CursorEventBody::None => (None, Vec::new()),
-        CursorEventBody::Text { text } => (bounded_preview(&text), Vec::new()),
+        CursorEventBody::Text { text } => ((!text.is_empty()).then_some(text), Vec::new()),
         CursorEventBody::ToolCall {
             call_id,
             tool_name,
             input_paths,
         } => {
-            let mut preview = String::new();
+            let mut body = String::new();
             if let Some(tool_name) = tool_name.as_deref() {
-                append_preview_component(&mut preview, tool_name);
+                append_body_component(&mut body, tool_name);
             }
             if let Some(call_id) = call_id.as_deref() {
-                append_preview_component(&mut preview, call_id);
+                append_body_component(&mut body, call_id);
             }
             for path in &input_paths {
-                append_preview_component(&mut preview, path);
+                append_body_component(&mut body, path);
             }
-            ((!preview.is_empty()).then_some(preview), input_paths)
+            ((!body.is_empty()).then_some(body), input_paths)
         }
     }
 }
 
-fn bounded_preview(value: &str) -> Option<String> {
-    let preview = value
-        .chars()
-        .take(MAX_BODY_PREVIEW_CHARS)
-        .collect::<String>();
-    (!preview.is_empty()).then_some(preview)
-}
-
-fn append_preview_component(preview: &mut String, value: &str) {
-    if value.is_empty() || preview.chars().count() >= MAX_BODY_PREVIEW_CHARS {
+fn append_body_component(body: &mut String, value: &str) {
+    if value.is_empty() {
         return;
     }
-    if !preview.is_empty() {
-        preview.push(' ');
+    if !body.is_empty() {
+        body.push(' ');
     }
-    let remaining = MAX_BODY_PREVIEW_CHARS.saturating_sub(preview.chars().count());
-    preview.extend(value.chars().take(remaining));
+    body.push_str(value);
 }
 
 fn source_backed_record_upper_bound(record: &CursorSourceBackedRecord) -> usize {
@@ -842,7 +833,7 @@ fn source_backed_record_upper_bound(record: &CursorSourceBackedRecord) -> usize 
         .len()
         .saturating_add(record.provider_session_id.len())
         .saturating_add(record.source_path.len())
-        .saturating_add(record.lexical_preview.as_deref().map_or(0, str::len))
+        .saturating_add(record.lexical_body.as_deref().map_or(0, str::len))
         .saturating_add(
             record
                 .verified_content_indexed_text
