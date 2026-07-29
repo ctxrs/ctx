@@ -1462,6 +1462,17 @@ fn coordinate_source_backed_refresh_with_catalog(
         });
     }
 
+    let config = AppConfig::load(data_root)
+        .context("load daemon configuration before source-backed refresh")?;
+    if config.daemon.enabled {
+        super::daemon_autostart::autostart_daemon_and_wait(
+            data_root,
+            &config,
+            crate::DaemonTriggerCommandArg::Search,
+        )
+        .context("start or recover enabled daemon before source-backed refresh")?;
+    }
+
     let request = compact_json(json!({
         "schema_version": 1,
         "op": SOURCE_REFRESH_REQUEST_OP,
@@ -1520,7 +1531,7 @@ fn coordinate_source_backed_refresh_with_catalog(
 
 fn wait_for_published_generation(
     data_root: &Path,
-    request_id: String,
+    mut request_id: String,
     mode: SourceBackedRefreshMode,
     expected_catalog: Option<&ExplicitSourceCatalogAuthority>,
 ) -> Result<SourceBackedRefreshObservation> {
@@ -1537,19 +1548,26 @@ fn wait_for_published_generation(
         ) {
             Ok(Some(response)) => response,
             Ok(None) => {
-                return Err(SourceBackedRefreshDaemonUnavailable::new(Some(format!(
-                    "daemon became unavailable while waiting for request {request_id}"
-                )))
-                .into())
+                request_id = recover_wait_refresh_request(data_root, expected_catalog)
+                    .with_context(|| {
+                        format!(
+                            "recover daemon while waiting for source refresh request {request_id}"
+                        )
+                    })?;
+                continue;
             }
             Err(error)
                 if error
                     .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
                     .is_some() =>
             {
-                return Err(
-                    SourceBackedRefreshDaemonUnavailable::new(Some(format!("{error:#}"))).into(),
-                )
+                request_id =
+                    recover_wait_refresh_request(data_root, expected_catalog).with_context(|| {
+                        format!(
+                            "recover unavailable daemon while waiting for source refresh request {request_id}: {error:#}"
+                        )
+                    })?;
+                continue;
             }
             Err(error) => {
                 return Err(error.context("wait for daemon-owned source-backed refresh publication"))
@@ -1633,6 +1651,50 @@ fn wait_for_published_generation(
             }
         }
     }
+}
+
+fn recover_wait_refresh_request(
+    data_root: &Path,
+    explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
+) -> Result<String> {
+    let config =
+        AppConfig::load(data_root).context("load daemon configuration for refresh recovery")?;
+    if !config.daemon.enabled {
+        return Err(SourceBackedRefreshDaemonUnavailable::new(Some(
+            "daemon was disabled while waiting for source refresh".to_owned(),
+        ))
+        .into());
+    }
+    super::daemon_autostart::autostart_daemon_and_wait(
+        data_root,
+        &config,
+        crate::DaemonTriggerCommandArg::Search,
+    )
+    .context("restart daemon-owned source refresh service")?;
+    let response = daemon_source_refresh_request(
+        data_root,
+        compact_json(json!({
+            "schema_version": 1,
+            "op": SOURCE_REFRESH_REQUEST_OP,
+            "mode": SourceBackedRefreshMode::Wait.as_str(),
+            "explicit_source_catalog": explicit_source_catalog
+                .map(ExplicitSourceCatalogAuthority::to_json),
+        })),
+        SOURCE_REFRESH_IPC_TIMEOUT,
+        SOURCE_REFRESH_RESPONSE_MAX_BYTES,
+    )?
+    .ok_or_else(|| {
+        SourceBackedRefreshDaemonUnavailable::new(Some(
+            "restarted daemon did not publish a source refresh endpoint".to_owned(),
+        ))
+    })?;
+    validate_daemon_refresh_response(&response)?;
+    response
+        .get("request_id")
+        .and_then(Value::as_str)
+        .filter(|request_id| !request_id.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow!("recovered daemon source refresh response has no request ID"))
 }
 
 fn published_refresh_receipt(

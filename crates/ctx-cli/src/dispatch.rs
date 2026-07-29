@@ -329,9 +329,8 @@ fn command_json_output(command: &CommandRoot) -> bool {
         CommandRoot::Mcp(_) => false,
         CommandRoot::Daemon(args) => match &args.command {
             DaemonCommand::Run(args) => args.format.is_json(),
-            DaemonCommand::Status(args)
-            | DaemonCommand::Enable(args)
-            | DaemonCommand::Disable(args) => args.format.is_json(),
+            DaemonCommand::Status(args) | DaemonCommand::Enable(args) => args.format.is_json(),
+            DaemonCommand::Disable(args) => args.format.is_json(),
         },
         CommandRoot::Upgrade(args) => args.json_output(),
         CommandRoot::Doctor(args) => args.format.is_json(),

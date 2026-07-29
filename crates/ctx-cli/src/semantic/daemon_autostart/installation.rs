@@ -6,8 +6,8 @@ pub(in crate::semantic) struct InstallationDaemonLease {
     pub(super) registration_id: String,
     pub(super) data_root: PathBuf,
     pub(super) trigger: DaemonTriggerCommandArg,
-    pub(super) idle_exit_seconds: u64,
-    pub(super) loop_interval_seconds: u64,
+    pub(super) idle_exit_seconds: Option<u64>,
+    pub(super) loop_interval_seconds: Option<u64>,
     pub(super) status: &'static str,
 }
 
@@ -16,16 +16,16 @@ pub(super) struct InstallationDaemonRestart {
     pub(super) registration_path: PathBuf,
     pub(super) data_root: PathBuf,
     pub(super) trigger: DaemonTriggerCommandArg,
-    pub(super) idle_exit_seconds: u64,
-    pub(super) loop_interval_seconds: u64,
+    pub(super) idle_exit_seconds: Option<u64>,
+    pub(super) loop_interval_seconds: Option<u64>,
 }
 
 impl InstallationDaemonLease {
     pub(in crate::semantic) fn acquire(
         data_root: &Path,
         trigger: DaemonTriggerCommandArg,
-        idle_exit_seconds: u64,
-        loop_interval_seconds: u64,
+        idle_exit_seconds: Option<u64>,
+        loop_interval_seconds: Option<u64>,
         allow_active_upgrade: bool,
     ) -> Result<Option<Self>> {
         let lock = open_installation_daemon_quiescence_lock()?;
@@ -73,6 +73,12 @@ impl InstallationDaemonLease {
     }
 
     pub(super) fn write_status(&self, status: &str, attempt_id: Option<&str>) -> Result<()> {
+        // Keep the numeric fields readable by v0.26 during rollback. New
+        // binaries use the explicit booleans to recover the unbounded
+        // persistent contract instead of treating those compatibility values
+        // as real exit/scheduling options.
+        let persistent = self.idle_exit_seconds.is_none();
+        let loop_interval_explicit = self.loop_interval_seconds.is_some();
         write_private_json_file(
             &self.registration_path,
             &compact_json(json!({
@@ -83,8 +89,12 @@ impl InstallationDaemonLease {
                 "pid": process::id(),
                 "data_root": self.data_root,
                 "trigger_command": self.trigger.as_str(),
-                "idle_exit_seconds": self.idle_exit_seconds,
-                "loop_interval_seconds": self.loop_interval_seconds,
+                "persistent": persistent,
+                "loop_interval_explicit": loop_interval_explicit,
+                "idle_exit_seconds": self.idle_exit_seconds
+                    .unwrap_or(DAEMON_IDLE_EXIT_SECONDS_CAP),
+                "loop_interval_seconds": self.loop_interval_seconds
+                    .unwrap_or(15 * 60),
                 "updated_at_ms": utc_now().timestamp_millis(),
             })),
         )
@@ -225,14 +235,35 @@ pub(super) fn read_installation_daemon_restarts_from(
         let data_root = PathBuf::from(value["data_root"].as_str().unwrap_or_default());
         let trigger = parse_daemon_trigger(value["trigger_command"].as_str())
             .ok_or_else(|| anyhow!("ctx daemon acknowledgement has an invalid trigger"))?;
-        let idle_exit_seconds = value["idle_exit_seconds"]
-            .as_u64()
-            .filter(|value| *value > 0 && *value <= DAEMON_IDLE_EXIT_SECONDS_CAP)
-            .ok_or_else(|| anyhow!("ctx daemon acknowledgement has an invalid idle timeout"))?;
-        let loop_interval_seconds = value["loop_interval_seconds"]
-            .as_u64()
-            .filter(|value| *value > 0 && *value <= 3_600)
-            .ok_or_else(|| anyhow!("ctx daemon acknowledgement has an invalid loop interval"))?;
+        let persistent = value
+            .get("persistent")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let idle_exit_seconds = if persistent {
+            None
+        } else {
+            Some(
+                value["idle_exit_seconds"]
+                    .as_u64()
+                    .filter(|value| *value > 0 && *value <= DAEMON_IDLE_EXIT_SECONDS_CAP)
+                    .ok_or_else(|| {
+                        anyhow!("ctx daemon acknowledgement has an invalid idle timeout")
+                    })?,
+            )
+        };
+        let loop_interval_explicit = value
+            .get("loop_interval_explicit")
+            .and_then(Value::as_bool)
+            .unwrap_or(!persistent);
+        let loop_interval_seconds = match value["loop_interval_seconds"].as_u64() {
+            Some(value) if value > 0 && value <= 3_600 && loop_interval_explicit => Some(value),
+            Some(value) if value > 0 && value <= 3_600 && persistent => None,
+            _ => {
+                return Err(anyhow!(
+                    "ctx daemon acknowledgement has an invalid loop interval"
+                ))
+            }
+        };
         restarts.push(InstallationDaemonRestart {
             registration_path: path,
             data_root,

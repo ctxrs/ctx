@@ -1,6 +1,7 @@
 use std::{
     path::{Path, PathBuf},
     process,
+    sync::Arc,
     time::{Duration as StdDuration, Instant},
 };
 
@@ -15,11 +16,15 @@ use crate::{
         DaemonRuntimeSnapshotV1, DaemonStartModeV1, DaemonSupervisorV1, DaemonTriggerV1,
         OperationCompletedV1, Outcome, PublicEventV1, RuntimeObservationV1,
     },
+    compact_json,
     config::{self, AppConfig, DaemonMode, CONFIG_FILE},
     output::print_json,
-    DaemonArgs, DaemonCommand, DaemonRunArgs, DaemonStartModeArg, DaemonTriggerCommandArg,
-    FormatArgs,
+    DaemonArgs, DaemonCommand, DaemonDisableArgs, DaemonRunArgs, DaemonStartModeArg,
+    DaemonTriggerCommandArg, FormatArgs,
 };
+
+#[cfg(test)]
+use super::source_backed_refresh_coordinator::SourceBackedRefreshCoordinator;
 
 use super::{
     daemon_autostart::{
@@ -32,24 +37,22 @@ use super::{
         source_refresh_retry_due,
     },
     daemon_status::{daemon_report_failure_message, print_daemon_status_human},
+    daemon_wakeup::{write_degraded_wakeup_receipt, DaemonFileWatcher, DaemonWakeup},
     daemon_worker::write_daemon_lifecycle_status_with_runtime,
     health_search::semantic_env_flag,
     model_runtime::SharedSemanticRuntime,
     paths_status::{
-        daemon_report, daemon_report_with_disabled_status, daemon_source_backed_refresh_job_path,
-        lower_semantic_worker_priority, read_daemon_job_status, read_daemon_status,
-        write_daemon_status, DaemonLock,
+        daemon_lock_is_active, daemon_report, daemon_report_with_disabled_status,
+        daemon_source_backed_refresh_job_path, lower_semantic_worker_priority,
+        read_daemon_job_status, read_daemon_status, write_daemon_status, DaemonLock,
     },
     query_service::{
         daemon_can_begin_idle_shutdown, daemon_query_service_transport_supported,
-        observe_daemon_query_activity, semantic_query_service_supported,
-        start_daemon_query_service, start_daemon_source_refresh_service, DaemonQueryService,
+        daemon_source_refresh_request, observe_daemon_query_activity,
+        semantic_query_service_supported, start_daemon_query_service,
+        start_daemon_source_refresh_service, DaemonQueryService,
     },
-    runtime_limits::{
-        DAEMON_BACKGROUND_CHILD_ENV, DAEMON_IDLE_EXIT_SECONDS_DEFAULT,
-        DAEMON_LOOP_INTERVAL_SECONDS_DEFAULT,
-    },
-    source_backed_refresh_coordinator::SourceBackedRefreshCoordinator,
+    runtime_limits::DAEMON_BACKGROUND_CHILD_ENV,
 };
 
 #[derive(Debug)]
@@ -81,6 +84,8 @@ impl DaemonIteration {
 
 const DAEMON_LIVENESS_MIN_INTERVAL: StdDuration = StdDuration::from_secs(23 * 60 * 60);
 const DAEMON_LIVENESS_JITTER_WINDOW: StdDuration = StdDuration::from_secs(60 * 60);
+const DAEMON_SAFETY_RECONCILE_MIN_INTERVAL: StdDuration = StdDuration::from_secs(15 * 60);
+const DAEMON_SAFETY_RECONCILE_JITTER_WINDOW: StdDuration = StdDuration::from_secs(5 * 60);
 
 #[derive(Debug)]
 struct DaemonTelemetry {
@@ -289,6 +294,16 @@ fn daemon_liveness_interval(seed: u64) -> StdDuration {
     DAEMON_LIVENESS_MIN_INTERVAL + StdDuration::from_secs(jitter_secs)
 }
 
+fn daemon_safety_reconcile_interval(seed: u64) -> StdDuration {
+    let jitter_window_secs = DAEMON_SAFETY_RECONCILE_JITTER_WINDOW.as_secs();
+    let jitter_secs = if jitter_window_secs == 0 {
+        0
+    } else {
+        seed % jitter_window_secs
+    };
+    DAEMON_SAFETY_RECONCILE_MIN_INTERVAL + StdDuration::from_secs(jitter_secs)
+}
+
 fn runtime_event(
     observation: DaemonRuntimeObservationV1,
     outcome: Outcome,
@@ -413,6 +428,7 @@ fn reload_daemon_runtime_config(
     query_service: &mut Option<DaemonQueryService>,
     refresh_service: &mut Option<DaemonQueryService>,
     reload: &mut DaemonConfigReloadState,
+    wakeup: &Arc<DaemonWakeup>,
 ) -> DaemonConfigReloadOutcome {
     let config = match AppConfig::load(data_root) {
         Ok(config) => config,
@@ -437,7 +453,11 @@ fn reload_daemon_runtime_config(
         semantic_query_service_supported() && daemon_query_service_transport_supported(),
     );
     if daemon_query_service_transport_supported() && refresh_service.is_none() {
-        match start_daemon_source_refresh_service(data_root, runtime.semantic_runtime.clone()) {
+        match start_daemon_source_refresh_service(
+            data_root,
+            runtime.semantic_runtime.clone(),
+            Arc::clone(wakeup),
+        ) {
             Ok(service) => *refresh_service = Some(service),
             Err(error) => {
                 reload.activation_failed(error);
@@ -545,7 +565,7 @@ pub(crate) fn run_daemon_command(
         DaemonCommand::Run(args) => run_daemon(args, data_root, config),
         DaemonCommand::Status(args) => run_daemon_status(args, data_root),
         DaemonCommand::Enable(args) => run_daemon_enabled_update(args, data_root, true),
-        DaemonCommand::Disable(args) => run_daemon_enabled_update(args, data_root, false),
+        DaemonCommand::Disable(args) => run_daemon_disable(args, data_root),
     };
     if let Some(operation) = operation {
         let event = PublicEventV1::OperationCompleted(OperationCompletedV1::for_daemon(
@@ -641,16 +661,86 @@ pub(super) fn run_daemon_enabled_update(
     enabled: bool,
 ) -> Result<()> {
     config::set_daemon_enabled(&data_root, enabled)?;
+    let handoff = if enabled {
+        let config = AppConfig::load(&data_root)?;
+        Some(super::daemon_autostart::autostart_daemon_and_wait(
+            &data_root,
+            &config,
+            DaemonTriggerCommandArg::Setup,
+        )?)
+    } else {
+        request_daemon_shutdown_and_wait(&data_root)?;
+        super::daemon_supervisor::disable_daemon_supervisor(&data_root)?;
+        None
+    };
     if args.format.is_json() {
         print_json(json!({
             "schema_version": 1,
             "daemon_enabled": enabled,
+            "running": handoff.is_some(),
+            "pid": handoff.map(|handoff| handoff.pid),
             "config_path": data_root.join(CONFIG_FILE),
             "local_only": true,
         }))?;
     } else {
         println!("daemon_enabled: {enabled}");
         println!("config_path: {}", data_root.join(CONFIG_FILE).display());
+    }
+    Ok(())
+}
+
+fn run_daemon_disable(args: DaemonDisableArgs, data_root: PathBuf) -> Result<()> {
+    if !args.prepare_uninstall {
+        return run_daemon_enabled_update(
+            FormatArgs {
+                format: args.format,
+            },
+            data_root,
+            false,
+        );
+    }
+    #[cfg(unix)]
+    {
+        let report = super::daemon_autostart::prepare_posix_daemon_uninstall(&data_root)?;
+        if args.format.is_json() {
+            print_json(report)?;
+        } else {
+            println!("daemon_enabled: false");
+            println!("daemon_running: false");
+            println!("supervisor_removed: true");
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (args, data_root);
+        Err(anyhow!(
+            "--prepare-uninstall is available only to POSIX hosted uninstallers"
+        ))
+    }
+}
+
+fn request_daemon_shutdown_and_wait(data_root: &Path) -> Result<()> {
+    const SHUTDOWN_TIMEOUT: StdDuration = StdDuration::from_secs(5);
+    const SHUTDOWN_RETRY: StdDuration = StdDuration::from_millis(50);
+    let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+    while daemon_lock_is_active(data_root) {
+        let _ = daemon_source_refresh_request(
+            data_root,
+            compact_json(json!({
+                "schema_version": 1,
+                "op": "shutdown",
+            })),
+            StdDuration::from_millis(500),
+            16 * 1024,
+        );
+        if Instant::now() >= deadline {
+            return Err(anyhow!(
+                "daemon was disabled but did not release lifecycle ownership within {} seconds",
+                SHUTDOWN_TIMEOUT.as_secs()
+            ));
+        }
+        std::thread::sleep(SHUTDOWN_RETRY);
     }
     Ok(())
 }
@@ -738,13 +828,10 @@ pub(super) fn run_daemon_inner(
         daemon_previous_status_needs_recovery(read_daemon_status(data_root).as_ref());
     let mut telemetry = (!run_once)
         .then(|| DaemonTelemetry::new(daemon_run_facts(&args), run_started, started_at_ms as u64));
-    let idle_exit = StdDuration::from_secs(
-        args.idle_exit_seconds
-            .unwrap_or(DAEMON_IDLE_EXIT_SECONDS_DEFAULT),
-    );
-    let loop_interval = StdDuration::from_secs(
-        args.loop_interval_seconds
-            .unwrap_or(DAEMON_LOOP_INTERVAL_SECONDS_DEFAULT),
+    let idle_exit = args.idle_exit_seconds.map(StdDuration::from_secs);
+    let safety_interval = args.loop_interval_seconds.map_or_else(
+        || daemon_safety_reconcile_interval(started_at_ms as u64),
+        StdDuration::from_secs,
     );
     let upgrade_restart_trigger = args
         .trigger_command
@@ -752,8 +839,8 @@ pub(super) fn run_daemon_inner(
     let Some(installation_daemon_lease) = InstallationDaemonLease::acquire(
         data_root,
         upgrade_restart_trigger,
-        idle_exit.as_secs(),
-        loop_interval.as_secs(),
+        idle_exit.map(|duration| duration.as_secs()),
+        args.loop_interval_seconds,
         current_process_owns_daemon_upgrade_handoff(data_root),
     )?
     else {
@@ -762,6 +849,7 @@ pub(super) fn run_daemon_inner(
     };
     let mut prepared_auto_upgrade = None;
     let mut auto_upgrade_handoff = None;
+    let wakeup = Arc::new(DaemonWakeup::default());
     let active_result = (|| -> Result<bool> {
         let mut failed = false;
         let mut runtime = DaemonRuntime {
@@ -791,6 +879,7 @@ pub(super) fn run_daemon_inner(
             &mut query_service,
             &mut refresh_service,
             &mut config_reload,
+            &wakeup,
         ) == DaemonConfigReloadOutcome::StopDisabled;
         if config_reload.status == "activation_failed" {
             let activation_error = config_reload
@@ -826,6 +915,13 @@ pub(super) fn run_daemon_inner(
             daemon_semantic_runtime_active(&runtime, query_service.as_ref()),
             &config_reload.to_json(),
         )?;
+        let mut file_watcher = match DaemonFileWatcher::start(data_root, Arc::clone(&wakeup)) {
+            Ok(watcher) => Some(watcher),
+            Err(error) => {
+                write_degraded_wakeup_receipt(data_root, &error)?;
+                None
+            }
+        };
         // The daemon is ready only after every fallible lifecycle and runtime
         // initialization step has succeeded. Publish that status before
         // acknowledging any durable restart request so every parent observes
@@ -850,6 +946,7 @@ pub(super) fn run_daemon_inner(
         let mut idle_since: Option<Instant> = None;
         let mut observed_query_generation = 0;
         let mut observed_refresh_generation = 0;
+        let mut next_safety_reconcile = Instant::now() + safety_interval;
         loop {
             if stop_disabled {
                 break;
@@ -861,6 +958,7 @@ pub(super) fn run_daemon_inner(
                 &mut query_service,
                 &mut refresh_service,
                 &mut config_reload,
+                &wakeup,
             ) == DaemonConfigReloadOutcome::StopDisabled
             {
                 write_daemon_lifecycle_status_with_runtime(
@@ -940,7 +1038,7 @@ pub(super) fn run_daemon_inner(
             if source_refresh_pending {
                 idle_since = None;
             }
-            if idle_since.is_some_and(|idle| idle.elapsed() >= idle_exit)
+            if idle_exit.is_some_and(|limit| idle_since.is_some_and(|idle| idle.elapsed() >= limit))
                 && !retry_due
                 && !source_refresh_pending
             {
@@ -988,6 +1086,7 @@ pub(super) fn run_daemon_inner(
             let iteration_events =
                 daemon_iteration_events(telemetry.as_mut(), &mut iteration, cycle_duration);
             send_daemon_events(data_root, &iteration_events);
+            wakeup.record_cycle(iteration.did_work);
             write_daemon_lifecycle_status_with_runtime(
                 data_root,
                 &args,
@@ -1021,13 +1120,52 @@ pub(super) fn run_daemon_inner(
             } else if idle_since.is_none() {
                 idle_since = Some(Instant::now());
             }
-            if daemon_wait_interrupted_by_upgrade(
-                data_root,
-                loop_interval,
-                refresh_service
+            let now = Instant::now();
+            let mut wait_for = next_safety_reconcile.saturating_duration_since(now);
+            if let Some(retry_after_ms) = runtime.history_retry.retry_after_ms() {
+                wait_for = wait_for.min(StdDuration::from_millis(retry_after_ms));
+            }
+            if let Some(retry_after_ms) = runtime.semantic_retry.retry_after_ms() {
+                wait_for = wait_for.min(StdDuration::from_millis(retry_after_ms));
+            }
+            if let (Some(idle), Some(limit)) = (idle_since, idle_exit) {
+                wait_for = wait_for.min(limit.saturating_sub(idle.elapsed()));
+            }
+            let wake = wakeup.wait(wait_for);
+            if wake.shutdown {
+                break;
+            }
+            let safety_due = wake.timed_out && Instant::now() >= next_safety_reconcile;
+            if safety_due {
+                next_safety_reconcile = Instant::now() + safety_interval;
+            }
+            if wake.filesystem || safety_due {
+                if let Some(source_refresh) = refresh_service
                     .as_ref()
-                    .map(|service| service.source_refresh.as_ref()),
-            ) {
+                    .map(|service| service.source_refresh.as_ref())
+                {
+                    let _ = source_refresh.enqueue_periodic(data_root);
+                }
+            }
+            if (wake.filesystem || safety_due)
+                && file_watcher
+                    .as_mut()
+                    .is_some_and(|watcher| watcher.reconcile().is_err())
+            {
+                // A native watch can become temporarily inaccessible. Keep
+                // the last good watch set and let the bounded safety
+                // reconciliation retry it.
+            }
+            if let Some(watcher) = file_watcher.as_ref() {
+                let _ = watcher.write_receipt(if safety_due || wake.filesystem {
+                    "active"
+                } else {
+                    "idle"
+                });
+            }
+            if daemon_upgrade_handoff_blocks_current_process(data_root)
+                || installation_upgrade_blocks_current_process(data_root)
+            {
                 break;
             }
         }
@@ -1068,6 +1206,7 @@ pub(super) fn run_daemon_inner(
         // Keep daemon ownership until the query service has removed its endpoint
         // and joined its listener thread. Otherwise a replacement can publish a
         // new endpoint that this service's destructor then removes.
+        drop(file_watcher);
         drop(query_service);
         drop(refresh_service);
         Ok(failed)
@@ -1108,8 +1247,10 @@ pub(super) fn run_daemon_inner(
             prepared,
             (
                 upgrade_restart_trigger.as_str(),
-                idle_exit.as_secs(),
-                loop_interval.as_secs(),
+                idle_exit
+                    .map(|duration| duration.as_secs())
+                    .unwrap_or(super::runtime_limits::DAEMON_IDLE_EXIT_SECONDS_CAP),
+                safety_interval.as_secs(),
             ),
             auto_upgrade_handoff,
         )?;
@@ -1156,31 +1297,6 @@ fn daemon_services_can_begin_idle_shutdown(
         activity.resume_accepting();
     }
     false
-}
-
-fn daemon_wait_interrupted_by_upgrade(
-    data_root: &Path,
-    duration: StdDuration,
-    source_refresh: Option<&SourceBackedRefreshCoordinator>,
-) -> bool {
-    const POLL_INTERVAL: StdDuration = StdDuration::from_millis(100);
-    let deadline = Instant::now() + duration;
-    loop {
-        if daemon_upgrade_handoff_blocks_current_process(data_root) {
-            return true;
-        }
-        if source_refresh.is_some_and(SourceBackedRefreshCoordinator::has_pending_request) {
-            return false;
-        }
-        let now = Instant::now();
-        if installation_upgrade_blocks_current_process(data_root) {
-            return true;
-        }
-        if now >= deadline {
-            return false;
-        }
-        std::thread::sleep(deadline.saturating_duration_since(now).min(POLL_INTERVAL));
-    }
 }
 
 fn installation_upgrade_blocks_current_process(data_root: &Path) -> bool {

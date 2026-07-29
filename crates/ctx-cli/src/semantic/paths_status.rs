@@ -628,6 +628,8 @@ pub(super) fn daemon_report_with_disabled_status(
         "lock_path": lock_path,
         "lock_identity": lock_identity,
         "source_refresh_endpoint": daemon_source_refresh_endpoint_report(data_root),
+        "supervisor": super::daemon_supervisor::daemon_supervisor_report(data_root),
+        "wakeup": super::daemon_wakeup::daemon_wakeup_report(data_root),
         "status_path": status_path,
         "jobs": jobs,
     }))

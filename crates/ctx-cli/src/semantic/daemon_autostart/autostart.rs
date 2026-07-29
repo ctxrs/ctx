@@ -8,10 +8,6 @@ pub(crate) fn maybe_autostart_daemon(
     maybe_autostart_daemon_inner(data_root, config, trigger);
 }
 
-pub(crate) fn maybe_autostart_daemon_for_search(data_root: &Path, config: &AppConfig) {
-    maybe_autostart_daemon_inner(data_root, config, DaemonTriggerCommandArg::Search);
-}
-
 pub(crate) fn daemon_autostart_suppression_reason() -> Option<&'static str> {
     if semantic_env_flag(DAEMON_BACKGROUND_CHILD_ENV) {
         Some("daemon_child")
@@ -24,15 +20,14 @@ pub(crate) fn daemon_autostart_suppression_reason() -> Option<&'static str> {
     }
 }
 
-pub(crate) fn daemon_autostart_can_reuse_existing(data_root: &Path) -> bool {
-    daemon_lock_is_active(data_root)
-}
-
 pub(crate) fn autostart_daemon_and_wait(
     data_root: &Path,
     config: &AppConfig,
     trigger: DaemonTriggerCommandArg,
 ) -> Result<DaemonHandoff> {
+    if daemon_autostart_suppression_reason().is_none() {
+        let _ = super::super::daemon_supervisor::ensure_daemon_supervisor(data_root);
+    }
     let request = request_daemon_autostart(data_root, config, trigger).map_err(|error| {
         anyhow!(
             "ctx daemon did not start: {error:#}. Run `ctx daemon status --format json`, then `ctx daemon run` for details"
@@ -97,6 +92,12 @@ pub(super) fn request_daemon_autostart(
     config: &AppConfig,
     trigger: DaemonTriggerCommandArg,
 ) -> Result<DaemonAutostartRequest> {
+    // Suppression disables spawning, not reuse. Test harnesses and managed
+    // callers can intentionally provide an already-owned daemon while
+    // forbidding any additional detached process.
+    if config.daemon.enabled && daemon_lock_is_active(data_root) {
+        return Ok(DaemonAutostartRequest::Existing);
+    }
     if let Some(reason) = daemon_autostart_suppression_reason() {
         return Ok(DaemonAutostartRequest::Suppressed(reason));
     }
@@ -155,14 +156,44 @@ fn daemon_handoff_observation(
     let status = read_daemon_status(data_root);
     let lock_pid = super::super::paths_status::read_pid_lock_file(&daemon_lock_path(data_root));
     let lock_active = lock_pid.is_some_and(|pid| daemon_lock_is_owned_by(data_root, pid));
-    daemon_handoff_observation_from(
+    let observation = daemon_handoff_observation_from(
         status.as_ref(),
         lock_pid,
         lock_active,
         expected_failure_pid,
         Some(expected_config),
         utc_now().timestamp_millis(),
+    );
+    match observation {
+        DaemonHandoffObservation::Running(handoff)
+            if !daemon_source_refresh_endpoint_is_usable(data_root, handoff.pid) =>
+        {
+            DaemonHandoffObservation::Pending
+        }
+        observation => observation,
+    }
+}
+
+fn daemon_source_refresh_endpoint_is_usable(data_root: &Path, expected_pid: u32) -> bool {
+    daemon_source_refresh_request(
+        data_root,
+        compact_json(json!({
+            "schema_version": 1,
+            "op": "ping",
+        })),
+        DAEMON_HEALTH_TIMEOUT,
+        DAEMON_HEALTH_RESPONSE_MAX_BYTES,
     )
+    .ok()
+    .flatten()
+    .is_some_and(|response| {
+        response.get("ok").and_then(Value::as_bool) == Some(true)
+            && response
+                .get("pid")
+                .and_then(Value::as_u64)
+                .and_then(|pid| u32::try_from(pid).ok())
+                == Some(expected_pid)
+    })
 }
 
 pub(super) fn daemon_handoff_observation_from(
@@ -298,8 +329,8 @@ pub(super) fn daemon_autostart_command(
     exe: &Path,
     data_root: &Path,
     trigger: DaemonTriggerCommandArg,
-    idle_exit: u64,
-    loop_interval: u64,
+    idle_exit: Option<u64>,
+    loop_interval: Option<u64>,
     handoff_token: Option<&str>,
 ) -> Command {
     let mut command = Command::new(exe);
@@ -308,10 +339,6 @@ pub(super) fn daemon_autostart_command(
         .arg(data_root)
         .arg("daemon")
         .arg("run")
-        .arg("--idle-exit-seconds")
-        .arg(idle_exit.to_string())
-        .arg("--loop-interval-seconds")
-        .arg(loop_interval.to_string())
         .arg("--start-mode")
         .arg(DaemonStartModeArg::Auto.as_str())
         .arg("--trigger-command")
@@ -321,6 +348,16 @@ pub(super) fn daemon_autostart_command(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    if let Some(idle_exit) = idle_exit {
+        command
+            .arg("--idle-exit-seconds")
+            .arg(idle_exit.to_string());
+    }
+    if let Some(loop_interval) = loop_interval {
+        command
+            .arg("--loop-interval-seconds")
+            .arg(loop_interval.to_string());
+    }
     #[cfg(unix)]
     unsafe {
         command.pre_exec(|| {
@@ -350,14 +387,9 @@ pub(super) fn configured_daemon_autostart_command(
         trigger,
         daemon_autostart_u64_env(
             "CTX_DAEMON_AUTOSTART_IDLE_EXIT_SECONDS",
-            DAEMON_AUTOSTART_IDLE_EXIT_SECONDS_DEFAULT,
             DAEMON_IDLE_EXIT_SECONDS_CAP,
         ),
-        daemon_autostart_u64_env(
-            "CTX_DAEMON_AUTOSTART_LOOP_INTERVAL_SECONDS",
-            DAEMON_AUTOSTART_LOOP_INTERVAL_SECONDS_DEFAULT,
-            3_600,
-        ),
+        daemon_autostart_u64_env("CTX_DAEMON_AUTOSTART_LOOP_INTERVAL_SECONDS", 3_600),
         handoff_token,
     );
     // Preserve an explicit process override across detached launch and

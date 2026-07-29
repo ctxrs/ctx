@@ -186,7 +186,7 @@ fn setup_without_semantic_flag_preserves_explicit_search_setting() {
 }
 
 #[test]
-fn setup_semantic_persists_opt_in_and_machine_output_does_not_autostart() {
+fn setup_semantic_persists_opt_in_when_autostart_is_explicitly_disabled() {
     let temp = tempdir();
     write_codex_setup_session(&temp);
 
@@ -200,7 +200,7 @@ fn setup_semantic_persists_opt_in_and_machine_output_does_not_autostart() {
     assert_eq!(setup["background_indexing"]["semantic_enabled"], true);
     assert_eq!(
         setup["background_indexing"]["daemon_autostart"]["reason"],
-        "machine_readable_output"
+        "autostart_disabled"
     );
     assert_no_daemon_autostart_mutation(&temp);
 
@@ -719,7 +719,7 @@ fn setup_backgrounds_discovered_codex_sessions_by_default_and_wait_imports() {
     );
     assert_eq!(
         setup["background_indexing"]["daemon_autostart"]["reason"],
-        "machine_readable_output"
+        "autostart_disabled"
     );
 
     let status = json_output(ctx(&temp).args(["status", "--format=json"]));
@@ -749,7 +749,7 @@ fn setup_backgrounds_discovered_codex_sessions_by_default_and_wait_imports() {
     );
     assert_eq!(
         ready["background_indexing"]["daemon_autostart"]["reason"],
-        "machine_readable_output"
+        "autostart_disabled"
     );
     assert!(
         ready["import"]["totals"]["imported_events"]
@@ -1007,53 +1007,40 @@ fn setup_autostart_records_spawn_failure_status() {
 }
 
 #[test]
-fn machine_readable_setup_preserves_json_without_autostarting_daemon() {
+fn machine_readable_setup_attempts_enabled_daemon_startup() {
     let temp = tempdir();
     let missing_exe = temp.path().join("missing-ctx-binary");
-    write_active_daemon_upgrade_handoff(&temp);
 
-    let setup = json_output(
+    let stderr = failure_stderr(
         ctx(&temp)
             .args(["setup", "--format=json", "--progress", "none"])
             .env("CTX_DAEMON_AUTOSTART_EXE", &missing_exe)
             .env_remove("CI")
             .env_remove("CTX_DAEMON_AUTOSTART_OFF"),
     );
-    assert_eq!(
-        setup["background_indexing"]["daemon_autostart"]["status"],
-        "not_needed"
-    );
-    assert_eq!(setup["mode"], "ready");
-    assert_eq!(setup["background_indexing"]["enabled"], false);
-    assert_eq!(
-        setup["background_indexing"]["daemon_autostart"]["reason"],
-        "machine_readable_output"
-    );
-    assert_no_daemon_autostart_mutation(&temp);
+    assert!(stderr.contains("ctx daemon did not start"), "{stderr}");
+    let status = json_output(ctx(&temp).args(["daemon", "status", "--format=json"]));
+    assert_eq!(status["daemon"]["status"], "failed", "{status:#}");
+    assert_eq!(status["daemon"]["reason"], "spawn_failed", "{status:#}");
 }
 
 #[test]
-fn progress_json_setup_does_not_autostart_or_nudge_daemon() {
+fn progress_json_setup_attempts_enabled_daemon_startup() {
     let temp = tempdir();
-    write_active_daemon_upgrade_handoff(&temp);
+    let missing_exe = temp.path().join("missing-ctx-binary");
 
     let output = ctx(&temp)
         .args(["setup", "--progress", "json"])
+        .env("CTX_DAEMON_AUTOSTART_EXE", &missing_exe)
         .env_remove("CI")
         .env_remove("CTX_DAEMON_AUTOSTART_OFF")
         .assert()
-        .success()
+        .failure()
         .get_output()
         .clone();
 
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(
-        stdout.contains(
-            "Daemon autostart was skipped because machine-readable output was requested."
-        ),
-        "{stdout}"
-    );
-    assert_no_daemon_autostart_mutation(&temp);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("ctx daemon did not start"), "{stderr}");
 }
 
 #[test]

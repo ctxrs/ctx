@@ -1,4 +1,5 @@
 use serde_json::{json, Value};
+use std::path::PathBuf;
 
 use crate::config::AppConfig;
 
@@ -10,6 +11,13 @@ use super::{
 pub(crate) struct UpgradeDiagnostics {
     pub(crate) report: Value,
     pub(crate) findings: Vec<String>,
+}
+
+pub(crate) fn managed_install_executable() -> anyhow::Result<Option<PathBuf>> {
+    Ok(match managed_install_marker_for_current_exe()? {
+        ManagedInstallMarker::Valid(marker) => Some(marker.install_path),
+        ManagedInstallMarker::Absent | ManagedInstallMarker::Invalid { .. } => None,
+    })
 }
 
 pub(crate) fn upgrade_diagnostics(config: &AppConfig) -> UpgradeDiagnostics {

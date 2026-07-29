@@ -6,6 +6,11 @@ pub(crate) fn blame(
     limit: u32,
     cursor: Option<String>,
 ) -> Result<BlameResult> {
+    // Blame is generation-sensitive: a healthy but older Pro receipt is not
+    // authoritative for the currently published Core generation. The
+    // materialization path is a no-op when both generations already match.
+    let mut materialization = ProMaterializationTelemetryV1::started();
+    materialize(data_root, &mut materialization)?;
     let first = blame_once(data_root, target.clone(), limit, cursor.clone());
     let should_catch_up = first.as_ref().is_err_and(|error| {
         matches!(

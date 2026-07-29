@@ -432,7 +432,15 @@ pub(crate) enum DaemonCommand {
     #[command(about = "Enable ctx daemon maintenance")]
     Enable(FormatArgs),
     #[command(about = "Disable ctx daemon maintenance")]
-    Disable(FormatArgs),
+    Disable(DaemonDisableArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+pub(crate) struct DaemonDisableArgs {
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    pub(crate) format: JsonOutputFormat,
+    #[arg(long, hide = true)]
+    pub(crate) prepare_uninstall: bool,
 }
 
 #[derive(Debug, Args, Clone)]

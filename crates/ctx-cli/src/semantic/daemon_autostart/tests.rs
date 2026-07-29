@@ -128,8 +128,8 @@ fn failed_restart_intent_write_preserves_partial_acknowledgement() -> Result<()>
         registration_id: "partial".to_owned(),
         data_root: blocked_root,
         trigger: DaemonTriggerCommandArg::Search,
-        idle_exit_seconds: 60,
-        loop_interval_seconds: 30,
+        idle_exit_seconds: Some(60),
+        loop_interval_seconds: Some(30),
         status: "live",
     };
     lease.write_status("live", None)?;
@@ -152,8 +152,8 @@ fn autostart_child_inherits_effective_analytics_policy() {
         Path::new("ctx"),
         Path::new("/tmp/ctx-daemon-telemetry-test"),
         DaemonTriggerCommandArg::Search,
-        5,
-        5,
+        Some(5),
+        Some(5),
         None,
     );
     let env = command
@@ -166,6 +166,24 @@ fn autostart_child_inherits_effective_analytics_policy() {
     assert!(env
         .iter()
         .all(|(key, _)| key != std::ffi::OsStr::new("CTX_ANALYTICS_ENABLED")));
+}
+
+#[test]
+fn persistent_autostart_child_has_no_implicit_exit_or_poll_interval() {
+    let command = daemon_autostart_command(
+        Path::new("ctx"),
+        Path::new("/tmp/ctx-daemon-persistent-test"),
+        DaemonTriggerCommandArg::Search,
+        None,
+        None,
+        None,
+    );
+    let args = command
+        .get_args()
+        .filter_map(std::ffi::OsStr::to_str)
+        .collect::<Vec<_>>();
+    assert!(!args.contains(&"--idle-exit-seconds"), "{args:?}");
+    assert!(!args.contains(&"--loop-interval-seconds"), "{args:?}");
 }
 
 #[test]
@@ -250,8 +268,8 @@ fn autostart_child_detaches_from_the_invoking_terminal_session() -> Result<()> {
         &executable,
         temp.path(),
         DaemonTriggerCommandArg::Setup,
-        5,
-        5,
+        Some(5),
+        Some(5),
         None,
     );
     command.env("CTX_DAEMON_TEST_RECEIPT", &receipt);
@@ -613,8 +631,8 @@ fn replacement_daemon_receives_only_its_handoff_bypass_token() {
         Path::new("ctx"),
         Path::new("/tmp/ctx-daemon-upgrade-test"),
         DaemonTriggerCommandArg::Search,
-        5,
-        5,
+        Some(5),
+        Some(5),
         Some("handoff-token"),
     );
     let env = command
