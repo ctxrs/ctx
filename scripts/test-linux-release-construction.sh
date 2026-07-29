@@ -633,7 +633,7 @@ printf '{}\n' >"${inspector_source}/contracts/public-control-surface-v1.json"
 printf '{}\n' >"${inspector_source}/tests/fixtures/custom-history-jsonl/basic.jsonl"
 printf 'candidate\n' >"${inspector_artifacts}/ctx"
 printf '%064d\n' 0 >"${inspector_artifacts}/ctx.sha256"
-printf 'ctx 0.26.0\n' >"${inspector_artifacts}/ctx.version"
+printf 'ctx 1.0.0\n' >"${inspector_artifacts}/ctx.version"
 inspector_output="${tmp_dir}/inspector-output"
 mkdir "${inspector_output}"
 scripts/stage-public-cli-inspector-inputs.sh \

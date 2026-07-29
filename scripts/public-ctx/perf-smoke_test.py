@@ -27,7 +27,7 @@ HELPERS = (
 )
 REPO_ROOT = SCRIPT.parents[2]
 FROZEN_PYTHON_SOURCE_SHA256 = (
-    "baf0bb0cf16940085091bbec37e7ad6097532a82bce013f58e597235aaa942cf"
+    "329bd0a34b21b99c003e26d98ac5b3a9a2012d18af7219341a72d6700a513bc6"
 )
 PHASES = (
     "initial_source_refresh",
@@ -124,7 +124,7 @@ import time
 from pathlib import Path
 
 ROLE = __ROLE__
-VERSION = "ctx 0.26.0"
+VERSION = "ctx 1.0.0"
 
 
 def emit(value):
@@ -380,11 +380,13 @@ class PerfSmokePolicyTests(unittest.TestCase):
         effective_role = self.module["effective_role"]
         harness_error = self.module["HarnessError"]
         for role in ("baseline", "candidate", "single"):
-            self.assertEqual(effective_role(role, "ctx 0.26.0"), role)
+            self.assertEqual(effective_role(role, "ctx 1.0.0"), role)
         with self.assertRaises(harness_error):
             effective_role("baseline-v0.25", "ctx 0.25.0")
         with self.assertRaises(harness_error):
             effective_role("candidate", "ctx 0.25.0")
+        with self.assertRaises(harness_error):
+            effective_role("candidate", "ctx 0.26.0")
 
     def test_storage_footprint_counts_current_artifacts(self) -> None:
         footprint = self.module["source_backed_storage_footprint"]

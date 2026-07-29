@@ -102,9 +102,9 @@ def expect_source_backed_status(
 def effective_role(role: str, version: str) -> str:
     if role not in {"baseline", "candidate", "single"}:
         raise HarnessError(f"unknown performance role: {role}")
-    if not version.startswith("ctx 0.26."):
+    if version != "ctx 1.0.0":
         raise HarnessError(
-            f"{role} performance binary must be a v0.26 source-backed build, got {version}"
+            f"{role} performance binary must be a ctx 1.0.0 source-backed build, got {version}"
         )
     return role
 
