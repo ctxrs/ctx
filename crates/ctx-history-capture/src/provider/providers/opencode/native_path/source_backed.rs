@@ -6,7 +6,6 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    fs::File,
     path::{Path, PathBuf},
 };
 
@@ -37,20 +36,21 @@ use super::{
         source_backed_retained_event_kind, source_backed_retained_file_touches,
         source_backed_retained_searchable_text,
     },
-    schema::OpenCodeNativeSchema,
+    schema::{hex_digest, OpenCodeNativeSchema},
 };
 use crate::{
+    common::io::ProviderSourceRoot,
     provider::{
         normalization::provider_required_timestamp_millis,
-        providers::opencode::OpenCodeSqliteDialect, sqlite::ProviderSqliteSourceSnapshot,
+        providers::opencode::OpenCodeSqliteDialect,
     },
     provider_sources::{
-        discover_provider_sources_for_provider_with_context, open_ordinary_file_without_following,
-        open_sqlite_source_snapshot, DiscoveryContext, DiscoveryReport, SqliteSourceAccessError,
+        discover_provider_sources_for_provider_with_context,
+        open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
+        DiscoveryContext, DiscoveryReport, SqliteSourceAccessError, SqliteSourceEvidence,
         SqliteSourceReadSnapshot,
     },
-    CaptureError, Result as CaptureResult, MAX_PROVIDER_SQLITE_VALUE_BYTES,
-    PROVIDER_MAX_PREVIEW_CHARS,
+    CaptureError, MAX_PROVIDER_SQLITE_VALUE_BYTES, PROVIDER_MAX_PREVIEW_CHARS,
 };
 
 const SOURCE_ANCHOR_KEY: &str = "active-database";
@@ -63,8 +63,6 @@ const NATIVE_SESSION_NAMESPACE: &str = "opencode-family.session-id";
 const SOURCE_BACKED_PAGE_ROWS: usize = 64;
 const SQLITE_SOURCE_INVALID_REASON: &str =
     "OpenCode-family history database must be a regular file";
-const SQLITE_SIDECAR_INVALID_REASON: &str =
-    "OpenCode-family history sidecar must be a regular file";
 
 #[derive(Debug, Error)]
 pub(crate) enum OpenCodeSourceBackedError {
@@ -262,8 +260,8 @@ fn scan_source(
     dialect: &'static OpenCodeSqliteDialect,
     emit: &mut dyn FnMut(Vec<LexicalDocument>) -> OpenCodeSourceBackedResult<()>,
 ) -> OpenCodeSourceBackedResult<OpenCodeSourceBackedScan> {
-    let opening_snapshot = provider_snapshot(path)?;
-    let (root_bound_database, sqlite_snapshot) = open_root_authorized_snapshot(path)?;
+    let (source_root, sqlite_snapshot) = open_root_authorized_snapshot(path)?;
+    let opening_evidence = sqlite_snapshot.evidence().clone();
     let mut pending_pages = Vec::new();
     let working = {
         let connection = sqlite_snapshot.connection()?;
@@ -271,7 +269,7 @@ fn scan_source(
         let schema = OpenCodeNativeSchema::probe(connection, dialect)?;
         let source = source_key(dialect, schema.family).map_err(source_backed_as_capture)?;
         let opening =
-            source_observation(&source, &opening_snapshot).map_err(source_backed_as_capture)?;
+            source_observation(&source, &opening_evidence).map_err(source_backed_as_capture)?;
         let sessions =
             load_sessions(connection, &schema, &source).map_err(source_backed_as_capture)?;
         let (counts, content_digest, emitted_pages) = stream_events(
@@ -297,13 +295,9 @@ fn scan_source(
             emitted_pages,
         }
     };
-    sqlite_snapshot.finish()?;
-    if !opening_snapshot.revalidate(path)? {
-        return Err(CaptureError::SourceChangedDuringCapture.into());
-    }
-
-    let closing_snapshot = provider_snapshot(path)?;
-    let closing = source_observation(&working.source, &closing_snapshot)?;
+    let closing_evidence = sqlite_snapshot.finish()?;
+    source_root.revalidate()?;
+    let closing = source_observation(&working.source, &closing_evidence)?;
     let certificate = CertifiedSource::certify(
         working.opening,
         closing,
@@ -312,7 +306,6 @@ fn scan_source(
         working.counts,
     )
     .map_err(map_certification_error)?;
-    drop(root_bound_database);
     for page in pending_pages {
         emit(page)?;
     }
@@ -690,43 +683,59 @@ fn source_key(
     )?)
 }
 
-fn provider_snapshot(path: &Path) -> CaptureResult<ProviderSqliteSourceSnapshot> {
-    ProviderSqliteSourceSnapshot::read(
-        path,
-        SQLITE_SOURCE_INVALID_REASON,
-        SQLITE_SIDECAR_INVALID_REASON,
-    )
-}
-
 fn open_root_authorized_snapshot(
     path: &Path,
-) -> OpenCodeSourceBackedResult<(File, SqliteSourceReadSnapshot)> {
+) -> OpenCodeSourceBackedResult<(ProviderSourceRoot, SqliteSourceReadSnapshot)> {
     open_root_authorized_snapshot_with_hook(path, || {})
 }
 
 fn open_root_authorized_snapshot_with_hook(
     path: &Path,
     after_authorize: impl FnOnce(),
-) -> OpenCodeSourceBackedResult<(File, SqliteSourceReadSnapshot)> {
-    let root_bound_database = open_ordinary_file_without_following(path)?;
+) -> OpenCodeSourceBackedResult<(ProviderSourceRoot, SqliteSourceReadSnapshot)> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let database_leaf =
+        path.file_name()
+            .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
+                path: path.to_path_buf(),
+                reason: SQLITE_SOURCE_INVALID_REASON,
+            })?;
+    let source_root = ProviderSourceRoot::open(parent)?;
+    let source_directory = source_root.directory()?;
+    let parent_handle = source_directory
+        .try_clone_authority_handle()
+        .map_err(CaptureError::from)?;
+    let sqlite_authority = retain_sqlite_source_directory_authority(&parent_handle)?;
+    let sqlite_snapshot =
+        open_root_handle_sqlite_source_snapshot(&sqlite_authority, database_leaf)?;
     after_authorize();
-    let sqlite_snapshot = open_sqlite_source_snapshot(path, &root_bound_database)?;
+    source_directory.revalidate()?;
+    source_root.revalidate()?;
     let connection = sqlite_snapshot.connection()?;
     let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
         .map_err(|_| OpenCodeSourceBackedError::CountOverflow)?;
     connection.set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit);
     connection.busy_timeout(std::time::Duration::from_secs(5))?;
-    Ok((root_bound_database, sqlite_snapshot))
+    Ok((source_root, sqlite_snapshot))
 }
 
 fn source_observation(
     source: &SourceKey,
-    snapshot: &ProviderSqliteSourceSnapshot,
+    evidence: &SqliteSourceEvidence,
 ) -> OpenCodeSourceBackedResult<SourceObservation> {
     Ok(SourceObservation::new(
         source.clone(),
         SOURCE_REVISION_KIND,
-        snapshot.revision_component().into_bytes(),
+        format!(
+            "identity={};length={};revision={}",
+            hex_digest(*evidence.identity()),
+            evidence.length(),
+            hex_digest(*evidence.revision()),
+        )
+        .into_bytes(),
     )?)
 }
 
@@ -887,10 +896,12 @@ impl OpenCodeSourceBackedExactResolver {
                 "locator does not belong to this OpenCode-family registration",
             ));
         }
-        let snapshot = provider_snapshot(&self.path).map_err(temporary_hydration_failure)?;
-        let observation = source_observation(locator.source(), &snapshot).map_err(|error| {
-            hydration_failure(HydrationFailureKind::InvalidLocator, error.to_string())
-        })?;
+        let (source_root, sqlite_snapshot) =
+            open_root_authorized_snapshot(&self.path).map_err(temporary_hydration_failure)?;
+        let observation = source_observation(locator.source(), sqlite_snapshot.evidence())
+            .map_err(|error| {
+                hydration_failure(HydrationFailureKind::InvalidLocator, error.to_string())
+            })?;
         if locator.certified_source_revision_digest() != Some(&source_revision_digest(&observation))
         {
             return Err(hydration_failure(
@@ -899,8 +910,6 @@ impl OpenCodeSourceBackedExactResolver {
             ));
         }
 
-        let (root_bound_database, sqlite_snapshot) =
-            open_root_authorized_snapshot(&self.path).map_err(temporary_hydration_failure)?;
         let connection = sqlite_snapshot
             .connection()
             .map_err(temporary_hydration_failure)?;
@@ -922,16 +931,9 @@ impl OpenCodeSourceBackedExactResolver {
         sqlite_snapshot
             .finish()
             .map_err(temporary_hydration_failure)?;
-        if !snapshot
-            .revalidate(&self.path)
-            .map_err(temporary_hydration_failure)?
-        {
-            return Err(hydration_failure(
-                HydrationFailureKind::StaleSourceEvidence,
-                "provider SQLite snapshot changed during exact-row hydration",
-            ));
-        }
-        drop(root_bound_database);
+        source_root
+            .revalidate()
+            .map_err(temporary_hydration_failure)?;
         Ok(provider_bytes)
     }
 }
@@ -1129,30 +1131,49 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::provider_sources::{
-        DiscoveryPlatform, DiscoveryPlatformDirs, ProviderSourceStatus, SqliteSourceComponent,
-    };
+    use crate::provider_sources::{DiscoveryPlatform, DiscoveryPlatformDirs, ProviderSourceStatus};
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn source_backed_open_rejects_leaf_swap_after_authorization() {
+    fn source_backed_open_does_not_follow_leaf_swap_after_authorization() {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let path = temp.path().join("opencode.sqlite");
         let attacker = temp.path().join("attacker.sqlite");
         let original = temp.path().join("original.sqlite");
-        create_fixture(&path, "opencode", 1);
-        create_fixture(&attacker, "opencode", 1);
+        create_fixture(&path, "expected", 1);
+        create_fixture(&attacker, "attacker", 1);
 
         let result = open_root_authorized_snapshot_with_hook(&path, || {
             fs::rename(&path, &original).unwrap();
             fs::rename(&attacker, &path).unwrap();
         });
-        assert!(matches!(
-            result,
-            Err(OpenCodeSourceBackedError::SqliteSource(
-                SqliteSourceAccessError::ConnectionIdentityMismatch
+        match result {
+            Ok((source_root, sqlite_snapshot)) => {
+                let data: String = sqlite_snapshot
+                    .connection()
+                    .unwrap()
+                    .query_row(
+                        "select data from session_message where id = 'message-0'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert!(data.contains("expected retained message"));
+                assert!(!data.contains("attacker retained message"));
+                match sqlite_snapshot.finish() {
+                    Ok(_) => source_root.revalidate().unwrap(),
+                    Err(SqliteSourceAccessError::RootHandleVfs(_)) => {}
+                    Err(error) => panic!("unexpected finish result after source swap: {error:?}"),
+                }
+            }
+            Err(OpenCodeSourceBackedError::Capture(
+                CaptureError::InvalidProviderTranscriptPath { .. },
             ))
-        ));
+            | Err(OpenCodeSourceBackedError::SqliteSource(
+                SqliteSourceAccessError::RootHandleVfs(_),
+            )) => {}
+            Err(error) => panic!("unexpected source-swap result: {error:?}"),
+        }
     }
 
     #[test]
@@ -1245,7 +1266,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn wal_source_is_typed_fail_closed_before_streaming() {
+    fn active_wal_scan_reads_latest_rows_without_writing_source_files() {
         let registration = opencode_source_backed_registration();
         let temp = crate::test_support_paths::tempdir().unwrap();
         let path = temp.path().join("opencode.sqlite");
@@ -1253,43 +1274,33 @@ mod tests {
 
         let writer = Connection::open(&path).unwrap();
         writer.pragma_update(None, "journal_mode", "wal").unwrap();
+        writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+        writer
+            .execute_batch("pragma wal_checkpoint(truncate)")
+            .unwrap();
+        let wal_body = r#"{"role":"user","text":"OpenCode active WAL sentinel"}"#;
         writer
             .execute(
-                "update session_message set time_updated = time_updated + 1
+                "update session_message set data = ?1, time_updated = time_updated + 1
                  where id = 'message-0'",
-                [],
+                [wal_body],
             )
             .unwrap();
-        writer
-            .set_db_config(
-                rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
-                true,
-            )
-            .unwrap();
-        drop(writer);
-        assert!(path.with_file_name("opencode.sqlite-wal").exists());
+        let before = sqlite_family_bytes(&path);
 
-        let mut emitted = false;
-        let error = registration
+        let mut documents = Vec::new();
+        registration
             .scan(&path, &mut |page| {
                 assert!(page.len() <= SOURCE_BACKED_PAGE_ROWS);
-                emitted = true;
+                documents.extend(page);
                 Ok(())
             })
-            .unwrap_err();
-        assert!(!emitted);
-        assert!(
-            matches!(
-                &error,
-                OpenCodeSourceBackedError::SqliteSource(
-                    SqliteSourceAccessError::UnsupportedSidecarIdentity {
-                        component: SqliteSourceComponent::Wal,
-                        ..
-                    }
-                )
-            ),
-            "unexpected error: {error:?}"
-        );
+            .unwrap();
+        assert!(documents
+            .iter()
+            .any(|document| document.body.contains("OpenCode active WAL sentinel")));
+        assert_eq!(sqlite_family_bytes(&path), before);
+        drop(writer);
     }
 
     #[test]
@@ -1404,5 +1415,17 @@ mod tests {
             expected.push(data);
         }
         expected
+    }
+
+    #[cfg(target_os = "linux")]
+    fn sqlite_family_bytes(path: &Path) -> Vec<Vec<u8>> {
+        ["", "-wal", "-shm"]
+            .into_iter()
+            .map(|suffix| {
+                let mut component = path.as_os_str().to_os_string();
+                component.push(suffix);
+                fs::read(PathBuf::from(component)).unwrap()
+            })
+            .collect()
     }
 }
