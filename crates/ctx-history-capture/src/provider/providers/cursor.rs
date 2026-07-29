@@ -1,8 +1,4 @@
-//! Provider-owned Cursor NativePath discovery and parsing.
-//!
-//! This module intentionally stops at provider-private publication rows. The
-//! Store publication facade and public import routing are frozen elsewhere and
-//! consume this slice directly through NativePath.
+//! Provider-owned Cursor source-backed discovery, parsing, and exact hydration.
 
 mod checkpoint;
 mod layout;
@@ -11,38 +7,25 @@ mod projection;
 mod source;
 mod source_backed;
 
-pub(crate) use checkpoint::CursorCheckpoint;
 pub(crate) use layout::{
     discover_cursor_transcripts, CursorDiscoveryIssueKind, CursorTranscriptPath,
 };
-pub(crate) use parser::{
-    cursor_complete_content_message_record, CursorRecordRejection, CursorRejectionKind,
-};
-pub(crate) use projection::{
-    CursorEventBody, CursorNativeEvent, CursorNativeSession, CursorPublicationPage,
-    CursorPublicationSink,
-};
+pub(crate) use parser::cursor_complete_content_message_record;
+pub(crate) use projection::CursorNativeSession;
 pub(crate) use source::{
     cursor_complete_content_source_from_admitted, cursor_complete_content_source_revision,
-    freeze_cursor_source, resolve_cursor_missing_sources, scan_cursor_source_into,
-    CursorCompletedExactInventory, CursorFrozenSource, CursorKnownSource,
-    CursorMissingSourceDisposition, CursorPriorObservation, CursorReadOutcome,
-    CursorSourceObservation,
+    freeze_cursor_source, scan_cursor_source, CursorSourceObservation,
 };
 pub(crate) use source_backed::{
     extract_cursor_source_backed_cold, hydrate_cursor_source_backed_message,
     CursorSourceBackedPage, CursorSourceBackedRecord, CursorSourceBackedSink,
-    CursorSourceBackedSourcePlan, CursorSourceBackedSummary, CursorSourceBackedTerminal,
+    CursorSourceBackedSourcePlan, CursorSourceBackedTerminal,
 };
 
 #[cfg(test)]
-pub(crate) use checkpoint::CursorCheckpointDisposition;
-#[cfg(test)]
-pub(crate) use projection::{CURSOR_PUBLICATION_PAGE_MAX_BYTES, CURSOR_PUBLICATION_PAGE_MAX_ROWS};
-#[cfg(test)]
-pub(crate) use source::{scan_cursor_source, CursorSourceGeneration, CursorSourceMutation};
+pub(crate) use source_backed::{
+    CURSOR_SOURCE_BACKED_PAGE_MAX_BYTES, CURSOR_SOURCE_BACKED_PAGE_MAX_ROWS,
+};
 
 #[cfg(test)]
 mod source_backed_tests;
-#[cfg(test)]
-mod tests;

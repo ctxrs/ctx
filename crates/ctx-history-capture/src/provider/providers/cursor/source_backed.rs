@@ -27,12 +27,9 @@ use crate::{
 
 use super::{
     cursor_complete_content_source_revision, discover_cursor_transcripts, freeze_cursor_source,
-    projection::{
-        CursorEventBody, CursorNativeEvent, CursorNativeOrder, CursorPublicationPage,
-        CursorPublicationSink, CURSOR_PUBLICATION_PAGE_MAX_BYTES, CURSOR_PUBLICATION_PAGE_MAX_ROWS,
-    },
-    source::{CursorSourceGeneration, CursorSourceMutation},
-    CursorNativeSession, CursorReadOutcome, CursorSourceObservation, CursorTranscriptPath,
+    projection::{CursorEventBody, CursorNativeEvent, CursorNativeOrder},
+    source::CursorSourceGeneration,
+    CursorNativeSession, CursorSourceObservation, CursorTranscriptPath,
 };
 
 const CURSOR_SOURCE_ANCHOR_NAMESPACE: &str = "cursor.session";
@@ -52,6 +49,8 @@ const CURSOR_EXACT_SOURCE_REVISION_DIGEST_DOMAIN: &[u8] =
 const CURSOR_EXACT_PATH_IDENTITY_DIGEST_DOMAIN: &[u8] = b"ctx-complete-content-path-identity-v1\0";
 const CURSOR_SOURCE_BACKED_PAGE_ENVELOPE_BYTES: usize = 1_024;
 const CURSOR_SOURCE_BACKED_RECORD_ENVELOPE_BYTES: usize = 8_192;
+pub(crate) const CURSOR_SOURCE_BACKED_PAGE_MAX_ROWS: usize = 64;
+pub(crate) const CURSOR_SOURCE_BACKED_PAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
 const CURSOR_EVENT_SEQUENCE_PARTS: u64 = u16::MAX as u64 + 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,28 +225,29 @@ pub(crate) fn extract_cursor_source_backed_cold(
         let frozen = freeze_cursor_source(&transcript)?;
         plan.source_path = frozen.observation().path.clone();
         let revision_digest = source_revision_digest(frozen.observation())?;
-        let mut bridge =
-            CursorProjectionBridge::new(sink, &plan, frozen.observation(), revision_digest);
-        let outcome = super::scan_cursor_source_into(&frozen, None, &mut bridge);
-        let outcome = match outcome {
-            Ok(outcome) => outcome,
-            Err(error) => return Err(error),
+        sink.begin_cursor_source(&plan)?;
+        let mut projection =
+            CursorSourceBackedProjection::new(sink, &plan, frozen.observation(), revision_digest);
+        let generation = {
+            let mut emit = |event| projection.push(event);
+            super::scan_cursor_source(&frozen, &mut emit)
         };
-        let bridge_counts = bridge.counts();
-        drop(bridge);
-        let CursorReadOutcome::Generation(generation) = outcome else {
-            sink.abort_cursor_source();
-            return Err(CaptureError::SystemInvariant(
-                "cold Cursor source-backed extraction returned an unchanged source",
-            ));
+        let generation = match generation {
+            Ok(generation) => generation,
+            Err(error) => {
+                drop(projection);
+                sink.abort_cursor_source();
+                return Err(error);
+            }
         };
-        if generation.mutation != CursorSourceMutation::NewPathScopedSource {
+        if let Err(error) = projection.flush() {
+            drop(projection);
             sink.abort_cursor_source();
-            return Err(CaptureError::SystemInvariant(
-                "cold Cursor source-backed extraction classified a prior mutation",
-            ));
+            return Err(error);
         }
-        let terminal = match source_terminal(plan, *generation, bridge_counts) {
+        let projection_counts = projection.counts();
+        drop(projection);
+        let terminal = match source_terminal(plan, generation, projection_counts) {
             Ok(terminal) => terminal,
             Err(error) => {
                 sink.abort_cursor_source();
@@ -501,13 +501,13 @@ fn source_observation(
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-struct BridgeCounts {
+struct ProjectionCounts {
     projected_records: u64,
     projected_native_records: u64,
     indexed_documents: u64,
 }
 
-struct CursorProjectionBridge<'a> {
+struct CursorSourceBackedProjection<'a> {
     sink: &'a mut dyn CursorSourceBackedSink,
     plan: &'a CursorSourceBackedSourcePlan,
     observation: &'a CursorSourceObservation,
@@ -515,10 +515,10 @@ struct CursorProjectionBridge<'a> {
     records: Vec<CursorSourceBackedRecord>,
     estimated_bytes: usize,
     page_ordinal: u64,
-    counts: BridgeCounts,
+    counts: ProjectionCounts,
 }
 
-impl<'a> CursorProjectionBridge<'a> {
+impl<'a> CursorSourceBackedProjection<'a> {
     fn new(
         sink: &'a mut dyn CursorSourceBackedSink,
         plan: &'a CursorSourceBackedSourcePlan,
@@ -533,11 +533,11 @@ impl<'a> CursorProjectionBridge<'a> {
             records: Vec::new(),
             estimated_bytes: CURSOR_SOURCE_BACKED_PAGE_ENVELOPE_BYTES,
             page_ordinal: 0,
-            counts: BridgeCounts::default(),
+            counts: ProjectionCounts::default(),
         }
     }
 
-    fn counts(&self) -> BridgeCounts {
+    fn counts(&self) -> ProjectionCounts {
         self.counts
     }
 
@@ -548,17 +548,18 @@ impl<'a> CursorProjectionBridge<'a> {
         let record_bytes = source_backed_record_upper_bound(&record);
         let separator_bytes = usize::from(!self.records.is_empty());
         if !self.records.is_empty()
-            && (self.records.len() >= CURSOR_PUBLICATION_PAGE_MAX_ROWS
+            && (self.records.len() >= CURSOR_SOURCE_BACKED_PAGE_MAX_ROWS
                 || self
                     .estimated_bytes
                     .saturating_add(separator_bytes)
                     .saturating_add(record_bytes)
-                    > CURSOR_PUBLICATION_PAGE_MAX_BYTES)
+                    > CURSOR_SOURCE_BACKED_PAGE_MAX_BYTES)
         {
             self.flush()?;
         }
         if self.records.is_empty()
-            && self.estimated_bytes.saturating_add(record_bytes) > CURSOR_PUBLICATION_PAGE_MAX_BYTES
+            && self.estimated_bytes.saturating_add(record_bytes)
+                > CURSOR_SOURCE_BACKED_PAGE_MAX_BYTES
         {
             return Err(CaptureError::SystemInvariant(
                 "Cursor source-backed record exceeds the bounded projection page",
@@ -611,28 +612,6 @@ impl<'a> CursorProjectionBridge<'a> {
             "Cursor source-backed page count overflowed",
         )?;
         Ok(())
-    }
-}
-
-impl CursorPublicationSink for CursorProjectionBridge<'_> {
-    fn begin_cursor_publication(&mut self) -> Result<()> {
-        self.sink.begin_cursor_source(self.plan)
-    }
-
-    fn stage_cursor_page(&mut self, page: CursorPublicationPage) -> Result<()> {
-        for event in page.events {
-            self.push(event)?;
-        }
-        Ok(())
-    }
-
-    fn abort_cursor_publication(&mut self) {
-        self.records.clear();
-        self.sink.abort_cursor_source();
-    }
-
-    fn commit_cursor_publication(&mut self) -> Result<()> {
-        self.flush()
     }
 }
 
@@ -873,9 +852,9 @@ fn source_backed_record_upper_bound(record: &CursorSourceBackedRecord) -> usize 
 fn source_terminal(
     plan: CursorSourceBackedSourcePlan,
     generation: CursorSourceGeneration,
-    bridge: BridgeCounts,
+    projection: ProjectionCounts,
 ) -> Result<CursorSourceBackedTerminal> {
-    if bridge.projected_records != generation.stats.nativepath_publication_rows {
+    if projection.projected_records != generation.stats.projected_records {
         return Err(CaptureError::SystemInvariant(
             "Cursor source-backed page rows do not reconcile with the parser",
         ));
@@ -885,11 +864,11 @@ fn source_terminal(
         .stats
         .complete_records
         .checked_sub(rejected_records)
-        .and_then(|value| value.checked_sub(bridge.projected_native_records))
+        .and_then(|value| value.checked_sub(projection.projected_native_records))
         .ok_or(CaptureError::SystemInvariant(
             "Cursor source-backed physical record counts do not reconcile",
         ))?;
-    let complete_records = bridge
+    let complete_records = projection
         .projected_records
         .checked_add(rejected_records)
         .and_then(|value| value.checked_add(ignored_records))
@@ -898,10 +877,10 @@ fn source_terminal(
         ))?;
     let counts = ScannedSourceCounts {
         complete_records,
-        retained_records: bridge.projected_records,
+        retained_records: projection.projected_records,
         rejected_records,
         ignored_records,
-        indexed_documents: bridge.indexed_documents,
+        indexed_documents: projection.indexed_documents,
         certified_bytes: generation.checkpoint.next_byte_offset,
     };
     let observation = source_observation(&plan.source, &generation.observation)?;
@@ -929,8 +908,8 @@ fn source_terminal(
         certified_source,
         terminal: generation.checkpoint.terminal,
         physical_records: generation.stats.complete_records,
-        projected_records: bridge.projected_records,
-        indexed_documents: bridge.indexed_documents,
+        projected_records: projection.projected_records,
+        indexed_documents: projection.indexed_documents,
         rejected_records,
     })
 }

@@ -17,12 +17,6 @@ pub(crate) struct CursorPrefixProof {
     pub(crate) semantic_records: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum CursorCheckpointDisposition {
-    Publish,
-    WithholdForRejections,
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CursorSessionCheckpoint {
     pub(crate) started_at: Option<DateTime<Utc>>,
@@ -40,7 +34,6 @@ pub(crate) struct CursorCheckpoint {
     pub(crate) prefix: CursorPrefixProof,
     pub(crate) session: CursorSessionCheckpoint,
     pub(crate) terminal: bool,
-    pub(crate) disposition: CursorCheckpointDisposition,
 }
 
 impl CursorCheckpoint {
@@ -51,7 +44,6 @@ impl CursorCheckpoint {
         prefix: CursorPrefixProof,
         session: CursorSessionCheckpoint,
         terminal: bool,
-        has_rejections: bool,
     ) -> Self {
         Self {
             schema_version: Self::SCHEMA_VERSION,
@@ -62,20 +54,7 @@ impl CursorCheckpoint {
             prefix,
             session,
             terminal,
-            disposition: if has_rejections {
-                CursorCheckpointDisposition::WithholdForRejections
-            } else {
-                CursorCheckpointDisposition::Publish
-            },
         }
-    }
-
-    pub(crate) fn is_supported(&self) -> bool {
-        self.schema_version == Self::SCHEMA_VERSION
-            && self.parser_revision == Self::PARSER_REVISION
-            && self.next_byte_offset == self.prefix.complete_bytes
-            && self.next_physical_line == self.prefix.physical_lines
-            && self.next_semantic_ordinal == self.prefix.semantic_records
     }
 }
 
@@ -138,16 +117,6 @@ impl CursorPrefixBuilder {
         self.content_hasher.update(content_sha256);
         self.complete_bytes = self.complete_bytes.saturating_add(consumed_bytes);
         self.physical_lines = self.physical_lines.saturating_add(1);
-    }
-
-    pub(super) fn proof(&self) -> CursorPrefixProof {
-        CursorPrefixProof {
-            sha256: self.hasher.clone().finalize().into(),
-            content_sha256: self.content_hasher.clone().finalize().into(),
-            complete_bytes: self.complete_bytes,
-            physical_lines: self.physical_lines,
-            semantic_records: self.semantic_records,
-        }
     }
 
     pub(super) fn complete_bytes(&self) -> u64 {
