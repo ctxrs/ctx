@@ -1,5 +1,6 @@
 use std::{
     cell::RefCell,
+    ffi::OsString,
     io::{self, Read},
     path::{Path, PathBuf},
     time::SystemTime,
@@ -9,10 +10,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
+    common::io::{OpenedProviderSourceFile, ProviderSourceDirectory, ProviderSourceRoot},
     provider_sources::{
-        open_sqlite_source_snapshot, SqliteSourceAccessError, SqliteSourceComponent,
-        SqliteSourceReadSnapshot,
+        open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
+        SqliteSourceAccessError, SqliteSourceReadSnapshot,
     },
     CaptureError, Result,
 };
@@ -164,6 +165,8 @@ impl GooseAdmittedSqliteComponent {
 #[derive(Debug)]
 struct GooseAdmittedSqliteFamily {
     root: ProviderSourceRoot,
+    directory: ProviderSourceDirectory,
+    database_name: OsString,
     database: GooseAdmittedSqliteComponent,
     wal: Option<GooseAdmittedSqliteComponent>,
     shared_memory: Option<GooseAdmittedSqliteComponent>,
@@ -185,6 +188,7 @@ impl GooseAdmittedSqliteFamily {
                     reason: "Goose SQLite path has no file name",
                 })?;
         let root = ProviderSourceRoot::open(parent)?;
+        let directory = root.directory()?;
         let database = GooseAdmittedSqliteComponent::open(&root, Path::new(filename))?;
         let wal = GooseAdmittedSqliteComponent::open_optional(
             &root,
@@ -200,6 +204,8 @@ impl GooseAdmittedSqliteFamily {
         )?;
         let family = Self {
             root,
+            directory,
+            database_name: filename.to_os_string(),
             database,
             wal,
             shared_memory,
@@ -223,29 +229,19 @@ impl GooseAdmittedSqliteFamily {
         }
     }
 
-    fn unsupported_stock_vfs_sidecar(&self) -> Option<SqliteSourceAccessError> {
-        let (component, capability) = if self.wal.is_some() {
-            (
-                SqliteSourceComponent::Wal,
-                "the stock Unix VFS cannot bind the opened WAL to the admitted Goose WAL handle",
-            )
-        } else if self.rollback_journal.is_some() {
-            (
-                SqliteSourceComponent::RollbackJournal,
-                "rollback recovery is not permitted without a root-handle SQLite VFS",
-            )
-        } else if self.shared_memory.is_some() {
-            (
-                SqliteSourceComponent::SharedMemory,
-                "the stock Unix VFS exposes no native SHM identity",
-            )
-        } else {
-            return None;
-        };
-        Some(SqliteSourceAccessError::UnsupportedSidecarIdentity {
-            component,
-            capability,
-        })
+    fn connection(&self) -> Result<SqliteSourceReadSnapshot> {
+        let directory = self.directory.try_clone_authority_handle()?;
+        let authority = retain_sqlite_source_directory_authority(&directory)
+            .map_err(goose_sqlite_access_error)?;
+        match open_root_handle_sqlite_source_snapshot(&authority, &self.database_name) {
+            Ok(snapshot) => Ok(snapshot),
+            Err(
+                SqliteSourceAccessError::SourceChanged
+                | SqliteSourceAccessError::ConnectionIdentityMismatch,
+            ) => Err(CaptureError::SourceChangedDuringCapture),
+            Err(_) if !self.revalidate()? => Err(CaptureError::SourceChangedDuringCapture),
+            Err(error) => Err(goose_sqlite_access_error(error)),
+        }
     }
 
     fn revalidate(&self) -> Result<bool> {
@@ -259,6 +255,7 @@ impl GooseAdmittedSqliteFamily {
             {
                 component.file.revalidate()?;
             }
+            self.directory.revalidate()?;
             self.root.revalidate()
         })();
         match result {
@@ -299,18 +296,7 @@ impl GooseSnapshotGeneration {
 
     fn acquire_once(source_path: &Path, attempts: u64) -> Result<Self> {
         let authority = GooseAdmittedSqliteFamily::open(source_path)?;
-        if let Some(error) = authority.unsupported_stock_vfs_sidecar() {
-            return Err(goose_sqlite_access_error(error));
-        }
-        let connection =
-            match open_sqlite_source_snapshot(source_path, authority.database.file.file()) {
-                Ok(connection) => connection,
-                Err(
-                    SqliteSourceAccessError::SourceChanged
-                    | SqliteSourceAccessError::ConnectionIdentityMismatch,
-                ) => return Err(CaptureError::SourceChangedDuringCapture),
-                Err(error) => return Err(goose_sqlite_access_error(error)),
-            };
+        let connection = authority.connection()?;
         if !authority.revalidate()? {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
@@ -329,19 +315,7 @@ impl GooseSnapshotGeneration {
             .borrow_mut()
             .take()
             .map(Ok)
-            .unwrap_or_else(|| {
-                open_sqlite_source_snapshot(
-                    self.observation.source_path(),
-                    self.authority.database.file.file(),
-                )
-                .map_err(|error| match error {
-                    SqliteSourceAccessError::SourceChanged
-                    | SqliteSourceAccessError::ConnectionIdentityMismatch => {
-                        CaptureError::SourceChangedDuringCapture
-                    }
-                    error => goose_sqlite_access_error(error),
-                })
-            })?;
+            .unwrap_or_else(|| self.authority.connection())?;
         if !self.authority.revalidate()? {
             drop(connection);
             return Err(CaptureError::SourceChangedDuringCapture);
@@ -363,6 +337,7 @@ impl GooseSnapshotGeneration {
                 SqliteSourceAccessError::SourceChanged
                 | SqliteSourceAccessError::ConnectionIdentityMismatch,
             ) => return Ok(false),
+            Err(_) if !self.authority.revalidate()? => return Ok(false),
             Err(error) => return Err(goose_sqlite_access_error(error)),
         }
         self.authority.revalidate()

@@ -1036,8 +1036,9 @@ fn oversized_unknown_encoding_diagnostic_is_bounded_and_siblings_survive() {
         .contains(&oversized_encoding_bytes.to_string()));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
-fn active_wal_generation_fails_closed_without_mutating_provider_db_family() {
+fn active_wal_generation_reads_latest_rows_without_mutating_provider_db_family() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("threads.db");
     let connection = Connection::open(&path).unwrap();
@@ -1074,19 +1075,16 @@ fn active_wal_generation_fails_closed_without_mutating_provider_db_family() {
     let shm_before = shm_path.exists().then(|| fs::read(&shm_path).unwrap());
 
     let mut sink = CollectingSink::default();
-    let error = scan_zed_nativepath(&ZedNativeSourceSelection::exact(&path), &mut sink)
-        .expect_err("stock-VFS Zed unexpectedly admitted an active WAL family");
-
-    assert!(matches!(
-        error,
-        ZedNativePathError::SqliteSourceAccess(
-            SqliteSourceAccessError::UnsupportedSidecarIdentity {
-                component: SqliteSourceComponent::Wal,
-                ..
-            }
-        )
-    ));
-    assert!(sink.pages.is_empty());
+    let authority =
+        complete(scan_zed_nativepath(&ZedNativeSourceSelection::exact(&path), &mut sink).unwrap());
+    assert_eq!(authority.counters.retained_events, 1);
+    assert_eq!(
+        sink.events()
+            .iter()
+            .map(|event| event.body.as_str())
+            .collect::<Vec<_>>(),
+        ["committed only in wal"]
+    );
     assert_eq!(fs::read(&path).unwrap(), database_before);
     assert_eq!(fs::read(&wal_path).unwrap(), wal_before);
     assert_eq!(
@@ -1110,13 +1108,11 @@ fn root_authorized_snapshot_preserves_zed_revision_contract() {
     );
     drop(connection);
 
-    let expected = crate::provider::sqlite::ProviderSqliteSourceSnapshot::read(
-        &path,
-        ZED_SOURCE_INVALID_REASON,
-        ZED_SIDECAR_INVALID_REASON,
-    )
-    .unwrap()
-    .revision_component();
+    // Zed's provider revision includes its exact DB/WAL/SHM/journal
+    // observations; it is intentionally distinct from stock-main evidence.
+    let expected = ZedAdmittedSqliteFamily::open(&path)
+        .unwrap()
+        .revision_component();
     let ZedSnapshotAcquisition::Acquired(mut snapshot) = acquire_immutable_snapshot(&path).unwrap()
     else {
         panic!("stable Zed database should acquire a root-authorized snapshot");
