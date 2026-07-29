@@ -88,6 +88,16 @@ pub(crate) fn run(args: McpArgs, data_root: PathBuf) -> Result<()> {
 }
 
 fn serve_stdio(data_root: PathBuf) -> Result<()> {
+    let daemon_config = config::AppConfig::load(&data_root)?;
+    if daemon_config.daemon.enabled
+        && crate::semantic::daemon_autostart_suppression_reason().is_none()
+    {
+        let _ = crate::semantic::autostart_daemon_and_wait(
+            &data_root,
+            &daemon_config,
+            crate::DaemonTriggerCommandArg::Search,
+        );
+    }
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut stdin = stdin.lock();

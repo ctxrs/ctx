@@ -24,6 +24,7 @@ clap_mangen.workspace = true
 ed25519-dalek.workspace = true
 jsonc-parser = { version = "0.33", features = ["serde", "serde_json"] }
 memmap2.workspace = true
+notify.workspace = true
 ring.workspace = true
 rusqlite.workspace = true
 serde.workspace = true

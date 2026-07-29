@@ -8,6 +8,10 @@ fn daemon_upgrade_restart_request_root(data_root: &Path) -> PathBuf {
     daemon_root_path(data_root).join(DAEMON_UPGRADE_RESTART_REQUEST_DIR)
 }
 
+#[cfg(unix)]
+const DAEMON_UNINSTALL_ABORT_AFTER_DISABLE_ENV: &str =
+    "CTX_DAEMON_UNINSTALL_ABORT_AFTER_DISABLE_FOR_TESTS";
+
 pub(super) fn daemon_query_endpoint_path(data_root: &Path) -> PathBuf {
     daemon_root_path(data_root).join(DAEMON_QUERY_ENDPOINT_FILE)
 }
@@ -96,14 +100,11 @@ impl DaemonUpgradeHandoff {
             trigger.as_str(),
             daemon_autostart_u64_env(
                 "CTX_DAEMON_AUTOSTART_IDLE_EXIT_SECONDS",
-                DAEMON_AUTOSTART_IDLE_EXIT_SECONDS_DEFAULT,
                 DAEMON_IDLE_EXIT_SECONDS_CAP,
-            ),
-            daemon_autostart_u64_env(
-                "CTX_DAEMON_AUTOSTART_LOOP_INTERVAL_SECONDS",
-                DAEMON_AUTOSTART_LOOP_INTERVAL_SECONDS_DEFAULT,
-                3_600,
-            ),
+            )
+            .unwrap_or(DAEMON_IDLE_EXIT_SECONDS_CAP),
+            daemon_autostart_u64_env("CTX_DAEMON_AUTOSTART_LOOP_INTERVAL_SECONDS", 3_600)
+                .unwrap_or(15 * 60),
         ))
     }
 
@@ -281,6 +282,15 @@ pub(crate) fn begin_daemon_upgrade_handoff(
         write_daemon_restart_request(data_root, trigger, &handoff_id)?;
     }
     write_daemon_upgrade_handoff(data_root, &handoff_id, "preparing", None)?;
+    let _ = daemon_source_refresh_request(
+        data_root,
+        compact_json(json!({
+            "schema_version": 1,
+            "op": "lifecycle_wakeup",
+        })),
+        DAEMON_HEALTH_TIMEOUT,
+        DAEMON_HEALTH_RESPONSE_MAX_BYTES,
+    );
     let handoff = DaemonUpgradeHandoff {
         data_root: data_root.to_path_buf(),
         handoff_id,
@@ -290,15 +300,264 @@ pub(crate) fn begin_daemon_upgrade_handoff(
     let deadline = Instant::now() + DAEMON_UPGRADE_STOP_TIMEOUT;
     while daemon_lock_is_active(data_root) {
         if Instant::now() >= deadline {
+            #[cfg(unix)]
+            terminate_identity_verified_residual_daemon(
+                data_root,
+                &env::current_exe().context("resolve upgrading ctx executable")?,
+            )
+            .context("stop residual ctx daemon before upgrade")?;
+            #[cfg(not(unix))]
             return Err(anyhow!(
                 "timed out waiting for the ctx daemon to stop before upgrade"
+            ));
+            break;
+        }
+        std::thread::sleep(DAEMON_UPGRADE_POLL_INTERVAL);
+    }
+    wait_for_daemon_lifecycle_release(data_root)?;
+    write_daemon_upgrade_handoff(data_root, &handoff.handoff_id, "ready", None)?;
+    handoff.wait_for_installation_quiescence()?;
+    Ok(handoff)
+}
+
+/// Hosted POSIX uninstallers call this command before deleting the installed
+/// executable. Each phase is idempotent so an interrupted uninstaller can
+/// invoke it again safely.
+#[cfg(unix)]
+pub(crate) fn prepare_posix_daemon_uninstall(data_root: &Path) -> Result<Value> {
+    crate::config::set_daemon_enabled(data_root, false)
+        .context("durably disable ctx daemon before uninstall")?;
+    if cfg!(debug_assertions) && env::var_os(DAEMON_UNINSTALL_ABORT_AFTER_DISABLE_ENV).is_some() {
+        process::exit(89);
+    }
+
+    request_disabled_daemon_shutdown(data_root);
+    let cooperative_deadline = Instant::now() + DAEMON_UPGRADE_STOP_TIMEOUT;
+    while daemon_lock_is_active(data_root) && Instant::now() < cooperative_deadline {
+        request_disabled_daemon_shutdown(data_root);
+        std::thread::sleep(DAEMON_UPGRADE_POLL_INTERVAL);
+    }
+    let expected_executable =
+        env::current_exe().context("resolve installed ctx executable before uninstall")?;
+    if daemon_lock_is_active(data_root) {
+        terminate_identity_verified_residual_daemon(data_root, &expected_executable)
+            .context("stop residual ctx daemon before uninstall")?;
+    }
+    wait_for_daemon_lifecycle_release(data_root)?;
+    super::super::daemon_supervisor::disable_daemon_supervisor(data_root)
+        .context("remove ctx daemon supervisor before uninstall")?;
+    remove_daemon_lifecycle_coordination(data_root)?;
+    Ok(compact_json(json!({
+        "schema_version": 1,
+        "command": "daemon_prepare_uninstall",
+        "ok": true,
+        "daemon_enabled": false,
+        "daemon_running": false,
+        "owner_lock_released": true,
+        "endpoint_released": true,
+        "supervisor_removed": true,
+        "coordination_state_removed": true,
+        "retry_safe": true,
+        "local_only": true,
+    })))
+}
+
+#[cfg(unix)]
+fn request_disabled_daemon_shutdown(data_root: &Path) {
+    let _ = daemon_source_refresh_request(
+        data_root,
+        compact_json(json!({
+            "schema_version": 1,
+            "op": "shutdown",
+        })),
+        DAEMON_HEALTH_TIMEOUT,
+        DAEMON_HEALTH_RESPONSE_MAX_BYTES,
+    );
+}
+
+#[cfg(unix)]
+fn wait_for_daemon_lifecycle_release(data_root: &Path) -> Result<()> {
+    let deadline = Instant::now() + DAEMON_UPGRADE_RESTART_TIMEOUT;
+    while daemon_lock_is_active(data_root) {
+        if Instant::now() >= deadline {
+            return Err(anyhow!(
+                "ctx daemon retained lifecycle ownership after verified termination"
             ));
         }
         std::thread::sleep(DAEMON_UPGRADE_POLL_INTERVAL);
     }
-    write_daemon_upgrade_handoff(data_root, &handoff.handoff_id, "ready", None)?;
-    handoff.wait_for_installation_quiescence()?;
-    Ok(handoff)
+    Ok(())
+}
+
+#[cfg(unix)]
+fn terminate_identity_verified_residual_daemon(
+    data_root: &Path,
+    expected_executable: &Path,
+) -> Result<()> {
+    let lock_path = daemon_lock_path(data_root);
+    let value = read_pid_lock_json(&lock_path)
+        .ok_or_else(|| anyhow!("active ctx daemon lock has no readable identity"))?;
+    let pid = pid_from_lock_json(&value)
+        .ok_or_else(|| anyhow!("active ctx daemon lock has no process identity"))?;
+    verify_residual_daemon_identity(data_root, expected_executable, pid, &value)?;
+    signal_verified_process(pid, libc::SIGTERM)?;
+    let term_deadline = Instant::now() + DAEMON_UPGRADE_RESTART_TIMEOUT;
+    while daemon_lock_is_active(data_root) && Instant::now() < term_deadline {
+        std::thread::sleep(DAEMON_UPGRADE_POLL_INTERVAL);
+    }
+    if !daemon_lock_is_active(data_root) {
+        return Ok(());
+    }
+
+    let current = read_pid_lock_json(&lock_path)
+        .ok_or_else(|| anyhow!("ctx daemon identity disappeared before forced termination"))?;
+    if pid_from_lock_json(&current) != Some(pid) {
+        return Err(anyhow!(
+            "ctx daemon ownership changed before forced termination; refusing to signal"
+        ));
+    }
+    verify_residual_daemon_identity(data_root, expected_executable, pid, &current)?;
+    signal_verified_process(pid, libc::SIGKILL)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn verify_residual_daemon_identity(
+    data_root: &Path,
+    expected_executable: &Path,
+    pid: u32,
+    value: &Value,
+) -> Result<()> {
+    if pid == process::id() {
+        return Err(anyhow!("refusing to terminate the current ctx process"));
+    }
+    if observe_pid_advisory_lock(&daemon_lock_path(data_root))
+        != Some(PidAdvisoryLockObservation {
+            held: true,
+            released: false,
+        })
+    {
+        return Err(anyhow!(
+            "ctx daemon owner lock is not held; refusing residual termination"
+        ));
+    }
+    let recorded_root = value
+        .get("data_root")
+        .and_then(Value::as_str)
+        .map(Path::new)
+        .ok_or_else(|| anyhow!("ctx daemon lock has no data-root identity"))?;
+    if fs::canonicalize(recorded_root).ok() != fs::canonicalize(data_root).ok() {
+        return Err(anyhow!(
+            "ctx daemon lock data-root identity does not match uninstall target"
+        ));
+    }
+    let recorded_binary = value
+        .get("binary")
+        .and_then(Value::as_str)
+        .map(Path::new)
+        .ok_or_else(|| anyhow!("ctx daemon lock has no executable identity"))?;
+    if !same_unix_file(recorded_binary, expected_executable)? {
+        return Err(anyhow!(
+            "ctx daemon lock executable is not the installed ctx executable"
+        ));
+    }
+    let process_executable = unix_process_executable(pid).ok_or_else(|| {
+        anyhow!(
+            "cannot verify executable identity for residual ctx process {pid}; refusing to signal"
+        )
+    })?;
+    if !same_unix_file(&process_executable, expected_executable)? {
+        return Err(anyhow!(
+            "residual lock owner is not the installed ctx executable; refusing to signal"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn same_unix_file(left: &Path, right: &Path) -> Result<bool> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let left = fs::metadata(left)
+        .with_context(|| format!("inspect executable identity {}", left.display()))?;
+    let right = fs::metadata(right)
+        .with_context(|| format!("inspect executable identity {}", right.display()))?;
+    Ok(left.dev() == right.dev() && left.ino() == right.ino())
+}
+
+#[cfg(target_os = "linux")]
+fn unix_process_executable(pid: u32) -> Option<PathBuf> {
+    fs::read_link(format!("/proc/{pid}/exe")).ok()
+}
+
+#[cfg(target_os = "macos")]
+fn unix_process_executable(pid: u32) -> Option<PathBuf> {
+    use std::ffi::CStr;
+
+    const MAX_PATH_BYTES: usize = 4096;
+    unsafe extern "C" {
+        fn proc_pidpath(pid: libc::c_int, buffer: *mut libc::c_void, size: u32) -> libc::c_int;
+    }
+    let mut buffer = vec![0_u8; MAX_PATH_BYTES];
+    let length = unsafe {
+        proc_pidpath(
+            libc::pid_t::try_from(pid).ok()?,
+            buffer.as_mut_ptr().cast(),
+            u32::try_from(buffer.len()).ok()?,
+        )
+    };
+    if length <= 0 {
+        return None;
+    }
+    CStr::from_bytes_until_nul(&buffer)
+        .ok()
+        .map(|path| PathBuf::from(path.to_string_lossy().into_owned()))
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn unix_process_executable(pid: u32) -> Option<PathBuf> {
+    [format!("/proc/{pid}/file"), format!("/proc/{pid}/exe")]
+        .into_iter()
+        .find_map(|path| fs::read_link(path).ok())
+}
+
+#[cfg(unix)]
+fn signal_verified_process(pid: u32, signal: libc::c_int) -> Result<()> {
+    let pid = libc::pid_t::try_from(pid).map_err(|_| anyhow!("invalid daemon process identity"))?;
+    if unsafe { libc::kill(pid, signal) } == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(());
+    }
+    Err(error).context("signal identity-verified residual ctx daemon")
+}
+
+#[cfg(unix)]
+fn remove_daemon_lifecycle_coordination(data_root: &Path) -> Result<()> {
+    remove_daemon_restart_requests(data_root);
+    let root = daemon_root_path(data_root);
+    for path in [
+        daemon_upgrade_handoff_path(data_root),
+        daemon_query_endpoint_path(data_root),
+        root.join("source-refresh-endpoint.json"),
+        root.join("query.sock"),
+        root.join("source-refresh.sock"),
+        root.join("supervisor.json"),
+        daemon_lock_path(data_root),
+        pid_lock_guard_path(&daemon_lock_path(data_root)),
+    ] {
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("remove daemon coordination {}", path.display()))
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Fence new daemon starts while the daemon that owns `data_root` is still
@@ -437,8 +696,8 @@ pub(crate) fn complete_replacement_daemon_handoff(
                     executable,
                     data_root,
                     trigger,
-                    idle_exit,
-                    loop_interval,
+                    (idle_exit != DAEMON_IDLE_EXIT_SECONDS_CAP).then_some(idle_exit),
+                    Some(loop_interval),
                     Some(handoff_id),
                 )
             } else {

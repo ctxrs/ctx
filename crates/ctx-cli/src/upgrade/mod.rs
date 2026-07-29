@@ -12,6 +12,7 @@ pub(crate) use command::{
     finish_daemon_auto_upgrade, prepare_daemon_auto_upgrade, PreparedDaemonUpgrade,
 };
 pub use command::{run, UpgradeArgs};
+pub(crate) use diagnostics::managed_install_executable;
 pub(crate) use diagnostics::upgrade_diagnostics;
 pub(crate) use install::is_valid_install_attempt_id;
 pub(crate) use state::{

@@ -26,12 +26,15 @@ use uuid::Uuid;
 
 use crate::output::compact_json;
 use crate::semantic::{
+    daemon_wakeup::DaemonWakeup,
     health_search::{
         create_private_dir_all, semantic_model_cache_available, semantic_worker_cache_dir,
     },
     model_contract::semantic_model_key,
     model_runtime::SharedSemanticRuntime,
-    paths_status::daemon_root_path,
+    paths_status::{
+        daemon_root_path, daemon_source_backed_refresh_job_path, read_daemon_job_status,
+    },
     source_backed_refresh_coordinator::{
         SourceBackedRefreshCoordinator, SourceBackedResolverAccessError,
     },
@@ -88,6 +91,10 @@ impl Drop for DaemonQueryService {
     fn drop(&mut self) {
         remove_daemon_service_endpoint(&self.data_root, self.service);
         self.activity.stop();
+        #[cfg(unix)]
+        {
+            let _ = UnixStream::connect(&self.socket_path);
+        }
         #[cfg(windows)]
         wake_windows_daemon_query_pipe(&self.pipe_name);
         if let Some(thread) = self.thread.take() {
@@ -297,6 +304,7 @@ pub(in crate::semantic) fn start_daemon_query_service(
         runtime,
         DAEMON_QUERY_REQUEST_READ_TIMEOUT,
         DaemonIpcService::SemanticQuery,
+        None,
     )
 }
 
@@ -312,6 +320,7 @@ pub(in crate::semantic) fn start_daemon_query_service_with_request_timeout(
         runtime,
         request_read_timeout,
         DaemonIpcService::SemanticQuery,
+        None,
     )
 }
 
@@ -319,12 +328,14 @@ pub(in crate::semantic) fn start_daemon_query_service_with_request_timeout(
 pub(in crate::semantic) fn start_daemon_source_refresh_service(
     data_root: &Path,
     runtime: SharedSemanticRuntime,
+    wakeup: Arc<DaemonWakeup>,
 ) -> Result<DaemonQueryService> {
     start_daemon_service_with_request_timeout(
         data_root,
         runtime,
         DAEMON_QUERY_REQUEST_READ_TIMEOUT,
         DaemonIpcService::SourceRefresh,
+        Some(wakeup),
     )
 }
 
@@ -340,6 +351,7 @@ pub(in crate::semantic) fn start_daemon_source_refresh_service_with_request_time
         runtime,
         request_read_timeout,
         DaemonIpcService::SourceRefresh,
+        Some(Arc::new(DaemonWakeup::default())),
     )
 }
 
@@ -349,13 +361,11 @@ fn start_daemon_service_with_request_timeout(
     runtime: SharedSemanticRuntime,
     request_read_timeout: StdDuration,
     service: DaemonIpcService,
+    wakeup: Option<Arc<DaemonWakeup>>,
 ) -> Result<DaemonQueryService> {
     let root = daemon_root_path(data_root);
     create_private_dir_all(&root)?;
     let (listener, path, socket_runtime_dir) = bind_daemon_service_listener(data_root, service)?;
-    listener
-        .set_nonblocking(true)
-        .context("make daemon query socket nonblocking")?;
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
         .with_context(|| format!("set daemon query socket permissions {}", path.display()))?;
     let endpoint = DaemonQueryEndpoint::Unix {
@@ -378,6 +388,7 @@ fn start_daemon_service_with_request_timeout(
     let thread_activity = activity.clone();
     let source_refresh = Arc::new(SourceBackedRefreshCoordinator::new());
     let thread_source_refresh = source_refresh.clone();
+    let thread_wakeup = wakeup;
     let spawn_result = std::thread::Builder::new()
         .name("ctx-daemon-query".to_owned())
         .spawn(move || {
@@ -409,10 +420,15 @@ fn start_daemon_service_with_request_timeout(
                             &thread_token,
                             stream,
                             request,
+                            thread_wakeup.as_deref(),
                         );
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(StdDuration::from_millis(25));
+                        if service == DaemonIpcService::SourceRefresh
+                            && thread_source_refresh.has_pending_request()
+                        {
+                            if let Some(wakeup) = thread_wakeup.as_ref() {
+                                wakeup.signal_ipc();
+                            }
+                        }
                     }
                     Err(_) => break,
                 }
@@ -461,6 +477,7 @@ pub(in crate::semantic) fn start_daemon_query_service(
         runtime,
         DAEMON_QUERY_REQUEST_READ_TIMEOUT,
         DaemonIpcService::SemanticQuery,
+        None,
     )
 }
 
@@ -476,6 +493,7 @@ pub(in crate::semantic) fn start_daemon_query_service_with_request_timeout(
         runtime,
         request_read_timeout,
         DaemonIpcService::SemanticQuery,
+        None,
     )
 }
 
@@ -483,12 +501,14 @@ pub(in crate::semantic) fn start_daemon_query_service_with_request_timeout(
 pub(in crate::semantic) fn start_daemon_source_refresh_service(
     data_root: &Path,
     runtime: SharedSemanticRuntime,
+    wakeup: Arc<DaemonWakeup>,
 ) -> Result<DaemonQueryService> {
     start_daemon_service_with_request_timeout(
         data_root,
         runtime,
         DAEMON_QUERY_REQUEST_READ_TIMEOUT,
         DaemonIpcService::SourceRefresh,
+        Some(wakeup),
     )
 }
 
@@ -504,6 +524,7 @@ pub(in crate::semantic) fn start_daemon_source_refresh_service_with_request_time
         runtime,
         request_read_timeout,
         DaemonIpcService::SourceRefresh,
+        Some(Arc::new(DaemonWakeup::default())),
     )
 }
 
@@ -513,6 +534,7 @@ fn start_daemon_service_with_request_timeout(
     runtime: SharedSemanticRuntime,
     request_read_timeout: StdDuration,
     service: DaemonIpcService,
+    wakeup: Option<Arc<DaemonWakeup>>,
 ) -> Result<DaemonQueryService> {
     let root = daemon_root_path(data_root);
     create_private_dir_all(&root)?;
@@ -534,6 +556,7 @@ fn start_daemon_service_with_request_timeout(
     let thread_activity = activity.clone();
     let source_refresh = Arc::new(SourceBackedRefreshCoordinator::new());
     let thread_source_refresh = source_refresh.clone();
+    let thread_wakeup = wakeup;
     let thread_pipe_name = pipe_name.clone();
     let spawn_result = std::thread::Builder::new()
         .name("ctx-daemon-query".to_owned())
@@ -567,7 +590,15 @@ fn start_daemon_service_with_request_timeout(
                     &thread_token,
                     stream,
                     request,
+                    thread_wakeup.as_deref(),
                 );
+                if service == DaemonIpcService::SourceRefresh
+                    && thread_source_refresh.has_pending_request()
+                {
+                    if let Some(wakeup) = thread_wakeup.as_ref() {
+                        wakeup.signal_ipc();
+                    }
+                }
             }
         });
     let thread = match spawn_result {
@@ -848,6 +879,7 @@ pub(in crate::semantic) fn start_daemon_query_service(
 pub(in crate::semantic) fn start_daemon_source_refresh_service(
     _data_root: &Path,
     _runtime: SharedSemanticRuntime,
+    _wakeup: Arc<DaemonWakeup>,
 ) -> Result<DaemonQueryService> {
     Err(anyhow!(
         "daemon source refresh service is not supported on this platform"
@@ -1439,6 +1471,7 @@ pub(in crate::semantic) fn handle_daemon_query_stream<S: std::io::Write>(
     token: &str,
     mut stream: S,
     request: Result<String>,
+    wakeup: Option<&DaemonWakeup>,
 ) {
     let result = request.and_then(|body| {
         handle_daemon_query_stream_inner(
@@ -1449,6 +1482,7 @@ pub(in crate::semantic) fn handle_daemon_query_stream<S: std::io::Write>(
             token,
             &mut stream,
             &body,
+            wakeup,
         )
     });
     if let Err(error) = result {
@@ -1472,6 +1506,7 @@ pub(in crate::semantic) fn handle_daemon_query_stream_inner<S: std::io::Write>(
     token: &str,
     stream: &mut S,
     body: &str,
+    wakeup: Option<&DaemonWakeup>,
 ) -> Result<()> {
     let request: Value = serde_json::from_str(body).context("parse daemon query request")?;
     if request.get("token").and_then(Value::as_str) != Some(token) {
@@ -1489,6 +1524,14 @@ pub(in crate::semantic) fn handle_daemon_query_stream_inner<S: std::io::Write>(
             return Ok(());
         }
         if op == "ping" {
+            let published_generation = read_daemon_job_status(
+                &daemon_source_backed_refresh_job_path(data_root),
+            )
+            .and_then(|job| {
+                job.get("published_generation")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            });
             writeln!(
                 stream,
                 "{}",
@@ -1497,6 +1540,70 @@ pub(in crate::semantic) fn handle_daemon_query_stream_inner<S: std::io::Write>(
                     "schema_version": 1,
                     "owner": "daemon",
                     "service": "source_refresh",
+                    "pid": std::process::id(),
+                    "published_generation": published_generation,
+                })))?
+            )?;
+            return Ok(());
+        }
+        if op == "shutdown" {
+            let config = crate::config::AppConfig::load(data_root)?;
+            if config.daemon.enabled {
+                return Err(anyhow!("daemon shutdown requires [daemon] enabled = false"));
+            }
+            let wakeup = wakeup.ok_or_else(|| anyhow!("daemon shutdown wakeup is unavailable"))?;
+            wakeup.signal_shutdown();
+            writeln!(
+                stream,
+                "{}",
+                serde_json::to_string(&compact_json(json!({
+                    "ok": true,
+                    "schema_version": 1,
+                    "owner": "daemon",
+                    "service": "source_refresh",
+                    "shutdown": "accepted",
+                    "pid": std::process::id(),
+                })))?
+            )?;
+            return Ok(());
+        }
+        if op == "lifecycle_wakeup" {
+            let wakeup = wakeup.ok_or_else(|| anyhow!("daemon lifecycle wakeup is unavailable"))?;
+            wakeup.signal_ipc();
+            writeln!(
+                stream,
+                "{}",
+                serde_json::to_string(&compact_json(json!({
+                    "ok": true,
+                    "schema_version": 1,
+                    "owner": "daemon",
+                    "service": "source_refresh",
+                    "lifecycle_wakeup": "accepted",
+                    "pid": std::process::id(),
+                })))?
+            )?;
+            return Ok(());
+        }
+        if op == "supervisor_handoff" {
+            let config = crate::config::AppConfig::load(data_root)?;
+            if !config.daemon.enabled {
+                return Err(anyhow!(
+                    "native-supervisor handoff requires an enabled daemon"
+                ));
+            }
+            let wakeup =
+                wakeup.ok_or_else(|| anyhow!("daemon supervisor handoff wakeup is unavailable"))?;
+            wakeup.signal_shutdown();
+            writeln!(
+                stream,
+                "{}",
+                serde_json::to_string(&compact_json(json!({
+                    "ok": true,
+                    "schema_version": 1,
+                    "owner": "daemon",
+                    "service": "source_refresh",
+                    "supervisor_handoff": "accepted",
+                    "pid": std::process::id(),
                 })))?
             )?;
             return Ok(());

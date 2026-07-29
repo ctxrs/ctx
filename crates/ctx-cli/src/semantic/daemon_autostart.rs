@@ -30,11 +30,13 @@ use super::{
     health_search::{create_private_dir_all, secure_private_file_permissions, semantic_env_flag},
     paths_status::{
         daemon_lock_is_active, daemon_lock_is_owned_by, daemon_lock_is_stale, daemon_lock_path,
-        daemon_root_path, daemon_status_path, open_or_create_pid_lock_file, process_state,
-        read_daemon_status, write_daemon_status, write_private_json_file, ProcessState,
+        daemon_root_path, daemon_status_path, observe_pid_advisory_lock,
+        open_or_create_pid_lock_file, pid_from_lock_json, pid_lock_guard_path, process_state,
+        read_daemon_status, read_pid_lock_json, write_daemon_status, write_private_json_file,
+        PidAdvisoryLockObservation, ProcessState,
     },
+    query_service::daemon_source_refresh_request,
     runtime_limits::{
-        DAEMON_AUTOSTART_IDLE_EXIT_SECONDS_DEFAULT, DAEMON_AUTOSTART_LOOP_INTERVAL_SECONDS_DEFAULT,
         DAEMON_AUTOSTART_OFF_ENV, DAEMON_BACKGROUND_CHILD_ENV, DAEMON_IDLE_EXIT_SECONDS_CAP,
         DAEMON_QUERY_ENDPOINT_FILE,
     },
@@ -46,8 +48,7 @@ mod installation;
 mod recovery;
 
 pub(crate) use autostart::{
-    autostart_daemon_and_wait, daemon_autostart_can_reuse_existing,
-    daemon_autostart_suppression_reason, maybe_autostart_daemon, maybe_autostart_daemon_for_search,
+    autostart_daemon_and_wait, daemon_autostart_suppression_reason, maybe_autostart_daemon,
 };
 use autostart::{
     configured_daemon_autostart_command, daemon_autostart_allowed, daemon_autostart_command,
@@ -56,6 +57,8 @@ use autostart::{
 #[cfg(test)]
 use autostart::{daemon_handoff_observation_from, wait_for_daemon_handoff_with};
 
+#[cfg(unix)]
+pub(crate) use handoff::prepare_posix_daemon_uninstall;
 pub(super) use handoff::{
     acknowledge_daemon_restart_requests, current_process_owns_daemon_upgrade_handoff,
     daemon_upgrade_handoff_blocks_current_process, read_daemon_restart_request,
@@ -126,13 +129,12 @@ pub(super) fn write_daemon_autostart_status(
     )
 }
 
-pub(super) fn daemon_autostart_u64_env(name: &str, default: u64, max: u64) -> u64 {
+pub(super) fn daemon_autostart_u64_env(name: &str, max: u64) -> Option<u64> {
     env::var(name)
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0)
         .map(|value| value.min(max))
-        .unwrap_or(default)
 }
 
 pub(super) fn maybe_autostart_daemon_inner(
@@ -143,7 +145,7 @@ pub(super) fn maybe_autostart_daemon_inner(
     let _ = request_daemon_autostart(data_root, config, trigger);
 }
 
-const DAEMON_UPGRADE_STOP_TIMEOUT: StdDuration = StdDuration::from_secs(75);
+const DAEMON_UPGRADE_STOP_TIMEOUT: StdDuration = StdDuration::from_secs(5);
 const DAEMON_UPGRADE_RESTART_TIMEOUT: StdDuration = StdDuration::from_secs(5);
 const DAEMON_UPGRADE_POLL_INTERVAL: StdDuration = StdDuration::from_millis(50);
 const DAEMON_UPGRADE_HANDOFF_STALE_AFTER: StdDuration = StdDuration::from_secs(15 * 60);
@@ -157,6 +159,8 @@ const DAEMON_UPGRADE_HANDOFF_TOKEN_ENV: &str = "CTX_DAEMON_UPGRADE_HANDOFF_TOKEN
 const DAEMON_SETUP_HANDOFF_POLL_ATTEMPTS: usize = 12_001;
 const DAEMON_SETUP_HANDOFF_MAX_HEARTBEAT_AGE_MS: i64 = 30_000;
 const DAEMON_SETUP_HANDOFF_MAX_FUTURE_HEARTBEAT_MS: i64 = 5_000;
+const DAEMON_HEALTH_TIMEOUT: StdDuration = StdDuration::from_millis(500);
+const DAEMON_HEALTH_RESPONSE_MAX_BYTES: u64 = 16 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DaemonHandoff {

@@ -69,15 +69,7 @@ fn launch_source_refresh_daemon(temp: &TempDir, binary: &Path) -> SourceRefreshD
         }
     }
     command
-        .args([
-            "daemon",
-            "run",
-            "--force",
-            "--idle-exit-seconds",
-            "600",
-            "--loop-interval-seconds",
-            "600",
-        ])
+        .args(["daemon", "run", "--force"])
         .env("CTX_DAEMON_MODE", "source-refresh-only")
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
@@ -956,7 +948,7 @@ fn search_refreshes_discovered_codex_prompt_history_before_query() {
 }
 
 #[test]
-fn machine_readable_default_search_reports_daemon_unavailable_without_autostart() {
+fn machine_readable_search_attempts_enabled_daemon_self_healing() {
     let temp = tempdir();
     let fixture = PathBuf::from(provider_history_fixture("codex-sessions"));
     copy_dir_all(&fixture, &temp.path().join(".codex").join("sessions"));
@@ -979,12 +971,18 @@ fn machine_readable_default_search_reports_daemon_unavailable_without_autostart(
     assert!(output.stdout.is_empty(), "{:?}", output.stdout);
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
-        stderr.contains(
-            "the ctx daemon is unavailable for source-backed refresh; no foreground writer was started"
-        ),
+        stderr.contains("ctx daemon did not start")
+            && stderr.contains("spawn ctx daemon")
+            && stderr.contains("missing-ctx-binary"),
         "{stderr}"
     );
-    assert!(!temp.path().join("daemon/status.json").exists());
+    let autostart_status: Value =
+        serde_json::from_slice(&fs::read(temp.path().join("daemon/status.json")).unwrap()).unwrap();
+    assert_eq!(autostart_status["status"], "failed", "{autostart_status:#}");
+    assert_eq!(
+        autostart_status["reason"], "spawn_failed",
+        "{autostart_status:#}"
+    );
     assert!(!temp.path().join("search/lexical/meta.json").exists());
     assert!(!temp.path().join("work.sqlite").exists());
 
@@ -1006,6 +1004,171 @@ fn machine_readable_default_search_reports_daemon_unavailable_without_autostart(
     );
     assert_eq!(status["prior_epoch"]["present"], false, "{status:#}");
     assert_eq!(status["prior_epoch"]["opened"], false, "{status:#}");
+}
+
+#[test]
+fn persistent_daemon_passively_publishes_appended_source_without_foreground_command() {
+    let temp = tempdir();
+    let source = temp
+        .path()
+        .join(".codex")
+        .join("sessions")
+        .join("2026")
+        .join("07")
+        .join("29")
+        .join("watch.jsonl");
+    write_codex_session(
+        &source,
+        "019c08d7-0000-7000-8000-000000000001",
+        &[(
+            "2026-07-29T12:00:00Z",
+            "user",
+            "persistent daemon initial oracle",
+        )],
+    );
+    let _daemon = start_source_refresh_daemon(&temp);
+
+    let initial = json_output(ctx(&temp).args([
+        "search",
+        "persistent daemon initial oracle",
+        "--provider",
+        "codex",
+        "--refresh",
+        "wait",
+        "--format=json",
+    ]));
+    let initial_generation = assert_published_generation(&initial, "wait");
+
+    append_codex_message(
+        &source,
+        "2026-07-29T12:01:00Z",
+        "assistant",
+        "passive append searchable generation oracle",
+    );
+
+    // Observe publication only through the daemon-owned receipt. No ctx
+    // command is run between the append and the new verified generation.
+    let job_path = temp.path().join("daemon/jobs/core-refresh.json");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let passive_generation = loop {
+        let job = fs::read(&job_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+        if let Some(generation) = job.as_ref().and_then(|job| {
+            (job["request_state"] == "published")
+                .then(|| job["published_generation"].as_str().map(str::to_owned))
+                .flatten()
+                .filter(|generation| generation != &initial_generation)
+        }) {
+            break generation;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "daemon did not passively publish appended source: job={job:#?}, wakeup={:#?}",
+            fs::read(temp.path().join("daemon/wakeup.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    };
+
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "passive append searchable generation oracle",
+        "--provider",
+        "codex",
+        "--refresh",
+        "off",
+        "--format=json",
+    ]));
+    assert_eq!(
+        search["retrieval"]["generation_id"], passive_generation,
+        "{search:#}"
+    );
+    assert_eq!(
+        search["results"].as_array().map(Vec::len),
+        Some(1),
+        "{search:#}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn live_daemon_prepare_uninstall_disables_stops_and_removes_coordination() {
+    let temp = tempdir();
+    let mut daemon = start_source_refresh_daemon(&temp);
+    let daemon_pid = daemon.pid();
+
+    let report =
+        json_output(ctx(&temp).args(["daemon", "disable", "--prepare-uninstall", "--format=json"]));
+    assert_eq!(report["command"], "daemon_prepare_uninstall", "{report:#}");
+    assert_eq!(report["daemon_enabled"], false, "{report:#}");
+    assert_eq!(report["daemon_running"], false, "{report:#}");
+    assert_eq!(report["owner_lock_released"], true, "{report:#}");
+    assert_eq!(report["endpoint_released"], true, "{report:#}");
+    assert_eq!(report["supervisor_removed"], true, "{report:#}");
+    assert_eq!(report["coordination_state_removed"], true, "{report:#}");
+    assert_eq!(report["retry_safe"], true, "{report:#}");
+
+    let exit = daemon
+        .child
+        .as_mut()
+        .expect("daemon child")
+        .wait()
+        .expect("wait for uninstalled daemon");
+    assert!(exit.success(), "daemon {daemon_pid} exit status: {exit}");
+    daemon.child = None;
+    let config = fs::read_to_string(temp.path().join("config.toml")).unwrap();
+    assert!(config.contains("enabled = false"), "{config}");
+    for relative in [
+        "daemon/daemon.lock",
+        "daemon/daemon.guard",
+        "daemon/query-endpoint.json",
+        "daemon/source-refresh-endpoint.json",
+        "daemon/upgrade-handoff.json",
+        "daemon/upgrade-restart-requests",
+        "daemon/supervisor.json",
+    ] {
+        assert!(
+            !temp.path().join(relative).exists(),
+            "uninstall retained {relative}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn interrupted_prepare_uninstall_is_retry_safe() {
+    let temp = tempdir();
+    let mut daemon = start_source_refresh_daemon(&temp);
+
+    ctx(&temp)
+        .args(["daemon", "disable", "--prepare-uninstall", "--format=json"])
+        .env("CTX_DAEMON_UNINSTALL_ABORT_AFTER_DISABLE_FOR_TESTS", "1")
+        .assert()
+        .code(89);
+    let config_after_interrupt = fs::read_to_string(temp.path().join("config.toml")).unwrap();
+    assert!(
+        config_after_interrupt.contains("enabled = false"),
+        "{config_after_interrupt}"
+    );
+
+    let report =
+        json_output(ctx(&temp).args(["daemon", "disable", "--prepare-uninstall", "--format=json"]));
+    assert_eq!(report["ok"], true, "{report:#}");
+    assert_eq!(report["retry_safe"], true, "{report:#}");
+    if let Some(child) = daemon.child.as_mut() {
+        let exit = child.wait().expect("wait for interrupted-uninstall daemon");
+        assert!(exit.success(), "{exit}");
+    }
+    daemon.child = None;
+
+    // A third invocation models a host uninstaller retry after Core cleanup
+    // completed but before it removed the installed executable.
+    let repeated =
+        json_output(ctx(&temp).args(["daemon", "disable", "--prepare-uninstall", "--format=json"]));
+    assert_eq!(repeated["ok"], true, "{repeated:#}");
+    assert_eq!(repeated["daemon_running"], false, "{repeated:#}");
 }
 
 #[test]

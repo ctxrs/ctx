@@ -8,9 +8,8 @@ use crate::config::CONFIG_FILE;
 use crate::output::print_json;
 use crate::semantic::{
     autostart_daemon_and_wait, coordinate_source_backed_refresh,
-    daemon_autostart_can_reuse_existing, daemon_autostart_suppression_reason,
-    semantic_query_service_supported, source_epoch_status_report, DaemonHandoff,
-    SourceBackedRefreshMode,
+    daemon_autostart_suppression_reason, semantic_query_service_supported,
+    source_epoch_status_report, DaemonHandoff, SourceBackedRefreshMode,
 };
 use crate::upgrade::data_migration;
 use crate::{config, SetupArgs};
@@ -44,21 +43,13 @@ pub(crate) fn run_setup(
     config::write_default_config(&data_root)?;
 
     let json_output = args.format.is_json();
-    let machine_readable_output =
-        json_output || args.progress == crate::progress::ProgressArg::Json;
     let suppression_reason = daemon_autostart_suppression_reason();
-    let can_reuse_daemon =
-        suppression_reason.is_none() && daemon_autostart_can_reuse_existing(&data_root);
-    let daemon_autostart_requested = config.daemon.enabled
-        && !args.no_daemon
-        && suppression_reason.is_none()
-        && (!machine_readable_output || can_reuse_daemon);
+    let daemon_autostart_requested =
+        config.daemon.enabled && !args.no_daemon && suppression_reason.is_none();
     let daemon_autostart_reason = if args.no_daemon {
         Some("explicit_opt_out")
     } else if !config.daemon.enabled {
         Some("daemon_disabled")
-    } else if machine_readable_output && !can_reuse_daemon {
-        Some("machine_readable_output")
     } else {
         suppression_reason
     };

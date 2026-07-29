@@ -31,6 +31,7 @@ json5 = { version = "0.4", default-features = false }
 jsonc-parser = { version = "0.33", default-features = false, features = ["serde", "serde_json"] }
 libc = "0.2"
 memmap2 = "0.9"
+notify = "8.2.0"
 predicates = "3.1"
 proptest = "1"
 regex = "1.10"
