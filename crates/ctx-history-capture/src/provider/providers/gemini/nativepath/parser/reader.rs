@@ -16,7 +16,6 @@ pub(crate) struct GeminiNativePageReader<'a> {
     pub(super) terminal: bool,
     pub(super) retained_event_count: u64,
     pub(super) state: ScanState<'a>,
-    pub(super) profile: GeminiNativePathProfile,
     pub(super) outcome: Option<GeminiScanOutcome>,
 }
 
@@ -49,8 +48,6 @@ struct GeminiReaderPosition {
 
 struct ScannedGeminiRecord {
     events: Vec<(GeminiRetainedEvent, usize)>,
-    transient_outputs: Vec<(ProOutputObservation, usize)>,
-    transient_output_reservations: Vec<usize>,
     rejections: Vec<GeminiRejection>,
     native_event_id: Option<String>,
     completed: bool,
@@ -58,8 +55,7 @@ struct ScannedGeminiRecord {
 
 impl<'a> GeminiNativePageReader<'a> {
     /// True when the selected provider checkpoint was certified and the scan
-    /// continues from it. Provider-owned output adapters use this to choose
-    /// append/resume versus a new output epoch without a second source scan.
+    /// continues from it.
     pub(crate) fn resumed_from_previous(&self) -> bool {
         self.resumed_prefix
     }
@@ -88,14 +84,12 @@ impl<'a> GeminiNativePageReader<'a> {
             next_safe_frontier: expected_frontier,
             terminal: false,
             events: Vec::new(),
-            output_pages: Vec::new(),
             rejections: Vec::new(),
             physical_records: 0,
             logical_units: 0,
             retained_event_bytes: 0,
             conservative_serialized_bytes: initial_page_bytes,
         };
-        let mut transient_outputs = Vec::new();
         // Cross-restart/source-wide duplicate authority belongs to canonical
         // event IDs at the bounded consumer. The provider rejects only IDs
         // that conflict inside the independently retryable page it owns.
@@ -180,28 +174,9 @@ impl<'a> GeminiNativePageReader<'a> {
             .ok_or(GeminiScanError::Capture(CaptureError::SystemInvariant(
                 "Gemini Core page accounting overflowed",
             )))?;
-            let unrepresentable_output = record.transient_output_reservations.iter().try_fold(
-                None,
-                |unrepresentable, reserved_bytes| -> GeminiScanResult<_> {
-                    if unrepresentable.is_some() {
-                        return Ok(unrepresentable);
-                    }
-                    let page_bytes = output_page_conservative_bytes(
-                        &next_safe_frontier,
-                        &next_safe_frontier,
-                        *reserved_bytes,
-                    )
-                    .ok_or(GeminiScanError::Capture(
-                        CaptureError::SystemInvariant(
-                            "Gemini output admission accounting overflowed",
-                        ),
-                    ))?;
-                    Ok((page_bytes > MAX_GEMINI_NATIVE_PAGE_BYTES).then_some(page_bytes))
-                },
-            )?;
             let too_many_units = next_units > MAX_GEMINI_NATIVE_PAGE_RECORDS;
             let too_many_bytes = next_page_bytes > MAX_GEMINI_NATIVE_PAGE_BYTES;
-            if too_many_units || too_many_bytes || unrepresentable_output.is_some() {
+            if too_many_units || too_many_bytes {
                 let raw_ordinal = position.raw_ordinal;
                 let byte_start = position.offset;
                 let byte_end_exclusive = self.offset;
@@ -213,12 +188,6 @@ impl<'a> GeminiNativePageReader<'a> {
                     format!(
                         "Gemini native record expands to {record_units} logical units; \
                          page maximum is {MAX_GEMINI_NATIVE_PAGE_RECORDS}"
-                    )
-                } else if let Some(output_page_bytes) = unrepresentable_output {
-                    format!(
-                        "Gemini transient output conservatively expands to \
-                         {output_page_bytes} serialized page bytes; page maximum is \
-                         {MAX_GEMINI_NATIVE_PAGE_BYTES}"
                     )
                 } else {
                     format!(
@@ -253,7 +222,6 @@ impl<'a> GeminiNativePageReader<'a> {
                 .state
                 .emitted_rows_this_scan
                 .saturating_add(emitted_events);
-            transient_outputs.extend(record.transient_outputs);
             page.rejections.extend(record.rejections);
             page.next_safe_frontier = next_safe_frontier;
             page.conservative_serialized_bytes = next_page_bytes;
@@ -280,14 +248,6 @@ impl<'a> GeminiNativePageReader<'a> {
                 &page.rejections,
                 page.terminal,
             );
-            if self.profile == GeminiNativePathProfile::CoreAndTransientOutputs {
-                page.output_pages = build_output_pages(
-                    &page.expected_frontier,
-                    &page.next_safe_frontier,
-                    transient_outputs,
-                    page.terminal,
-                )?;
-            }
             debug_assert!(page.physical_records <= MAX_GEMINI_NATIVE_PAGE_RECORDS);
             debug_assert!(page.logical_units <= MAX_GEMINI_NATIVE_PAGE_RECORDS);
             debug_assert!(page.conservative_serialized_bytes <= MAX_GEMINI_NATIVE_PAGE_BYTES);
@@ -398,8 +358,6 @@ impl<'a> GeminiNativePageReader<'a> {
             self.terminal = false;
             return Ok(Some(ScannedGeminiRecord {
                 events: Vec::new(),
-                transient_outputs: Vec::new(),
-                transient_output_reservations: Vec::new(),
                 rejections: Vec::new(),
                 native_event_id: None,
                 completed: false,
@@ -421,8 +379,6 @@ impl<'a> GeminiNativePageReader<'a> {
             self.complete_record(record.terminated);
             return Ok(Some(ScannedGeminiRecord {
                 events: Vec::new(),
-                transient_outputs: Vec::new(),
-                transient_output_reservations: Vec::new(),
                 rejections: vec![rejection],
                 native_event_id: None,
                 completed: true,
@@ -433,8 +389,6 @@ impl<'a> GeminiNativePageReader<'a> {
             self.append_boundary_safe = record.terminated;
             return Ok(Some(ScannedGeminiRecord {
                 events: Vec::new(),
-                transient_outputs: Vec::new(),
-                transient_output_reservations: Vec::new(),
                 rejections: Vec::new(),
                 native_event_id: None,
                 completed: true,
@@ -459,8 +413,6 @@ impl<'a> GeminiNativePageReader<'a> {
                 self.complete_record(record.terminated);
                 return Ok(Some(ScannedGeminiRecord {
                     events: Vec::new(),
-                    transient_outputs: Vec::new(),
-                    transient_output_reservations: Vec::new(),
                     rejections: vec![rejection],
                     native_event_id: None,
                     completed: true,
@@ -484,8 +436,6 @@ impl<'a> GeminiNativePageReader<'a> {
                 self.complete_record(record.terminated);
                 return Ok(Some(ScannedGeminiRecord {
                     events: Vec::new(),
-                    transient_outputs: Vec::new(),
-                    transient_output_reservations: Vec::new(),
                     rejections: vec![rejection],
                     native_event_id: None,
                     completed: true,
@@ -505,17 +455,13 @@ impl<'a> GeminiNativePageReader<'a> {
             self.complete_record(record.terminated);
             return Ok(Some(ScannedGeminiRecord {
                 events: Vec::new(),
-                transient_outputs: Vec::new(),
-                transient_output_reservations: Vec::new(),
                 rejections: vec![rejection],
                 native_event_id: None,
                 completed: true,
             }));
         }
         let mut events = Vec::new();
-        let mut transient_outputs = Vec::new();
-        let mut transient_output_reservations = Vec::new();
-        let mut rejections = Vec::new();
+        let rejections = Vec::new();
         match class {
             GeminiRecordClass::Header => {
                 if self.state.session.is_some() {
@@ -561,9 +507,9 @@ impl<'a> GeminiNativePageReader<'a> {
                             .to_owned(),
                     });
                 };
-                let mut hydrated = match hydrate_result_record(
+                let hydrated = match hydrate_result_record(
                     payload,
-                    self.profile,
+                    GeminiNativePathProfile::CoreOnly,
                     self.source,
                     session,
                     self.raw_ordinal,
@@ -581,50 +527,6 @@ impl<'a> GeminiNativePageReader<'a> {
                         )));
                     }
                 };
-                let output_frontier = self.frontier();
-                let mut oversized_subrecords = BTreeSet::new();
-                for (sub_ordinal, reserved_bytes) in &hydrated.output_reservations {
-                    let page_bytes = output_page_conservative_bytes(
-                        &output_frontier,
-                        &output_frontier,
-                        *reserved_bytes,
-                    )
-                    .ok_or(GeminiScanError::Capture(
-                        CaptureError::SystemInvariant(
-                            "Gemini output admission accounting overflowed",
-                        ),
-                    ))?;
-                    if page_bytes > MAX_GEMINI_NATIVE_PAGE_BYTES {
-                        oversized_subrecords.insert(*sub_ordinal);
-                        rejections.push(self.state.reject(
-                            self.raw_ordinal,
-                            byte_start,
-                            byte_end_exclusive,
-                            format!(
-                                "Gemini output subrecord {sub_ordinal} conservatively expands to \
-                                 {page_bytes} serialized page bytes; page maximum is \
-                                 {MAX_GEMINI_NATIVE_PAGE_BYTES}"
-                            ),
-                        ));
-                    }
-                }
-                if !oversized_subrecords.is_empty() {
-                    hydrated.events.retain(|(event, _)| {
-                        !oversized_subrecords.contains(&event.native_order.sub_ordinal)
-                    });
-                    hydrated.outputs.retain(|(output, _)| {
-                        output
-                            .coordinate
-                            .source_record_subrecord_index
-                            .is_none_or(|sub_ordinal| !oversized_subrecords.contains(&sub_ordinal))
-                    });
-                    hydrated
-                        .output_reservations
-                        .retain(|(sub_ordinal, _)| !oversized_subrecords.contains(sub_ordinal));
-                    hydrated.failure_diagnostics = hydrated.events.len();
-                    hydrated.failure_previews =
-                        hydrated.failure_previews.min(hydrated.events.len());
-                }
                 self.state.metrics.result_body_bytes_decoded_or_allocated = self
                     .state
                     .metrics
@@ -640,11 +542,6 @@ impl<'a> GeminiNativePageReader<'a> {
                     .metrics
                     .result_previews_created
                     .saturating_add(hydrated.failure_previews as u64);
-                self.state.metrics.result_handoffs_created = self
-                    .state
-                    .metrics
-                    .result_handoffs_created
-                    .saturating_add(hydrated.outputs.len() as u64);
                 for (event, event_bytes) in &hydrated.events {
                     if *event_bytes > MAX_GEMINI_NATIVE_PAGE_BYTES {
                         return Ok(Some(self.reject_completed_record(
@@ -660,12 +557,6 @@ impl<'a> GeminiNativePageReader<'a> {
                     self.state.count_retained(event);
                 }
                 events = hydrated.events;
-                transient_outputs = hydrated.outputs;
-                transient_output_reservations = hydrated
-                    .output_reservations
-                    .into_iter()
-                    .map(|(_, reserved_bytes)| reserved_bytes)
-                    .collect();
             }
             GeminiRecordClass::Message
             | GeminiRecordClass::ToolCall
@@ -745,8 +636,6 @@ impl<'a> GeminiNativePageReader<'a> {
         self.complete_record(record.terminated);
         Ok(Some(ScannedGeminiRecord {
             events,
-            transient_outputs,
-            transient_output_reservations,
             rejections,
             native_event_id,
             completed: true,
@@ -782,8 +671,6 @@ impl<'a> GeminiNativePageReader<'a> {
         self.complete_record(terminated);
         ScannedGeminiRecord {
             events: Vec::new(),
-            transient_outputs: Vec::new(),
-            transient_output_reservations: Vec::new(),
             rejections: vec![rejection],
             native_event_id: None,
             completed: true,

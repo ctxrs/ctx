@@ -186,11 +186,7 @@ fn gemini_nativepath_full_prefix_hash_rejects_byte_zero_rewrite_with_preserved_t
 
     reset_gemini_parse_counters();
     assert!(matches!(
-        read_gemini_transcript_pages_from_frontier(
-            &changed_source,
-            &frontier,
-            GeminiNativePathProfile::CoreOnly
-        ),
+        read_gemini_transcript_pages_from_frontier(&changed_source, &frontier),
         Err(GeminiScanError::Capture(
             CaptureError::SourceChangedDuringCapture
         ))
@@ -480,12 +476,7 @@ fn gemini_nativepath_delegates_cross_page_duplicate_authority_to_canonical_ident
     assert!(reader.next_page().unwrap().is_none());
     assert_eq!(reader.outcome().unwrap().rejected_records, 0);
 
-    let mut replay = read_gemini_transcript_pages_from_frontier(
-        &source,
-        &replay_frontier,
-        GeminiNativePathProfile::CoreOnly,
-    )
-    .unwrap();
+    let mut replay = read_gemini_transcript_pages_from_frontier(&source, &replay_frontier).unwrap();
     let replayed = replay.next_page().unwrap().unwrap();
     assert_eq!(replayed.identity, second_identity);
     assert_eq!(replayed.rejections, second_page.rejections);

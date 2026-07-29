@@ -12,10 +12,10 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::dto::GeminiEventBody;
+use super::parser::read_gemini_transcript_pages;
 use super::{
-    read_gemini_transcript_pages_with_profile, GeminiEventIdentity, GeminiFileObservation,
-    GeminiNativePage, GeminiNativePageReader, GeminiNativePathProfile, GeminiRetainedEvent,
-    GeminiScanError, GeminiSession, GeminiTranscriptSource,
+    GeminiEventIdentity, GeminiFileObservation, GeminiNativePage, GeminiNativePageReader,
+    GeminiRetainedEvent, GeminiScanError, GeminiSession, GeminiTranscriptSource,
 };
 use crate::{CaptureError, GEMINI_CLI_SOURCE_FORMAT, MAX_PROVIDER_JSONL_LINE_BYTES};
 
@@ -190,8 +190,6 @@ pub(crate) enum GeminiSourceBackedError {
     ReaderNotDrained,
     #[error("Gemini source-backed page changed its native session")]
     SessionChanged,
-    #[error("Gemini Core-only source-backed reader emitted transient output")]
-    UnexpectedOutput,
     #[error("Gemini source-backed scan counts do not reconcile")]
     CountMismatch,
     #[error("Gemini source-backed count or byte range overflowed")]
@@ -248,11 +246,7 @@ pub(crate) struct GeminiSourceBackedLeafReader<'a> {
 
 impl<'a> GeminiSourceBackedLeafReader<'a> {
     pub(crate) fn open(source: &'a GeminiTranscriptSource) -> GeminiSourceBackedResult<Self> {
-        let mut native = read_gemini_transcript_pages_with_profile(
-            source,
-            None,
-            GeminiNativePathProfile::CoreOnly,
-        )?;
+        let mut native = read_gemini_transcript_pages(source, None)?;
         let pending = loop {
             let Some(page) = native.next_page()? else {
                 return Err(GeminiSourceBackedError::MissingSession);
@@ -315,9 +309,6 @@ impl<'a> GeminiSourceBackedLeafReader<'a> {
         let Some(page) = page else {
             return Ok(None);
         };
-        if !page.output_pages.is_empty() {
-            return Err(GeminiSourceBackedError::UnexpectedOutput);
-        }
         let page_session = page
             .next_safe_frontier
             .session
