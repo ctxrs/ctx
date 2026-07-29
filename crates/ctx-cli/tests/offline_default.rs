@@ -16,7 +16,7 @@ fn write_network_endpoints(data_root: &Path, endpoint: &str, analytics_enabled: 
         data_root.join("config.toml"),
         format!(
             "[analytics]\n{enabled}endpoint = \"{endpoint}\"\n\
-             [upgrade]\nfunctions_base = \"{endpoint}\"\n"
+             [upgrade]\nauto = \"off\"\n"
         ),
     )
     .unwrap();

@@ -60,6 +60,15 @@ Manual `ctx upgrade` verifies signed release metadata, explicit self-upgrade
 policy, artifact SHA-256, the current managed install marker, and the staged
 binary's `ctx --version` output before replacing the installed binary.
 
+The production binary fixes release metadata under
+`https://cli.ctx.rs/functions/v1/releases/<channel>/`, derives the detached
+signature URL from that metadata URL, verifies with its embedded release public
+key, and accepts artifact URLs only under the compiled
+`https://cli.ctx.rs/storage/v1/object/public/releases/artifacts/` authority.
+Config files and process environment variables cannot replace those origins or
+the verification key. A key or authority change therefore requires a new ctx
+binary, not a shell-profile or config-file change.
+
 When local semantic search is explicitly enabled, the same signed release
 metadata may carry the semantic asset catalog. ctx verifies the metadata
 signature before it accepts any catalog URL, archive hash, expanded-size limit,

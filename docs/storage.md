@@ -19,9 +19,11 @@ to use the canonical controls; the old names are not shown in CLI or installer
 help.
 
 Other aliases are removed in 0.26: replace `CTX_CHANNEL` with
-`CTX_UPGRADE_CHANNEL`, `CTX_FUNCTIONS_BASE` with
-`CTX_UPGRADE_FUNCTIONS_BASE`, and `CTX_DISABLE_SEMANTIC_SEARCH` with
-`CTX_SEARCH_SEMANTIC=false`.
+`CTX_UPGRADE_CHANNEL` and `CTX_DISABLE_SEMANTIC_SEARCH` with
+`CTX_SEARCH_SEMANTIC=false`. `CTX_FUNCTIONS_BASE`,
+`CTX_UPGRADE_FUNCTIONS_BASE`, and `upgrade.functions_base` are removed without
+replacement: release metadata, signature, verification-key, and artifact-origin
+authority is compiled into the production binary.
 
 The duplicate `upgrade.interval_seconds` config key is also removed. Use
 `upgrade.interval_hours` for persistent configuration or

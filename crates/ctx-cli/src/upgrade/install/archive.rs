@@ -175,7 +175,8 @@ pub(super) fn extract_runtime_archive(
     let script_path = archive_path.with_extension("extract.ps1");
     fs::write(&script_path, super::windows_runtime_extract_script())
         .with_context(|| format!("write runtime extraction helper {}", script_path.display()))?;
-    let output = std::process::Command::new("powershell")
+    let mut command = std::process::Command::new("powershell");
+    command
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
         .arg(&script_path)
         .arg("-ArchivePath")
@@ -185,7 +186,9 @@ pub(super) fn extract_runtime_archive(
         .arg("-ExpectedVersion")
         .arg(version)
         .arg("-MaxExpandedBytes")
-        .arg(runtime_expanded_size_limit().to_string())
+        .arg(runtime_expanded_size_limit().to_string());
+    crate::process_environment::sanitize_release_authority_env(&mut command);
+    let output = command
         .output()
         .context("run Windows ONNX Runtime extraction helper");
     let _ = fs::remove_file(&script_path);
@@ -449,7 +452,8 @@ fn extract_semantic_zip(
         .with_context(|| format!("write extraction contract {}", contract_path.display()))?;
     fs::write(&script_path, WINDOWS_SEMANTIC_ZIP_EXTRACT_SCRIPT)
         .with_context(|| format!("write extraction helper {}", script_path.display()))?;
-    let output = std::process::Command::new("powershell")
+    let mut command = std::process::Command::new("powershell");
+    command
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
         .arg(&script_path)
         .arg("-ArchivePath")
@@ -457,7 +461,9 @@ fn extract_semantic_zip(
         .arg("-Destination")
         .arg(destination)
         .arg("-ContractPath")
-        .arg(&contract_path)
+        .arg(&contract_path);
+    crate::process_environment::sanitize_release_authority_env(&mut command);
+    let output = command
         .output()
         .context("run signed Semantic zip extraction helper");
     let _ = fs::remove_file(&script_path);

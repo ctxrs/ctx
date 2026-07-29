@@ -178,7 +178,10 @@ ctx_rust_binary(
         ":cargo_toml_env_vars",
         "release-stamp.env",
     ],
-    rustc_flags = CTX_CLI_RUSTC_FLAGS + ["-Cdebug-assertions=yes"],
+    rustc_flags = CTX_CLI_RUSTC_FLAGS + [
+        "--cfg=ctx_release_qualification",
+        "-Cdebug-assertions=yes",
+    ],
     stamp = -1,
 )
 
@@ -199,7 +202,9 @@ ctx_rust_binary(
         "release-stamp.env",
         "src/upgrade/test-harness.env",
     ],
-    rustc_flags = CTX_CLI_RUSTC_FLAGS,
+    # Local metadata/signature/key injection exists only in this test-only
+    # build capability. The published :ctx target cannot select it.
+    rustc_flags = CTX_CLI_RUSTC_FLAGS + ["--cfg=ctx_release_qualification"],
     stamp = -1,
 )
 

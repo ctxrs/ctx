@@ -616,7 +616,6 @@ endpoint = "file:///tmp/ctx-analytics.jsonl"
 auto = "off"
 channel = "beta"
 interval_hours = 2
-functions_base = "https://example.test/functions/v1"
 
 [daemon]
 enabled = false
@@ -631,11 +630,23 @@ enabled = false
     assert_eq!(config.upgrade.auto, "off");
     assert_eq!(config.upgrade.channel, "beta");
     assert_eq!(config.upgrade.interval, Duration::from_secs(2 * 60 * 60));
-    assert_eq!(
-        config.upgrade.functions_base,
-        "https://example.test/functions/v1"
-    );
     assert!(!config.daemon.enabled);
+}
+
+#[test]
+fn config_rejects_upgrade_metadata_authority_substitution() {
+    let values = parse_toml_subset(
+        "[upgrade]\nfunctions_base = \"file:///attacker/ctx-release-metadata.env\"\n",
+    )
+    .unwrap();
+    let error = AppConfig::default().apply_values(&values).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("unknown config key `upgrade.functions_base`"),
+        "{error:#}"
+    );
 }
 
 #[test]
