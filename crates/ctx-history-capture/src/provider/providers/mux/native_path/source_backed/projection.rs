@@ -1,3 +1,4 @@
+use super::resolver::encode_mux_coordinate;
 use super::*;
 
 pub(super) fn classify_scan(
