@@ -32,9 +32,17 @@
 //! body archive or relational tombstone payload is required.
 
 mod model;
+mod raw_sql;
 mod schema;
 
 pub use model::*;
+pub use raw_sql::{
+    RawSqlColumn, RawSqlLimits, RawSqlOptions, RawSqlResult, RawSqlTruncation, RawSqlValue,
+    RAW_SQL_DEFAULT_MAX_COLUMNS, RAW_SQL_DEFAULT_MAX_ROWS, RAW_SQL_DEFAULT_MAX_SQL_BYTES,
+    RAW_SQL_DEFAULT_MAX_VALUE_BYTES, RAW_SQL_DEFAULT_TIMEOUT, RAW_SQL_MAX_COLUMNS_CAP,
+    RAW_SQL_MAX_RESULT_CELLS, RAW_SQL_MAX_RESULT_PREVIEW_BYTES, RAW_SQL_MAX_ROWS_CAP,
+    RAW_SQL_MAX_SQL_BYTES_CAP, RAW_SQL_MAX_TIMEOUT, RAW_SQL_MAX_VALUE_BYTES_CAP,
+};
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -54,8 +62,8 @@ use sha2::{Digest, Sha256};
 use crate::{
     connection::{configure_read_only_connection, BUSY_TIMEOUT},
     object_store::{restrict_private_dir, restrict_private_file},
-    raw_sql::{raw_sql_query_connection, RawSqlOptions, RawSqlResult},
 };
+use raw_sql::raw_sql_query_connection;
 
 pub(super) const GENERATION_MANIFEST_VERSION: u32 = 3;
 pub(super) const REQUIRED_LEXICAL_SCHEMA_VERSION: u32 = 5;
@@ -171,7 +179,7 @@ impl SourceBackedRelationalProjection {
     }
 
     pub fn raw_sql_query(&self, sql: &str, options: RawSqlOptions) -> Result<RawSqlResult> {
-        raw_sql_query_connection(&self.conn, sql, options).map_err(RelationalProjectionError::from)
+        raw_sql_query_connection(&self.conn, sql, options)
     }
 
     /// Replaces the complete relational projection from one Core generation.

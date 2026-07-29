@@ -1,5 +1,4 @@
 use ctx_history_index::{GenerationWriter, VerifiedIndex, WriterOptions};
-use ctx_history_search::sql_compatibility_path;
 use ctx_history_store::{CommittedCoreGeneration, SourceBackedRelationalProjection};
 use rusqlite::Connection;
 use std::{
@@ -90,7 +89,7 @@ pub(crate) fn initialize_generation_only_sql_projection(data_root: &Path) -> Str
         certified_source_bytes: core_receipt.certified_source_bytes,
     };
     let mut projection =
-        SourceBackedRelationalProjection::open(sql_compatibility_path(data_root)).unwrap();
+        SourceBackedRelationalProjection::open(data_root.join("relational.sqlite")).unwrap();
     let relational_receipt = projection.rebuild(&generation, std::iter::empty()).unwrap();
     assert_eq!(
         relational_receipt.core_generation_id,

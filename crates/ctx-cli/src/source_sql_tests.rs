@@ -3,7 +3,7 @@ use ctx_history_store::{
     RawSqlOptions, RawSqlValue, RelationalProjectionStatus, SourceBackedRelationalProjection,
 };
 
-use crate::{sql_compatibility_path, SqlCompatibility};
+use super::{sql_compatibility_path, SqlCompatibility};
 
 #[test]
 fn sql_compatibility_opens_only_the_independent_projection() {

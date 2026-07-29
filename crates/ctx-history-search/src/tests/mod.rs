@@ -40,4 +40,3 @@ mod ranking;
 mod rich;
 mod snippets;
 mod source_metadata;
-mod sql_compatibility;

@@ -12,7 +12,6 @@ mod identity;
 mod native_path_group;
 mod object_store;
 mod projection_journal;
-mod raw_sql;
 mod records;
 mod result_storage;
 mod runs;
@@ -66,21 +65,19 @@ pub use projection_journal::{
     PROJECTION_JOURNAL_MAX_PAGE_BYTES, PROJECTION_JOURNAL_PAGE_SIZE,
     PROJECTION_JOURNAL_RECORD_MAX_BYTES,
 };
-pub use raw_sql::{
-    RawSqlColumn, RawSqlLimits, RawSqlOptions, RawSqlResult, RawSqlTruncation, RawSqlValue,
-    RAW_SQL_DEFAULT_MAX_COLUMNS, RAW_SQL_DEFAULT_MAX_ROWS, RAW_SQL_DEFAULT_MAX_SQL_BYTES,
-    RAW_SQL_DEFAULT_MAX_VALUE_BYTES, RAW_SQL_DEFAULT_TIMEOUT, RAW_SQL_MAX_COLUMNS_CAP,
-    RAW_SQL_MAX_RESULT_CELLS, RAW_SQL_MAX_RESULT_PREVIEW_BYTES, RAW_SQL_MAX_ROWS_CAP,
-    RAW_SQL_MAX_SQL_BYTES_CAP, RAW_SQL_MAX_TIMEOUT, RAW_SQL_MAX_VALUE_BYTES_CAP,
-};
 pub use search::projections::{EventEmbeddingDocument, EventSearchHit, SemanticProjectionSnapshot};
 pub use semantic_projection_epoch::CanonicalSemanticProjectionVersion;
 pub use source_backed_relational::{
-    CommittedCoreGeneration, RelationalEventMetadata, RelationalFileTouchMetadata,
+    CommittedCoreGeneration, RawSqlColumn, RawSqlLimits, RawSqlOptions, RawSqlResult,
+    RawSqlTruncation, RawSqlValue, RelationalEventMetadata, RelationalFileTouchMetadata,
     RelationalProjectionError, RelationalProjectionMetadata, RelationalProjectionReceipt,
     RelationalProjectionRecord, RelationalProjectionStatus, RelationalSessionMetadata,
-    RelationalSourceMetadata, SourceBackedRelationalProjection,
-    RELATIONAL_PROJECTION_CONTRACT_VERSION, RELATIONAL_PROJECTION_SCHEMA_VERSION,
+    RelationalSourceMetadata, SourceBackedRelationalProjection, RAW_SQL_DEFAULT_MAX_COLUMNS,
+    RAW_SQL_DEFAULT_MAX_ROWS, RAW_SQL_DEFAULT_MAX_SQL_BYTES, RAW_SQL_DEFAULT_MAX_VALUE_BYTES,
+    RAW_SQL_DEFAULT_TIMEOUT, RAW_SQL_MAX_COLUMNS_CAP, RAW_SQL_MAX_RESULT_CELLS,
+    RAW_SQL_MAX_RESULT_PREVIEW_BYTES, RAW_SQL_MAX_ROWS_CAP, RAW_SQL_MAX_SQL_BYTES_CAP,
+    RAW_SQL_MAX_TIMEOUT, RAW_SQL_MAX_VALUE_BYTES_CAP, RELATIONAL_PROJECTION_CONTRACT_VERSION,
+    RELATIONAL_PROJECTION_SCHEMA_VERSION,
 };
 pub use source_generations::{
     NativePathRetainedSourceEntities, NativePathSourceEntityFrontier, NativePathSourceEntityKind,

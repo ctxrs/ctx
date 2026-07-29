@@ -3,13 +3,13 @@ use std::{fs, io::Read, path::PathBuf, time::Duration as StdDuration};
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Number, Value};
 
-use ctx_history_search::SqlCompatibility;
 use ctx_history_store::{
     RawSqlOptions, RawSqlResult, RawSqlValue, RAW_SQL_MAX_SQL_BYTES_CAP, RAW_SQL_MAX_TIMEOUT,
 };
 
 use crate::analytics::{count_bucket, duration_bucket, SqlTelemetry};
 use crate::output::{compact_json, print_json, SqlFormat};
+use crate::source_sql::SqlCompatibility;
 use crate::SqlArgs;
 
 pub(crate) fn parse_sql_timeout(value: &str) -> std::result::Result<StdDuration, String> {

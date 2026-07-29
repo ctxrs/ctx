@@ -106,3 +106,7 @@ impl SqlCompatibility {
 pub fn sql_compatibility_path(data_root: impl AsRef<Path>) -> PathBuf {
     data_root.as_ref().join("relational.sqlite")
 }
+
+#[cfg(test)]
+#[path = "source_sql_tests.rs"]
+mod tests;

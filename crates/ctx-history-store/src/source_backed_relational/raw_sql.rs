@@ -7,7 +7,7 @@ use std::{
 
 use rusqlite::{ffi, limits::Limit, types::ValueRef, Connection, ErrorCode};
 
-use crate::{Result, Store, StoreError};
+use super::{RelationalProjectionError, Result};
 
 pub const RAW_SQL_DEFAULT_MAX_ROWS: usize = 100;
 pub const RAW_SQL_MAX_ROWS_CAP: usize = 10_000;
@@ -101,20 +101,14 @@ impl RawSqlValue {
     }
 }
 
-impl Store {
-    pub fn raw_sql_query(&self, sql: &str, options: RawSqlOptions) -> Result<RawSqlResult> {
-        raw_sql_query_connection(&self.conn, sql, options)
-    }
-}
-
-pub(crate) fn raw_sql_query_connection(
+pub(super) fn raw_sql_query_connection(
     conn: &Connection,
     sql: &str,
     options: RawSqlOptions,
 ) -> Result<RawSqlResult> {
     let sql = sql.trim();
     if sql.is_empty() {
-        return Err(StoreError::RawSqlEmpty);
+        return Err(RelationalProjectionError::RawSqlEmpty);
     }
     validate_raw_sql_options(&options)?;
     validate_raw_sql_statement_bytes(sql, &options)?;
@@ -123,17 +117,17 @@ pub(crate) fn raw_sql_query_connection(
 
     let mut stmt = conn.prepare(sql)?;
     if stmt.parameter_count() > 0 {
-        return Err(StoreError::RawSqlHasParameters);
+        return Err(RelationalProjectionError::RawSqlHasParameters);
     }
     if !stmt.readonly() {
-        return Err(StoreError::RawSqlNotReadOnly);
+        return Err(RelationalProjectionError::RawSqlNotReadOnly);
     }
     let column_count = stmt.column_count();
     if column_count == 0 {
-        return Err(StoreError::RawSqlNoColumns);
+        return Err(RelationalProjectionError::RawSqlNoColumns);
     }
     if column_count > options.max_columns {
-        return Err(StoreError::RawSqlTooManyColumns {
+        return Err(RelationalProjectionError::RawSqlTooManyColumns {
             columns: column_count,
             max_columns: options.max_columns,
         });
@@ -196,11 +190,11 @@ pub(crate) fn raw_sql_query_connection(
     conn.progress_handler(0, None::<fn() -> bool>);
 
     match query_result {
-        Err(StoreError::Sql(rusqlite::Error::SqliteFailure(error, _)))
+        Err(RelationalProjectionError::Sql(rusqlite::Error::SqliteFailure(error, _)))
             if error.code == ErrorCode::OperationInterrupted
                 && started.elapsed() >= options.timeout =>
         {
-            Err(StoreError::RawSqlTimedOut {
+            Err(RelationalProjectionError::RawSqlTimedOut {
                 timeout_ms: duration_ms(options.timeout),
             })
         }
@@ -230,7 +224,7 @@ fn validate_raw_sql_options(options: &RawSqlOptions) -> Result<()> {
     )?;
     let timeout_ms = duration_ms(options.timeout);
     if timeout_ms == 0 || options.timeout > RAW_SQL_MAX_TIMEOUT {
-        return Err(StoreError::RawSqlLimitOutOfRange {
+        return Err(RelationalProjectionError::RawSqlLimitOutOfRange {
             field: "timeout_ms",
             value: usize::try_from(timeout_ms).unwrap_or(usize::MAX),
             min: 1,
@@ -261,7 +255,7 @@ fn validate_raw_sql_result_preview_budget(
     if estimated_cells > RAW_SQL_MAX_RESULT_CELLS
         || estimated_bytes > RAW_SQL_MAX_RESULT_PREVIEW_BYTES
     {
-        return Err(StoreError::RawSqlResultBudgetTooLarge {
+        return Err(RelationalProjectionError::RawSqlResultBudgetTooLarge {
             estimated_bytes,
             max_result_bytes: RAW_SQL_MAX_RESULT_PREVIEW_BYTES,
         });
@@ -280,20 +274,21 @@ impl<'a> RawSqlLimitGuard<'a> {
     fn apply(conn: &'a Connection, options: &RawSqlOptions) -> Result<Self> {
         let length_limit = raw_sql_length_limit(options)?;
         let sql_length_limit = i32::try_from(options.max_sql_bytes).map_err(|_| {
-            StoreError::RawSqlLimitOutOfRange {
+            RelationalProjectionError::RawSqlLimitOutOfRange {
                 field: "max_sql_bytes",
                 value: options.max_sql_bytes,
                 min: 1,
                 max: RAW_SQL_MAX_SQL_BYTES_CAP,
             }
         })?;
-        let column_limit =
-            i32::try_from(options.max_columns).map_err(|_| StoreError::RawSqlLimitOutOfRange {
+        let column_limit = i32::try_from(options.max_columns).map_err(|_| {
+            RelationalProjectionError::RawSqlLimitOutOfRange {
                 field: "max_columns",
                 value: options.max_columns,
                 min: 1,
                 max: RAW_SQL_MAX_COLUMNS_CAP,
-            })?;
+            }
+        })?;
         let guard = Self {
             conn,
             length: conn.set_limit(Limit::SQLITE_LIMIT_LENGTH, length_limit),
@@ -318,7 +313,7 @@ fn raw_sql_length_limit(options: &RawSqlOptions) -> Result<i32> {
         .max_value_bytes
         .saturating_add(RAW_SQL_VALUE_LENGTH_MARGIN_BYTES);
     let bytes = bytes.max(RAW_SQL_MIN_SQLITE_LENGTH_LIMIT_BYTES);
-    i32::try_from(bytes).map_err(|_| StoreError::RawSqlLimitOutOfRange {
+    i32::try_from(bytes).map_err(|_| RelationalProjectionError::RawSqlLimitOutOfRange {
         field: "max_value_bytes",
         value: options.max_value_bytes,
         min: 1,
@@ -330,7 +325,7 @@ fn validate_raw_sql_usize(field: &'static str, value: usize, min: usize, max: us
     if (min..=max).contains(&value) {
         Ok(())
     } else {
-        Err(StoreError::RawSqlLimitOutOfRange {
+        Err(RelationalProjectionError::RawSqlLimitOutOfRange {
             field,
             value,
             min,
@@ -340,7 +335,7 @@ fn validate_raw_sql_usize(field: &'static str, value: usize, min: usize, max: us
 }
 
 fn reject_sql_tail(conn: &Connection, sql: &str) -> Result<()> {
-    let c_sql = CString::new(sql).map_err(|_| StoreError::RawSqlInteriorNul)?;
+    let c_sql = CString::new(sql).map_err(|_| RelationalProjectionError::RawSqlInteriorNul)?;
     let mut stmt = ptr::null_mut();
     let mut tail: *const c_char = ptr::null();
     let rc =
@@ -358,7 +353,9 @@ fn reject_sql_tail(conn: &Connection, sql: &str) -> Result<()> {
     let tail_offset = (tail as usize).saturating_sub(start);
     let sql_bytes = c_sql.as_bytes();
     if tail_offset < sql_bytes.len() && sql_tail_has_statement(&sql[tail_offset..]) {
-        return Err(StoreError::Sql(rusqlite::Error::MultipleStatement));
+        return Err(RelationalProjectionError::Sql(
+            rusqlite::Error::MultipleStatement,
+        ));
     }
     Ok(())
 }
