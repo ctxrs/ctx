@@ -14,16 +14,19 @@ use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use super::super::FirebenderOutputEvidence;
+use super::super::{
+    firebender_event_parts, firebender_message_time, firebender_output_evidence,
+    FirebenderOutputEvidence,
+};
 use super::{
-    build_page, core::firebender_raw_row_digest, firebender_path_identity,
-    firebender_source_revision, validate_schema, FirebenderFrontier, FirebenderPage, FirebenderRow,
+    firebender_path_identity, firebender_raw_row_digest, firebender_source_revision,
+    scan::build_page, validate_schema, FirebenderFrontier, FirebenderPage, FirebenderRow,
     FirebenderSqliteDatabase, SqliteSourceEvidence,
 };
 use crate::{
     native_source::NativeSqliteValue,
     provider::{
-        normalization::provider_timestamp_millis,
+        normalization::{provider_policy_event_text, provider_timestamp_millis},
         sqlite::{sqlite_schema_fingerprint, sqlite_table_columns, SqliteLengthPreflightGuard},
     },
     CaptureError, Result as CaptureResult, FIREBENDER_SQLITE_SOURCE_FORMAT,
@@ -171,9 +174,9 @@ impl FirebenderSourceBackedScanner {
         if self.drained {
             return Ok(None);
         }
-        let page = self.database.read(&self.database_path, |conn| {
-            build_page(conn, &self.frontier, false)
-        })?;
+        let page = self
+            .database
+            .read(&self.database_path, |conn| build_page(conn, &self.frontier))?;
         self.frontier = page.next.clone();
         if page.row.is_none() && page.rejection.is_none() {
             self.drained = page.next.terminal;
@@ -399,36 +402,23 @@ fn firebender_document(
 ) -> FirebenderSourceBackedResult<Option<LexicalDocument>> {
     let message_index_u64 =
         u64::try_from(message_index).map_err(|_| FirebenderSourceBackedError::CountOverflow)?;
-    let native = super::firebender_native_event(
+    let event = firebender_event_parts(
         &row.id,
         message_index_u64,
         message,
         firebender_message_occurred_at(row, message_index, message),
     );
-    let body = if native.event_type == EventType::ToolOutput {
-        let evidence = super::firebender_output_evidence(message);
+    let body = if event.event_type == EventType::ToolOutput {
+        let evidence = firebender_output_evidence(message);
         if !evidence.failure && !evidence.timeout {
             return Ok(None);
         }
         sparse_output_body(&evidence)
     } else {
-        native
-            .payload
-            .get("text")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned)
-            .unwrap_or_else(|| {
-                format!(
-                    "Firebender {}",
-                    message
-                        .get("role")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("message")
-                )
-            })
+        provider_policy_event_text(event.event_type, &event.text, &event.body).text
     };
     let body = if body.is_empty() {
-        format!("Firebender {}", native.event_type.as_str())
+        format!("Firebender {}", event.event_type.as_str())
     } else {
         body
     };
@@ -468,9 +458,9 @@ fn firebender_document(
         agent_type: ctx_history_core::AgentType::Primary.as_str().to_owned(),
         is_primary: true,
         event_sequence: message_index_u64,
-        occurred_at_unix_ms: Some(native.occurred_at.timestamp_millis()),
-        event_type: native.event_type.as_str().to_owned(),
-        role: native.role.map(|role| role.as_str().to_owned()),
+        occurred_at_unix_ms: Some(event.occurred_at.timestamp_millis()),
+        event_type: event.event_type.as_str().to_owned(),
+        role: event.role.map(|role| role.as_str().to_owned()),
         body,
         workspace: workspace.map(str::to_owned),
         cwd: None,
@@ -522,7 +512,7 @@ fn firebender_message_occurred_at(
 ) -> DateTime<Utc> {
     let started_at = provider_timestamp_millis(Some(row.created_at), DateTime::<Utc>::UNIX_EPOCH);
     let offset = i64::try_from(message_index).unwrap_or(i64::MAX);
-    super::firebender_message_time(message, started_at + chrono::Duration::milliseconds(offset))
+    firebender_message_time(message, started_at + chrono::Duration::milliseconds(offset))
 }
 
 fn sparse_output_body(evidence: &FirebenderOutputEvidence) -> String {
@@ -630,7 +620,6 @@ fn load_exact_row(conn: &Connection, rowid: i64) -> CaptureResult<Option<Fireben
             })?;
         Ok(FirebenderRow {
             rowid,
-            row_ordinal: 0,
             id: row.get(0)?,
             name: row.get(1)?,
             created_at: row.get(2)?,

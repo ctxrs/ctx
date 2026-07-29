@@ -5,24 +5,37 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{EventRole, EventType};
+use ctx_history_store::Store;
 use serde_json::{json, Value};
 
 use crate::{
     provider::normalization::{
-        provider_capped_json, provider_policy_body, provider_policy_event_text,
-        provider_result_identifier_evidence, provider_result_outcome_evidence, provider_role,
-        provider_timestamp_value,
+        provider_policy_body, provider_policy_event_text, provider_result_identifier_evidence,
+        provider_result_outcome_evidence, provider_role, provider_timestamp_value,
     },
-    CaptureError, Result, FIREBENDER_SQLITE_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS,
+    CaptureError, ProviderAdapterContext, ProviderImportOptions, ProviderImportSummary, Result,
+    FIREBENDER_SQLITE_SOURCE_FORMAT,
 };
 
 mod message_text;
 pub(crate) mod native_path;
 
-pub(crate) use message_text::{firebender_message_text, firebender_result_content};
-pub(crate) use native_path::import_firebender_nativepath;
+pub(crate) use message_text::firebender_message_text;
+#[allow(unused_imports)]
+pub(crate) use message_text::firebender_result_content;
 
-pub(super) const FIREBENDER_LOCATOR_KIND: &str = "firebender-chat-session-row-v1";
+/// Rejects the released Store-ingestion entrypoint while shared dispatch still
+/// carries its historical signature. Firebender ingestion is source-backed.
+pub(crate) fn import_firebender_nativepath(
+    _path: &Path,
+    _store: &mut Store,
+    _context: ProviderAdapterContext,
+    _import_options: ProviderImportOptions,
+) -> Result<ProviderImportSummary> {
+    Err(CaptureError::UnsupportedSchema(
+        "Firebender Store ingestion was removed; use source-backed ingestion".to_owned(),
+    ))
+}
 
 pub(crate) fn firebender_chat_history_db_path(path: &Path) -> Result<PathBuf> {
     match fs::symlink_metadata(path) {
@@ -191,8 +204,6 @@ pub(crate) struct FirebenderNativeEvent {
     pub(crate) provider_event_hash: Option<String>,
     pub(crate) cursor: String,
     pub(crate) event_type: EventType,
-    pub(super) role: Option<EventRole>,
-    pub(super) occurred_at: DateTime<Utc>,
     pub(crate) payload: Value,
     pub(crate) metadata: Value,
 }
@@ -219,15 +230,13 @@ pub(crate) fn firebender_native_event(
         provider_event_hash: event.provider_event_hash,
         cursor: event.cursor,
         event_type: event.event_type,
-        role: event.role,
-        occurred_at: event.occurred_at,
         payload: json!({
             "text": retained_text.text,
             "text_retention": retained_text.retention.as_json(),
             "result_evidence": result_evidence,
             "result_outcome": result_outcome,
             "source_format": FIREBENDER_SQLITE_SOURCE_FORMAT,
-            "body": provider_capped_json(&retained_body, PROVIDER_MAX_PREVIEW_CHARS),
+            "body": retained_body,
         }),
         metadata: event.metadata,
     }
