@@ -2211,9 +2211,7 @@ fn register_codex_session_tree_route(
         move |request| {
             let hydrated = CodexLocatorResolverV0::discover([&hydration_root])
                 .and_then(|resolver| resolver.hydrate(request.locator()))
-                .map_err(|error| {
-                    hydration_failure(HydrationFailureKind::StaleRecordEvidence, error)
-                })?;
+                .map_err(codex_locator_hydration_failure)?;
             Ok(HydratedProviderRecord {
                 event_id: request.event_id(),
                 provider_bytes: codex_display_bytes(hydrated)?,
@@ -6138,6 +6136,18 @@ mod tests {
                 .provider_bytes,
             cold_expected[0]
         );
+
+        let temporarily_absent = sessions.join("selected.jsonl.temporarily-absent");
+        fs::rename(&selected, &temporarily_absent).unwrap();
+        let unavailable = tree_registry
+            .resolver_registry()
+            .hydrate_event(&cold_requests[0])
+            .unwrap_err();
+        assert_eq!(
+            unavailable.kind,
+            HydrationFailureKind::TemporarilyUnavailable
+        );
+        fs::rename(&temporarily_absent, &selected).unwrap();
 
         let mutated_first = format!(
             "selected full lexical body {} mutatedtaillexeme",
