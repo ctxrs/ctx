@@ -683,7 +683,8 @@ fn astrbot_hydration_types_malformed_rows_schema_and_locator_without_fallbacks()
             "AstrBot source-backed path contains forbidden fallback {forbidden}"
         );
     }
-    let route_source = include_str!("../../../../source_backed.rs");
+    let route_source =
+        include_str!("../../../../source_backed/registration/inventories.rs");
     let route = route_source
         .split_once("pub fn register_astrbot_source_backed_route")
         .unwrap()
