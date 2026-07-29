@@ -29,11 +29,12 @@ use thiserror::Error;
 use super::codex::nativepath::{
     codex_source_observation, codex_writer_base_sources, discover_codex_root_inventory_v0,
     ingest_codex_sources_serial_v0, managed_codex_session_source,
+    observe_codex_explicit_session_source_backed_v0,
     observe_codex_prompt_history_source_backed_explicit_v0,
-    scan_codex_prompt_history_source_backed_v0, CodexHydratedRecordV0, CodexLocatorResolverV0,
-    CodexPromptHistorySourceBackedDispositionV0, CodexPromptHistorySourceBackedInputV0,
-    CodexPromptHistorySourceBackedResolverV0, CodexSourceBackedCountersV0,
-    CodexSourceBackedPhaseTimingsV0,
+    scan_codex_prompt_history_source_backed_v0, CodexExplicitSessionSourceBackedInputV0,
+    CodexHydratedRecordV0, CodexLocatorResolverV0, CodexPromptHistorySourceBackedDispositionV0,
+    CodexPromptHistorySourceBackedInputV0, CodexPromptHistorySourceBackedResolverV0,
+    CodexSourceBackedCountersV0, CodexSourceBackedErrorV0, CodexSourceBackedPhaseTimingsV0,
 };
 use super::custom_history_jsonl::{
     observe_custom_history_source_backed_explicit, revalidate_custom_history_source_backed,
@@ -226,25 +227,6 @@ macro_rules! route {
     };
 }
 
-macro_rules! unsupported_format_route {
-    (
-        $provider:ident, $selected_format:literal => $certified_format:literal,
-        $automatic:literal, $explicit:literal, $authority:ident, $reason:literal
-    ) => {
-        SourceBackedProviderRouteMetadata {
-            provider: CaptureProvider::$provider,
-            source_format: $selected_format,
-            certified_source_format: $certified_format,
-            automatic: $automatic,
-            explicit_manual: $explicit,
-            selector_authority: SourceBackedSelectorAuthority::$authority,
-            exact_hydration: SourceBackedHydrationSupport::Unsupported,
-            hydration_limitation: None,
-            unsupported_reason: Some($reason),
-        }
-    };
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceBackedRouteConstructor {
     ProviderSource,
@@ -335,13 +317,13 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         DiscoveredWinner,
         Full
     ),
-    unsupported_format_route!(
+    route!(
         Codex,
         "codex_session_jsonl" => "codex_session_jsonl",
         false,
         true,
         ExplicitPath,
-        "single-file Codex rollout source-backed discovery is not exposed to the coordinator"
+        Full
     ),
     route!(
         Claude,
@@ -2089,9 +2071,12 @@ pub fn register_landed_source_backed_route(
         CaptureProvider::Codex if source.source_format == "codex_session_jsonl_tree" => {
             register_codex_session_tree_route(registry, source, selection)
         }
+        CaptureProvider::Codex if source.source_format == "codex_session_jsonl" => {
+            register_codex_explicit_session_route(registry, source, selection)
+        }
         CaptureProvider::Codex => Err(invalid_route(
             source.provider,
-            "single-file Codex session source-backed discovery is not exposed to the coordinator",
+            "unknown Codex source format",
         )),
         CaptureProvider::Zed => register_zed_route(registry, source, selection),
         CaptureProvider::Gemini => register_gemini_source_backed_route(registry, source, selection),
@@ -2242,6 +2227,192 @@ fn register_codex_session_tree_route(
         driver,
     )?);
     Ok(())
+}
+
+fn register_codex_explicit_session_route(
+    registry: &mut SourceBackedProviderRegistry,
+    source: ProviderSource,
+    selection: SourceBackedRouteSelection,
+) -> SourceBackedCoordinatorResult<()> {
+    let input = CodexExplicitSessionSourceBackedInputV0::discover(&source.path)
+        .map_err(|error| invalid_route(source.provider, error.to_string()))?;
+    let owned_source = input.source().clone();
+    let scan_input = input.clone();
+    let revalidation_input = input.clone();
+    let hydration_input = input.clone();
+    let batch_hydration_input = input;
+    let claimed_source = owned_source.clone();
+    let driver = SourceBackedRouteDriver::new(
+        move |sink| {
+            let opening = observe_codex_explicit_session_source_backed_v0(&scan_input)
+                .map_err(route_error)?;
+            let base = sink.base_source(&claimed_source).cloned();
+            if opening.is_missing() {
+                let closing = observe_codex_explicit_session_source_backed_v0(&scan_input)
+                    .map_err(route_error)?;
+                let inventory = opening.certify_against(&closing).map_err(route_error)?;
+                if let Some(base) = base {
+                    let deletion = CertifiedSourceDeletion::from_inventory(
+                        base.observation().source().clone(),
+                        &inventory,
+                    )
+                    .map_err(route_error)?;
+                    sink.delete_source(deletion, inventory)
+                        .map_err(route_coordinator_error)?;
+                }
+                return Ok(());
+            }
+
+            let plan = opening.source_plan().ok_or_else(|| {
+                SourceBackedRouteError::new(
+                    SourceBackedRouteErrorKind::SourceChanged,
+                    "explicit Codex session disappeared after its opening observation",
+                )
+            })?;
+            if !plan.1.exact_descriptor_eq(&claimed_source) {
+                return Err(SourceBackedRouteError::new(
+                    SourceBackedRouteErrorKind::SourceChanged,
+                    "explicit Codex session changed its exact source identity",
+                ));
+            }
+            sink.claim(&claimed_source)
+                .map_err(route_coordinator_error)?;
+            let base_sources = base
+                .into_iter()
+                .map(|base| (base.observation().source().clone(), base))
+                .collect::<HashMap<_, _>>();
+            let mut revalidation = HashMap::new();
+            let mut timings = CodexSourceBackedPhaseTimingsV0::default();
+            let mut counters = CodexSourceBackedCountersV0::default();
+            ingest_codex_sources_serial_v0(
+                vec![plan],
+                &base_sources,
+                sink.writer,
+                &mut revalidation,
+                &mut timings,
+                &mut counters,
+            )
+            .map_err(route_error)
+        },
+        move |candidate| candidate.exact_descriptor_eq(&owned_source),
+        move |target| match target {
+            SourceBackedRevalidationTarget::Source(expected) => {
+                let Ok(inventory) =
+                    observe_codex_explicit_session_source_backed_v0(&revalidation_input)
+                else {
+                    return false;
+                };
+                inventory
+                    .source_plan()
+                    .filter(|(_, source_key, _)| {
+                        source_key.exact_descriptor_eq(expected.observation().source())
+                    })
+                    .and_then(|(catalog_source, source_key, _)| {
+                        codex_source_observation(&source_key, &catalog_source.catalog_observation)
+                            .ok()
+                    })
+                    .is_some_and(|observation| observation == *expected.observation())
+            }
+            SourceBackedRevalidationTarget::Deletion(deletion) => {
+                let Ok(opening) =
+                    observe_codex_explicit_session_source_backed_v0(&revalidation_input)
+                else {
+                    return false;
+                };
+                let Ok(closing) =
+                    observe_codex_explicit_session_source_backed_v0(&revalidation_input)
+                else {
+                    return false;
+                };
+                opening
+                    .certify_against(&closing)
+                    .is_ok_and(|inventory| deletion.verifies(&inventory))
+            }
+        },
+        move |request| hydrate_codex_explicit_event(&hydration_input, request),
+    )
+    .with_batch_hydration(move |request| {
+        hydrate_codex_explicit_batch(&batch_hydration_input, request)
+    });
+    registry.register(executable_route(
+        source,
+        selection,
+        SourceBackedSelectorAuthority::ExplicitPath,
+        driver,
+    )?);
+    Ok(())
+}
+
+fn hydrate_codex_explicit_event(
+    input: &CodexExplicitSessionSourceBackedInputV0,
+    request: &EventHydrationRequest,
+) -> Result<HydratedProviderRecord, HydrationFailure> {
+    codex_explicit_resolver(input)?
+        .hydrate_event_request(request)
+        .map_err(codex_locator_hydration_failure)
+}
+
+fn hydrate_codex_explicit_batch(
+    input: &CodexExplicitSessionSourceBackedInputV0,
+    request: &BatchHydrationRequest,
+) -> Result<BatchHydrationResult, HydrationFailure> {
+    codex_explicit_resolver(input)?
+        .hydrate_batch_request(request)
+        .map_err(codex_locator_hydration_failure)
+}
+
+fn codex_explicit_resolver(
+    input: &CodexExplicitSessionSourceBackedInputV0,
+) -> Result<CodexLocatorResolverV0, HydrationFailure> {
+    let inventory = observe_codex_explicit_session_source_backed_v0(input)
+        .map_err(codex_explicit_observation_hydration_failure)?;
+    inventory
+        .resolver()
+        .map_err(codex_locator_hydration_failure)?
+        .ok_or_else(|| {
+            hydration_failure(
+                HydrationFailureKind::ConfirmedDeleted,
+                "the explicit Codex session source is absent",
+            )
+        })
+}
+
+fn codex_explicit_observation_hydration_failure(
+    error: CodexSourceBackedErrorV0,
+) -> HydrationFailure {
+    let kind = match &error {
+        CodexSourceBackedErrorV0::ExplicitSourceIdentityChanged
+        | CodexSourceBackedErrorV0::Capture(
+            CaptureError::InvalidPayload(_) | CaptureError::SourceChangedDuringCapture,
+        ) => HydrationFailureKind::StaleSourceEvidence,
+        _ => HydrationFailureKind::TemporarilyUnavailable,
+    };
+    hydration_failure(kind, error)
+}
+
+fn codex_locator_hydration_failure(error: CodexSourceBackedErrorV0) -> HydrationFailure {
+    let kind = match &error {
+        CodexSourceBackedErrorV0::LocatorDigestMismatch
+        | CodexSourceBackedErrorV0::LocatorRecordBoundaryMismatch => {
+            HydrationFailureKind::StaleRecordEvidence
+        }
+        CodexSourceBackedErrorV0::LocatorRangeMissing => HydrationFailureKind::MissingRecord,
+        CodexSourceBackedErrorV0::ExplicitSourceIdentityChanged
+        | CodexSourceBackedErrorV0::Capture(
+            CaptureError::SourceChangedDuringCapture
+            | CaptureError::InvalidProviderTranscriptPath { .. },
+        ) => HydrationFailureKind::StaleSourceEvidence,
+        CodexSourceBackedErrorV0::InvalidCodexLocator
+        | CodexSourceBackedErrorV0::LocatorSourceNotFound(_)
+        | CodexSourceBackedErrorV0::LocatorRangeTooLarge
+        | CodexSourceBackedErrorV0::LocatorEventMismatch => HydrationFailureKind::InvalidLocator,
+        CodexSourceBackedErrorV0::LocatorRecordNotDisplayable => {
+            HydrationFailureKind::UnsupportedParserRevision
+        }
+        CodexSourceBackedErrorV0::Json(_) => HydrationFailureKind::StaleRecordEvidence,
+        _ => HydrationFailureKind::TemporarilyUnavailable,
+    };
+    hydration_failure(kind, error)
 }
 
 // SHA-256("ctx.codex.prompt-history.default-catalog-lineage.v0"). This is
@@ -5202,11 +5373,7 @@ mod tests {
             .iter()
             .filter(|route| route.unsupported_reason.is_some())
             .collect::<Vec<_>>();
-        assert_eq!(unsupported.len(), 1);
-        assert_eq!(unsupported[0].provider, CaptureProvider::Codex);
-        assert_eq!(unsupported[0].source_format, "codex_session_jsonl");
-        assert!(!unsupported[0].automatic);
-        assert!(unsupported[0].explicit_manual);
+        assert!(unsupported.is_empty());
         let mut formats = HashSet::new();
         for route in LANDED_SOURCE_BACKED_ROUTES {
             assert!(
@@ -5738,6 +5905,329 @@ mod tests {
     }
 
     #[test]
+    fn explicit_codex_session_route_is_exact_replay_stable_and_typed_for_hydration() {
+        let temp = tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        let selected = sessions.join("selected.jsonl");
+        let sibling = sessions.join("sibling.jsonl");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let native_session_id = "019facf0-1111-7777-8888-000000000001";
+        let sibling_session_id = "019facf0-2222-7777-8888-000000000002";
+        let selected_first = format!(
+            "selected full lexical body {} selectedtaillexeme",
+            "meaningful ".repeat(1_024)
+        );
+        let selected_second = "selected second exact message".to_owned();
+        let selected_bytes =
+            codex_rollout_bytes(native_session_id, &[&selected_first, &selected_second]);
+        let sibling_bytes = codex_rollout_bytes(sibling_session_id, &["siblingleakagesentinel"]);
+        fs::write(&selected, &selected_bytes).unwrap();
+        fs::write(&sibling, &sibling_bytes).unwrap();
+
+        let route_metadata =
+            landed_format_route(CaptureProvider::Codex, "codex_session_jsonl").unwrap();
+        assert_eq!(
+            route_metadata.exact_hydration,
+            SourceBackedHydrationSupport::Full
+        );
+        assert_eq!(
+            route_metadata.selector_authority,
+            SourceBackedSelectorAuthority::ExplicitPath
+        );
+        assert!(!route_metadata.automatic);
+        assert!(route_metadata.explicit_manual);
+        assert!(route_metadata.unsupported_reason.is_none());
+
+        let explicit_source = fixture_provider_source_at(
+            CaptureProvider::Codex,
+            "codex_session_jsonl",
+            ProviderImportSupport::Explicit,
+            &selected,
+        );
+        let mut explicit_registry = SourceBackedProviderRegistry::new();
+        register_landed_source_backed_route(
+            &mut explicit_registry,
+            explicit_source,
+            SourceBackedRouteSelection::ExplicitManual,
+        )
+        .unwrap();
+        let registered = explicit_registry.routes().next().unwrap();
+        assert_eq!(
+            registered.selection,
+            Some(SourceBackedRouteSelection::ExplicitManual)
+        );
+        assert_eq!(
+            registered.selector_authority,
+            SourceBackedSelectorAuthority::ExplicitPath
+        );
+        assert!(registered.unsupported_reason.is_none());
+
+        let explicit_index_root = temp.path().join("explicit-index");
+        let cold = refresh_source_backed_generation(
+            &explicit_index_root,
+            &explicit_registry,
+            WriterOptions {
+                indexer_threads: 1,
+                memory_bytes: 15_000_000,
+            },
+        )
+        .unwrap();
+        assert_eq!(cold.scanned_routes, 1);
+        assert_eq!(cold.sources.len(), 1);
+        assert_eq!(cold.commit.indexed_documents, 2);
+        assert!(cold.removals.is_empty());
+        let selected_source = cold.sources[0].observation().source().clone();
+        assert_eq!(selected_source.source_format(), "codex_session_jsonl");
+
+        let cold_index = VerifiedIndex::open(&explicit_index_root).unwrap();
+        assert_eq!(cold_index.document_count(), 2);
+        assert_eq!(
+            cold_index
+                .search_event_candidates("selectedtaillexeme", 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(cold_index
+            .search_event_candidates("siblingleakagesentinel", 10)
+            .unwrap()
+            .is_empty());
+        let cold_events = cold_index
+            .source_event_page(&selected_source, None, 10)
+            .unwrap()
+            .items;
+        assert_eq!(cold_events.len(), 2);
+        assert!(cold_events.iter().all(|event| {
+            event.source_path.as_deref() == selected.to_str()
+                && event.provider_session_id.as_deref() == Some(native_session_id)
+        }));
+        for event in &cold_events {
+            assert_eq!(
+                event.locator.revision_policy(),
+                LocatorRevisionPolicy::StableRecordEvidence
+            );
+            assert!(event.locator.certified_source_revision_digest().is_none());
+            let NativeRecordCoordinate::Jsonl {
+                byte_length,
+                physical_ordinal,
+                native_session_key,
+                native_event_key,
+                ..
+            } = event.locator.coordinate()
+            else {
+                panic!("explicit Codex route emitted a non-JSONL locator");
+            };
+            assert_ne!(*byte_length, 0);
+            assert_eq!(*physical_ordinal, event.event_sequence);
+            assert_eq!(
+                native_session_key,
+                &Some(TypedKey::Utf8(native_session_id.to_owned()))
+            );
+            assert_eq!(native_event_key, &Some(TypedKey::U64(event.event_sequence)));
+        }
+
+        let cold_requests = cold_events
+            .iter()
+            .map(|event| EventHydrationRequest::new(event.event_id, event.locator.clone()).unwrap())
+            .collect::<Vec<_>>();
+        let cold_batch = BatchHydrationRequest::new(cold_requests.clone()).unwrap();
+        let cold_hydrated = explicit_registry
+            .resolver_registry()
+            .hydrate_batch(&cold_batch)
+            .unwrap();
+        let cold_expected = cold_events
+            .iter()
+            .map(|event| match event.event_sequence {
+                1 => selected_first.as_bytes().to_vec(),
+                2 => selected_second.as_bytes().to_vec(),
+                sequence => panic!("unexpected selected event sequence {sequence}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            cold_hydrated
+                .records()
+                .iter()
+                .map(|record| record.provider_bytes.clone())
+                .collect::<Vec<_>>(),
+            cold_expected
+        );
+
+        let replay = refresh_source_backed_generation(
+            &explicit_index_root,
+            &explicit_registry,
+            WriterOptions {
+                indexer_threads: 1,
+                memory_bytes: 15_000_000,
+            },
+        )
+        .unwrap();
+        assert_eq!(replay.commit.indexed_documents, 2);
+        assert_eq!(replay.sources, cold.sources);
+        let replay_index = VerifiedIndex::open(&explicit_index_root).unwrap();
+        let replay_events = replay_index
+            .source_event_page(&selected_source, None, 10)
+            .unwrap()
+            .items;
+        assert_eq!(replay_events, cold_events);
+        assert_eq!(
+            explicit_registry
+                .resolver_registry()
+                .hydrate_batch(&cold_batch)
+                .unwrap()
+                .records()
+                .iter()
+                .map(|record| record.provider_bytes.clone())
+                .collect::<Vec<_>>(),
+            cold_expected
+        );
+
+        let mut tree_registry = SourceBackedProviderRegistry::new();
+        register_landed_source_backed_route(
+            &mut tree_registry,
+            fixture_provider_source_at(
+                CaptureProvider::Codex,
+                "codex_session_jsonl_tree",
+                ProviderImportSupport::Native,
+                &sessions,
+            ),
+            SourceBackedRouteSelection::Automatic,
+        )
+        .unwrap();
+        let tree_index_root = temp.path().join("tree-index");
+        let tree = refresh_source_backed_generation(
+            &tree_index_root,
+            &tree_registry,
+            WriterOptions {
+                indexer_threads: 1,
+                memory_bytes: 15_000_000,
+            },
+        )
+        .unwrap();
+        assert_eq!(tree.sources.len(), 2);
+        let tree_index = VerifiedIndex::open(&tree_index_root).unwrap();
+        assert_eq!(tree_index.document_count(), 3);
+        assert_eq!(
+            tree_index
+                .source_event_page(&selected_source, None, 10)
+                .unwrap()
+                .items,
+            cold_events
+        );
+        assert_eq!(
+            tree_registry
+                .resolver_registry()
+                .hydrate_event(&cold_requests[0])
+                .unwrap()
+                .provider_bytes,
+            cold_expected[0]
+        );
+
+        let mutated_first = format!(
+            "selected full lexical body {} mutatedtaillexeme",
+            "meaningful ".repeat(1_024)
+        );
+        fs::write(
+            &selected,
+            codex_rollout_bytes(native_session_id, &[&mutated_first, &selected_second]),
+        )
+        .unwrap();
+        let original_first = cold_events
+            .iter()
+            .find(|event| event.event_sequence == 1)
+            .unwrap();
+        let stale = explicit_registry
+            .resolver_registry()
+            .hydrate_event(
+                &EventHydrationRequest::new(
+                    original_first.event_id,
+                    original_first.locator.clone(),
+                )
+                .unwrap(),
+            )
+            .unwrap_err();
+        assert_eq!(stale.kind, HydrationFailureKind::StaleRecordEvidence);
+
+        refresh_source_backed_generation(
+            &explicit_index_root,
+            &explicit_registry,
+            WriterOptions {
+                indexer_threads: 1,
+                memory_bytes: 15_000_000,
+            },
+        )
+        .unwrap();
+        let mutated_index = VerifiedIndex::open(&explicit_index_root).unwrap();
+        assert!(mutated_index
+            .search_event_candidates("selectedtaillexeme", 10)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            mutated_index
+                .search_event_candidates("mutatedtaillexeme", 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        let mutated_events = mutated_index
+            .source_event_page(&selected_source, None, 10)
+            .unwrap()
+            .items;
+        assert_eq!(
+            mutated_events
+                .iter()
+                .map(|event| event.event_id)
+                .collect::<Vec<_>>(),
+            cold_events
+                .iter()
+                .map(|event| event.event_id)
+                .collect::<Vec<_>>()
+        );
+        assert_ne!(
+            mutated_events
+                .iter()
+                .find(|event| event.event_sequence == 1)
+                .unwrap()
+                .locator,
+            original_first.locator
+        );
+
+        fs::remove_file(&selected).unwrap();
+        let deleted = explicit_registry
+            .resolver_registry()
+            .hydrate_event(&cold_requests[0])
+            .unwrap_err();
+        assert_eq!(deleted.kind, HydrationFailureKind::ConfirmedDeleted);
+        let deletion = refresh_source_backed_generation(
+            &explicit_index_root,
+            &explicit_registry,
+            WriterOptions {
+                indexer_threads: 1,
+                memory_bytes: 15_000_000,
+            },
+        )
+        .unwrap();
+        assert!(deletion.sources.is_empty());
+        assert_eq!(deletion.removals.len(), 1);
+        assert_eq!(
+            VerifiedIndex::open(&explicit_index_root)
+                .unwrap()
+                .document_count(),
+            0
+        );
+
+        fs::create_dir(&selected).unwrap();
+        let unavailable = explicit_registry
+            .resolver_registry()
+            .hydrate_event(&cold_requests[0])
+            .unwrap_err();
+        assert_eq!(
+            unavailable.kind,
+            HydrationFailureKind::TemporarilyUnavailable
+        );
+    }
+
+    #[test]
     fn resolver_routes_selected_tree_to_certified_leaf_format() {
         let route = fixture_route_with_selected_format(
             CaptureProvider::Qoder,
@@ -5779,6 +6269,46 @@ mod tests {
             SourceAnchor::CatalogLineage([lineage; 32]),
         )
         .unwrap()
+    }
+
+    fn codex_rollout_bytes(native_session_id: &str, messages: &[&str]) -> Vec<u8> {
+        let mut records = vec![serde_json::json!({
+            "timestamp": "2026-07-29T12:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": native_session_id,
+                "timestamp": "2026-07-29T12:00:00Z",
+                "cwd": "/tmp/explicit-codex-source",
+                "originator": "codex_cli_rs",
+                "cli_version": "0.1.0",
+                "source": "cli",
+                "model_provider": "openai"
+            }
+        })];
+        records.extend(messages.iter().enumerate().map(|(index, message)| {
+            serde_json::json!({
+                "timestamp": format!("2026-07-29T12:00:{:02}Z", index.saturating_add(1)),
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": if index == 0 { "user" } else { "assistant" },
+                    "content": [{
+                        "type": "input_text",
+                        "text": message
+                    }]
+                }
+            })
+        }));
+        let mut bytes = records
+            .into_iter()
+            .flat_map(|record| {
+                let mut line = serde_json::to_vec(&record).unwrap();
+                line.push(b'\n');
+                line
+            })
+            .collect::<Vec<_>>();
+        bytes.shrink_to_fit();
+        bytes
     }
 
     fn fixture_session_id(source: &SourceKey) -> ctx_history_core::StableEntityId {

@@ -427,8 +427,38 @@ fn catalog_codex_session_file(
     observation: &CodexFileObservation,
     cataloged_at_ms: i64,
 ) -> Result<CatalogSession> {
-    let path = &source_file.path;
-    let session_meta = read_codex_session_meta_opened(source_file)?;
+    catalog_codex_session_opened(
+        &source_file.path,
+        &source_file.opened,
+        source_root,
+        observation,
+        cataloged_at_ms,
+    )
+}
+
+pub(crate) fn catalog_codex_explicit_session_opened(
+    path: &Path,
+    opened: &OpenedProviderSourceFile,
+) -> Result<CatalogSession> {
+    let observation = opened_codex_file_observation(path, opened.file())?;
+    opened.revalidate()?;
+    catalog_codex_session_opened(
+        path,
+        opened,
+        &path.display().to_string(),
+        &observation,
+        system_time_ms(SystemTime::now()),
+    )
+}
+
+fn catalog_codex_session_opened(
+    path: &Path,
+    opened: &OpenedProviderSourceFile,
+    source_root: &str,
+    observation: &CodexFileObservation,
+    cataloged_at_ms: i64,
+) -> Result<CatalogSession> {
+    let session_meta = read_codex_session_meta_from_opened(opened)?;
     let payload = session_meta.as_ref().and_then(|value| value.get("payload"));
     let source = payload
         .and_then(|payload| payload.get("source"))
@@ -510,7 +540,11 @@ pub(crate) fn read_codex_session_meta(path: &Path) -> Result<Option<Value>> {
 }
 
 fn read_codex_session_meta_opened(source: &CodexCatalogFile) -> Result<Option<Value>> {
-    let mut reader = BufReader::new(source.opened.file().try_clone()?);
+    read_codex_session_meta_from_opened(&source.opened)
+}
+
+fn read_codex_session_meta_from_opened(opened: &OpenedProviderSourceFile) -> Result<Option<Value>> {
+    let mut reader = BufReader::new(opened.file().try_clone()?);
     let mut line = Vec::new();
     for _ in 0..32 {
         match read_provider_jsonl_line_or_skip_oversized(&mut reader, &mut line)? {
@@ -525,11 +559,11 @@ fn read_codex_session_meta_opened(source: &CodexCatalogFile) -> Result<Option<Va
             continue;
         };
         if value.get("type").and_then(Value::as_str) == Some("session_meta") {
-            source.opened.revalidate()?;
+            opened.revalidate()?;
             return Ok(Some(value));
         }
     }
-    source.opened.revalidate()?;
+    opened.revalidate()?;
     Ok(None)
 }
 pub(crate) fn codex_parent_session_id(source: &Value) -> Option<String> {
