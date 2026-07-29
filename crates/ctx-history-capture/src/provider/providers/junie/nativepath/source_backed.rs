@@ -212,7 +212,6 @@ impl CurrentSource {
                 next_event_index: 0,
                 prefix_sha256: Sha256::digest([]).into(),
                 state: RuntimeState::fresh(&meta, imported_at),
-                pending: None,
             },
             pending_documents: VecDeque::new(),
             retained_records: 0,
@@ -270,7 +269,6 @@ impl CurrentSource {
             next_event_index: parsed.next_event_index,
             prefix_sha256: parsed.after_prefix_sha256,
             state: parsed.after_state,
-            pending: None,
         };
         self.terminal = parsed.terminal;
         Ok(())
@@ -1419,26 +1417,37 @@ mod tests {
     fn junie_source_backed_has_no_preview_complete_or_legacy_store_fallback() {
         let provider_source = include_str!("source_backed.rs");
         let nativepath_source = include_str!("../nativepath.rs");
-        let cursor_source = include_str!("cursor.rs");
+        let projection_source = include_str!("projection.rs");
         let registry_source = include_str!("../../../source_backed.rs");
-        for forbidden in [
-            ["ctx_history_", "store"].concat(),
-            ["Store", "::"].concat(),
-            ["import_junie_", "nativepath("].concat(),
-            ["provider_bytes: ", "document.body"].concat(),
-            ["provider_local_preview(&", "row.text"].concat(),
-        ] {
-            assert!(
-                !provider_source.contains(&forbidden),
-                "Junie source-backed route contains forbidden architecture token {forbidden:?}"
-            );
+        for source in [provider_source, projection_source] {
+            for forbidden in [
+                ["ctx_history_", "store"].concat(),
+                ["Store", "::"].concat(),
+                ["import_junie_", "nativepath("].concat(),
+                ["provider_bytes: ", "document.body"].concat(),
+                ["provider_local_preview(&", "row.text"].concat(),
+            ] {
+                assert!(
+                    !source.contains(&forbidden),
+                    "Junie source-backed route contains forbidden architecture token {forbidden:?}"
+                );
+            }
         }
         assert!(provider_source.contains("exact_junie_lexical_body"));
         assert!(provider_source.contains("fn hydrate_batch("));
         assert!(provider_source.contains("self.hydrate_requests(request.events())"));
         assert!(!nativepath_source.contains("mod output;"));
-        assert!(!cursor_source.contains("CertifiedProviderCursor"));
-        assert!(!cursor_source.contains("ReleasedJunie"));
+        assert!(!nativepath_source.contains("mod core;"));
+        assert!(!nativepath_source.contains("mod cursor;"));
+        assert!(!nativepath_source.contains("mod lifecycle;"));
+        assert!(!nativepath_source.contains("mod publication;"));
+        let legacy_store_type = ["ctx_history_", "store::Store"].concat();
+        assert_eq!(
+            nativepath_source.matches(&legacy_store_type).count(),
+            1,
+            "Junie compatibility Store reference must remain a single typed-unsupported shim"
+        );
+        assert!(nativepath_source.contains("CaptureError::UnsupportedSchema"));
         assert!(registry_source.contains("JunieLocatorResolverV0::discover_for_hydration"));
         assert!(registry_source.contains(".with_batch_hydration(move |request|"));
     }

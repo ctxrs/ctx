@@ -1,12 +1,9 @@
 use super::*;
 
-pub(super) const MUX_CURSOR_VERSION: u32 = 1;
 pub(super) const MUX_FRONTIER_VERSION: u32 = 1;
-pub(super) const MUX_ROOT_MANIFEST_VERSION: u32 = 1;
 pub(super) const MUX_PAGE_MAX_RECORDS: usize = 8;
 pub(super) const MUX_PAGE_MAX_BYTES: usize = 4 * 1024 * 1024;
 pub(super) const MUX_MAX_FILE_TOUCHES_PER_EVENT: usize = 448;
-pub(super) const MUX_PUBLICATION_PREFIX: &str = "mux-nativepath-v1:";
 pub(super) const MUX_PARTIAL_NATIVE_ORDINAL: u64 = 1_u64 << 63;
 pub(super) const MUX_GENERATION_BITS: u32 = 16;
 pub(super) const MUX_ORDINAL_BITS: u32 = 47;
@@ -55,55 +52,14 @@ impl MuxFrontier {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct MuxCursorWire {
-    pub(super) version: u32,
-    pub(super) capture_revision: u32,
-    pub(super) policy_revision: u32,
-    pub(super) kind: MuxStreamKind,
-    pub(super) canonical_path: PathBuf,
-    pub(super) source_revision: String,
-    pub(super) metadata_revision: String,
-    pub(super) generation: u64,
-    pub(super) frontier: MuxFrontier,
-    pub(super) terminal: bool,
-    pub(super) retired: bool,
-    pub(super) accepted_events: u64,
-    pub(super) rejected_records: u64,
-    pub(super) first_failure: Option<MuxFailureWire>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct MuxFailureWire {
+#[derive(Debug, Clone)]
+pub(super) struct MuxFailure {
     pub(super) line: usize,
     pub(super) error: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct MuxRootManifest {
-    pub(super) version: u32,
-    pub(super) configured_root: PathBuf,
-    pub(super) sources: Vec<MuxManifestSource>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct MuxManifestSource {
-    pub(super) path: PathBuf,
-    pub(super) kind: MuxStreamKind,
-    pub(super) cursor_stream: String,
-    pub(super) locator_identity: String,
-    pub(super) canonical_source_identity: String,
-    pub(super) source_revision: String,
-}
-
 #[derive(Debug)]
 pub(super) struct MuxPreparedRow {
-    pub(super) line_number: usize,
-    pub(super) native_ordinal: u64,
     pub(super) source_record_ordinal: u64,
     pub(super) source_locator: CompleteContentSourceLocator,
     pub(super) source_record_digest: CompleteContentBodyDigest,
@@ -111,7 +67,6 @@ pub(super) struct MuxPreparedRow {
     pub(super) message_content_ref: Option<ContentRef>,
     pub(super) unaddressable_output: Option<MuxUnaddressableOutput>,
     pub(super) event: Option<MuxCoreEvent>,
-    pub(super) event_hash: Option<String>,
     pub(super) file_touches: Vec<MuxFileTouch>,
 }
 
@@ -123,84 +78,23 @@ pub(super) enum MuxUnaddressableOutput {
 
 #[derive(Debug)]
 pub(super) struct MuxFileTouch {
-    pub(super) provider_touch_index: u64,
-    pub(super) provider_event_index: Option<u64>,
-    pub(super) raw_source_path: Option<String>,
-    pub(super) source_root: Option<String>,
     pub(super) path: String,
-    pub(super) change_kind: Option<FileChangeKind>,
-    pub(super) old_path: Option<String>,
-    pub(super) line_count_delta: Option<i64>,
-    pub(super) confidence: Confidence,
-    pub(super) occurred_at: DateTime<Utc>,
-    pub(super) metadata: Value,
 }
 
 #[derive(Debug)]
 pub(super) struct MuxPreparedPage {
     pub(super) rows: Vec<MuxPreparedRow>,
-    pub(super) expected: MuxFrontier,
     pub(super) next: MuxFrontier,
     pub(super) terminal: bool,
     pub(super) deferred_incomplete: bool,
-    pub(super) previous_rejected_records: u64,
     pub(super) rejected_records: u64,
-    pub(super) first_failure: Option<MuxFailureWire>,
-}
-
-#[derive(Debug)]
-pub(super) struct MuxLoadedCursor {
-    pub(super) stored: SyncCursor,
-    pub(super) wire: MuxCursorWire,
+    pub(super) first_failure: Option<MuxFailure>,
 }
 
 #[derive(Debug)]
 pub(super) struct MuxSourcePlan {
-    pub(super) source: MuxSessionSource,
     pub(super) path: PathBuf,
     pub(super) kind: MuxStreamKind,
     pub(super) observation: MuxFileObservation,
-    pub(super) path_identity: String,
-    pub(super) cursor_stream: String,
-    pub(super) canonical_source_identity: String,
-    pub(super) source_revision: String,
-    pub(super) metadata_revision: String,
-    pub(super) prior: Option<MuxLoadedCursor>,
     pub(super) generation: u64,
-    pub(super) initial_frontier: MuxFrontier,
-    pub(super) accepted_events: u64,
-    pub(super) rejected_records: u64,
-    pub(super) first_failure: Option<MuxFailureWire>,
-}
-
-impl MuxSourcePlan {
-    pub(super) fn manifest_source(&self) -> MuxManifestSource {
-        MuxManifestSource {
-            path: self.observation.canonical_path.clone(),
-            kind: self.kind,
-            cursor_stream: self.cursor_stream.clone(),
-            locator_identity: self.path_identity.clone(),
-            canonical_source_identity: self.canonical_source_identity.clone(),
-            source_revision: self.source_revision.clone(),
-        }
-    }
-
-    pub(super) fn is_primary_source(&self) -> bool {
-        self.source
-            .chat_path
-            .as_deref()
-            .or(self.source.partial_path.as_deref())
-            == Some(self.path.as_path())
-    }
-
-    pub(super) fn counts_session_projection(&self) -> bool {
-        self.is_primary_source()
-    }
-}
-
-pub(super) fn stream_kind_rank(kind: MuxStreamKind) -> u8 {
-    match kind {
-        MuxStreamKind::Chat => 0,
-        MuxStreamKind::Partial => 1,
-    }
 }

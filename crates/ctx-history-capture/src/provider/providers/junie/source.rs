@@ -1,6 +1,6 @@
 use std::{
     fs::Metadata,
-    path::{Path, PathBuf},
+    path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
 

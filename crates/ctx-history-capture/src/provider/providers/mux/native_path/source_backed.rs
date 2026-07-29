@@ -35,13 +35,13 @@ use super::{
     mux_event_id, mux_event_text, mux_event_type, mux_output_projection, mux_partial_event_index,
     mux_result_content,
     parse::read_core_page,
-    MuxOutputOutcome,
+    MuxOutputOutcome, MUX_LOCATOR_KIND,
 };
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
     complete_content::CompleteContentBodyDigest,
     provider::normalization::provider_value_text,
-    CaptureError, ProviderAdapterContext, MAX_PROVIDER_JSONL_LINE_BYTES, MUX_SOURCE_FORMAT,
+    CaptureError, MAX_PROVIDER_JSONL_LINE_BYTES, MUX_SOURCE_FORMAT,
 };
 
 use crate::provider::providers::mux::{
@@ -443,12 +443,6 @@ pub(crate) fn scan_mux_source_backed(
     let mut emitted_documents = 0_u64;
     let mut emitted_unaddressable = 0_u64;
     let mut session = candidate.metadata.clone();
-    let context = ProviderAdapterContext {
-        machine_id: "mux-source-backed".to_owned(),
-        source_path: Some(candidate.configured_root.clone()),
-        source_root: Some(candidate.configured_root.clone()),
-        imported_at: candidate.observed_at,
-    };
 
     let (chat_start, scan_partial, prior_checkpoint) = match &plan {
         MuxScanPlan::Cold => (MuxFrontier::initial(), true, None),
@@ -477,7 +471,6 @@ pub(crate) fn scan_mux_source_backed(
     ) {
         (Some(path), Some(observation), Some(file), _) => Some(scan_leaf(
             candidate,
-            &context,
             &mut session,
             path,
             file,
@@ -510,7 +503,6 @@ pub(crate) fn scan_mux_source_backed(
         ) {
             (Some(path), Some(observation), Some(file)) => Some(scan_leaf(
                 candidate,
-                &context,
                 &mut session,
                 path,
                 file,
@@ -1318,7 +1310,6 @@ fn classify_scan(
 #[allow(clippy::too_many_arguments)]
 fn scan_leaf(
     candidate: &MuxSourceBackedCandidate,
-    context: &ProviderAdapterContext,
     session: &mut MuxBoundedSessionMetadata,
     path: &Path,
     file: &OpenedProviderSourceFile,
@@ -1330,13 +1321,7 @@ fn scan_leaf(
     emitted_unaddressable: &mut u64,
     emit: &mut impl FnMut(MuxSourceBackedPage) -> MuxSourceBackedResult<()>,
 ) -> MuxSourceBackedResult<MuxLeafScan> {
-    let plan = source_plan(
-        candidate,
-        path,
-        kind,
-        observation.clone(),
-        initial_frontier.clone(),
-    );
+    let plan = source_plan(path, kind, observation.clone());
     let (mut reader, mut hasher) = open_reader_at_frontier(file, &initial_frontier)?;
     let mut frontier = initial_frontier.clone();
     let mut retained_records = 0_u64;
@@ -1354,7 +1339,6 @@ fn scan_leaf(
             frontier.clone(),
             rejected_records,
             first_failure.clone(),
-            context,
         )?
         .ok_or(CaptureError::SystemInvariant(
             "Mux source-backed parser omitted a terminal page",
@@ -1408,29 +1392,12 @@ fn scan_leaf(
     })
 }
 
-fn source_plan(
-    candidate: &MuxSourceBackedCandidate,
-    path: &Path,
-    kind: MuxStreamKind,
-    observation: MuxFileObservation,
-    initial_frontier: MuxFrontier,
-) -> MuxSourcePlan {
+fn source_plan(path: &Path, kind: MuxStreamKind, observation: MuxFileObservation) -> MuxSourcePlan {
     MuxSourcePlan {
-        source: candidate.source.clone(),
         path: path.to_path_buf(),
         kind,
-        source_revision: observation.source_revision(kind.label()),
-        metadata_revision: observation.metadata_revision(),
         observation,
-        path_identity: "mux-source-backed".to_owned(),
-        cursor_stream: "mux-source-backed".to_owned(),
-        canonical_source_identity: candidate.source_key.identity().to_string(),
-        prior: None,
         generation: 0,
-        initial_frontier,
-        accepted_events: 0,
-        rejected_records: 0,
-        first_failure: None,
     }
 }
 
@@ -1576,6 +1543,9 @@ fn exact_mux_lexical_body(
     row: &MuxPreparedRow,
     event_sequence: u64,
 ) -> MuxSourceBackedResult<String> {
+    if row.source_locator.kind() != MUX_LOCATOR_KIND {
+        return Err(MuxSourceBackedError::InvalidLocator);
+    }
     let (_, byte_start, byte_end_exclusive) = decode_mux_legacy_range(row.source_locator.value())
         .ok_or(MuxSourceBackedError::InvalidLocator)?;
     let coordinate = MuxLogicalRecordCoordinate {

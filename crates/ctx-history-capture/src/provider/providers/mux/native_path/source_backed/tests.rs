@@ -312,28 +312,41 @@ fn source_backed_mux_has_no_preview_complete_or_legacy_store_publication_fallbac
     let provider_source = include_str!("../source_backed.rs");
     let native_path_source = include_str!("../../native_path.rs");
     let native_source = include_str!("../source.rs");
+    let model_source = include_str!("../model.rs");
+    let parse_source = include_str!("../parse.rs");
     let registry_source = include_str!("../../../../source_backed.rs");
-    for forbidden in [
-        ["ctx_history_", "store"].concat(),
-        ["Store", "::"].concat(),
-        ["import_mux_", "native_path("].concat(),
-        ["mux_legacy_", "bridge("].concat(),
-        ["provider_bytes: ", "projection.body"].concat(),
-        "MAX_BODY_PREVIEW_CHARS".to_owned(),
-        "provider_local_preview".to_owned(),
-    ] {
-        assert!(
-            !provider_source.contains(&forbidden),
-            "Mux source-backed route contains forbidden architecture token {forbidden:?}"
-        );
+    for source in [provider_source, native_source, model_source, parse_source] {
+        for forbidden in [
+            ["ctx_history_", "store"].concat(),
+            ["Store", "::"].concat(),
+            ["import_mux_", "native_path("].concat(),
+            ["mux_legacy_", "bridge("].concat(),
+            ["provider_bytes: ", "projection.body"].concat(),
+            "MAX_BODY_PREVIEW_CHARS".to_owned(),
+            "provider_local_preview".to_owned(),
+        ] {
+            assert!(
+                !source.contains(&forbidden),
+                "Mux source-backed route contains forbidden architecture token {forbidden:?}"
+            );
+        }
     }
     assert!(!provider_source.contains("legacy_bridge"));
     assert!(provider_source.contains("exact_mux_lexical_body"));
     assert!(provider_source.contains("fn hydrate_batch("));
     assert!(provider_source.contains("self.hydrate_requests(request.events())"));
     assert!(!native_path_source.contains("mod output;"));
-    assert!(!native_source.contains("CertifiedProviderCursor"));
-    assert!(!native_source.contains("mux_legacy_bridge"));
+    assert!(!native_path_source.contains("mod core;"));
+    assert!(!native_path_source.contains("mod lifecycle;"));
+    assert!(!native_path_source.contains("mod projection;"));
+    assert!(!native_path_source.contains("mod publication;"));
+    let legacy_store_type = ["ctx_history_", "store::Store"].concat();
+    assert_eq!(
+        native_path_source.matches(&legacy_store_type).count(),
+        1,
+        "Mux compatibility Store reference must remain a single typed-unsupported shim"
+    );
+    assert!(native_path_source.contains("CaptureError::UnsupportedSchema"));
     assert!(registry_source.contains("MuxSourceBackedResolverV0::discover_for_hydration"));
     assert!(registry_source.contains(".with_batch_hydration(move |request|"));
     let unsupported_fallback = ["Mux exact content requires", "brokered compound-file"].concat();
