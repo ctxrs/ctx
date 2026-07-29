@@ -1,9 +1,7 @@
 use std::{
     env, fs,
-    io::Write as _,
     path::{Path, PathBuf},
     process::Command,
-    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
@@ -15,17 +13,22 @@ use serde_json::{json, Value};
 use crate::{compact_json, identity};
 
 use super::{
-    health_search::create_private_dir_all,
     paths_status::{
         daemon_lock_is_active, daemon_root_path, pid_from_lock_json, read_pid_lock_json,
-        write_private_json_file,
     },
     query_service::daemon_source_refresh_request,
 };
 
-const SUPERVISOR_RECEIPT_FILE: &str = "supervisor.json";
+mod state;
+#[cfg(test)]
+mod tests;
+
+use state::{
+    native_supervisor_artifact_path, native_supervisor_kind, native_supervisor_limitation,
+    write_atomic_file, write_supervisor_receipt,
+};
+
 const SUPERVISOR_HANDOFF_TIMEOUT: Duration = Duration::from_secs(5);
-static SUPERVISOR_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const SUPERVISOR_ENV_ALLOWLIST: &[&str] = &[
     "DBUS_SESSION_BUS_ADDRESS",
     "DISPLAY",
@@ -968,204 +971,8 @@ fn xml_escape(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-fn write_atomic_file(path: &Path, body: &[u8]) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow!("supervisor artifact has no parent directory"))?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("create supervisor artifact directory {}", parent.display()))?;
-    let sequence = SUPERVISOR_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let temp = parent.join(format!(
-        ".{}.{}.{}.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("ctx-supervisor"),
-        std::process::id(),
-        sequence,
-    ));
-    let result = (|| -> Result<()> {
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        let mut file = options
-            .open(&temp)
-            .with_context(|| format!("create supervisor artifact {}", temp.display()))?;
-        file.write_all(body)
-            .with_context(|| format!("write supervisor artifact {}", temp.display()))?;
-        file.sync_all()
-            .with_context(|| format!("sync supervisor artifact {}", temp.display()))?;
-        drop(file);
-        fs::rename(&temp, path)
-            .with_context(|| format!("publish supervisor artifact {}", path.display()))?;
-        sync_supervisor_directory(parent)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
-    }
-    result
-}
-
-#[cfg(unix)]
-fn sync_supervisor_directory(path: &Path) -> Result<()> {
-    fs::File::open(path)
-        .with_context(|| format!("open supervisor directory {}", path.display()))?
-        .sync_all()
-        .with_context(|| format!("sync supervisor directory {}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn sync_supervisor_directory(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn native_supervisor_artifact_path(_data_root: &Path) -> Result<Option<PathBuf>> {
-    linux_systemd_unit_path().map(Some)
-}
-
-#[cfg(target_os = "macos")]
-fn native_supervisor_artifact_path(_data_root: &Path) -> Result<Option<PathBuf>> {
-    let home = identity::home_dir().ok_or_else(|| anyhow!("resolve user home for LaunchAgent"))?;
-    Ok(Some(
-        home.join("Library")
-            .join("LaunchAgents")
-            .join("rs.ctx.daemon.plist"),
-    ))
-}
-
-#[cfg(windows)]
-fn native_supervisor_artifact_path(data_root: &Path) -> Result<Option<PathBuf>> {
-    Ok(Some(daemon_root_path(data_root).join("windows-task.xml")))
-}
-
-#[cfg(target_os = "freebsd")]
-fn native_supervisor_artifact_path(_data_root: &Path) -> Result<Option<PathBuf>> {
-    Ok(None)
-}
-
-#[cfg(not(any(
-    target_os = "linux",
-    target_os = "macos",
-    target_os = "freebsd",
-    windows
-)))]
-fn native_supervisor_artifact_path(_data_root: &Path) -> Result<Option<PathBuf>> {
-    Ok(None)
-}
-
-fn write_supervisor_receipt(
-    data_root: &Path,
-    kind: &str,
-    status: &str,
-    autostart: bool,
-    restart: bool,
-    artifact: Option<&Path>,
-    limitation: Option<&str>,
-    last_error: Option<String>,
-) -> Result<()> {
-    let root = daemon_root_path(data_root);
-    create_private_dir_all(&root)?;
-    let installed = status == "installed";
-    let owner_pid = installed
-        .then(|| read_pid_lock_json(&super::paths_status::daemon_lock_path(data_root)))
-        .flatten()
-        .as_ref()
-        .and_then(pid_from_lock_json);
-    write_private_json_file(
-        &root.join(SUPERVISOR_RECEIPT_FILE),
-        &compact_json(json!({
-            "schema_version": 1,
-            "kind": kind,
-            "status": status,
-            "autostart_supported": autostart,
-            "restart_supported": restart,
-            "registration_verified": installed,
-            "live_owner_verified": installed,
-            "owner_pid": owner_pid,
-            "artifact_path": artifact,
-            "limitation": limitation,
-            "last_error": last_error,
-        })),
-    )
-}
-
 pub(super) fn daemon_supervisor_report(data_root: &Path) -> Value {
-    let path = daemon_root_path(data_root).join(SUPERVISOR_RECEIPT_FILE);
-    fs::read_to_string(&path)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_else(|| {
-            compact_json(json!({
-                "schema_version": 1,
-                "kind": "unconfigured",
-                "status": "unknown",
-                "autostart_supported": false,
-                "restart_supported": false,
-                "receipt_path": path,
-            }))
-        })
-}
-
-#[cfg(target_os = "linux")]
-fn native_supervisor_kind() -> &'static str {
-    "systemd_user"
-}
-
-#[cfg(target_os = "macos")]
-fn native_supervisor_kind() -> &'static str {
-    "launch_agent"
-}
-
-#[cfg(windows)]
-fn native_supervisor_kind() -> &'static str {
-    "windows_task_scheduler"
-}
-
-#[cfg(target_os = "freebsd")]
-fn native_supervisor_kind() -> &'static str {
-    "freebsd_user_supervisor_unavailable"
-}
-
-#[cfg(not(any(
-    target_os = "linux",
-    target_os = "macos",
-    target_os = "freebsd",
-    windows
-)))]
-fn native_supervisor_kind() -> &'static str {
-    "unsupported"
-}
-
-fn native_supervisor_limitation() -> &'static str {
-    #[cfg(target_os = "linux")]
-    {
-        "systemd user services are unavailable; retrieval commands retain CLI self-healing"
-    }
-    #[cfg(target_os = "macos")]
-    {
-        "LaunchAgent registration is unavailable; retrieval commands retain CLI self-healing"
-    }
-    #[cfg(windows)]
-    {
-        "Task Scheduler registration is unavailable; retrieval commands retain CLI self-healing"
-    }
-    #[cfg(target_os = "freebsd")]
-    {
-        freebsd_supervisor_authority_blocker()
-    }
-    #[cfg(not(any(
-        target_os = "linux",
-        target_os = "macos",
-        target_os = "freebsd",
-        windows
-    )))]
-    {
-        "this platform has no maintained native per-user supervisor integration; retrieval commands retain CLI self-healing"
-    }
+    state::daemon_supervisor_report(data_root)
 }
 
 fn freebsd_supervisor_authority_blocker() -> &'static str {
@@ -1174,173 +981,4 @@ fn freebsd_supervisor_authority_blocker() -> &'static str {
 
 fn native_supervisor_product_authority_blocker() -> bool {
     cfg!(not(any(target_os = "linux", target_os = "macos", windows)))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn systemd_unit_is_persistent_and_restart_on_failure() {
-        let unit = linux_systemd_unit(
-            Path::new("/home/user/.local/bin/ctx"),
-            Path::new("/home/user/.local/share/ctx"),
-        );
-        assert!(unit.contains("Restart=on-failure"));
-        assert!(unit.contains("WantedBy=default.target"));
-        assert!(unit.contains("ExecStart=/usr/bin/env -i "));
-        assert!(!unit.contains("CTX_RELEASE_"));
-        assert!(!unit.contains("idle-exit-seconds"));
-        assert!(!unit.contains("loop-interval-seconds"));
-    }
-
-    #[test]
-    fn systemd_registration_requires_a_nonzero_live_main_pid() {
-        assert_eq!(systemd_main_pid(b"4242\n").unwrap(), 4242);
-        assert!(systemd_main_pid(b"0\n").is_err());
-        assert!(systemd_main_pid(b"\n").is_err());
-    }
-
-    #[test]
-    fn launch_agent_plist_is_persistent_sanitized_and_gui_registration_is_identity_bearing() {
-        let plist = launch_agent_plist(
-            Path::new("/Users/test/Library/Application Support/ctx/ctx"),
-            Path::new("/Users/test/Library/Application Support/ctx/data"),
-        );
-        assert!(plist.contains("<key>Label</key><string>rs.ctx.daemon</string>"));
-        assert!(plist.contains("<key>RunAtLoad</key><true/>"));
-        assert!(plist.contains("<key>KeepAlive</key>"));
-        assert!(plist.contains("<string>/usr/bin/env</string><string>-i</string>"));
-        assert!(!plist.contains("CTX_RELEASE_"));
-        assert!(!plist.contains("idle-exit-seconds"));
-        assert_eq!(
-            launchctl_print_pid("state = running\n\tpid = 73\n"),
-            Some(73)
-        );
-        assert_eq!(launchctl_print_pid("state = waiting\n"), None);
-    }
-
-    #[test]
-    fn windows_task_contract_is_current_user_restartable_and_spawns_with_a_clear_environment() {
-        let script = windows_sanitized_daemon_script(
-            Path::new(r"C:\Program Files\ctx\ctx.exe"),
-            Path::new(r"C:\Users\test\AppData\Local\ctx"),
-        );
-        assert!(script.contains("EnvironmentVariables.Clear()"));
-        assert!(script.contains("UseShellExecute=$false"));
-        assert!(!script.contains("CTX_RELEASE_"));
-        assert!(!script.contains("idle-exit-seconds"));
-
-        let xml = windows_task_xml(
-            Path::new(r"C:\Program Files\ctx\ctx.exe"),
-            Path::new(r"C:\Users\test\AppData\Local\ctx"),
-            Path::new(r"C:\Windows"),
-            "S-1-5-21-1000",
-            r"\ctx-daemon-S-1-5-21-1000",
-        );
-        assert!(windows_task_registration_matches(
-            &xml,
-            Path::new(r"C:\Program Files\ctx\ctx.exe"),
-            Path::new(r"C:\Users\test\AppData\Local\ctx"),
-            Path::new(r"C:\Windows"),
-            "S-1-5-21-1000",
-            r"\ctx-daemon-S-1-5-21-1000",
-        ));
-        assert!(xml.contains("<LogonTrigger>"));
-        assert!(xml.contains("<UserId>S-1-5-21-1000</UserId>"));
-        assert!(xml.contains("<RestartOnFailure>"));
-        assert!(xml.contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"));
-        assert!(!windows_task_registration_matches(
-            "<Task><LogonType>InteractiveToken</LogonType></Task>",
-            Path::new(r"C:\Program Files\ctx\ctx.exe"),
-            Path::new(r"C:\Users\test\AppData\Local\ctx"),
-            Path::new(r"C:\Windows"),
-            "S-1-5-21-1000",
-            r"\ctx-daemon-S-1-5-21-1000",
-        ));
-        assert_eq!(
-            windows_task_name("S-1-5-21-1000"),
-            r"\ctx-daemon-S-1-5-21-1000"
-        );
-        let state_script = windows_task_state_script(r"\ctx-daemon-S-1-5-21-1000");
-        assert!(state_script.contains("-TaskPath '\\'"));
-        assert!(state_script.contains("-TaskName 'ctx-daemon-S-1-5-21-1000'"));
-        assert_eq!(parse_windows_task_state(b"4\r\n"), Some(4));
-        assert_ne!(parse_windows_task_state(b"3\r\n"), Some(4));
-    }
-
-    #[test]
-    fn windows_task_status_decoder_handles_task_scheduler_utf16_xml() {
-        let source = r#"<Task><RegistrationInfo><URI>\ctx-daemon-S-1-5-21-1000</URI></RegistrationInfo></Task>"#;
-        let mut encoded = vec![0xff, 0xfe];
-        encoded.extend(source.encode_utf16().flat_map(u16::to_le_bytes));
-        assert_eq!(decode_supervisor_text(&encoded), source);
-    }
-
-    #[test]
-    fn windows_command_line_quoting_preserves_spaces_quotes_and_trailing_separators() {
-        assert_eq!(windows_command_line_quote("plain"), "plain");
-        assert_eq!(windows_command_line_quote("two words"), "\"two words\"");
-        assert_eq!(windows_command_line_quote(r#"C:\a b\"#), r#""C:\a b\\""#,);
-    }
-
-    #[test]
-    fn freebsd_limitation_names_the_missing_product_authority_without_claiming_support() {
-        let limitation = freebsd_supervisor_authority_blocker();
-        assert!(limitation.contains("no standard current-user service manager"));
-        assert!(limitation.contains("will not mutate the user's crontab"));
-        assert!(limitation.contains("typed CLI self-healing"));
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
-    #[test]
-    fn supervisor_live_ownership_requires_exact_manager_pid_and_executable() {
-        let temp = tempfile::tempdir().unwrap();
-        let _lock = super::super::paths_status::DaemonLock::acquire(temp.path())
-            .unwrap()
-            .expect("daemon lock");
-        let executable = env::current_exe().unwrap();
-        assert_eq!(
-            verify_daemon_owner_identity(temp.path(), &executable, Some(std::process::id()))
-                .unwrap(),
-            std::process::id()
-        );
-        assert!(verify_daemon_owner_identity(
-            temp.path(),
-            &executable,
-            Some(std::process::id().saturating_add(1)),
-        )
-        .is_err());
-        assert!(verify_daemon_owner_identity(
-            temp.path(),
-            &temp.path().join("not-the-owner"),
-            Some(std::process::id()),
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn fallback_disable_status_is_retry_safe_without_claiming_registration() {
-        let temp = tempfile::tempdir().unwrap();
-        write_supervisor_receipt(
-            temp.path(),
-            "cli_self_heal",
-            "fallback",
-            false,
-            false,
-            None,
-            Some("test limitation"),
-            None,
-        )
-        .unwrap();
-        disable_daemon_supervisor(temp.path()).unwrap();
-        disable_daemon_supervisor(temp.path()).unwrap();
-        let status = daemon_supervisor_report(temp.path());
-        assert_eq!(status["status"], "disabled");
-        assert_eq!(status["registration_verified"], false);
-        assert_eq!(status["live_owner_verified"], false);
-        assert_eq!(status["autostart_supported"], false);
-        assert_eq!(status["restart_supported"], false);
-    }
 }
