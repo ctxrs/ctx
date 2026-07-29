@@ -103,7 +103,6 @@ pub(crate) enum ImportFailureType {
     Permission,
     SourceDatabase,
     MalformedSource,
-    Store,
     WorkerPanic,
     SystemIo,
     System,
@@ -119,7 +118,6 @@ impl ImportFailureType {
             Self::Permission => "permission",
             Self::SourceDatabase => "source_database",
             Self::MalformedSource => "malformed_source",
-            Self::Store => "store",
             Self::WorkerPanic => "worker_panic",
             Self::SystemIo => "system_io",
             Self::System => "system",
@@ -133,8 +131,7 @@ pub(crate) fn import_error_scope(error: &anyhow::Error) -> ImportFailureScope {
         matches!(
             cause.downcast_ref::<CaptureError>(),
             Some(
-                CaptureError::Store(_)
-                    | CaptureError::WorkerPanicked(_)
+                CaptureError::WorkerPanicked(_)
                     | CaptureError::SystemIo { .. }
                     | CaptureError::SystemInvariant(_)
             )
@@ -153,7 +150,6 @@ pub(crate) fn import_failure_type(error: &anyhow::Error) -> ImportFailureType {
                 CaptureError::WorkerPanicked(_) => ImportFailureType::WorkerPanic,
                 CaptureError::SystemIo { .. } => ImportFailureType::SystemIo,
                 CaptureError::SystemInvariant(_) => ImportFailureType::System,
-                CaptureError::Store(_) => ImportFailureType::Store,
                 CaptureError::ProviderSource { kind, .. } => match kind {
                     ProviderSourceFailureKind::NotFound => ImportFailureType::NotFound,
                     ProviderSourceFailureKind::Permission => ImportFailureType::Permission,

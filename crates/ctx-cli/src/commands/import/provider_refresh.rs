@@ -713,7 +713,6 @@ fn map_failure_type(failure_type: ImportFailureType) -> ProviderRefreshFailureTy
         ImportFailureType::Permission => ProviderRefreshFailureType::Permission,
         ImportFailureType::SourceDatabase => ProviderRefreshFailureType::SourceDatabase,
         ImportFailureType::MalformedSource => ProviderRefreshFailureType::MalformedSource,
-        ImportFailureType::Store => ProviderRefreshFailureType::Store,
         ImportFailureType::WorkerPanic => ProviderRefreshFailureType::WorkerPanic,
         ImportFailureType::SystemIo => ProviderRefreshFailureType::SystemIo,
         ImportFailureType::System => ProviderRefreshFailureType::System,

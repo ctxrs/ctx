@@ -355,7 +355,7 @@ fn detailed_facts_distinguish_partial_lane_and_failure_results() {
             ProviderProResult::Behind,
             Some(2),
             ImportFailureScope::System,
-            ImportFailureType::Store,
+            ImportFailureType::System,
         ),
     );
 
@@ -372,7 +372,7 @@ fn detailed_facts_distinguish_partial_lane_and_failure_results() {
     assert_eq!(refresh.canonical_pro_result, ProviderProResult::Partial);
     assert_eq!(refresh.output_pro_result, ProviderProResult::Behind);
     assert_eq!(refresh.failure_scope, ProviderRefreshFailureScope::System);
-    assert_eq!(refresh.failure_type, ProviderRefreshFailureType::Store);
+    assert_eq!(refresh.failure_type, ProviderRefreshFailureType::System);
     assert_eq!(refresh.retired_records, Some(CountBucket::TwoToFive));
 }
 
