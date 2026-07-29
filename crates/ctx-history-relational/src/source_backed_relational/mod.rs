@@ -2,8 +2,8 @@
 //!
 //! This database is a disposable consumer of a committed Core generation. It
 //! stores stable identities, relational metadata, and native locator/evidence
-//! envelopes; it stores no provider body, search text, or preview and never
-//! participates in Core lexical publication.
+//! envelopes; it stores no event payload, provider body, search text, or
+//! preview and never participates in Core lexical publication.
 //!
 //! Integration sequence:
 //!
@@ -29,7 +29,7 @@
 //! A normal catch-up stream contains only sources whose certificates changed.
 //! A rebuild stream contains every source in the manifest. Confirmed deletion
 //! is represented by omission from the new certified manifest, so no provider
-//! body archive or relational tombstone payload is required.
+//! body archive or relational tombstone row is required.
 
 mod manifest;
 mod materialization;

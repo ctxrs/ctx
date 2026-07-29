@@ -8,7 +8,6 @@ use ctx_history_core::{
     SourceInventoryObservation, SourceObservation, SourceRecordLocator, TypedKey,
 };
 use rusqlite::ffi::ErrorCode;
-use serde_json::Value;
 use tempfile::TempDir;
 
 use super::*;
@@ -230,6 +229,18 @@ fn query_rows(projection: &SourceBackedRelationalProjection, sql: &str) -> Vec<V
         .rows
 }
 
+fn schema_columns(projection: &SourceBackedRelationalProjection, object: &str) -> Vec<String> {
+    let mut statement = projection
+        .conn
+        .prepare("SELECT name FROM pragma_table_info(?1) ORDER BY cid")
+        .unwrap();
+    statement
+        .query_map([object], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+}
+
 #[test]
 fn source_backed_projection_preserves_metadata_sql_and_exact_generation_evidence() {
     let (_temp, mut projection) = projection();
@@ -270,25 +281,31 @@ fn source_backed_projection_preserves_metadata_sql_and_exact_generation_evidence
 
     let events = query_rows(
         &projection,
-        "SELECT e.ctx_event_id, e.ctx_session_id, e.event_type, e.role, e.payload_json,
-                s.agent_type, e.branch, e.workspace
+        "SELECT e.ctx_event_id, e.ctx_session_id, e.event_seq, e.event_type, e.role,
+                e.occurred_at_ms, e.fidelity, s.agent_type, e.branch, e.workspace
          FROM ctx_events e
          JOIN ctx_sessions s ON s.ctx_session_id = e.ctx_session_id",
     );
     assert_eq!(events.len(), 1);
-    let RawSqlValue::Text { value: payload, .. } = &events[0][4] else {
-        panic!("payload_json was not text");
-    };
-    let payload: Value = serde_json::from_str(payload).unwrap();
-    assert_eq!(payload["content_authority"], "provider_source");
-    assert_eq!(payload.as_object().unwrap().len(), 1);
-    assert!(payload.get("body_preview").is_none());
-    assert!(payload.get("preview").is_none());
-    assert!(payload.get("text").is_none());
-    assert!(payload.get("body").is_none());
-    assert!(payload.get("content").is_none());
+    assert_eq!(events[0][2], RawSqlValue::Integer(0));
     assert_eq!(
-        events[0][5],
+        events[0][3],
+        RawSqlValue::Text {
+            value: "message".to_owned(),
+            bytes: 7,
+            truncated: false,
+        }
+    );
+    assert_eq!(
+        events[0][4],
+        RawSqlValue::Text {
+            value: "assistant".to_owned(),
+            bytes: 9,
+            truncated: false,
+        }
+    );
+    assert_eq!(
+        events[0][7],
         RawSqlValue::Text {
             value: "primary".to_owned(),
             bytes: 7,
@@ -325,8 +342,15 @@ fn source_backed_projection_preserves_metadata_sql_and_exact_generation_evidence
     let forbidden_columns: i64 = projection
         .conn
         .query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('source_backed_events')
-             WHERE lower(name) IN ('body', 'content', 'provider_body', 'raw_json')",
+            "SELECT COUNT(*) FROM (
+                SELECT name FROM pragma_table_info('source_backed_events')
+                UNION ALL
+                SELECT name FROM pragma_table_info('ctx_events')
+             )
+             WHERE lower(name) IN (
+                'payload', 'payload_json', 'body', 'content', 'provider_body',
+                'raw_json', 'body_preview', 'body_search', 'search_text', 'preview', 'text'
+             )",
             [],
             |row| row.get(0),
         )
@@ -462,7 +486,8 @@ fn append_rewrite_deletion_and_rebuild_are_atomic_and_source_scoped() {
     );
     let baseline = query_rows(
         &projection,
-        "SELECT ctx_event_id, ctx_session_id, event_seq, payload_json
+        "SELECT ctx_event_id, ctx_session_id, event_seq, event_type, role,
+                occurred_at_ms, fidelity
          FROM ctx_events ORDER BY ctx_event_id",
     );
     let mut complete = records(first.clone(), 2, 2);
@@ -472,7 +497,8 @@ fn append_rewrite_deletion_and_rebuild_are_atomic_and_source_scoped() {
         baseline,
         query_rows(
             &projection,
-            "SELECT ctx_event_id, ctx_session_id, event_seq, payload_json
+            "SELECT ctx_event_id, ctx_session_id, event_seq, event_type, role,
+                    occurred_at_ms, fidelity
              FROM ctx_events ORDER BY ctx_event_id",
         )
     );
@@ -627,14 +653,14 @@ fn manifest_v3_schema_v5_and_exact_policy_hash_fail_closed() {
 }
 
 #[test]
-fn old_relational_schema_requires_disposable_rebuild() {
+fn previous_relational_schema_requires_disposable_rebuild() {
     let (temp, projection) = projection();
     let path = projection.path().to_path_buf();
     drop(projection);
     let conn = Connection::open(&path).unwrap();
     conn.execute(
         "UPDATE source_backed_relational_state
-         SET schema_version = 1, contract_version = 1
+         SET schema_version = 2, contract_version = 2
          WHERE singleton = 1",
         [],
     )
@@ -648,8 +674,8 @@ fn old_relational_schema_requires_disposable_rebuild() {
     assert!(matches!(
         error,
         RelationalProjectionError::UnsupportedSchema {
-            schema_version: 1,
-            contract_version: 1,
+            schema_version: 2,
+            contract_version: 2,
         }
     ));
     assert!(error
@@ -659,7 +685,7 @@ fn old_relational_schema_requires_disposable_rebuild() {
 }
 
 #[test]
-fn sqlite_bytes_and_views_exclude_provider_body_search_text_and_preview() {
+fn sqlite_schema_bytes_and_views_exclude_event_payloads() {
     let temp = tempfile::tempdir().unwrap();
     let provider_dir = temp.path().join("provider");
     fs::create_dir_all(&provider_dir).unwrap();
@@ -686,33 +712,64 @@ fn sqlite_bytes_and_views_exclude_provider_body_search_text_and_preview() {
     session_metadata.source_path = Some(provider_path.to_string_lossy().into_owned());
     projection.rebuild(&committed, projected_records).unwrap();
 
-    let payload: String = projection
-        .conn
-        .query_row("SELECT payload_json FROM ctx_events", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(payload, r#"{"content_authority":"provider_source"}"#);
-    let forbidden_view_columns: i64 = projection
+    assert_eq!(
+        schema_columns(&projection, "source_backed_events"),
+        [
+            "ctx_event_id",
+            "event_identity",
+            "source_id",
+            "ctx_session_id",
+            "session_identity",
+            "event_seq",
+            "event_type",
+            "role",
+            "occurred_at_ms",
+            "fidelity",
+            "native_locator_json",
+            "record_digest",
+        ]
+    );
+    assert_eq!(
+        schema_columns(&projection, "ctx_events"),
+        [
+            "ctx_event_id",
+            "ctx_session_id",
+            "history_record_id",
+            "provider",
+            "provider_session_id",
+            "event_seq",
+            "event_type",
+            "role",
+            "occurred_at_ms",
+            "fidelity",
+            "cwd",
+            "source_path",
+            "source_format",
+            "source_root",
+            "source_identity",
+            "branch",
+            "workspace",
+        ]
+    );
+    let event_view_definition: String = projection
         .conn
         .query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('ctx_events')
-             WHERE lower(name) LIKE '%body%'
-                OR lower(name) LIKE '%preview%'
-                OR lower(name) LIKE '%search_text%'",
+            "SELECT sql FROM sqlite_schema WHERE type = 'view' AND name = 'ctx_events'",
             [],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(forbidden_view_columns, 0);
-    let view_definitions: String = projection
-        .conn
-        .query_row(
-            "SELECT group_concat(sql, ' ') FROM sqlite_schema WHERE type = 'view'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert!(!view_definitions.to_lowercase().contains("body_preview"));
-    assert!(!view_definitions.to_lowercase().contains("body_search"));
+    let event_view_definition = event_view_definition.to_lowercase();
+    for forbidden_schema_term in [
+        "payload",
+        "content",
+        "body",
+        "preview",
+        "search_text",
+        "raw_json",
+    ] {
+        assert!(!event_view_definition.contains(forbidden_schema_term));
+    }
 
     projection
         .conn
@@ -740,6 +797,15 @@ fn sqlite_bytes_and_views_exclude_provider_body_search_text_and_preview() {
         assert!(!bytes
             .windows(b"body_search".len())
             .any(|window| window == b"body_search"));
+        assert!(!bytes
+            .windows(b"payload_json".len())
+            .any(|window| window == b"payload_json"));
+        assert!(!bytes
+            .windows(b"content_authority".len())
+            .any(|window| window == b"content_authority"));
+        assert!(!bytes
+            .windows(b"provider_source".len())
+            .any(|window| window == b"provider_source"));
     }
 }
 
