@@ -56,7 +56,6 @@ import_options!(
     OpenClawImportOptions,
     HermesSqliteImportOptions,
     NanoClawImportOptions,
-    AstrBotSqliteImportOptions,
     ShelleySqliteImportOptions,
     ContinueCliImportOptions,
     OpenHandsImportOptions,
