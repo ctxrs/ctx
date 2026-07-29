@@ -26,35 +26,3 @@ pub(in crate::semantic) struct SemanticEventDocument {
     pub(in crate::semantic) record_workspace: Option<String>,
     pub(in crate::semantic) text: String,
 }
-
-// The legacy Store projection remains compiled until its SQL module is removed.
-// Keep that compatibility at call sites without making its DTO part of the CLI
-// semantic type contract.
-macro_rules! semantic_event_document_from_store_projection {
-    ($document:expr) => {{
-        let document = $document;
-        $crate::semantic::SemanticEventDocument {
-            event_id: document.event_id,
-            history_record_id: document.history_record_id,
-            session_id: document.session_id,
-            seq: document.seq,
-            occurred_at_ms: document.occurred_at_ms,
-            anchor_occurred_at_ms: document.anchor_occurred_at_ms,
-            event_type: document.event_type,
-            role: document.role,
-            rank_bucket: document.rank_bucket,
-            provider: document.provider,
-            source_format: document.source_format,
-            agent_type: document.agent_type,
-            session_is_primary: document.session_is_primary,
-            cwd: document.cwd,
-            raw_source_path: document.raw_source_path,
-            record_title: document.record_title,
-            record_kind: document.record_kind,
-            record_workspace: document.record_workspace,
-            text: document.text,
-        }
-    }};
-}
-
-pub(in crate::semantic) use semantic_event_document_from_store_projection;

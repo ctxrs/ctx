@@ -220,7 +220,6 @@ fn daemon_status_reports_retryable_memory_deferral() -> Result<()> {
 fn daemon_acquisition_failure_is_explicit_retryable_and_fail_closed() -> Result<()> {
     let temp = tempfile::tempdir()?;
     write_semantic_enabled_config(temp.path())?;
-    write_searchable_store(temp.path(), 2)?;
 
     let startup = run_daemon_semantic_model_startup_with(
         temp.path(),
@@ -265,7 +264,6 @@ fn daemon_acquisition_failure_is_explicit_retryable_and_fail_closed() -> Result<
 fn verified_cache_missing_runtime_reports_model_load_failed_compatibly() -> Result<()> {
     let temp = tempfile::tempdir()?;
     write_semantic_enabled_config(temp.path())?;
-    write_searchable_store(temp.path(), 1)?;
     let cache_dir = temp.path().join("semantic-model-cache");
     write_test_semantic_cache(&cache_dir)?;
     let missing_runtime = temp.path().join("missing-libonnxruntime.so");
