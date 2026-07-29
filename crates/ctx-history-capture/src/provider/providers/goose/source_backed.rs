@@ -189,10 +189,6 @@ impl GooseSourceBackedAdapterV0 {
         &self.source
     }
 
-    pub(crate) fn selection(&self) -> &GooseSourceBackedSelectionV0 {
-        &self.selection
-    }
-
     pub(crate) fn scan(&self) -> GooseSourceBackedResultV0<GooseSourceBackedScanV0<'_>> {
         let scanner = self.reader.scanner_with_profile(
             GooseNativeProfile::CoreOnly,

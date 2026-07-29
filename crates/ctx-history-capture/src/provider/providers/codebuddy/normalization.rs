@@ -11,6 +11,9 @@ pub(super) fn codebuddy_title_from_text(text: &str) -> Option<String> {
 
 #[derive(Debug, Clone)]
 pub(super) struct CodeBuddyEventInput {
+    // Preserve the provider sequence on the normalization input for non-Core
+    // consumers even though the current draft keys by native message id.
+    #[allow(dead_code)]
     pub(super) provider_event_index: u64,
     pub(super) native_message_id: String,
     pub(super) event_type: EventType,
@@ -107,7 +110,11 @@ fn remove_xml_like_block(input: &str, tag: &str) -> String {
 
 pub(super) struct CodeBuddySessionInput<'a> {
     pub(super) provider_session_id: &'a str,
+    // Preserve provider session bounds in the input contract for non-Core
+    // materializers even though the current draft carries only identity/cwd.
+    #[allow(dead_code)]
     pub(super) started_at: DateTime<Utc>,
+    #[allow(dead_code)]
     pub(super) ended_at: Option<DateTime<Utc>>,
     pub(super) cwd: Option<&'a str>,
 }
@@ -115,14 +122,11 @@ pub(super) struct CodeBuddySessionInput<'a> {
 #[derive(Debug, Clone)]
 pub(super) struct CodeBuddySessionDraft {
     pub(super) provider_session_id: String,
-    pub(super) started_at: DateTime<Utc>,
-    pub(super) ended_at: Option<DateTime<Utc>>,
     pub(super) cwd: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct CodeBuddyEventDraft {
-    pub(super) provider_event_index: u64,
     pub(super) native_message_id: String,
     pub(super) legacy_provider_event_hash: String,
     pub(super) event_type: EventType,
@@ -142,8 +146,6 @@ pub(super) fn codebuddy_normalized_rows(
 pub(super) fn codebuddy_session_draft(draft: &CodeBuddySessionInput<'_>) -> CodeBuddySessionDraft {
     CodeBuddySessionDraft {
         provider_session_id: draft.provider_session_id.to_owned(),
-        started_at: draft.started_at,
-        ended_at: draft.ended_at,
         cwd: draft.cwd.map(str::to_owned),
     }
 }
@@ -152,7 +154,6 @@ fn codebuddy_event(provider_session_id: &str, event: CodeBuddyEventInput) -> Cod
     let event_id = format!("{provider_session_id}:{}", event.native_message_id);
     let role = provider_role(event.role.as_deref());
     CodeBuddyEventDraft {
-        provider_event_index: event.provider_event_index,
         native_message_id: event.native_message_id,
         legacy_provider_event_hash: event_id,
         event_type: event.event_type,

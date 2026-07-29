@@ -54,7 +54,6 @@ impl CodeBuddyExtensionMetadata {
 
 #[derive(Debug, Clone)]
 pub(super) struct CodeBuddyExtensionObservation {
-    pub(super) canonical_session_dir: PathBuf,
     pub(super) source_revision: String,
 }
 
@@ -69,16 +68,9 @@ impl CodeBuddyExtensionObservation {
         metadata: &CodeBuddyExtensionMetadata,
         session_ordinal: usize,
     ) -> Result<(Self, Vec<CodeBuddyExtensionRejection>)> {
-        let canonical_session_dir = fs::canonicalize(&metadata.session_dir)?;
         let (source_revision, _, rejections) =
             codebuddy_extension_source_revision(metadata, session_ordinal)?;
-        Ok((
-            Self {
-                canonical_session_dir,
-                source_revision,
-            },
-            rejections,
-        ))
+        Ok((Self { source_revision }, rejections))
     }
 }
 

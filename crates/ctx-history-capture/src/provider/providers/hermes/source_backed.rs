@@ -230,14 +230,20 @@ fn hermes_source_key(anchor: SourceAnchor) -> HermesSourceBackedResult<SourceKey
 pub(crate) struct HermesSourceBackedSession {
     pub(crate) session_id: StableEntityId,
     pub(crate) parent_session_id: Option<StableEntityId>,
+    // Root identity, primary classification, and source timestamps remain part
+    // of the exact session record used by non-Core materializers.
+    #[allow(dead_code)]
     pub(crate) root_session_id: StableEntityId,
     pub(crate) provider_session_id: String,
     pub(crate) provider_parent_session_id: Option<String>,
     pub(crate) branch: Option<String>,
     pub(crate) source_path: String,
     pub(crate) agent_type: String,
+    #[allow(dead_code)]
     pub(crate) is_primary: bool,
+    #[allow(dead_code)]
     pub(crate) started_at_unix_ms: i64,
+    #[allow(dead_code)]
     pub(crate) ended_at_unix_ms: Option<i64>,
     pub(crate) workspace: Option<String>,
     pub(crate) cwd: Option<String>,
@@ -246,8 +252,12 @@ pub(crate) struct HermesSourceBackedSession {
 
 #[derive(Debug, Clone)]
 pub(crate) struct HermesSourceBackedRejection {
+    // Exact provider position is retained with rejection diagnostics.
+    #[allow(dead_code)]
     phase: HermesPhase,
+    #[allow(dead_code)]
     pub(crate) rowid: i64,
+    #[allow(dead_code)]
     pub(crate) ordinal: u64,
     pub(crate) reason: String,
 }

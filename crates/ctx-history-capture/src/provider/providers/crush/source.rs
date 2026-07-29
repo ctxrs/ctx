@@ -1,32 +1,11 @@
-use std::{collections::BTreeSet, path::Path};
+use std::collections::BTreeSet;
 
 use rusqlite::Connection;
 
 use crate::provider::sqlite::{
     ensure_sqlite_table_columns, sqlite_table_columns, sqlite_table_exists,
-    ProviderSqliteSourceSnapshot,
 };
 use crate::{CaptureError, Result};
-
-use super::{CRUSH_CAPTURE_REVISION, CRUSH_POLICY_REVISION};
-
-pub(super) fn source_snapshot(path: &Path) -> Result<ProviderSqliteSourceSnapshot> {
-    ProviderSqliteSourceSnapshot::read(
-        path,
-        "Crush SQLite source must be a regular non-symlink file",
-        "Crush SQLite sidecar must be a regular non-symlink file",
-    )
-}
-
-pub(super) fn source_revision(
-    snapshot: &ProviderSqliteSourceSnapshot,
-    schema_fingerprint: &str,
-) -> String {
-    format!(
-        "crush-sqlite-snapshot-v1:capture={CRUSH_CAPTURE_REVISION};policy={CRUSH_POLICY_REVISION};schema={schema_fingerprint};{}",
-        snapshot.revision_component(),
-    )
-}
 
 pub(super) fn session_columns(conn: &Connection) -> Result<BTreeSet<String>> {
     if !sqlite_table_exists(conn, "sessions")? {

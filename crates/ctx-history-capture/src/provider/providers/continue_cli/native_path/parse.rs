@@ -210,6 +210,9 @@ pub(super) struct RawContinueMessage {
 #[derive(Debug)]
 pub(super) struct RawContinueMessageCall {
     pub(super) id: Option<String>,
+    // Preserve provider call classification in the decoded release shape even
+    // while Core normalization uses the call name and file-touch evidence.
+    #[allow(dead_code)]
     pub(super) kind: Option<String>,
     pub(super) name: Option<String>,
     pub(super) file_touches: Vec<ContinueFileTouch>,
@@ -228,14 +231,20 @@ pub(super) struct RawContinueToolCallState {
     pub(super) tool_call_id: Option<String>,
     pub(super) tool_call: Option<RawContinueToolCall>,
     pub(super) status: Option<String>,
+    // Exit accounting remains exact provider evidence for Pro/cross-target
+    // consumers; Core currently derives outcome from status.
+    #[allow(dead_code)]
     pub(super) exit_code: Option<i64>,
+    #[allow(dead_code)]
     pub(super) duration_ms: Option<i64>,
+    #[allow(dead_code)]
     pub(super) timed_out: Option<bool>,
 }
 
 #[derive(Debug)]
 pub(super) struct RawContinueToolCall {
     pub(super) id: Option<String>,
+    #[allow(dead_code)]
     pub(super) kind: Option<String>,
     pub(super) name: Option<String>,
     pub(super) function_name: Option<String>,

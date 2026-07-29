@@ -173,6 +173,9 @@ pub(crate) struct FirebenderNativeEvent {
     pub(crate) cursor: String,
     pub(crate) event_type: EventType,
     pub(crate) payload: Value,
+    // Provider metadata is retained at the native-event boundary for Pro and
+    // exact diagnostic materialization.
+    #[allow(dead_code)]
     pub(crate) metadata: Value,
 }
 

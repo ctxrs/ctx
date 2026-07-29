@@ -236,6 +236,9 @@ struct CodeBuddyInventory {
 #[derive(Debug)]
 struct CodeBuddyRecord {
     native_ordinal: u64,
+    // Physical line remains parser evidence for cross-target diagnostics even
+    // though release projection keys records by native ordinal.
+    #[allow(dead_code)]
     physical_line: usize,
     byte_start: Option<u64>,
     byte_end_exclusive: Option<u64>,

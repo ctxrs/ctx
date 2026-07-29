@@ -21,7 +21,6 @@ pub(crate) struct OpenCodeSqliteDialect {
     pub(crate) provider: CaptureProvider,
     pub(crate) display_name: &'static str,
     pub(crate) source_format: &'static str,
-    pub(crate) session_time_created_field: &'static str,
     pub(crate) session_message_time_created_field: &'static str,
     pub(crate) event_time_created_field: &'static str,
 }
@@ -30,7 +29,6 @@ pub(crate) const OPENCODE_SQLITE_DIALECT: OpenCodeSqliteDialect = OpenCodeSqlite
     provider: CaptureProvider::OpenCode,
     display_name: "OpenCode",
     source_format: OPENCODE_SQLITE_SOURCE_FORMAT,
-    session_time_created_field: "OpenCode session time_created",
     session_message_time_created_field: "OpenCode session_message time_created",
     event_time_created_field: "OpenCode event time.created",
 };
@@ -39,7 +37,6 @@ pub(crate) const KILO_SQLITE_DIALECT: OpenCodeSqliteDialect = OpenCodeSqliteDial
     provider: CaptureProvider::Kilo,
     display_name: "Kilo",
     source_format: KILO_SQLITE_SOURCE_FORMAT,
-    session_time_created_field: "Kilo session time_created",
     session_message_time_created_field: "Kilo session_message time_created",
     event_time_created_field: "Kilo event time.created",
 };
@@ -48,7 +45,6 @@ pub(crate) const MIMOCODE_SQLITE_DIALECT: OpenCodeSqliteDialect = OpenCodeSqlite
     provider: CaptureProvider::MiMoCode,
     display_name: "MiMo Code",
     source_format: MIMOCODE_SQLITE_SOURCE_FORMAT,
-    session_time_created_field: "MiMo Code session time_created",
     session_message_time_created_field: "MiMo Code session_message time_created",
     event_time_created_field: "MiMo Code event time.created",
 };
@@ -71,15 +67,6 @@ impl OpenCodeCapturedShape {
             _ => Err(CaptureError::InvalidPayload(
                 "OpenCode locator has an unknown captured shape".to_owned(),
             )),
-        }
-    }
-
-    pub(super) fn tag(self) -> u8 {
-        match self {
-            Self::SessionMessage => 1,
-            Self::SessionEntry => 2,
-            Self::MessagePart => 3,
-            Self::Message => 4,
         }
     }
 
@@ -204,7 +191,6 @@ pub(super) fn opencode_table_has_rows(conn: &Connection, table: &str) -> Result<
 
 pub(super) struct OpenCodeRowSql {
     pub(super) source_alias: &'static str,
-    pub(super) candidate_from_clause: String,
     pub(super) from_clause: String,
     pub(super) message_id: String,
     pub(super) session_id: String,
@@ -227,7 +213,6 @@ impl OpenCodeRowSql {
                 let seq_present = if columns.contains("seq") { "1" } else { "0" };
                 Ok(Self {
                     source_alias: "x",
-                    candidate_from_clause: "session_message x".to_owned(),
                     from_clause: "session_message x".to_owned(),
                     message_id: "cast(x.id as text)".to_owned(),
                     session_id: "cast(x.session_id as text)".to_owned(),
@@ -244,7 +229,6 @@ impl OpenCodeRowSql {
             }
             OpenCodeCapturedShape::SessionEntry => Ok(Self {
                 source_alias: "x",
-                candidate_from_clause: "session_entry x".to_owned(),
                 from_clause: "session_entry x".to_owned(),
                 message_id: "cast(x.id as text)".to_owned(),
                 session_id: "cast(x.session_id as text)".to_owned(),
@@ -262,7 +246,6 @@ impl OpenCodeRowSql {
                 let part_columns = sqlite_table_columns(conn, "part")?;
                 Ok(Self {
                     source_alias: "x",
-                    candidate_from_clause: "part x".to_owned(),
                     from_clause: "part x".to_owned(),
                     message_id: "cast(x.message_id as text)".to_owned(),
                     session_id: "cast(x.session_id as text)".to_owned(),
@@ -279,7 +262,6 @@ impl OpenCodeRowSql {
             }
             OpenCodeCapturedShape::Message => Ok(Self {
                 source_alias: "x",
-                candidate_from_clause: "message x".to_owned(),
                 from_clause: "message x".to_owned(),
                 message_id: "cast(x.id as text)".to_owned(),
                 session_id: "cast(x.session_id as text)".to_owned(),

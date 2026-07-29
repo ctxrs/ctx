@@ -34,7 +34,6 @@ const FORGECODE_LOCATOR_KIND: &str = "forgecode-conversation-row-v1";
 
 pub(super) struct ForgeCodeCompleteContentDigest {
     locator: NativeLocator,
-    values: Vec<NativeSqliteValue>,
     record_digest: [u8; 32],
     canonical_record_bytes: u64,
 }
@@ -67,7 +66,6 @@ impl ForgeCodeCompleteContentDigest {
         let canonical_record_bytes = forgecode_logical_record_bytes(&values)?;
         Ok(Self {
             locator,
-            values,
             record_digest,
             canonical_record_bytes,
         })

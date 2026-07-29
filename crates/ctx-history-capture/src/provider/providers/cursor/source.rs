@@ -75,10 +75,6 @@ pub(crate) struct CursorFrozenSource {
 }
 
 impl CursorFrozenSource {
-    pub(crate) fn transcript(&self) -> &CursorTranscriptPath {
-        &self.transcript
-    }
-
     pub(crate) fn observation(&self) -> &CursorSourceObservation {
         &self.observation
     }

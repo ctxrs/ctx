@@ -8,6 +8,9 @@ use super::KiroPhase;
 pub(super) struct KiroCandidate {
     pub(super) phase: KiroPhase,
     pub(super) rowid: i64,
+    // Preserve the admitted row ordinal in the candidate data shape for exact
+    // cross-target scan diagnostics.
+    #[allow(dead_code)]
     pub(super) row_ordinal: u64,
     pub(super) retained_bytes: u64,
     pub(super) type_valid: [bool; 5],

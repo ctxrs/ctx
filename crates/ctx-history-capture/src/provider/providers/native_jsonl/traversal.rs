@@ -35,29 +35,6 @@ impl NativeJsonlSourceFile {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum NativeJsonlRootKind {
-    File,
-    Directory,
-}
-
-pub(super) fn native_jsonl_root_kind(root: &Path) -> Result<Option<NativeJsonlRootKind>> {
-    match open_provider_source_path(root) {
-        Ok(OpenedProviderSourcePath::File(file)) => {
-            file.revalidate()?;
-            Ok(Some(NativeJsonlRootKind::File))
-        }
-        Ok(OpenedProviderSourcePath::Directory(directory)) => {
-            let authority = directory.authority_root();
-            directory.revalidate()?;
-            authority.revalidate()?;
-            Ok(Some(NativeJsonlRootKind::Directory))
-        }
-        Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
 pub(super) fn visit_jsonl_tree_files(
     provider: CaptureProvider,
     root: &Path,

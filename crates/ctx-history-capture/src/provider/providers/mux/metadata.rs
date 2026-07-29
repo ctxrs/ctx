@@ -3,16 +3,12 @@ use std::path::Path;
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
-use crate::common::io::read_text_file_limited;
 use crate::common::time::parse_rfc3339_utc;
 use crate::provider::custom_history_jsonl::push_provider_import_failure;
 use crate::provider::normalization::{
     provider_capped_json, provider_local_preview, provider_timestamp_seconds_to_datetime,
 };
-use crate::{
-    CaptureError, ProviderImportSummary, Result, MAX_PROVIDER_JSONL_LINE_BYTES,
-    PROVIDER_MAX_PREVIEW_CHARS,
-};
+use crate::{CaptureError, ProviderImportSummary, Result, PROVIDER_MAX_PREVIEW_CHARS};
 
 use super::source::MuxSessionSource;
 use super::{MUX_MAX_FAILURE_BYTES, MUX_MAX_ID_BYTES};
@@ -25,25 +21,11 @@ pub(super) struct MuxBoundedSessionMetadata {
     pub(super) started_at: String,
     pub(super) cwd: Option<String>,
     pub(super) model: Option<String>,
+    // The bounded metadata preview remains staging-Pro/session diagnostic data.
+    #[allow(dead_code)]
     pub(super) metadata: Value,
     pub(super) metadata_revision: String,
     pub(super) metadata_failure: Option<String>,
-}
-
-pub(super) fn mux_bounded_session_metadata(
-    source: &MuxSessionSource,
-    metadata_revision: &str,
-    imported_at: DateTime<Utc>,
-) -> Result<MuxBoundedSessionMetadata> {
-    let mut summary = ProviderImportSummary::default();
-    let metadata = read_mux_metadata(source.metadata_path.as_deref(), &mut summary);
-    mux_bounded_session_metadata_from_value(
-        source,
-        metadata_revision,
-        imported_at,
-        metadata,
-        summary,
-    )
 }
 
 pub(super) fn mux_bounded_session_metadata_from_bytes(
@@ -152,41 +134,6 @@ fn mux_bounded_session_metadata_from_value(
         metadata_revision: metadata_revision.to_owned(),
         metadata_failure,
     })
-}
-
-fn read_mux_metadata(path: Option<&Path>, summary: &mut ProviderImportSummary) -> Value {
-    let Some(path) = path else {
-        return Value::Null;
-    };
-    match read_text_file_limited(path, MAX_PROVIDER_JSONL_LINE_BYTES, "Mux metadata.json") {
-        Ok(raw) => match serde_json::from_str::<Value>(&raw) {
-            Ok(value) if value.is_object() => value,
-            Ok(_) => {
-                push_provider_import_failure(
-                    summary,
-                    0,
-                    "Mux metadata.json must contain a JSON object".to_owned(),
-                );
-                Value::Null
-            }
-            Err(err) => {
-                push_provider_import_failure(
-                    summary,
-                    0,
-                    format!("invalid Mux metadata.json: {err}"),
-                );
-                Value::Null
-            }
-        },
-        Err(err) => {
-            push_provider_import_failure(
-                summary,
-                0,
-                format!("could not read Mux metadata.json: {err}"),
-            );
-            Value::Null
-        }
-    }
 }
 
 pub(super) fn bounded_mux_id(value: String, path: &Path, label: &'static str) -> Result<String> {

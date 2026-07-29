@@ -154,8 +154,13 @@ pub(crate) struct DirectJsonlPage {
     pub(crate) next_checkpoint: DirectJsonlCheckpoint,
     pub(crate) events: Vec<DirectJsonlEvent>,
     pub(crate) rejections: Vec<DirectJsonlRejection>,
+    // Bounded page accounting and terminal state remain part of the cross-target
+    // scanner contract even when the Core coordinator uses checkpoints.
+    #[allow(dead_code)]
     pub(crate) logical_units: usize,
+    #[allow(dead_code)]
     pub(crate) conservative_serialized_bytes: usize,
+    #[allow(dead_code)]
     pub(crate) terminal: bool,
 }
 

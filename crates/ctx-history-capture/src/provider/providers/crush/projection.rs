@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use ctx_history_core::{Confidence, EventRole, EventType, FileChangeKind};
+use ctx_history_core::{EventRole, EventType};
 use serde_json::{json, Value};
 
 use crate::native_source::NativeSqliteValue;
@@ -7,7 +7,7 @@ use crate::provider::normalization::compact_provider_result_payload;
 use crate::provider::normalization::{
     provider_capped_json, provider_line_from_index, provider_normalized_result_value,
     provider_policy_body, provider_policy_event_text, provider_role, provider_timestamp_millis,
-    provider_timestamp_seconds, provider_value_text,
+    provider_value_text,
 };
 use crate::{
     compute_payload_hash, fnv1a64, CaptureError, OutputCommandContext, OutputObservationKind,
@@ -16,6 +16,9 @@ use crate::{
 };
 
 #[derive(Debug, Clone)]
+// The SQLite decoder keeps the complete provider row for deterministic
+// source-backed projection even when Core does not read every optional column.
+#[allow(dead_code)]
 pub(super) struct CrushSessionRow {
     pub(super) id: String,
     pub(super) parent_session_id: Option<String>,
@@ -43,6 +46,8 @@ pub(super) struct CrushMessageRow {
 }
 
 #[derive(Debug, Clone)]
+// File-row columns are retained by the phase-complete query decoder.
+#[allow(dead_code)]
 pub(super) struct CrushFileRow {
     pub(super) rowid: i64,
     pub(super) session_id: Option<String>,
@@ -53,6 +58,8 @@ pub(super) struct CrushFileRow {
 }
 
 #[derive(Debug, Clone)]
+// Read-file columns are retained by the phase-complete query decoder.
+#[allow(dead_code)]
 pub(super) struct CrushReadFileRow {
     pub(super) rowid: i64,
     pub(super) session_id: String,
@@ -60,20 +67,15 @@ pub(super) struct CrushReadFileRow {
     pub(super) read_at: Option<i64>,
 }
 
+// Rejection detail is retained for provider diagnostics at the page boundary.
+#[allow(dead_code)]
 pub(super) enum CrushRecordProjection {
     Message(Box<CrushMessageProjection>),
     Rejection { line_number: usize, reason: String },
 }
 
-pub(super) struct CrushSessionDraft {
-    pub(super) provider_session_id: String,
-    pub(super) parent_provider_session_id: Option<String>,
-    pub(super) started_at: DateTime<Utc>,
-    pub(super) ended_at: Option<DateTime<Utc>>,
-    pub(super) source_metadata: Value,
-    pub(super) session_metadata: Value,
-}
-
+// This is the retained event shape consumed by source-backed page projection.
+#[allow(dead_code)]
 pub(super) struct CrushEventDraft {
     pub(super) provider_event_index: u64,
     pub(super) legacy_provider_event_index: u64,
@@ -86,19 +88,9 @@ pub(super) struct CrushEventDraft {
     pub(super) metadata: Value,
 }
 
-pub(super) struct CrushFileTouchDraft {
-    pub(super) provider_session_id: String,
-    pub(super) provider_touch_index: u64,
-    pub(super) provider_event_index: Option<u64>,
-    pub(super) path: String,
-    pub(super) change_kind: Option<FileChangeKind>,
-    pub(super) old_path: Option<String>,
-    pub(super) line_count_delta: Option<i64>,
-    pub(super) confidence: Confidence,
-    pub(super) occurred_at: DateTime<Utc>,
-    pub(super) metadata: Value,
-}
-
+// The projection carries exact hydration/accounting evidence alongside the Core
+// event even when the current coordinator reads only a subset.
+#[allow(dead_code)]
 pub(super) struct CrushMessageProjection {
     pub(super) line_number: usize,
     pub(super) provider_session_id: String,
@@ -113,6 +105,8 @@ pub(super) struct CrushMessageProjection {
     pub(super) parent_session_id: Option<String>,
 }
 
+// Command classification is retained with the output evidence shape.
+#[allow(dead_code)]
 pub(super) struct CrushOutputProjection {
     pub(super) kind: OutputObservationKind,
     pub(super) call_id: Option<String>,
@@ -291,46 +285,6 @@ fn crush_normalized_payload_hash(event_type: EventType, payload: &Value) -> Resu
     compute_payload_hash(&compact_provider_result_payload(event_type, payload))
 }
 
-pub(super) fn project_session(
-    session: &CrushSessionRow,
-    raw_source_path: &str,
-    user_version: i64,
-    schema_fingerprint: &str,
-    fallback: DateTime<Utc>,
-) -> CrushSessionDraft {
-    let started_at = provider_timestamp_millis(session.created_at, fallback);
-    let ended_at = session
-        .updated_at
-        .map(|timestamp| provider_timestamp_millis(Some(timestamp), started_at));
-    CrushSessionDraft {
-        provider_session_id: session.id.clone(),
-        parent_provider_session_id: session.parent_session_id.clone(),
-        started_at,
-        ended_at,
-        source_metadata: json!({
-            "adapter": CRUSH_SQLITE_SOURCE_FORMAT,
-            "sqlite_user_version": user_version,
-            "schema_fingerprint": schema_fingerprint,
-            "source_path": raw_source_path,
-            "upstream_tables": ["sessions", "messages", "files", "read_files"],
-        }),
-        session_metadata: json!({
-            "source_format": CRUSH_SQLITE_SOURCE_FORMAT,
-            "session_id": session.id,
-            "title": session.title,
-            "parent_session_id": session.parent_session_id,
-            "summary_message_id": session.summary_message_id,
-            "tokens": {
-                "prompt": session.prompt_tokens,
-                "completion": session.completion_tokens,
-            },
-            "cost": session.cost,
-            "created_at": session.created_at,
-            "updated_at": session.updated_at,
-        }),
-    }
-}
-
 pub(super) fn decode_session(values: &[NativeSqliteValue]) -> Result<CrushSessionRow> {
     if values.len() != 10 {
         return Err(CaptureError::SystemInvariant(
@@ -481,57 +435,6 @@ fn optional_real(values: &[NativeSqliteValue], index: usize) -> Result<Option<f6
         None => Err(CaptureError::SystemInvariant(
             "Crush logical row is missing a projected optional real value",
         )),
-    }
-}
-
-pub(super) fn file_touch(
-    row: CrushFileRow,
-    fallback: DateTime<Utc>,
-) -> Option<CrushFileTouchDraft> {
-    let session_id = row.session_id?;
-    let occurred_at = provider_timestamp_millis(row.updated_at.or(row.created_at), fallback);
-    let touch_index = 0x0100_0000_0000_u64.saturating_add(row.rowid.max(0) as u64);
-    Some(CrushFileTouchDraft {
-        provider_session_id: session_id,
-        provider_touch_index: touch_index,
-        provider_event_index: None,
-        path: row.path,
-        change_kind: Some(FileChangeKind::Modified),
-        old_path: None,
-        line_count_delta: None,
-        confidence: Confidence::Explicit,
-        occurred_at,
-        metadata: json!({
-            "source": "crush_files",
-            "rowid": row.rowid,
-            "version": row.version,
-            "created_at": row.created_at,
-            "updated_at": row.updated_at,
-        }),
-    })
-}
-
-pub(super) fn read_file_touch(
-    row: CrushReadFileRow,
-    fallback: DateTime<Utc>,
-) -> CrushFileTouchDraft {
-    let occurred_at = provider_timestamp_seconds(row.read_at.map(|value| value as f64), fallback);
-    let touch_index = 0x0200_0000_0000_u64.saturating_add(row.rowid.max(0) as u64);
-    CrushFileTouchDraft {
-        provider_session_id: row.session_id,
-        provider_touch_index: touch_index,
-        provider_event_index: None,
-        path: row.path,
-        change_kind: Some(FileChangeKind::Read),
-        old_path: None,
-        line_count_delta: None,
-        confidence: Confidence::Explicit,
-        occurred_at,
-        metadata: json!({
-            "source": "crush_read_files",
-            "rowid": row.rowid,
-            "read_at": row.read_at,
-        }),
     }
 }
 

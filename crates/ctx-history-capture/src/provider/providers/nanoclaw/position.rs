@@ -89,26 +89,6 @@ impl NanoClawFrontier {
             message_rowid: 0,
         }
     }
-
-    pub(super) fn validate(self) -> Result<Self> {
-        let valid_initial = self == Self::initial();
-        let valid_session = self.session_rowid > 0
-            && match self.phase {
-                NanoClawPositionPhase::NextSession => {
-                    self.message_source.is_none() && self.message_rowid == 0
-                }
-                NanoClawPositionPhase::Messages => {
-                    self.message_source.is_some() == (self.message_rowid > 0)
-                }
-            };
-        if valid_initial || valid_session {
-            Ok(self)
-        } else {
-            Err(CaptureError::InvalidPayload(
-                "NanoClaw NativePath cursor contains an invalid frontier".to_owned(),
-            ))
-        }
-    }
 }
 
 pub(super) fn nanoclaw_message_locator(

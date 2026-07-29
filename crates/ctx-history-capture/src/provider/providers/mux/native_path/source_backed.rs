@@ -102,7 +102,6 @@ pub(crate) type MuxSourceBackedResult<T> = Result<T, MuxSourceBackedError>;
 /// `chat-archive.jsonl` is intentionally absent from this contract.
 #[derive(Debug, Clone)]
 pub(crate) struct MuxSourceBackedCandidate {
-    configured_root: PathBuf,
     authority: ProviderSourceRoot,
     source: MuxSessionSource,
     session_relative_path: PathBuf,
@@ -114,16 +113,11 @@ pub(crate) struct MuxSourceBackedCandidate {
     session_id: StableEntityId,
     parent_session_id: Option<StableEntityId>,
     root_session_id: StableEntityId,
-    observed_at: DateTime<Utc>,
 }
 
 impl MuxSourceBackedCandidate {
     pub(crate) fn source_key(&self) -> &SourceKey {
         &self.source_key
-    }
-
-    pub(crate) fn session_id(&self) -> StableEntityId {
-        self.session_id
     }
 
     pub(crate) fn parent_session_id(&self) -> Option<StableEntityId> {
@@ -140,10 +134,6 @@ impl MuxSourceBackedCandidate {
 
     pub(crate) fn parent_provider_session_id(&self) -> Option<&str> {
         self.metadata.parent_provider_session_id.as_deref()
-    }
-
-    pub(crate) fn root_provider_session_id(&self) -> Option<&str> {
-        self.metadata.root_provider_session_id.as_deref()
     }
 }
 
@@ -172,8 +162,14 @@ pub(crate) struct MuxReplacementEvidence {
 pub(crate) enum MuxSourceBackedDisposition {
     Cold,
     Unchanged,
-    Append { proof: CertifiedSourceAppend },
-    Replacement { evidence: MuxReplacementEvidence },
+    // The certified append proof is retained for commit-time/Pro consumers.
+    #[allow(dead_code)]
+    Append {
+        proof: CertifiedSourceAppend,
+    },
+    Replacement {
+        evidence: MuxReplacementEvidence,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -188,6 +184,8 @@ pub(crate) struct MuxSourceBackedScanReceipt {
 pub(crate) struct MuxSourceBackedPage {
     pub(crate) source: SourceKey,
     pub(crate) session_id: StableEntityId,
+    // Stream kind remains explicit at both page and record boundaries.
+    #[allow(dead_code)]
     pub(crate) stream_kind: MuxStreamKind,
     pub(crate) records: Vec<MuxSourceBackedRecord>,
     pub(crate) unaddressable: Vec<MuxUnaddressableRecord>,
@@ -197,8 +195,13 @@ pub(crate) struct MuxSourceBackedPage {
 pub(crate) struct MuxSourceBackedRecord {
     pub(crate) document: LexicalDocument,
     pub(crate) stream_kind: MuxStreamKind,
+    // Native identity and complete-content evidence remain available to staging
+    // Pro/exact hydration consumers.
+    #[allow(dead_code)]
     pub(crate) source_record_ordinal: u64,
+    #[allow(dead_code)]
     pub(crate) native_record_id: String,
+    #[allow(dead_code)]
     pub(crate) message_content_ref: Option<ctx_history_core::ContentRef>,
 }
 
@@ -210,6 +213,8 @@ pub(crate) enum MuxUnaddressableReason {
 
 #[derive(Debug, Clone)]
 pub(crate) struct MuxBoundedProjection {
+    // Keep provider identity with the bounded unaddressable projection.
+    #[allow(dead_code)]
     pub(crate) provider_session_id: String,
     pub(crate) event_sequence: u64,
     pub(crate) occurred_at_unix_ms: Option<i64>,
@@ -222,9 +227,15 @@ pub(crate) struct MuxBoundedProjection {
 
 #[derive(Debug, Clone)]
 pub(crate) struct MuxUnaddressableRecord {
+    // Exact native coordinates remain diagnostic evidence; Core currently
+    // consumes only reason and bounded_projection.
+    #[allow(dead_code)]
     pub(crate) event_id: StableEntityId,
+    #[allow(dead_code)]
     pub(crate) stream_kind: MuxStreamKind,
+    #[allow(dead_code)]
     pub(crate) source_record_ordinal: u64,
+    #[allow(dead_code)]
     pub(crate) native_record_id: String,
     pub(crate) reason: MuxUnaddressableReason,
     pub(crate) bounded_projection: Option<MuxBoundedProjection>,
@@ -383,7 +394,6 @@ pub(crate) fn discover_mux_source_backed_sources(
             .or(parent_session_id)
             .unwrap_or(session_id);
         candidates.push(MuxSourceBackedCandidate {
-            configured_root: root.to_path_buf(),
             authority: authority.clone(),
             source,
             session_relative_path,
@@ -395,7 +405,6 @@ pub(crate) fn discover_mux_source_backed_sources(
             session_id,
             parent_session_id,
             root_session_id,
-            observed_at,
         });
     }
     Ok(candidates)

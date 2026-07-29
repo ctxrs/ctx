@@ -105,12 +105,19 @@ pub(super) struct GooseNativePage {
 #[derive(Clone, Debug)]
 pub(super) struct GooseNativeScanSummary {
     pub(super) source_authority: GooseNativeSourceAuthority,
+    // Generation, capability, semantic, and physical-position evidence is
+    // retained for exact rebuild/Pro consumers beyond the Core summary.
+    #[allow(dead_code)]
     pub(super) raw_generation_digest: String,
+    #[allow(dead_code)]
     pub(super) capability_digest: String,
+    #[allow(dead_code)]
     pub(super) semantic_digest: String,
+    #[allow(dead_code)]
     pub(super) physical_source_identity: GooseNativePhysicalSourceIdentity,
     pub(super) completed_inventory_token: Option<String>,
     pub(super) complete: bool,
+    #[allow(dead_code)]
     pub(super) position: GooseNativeScanPosition,
     pub(super) inventory: GooseNativeInventorySummary,
     #[cfg(test)]

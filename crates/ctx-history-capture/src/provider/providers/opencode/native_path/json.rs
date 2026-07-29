@@ -74,16 +74,6 @@ pub(super) struct OpenCodeJsonVisitorMetrics {
     bytes: AtomicU64,
 }
 
-impl OpenCodeJsonVisitorMetrics {
-    pub(super) fn records(&self) -> u64 {
-        self.records.load(Ordering::Relaxed)
-    }
-
-    pub(super) fn bytes(&self) -> u64 {
-        self.bytes.load(Ordering::Relaxed)
-    }
-}
-
 #[derive(Serialize, Deserialize)]
 struct RetainedWire {
     effective_type: String,

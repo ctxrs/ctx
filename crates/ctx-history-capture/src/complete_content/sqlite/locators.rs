@@ -211,7 +211,10 @@ pub(super) fn optional_column<'a>(
 /// Adds a verified message locator from evidence computed while the immutable
 /// source row was hydrated. This lets bounded NativePath staging retain only
 /// the digest and content reference instead of a second copy of the full text.
-#[allow(clippy::too_many_arguments)]
+///
+/// This crate-visible attachment seam is retained for generated/cross-target
+/// provider builds even though the current Linux Core graph has no caller.
+#[allow(clippy::too_many_arguments, dead_code)]
 pub(crate) fn attach_sqlite_complete_content_locator_with_ref(
     provider: CaptureProvider,
     source_format: &str,

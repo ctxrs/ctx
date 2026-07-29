@@ -169,6 +169,8 @@ pub(super) fn forgecode_event(
 
 #[derive(Debug)]
 pub(super) struct ForgeCodeNativeEvent {
+    // Keep the native sequence with the event for non-Core materializers.
+    #[allow(dead_code)]
     pub(super) provider_event_index: u64,
     pub(super) provider_event_hash: Option<String>,
     pub(super) cursor: String,

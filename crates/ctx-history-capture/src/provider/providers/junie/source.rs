@@ -6,7 +6,7 @@ use std::{
 
 use serde_json::json;
 
-use crate::{fnv1a64, CaptureError, Result};
+use crate::{fnv1a64, Result};
 
 use super::{
     session_tree::{bounded_junie_index_meta, JunieIndexMeta, JunieSessionPath},
@@ -108,17 +108,6 @@ impl JunieSessionObservation {
             "{JUNIE_SOURCE_REVISION_SCHEMA}:fnv1a64:{:016x}",
             fnv1a64(input.as_bytes())
         )
-    }
-
-    pub(super) fn revalidate(&self, session_path: &JunieSessionPath) -> Result<bool> {
-        match Self::read(session_path) {
-            Ok(current) => Ok(current == *self),
-            Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                Ok(false)
-            }
-            Err(CaptureError::InvalidProviderTranscriptPath { .. }) => Ok(false),
-            Err(error) => Err(error),
-        }
     }
 }
 

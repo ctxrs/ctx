@@ -108,14 +108,6 @@ pub(crate) fn opencode_complete_message_with_normalized_hash(
     complete_content::opencode_complete_message_with_normalized_hash(values, dialect)
 }
 
-pub(crate) fn opencode_normalized_message_payload(
-    message_identity: &str,
-    complete_text: &str,
-    body: &serde_json::Value,
-) -> serde_json::Value {
-    complete_content::opencode_normalized_message_payload(message_identity, complete_text, body)
-}
-
 pub(crate) fn decode_opencode_message_locator(
     locator: &NativeLocator,
 ) -> Result<(OpenCodeCapturedShape, i64)> {

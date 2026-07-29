@@ -242,6 +242,8 @@ pub(crate) struct OpenClawSourceBackedPageV0 {
     pub(crate) retained_records: u64,
     pub(crate) rejected_records: u64,
     pub(crate) certified_prefix_bytes: u64,
+    // Terminal page state remains explicit for cross-target scanner consumers.
+    #[allow(dead_code)]
     pub(crate) terminal: bool,
 }
 

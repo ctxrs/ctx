@@ -292,6 +292,9 @@ pub(in crate::provider::providers::forgecode) struct ForgeCodeScanner {
 
 #[derive(Debug)]
 pub(in crate::provider::providers::forgecode) struct ForgeCodePage {
+    // Frontier and output-byte accounting remain part of the bounded page
+    // contract even when the Core coordinator consumes only next_frontier.
+    #[allow(dead_code)]
     pub(in crate::provider::providers::forgecode) expected_frontier: ForgeCodeFrontier,
     pub(in crate::provider::providers::forgecode) next_frontier: ForgeCodeFrontier,
     pub(in crate::provider::providers::forgecode) terminal: bool,
@@ -301,6 +304,7 @@ pub(in crate::provider::providers::forgecode) struct ForgeCodePage {
     pub(in crate::provider::providers::forgecode) touches: Vec<ForgeCodeFileTouch>,
     pub(in crate::provider::providers::forgecode) rejections: Vec<ProviderImportFailure>,
     pub(in crate::provider::providers::forgecode) retained_bytes: usize,
+    #[allow(dead_code)]
     pub(in crate::provider::providers::forgecode) retained_output_bytes: usize,
 }
 
@@ -322,6 +326,8 @@ pub(in crate::provider::providers::forgecode) struct ForgeCodeConversationRow {
     pub(in crate::provider::providers::forgecode) updated_at: Option<String>,
     pub(in crate::provider::providers::forgecode) context_metadata: Value,
     pub(in crate::provider::providers::forgecode) metrics_metadata: Option<Value>,
+    // Exact context cardinality remains provider evidence for staging Pro.
+    #[allow(dead_code)]
     pub(in crate::provider::providers::forgecode) context_message_count: usize,
     pub(in crate::provider::providers::forgecode) initiator: Option<String>,
 }

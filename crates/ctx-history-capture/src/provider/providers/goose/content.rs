@@ -97,6 +97,9 @@ pub(super) fn complete_message_with_normalized_hash(
     ))
 }
 
+// Retain the crate-visible SQLite attachment seam for generated/cross-target
+// provider graphs even though the current Linux Core route does not call it.
+#[allow(dead_code)]
 pub(super) fn attach_message_locator(
     rowid: i64,
     native_record_id: &str,

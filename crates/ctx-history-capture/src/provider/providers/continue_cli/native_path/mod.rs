@@ -58,7 +58,4 @@ pub(crate) enum ContinueNativePathError {
     },
     #[error("Continue source `{path}` changed while it was being read")]
     SourceChanged { path: PathBuf },
-    #[cfg(test)]
-    #[error("Continue pending page exceeds the {limit} path limit ({observed} paths)")]
-    PendingPageTooLarge { limit: usize, observed: usize },
 }

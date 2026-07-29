@@ -4,7 +4,7 @@ use super::{
         parse_continue_source, ContinueIncompleteSource, ContinueOutputExclusionStats,
         ContinueParseOutcome, ContinueSourceFailure, ContinueSourcePageStream,
     },
-    source::{ContinueDiscovery, ContinuePathIter, ContinueRootAuthority},
+    source::{ContinueDiscovery, ContinuePathIter},
     ContinueNativePathError,
 };
 
@@ -40,17 +40,6 @@ pub(crate) struct ContinuePreparationStream<'a> {
     active_source: Option<Box<ContinueSourcePageStream>>,
     stats: ContinuePreparationStats,
     done: bool,
-}
-
-impl<'a> ContinuePreparationStream<'a> {
-    pub(crate) fn root_authority(&self) -> &ContinueRootAuthority {
-        self.discovery.root_authority()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn stats(&self) -> ContinuePreparationStats {
-        self.stats
-    }
 }
 
 pub(crate) fn prepare_continue_discovery(

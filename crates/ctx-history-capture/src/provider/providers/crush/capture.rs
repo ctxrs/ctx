@@ -2,11 +2,8 @@
 
 use sha2::{Digest, Sha256};
 
-use crate::complete_content::CompleteContentBodyDigest;
-use crate::native_source::{NativeLocator, NativeSqliteValue};
-use crate::{CaptureError, Result};
+use crate::native_source::NativeSqliteValue;
 
-pub(crate) const CRUSH_LOCATOR_KIND: &str = "crush-sqlite-row-v1";
 pub(super) const CRUSH_SQLITE_VALUE_OVERHEAD_BYTES: u64 = 64 * 13;
 
 pub(crate) fn message_child_values(
@@ -47,23 +44,6 @@ fn optional_integer_value(value: Option<i64>) -> NativeSqliteValue {
     value.map_or(NativeSqliteValue::Null, NativeSqliteValue::Integer)
 }
 
-pub(super) fn message_locator(rowid: i64) -> Result<NativeLocator> {
-    let mut value = Vec::with_capacity(1 + 8);
-    value.push(2);
-    value.extend_from_slice(&ordered_i64(rowid).to_be_bytes());
-    NativeLocator::new(CRUSH_LOCATOR_KIND, value)
-        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))
-}
-
-pub(super) fn message_record_digest(
-    values: &[NativeSqliteValue],
-) -> Result<CompleteContentBodyDigest> {
-    let digest = message_record_digest_bytes(values);
-    CompleteContentBodyDigest::parse(hex_digest(&digest)).ok_or(CaptureError::SystemInvariant(
-        "Crush SQLite record digest is not valid SHA-256",
-    ))
-}
-
 pub(super) fn message_record_digest_bytes(values: &[NativeSqliteValue]) -> [u8; 32] {
     const DOMAIN: &[u8] = b"ctx-complete-content-sqlite-logical-row-v1\0";
     let mut digest = Sha256::new();
@@ -93,12 +73,4 @@ pub(super) fn message_record_digest_bytes(values: &[NativeSqliteValue]) -> [u8; 
         }
     }
     digest.finalize().into()
-}
-
-fn hex_digest(digest: &[u8; 32]) -> String {
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-fn ordered_i64(value: i64) -> u64 {
-    (value as u64) ^ (1_u64 << 63)
 }
