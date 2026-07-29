@@ -10,10 +10,6 @@ pub(super) fn is_complete_content_tool_call(message: &Value) -> bool {
             message.pointer("/params/name").and_then(Value::as_str),
             Some("show_session" | "show_event")
         )
-        && message
-            .pointer("/params/arguments/content")
-            .and_then(Value::as_str)
-            == Some("complete")
 }
 
 pub(super) fn is_blame_tool_call(message: &Value) -> bool {
@@ -76,7 +72,7 @@ pub(super) fn bound_complete_content_mcp_response(
             "isError": true,
             "content": [{
                 "type": "text",
-                "text": "complete content response exceeds the serialized MCP output limit",
+                "text": "show response exceeds the serialized MCP output limit",
             }],
             "structuredContent": {
                 "error": "content_too_large",
@@ -92,7 +88,7 @@ pub(super) fn bound_complete_content_mcp_response(
         error_response(
             Value::Null,
             -32603,
-            "Complete content response too large",
+            "Show response too large",
             Some(json!({ "error": "content_too_large" })),
         )
     }
