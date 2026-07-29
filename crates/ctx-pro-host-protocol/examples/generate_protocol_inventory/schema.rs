@@ -180,7 +180,7 @@ pub(super) fn inventory() -> Value {
             ], &[]),
             "EvidenceCitation": fields(&[], &[
                 "observation_id", "observation_seq", "observation_kind", "session_id", "event_id",
-                "event_seq", "source_path", "fixture_line", "source_record_ordinal",
+                "event_seq", "source_locator", "source_path", "fixture_line", "source_record_ordinal",
                 "source_record_subrecord_index", "byte_range", "source_sha256"
             ]),
             "FileBlameMatch": fields(
@@ -350,14 +350,18 @@ pub(super) fn inventory() -> Value {
         },
         "evidence_citation": {
             "branches": {
-                "canonical_or_source": [
+                "canonical_or_source_path": [
                     "observation_id", "observation_seq", "observation_kind", "session_id",
                     "event_id", "event_seq", "source_path", "fixture_line",
                     "source_record_ordinal", "source_record_subrecord_index", "byte_range",
                     "source_sha256"
+                ],
+                "exact_source_locator": [
+                    "source_locator", "source_record_ordinal", "byte_range",
+                    "source_sha256"
                 ]
             },
-            "selection": "canonical_or_source_coordinates_must_be_usable"
+            "selection": "canonical_or_source_path_coordinates_must_be_usable_or_source_locator_must_be_contract_valid_with_exact_record_digest_and_derived_jsonl_coordinates"
         },
         "representative_frames": {
             "host_status": frame_hex(&status),

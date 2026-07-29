@@ -32,6 +32,8 @@ pub enum SourceResolverContractError {
     },
     #[error("exact-revision locator is missing source revision evidence")]
     MissingSourceRevision,
+    #[error("JSONL locator byte range overflowed")]
+    InvalidJsonlByteRange,
     #[error("event identity does not belong to the locator source")]
     IdentitySourceMismatch,
     #[error("event identity has the wrong entity kind")]
@@ -53,7 +55,7 @@ pub enum SourceResolverContractError {
 pub type SourceResolverContractResult<T> = Result<T, SourceResolverContractError>;
 
 /// Whether record evidence survives a benign append to the containing source.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum LocatorRevisionPolicy {
     /// The complete source revision must still equal the committed revision.
     ExactSourceRevision,
@@ -63,7 +65,8 @@ pub enum LocatorRevisionPolicy {
 }
 
 /// Path-independent provider-native coordinates.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum NativeRecordCoordinate {
     Jsonl {
         byte_offset: u64,
@@ -92,7 +95,8 @@ pub enum NativeRecordCoordinate {
 }
 
 /// Locator and integrity evidence for one exact provider record.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SourceRecordLocator {
     locator_version: u16,
     source: SourceKey,
@@ -436,12 +440,19 @@ fn invalid_batch_result(detail: impl Into<String>) -> HydrationFailure {
 
 fn validate_coordinate(coordinate: &NativeRecordCoordinate) -> SourceResolverContractResult<()> {
     match coordinate {
-        NativeRecordCoordinate::Jsonl { byte_length, .. } => {
+        NativeRecordCoordinate::Jsonl {
+            byte_offset,
+            byte_length,
+            ..
+        } => {
             if *byte_length == 0 {
                 return Err(SourceResolverContractError::EmptyField {
                     field: "jsonl_byte_length",
                 });
             }
+            byte_offset
+                .checked_add(*byte_length)
+                .ok_or(SourceResolverContractError::InvalidJsonlByteRange)?;
         }
         NativeRecordCoordinate::ProviderSqlite {
             logical_relation, ..

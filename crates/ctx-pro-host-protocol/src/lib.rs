@@ -6,7 +6,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub use ctx_history_core::ContentRef;
+use ctx_history_core::NativeRecordCoordinate;
+pub use ctx_history_core::{ContentRef, SourceRecordLocator};
 
 pub const FRAME_MAGIC: &[u8; 6] = b"CTXPRO";
 pub const PROTOCOL_VERSION: u16 = 1;
@@ -115,6 +116,7 @@ pub struct EvidenceCitation {
     pub session_id: Option<Uuid>,
     pub event_id: Option<Uuid>,
     pub event_seq: Option<u64>,
+    pub source_locator: Option<SourceRecordLocator>,
     pub source_path: Option<String>,
     pub fixture_line: Option<u64>,
     pub source_record_ordinal: Option<u64>,
@@ -147,6 +149,9 @@ impl EvidenceCitation {
         if !fields_are_valid {
             return false;
         }
+        if let Some(locator) = &self.source_locator {
+            return self.has_exact_source_locator(locator);
+        }
         let canonical =
             self.observation_id.is_some() || self.event_id.is_some() || self.session_id.is_some();
         let source = self.source_path.is_some()
@@ -156,6 +161,48 @@ impl EvidenceCitation {
                 || self.source_sha256.is_some());
         canonical || source
     }
+
+    fn has_exact_source_locator(&self, locator: &SourceRecordLocator) -> bool {
+        let record_digest = lower_hex(locator.record_digest());
+        if locator.validate_contract().is_err()
+            || self.observation_id.is_some()
+            || self.observation_seq.is_some()
+            || self.observation_kind.is_some()
+            || self.session_id.is_some()
+            || self.event_id.is_some()
+            || self.event_seq.is_some()
+            || self.source_path.is_some()
+            || self.fixture_line.is_some()
+            || self.source_record_subrecord_index.is_some()
+            || self.source_sha256.as_deref() != Some(record_digest.as_str())
+        {
+            return false;
+        }
+        match locator.coordinate() {
+            NativeRecordCoordinate::Jsonl {
+                byte_offset,
+                byte_length,
+                physical_ordinal,
+                ..
+            } => {
+                let Some(end_exclusive) = byte_offset.checked_add(*byte_length) else {
+                    return false;
+                };
+                self.source_record_ordinal == Some(*physical_ordinal)
+                    && self.byte_range
+                        == Some(ByteRange {
+                            start: *byte_offset,
+                            end_exclusive,
+                        })
+            }
+            NativeRecordCoordinate::ProviderSqlite { .. }
+            | NativeRecordCoordinate::Document { .. }
+            | NativeRecordCoordinate::TreeRecord { .. }
+            | NativeRecordCoordinate::ProviderNative { .. } => {
+                self.source_record_ordinal.is_none() && self.byte_range.is_none()
+            }
+        }
+    }
 }
 
 fn is_lower_sha256(value: &str) -> bool {
@@ -163,6 +210,16 @@ fn is_lower_sha256(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn lower_hex(bytes: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(64);
+    for byte in bytes {
+        output.push(char::from(HEX[usize::from(byte >> 4)]));
+        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    output
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

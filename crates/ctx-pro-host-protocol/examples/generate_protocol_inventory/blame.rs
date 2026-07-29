@@ -16,6 +16,7 @@ fn canonical_citation(seed: u32, observation_kind: ObservationKind) -> EvidenceC
         session_id: Some(Uuid::from_u128(2_000 + u128::from(seed))),
         event_id: Some(Uuid::from_u128(3_000 + u128::from(seed))),
         event_seq: Some(u64::from(seed)),
+        source_locator: None,
         source_path: Some("fixture/session.jsonl".to_owned()),
         fixture_line: Some(u64::from(seed)),
         source_record_ordinal: Some(u64::from(seed - 1)),
@@ -25,6 +26,25 @@ fn canonical_citation(seed: u32, observation_kind: ObservationKind) -> EvidenceC
             end_exclusive: u64::from(seed) * 100 + 80,
         }),
         source_sha256: Some(format!("{seed:064x}")),
+    }
+}
+
+fn exact_source_citation() -> EvidenceCitation {
+    let locator = fixtures::source_locator();
+    EvidenceCitation {
+        observation_id: None,
+        observation_seq: None,
+        observation_kind: None,
+        session_id: None,
+        event_id: None,
+        event_seq: None,
+        source_sha256: Some(hex(locator.record_digest())),
+        source_locator: Some(locator),
+        source_path: None,
+        fixture_line: None,
+        source_record_ordinal: None,
+        source_record_subrecord_index: None,
+        byte_range: None,
     }
 }
 
@@ -90,7 +110,7 @@ pub(super) fn file_blame_result(
         evidence: vec![
             NumberedEvidence {
                 number: 1,
-                citation: canonical_citation(1, ObservationKind::FileTouch),
+                citation: exact_source_citation(),
             },
             NumberedEvidence {
                 number: 2,

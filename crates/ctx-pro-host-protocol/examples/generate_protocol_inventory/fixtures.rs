@@ -110,17 +110,7 @@ pub(super) fn source_record() -> SourceRecord {
         subrecord_selector: None,
     })
     .expect("golden event ID");
-    let locator = SourceRecordLocator::new(
-        source,
-        NativeRecordCoordinate::ProviderNative {
-            namespace: "golden-record".to_owned(),
-            coordinate: TypedKey::U64(1),
-        },
-        LocatorRevisionPolicy::ExactSourceRevision,
-        Some([8; 32]),
-        [6; 32],
-    )
-    .expect("golden locator");
+    let locator = source_locator();
     SourceRecord::new(
         event_id,
         session_id,
@@ -169,6 +159,20 @@ pub(super) fn source_record() -> SourceRecord {
         ],
     )
     .expect("golden source record")
+}
+
+pub(super) fn source_locator() -> SourceRecordLocator {
+    SourceRecordLocator::new(
+        certified_source().observation().source().clone(),
+        NativeRecordCoordinate::ProviderNative {
+            namespace: "golden-record".to_owned(),
+            coordinate: TypedKey::U64(1),
+        },
+        LocatorRevisionPolicy::ExactSourceRevision,
+        Some([8; 32]),
+        [6; 32],
+    )
+    .expect("golden locator")
 }
 
 pub(super) fn source_removal() -> SourceRemoval {
