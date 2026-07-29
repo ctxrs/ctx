@@ -1,9 +1,9 @@
 pub(super) fn run_daemon_once_with_activity(
-    _args: &DaemonRunArgs,
+    args: &DaemonRunArgs,
     data_root: &Path,
     runtime: &mut DaemonRuntime,
     deadline: Option<Instant>,
-    _semantic_enabled: bool,
+    semantic_enabled: bool,
     query_activity: Option<&DaemonQueryActivity>,
     source_refresh: Option<&SourceBackedRefreshCoordinator>,
 ) -> Result<DaemonIteration> {
@@ -27,7 +27,15 @@ pub(super) fn run_daemon_once_with_activity(
         ));
     }
     if source_refresh_requested {
-        return run_full_source_backed_refresh(data_root, runtime, source_refresh, false);
+        return run_full_source_backed_refresh(
+            args,
+            data_root,
+            runtime,
+            deadline,
+            semantic_enabled,
+            source_refresh,
+            false,
+        );
     }
     if !runtime.history_retry.ready() {
         let job = source_backed_refresh_retry_backoff_job(data_root, &runtime.history_retry);
@@ -42,7 +50,15 @@ pub(super) fn run_daemon_once_with_activity(
             DaemonCycleStateV1::unknown(),
         ));
     }
-    run_full_source_backed_refresh(data_root, runtime, source_refresh, true)
+    run_full_source_backed_refresh(
+        args,
+        data_root,
+        runtime,
+        deadline,
+        semantic_enabled,
+        source_refresh,
+        true,
+    )
 }
 
 fn run_pending_source_backed_refresh(
@@ -65,8 +81,11 @@ fn run_pending_source_backed_refresh(
 }
 
 fn run_full_source_backed_refresh(
+    args: &DaemonRunArgs,
     data_root: &Path,
     runtime: &mut DaemonRuntime,
+    deadline: Option<Instant>,
+    semantic_enabled: bool,
     source_refresh: Option<&SourceBackedRefreshCoordinator>,
     enqueue_periodic: bool,
 ) -> Result<DaemonIteration> {
@@ -163,6 +182,19 @@ fn run_full_source_backed_refresh(
             }
         }
     }
+    if !run.failed
+        && semantic_enabled
+        && daemon_mode_runs_source_backed_semantic_projection(runtime.config.daemon.mode)
+    {
+        let semantic_job =
+            run_daemon_semantic_job_with_retry(args, data_root, runtime, deadline, true);
+        did_work |= daemon_semantic_job_did_work(&semantic_job);
+        write_daemon_job_status_unless_deadline_skip(
+            &daemon_semantic_job_path(data_root),
+            &semantic_job,
+        )?;
+        job["semantic_projection"] = semantic_job;
+    }
     finish_full_source_backed_refresh(data_root, runtime, job, did_work)
 }
 
@@ -171,6 +203,10 @@ fn daemon_mode_runs_source_backed_pro_catch_up(mode: crate::config::DaemonMode) 
 }
 
 fn daemon_mode_runs_source_backed_relational_catch_up(mode: crate::config::DaemonMode) -> bool {
+    !mode.runs_only_source_refresh()
+}
+
+fn daemon_mode_runs_source_backed_semantic_projection(mode: crate::config::DaemonMode) -> bool {
     !mode.runs_only_source_refresh()
 }
 
@@ -305,6 +341,29 @@ pub(super) fn preserve_daemon_retry_state(job: &mut Value, backoff: &DaemonRetry
     job["retry_not_before_at_ms"] = json!(backoff.retry_not_before_at_ms);
 }
 
+fn run_daemon_semantic_job_with_retry(
+    args: &DaemonRunArgs,
+    data_root: &Path,
+    runtime: &mut DaemonRuntime,
+    deadline: Option<Instant>,
+    semantic_enabled: bool,
+) -> Value {
+    if let Some(job) = runtime.semantic_blocked_job.as_ref() {
+        return job.clone();
+    }
+    if !runtime.semantic_retry.ready() {
+        return daemon_semantic_retry_backoff_job(data_root, &runtime.semantic_retry);
+    }
+    let job = run_daemon_semantic_job(args, data_root, runtime, deadline, semantic_enabled)
+        .unwrap_or_else(|error| daemon_semantic_failed_job(data_root, error));
+    let job = record_daemon_job_retry(&mut runtime.semantic_retry, job);
+    if semantic_failure_class_from_job(&job).is_some_and(SemanticFailureClass::blocks_until_restart)
+    {
+        runtime.semantic_blocked_job = Some(job.clone());
+    }
+    job
+}
+
 pub(super) fn record_daemon_job_retry(backoff: &mut DaemonRetryBackoff, mut job: Value) -> Value {
     if daemon_job_should_backoff(&job) {
         let delay = backoff.record_failure();
@@ -348,6 +407,27 @@ pub(super) fn daemon_job_failed(value: &Value) -> bool {
     value.get("status").and_then(Value::as_str) == Some("failed")
 }
 
+fn daemon_semantic_job_did_work(value: &Value) -> bool {
+    value
+        .get("indexed_chunks")
+        .and_then(Value::as_u64)
+        .is_some_and(|chunks| chunks > 0)
+        || value
+            .get("source_records_scanned")
+            .and_then(Value::as_u64)
+            .is_some_and(|records| records > 0)
+}
+
+fn write_daemon_job_status_unless_deadline_skip(path: &Path, value: &Value) -> Result<()> {
+    if value.get("status").and_then(Value::as_str) == Some("skipped")
+        && value.get("reason").and_then(Value::as_str) == Some("daemon_deadline")
+        && path.exists()
+    {
+        return Ok(());
+    }
+    write_daemon_job_status(path, value)
+}
+
 pub(super) fn daemon_deadline_remaining(deadline: Option<Instant>) -> Option<StdDuration> {
     deadline.and_then(|deadline| deadline.checked_duration_since(Instant::now()))
 }
@@ -378,9 +458,13 @@ use crate::{
 
 use super::{
     daemon::{DaemonIteration, DaemonRuntime},
-    daemon_retry::{semantic_failure_class_from_job, DaemonRetryBackoff},
+    daemon_retry::{semantic_failure_class_from_job, DaemonRetryBackoff, SemanticFailureClass},
+    daemon_worker::{
+        daemon_semantic_failed_job, daemon_semantic_retry_backoff_job, run_daemon_semantic_job,
+    },
     paths_status::{
-        daemon_source_backed_refresh_job_path, read_daemon_job_status, write_daemon_job_status,
+        daemon_semantic_job_path, daemon_source_backed_refresh_job_path, read_daemon_job_status,
+        write_daemon_job_status,
     },
     query_service::DaemonQueryActivity,
     reports::SemanticWorkerReport,
@@ -402,7 +486,8 @@ mod tests {
 
     use super::{
         daemon_job_should_backoff, daemon_mode_runs_source_backed_pro_catch_up,
-        daemon_mode_runs_source_backed_relational_catch_up, record_daemon_job_retry,
+        daemon_mode_runs_source_backed_relational_catch_up,
+        daemon_mode_runs_source_backed_semantic_projection, record_daemon_job_retry,
         run_daemon_once_with_activity, DaemonRetryBackoff, DaemonRuntime,
     };
 
@@ -422,6 +507,16 @@ mod tests {
             DaemonMode::Full
         ));
         assert!(!daemon_mode_runs_source_backed_relational_catch_up(
+            DaemonMode::SourceRefreshOnly
+        ));
+    }
+
+    #[test]
+    fn source_refresh_only_mode_excludes_source_backed_semantic_projection() {
+        assert!(daemon_mode_runs_source_backed_semantic_projection(
+            DaemonMode::Full
+        ));
+        assert!(!daemon_mode_runs_source_backed_semantic_projection(
             DaemonMode::SourceRefreshOnly
         ));
     }
@@ -448,16 +543,9 @@ mod tests {
             format: JsonOutputFormat::Json,
         };
 
-        let iteration = run_daemon_once_with_activity(
-            &args,
-            temp.path(),
-            &mut runtime,
-            None,
-            false,
-            None,
-            None,
-        )
-        .unwrap();
+        let iteration =
+            run_daemon_once_with_activity(&args, temp.path(), &mut runtime, None, true, None, None)
+                .unwrap();
 
         assert!(!iteration.did_work);
         assert!(!iteration.failed);
@@ -469,6 +557,7 @@ mod tests {
             .path()
             .join("daemon/jobs/source-backed-relational-catch-up.json")
             .exists());
+        assert!(!super::daemon_semantic_job_path(temp.path()).exists());
     }
 
     #[test]
@@ -512,6 +601,28 @@ mod tests {
 
         assert_eq!(recorded["status"], "completed");
         assert_eq!(recorded["relational_projection"]["status"], "error");
+        assert_eq!(backoff.consecutive_failures, 0);
+    }
+
+    #[test]
+    fn semantic_projection_error_never_puts_core_refresh_into_backoff() {
+        let core_job = json!({
+            "status": "completed",
+            "published_generation": "a".repeat(64),
+            "semantic_projection": {
+                "status": "failed",
+                "retryable": true,
+                "failure_class": "transient",
+                "last_error": "fixture semantic failure",
+            },
+        });
+        let mut backoff = DaemonRetryBackoff::default();
+
+        assert!(!daemon_job_should_backoff(&core_job));
+        let recorded = record_daemon_job_retry(&mut backoff, core_job);
+
+        assert_eq!(recorded["status"], "completed");
+        assert_eq!(recorded["semantic_projection"]["status"], "failed");
         assert_eq!(backoff.consecutive_failures, 0);
     }
 }

@@ -72,6 +72,7 @@ mod query_service;
 use query_service::*;
 pub(crate) use query_service::{
     search_packet_with_backend, semantic_query_service_supported, wait_for_daemon_query_service,
+    SourceBackedSemanticNotReady,
 };
 #[cfg(any(target_os = "macos", test))]
 mod model_acquisition;

@@ -579,6 +579,14 @@ struct PinnedScanSegmentInner {
     vectors: Mmap,
     metadata: Mmap,
     active_bits: Vec<u64>,
+    scoring_chunks: Vec<FlatScoringChunk>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FlatScoringChunk {
+    ordinal: usize,
+    event_id: Uuid,
+    chunk_index: u32,
 }
 
 impl PinnedScanSegment {
@@ -595,11 +603,7 @@ impl PinnedScanSegment {
     }
 
     pub(in crate::semantic) fn active_chunk_count(&self) -> usize {
-        self.inner
-            .active_bits
-            .iter()
-            .map(|word| word.count_ones() as usize)
-            .sum()
+        self.inner.scoring_chunks.len()
     }
 
     pub(in crate::semantic) fn chunks(&self) -> FlatScanChunkIter<'_> {
@@ -607,6 +611,25 @@ impl PinnedScanSegment {
             segment: self,
             ordinal: 0,
         }
+    }
+
+    /// Iterate the fixed-width active metadata needed by exact scoring.
+    ///
+    /// Generation pinning builds this compact projection while validating
+    /// metadata, so steady queries neither decode full metadata records nor
+    /// test the active bitmap for every stored ordinal.
+    pub(in crate::semantic) fn scoring_chunks(&self) -> FlatScoringChunkIter<'_> {
+        FlatScoringChunkIter {
+            segment: self,
+            chunks: self.inner.scoring_chunks.iter(),
+        }
+    }
+
+    pub(in crate::semantic) fn chunk_at(&self, ordinal: usize) -> Option<FlatScanChunkRef<'_>> {
+        if ordinal >= self.vector_count() || !self.is_active(ordinal) {
+            return None;
+        }
+        Some(self.chunk_ref(ordinal))
     }
 
     fn is_active(&self, ordinal: usize) -> bool {
@@ -631,6 +654,52 @@ impl PinnedScanSegment {
         // validates the complete mapped byte range before this slice is built.
         unsafe { std::slice::from_raw_parts(pointer, self.inner.dimensions) }
     }
+
+    fn chunk_ref(&self, ordinal: usize) -> FlatScanChunkRef<'_> {
+        let metadata = self.metadata(ordinal);
+        FlatScanChunkRef {
+            ordinal,
+            event_id: metadata.event_id,
+            seq: metadata.seq,
+            source_text_hash: metadata.source_text_hash,
+            chunk_index: metadata.chunk_index,
+            start_char: metadata.start_char,
+            end_char: metadata.end_char,
+            vector: self.vector(ordinal),
+        }
+    }
+}
+
+pub(in crate::semantic) struct FlatScoringChunkIter<'a> {
+    segment: &'a PinnedScanSegment,
+    chunks: std::slice::Iter<'a, FlatScoringChunk>,
+}
+
+impl<'a> Iterator for FlatScoringChunkIter<'a> {
+    type Item = FlatScoringChunkRef<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let chunk = self.chunks.next()?;
+        Some(FlatScoringChunkRef {
+            ordinal: chunk.ordinal,
+            event_id: chunk.event_id,
+            chunk_index: chunk.chunk_index,
+            vector: self.segment.vector(chunk.ordinal),
+        })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.chunks.size_hint()
+    }
+}
+
+impl ExactSizeIterator for FlatScoringChunkIter<'_> {}
+
+pub(in crate::semantic) struct FlatScoringChunkRef<'a> {
+    pub(in crate::semantic) ordinal: usize,
+    pub(in crate::semantic) event_id: Uuid,
+    pub(in crate::semantic) chunk_index: u32,
+    pub(in crate::semantic) vector: &'a [f32],
 }
 
 pub(in crate::semantic) struct FlatScanChunkIter<'a> {
@@ -648,17 +717,7 @@ impl<'a> Iterator for FlatScanChunkIter<'a> {
             if !self.segment.is_active(ordinal) {
                 continue;
             }
-            let metadata = self.segment.metadata(ordinal);
-            return Some(FlatScanChunkRef {
-                ordinal,
-                event_id: metadata.event_id,
-                seq: metadata.seq,
-                source_text_hash: metadata.source_text_hash,
-                chunk_index: metadata.chunk_index,
-                start_char: metadata.start_char,
-                end_char: metadata.end_char,
-                vector: self.segment.vector(ordinal),
-            });
+            return Some(self.segment.chunk_ref(ordinal));
         }
         None
     }
@@ -828,6 +887,7 @@ fn load_pinned_generation(
     for segment in loaded {
         let vector_count = usize_from_u64(segment.descriptor.vector_count, "vector count")?;
         let mut active_bits = vec![0_u64; vector_count.div_ceil(64)];
+        let mut scoring_chunks = Vec::new();
         for ordinal in 0..vector_count {
             let metadata = metadata_at(&segment.metadata, ordinal);
             let active = versions.get(&metadata.event_id).is_some_and(|version| {
@@ -838,6 +898,11 @@ fn load_pinned_generation(
                 continue;
             }
             active_bits[ordinal / 64] |= 1_u64 << (ordinal % 64);
+            scoring_chunks.push(FlatScoringChunk {
+                ordinal,
+                event_id: metadata.event_id,
+                chunk_index: metadata.chunk_index,
+            });
             active_chunks = active_chunks
                 .checked_add(1)
                 .ok_or_else(|| FlatStoreError::Corrupt("active chunk count overflow".to_owned()))?;
@@ -871,6 +936,7 @@ fn load_pinned_generation(
                 vectors: segment.vectors,
                 metadata: segment.metadata,
                 active_bits,
+                scoring_chunks,
             }),
         });
     }
@@ -2588,6 +2654,28 @@ mod tests {
             visible_chunks(&pinned),
             vec![(first, 30, 7, vec![0.0, 0.0, 0.0, 1.0])]
         );
+        assert_eq!(
+            pinned
+                .scan_segments()
+                .iter()
+                .map(PinnedScanSegment::active_chunk_count)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert!(pinned.scan_segments()[0].chunk_at(0).is_none());
+        let scoring = pinned.scan_segments()[1]
+            .scoring_chunks()
+            .next()
+            .ok_or_else(|| FlatStoreError::Corrupt("expected scoring metadata".to_owned()))?;
+        assert_eq!(scoring.ordinal, 0);
+        assert_eq!(scoring.event_id, first);
+        assert_eq!(scoring.chunk_index, 7);
+        let resolved = pinned.scan_segments()[1]
+            .chunk_at(scoring.ordinal)
+            .ok_or_else(|| FlatStoreError::Corrupt("expected direct metadata lookup".to_owned()))?;
+        assert_eq!(resolved.event_id, scoring.event_id);
+        assert_eq!(resolved.chunk_index, scoring.chunk_index);
+        assert_eq!(resolved.source_text_hash, hash(3));
         let active_vector = pinned
             .scan_segments()
             .iter()

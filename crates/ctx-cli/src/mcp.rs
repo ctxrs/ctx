@@ -556,10 +556,11 @@ fn tool_search(arguments: &Value, data_root: &Path) -> Result<Value> {
             events,
             include_current_session,
             backend,
+            semantic_weight,
+            semantic_enabled: false,
             refresh: RefreshArg::Off,
         },
         data_root,
-        semantic_weight,
     )
 }
 

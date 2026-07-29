@@ -23,12 +23,14 @@ use crate::{
         enforce_complete_content_cli_output_limit, enforce_complete_content_output_limit,
         ContentPolicy, CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
     },
+    config,
     output::{compact_json, print_json, JsonOutputFormat, OutputFormat},
     provider_args::ProviderArg,
     search_filters::parse_since_filter,
     semantic::{
-        coordinate_source_backed_refresh, PinnedSourceBackedGeneration, SourceBackedRefreshMode,
-        SourceBackedRefreshObservation,
+        coordinate_source_backed_refresh, semantic_query_service_supported,
+        PinnedSourceBackedGeneration, SourceBackedRefreshMode, SourceBackedRefreshObservation,
+        SourceBackedSemanticNotReady,
     },
     transcript::{
         normalize_uuid_prefix, print_locate_event_text, print_locate_session_text,
@@ -65,6 +67,8 @@ pub(crate) struct SourceSearchRequest {
     pub(crate) events: bool,
     pub(crate) include_current_session: bool,
     pub(crate) backend: Option<SearchBackendArg>,
+    pub(crate) semantic_weight: f32,
+    pub(crate) semantic_enabled: bool,
     pub(crate) refresh: RefreshArg,
 }
 
@@ -89,6 +93,8 @@ impl From<&SearchArgs> for SourceSearchRequest {
             events: args.events || args.session.is_some(),
             include_current_session: args.include_current_session,
             backend: args.backend,
+            semantic_weight: args.semantic_weight,
+            semantic_enabled: false,
             refresh: args.refresh,
         }
     }
@@ -102,7 +108,15 @@ struct SearchCollection {
     requested_backend: SearchBackendArg,
     effective_backend: SearchBackendArg,
     semantic_weight: f32,
+    semantic_status: &'static str,
+    semantic_fallback: Option<SemanticFallbackDiagnostics>,
     semantic_diagnostics: Option<Value>,
+}
+
+#[derive(Debug, Clone)]
+struct SemanticFallbackDiagnostics {
+    code: &'static str,
+    detail: String,
 }
 
 #[derive(Debug, Clone)]
@@ -132,8 +146,27 @@ pub(crate) fn run_search(
     data_root: PathBuf,
     telemetry: &mut SearchTelemetry,
 ) -> Result<()> {
-    let semantic_weight = args.semantic_weight;
-    let request = SourceSearchRequest::from(&args);
+    let config = config::AppConfig::load(&data_root)?;
+    let mut request = SourceSearchRequest::from(&args);
+    let requested_backend = resolve_source_search_backend(&request, &config)?;
+    request.backend = Some(requested_backend);
+    request.semantic_enabled = config.semantic_search_enabled();
+    let semantic_weight = request.semantic_weight;
+    let json_output = args.format == JsonOutputFormat::Json;
+    if request.refresh == RefreshArg::Background && config.daemon.enabled && !json_output {
+        crate::semantic::maybe_autostart_daemon_for_search(&data_root, &config);
+    }
+    if request.refresh == RefreshArg::Background
+        && request.semantic_enabled
+        && semantic_query_service_supported()
+        && matches!(
+            requested_backend,
+            SearchBackendArg::Semantic | SearchBackendArg::Hybrid
+        )
+        && !(requested_backend == SearchBackendArg::Hybrid && semantic_weight == 0.0)
+    {
+        crate::semantic::wait_for_daemon_query_service(&data_root, Duration::from_secs(3));
+    }
     let refresh_started = Instant::now();
     let refresh = refresh_for_search(&request, &data_root)?;
     let initial_refresh_duration = refresh_started.elapsed();
@@ -142,6 +175,14 @@ pub(crate) fn run_search(
     let query_started = Instant::now();
     let (value, collection, index, refresh_status, refresh_source_count, retry_refresh_duration) =
         search_with_hydration_retry(&request, &data_root, semantic_weight, refresh)?;
+    if !json_output {
+        if let Some(fallback) = collection.semantic_fallback.as_ref() {
+            eprintln!(
+                "warning: semantic retrieval is unavailable ({}); falling back to lexical search",
+                fallback.code
+            );
+        }
+    }
     let query_duration = query_started.elapsed();
     telemetry.refresh_duration = Some(duration_bucket(
         initial_refresh_duration.saturating_add(retry_refresh_duration),
@@ -174,11 +215,11 @@ pub(crate) fn run_search(
     Ok(())
 }
 
-pub(crate) fn mcp_search(
-    request: SourceSearchRequest,
-    data_root: &Path,
-    semantic_weight: f32,
-) -> Result<Value> {
+pub(crate) fn mcp_search(mut request: SourceSearchRequest, data_root: &Path) -> Result<Value> {
+    let config = config::AppConfig::load(data_root)?;
+    request.backend = Some(resolve_source_search_backend(&request, &config)?);
+    request.semantic_enabled = config.semantic_search_enabled();
+    let semantic_weight = request.semantic_weight;
     let refresh = refresh_for_search(&request, data_root)?;
     let (value, _, _, _, _, _) =
         search_with_hydration_retry(&request, data_root, semantic_weight, refresh)?;
@@ -690,6 +731,17 @@ fn search_query_texts(request: &SourceSearchRequest) -> Vec<&str> {
         .collect()
 }
 
+fn resolve_source_search_backend(
+    request: &SourceSearchRequest,
+    config: &config::AppConfig,
+) -> Result<SearchBackendArg> {
+    if request.backend.is_none() && search_query_texts(request).is_empty() && request.file.is_some()
+    {
+        return Ok(SearchBackendArg::Lexical);
+    }
+    crate::commands::search::resolve_search_backend(request.backend, config)
+}
+
 fn index_search_filters(
     request: &SourceSearchRequest,
     index: &VerifiedIndex,
@@ -752,6 +804,7 @@ fn collect_search_hits_with_backend(
     semantic_weight: f32,
     filters: &EventSearchFilters,
 ) -> Result<SearchCollection> {
+    let mut semantic_pin = None;
     collect_search_hits_with_backend_using(
         request,
         index,
@@ -759,12 +812,23 @@ fn collect_search_hits_with_backend(
         semantic_weight,
         filters,
         |index, data_root, query, filters, candidate_limit| {
-            PinnedSourceBackedGeneration::semantic_candidates_for_source_generation(
+            if semantic_pin.is_none() {
+                semantic_pin = Some(
+                    PinnedSourceBackedGeneration::pin_semantic_query_for_source_generation(
+                        index, data_root,
+                    )?,
+                );
+            }
+            let pin = semantic_pin
+                .as_ref()
+                .ok_or_else(|| anyhow!("source-backed semantic query pin is unavailable"))?;
+            PinnedSourceBackedGeneration::semantic_candidates_for_pinned_source_generation(
                 index,
                 data_root,
                 query,
                 filters,
                 candidate_limit,
+                pin,
             )
         },
     )
@@ -803,25 +867,71 @@ where
         collection.semantic_weight = 0.0;
         return Ok(collection);
     }
+    if !request.semantic_enabled {
+        let not_ready = SourceBackedSemanticNotReady::new(
+            "semantic_disabled",
+            "local semantic retrieval is disabled",
+        );
+        if requested_backend == SearchBackendArg::Semantic {
+            return Err(anyhow::Error::new(not_ready));
+        }
+        let mut collection = collect_search_hits(
+            index,
+            &search_query_texts(request),
+            request.limit,
+            request.events,
+            filters,
+        )?;
+        let fallback = SemanticFallbackDiagnostics {
+            code: not_ready.code(),
+            detail: not_ready.detail().to_owned(),
+        };
+        collection.requested_backend = requested_backend;
+        collection.effective_backend = SearchBackendArg::Lexical;
+        collection.semantic_weight = semantic_weight;
+        collection.semantic_status = "disabled";
+        collection.semantic_fallback = Some(fallback.clone());
+        collection.semantic_diagnostics = Some(json!({
+            "query_count": search_query_texts(request).len(),
+            "queries": [],
+            "fallback": {
+                "code": fallback.code,
+                "detail": fallback.detail,
+            },
+        }));
+        return Ok(collection);
+    }
 
     let queries = search_query_texts(request);
     let mut semantic_by_event = BTreeMap::<Uuid, EventSearchCandidate>::new();
     let mut semantic_query_diagnostics = Vec::with_capacity(queries.len());
     let mut semantic_search = semantic_search;
     for query in &queries {
-        let (candidates, diagnostics) = semantic_search(
-            index,
-            data_root,
-            query,
-            filters,
-            SOURCE_FUSION_CANDIDATES,
-        )
-        .with_context(|| {
-                format!(
-                    "{} search requires a complete flat-F32 projection of the pinned source-backed generation",
-                    requested_backend.as_str()
-                )
-            })?;
+        let semantic_result =
+            semantic_search(index, data_root, query, filters, SOURCE_FUSION_CANDIDATES);
+        let (candidates, diagnostics) = match semantic_result {
+            Ok(value) => value,
+            Err(error) if requested_backend == SearchBackendArg::Hybrid => {
+                let fallback = semantic_fallback_diagnostics(&error);
+                let mut collection =
+                    collect_search_hits(index, &queries, request.limit, request.events, filters)?;
+                collection.requested_backend = requested_backend;
+                collection.effective_backend = SearchBackendArg::Lexical;
+                collection.semantic_weight = semantic_weight;
+                collection.semantic_status = "unavailable";
+                collection.semantic_fallback = Some(fallback.clone());
+                collection.semantic_diagnostics = Some(json!({
+                    "query_count": queries.len(),
+                    "queries": semantic_query_diagnostics,
+                    "fallback": {
+                        "code": fallback.code,
+                        "detail": fallback.detail,
+                    },
+                }));
+                return Ok(collection);
+            }
+            Err(error) => return Err(error),
+        };
         semantic_query_diagnostics.push(json!({
             "query": query,
             "diagnostics": diagnostics,
@@ -875,8 +985,23 @@ where
         } else {
             semantic_weight
         },
+        semantic_status: "ready",
+        semantic_fallback: None,
         semantic_diagnostics: Some(semantic_diagnostics),
     })
+}
+
+fn semantic_fallback_diagnostics(error: &anyhow::Error) -> SemanticFallbackDiagnostics {
+    if let Some(not_ready) = error.downcast_ref::<SourceBackedSemanticNotReady>() {
+        return SemanticFallbackDiagnostics {
+            code: not_ready.code(),
+            detail: not_ready.detail().to_owned(),
+        };
+    }
+    SemanticFallbackDiagnostics {
+        code: "semantic_query_failed",
+        detail: format!("{error:#}"),
+    }
 }
 
 fn collect_search_hits(
@@ -910,6 +1035,8 @@ fn collect_search_hits(
                 requested_backend: SearchBackendArg::Lexical,
                 effective_backend: SearchBackendArg::Lexical,
                 semantic_weight: 0.0,
+                semantic_status: "skipped",
+                semantic_fallback: None,
                 semantic_diagnostics: None,
             });
         }
@@ -921,6 +1048,8 @@ fn collect_search_hits(
                 requested_backend: SearchBackendArg::Lexical,
                 effective_backend: SearchBackendArg::Lexical,
                 semantic_weight: 0.0,
+                semantic_status: "skipped",
+                semantic_fallback: None,
                 semantic_diagnostics: None,
             });
         }
@@ -1104,6 +1233,9 @@ fn search_json(
             "requested_mode": collection.requested_backend.as_str(),
             "effective_mode": collection.effective_backend.as_str(),
             "semantic_weight": collection.semantic_weight,
+            "semantic_status": collection.semantic_status,
+            "semantic_fallback_code": collection.semantic_fallback.as_ref().map(|fallback| fallback.code),
+            "semantic_fallback": collection.semantic_fallback.as_ref().map(|fallback| fallback.detail.as_str()),
             "semantic_diagnostics": collection.semantic_diagnostics,
             "index": "source_backed",
             "generation_id": index.generation_id(),
@@ -1948,6 +2080,8 @@ mod tests {
             events: false,
             include_current_session: true,
             backend: Some(SearchBackendArg::Lexical),
+            semantic_weight: 0.35,
+            semantic_enabled: true,
             refresh,
         }
     }
@@ -2168,7 +2302,7 @@ mod tests {
     }
 
     #[test]
-    fn generation_only_semantic_and_hybrid_require_the_exact_flat_projection() {
+    fn generation_only_semantic_is_typed_and_hybrid_falls_back_without_exact_projection() {
         let temp = tempdir().unwrap();
         write_test_generation(temp.path());
         let index = open_index(temp.path()).unwrap();
@@ -2186,10 +2320,35 @@ mod tests {
         let mut hybrid_request = request(RefreshArg::Off);
         hybrid_request.backend = Some(SearchBackendArg::Hybrid);
         let filters = index_search_filters(&hybrid_request, &index).unwrap();
-        let missing =
+        let fallback =
             collect_search_hits_with_backend(&hybrid_request, &index, temp.path(), 0.35, &filters)
-                .unwrap_err();
-        assert!(format!("{missing:#}").contains("flat-F32"));
+                .unwrap();
+        assert_eq!(fallback.requested_backend, SearchBackendArg::Hybrid);
+        assert_eq!(fallback.effective_backend, SearchBackendArg::Lexical);
+        assert_eq!(fallback.semantic_weight, 0.35);
+        assert_eq!(fallback.semantic_status, "unavailable");
+        assert_eq!(
+            fallback.semantic_fallback.as_ref().map(|value| value.code),
+            Some("semantic_store_missing")
+        );
+        assert_eq!(fallback.hits.len(), 1);
+
+        let mut semantic_request = request(RefreshArg::Off);
+        semantic_request.backend = Some(SearchBackendArg::Semantic);
+        let filters = index_search_filters(&semantic_request, &index).unwrap();
+        let missing = collect_search_hits_with_backend(
+            &semantic_request,
+            &index,
+            temp.path(),
+            0.35,
+            &filters,
+        )
+        .unwrap_err();
+        let not_ready = missing
+            .downcast_ref::<SourceBackedSemanticNotReady>()
+            .expect("semantic-only errors remain typed");
+        assert_eq!(not_ready.code(), "semantic_store_missing");
+        assert!(not_ready.detail().contains("flat-F32"));
 
         let mut embedding = vec![0.0; 384];
         embedding[0] = 1.0;
@@ -2244,12 +2403,18 @@ mod tests {
             .unwrap();
             assert_eq!(collection.requested_backend, backend);
             assert_eq!(collection.effective_backend, backend);
+            assert_eq!(collection.semantic_status, "ready");
             assert_eq!(collection.hits.len(), 1);
             let diagnostics = collection.semantic_diagnostics.unwrap();
-            assert_eq!(diagnostics["vector_backend"], "flat_f32");
-            assert_eq!(diagnostics["core_generation_id"], index.generation_id());
-            assert!(diagnostics["flat_generation"].as_u64().unwrap() > 0);
-            assert!(diagnostics["flat_generation_hash"]
+            assert_eq!(diagnostics["query_count"], 1);
+            let query_diagnostics = &diagnostics["queries"][0]["diagnostics"];
+            assert_eq!(query_diagnostics["vector_backend"], "flat_f32");
+            assert_eq!(
+                query_diagnostics["core_generation_id"],
+                index.generation_id()
+            );
+            assert!(query_diagnostics["flat_generation"].as_u64().unwrap() > 0);
+            assert!(query_diagnostics["flat_generation_hash"]
                 .as_str()
                 .is_some_and(|value| !value.is_empty()));
         }
@@ -2258,6 +2423,71 @@ mod tests {
             !database_path(temp.path().to_path_buf()).exists(),
             "generation-only semantic/hybrid must not create or open the legacy Store"
         );
+    }
+
+    #[test]
+    fn zero_weight_hybrid_performs_no_semantic_callback_or_store_work() {
+        let temp = tempdir().unwrap();
+        write_test_generation(temp.path());
+        let index = open_index(temp.path()).unwrap();
+        let mut hybrid_request = request(RefreshArg::Off);
+        hybrid_request.backend = Some(SearchBackendArg::Hybrid);
+        let filters = index_search_filters(&hybrid_request, &index).unwrap();
+
+        let collection = collect_search_hits_with_backend_using(
+            &hybrid_request,
+            &index,
+            temp.path(),
+            0.0,
+            &filters,
+            |_index, _data_root, _query, _filters, _candidate_limit| {
+                panic!("zero-weight hybrid must not pin vectors, embed, or use IPC")
+            },
+        )
+        .unwrap();
+
+        assert_eq!(collection.requested_backend, SearchBackendArg::Hybrid);
+        assert_eq!(collection.effective_backend, SearchBackendArg::Lexical);
+        assert_eq!(collection.semantic_weight, 0.0);
+        assert_eq!(collection.semantic_status, "skipped");
+        assert!(collection.semantic_fallback.is_none());
+        assert_eq!(collection.hits.len(), 1);
+        assert!(!temp
+            .path()
+            .join("source-backed-semantic-flat-f32-v0")
+            .exists());
+        assert!(!database_path(temp.path().to_path_buf()).exists());
+    }
+
+    #[test]
+    fn mcp_source_route_applies_the_semantic_config_default_to_source_generations() {
+        let temp = tempdir().unwrap();
+        write_test_generation(temp.path());
+        let mut source_request = request(RefreshArg::Off);
+        source_request.query = "query-with-no-fixture-match".to_owned();
+        source_request.backend = None;
+
+        let lexical = mcp_search(source_request.clone(), temp.path()).unwrap();
+        assert_eq!(lexical["retrieval"]["requested_mode"], "lexical");
+        assert_eq!(lexical["retrieval"]["effective_mode"], "lexical");
+
+        config::set_semantic_search_enabled(temp.path(), true).unwrap();
+        let hybrid = mcp_search(source_request, temp.path()).unwrap();
+        assert_eq!(hybrid["retrieval"]["requested_mode"], "hybrid");
+        assert_eq!(hybrid["retrieval"]["effective_mode"], "lexical");
+        assert_eq!(
+            hybrid["retrieval"]["semantic_fallback_code"],
+            "semantic_store_missing"
+        );
+
+        let mut file_only = request(RefreshArg::Off);
+        file_only.query.clear();
+        file_only.backend = None;
+        file_only.file = Some(PathBuf::from("/fixture/no-match.rs"));
+        let file_only = mcp_search(file_only, temp.path()).unwrap();
+        assert_eq!(file_only["retrieval"]["requested_mode"], "lexical");
+        assert_eq!(file_only["retrieval"]["effective_mode"], "lexical");
+        assert!(!database_path(temp.path().to_path_buf()).exists());
     }
 
     #[test]

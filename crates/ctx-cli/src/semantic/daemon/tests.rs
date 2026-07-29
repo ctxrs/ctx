@@ -119,6 +119,23 @@ fn test_daemon_run_args() -> DaemonRunArgs {
 }
 
 #[test]
+fn semantic_runtime_is_requested_only_for_supported_full_daemons() {
+    let mut config = AppConfig::default();
+    config.search.semantic = Some(true);
+    config.daemon.mode = DaemonMode::Full;
+
+    assert!(daemon_semantic_runtime_requested(&config, true));
+    assert!(!daemon_semantic_runtime_requested(&config, false));
+
+    config.search.semantic = Some(false);
+    assert!(!daemon_semantic_runtime_requested(&config, true));
+
+    config.search.semantic = Some(true);
+    config.daemon.mode = DaemonMode::SourceRefreshOnly;
+    assert!(!daemon_semantic_runtime_requested(&config, true));
+}
+
+#[test]
 fn source_refresh_only_scheduler_runs_no_unrelated_job() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
@@ -290,6 +307,12 @@ fn full_scheduler_periodically_runs_the_global_source_refresh_executor() -> Resu
     assert_eq!(job["daemon_mode"], "full");
     assert_eq!(job["trigger"], "periodic");
     assert_eq!(job["trigger_provenance"], "daemon_scheduler");
+    assert_eq!(job["semantic_projection"]["status"], "ready");
+    let semantic_job = read_daemon_job_status(
+        &super::super::paths_status::daemon_semantic_job_path(temp.path()),
+    )
+    .ok_or_else(|| anyhow!("source-backed semantic projection job was not persisted"))?;
+    assert_eq!(semantic_job["status"], "ready");
     assert!(temp
         .path()
         .join("source-backed-lexical-v0/meta.json")
@@ -354,7 +377,7 @@ fn full_scheduler_never_runs_or_activates_legacy_history_state() -> Result<()> {
         temp.path(),
         &mut runtime,
         None,
-        true,
+        false,
         None,
         Some(&coordinator),
     )?;
