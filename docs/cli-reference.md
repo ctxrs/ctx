@@ -244,12 +244,14 @@ Current rows include:
 Native JSON rows include `provider`, `path`, `exists`, `source_format`,
 `status`, `import_support`, `native_import`, `importable`, and any
 `unsupported_reason`. Plugin JSON rows use
-`kind: "history_source_plugin"` and include `plugin`, `history_source`,
-`provider_key`, `source_id`, `manifest_path`, and `enabled`. Invalid installed
-plugin manifests appear as non-importable plugin rows with `status: "invalid"`
-and an `error`. `sources` reads path metadata and plugin manifests, writes
-nothing to provider files or source repositories, and does not execute plugin
-commands.
+`kind: "history_source_plugin"` and include `plugin`, `plugin_source`,
+`history_source`, `provider_key`, `source_id`, `manifest_path`, `enabled`,
+`import_mode: "explicit_source_backed"`, and
+`provider_source_authority: true`. Valid plugin rows report
+`status: "available"` and `importable: true`. Invalid installed plugin
+manifests appear as non-importable plugin rows with `status: "invalid"` and an
+`error`. `sources` reads path metadata and plugin manifests, writes nothing to
+provider files or source repositories, and does not execute plugin commands.
 
 A detected current format that ctx cannot import has `status: "unsupported"`
 and `import_support: "unsupported"`. A supported source that requires user
@@ -314,6 +316,12 @@ publishes it under `search/lexical`. It then advances disposable consumers such
 as `relational.sqlite`; semantic catch-up is daemon-owned. It does not write
 `config.toml` for implicit defaults.
 
+History-source plugin import is explicit and single-source in 1.0. A selected
+manifest command emits `ctx-history-jsonl-v1`; ctx validates and merges that
+delta into a private managed provider export, registers the custom route, and
+waits for daemon-owned source-backed publication before committing its cursor.
+Plugin commands are not executed by `import --all`, setup, or search refresh.
+
 Imports always commit valid records and report rejected records. An unreadable
 or structurally incompatible input fails that source, while ctx-owned storage
 or index failures abort the command. A source with only rejected records is a
@@ -328,9 +336,10 @@ When `[daemon].enabled` is true, `import` may opportunistically start a short
 one-pass ctx-owned maintenance profile after the foreground import finishes.
 The daemon work includes bounded native provider-history refresh plus semantic
 indexing when semantic is enabled. It may acquire the local embedding model for
-semantic indexing. Use `import --no-daemon` for a one-run opt-out. Custom JSONL
-imports and explicit history-source-only imports do not autostart daemon
-maintenance; machine-readable import does not start or nudge the daemon.
+semantic indexing. Explicit custom JSONL and history-source imports use the
+daemon-owned source-refresh endpoint for their foreground publication and may
+start it unless `import --no-daemon` is set. With `--no-daemon`, an
+already-running source-refresh endpoint is required.
 
 ## Local Pro
 
@@ -682,7 +691,9 @@ Tantivy generation while the ctx daemon owns lexical publication plus
 relational and semantic catch-up. If no local generation exists yet, search
 performs a bounded foreground lexical bootstrap. If daemon maintenance is
 disabled, background mode uses the same bounded foreground source-refresh path
-for discovered native providers and enabled automatic history-source plugins.
+for discovered native providers. History-source plugins are searched from the
+published generation after explicit import; search refresh does not execute
+their commands in 1.0.
 Semantic retrieval reads an existing compatible generation under
 `search/semantic`; search does not initialize semantic storage, download
 embedding models, or run semantic indexing. Use `--refresh off` to query the
@@ -711,9 +722,10 @@ ahead of partial matches. Repeat
 `--term <query-or-keyword>` when you want to broaden a search across several
 related queries or keywords and merge the ranked results; `--term` is OR-style
 broadening, not a must-include filter.
-Custom history imports can be filtered by `--history-source` using
-`plugin/source` or `provider_key/source_id`, or by exact `--provider-key`,
-`--source-id`, and `--source-format` values. These filters imply
+Custom history imports can be filtered by canonical
+`--history-source provider_key/source_id`, or by exact `--provider-key`,
+`--source-id`, and `--source-format` values. The plugin/source alias is for
+explicit plugin import selection. These search filters imply
 `--provider custom` and cannot be combined with another provider.
 Default search excludes subagent sessions so primary human-agent intent and
 decisions stay prominent. Use `--include-subagents` when implementation details,

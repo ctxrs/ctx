@@ -367,11 +367,11 @@ failures. `sources_completed_with_rejections` counts sources that committed
 accepted content while rejecting other records. `resume_mode` is currently `idempotent_rescan` when
 `--resume` is passed and `normal_scan` otherwise.
 
-Human-readable native imports that target discovered/default provider sources
-may opportunistically start the ctx-owned background daemon maintenance profile
-after foreground import work when `[daemon].enabled` is true. JSON output never
-starts or nudges the daemon. `ctx import --no-daemon`, custom JSONL imports, and explicit
-history-source-only imports do not autostart daemon maintenance. The daemon, when started, reports
+Imports may opportunistically start the ctx-owned daemon maintenance profile
+when `[daemon].enabled` is true. Explicit custom JSONL and history-source
+imports require its source-refresh endpoint even with JSON output. Set
+`ctx import --no-daemon` to prevent autostart; those explicit source-backed
+routes then require an already-running endpoint. The daemon, when started, reports
 `start_mode: "auto"` and `trigger_command: "import"` through status surfaces.
 Import result schema version 2 does not embed daemon process state. Use
 `ctx daemon status --format json` to inspect an already-running or explicitly started

@@ -24,13 +24,15 @@ research agent.
   native source is currently importable.
 - `ctx import` indexes supported local transcript formats and selected local
   history-source plugins, and can opportunistically start the same short
-  one-pass ctx-owned maintenance profile when `[daemon].enabled` is true for
-  native provider imports. `ctx import --no-daemon`, custom JSONL imports, explicit
-  history-source-only imports, and machine-readable import do not autostart or
-  nudge maintenance.
+  one-pass ctx-owned maintenance profile when `[daemon].enabled` is true.
+  Explicit custom JSONL and history-source imports use its required
+  daemon-owned source-refresh endpoint. `ctx import --no-daemon` never starts
+  it and therefore requires an already-running endpoint for those explicit
+  source-backed routes.
 - `ctx search` can refresh a bounded batch from discovered native provider
-  sources and enabled auto history-source plugins before returning ranked local
-  hits from the local index, with event IDs when a hit maps to an indexed event.
+  sources before returning ranked local hits from the local index, with event
+  IDs when a hit maps to an indexed event. History-source plugins enter the
+  same source-backed index only through explicit single-source import in 1.0.
   Default background refresh may autostart daemon maintenance for
   human-readable search while
   semantic search is disabled. Semantic and hybrid search read existing local
