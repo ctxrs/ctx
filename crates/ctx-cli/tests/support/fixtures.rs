@@ -1,3 +1,6 @@
+use ctx_history_index::{GenerationWriter, VerifiedIndex, WriterOptions};
+use ctx_history_search::sql_compatibility_path;
+use ctx_history_store::{CommittedCoreGeneration, SourceBackedRelationalProjection};
 use rusqlite::Connection;
 use std::{
     fs,
@@ -63,6 +66,37 @@ pub(crate) fn write_sqlite_fixture_from_sql(sql_fixture: &str, db_path: &Path) {
     let sql = fs::read_to_string(provider_history_fixture(sql_fixture)).unwrap();
     let conn = Connection::open(db_path).unwrap();
     conn.execute_batch(&sql).unwrap();
+}
+
+pub(crate) fn initialize_generation_only_sql_projection(data_root: &Path) -> String {
+    let index_root = data_root.join("source-backed-lexical-v0");
+    let writer = GenerationWriter::open(
+        &index_root,
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 32 * 1024 * 1024,
+        },
+    )
+    .unwrap();
+    let core_receipt = writer.commit(|_| true).unwrap();
+    let verified = VerifiedIndex::open(index_root).unwrap();
+    assert_eq!(verified.generation_id(), core_receipt.generation_id);
+
+    let generation = CommittedCoreGeneration {
+        generation_id: core_receipt.generation_id.clone(),
+        manifest_json: serde_json::to_vec(verified.manifest()).unwrap(),
+        indexed_documents: core_receipt.indexed_documents,
+        certified_sources: core_receipt.certified_sources,
+        certified_source_bytes: core_receipt.certified_source_bytes,
+    };
+    let mut projection =
+        SourceBackedRelationalProjection::open(sql_compatibility_path(data_root)).unwrap();
+    let relational_receipt = projection.rebuild(&generation, std::iter::empty()).unwrap();
+    assert_eq!(
+        relational_receipt.core_generation_id,
+        core_receipt.generation_id
+    );
+    core_receipt.generation_id
 }
 
 pub(crate) fn copy_dir_all(from: &Path, to: &Path) {

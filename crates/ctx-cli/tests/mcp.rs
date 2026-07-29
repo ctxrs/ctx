@@ -292,10 +292,8 @@ fn mcp_rejects_invalid_utf8_input_line_and_continues() {
 #[test]
 fn mcp_sql_tool_returns_structured_json_and_rejects_writes() {
     let temp = tempdir();
-    ctx(&temp)
-        .args(["setup", "--catalog-only", "--progress", "none"])
-        .assert()
-        .success();
+    let generation_id = initialize_generation_only_sql_projection(temp.path());
+    assert!(!temp.path().join("work.sqlite").exists());
 
     let responses = mcp_roundtrip(
         &temp,
@@ -317,8 +315,19 @@ fn mcp_sql_tool_returns_structured_json_and_rejects_writes() {
                 "params": {
                     "name": "sql",
                     "arguments": {
-                        "sql": "SELECT COUNT(*) AS sessions FROM ctx_sessions",
+                        "sql": "SELECT core_generation_id, status, (SELECT COUNT(*) FROM ctx_sessions) AS sessions FROM ctx_projection_metadata",
                         "max_rows": 5
+                    }
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": "unsupported",
+                "method": "tools/call",
+                "params": {
+                    "name": "sql",
+                    "arguments": {
+                        "sql": "SELECT * FROM events"
                     }
                 }
             }),
@@ -357,20 +366,31 @@ fn mcp_sql_tool_returns_structured_json_and_rejects_writes() {
     assert_eq!(sql["payload_type"], "sql_result");
     assert_eq!(sql["read_only"], true);
     assert_eq!(sql["share_safe"], false);
-    assert_eq!(sql["columns"], json!(["sessions"]));
-    assert_eq!(sql["rows"], json!([[0]]));
+    assert_eq!(
+        sql["columns"],
+        json!(["core_generation_id", "status", "sessions"])
+    );
+    assert_eq!(sql["rows"], json!([[generation_id, "ready", 0]]));
     assert_useful_mcp_text(
         &responses[1]["result"],
         &[
             "ctx sql",
             "returned_rows: 1",
             "truncated: rows=false, values=false",
-            "| sessions |",
-            "| 0 |",
+            "core_generation_id",
+            "ready",
         ],
     );
 
-    let write = &responses[2]["result"];
+    let unsupported = &responses[2]["result"];
+    assert_eq!(unsupported["isError"], true);
+    assert!(unsupported["structuredContent"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("no such table: events"));
+    assert!(mcp_content_text(unsupported).contains("no such table: events"));
+
+    let write = &responses[3]["result"];
     assert_eq!(write["isError"], true);
     assert!(write["structuredContent"]["error"]
         .as_str()
@@ -378,13 +398,52 @@ fn mcp_sql_tool_returns_structured_json_and_rejects_writes() {
         .contains("SQL query must be read-only"));
     assert!(mcp_content_text(write).contains("SQL query must be read-only"));
 
-    let budget = &responses[3]["result"];
+    let budget = &responses[4]["result"];
     assert_eq!(budget["isError"], true);
     assert!(budget["structuredContent"]["error"]
         .as_str()
         .unwrap()
         .contains("SQL result preview budget"));
     assert!(mcp_content_text(budget).contains("SQL result preview budget"));
+    assert!(!temp.path().join("work.sqlite").exists());
+}
+
+#[test]
+fn mcp_sql_fresh_root_initializes_only_relational_projection() {
+    let temp = tempdir();
+    let responses = mcp_roundtrip(
+        &temp,
+        &[
+            json!({
+                "jsonrpc": "2.0",
+                "id": "init",
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": { "name": "ctx-test", "version": "0" }
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": "sql",
+                "method": "tools/call",
+                "params": {
+                    "name": "sql",
+                    "arguments": {
+                        "sql": "SELECT 1 AS one"
+                    }
+                }
+            }),
+        ],
+    );
+
+    assert_eq!(
+        responses[1]["result"]["structuredContent"]["rows"],
+        json!([[1]])
+    );
+    assert!(temp.path().join("relational.sqlite").is_file());
+    assert!(!temp.path().join("work.sqlite").exists());
 }
 
 #[test]

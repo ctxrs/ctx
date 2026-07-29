@@ -7,6 +7,7 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, Subcommand};
 use ctx_history_core::{database_path, EventType};
+use ctx_history_search::SqlCompatibility;
 use ctx_history_store::{
     RawSqlOptions, Store, RAW_SQL_DEFAULT_MAX_COLUMNS, RAW_SQL_DEFAULT_MAX_ROWS,
     RAW_SQL_DEFAULT_MAX_SQL_BYTES, RAW_SQL_DEFAULT_MAX_VALUE_BYTES, RAW_SQL_DEFAULT_TIMEOUT,
@@ -741,8 +742,8 @@ fn tool_sql(arguments: &Value, data_root: &Path) -> Result<Value> {
         })
         .transpose()?
         .unwrap_or_else(|| duration_millis_u64(RAW_SQL_DEFAULT_TIMEOUT));
-    let store = open_existing_store(data_root)?;
-    let result = store.raw_sql_query(
+    let compatibility = SqlCompatibility::open_for_data_root(data_root)?;
+    let result = compatibility.query(
         &sql,
         RawSqlOptions {
             max_rows,

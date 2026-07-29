@@ -17,6 +17,8 @@ use ctx_history_store::{
 
 pub type SqlCompatibilityResult<T> = std::result::Result<T, RelationalProjectionError>;
 
+const SOURCE_BACKED_INDEX_DIRECTORY: &str = "source-backed-lexical-v0";
+
 /// A read-only handle to current stable `ctx_*` views and projection metadata.
 pub struct SqlCompatibility {
     projection: SourceBackedRelationalProjection,
@@ -27,6 +29,36 @@ impl SqlCompatibility {
         Ok(Self {
             projection: SourceBackedRelationalProjection::open_read_only(path)?,
         })
+    }
+
+    /// Selects SQL authority for one ctx data root.
+    ///
+    /// The source-backed projection always wins. A committed source generation
+    /// without its relational consumer fails closed instead of falling back to
+    /// stale canonical rows. A completely fresh root initializes only the
+    /// disposable relational schema. `work.sqlite` is never inspected: v0.26
+    /// source-backed history is a new data epoch and old Store rows remain
+    /// runtime-inactive.
+    pub fn open_for_data_root(data_root: impl AsRef<Path>) -> SqlCompatibilityResult<Self> {
+        let data_root = data_root.as_ref();
+        let projection_path = sql_compatibility_path(data_root);
+        if projection_path.try_exists()? {
+            return Self::open(projection_path);
+        }
+
+        let generation_path = data_root.join(SOURCE_BACKED_INDEX_DIRECTORY);
+        if generation_path.join("meta.json").try_exists()? {
+            return Err(
+                RelationalProjectionError::MissingSourceBackedSqlProjection {
+                    projection_path,
+                    generation_path,
+                },
+            );
+        }
+
+        let writer = SourceBackedRelationalProjection::open(&projection_path)?;
+        drop(writer);
+        Self::open(projection_path)
     }
 
     pub fn path(&self) -> &Path {
