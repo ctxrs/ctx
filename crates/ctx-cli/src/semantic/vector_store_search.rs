@@ -15,58 +15,12 @@ use super::{
             ActiveChunk, ExactFlatF32Scan, FlatScanConfig, FlatScanLocation, FlatScanSkipReason,
         },
         flat_segments::PinnedFlatGeneration,
-        SemanticVectorHit, SemanticVectorSearch, SemanticVectorSearchStats, SemanticVectorStore,
+        SemanticVectorHit, SemanticVectorSearch, SemanticVectorSearchStats,
     },
-    vector_store_schema::{
-        semantic_owned_sidecar_result, SemanticVectorStoreError, SEMANTIC_VECTOR_BACKEND_FLAT_F32,
-    },
+    vector_store_schema::{SemanticVectorStoreError, SEMANTIC_VECTOR_BACKEND_FLAT_F32},
 };
 
 static EXACT_QUERY_LIMITER: LazyLock<ExactQueryLimiter> = LazyLock::new(ExactQueryLimiter::default);
-
-impl SemanticVectorStore {
-    pub(super) fn search(
-        &self,
-        query_embedding: &[f32],
-        limit: usize,
-    ) -> Result<SemanticVectorSearch> {
-        if query_embedding.len() != SEMANTIC_DIMENSIONS {
-            return Err(SemanticVectorStoreError::unavailable(format!(
-                "semantic query has {} dimensions, expected {SEMANTIC_DIMENSIONS}",
-                query_embedding.len()
-            ))
-            .into());
-        }
-        if limit > SEMANTIC_EXACT_TOP_K_MAX {
-            return Err(SemanticVectorStoreError::unavailable(format!(
-                "semantic top-k {limit} exceeds the exact-scan cap {SEMANTIC_EXACT_TOP_K_MAX}"
-            ))
-            .into());
-        }
-        if limit == 0 {
-            return Ok(SemanticVectorSearch::default());
-        }
-        let _permit = EXACT_QUERY_LIMITER.acquire();
-        let started = Instant::now();
-        let Some(reader) = self.flat_pin_generation()? else {
-            return Ok(SemanticVectorSearch {
-                hits: Vec::new(),
-                stats: SemanticVectorSearchStats {
-                    backend: Some(SEMANTIC_VECTOR_BACKEND_FLAT_F32),
-                    scan_ms: started.elapsed().as_millis() as u64,
-                    ..SemanticVectorSearchStats::default()
-                },
-            });
-        };
-        semantic_owned_sidecar_result(scan_exact_generation(
-            &reader,
-            query_embedding,
-            limit,
-            None,
-            started,
-        ))
-    }
-}
 
 pub(super) fn scan_exact_generation(
     reader: &PinnedFlatGeneration,
@@ -75,6 +29,23 @@ pub(super) fn scan_exact_generation(
     allowed_events: Option<&HashSet<Uuid>>,
     started: Instant,
 ) -> Result<SemanticVectorSearch> {
+    if query_embedding.len() != SEMANTIC_DIMENSIONS {
+        return Err(SemanticVectorStoreError::unavailable(format!(
+            "semantic query has {} dimensions, expected {SEMANTIC_DIMENSIONS}",
+            query_embedding.len()
+        ))
+        .into());
+    }
+    if limit > SEMANTIC_EXACT_TOP_K_MAX {
+        return Err(SemanticVectorStoreError::unavailable(format!(
+            "semantic top-k {limit} exceeds the exact-scan cap {SEMANTIC_EXACT_TOP_K_MAX}"
+        ))
+        .into());
+    }
+    if limit == 0 {
+        return Ok(SemanticVectorSearch::default());
+    }
+    let _permit = EXACT_QUERY_LIMITER.acquire();
     let dimensions = usize::try_from(reader.model_contract().dimensions)?;
     let mut scan = ExactFlatF32Scan::new(query_embedding, FlatScanConfig::new(dimensions, limit))
         .map_err(|error| SemanticVectorStoreError::unavailable(error.to_string()))?;
@@ -210,5 +181,61 @@ impl Drop for ExactQueryPermit<'_> {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         *active = active.saturating_sub(1);
         self.limiter.wake.notify_one();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::mpsc, time::Duration};
+
+    use super::*;
+    use crate::semantic::vector_store::{SemanticChunkDocument, SemanticVectorStore};
+
+    #[test]
+    fn direct_exact_generation_scan_waits_for_bounded_admission() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut store = SemanticVectorStore::open(&temp.path().join("search").join("semantic"))?;
+        let event_id = Uuid::new_v4();
+        let mut embedding = vec![0.0; SEMANTIC_DIMENSIONS];
+        embedding[0] = 1.0;
+        store.upsert_chunk_embeddings(&[(
+            SemanticChunkDocument {
+                event_id,
+                seq: 1,
+                chunk_index: 0,
+                source_text_hash: "00".repeat(32),
+                text: String::new(),
+                start_char: 0,
+                end_char: 1,
+            },
+            embedding.clone(),
+        )])?;
+        let pinned = store
+            .flat_pin_generation()?
+            .expect("fixture must publish a flat generation");
+        let permits = (0..SEMANTIC_EXACT_QUERY_CONCURRENCY)
+            .map(|_| EXACT_QUERY_LIMITER.acquire())
+            .collect::<Vec<_>>();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let _ = entered_tx.send(());
+            let result = scan_exact_generation(&pinned, &embedding, 1, None, Instant::now());
+            let _ = result_tx.send(result);
+        });
+
+        entered_rx.recv_timeout(Duration::from_secs(1))?;
+        assert!(matches!(
+            result_rx.recv_timeout(Duration::from_millis(50)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        drop(permits);
+        let search = result_rx.recv_timeout(Duration::from_secs(2))??;
+        handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("exact-scan admission test thread panicked"))?;
+        assert_eq!(search.hits.len(), 1);
+        assert_eq!(search.hits[0].event_id, event_id);
+        Ok(())
     }
 }

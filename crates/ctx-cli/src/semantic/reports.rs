@@ -60,7 +60,7 @@ impl SemanticWorkerReport {
             embedding_runtime: None,
             failure_class: None,
             resource_deferral: None,
-            vector_path: semantic_vector_path(data_root),
+            vector_path: source_backed_semantic_vector_path(data_root),
             lock_path: semantic_worker_lock_path(data_root),
             status_path: semantic_worker_status_path(data_root),
         }
@@ -134,139 +134,11 @@ pub(crate) fn semantic_worker_report_configured_json(
     value
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct SemanticRetrievalReport {
-    pub(super) requested_mode: SearchBackendArg,
-    pub(super) effective_mode: SearchBackendArg,
-    pub(super) semantic_weight: f32,
-    pub(super) semantic_status: &'static str,
-    pub(super) semantic_fallback_code: Option<&'static str>,
-    pub(super) semantic_fallback: Option<String>,
-    pub(super) embedding_model: Option<String>,
-    pub(super) embedded_items: usize,
-    pub(super) embedded_chunks: usize,
-    pub(super) searchable_items: usize,
-    pub(super) indexed_now: usize,
-    pub(super) vector_path: Option<PathBuf>,
-    pub(super) worker: Option<SemanticWorkerReport>,
-    pub(super) diagnostics: Option<SemanticRetrievalDiagnostics>,
-}
-
-impl SemanticRetrievalReport {
-    pub(crate) fn lexical(requested_mode: SearchBackendArg, searchable_items: usize) -> Self {
-        Self {
-            requested_mode,
-            effective_mode: SearchBackendArg::Lexical,
-            semantic_weight: 0.0,
-            semantic_status: "skipped",
-            semantic_fallback_code: None,
-            semantic_fallback: None,
-            embedding_model: None,
-            embedded_items: 0,
-            embedded_chunks: 0,
-            searchable_items,
-            indexed_now: 0,
-            vector_path: None,
-            worker: None,
-            diagnostics: None,
-        }
-    }
-
-    pub(super) fn apply_worker_counts(&mut self, worker: &SemanticWorkerReport) {
-        self.searchable_items = worker.searchable_items;
-        self.embedded_items = worker.embedded_items;
-        self.embedded_chunks = worker.embedded_chunks;
-    }
-
-    pub(super) fn apply_worker_coverage(&mut self, worker: &SemanticWorkerReport) {
-        self.apply_worker_counts(worker);
-        self.semantic_status = semantic_status_from_worker(worker);
-    }
-
-    pub(super) fn set_semantic_fallback(&mut self, code: &'static str, message: impl Into<String>) {
-        self.semantic_fallback_code = Some(code);
-        self.semantic_fallback = Some(message.into());
-    }
-
-    pub(crate) fn to_json(&self) -> Value {
-        compact_json(json!({
-            "requested_mode": self.requested_mode.as_str(),
-            "effective_mode": self.effective_mode.as_str(),
-            "semantic_weight": self.semantic_weight,
-            "semantic_status": self.semantic_status,
-            "semantic_fallback_code": self.semantic_fallback_code,
-            "semantic_fallback": self.semantic_fallback,
-            "embedding_model": self.embedding_model,
-            "coverage": {
-                "embedded_items": self.embedded_items,
-                "embedded_chunks": self.embedded_chunks,
-                "searchable_items": self.searchable_items,
-                "searchable_items_known": self.worker.as_ref().map(|worker| worker.searchable_items_known),
-                "indexed_now": self.indexed_now,
-                "dirty_items": self.worker.as_ref().map(|worker| worker.dirty_items),
-            },
-            "vector_path": self.vector_path.as_ref().map(|path| path.display().to_string()),
-            "worker": self.worker.as_ref().map(SemanticWorkerReport::to_json),
-            "diagnostics": self.diagnostics.as_ref().map(SemanticRetrievalDiagnostics::to_json),
-        }))
-    }
-
-    pub(crate) fn effective_mode(&self) -> SearchBackendArg {
-        self.effective_mode
-    }
-}
-
-pub(super) fn semantic_status_from_worker(worker: &SemanticWorkerReport) -> &'static str {
-    if !worker.searchable_items_known || worker.searchable_items == 0 || worker.embedded_items == 0
-    {
-        "unavailable"
-    } else if semantic_worker_coverage_ready(worker) {
-        "ready"
-    } else {
-        "partial"
-    }
-}
-
-pub(super) fn semantic_worker_coverage_ready(worker: &SemanticWorkerReport) -> bool {
-    worker.searchable_items_known
-        && worker.searchable_items > 0
-        && worker.embedded_items >= worker.searchable_items
-        && worker.dirty_items == 0
-}
-
-#[derive(Debug, Clone, Default)]
-pub(super) struct SemanticRetrievalDiagnostics {
-    pub(super) vector_backend: Option<&'static str>,
-    pub(super) query_embed_ms: Option<u64>,
-    pub(super) vector_scan_ms: Option<u64>,
-    pub(super) chunks_scanned: Option<usize>,
-    pub(super) vector_bytes_read: Option<usize>,
-    pub(super) events_scored: Option<usize>,
-    pub(super) hydration_ms: Option<u64>,
-    pub(super) stale_events_dropped: Option<usize>,
-    pub(super) semantic_candidates: Option<usize>,
-}
-
-impl SemanticRetrievalDiagnostics {
-    pub(super) fn to_json(&self) -> Value {
-        compact_json(json!({
-            "vector_backend": self.vector_backend,
-            "query_embed_ms": self.query_embed_ms,
-            "vector_scan_ms": self.vector_scan_ms,
-            "chunks_scanned": self.chunks_scanned,
-            "vector_bytes_read": self.vector_bytes_read,
-            "events_scored": self.events_scored,
-            "hydration_ms": self.hydration_ms,
-            "stale_events_dropped": self.stale_events_dropped,
-            "semantic_candidates": self.semantic_candidates,
-        }))
-    }
-}
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::{compact_json, config::AppConfig, SearchBackendArg};
+use crate::{compact_json, config::AppConfig};
 
 use super::{
     health_search::{
@@ -274,6 +146,7 @@ use super::{
         semantic_model_cache_available, semantic_worker_cache_dir,
     },
     model_contract::semantic_model_key,
-    paths_status::{semantic_vector_path, semantic_worker_lock_path, semantic_worker_status_path},
+    paths_status::{semantic_worker_lock_path, semantic_worker_status_path},
     query_service::semantic_query_service_supported,
+    vector_store::source_backed_semantic_vector_path,
 };

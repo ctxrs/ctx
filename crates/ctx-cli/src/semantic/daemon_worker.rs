@@ -15,9 +15,9 @@ use ctx_history_core::{
     HydrationFailure, HydrationFailureKind,
 };
 use ctx_history_index::{EventRecord, VerifiedIndex};
+use ctx_history_store::CanonicalSemanticProjectionVersion;
 #[cfg(test)]
 use ctx_history_store::Store;
-use ctx_history_store::{CanonicalSemanticProjectionVersion, EventEmbeddingDocument};
 use serde_json::{json, Value};
 
 use crate::{DaemonRunArgs, DaemonTriggerCommandArg};
@@ -57,7 +57,11 @@ use super::{
         SemanticChunkDocument, SemanticVectorStore, SourceBackedSemanticEmbedder,
         SourceBackedSemanticOutcome, SourceBackedSemanticResolver,
     },
+    SemanticEventDocument,
 };
+
+#[cfg(test)]
+use super::document::semantic_event_document_from_store_projection;
 
 #[cfg(test)]
 use super::{
@@ -67,8 +71,7 @@ use super::{
     indexing::{backfill_semantic_embeddings, semantic_document_hash, semantic_source_text},
     model_contract::SEMANTIC_MODEL_ID,
     paths_status::{
-        read_semantic_worker_status, semantic_status_file_model_matches, semantic_vector_path,
-        SemanticWorkerLock,
+        read_semantic_worker_status, semantic_status_file_model_matches, SemanticWorkerLock,
     },
     runtime_limits::{
         SEMANTIC_DIRTY_QUEUE_RECENT_LIMIT, SEMANTIC_WORKER_BATCH_DEFAULT,
@@ -635,7 +638,7 @@ where
         &mut self,
         event: &EventRecord,
         request: &EventHydrationRequest,
-    ) -> std::result::Result<EventEmbeddingDocument, HydrationFailure> {
+    ) -> std::result::Result<SemanticEventDocument, HydrationFailure> {
         validate_source_semantic_request(event, request)?;
         let user_text = hydrate_source_semantic_text(&self.sources, event, request)?;
         let mut sections = vec![format!("user:\n{}", user_text.trim())];
@@ -653,7 +656,7 @@ where
             .chars()
             .take(SEMANTIC_SOURCE_MAX_CHARS)
             .collect::<String>();
-        Ok(EventEmbeddingDocument {
+        Ok(SemanticEventDocument {
             event_id: event.event_id.as_uuid(),
             history_record_id: None,
             session_id: Some(event.session_id.as_uuid()),
@@ -854,7 +857,7 @@ pub(super) fn reconcile_committed_semantic_work_with_state(
     store: &Store,
     sweep: &mut SemanticReconciliationSweepState,
 ) -> Result<SemanticReconciliationOutcome> {
-    let vector_path = semantic_vector_path(data_root);
+    let vector_path = source_backed_semantic_vector_path(data_root);
     if !vector_path.exists() {
         sweep.target_version = Some(store.canonical_semantic_projection_version()?);
         sweep.committed_store_complete = true;
@@ -895,7 +898,11 @@ pub(super) fn reconcile_committed_semantic_work_with_state(
     }
 
     let before = vector_store.committed_store_reconciliation_cursor()?;
-    let docs = store.recent_event_embedding_documents(before, SEMANTIC_DIRTY_QUEUE_RECENT_LIMIT)?;
+    let docs = store
+        .recent_event_embedding_documents(before, SEMANTIC_DIRTY_QUEUE_RECENT_LIMIT)?
+        .into_iter()
+        .map(|document| semantic_event_document_from_store_projection!(document))
+        .collect::<Vec<_>>();
     if docs.is_empty() {
         vector_store.set_committed_store_reconciliation_cursor(None)?;
         sweep.committed_store_complete = true;
@@ -1507,7 +1514,7 @@ pub(super) fn run_semantic_worker_inner_with_runtime(
     }
     let store = Store::open(&db_path).context("open ctx store for semantic worker")?;
     refresh_semantic_document_count_cache(&store)?;
-    let vector_path = semantic_vector_path(data_root);
+    let vector_path = source_backed_semantic_vector_path(data_root);
     let mut vector_store = SemanticVectorStore::open(&vector_path)?;
     let prune_outcome = vector_store.prune_ineligible_events(&store)?;
     let started_at_ms = utc_now().timestamp_millis();
@@ -1663,13 +1670,17 @@ pub(super) fn queue_recent_semantic_work(
     store: &Store,
     reason: &str,
 ) -> Result<usize> {
-    let vector_path = semantic_vector_path(data_root);
+    let vector_path = source_backed_semantic_vector_path(data_root);
     if !vector_path.exists()
         && !semantic_model_cache_available(&semantic_worker_cache_dir(data_root))
     {
         return Ok(0);
     }
-    let docs = store.recent_event_embedding_documents(None, SEMANTIC_DIRTY_QUEUE_RECENT_LIMIT)?;
+    let docs = store
+        .recent_event_embedding_documents(None, SEMANTIC_DIRTY_QUEUE_RECENT_LIMIT)?
+        .into_iter()
+        .map(|document| semantic_event_document_from_store_projection!(document))
+        .collect::<Vec<_>>();
     if docs.is_empty() {
         return Ok(0);
     }

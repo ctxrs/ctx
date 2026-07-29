@@ -21,11 +21,6 @@ pub(super) struct SemanticVectorSearch {
     pub(super) stats: SemanticVectorSearchStats,
 }
 
-pub(super) struct SemanticHitSearch {
-    pub(super) hits: Vec<ctx_history_search::SemanticEventHit>,
-    pub(super) diagnostics: SemanticRetrievalDiagnostics,
-}
-
 #[derive(Debug, Clone)]
 pub(super) struct SemanticChunkDocument {
     pub(super) event_id: Uuid,
@@ -70,8 +65,6 @@ pub(super) struct SemanticVectorStore {
 }
 use rusqlite::Connection;
 use uuid::Uuid;
-
-use super::reports::SemanticRetrievalDiagnostics;
 
 mod source_projection;
 pub(super) use source_projection::{

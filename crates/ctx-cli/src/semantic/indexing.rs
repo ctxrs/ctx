@@ -5,24 +5,22 @@ use std::{
 };
 
 use anyhow::Result;
-use ctx_history_store::{EventEmbeddingDocument, Store};
+use ctx_history_store::Store;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::{
+    document::semantic_event_document_from_store_projection,
     model_contract::{SEMANTIC_PASSAGE_PREFIX, SEMANTIC_QUERY_PREFIX},
     model_runtime::SharedSemanticRuntime,
-    reports::SemanticRetrievalDiagnostics,
     runtime_limits::{
         SEMANTIC_CHUNK_OVERLAP_CHARS, SEMANTIC_CHUNK_TARGET_CHARS,
         SEMANTIC_DEADLINE_CHUNKS_PER_SECOND, SEMANTIC_DEADLINE_MIN_CHUNK_BATCH,
         SEMANTIC_DIRTY_QUEUE_RECENT_LIMIT, SEMANTIC_MODEL_INIT_MIN_REMAINING_SECS,
         SEMANTIC_SOURCE_MAX_CHARS,
     },
-    vector_store::{
-        SemanticChunkDocument, SemanticHitSearch, SemanticIndexOutcome, SemanticVectorHit,
-        SemanticVectorStore,
-    },
+    vector_store::{SemanticChunkDocument, SemanticIndexOutcome, SemanticVectorStore},
+    SemanticEventDocument,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -44,7 +42,11 @@ pub(super) fn backfill_semantic_embeddings(
     let dirty_ids =
         vector_store.queued_dirty_event_ids(max_to_index.min(SEMANTIC_DIRTY_QUEUE_RECENT_LIMIT))?;
     if !dirty_ids.is_empty() && indexed < max_to_index {
-        let docs = store.event_embedding_documents_by_ids(&dirty_ids)?;
+        let docs = store
+            .event_embedding_documents_by_ids(&dirty_ids)?
+            .into_iter()
+            .map(|document| semantic_event_document_from_store_projection!(document))
+            .collect::<Vec<_>>();
         extend_existing_hashes_for_docs(vector_store, &mut existing_hashes, &docs)?;
         let found_event_ids = docs.iter().map(|doc| doc.event_id).collect::<HashSet<_>>();
         let mut consumed_event_ids = dirty_ids
@@ -82,7 +84,11 @@ pub(super) fn backfill_semantic_embeddings(
         {
             break;
         }
-        let docs = store.recent_event_embedding_documents(before, 512)?;
+        let docs = store
+            .recent_event_embedding_documents(before, 512)?
+            .into_iter()
+            .map(|document| semantic_event_document_from_store_projection!(document))
+            .collect::<Vec<_>>();
         if docs.is_empty() {
             if continue_past_indexed_pages {
                 vector_store.set_backfill_cursor(None)?;
@@ -150,7 +156,7 @@ pub(super) fn semantic_consumed_page_anchor_cursor(
 pub(super) fn extend_existing_hashes_for_docs(
     vector_store: &SemanticVectorStore,
     existing_hashes: &mut HashMap<Uuid, String>,
-    docs: &[EventEmbeddingDocument],
+    docs: &[SemanticEventDocument],
 ) -> Result<()> {
     let event_ids = docs
         .iter()
@@ -171,7 +177,7 @@ pub(super) fn index_semantic_documents(
     model_init_ms: &mut Option<u64>,
     cache_dir: &Path,
     existing_hashes: &mut HashMap<Uuid, String>,
-    docs: Vec<EventEmbeddingDocument>,
+    docs: Vec<SemanticEventDocument>,
     limit: usize,
     deadline: Option<Instant>,
 ) -> Result<SemanticIndexOutcome> {
@@ -330,7 +336,7 @@ pub(super) fn semantic_source_text(text: &str) -> String {
 }
 
 pub(super) fn semantic_chunks_for_document(
-    doc: &EventEmbeddingDocument,
+    doc: &SemanticEventDocument,
     source_text: &str,
     source_text_hash: &str,
 ) -> Vec<SemanticChunkDocument> {
@@ -352,15 +358,15 @@ pub(super) fn semantic_chunks_for_document(
         .collect()
 }
 
-pub(super) fn semantic_document_hash(doc: &EventEmbeddingDocument, source_text: &str) -> String {
+pub(super) fn semantic_document_hash(doc: &SemanticEventDocument, source_text: &str) -> String {
     semantic_text_hash(&semantic_embedded_document_text(doc, source_text))
 }
 
-pub(super) fn semantic_embedded_document_text(doc: &EventEmbeddingDocument, body: &str) -> String {
+pub(super) fn semantic_embedded_document_text(doc: &SemanticEventDocument, body: &str) -> String {
     semantic_embedded_chunk_text(doc, body)
 }
 
-pub(super) fn semantic_embedded_chunk_text(doc: &EventEmbeddingDocument, body: &str) -> String {
+pub(super) fn semantic_embedded_chunk_text(doc: &SemanticEventDocument, body: &str) -> String {
     let header = semantic_document_header(doc);
     let text = if header.is_empty() {
         body.to_owned()
@@ -387,7 +393,7 @@ pub(super) fn semantic_e5_query_text_value(text: &str) -> String {
     semantic_e5_prefixed_text(SEMANTIC_QUERY_PREFIX, text)
 }
 
-pub(super) fn semantic_document_header(doc: &EventEmbeddingDocument) -> String {
+pub(super) fn semantic_document_header(doc: &SemanticEventDocument) -> String {
     let mut lines = vec![
         "semantic_document: v2".to_owned(),
         format!("event_type: {}", doc.event_type.as_str()),
@@ -499,89 +505,4 @@ pub(super) fn semantic_text_hash(text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());
     format!("{:x}", hasher.finalize())
-}
-
-pub(super) fn compare_semantic_hits_desc(
-    left: &SemanticVectorHit,
-    right: &SemanticVectorHit,
-) -> std::cmp::Ordering {
-    right
-        .similarity
-        .total_cmp(&left.similarity)
-        .then_with(|| left.event_id.cmp(&right.event_id))
-}
-
-pub(super) fn semantic_hits_for_query(
-    store: &Store,
-    vector_store: &SemanticVectorStore,
-    query_embedding: &[f32],
-    limit: usize,
-) -> Result<SemanticHitSearch> {
-    let vector_search = vector_store.search(query_embedding, limit)?;
-    let mut diagnostics = SemanticRetrievalDiagnostics {
-        vector_backend: vector_search.stats.backend,
-        vector_scan_ms: Some(vector_search.stats.scan_ms),
-        chunks_scanned: Some(vector_search.stats.chunks_scanned),
-        vector_bytes_read: Some(vector_search.stats.vector_bytes_read),
-        events_scored: Some(vector_search.stats.events_scored),
-        ..SemanticRetrievalDiagnostics::default()
-    };
-    let mut best_by_event = HashMap::<Uuid, SemanticVectorHit>::new();
-    for hit in vector_search.hits {
-        let replace = best_by_event
-            .get(&hit.event_id)
-            .map(|existing| hit.similarity > existing.similarity)
-            .unwrap_or(true);
-        if replace {
-            best_by_event.insert(hit.event_id, hit);
-        }
-    }
-    let mut vector_hits = best_by_event.into_values().collect::<Vec<_>>();
-    vector_hits.sort_by(compare_semantic_hits_desc);
-    let candidate_chunk_ranges = vector_hits
-        .iter()
-        .map(|hit| (hit.event_id, (hit.start_char, hit.end_char)))
-        .collect::<HashMap<_, _>>();
-    let hydration_started = Instant::now();
-    let canonical_snapshot = store.semantic_projection_snapshot_by_id(&candidate_chunk_ranges)?;
-    diagnostics.hydration_ms = Some(hydration_started.elapsed().as_millis() as u64);
-    let current_hashes = current_semantic_source_hashes(&canonical_snapshot.documents);
-    let before_stale_filter = vector_hits.len();
-    vector_hits.retain(|hit| {
-        current_hashes
-            .get(&hit.event_id)
-            .is_some_and(|hash| hash == &hit.source_text_hash)
-    });
-    diagnostics.stale_events_dropped = Some(before_stale_filter.saturating_sub(vector_hits.len()));
-    if vector_hits.len() > limit {
-        vector_hits.truncate(limit);
-    }
-    let hydrated_by_id = canonical_snapshot
-        .hits
-        .into_iter()
-        .map(|hit| (hit.event_id, hit))
-        .collect::<HashMap<_, _>>();
-    let mut hits = Vec::new();
-    for vector_hit in vector_hits {
-        if let Some(hit) = hydrated_by_id.get(&vector_hit.event_id).cloned() {
-            hits.push(ctx_history_search::SemanticEventHit {
-                hit,
-                similarity: vector_hit.similarity,
-            });
-        }
-    }
-    diagnostics.semantic_candidates = Some(hits.len());
-    Ok(SemanticHitSearch { hits, diagnostics })
-}
-
-pub(super) fn current_semantic_source_hashes(
-    documents: &[EventEmbeddingDocument],
-) -> HashMap<Uuid, String> {
-    documents
-        .iter()
-        .map(|doc| {
-            let source_text = semantic_source_text(&doc.text);
-            (doc.event_id, semantic_document_hash(doc, &source_text))
-        })
-        .collect()
 }

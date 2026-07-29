@@ -1,7 +1,3 @@
-pub(super) fn semantic_vector_path(data_root: &Path) -> PathBuf {
-    data_root.join("semantic-vectors")
-}
-
 pub(super) fn semantic_worker_lock_path(data_root: &Path) -> PathBuf {
     data_root.join(SEMANTIC_WORKER_LOCK_FILE)
 }
@@ -546,7 +542,7 @@ pub(super) fn semantic_worker_report_with_count_mode(
             None => (0, false),
         },
     };
-    let vector_path = semantic_vector_path(data_root);
+    let vector_path = source_backed_semantic_vector_path(data_root);
     let model_cache_available =
         semantic_model_cache_available(&semantic_worker_cache_dir(data_root));
     let sidecar_state_result = (|| -> Result<(SemanticSidecarStats, usize)> {
@@ -1309,7 +1305,7 @@ use super::{
         PID_LOCK_ACQUIRE_ATTEMPTS, PID_LOCK_ACQUIRE_RETRY, PID_LOCK_INCOMPLETE_GRACE,
         PID_LOCK_PROTOCOL, SEMANTIC_WORKER_LOCK_FILE, SEMANTIC_WORKER_STATUS_FILE,
     },
-    vector_store::{SemanticSidecarStats, SemanticVectorStore},
+    vector_store::{source_backed_semantic_vector_path, SemanticSidecarStats, SemanticVectorStore},
 };
 
 #[cfg(unix)]
