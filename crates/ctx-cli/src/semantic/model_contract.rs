@@ -5,9 +5,11 @@ use std::{
 
 pub(super) const SEMANTIC_BACKEND: &str = "multilingual-e5";
 pub(super) const SEMANTIC_MODEL_KEY: &str = "e5-small-v1:mean-pool:l2:query-passage";
-pub(super) const SEMANTIC_MODEL_ID: &str = "intfloat/multilingual-e5-small";
-pub(super) const SEMANTIC_MODEL_REVISION: &str = "614241f622f53c4eeff9890bdc4f31cfecc418b3";
-pub(super) const SEMANTIC_MODEL_CONTRACT_VERSION: u32 = 2;
+pub(super) const SEMANTIC_MODEL_ID: &str = ctx_history_index::SEMANTIC_EMBEDDING_MODEL;
+pub(super) const SEMANTIC_MODEL_REVISION: &str =
+    ctx_history_index::SEMANTIC_EMBEDDING_MODEL_REVISION;
+pub(super) const SEMANTIC_MODEL_CONTRACT_VERSION: u32 =
+    ctx_history_index::SEMANTIC_EMBEDDING_CONTRACT_REVISION;
 pub(super) const SEMANTIC_HF_MODEL_CACHE_DIR: &str = "models--intfloat--multilingual-e5-small";
 pub(super) const SEMANTIC_MANAGED_MODEL_CACHE_DIR: &str = "ctx-semantic-models";
 const SEMANTIC_ACCELERATOR_ONNX_MODEL_FILE: SemanticModelFile = SemanticModelFile::new(
@@ -52,10 +54,10 @@ pub(super) const SEMANTIC_PROVISIONING_MODEL_PATHS: &[&str] = &[
     "tokenizer.json",
     "tokenizer_config.json",
 ];
-pub(super) const SEMANTIC_DIMENSIONS: usize = 384;
+pub(super) const SEMANTIC_DIMENSIONS: usize = ctx_history_index::SEMANTIC_EMBEDDING_DIMENSIONS;
 pub(super) const SEMANTIC_MAX_SEQUENCE_LENGTH: usize = 512;
 pub(super) const SEMANTIC_POOLING: &str = "attention-mask-mean";
-pub(super) const SEMANTIC_NORMALIZATION: &str = "l2";
+pub(super) const SEMANTIC_NORMALIZATION: &str = ctx_history_index::SEMANTIC_EMBEDDING_NORMALIZATION;
 pub(super) const SEMANTIC_PASSAGE_PREFIX: &str = "passage: ";
 pub(super) const SEMANTIC_QUERY_PREFIX: &str = "query: ";
 pub(super) const SEMANTIC_CONTRACT_CANARY_TEXT: &str = "búsqueda semántica 世界";

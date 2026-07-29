@@ -6,8 +6,19 @@
 //! either the previous complete generation or the new complete generation.
 
 mod durable_directory;
+pub mod policy;
 mod query;
 
+pub use policy::{
+    current_source_generation_policy, current_source_generation_policy_hash,
+    EmbeddingGenerationPolicy, LexicalBodySelection, LexicalGenerationPolicy,
+    LexicalIndexedBodyLimit, SemanticGenerationPolicy, SemanticHydratedContentFilter,
+    SourceEventClass, SourceEventRole, SourceGenerationPolicy, StoredSourceContent,
+    LEXICAL_INDEXED_BODY_LIMIT, LEXICAL_SCHEMA_REVISION, LEXICAL_TOKENIZER_REVISION,
+    SEMANTIC_CHUNK_OVERLAP_CHARS, SEMANTIC_CHUNK_TARGET_CHARS,
+    SEMANTIC_EMBEDDING_CONTRACT_REVISION, SEMANTIC_EMBEDDING_DIMENSIONS, SEMANTIC_EMBEDDING_MODEL,
+    SEMANTIC_EMBEDDING_MODEL_REVISION, SEMANTIC_EMBEDDING_NORMALIZATION, SEMANTIC_SOURCE_MAX_CHARS,
+};
 pub use query::{
     AgentScope, EventRecord, EventSearchCandidate, EventSearchFilters, ExcludedSessionTree,
     SemanticEligibility, SemanticEventCursor, SemanticEventPage, SessionRecord, SourceEventCursor,
@@ -43,10 +54,9 @@ use uuid::Uuid;
 
 use durable_directory::{reclaim_abandoned_atomic_writes, DurableMmapDirectory};
 
-pub const GENERATION_MANIFEST_VERSION: u32 = 2;
-pub const LEXICAL_SCHEMA_VERSION: u32 = 4;
-pub const LEXICAL_ANALYZER_VERSION: u32 = 1;
-pub const MAX_BODY_PREVIEW_CHARS: usize = 2_048;
+pub const GENERATION_MANIFEST_VERSION: u32 = 3;
+pub const LEXICAL_SCHEMA_VERSION: u32 = LEXICAL_SCHEMA_REVISION;
+pub const LEXICAL_ANALYZER_VERSION: u32 = LEXICAL_TOKENIZER_REVISION;
 
 const MANIFEST_DIRECTORY: &str = "ctx-generations";
 const COMMIT_PAYLOAD_VERSION: u32 = 1;
@@ -82,6 +92,11 @@ pub enum IndexError {
         schema: u32,
         analyzer: u32,
     },
+    #[error(
+        "source generation policy mismatch: expected {expected}, generation carries {actual}; \
+         rebuild the disposable generation"
+    )]
+    GenerationPolicyMismatch { expected: String, actual: String },
     #[error("lexical index schema does not match ctx schema version {0}")]
     SchemaMismatch(u32),
     #[error("a nonempty lexical index has no ctx generation payload")]
@@ -268,7 +283,7 @@ pub struct LexicalDocument {
     pub occurred_at_unix_ms: Option<i64>,
     pub event_type: String,
     pub role: Option<String>,
-    /// An already-bounded searchable preview, never an unbounded event body.
+    /// Full policy-selected meaningful text. It is indexed but never stored.
     pub body: String,
     pub workspace: Option<String>,
     pub cwd: Option<String>,
@@ -293,13 +308,8 @@ impl LexicalDocument {
         if self.body.is_empty() {
             return Err(IndexError::EmptyDocumentField { field: "body" });
         }
-        let body_chars = self.body.chars().count();
-        if body_chars > MAX_BODY_PREVIEW_CHARS {
-            return Err(IndexError::DocumentFieldTooLarge {
-                field: "body_chars",
-                actual: body_chars,
-                maximum: MAX_BODY_PREVIEW_CHARS,
-            });
+        match LEXICAL_INDEXED_BODY_LIMIT {
+            LexicalIndexedBodyLimit::ProviderValidatedFullText => {}
         }
         validate_optional_document_text(
             "provider_session_id",
@@ -389,6 +399,7 @@ pub struct GenerationManifest {
     pub identity_version: u16,
     pub lexical_schema_version: u32,
     pub lexical_analyzer_version: u32,
+    pub policy_schema_hash: String,
     pub indexed_documents: u64,
     pub certified_source_bytes: u64,
     pub sources: Vec<CertifiedSource>,
@@ -439,6 +450,7 @@ impl GenerationManifest {
             identity_version: IDENTITY_VERSION,
             lexical_schema_version: LEXICAL_SCHEMA_VERSION,
             lexical_analyzer_version: LEXICAL_ANALYZER_VERSION,
+            policy_schema_hash: current_source_generation_policy_hash()?,
             indexed_documents,
             certified_source_bytes,
             sources,
@@ -560,7 +572,7 @@ struct Fields {
     occurred_at_unix_ms: Field,
     event_type: Field,
     role: Field,
-    body_preview: Field,
+    body_search: Field,
     workspace: Field,
     workspace_filter: Field,
     cwd: Field,
@@ -947,7 +959,7 @@ impl GenerationWriter {
         if let Some(role) = document.role {
             target.add_text(self.fields.role, role);
         }
-        target.add_text(self.fields.body_preview, document.body);
+        target.add_text(self.fields.body_search, document.body);
         if let Some(workspace) = document.workspace {
             target.add_text(self.fields.workspace_filter, workspace.to_lowercase());
             target.add_text(self.fields.workspace, workspace);
@@ -1250,7 +1262,7 @@ impl VerifiedIndex {
     fn count_term(&self, term_text: &str) -> Result<usize> {
         use tantivy::query::TermQuery;
 
-        let body = required_field(self.searcher.schema(), "body_preview")?;
+        let body = required_field(self.searcher.schema(), "body_search")?;
         let query = TermQuery::new(
             Term::from_field_text(body, term_text),
             IndexRecordOption::Basic,
@@ -1298,6 +1310,13 @@ fn load_manifest_for_metas(root: &Path, metas: &IndexMeta) -> Result<GenerationM
             identity: manifest.identity_version,
             schema: manifest.lexical_schema_version,
             analyzer: manifest.lexical_analyzer_version,
+        });
+    }
+    let expected_policy_hash = current_source_generation_policy_hash()?;
+    if manifest.policy_schema_hash != expected_policy_hash {
+        return Err(IndexError::GenerationPolicyMismatch {
+            expected: expected_policy_hash,
+            actual: manifest.policy_schema_hash,
         });
     }
     manifest.validate_contract()?;
@@ -1613,10 +1632,8 @@ fn lexical_schema() -> Schema {
         .set_tokenizer("default")
         .set_index_option(IndexRecordOption::WithFreqsAndPositions);
     builder.add_text_field(
-        "body_preview",
-        TextOptions::default()
-            .set_indexing_options(body_indexing)
-            .set_stored(),
+        "body_search",
+        TextOptions::default().set_indexing_options(body_indexing),
     );
     builder.add_text_field("workspace", STRING | STORED);
     builder.add_text_field("workspace_filter", STRING);
@@ -1653,7 +1670,7 @@ fn fields_from_schema(schema: &Schema) -> Result<Fields> {
         occurred_at_unix_ms: required_field(schema, "occurred_at_unix_ms")?,
         event_type: required_field(schema, "event_type")?,
         role: required_field(schema, "role")?,
-        body_preview: required_field(schema, "body_preview")?,
+        body_search: required_field(schema, "body_search")?,
         workspace: required_field(schema, "workspace")?,
         workspace_filter: required_field(schema, "workspace_filter")?,
         cwd: required_field(schema, "cwd")?,
@@ -2314,7 +2331,6 @@ mod tests {
         assert_eq!(exact.occurred_at_unix_ms, first.occurred_at_unix_ms);
         assert_eq!(exact.event_type, "message");
         assert_eq!(exact.role.as_deref(), Some("user"));
-        assert_eq!(exact.preview, "atomic generation");
         assert_eq!(exact.workspace.as_deref(), Some("ctx"));
         assert_eq!(exact.cwd.as_deref(), Some("/work/ctx"));
         assert_eq!(exact.touched_files, vec!["src/lib.rs"]);
@@ -2537,9 +2553,10 @@ mod tests {
         ));
         let rewritten = collect_source_pages(&rewritten_pin, &source, 1);
         assert_eq!(rewritten.len(), 2);
-        assert!(rewritten
-            .iter()
-            .any(|event| event.preview == "rewritten first"));
+        assert!(rewritten.iter().any(|event| {
+            event.event_id == rewritten_first.event_id
+                && event.workspace.as_deref() == Some("rewritten")
+        }));
         assert!(rewritten
             .iter()
             .any(|event| event.event_id == replacement.event_id));
@@ -2548,7 +2565,7 @@ mod tests {
             .all(|event| event.event_id != old_second.event_id));
         let old = collect_source_pages(&old_pin, &source, 1);
         assert_eq!(old.len(), 2);
-        assert!(old.iter().any(|event| event.preview == "old first"));
+        assert!(old.iter().any(|event| event.event_id == old_first.event_id));
 
         let changed_descriptor = source_for_provider(
             "codex",
@@ -2588,24 +2605,28 @@ mod tests {
         assistant.role = Some("assistant".to_owned());
         let mut tool = document(&source, 3, "user-shaped tool call");
         tool.event_type = "tool_call".to_owned();
-        let control = document(
+        let mut control = document(
             &source,
             4,
             "  <environment_context>not a semantic turn</environment_context>  ",
         );
+        control.event_type = "notice".to_owned();
         let second = document(&source, 5, "second eligible user message");
         let third = document(&source, 6, "third eligible user message");
-        let aborted = document(&source, 7, "<turn_aborted>interrupted</turn_aborted>");
-        let notification = document(
+        let mut aborted = document(&source, 7, "<turn_aborted>interrupted</turn_aborted>");
+        aborted.event_type = "notice".to_owned();
+        let mut notification = document(
             &source,
             8,
             "<subagent_notification>completed</subagent_notification>",
         );
-        let warning = document(
+        notification.event_type = "notice".to_owned();
+        let mut warning = document(
             &source,
             9,
             "Warning: The maximum number of unified exec processes has been reached",
         );
+        warning.event_type = "notice".to_owned();
         let discussion = document(
             &source,
             10,
@@ -2644,7 +2665,7 @@ mod tests {
         assert_eq!(first_page.generation_id, index.generation_id());
         assert_eq!(
             first_page.eligibility,
-            SemanticEligibility::LiteTurnUserMessageV1
+            SemanticEligibility::UserMessageCandidateV2
         );
         assert_eq!(first_page.eligible_total, 4);
         assert_eq!(first_page.eligible_count(), 2);
@@ -2662,7 +2683,6 @@ mod tests {
             first_page.items[0].root_session_id,
             first_page.items[0].session_id
         );
-        assert!(first_page.items[0].preview.chars().count() <= MAX_BODY_PREVIEW_CHARS);
 
         let cursor = first_page.next_cursor.unwrap();
         assert_eq!(cursor.generation_id(), index.generation_id());
@@ -2792,16 +2812,17 @@ mod tests {
         assert_eq!(old_records.len(), 2);
         assert!(old_records
             .iter()
-            .any(|event| event.preview == "old first event"));
+            .any(|event| event.event_id == old_first.event_id));
         assert!(old_records
             .iter()
             .any(|event| event.event_id == old_second.event_id));
 
         let rewritten_records = page_all(&rewritten_pin);
         assert_eq!(rewritten_records.len(), 2);
-        assert!(rewritten_records
-            .iter()
-            .any(|event| event.preview == "rewritten first event"));
+        assert!(rewritten_records.iter().any(|event| {
+            event.event_id == rewritten_first.event_id
+                && event.workspace.as_deref() == Some("rewritten-workspace")
+        }));
         assert!(rewritten_records
             .iter()
             .all(|event| event.event_id != old_second.event_id));
@@ -2999,24 +3020,40 @@ mod tests {
     }
 
     #[test]
-    fn maximum_length_preview_is_stored_and_returned() {
+    fn full_body_is_searchable_but_never_stored_or_returned() {
         let temp = tempdir().unwrap();
         let source = source("session.jsonl");
-        let preview = "界".repeat(MAX_BODY_PREVIEW_CHARS);
-        let expected = document(&source, 1, &preview);
+        let body = format!("{} tailonlyneedle", "界".repeat(16_384));
+        let expected = document(&source, 1, &body);
         let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
         writer.begin_source(source.clone()).unwrap();
         writer.add_document(expected.clone()).unwrap();
         writer.certify_source(certificate(&source, 1, 1)).unwrap();
         writer.commit(|_| true).unwrap();
 
-        let record = VerifiedIndex::open(temp.path())
-            .unwrap()
+        let index = VerifiedIndex::open(temp.path()).unwrap();
+        let record = index
             .event_by_id(expected.event_id.as_uuid())
             .unwrap()
             .unwrap();
-        assert_eq!(record.preview, preview);
-        assert_eq!(record.preview.chars().count(), MAX_BODY_PREVIEW_CHARS);
+        assert_eq!(record.locator, expected.locator);
+        assert_eq!(
+            index.search_event_candidates("tailonlyneedle", 10).unwrap()[0]
+                .event
+                .event_id,
+            expected.event_id
+        );
+
+        let fields = fields_from_schema(index.searcher.schema()).unwrap();
+        let address = index
+            .searcher
+            .search(&AllQuery, &DocSetCollector)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let stored: TantivyDocument = index.searcher.doc(address).unwrap();
+        assert!(stored.get_first(fields.body_search).is_none());
     }
 
     #[test]
@@ -3408,7 +3445,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_v3_manifest_fails_closed_at_generation_boundary() {
+    fn stale_schema_manifest_fails_closed_at_generation_boundary() {
         let temp = tempdir().unwrap();
         let source = source("session.jsonl");
         let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
@@ -3439,6 +3476,73 @@ mod tests {
                 schema: 3,
                 analyzer: LEXICAL_ANALYZER_VERSION,
             }
+        ));
+    }
+
+    #[test]
+    fn current_manifest_roundtrips_with_exact_policy_hash() {
+        let source = source("manifest-roundtrip.jsonl");
+        let manifest = GenerationManifest::from_sources(vec![certificate(&source, 7, 3)]).unwrap();
+        let canonical = serde_json::to_vec(&manifest).unwrap();
+        let roundtrip: GenerationManifest = serde_json::from_slice(&canonical).unwrap();
+
+        assert_eq!(serde_json::to_vec(&roundtrip).unwrap(), canonical);
+        assert_eq!(
+            roundtrip.policy_schema_hash,
+            current_source_generation_policy_hash().unwrap()
+        );
+        assert_eq!(
+            roundtrip.generation_id().unwrap(),
+            manifest.generation_id().unwrap()
+        );
+    }
+
+    #[test]
+    fn policy_field_change_changes_hash_and_generation_id() {
+        let manifest = GenerationManifest::from_sources(Vec::new()).unwrap();
+        let mut changed_policy = current_source_generation_policy();
+        changed_policy.semantic.chunk_overlap_chars += 1;
+        let changed_policy_hash = changed_policy.canonical_sha256().unwrap();
+        let mut changed_manifest = manifest.clone();
+        changed_manifest.policy_schema_hash = changed_policy_hash.clone();
+
+        assert_ne!(manifest.policy_schema_hash, changed_policy_hash);
+        assert_ne!(
+            manifest.generation_id().unwrap(),
+            changed_manifest.generation_id().unwrap()
+        );
+    }
+
+    #[test]
+    fn verified_open_rejects_mismatched_active_policy() {
+        let temp = tempdir().unwrap();
+        let source = source("policy-mismatch.jsonl");
+        let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        writer.begin_source(source.clone()).unwrap();
+        writer.add_document(document(&source, 1, "body")).unwrap();
+        writer.certify_source(certificate(&source, 1, 1)).unwrap();
+        writer.commit(|_| true).unwrap();
+
+        let pinned = VerifiedIndex::open(temp.path()).unwrap();
+        let mut mismatched_policy = current_source_generation_policy();
+        mismatched_policy.lexical.event_projector_revision += 1;
+        let mismatched_policy_hash = mismatched_policy.canonical_sha256().unwrap();
+        let mut mismatched_manifest = pinned.manifest().clone();
+        mismatched_manifest.policy_schema_hash = mismatched_policy_hash.clone();
+        let index = pinned.searcher.index().clone();
+        publish_unchecked_generation(temp.path(), &index, mismatched_manifest, &[], Vec::new());
+
+        let error = match VerifiedIndex::open(temp.path()) {
+            Ok(_) => panic!("mismatched policy generation unexpectedly opened"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            IndexError::GenerationPolicyMismatch {
+                expected,
+                actual,
+            } if expected == current_source_generation_policy_hash().unwrap()
+                && actual == mismatched_policy_hash
         ));
     }
 
@@ -3576,24 +3680,15 @@ mod tests {
     }
 
     #[test]
-    fn body_projection_is_bounded_by_characters() {
+    fn empty_body_is_rejected_without_an_index_side_length_limit() {
         let temp = tempdir().unwrap();
         let source = source("session.jsonl");
         let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
         writer.begin_source(source.clone()).unwrap();
-        let error = writer
-            .add_document(document(
-                &source,
-                1,
-                &"界".repeat(MAX_BODY_PREVIEW_CHARS + 1),
-            ))
-            .unwrap_err();
+        let error = writer.add_document(document(&source, 1, "")).unwrap_err();
         assert!(matches!(
             error,
-            IndexError::DocumentFieldTooLarge {
-                field: "body_chars",
-                ..
-            }
+            IndexError::EmptyDocumentField { field: "body" }
         ));
     }
 

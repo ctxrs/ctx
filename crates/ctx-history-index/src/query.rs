@@ -15,10 +15,7 @@ use tantivy::{
 };
 use uuid::Uuid;
 
-use super::{
-    fields_from_schema, hex, source_token, Fields, IndexError, Result, VerifiedIndex,
-    MAX_BODY_PREVIEW_CHARS,
-};
+use super::{fields_from_schema, hex, source_token, Fields, IndexError, Result, VerifiedIndex};
 
 const ID_PREFIX_MATCH_LIMIT: usize = 2;
 const BODY_ANALYZER: &str = "default";
@@ -72,26 +69,27 @@ pub struct SourceEventPage {
     pub terminal: bool,
 }
 
-/// Stable eligibility policy used by the source-backed semantic projection.
+/// Stable metadata-only candidate policy for source-backed semantic projection.
 ///
-/// This contract is independent of lexical query terms, scores, and ranking.
-/// Future eligibility changes must add a new enum variant instead of changing
-/// the meaning of this variant.
+/// The lexical index cannot decide whether user-message content is meaningful
+/// because it does not store source text. Downstream semantic projection must
+/// hydrate the exact locator and apply the generation policy's hydrated content
+/// filter before chunking or embedding. This contract is independent of lexical
+/// query terms, scores, and ranking. Future candidate changes must add a new
+/// enum variant instead of changing the meaning of this variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SemanticEligibility {
-    LiteTurnUserMessageV1,
+    UserMessageCandidateV2,
 }
 
 impl SemanticEligibility {
-    pub const CURRENT: Self = Self::LiteTurnUserMessageV1;
+    pub const CURRENT: Self = Self::UserMessageCandidateV2;
 
     pub fn includes(self, event: &EventRecord) -> bool {
         match self {
-            Self::LiteTurnUserMessageV1 => {
-                event.event_type == "message"
-                    && event.role.as_deref() == Some("user")
-                    && !semantic_control_preview(&event.preview)
+            Self::UserMessageCandidateV2 => {
+                event.event_type == "message" && event.role.as_deref() == Some("user")
             }
         }
     }
@@ -127,11 +125,13 @@ impl SemanticEventCursor {
     }
 }
 
-/// One deterministic page of semantic-eligible events from a pinned index.
+/// One deterministic page of metadata-selected semantic candidates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SemanticEventPage {
     pub generation_id: String,
     pub eligibility: SemanticEligibility,
+    /// Exact count of metadata candidates before source hydration and content
+    /// filtering.
     pub eligible_total: u64,
     pub items: Vec<EventRecord>,
     pub next_cursor: Option<SemanticEventCursor>,
@@ -195,7 +195,6 @@ pub struct EventRecord {
     pub occurred_at_unix_ms: Option<i64>,
     pub event_type: String,
     pub role: Option<String>,
-    pub preview: String,
     pub workspace: Option<String>,
     pub cwd: Option<String>,
     pub touched_files: Vec<String>,
@@ -269,7 +268,8 @@ impl VerifiedIndex {
         })
     }
 
-    /// Returns semantic-eligible events in strict full `StableEntityId` order.
+    /// Returns metadata-selected semantic candidates in strict full
+    /// `StableEntityId` order.
     ///
     /// The cursor is an exclusive keyset bound to this pinned generation.
     /// At most [`MAX_SEMANTIC_EVENT_PAGE_ITEMS`] records, plus one lookahead
@@ -313,7 +313,7 @@ impl VerifiedIndex {
         })
     }
 
-    /// Returns the exact total for the current semantic eligibility contract.
+    /// Returns the exact total for the current metadata candidate contract.
     ///
     /// The count is computed lazily from this immutable searcher and cached for
     /// the lifetime of the pin.
@@ -329,7 +329,7 @@ impl VerifiedIndex {
         Ok(count)
     }
 
-    /// Searches the bounded event previews using ordinary analyzed text.
+    /// Searches full policy-selected event text using ordinary analyzed text.
     ///
     /// Every analyzed token is required. QueryParser operators and field
     /// syntax are intentionally not accepted.
@@ -345,7 +345,7 @@ impl VerifiedIndex {
         )
     }
 
-    /// Searches bounded event previews with conjunctive metadata filters.
+    /// Searches policy-selected event text with conjunctive metadata filters.
     ///
     /// Exact-value fields use their canonical stored spelling. Workspace and
     /// touched-file filters use case-insensitive substring matching over
@@ -488,7 +488,7 @@ impl VerifiedIndex {
         }
         Ok(tokens
             .into_keys()
-            .map(|token| Term::from_field_text(fields.body_preview, &token))
+            .map(|token| Term::from_field_text(fields.body_search, &token))
             .collect())
     }
 
@@ -798,10 +798,6 @@ pub(super) fn stored_event_record(
     {
         return Err(IndexError::InvalidStoredDocumentField("provider"));
     }
-    let preview = required_string(&document, fields.body_preview, "body_preview")?;
-    if preview.is_empty() || preview.chars().count() > MAX_BODY_PREVIEW_CHARS {
-        return Err(IndexError::InvalidStoredDocumentField("body_preview"));
-    }
     let touched_files = document
         .get_all(fields.touched_file)
         .map(|value| {
@@ -840,7 +836,6 @@ pub(super) fn stored_event_record(
         occurred_at_unix_ms: optional_i64(&document, fields.occurred_at_unix_ms)?,
         event_type: required_string(&document, fields.event_type, "event_type")?,
         role: optional_string(&document, fields.role)?,
-        preview,
         workspace: optional_string(&document, fields.workspace)?,
         cwd: optional_string(&document, fields.cwd)?,
         touched_files,
@@ -881,14 +876,6 @@ impl Ord for EventIdentityCandidate {
     fn cmp(&self, other: &Self) -> Ordering {
         self.identity.cmp(&other.identity)
     }
-}
-
-fn semantic_control_preview(preview: &str) -> bool {
-    let trimmed = preview.trim();
-    trimmed.starts_with("<environment_context>")
-        || trimmed.starts_with("<turn_aborted>")
-        || trimmed.starts_with("<subagent_notification>")
-        || trimmed.starts_with("Warning: The maximum number of unified exec processes")
 }
 
 impl From<&EventRecord> for SessionRecord {
