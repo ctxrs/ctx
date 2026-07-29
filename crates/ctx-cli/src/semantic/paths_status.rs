@@ -668,6 +668,7 @@ pub(super) fn daemon_source_backed_refresh_job_report(
             .and_then(|value| json_string(value, "published_generation")),
         "generation_changed": job
             .and_then(|value| value.get("generation_changed").cloned()),
+        "receipt": job.and_then(|value| value.get("receipt").cloned()),
         "coalesced_requests": job
             .and_then(|value| value.get("coalesced_requests").cloned()),
         "progress": job.and_then(|value| value.get("progress").cloned()),

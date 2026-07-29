@@ -1260,7 +1260,7 @@ fn build_automatic_source_backed_registry_from_report(
         if source.import_support == ProviderImportSupport::Unsupported
             || source.source_kind == ProviderSourceKind::DetectionOnly
             || source.status == ProviderSourceStatus::Unsupported
-            || source.unsupported_reason.is_some()
+            || (source.unsupported_reason.is_some() && source.status != ProviderSourceStatus::Empty)
         {
             let detail = source
                 .unsupported_reason
@@ -1300,6 +1300,13 @@ fn build_automatic_source_backed_registry_from_report(
         if let Some(reason) = format_route.unsupported_reason {
             retain_unsupported_automatic_format(&mut registry, &mut issues, source, reason);
             continue;
+        }
+
+        let mut source = source;
+        if source.status == ProviderSourceStatus::Empty {
+            // Resolver diagnostics explain why a present root is empty; they do
+            // not make its landed adapter unsupported.
+            source.unsupported_reason = None;
         }
 
         let compound_provider = matches!(
@@ -5727,6 +5734,100 @@ mod tests {
                 reason: SourceBackedAutomaticUnavailableReason::UnsupportedFormat { .. },
             } if source.provider == CaptureProvider::Unknown
                 && source.source_format == "unknown_detected_format"
+        )));
+    }
+
+    #[test]
+    fn automatic_registry_keeps_present_empty_roots_executable_and_other_statuses_typed() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        let sessions = home.join(".codex/sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let context = DiscoveryContext::new(
+            &home,
+            temp.path().join("cwd"),
+            DiscoveryPlatform::Linux,
+            crate::DiscoveryPlatformDirs::default(),
+        );
+
+        let mut empty = fixture_provider_source_at(
+            CaptureProvider::Codex,
+            "codex_session_jsonl_tree",
+            ProviderImportSupport::Native,
+            &sessions,
+        );
+        empty.status = ProviderSourceStatus::Empty;
+        empty.unsupported_reason = Some("path exists but has no sessions");
+
+        let empty_build =
+            build_automatic_source_backed_registry_from_report(&context, vec![empty], Vec::new());
+        assert_eq!(empty_build.executable_route_count(), 1);
+        assert_eq!(empty_build.unsupported_route_count(), 0);
+        assert!(empty_build.issues.is_empty());
+        let empty_route = empty_build
+            .registry
+            .routes()
+            .find(|route| route.source.path == sessions)
+            .expect("present empty Codex root must retain its landed route");
+        assert_eq!(empty_route.source.status, ProviderSourceStatus::Empty);
+        assert_eq!(empty_route.unsupported_reason, None);
+
+        fs::rename(&sessions, home.join(".codex/sessions-renamed")).unwrap();
+
+        let mut missing = fixture_provider_source_at(
+            CaptureProvider::Codex,
+            "codex_session_jsonl_tree",
+            ProviderImportSupport::Native,
+            &sessions,
+        );
+        missing.exists = false;
+        missing.status = ProviderSourceStatus::Missing;
+
+        let mut unknown = fixture_provider_source_at(
+            CaptureProvider::Codex,
+            "codex_history_jsonl",
+            ProviderImportSupport::Native,
+            home.join(".codex/history.jsonl"),
+        );
+        unknown.status = ProviderSourceStatus::Unknown;
+
+        let unsupported = fixture_provider_source(
+            CaptureProvider::Unknown,
+            "unknown_detected_format",
+            ProviderImportSupport::Unsupported,
+        );
+        let unavailable_build = build_automatic_source_backed_registry_from_report(
+            &context,
+            vec![missing, unknown, unsupported],
+            Vec::new(),
+        );
+
+        assert_eq!(unavailable_build.executable_route_count(), 0);
+        assert_eq!(unavailable_build.unsupported_route_count(), 1);
+        assert!(unavailable_build.issues.iter().any(|issue| matches!(
+            issue,
+            SourceBackedAutomaticRegistryIssue::Unavailable {
+                source,
+                reason: SourceBackedAutomaticUnavailableReason::SourceStatus(
+                    ProviderSourceStatus::Missing
+                ),
+            } if !source.exists && source.path == sessions
+        )));
+        assert!(unavailable_build.issues.iter().any(|issue| matches!(
+            issue,
+            SourceBackedAutomaticRegistryIssue::Unavailable {
+                reason: SourceBackedAutomaticUnavailableReason::SourceStatus(
+                    ProviderSourceStatus::Unknown
+                ),
+                ..
+            }
+        )));
+        assert!(unavailable_build.issues.iter().any(|issue| matches!(
+            issue,
+            SourceBackedAutomaticRegistryIssue::Unavailable {
+                source,
+                reason: SourceBackedAutomaticUnavailableReason::UnsupportedFormat { .. },
+            } if source.status == ProviderSourceStatus::Unsupported
         )));
     }
 

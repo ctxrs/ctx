@@ -16,7 +16,9 @@ use ctx_history_capture::{
 };
 #[cfg(test)]
 use ctx_history_core::CaptureProvider;
-use ctx_history_core::{utc_now, HydrationFailure, HydrationFailureKind};
+use ctx_history_core::{
+    utc_now, CertifiedSource, HydrationFailure, HydrationFailureKind, ScannedSourceCounts,
+};
 use ctx_history_index::{IndexError, VerifiedIndex, WriterOptions};
 use ctx_pro_host_protocol::{SourceManifest, SourceRemoval};
 use serde_json::{json, Value};
@@ -115,7 +117,98 @@ pub(crate) struct SourceBackedRefreshPublication {
     pub(crate) unsupported_routes: usize,
     pub(crate) certified_source_count: usize,
     pub(crate) certified_source_bytes: u64,
+    pub(crate) current: SourceBackedRefreshCurrent,
     pub(crate) timings: SourceBackedRefreshTimings,
+}
+
+/// Exact cardinalities of the generation that was verified after publication.
+///
+/// These are current-state facts, not deltas attributed to one refresh.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub(crate) struct SourceBackedRefreshCurrent {
+    pub(crate) source_count: usize,
+    pub(crate) indexed_documents: u64,
+    pub(crate) complete_records: u64,
+    pub(crate) retained_records: u64,
+    pub(crate) rejected_records: u64,
+    pub(crate) ignored_records: u64,
+    pub(crate) certified_source_bytes: u64,
+    pub(crate) sources_with_rejections: usize,
+    pub(crate) removed_source_count: usize,
+}
+
+impl SourceBackedRefreshCurrent {
+    fn from_sources(sources: &[CertifiedSource], removed_source_count: usize) -> Result<Self> {
+        let mut current = Self {
+            source_count: sources.len(),
+            removed_source_count,
+            ..Self::default()
+        };
+        for source in sources {
+            let counts = source.counts();
+            current.add_counts(counts)?;
+            current.sources_with_rejections = current
+                .sources_with_rejections
+                .checked_add(usize::from(counts.rejected_records > 0))
+                .ok_or_else(|| anyhow!("source-backed current rejection-source count overflow"))?;
+        }
+        Ok(current)
+    }
+
+    fn add_counts(&mut self, counts: ScannedSourceCounts) -> Result<()> {
+        self.indexed_documents =
+            checked_current_count(self.indexed_documents, counts.indexed_documents)?;
+        self.complete_records =
+            checked_current_count(self.complete_records, counts.complete_records)?;
+        self.retained_records =
+            checked_current_count(self.retained_records, counts.retained_records)?;
+        self.rejected_records =
+            checked_current_count(self.rejected_records, counts.rejected_records)?;
+        self.ignored_records = checked_current_count(self.ignored_records, counts.ignored_records)?;
+        self.certified_source_bytes =
+            checked_current_count(self.certified_source_bytes, counts.certified_bytes)?;
+        Ok(())
+    }
+
+    fn to_json(self) -> Value {
+        json!({
+            "current_source_count": self.source_count,
+            "current_indexed_documents": self.indexed_documents,
+            "current_complete_records": self.complete_records,
+            "current_retained_records": self.retained_records,
+            "current_rejected_records": self.rejected_records,
+            "current_ignored_records": self.ignored_records,
+            "current_certified_source_bytes": self.certified_source_bytes,
+            "current_sources_with_rejections": self.sources_with_rejections,
+            "removed_source_count": self.removed_source_count,
+        })
+    }
+}
+
+fn checked_current_count(current: u64, next: u64) -> Result<u64> {
+    current
+        .checked_add(next)
+        .ok_or_else(|| anyhow!("source-backed current generation count overflow"))
+}
+
+/// Verified terminal receipt for one daemon-owned source refresh.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct SourceBackedRefreshReceipt {
+    pub(crate) previous_generation: Option<String>,
+    pub(crate) published_generation: String,
+    pub(crate) generation_changed: bool,
+    pub(crate) current: SourceBackedRefreshCurrent,
+}
+
+impl SourceBackedRefreshReceipt {
+    fn to_json(&self) -> Value {
+        compact_json(json!({
+            "previous_generation": self.previous_generation,
+            "published_generation": self.published_generation,
+            "generation_changed": self.generation_changed,
+            "current": self.current.to_json(),
+        }))
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
@@ -271,6 +364,7 @@ struct SourceBackedRefreshAttempt {
     unsupported_routes: Option<usize>,
     certified_source_count: Option<usize>,
     certified_source_bytes: Option<u64>,
+    receipt: Option<SourceBackedRefreshReceipt>,
     timings: Option<SourceBackedRefreshTimings>,
     daemon_mode: DaemonMode,
     trigger: &'static str,
@@ -297,7 +391,8 @@ impl SourceBackedRefreshAttempt {
             "published_explicit_source_catalog": self.published_explicit_source_catalog
                 .as_ref()
                 .map(ExplicitSourceCatalogAuthority::to_json),
-            "generation_changed": self.previous_generation != self.published_generation,
+            "generation_changed": self.receipt.as_ref().map(|receipt| receipt.generation_changed),
+            "receipt": self.receipt.as_ref().map(SourceBackedRefreshReceipt::to_json),
             "coalesced_requests": self.coalesced_requests,
             "progress": self.progress.to_json(),
             "scanned_routes": self.scanned_routes,
@@ -335,7 +430,8 @@ impl SourceBackedRefreshAttempt {
             "published_explicit_source_catalog": self.published_explicit_source_catalog
                 .as_ref()
                 .map(ExplicitSourceCatalogAuthority::to_json),
-            "generation_changed": self.previous_generation != self.published_generation,
+            "generation_changed": self.receipt.as_ref().map(|receipt| receipt.generation_changed),
+            "receipt": self.receipt.as_ref().map(SourceBackedRefreshReceipt::to_json),
             "coalesced_requests": self.coalesced_requests,
             "progress": self.progress.to_json(),
             "scanned_routes": self.scanned_routes,
@@ -681,6 +777,7 @@ impl SourceBackedRefreshCoordinator {
             unsupported_routes: None,
             certified_source_count: None,
             certified_source_bytes: None,
+            receipt: None,
             timings: None,
             daemon_mode: metadata.daemon_mode,
             trigger: metadata.trigger,
@@ -838,6 +935,8 @@ impl SourceBackedRefreshCoordinator {
 
             match verified {
                 Ok((observed, publication)) => {
+                    let generation_changed =
+                        previous_generation.as_deref() != Some(observed.as_str());
                     attempt.state = SourceBackedRefreshState::Published;
                     attempt.published_generation = Some(observed.clone());
                     attempt.progress.phase = "published".to_owned();
@@ -846,6 +945,12 @@ impl SourceBackedRefreshCoordinator {
                     attempt.unsupported_routes = Some(publication.unsupported_routes);
                     attempt.certified_source_count = Some(publication.certified_source_count);
                     attempt.certified_source_bytes = Some(publication.certified_source_bytes);
+                    attempt.receipt = Some(SourceBackedRefreshReceipt {
+                        previous_generation: previous_generation.clone(),
+                        published_generation: observed.clone(),
+                        generation_changed,
+                        current: publication.current,
+                    });
                     attempt.timings = Some(publication.timings);
                     let source_manifest = publication.source_manifest;
                     attempt.published_explicit_source_catalog = requested_catalog.clone();
@@ -1144,6 +1249,16 @@ fn refresh_all_provider_sources(
     let receipt = executor
         .refresh(index_root, report_progress)
         .context("run capture-owned all-provider source-backed refresh")?;
+    let current =
+        SourceBackedRefreshCurrent::from_sources(&receipt.sources, receipt.removals.len())?;
+    if current.source_count != receipt.certified_source_count
+        || current.certified_source_bytes != receipt.certified_source_bytes
+        || current.indexed_documents != receipt.commit.indexed_documents
+    {
+        bail!(
+            "capture-owned source refresh receipt does not match its retained generation cardinalities"
+        );
+    }
     let removals = receipt
         .removals
         .iter()
@@ -1165,6 +1280,7 @@ fn refresh_all_provider_sources(
         unsupported_routes: receipt.unsupported_routes.len(),
         certified_source_count: receipt.certified_source_count,
         certified_source_bytes: receipt.certified_source_bytes,
+        current,
         timings: SourceBackedRefreshTimings {
             discovery_us: nonzero_duration_micros(receipt.discovery_duration),
             scan_stage_us: nonzero_duration_micros(receipt.scan_stage_duration),
@@ -1310,6 +1426,7 @@ pub(crate) struct SourceBackedRefreshObservation {
     pub(crate) request_id: Option<String>,
     pub(crate) daemon_available: bool,
     pub(crate) source_count: usize,
+    pub(crate) receipt: Option<SourceBackedRefreshReceipt>,
     pub(crate) pin: PinnedSourceBackedGeneration,
 }
 
@@ -1340,6 +1457,7 @@ fn coordinate_source_backed_refresh_with_catalog(
             request_id: None,
             daemon_available: false,
             source_count: 0,
+            receipt: None,
             pin,
         });
     }
@@ -1392,6 +1510,7 @@ fn coordinate_source_backed_refresh_with_catalog(
             request_id: Some(request_id),
             daemon_available: true,
             source_count: response_source_count(&response),
+            receipt: None,
             pin,
         });
     }
@@ -1473,12 +1592,14 @@ fn wait_for_published_generation(
                         pin.generation_id()
                     );
                 }
+                let receipt = published_refresh_receipt(&response, &pin)?;
                 return Ok(SourceBackedRefreshObservation {
                     mode,
                     status: "published".to_owned(),
                     request_id: Some(request_id),
                     daemon_available: true,
                     source_count: response_source_count(&response),
+                    receipt: Some(receipt),
                     pin,
                 });
             }
@@ -1514,6 +1635,126 @@ fn wait_for_published_generation(
     }
 }
 
+fn published_refresh_receipt(
+    response: &Value,
+    pin: &PinnedSourceBackedGeneration,
+) -> Result<SourceBackedRefreshReceipt> {
+    let value = response
+        .get("receipt")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("published daemon source refresh has no terminal receipt"))?;
+    let previous_generation = optional_generation(value.get("previous_generation"))?;
+    let published_generation = required_generation(
+        value.get("published_generation"),
+        "terminal receipt published generation",
+    )?;
+    let generation_changed = value
+        .get("generation_changed")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            anyhow!("published daemon source refresh receipt has no generation_changed fact")
+        })?;
+    let current_value = value
+        .get("current")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            anyhow!("published daemon source refresh receipt has no current generation facts")
+        })?;
+    let current = SourceBackedRefreshCurrent {
+        source_count: required_usize(current_value, "current_source_count")?,
+        indexed_documents: required_u64(current_value, "current_indexed_documents")?,
+        complete_records: required_u64(current_value, "current_complete_records")?,
+        retained_records: required_u64(current_value, "current_retained_records")?,
+        rejected_records: required_u64(current_value, "current_rejected_records")?,
+        ignored_records: required_u64(current_value, "current_ignored_records")?,
+        certified_source_bytes: required_u64(current_value, "current_certified_source_bytes")?,
+        sources_with_rejections: required_usize(current_value, "current_sources_with_rejections")?,
+        removed_source_count: required_usize(current_value, "removed_source_count")?,
+    };
+
+    let top_previous_generation = optional_generation(response.get("previous_generation"))?;
+    let top_published_generation = required_generation(
+        response.get("published_generation"),
+        "published daemon source refresh generation",
+    )?;
+    let top_generation_changed = response
+        .get("generation_changed")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| anyhow!("published daemon source refresh has no generation_changed fact"))?;
+    let identity_changed = previous_generation.as_deref() != Some(published_generation.as_str());
+    if previous_generation != top_previous_generation
+        || published_generation != top_published_generation
+        || generation_changed != top_generation_changed
+        || generation_changed != identity_changed
+    {
+        bail!("published daemon source refresh receipt has inconsistent generation identity facts");
+    }
+
+    let manifest = pin.index.manifest();
+    let verified_current =
+        SourceBackedRefreshCurrent::from_sources(&manifest.sources, manifest.removals.len())?;
+    if current != verified_current
+        || current.source_count
+            != required_usize_from_value(
+                response.get("certified_source_count"),
+                "certified_source_count",
+            )?
+        || current.certified_source_bytes
+            != required_u64_from_value(
+                response.get("certified_source_bytes"),
+                "certified_source_bytes",
+            )?
+    {
+        bail!(
+            "published daemon source refresh receipt does not match the verified current generation"
+        );
+    }
+
+    Ok(SourceBackedRefreshReceipt {
+        previous_generation,
+        published_generation,
+        generation_changed,
+        current,
+    })
+}
+
+fn optional_generation(value: Option<&Value>) -> Result<Option<String>> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if !value.is_empty() => Ok(Some(value.clone())),
+        _ => bail!("daemon source refresh generation identity is malformed"),
+    }
+}
+
+fn required_generation(value: Option<&Value>, label: &str) -> Result<String> {
+    value
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow!("{label} is missing"))
+}
+
+fn required_usize(value: &serde_json::Map<String, Value>, field: &str) -> Result<usize> {
+    required_usize_from_value(value.get(field), field)
+}
+
+fn required_usize_from_value(value: Option<&Value>, field: &str) -> Result<usize> {
+    value
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| anyhow!("published daemon source refresh receipt has invalid {field}"))
+}
+
+fn required_u64(value: &serde_json::Map<String, Value>, field: &str) -> Result<u64> {
+    required_u64_from_value(value.get(field), field)
+}
+
+fn required_u64_from_value(value: Option<&Value>, field: &str) -> Result<u64> {
+    value
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow!("published daemon source refresh receipt has invalid {field}"))
+}
+
 fn daemon_unavailable_fallback(
     data_root: &Path,
     mode: SourceBackedRefreshMode,
@@ -1527,6 +1768,7 @@ fn daemon_unavailable_fallback(
                 request_id: None,
                 daemon_available: false,
                 source_count: 0,
+                receipt: None,
                 pin,
             });
         }
@@ -1612,6 +1854,16 @@ mod tests {
             unsupported_routes: 0,
             certified_source_count: 1,
             certified_source_bytes: 128,
+            current: SourceBackedRefreshCurrent {
+                source_count: 1,
+                indexed_documents: 2,
+                complete_records: 3,
+                retained_records: 2,
+                rejected_records: 1,
+                certified_source_bytes: 128,
+                sources_with_rejections: 1,
+                ..SourceBackedRefreshCurrent::default()
+            },
             timings: SourceBackedRefreshTimings {
                 discovery_us: 11,
                 scan_stage_us: 22,
@@ -1872,6 +2124,13 @@ mod tests {
             .expect("published request status");
         assert_eq!(status["request_state"], "published");
         assert_eq!(status["published_generation"], "generation-2");
+        assert_eq!(status["generation_changed"], true);
+        assert_eq!(status["receipt"]["previous_generation"], "generation-1");
+        assert_eq!(status["receipt"]["published_generation"], "generation-2");
+        assert_eq!(status["receipt"]["generation_changed"], true);
+        assert_eq!(status["receipt"]["current"]["current_source_count"], 1);
+        assert_eq!(status["receipt"]["current"]["current_indexed_documents"], 2);
+        assert_eq!(status["receipt"]["current"]["current_rejected_records"], 1);
         assert_eq!(
             status["coalesced_requests"].as_u64(),
             Some((REQUESTS - 1) as u64)
@@ -1889,6 +2148,29 @@ mod tests {
                 |_| Ok(()),
             )
             .is_none());
+    }
+
+    #[test]
+    fn unchanged_nonempty_publication_is_no_op_by_generation_identity() {
+        let coordinator = SourceBackedRefreshCoordinator::new();
+        let request = coordinator.enqueue(Some("generation-1".to_owned()));
+        let request_id = request_id(&request);
+        let run = coordinator
+            .run_next_with(
+                |_, _| Ok(test_publication("generation-1")),
+                || Ok(Some("generation-1".to_owned())),
+                |_| Ok(()),
+                |_| Ok(()),
+            )
+            .expect("queued refresh");
+
+        assert!(!run.failed);
+        assert!(!run.did_work);
+        let status = coordinator.status(&request_id).expect("published request");
+        assert_eq!(status["generation_changed"], false);
+        assert_eq!(status["receipt"]["generation_changed"], false);
+        assert_eq!(status["receipt"]["current"]["current_source_count"], 1);
+        assert_eq!(status["receipt"]["current"]["current_indexed_documents"], 2);
     }
 
     #[test]
@@ -1968,6 +2250,8 @@ mod tests {
         assert_eq!(status["request_state"], "failed");
         assert_eq!(status["previous_generation"], "generation-1");
         assert_eq!(status["published_generation"], "generation-1");
+        assert!(status.get("generation_changed").is_none());
+        assert!(status.get("receipt").is_none());
         assert!(status["last_error"]
             .as_str()
             .is_some_and(|error| error.contains("injected writer failure")));

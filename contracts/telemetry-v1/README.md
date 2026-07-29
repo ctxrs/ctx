@@ -46,6 +46,11 @@ failure of the snapshot-bearing batch leaves the claim unacknowledged.
 `provider_refresh_completed@1` records one completed aggregate for every
 observed closed provider/source-mode pair. Provider names are the complete
 `CaptureProvider` vocabulary; producers do not suppress low-usage providers.
+That per-provider contract remains unchanged. One provider-neutral aggregate is
+also permitted for an authoritative all-provider publication when the global
+receipt cannot truthfully attribute a provider, source mode, or per-run count
+delta; that event omits `provider`, `source_mode`, and all per-run count buckets
+instead of guessing them or serializing default zeroes.
 Its decision fields are closed:
 
 - `content_evidence`: `none`, `accepted`, `mixed`, or `unknown`;

@@ -11,9 +11,9 @@
     "crates/ctx-cli/src/analytics/runtime.rs": "b2ab7fb8655d1eafc34e997472f2fdb0a4afa33029a8b92b47f9f752e4d951a6",
     "crates/ctx-cli/src/analytics/pro.rs": "d72121e4876179dc691061af5a471efa651180ea486e6c7cd6837b4e09aa194e",
     "crates/ctx-cli/src/analytics/buckets.rs": "46e2d96819cbb2c83534b38d5be6500e175b014c6ee9f6d4ad41cdb5421fc566",
-    "crates/ctx-cli/src/analytics/provider.rs": "827522c5ac4c3c77ee7e7282e01dd05d8863568db488cf58847bf543caab69ea",
+    "crates/ctx-cli/src/analytics/provider.rs": "7ed0cf239abb7617a9111faf946b1e43ec406431d7896e51c2533057cd2f4fda",
     "crates/ctx-cli/src/analytics/product.rs": "90c84843faf1550d417da4e7e77134c6a2fc9d6425018b6b0c458be74e358387",
-    "crates/ctx-cli/src/analytics/sender.rs": "b15313d68e94e19ea166cffbe31f718877a0b3c544621a35f71d4d713b5f5def",
+    "crates/ctx-cli/src/analytics/sender.rs": "a17a2b75e0178c6d16e5add6e4e58c5c634dbc3644cd832840a9abb60ce29fb2",
     "crates/ctx-cli/src/upgrade/command.rs": "0b91291c968dfc5137e4100f9071048a5cb5d67884ba86e71a1cabdcfb90c1a0",
     "crates/ctx-cli/src/upgrade/command/daemon.rs": "548cc098fb7d95f80c839728e56bec7555665a1e9e5d13da082678fa3e7fe31e",
     "crates/ctx-cli/src/upgrade/state.rs": "451c3511656fe99e35d52ebfc7e890ede9a152c8b841013b6bbd537f124ec397"
