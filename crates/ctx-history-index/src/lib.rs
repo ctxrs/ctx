@@ -587,6 +587,9 @@ struct PendingSource {
     certificate: Option<CertifiedSource>,
 }
 
+// Append validation consults the base certificate throughout staged ingestion.
+// Boxing it would add allocation and indirection without measured product benefit.
+#[allow(clippy::large_enum_variant)]
 enum PendingSourceMode {
     Replace,
     Append { base: CertifiedSource },
@@ -1278,7 +1281,7 @@ fn load_manifest_for_metas(root: &Path, metas: &IndexMeta) -> Result<GenerationM
         .payload
         .as_ref()
         .ok_or(IndexError::MissingCommitPayload)?;
-    let payload: CommitPayload = serde_json::from_str(&payload)?;
+    let payload: CommitPayload = serde_json::from_str(payload)?;
     if payload.version != COMMIT_PAYLOAD_VERSION {
         return Err(IndexError::UnsupportedCommitPayload(payload.version));
     }
