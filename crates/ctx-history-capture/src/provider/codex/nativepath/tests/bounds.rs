@@ -53,14 +53,11 @@ fn records_over_16_mib_are_stream_skipped_without_losing_physical_ordinals() {
             .collect::<Vec<_>>(),
         vec![1, 2]
     );
-    assert_eq!(scan.counters.result_body_bytes_decoded_or_allocated, 0);
-    assert_eq!(scan.counters.result_hashes_created, 0);
-    assert_eq!(scan.counters.result_previews_created, 0);
 }
 
 #[test]
 #[ignore = "diagnostic release-mode benchmark over the 154 MB Codex fixture"]
-fn core_only_quickbench_guards_the_nativepath_parser_hot_path() {
+fn source_backed_quickbench_guards_the_nativepath_parser_hot_path() {
     const EXPECTED_FILES: usize = 6_000;
     const EXPECTED_BYTES: u64 = 154_299_600;
     const EXPECTED_SHA256: &str =
@@ -106,20 +103,12 @@ fn core_only_quickbench_guards_the_nativepath_parser_hot_path() {
         let mut structural_parses = 0_u64;
         let mut typed_parses = 0_u64;
         let mut structural_output_probes = 0_u64;
-        let mut typed_output_parses = 0_u64;
         for source in &sources {
             let mut scanner =
-                CodexNativeScanner::new(source.clone(), None, CodexNativeProfile::CoreOnly)
-                    .unwrap();
+                CodexNativeScanner::new_source_backed_v0(source.clone(), None).unwrap();
             while let Some(page) = scanner.next_page().unwrap() {
-                match &page {
-                    CodexNativeOwnedPage::Core(page) => {
-                        rows = rows.saturating_add(page.core_rows.len() as u64);
-                    }
-                    CodexNativeOwnedPage::Pro(_) => {
-                        panic!("CoreOnly must not emit transient Pro pages");
-                    }
-                }
+                let CodexNativeOwnedPage::Core(page) = &page;
+                rows = rows.saturating_add(page.source_backed_rows.len() as u64);
                 black_box(page);
             }
             let scan = scanner.finish().unwrap();
@@ -132,8 +121,6 @@ fn core_only_quickbench_guards_the_nativepath_parser_hot_path() {
             typed_parses = typed_parses.saturating_add(scan.counters.typed_json_parses);
             structural_output_probes =
                 structural_output_probes.saturating_add(scan.counters.structural_output_probes);
-            typed_output_parses =
-                typed_output_parses.saturating_add(scan.counters.typed_output_parses);
         }
         assert_eq!(rows, EXPECTED_ROWS);
         assert_eq!(results, EXPECTED_RESULTS);
@@ -142,7 +129,6 @@ fn core_only_quickbench_guards_the_nativepath_parser_hot_path() {
         assert_eq!(structural_parses, 36_060);
         assert_eq!(typed_parses, 30_000);
         assert_eq!(structural_output_probes, EXPECTED_RESULTS);
-        assert_eq!(typed_output_parses, 0);
         black_box((
             rows,
             results,
@@ -163,7 +149,7 @@ fn core_only_quickbench_guards_the_nativepath_parser_hot_path() {
     samples.sort_unstable();
     let median = samples[1];
     println!(
-        "Codex NativePath CoreOnly median over {} bytes and {} sources: {:.3}s",
+        "Codex source-backed NativePath median over {} bytes and {} sources: {:.3}s",
         EXPECTED_BYTES,
         EXPECTED_FILES,
         median.as_secs_f64()

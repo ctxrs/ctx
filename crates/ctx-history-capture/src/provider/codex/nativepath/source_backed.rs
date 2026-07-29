@@ -2422,7 +2422,7 @@ mod tests {
     }
 
     #[test]
-    fn source_backed_projection_matches_legacy_semantics_without_legacy_operations() {
+    fn source_backed_projection_preserves_semantics_without_legacy_operations() {
         let temp = tempfile::tempdir().unwrap();
         let sessions = temp.path().join("sessions");
         let index = temp.path().join("global-index");
@@ -2475,72 +2475,6 @@ mod tests {
         assert_eq!(
             hydrated.decoded_display_text.as_deref(),
             Some(long_message.as_str())
-        );
-
-        let (catalog_summary, catalog_sessions) =
-            discover_codex_session_catalog(&sessions).unwrap();
-        assert_eq!(catalog_summary.failed_sessions, 0);
-        let discovery = super::super::discover_codex_catalog_sources(&catalog_sessions);
-        assert!(discovery.rejections.is_empty());
-        let source = discovery.sources.into_iter().next().unwrap();
-        let mut scanner =
-            CodexNativeScanner::new(source, None, super::super::CodexNativeProfile::CoreOnly)
-                .unwrap();
-        let mut legacy_rows = Vec::new();
-        let mut legacy_counters = CodexSourceBackedCountersV0::default();
-        while let Some(page) = scanner.next_page().unwrap() {
-            let CodexNativeOwnedPage::Core(page) = page else {
-                panic!("legacy Core-only control emitted Pro output");
-            };
-            assert!(page.source_backed_rows.is_empty());
-            for row in page.core_rows {
-                legacy_lexical_preview_for_control(&row, &mut legacy_counters);
-                legacy_rows.push(row);
-            }
-        }
-        let legacy_scan = scanner.finish().unwrap();
-        legacy_counters.add_scan(legacy_scan.counters);
-        assert_eq!(
-            legacy_rows
-                .iter()
-                .map(|row| (
-                    row.raw_ordinal,
-                    row.provider_event.event_type.as_str(),
-                    row.provider_event.role.map(|role| role.as_str()),
-                    row.file_touches
-                        .iter()
-                        .map(|touch| touch.path.as_str())
-                        .collect::<Vec<_>>(),
-                ))
-                .collect::<Vec<_>>(),
-            events
-                .iter()
-                .map(|event| (
-                    event.event_sequence,
-                    event.event_type.as_str(),
-                    event.role.as_deref(),
-                    event
-                        .touched_files
-                        .iter()
-                        .map(String::as_str)
-                        .collect::<Vec<_>>(),
-                ))
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(legacy_counters.scanner_legacy_body_json_serializations, 3);
-        assert_eq!(legacy_counters.scanner_legacy_row_json_serializations, 3);
-        assert_eq!(legacy_counters.scanner_legacy_normalized_payload_hashes, 3);
-        assert_eq!(legacy_counters.scanner_legacy_file_touch_rows, 1);
-        assert_eq!(legacy_counters.scanner_legacy_complete_content_locators, 0);
-        assert_eq!(
-            legacy_counters.scanner_legacy_duplicate_preview_allocations,
-            3
-        );
-        assert!(legacy_counters.scanner_legacy_page_owner_json_serializations > 0);
-        assert!(legacy_counters.scanner_legacy_page_identity_owner_json_serializations > 0);
-        assert_eq!(
-            legacy_counters.scanner_legacy_page_identity_row_json_serializations,
-            3
         );
     }
 
@@ -2626,19 +2560,6 @@ mod tests {
             counters.scanner_legacy_page_identity_row_json_serializations,
             0
         );
-    }
-
-    fn legacy_lexical_preview_for_control(
-        row: &super::super::rows::CodexEventRow,
-        counters: &mut CodexSourceBackedCountersV0,
-    ) -> Option<String> {
-        let preview = row.lexical_preview();
-        if preview.is_some() {
-            counters.scanner_legacy_duplicate_preview_allocations = counters
-                .scanner_legacy_duplicate_preview_allocations
-                .saturating_add(1);
-        }
-        preview
     }
 
     fn search_event_ids(index: &VerifiedIndex, query: &str) -> Vec<StableEntityId> {

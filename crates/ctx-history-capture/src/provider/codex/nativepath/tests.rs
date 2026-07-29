@@ -1,26 +1,20 @@
 use std::{
     collections::BTreeSet,
-    fmt::Write as _,
     fs,
     hint::black_box,
     path::{Path, PathBuf},
     time::Instant,
 };
 
-use ctx_history_core::{AgentType, CaptureProvider, EventType};
 use crate::provider::codex::catalog::CatalogSession;
+use ctx_history_core::{AgentType, CaptureProvider, EventType};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
+use super::rows::CodexSourceBackedRowV0;
 use super::*;
-use crate::{
-    complete_content::{
-        jsonl::JSONL_COMPLETE_CONTENT_LOCATOR_KIND, CompleteContentBodyDigest,
-        VerifiedContentLocatorsV1, VerifiedContentRole, VERIFIED_CONTENT_LOCATORS_METADATA_KEY,
-    },
-    observe_ordinary_file, CODEX_SESSION_SOURCE_FORMAT,
-};
+use crate::{observe_ordinary_file, CODEX_SESSION_SOURCE_FORMAT};
 
 fn jsonl(value: Value) -> String {
     let mut line = serde_json::to_string(&value).unwrap();
@@ -161,15 +155,11 @@ pub(super) fn write_source(contents: &str) -> (TempDir, std::path::PathBuf) {
 
 #[derive(Default)]
 struct CollectingSink {
-    rows: Vec<CodexEventRow>,
-    pro_outputs: Vec<crate::ProOutputObservation>,
+    rows: Vec<CodexSourceBackedRowV0>,
     pages: Vec<(usize, usize)>,
-    pro_pages: Vec<(usize, usize)>,
     physical_records: Vec<u64>,
     frontiers: Vec<(CodexNativeFrontier, CodexNativeFrontier)>,
-    pro_frontiers: Vec<(CodexNativeFrontier, CodexNativeFrontier)>,
     core_receipts: Vec<CodexNativePageReceipt>,
-    pro_receipts: Vec<CodexNativeProOutputPageReceipt>,
     owner_ids: BTreeSet<String>,
 }
 
@@ -177,55 +167,31 @@ fn scan_collect(
     source: CodexCatalogSource,
     proof: Option<&CodexAppendProof>,
 ) -> (CodexSourceScan, CollectingSink) {
-    scan_collect_profile(source, proof, CodexNativeProfile::CoreOnly)
-}
-
-fn scan_collect_profile(
-    source: CodexCatalogSource,
-    proof: Option<&CodexAppendProof>,
-    profile: CodexNativeProfile,
-) -> (CodexSourceScan, CollectingSink) {
-    let mut scanner = CodexNativeScanner::new(source, proof, profile).unwrap();
+    let mut scanner = CodexNativeScanner::new_source_backed_v0(source, proof).unwrap();
     let mut collected = CollectingSink::default();
     while let Some(page) = scanner.next_page().unwrap() {
-        match page {
-            CodexNativeOwnedPage::Core(page) => {
-                let units = page.core_rows.len();
-                assert!(units <= MAX_CODEX_PAGE_ROWS);
-                assert!(page.physical_records <= MAX_CODEX_PAGE_ROWS as u64);
-                assert!(page.serialized_bytes <= MAX_CODEX_PAGE_BYTES);
-                assert_eq!(
-                    page.next_safe_frontier
-                        .next_raw_ordinal
-                        .saturating_sub(page.expected_frontier.next_raw_ordinal),
-                    page.physical_records
-                );
-                if let Some(owner) = page.owner.as_ref() {
-                    collected.owner_ids.insert(owner.native_session_id.clone());
-                }
-                let receipt = page.receipt();
-                collected.pages.push((units, page.serialized_bytes));
-                collected.physical_records.push(page.physical_records);
-                collected
-                    .frontiers
-                    .push((page.expected_frontier, page.next_safe_frontier));
-                collected.core_receipts.push(receipt);
-                collected.rows.extend(page.core_rows);
-            }
-            CodexNativeOwnedPage::Pro(page) => {
-                assert!(page.outputs.len() <= MAX_CODEX_PAGE_ROWS);
-                assert!(page.serialized_bytes <= MAX_CODEX_PAGE_BYTES);
-                let receipt = page.receipt();
-                collected
-                    .pro_pages
-                    .push((page.outputs.len(), page.serialized_bytes));
-                collected
-                    .pro_frontiers
-                    .push((page.expected_frontier, page.next_safe_frontier));
-                collected.pro_receipts.push(receipt);
-                collected.pro_outputs.extend(page.outputs);
-            }
+        let CodexNativeOwnedPage::Core(page) = page;
+        assert!(page.core_rows.is_empty());
+        let units = page.source_backed_rows.len();
+        assert!(units <= MAX_CODEX_PAGE_ROWS);
+        assert!(page.serialized_bytes <= MAX_CODEX_PAGE_BYTES);
+        assert_eq!(
+            page.next_safe_frontier
+                .next_raw_ordinal
+                .saturating_sub(page.expected_frontier.next_raw_ordinal),
+            page.physical_records
+        );
+        if let Some(owner) = page.owner.as_ref() {
+            collected.owner_ids.insert(owner.native_session_id.clone());
         }
+        let receipt = page.receipt();
+        collected.pages.push((units, page.serialized_bytes));
+        collected.physical_records.push(page.physical_records);
+        collected
+            .frontiers
+            .push((page.expected_frontier, page.next_safe_frontier));
+        collected.core_receipts.push(receipt);
+        collected.rows.extend(page.source_backed_rows);
     }
     let scan = scanner.finish().unwrap();
     (scan, collected)
@@ -292,10 +258,9 @@ fn assert_checkpoint_replay_rejected(
     )
     .unwrap();
     let proof = CodexAppendProof::new(identity, CodexCheckpointGeneration::new(88), checkpoint);
-    let error = CodexNativeScanner::new(
+    let error = CodexNativeScanner::new_source_backed_v0(
         discover_one(path, native_session_id),
         Some(&proof),
-        CodexNativeProfile::CoreOnly,
     )
     .unwrap_err();
     assert!(format!("{error}").contains("invalid Codex append proof"));
