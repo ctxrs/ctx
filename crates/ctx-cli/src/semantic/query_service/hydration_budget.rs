@@ -6,9 +6,9 @@ use ctx_history_core::{EventHydrationRequest, NativeRecordCoordinate};
 pub(super) const SOURCE_HYDRATION_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 // Every source-backed provider already rejects one complete body above 16 MiB.
-// Unknown-size native/SQLite coordinates reserve that full ceiling before the
-// provider is entered. JSONL coordinates reserve their exact certified byte
-// range, including record framing.
+// Unknown-size native/SQLite coordinates reserve that full ceiling in bounded
+// waves before the provider is entered. JSONL coordinates reserve their exact
+// certified byte ranges request-wide, including record framing.
 pub(super) const SOURCE_HYDRATION_MAX_ITEM_BYTES: usize = COMPLETE_CONTENT_MAX_BODY_BYTES;
 const TRANSIENT_ITEM_OVERHEAD_BYTES: usize = 512;
 const RETAINED_ITEM_OVERHEAD_BYTES: usize = 512;
@@ -59,6 +59,7 @@ impl HydrationByteBudget {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn charge_retained(&self, bytes: usize) -> Result<(), HydrationBudgetError> {
         let mut state = self.lock_state();
         let Some(next) = state.retained_bytes.checked_add(bytes) else {
@@ -116,12 +117,18 @@ impl HydrationByteBudget {
         self.changed.notify_all();
     }
 
+    pub(super) fn cancel_exhausted(&self) {
+        let mut state = self.lock_state();
+        self.exhaust(&mut state);
+    }
+
     pub(super) fn is_cancelled(&self) -> bool {
         self.lock_state().cancelled
     }
 
     pub(super) fn available_when_idle(&self) -> usize {
         let state = self.lock_state();
+        debug_assert_eq!(state.in_flight_bytes, 0);
         self.limit_bytes.saturating_sub(state.retained_bytes)
     }
 
@@ -213,6 +220,43 @@ pub(super) fn provider_read_reservation_bytes(
         .ok_or(HydrationBudgetError::Exhausted)
 }
 
+pub(super) fn unknown_provider_read_reservation_bytes(
+    display_copy_bytes: usize,
+) -> Result<usize, HydrationBudgetError> {
+    SOURCE_HYDRATION_MAX_ITEM_BYTES
+        .checked_add(display_copy_bytes)
+        .and_then(|bytes| bytes.checked_add(TRANSIENT_ITEM_OVERHEAD_BYTES))
+        .ok_or(HydrationBudgetError::Exhausted)
+}
+
+pub(super) fn provider_read_size_is_exact(request: &EventHydrationRequest) -> bool {
+    matches!(
+        request.locator().coordinate(),
+        NativeRecordCoordinate::Jsonl { .. }
+    )
+}
+
+pub(super) fn retained_response_items_metadata_charge(
+    items: usize,
+) -> Result<usize, HydrationBudgetError> {
+    items
+        .checked_mul(RETAINED_ITEM_OVERHEAD_BYTES)
+        .ok_or(HydrationBudgetError::Exhausted)
+}
+
+pub(super) fn retained_response_item_content_charge(
+    text: &String,
+) -> Result<usize, HydrationBudgetError> {
+    Ok(escaped_json_string_bytes(text).max(text.capacity()))
+}
+
+#[cfg(test)]
+pub(super) fn retained_response_item_charge(text: &String) -> Result<usize, HydrationBudgetError> {
+    retained_response_item_content_charge(text)?
+        .checked_add(RETAINED_ITEM_OVERHEAD_BYTES)
+        .ok_or(HydrationBudgetError::Exhausted)
+}
+
 fn provider_read_bytes(request: &EventHydrationRequest) -> Result<usize, HydrationBudgetError> {
     match request.locator().coordinate() {
         // The certified range includes JSONL delimiters/framing and may be a
@@ -244,13 +288,6 @@ pub(super) fn successful_response_envelope_charge(
 ) -> Result<usize, HydrationBudgetError> {
     RESPONSE_ENVELOPE_OVERHEAD_BYTES
         .checked_add(generation_id.len())
-        .ok_or(HydrationBudgetError::Exhausted)
-}
-
-pub(super) fn retained_response_item_charge(text: &String) -> Result<usize, HydrationBudgetError> {
-    escaped_json_string_bytes(text)
-        .max(text.capacity())
-        .checked_add(RETAINED_ITEM_OVERHEAD_BYTES)
         .ok_or(HydrationBudgetError::Exhausted)
 }
 
