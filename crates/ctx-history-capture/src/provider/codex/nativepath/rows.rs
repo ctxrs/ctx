@@ -502,16 +502,12 @@ enum SourceBackedSemanticProjection {
 /// `Eligible` means Core may publish a locator and exact hydration must decode
 /// display text from that same record. Known bookkeeping, encrypted/code-only,
 /// and non-diagnostic result records are intentionally non-display and never
-/// enter source-page enumeration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum CodexSourceBackedDocumentEligibility {
-    Eligible,
-    IntentionallyNonDisplay,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub(super) enum CodexSourceBackedDisplayText {
-    Exact(String),
+/// enter source-page enumeration. `ParserRevisionGap` is neither category: it
+/// must remain a typed hydration failure if an admitted record reaches a newer
+/// or malformed display shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum CodexSourceBackedDocumentEligibility<T = ()> {
+    Eligible(T),
     IntentionallyNonDisplay,
     ParserRevisionGap,
 }
@@ -527,7 +523,7 @@ pub(super) fn source_backed_output_eligibility(
         )
         && structural.has_exact_display_field
     {
-        CodexSourceBackedDocumentEligibility::Eligible
+        CodexSourceBackedDocumentEligibility::Eligible(())
     } else {
         CodexSourceBackedDocumentEligibility::IntentionallyNonDisplay
     }
@@ -548,43 +544,48 @@ fn source_backed_semantic_projection(
 pub(super) fn source_backed_display_text(
     probe: &CodexRecordProbe<'_>,
     payload: &Value,
-) -> CodexSourceBackedDisplayText {
+) -> CodexSourceBackedDocumentEligibility<String> {
     match probe.class {
         CodexRecordClass::Retained(kind) => {
             match source_backed_semantic_projection(kind, payload) {
                 SourceBackedSemanticProjection::Materialized(semantic) => {
-                    CodexSourceBackedDisplayText::Exact(semantic.lexical_body)
+                    CodexSourceBackedDocumentEligibility::Eligible(semantic.lexical_body)
                 }
                 SourceBackedSemanticProjection::ValidUnmaterializable => {
-                    CodexSourceBackedDisplayText::IntentionallyNonDisplay
+                    CodexSourceBackedDocumentEligibility::IntentionallyNonDisplay
                 }
                 SourceBackedSemanticProjection::Malformed(_) => {
-                    CodexSourceBackedDisplayText::ParserRevisionGap
+                    CodexSourceBackedDocumentEligibility::ParserRevisionGap
                 }
             }
         }
         CodexRecordClass::ExcludedResult(result_kind) => {
             let Some(structural) = probe.output.as_ref() else {
                 return if result_kind.is_eligible_output() {
-                    CodexSourceBackedDisplayText::ParserRevisionGap
+                    CodexSourceBackedDocumentEligibility::ParserRevisionGap
                 } else {
-                    CodexSourceBackedDisplayText::IntentionallyNonDisplay
+                    CodexSourceBackedDocumentEligibility::IntentionallyNonDisplay
                 };
             };
             match source_backed_output_eligibility(result_kind, structural) {
-                CodexSourceBackedDocumentEligibility::Eligible => {
+                CodexSourceBackedDocumentEligibility::Eligible(()) => {
                     match codex_result_content(payload) {
-                        Some(content) => CodexSourceBackedDisplayText::Exact(content.into_owned()),
-                        None => CodexSourceBackedDisplayText::ParserRevisionGap,
+                        Some(content) => {
+                            CodexSourceBackedDocumentEligibility::Eligible(content.into_owned())
+                        }
+                        None => CodexSourceBackedDocumentEligibility::ParserRevisionGap,
                     }
                 }
                 CodexSourceBackedDocumentEligibility::IntentionallyNonDisplay => {
-                    CodexSourceBackedDisplayText::IntentionallyNonDisplay
+                    CodexSourceBackedDocumentEligibility::IntentionallyNonDisplay
+                }
+                CodexSourceBackedDocumentEligibility::ParserRevisionGap => {
+                    CodexSourceBackedDocumentEligibility::ParserRevisionGap
                 }
             }
         }
         CodexRecordClass::SessionMeta | CodexRecordClass::Ignored => {
-            CodexSourceBackedDisplayText::IntentionallyNonDisplay
+            CodexSourceBackedDocumentEligibility::IntentionallyNonDisplay
         }
     }
 }

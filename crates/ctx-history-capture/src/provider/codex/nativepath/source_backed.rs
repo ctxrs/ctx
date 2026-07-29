@@ -31,7 +31,9 @@ use thiserror::Error;
 use super::{
     reader::{CodexParseDisposition, CodexScanCounters},
     record::classify_codex_record,
-    rows::{source_backed_display_text, CodexSourceBackedDisplayText, CodexSourceBackedRowV0},
+    rows::{
+        source_backed_display_text, CodexSourceBackedDocumentEligibility, CodexSourceBackedRowV0,
+    },
     source::{CodexCatalogSource, CodexFileObservation, CodexSourceIdentity},
     CodexAppendProof, CodexCheckpointGeneration, CodexNativeCheckpoint, CodexNativeOwnedPage,
     CodexNativeScanner, CodexSessionRow,
@@ -1636,9 +1638,9 @@ fn decode_exact_display_text(
         return Ok(None);
     };
     Ok(match source_backed_display_text(&probe, payload) {
-        CodexSourceBackedDisplayText::Exact(text) => Some(text),
-        CodexSourceBackedDisplayText::IntentionallyNonDisplay
-        | CodexSourceBackedDisplayText::ParserRevisionGap => None,
+        CodexSourceBackedDocumentEligibility::Eligible(text) => Some(text),
+        CodexSourceBackedDocumentEligibility::IntentionallyNonDisplay
+        | CodexSourceBackedDocumentEligibility::ParserRevisionGap => None,
     })
 }
 

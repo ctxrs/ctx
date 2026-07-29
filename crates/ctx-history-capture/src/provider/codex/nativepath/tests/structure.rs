@@ -57,7 +57,7 @@ fn structural_output_marks_metadata_only_failures_as_non_display() {
 
 #[test]
 fn source_backed_display_contract_distinguishes_non_display_from_revision_gaps() {
-    use super::rows::CodexSourceBackedDisplayText;
+    use super::rows::CodexSourceBackedDocumentEligibility;
 
     for line in [
         r#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"metadata-only","status":"failed"}}"#,
@@ -65,18 +65,20 @@ fn source_backed_display_contract_distinguishes_non_display_from_revision_gaps()
     ] {
         assert_eq!(
             source_backed_display_disposition(line),
-            CodexSourceBackedDisplayText::IntentionallyNonDisplay
+            CodexSourceBackedDocumentEligibility::IntentionallyNonDisplay
         );
     }
     assert_eq!(
         source_backed_display_disposition(
             r#"{"type":"response_item","payload":{"type":"message","role":"assistant"}}"#,
         ),
-        CodexSourceBackedDisplayText::ParserRevisionGap
+        CodexSourceBackedDocumentEligibility::ParserRevisionGap
     );
 }
 
-fn source_backed_display_disposition(line: &str) -> super::rows::CodexSourceBackedDisplayText {
+fn source_backed_display_disposition(
+    line: &str,
+) -> super::rows::CodexSourceBackedDocumentEligibility<String> {
     let probe = super::record::classify_codex_record(line.as_bytes()).unwrap();
     let envelope = serde_json::from_str::<Value>(line).unwrap();
     super::rows::source_backed_display_text(&probe, &envelope["payload"])
