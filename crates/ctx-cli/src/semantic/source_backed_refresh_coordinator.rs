@@ -17,6 +17,7 @@ use ctx_history_core::utc_now;
 #[cfg(test)]
 use ctx_history_core::CaptureProvider;
 use ctx_history_index::{VerifiedIndex, WriterOptions};
+use ctx_pro_host_protocol::{SourceManifest, SourceRemoval};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -89,6 +90,9 @@ impl std::error::Error for SourceBackedRefreshDaemonUnavailable {}
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct SourceBackedRefreshPublication {
     pub(crate) generation_id: String,
+    /// Exact metadata-only Pro handoff for this Core generation. Test
+    /// executors may omit it; the capture-owned production executor never does.
+    pub(crate) source_manifest: Option<SourceManifest>,
     pub(crate) scanned_routes: usize,
     pub(crate) unsupported_routes: usize,
     pub(crate) certified_source_count: usize,
@@ -836,8 +840,22 @@ fn refresh_all_provider_sources(
     let receipt = executor
         .refresh(index_root, report_progress)
         .context("run capture-owned all-provider source-backed refresh")?;
+    let removals = receipt
+        .removals
+        .iter()
+        .cloned()
+        .map(|removal| SourceRemoval::new(removal.deletion, removal.inventory))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| anyhow!("build certified Pro source removal: {}", error.message))?;
+    let source_manifest = SourceManifest::new(
+        receipt.commit.generation_id.clone(),
+        receipt.sources.clone(),
+        removals,
+    )
+    .map_err(|error| anyhow!("build Pro source manifest: {}", error.message))?;
     Ok(SourceBackedRefreshPublication {
         generation_id: receipt.commit.generation_id,
+        source_manifest: Some(source_manifest),
         scanned_routes: receipt.scanned_routes,
         unsupported_routes: receipt.unsupported_routes.len(),
         certified_source_count: receipt.certified_source_count,
@@ -1245,6 +1263,7 @@ mod tests {
     fn test_publication(generation_id: impl Into<String>) -> SourceBackedRefreshPublication {
         SourceBackedRefreshPublication {
             generation_id: generation_id.into(),
+            source_manifest: None,
             scanned_routes: 1,
             unsupported_routes: 0,
             certified_source_count: 1,
