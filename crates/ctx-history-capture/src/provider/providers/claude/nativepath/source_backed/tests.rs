@@ -66,10 +66,14 @@ fn source_backed_cold_and_noop_extract_stable_bounded_documents_and_frontiers() 
     let projects = projects_root(temp.path());
     let primary = session_path(&projects, "-project", "session-1");
     let subagent = projects.join("-project/session-1/subagents/agent-review.jsonl");
+    let full_body = format!(
+        "claude-full-{}-claude-tail-sentinel",
+        "c".repeat(ctx_history_index::MAX_BODY_PREVIEW_CHARS + 128)
+    );
     write_lines(
         &primary,
         &[
-            message("session-1", "message-1", &"bounded ".repeat(600)),
+            message("session-1", "message-1", &full_body),
             json!({
                 "sessionId": "session-1",
                 "type": "assistant",
@@ -105,9 +109,8 @@ fn source_backed_cold_and_noop_extract_stable_bounded_documents_and_frontiers() 
     let (cold, cold_documents, cold_frontiers) = scan(leaf.clone(), None);
     assert_eq!(cold.disposition, ClaudeSourceBackedDisposition::Full);
     assert_eq!(cold_documents.len(), 2);
-    assert!(cold_documents
-        .iter()
-        .all(|document| document.body.chars().count() <= MAX_BODY_PREVIEW_CHARS));
+    assert_eq!(cold_documents[0].body, full_body);
+    assert!(cold_documents[0].body.ends_with("claude-tail-sentinel"));
     assert_eq!(cold_documents[0].session_id, leaf.session_id());
     assert_eq!(cold_documents[0].parent_session_id, None);
     assert_eq!(cold_documents[0].root_session_id, leaf.session_id());
@@ -122,6 +125,12 @@ fn source_backed_cold_and_noop_extract_stable_bounded_documents_and_frontiers() 
     assert!(cold_documents[0].is_primary);
     assert_eq!(cold_documents[0].cwd.as_deref(), Some("/workspace/project"));
     assert_eq!(cold_documents[1].touched_files, ["src/lib.rs"]);
+    let unsupported =
+        hydrate_claude_source_record(&projects, &cold_documents[1].locator).unwrap_err();
+    assert!(matches!(
+        unsupported,
+        ClaudeSourceBackedError::ExactDisplayUnavailable
+    ));
     assert!(cold_frontiers
         .last()
         .is_some_and(|frontier| frontier.certified_prefix_bytes() > 0));
@@ -154,20 +163,21 @@ fn exact_jsonl_locator_reopens_full_message_and_fails_closed_after_rewrite() {
     let temp = tempdir().unwrap();
     let projects = projects_root(temp.path());
     let path = session_path(&projects, "-project", "session-1");
-    let full_text = format!("exact locator {}", "content ".repeat(700));
+    let full_text = format!("exact locator {} claude-exact-tail", "content ".repeat(700));
     write_lines(&path, &[message("session-1", "message-1", &full_text)]);
 
     let inventory = discover_claude_source_backed(&projects).unwrap();
     let leaf = inventory.leaves()[0].clone();
     let (_, documents, _) = scan(leaf, None);
     assert_eq!(documents.len(), 1);
-    assert!(documents[0].body.len() < full_text.len());
+    assert_eq!(documents[0].body, full_text);
+    assert!(documents[0].body.ends_with("claude-exact-tail"));
     let hydrated = hydrate_claude_source_record(&projects, &documents[0].locator).unwrap();
     assert_eq!(
         hydrated.decoded_display_text.as_deref(),
         Some(full_text.as_str())
     );
-    assert!(!hydrated.provider_bytes.is_empty());
+    assert_eq!(hydrated.provider_bytes, documents[0].body.as_bytes());
 
     let replacement = full_text.replace("exact locator", "stale locator");
     assert_eq!(replacement.len(), full_text.len());
@@ -177,6 +187,13 @@ fn exact_jsonl_locator_reopens_full_message_and_fails_closed_after_rewrite() {
         error,
         ClaudeSourceBackedError::LocatorRecordChanged
     ));
+}
+
+#[test]
+fn source_backed_claude_adapter_has_no_preview_or_store_body_fallback() {
+    let source = include_str!("../source_backed.rs");
+    assert!(!source.contains("MAX_BODY_PREVIEW_CHARS"));
+    assert!(!source.contains("ctx_history_store"));
 }
 
 #[test]

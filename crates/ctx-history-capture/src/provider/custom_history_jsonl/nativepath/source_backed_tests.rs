@@ -126,7 +126,7 @@ fn cold_noop_and_append_emit_stable_ids_in_bounded_pages() {
     let temp = tempdir().unwrap();
     let path = temp.path().join("explicit.jsonl");
     let long = format!(
-        "bounded-preview-sentinel-{}",
+        "full-body-sentinel-{}-custom-tail-sentinel",
         "x".repeat(ctx_history_index::MAX_BODY_PREVIEW_CHARS + 128)
     );
     let mut records = vec![
@@ -159,10 +159,8 @@ fn cold_noop_and_append_emit_stable_ids_in_bounded_pages() {
     assert!(cold_pages
         .iter()
         .all(|(documents, bytes)| *documents <= 64 && *bytes <= 1024 * 1024));
-    assert_eq!(
-        cold_documents[0].body.chars().count(),
-        ctx_history_index::MAX_BODY_PREVIEW_CHARS
-    );
+    assert_eq!(cold_documents[0].body, long);
+    assert!(cold_documents[0].body.ends_with("custom-tail-sentinel"));
     assert_eq!(cold_documents[0].agent_type, "subagent");
     assert!(!cold_documents[0].is_primary);
     assert_eq!(
@@ -330,7 +328,7 @@ fn exact_resolver_hydrates_grouped_records_and_rejects_stale_locator() {
         event(0, "event-a", "root", "alpha exact"),
         event(1, "event-b", "root", "beta exact"),
     ];
-    let lines = write_records(&path, &records);
+    write_records(&path, &records);
     let input = CustomHistorySourceBackedInput::explicit(&path, [10; 32]);
     let (outcome, documents, _) = collect(&input, None);
     let receipt = present(outcome);
@@ -343,7 +341,7 @@ fn exact_resolver_hydrates_grouped_records_and_rejects_stale_locator() {
         .collect::<Vec<_>>();
 
     let first = resolver.hydrate_event(&requests[0]).unwrap();
-    assert_eq!(first.provider_bytes, lines[3]);
+    assert_eq!(first.provider_bytes, b"alpha exact");
     let session_request =
         SessionHydrationRequest::new(documents[0].session_id, requests.clone()).unwrap();
     let hydrated = resolver.hydrate_session(&session_request).unwrap();
@@ -352,7 +350,7 @@ fn exact_resolver_hydrates_grouped_records_and_rejects_stale_locator() {
             .iter()
             .map(|record| record.provider_bytes.as_slice())
             .collect::<Vec<_>>(),
-        vec![lines[3].as_slice(), lines[4].as_slice()]
+        vec![b"alpha exact".as_slice(), b"beta exact".as_slice()]
     );
     assert!(documents.iter().all(|document| matches!(
         document.locator.coordinate(),
@@ -373,6 +371,42 @@ fn exact_resolver_hydrates_grouped_records_and_rejects_stale_locator() {
     write_records(&path, &rewritten);
     let stale = resolver.hydrate_event(&requests[0]).unwrap_err();
     assert_eq!(stale.kind, HydrationFailureKind::StaleRecordEvidence);
+}
+
+#[test]
+fn lexical_body_prefers_full_payload_over_native_preview_and_hydrates_identically() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("preview.jsonl");
+    let full = format!(
+        "custom-full-{}-custom-preview-tail",
+        "p".repeat(ctx_history_index::MAX_BODY_PREVIEW_CHARS + 64)
+    );
+    let mut record = event(0, "event-full", "root", &full);
+    record["preview"] = Value::String("native preview only".to_owned());
+    write_records(
+        &path,
+        &[manifest(), source(), session("root", None, true), record],
+    );
+    let input = CustomHistorySourceBackedInput::explicit(&path, [13; 32]);
+    let (outcome, documents, _) = collect(&input, None);
+    let receipt = present(outcome);
+    assert_eq!(documents[0].body, full);
+    assert!(documents[0].body.ends_with("custom-preview-tail"));
+
+    let resolver = CustomHistorySourceBackedResolver::new([receipt.route]).unwrap();
+    let request =
+        EventHydrationRequest::new(documents[0].event_id, documents[0].locator.clone()).unwrap();
+    assert_eq!(
+        resolver.hydrate_event(&request).unwrap().provider_bytes,
+        documents[0].body.as_bytes()
+    );
+}
+
+#[test]
+fn source_backed_custom_adapter_has_no_preview_or_store_body_fallback() {
+    let source = include_str!("source_backed.rs");
+    assert!(!source.contains("MAX_BODY_PREVIEW_CHARS"));
+    assert!(!source.contains("ctx_history_store"));
 }
 
 #[test]

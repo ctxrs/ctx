@@ -59,8 +59,8 @@ fn cold_noop_append_and_exact_hydration_keep_stable_bounded_identity() {
     let temp = tempdir().unwrap();
     let path = temp.path().join("history.jsonl");
     let long = format!(
-        "bounded-prompt-{}",
-        "x".repeat(MAX_BODY_PREVIEW_CHARS.saturating_add(128))
+        "full-prompt-{}-prompt-tail-sentinel",
+        "x".repeat(ctx_history_index::MAX_BODY_PREVIEW_CHARS.saturating_add(128))
     );
     let mut lines = (0..70)
         .map(|index| {
@@ -86,10 +86,8 @@ fn cold_noop_append_and_exact_hydration_keep_stable_bounded_identity() {
     assert!(pages.iter().all(|(documents, bytes)| {
         *documents <= PAGE_MAX_DOCUMENTS && *bytes <= PAGE_MAX_RETAINED_BYTES
     }));
-    assert_eq!(
-        cold_documents[0].body.chars().count(),
-        MAX_BODY_PREVIEW_CHARS
-    );
+    assert_eq!(cold_documents[0].body, long);
+    assert!(cold_documents[0].body.ends_with("prompt-tail-sentinel"));
     assert_eq!(
         cold_documents[0].root_session_id,
         cold_documents[0].session_id
@@ -116,7 +114,7 @@ fn cold_noop_append_and_exact_hydration_keep_stable_bounded_identity() {
     .unwrap();
     assert_eq!(
         resolver.hydrate_event(&request).unwrap().provider_bytes,
-        lines[0]
+        long.as_bytes()
     );
 
     let (noop, noop_documents, noop_pages) = collect(&input, Some(&cold.certificate));
@@ -153,6 +151,13 @@ fn cold_noop_append_and_exact_hydration_keep_stable_bounded_identity() {
         rebuilt.last().unwrap().event_id,
         appended_documents[0].event_id
     );
+}
+
+#[test]
+fn source_backed_prompt_adapter_has_no_preview_or_store_body_fallback() {
+    let source = include_str!("../source_backed.rs");
+    assert!(!source.contains("MAX_BODY_PREVIEW_CHARS"));
+    assert!(!source.contains("ctx_history_store"));
 }
 
 #[test]

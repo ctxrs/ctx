@@ -38,7 +38,7 @@ fn forgecode_source_backed_cold_scan_is_bounded_and_stable() {
     assert!(first
         .documents
         .iter()
-        .all(|document| document.body.chars().count() <= MAX_BODY_PREVIEW_CHARS));
+        .all(|document| !document.body.is_empty()));
     let canonical_source_path = fs::canonicalize(&source_path)
         .unwrap()
         .display()
@@ -83,7 +83,10 @@ fn forgecode_source_backed_cold_scan_is_bounded_and_stable() {
 fn forgecode_source_backed_exact_resolver_uses_compound_row_coordinates() {
     let directory = crate::test_support_paths::tempdir().unwrap();
     let source_path = directory.path().join(".forge.db");
-    let complete = "x".repeat(MAX_BODY_PREVIEW_CHARS + 257);
+    let complete = format!(
+        "{}-forgecode-tail-sentinel",
+        "x".repeat(ctx_history_index::MAX_BODY_PREVIEW_CHARS + 257)
+    );
     write_source(
         &source_path,
         "exact-conversation",
@@ -93,10 +96,10 @@ fn forgecode_source_backed_exact_resolver_uses_compound_row_coordinates() {
         ]),
     );
     let scanned = scan(ForgeCodeSourceSelectionV0::selected(&source_path));
-    assert_eq!(
-        scanned.documents[0].body.chars().count(),
-        MAX_BODY_PREVIEW_CHARS
-    );
+    assert_eq!(scanned.documents[0].body, complete);
+    assert!(scanned.documents[0]
+        .body
+        .ends_with("forgecode-tail-sentinel"));
     let NativeRecordCoordinate::ProviderSqlite {
         logical_relation,
         primary_key,
@@ -146,6 +149,13 @@ fn forgecode_source_backed_exact_resolver_uses_compound_row_coordinates() {
         .unwrap();
     assert_eq!(session.len(), 2);
     assert_eq!(session[1].provider_bytes, b"second exact message");
+}
+
+#[test]
+fn source_backed_forgecode_adapter_has_no_preview_or_store_body_fallback() {
+    let source = include_str!("../source_backed.rs");
+    assert!(!source.contains("MAX_BODY_PREVIEW_CHARS"));
+    assert!(!source.contains("ctx_history_store"));
 }
 
 #[test]
