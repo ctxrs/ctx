@@ -27,9 +27,9 @@ use super::{
     bounded::BoundedString,
     normalize::{
         estimated_event_bytes, ClineCatalogEntry, ClineEventComponent, ClineEventContext,
-        ClineEventKind, ClineEventRole, ClineEventRow, ClineFileSourceIdentity, ClineFileTouch,
-        ClineItemCheckpoint, ClineItemRejection, ClineItemRejectionKind, ClineMetadataCheckpoint,
-        ClineNativeItemKey, ClinePublicationStats, ClineSessionRow, ClineSourceRecordEvidence,
+        ClineEventKind, ClineEventRole, ClineEventRow, ClineFileTouch, ClineItemCheckpoint,
+        ClineItemRejection, ClineItemRejectionKind, ClineMetadataCheckpoint, ClineNativeItemKey,
+        ClinePublicationStats, ClineSessionRow, ClineSourceRecordEvidence,
         ClineSparseOutputDiagnostic, ClineTaskIdentity, ClineTaskIdentityOrigin,
         CLINE_NATIVE_CORE_PAGE_MAX_BYTES, CLINE_NATIVE_MAX_RETAINED_ITEM_BYTES,
         CLINE_NATIVE_PAGE_MAX_UNITS,

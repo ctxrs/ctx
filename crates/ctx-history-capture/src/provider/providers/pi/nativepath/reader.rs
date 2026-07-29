@@ -310,8 +310,6 @@ pub(crate) struct PiNativeScanStats {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PiNativeScanOutcome {
-    pub(crate) complete: bool,
-    pub(crate) core_lifecycle: Option<PiSourceLifecycle>,
     pub(crate) core_checkpoint: Option<PiNativeCheckpoint>,
     pub(crate) stats: PiNativeScanStats,
 }
@@ -365,20 +363,6 @@ pub(crate) struct PiNativeScanner {
     complete: bool,
     finished: bool,
     stats: PiNativeScanStats,
-}
-
-pub(crate) fn open_pi_native_session(
-    path: &Path,
-    options: PiNativeScanOptions,
-) -> Result<PiNativeOpenOutcome, PiNativePathError> {
-    let opened = match PiFrozenSource::open(path) {
-        Ok(source) => source,
-        Err(PiNativePathError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
-            return Ok(PiNativeOpenOutcome::Deleted);
-        }
-        Err(error) => return Err(error),
-    };
-    open_pi_native_session_from_frozen(path, opened, options)
 }
 
 pub(crate) fn open_pi_native_session_retained(
@@ -605,8 +589,6 @@ impl PiNativeScanner {
 
     pub(crate) fn outcome(&self) -> Option<PiNativeScanOutcome> {
         self.finished.then(|| PiNativeScanOutcome {
-            complete: self.complete,
-            core_lifecycle: self.core.as_ref().map(|lane| lane.lifecycle),
             core_checkpoint: self.core.as_ref().map(|lane| lane.emitted.clone()),
             stats: self.stats.clone(),
         })

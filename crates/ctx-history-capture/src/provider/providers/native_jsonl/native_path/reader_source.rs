@@ -74,48 +74,10 @@ pub(super) fn read_bounded_jsonl_line(
     }
 }
 
-pub(crate) fn observe_file(path: &Path) -> Result<DirectJsonlFileObservation> {
-    let opened = crate::common::io::open_provider_source_file(path)?;
-    let observation = observe_opened_file(&opened)?;
-    opened.revalidate()?;
-    Ok(observation)
-}
-
 pub(crate) fn observe_opened_file(
     opened: &crate::common::io::OpenedProviderSourceFile,
 ) -> Result<DirectJsonlFileObservation> {
     observe_metadata(opened.metadata())
-}
-
-pub(crate) fn direct_jsonl_source_revision(observation: &DirectJsonlFileObservation) -> String {
-    let side = if observation.modified.before_epoch {
-        '-'
-    } else {
-        '+'
-    };
-    format!(
-        "native-jsonl-metadata-v1:length={};modified={side}{}.{:09};readonly={};device={};inode={}",
-        observation.length,
-        observation.modified.seconds,
-        observation.modified.nanos,
-        observation.readonly,
-        observation
-            .device
-            .map_or_else(|| "none".to_owned(), |value| value.to_string()),
-        observation
-            .inode
-            .map_or_else(|| "none".to_owned(), |value| value.to_string()),
-    )
-}
-
-pub(crate) fn direct_jsonl_prefix_sha256_opened(
-    opened: &crate::common::io::OpenedProviderSourceFile,
-    length: u64,
-) -> Result<[u8; 32]> {
-    let mut file = opened.file().try_clone()?;
-    let digest = prefix_digest(&hash_prefix(&mut file, length, new_prefix_hasher())?);
-    opened.revalidate()?;
-    Ok(digest)
 }
 
 pub(super) fn observe_metadata(metadata: &Metadata) -> Result<DirectJsonlFileObservation> {

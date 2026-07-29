@@ -25,11 +25,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::{
-    checkpoint::PiNativeCheckpoint,
-    reader::{
-        open_pi_native_session, open_pi_native_session_retained, PiNativeOpenOutcome,
-        PiNativeScanOptions, PiSourceLifecycle,
-    },
+    reader::{open_pi_native_session_retained, PiNativeOpenOutcome, PiNativeScanOptions},
     rows::{PiNativeCoreUnit, PiNativeEventRow, PiNativeFileTouchRow, PiNativeSessionRow},
     source::{discover_pi_sessions, PiFrozenSource, PiNativePathError},
 };
@@ -87,8 +83,6 @@ pub(crate) enum PiSourceBackedError {
     PriorSourceMismatch,
     #[error("Pi source certificate has no NativePath checkpoint frontier")]
     MissingCheckpoint,
-    #[error("Pi source certificate has an unsupported NativePath checkpoint")]
-    InvalidCheckpoint,
     #[error("Pi source-backed scanner has not been fully drained")]
     ProjectionNotDrained,
     #[error("Pi source-backed scan counters do not reconcile")]
@@ -166,7 +160,6 @@ impl PiSourceBackedRoot {
 pub(crate) struct PiSourceRoute {
     pub(crate) source: SourceKey,
     pub(crate) path: PathBuf,
-    pub(crate) source_revision: String,
     opened: Arc<OpenedProviderSourceFile>,
 }
 
@@ -179,9 +172,7 @@ pub(crate) struct PiSourceBackedPage {
 #[derive(Clone, Debug)]
 pub(crate) struct PiSourceBackedProjection {
     pub(crate) route: PiSourceRoute,
-    pub(crate) lifecycle: PiSourceLifecycle,
     pub(crate) certificate: CertifiedSource,
-    pub(crate) checkpoint: PiNativeCheckpoint,
 }
 
 #[derive(Clone, Debug)]
@@ -200,7 +191,6 @@ pub(crate) struct PiSourceBackedScanner {
     source_path: String,
     source_revision: String,
     opened: Arc<OpenedProviderSourceFile>,
-    previous: Option<CertifiedSource>,
     source: Option<SourceKey>,
     session_id: Option<StableEntityId>,
     parent_session_id: Option<StableEntityId>,
@@ -215,49 +205,26 @@ pub(crate) struct PiSourceBackedScanner {
 }
 
 impl PiSourceBackedScanner {
-    pub(crate) fn open(
-        path: impl AsRef<Path>,
-        mut context: ProviderAdapterContext,
-        previous: Option<CertifiedSource>,
-    ) -> PiSourceBackedResult<Self> {
-        let path = path.as_ref().to_path_buf();
-        let source_path = provider_path_identity(&path)?;
-        context.source_path = Some(path.clone());
-        let mut options = PiNativeScanOptions::new(context);
-        if let Some(previous) = previous.as_ref() {
-            options.resume.core = Some(decode_checkpoint(previous)?);
-        }
-        let PiNativeOpenOutcome::Ready(scanner) = open_pi_native_session(&path, options)? else {
-            return Err(PiSourceBackedError::SourceDeleted(path));
-        };
-        Self::from_scanner(path, source_path, previous, scanner)
-    }
-
     fn open_retained(
         path: &Path,
         opened: Arc<OpenedProviderSourceFile>,
         mut context: ProviderAdapterContext,
-        previous: Option<CertifiedSource>,
     ) -> PiSourceBackedResult<Self> {
         let path = path.to_path_buf();
         let source_path = provider_path_identity(&path)?;
         context.source_path = Some(path.clone());
-        let mut options = PiNativeScanOptions::new(context);
-        if let Some(previous) = previous.as_ref() {
-            options.resume.core = Some(decode_checkpoint(previous)?);
-        }
+        let options = PiNativeScanOptions::new(context);
         let PiNativeOpenOutcome::Ready(scanner) =
             open_pi_native_session_retained(&path, opened, options)?
         else {
             return Err(PiSourceBackedError::SourceDeleted(path));
         };
-        Self::from_scanner(path, source_path, previous, scanner)
+        Self::from_scanner(path, source_path, scanner)
     }
 
     fn from_scanner(
         path: PathBuf,
         source_path: String,
-        previous: Option<CertifiedSource>,
         scanner: Box<super::reader::PiNativeScanner>,
     ) -> PiSourceBackedResult<Self> {
         let opened = scanner.opened_source();
@@ -272,7 +239,6 @@ impl PiSourceBackedScanner {
             source_path,
             source_revision,
             opened,
-            previous,
             source: None,
             session_id: None,
             parent_session_id: None,
@@ -313,9 +279,6 @@ impl PiSourceBackedScanner {
             .scanner
             .outcome()
             .ok_or(PiSourceBackedError::ProjectionNotDrained)?;
-        let lifecycle = outcome
-            .core_lifecycle
-            .ok_or(PiSourceBackedError::ProjectionNotDrained)?;
         let checkpoint = outcome
             .core_checkpoint
             .ok_or(PiSourceBackedError::MissingCheckpoint)?;
@@ -324,22 +287,10 @@ impl PiSourceBackedScanner {
             .ok_or_else(|| PiSourceBackedError::MissingSessionHeader(self.path.clone()))?;
         self.scanner.revalidate_source()?;
 
-        let base_counts = if matches!(
-            lifecycle,
-            PiSourceLifecycle::NoOp | PiSourceLifecycle::Append | PiSourceLifecycle::Relocate
-        ) {
-            self.previous
-                .as_ref()
-                .map(CertifiedSource::counts)
-                .unwrap_or_default()
-        } else {
-            ScannedSourceCounts::default()
-        };
-        let complete_records =
-            checked_add(base_counts.complete_records, outcome.stats.complete_records)?;
-        let retained_records = checked_add(base_counts.retained_records, self.retained_delta)?;
-        let rejected_records = checked_add(base_counts.rejected_records, self.rejected_delta)?;
-        let indexed_documents = checked_add(base_counts.indexed_documents, self.indexed_delta)?;
+        let complete_records = outcome.stats.complete_records;
+        let retained_records = self.retained_delta;
+        let rejected_records = self.rejected_delta;
+        let indexed_documents = self.indexed_delta;
         let classified = checked_add(retained_records, rejected_records)?;
         let ignored_records = complete_records
             .checked_sub(classified)
@@ -378,12 +329,9 @@ impl PiSourceBackedScanner {
             route: PiSourceRoute {
                 source,
                 path: self.path,
-                source_revision: self.source_revision,
                 opened: self.opened,
             },
-            lifecycle,
             certificate,
-            checkpoint,
         })
     }
 
@@ -445,13 +393,6 @@ impl PiSourceBackedScanner {
             return Ok(());
         }
         let source = pi_source_key(provider_session_id)?;
-        if self
-            .previous
-            .as_ref()
-            .is_some_and(|previous| !previous.observation().source().exact_descriptor_eq(&source))
-        {
-            return Err(PiSourceBackedError::PriorSourceMismatch);
-        }
         let session_id = pi_session_identity(&source, provider_session_id)?;
         let parent_session_id = parent_provider_session_id
             .map(pi_session_identity_for_native)
@@ -589,7 +530,6 @@ pub(crate) fn project_pi_source_backed_root_cold(
             path,
             opening.discovery.opened(path)?,
             context.clone(),
-            None,
         )?;
         while let Some(page) = scanner.next_page()? {
             emit(page);
@@ -697,19 +637,6 @@ impl PiSourceBackedResolver {
             by_source.insert(route.source.clone(), route);
         }
         Ok(Self { routes: by_source })
-    }
-
-    pub(crate) fn hydrate_message(
-        &self,
-        request: &EventHydrationRequest,
-    ) -> Result<Option<String>, HydrationFailure> {
-        let hydrated = self.hydrate_event(request)?;
-        String::from_utf8(hydrated.provider_bytes)
-            .map(Some)
-            .map_err(|error| HydrationFailure {
-                kind: HydrationFailureKind::InvalidLocator,
-                detail: error.to_string(),
-            })
     }
 
     fn hydrate_exact(
@@ -882,31 +809,6 @@ fn pi_session_identity(
 fn pi_session_identity_for_native(native_session_id: &str) -> PiSourceBackedResult<StableEntityId> {
     let source = pi_source_key(native_session_id)?;
     pi_session_identity(&source, native_session_id)
-}
-
-fn decode_checkpoint(previous: &CertifiedSource) -> PiSourceBackedResult<PiNativeCheckpoint> {
-    if previous.parser_revision() != PI_PARSER_REVISION {
-        return Err(PiSourceBackedError::InvalidCheckpoint);
-    }
-    let frontier = previous
-        .frontier()
-        .ok_or(PiSourceBackedError::MissingCheckpoint)?;
-    if frontier.checkpoint_kind() != PI_FRONTIER_KIND {
-        return Err(PiSourceBackedError::InvalidCheckpoint);
-    }
-    let TypedKey::Bytes(bytes) = frontier.checkpoint() else {
-        return Err(PiSourceBackedError::InvalidCheckpoint);
-    };
-    let checkpoint: PiNativeCheckpoint =
-        serde_json::from_slice(bytes).map_err(|_| PiSourceBackedError::InvalidCheckpoint)?;
-    if checkpoint.complete_offset != frontier.certified_prefix_bytes()
-        || checkpoint.committed_prefix_sha256 != *frontier.certified_prefix_digest()
-        || checkpoint.complete_offset != previous.counts().certified_bytes
-        || checkpoint.next_ordinal != previous.counts().complete_records
-    {
-        return Err(PiSourceBackedError::InvalidCheckpoint);
-    }
-    Ok(checkpoint)
 }
 
 fn lexical_body(row: &PiNativeEventRow) -> String {

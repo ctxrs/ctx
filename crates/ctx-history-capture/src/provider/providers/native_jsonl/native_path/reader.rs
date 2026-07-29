@@ -59,10 +59,7 @@ pub(super) use projection::hydrated_direct_jsonl_lexical_text;
 
 #[path = "reader_source.rs"]
 mod source;
-pub(crate) use source::{
-    direct_jsonl_prefix_sha256_opened, direct_jsonl_source_revision, observe_file,
-    observe_opened_file,
-};
+pub(crate) use source::observe_opened_file;
 use source::{
     event_wire_bytes, hash_prefix, new_prefix_hasher, observe_metadata, prefix_digest,
     read_bounded_jsonl_line, rejection_wire_bytes, same_file_identity, DirectLine,

@@ -104,13 +104,6 @@ impl ClaudeRetainedRow {
     }
 }
 
-#[derive(Debug)]
-#[allow(dead_code)]
-pub(crate) struct ClaudeRowPage {
-    pub(crate) rows: Vec<ClaudeRetainedRow>,
-    pub(crate) estimated_bytes: usize,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ClaudeSessionMetadata {

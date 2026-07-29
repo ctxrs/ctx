@@ -16,10 +16,12 @@ use crate::{
     CLINE_TASK_JSON_SOURCE_FORMAT, ROO_TASK_JSON_SOURCE_FORMAT,
 };
 
+use super::source_backed::{
+    estimated_documents_bytes, TaskJsonSourceBackedCompletion, TaskJsonSourceBackedPage,
+};
 use super::{
     cline_task_json_source_backed_adapter, cline_task_json_source_backed_resolver,
     roo_task_json_source_backed_adapter, roo_task_json_source_backed_resolver,
-    TaskJsonSourceBackedCompletion, TaskJsonSourceBackedPage,
 };
 
 #[test]
@@ -141,7 +143,7 @@ fn lifecycle_case(provider: CaptureProvider) {
     assert!(!cold_pages.is_empty());
     assert!(cold_pages.iter().all(|page| {
         page.documents.len() <= 64
-            && page.estimated_owned_bytes <= 4 * 1024 * 1024
+            && estimated_documents_bytes(&page.documents) <= 4 * 1024 * 1024
             && page.documents.iter().all(|document| {
                 document.parent_session_id.is_none()
                     && document.root_session_id == document.session_id
@@ -179,16 +181,6 @@ fn lifecycle_case(provider: CaptureProvider) {
     let cold_locator = full_document.locator.clone();
     let cold_source = cold.tasks[0].source.clone();
     let cold_certificate = cold.tasks[0].certified_source.clone();
-    assert!(matches!(
-        cold.tasks[0]
-            .session
-            .locator
-            .as_ref()
-            .expect("metadata locator")
-            .coordinate(),
-        NativeRecordCoordinate::Document { .. }
-    ));
-
     let resolver = resolver(provider, &[selected.clone()]);
     let hydrated = resolver
         .hydrate_locator(&cold_locator)
@@ -251,7 +243,7 @@ fn scan(
 fn resolver(
     provider: CaptureProvider,
     selected: &[ProviderSource],
-) -> super::TaskJsonSourceBackedResolver {
+) -> super::source_backed::TaskJsonSourceBackedResolver {
     match provider {
         CaptureProvider::Cline => {
             cline_task_json_source_backed_resolver(selected).expect("Cline resolver")

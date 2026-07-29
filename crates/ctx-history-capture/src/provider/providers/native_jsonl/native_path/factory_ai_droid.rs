@@ -22,7 +22,7 @@ pub(crate) const fn factory_droid_source_backed_adapter() -> super::DirectJsonlS
 
 #[path = "factory_ai_droid_records.rs"]
 mod records;
-pub(crate) use records::{
+pub(in crate::provider::providers::native_jsonl) use records::{
     enumerate_factory_droid_results, factory_droid_event_identity, factory_droid_event_text,
     factory_droid_event_type, factory_droid_file_is_selected, factory_droid_header_cwd,
     factory_droid_header_session_id, factory_droid_model, factory_droid_role,

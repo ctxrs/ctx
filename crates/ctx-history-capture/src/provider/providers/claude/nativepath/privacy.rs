@@ -22,7 +22,6 @@ pub(super) struct RawResultClassification {
 }
 
 impl RawResultClassification {
-    #[allow(dead_code)]
     pub(super) fn is_result(self) -> bool {
         self.tagged_command_output || self.result_block || self.result_like_shape
     }
@@ -108,14 +107,6 @@ pub(super) fn preflight_record(bytes: &[u8]) -> Result<RawRecordPreflight, serde
         output_descriptors: scanner.output_descriptors,
         output_descriptor_count: scanner.output_descriptor_count,
     })
-}
-
-#[allow(dead_code)]
-pub(super) fn preclassify_result(
-    bytes: &[u8],
-) -> Result<Option<RawResultClassification>, serde_json::Error> {
-    let preflight = preflight_record(bytes)?;
-    Ok(preflight.result.is_result().then_some(preflight.result))
 }
 
 fn structural_error(reason: &'static str) -> serde_json::Error {

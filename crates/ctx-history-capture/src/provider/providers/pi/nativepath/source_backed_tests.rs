@@ -5,15 +5,16 @@ use std::{
 };
 
 use ctx_history_core::{
-    EventHydrationRequest, HydrationFailureKind, LocatorRevisionPolicy, NativeRecordCoordinate,
-    TypedKey,
+    CertifiedSourceDeletion, ContentSourceResolver, EventHydrationRequest, HydrationFailureKind,
+    LocatorRevisionPolicy, NativeRecordCoordinate, TypedKey,
 };
 
 use crate::{
     provider::provider_path_identity, test_support_paths::tempdir, ProviderAdapterContext,
 };
 
-use super::{reader::PiSourceLifecycle, *};
+use super::source_backed::PiSourceBackedError;
+use super::*;
 
 fn context(root: &Path) -> ProviderAdapterContext {
     ProviderAdapterContext {
@@ -96,10 +97,6 @@ fn cold_projection_certifies_lineage_and_old_locator_survives_append() {
             .unwrap();
     assert_eq!(cold.inventory.observed_sources(), 2);
     assert_eq!(cold.sources.len(), 2);
-    assert!(cold
-        .sources
-        .iter()
-        .all(|source| source.lifecycle == PiSourceLifecycle::Fresh));
 
     let cold_documents = cold_pages
         .into_iter()
@@ -208,31 +205,36 @@ fn cold_projection_certifies_lineage_and_old_locator_survives_append() {
         .write_all(format!("{}\n", message("appended-message", "append sentinel", 3)).as_bytes())
         .unwrap();
 
-    let mut append_scanner = PiSourceBackedScanner::open(
-        &child_path,
-        context(&root),
-        Some(child_cold.certificate.clone()),
-    )
+    let mut append_pages = Vec::new();
+    let appended_root = project_pi_source_backed_root_cold(&winning, context(&root), |page| {
+        append_pages.push(page)
+    })
     .unwrap();
     let mut appended_documents = Vec::new();
-    while let Some(page) = append_scanner.next_page().unwrap() {
-        appended_documents.extend(page.documents);
-    }
-    let appended = append_scanner.finish().unwrap();
-    assert_eq!(appended.lifecycle, PiSourceLifecycle::Append);
-    assert_eq!(appended_documents.len(), 1);
+    appended_documents.extend(append_pages.into_iter().flat_map(|page| page.documents));
+    let appended = appended_root
+        .sources
+        .into_iter()
+        .find(|source| source.route.path == child_path)
+        .unwrap();
+    assert_eq!(
+        appended_documents
+            .iter()
+            .filter(|document| document.provider_session_id.as_deref() == Some(child_session))
+            .count(),
+        2
+    );
     assert_eq!(appended.certificate.counts().complete_records, 3);
     assert_eq!(appended.certificate.counts().retained_records, 2);
     assert_eq!(appended.certificate.counts().ignored_records, 1);
     assert_eq!(appended.certificate.counts().indexed_documents, 2);
-    assert_eq!(appended.checkpoint.next_ordinal, 3);
 
     let resolver = PiSourceBackedResolver::new([appended.route]).unwrap();
     let request =
         EventHydrationRequest::new(child_document.event_id, child_document.locator).unwrap();
     assert_eq!(
-        resolver.hydrate_message(&request).unwrap().as_deref(),
-        Some(long_message.as_str())
+        String::from_utf8(resolver.hydrate_event(&request).unwrap().provider_bytes).unwrap(),
+        long_message
     );
 }
 
@@ -286,6 +288,7 @@ fn source_backed_rewrite_truncate_delete_unavailable_and_stale_evidence_fail_clo
     })
     .unwrap();
     let cold_source = cold.sources.into_iter().next().unwrap();
+    let cold_source_key = cold_source.route.source.clone();
     let original = cold_documents
         .into_iter()
         .find(|document| document.body == "original body")
@@ -302,15 +305,12 @@ fn source_backed_rewrite_truncate_delete_unavailable_and_stale_evidence_fail_clo
             message("removed-message", "removed by truncate", 2),
         ],
     );
-    let mut rewrite_scanner =
-        PiSourceBackedScanner::open(&path, context(&root), Some(cold_source.certificate.clone()))
-            .unwrap();
     let mut rewrite_documents = Vec::new();
-    while let Some(page) = rewrite_scanner.next_page().unwrap() {
+    let rewritten_root = project_pi_source_backed_root_cold(&winning, context(&root), |page| {
         rewrite_documents.extend(page.documents);
-    }
-    let rewritten = rewrite_scanner.finish().unwrap();
-    assert_eq!(rewritten.lifecycle, PiSourceLifecycle::Rewrite);
+    })
+    .unwrap();
+    let rewritten = rewritten_root.sources.into_iter().next().unwrap();
     let rewritten_stable = rewrite_documents
         .iter()
         .find(|document| document.body == "rewritten full body")
@@ -321,7 +321,7 @@ fn source_backed_rewrite_truncate_delete_unavailable_and_stale_evidence_fail_clo
 
     let rewritten_resolver = PiSourceBackedResolver::new([rewritten.route]).unwrap();
     let stale = rewritten_resolver
-        .hydrate_message(&original_request)
+        .hydrate_event(&original_request)
         .unwrap_err();
     assert_eq!(stale.kind, HydrationFailureKind::StaleRecordEvidence);
 
@@ -331,27 +331,31 @@ fn source_backed_rewrite_truncate_delete_unavailable_and_stale_evidence_fail_clo
         None,
         &[message("stable-message", "short", 1)],
     );
-    let mut truncate_scanner =
-        PiSourceBackedScanner::open(&path, context(&root), Some(cold_source.certificate)).unwrap();
     let mut truncated_documents = Vec::new();
-    while let Some(page) = truncate_scanner.next_page().unwrap() {
+    let truncated_root = project_pi_source_backed_root_cold(&winning, context(&root), |page| {
         truncated_documents.extend(page.documents);
-    }
-    let truncated = truncate_scanner.finish().unwrap();
-    assert_eq!(truncated.lifecycle, PiSourceLifecycle::Truncate);
+    })
+    .unwrap();
+    let truncated = truncated_root.sources.into_iter().next().unwrap();
     assert_eq!(truncated_documents.len(), 1);
     assert_eq!(truncated_documents[0].event_id, original.event_id);
     assert_eq!(truncated_documents[0].body, "short");
+    assert_eq!(truncated.certificate.counts().complete_records, 2);
+    assert_eq!(truncated.route.source, original.source);
 
     fs::remove_file(&path).unwrap();
-    assert!(matches!(
-        PiSourceBackedScanner::open(&path, context(&root), Some(truncated.certificate)),
-        Err(PiSourceBackedError::SourceDeleted(deleted)) if deleted == path
-    ));
+    let deleted = project_pi_source_backed_root_cold(&winning, context(&root), |_| {}).unwrap();
+    assert!(deleted.sources.is_empty());
+    assert_eq!(deleted.inventory.observed_sources(), 0);
+    assert!(
+        CertifiedSourceDeletion::from_inventory(cold_source_key, &deleted.inventory)
+            .unwrap()
+            .verifies(&deleted.inventory)
+    );
 
     let unavailable = PiSourceBackedResolver::new([])
         .unwrap()
-        .hydrate_message(&original_request)
+        .hydrate_event(&original_request)
         .unwrap_err();
     assert_eq!(
         unavailable.kind,

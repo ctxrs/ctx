@@ -27,8 +27,8 @@ use super::{
     },
     parse::{hydrate_component, ClineArrayScanStep, ClineArrayScanner, ClineLocalReadError},
     source::{
-        ClineComponent, ClineComponentObservation, ClineDiscovery, ClineLiveTaskObservation,
-        ClineObservedFileState, TaskJsonNativeDialect,
+        ClineComponent, ClineDiscovery, ClineLiveTaskObservation, ClineObservedFileState,
+        TaskJsonNativeDialect,
     },
     ClineNativePathError, ClineNativeReader,
 };
@@ -100,23 +100,12 @@ pub(crate) type TaskJsonSourceBackedResult<T> = Result<T, TaskJsonSourceBackedEr
 pub(crate) struct TaskJsonSourceBackedPage {
     pub(crate) source: SourceKey,
     pub(crate) documents: Box<[LexicalDocument]>,
-    pub(crate) estimated_owned_bytes: usize,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct TaskJsonSourceBackedSession {
-    pub(crate) session_id: StableEntityId,
-    pub(crate) provider_session_id: String,
-    pub(crate) title: Option<String>,
-    pub(crate) workspace: Option<String>,
-    pub(crate) locator: Option<SourceRecordLocator>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct TaskJsonCertifiedTask {
     pub(crate) source: SourceKey,
     pub(crate) certified_source: CertifiedSource,
-    pub(crate) session: TaskJsonSourceBackedSession,
 }
 
 #[derive(Debug)]
@@ -491,7 +480,22 @@ fn project_native_page(
             event,
         )?);
     }
-    let estimated_owned_bytes = documents.iter().fold(0_usize, |total, document| {
+    let estimated_owned_bytes = estimated_documents_bytes(&documents);
+    if documents.len() > MAX_SOURCE_BACKED_PAGE_DOCUMENTS
+        || estimated_owned_bytes > MAX_SOURCE_BACKED_PAGE_BYTES
+    {
+        return Err(TaskJsonSourceBackedError::PageBound {
+            provider: dialect.display_name,
+        });
+    }
+    Ok(Some(TaskJsonSourceBackedPage {
+        source: task.source.clone(),
+        documents: documents.into_boxed_slice(),
+    }))
+}
+
+pub(super) fn estimated_documents_bytes(documents: &[LexicalDocument]) -> usize {
+    documents.iter().fold(0_usize, |total, document| {
         total
             .saturating_add(document.body.len())
             .saturating_add(document.event_type.len())
@@ -506,19 +510,7 @@ fn project_native_page(
                     .map(String::len)
                     .sum::<usize>(),
             )
-    });
-    if documents.len() > MAX_SOURCE_BACKED_PAGE_DOCUMENTS
-        || estimated_owned_bytes > MAX_SOURCE_BACKED_PAGE_BYTES
-    {
-        return Err(TaskJsonSourceBackedError::PageBound {
-            provider: dialect.display_name,
-        });
-    }
-    Ok(Some(TaskJsonSourceBackedPage {
-        source: task.source.clone(),
-        documents: documents.into_boxed_slice(),
-        estimated_owned_bytes,
-    }))
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -633,46 +625,10 @@ fn certify_task(
         content_digest,
         accumulator.counts,
     )?;
-    let session = &checkpoint.task_metadata.session;
-    let session_id = derive_task_session_id(&accumulator.source, session.identity.as_str())?;
-    let locator = session_locator(
-        &accumulator.source,
-        accumulator.revision_digest,
-        &checkpoint.task_metadata.observation,
-        checkpoint.task_metadata.content_sha256,
-    )?;
     Ok(TaskJsonCertifiedTask {
         source: accumulator.source,
         certified_source,
-        session: TaskJsonSourceBackedSession {
-            session_id,
-            provider_session_id: session.identity.as_str().to_owned(),
-            title: session.title.as_deref().map(str::to_owned),
-            workspace: session.workspace_directory.as_deref().map(str::to_owned),
-            locator,
-        },
     })
-}
-
-fn session_locator(
-    source: &SourceKey,
-    revision_digest: [u8; 32],
-    observation: &ClineComponentObservation,
-    content_digest: Option<[u8; 32]>,
-) -> TaskJsonSourceBackedResult<Option<SourceRecordLocator>> {
-    let Some(content_digest) = content_digest else {
-        return Ok(None);
-    };
-    Ok(Some(SourceRecordLocator::new(
-        source.clone(),
-        NativeRecordCoordinate::Document {
-            object_key: TypedKey::utf8(observation.component.file_name())?,
-            json_pointer: None,
-        },
-        LocatorRevisionPolicy::ExactSourceRevision,
-        Some(revision_digest),
-        content_digest,
-    )?))
 }
 
 impl TaskJsonSourceBackedResolver {

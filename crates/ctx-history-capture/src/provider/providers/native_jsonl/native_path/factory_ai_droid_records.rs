@@ -105,7 +105,7 @@ pub(crate) fn factory_droid_model(value: &Value) -> Option<Value> {
         .or_else(|| value.pointer("/metadata/model").cloned())
 }
 
-pub(crate) fn enumerate_factory_droid_results(
+pub(in crate::provider::providers::native_jsonl) fn enumerate_factory_droid_results(
     value: &Value,
 ) -> std::result::Result<Vec<NativeJsonlResultSubrecord<'_>>, NativeJsonlResultExtractionError> {
     if value.get("type").and_then(Value::as_str) != Some("message") {

@@ -7,9 +7,7 @@ mod source;
 mod source_backed;
 
 pub(crate) use source_backed::{
-    project_pi_source_backed_root_cold, PiSourceBackedError, PiSourceBackedPage,
-    PiSourceBackedProjection, PiSourceBackedResolver, PiSourceBackedRoot,
-    PiSourceBackedRootProjection, PiSourceBackedScanner, PiSourceRoute,
+    project_pi_source_backed_root_cold, PiSourceBackedResolver, PiSourceBackedRoot,
 };
 
 #[cfg(test)]

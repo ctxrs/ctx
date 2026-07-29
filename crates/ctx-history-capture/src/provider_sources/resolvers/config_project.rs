@@ -25,9 +25,11 @@ mod roo;
 mod rovo;
 mod vibe;
 
+#[cfg(test)]
+use crush::CrushProjectSelectorKey;
 pub(crate) use crush::{
-    CrushDiscoveredProjectDatabase, CrushDiscoveredProjectInventory, CrushProjectInventorySelector,
-    CrushProjectInventorySelectorError, CrushProjectSelectorKey,
+    CrushDiscoveredProjectInventory, CrushProjectInventorySelector,
+    CrushProjectInventorySelectorError,
 };
 
 const PI_FORMAT: &str = "pi_session_jsonl";

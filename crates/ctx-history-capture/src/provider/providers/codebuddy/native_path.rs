@@ -19,26 +19,26 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    CODEBUDDY_SOURCE_FORMAT, CaptureError, MAX_PROVIDER_JSONL_LINE_BYTES, ProviderAdapterContext,
-    ProviderImportOptions, Result,
     common::io::{
-        OpenedProviderSourceFile, ProviderSourceDirectory, ProviderSourceRoot,
         ensure_provider_path_parents_are_not_symlinks, ensure_regular_provider_transcript_file,
+        OpenedProviderSourceFile, ProviderSourceDirectory, ProviderSourceRoot,
     },
     provider::{
         normalization::{provider_role, provider_value_text},
         providers::task_json::task_json_time_field,
     },
+    CaptureError, ProviderAdapterContext, ProviderImportOptions, Result, CODEBUDDY_SOURCE_FORMAT,
+    MAX_PROVIDER_JSONL_LINE_BYTES,
 };
 
 use super::{
-    CODEBUDDY_CLI_POLICY_REVISION, CODEBUDDY_MAX_FAILURE_BYTES, CODEBUDDY_MAX_SCAN_REJECTIONS,
     normalization::{
-        CodeBuddyEventDraft, CodeBuddyEventInput, CodeBuddySessionDraft, CodeBuddySessionInput,
         codebuddy_clean_content, codebuddy_decoded_message, codebuddy_message_text,
-        codebuddy_normalized_rows, codebuddy_title_from_text,
+        codebuddy_normalized_rows, codebuddy_title_from_text, CodeBuddyEventDraft,
+        CodeBuddyEventInput, CodeBuddySessionDraft, CodeBuddySessionInput,
     },
     source::{CodeBuddyFrozenFile, CodeBuddyRevisionHasher},
+    CODEBUDDY_CLI_POLICY_REVISION, CODEBUDDY_MAX_FAILURE_BYTES, CODEBUDDY_MAX_SCAN_REJECTIONS,
 };
 
 #[path = "extension/discovery.rs"]
@@ -47,10 +47,10 @@ mod extension_discovery;
 mod extension_source;
 
 use extension_source::{
-    CodeBuddyExtensionMessageError, CodeBuddyExtensionMetadata, CodeBuddyExtensionObservation,
-    CodeBuddyExtensionRejection, codebuddy_extension_line_number, codebuddy_extension_message_file,
+    codebuddy_extension_line_number, codebuddy_extension_message_file,
     codebuddy_extension_metadata, codebuddy_extension_metadata_from_admitted,
-    codebuddy_extension_metadata_text, codebuddy_message_time,
+    codebuddy_extension_metadata_text, codebuddy_message_time, CodeBuddyExtensionMessageError,
+    CodeBuddyExtensionMetadata, CodeBuddyExtensionObservation, CodeBuddyExtensionRejection,
 };
 
 const CODEBUDDY_NATIVE_PAGE_MAX_UNITS: usize = 64;
@@ -194,7 +194,6 @@ struct CodeBuddySource {
 #[derive(Debug)]
 struct CodeBuddyCapabilitySource {
     authority: ProviderSourceRoot,
-    relative_path: PathBuf,
     primary: Option<OpenedProviderSourceFile>,
     extension: Option<CodeBuddyExtensionCapability>,
     revision: String,
@@ -276,8 +275,5 @@ use parsing::*;
 use projection::*;
 pub(crate) use source_backed::registration::register as register_source_backed_route;
 pub(crate) use source_backed::{
-    CodeBuddyHydratedSourceRecord, CodeBuddySourceBackedPage, CodeBuddySourceBackedRejection,
-    CodeBuddySourceBackedScan, codebuddy_cli_complete_content_record,
-    codebuddy_cli_complete_content_source_from_admitted, hydrate_codebuddy_source_backed_record,
-    scan_codebuddy_source_backed_root,
+    codebuddy_cli_complete_content_record, codebuddy_cli_complete_content_source_from_admitted,
 };

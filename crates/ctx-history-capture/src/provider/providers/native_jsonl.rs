@@ -10,7 +10,6 @@ mod normalization;
 pub(crate) mod result_content;
 mod traversal;
 
-pub(crate) use dialect::native_jsonl_missing_reason;
 pub(crate) use native_path::{
     direct_jsonl_complete_message_provider_event_hash, qoder_complete_content_message_record,
 };

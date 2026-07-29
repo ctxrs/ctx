@@ -284,32 +284,6 @@ impl ClaudeDiscovery {
     }
 }
 
-/// Provider-owned source lifecycle evidence. The short names in the comments
-/// are the NativePath review matrix: N/R/A/W/Rw/X/M/C/D.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ClaudeSourceLifecycle {
-    New,         // N
-    Replay,      // R
-    Append,      // A
-    Rewrite,     // W
-    Rewind,      // Rw
-    Replacement, // X
-    Move,        // M
-    Copy,        // C
-    #[allow(dead_code)]
-    DeletionCandidate, // D
-    Ambiguous,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(crate) struct ClaudeDeletionCandidate {
-    pub(crate) lifecycle: ClaudeSourceLifecycle,
-    pub(crate) session_key: ClaudeSessionKey,
-    pub(crate) canonical_route: PathBuf,
-    pub(crate) inventory: ClaudeInventoryCertificate,
-}
-
 #[derive(Debug, Default)]
 struct ClaudeOpenedTree {
     directories: BTreeSet<PathBuf>,
@@ -809,17 +783,6 @@ pub(super) fn revalidate_open_file(
     Ok(())
 }
 
-pub(crate) fn revalidate_discovered_source(
-    source: &DiscoveredClaudeSession,
-) -> Result<(), ClaudeNativePathError> {
-    source
-        .opened
-        .revalidate()
-        .map_err(|_| ClaudeNativePathError::SourceChanged {
-            path: source.path.clone(),
-        })
-}
-
 fn utf8_file_stem(path: &Path) -> Result<&str, ClaudeNativePathError> {
     path.file_stem()
         .and_then(OsStr::to_str)
@@ -844,43 +807,4 @@ fn is_subagent_jsonl(path: &Path) -> bool {
             .file_stem()
             .and_then(OsStr::to_str)
             .is_some_and(|name| name.starts_with("agent-") && name.len() > "agent-".len())
-}
-
-#[allow(dead_code)]
-pub(crate) fn authoritative_deletion_candidates(
-    discovery: &ClaudeDiscovery,
-    known: &[super::checkpoint::ParseCheckpoint],
-) -> Result<Vec<ClaudeDeletionCandidate>, ClaudeNativePathError> {
-    if !discovery.inventory.complete {
-        return Err(ClaudeNativePathError::InvalidCheckpoint {
-            reason: "deletion authority requires a complete Claude inventory".to_owned(),
-        });
-    }
-    if known.len() > CLAUDE_MAX_TRAVERSAL_ENTRIES {
-        return Err(ClaudeNativePathError::InvalidCheckpoint {
-            reason: format!(
-                "deletion authority exceeds the {CLAUDE_MAX_TRAVERSAL_ENTRIES}-source Claude bound"
-            ),
-        });
-    }
-    discovery.revalidate_inventory()?;
-    let present = discovery
-        .sessions
-        .iter()
-        .map(|source| &source.canonical_path)
-        .collect::<std::collections::BTreeSet<_>>();
-    let mut missing_routes = std::collections::BTreeSet::new();
-    Ok(known
-        .iter()
-        .filter(|checkpoint| {
-            !present.contains(&checkpoint.canonical_route)
-                && missing_routes.insert(checkpoint.canonical_route.clone())
-        })
-        .map(|checkpoint| ClaudeDeletionCandidate {
-            lifecycle: ClaudeSourceLifecycle::DeletionCandidate,
-            session_key: checkpoint.session_key.clone(),
-            canonical_route: checkpoint.canonical_route.clone(),
-            inventory: discovery.inventory.clone(),
-        })
-        .collect())
 }

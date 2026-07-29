@@ -14,9 +14,11 @@ mod source;
 mod source_backed;
 mod stream;
 
+#[cfg(test)]
+pub(crate) use source_backed::GooseSourceBackedSnapshotV0;
 pub(crate) use source_backed::{
     GooseSourceBackedAdapterV0, GooseSourceBackedResolverV0, GooseSourceBackedSelectionV0,
-    GooseSourceBackedSnapshotV0, GooseSourceRouteV0,
+    GooseSourceRouteV0,
 };
 
 pub(crate) fn load_goose_message_values_schema(conn: &rusqlite::Connection) -> Result<()> {

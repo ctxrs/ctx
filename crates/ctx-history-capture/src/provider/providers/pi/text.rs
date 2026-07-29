@@ -42,7 +42,6 @@ pub(crate) fn pi_result_content(entry: &Value) -> Option<String> {
     }
 }
 
-#[allow(dead_code)]
 fn pi_result_value_text(value: &Value) -> Option<String> {
     if let Some(text) = value.as_str() {
         return Some(text.to_owned());

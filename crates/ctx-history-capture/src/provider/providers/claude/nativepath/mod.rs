@@ -13,6 +13,5 @@ pub(crate) use checkpoint::ParseCheckpoint;
 pub(crate) use reader::ClaudeNativeScanner;
 pub(crate) use rows::{ClaudeEventKind, ClaudeRetainedRow, ClaudeSessionMetadata};
 pub(crate) use source::{
-    discover_projects, revalidate_discovered_source, ClaudeNativePathError,
-    DiscoveredClaudeSession, SessionLayout,
+    discover_projects, ClaudeNativePathError, DiscoveredClaudeSession, SessionLayout,
 };

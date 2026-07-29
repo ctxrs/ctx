@@ -6,10 +6,10 @@
 //! locator contracts, and replacement evidence.
 
 use ctx_history_core::{
-    CertifiedSource, EventIdentityInput, LocatorRevisionPolicy, NativeItemKey,
-    NativeRecordCoordinate, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput,
-    SourceAnchor, SourceFrontier, SourceKey, SourceObservation, SourceRecordLocator, TypedKey,
-    derive_event_id, derive_session_id,
+    derive_event_id, derive_session_id, CertifiedSource, EventIdentityInput, LocatorRevisionPolicy,
+    NativeItemKey, NativeRecordCoordinate, NativeSessionKey, ScannedSourceCounts,
+    SessionIdentityInput, SourceAnchor, SourceFrontier, SourceKey, SourceObservation,
+    SourceRecordLocator, TypedKey,
 };
 use ctx_history_index::LexicalDocument;
 
@@ -344,7 +344,6 @@ fn bind_codebuddy_capability(
             source.source_revision.clone_from(&revision);
             CodeBuddyCapabilitySource {
                 authority: authority.clone(),
-                relative_path,
                 primary: Some(primary),
                 extension: None,
                 revision,
@@ -414,7 +413,6 @@ fn bind_codebuddy_capability(
             source.source_revision.clone_from(&effective_revision);
             CodeBuddyCapabilitySource {
                 authority: authority.clone(),
-                relative_path,
                 primary: None,
                 extension: Some(CodeBuddyExtensionCapability {
                     metadata,
@@ -915,11 +913,9 @@ fn structured_coordinate(coordinate: &NativeRecordCoordinate) -> Result<(String,
         ));
     };
     match parts.as_slice() {
-        [
-            TypedKey::Utf8(tag),
-            TypedKey::U64(ordinal),
-            TypedKey::Utf8(native_id),
-        ] if tag == CODEBUDDY_EXTENSION_LOCATOR_TAG => {
+        [TypedKey::Utf8(tag), TypedKey::U64(ordinal), TypedKey::Utf8(native_id)]
+            if tag == CODEBUDDY_EXTENSION_LOCATOR_TAG =>
+        {
             Ok((relative_path.clone(), *ordinal, native_id.clone()))
         }
         _ => Err(invalid_source_backed(
@@ -1288,12 +1284,10 @@ mod tests {
         let retired = temp.path().join("retired-codebuddy");
         fs::rename(&root, &retired).unwrap();
         write_dual_store(&root, "cli after", "extension after");
-        assert!(
-            inventory
-                .sources
-                .iter()
-                .all(|source| revalidate_codebuddy_capability(source).is_err())
-        );
+        assert!(inventory
+            .sources
+            .iter()
+            .all(|source| revalidate_codebuddy_capability(source).is_err()));
         assert!(hydrate_codebuddy_source_backed_record(&root, &stale_extension).is_err());
     }
 }
@@ -1302,12 +1296,12 @@ pub(crate) mod registration {
     use ctx_history_core::{CaptureProvider, HydratedProviderRecord, HydrationFailureKind};
 
     use super::{hydrate_codebuddy_source_backed_record, scan_codebuddy_source_backed_root};
-    use crate::ProviderSource;
     use crate::provider::source_backed::{
-        SourceBackedCoordinatorResult, SourceBackedProviderRegistry, SourceBackedRouteSelection,
-        SourceBackedSelectorAuthority, captured_route_driver, executable_route, hydration_failure,
-        provider_format_scope, route_capture_error,
+        captured_route_driver, executable_route, hydration_failure, provider_format_scope,
+        route_capture_error, SourceBackedCoordinatorResult, SourceBackedProviderRegistry,
+        SourceBackedRouteSelection, SourceBackedSelectorAuthority,
     };
+    use crate::ProviderSource;
 
     pub(crate) fn register(
         registry: &mut SourceBackedProviderRegistry,
