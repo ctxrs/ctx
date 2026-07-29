@@ -20,6 +20,7 @@ use crate::progress::{format_bytes, format_count, plural, ProgressArg, ProgressR
 use crate::provider_sources::SourceInfo;
 use crate::{ImportArgs, WAL_TRUNCATE_MIN_BYTES};
 
+mod automatic_source_refresh;
 mod catalog;
 mod cold;
 mod entry;
@@ -34,6 +35,9 @@ mod report;
 mod requests;
 mod totals;
 
+use automatic_source_refresh::{
+    run_automatic_source_refresh_import, AutomaticSourceRefreshImportContext,
+};
 use catalog::source_uses_incremental_event_search;
 use cold::{try_codex_cold_cli_import, CodexColdSeed};
 pub(crate) use entry::{
@@ -344,6 +348,15 @@ fn run_import_internal_with_pro_output(
             options,
         });
     }
+    return run_automatic_source_refresh_import(AutomaticSourceRefreshImportContext {
+        args,
+        data_root,
+        telemetry,
+        provider_refreshes,
+        config,
+        options,
+    });
+    #[allow(unreachable_code)]
     let db_path = database_path(data_root.clone());
     let automatic_pro_output = pro_output_selection.is_automatic();
     let (mut pro_output, require_complete_pro_output) = pro_output_selection.begin(&data_root);
