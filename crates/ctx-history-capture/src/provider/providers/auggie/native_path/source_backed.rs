@@ -26,13 +26,17 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::{
-    auggie_request_text, auggie_response_text, invalid_source_path,
-    normalized_auggie_authority_path, parse_auggie_source, parse_opened_auggie_source,
-    AuggieFileStamp, ParsedAuggieEvent, ParsedAuggieSession, AUGGIE_MAX_DISCOVERED_FILES,
-    AUGGIE_PARSER_REVISION,
+    model::{
+        ParsedAuggieEvent, ParsedAuggieSession, ParsedAuggieSource, AUGGIE_MAX_DISCOVERED_FILES,
+        AUGGIE_PARSER_REVISION,
+    },
+    normalized_auggie_authority_path,
+    parse::{parse_auggie_source, parse_opened_auggie_source},
+    source::{invalid_source_path, AuggieFileStamp},
 };
 use crate::{
     common::io::{open_provider_source_path, OpenedProviderSourcePath, ProviderSourceRoot},
+    provider::providers::auggie::{auggie_request_text, auggie_response_text},
     CaptureError, ProviderAdapterContext, AUGGIE_SESSION_JSON_SOURCE_FORMAT,
     MAX_PROVIDER_JSONL_LINE_BYTES,
 };
@@ -62,7 +66,7 @@ pub(crate) enum AuggieSourceBackedError {
     DuplicateNativeSessionId(String),
     #[error("Auggie source contains duplicate stable event identity {0}")]
     DuplicateEventIdentity(StableEntityId),
-    #[error("Auggie source-backed event has no bounded lexical text")]
+    #[error("Auggie source-backed event has no meaningful lexical text")]
     MissingLexicalText,
     #[error("locator is not an Auggie structured-session document record")]
     InvalidLocator,
@@ -160,7 +164,7 @@ pub(crate) struct AuggieSourceBackedSource {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AuggieHydratedSourceRecord {
-    /// The bounded provider record for this locator is the whole JSON document.
+    /// Exact provider-owned message bytes selected by the typed document locator.
     pub(crate) provider_bytes: Vec<u8>,
     pub(crate) decoded_display_text: String,
 }
@@ -251,7 +255,7 @@ pub(crate) fn project_auggie_source_backed(
     path: &Path,
     context: &ProviderAdapterContext,
 ) -> AuggieSourceBackedResult<AuggieSourceBackedSource> {
-    let parsed = parse_auggie_source(path, context, None, false)?;
+    let parsed = parse_auggie_source(path, context)?;
     project_parsed_auggie_source_backed(parsed)
 }
 
@@ -259,12 +263,12 @@ fn project_opened_auggie_source_backed(
     stamp: AuggieFileStamp,
     context: &ProviderAdapterContext,
 ) -> AuggieSourceBackedResult<AuggieSourceBackedSource> {
-    let parsed = parse_opened_auggie_source(stamp, context, None, false)?;
+    let parsed = parse_opened_auggie_source(stamp, context)?;
     project_parsed_auggie_source_backed(parsed)
 }
 
 fn project_parsed_auggie_source_backed(
-    parsed: super::ParsedAuggieSource,
+    parsed: ParsedAuggieSource,
 ) -> AuggieSourceBackedResult<AuggieSourceBackedSource> {
     let source = auggie_source_key(&parsed.session.provider_session_id)?;
     let session_id = auggie_session_id(&source, &parsed.session.provider_session_id)?;
@@ -342,7 +346,7 @@ pub(crate) fn project_auggie_source_backed_inventory(
     Ok(sources)
 }
 
-/// Rehydrates one exact bounded message from the provider-owned JSON document.
+/// Rehydrates one exact message from the provider-owned JSON document.
 pub(crate) fn hydrate_auggie_source_backed(
     path: &Path,
     locator: &SourceRecordLocator,
@@ -514,7 +518,7 @@ fn auggie_lexical_document(
         CaptureError::InvalidPayload("Auggie chat history index exceeds u64".to_owned())
     })?;
     let object_key = TypedKey::composite(vec![
-        TypedKey::utf8(&parsed.event.provider_event_hash)?,
+        TypedKey::utf8(&parsed.provider_event_hash)?,
         TypedKey::U64(chat_index),
         TypedKey::utf8(parsed.message_kind)?,
     ])?;
@@ -528,13 +532,8 @@ fn auggie_lexical_document(
         Some(content_digest),
         content_digest,
     )?;
-    let body = parsed
-        .event
-        .payload
-        .get("text")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .filter(|text| !text.is_empty())
+    let body = (!parsed.text.is_empty())
+        .then_some(parsed.text)
         .ok_or(AuggieSourceBackedError::MissingLexicalText)?;
     Ok(LexicalDocument {
         event_id,
@@ -548,10 +547,10 @@ fn auggie_lexical_document(
         source_path: Some(session.raw_source_path.clone()),
         agent_type: ctx_history_core::AgentType::Primary.as_str().to_owned(),
         is_primary: true,
-        event_sequence: parsed.event.provider_event_index,
-        occurred_at_unix_ms: Some(parsed.event.occurred_at.timestamp_millis()),
-        event_type: parsed.event.event_type.as_str().to_owned(),
-        role: Some(parsed.event.role.as_str().to_owned()),
+        event_sequence: parsed.provider_event_index,
+        occurred_at_unix_ms: Some(parsed.occurred_at.timestamp_millis()),
+        event_type: parsed.event_type.as_str().to_owned(),
+        role: Some(parsed.role.as_str().to_owned()),
         body,
         workspace: session.cwd.clone(),
         cwd: session.cwd.clone(),
@@ -707,21 +706,32 @@ mod tests {
     }
 
     fn write_session(path: &Path, request_text: &str, response_text: &str) {
+        write_history(path, &[("request-stable-id", request_text, response_text)]);
+    }
+
+    fn write_history(path: &Path, exchanges: &[(&str, &str, &str)]) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let chat_history = exchanges
+            .iter()
+            .enumerate()
+            .map(|(index, (request_id, request_text, response_text))| {
+                json!({
+                    "exchange": {
+                        "request_id": request_id,
+                        "request_message": request_text,
+                        "response_text": response_text,
+                    },
+                    "finishedAt": format!("2026-07-28T11:{:02}:00Z", index + 1),
+                })
+            })
+            .collect::<Vec<_>>();
         fs::write(
             path,
             serde_json::to_vec(&json!({
                 "sessionId": "auggie-source-session",
                 "created": "2026-07-28T11:00:00Z",
                 "workspaceRoot": "/workspace/auggie",
-                "chatHistory": [{
-                    "exchange": {
-                        "request_id": "request-stable-id",
-                        "request_message": request_text,
-                        "response_text": response_text,
-                    },
-                    "finishedAt": "2026-07-28T11:01:00Z",
-                }],
+                "chatHistory": chat_history,
             }))
             .unwrap(),
         )
@@ -925,5 +935,99 @@ mod tests {
             explicit.paths[0],
             fs::canonicalize(cache_sessions.join("explicit.json")).unwrap()
         );
+    }
+
+    #[test]
+    fn inventory_and_projection_signal_append_rewrite_truncate_delete_and_unavailable() {
+        let temp = tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        let root = AuggieSourceBackedRoot::explicit(&sessions);
+
+        let missing = discover_auggie_source_backed(&root).unwrap();
+        assert_eq!(
+            missing.status,
+            AuggieSourceBackedInventoryStatus::Unavailable
+        );
+        assert!(missing.paths.is_empty());
+
+        fs::create_dir_all(&sessions).unwrap();
+        let empty = discover_auggie_source_backed(&root).unwrap();
+        assert_eq!(empty.status, AuggieSourceBackedInventoryStatus::Complete);
+        assert!(empty.paths.is_empty());
+
+        let path = sessions.join("session.json");
+        write_history(
+            &path,
+            &[("stable-request-1", "initial request", "initial response")],
+        );
+        let initial_inventory = discover_auggie_source_backed(&root).unwrap();
+        let initial =
+            project_auggie_source_backed_inventory(&initial_inventory, &context(&sessions))
+                .unwrap();
+        assert_eq!(initial.len(), 1);
+        assert_eq!(initial[0].documents.len(), 2);
+        let initial_ids = initial[0]
+            .documents
+            .iter()
+            .map(|document| document.event_id)
+            .collect::<Vec<_>>();
+
+        write_history(
+            &path,
+            &[
+                (
+                    "stable-request-1",
+                    "rewritten request with a longer body",
+                    "rewritten response",
+                ),
+                ("stable-request-2", "appended request", "appended response"),
+            ],
+        );
+        let appended = project_auggie_source_backed_inventory(
+            &discover_auggie_source_backed(&root).unwrap(),
+            &context(&sessions),
+        )
+        .unwrap();
+        assert_eq!(appended[0].documents.len(), 4);
+        assert_eq!(appended[0].documents[0].event_id, initial_ids[0]);
+        assert_eq!(appended[0].documents[1].event_id, initial_ids[1]);
+        assert_eq!(
+            appended[0].documents[0].body,
+            "rewritten request with a longer body"
+        );
+
+        write_history(
+            &path,
+            &[(
+                "stable-request-1",
+                "truncated generation request",
+                "truncated generation response",
+            )],
+        );
+        let truncated = project_auggie_source_backed_inventory(
+            &discover_auggie_source_backed(&root).unwrap(),
+            &context(&sessions),
+        )
+        .unwrap();
+        assert_eq!(truncated[0].documents.len(), 2);
+        assert_eq!(truncated[0].documents[0].event_id, initial_ids[0]);
+        assert_eq!(truncated[0].documents[1].event_id, initial_ids[1]);
+
+        let stale_inventory = discover_auggie_source_backed(&root).unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(
+            project_auggie_source_backed_inventory(&stale_inventory, &context(&sessions)).is_err()
+        );
+        let deleted = discover_auggie_source_backed(&root).unwrap();
+        assert_eq!(deleted.status, AuggieSourceBackedInventoryStatus::Complete);
+        assert!(deleted.paths.is_empty());
+
+        fs::remove_dir(&sessions).unwrap();
+        let unavailable = discover_auggie_source_backed(&root).unwrap();
+        assert_eq!(
+            unavailable.status,
+            AuggieSourceBackedInventoryStatus::Unavailable
+        );
+        assert!(unavailable.paths.is_empty());
     }
 }
