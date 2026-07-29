@@ -226,7 +226,7 @@ impl WorkOsDeviceClient {
         tokens: &WorkOsTokens,
         organization_id: &str,
     ) -> Result<()> {
-        if self.validate_tokens(&tokens)? != WorkOsTokenDisposition::OrganizationBound
+        if self.validate_tokens(tokens)? != WorkOsTokenDisposition::OrganizationBound
             || tokens.organization_id.as_deref() != Some(organization_id)
         {
             bail!("authentication_invalid: WorkOS token refresh selected another organization");

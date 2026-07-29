@@ -66,8 +66,10 @@ pub(crate) fn run_explicit_source_catalog_import(
         .context("publish explicit source through daemon-owned source refresh")?;
     let published_generation = refresh.pin.generation_id().to_owned();
 
-    let mut summary = ProviderImportSummary::default();
-    summary.imported = 1;
+    let summary = ProviderImportSummary {
+        imported: 1,
+        ..ProviderImportSummary::default()
+    };
     context.provider_refreshes.record_success_with_facts(
         source.provider,
         context.refresh_trigger,

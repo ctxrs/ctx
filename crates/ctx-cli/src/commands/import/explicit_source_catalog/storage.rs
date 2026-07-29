@@ -31,7 +31,7 @@ pub(super) fn validate_approved_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn sort_and_validate_entries(entries: &mut Vec<CatalogEntry>) -> Result<()> {
+pub(super) fn sort_and_validate_entries(entries: &mut [CatalogEntry]) -> Result<()> {
     if entries.len() > CATALOG_MAX_ENTRIES {
         bail!("explicit source catalog exceeds its {CATALOG_MAX_ENTRIES}-entry bound");
     }

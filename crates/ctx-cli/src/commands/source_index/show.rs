@@ -80,11 +80,13 @@ pub(crate) fn run_show(
                 &index,
                 &data_root,
                 &session,
-                args.mode,
-                args.content,
-                args.format,
-                None,
-                CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
+                SessionJsonOptions {
+                    mode: args.mode,
+                    content: args.content,
+                    format: args.format,
+                    max_events: None,
+                    output_limit_bytes: CLI_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
+                },
             )?;
             telemetry.events_returned = value["events"]
                 .as_array()
@@ -191,11 +193,13 @@ pub(crate) fn mcp_show_session(
         &index,
         data_root,
         &session,
-        mode,
-        content,
-        OutputFormat::Json,
-        Some(max_events),
-        output_limit_bytes,
+        SessionJsonOptions {
+            mode,
+            content,
+            format: OutputFormat::Json,
+            max_events: Some(max_events),
+            output_limit_bytes,
+        },
     )?;
     let event_id = value["events"]
         .as_array()
@@ -232,26 +236,43 @@ pub(crate) fn mcp_show_event(
     Ok(value)
 }
 
-fn session_json(
-    index: &VerifiedIndex,
-    data_root: &Path,
-    session: &SessionRecord,
+struct SessionJsonOptions {
     mode: TranscriptMode,
     content: ContentPolicy,
     format: OutputFormat,
     max_events: Option<usize>,
     output_limit_bytes: usize,
+}
+
+fn session_json(
+    index: &VerifiedIndex,
+    data_root: &Path,
+    session: &SessionRecord,
+    options: SessionJsonOptions,
 ) -> Result<Value> {
     let mut events = index.events_for_session(session.session_id.as_uuid())?;
     let source = session_source_json(session, events.first());
-    let truncated = max_events.is_some_and(|limit| events.len() > limit);
-    if let Some(limit) = max_events {
+    let truncated = options.max_events.is_some_and(|limit| events.len() > limit);
+    if let Some(limit) = options.max_events {
         events.truncate(limit);
     }
-    let selected = select_session_events(&events, mode);
-    let rendered = render_event_values(index, data_root, &selected, content, output_limit_bytes)?;
+    let selected = select_session_events(&events, options.mode);
+    let rendered = render_event_values(
+        index,
+        data_root,
+        &selected,
+        options.content,
+        options.output_limit_bytes,
+    )?;
     Ok(session_transcript_value(
-        session, mode, content, format, source, rendered, truncated, max_events,
+        session,
+        options.mode,
+        options.content,
+        options.format,
+        source,
+        rendered,
+        truncated,
+        options.max_events,
     ))
 }
 
