@@ -1,25 +1,30 @@
 use std::{
     fs,
-    io::Write as _,
     path::{Path, PathBuf},
+};
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+use std::{
+    io::Write as _,
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::Result;
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+use anyhow::{anyhow, Context};
 use serde_json::{json, Value};
 
 use crate::compact_json;
 
 use super::super::{
     health_search::create_private_dir_all,
-    paths_status::{
-        daemon_root_path, pid_from_lock_json, read_pid_lock_json, write_private_json_file,
-    },
+    paths_status::{daemon_root_path, write_private_json_file},
 };
 
 const SUPERVISOR_RECEIPT_FILE: &str = "supervisor.json";
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 static SUPERVISOR_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 pub(super) fn write_atomic_file(path: &Path, body: &[u8]) -> Result<()> {
     let parent = path
         .parent()
@@ -61,7 +66,7 @@ pub(super) fn write_atomic_file(path: &Path, body: &[u8]) -> Result<()> {
     result
 }
 
-#[cfg(unix)]
+#[cfg(all(any(target_os = "linux", target_os = "macos", windows), unix))]
 fn sync_supervisor_directory(path: &Path) -> Result<()> {
     fs::File::open(path)
         .with_context(|| format!("open supervisor directory {}", path.display()))?
@@ -69,7 +74,7 @@ fn sync_supervisor_directory(path: &Path) -> Result<()> {
         .with_context(|| format!("sync supervisor directory {}", path.display()))
 }
 
-#[cfg(not(unix))]
+#[cfg(all(any(target_os = "linux", target_os = "macos", windows), not(unix)))]
 fn sync_supervisor_directory(_path: &Path) -> Result<()> {
     Ok(())
 }
@@ -110,43 +115,46 @@ pub(super) fn native_supervisor_artifact_path(_data_root: &Path) -> Result<Optio
     Ok(None)
 }
 
+pub(super) struct SupervisorReceipt {
+    pub(super) kind: String,
+    pub(super) status: &'static str,
+    pub(super) autostart_supported: bool,
+    pub(super) restart_supported: bool,
+    pub(super) registration_verified: bool,
+    pub(super) live_owner_verified: bool,
+    pub(super) owner_pid: Option<u32>,
+    pub(super) artifact_path: Option<PathBuf>,
+    pub(super) executable_path: Option<PathBuf>,
+    pub(super) limitation: Option<String>,
+    pub(super) last_error: Option<String>,
+}
+
 pub(super) fn write_supervisor_receipt(
     data_root: &Path,
-    kind: &str,
-    status: &str,
-    autostart: bool,
-    restart: bool,
-    artifact: Option<&Path>,
-    limitation: Option<&str>,
-    last_error: Option<String>,
+    receipt: &SupervisorReceipt,
 ) -> Result<()> {
     let root = daemon_root_path(data_root);
     create_private_dir_all(&root)?;
-    let installed = status == "installed";
-    let owner_pid = installed
-        .then(|| read_pid_lock_json(&super::super::paths_status::daemon_lock_path(data_root)))
-        .flatten()
-        .as_ref()
-        .and_then(pid_from_lock_json);
     write_private_json_file(
         &root.join(SUPERVISOR_RECEIPT_FILE),
         &compact_json(json!({
             "schema_version": 1,
-            "kind": kind,
-            "status": status,
-            "autostart_supported": autostart,
-            "restart_supported": restart,
-            "registration_verified": installed,
-            "live_owner_verified": installed,
-            "owner_pid": owner_pid,
-            "artifact_path": artifact,
-            "limitation": limitation,
-            "last_error": last_error,
+            "kind": receipt.kind,
+            "status": receipt.status,
+            "autostart_supported": receipt.autostart_supported,
+            "restart_supported": receipt.restart_supported,
+            "registration_verified": receipt.registration_verified,
+            "live_owner_verified": receipt.live_owner_verified,
+            "owner_pid": receipt.owner_pid,
+            "artifact_path": receipt.artifact_path,
+            "executable_path": receipt.executable_path,
+            "limitation": receipt.limitation,
+            "last_error": receipt.last_error,
         })),
     )
 }
 
-pub(super) fn daemon_supervisor_report(data_root: &Path) -> Value {
+pub(super) fn stored_supervisor_report(data_root: &Path) -> Value {
     let path = daemon_root_path(data_root).join(SUPERVISOR_RECEIPT_FILE);
     fs::read_to_string(&path)
         .ok()

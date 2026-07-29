@@ -19,7 +19,8 @@ const RELEASE_AUTHORITY_ENV_VARS: &[&str] = &[
 pub(crate) fn sanitize_release_authority_env(command: &mut Command) -> &mut Command {
     let configured_authority = command
         .get_envs()
-        .filter_map(|(key, _)| is_release_authority_env_var(key).then(|| key.to_os_string()))
+        .filter(|(key, _)| is_release_authority_env_var(key))
+        .map(|(key, _)| key.to_os_string())
         .collect::<Vec<_>>();
     let inherited_authority = env::vars_os()
         .map(|(key, _)| key)

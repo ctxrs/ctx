@@ -57,13 +57,11 @@ use capture_refresh::{
 };
 #[cfg(test)]
 use coordinator_state::CaptureOwnedSourceBackedRefreshExecutor;
+pub(in crate::semantic) use coordinator_state::SourceBackedRefreshCoordinator;
 use coordinator_state::SourceBackedRefreshProgressUpdate;
 pub(crate) use coordinator_state::{
     GenerationBoundSourceBackedResolver, SourceBackedRefreshExecution, SourceBackedRefreshExecutor,
     SourceBackedRefreshReceipt, SourceBackedRefreshTimings, SourceBackedResolverAccessError,
-};
-pub(in crate::semantic) use coordinator_state::{
-    SourceBackedRefreshCoordinator, SourceBackedRefreshRun,
 };
 
 const SEARCH_DIRECTORY: &str = "search";

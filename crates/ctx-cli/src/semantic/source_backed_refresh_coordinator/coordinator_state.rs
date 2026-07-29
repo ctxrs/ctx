@@ -643,9 +643,7 @@ impl SourceBackedRefreshCoordinator {
         current_source: Option<String>,
     ) -> Option<Value> {
         let mut state = self.lock_state();
-        let Some(attempt) = find_attempt_mut(&mut state, request_id) else {
-            return None;
-        };
+        let attempt = find_attempt_mut(&mut state, request_id)?;
         if attempt.state != SourceBackedRefreshState::Running {
             return None;
         }

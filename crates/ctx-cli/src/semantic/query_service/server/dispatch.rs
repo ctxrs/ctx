@@ -16,6 +16,19 @@ use crate::semantic::{
 use super::super::transport::DaemonIpcService;
 use super::hydration::handle_source_hydration_batch;
 
+pub(in crate::semantic) struct DaemonQueryDispatch<'a> {
+    data_root: &'a Path,
+    runtime: &'a SharedSemanticRuntime,
+    source_refresh: &'a SourceBackedRefreshCoordinator,
+    service: DaemonIpcService,
+    token: &'a str,
+    wakeup: Option<&'a DaemonWakeup>,
+}
+
+// The Unix and Windows transport loops own this callback ABI and pass the
+// stream plus request by value. Keep that boundary stable while grouping the
+// cohesive service state used by the actual dispatcher below.
+#[allow(clippy::too_many_arguments)]
 pub(in crate::semantic) fn handle_daemon_query_stream<S: std::io::Write>(
     data_root: &Path,
     runtime: &SharedSemanticRuntime,
@@ -28,14 +41,16 @@ pub(in crate::semantic) fn handle_daemon_query_stream<S: std::io::Write>(
 ) {
     let result = request.and_then(|body| {
         handle_daemon_query_stream_inner(
-            data_root,
-            runtime,
-            source_refresh,
-            service,
-            token,
+            DaemonQueryDispatch {
+                data_root,
+                runtime,
+                source_refresh,
+                service,
+                token,
+                wakeup,
+            },
             &mut stream,
             &body,
-            wakeup,
         )
     });
     if let Err(error) = result {
@@ -52,15 +67,18 @@ pub(in crate::semantic) fn handle_daemon_query_stream<S: std::io::Write>(
 }
 
 pub(in crate::semantic) fn handle_daemon_query_stream_inner<S: std::io::Write>(
-    data_root: &Path,
-    runtime: &SharedSemanticRuntime,
-    source_refresh: &SourceBackedRefreshCoordinator,
-    service: DaemonIpcService,
-    token: &str,
+    dispatch: DaemonQueryDispatch<'_>,
     stream: &mut S,
     body: &str,
-    wakeup: Option<&DaemonWakeup>,
 ) -> Result<()> {
+    let DaemonQueryDispatch {
+        data_root,
+        runtime,
+        source_refresh,
+        service,
+        token,
+        wakeup,
+    } = dispatch;
     let request: Value = serde_json::from_str(body).context("parse daemon query request")?;
     if request.get("token").and_then(Value::as_str) != Some(token) {
         return Err(anyhow!("daemon query authentication failed"));

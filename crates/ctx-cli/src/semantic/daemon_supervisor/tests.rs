@@ -1,4 +1,98 @@
 use super::*;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Barrier, Mutex,
+};
+
+#[derive(Default)]
+struct FakeSupervisorState {
+    registered: bool,
+    live_owner: Option<u32>,
+    installs: usize,
+    disables: usize,
+    starts: usize,
+    upgrade_fence_released: bool,
+    start_observed_released_fence: bool,
+}
+
+#[derive(Default)]
+struct FakeSupervisorBackend {
+    state: Mutex<FakeSupervisorState>,
+    delay_install: bool,
+    fail_install_after_registration: bool,
+}
+
+impl FakeSupervisorBackend {
+    fn with_registration(live_owner: Option<u32>) -> Self {
+        Self {
+            state: Mutex::new(FakeSupervisorState {
+                registered: true,
+                live_owner,
+                ..FakeSupervisorState::default()
+            }),
+            delay_install: false,
+            fail_install_after_registration: false,
+        }
+    }
+}
+
+impl NativeSupervisorBackend for FakeSupervisorBackend {
+    fn artifact_path(&self, data_root: &Path) -> Result<Option<PathBuf>> {
+        Ok(Some(data_root.join("fake-native-registration")))
+    }
+
+    fn install(&self, data_root: &Path, _executable: &Path) -> Result<PathBuf> {
+        {
+            let mut state = self.state.lock().unwrap();
+            state.installs += 1;
+        }
+        if self.delay_install {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let mut state = self.state.lock().unwrap();
+        state.registered = true;
+        state.live_owner = Some(4_242);
+        if self.fail_install_after_registration {
+            return Err(anyhow!(
+                "fake installer failed after publishing valid registration"
+            ));
+        }
+        Ok(data_root.join("fake-native-registration"))
+    }
+
+    fn disable(&self, _data_root: &Path) -> Result<Option<PathBuf>> {
+        let mut state = self.state.lock().unwrap();
+        state.disables += 1;
+        state.registered = false;
+        state.live_owner = None;
+        Ok(None)
+    }
+
+    fn verify_registration(&self, _data_root: &Path, _executable: &Path) -> Result<()> {
+        self.state
+            .lock()
+            .unwrap()
+            .registered
+            .then_some(())
+            .ok_or_else(|| anyhow!("fake native registration is absent"))
+    }
+
+    fn verify_live_owner(&self, _data_root: &Path, _executable: &Path) -> Result<u32> {
+        self.state
+            .lock()
+            .unwrap()
+            .live_owner
+            .ok_or_else(|| anyhow!("fake native manager has no owner"))
+    }
+
+    fn start(&self, _data_root: &Path) -> Result<()> {
+        let mut state = self.state.lock().unwrap();
+        state.starts += 1;
+        state.start_observed_released_fence = state.upgrade_fence_released;
+        state.live_owner = Some(4_242);
+        Ok(())
+    }
+}
 
 #[cfg(target_os = "linux")]
 #[test]
@@ -114,6 +208,148 @@ fn freebsd_limitation_names_the_missing_product_authority_without_claiming_suppo
     assert!(limitation.contains("typed CLI self-healing"));
 }
 
+#[test]
+fn concurrent_recovery_revalidates_registration_under_the_installation_lock() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let executable = temp.path().join("ctx");
+    let backend = Arc::new(FakeSupervisorBackend {
+        delay_install: true,
+        fail_install_after_registration: true,
+        ..FakeSupervisorBackend::default()
+    });
+    let barrier = Arc::new(Barrier::new(3));
+    let callers = (0..2)
+        .map(|_| {
+            let data_root = temp.path().to_path_buf();
+            let executable = executable.clone();
+            let backend = Arc::clone(&backend);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                ensure_native_supervisor_with(&data_root, &executable, backend.as_ref())
+            })
+        })
+        .collect::<Vec<_>>();
+    barrier.wait();
+    for caller in callers {
+        assert_eq!(
+            caller
+                .join()
+                .expect("join concurrent supervisor recovery")?,
+            DaemonSupervisorStart::Native
+        );
+    }
+    let state = backend.state.lock().unwrap();
+    assert_eq!(state.installs, 1);
+    assert_eq!(state.disables, 0);
+    assert_eq!(state.starts, 0);
+    assert!(state.registered);
+    assert_eq!(state.live_owner, Some(4_242));
+    drop(state);
+    let receipt = stored_supervisor_report(temp.path());
+    assert_eq!(receipt["status"], "installed");
+    assert_eq!(receipt["registration_verified"], true);
+    assert_eq!(receipt["live_owner_verified"], true);
+    assert_eq!(receipt["owner_pid"], 4_242);
+    Ok(())
+}
+
+#[test]
+fn upgrade_handoff_releases_fence_before_native_manager_start() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let executable = temp.path().join("ctx");
+    let backend = FakeSupervisorBackend::with_registration(None);
+    let result =
+        resume_daemon_supervisor_after_upgrade_with(temp.path(), &executable, &backend, || {
+            backend.state.lock().unwrap().upgrade_fence_released = true;
+            Ok(())
+        })?;
+    assert_eq!(result, DaemonSupervisorUpgradeResume::Native);
+    let state = backend.state.lock().unwrap();
+    assert_eq!(state.starts, 1);
+    assert!(state.start_observed_released_fence);
+    assert_eq!(state.live_owner, Some(4_242));
+    drop(state);
+    let report = stored_supervisor_report(temp.path());
+    assert_eq!(report["status"], "installed");
+    assert_eq!(report["owner_pid"], 4_242);
+    Ok(())
+}
+
+#[test]
+fn upgrade_handoff_keeps_fence_for_detached_fallback_without_native_registration() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let executable = temp.path().join("ctx");
+    let backend = FakeSupervisorBackend::default();
+    let fence_released = AtomicBool::new(false);
+    let result =
+        resume_daemon_supervisor_after_upgrade_with(temp.path(), &executable, &backend, || {
+            fence_released.store(true, Ordering::SeqCst);
+            Ok(())
+        })?;
+    assert_eq!(result, DaemonSupervisorUpgradeResume::Fallback);
+    assert!(!fence_released.load(Ordering::SeqCst));
+    assert_eq!(backend.state.lock().unwrap().starts, 0);
+    Ok(())
+}
+
+#[test]
+fn status_revalidates_registration_and_live_owner_instead_of_replaying_receipt() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let executable = temp.path().join("ctx");
+    let backend = FakeSupervisorBackend::with_registration(Some(4_242));
+    write_installed_receipt(
+        temp.path(),
+        &executable,
+        backend.artifact_path(temp.path())?,
+        4_242,
+    )?;
+
+    backend.state.lock().unwrap().live_owner = Some(7_331);
+    let restarted = revalidated_supervisor_report_with(temp.path(), &backend);
+    assert_eq!(restarted["status"], "installed");
+    assert_eq!(restarted["registration_verified"], true);
+    assert_eq!(restarted["live_owner_verified"], true);
+    assert_eq!(restarted["owner_pid"], 7_331);
+
+    backend.state.lock().unwrap().live_owner = None;
+    let stopped = revalidated_supervisor_report_with(temp.path(), &backend);
+    assert_eq!(stopped["status"], "registered_not_running");
+    assert_eq!(stopped["registration_verified"], true);
+    assert_eq!(stopped["live_owner_verified"], false);
+    assert_eq!(stopped["owner_pid"], Value::Null);
+
+    backend.state.lock().unwrap().registered = false;
+    let stale = revalidated_supervisor_report_with(temp.path(), &backend);
+    assert_eq!(stale["status"], "stale_registration");
+    assert_eq!(stale["registration_verified"], false);
+    assert_eq!(stale["live_owner_verified"], false);
+    Ok(())
+}
+
+#[test]
+fn supervisor_report_states_forced_termination_identity_limitations() {
+    let temp = tempfile::tempdir().unwrap();
+    let report = daemon_supervisor_report(temp.path());
+    if cfg!(target_os = "linux") {
+        assert_eq!(
+            report["forced_termination_identity"]["strategy"],
+            "pidfd_when_available"
+        );
+        assert!(report["forced_termination_identity"]["limitation"]
+            .as_str()
+            .is_some_and(|value| value.contains("PID reuse")));
+    } else if cfg!(unix) {
+        assert_eq!(
+            report["forced_termination_identity"]["strategy"],
+            "reverified_pid"
+        );
+        assert!(report["forced_termination_identity"]["limitation"]
+            .as_str()
+            .is_some_and(|value| value.contains("cannot eliminate")));
+    }
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 #[test]
 fn supervisor_live_ownership_requires_exact_manager_pid_and_executable() {
@@ -145,13 +381,19 @@ fn fallback_disable_status_is_retry_safe_without_claiming_registration() {
     let temp = tempfile::tempdir().unwrap();
     write_supervisor_receipt(
         temp.path(),
-        "cli_self_heal",
-        "fallback",
-        false,
-        false,
-        None,
-        Some("test limitation"),
-        None,
+        &SupervisorReceipt {
+            kind: "cli_self_heal".to_owned(),
+            status: "fallback",
+            autostart_supported: false,
+            restart_supported: false,
+            registration_verified: false,
+            live_owner_verified: false,
+            owner_pid: None,
+            artifact_path: None,
+            executable_path: None,
+            limitation: Some("test limitation".to_owned()),
+            last_error: None,
+        },
     )
     .unwrap();
     disable_daemon_supervisor(temp.path()).unwrap();
