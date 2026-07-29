@@ -174,9 +174,14 @@ pub(crate) fn run_search(
     Ok(())
 }
 
-pub(crate) fn mcp_search(request: SourceSearchRequest, data_root: &Path) -> Result<Value> {
+pub(crate) fn mcp_search(
+    request: SourceSearchRequest,
+    data_root: &Path,
+    semantic_weight: f32,
+) -> Result<Value> {
     let refresh = refresh_for_search(&request, data_root)?;
-    let (value, _, _, _, _, _) = search_with_hydration_retry(&request, data_root, 0.35, refresh)?;
+    let (value, _, _, _, _, _) =
+        search_with_hydration_retry(&request, data_root, semantic_weight, refresh)?;
     Ok(value)
 }
 

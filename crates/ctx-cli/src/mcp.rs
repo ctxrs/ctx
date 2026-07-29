@@ -4,12 +4,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::Result;
 use clap::{Args, Subcommand};
-use ctx_history_core::{database_path, EventType};
+use ctx_history_core::EventType;
 use ctx_history_search::SqlCompatibility;
 use ctx_history_store::{
-    RawSqlOptions, Store, RAW_SQL_DEFAULT_MAX_COLUMNS, RAW_SQL_DEFAULT_MAX_ROWS,
+    RawSqlOptions, RAW_SQL_DEFAULT_MAX_COLUMNS, RAW_SQL_DEFAULT_MAX_ROWS,
     RAW_SQL_DEFAULT_MAX_SQL_BYTES, RAW_SQL_DEFAULT_MAX_VALUE_BYTES, RAW_SQL_DEFAULT_TIMEOUT,
     RAW_SQL_MAX_COLUMNS_CAP, RAW_SQL_MAX_ROWS_CAP, RAW_SQL_MAX_SQL_BYTES_CAP, RAW_SQL_MAX_TIMEOUT,
     RAW_SQL_MAX_VALUE_BYTES_CAP,
@@ -28,7 +28,7 @@ mod text;
 use arguments::{
     allowed_tool_arguments, duration_millis_u64, optional_bool, optional_f32, optional_provider,
     optional_search_backend, optional_string, optional_transcript_mode, optional_usize,
-    validate_argument_keys, validate_search_filter_arguments,
+    validate_argument_keys,
 };
 use input::{read_mcp_input_line, McpInputLine};
 use pro::{
@@ -48,17 +48,15 @@ use telemetry::{McpHandled, McpTelemetry, RequestDescriptor};
 use text::render_tool_text;
 
 use super::{
-    compact_json, config, discovered_plugin_sources_json, raw_sql_result_json, search_filters,
-    search_has_intent, sources_json, ProviderArg, RefreshArg, SearchDto, SearchFilterInput,
-    SearchIntentInput, SearchRefreshReport, SourceIdentityFilterArgs, TranscriptMode,
-    MAX_EVENT_WINDOW, MAX_SEARCH_LIMIT,
+    compact_json, config, discovered_plugin_sources_json, raw_sql_result_json, search_has_intent,
+    sources_json, ProviderArg, RefreshArg, SearchIntentInput, SourceIdentityFilterArgs,
+    TranscriptMode, MAX_EVENT_WINDOW, MAX_SEARCH_LIMIT,
 };
 use crate::analytics::{McpErrorClassV1, McpStopReasonV1, Outcome};
-use crate::commands::search::resolve_search_backend;
 use crate::complete_content::MCP_COMPLETE_CONTENT_MAX_OUTPUT_BYTES;
 use crate::local_usage::{McpInvocation, McpUsageRecorder};
 use crate::provider_sources::{discovered_sources_report, discovery_report_issues_json};
-use crate::semantic::{search_packet_with_backend, source_epoch_status_report};
+use crate::semantic::source_epoch_status_report;
 
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const MCP_SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &[MCP_PROTOCOL_VERSION, "2025-06-18"];
@@ -538,87 +536,31 @@ fn tool_search(arguments: &Value, data_root: &Path) -> Result<Value> {
     }) {
         return Err(invalid_tool_request("search needs a query or file"));
     }
-    if crate::commands::source_index::index_is_available(data_root) {
-        return crate::commands::source_index::mcp_search(
-            crate::commands::source_index::SourceSearchRequest {
-                query,
-                terms: Vec::new(),
-                limit,
-                provider: provider.map(ProviderArg::capture_provider),
-                history_source: source_identity.history_source,
-                provider_key: source_identity.provider_key,
-                source_id: source_identity.source_id,
-                source_format: source_identity.source_format,
-                workspace,
-                since,
-                primary_only,
-                include_subagents,
-                event_type,
-                file,
-                session,
-                events,
-                include_current_session,
-                backend,
-                refresh: RefreshArg::Off,
-            },
-            data_root,
-        );
-    }
-    validate_search_filter_arguments(
-        provider.as_ref(),
-        &source_identity,
-        session.as_deref(),
-        since.as_deref(),
-        event_type.as_deref(),
-    )?;
-    let config = config::AppConfig::load(data_root)?;
-    let backend = resolve_search_backend(backend, &config)?;
-    let store = open_existing_store(data_root)?;
-
-    let options = ctx_history_search::PacketOptions {
-        limit,
-        filters: search_filters(
-            SearchFilterInput {
-                session,
-                provider,
-                source_identity,
-                workspace,
-                since,
-                primary_only,
-                include_subagents,
-                event_type,
-                file,
-                include_current_session,
-            },
-            Some(&store),
-        )?,
-        result_mode: if events {
-            ctx_history_search::SearchResultMode::Events
-        } else {
-            ctx_history_search::SearchResultMode::Sessions
+    crate::commands::source_index::mcp_search(
+        crate::commands::source_index::SourceSearchRequest {
+            query,
+            terms: Vec::new(),
+            limit,
+            provider: provider.map(ProviderArg::capture_provider),
+            history_source: source_identity.history_source,
+            provider_key: source_identity.provider_key,
+            source_id: source_identity.source_id,
+            source_format: source_identity.source_format,
+            workspace,
+            since,
+            primary_only,
+            include_subagents,
+            event_type,
+            file,
+            session,
+            events,
+            include_current_session,
+            backend,
+            refresh: RefreshArg::Off,
         },
-        ..ctx_history_search::PacketOptions::default()
-    };
-    let (packet, retrieval) = search_packet_with_backend(
-        &store,
         data_root,
-        &query,
-        &[],
-        &options,
-        backend,
-        config.semantic_search_enabled(),
         semantic_weight,
-        RefreshArg::Off,
-        false,
-    )?;
-    let refresh = SearchRefreshReport::skipped(RefreshArg::Off, "skipped");
-    Ok(SearchDto::packet(
-        &store,
-        &packet,
-        &refresh,
-        &retrieval,
-        Some(&query),
-    ))
+    )
 }
 
 fn tool_sql(arguments: &Value, data_root: &Path) -> Result<Value> {
@@ -649,18 +591,6 @@ fn tool_sql(arguments: &Value, data_root: &Path) -> Result<Value> {
         },
     )?;
     Ok(raw_sql_result_json(&result))
-}
-
-fn open_existing_store(data_root: &Path) -> Result<Store> {
-    let db_path = database_path(data_root.to_path_buf());
-    if !db_path.exists() {
-        return Err(anyhow!(
-            "ctx store is not initialized at {}; run `ctx setup` or `ctx import` first",
-            db_path.display()
-        ));
-    }
-    Store::open_read_only(&db_path)
-        .with_context(|| format!("open read-only ctx store {}", db_path.display()))
 }
 
 fn tool_definitions() -> Vec<Value> {
