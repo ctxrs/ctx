@@ -353,8 +353,10 @@ pub fn register_codex_prompt_history_source_backed_route(
         let scan =
             scan_codex_prompt_history_source_backed_v0(terminal_source.clone(), None, |_| Ok(()))
                 .map_err(route_error)?;
-        let inventory =
-            certify_captured_route_inventory(&terminal_route, &[scan.certificate.clone()])?;
+        let inventory = certify_captured_route_inventory(
+            &terminal_route,
+            std::slice::from_ref(&scan.certificate),
+        )?;
         Ok((scan.certificate, inventory))
     });
     let source_terminal_capture = Arc::clone(&terminal_capture);
