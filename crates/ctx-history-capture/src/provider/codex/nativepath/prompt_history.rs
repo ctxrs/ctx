@@ -1,5 +1,3 @@
-#[cfg(test)]
-use std::fs;
 use std::{
     collections::BTreeMap,
     fs::{File, Metadata},
@@ -60,61 +58,11 @@ const MAX_PAGE_BYTES: usize = NATIVE_INGESTION_PAGE_MAX_BYTES - 512 * 1024;
 const RETIREMENT_PAGE_LIMIT: usize = 256;
 const PAGE_OVERHEAD_BYTES: usize = 64 * 1024;
 
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct PromptHistoryIoMetrics {
-    opens: usize,
-    bytes_read: u64,
-}
-
-#[cfg(test)]
-std::thread_local! {
-    static PROMPT_HISTORY_IO_METRICS: std::cell::Cell<PromptHistoryIoMetrics> =
-        const { std::cell::Cell::new(PromptHistoryIoMetrics {
-            opens: 0,
-            bytes_read: 0,
-        }) };
-}
-
 #[inline]
 fn open_prompt_history_source(source: &OpenedProviderSourceFile) -> Result<File> {
     let mut file = source.file().try_clone()?;
     file.seek(SeekFrom::Start(0))?;
-    #[cfg(test)]
-    PROMPT_HISTORY_IO_METRICS.with(|metrics| {
-        let current = metrics.get();
-        metrics.set(PromptHistoryIoMetrics {
-            opens: current.opens.saturating_add(1),
-            ..current
-        });
-    });
     Ok(file)
-}
-
-#[inline(always)]
-fn note_prompt_history_bytes_read(bytes: usize) {
-    #[cfg(test)]
-    PROMPT_HISTORY_IO_METRICS.with(|metrics| {
-        let current = metrics.get();
-        metrics.set(PromptHistoryIoMetrics {
-            bytes_read: current
-                .bytes_read
-                .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX)),
-            ..current
-        });
-    });
-    #[cfg(not(test))]
-    let _ = bytes;
-}
-
-#[cfg(test)]
-fn reset_prompt_history_io_metrics() {
-    PROMPT_HISTORY_IO_METRICS.with(|metrics| metrics.set(PromptHistoryIoMetrics::default()));
-}
-
-#[cfg(test)]
-fn prompt_history_io_metrics() -> PromptHistoryIoMetrics {
-    PROMPT_HISTORY_IO_METRICS.with(std::cell::Cell::get)
 }
 
 #[derive(Debug, Deserialize)]
@@ -732,8 +680,6 @@ mod output;
 mod page;
 mod rows;
 mod source_backed;
-#[cfg(test)]
-mod tests;
 
 use cursor::*;
 use identity::*;

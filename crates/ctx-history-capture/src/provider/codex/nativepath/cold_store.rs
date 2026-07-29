@@ -72,26 +72,6 @@ where
     )
 }
 
-#[cfg(test)]
-pub(crate) fn build_codex_cold_store_with_begin_hook<Begin, BeforeCapture>(
-    options: CodexColdStoreOptions,
-    begin: Begin,
-    before_capture: BeforeCapture,
-) -> Result<CodexColdStoreOutcome>
-where
-    Begin:
-        FnOnce(&Path) -> std::result::Result<Option<ColdStoreBuild>, ctx_history_store::StoreError>,
-    BeforeCapture: FnOnce() -> Result<()>,
-{
-    build_codex_cold_store_with_begin_and_hooks(
-        options,
-        begin,
-        before_capture,
-        |_| Ok(()),
-        |_| Ok(()),
-    )
-}
-
 fn build_codex_cold_store_with_begin_and_hooks<Begin, BeforeCapture, AfterCapture, BeforeInstall>(
     options: CodexColdStoreOptions,
     begin: Begin,

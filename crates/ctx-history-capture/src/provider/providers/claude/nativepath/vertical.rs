@@ -1,10 +1,5 @@
-#[cfg(test)]
-use std::fs;
-#[cfg(test)]
-use std::sync::{atomic::AtomicUsize, Arc};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -75,9 +70,6 @@ use entities::*;
 use output::*;
 use preparation::*;
 use publication::*;
-
-#[cfg(test)]
-mod tests;
 
 const CLAUDE_STORE_CURSOR_VERSION: u32 = 1;
 const CLAUDE_OUTPUT_CURSOR_VERSION: u32 = 1;

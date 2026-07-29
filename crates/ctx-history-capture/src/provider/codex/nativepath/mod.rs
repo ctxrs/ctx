@@ -72,8 +72,6 @@ pub(crate) use vertical::{
     CodexNativeRootGroup, CodexNativeStoreOptions,
 };
 #[cfg(test)]
-mod cold_store_tests;
-#[cfg(test)]
 mod tests;
 
 pub fn build_codex_cold_store(

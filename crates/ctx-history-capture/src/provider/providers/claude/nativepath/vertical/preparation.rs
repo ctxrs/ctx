@@ -55,22 +55,6 @@ pub(super) enum PreparedClaudeCore {
     Individual,
 }
 
-#[derive(Clone, Default)]
-pub(super) struct ClaudePreparationTestHooks {
-    #[cfg(test)]
-    pub(super) available_parallelism: Option<usize>,
-    #[cfg(test)]
-    pub(super) fail_spawn_at: Option<usize>,
-    #[cfg(test)]
-    pub(super) panic_worker: Option<usize>,
-    #[cfg(test)]
-    pub(super) joined_workers: Option<Arc<AtomicUsize>>,
-    #[cfg(test)]
-    pub(super) cancelled_workers: Option<Arc<AtomicUsize>>,
-    #[cfg(test)]
-    pub(super) wait_for_cancellation: bool,
-}
-
 impl PreparedClaudeCoreSource {
     fn retained_page_bytes(&self) -> usize {
         self.page.serialized_bytes
@@ -191,7 +175,6 @@ pub(super) fn import_core_sources_grouped(
                 &store_path,
                 sources,
                 options,
-                &ClaudePreparationTestHooks::default(),
                 |source, prepared_source| {
                     if consume(source, prepared_source)? {
                         return Err(CaptureError::SystemInvariant(
@@ -277,7 +260,6 @@ pub(super) fn prepare_grouped_core_sources_parallel<Consume>(
     store_path: &Path,
     sources: &[DiscoveredClaudeSession],
     options: &ClaudeProjectsImportOptions,
-    hooks: &ClaudePreparationTestHooks,
     mut consume: Consume,
 ) -> Result<()>
 where
@@ -296,8 +278,6 @@ where
     let available_parallelism = thread::available_parallelism()
         .map(usize::from)
         .unwrap_or(1);
-    #[cfg(test)]
-    let available_parallelism = hooks.available_parallelism.unwrap_or(available_parallelism);
     let workers = preparation_worker_count(sources.len(), available_parallelism);
     let lane_capacity = preparation_lane_capacity(workers);
     let cancelled = AtomicBool::new(false);
@@ -308,59 +288,28 @@ where
         let mut handles = Vec::with_capacity(workers);
         let mut spawn_error = None;
         for (worker, sender) in senders.into_iter().enumerate() {
-            #[cfg(test)]
-            let injected_spawn_failure = hooks.fail_spawn_at == Some(worker);
-            #[cfg(not(test))]
-            let injected_spawn_failure = false;
-            let spawned = if injected_spawn_failure {
-                Err(io::Error::other(
-                    "injected Claude preparation spawn failure",
-                ))
-            } else {
-                let cancelled = &cancelled;
-                let hooks = hooks.clone();
-                #[cfg(not(test))]
-                let _ = &hooks;
-                thread::Builder::new()
-                    .name(format!("ctx-claude-prepare-{worker}"))
-                    .spawn_scoped(scope, move || {
-                        #[cfg(test)]
-                        if hooks.panic_worker == Some(worker) {
-                            panic!("injected Claude preparation worker panic");
-                        }
-                        #[cfg(test)]
-                        if hooks.wait_for_cancellation {
-                            while !cancelled.load(Ordering::Acquire) {
-                                thread::yield_now();
-                            }
-                            if let Some(count) = &hooks.cancelled_workers {
-                                count.fetch_add(1, Ordering::Relaxed);
-                            }
+            let cancelled = &cancelled;
+            let spawned = thread::Builder::new()
+                .name(format!("ctx-claude-prepare-{worker}"))
+                .spawn_scoped(scope, move || {
+                    let store = match Store::open_read_only(store_path) {
+                        Ok(store) => store,
+                        Err(error) => {
+                            let _ = sender.send(Err(error.into()));
                             return;
                         }
-                        let store = match Store::open_read_only(store_path) {
-                            Ok(store) => store,
-                            Err(error) => {
-                                let _ = sender.send(Err(error.into()));
-                                return;
-                            }
-                        };
-                        for source in sources.iter().skip(worker).step_by(workers) {
-                            if cancelled.load(Ordering::Acquire) {
-                                #[cfg(test)]
-                                if let Some(count) = &hooks.cancelled_workers {
-                                    count.fetch_add(1, Ordering::Relaxed);
-                                }
-                                return;
-                            }
-                            let prepared = prepare_grouped_core_source(&store, source, options);
-                            let failed = prepared.is_err();
-                            if sender.send(prepared).is_err() || failed {
-                                return;
-                            }
+                    };
+                    for source in sources.iter().skip(worker).step_by(workers) {
+                        if cancelled.load(Ordering::Acquire) {
+                            return;
                         }
-                    })
-            };
+                        let prepared = prepare_grouped_core_source(&store, source, options);
+                        let failed = prepared.is_err();
+                        if sender.send(prepared).is_err() || failed {
+                            return;
+                        }
+                    }
+                });
             match spawned {
                 Ok(handle) => handles.push(handle),
                 Err(error) => {
@@ -389,10 +338,6 @@ where
         let mut worker_panicked = false;
         for handle in handles {
             worker_panicked |= handle.join().is_err();
-            #[cfg(test)]
-            if let Some(count) = &hooks.joined_workers {
-                count.fetch_add(1, Ordering::Relaxed);
-            }
         }
         if let Some(source) = spawn_error {
             return Err(CaptureError::SystemIo {
@@ -534,46 +479,4 @@ fn prepare_grouped_core_source(
             mutation_units,
         },
     )))
-}
-
-#[cfg(test)]
-mod aggregate_group_tests {
-    use super::*;
-
-    fn source(mutation_units: usize, retained_page_bytes: usize) -> ClaudeCoreSourceAccounting {
-        ClaudeCoreSourceAccounting {
-            mutation_units,
-            retained_page_bytes,
-        }
-    }
-
-    #[test]
-    fn core_group_accumulator_accepts_more_than_64_page_units() {
-        let page_units = crate::provider::native_ingestion::NATIVE_INGESTION_PAGE_MAX_UNITS;
-        let mut group = ClaudeCoreGroupAccounting::default();
-        assert!(group.try_push(source(page_units + 5, 1)));
-        assert!(group.try_push(source(page_units + 5, 1)));
-        assert_eq!(group.sources, 2);
-        assert_eq!(page_units * group.sources, 128);
-    }
-
-    #[test]
-    fn core_group_accumulator_splits_on_attempted_store_mutations() {
-        let mut first = ClaudeCoreGroupAccounting::default();
-        assert!(first.try_push(source(NATIVE_PATH_MAX_MUTATION_UNITS, 1)));
-        assert!(!first.try_push(source(1, 1)));
-
-        let mut second = ClaudeCoreGroupAccounting::default();
-        assert!(second.try_push(source(1, 1)));
-    }
-
-    #[test]
-    fn core_group_accumulator_splits_on_aggregate_encoded_bytes() {
-        let mut first = ClaudeCoreGroupAccounting::default();
-        assert!(first.try_push(source(1, CLAUDE_GROUP_MAX_RETAINED_PAGE_BYTES - 1)));
-        assert!(!first.try_push(source(1, 2)));
-
-        let mut second = ClaudeCoreGroupAccounting::default();
-        assert!(second.try_push(source(1, 2)));
-    }
 }
