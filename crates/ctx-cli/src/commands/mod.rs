@@ -11,4 +11,3 @@ pub(crate) mod source_index;
 pub(crate) mod sources;
 pub(crate) mod sql;
 pub(crate) mod status;
-mod store_telemetry;
