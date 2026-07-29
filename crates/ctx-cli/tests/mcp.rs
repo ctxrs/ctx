@@ -717,21 +717,10 @@ fn mcp_sources_matches_cli_discovery_issues() {
 }
 
 #[test]
-fn mcp_sources_and_search_support_history_source_plugins() {
+fn mcp_sources_reports_plugins_without_exposing_a_legacy_ingestion_path() {
     let temp = tempdir();
-    let plugin = write_history_source_plugin(&temp, "hermes", false, None);
-    json_output(
-        ctx(&temp)
-            .env("CTX_HISTORY_PLUGIN_PATH", &plugin.manifest_dir)
-            .args([
-                "import",
-                "--history-source",
-                "hermes/default",
-                "--format=json",
-                "--progress",
-                "none",
-            ]),
-    );
+    let plugin =
+        write_history_source_plugin_with_refresh(&temp, "hermes", true, Some("auto"), None);
 
     let responses = mcp_roundtrip_with_env(
         &temp,
@@ -755,20 +744,6 @@ fn mcp_sources_and_search_support_history_source_plugins() {
                     "arguments": {}
                 }
             }),
-            json!({
-                "jsonrpc": "2.0",
-                "id": "search",
-                "method": "tools/call",
-                "params": {
-                    "name": "search",
-                    "arguments": {
-                        "query": "hermes plugin initial marker",
-                        "provider": "custom",
-                        "history_source": "hermes/default",
-                        "limit": 5
-                    }
-                }
-            }),
         ],
         &[(
             "CTX_HISTORY_PLUGIN_PATH",
@@ -779,36 +754,22 @@ fn mcp_sources_and_search_support_history_source_plugins() {
     let sources = responses[1]["result"]["structuredContent"]["sources"]
         .as_array()
         .unwrap();
-    assert!(sources
+    let source = sources
         .iter()
-        .any(|source| source["history_source"] == "hermes/default"));
+        .find(|source| source["history_source"] == "hermes/default")
+        .unwrap();
+    assert_eq!(source["status"], "unsupported");
+    assert_eq!(source["importable"], false);
+    assert!(!plugin.run_marker.exists());
     assert_useful_mcp_text(
         &responses[1]["result"],
         &[
             "ctx sources",
             "sources:",
-            "available:",
             "importable:",
             "custom",
-            "available",
+            "unsupported",
             "hermes/default",
-        ],
-    );
-
-    let search = &responses[2]["result"]["structuredContent"];
-    assert_eq!(search["filters"]["provider"], "custom");
-    assert_eq!(search["filters"]["history_source"], "hermes/default");
-    assert_eq!(search["payload_type"], "search_results");
-    assert_eq!(search["results"][0]["history_source"], "hermes/default");
-    assert!(search["results"][0]["result_type"].is_string());
-    assert_useful_mcp_text(
-        &responses[2]["result"],
-        &[
-            "ctx search",
-            "query: hermes plugin initial marker",
-            "filters: provider=custom, history_source=hermes/default",
-            "hermes/default",
-            "snippet:",
         ],
     );
 }
