@@ -12,6 +12,7 @@ mod dispatch;
 mod docs;
 mod execution_capabilities;
 mod history_source_plugins;
+mod hydration_error;
 mod identity;
 mod install_marker;
 mod integrations;

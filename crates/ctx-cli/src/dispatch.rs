@@ -7,9 +7,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use ctx_history_capture::complete_content::CompleteContentErrorKind;
-use ctx_history_core::{default_data_root, HydrationFailure, HydrationFailureKind};
-use serde_json::{json, Value};
+use ctx_history_core::default_data_root;
 
 use crate::{
     analytics::{self, ClientOperationDraft},
@@ -35,7 +33,9 @@ use crate::{
     complete_content,
     config::AppConfig,
     deprecated_controls::DeprecatedControls,
-    docs, integrations, local_usage, mcp,
+    docs,
+    hydration_error::source_hydration_error_contract,
+    integrations, local_usage, mcp,
     output::{JsonOutputFormat, OutputFormat, SqlFormat},
     pro, semantic, upgrade,
 };
@@ -50,108 +50,6 @@ pub(crate) struct RenderedCliError;
 
 pub(crate) fn rendered_cli_error() -> anyhow::Error {
     RenderedCliError.into()
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SourceHydrationErrorContract {
-    error_code: String,
-    failure_kind: &'static str,
-    detail: &'static str,
-    retryable: bool,
-}
-
-impl SourceHydrationErrorContract {
-    pub(crate) fn from_failure(
-        failure: HydrationFailure,
-        retryable: bool,
-        stable_code_override: Option<&str>,
-    ) -> Self {
-        let (error_kind, failure_kind, detail) = match failure.kind {
-            HydrationFailureKind::TemporarilyUnavailable => (
-                CompleteContentErrorKind::SourceUnreadable,
-                "temporarily_unavailable",
-                "source hydration is temporarily unavailable",
-            ),
-            HydrationFailureKind::ConfirmedDeleted => (
-                CompleteContentErrorKind::SourceMissing,
-                "confirmed_deleted",
-                "the indexed source is no longer available",
-            ),
-            HydrationFailureKind::StaleSourceEvidence => (
-                CompleteContentErrorKind::SourceChanged,
-                "stale_source_evidence",
-                "the source identity changed after indexing",
-            ),
-            HydrationFailureKind::StaleRecordEvidence => (
-                CompleteContentErrorKind::ContentVerificationFailed,
-                "stale_record_evidence",
-                "the source record changed after indexing",
-            ),
-            HydrationFailureKind::MissingRecord => (
-                CompleteContentErrorKind::SourceRecordMissing,
-                "missing_record",
-                "the indexed source record is no longer available",
-            ),
-            HydrationFailureKind::UnsupportedParserRevision => (
-                CompleteContentErrorKind::HydrationUnsupported,
-                "unsupported_parser_revision",
-                "the source parser revision does not support hydration",
-            ),
-            HydrationFailureKind::InvalidLocator => (
-                CompleteContentErrorKind::ContentVerificationFailed,
-                "invalid_locator",
-                "the indexed source locator could not be verified",
-            ),
-        };
-        // Resolver details can contain provider-native paths or content. The
-        // stable contract deliberately exposes only the typed failure class.
-        let _ = failure.detail;
-        let error_code = stable_code_override
-            .and_then(stable_source_hydration_error_code_override)
-            .unwrap_or_else(|| error_kind.as_str())
-            .to_owned();
-        Self {
-            error_code,
-            failure_kind,
-            detail,
-            retryable,
-        }
-    }
-
-    pub(crate) fn detail(&self) -> &'static str {
-        self.detail
-    }
-
-    pub(crate) fn structured(&self) -> Value {
-        let error = format!("{}/{}", self.error_code, self.failure_kind);
-        json!({
-            "error": error,
-            "error_code": self.error_code,
-            "failure_kind": self.failure_kind,
-            "detail": self.detail,
-            "retryable": self.retryable,
-        })
-    }
-}
-
-fn stable_source_hydration_error_code_override(code: &str) -> Option<&str> {
-    match code {
-        // The aggregate hydration-budget P0 will expose this code from
-        // SourceHydrationUnavailable. Keep the override allowlisted so daemon
-        // implementation codes never become public by accident.
-        "hydration_budget_exceeded" => Some(code),
-        _ => None,
-    }
-}
-
-pub(crate) fn source_hydration_error_contract(
-    error: &anyhow::Error,
-) -> Option<SourceHydrationErrorContract> {
-    let retryable = semantic::PinnedSourceBackedGeneration::source_hydration_retryable(error);
-    let failure = semantic::PinnedSourceBackedGeneration::source_hydration_failure(error)?;
-    Some(SourceHydrationErrorContract::from_failure(
-        failure, retryable, None,
-    ))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -633,102 +531,6 @@ mod tests {
                 "{args:?}"
             );
         }
-    }
-
-    #[test]
-    fn source_hydration_failures_use_stable_safe_public_contracts() {
-        let cases = [
-            (
-                HydrationFailureKind::TemporarilyUnavailable,
-                "source_unreadable",
-                "temporarily_unavailable",
-                true,
-            ),
-            (
-                HydrationFailureKind::ConfirmedDeleted,
-                "source_missing",
-                "confirmed_deleted",
-                true,
-            ),
-            (
-                HydrationFailureKind::StaleSourceEvidence,
-                "source_changed",
-                "stale_source_evidence",
-                true,
-            ),
-            (
-                HydrationFailureKind::StaleRecordEvidence,
-                "content_verification_failed",
-                "stale_record_evidence",
-                true,
-            ),
-            (
-                HydrationFailureKind::MissingRecord,
-                "source_record_missing",
-                "missing_record",
-                true,
-            ),
-            (
-                HydrationFailureKind::UnsupportedParserRevision,
-                "hydration_unsupported",
-                "unsupported_parser_revision",
-                false,
-            ),
-            (
-                HydrationFailureKind::InvalidLocator,
-                "content_verification_failed",
-                "invalid_locator",
-                false,
-            ),
-        ];
-
-        for (kind, error_code, failure_kind, retryable) in cases {
-            let contract = SourceHydrationErrorContract::from_failure(
-                HydrationFailure {
-                    kind,
-                    detail: "secret provider content at /private/source/path".to_owned(),
-                },
-                retryable,
-                None,
-            );
-            let structured = contract.structured();
-            let encoded = serde_json::to_string(&structured).unwrap();
-            let reparsed: Value = serde_json::from_str(&encoded).unwrap();
-
-            assert_eq!(reparsed["error"], format!("{error_code}/{failure_kind}"));
-            assert_eq!(reparsed["error_code"], error_code);
-            assert_eq!(reparsed["failure_kind"], failure_kind);
-            assert_eq!(reparsed["retryable"], retryable);
-            assert!(reparsed["detail"]
-                .as_str()
-                .is_some_and(|value| !value.is_empty()));
-            assert!(!encoded.contains("secret provider content"));
-            assert!(!encoded.contains("/private/source/path"));
-        }
-    }
-
-    #[test]
-    fn source_hydration_budget_override_preserves_specific_stable_code() {
-        let contract = SourceHydrationErrorContract::from_failure(
-            HydrationFailure {
-                kind: HydrationFailureKind::TemporarilyUnavailable,
-                detail: "internal budget implementation detail".to_owned(),
-            },
-            true,
-            Some("hydration_budget_exceeded"),
-        );
-        let structured = contract.structured();
-
-        assert_eq!(
-            structured["error"],
-            "hydration_budget_exceeded/temporarily_unavailable"
-        );
-        assert_eq!(structured["error_code"], "hydration_budget_exceeded");
-        assert_eq!(structured["failure_kind"], "temporarily_unavailable");
-        assert_eq!(structured["retryable"], true);
-        assert!(!structured
-            .to_string()
-            .contains("internal budget implementation detail"));
     }
 
     struct FlushWriter {
