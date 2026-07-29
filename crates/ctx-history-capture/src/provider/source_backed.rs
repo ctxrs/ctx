@@ -771,7 +771,6 @@ pub enum SourceBackedCoordinatorError {
 pub struct SourceBackedGenerationSink<'writer> {
     writer: &'writer mut GenerationWriter,
     owners: &'writer mut HashMap<[u8; 32], SourceOwner>,
-    removals: &'writer mut Vec<SourceBackedCertifiedRemoval>,
     route_index: usize,
 }
 
@@ -835,11 +834,7 @@ impl SourceBackedGenerationSink<'_> {
             return Err(SourceBackedCoordinatorError::InvalidDeletionWitness);
         }
         self.claim(deletion.source())?;
-        self.writer.delete_source(deletion.clone())?;
-        self.removals.push(SourceBackedCertifiedRemoval {
-            deletion,
-            inventory,
-        });
+        self.writer.delete_source(deletion, inventory)?;
         Ok(())
     }
 
@@ -1786,7 +1781,6 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
     let scan_started = Instant::now();
     let mut writer = GenerationWriter::open(index_root.as_ref(), writer_options)?;
     let mut owners = HashMap::new();
-    let mut removals = Vec::new();
     let mut completed_routes = 0;
     for (route_index, route) in registry.routes.iter().enumerate() {
         let Some(driver) = &route.driver else {
@@ -1806,7 +1800,6 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
         let mut sink = SourceBackedGenerationSink {
             writer: &mut writer,
             owners: &mut owners,
-            removals: &mut removals,
             route_index,
         };
         (driver.scan)(&mut sink).map_err(|source| SourceBackedCoordinatorError::RouteScan {
@@ -1866,11 +1859,17 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
     .map_err(SourceBackedCoordinatorError::Progress)?;
     let certified_source_count = commit.certified_sources;
     let certified_source_bytes = commit.certified_source_bytes;
-    let sources = VerifiedIndex::open(index_root.as_ref())?
+    let verified = VerifiedIndex::open(index_root.as_ref())?;
+    let sources = verified.manifest().sources.clone();
+    let removals = verified
         .manifest()
-        .sources
-        .clone();
-    removals.sort_by_key(|removal| removal.deletion.source().identity().digest());
+        .removals
+        .iter()
+        .map(|removal| SourceBackedCertifiedRemoval {
+            deletion: removal.deletion().clone(),
+            inventory: removal.inventory().clone(),
+        })
+        .collect();
     Ok(SourceBackedRefreshReceipt {
         commit,
         sources,
