@@ -2,92 +2,129 @@
 
 perf_smoke_emit_python_validation_oracles() {
   cat <<'PY'
-def expect_import_totals(packet: dict[str, object]) -> dict[str, int]:
-    totals = packet.get("totals")
-    if not isinstance(totals, dict):
-        raise HarnessError(f"import output is missing totals: {packet}")
-    failed = int(totals.get("failed", 0))
-    failed_sources = int(totals.get("failed_sources", 0))
-    if failed or failed_sources:
-        raise HarnessError(f"import reported failures: {totals}")
-    return {key: int(value) for key, value in totals.items() if isinstance(value, int)}
-
-
-def profile_summary(packet: dict[str, object]) -> dict[str, object]:
-    totals = expect_import_totals(packet)
+def expect_source_refresh(
+    packet: dict[str, object],
+    *,
+    changed: bool,
+) -> dict[str, object]:
+    jobs = packet.get("jobs")
+    refresh = jobs.get("source_backed_refresh") if isinstance(jobs, dict) else None
+    if (
+        packet.get("status") != "completed"
+        or not isinstance(refresh, dict)
+        or refresh.get("status") != "completed"
+        or refresh.get("request_state") != "published"
+        or refresh.get("generation_changed") is not changed
+        or not isinstance(refresh.get("published_generation"), str)
+        or int(refresh.get("source_count", 0)) < 1
+        or int(refresh.get("certified_source_count", 0)) < 1
+    ):
+        raise HarnessError(f"daemon did not publish the expected source refresh: {packet}")
     return {
-        "source_files": totals.get("source_files", 0),
-        "source_bytes": totals.get("source_bytes", 0),
-        "imported_sessions": totals.get("imported_sessions", 0),
-        "imported_events": totals.get("imported_events", 0),
-        "imported_edges": totals.get("imported_edges", 0),
-        "skipped": totals.get("skipped", 0),
+        "generation_changed": changed,
+        "published_generation": refresh["published_generation"],
+        "source_count": refresh["source_count"],
+        "certified_source_count": refresh["certified_source_count"],
+        "certified_source_bytes": refresh.get("certified_source_bytes"),
+        "scanned_routes": refresh.get("scanned_routes"),
+        "timings_us": refresh.get("timings_us"),
     }
 
 
-def expect_exact_import_delta(
-    summary: dict[str, object],
-    label: str,
-    sessions: int,
-    events: int,
-    edges: int = 0,
+def expect_source_backed_status(
+    packet: dict[str, object],
+    data_root: Path,
+    expected_sessions: int,
+    expected_events: int,
+    prior_epoch_sha256: str,
 ) -> None:
-    expected = {
-        "imported_sessions": sessions,
-        "imported_events": events,
-        "imported_edges": edges,
-    }
-    actual = {key: summary[key] for key in expected}
-    if actual != expected:
-        raise HarnessError(f"{label} imported unexpected fixture totals: {actual} != {expected}")
-
-
-def expect_source_backed_status(packet: dict[str, object], data_root: Path) -> None:
+    history_epoch = packet.get("history_epoch")
     lexical = packet.get("lexical")
+    catalog = packet.get("catalog")
     semantic = packet.get("semantic")
     relational = packet.get("relational")
     prior_epoch = packet.get("prior_epoch")
     if packet.get("schema_version") != 2 or packet.get("initialized") is not True:
         raise HarnessError(f"status is not a ready v0.26 source epoch: {packet}")
-    if not isinstance(lexical, dict) or lexical.get("path") != str(
-        data_root / "search" / "lexical"
+    if (
+        not isinstance(history_epoch, dict)
+        or history_epoch.get("name") != "v0.26_source_backed"
+        or history_epoch.get("status") != "ready"
+        or history_epoch.get("origin") != "prior_epoch_preserved"
+        or history_epoch.get("phase") != "ready"
+    ):
+        raise HarnessError(f"status has an unexpected source epoch: {history_epoch}")
+    lexical_path = data_root / "search" / "lexical"
+    lexical_state = (lexical.get("status"), lexical.get("reason")) if isinstance(
+        lexical, dict
+    ) else None
+    if (
+        not isinstance(lexical, dict)
+        or lexical_state
+        not in {
+            ("ready", None),
+            ("stale", "epoch_generation_mismatch"),
+        }
+        or lexical.get("path") != str(lexical_path)
+        or int(lexical.get("indexed_documents", -1)) != expected_events
+        or not lexical_path.is_dir()
+        or not (lexical_path / "meta.json").is_file()
     ):
         raise HarnessError(f"status has an unexpected lexical generation path: {lexical}")
+    generation_id = lexical.get("generation_id")
+    if (
+        not isinstance(catalog, dict)
+        or catalog.get("status") != "ready"
+        or catalog.get("generation_matches") is not True
+        or catalog.get("generation_id") != generation_id
+        or int(catalog.get("certified_sources", 0)) < 1
+    ):
+        raise HarnessError(f"status has an unexpected source catalog: {catalog}")
     flat_f32 = semantic.get("flat_f32") if isinstance(semantic, dict) else None
-    if not isinstance(flat_f32, dict) or flat_f32.get("path") != str(
-        data_root / "search" / "semantic"
+    semantic_path = data_root / "search" / "semantic"
+    if (
+        not isinstance(semantic, dict)
+        or semantic.get("enabled") is not False
+        or semantic.get("status") != "disabled"
+        or not isinstance(flat_f32, dict)
+        or flat_f32.get("status") != "disabled"
+        or flat_f32.get("path") != str(semantic_path)
+        or semantic_path.exists()
     ):
         raise HarnessError(f"status has an unexpected semantic generation path: {semantic}")
-    if not isinstance(relational, dict) or relational.get("path") != str(
-        data_root / "relational.sqlite"
+    relational_path = data_root / "relational.sqlite"
+    if (
+        not isinstance(relational, dict)
+        or relational.get("status") != "ready"
+        or relational.get("projection_status") != "ready"
+        or relational.get("generation_matches") is not True
+        or relational.get("active_core_generation_id") != generation_id
+        or relational.get("path") != str(relational_path)
+        or int(relational.get("session_count", -1)) != expected_sessions
+        or int(relational.get("event_count", -1)) != expected_events
+        or not relational_path.is_file()
     ):
         raise HarnessError(f"status has an unexpected relational projection path: {relational}")
     if (
         not isinstance(prior_epoch, dict)
-        or prior_epoch.get("status") != "absent"
+        or prior_epoch.get("status") != "preserved"
+        or prior_epoch.get("authority") != "non_authoritative"
+        or prior_epoch.get("preserved") is not True
         or prior_epoch.get("active") is not False
         or prior_epoch.get("opened") is not False
-        or (data_root / "work.sqlite").exists()
     ):
-        raise HarnessError(f"fresh source-backed run activated prior-epoch storage: {prior_epoch}")
+        raise HarnessError(f"source-backed run activated prior-epoch storage: {prior_epoch}")
+    assert_prior_epoch_sentinel(data_root, prior_epoch_sha256)
 
 
 def effective_role(role: str, version: str) -> str:
-    if role in {"baseline", "candidate", "single"}:
-        return role
-    raise HarnessError(f"unknown performance role: {role}")
-
-
-def append_expectation(role: str, changed_files: int) -> dict[str, object]:
     if role not in {"baseline", "candidate", "single"}:
-        raise HarnessError(f"append expectation is unavailable for role: {role}")
-    return {
-        "role": role,
-        "imported_sessions": 0,
-        "imported_events": changed_files,
-        "imported_edges": 0,
-        "shape": "source-backed refresh appends events without re-importing the session",
-    }
+        raise HarnessError(f"unknown performance role: {role}")
+    if not version.startswith("ctx 0.26."):
+        raise HarnessError(
+            f"{role} performance binary must be a v0.26 source-backed build, got {version}"
+        )
+    return role
 
 
 def result_metric(result: dict[str, object], name: str) -> int | float:
@@ -304,21 +341,8 @@ def ctx_version(ctx_bin: Path, env: dict[str, str]) -> str:
     return completed.stdout.strip()
 
 
-def import_command(corpus_root: Path, resume: bool = False) -> list[str]:
-    args = [
-        "import",
-        "--provider",
-        "codex",
-        "--path",
-        str(corpus_root),
-        "--no-daemon",
-        "--format=json",
-        "--progress",
-        "none",
-    ]
-    if resume:
-        args.insert(5, "--resume")
-    return args
+def source_refresh_command() -> list[str]:
+    return ["daemon", "run", "--once", "--force", "--format=json"]
 
 
 def process_is_active(pid: int) -> bool:
@@ -381,7 +405,7 @@ def regression_check(
         passed = head <= threshold
     return {
         "name": name,
-        "policy": "legacy_relative_regression",
+        "policy": "relative_regression",
         "unit": unit,
         "baseline": round2(baseline),
         "candidate": round2(head),

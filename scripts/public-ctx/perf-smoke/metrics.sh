@@ -84,6 +84,9 @@ def source_backed_storage_footprint(data_root: Path) -> dict[str, int]:
         data_root / "relational.sqlite-shm",
     ]
     sizes = {
+        "catalogs/explicit-sources": tree_bytes(
+            data_root / "catalogs" / "explicit-sources"
+        ),
         "search/lexical": tree_bytes(data_root / "search" / "lexical"),
         "search/semantic": tree_bytes(data_root / "search" / "semantic"),
         "relational": sum(tree_bytes(path) for path in relational_files),

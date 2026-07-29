@@ -115,57 +115,6 @@ def comparison_report(
             ]
         )
 
-    baseline_query_timings = baseline["profiles"]["concurrent_refresh_off_search"]["query"][
-        "timings"
-    ]
-    candidate_query_timings = candidate["profiles"]["concurrent_refresh_off_search"]["query"][
-        "timings"
-    ]
-    if baseline_query_timings is not None and candidate_query_timings is not None:
-        baseline_query_wall = float(baseline_query_timings["p95_ms"])
-        candidate_query_wall = float(candidate_query_timings["p95_ms"])
-        checks.append(
-            regression_check(
-                "concurrent_refresh_off_search_wall_p95",
-                baseline_query_wall,
-                candidate_query_wall,
-                allowed_regression_pct,
-                "ms",
-            )
-        )
-        checks.append(
-            ratio_check(
-                "concurrent_refresh_off_search_wall_parity",
-                baseline_query_wall,
-                candidate_query_wall,
-                WALL_PARITY_RATIO,
-                "ms",
-                "candidate_wall_at_or_below_baseline",
-                inclusive=True,
-            )
-        )
-    else:
-        for name, policy in [
-            ("concurrent_refresh_off_search_wall_p95", "legacy_relative_regression"),
-            (
-                "concurrent_refresh_off_search_wall_parity",
-                "candidate_wall_at_or_below_baseline",
-            ),
-        ]:
-            checks.append({
-                "name": name,
-                "policy": policy,
-                "unit": "ms",
-                "baseline": None,
-                "candidate": None,
-                "head": None,
-                "change_pct": None,
-                "threshold": None,
-                "allowed_regression_pct": allowed_regression_pct,
-                "passed": False,
-                "reason": "one or both runs collected no concurrent query sample",
-            })
-
     informational: list[dict[str, object]] = []
     for phase in CORE_PHASES:
         for resource, statistic, unit in [

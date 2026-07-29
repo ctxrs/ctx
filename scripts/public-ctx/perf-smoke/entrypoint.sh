@@ -19,11 +19,14 @@ def selected_comparison_orders(selector: str, enforce: bool) -> list[str]:
     return [normalized]
 
 
-def execution_specs_for_order(order: str) -> list[tuple[Path, str, str]]:
+def execution_specs_for_order(
+    order: str,
+    run_specs: list[tuple[Path, str, str]],
+) -> list[tuple[Path, str, str]]:
     if order == "baseline-first":
-        return list(RUN_SPECS)
+        return list(run_specs)
     if order == "candidate-first":
-        return list(reversed(RUN_SPECS))
+        return list(reversed(run_specs))
     raise HarnessError(f"unknown comparison order: {order}")
 
 
@@ -41,17 +44,18 @@ def main() -> int:
         str(binding["role"]): binding for binding in binary_hash_binding["bindings"]
     }
 
-    sessions = env_int("CTX_PERF_SMOKE_SESSIONS", 2000, 1, 10_000)
+    sessions = env_int("CTX_PERF_SMOKE_SESSIONS", 2000, 2, 10_000)
     large_session_events = env_int(
         "CTX_PERF_SMOKE_LARGE_SESSION_EVENTS", 4096, 65, 65_536
     )
     initial_repeats = env_int("CTX_PERF_SMOKE_INITIAL_REPEATS", 3, 1, 5)
     repeats = env_int("CTX_PERF_SMOKE_REPEATS", 5, 1, 10)
+    if sessions <= repeats:
+        raise HarnessError(
+            "CTX_PERF_SMOKE_SESSIONS must exceed CTX_PERF_SMOKE_REPEATS "
+            "so every delete sample retains a searchable source"
+        )
     changed_files = min(env_int("CTX_PERF_SMOKE_CHANGED_FILES", 5), sessions)
-    concurrent_queries = env_int("CTX_PERF_SMOKE_CONCURRENT_QUERIES", 5, 1, 20)
-    concurrent_interval_ms = env_int(
-        "CTX_PERF_SMOKE_CONCURRENT_QUERY_INTERVAL_MS", 10, 0, 1_000
-    )
     sampling_interval_ms = env_int("CTX_PERF_SMOKE_SAMPLING_INTERVAL_MS", 5, 1, 1_000)
     command_timeout_seconds = env_float(
         "CTX_PERF_SMOKE_COMMAND_TIMEOUT_SECONDS", 300.0, 1.0, 900.0
@@ -59,7 +63,6 @@ def main() -> int:
     total_timeout_seconds = env_float(
         "CTX_PERF_SMOKE_TOTAL_TIMEOUT_SECONDS", 1800.0, 1.0, 7_200.0
     )
-    require_concurrency = env_flag("CTX_PERF_SMOKE_REQUIRE_CONCURRENCY", True)
     allowed_regression_pct = env_float("CTX_PERF_SMOKE_REGRESSION_PCT", 10.0)
     max_peak_rss_bytes = (
         env_float("CTX_PERF_SMOKE_MAX_PEAK_RSS_MIB", 1024.0, 1.0, 1024.0)
@@ -79,6 +82,7 @@ def main() -> int:
         os.environ.get("CTX_PERF_SMOKE_WORK_DIR", HARNESS_ROOT / "target" / "ctx-perf-smoke")
     )
     work_root = prepare_work_root(work_base)
+    execution_run_specs = stage_run_specs(RUN_SPECS, work_root)
     default_artifact_dir = Path(
         os.environ.get(
             "TEST_UNDECLARED_OUTPUTS_DIR",
@@ -94,13 +98,13 @@ def main() -> int:
     thresholds = {
         "status_p95_ms": env_float("CTX_PERF_SMOKE_STATUS_P95_MS", 750.0),
         "search_p95_ms": env_float("CTX_PERF_SMOKE_SEARCH_P95_MS", 2500.0),
-        "import_noop_p95_ms": env_float("CTX_PERF_SMOKE_IMPORT_NOOP_P95_MS", 2500.0),
-        "import_changed_p95_ms": env_float("CTX_PERF_SMOKE_IMPORT_CHANGED_P95_MS", 3000.0),
-        "import_replacement_p95_ms": env_float(
-            "CTX_PERF_SMOKE_IMPORT_REPLACEMENT_P95_MS", 3500.0
+        "refresh_noop_p95_ms": env_float("CTX_PERF_SMOKE_REFRESH_NOOP_P95_MS", 2500.0),
+        "refresh_append_p95_ms": env_float("CTX_PERF_SMOKE_REFRESH_APPEND_P95_MS", 3000.0),
+        "refresh_replacement_p95_ms": env_float(
+            "CTX_PERF_SMOKE_REFRESH_REPLACEMENT_P95_MS", 3500.0
         ),
-        "concurrent_search_p95_ms": env_float(
-            "CTX_PERF_SMOKE_CONCURRENT_SEARCH_P95_MS", 2500.0
+        "refresh_delete_p95_ms": env_float(
+            "CTX_PERF_SMOKE_REFRESH_DELETE_P95_MS", 3500.0
         ),
         "show_session_p95_ms": env_float("CTX_PERF_SMOKE_SHOW_SESSION_P95_MS", 1500.0),
     }
@@ -110,7 +114,7 @@ def main() -> int:
     order_reports: list[dict[str, object]] = []
     run_index = 0
     if RUN_MODE == "single":
-        ctx_bin, label, role = RUN_SPECS[0]
+        ctx_bin, label, role = execution_run_specs[0]
         run = run_one(
             ctx_bin,
             label,
@@ -125,9 +129,6 @@ def main() -> int:
             initial_repeats,
             repeats,
             changed_files,
-            concurrent_queries,
-            concurrent_interval_ms,
-            require_concurrency,
             sampling_interval_ms,
             thresholds,
         )
@@ -144,7 +145,7 @@ def main() -> int:
     else:
         for order in comparison_orders:
             order_runs: list[dict[str, object]] = []
-            execution_specs = execution_specs_for_order(order)
+            execution_specs = execution_specs_for_order(order, execution_run_specs)
             for position, (ctx_bin, label, role) in enumerate(execution_specs):
                 run = run_one(
                     ctx_bin,
@@ -160,9 +161,6 @@ def main() -> int:
                     initial_repeats,
                     repeats,
                     changed_files,
-                    concurrent_queries,
-                    concurrent_interval_ms,
-                    require_concurrency,
                     sampling_interval_ms,
                     thresholds,
                 )
@@ -222,7 +220,7 @@ def main() -> int:
     comparison_passed = comparison is None or comparison["status"] == "passed"
     passed = run_checks_passed and comparison_passed
     artifact = {
-        "schema_version": 5,
+        "schema_version": 6,
         "profile": "ctx-cli-perf-smoke",
         "status": "passed" if passed else "failed",
         "enforced": enforce,
@@ -236,9 +234,6 @@ def main() -> int:
             "initial_repeats": initial_repeats,
             "repeats": repeats,
             "changed_files_per_sample": changed_files,
-            "concurrent_queries": concurrent_queries,
-            "concurrent_query_interval_ms": concurrent_interval_ms,
-            "require_concurrency": require_concurrency,
             "sampling_interval_ms": sampling_interval_ms,
             "command_timeout_seconds": command_timeout_seconds,
             "total_timeout_seconds": total_timeout_seconds,
@@ -256,10 +251,10 @@ def main() -> int:
             "env_overrides": [
                 "CTX_PERF_SMOKE_STATUS_P95_MS",
                 "CTX_PERF_SMOKE_SEARCH_P95_MS",
-                "CTX_PERF_SMOKE_IMPORT_NOOP_P95_MS",
-                "CTX_PERF_SMOKE_IMPORT_CHANGED_P95_MS",
-                "CTX_PERF_SMOKE_IMPORT_REPLACEMENT_P95_MS",
-                "CTX_PERF_SMOKE_CONCURRENT_SEARCH_P95_MS",
+                "CTX_PERF_SMOKE_REFRESH_NOOP_P95_MS",
+                "CTX_PERF_SMOKE_REFRESH_APPEND_P95_MS",
+                "CTX_PERF_SMOKE_REFRESH_REPLACEMENT_P95_MS",
+                "CTX_PERF_SMOKE_REFRESH_DELETE_P95_MS",
                 "CTX_PERF_SMOKE_SHOW_SESSION_P95_MS",
                 "CTX_PERF_SMOKE_REGRESSION_PCT",
                 "CTX_PERF_SMOKE_MAX_PEAK_RSS_MIB",
@@ -270,9 +265,9 @@ def main() -> int:
                 "enforced comparison binds baseline and candidate paths to explicit "
                 "expected SHA-256 values before any binary or corpus execution"
             ),
-            "append_oracles": (
-                "both binaries must report appended source events without re-importing "
-                "the existing session"
+            "source_mutation_oracles": (
+                "both binaries must publish source-backed generations whose status counts "
+                "match the current provider files after append, replacement, and deletion"
             ),
             "wall_clock": "Python time.perf_counter around one ctx process",
             "cpu_and_rss": "wait4 child rusage; Linux ru_maxrss converted from KiB to bytes",
@@ -283,8 +278,9 @@ def main() -> int:
             ),
             "block_io_fallback": "wait4 ru_inblock/ru_oublock multiplied by 512 bytes",
             "source_backed_storage_high_water": (
-                "maximum observed combined search/lexical, search/semantic, and "
-                "relational projection bytes at the configured polling interval; "
+                "maximum observed combined explicit source catalog, search/lexical, "
+                "search/semantic, and relational projection bytes at the configured "
+                "polling interval; "
                 "a shorter transient can be missed"
             ),
             "scope_limits": (
