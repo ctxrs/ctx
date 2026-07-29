@@ -53,7 +53,7 @@ pub(super) fn tool_error_result(err: Error) -> Value {
             "structuredContent": structured,
         });
     }
-    if let Some(error) = crate::dispatch::source_hydration_error_contract(&err) {
+    if let Some(error) = crate::hydration_error::source_hydration_error_contract(&err) {
         return source_hydration_tool_error(error);
     }
     if let Some(error) = err.downcast_ref::<InvalidToolRequest>() {
@@ -102,7 +102,9 @@ pub(super) fn tool_error_result(err: Error) -> Value {
     })
 }
 
-fn source_hydration_tool_error(error: crate::dispatch::SourceHydrationErrorContract) -> Value {
+fn source_hydration_tool_error(
+    error: crate::hydration_error::SourceHydrationErrorContract,
+) -> Value {
     json!({
         "isError": true,
         "content": [
@@ -212,14 +214,12 @@ mod tests {
 
     #[test]
     fn source_hydration_error_has_typed_safe_structured_content() {
-        let contract = crate::dispatch::SourceHydrationErrorContract::from_failure(
-            HydrationFailure {
-                kind: HydrationFailureKind::StaleRecordEvidence,
-                detail: "secret provider content at /private/source/path".to_owned(),
-            },
-            true,
-            None,
-        );
+        let failure = HydrationFailure {
+            kind: HydrationFailureKind::StaleRecordEvidence,
+            detail: "secret provider content at /private/source/path".to_owned(),
+        };
+        let contract =
+            crate::hydration_error::SourceHydrationErrorContract::from_failure(&failure, true);
         let result = super::source_hydration_tool_error(contract);
 
         assert_eq!(result["isError"], true);
