@@ -528,6 +528,97 @@ fn source_manifest_admission_binds_exact_counts_and_aggregate_digest() {
 }
 
 #[test]
+fn source_manifest_admission_rejects_duplicate_and_out_of_order_entries() {
+    let mut sources = vec![
+        certified_source_at(1, 4),
+        certified_source_at(2, 4),
+        certified_source_at(3, 4),
+    ];
+    sources.sort_by_key(source_identity_digest);
+    let header =
+        SourceManifestHeader::new("a".repeat(64), 1, 1, 1, 1, "b".repeat(64), &sources, &[])
+            .unwrap();
+
+    let duplicate = vec![sources[0].clone(), sources[0].clone()];
+    assert_eq!(
+        SourceManifestPage::new(&header, 0, 0, SourceManifestPageEntries::Sources(duplicate),)
+            .unwrap_err()
+            .class,
+        ErrorClass::InvalidRequest
+    );
+
+    let mut out_of_order = sources;
+    out_of_order.swap(0, 1);
+    assert_eq!(
+        SourceManifestPage::new(
+            &header,
+            0,
+            0,
+            SourceManifestPageEntries::Sources(out_of_order),
+        )
+        .unwrap_err()
+        .class,
+        ErrorClass::InvalidRequest
+    );
+}
+
+#[test]
+fn source_manifest_admission_restart_preserves_exact_cursor_and_replay_state() {
+    let mut sources = vec![
+        certified_source_at(1, 4),
+        certified_source_at(2, 4),
+        certified_source_at(3, 4),
+    ];
+    sources.sort_by_key(source_identity_digest);
+    let header =
+        SourceManifestHeader::new("a".repeat(64), 1, 1, 1, 1, "b".repeat(64), &sources, &[])
+            .unwrap();
+    let cursor = SourceManifestAdmissionCursor {
+        core_generation_id: header.core_generation_id.clone(),
+        aggregate_sha256: header.aggregate_sha256.clone(),
+        next_page_index: 2,
+        next_source_index: 2,
+        next_removal_index: 0,
+    };
+    let restarted = SourceManifestAdmissionBegan {
+        cursor: cursor.clone(),
+        replayed: true,
+    };
+    restarted.validate_for(&header).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<SourceManifestAdmissionBegan>(
+            &serde_json::to_vec(&restarted).unwrap()
+        )
+        .unwrap(),
+        restarted
+    );
+
+    let replayed_page = SourceManifestPageAdmitted {
+        cursor: cursor.clone(),
+        replayed: true,
+    };
+    replayed_page.validate_for(&header).unwrap();
+    assert_eq!(replayed_page.cursor, cursor);
+
+    let complete = SourceManifestAdmissionCursor {
+        next_page_index: 3,
+        next_source_index: header.source_count,
+        ..cursor
+    };
+    assert!(complete.is_complete_for(&header));
+
+    let mut restarted_for_another_manifest = restarted;
+    restarted_for_another_manifest.cursor.aggregate_sha256 = "f".repeat(64);
+    assert_eq!(
+        restarted_for_another_manifest
+            .validate_for(&header)
+            .unwrap_err()
+            .class,
+        ErrorClass::Sequence
+    );
+}
+
+#[test]
 fn source_backed_pro_unknown_capability_fails_closed_before_negotiation() {
     let hello = json!({
         "protocol_version": crate::PROTOCOL_VERSION,
