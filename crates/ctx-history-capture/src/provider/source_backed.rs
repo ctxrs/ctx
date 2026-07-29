@@ -21,7 +21,8 @@ use ctx_history_core::{
     SourceAnchor, SourceFrontier, SourceKey, TypedKey,
 };
 use ctx_history_index::{
-    CommitReceipt, GenerationWriter, IndexError, LexicalDocument, RevalidationTarget, WriterOptions,
+    CommitReceipt, GenerationWriter, IndexError, LexicalDocument, RevalidationTarget,
+    VerifiedIndex, WriterOptions,
 };
 use thiserror::Error;
 
@@ -755,6 +756,8 @@ pub enum SourceBackedCoordinatorError {
     DuplicateSourceOwner { source_id: String },
     #[error("no executable source-backed routes were registered")]
     NoExecutableRoutes,
+    #[error("source deletion was not certified by its supplied authoritative inventory")]
+    InvalidDeletionWitness,
     #[error("source-backed refresh progress callback failed: {0}")]
     Progress(SourceBackedRouteError),
 }
@@ -764,6 +767,7 @@ pub enum SourceBackedCoordinatorError {
 pub struct SourceBackedGenerationSink<'writer> {
     writer: &'writer mut GenerationWriter,
     owners: &'writer mut HashMap<[u8; 32], SourceOwner>,
+    removals: &'writer mut Vec<SourceBackedCertifiedRemoval>,
     route_index: usize,
 }
 
@@ -821,9 +825,17 @@ impl SourceBackedGenerationSink<'_> {
     pub fn delete_source(
         &mut self,
         deletion: CertifiedSourceDeletion,
+        inventory: CertifiedSourceInventory,
     ) -> SourceBackedCoordinatorResult<()> {
+        if !deletion.verifies(&inventory) {
+            return Err(SourceBackedCoordinatorError::InvalidDeletionWitness);
+        }
         self.claim(deletion.source())?;
-        self.writer.delete_source(deletion)?;
+        self.writer.delete_source(deletion.clone())?;
+        self.removals.push(SourceBackedCertifiedRemoval {
+            deletion,
+            inventory,
+        });
         Ok(())
     }
 
@@ -1688,6 +1700,11 @@ impl SourceBackedRefreshExecutor {
 #[derive(Debug)]
 pub struct SourceBackedRefreshReceipt {
     pub commit: CommitReceipt,
+    /// The exact retained source set committed by `commit`.
+    pub sources: Vec<CertifiedSource>,
+    /// Certified removals applied by this commit. These are projection
+    /// handoff evidence, not provider content.
+    pub removals: Vec<SourceBackedCertifiedRemoval>,
     pub scanned_routes: usize,
     pub unsupported_routes: Vec<SourceBackedRouteMetadata>,
     pub discovery_duration: Duration,
@@ -1695,6 +1712,12 @@ pub struct SourceBackedRefreshReceipt {
     pub commit_duration: Duration,
     pub certified_source_count: usize,
     pub certified_source_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceBackedCertifiedRemoval {
+    pub deletion: CertifiedSourceDeletion,
+    pub inventory: CertifiedSourceInventory,
 }
 
 /// Runs every executable route against one writer and publishes one atomic
@@ -1757,8 +1780,9 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
         .collect();
 
     let scan_started = Instant::now();
-    let mut writer = GenerationWriter::open(index_root, writer_options)?;
+    let mut writer = GenerationWriter::open(index_root.as_ref(), writer_options)?;
     let mut owners = HashMap::new();
+    let mut removals = Vec::new();
     let mut completed_routes = 0;
     for (route_index, route) in registry.routes.iter().enumerate() {
         let Some(driver) = &route.driver else {
@@ -1778,6 +1802,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
         let mut sink = SourceBackedGenerationSink {
             writer: &mut writer,
             owners: &mut owners,
+            removals: &mut removals,
             route_index,
         };
         (driver.scan)(&mut sink).map_err(|source| SourceBackedCoordinatorError::RouteScan {
@@ -1837,8 +1862,15 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
     .map_err(SourceBackedCoordinatorError::Progress)?;
     let certified_source_count = commit.certified_sources;
     let certified_source_bytes = commit.certified_source_bytes;
+    let sources = VerifiedIndex::open(index_root.as_ref())?
+        .manifest()
+        .sources
+        .clone();
+    removals.sort_by_key(|removal| removal.deletion.source().identity().digest());
     Ok(SourceBackedRefreshReceipt {
         commit,
+        sources,
+        removals,
         scanned_routes,
         unsupported_routes,
         discovery_duration,
@@ -2010,6 +2042,7 @@ fn register_codex_route(
                             &opening.certificate,
                         )
                         .map_err(route_error)?,
+                        opening.certificate.clone(),
                     )
                     .map_err(route_coordinator_error)?;
                 }
@@ -2506,14 +2539,18 @@ pub fn register_custom_history_source_backed_route(
                         Ok(())
                     })
                     .map_err(route_error)?;
-                let CustomHistorySourceBackedOutcome::Missing { deletion, .. } = outcome else {
+                let CustomHistorySourceBackedOutcome::Missing {
+                    inventory,
+                    deletion,
+                } = outcome
+                else {
                     return Err(SourceBackedRouteError::new(
                         SourceBackedRouteErrorKind::SourceChanged,
                         "Custom History source appeared after its opening observation",
                     ));
                 };
                 if let Some(deletion) = deletion {
-                    sink.delete_source(deletion)
+                    sink.delete_source(deletion, inventory)
                         .map_err(route_coordinator_error)?;
                 }
                 return Ok(());
@@ -3059,6 +3096,7 @@ where
                             &certified_inventory,
                         )
                         .map_err(route_error)?,
+                        certified_inventory.clone(),
                     )
                     .map_err(route_coordinator_error)?;
                 }
@@ -4771,6 +4809,8 @@ mod tests {
         assert_eq!(receipt.commit.certified_sources, 2);
         assert_eq!(receipt.certified_source_count, 2);
         assert_eq!(receipt.certified_source_bytes, 2);
+        assert_eq!(receipt.sources.len(), 2);
+        assert!(receipt.removals.is_empty());
         assert!(receipt.scan_stage_duration > Duration::ZERO);
         assert!(receipt.commit_duration > Duration::ZERO);
         assert!(progress
