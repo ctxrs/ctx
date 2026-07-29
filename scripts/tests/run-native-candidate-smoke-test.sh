@@ -18,6 +18,12 @@ test -n "${HOME:-}"
 test -n "${XDG_CONFIG_HOME:-}"
 test -n "${XDG_CACHE_HOME:-}"
 test "${HOME}" != "${ORIGINAL_HOME:-not-in-clean-env}"
+if data_root_mode="$(stat -c '%a' "${CTX_DATA_ROOT}" 2>/dev/null)"; then
+  :
+else
+  data_root_mode="$(stat -f '%Lp' "${CTX_DATA_ROOT}")"
+fi
+test "${data_root_mode}" = 700
 
 case " $* " in
   *" --backend semantic "*)

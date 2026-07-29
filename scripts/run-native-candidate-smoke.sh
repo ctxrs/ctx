@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+umask 077
 
 usage() {
   cat >&2 <<'USAGE'
