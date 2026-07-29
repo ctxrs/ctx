@@ -113,10 +113,16 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_store() {
         0.35
     );
     let status = &responses[2]["result"]["structuredContent"];
-    assert_eq!(status["schema_version"], 1);
+    assert_eq!(status["schema_version"], 2);
     assert_eq!(status["initialized"], false);
-    assert_eq!(status["indexed_sessions"], 0);
-    assert_eq!(status["indexed_events"], 0);
+    assert!(status["indexed_sessions"].is_null());
+    assert!(status["indexed_events"].is_null());
+    assert_eq!(status["history_epoch"]["status"], "unavailable");
+    assert_eq!(status["lexical"]["status"], "unavailable");
+    assert_eq!(status["refresh"]["status"], "unavailable");
+    assert_eq!(status["relational"]["status"], "unavailable");
+    assert_eq!(status["legacy_history"]["status"], "absent");
+    assert_eq!(status["legacy_history"]["opened"], false);
     assert_eq!(status["read_only"], true);
     assert_eq!(status["semantic"]["status"], "disabled");
     assert_eq!(status["daemon"]["enabled"], true);
@@ -125,16 +131,17 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_store() {
         &[
             "ctx status",
             "initialized: false",
-            "database_path:",
-            "indexed_items: 0",
-            "indexed_sessions: 0",
-            "indexed_events: 0",
+            "history_epoch: status=unavailable reason=epoch_not_initialized",
+            "lexical: status=unavailable reason=epoch_not_initialized",
+            "source_refresh: status=unavailable reason=daemon_unavailable",
+            "relational: status=unavailable reason=lexical_generation_unavailable",
+            "legacy_history: status=absent",
             "read_only: true",
             "local_only: true",
             "semantic: status=disabled",
-            "semantic_coverage: searchable_items=0",
+            "flat_f32: status=unavailable reason=lexical_generation_unavailable",
             "daemon: enabled=true",
-            "daemon_jobs:",
+            "daemon_jobs: source_backed_refresh=",
         ],
     );
     assert!(

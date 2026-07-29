@@ -48,21 +48,17 @@ use telemetry::{McpHandled, McpTelemetry, RequestDescriptor};
 use text::render_tool_text;
 
 use super::{
-    compact_json, config, config::CONFIG_FILE, discovered_plugin_sources_json, raw_sql_result_json,
-    search_filters, search_has_intent, sources_json, ProviderArg, RefreshArg, SearchDto,
-    SearchFilterInput, SearchIntentInput, SearchRefreshReport, SourceIdentityFilterArgs,
-    TranscriptMode, MAX_EVENT_WINDOW, MAX_SEARCH_LIMIT,
+    compact_json, config, discovered_plugin_sources_json, raw_sql_result_json, search_filters,
+    search_has_intent, sources_json, ProviderArg, RefreshArg, SearchDto, SearchFilterInput,
+    SearchIntentInput, SearchRefreshReport, SourceIdentityFilterArgs, TranscriptMode,
+    MAX_EVENT_WINDOW, MAX_SEARCH_LIMIT,
 };
 use crate::analytics::{McpErrorClassV1, McpStopReasonV1, Outcome};
 use crate::commands::search::resolve_search_backend;
 use crate::complete_content::MCP_COMPLETE_CONTENT_MAX_OUTPUT_BYTES;
 use crate::local_usage::{McpInvocation, McpUsageRecorder};
 use crate::provider_sources::{discovered_sources_report, discovery_report_issues_json};
-use crate::semantic::{
-    daemon_report, search_packet_with_backend, semantic_worker_report_cached,
-    semantic_worker_report_configured_json,
-};
-use crate::store_util::open_existing_store_read_only;
+use crate::semantic::{search_packet_with_backend, source_epoch_status_report};
 
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const MCP_SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &[MCP_PROTOCOL_VERSION, "2025-06-18"];
@@ -481,109 +477,8 @@ fn handle_tools_call(
 }
 
 fn tool_status(data_root: &Path) -> Result<Value> {
-    let db_path = database_path(data_root.to_path_buf());
-    let initialized = db_path.exists();
     let config = config::AppConfig::load(data_root)?;
-    let (
-        indexed_items,
-        indexed_sessions,
-        indexed_events,
-        indexed_sources,
-        cataloged_sessions,
-        indexed_catalog_sessions,
-        pending_catalog_sessions,
-        failed_catalog_sessions,
-        stale_catalog_sessions,
-        source_import_files,
-        indexed_source_import_files,
-        pending_source_import_files,
-        failed_source_import_files,
-        stale_source_import_files,
-        semantic,
-        daemon,
-    ) = if initialized {
-        let store = open_existing_store_read_only(&db_path, "ctx mcp status")?;
-        let catalog_counts = store.catalog_session_counts()?;
-        let source_import_file_counts = store.source_import_file_counts()?;
-        let indexed_counts = store.indexed_history_counts()?;
-        let semantic_report = semantic_worker_report_cached(data_root, Some(&store))?;
-        let daemon = daemon_report(data_root, &semantic_report);
-        let semantic = semantic_worker_report_configured_json(&config, &semantic_report);
-        (
-            indexed_counts.items(),
-            indexed_counts.sessions,
-            indexed_counts.events,
-            store.capture_source_count()?,
-            catalog_counts.total,
-            catalog_counts.indexed,
-            catalog_counts.pending,
-            catalog_counts.failed,
-            catalog_counts.stale,
-            source_import_file_counts.total,
-            source_import_file_counts.indexed,
-            source_import_file_counts.pending,
-            source_import_file_counts.failed,
-            source_import_file_counts.stale,
-            semantic,
-            daemon,
-        )
-    } else {
-        let semantic_report = semantic_worker_report_cached(data_root, None)?;
-        let daemon = daemon_report(data_root, &semantic_report);
-        (
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            semantic_worker_report_configured_json(&config, &semantic_report),
-            daemon,
-        )
-    };
-    let inventory_units = cataloged_sessions.saturating_add(source_import_files);
-    let pending_inventory_units =
-        pending_catalog_sessions.saturating_add(pending_source_import_files);
-    let failed_inventory_units = failed_catalog_sessions.saturating_add(failed_source_import_files);
-    let stale_inventory_units = stale_catalog_sessions.saturating_add(stale_source_import_files);
-
-    Ok(json!({
-        "schema_version": 1,
-        "initialized": initialized,
-        "data_root": data_root,
-        "database_path": db_path,
-        "config_path": data_root.join(CONFIG_FILE),
-        "indexed_items": indexed_items,
-        "indexed_sessions": indexed_sessions,
-        "indexed_events": indexed_events,
-        "indexed_sources": indexed_sources,
-        "inventory_units": inventory_units,
-        "pending_inventory_units": pending_inventory_units,
-        "failed_inventory_units": failed_inventory_units,
-        "stale_inventory_units": stale_inventory_units,
-        "cataloged_sessions": cataloged_sessions,
-        "indexed_catalog_sessions": indexed_catalog_sessions,
-        "pending_catalog_sessions": pending_catalog_sessions,
-        "failed_catalog_sessions": failed_catalog_sessions,
-        "stale_catalog_sessions": stale_catalog_sessions,
-        "source_import_files": source_import_files,
-        "indexed_source_import_files": indexed_source_import_files,
-        "pending_source_import_files": pending_source_import_files,
-        "failed_source_import_files": failed_source_import_files,
-        "stale_source_import_files": stale_source_import_files,
-        "semantic": semantic,
-        "daemon": daemon,
-        "local_only": true,
-        "read_only": true,
-    }))
+    Ok(source_epoch_status_report(data_root, &config)?.report)
 }
 
 fn tool_sources(data_root: &Path) -> Result<Value> {

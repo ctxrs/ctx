@@ -111,6 +111,8 @@ mod daemon_retry;
 mod daemon_status;
 #[cfg(test)]
 use daemon_retry::*;
+mod source_status;
+pub(crate) use source_status::{source_epoch_status_report, SourceEpochStatus};
 mod source_backed_pro_catch_up;
 mod source_backed_refresh_coordinator;
 mod source_backed_relational_catch_up;
