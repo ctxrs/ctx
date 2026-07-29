@@ -137,6 +137,16 @@ mkdir -p "${output_dir}"
 [[ -d "${output_dir}" && -w "${output_dir}" ]] \
   || die "release output directory is not writable"
 
+release_work_root="${CTX_LINUX_RELEASE_WORK_ROOT:-/tmp}"
+[[ "${release_work_root}" == /* ]] \
+  || die "CTX_LINUX_RELEASE_WORK_ROOT must be an absolute path"
+[[ -d "${release_work_root}" && ! -L "${release_work_root}" \
+  && -w "${release_work_root}" ]] \
+  || die "Linux release work root must be a writable non-symlink directory"
+release_work_root="$(cd "${release_work_root}" && pwd -P)"
+[[ "${release_work_root}" != / ]] \
+  || die "Linux release work root must not be the filesystem root"
+
 bazel_version="$(tr -d '[:space:]' <.bazelversion)"
 base_image="${CTX_PUBLIC_TARGET_LINUX_BUILDER_IMAGE}"
 ubuntu_snapshot="${CTX_PUBLIC_TARGET_LINUX_UBUNTU_SNAPSHOT}"
@@ -232,9 +242,10 @@ done
 lock_file="/tmp/ctx-public-${platform}-bazel-release.lock"
 exec 9>"${lock_file}"
 flock -x 9
-task_root="$(mktemp -d "/tmp/ctx-public-${platform}-bazel-release.XXXXXX")"
+task_prefix="${release_work_root}/ctx-public-${platform}-bazel-release."
+task_root="$(mktemp -d "${task_prefix}XXXXXX")"
 cleanup() {
-  if [[ "${task_root:-}" == "/tmp/ctx-public-${platform}-bazel-release."* \
+  if [[ "${task_root:-}" == "${task_prefix}"* \
     && -d "${task_root}" && ! -L "${task_root}" ]]; then
     chmod -R u+w -- "${task_root}" 2>/dev/null || true
     rm -rf -- "${task_root}"

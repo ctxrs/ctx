@@ -285,6 +285,18 @@ esac
             "e389c5f2b1c2ac2c55406f7c661d8b88",
             builder,
         )
+        self.assertIn(
+            'release_work_root="${CTX_LINUX_RELEASE_WORK_ROOT:-/tmp}"',
+            builder,
+        )
+        self.assertIn(
+            'task_root="$(mktemp -d "${task_prefix}XXXXXX")"',
+            builder,
+        )
+        self.assertNotIn(
+            'mktemp -d "/tmp/ctx-public-${platform}-bazel-release.',
+            builder,
+        )
         self.assertIn('BUILD_WORKSPACE_DIRECTORY="$PWD"', builder)
         self.assertIn('RUNFILES_DIR="$route.runfiles"', builder)
         self.assertIn("--network none", builder)
