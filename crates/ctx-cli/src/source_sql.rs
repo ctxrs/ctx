@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 
 use ctx_history_index::VerifiedIndex;
-use ctx_history_store::{
+use ctx_history_relational::{
     RawSqlOptions, RawSqlResult, RelationalProjectionError, RelationalProjectionMetadata,
     RelationalProjectionStatus, SourceBackedRelationalProjection,
 };

@@ -1,5 +1,5 @@
 [package]
-name = "ctx-history-store"
+name = "ctx-history-relational"
 version = "0.26.0"
 description = "Disposable relational projection for source-backed ctx history"
 edition.workspace = true

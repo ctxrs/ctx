@@ -9,7 +9,7 @@ use ctx_history_core::{
     AgentType, Confidence, EventRole, EventType, Fidelity, SessionStatus, StableEntityId,
 };
 use ctx_history_index::{EventRecord, VerifiedIndex, MAX_SOURCE_EVENT_PAGE_ITEMS};
-use ctx_history_store::{
+use ctx_history_relational::{
     CommittedCoreGeneration, RawSqlOptions, RawSqlValue, RelationalEventMetadata,
     RelationalFileTouchMetadata, RelationalProjectionError, RelationalProjectionMetadata,
     RelationalProjectionReceipt, RelationalProjectionRecord, RelationalProjectionStatus,
@@ -756,7 +756,7 @@ mod tests {
         SourceInventoryObservation, SourceObservation, SourceRecordLocator, TypedKey,
     };
     use ctx_history_index::{GenerationWriter, LexicalDocument, WriterOptions};
-    use ctx_history_store::{RawSqlValue, RelationalProjectionStatus};
+    use ctx_history_relational::{RawSqlValue, RelationalProjectionStatus};
 
     use super::*;
     use crate::source_sql::SqlCompatibility;

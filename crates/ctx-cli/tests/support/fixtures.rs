@@ -1,5 +1,5 @@
 use ctx_history_index::{GenerationWriter, VerifiedIndex, WriterOptions};
-use ctx_history_store::{CommittedCoreGeneration, SourceBackedRelationalProjection};
+use ctx_history_relational::{CommittedCoreGeneration, SourceBackedRelationalProjection};
 use rusqlite::Connection;
 use std::{
     fs,

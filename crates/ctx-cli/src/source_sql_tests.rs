@@ -1,5 +1,5 @@
 use ctx_history_core::database_path;
-use ctx_history_store::{
+use ctx_history_relational::{
     RawSqlOptions, RawSqlValue, RelationalProjectionStatus, SourceBackedRelationalProjection,
 };
 

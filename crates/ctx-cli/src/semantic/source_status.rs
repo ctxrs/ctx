@@ -5,7 +5,7 @@ use ctx_history_core::database_path;
 use ctx_history_index::{
     current_source_generation_policy, current_source_generation_policy_hash, VerifiedIndex,
 };
-use ctx_history_store::RelationalProjectionStatus;
+use ctx_history_relational::RelationalProjectionStatus;
 use serde_json::{json, Value};
 
 use crate::{

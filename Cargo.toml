@@ -4,7 +4,7 @@ members = [
     "crates/ctx-history-capture",
     "crates/ctx-history-core",
     "crates/ctx-history-index",
-    "crates/ctx-history-store",
+    "crates/ctx-history-relational",
     "crates/ctx-pro-host-protocol",
     "crates/ctx-protocol",
     "crates/ctx-sdk",

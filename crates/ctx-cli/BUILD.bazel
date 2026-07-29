@@ -73,7 +73,7 @@ CTX_CLI_DEPS = [
     "//crates/ctx-history-capture:lib",
     "//crates/ctx-history-core:lib",
     "//crates/ctx-history-index:lib",
-    "//crates/ctx-history-store:lib",
+    "//crates/ctx-history-relational:lib",
     "//crates/ctx-pro-host-protocol:lib",
 ]
 
@@ -403,6 +403,11 @@ ctx_cli_integration_test(
 ctx_cli_integration_test(
     name = "source_backed_content_tests",
     src = "tests/source_backed_content.rs",
+)
+
+ctx_cli_integration_test(
+    name = "status_store_cutover_tests",
+    src = "tests/status_store_cutover.rs",
 )
 
 ctx_cli_integration_test(

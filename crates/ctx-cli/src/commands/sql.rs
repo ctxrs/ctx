@@ -3,7 +3,7 @@ use std::{fs, io::Read, path::PathBuf, time::Duration as StdDuration};
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Number, Value};
 
-use ctx_history_store::{
+use ctx_history_relational::{
     RawSqlOptions, RawSqlResult, RawSqlValue, RAW_SQL_MAX_SQL_BYTES_CAP, RAW_SQL_MAX_TIMEOUT,
 };
 

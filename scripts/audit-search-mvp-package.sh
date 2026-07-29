@@ -102,7 +102,7 @@ if grep_files 'work-[r]ecord-(publish|report|vcs)[[:space:]]*=' \
   crates/ctx-history-core/Cargo.toml \
   crates/ctx-history-index/Cargo.toml \
   crates/ctx-history-search/Cargo.toml \
-  crates/ctx-history-store/Cargo.toml >/dev/null 2>&1; then
+  crates/ctx-history-relational/Cargo.toml >/dev/null 2>&1; then
   fail 'default crate manifests depend on publish/report/vcs crates'
 fi
 
