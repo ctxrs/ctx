@@ -1,34 +1,24 @@
 use std::mem::size_of;
 
 use chrono::{DateTime, Utc};
-use ctx_history_core::{
-    compute_payload_hash, CaptureProvider, Confidence, ContentRef, EventRole, EventType,
-    FileChangeKind,
-};
-use serde::{ser::SerializeStruct, Deserialize, Serialize, Serializer};
+use ctx_history_core::{EventRole, EventType};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::record::{
     CodexDecodedRecord, CodexRecordClass, CodexRecordProbe, CodexResultKind, CodexRetainedKind,
     CodexStructuralOutput,
 };
-use crate::complete_content::{
-    attach_verified_content_locator, jsonl::JSONL_COMPLETE_CONTENT_LOCATOR_KIND,
-    verified_content_profile, CompleteContentBodyDigest, CompleteContentSourceFamily,
-    VerifiedContentLocatorV1, VerifiedContentRole, COMPLETE_CONTENT_MAX_BODY_BYTES,
-};
 use crate::provider::codex::events::{
     codex_command_preview, codex_content_text, codex_local_preview, codex_message_body,
-    codex_provider_event, codex_result_content, codex_sparse_tool_output_event,
-    codex_tool_arguments_preview, codex_tool_name, CodexNativeEvent, CodexToolCallContext,
+    codex_provider_event, codex_result_content, codex_tool_arguments_preview, codex_tool_name,
+    CodexNativeEvent, CodexToolCallContext,
 };
 use crate::{
     CaptureError, OutputOutcome, OutputOutcomeMetadata, Result as CaptureResult,
     CODEX_SESSION_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS, PROVIDER_MAX_TEXT_CHARS,
 };
 
-#[cfg(test)]
-pub(super) const CODEX_LEXICAL_PREVIEW_CHARS: usize = 2_048;
 const OWNED_ALLOCATION_OVERHEAD_BYTES: usize = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,11 +39,7 @@ pub(crate) struct CodexSessionRow {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CodexEventRow {
-    pub(crate) raw_ordinal: u64,
-    pub(crate) normalized_body_hash: String,
     pub(crate) provider_event: CodexNativeEvent,
-    pub(crate) file_touches: Vec<CodexFileTouch>,
-    source_record: Option<CodexRecordEvidence>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,143 +84,9 @@ pub(super) struct CodexSourceBackedBuiltRowV0 {
     pub(super) tool_context: Option<(String, CodexToolCallContext)>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) struct CodexFileTouch {
-    pub(crate) provider: CaptureProvider,
-    pub(crate) provider_session_id: String,
-    pub(crate) provider_touch_index: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) provider_event_index: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) raw_source_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) source_root: Option<String>,
-    pub(crate) path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) change_kind: Option<FileChangeKind>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) old_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) line_count_delta: Option<i64>,
-    #[serde(default)]
-    pub(crate) confidence: Confidence,
-    pub(crate) occurred_at: DateTime<Utc>,
-    pub(crate) source_format: String,
-    #[serde(default = "crate::common::json::default_metadata")]
-    pub(crate) metadata: Value,
-}
-
-impl Serialize for CodexEventRow {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let item_type = self
-            .provider_event
-            .metadata
-            .get("item_type")
-            .or_else(|| self.provider_event.payload.get("item_type"))
-            .and_then(Value::as_str)
-            .ok_or_else(|| serde::ser::Error::custom("Codex event row has no item type"))?;
-        let mut row = serializer.serialize_struct("CodexEventRow", 9)?;
-        row.serialize_field("raw_ordinal", &self.raw_ordinal)?;
-        row.serialize_field("occurred_at", &self.provider_event.occurred_at)?;
-        row.serialize_field("event_type", &self.provider_event.event_type)?;
-        row.serialize_field("role", &self.provider_event.role)?;
-        row.serialize_field("normalized_body", &self.provider_event.payload)?;
-        row.serialize_field("normalized_body_hash", &self.normalized_body_hash)?;
-        row.serialize_field("item_type", item_type)?;
-        row.serialize_field("provider_event", &self.provider_event)?;
-        row.serialize_field("file_touches", &self.file_touches)?;
-        row.end()
-    }
-}
-
-impl CodexEventRow {
-    pub(crate) fn mutation_units(&self) -> usize {
-        1_usize
-            .saturating_add(usize::from(
-                self.provider_event.event_type == EventType::CommandOutput,
-            ))
-            .saturating_add(self.file_touches.len())
-    }
-
-    pub(crate) fn bind_source_record(
-        &mut self,
-        byte_offset: u64,
-        byte_end_exclusive: u64,
-        record_digest: [u8; 32],
-    ) -> CaptureResult<()> {
-        let byte_length =
-            byte_end_exclusive
-                .checked_sub(byte_offset)
-                .ok_or(CaptureError::SystemInvariant(
-                    "Codex source record range is reversed",
-                ))?;
-        if byte_length == 0 {
-            return Err(CaptureError::SystemInvariant(
-                "Codex source record range is empty",
-            ));
-        }
-        self.source_record = Some(CodexRecordEvidence {
-            byte_offset,
-            byte_length,
-            record_digest,
-        });
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn lexical_preview(&self) -> Option<String> {
-        let direct = ["text", "preview", "summary", "command", "message"]
-            .into_iter()
-            .find_map(|field| {
-                self.provider_event
-                    .payload
-                    .get(field)
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|text| !text.is_empty())
-            });
-        if let Some(direct) = direct {
-            return Some(codex_local_preview(direct, CODEX_LEXICAL_PREVIEW_CHARS).0);
-        }
-
-        let structured = ["tool", "name", "arguments_preview", "status"]
-            .into_iter()
-            .filter_map(|field| {
-                self.provider_event
-                    .payload
-                    .get(field)
-                    .and_then(|value| match value {
-                        Value::String(value) if !value.trim().is_empty() => {
-                            Some(format!("{field}: {}", value.trim()))
-                        }
-                        Value::Number(_) | Value::Bool(_) => Some(format!("{field}: {value}")),
-                        _ => None,
-                    })
-            })
-            .collect::<Vec<_>>()
-            .join(" | ");
-        if !structured.is_empty() {
-            return Some(codex_local_preview(&structured, CODEX_LEXICAL_PREVIEW_CHARS).0);
-        }
-
-        let role = self
-            .provider_event
-            .role
-            .map(|role| role.as_str())
-            .unwrap_or("event");
-        Some(format!(
-            "{} {role}",
-            self.provider_event.event_type.as_str()
-        ))
-    }
-}
-
 pub(super) enum CodexRetainedNonMaterialized {
     ValidUnmaterializable,
-    Malformed(&'static str),
+    Malformed,
 }
 
 pub(super) type CodexRetainedProjection =
@@ -256,8 +108,8 @@ pub(super) fn build_event_row(
         BuiltBodyProjection::ValidUnmaterializable => {
             return Ok(Err(CodexRetainedNonMaterialized::ValidUnmaterializable));
         }
-        BuiltBodyProjection::Malformed(reason) => {
-            return Ok(Err(CodexRetainedNonMaterialized::Malformed(reason)));
+        BuiltBodyProjection::Malformed => {
+            return Ok(Err(CodexRetainedNonMaterialized::Malformed));
         }
     };
     let line_number = raw_ordinal
@@ -282,91 +134,7 @@ pub(super) fn build_event_row(
             "source_record_subrecord_index": 0,
         }),
     );
-    let normalized_body_hash = compute_payload_hash(&provider_event.payload)?;
-    Ok(Ok(CodexEventRow {
-        raw_ordinal,
-        normalized_body_hash,
-        provider_event,
-        file_touches: Vec::new(),
-        source_record: None,
-    }))
-}
-
-pub(super) fn attach_complete_message_locator(
-    row: &mut CodexEventRow,
-    retained: &CodexDecodedRecord,
-    record_bytes: &[u8],
-    byte_start: u64,
-    byte_end_exclusive: u64,
-) -> CaptureResult<bool> {
-    if row.provider_event.event_type != EventType::Message
-        || row
-            .provider_event
-            .payload
-            .get("truncated")
-            .and_then(Value::as_bool)
-            != Some(true)
-    {
-        return Ok(false);
-    }
-    let text = retained
-        .payload
-        .get("content")
-        .and_then(codex_content_text)
-        .ok_or(CaptureError::SystemInvariant(
-            "truncated Codex message has no complete provider body",
-        ))?;
-    if text.chars().count() <= PROVIDER_MAX_TEXT_CHARS {
-        return Err(CaptureError::SystemInvariant(
-            "truncated Codex message does not exceed the indexed body limit",
-        ));
-    }
-    if text.len() > COMPLETE_CONTENT_MAX_BODY_BYTES {
-        return Ok(false);
-    }
-    if byte_start >= byte_end_exclusive {
-        return Err(CaptureError::SystemInvariant(
-            "Codex verified-content locator range is empty",
-        ));
-    }
-    let profile = verified_content_profile(
-        CaptureProvider::Codex,
-        CODEX_SESSION_SOURCE_FORMAT,
-        CompleteContentSourceFamily::Jsonl,
-        VerifiedContentRole::MessageBody,
-    )
-    .ok_or(CaptureError::SystemInvariant(
-        "Codex JSONL complete-content route has no verified profile",
-    ))?;
-    let content_ref = ContentRef::from_bytes(text.as_bytes()).ok_or(
-        CaptureError::SystemInvariant("Codex complete-content body length exceeds u64"),
-    )?;
-    let mut range = [0_u8; 16];
-    range[..8].copy_from_slice(&byte_start.to_be_bytes());
-    range[8..].copy_from_slice(&byte_end_exclusive.to_be_bytes());
-    let line_number = row
-        .raw_ordinal
-        .checked_add(1)
-        .ok_or(CaptureError::SystemInvariant(
-            "Codex verified-content line number exceeds u64",
-        ))?;
-    let locator = VerifiedContentLocatorV1::new(
-        VerifiedContentRole::MessageBody,
-        profile,
-        content_ref,
-        CompleteContentSourceFamily::Jsonl,
-        JSONL_COMPLETE_CONTENT_LOCATOR_KIND,
-        &range,
-        format!("line-{line_number}"),
-        CompleteContentBodyDigest::from_bytes(record_bytes),
-    )
-    .ok_or(CaptureError::SystemInvariant(
-        "Codex verified-content locator exceeds its bounded schema",
-    ))?;
-    attach_verified_content_locator(&mut row.provider_event.metadata, locator).ok_or(
-        CaptureError::SystemInvariant("Codex verified-content locator collection is malformed"),
-    )?;
-    Ok(true)
+    Ok(Ok(CodexEventRow { provider_event }))
 }
 
 pub(super) fn build_source_backed_event_row(
@@ -382,8 +150,8 @@ pub(super) fn build_source_backed_event_row(
         SourceBackedSemanticProjection::ValidUnmaterializable => {
             return Ok(Err(CodexRetainedNonMaterialized::ValidUnmaterializable));
         }
-        SourceBackedSemanticProjection::Malformed(reason) => {
-            return Ok(Err(CodexRetainedNonMaterialized::Malformed(reason)));
+        SourceBackedSemanticProjection::Malformed => {
+            return Ok(Err(CodexRetainedNonMaterialized::Malformed));
         }
     };
     let source_record = source_record_evidence(byte_offset, byte_end_exclusive, record_digest)?;
@@ -493,7 +261,7 @@ struct SourceBackedSemantic {
 enum SourceBackedSemanticProjection {
     Materialized(SourceBackedSemantic),
     ValidUnmaterializable,
-    Malformed(&'static str),
+    Malformed,
 }
 
 /// The shared admission rule for Codex documents whose exact display text
@@ -554,7 +322,7 @@ pub(super) fn source_backed_display_text(
                 SourceBackedSemanticProjection::ValidUnmaterializable => {
                     CodexSourceBackedDocumentEligibility::IntentionallyNonDisplay
                 }
-                SourceBackedSemanticProjection::Malformed(_) => {
+                SourceBackedSemanticProjection::Malformed => {
                     CodexSourceBackedDocumentEligibility::ParserRevisionGap
                 }
             }
@@ -600,11 +368,11 @@ fn source_backed_message(payload: &Value) -> SourceBackedSemanticProjection {
         "assistant" => EventRole::Assistant,
         "developer" | "system" => EventRole::System,
         _ => {
-            return SourceBackedSemanticProjection::Malformed("malformed retained Codex message");
+            return SourceBackedSemanticProjection::Malformed;
         }
     };
     let Some(text) = payload.get("content").and_then(codex_content_text) else {
-        return SourceBackedSemanticProjection::Malformed("malformed retained Codex message");
+        return SourceBackedSemanticProjection::Malformed;
     };
     SourceBackedSemanticProjection::Materialized(SourceBackedSemantic {
         event_type: EventType::Message,
@@ -628,7 +396,7 @@ fn source_backed_reasoning(payload: &Value) -> SourceBackedSemanticProjection {
         return if is_encrypted_reasoning_without_plaintext(payload) {
             SourceBackedSemanticProjection::ValidUnmaterializable
         } else {
-            SourceBackedSemanticProjection::Malformed("malformed retained Codex reasoning")
+            SourceBackedSemanticProjection::Malformed
         };
     };
     SourceBackedSemanticProjection::Materialized(SourceBackedSemantic {
@@ -648,7 +416,7 @@ fn source_backed_compacted(payload: &Value) -> SourceBackedSemanticProjection {
         return if is_source_only_compacted(payload) {
             SourceBackedSemanticProjection::ValidUnmaterializable
         } else {
-            SourceBackedSemanticProjection::Malformed("malformed retained Codex compacted record")
+            SourceBackedSemanticProjection::Malformed
         };
     };
     SourceBackedSemanticProjection::Materialized(SourceBackedSemantic {
@@ -665,7 +433,7 @@ fn source_backed_compacted(payload: &Value) -> SourceBackedSemanticProjection {
 
 fn source_backed_tool_call(payload: &Value) -> SourceBackedSemanticProjection {
     let Some((text, tool_context)) = source_backed_tool_call_text(payload) else {
-        return SourceBackedSemanticProjection::Malformed("malformed retained Codex tool call");
+        return SourceBackedSemanticProjection::Malformed;
     };
     SourceBackedSemanticProjection::Materialized(SourceBackedSemantic {
         event_type: EventType::ToolCall,
@@ -770,43 +538,6 @@ pub(super) fn tool_context_from_row(row: &CodexEventRow) -> Option<(String, Code
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn build_sparse_output_row(
-    raw_ordinal: u64,
-    occurred_at: DateTime<Utc>,
-    result_kind: CodexResultKind,
-    call_id: Option<&str>,
-    context: Option<&CodexToolCallContext>,
-    outcome: &OutputOutcomeMetadata,
-    output_bytes: Option<usize>,
-) -> Option<CodexEventRow> {
-    let item_type = result_kind.item_type();
-    let fallback_tool_name = context
-        .map(|context| context.tool_name.as_str())
-        .unwrap_or(item_type);
-    let line_number = raw_ordinal
-        .checked_add(1)
-        .and_then(|line| usize::try_from(line).ok())?;
-    let provider_event = codex_sparse_tool_output_event(
-        item_type,
-        fallback_tool_name,
-        call_id,
-        line_number,
-        occurred_at,
-        context,
-        outcome,
-        output_bytes,
-    )?;
-    let normalized_body_hash = compute_payload_hash(&provider_event.payload).ok()?;
-    Some(CodexEventRow {
-        raw_ordinal,
-        normalized_body_hash,
-        provider_event,
-        file_touches: Vec::new(),
-        source_record: None,
-    })
-}
-
 struct BuiltBody {
     event_type: EventType,
     role: Option<EventRole>,
@@ -817,12 +548,12 @@ struct BuiltBody {
 enum BuiltBodyProjection {
     Materialized(BuiltBody),
     ValidUnmaterializable,
-    Malformed(&'static str),
+    Malformed,
 }
 
 fn build_message(payload: &Value) -> BuiltBodyProjection {
     let Some((role, body)) = codex_message_body(payload) else {
-        return BuiltBodyProjection::Malformed("malformed retained Codex message");
+        return BuiltBodyProjection::Malformed;
     };
     BuiltBodyProjection::Materialized(BuiltBody {
         event_type: EventType::Message,
@@ -846,7 +577,7 @@ fn build_reasoning(payload: &Value) -> BuiltBodyProjection {
         return if is_encrypted_reasoning_without_plaintext(payload) {
             BuiltBodyProjection::ValidUnmaterializable
         } else {
-            BuiltBodyProjection::Malformed("malformed retained Codex reasoning")
+            BuiltBodyProjection::Malformed
         };
     };
     let (summary, truncated) = codex_local_preview(&summary, PROVIDER_MAX_TEXT_CHARS);
@@ -890,7 +621,7 @@ fn build_compacted(payload: &Value) -> BuiltBodyProjection {
         return if is_source_only_compacted(payload) {
             BuiltBodyProjection::ValidUnmaterializable
         } else {
-            BuiltBodyProjection::Malformed("malformed retained Codex compacted record")
+            BuiltBodyProjection::Malformed
         };
     };
     let (text, truncated) = codex_local_preview(&text, PROVIDER_MAX_TEXT_CHARS);
@@ -918,7 +649,7 @@ fn is_source_only_compacted(payload: &Value) -> bool {
 
 fn build_tool_call(payload: &Value) -> BuiltBodyProjection {
     let Some(item_type) = payload.get("type").and_then(Value::as_str) else {
-        return BuiltBodyProjection::Malformed("malformed retained Codex tool call");
+        return BuiltBodyProjection::Malformed;
     };
     let tool_name = codex_tool_name(payload, item_type);
     let call_id = payload.get("call_id").and_then(Value::as_str);

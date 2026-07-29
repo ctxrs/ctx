@@ -20,21 +20,16 @@ pub(crate) use reader::{
 };
 #[cfg(test)]
 pub(crate) use reader::{
-    CodexNativeFrontier, CodexNativePageReceipt, CodexParseDisposition, MAX_CODEX_PAGE_BYTES,
-    MAX_CODEX_PAGE_ROWS, MAX_CODEX_RECORD_BYTES,
+    CodexNativeFrontier, CodexParseDisposition, MAX_CODEX_PAGE_BYTES, MAX_CODEX_PAGE_ROWS,
+    MAX_CODEX_RECORD_BYTES,
 };
-#[cfg(test)]
-pub(crate) use rows::CodexEventRow;
-pub(crate) use rows::{CodexFileTouch, CodexSessionRow};
-#[cfg(test)]
-pub(crate) use source::{
-    classify_source_lifecycle, CodexCatalogSource, CodexKnownSource, CodexSourceIdentity,
-    CodexSourceLifecycle,
-};
+pub(crate) use rows::CodexSessionRow;
 pub(crate) use source::{
     discover_codex_catalog_sources, CodexAppendProof, CodexCheckpointGeneration,
     CodexFileObservation,
 };
+#[cfg(test)]
+pub(crate) use source::{CodexCatalogSource, CodexSourceIdentity};
 pub(crate) use source_backed::{
     discover_codex_root_inventory_v0, ingest_codex_sources_serial_v0, managed_codex_session_source,
     observe_codex_explicit_session_source_backed_v0,

@@ -128,6 +128,7 @@ pub(crate) struct RetainedCodexSessionCatalog {
     pub(crate) root: ProviderSourceRoot,
 }
 
+#[cfg(test)]
 pub(crate) fn discover_codex_session_catalog(
     root: &Path,
 ) -> Result<(CatalogSummary, Vec<CatalogSession>)> {
@@ -530,19 +531,6 @@ fn catalog_codex_session_opened(
         }),
     })
 }
-pub(crate) fn read_codex_session_meta(path: &Path) -> Result<Option<Value>> {
-    let authority_path = authority_path(path)?;
-    let source = CodexCatalogFile {
-        path: path.to_path_buf(),
-        opened: open_provider_source_file(&authority_path)?,
-    };
-    read_codex_session_meta_opened(&source)
-}
-
-fn read_codex_session_meta_opened(source: &CodexCatalogFile) -> Result<Option<Value>> {
-    read_codex_session_meta_from_opened(&source.opened)
-}
-
 fn read_codex_session_meta_from_opened(opened: &OpenedProviderSourceFile) -> Result<Option<Value>> {
     let mut reader = BufReader::new(opened.file().try_clone()?);
     let mut line = Vec::new();

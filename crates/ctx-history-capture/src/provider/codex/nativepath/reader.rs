@@ -34,14 +34,10 @@ use crate::{
     provider::codex::events::CodexToolCallContext,
     provider::file_touches::{
         event_type_supports_structured_file_touches, visit_provider_file_touch_drafts_with_limit,
-        MAX_PROVIDER_FILE_TOUCHES_PER_EVENT, PROVIDER_FILE_TOUCH_LIMIT_REJECTION,
+        MAX_PROVIDER_FILE_TOUCHES_PER_EVENT,
     },
     CaptureError, OutputOutcome, Result,
 };
-#[cfg(test)]
-use crate::{observe_ordinary_file, provider_sources::open_ordinary_file_without_following};
-
-const MAX_REJECTION_DETAILS: usize = 32;
 const CHECKPOINT_READ_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_CODEX_PAGE_UNITS: usize = 64;
 const MAX_CODEX_SOURCE_BACKED_PAGE_RECORDS: u64 = 4 * 1024;
@@ -54,8 +50,6 @@ pub(crate) const MAX_CODEX_RECORD_BYTES: usize = 16 * 1024 * 1024;
 #[cfg(test)]
 pub(crate) const MAX_CODEX_PAGE_ROWS: usize = MAX_CODEX_PAGE_UNITS;
 pub(crate) const MAX_CODEX_PAGE_BYTES: usize = 8 * 1024 * 1024;
-const CODEX_SOURCE_BACKED_PAGE_IDENTITY_DOMAIN: &[u8] =
-    b"ctx/codex-nativepath/source-backed-page/v0\0";
 // These stay wire-identical to provider_sources::ordinary_file so a catalog
 // observation can be certified against identity read from the scanner's handle.
 const ORDINARY_FILE_TOKEN_DOMAIN: &[u8] = b"ctx-ordinary-file-observation-v2\0";
@@ -67,20 +61,6 @@ pub(crate) enum CodexParseDisposition {
     FullGeneration,
     AppendDelta,
     ObservationReplay,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PrefixProof {
-    NotAttempted,
-    Matched,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CodexRecordRejection {
-    pub(crate) raw_ordinal: u64,
-    pub(crate) start_byte: u64,
-    pub(crate) end_byte: u64,
-    pub(crate) reason: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,7 +124,6 @@ pub(crate) struct CodexNativeFrontier {
 /// `next_safe_frontier` and that record is parsed as part of the next page.
 #[derive(Debug)]
 pub(crate) struct CodexNativePage {
-    pub(crate) identity: CodexNativePageIdentity,
     pub(crate) owner: Option<CodexSessionRow>,
     pub(crate) expected_frontier: CodexNativeFrontier,
     pub(crate) next_safe_frontier: CodexNativeFrontier,
@@ -156,57 +135,13 @@ pub(crate) struct CodexNativePage {
 }
 
 impl CodexNativePage {
-    pub(crate) fn mutation_units(&self) -> usize {
-        self.core_rows
-            .iter()
-            .map(CodexEventRow::mutation_units)
-            .sum::<usize>()
-            .saturating_add(self.source_backed_rows.len())
-    }
-
     fn units(&self) -> usize {
-        self.mutation_units()
+        self.source_backed_rows.len()
     }
 
     fn has_progress(&self) -> bool {
         self.physical_records != 0
     }
-
-    pub(crate) fn receipt(&self) -> CodexNativePageReceipt {
-        CodexNativePageReceipt {
-            identity: self.identity,
-            expected_frontier: self.expected_frontier.clone(),
-            committed_frontier: self.next_safe_frontier.clone(),
-            accepted_core_rows: self
-                .core_rows
-                .len()
-                .saturating_add(self.source_backed_rows.len()),
-            accepted_physical_records: self.physical_records,
-        }
-    }
-
-    pub(crate) fn recompute_identity(&mut self) -> Result<()> {
-        self.identity = core_page_identity(self)?;
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct CodexNativePageIdentity([u8; 32]);
-
-impl CodexNativePageIdentity {
-    pub(crate) const fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CodexNativePageReceipt {
-    pub(crate) identity: CodexNativePageIdentity,
-    pub(crate) expected_frontier: CodexNativeFrontier,
-    pub(crate) committed_frontier: CodexNativeFrontier,
-    pub(crate) accepted_core_rows: usize,
-    pub(crate) accepted_physical_records: u64,
 }
 
 #[derive(Debug)]
@@ -220,34 +155,20 @@ pub(crate) struct CodexSourceScan {
     pub(crate) before_observation: CodexFileObservation,
     pub(crate) after_observation: CodexFileObservation,
     pub(crate) disposition: CodexParseDisposition,
-    prefix_proof: PrefixProof,
-    resume_proof: Option<CodexAppendProof>,
     pub(crate) full_revision_sha256: [u8; 32],
     pub(crate) complete_prefix_sha256: [u8; 32],
     pub(crate) complete_prefix_end: u64,
     pub(crate) next_raw_ordinal: u64,
     pub(crate) owner: Option<CodexSessionRow>,
     pending_tool_authorities: Vec<CodexPendingToolAuthority>,
-    pub(crate) rejections: Vec<CodexRecordRejection>,
     pub(crate) incomplete_tail: Option<CodexIncompleteTail>,
     pub(crate) counters: CodexScanCounters,
 }
 
 impl CodexSourceScan {
+    #[cfg(test)]
     pub(crate) fn terminal(&self) -> bool {
         self.incomplete_tail.is_none()
-    }
-
-    pub(crate) fn prefix_proof_matches(&self) -> bool {
-        self.prefix_proof == PrefixProof::Matched
-    }
-
-    pub(crate) fn is_observation_replay(&self) -> bool {
-        self.disposition == CodexParseDisposition::ObservationReplay
-    }
-
-    pub(crate) fn resume_proof(&self) -> Option<&CodexAppendProof> {
-        self.resume_proof.as_ref()
     }
 
     pub(crate) fn checkpoint(&self) -> Option<CodexNativeCheckpoint> {
@@ -289,8 +210,6 @@ pub(crate) struct CodexNativeScanner {
     before: CodexFileObservation,
     reader: BufReader<File>,
     disposition: CodexParseDisposition,
-    prefix_proof: PrefixProof,
-    resume_proof: Option<CodexAppendProof>,
     offset: u64,
     raw_ordinal: u64,
     owner: Option<CodexSessionRow>,
@@ -299,7 +218,6 @@ pub(crate) struct CodexNativeScanner {
     complete_hasher: Sha256,
     full_hasher: Sha256,
     record_buffer: Vec<u8>,
-    rejections: Vec<CodexRecordRejection>,
     incomplete_tail: Option<CodexIncompleteTail>,
     counters: CodexScanCounters,
     replay: Option<CodexSourceScan>,
@@ -323,7 +241,6 @@ struct ScannerPosition {
     had_owner: bool,
     complete_hasher: Sha256,
     full_hasher: Sha256,
-    rejection_len: usize,
     counters: CodexScanCounters,
 }
 
@@ -354,8 +271,6 @@ mod identity;
 mod page_builder;
 mod project;
 mod scanner;
-#[cfg(test)]
-mod tests;
 
 use checkpoint::*;
 pub(crate) use checkpoint::{

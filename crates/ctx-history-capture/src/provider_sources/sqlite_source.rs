@@ -104,10 +104,12 @@ impl SqliteSourceEvidence {
         &self.revision
     }
 
+    #[cfg(test)]
     pub(crate) fn wal_length(&self) -> Option<u64> {
         self.wal_length
     }
 
+    #[cfg(test)]
     pub(crate) fn shared_memory_length(&self) -> Option<u64> {
         self.shared_memory_length
     }

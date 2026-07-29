@@ -5,16 +5,14 @@
 // relative to the previously opened directory descriptor instead.
 
 use std::{
-    collections::BTreeSet,
-    ffi::{CStr, CString, OsStr, OsString},
+    ffi::{CString, OsStr},
     fs::{File, Metadata},
     io,
     os::{
         fd::{AsRawFd, FromRawFd},
-        unix::ffi::{OsStrExt, OsStringExt},
+        unix::ffi::OsStrExt,
     },
     path::{Component, Path},
-    time::Instant,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,12 +28,6 @@ pub(crate) enum OpenedPath {
 }
 
 impl OpenedPath {
-    pub(crate) fn file(&self) -> &File {
-        match self {
-            Self::File(file) | Self::Directory(file) => file,
-        }
-    }
-
     pub(crate) fn into_file(self) -> File {
         match self {
             Self::File(file) | Self::Directory(file) => file,
@@ -149,63 +141,6 @@ pub(crate) fn open_child(parent: &File, name: &OsStr) -> io::Result<OpenedPath> 
     }
 }
 
-#[derive(Debug)]
-pub(crate) enum DirectoryEntriesError {
-    Io(io::Error),
-    ContentTooLarge,
-    Deadline,
-}
-
-pub(crate) fn directory_entries(
-    directory: &File,
-    maximum_entries: usize,
-    deadline: Instant,
-) -> Result<Vec<OsString>, DirectoryEntriesError> {
-    let duplicate = unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
-    if duplicate < 0 {
-        return Err(DirectoryEntriesError::Io(io::Error::last_os_error()));
-    }
-    let stream = unsafe { libc::fdopendir(duplicate) };
-    if stream.is_null() {
-        let cause = io::Error::last_os_error();
-        unsafe {
-            libc::close(duplicate);
-        }
-        return Err(DirectoryEntriesError::Io(cause));
-    }
-    let mut names = BTreeSet::new();
-    let result = loop {
-        if Instant::now() >= deadline {
-            break Err(DirectoryEntriesError::Deadline);
-        }
-        clear_errno();
-        let entry = unsafe { libc::readdir(stream) };
-        if entry.is_null() {
-            let cause = current_errno();
-            if cause != 0 {
-                break Err(DirectoryEntriesError::Io(io::Error::from_raw_os_error(
-                    cause,
-                )));
-            }
-            break Ok(());
-        }
-        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
-        if name != b"." && name != b".." {
-            let name = OsString::from_vec(name.to_vec());
-            if !names.contains(&name) && names.len() >= maximum_entries {
-                break Err(DirectoryEntriesError::ContentTooLarge);
-            }
-            names.insert(name);
-        }
-    };
-    let close_result = unsafe { libc::closedir(stream) };
-    result?;
-    if close_result != 0 {
-        return Err(DirectoryEntriesError::Io(io::Error::last_os_error()));
-    }
-    Ok(names.into_iter().collect())
-}
-
 fn open_component(parent: libc::c_int, name: &OsStr, expected: ExpectedType) -> io::Result<File> {
     let name = CString::new(name.as_bytes()).map_err(|_| {
         io::Error::new(
@@ -226,26 +161,6 @@ fn open_component(parent: libc::c_int, name: &OsStr, expected: ExpectedType) -> 
     Ok(file)
 }
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
-fn errno_location() -> *mut libc::c_int {
-    unsafe { libc::__errno_location() }
-}
-
-#[cfg(any(target_os = "macos", target_os = "freebsd"))]
-fn errno_location() -> *mut libc::c_int {
-    unsafe { libc::__error() }
-}
-
-fn clear_errno() {
-    unsafe {
-        *errno_location() = 0;
-    }
-}
-
-fn current_errno() -> libc::c_int {
-    unsafe { *errno_location() }
-}
-
 fn verify_type(metadata: &Metadata, expected: ExpectedType) -> io::Result<()> {
     let matches = match expected {
         ExpectedType::File => metadata.file_type().is_file(),
@@ -263,11 +178,10 @@ fn verify_type(metadata: &Metadata, expected: ExpectedType) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsStr, fs, io::Read, time::Duration};
+    use std::fs;
+    use std::io::Read;
 
-    use super::{
-        directory_entries, open_child, open_path, DirectoryEntriesError, ExpectedType, OpenedPath,
-    };
+    use super::{open_path, ExpectedType};
 
     #[test]
     fn descriptor_walk_reads_an_ordinary_file() {
@@ -331,57 +245,5 @@ mod tests {
             ExpectedType::File
         )
         .is_err());
-    }
-
-    #[test]
-    fn descriptor_directory_enumeration_and_child_open_are_relative() {
-        let temp = tempfile::tempdir().unwrap();
-        fs::write(temp.path().join("b.json"), b"b").unwrap();
-        fs::write(temp.path().join("a.json"), b"a").unwrap();
-        let directory = open_path(temp.path(), ExpectedType::Directory).unwrap();
-        assert_eq!(
-            directory_entries(
-                &directory,
-                2,
-                std::time::Instant::now() + Duration::from_secs(1)
-            )
-            .unwrap(),
-            [OsStr::new("a.json"), OsStr::new("b.json")]
-        );
-        let OpenedPath::File(mut child) = open_child(&directory, OsStr::new("a.json")).unwrap()
-        else {
-            panic!("ordinary child must be a file");
-        };
-        let mut contents = String::new();
-        child.read_to_string(&mut contents).unwrap();
-        assert_eq!(contents, "a");
-    }
-
-    #[test]
-    fn descriptor_directory_enumeration_stops_at_the_entry_bound() {
-        let temp = tempfile::tempdir().unwrap();
-        for index in 0..64 {
-            fs::write(temp.path().join(format!("{index:03}.json")), b"{}").unwrap();
-        }
-        let directory = open_path(temp.path(), ExpectedType::Directory).unwrap();
-        assert!(matches!(
-            directory_entries(
-                &directory,
-                8,
-                std::time::Instant::now() + Duration::from_secs(1)
-            ),
-            Err(DirectoryEntriesError::ContentTooLarge)
-        ));
-    }
-
-    #[test]
-    fn descriptor_directory_enumeration_stops_at_the_deadline() {
-        let temp = tempfile::tempdir().unwrap();
-        fs::write(temp.path().join("entry.json"), b"{}").unwrap();
-        let directory = open_path(temp.path(), ExpectedType::Directory).unwrap();
-        assert!(matches!(
-            directory_entries(&directory, 8, std::time::Instant::now()),
-            Err(DirectoryEntriesError::Deadline)
-        ));
     }
 }

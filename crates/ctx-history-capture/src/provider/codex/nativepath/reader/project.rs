@@ -28,7 +28,7 @@ impl CodexNativeScanner {
         let probe = match classify_codex_record(record) {
             Ok(probe) => probe,
             Err(_) => {
-                self.reject(start_byte, end_byte, "malformed Codex JSON record", false);
+                self.reject(false);
                 return Ok(CodexRecordProjection::default());
             }
         };
@@ -44,12 +44,7 @@ impl CodexNativeScanner {
                         self.counters.ignored_records =
                             self.counters.ignored_records.saturating_add(1);
                     }
-                    None => self.reject(
-                        start_byte,
-                        end_byte,
-                        "malformed Codex session metadata",
-                        false,
-                    ),
+                    None => self.reject(false),
                 }
                 Ok(CodexRecordProjection::default())
             }
@@ -59,24 +54,14 @@ impl CodexNativeScanner {
             }
             CodexRecordClass::Retained(kind) => {
                 let Some(owner) = self.owner.as_ref() else {
-                    self.reject(
-                        start_byte,
-                        end_byte,
-                        "Codex retained record appeared before session metadata",
-                        false,
-                    );
+                    self.reject(false);
                     return Ok(CodexRecordProjection::default());
                 };
                 self.counters.retained_json_parses =
                     self.counters.retained_json_parses.saturating_add(1);
                 self.counters.typed_json_parses = self.counters.typed_json_parses.saturating_add(1);
                 let Some(retained) = parse_decoded_record(record, owner) else {
-                    self.reject(
-                        start_byte,
-                        end_byte,
-                        "malformed retained Codex record",
-                        false,
-                    );
+                    self.reject(false);
                     return Ok(CodexRecordProjection::default());
                 };
                 let mut built = match build_source_backed_event_row(
@@ -93,8 +78,8 @@ impl CodexNativeScanner {
                             self.counters.ignored_records.saturating_add(1);
                         return Ok(CodexRecordProjection::default());
                     }
-                    Err(CodexRetainedNonMaterialized::Malformed(reason)) => {
-                        self.reject(start_byte, end_byte, reason, false);
+                    Err(CodexRetainedNonMaterialized::Malformed) => {
+                        self.reject(false);
                         return Ok(CodexRecordProjection::default());
                     }
                 };
@@ -108,22 +93,12 @@ impl CodexNativeScanner {
                     },
                 )?;
                 if touch_outcome.limit_exceeded() {
-                    self.reject(
-                        start_byte,
-                        end_byte,
-                        PROVIDER_FILE_TOUCH_LIMIT_REJECTION,
-                        false,
-                    );
+                    self.reject(false);
                     return Ok(CodexRecordProjection::default());
                 }
                 let row_bytes = built.row.estimated_owned_bytes().unwrap_or(usize::MAX);
                 if row_bytes > MAX_CODEX_PAGE_BYTES.saturating_sub(PAGE_FIXED_WIRE_BYTES) {
-                    self.reject(
-                        start_byte,
-                        end_byte,
-                        "Codex record projection exceeds the bounded NativePath Core page",
-                        false,
-                    );
+                    self.reject(false);
                     return Ok(CodexRecordProjection::default());
                 }
                 let lexical_bytes = built.row.lexical_body.len();
@@ -213,21 +188,11 @@ impl CodexNativeScanner {
             OutputOutcome::Failure | OutputOutcome::Timeout
         );
         let Some(owner) = self.owner.clone() else {
-            self.reject(
-                start_byte,
-                end_byte,
-                "Codex output appeared before session metadata",
-                false,
-            );
+            self.reject(false);
             return Ok(CodexRecordProjection::default());
         };
         let Some(occurred_at) = probe_timestamp(probe, owner.started_at) else {
-            self.reject(
-                start_byte,
-                end_byte,
-                "Codex output timestamp is not valid RFC3339",
-                false,
-            );
+            self.reject(false);
             return Ok(CodexRecordProjection::default());
         };
 
@@ -276,12 +241,7 @@ impl CodexNativeScanner {
             Some(row) => {
                 let row_bytes = row.estimated_owned_bytes().unwrap_or(usize::MAX);
                 if row_bytes > MAX_CODEX_PAGE_BYTES.saturating_sub(PAGE_FIXED_WIRE_BYTES) {
-                    self.reject(
-                        start_byte,
-                        end_byte,
-                        "Codex record projection exceeds the bounded NativePath Core page",
-                        false,
-                    );
+                    self.reject(false);
                     return Ok(CodexRecordProjection::default());
                 }
                 self.counters.retained_records = self.counters.retained_records.saturating_add(1);
@@ -345,13 +305,7 @@ impl CodexNativeScanner {
         }
     }
 
-    pub(super) fn reject(
-        &mut self,
-        start_byte: u64,
-        end_byte: u64,
-        reason: &'static str,
-        oversized: bool,
-    ) {
+    pub(super) fn reject(&mut self, oversized: bool) {
         if oversized {
             self.counters.oversized_records = self.counters.oversized_records.saturating_add(1);
         } else {
@@ -359,13 +313,5 @@ impl CodexNativeScanner {
         }
         self.counters.rejected_complete_records =
             self.counters.rejected_complete_records.saturating_add(1);
-        if self.rejections.len() < MAX_REJECTION_DETAILS {
-            self.rejections.push(CodexRecordRejection {
-                raw_ordinal: self.raw_ordinal,
-                start_byte,
-                end_byte,
-                reason,
-            });
-        }
     }
 }

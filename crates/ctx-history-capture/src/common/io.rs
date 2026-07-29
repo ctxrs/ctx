@@ -276,6 +276,7 @@ fn inventory_provider_paths(
     Ok(state.finish())
 }
 
+#[cfg(test)]
 pub(crate) fn collect_jsonl_paths_bounded(
     root: &Path,
     paths: &mut Vec<PathBuf>,

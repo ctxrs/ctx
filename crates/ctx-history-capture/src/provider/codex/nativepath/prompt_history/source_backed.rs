@@ -129,10 +129,6 @@ pub(crate) struct CodexPromptHistorySourceBackedSourceV0 {
 }
 
 impl CodexPromptHistorySourceBackedSourceV0 {
-    pub(crate) fn input(&self) -> &CodexPromptHistorySourceBackedInputV0 {
-        &self.input
-    }
-
     pub(crate) fn source(&self) -> &SourceKey {
         &self.source
     }
@@ -146,7 +142,7 @@ impl CodexPromptHistorySourceBackedSourceV0 {
 pub(crate) enum CodexPromptHistorySourceBackedDispositionV0 {
     Cold,
     Unchanged,
-    Append { proof: CertifiedSourceAppend },
+    Append,
     Replacement,
 }
 
@@ -163,6 +159,7 @@ pub(crate) struct CodexPromptHistorySourceBackedScanV0 {
     pub(crate) certificate: CertifiedSource,
     pub(crate) disposition: CodexPromptHistorySourceBackedDispositionV0,
     pub(crate) emitted_documents: u64,
+    #[cfg(test)]
     pub(crate) terminal: bool,
 }
 
@@ -286,16 +283,6 @@ pub(crate) fn observe_codex_prompt_history_source_backed_explicit_v0(
     })
 }
 
-/// Convenience entrypoint for a selected explicit source.
-pub(crate) fn scan_codex_prompt_history_source_backed_explicit_v0(
-    input: &CodexPromptHistorySourceBackedInputV0,
-    prior: Option<&CertifiedSource>,
-    emit: impl FnMut(CodexPromptHistorySourceBackedPageV0) -> CodexPromptHistorySourceBackedResultV0<()>,
-) -> CodexPromptHistorySourceBackedResultV0<CodexPromptHistorySourceBackedScanV0> {
-    let source = observe_codex_prompt_history_source_backed_explicit_v0(input)?;
-    scan_codex_prompt_history_source_backed_v0(source, prior, emit)
-}
-
 /// Scans through the retained source capability and emits bounded lexical pages.
 pub(crate) fn scan_codex_prompt_history_source_backed_v0(
     source: CodexPromptHistorySourceBackedSourceV0,
@@ -377,20 +364,9 @@ pub(crate) fn scan_codex_prompt_history_source_backed_v0(
         certificate,
         disposition,
         emitted_documents,
+        #[cfg(test)]
         terminal: analysis.terminal,
     })
-}
-
-pub(crate) fn revalidate_codex_prompt_history_source_backed_v0(
-    input: &CodexPromptHistorySourceBackedInputV0,
-    certificate: &CertifiedSource,
-) -> CodexPromptHistorySourceBackedResultV0<bool> {
-    let scan =
-        scan_codex_prompt_history_source_backed_explicit_v0(input, Some(certificate), |_| Ok(()))?;
-    Ok(matches!(
-        scan.disposition,
-        CodexPromptHistorySourceBackedDispositionV0::Unchanged
-    ))
 }
 
 fn classify_disposition(
@@ -414,14 +390,16 @@ fn classify_disposition(
                 if let Some(prefix_digest) =
                     hash_opened_prefix(&source.opened, checkpoint.certified_prefix_bytes)?
                 {
-                    if let Ok(proof) = CertifiedSourceAppend::certify(
+                    if CertifiedSourceAppend::certify(
                         prior,
                         current.clone(),
                         checkpoint.certified_prefix_bytes,
                         prefix_digest,
-                    ) {
+                    )
+                    .is_ok()
+                    {
                         return Ok((
-                            CodexPromptHistorySourceBackedDispositionV0::Append { proof },
+                            CodexPromptHistorySourceBackedDispositionV0::Append,
                             checkpoint.certified_prefix_bytes,
                         ));
                     }

@@ -59,15 +59,12 @@ impl CodexNativeScanner {
                 before_observation: before.clone(),
                 after_observation: before.clone(),
                 disposition: CodexParseDisposition::ObservationReplay,
-                prefix_proof: PrefixProof::Matched,
-                resume_proof: Some(proof.clone()),
                 full_revision_sha256: proof.checkpoint.full_revision_sha256,
                 complete_prefix_sha256: proof.checkpoint.complete_prefix_sha256,
                 complete_prefix_end: proof.checkpoint.complete_prefix_end(),
                 next_raw_ordinal: proof.checkpoint.next_raw_ordinal(),
                 owner: Some(proof.checkpoint.owner.clone()),
                 pending_tool_authorities: proof.checkpoint.pending_tool_authorities().to_vec(),
-                rejections: Vec::new(),
                 incomplete_tail,
                 counters: CodexScanCounters {
                     bytes_read: validated.bytes_read,
@@ -84,8 +81,6 @@ impl CodexNativeScanner {
                 before,
                 reader,
                 disposition: CodexParseDisposition::ObservationReplay,
-                prefix_proof: PrefixProof::Matched,
-                resume_proof: Some(proof.clone()),
                 offset: replay.complete_prefix_end,
                 raw_ordinal: replay.next_raw_ordinal,
                 owner: replay.owner.clone(),
@@ -94,7 +89,6 @@ impl CodexNativeScanner {
                 complete_hasher: Sha256::new(),
                 full_hasher: Sha256::new(),
                 record_buffer: Vec::new(),
-                rejections: Vec::new(),
                 incomplete_tail: None,
                 counters: replay.counters,
                 replay: Some(replay),
@@ -106,8 +100,6 @@ impl CodexNativeScanner {
 
         let (
             disposition,
-            prefix_proof,
-            resume_proof,
             owner,
             tool_contexts,
             tool_authorities,
@@ -132,8 +124,6 @@ impl CodexNativeScanner {
                 reader.seek(SeekFrom::Start(proof.checkpoint.complete_prefix_end()))?;
                 (
                     CodexParseDisposition::AppendDelta,
-                    PrefixProof::Matched,
-                    Some(proof.clone()),
                     Some(proof.checkpoint.owner.clone()),
                     tool_contexts,
                     tool_authorities,
@@ -152,8 +142,6 @@ impl CodexNativeScanner {
                 reader.seek(SeekFrom::Start(0))?;
                 (
                     CodexParseDisposition::FullGeneration,
-                    PrefixProof::NotAttempted,
-                    None,
                     None,
                     BTreeMap::new(),
                     BTreeMap::new(),
@@ -176,8 +164,6 @@ impl CodexNativeScanner {
             before,
             reader,
             disposition,
-            prefix_proof,
-            resume_proof,
             offset,
             raw_ordinal,
             owner,
@@ -186,7 +172,6 @@ impl CodexNativeScanner {
             complete_hasher: complete_hasher.clone(),
             full_hasher: complete_hasher,
             record_buffer: Vec::new(),
-            rejections: Vec::new(),
             incomplete_tail: None,
             counters: CodexScanCounters {
                 bytes_read: validation_bytes,
@@ -276,12 +261,7 @@ impl CodexNativeScanner {
                 self.counters.ignored_records = self.counters.ignored_records.saturating_add(1);
                 CodexRecordProjection::default()
             } else if record_read.oversized {
-                self.reject(
-                    record_start,
-                    record_end,
-                    "Codex JSONL record exceeds the 16 MiB provider bound",
-                    true,
-                );
+                self.reject(true);
                 CodexRecordProjection::default()
             } else {
                 let record_buffer = std::mem::take(&mut self.record_buffer);
@@ -310,12 +290,7 @@ impl CodexNativeScanner {
                     self.restore(position)?;
                     return self.emit_active_core_page().map(Some);
                 }
-                self.reject(
-                    record_start,
-                    record_end,
-                    "Codex record projection exceeds the bounded NativePath Core page",
-                    false,
-                );
+                self.reject(false);
                 projection = CodexRecordProjection::default();
             } else {
                 let page = self
@@ -340,76 +315,4 @@ impl CodexNativeScanner {
             page.physical_records = page.physical_records.saturating_add(1);
         }
     }
-
-    pub(crate) const fn disposition(&self) -> CodexParseDisposition {
-        self.disposition
-    }
-
-    pub(crate) const fn is_exhausted(&self) -> bool {
-        self.exhausted
-    }
-
-    pub(crate) const fn counters(&self) -> CodexScanCounters {
-        self.counters
-    }
-
-    pub(crate) fn owner(&self) -> Option<&CodexSessionRow> {
-        self.owner.as_ref()
-    }
-
-    /// Returns restart authority for the exact complete-record boundary most
-    /// recently emitted by the Core lane.
-    ///
-    /// A continuation checkpoint certifies only the consumed prefix. The
-    /// catalog observation remains the authority for the complete physical
-    /// source and is revalidated before every continuation is published.
-    pub(crate) fn checkpoint_at_frontier(
-        &self,
-        frontier: &CodexNativeFrontier,
-    ) -> Result<CodexNativeCheckpoint> {
-        if *frontier != self.frontier() || frontier.complete_prefix_end > self.before.len {
-            return Err(CaptureError::SystemInvariant(
-                "Codex checkpoint frontier is not the current scanner boundary",
-            ));
-        }
-        let owner = self.owner.clone().ok_or(CaptureError::InvalidPayload(
-            "Codex NativePath source has no session owner".to_owned(),
-        ))?;
-        let mut observation = self.before.clone();
-        observation.len = frontier.complete_prefix_end;
-        Ok(CodexNativeCheckpoint::new(
-            observation,
-            frontier.complete_prefix_sha256,
-            frontier.complete_prefix_sha256,
-            frontier.complete_prefix_end,
-            frontier.next_raw_ordinal,
-            None,
-            &self.tool_authorities.values().cloned().collect::<Vec<_>>(),
-            owner,
-        ))
-    }
-}
-
-fn open_certified_codex_source(path: &Path, observation: &CodexFileObservation) -> Result<File> {
-    let authority_path = std::path::absolute(path)?;
-    let opened = open_provider_source_file(&authority_path)?;
-    let file = opened.file().try_clone()?;
-    validate_open_file_metadata(path, &file, observation)?;
-    Ok(file)
-}
-
-#[cfg(all(test, unix))]
-pub(super) fn open_certified_codex_source_with_hooks(
-    path: &Path,
-    observation: &CodexFileObservation,
-    before_open: impl FnOnce(),
-    after_open: impl FnOnce(),
-) -> Result<File> {
-    before_open();
-    let authority_path = std::path::absolute(path)?;
-    let opened = open_provider_source_file(&authority_path)?;
-    let file = opened.file().try_clone()?;
-    after_open();
-    validate_open_file_metadata(path, &file, observation)?;
-    Ok(file)
 }

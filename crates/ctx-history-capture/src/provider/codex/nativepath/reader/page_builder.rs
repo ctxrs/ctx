@@ -11,7 +11,6 @@ impl CodexNativeScanner {
     pub(super) fn new_core_page(&mut self) -> Result<CodexNativePage> {
         let expected_frontier = self.frontier();
         Ok(CodexNativePage {
-            identity: CodexNativePageIdentity::default(),
             owner: self.owner.clone(),
             next_safe_frontier: expected_frontier.clone(),
             expected_frontier,
@@ -85,8 +84,6 @@ impl CodexNativeScanner {
             before_observation: self.before,
             after_observation: after,
             disposition: self.disposition,
-            prefix_proof: self.prefix_proof,
-            resume_proof: self.resume_proof,
             full_revision_sha256,
             complete_prefix_sha256,
             complete_prefix_end: self
@@ -97,7 +94,6 @@ impl CodexNativeScanner {
             next_raw_ordinal: self.raw_ordinal,
             owner: self.owner,
             pending_tool_authorities: self.tool_authorities.into_values().collect(),
-            rejections: self.rejections,
             incomplete_tail: self.incomplete_tail,
             counters: self.counters,
         })
@@ -110,7 +106,6 @@ impl CodexNativeScanner {
             had_owner: self.owner.is_some(),
             complete_hasher: self.complete_hasher.clone(),
             full_hasher: self.full_hasher.clone(),
-            rejection_len: self.rejections.len(),
             counters: self.counters,
         }
     }
@@ -130,7 +125,6 @@ impl CodexNativeScanner {
         }
         self.complete_hasher = position.complete_hasher;
         self.full_hasher = position.full_hasher;
-        self.rejections.truncate(position.rejection_len);
         self.counters = position.counters;
         (
             self.counters.prefiltered_records,
@@ -162,7 +156,6 @@ impl CodexNativeScanner {
         self.counters.emitted_pages = self.counters.emitted_pages.saturating_add(1);
         self.counters.peak_page_rows = self.counters.peak_page_rows.max(page.units());
         self.counters.peak_page_bytes = self.counters.peak_page_bytes.max(page.serialized_bytes);
-        page.identity = core_page_identity(&page)?;
         Ok(page)
     }
 }
