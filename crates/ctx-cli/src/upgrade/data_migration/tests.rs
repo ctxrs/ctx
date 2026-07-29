@@ -5,8 +5,8 @@ use ctx_history_index::{GenerationWriter, WriterOptions};
 use tempfile::tempdir;
 
 use super::{
-    complete_source_rebuild, inspect, lexical_projection_path, prepare,
-    record_source_rebuild_failure, MigrationDecision, MigrationOrigin, MigrationPhase,
+    complete_source_rebuild, inspect, journal_path, lexical_projection_path, migration_directory,
+    prepare, record_source_rebuild_failure, MigrationDecision, MigrationOrigin, MigrationPhase,
 };
 
 fn create_previous_store(data_root: &Path, bytes: &[u8]) -> Vec<u8> {
@@ -85,6 +85,25 @@ fn prototype_search_directory_is_not_migrated_or_reused() {
 }
 
 #[test]
+fn epoch_activation_has_no_legacy_history_reader_dependencies() {
+    let source = include_str!("mod.rs");
+
+    for forbidden in [
+        "ctx_history_store",
+        "rusqlite",
+        "Store::open",
+        "Connection::open",
+        "legacy::",
+        "build_or_resume",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "fresh epoch activation must not depend on legacy history reader `{forbidden}`"
+        );
+    }
+}
+
+#[test]
 fn activation_accepts_only_the_exact_fresh_generation() {
     let temp = tempdir().unwrap();
     let data_root = temp.path().join("data");
@@ -104,6 +123,31 @@ fn activation_accepts_only_the_exact_fresh_generation() {
 
     let repeated = complete_source_rebuild(&data_root, &generation).unwrap();
     assert!(matches!(repeated, MigrationDecision::Ready(_)));
+}
+
+#[test]
+fn fresh_activation_is_idempotent() {
+    let temp = tempdir().unwrap();
+    let data_root = temp.path().join("fresh-data");
+
+    let prepared = prepare(&data_root, &[]).unwrap();
+    assert_eq!(prepared.marker().origin, MigrationOrigin::Fresh);
+    assert!(prepared.marker().legacy_store_path.is_none());
+
+    let generation = publish_empty_generation(&data_root);
+    let completed = complete_source_rebuild(&data_root, &generation).unwrap();
+    assert!(matches!(completed, MigrationDecision::Ready(_)));
+    let journal_after_activation = fs::read(journal_path(&data_root)).unwrap();
+
+    let repeated_completion = complete_source_rebuild(&data_root, &generation).unwrap();
+    let repeated_prepare = prepare(&data_root, &[]).unwrap();
+
+    assert!(matches!(repeated_completion, MigrationDecision::Ready(_)));
+    assert!(matches!(repeated_prepare, MigrationDecision::Ready(_)));
+    assert_eq!(
+        fs::read(journal_path(&data_root)).unwrap(),
+        journal_after_activation
+    );
 }
 
 #[test]
@@ -136,7 +180,24 @@ fn symlinked_previous_store_is_rejected_without_following_it() {
     fs::write(&target, b"outside").unwrap();
     symlink(&target, database_path(data_root.clone())).unwrap();
 
-    let error = inspect(&data_root).unwrap_err();
-    assert!(format!("{error:#}").contains("not a regular file"));
+    let inspection_error = inspect(&data_root).unwrap_err();
+    assert!(format!("{inspection_error:#}").contains("not a regular file"));
+    let activation_error = prepare(&data_root, &[]).unwrap_err();
+    assert!(format!("{activation_error:#}").contains("not a regular file"));
     assert_eq!(fs::read(target).unwrap(), b"outside");
+    assert!(!migration_directory(&data_root).exists());
+}
+
+#[test]
+fn nonregular_previous_store_is_rejected_without_epoch_initialization() {
+    let temp = tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let store_path = database_path(data_root.clone());
+    fs::create_dir_all(&store_path).unwrap();
+
+    let error = prepare(&data_root, &[]).unwrap_err();
+
+    assert!(format!("{error:#}").contains("not a regular file"));
+    assert!(store_path.is_dir());
+    assert!(!migration_directory(&data_root).exists());
 }
