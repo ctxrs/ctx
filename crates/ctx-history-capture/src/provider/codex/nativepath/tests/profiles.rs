@@ -176,10 +176,8 @@ fn source_backed_row_preserves_full_lexical_text_and_exact_record_evidence() {
     assert!(row.lexical_body.ends_with("MESSAGE_END"));
     assert_eq!(row.source_record.byte_offset, message_start);
     assert_eq!(row.source_record.byte_length, message_record.len() as u64);
-    assert_eq!(
-        row.source_record.record_digest,
-        Sha256::digest(message_record.as_bytes()).into()
-    );
+    let expected_digest: [u8; 32] = Sha256::digest(message_record.as_bytes()).into();
+    assert_eq!(row.source_record.record_digest, expected_digest);
 }
 
 #[test]
@@ -247,10 +245,8 @@ fn source_backed_projection_prefilters_with_exact_scan_accounting() {
     assert_eq!(row.raw_ordinal, 3);
     assert_eq!(row.source_record.byte_offset, retained_start);
     assert_eq!(row.source_record.byte_length, retained.len() as u64);
-    assert_eq!(
-        row.source_record.record_digest,
-        Sha256::digest(retained.as_bytes()).into()
-    );
+    let expected_digest: [u8; 32] = Sha256::digest(retained.as_bytes()).into();
+    assert_eq!(row.source_record.record_digest, expected_digest);
     assert_eq!(scan.counters.legacy_body_json_serializations, 0);
     assert_eq!(scan.counters.legacy_row_json_serializations, 0);
     assert_eq!(scan.counters.legacy_json_serialized_bytes, 0);

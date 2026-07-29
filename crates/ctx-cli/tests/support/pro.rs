@@ -114,7 +114,7 @@ pub(crate) fn write_oversized_blame_helper(path: &Path) {
 #[cfg(unix)]
 fn write_blame_helper_with_oversized_page(path: &Path, oversized_page: bool) {
     const HELPER: &str = r#"#!/usr/bin/python3
-import base64, json, os, struct, sys
+import json, os, struct, sys
 
 def receive():
     header = sys.stdin.buffer.read(12)
@@ -133,7 +133,7 @@ if 'query' not in hello['message']['body']['capabilities']:
     sys.exit(21)
 capabilities = [
     capability for capability in hello['message']['body']['capabilities']
-    if capability in ('query', 'git_read')
+    if capability in ('status', 'query', 'git_read')
 ]
 send({
   'sequence': hello['sequence'],
@@ -147,9 +147,26 @@ send({
   }}
 })
 request = receive()
+if request['message']['kind'] != 'status':
+    sys.exit(22)
+send({
+  'sequence': request['sequence'],
+  'request_id': request['request_id'],
+  'message': {'kind':'status','body':{
+    'state':'ready',
+    'authority':'source',
+    'source_receipt':{
+      'core_generation_id':'a' * 64,
+      'manifest_aggregate_sha256':'b' * 64,
+      'materializer_revision':'fake-source-materializer-v1',
+      'progress':[]
+    }
+  }}
+})
+request = receive()
 body = request['message']['body']
 if request['message']['kind'] != 'blame':
-    sys.exit(22)
+    sys.exit(26)
 target = body['target']
 if body['limit'] < 1 or body['limit'] > 100:
     sys.exit(23)
@@ -163,29 +180,16 @@ evidence = [{
   }
 }]
 if __OVERSIZED_BLAME__:
-    locator_payload = base64.b64encode(b'x' * (64 * 1024)).decode()
     evidence = [{
       'number':number,
       'citation':{
-        'provider_output':{
-          'source_id':'oversized-source',
-          'source_epoch':1,
-          'locator':{
-            'version':1,
-            'kind':'native',
-            'payload_base64':locator_payload
-          },
-          'coordinate':{
-            'unit_key':'unit',
-            'native_sequence':number,
-            'native_record_id':None,
-            'source_record_ordinal':None,
-            'source_record_subrecord_index':None,
-            'byte_start':None,
-            'byte_end_exclusive':None
-          },
-          'availability':'available'
-        }
+        'source_path':'x' * 8192,
+        'source_record_ordinal':number,
+        'byte_range':{
+          'start':number,
+          'end_exclusive':number + 1
+        },
+        'source_sha256':'a' * 64
       }
     } for number in range(1, 17)]
 evidence_numbers = [item['number'] for item in evidence]

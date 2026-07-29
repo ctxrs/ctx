@@ -11,7 +11,6 @@ pub use ctx_history_core::ContentRef;
 pub const FRAME_MAGIC: &[u8; 6] = b"CTXPRO";
 pub const PROTOCOL_VERSION: u16 = 1;
 include!("protocol_fingerprint.rs");
-pub const PROJECTION_CONTRACT_VERSION: u32 = 1;
 pub const FRAME_HEADER_BYTES: usize = FRAME_MAGIC.len() + 2 + 4;
 pub const MAX_FRAME_PAYLOAD_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_BLAME_RESULTS: u32 = 100;
@@ -35,18 +34,6 @@ mod error;
 pub use error::{ErrorClass, ProtocolError};
 mod frame;
 pub use frame::{read_frame, write_frame, FrameError};
-mod journal;
-pub use journal::{
-    canonical_payload_bytes, initial_journal_digest, journal_record_digest,
-    journal_sync_envelope_bytes, sha256_hex, JournalCheckpoint, JournalContextWindow,
-    JournalEntityKind, JournalEvidenceIdentity, JournalOperation, JournalPosition,
-    JournalProvenanceIdentity, JournalRecord, JournalSyncMode, JournalSyncRequest,
-    JournalSyncResult, MAX_AUTHORIZED_REPOSITORY_ROOTS,
-    MAX_AUTHORIZED_REPOSITORY_ROOTS_TOTAL_BYTES, MAX_AUTHORIZED_REPOSITORY_ROOT_BYTES,
-    MAX_JOURNAL_CONTEXT_BYTES, MAX_JOURNAL_CONTEXT_RECORDS, MAX_JOURNAL_EVIDENCE_PER_RECORD,
-    MAX_JOURNAL_IDENTITY_BYTES, MAX_JOURNAL_PAYLOAD_BYTES, MAX_JOURNAL_RECORDS_PER_BATCH,
-    MAX_JOURNAL_SYNC_ENVELOPE_BYTES,
-};
 mod layout;
 pub use layout::{
     pro_clock_record_id, pro_graph_record_id, valid_pro_installation_id, ProFilesystemLayout,
@@ -69,20 +56,6 @@ mod message;
 pub use message::{
     Capability, GraphState, HelloRequest, HelloResult, HelperEnvelope, HelperMessage, HostEnvelope,
     HostMessage, MaterializationAuthority, StatusRequest, StatusResult,
-};
-mod output;
-pub use output::{
-    BeginOutputInventoryRequest, FinishOutputInventoryRequest, ObserveOutputSourceRequest,
-    OutputAssociations, OutputCommandContext, OutputInventoryBegan, OutputInventoryFinished,
-    OutputNativeCoordinate, OutputNativeCursor, OutputObservationKind, OutputOutcome,
-    OutputOutcomeMetadata, OutputPageMaterialized, OutputProgressRequest, OutputProgressResult,
-    OutputRepositoryContext, OutputSourceAvailability, OutputSourceDisposition,
-    OutputSourceIdentity, OutputSourceLocator, OutputSourceObserved, OutputSourceProgress,
-    ProOutputMaterializationPage, ProOutputObservation, ProviderOutputEvidence,
-    TransientOutputContent, MAX_OUTPUT_COMMAND_BYTES, MAX_OUTPUT_CONTENT_BYTES,
-    MAX_OUTPUT_CONTENT_BYTES_PER_PAGE, MAX_OUTPUT_CURSOR_BYTES, MAX_OUTPUT_IDENTITY_BYTES,
-    MAX_OUTPUT_LOCATOR_BYTES, MAX_OUTPUT_OBSERVATIONS_PER_PAGE, MAX_OUTPUT_PROGRESS_SOURCES,
-    OUTPUT_MATERIALIZATION_CONTRACT_VERSION,
 };
 mod query;
 pub use query::{
@@ -148,28 +121,11 @@ pub struct EvidenceCitation {
     pub source_record_subrecord_index: Option<u32>,
     pub byte_range: Option<ByteRange>,
     pub source_sha256: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_output: Option<ProviderOutputEvidence>,
 }
 
 impl EvidenceCitation {
     #[must_use]
     pub fn is_usable(&self) -> bool {
-        if let Some(provider_output) = &self.provider_output {
-            return self.observation_id.is_none()
-                && self.observation_seq.is_none()
-                && self.observation_kind.is_none()
-                && self.session_id.is_none()
-                && self.event_id.is_none()
-                && self.event_seq.is_none()
-                && self.source_path.is_none()
-                && self.fixture_line.is_none()
-                && self.source_record_ordinal.is_none()
-                && self.source_record_subrecord_index.is_none()
-                && self.byte_range.is_none()
-                && self.source_sha256.is_none()
-                && provider_output.is_usable();
-        }
         let coordinate_is_complete = self.observation_id.is_some()
             == (self.observation_seq.is_some() && self.observation_kind.is_some());
         let fields_are_valid = coordinate_is_complete
