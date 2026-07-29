@@ -200,7 +200,7 @@ fn sql_is_read_only_and_does_not_initialize_store() {
 fn show_does_not_initialize_store() {
     let temp = tempdir();
     let stderr = failure_stderr(ctx(&temp).args(["show", "event", "deadbeef"]));
-    assert!(stderr.contains("ctx store is not initialized"));
+    assert!(stderr.contains("source-backed Core index is not initialized"));
     assert!(!temp.path().join("work.sqlite").exists());
 }
 
@@ -402,50 +402,6 @@ fn fresh_home_search_mvp_flow() {
     assert_eq!(file_search["query"], "");
     assert!(file_search["results"].is_array());
 
-    let show_event = json_output(ctx(&temp).args([
-        "show",
-        "event",
-        &ctx_event_id,
-        "--window",
-        "2",
-        "--format",
-        "json",
-    ]));
-    assert_eq!(show_event["schema_version"], 1);
-    assert_eq!(show_event["payload_type"], "event_window");
-    assert_eq!(show_event["event"]["ctx_event_id"], ctx_event_id);
-    assert_eq!(show_event["event"]["ctx_session_id"], ctx_session_id);
-    assert_omits_keys(
-        &show_event,
-        &[
-            "record_id",
-            "history_record_id",
-            "kind",
-            "payload",
-            "payload_blob_id",
-            "dedupe_key",
-            "capture_source_id",
-        ],
-    );
-    assert!(show_event["events"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|event| event["ctx_event_id"].is_string()
-            && event["ctx_session_id"].is_string()
-            && event["preview"].is_string()));
-
-    let show_event_prefix = json_output(ctx(&temp).args([
-        "show",
-        "event",
-        &ctx_event_id[..8],
-        "--window",
-        "1",
-        "--format",
-        "json",
-    ]));
-    assert_eq!(show_event_prefix["event"]["ctx_event_id"], ctx_event_id);
-
     let oversized_after = failure_stderr(ctx(&temp).args([
         "show",
         "event",
@@ -470,32 +426,6 @@ fn fresh_home_search_mvp_flow() {
         "{oversized_window}"
     );
 
-    let show_session =
-        json_output(ctx(&temp).args(["show", "session", &ctx_session_id, "--format", "json"]));
-    assert_eq!(show_session["schema_version"], 1);
-    assert_eq!(show_session["payload_type"], "session_transcript");
-    assert_eq!(show_session["session"]["record_type"], "session");
-    assert_eq!(show_session["session"]["item_id"], ctx_session_id);
-    assert_eq!(show_session["mode"], "lite");
-
-    let show_session_prefix =
-        json_output(ctx(&temp).args(["show", "session", &ctx_session_id[..8], "--format", "json"]));
-    assert_eq!(show_session_prefix["session"]["item_id"], ctx_session_id);
-
-    let show_session_full = json_output(ctx(&temp).args([
-        "show",
-        "session",
-        &ctx_session_id,
-        "--mode",
-        "full",
-        "--format",
-        "json",
-    ]));
-    assert_eq!(show_session_full["schema_version"], 1);
-    assert_eq!(show_session_full["payload_type"], "session_transcript");
-    assert_eq!(show_session_full["session"]["item_id"], ctx_session_id);
-    assert_eq!(show_session_full["mode"], "full");
-
     let locate_event =
         json_output(ctx(&temp).args(["locate", "event", &ctx_event_id, "--format=json"]));
     assert_eq!(locate_event["schema_version"], 1);
@@ -506,50 +436,6 @@ fn fresh_home_search_mvp_flow() {
     assert!(locate_event["provider_session_id"].is_string());
     assert!(locate_event["source"]["path"].is_string());
     assert!(locate_event["cursor"].is_string());
-
-    let export_path = temp.path().join("transcript.md");
-    ctx(&temp)
-        .args([
-            "show",
-            "session",
-            &ctx_session_id,
-            "--format",
-            "markdown",
-            "--out",
-            export_path.to_str().unwrap(),
-        ])
-        .assert()
-        .success();
-    assert!(
-        export_path.exists(),
-        "show session --out should write the requested artifact path"
-    );
-    let exported = fs::read_to_string(&export_path).unwrap();
-    assert!(
-        exported.contains("- mode: `lite`"),
-        "show session --out should default to lite transcript mode"
-    );
-
-    let full_export_path = temp.path().join("transcript-full.md");
-    ctx(&temp)
-        .args([
-            "show",
-            "session",
-            &ctx_session_id,
-            "--mode",
-            "full",
-            "--format",
-            "markdown",
-            "--out",
-            full_export_path.to_str().unwrap(),
-        ])
-        .assert()
-        .success();
-    let exported_full = fs::read_to_string(&full_export_path).unwrap();
-    assert!(
-        exported_full.contains("- mode: `full`"),
-        "show session --mode full --out should remain explicit"
-    );
 
     let status = json_output(ctx(&temp).args(["status", "--format=json"]));
     assert_eq!(status["schema_version"], 1);

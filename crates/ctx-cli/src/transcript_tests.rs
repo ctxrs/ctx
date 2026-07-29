@@ -1,6 +1,6 @@
 use super::*;
 use chrono::{DateTime, Utc};
-use ctx_history_core::{Fidelity, SyncMetadata, SyncState, Visibility};
+use ctx_history_core::{EventRole, EventType, Fidelity, SyncMetadata, SyncState, Visibility};
 
 fn test_event() -> Event {
     Event {
@@ -27,66 +27,6 @@ fn test_event() -> Event {
             metadata: json!({}),
         },
     }
-}
-
-#[test]
-fn event_content_preserves_payload_text() {
-    let event = test_event();
-
-    let content = event_content(&event);
-    let preview = event_preview(&event);
-
-    assert!(content.contains("local show payload should render"));
-    assert!(preview.contains("local show payload"));
-}
-
-fn truncated_content(complete_content_available: bool) -> ResolvedEventContent {
-    ResolvedEventContent {
-        text: "bounded output preview".to_owned(),
-        outcome: crate::complete_content::EventContentOutcome {
-            requested: ContentPolicy::Complete,
-            complete: false,
-            origin: crate::complete_content::ContentOrigin::CtxIndex,
-            stored_truncated: true,
-            source_verified: false,
-        },
-        complete_content_available,
-    }
-}
-
-#[test]
-fn policy_bounded_text_guidance_is_terminal() {
-    let event = test_event();
-    let mut rendered = String::new();
-    push_event_text_block(&mut rendered, &event, &truncated_content(false));
-
-    assert!(rendered.contains("content: indexed bounded preview (complete content unavailable)"));
-    assert!(!rendered.contains("use --content complete"));
-}
-
-#[test]
-fn policy_bounded_markdown_guidance_is_terminal() {
-    let mut rendered = String::new();
-    push_indexed_truncation_markdown(&mut rendered, &truncated_content(false));
-
-    assert_eq!(
-        rendered,
-        "> Complete content is unavailable beyond this indexed bounded preview.\n\n"
-    );
-    assert!(!rendered.contains("--content complete"));
-}
-
-#[test]
-fn recoverable_message_guidance_still_offers_complete_content() {
-    let content = truncated_content(true);
-    let event = test_event();
-    let mut text = String::new();
-    push_event_text_block(&mut text, &event, &content);
-    let mut markdown = String::new();
-    push_indexed_truncation_markdown(&mut markdown, &content);
-
-    assert!(text.contains("use --content complete"));
-    assert!(markdown.contains("use `--content complete`"));
 }
 
 #[test]

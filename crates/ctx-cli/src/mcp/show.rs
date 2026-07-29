@@ -1,73 +1,34 @@
 use std::path::Path;
 
 use anyhow::Result;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use super::{
-    event_window, event_window_json, invalid_tool_request, open_existing_store, optional_string,
-    optional_transcript_mode, optional_usize, session_transcript_json, OutputFormat,
+    invalid_tool_request, optional_string, optional_transcript_mode, optional_usize,
     TranscriptMode, MAX_EVENT_WINDOW, MCP_MAX_SESSION_EVENTS,
 };
-use crate::complete_content::{
-    resolve_event_contents, ContentPolicy, MCP_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
-};
+use crate::complete_content::{ContentPolicy, MCP_COMPLETE_CONTENT_MAX_OUTPUT_BYTES};
 
 pub(super) fn tool_show_session(arguments: &Value, data_root: &Path) -> Result<Value> {
     let session_id = optional_string(arguments, "ctx_session_id")?
         .ok_or_else(|| invalid_tool_request("ctx_session_id is required"))?;
+    validate_ctx_id(&session_id, "ctx_session_id", "session")?;
     let mode = optional_transcript_mode(arguments, "mode")?.unwrap_or(TranscriptMode::Lite);
     let content_policy = optional_content_policy(arguments, "content")?;
-    if crate::commands::source_index::index_is_available(data_root) {
-        return crate::commands::source_index::mcp_show_session(
-            data_root,
-            &session_id,
-            mode,
-            content_policy,
-            MCP_MAX_SESSION_EVENTS,
-            MCP_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
-        );
-    }
-    let session_id = uuid::Uuid::parse_str(&session_id)
-        .map_err(|error| invalid_tool_request(format!("invalid ctx_session_id: {error}")))?;
-    let store = open_existing_store(data_root)?;
-    let session = store.get_session(session_id)?;
-    let mut events = store.events_for_session_limited(session.id, MCP_MAX_SESSION_EVENTS + 1)?;
-    let truncated = events.len() > MCP_MAX_SESSION_EVENTS;
-    if truncated {
-        events.truncate(MCP_MAX_SESSION_EVENTS);
-    }
-    let selected = crate::transcript::selected_transcript_events(&events, mode);
-    let content = resolve_event_contents(
-        &store,
-        &selected,
-        content_policy,
-        MCP_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
-    )?;
-    let mut value = session_transcript_json(
-        &store,
-        &session,
-        &events,
+    crate::commands::source_index::mcp_show_session(
+        data_root,
+        &session_id,
         mode,
-        OutputFormat::Json,
-        &content,
-    )?;
-    if truncated {
-        if let Some(object) = value.as_object_mut() {
-            object.insert(
-                "truncated".to_owned(),
-                json!({
-                    "events": true,
-                    "max_events": MCP_MAX_SESSION_EVENTS,
-                }),
-            );
-        }
-    }
-    Ok(value)
+        content_policy,
+        MCP_MAX_SESSION_EVENTS,
+        MCP_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
+    )
 }
 
 pub(super) fn tool_show_event(arguments: &Value, data_root: &Path) -> Result<Value> {
     let event_id = optional_string(arguments, "ctx_event_id")?
         .ok_or_else(|| invalid_tool_request("ctx_event_id is required"))?;
+    validate_ctx_id(&event_id, "ctx_event_id", "event")?;
     let before = optional_usize(arguments, "before")?.unwrap_or(0);
     let after = optional_usize(arguments, "after")?.unwrap_or(0);
     let window = optional_usize(arguments, "window")?;
@@ -80,30 +41,15 @@ pub(super) fn tool_show_event(arguments: &Value, data_root: &Path) -> Result<Val
             "show_event before/after/window must be {MAX_EVENT_WINDOW} or less"
         )));
     }
-    if crate::commands::source_index::index_is_available(data_root) {
-        return crate::commands::source_index::mcp_show_event(
-            data_root,
-            &event_id,
-            before,
-            after,
-            window,
-            content_policy,
-            MCP_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
-        );
-    }
-    let event_id = uuid::Uuid::parse_str(&event_id)
-        .map_err(|error| invalid_tool_request(format!("invalid ctx_event_id: {error}")))?;
-    let store = open_existing_store(data_root)?;
-    let event = store.get_event(event_id)?;
-    let events = event_window(&store, &event, before, after, window)?;
-    let selected = events.iter().collect::<Vec<_>>();
-    let content = resolve_event_contents(
-        &store,
-        &selected,
+    crate::commands::source_index::mcp_show_event(
+        data_root,
+        &event_id,
+        before,
+        after,
+        window,
         content_policy,
         MCP_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
-    )?;
-    event_window_json(&store, &event, &events, OutputFormat::Json, &content)
+    )
 }
 
 fn optional_content_policy(arguments: &Value, key: &str) -> Result<ContentPolicy> {
@@ -114,4 +60,13 @@ fn optional_content_policy(arguments: &Value, key: &str) -> Result<ContentPolicy
             "content must be one of indexed, complete",
         )),
     }
+}
+
+fn validate_ctx_id(id: &str, argument: &str, kind: &str) -> Result<()> {
+    if uuid::Uuid::parse_str(id.trim()).is_ok() {
+        return Ok(());
+    }
+    crate::transcript::normalize_uuid_prefix(id, kind)
+        .map(|_| ())
+        .map_err(|error| invalid_tool_request(format!("invalid {argument}: {error}")))
 }

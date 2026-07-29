@@ -44,7 +44,7 @@ pub(crate) use cli::{
 };
 pub(crate) use commands::search::{RefreshArg, SearchRefreshReport};
 pub(crate) use commands::sql::raw_sql_result_json;
-pub(crate) use output::{compact_json, OutputFormat};
+pub(crate) use output::compact_json;
 pub(crate) use provider_args::{cli_supported_provider, parse_provider_arg, ProviderArg};
 pub(crate) use provider_sources::{discovered_plugin_sources_json, sources_json};
 pub(crate) use search_filters::{
@@ -52,9 +52,7 @@ pub(crate) use search_filters::{
     SourceIdentityFilterArgs,
 };
 pub(crate) use search_render::SearchDto;
-pub(crate) use transcript::{
-    event_window, event_window_json, session_transcript_json, TranscriptMode,
-};
+pub(crate) use transcript::TranscriptMode;
 pub(crate) use value_parsers::parse_event_window_limit;
 
 const WAL_TRUNCATE_MIN_BYTES: u64 = 64 * 1024 * 1024;
