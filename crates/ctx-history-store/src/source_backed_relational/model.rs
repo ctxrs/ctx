@@ -46,6 +46,15 @@ pub enum RelationalProjectionError {
         projection_path: std::path::PathBuf,
         generation_path: std::path::PathBuf,
     },
+    #[error(
+        "source-backed SQL projection is not ready for Core generation {expected_generation}; \
+         active generation is {active_generation:?} with status {status}; wait for daemon catch-up"
+    )]
+    SourceBackedSqlGenerationMismatch {
+        expected_generation: String,
+        active_generation: Option<String>,
+        status: String,
+    },
     #[error("invalid committed Core generation: {0}")]
     InvalidCoreGeneration(String),
     #[error("invalid source-backed relational record: {0}")]

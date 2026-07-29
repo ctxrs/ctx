@@ -4,15 +4,16 @@
 //! Command/MCP integration should open this reader at the relational
 //! projection path, not at the legacy canonical Store path. The writer is
 //! advanced only after a certified Core commit through
-//! `SourceBackedRelationalProjection::catch_up`; therefore this reader may
-//! report an older `active_core_generation_id` or `Behind` status without
-//! changing Core search success.
+//! `SourceBackedRelationalProjection::catch_up`. Query admission fails closed
+//! while that projection is absent, behind, or bound to a different Core
+//! generation; Core search success remains independent.
 
 use std::path::{Path, PathBuf};
 
+use ctx_history_index::VerifiedIndex;
 use ctx_history_store::{
     RawSqlOptions, RawSqlResult, RelationalProjectionError, RelationalProjectionMetadata,
-    SourceBackedRelationalProjection,
+    RelationalProjectionStatus, SourceBackedRelationalProjection,
 };
 
 pub type SqlCompatibilityResult<T> = std::result::Result<T, RelationalProjectionError>;
@@ -42,11 +43,34 @@ impl SqlCompatibility {
     pub fn open_for_data_root(data_root: impl AsRef<Path>) -> SqlCompatibilityResult<Self> {
         let data_root = data_root.as_ref();
         let projection_path = sql_compatibility_path(data_root);
+        let generation_path = data_root.join(SOURCE_BACKED_INDEX_DIRECTORY);
         if projection_path.try_exists()? {
-            return Self::open(projection_path);
+            let compatibility = Self::open(projection_path)?;
+            if generation_path.join("meta.json").try_exists()? {
+                let index = VerifiedIndex::open(&generation_path).map_err(|error| {
+                    RelationalProjectionError::InvalidCoreGeneration(error.to_string())
+                })?;
+                let metadata = compatibility.metadata()?;
+                if metadata.status != RelationalProjectionStatus::Ready
+                    || metadata.active_core_generation_id.as_deref() != Some(index.generation_id())
+                {
+                    return Err(
+                        RelationalProjectionError::SourceBackedSqlGenerationMismatch {
+                            expected_generation: index.generation_id().to_owned(),
+                            active_generation: metadata.active_core_generation_id,
+                            status: match metadata.status {
+                                RelationalProjectionStatus::Empty => "empty",
+                                RelationalProjectionStatus::Ready => "ready",
+                                RelationalProjectionStatus::Behind => "behind",
+                            }
+                            .to_owned(),
+                        },
+                    );
+                }
+            }
+            return Ok(compatibility);
         }
 
-        let generation_path = data_root.join(SOURCE_BACKED_INDEX_DIRECTORY);
         if generation_path.join("meta.json").try_exists()? {
             return Err(
                 RelationalProjectionError::MissingSourceBackedSqlProjection {

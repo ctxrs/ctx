@@ -17,6 +17,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 ctx-history-core = { path = "../ctx-history-core" }
+ctx-history-index = { path = "../ctx-history-index" }
 ctx-history-store = { path = "../ctx-history-store" }
 
 [dev-dependencies]
