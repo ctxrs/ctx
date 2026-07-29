@@ -158,6 +158,7 @@ fn helper_messages(fingerprint: &str) -> Vec<(&'static str, HelperMessage)> {
                 cursor: SourceManifestAdmissionCursor {
                     core_generation_id: "a".repeat(64),
                     aggregate_sha256: source_manifest_header().aggregate_sha256,
+                    next_page_previous_sha256: source_manifest_page().page_sha256,
                     next_page_index: 1,
                     next_source_index: 1,
                     next_removal_index: 0,

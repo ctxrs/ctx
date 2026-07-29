@@ -306,7 +306,8 @@ impl SourceBackedProAdmissionConsumer for FixtureConsumer {
         Ok(SourceManifestAdmitted {
             receipt: ctx_pro_host_protocol::SourceManifestAdmissionReceipt {
                 header: header.clone(),
-                page_count: cursor.next_page_index,
+                page_count: header.page_count,
+                terminal_chain_sha256: cursor.next_page_previous_sha256.clone(),
             },
             materializer_revision: self.materializer_revision.clone(),
             progress: self.progress.values().cloned().collect(),

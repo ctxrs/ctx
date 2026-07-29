@@ -52,6 +52,7 @@ pub(super) fn source_manifest_header() -> SourceManifestHeader {
         1,
         1,
         "b".repeat(64),
+        1,
         &manifest.sources,
         &manifest.removals,
     )
@@ -62,6 +63,7 @@ pub(super) fn source_manifest_page() -> SourceManifestPage {
     let header = source_manifest_header();
     SourceManifestPage::new(
         &header,
+        SourceManifestAdmissionCursor::initial(&header).next_page_previous_sha256,
         0,
         0,
         SourceManifestPageEntries::Sources(vec![certified_source()]),
@@ -70,9 +72,11 @@ pub(super) fn source_manifest_page() -> SourceManifestPage {
 }
 
 pub(super) fn source_manifest_admission_receipt() -> SourceManifestAdmissionReceipt {
+    let page = source_manifest_page();
     SourceManifestAdmissionReceipt {
         header: source_manifest_header(),
         page_count: 1,
+        terminal_chain_sha256: page.page_sha256,
     }
 }
 

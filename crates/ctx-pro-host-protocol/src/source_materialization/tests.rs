@@ -399,9 +399,19 @@ fn source_manifest_admission_pages_a_3464_source_production_fixture_deterministi
         .map(|index| certified_source_at(index, 4 * 1024))
         .collect::<Vec<_>>();
     sources.sort_by_key(source_identity_digest);
-    let header =
-        SourceManifestHeader::new("a".repeat(64), 1, 1, 1, 1, "b".repeat(64), &sources, &[])
-            .unwrap();
+    let page_count = u32::try_from(SOURCE_COUNT.div_ceil(MAX_SOURCE_MANIFEST_PAGE_ITEMS)).unwrap();
+    let header = SourceManifestHeader::new(
+        "a".repeat(64),
+        1,
+        1,
+        1,
+        1,
+        "b".repeat(64),
+        page_count,
+        &sources,
+        &[],
+    )
+    .unwrap();
     assert_eq!(header.source_count, 3_464);
     assert_eq!(
         BeginSourceManifestRequest {
@@ -414,19 +424,27 @@ fn source_manifest_admission_pages_a_3464_source_production_fixture_deterministi
         "the rollback whole-manifest transfer must remain bounded"
     );
 
-    let pages = sources
-        .chunks(MAX_SOURCE_MANIFEST_PAGE_ITEMS)
-        .enumerate()
-        .map(|(page_index, entries)| {
-            SourceManifestPage::new(
-                &header,
-                u32::try_from(page_index).unwrap(),
-                u32::try_from(page_index * MAX_SOURCE_MANIFEST_PAGE_ITEMS).unwrap(),
-                SourceManifestPageEntries::Sources(entries.to_vec()),
-            )
-            .unwrap()
-        })
-        .collect::<Vec<_>>();
+    let build_pages = || {
+        let mut previous =
+            SourceManifestAdmissionCursor::initial(&header).next_page_previous_sha256;
+        sources
+            .chunks(MAX_SOURCE_MANIFEST_PAGE_ITEMS)
+            .enumerate()
+            .map(|(page_index, entries)| {
+                let page = SourceManifestPage::new(
+                    &header,
+                    &previous,
+                    u32::try_from(page_index).unwrap(),
+                    u32::try_from(page_index * MAX_SOURCE_MANIFEST_PAGE_ITEMS).unwrap(),
+                    SourceManifestPageEntries::Sources(entries.to_vec()),
+                )
+                .unwrap();
+                previous.clone_from(&page.page_sha256);
+                page
+            })
+            .collect::<Vec<_>>()
+    };
+    let pages = build_pages();
     assert_eq!(
         pages.len(),
         SOURCE_COUNT.div_ceil(MAX_SOURCE_MANIFEST_PAGE_ITEMS)
@@ -437,20 +455,7 @@ fn source_manifest_admission_pages_a_3464_source_production_fixture_deterministi
             .len()
             <= MAX_SOURCE_MANIFEST_PAGE_WIRE_BYTES
     }));
-    assert_eq!(
-        pages,
-        sources
-            .chunks(MAX_SOURCE_MANIFEST_PAGE_ITEMS)
-            .enumerate()
-            .map(|(page_index, entries)| SourceManifestPage::new(
-                &header,
-                u32::try_from(page_index).unwrap(),
-                u32::try_from(page_index * MAX_SOURCE_MANIFEST_PAGE_ITEMS).unwrap(),
-                SourceManifestPageEntries::Sources(entries.to_vec()),
-            )
-            .unwrap())
-            .collect::<Vec<_>>()
-    );
+    assert_eq!(pages, build_pages());
     header.validate_contents(&sources, &[]).unwrap();
 }
 
@@ -480,11 +485,26 @@ fn source_manifest_admission_rejects_an_oversize_metadata_only_page() {
         })
         .collect::<Vec<_>>();
     removals.sort_by_key(|removal| removal.deletion.source().identity().digest());
-    let header =
-        SourceManifestHeader::new("a".repeat(64), 1, 1, 1, 1, "b".repeat(64), &[], &removals)
-            .unwrap();
-    let result =
-        SourceManifestPage::new(&header, 0, 0, SourceManifestPageEntries::Removals(removals));
+    let header = SourceManifestHeader::new(
+        "a".repeat(64),
+        1,
+        1,
+        1,
+        1,
+        "b".repeat(64),
+        1,
+        &[],
+        &removals,
+    )
+    .unwrap();
+    let previous = SourceManifestAdmissionCursor::initial(&header).next_page_previous_sha256;
+    let result = SourceManifestPage::new(
+        &header,
+        previous,
+        0,
+        0,
+        SourceManifestPageEntries::Removals(removals),
+    );
     match result {
         Err(error) => assert_eq!(error.class, ErrorClass::Bounds),
         Ok(page) => panic!(
@@ -499,7 +519,7 @@ fn source_manifest_admission_binds_exact_counts_and_aggregate_digest() {
     let mut sources = vec![certified_source_at(1, 4), certified_source_at(2, 4)];
     sources.sort_by_key(source_identity_digest);
     let header =
-        SourceManifestHeader::new("a".repeat(64), 1, 1, 1, 1, "b".repeat(64), &sources, &[])
+        SourceManifestHeader::new("a".repeat(64), 1, 1, 1, 1, "b".repeat(64), 1, &sources, &[])
             .unwrap();
     let mut wrong_count = header.clone();
     wrong_count.source_count -= 1;
@@ -509,6 +529,15 @@ fn source_manifest_admission_binds_exact_counts_and_aggregate_digest() {
             .unwrap_err()
             .class,
         ErrorClass::Sequence
+    );
+    let mut wrong_page_count = header.clone();
+    wrong_page_count.page_count = 2;
+    assert_eq!(
+        wrong_page_count
+            .validate_contents(&sources, &[])
+            .unwrap_err()
+            .class,
+        ErrorClass::InvalidRequest
     );
     let mut wrong_digest = header;
     wrong_digest.aggregate_sha256 = "f".repeat(64);
@@ -530,14 +559,21 @@ fn source_manifest_admission_rejects_duplicate_and_out_of_order_entries() {
     ];
     sources.sort_by_key(source_identity_digest);
     let header =
-        SourceManifestHeader::new("a".repeat(64), 1, 1, 1, 1, "b".repeat(64), &sources, &[])
+        SourceManifestHeader::new("a".repeat(64), 1, 1, 1, 1, "b".repeat(64), 1, &sources, &[])
             .unwrap();
+    let previous = SourceManifestAdmissionCursor::initial(&header).next_page_previous_sha256;
 
     let duplicate = vec![sources[0].clone(), sources[0].clone()];
     assert_eq!(
-        SourceManifestPage::new(&header, 0, 0, SourceManifestPageEntries::Sources(duplicate),)
-            .unwrap_err()
-            .class,
+        SourceManifestPage::new(
+            &header,
+            &previous,
+            0,
+            0,
+            SourceManifestPageEntries::Sources(duplicate),
+        )
+        .unwrap_err()
+        .class,
         ErrorClass::InvalidRequest
     );
 
@@ -546,6 +582,7 @@ fn source_manifest_admission_rejects_duplicate_and_out_of_order_entries() {
     assert_eq!(
         SourceManifestPage::new(
             &header,
+            previous,
             0,
             0,
             SourceManifestPageEntries::Sources(out_of_order),
@@ -565,11 +602,29 @@ fn source_manifest_admission_restart_preserves_exact_cursor_and_replay_state() {
     ];
     sources.sort_by_key(source_identity_digest);
     let header =
-        SourceManifestHeader::new("a".repeat(64), 1, 1, 1, 1, "b".repeat(64), &sources, &[])
+        SourceManifestHeader::new("a".repeat(64), 1, 1, 1, 1, "b".repeat(64), 3, &sources, &[])
             .unwrap();
+    let initial = SourceManifestAdmissionCursor::initial(&header);
+    let first_page = SourceManifestPage::new(
+        &header,
+        &initial.next_page_previous_sha256,
+        0,
+        0,
+        SourceManifestPageEntries::Sources(vec![sources[0].clone()]),
+    )
+    .unwrap();
+    let second_page = SourceManifestPage::new(
+        &header,
+        &first_page.page_sha256,
+        1,
+        1,
+        SourceManifestPageEntries::Sources(vec![sources[1].clone()]),
+    )
+    .unwrap();
     let cursor = SourceManifestAdmissionCursor {
         core_generation_id: header.core_generation_id.clone(),
         aggregate_sha256: header.aggregate_sha256.clone(),
+        next_page_previous_sha256: second_page.page_sha256,
         next_page_index: 2,
         next_source_index: 2,
         next_removal_index: 0,
@@ -594,12 +649,28 @@ fn source_manifest_admission_restart_preserves_exact_cursor_and_replay_state() {
     replayed_page.validate_for(&header).unwrap();
     assert_eq!(replayed_page.cursor, cursor);
 
+    let third_page = SourceManifestPage::new(
+        &header,
+        &cursor.next_page_previous_sha256,
+        2,
+        2,
+        SourceManifestPageEntries::Sources(vec![sources[2].clone()]),
+    )
+    .unwrap();
     let complete = SourceManifestAdmissionCursor {
+        next_page_previous_sha256: third_page.page_sha256,
         next_page_index: 3,
         next_source_index: header.source_count,
         ..cursor
     };
     assert!(complete.is_complete_for(&header));
+    SourceManifestAdmissionReceipt {
+        header: header.clone(),
+        page_count: header.page_count,
+        terminal_chain_sha256: complete.next_page_previous_sha256.clone(),
+    }
+    .validate()
+    .unwrap();
 
     let mut restarted_for_another_manifest = restarted;
     restarted_for_another_manifest.cursor.aggregate_sha256 = "f".repeat(64);

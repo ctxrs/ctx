@@ -66,6 +66,7 @@ fn source_manifest_aggregate_sha256(
     digest_field(&mut digest, header.policy_schema_hash.as_bytes());
     digest.update(header.source_count.to_be_bytes());
     digest.update(header.removal_count.to_be_bytes());
+    digest.update(header.page_count.to_be_bytes());
     for source in sources {
         digest.update(b"s");
         digest_json(&mut digest, source)?;
@@ -77,12 +78,30 @@ fn source_manifest_aggregate_sha256(
     Ok(hex_digest(digest.finalize()))
 }
 
+fn source_manifest_initial_chain_sha256(header: &SourceManifestHeader) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"ctx-pro-source-manifest-chain-start-v1\0");
+    digest.update(header.contract_version.to_be_bytes());
+    digest_field(&mut digest, header.core_generation_id.as_bytes());
+    digest.update(header.generation_manifest_version.to_be_bytes());
+    digest.update(header.identity_version.to_be_bytes());
+    digest.update(header.lexical_schema_version.to_be_bytes());
+    digest.update(header.lexical_analyzer_version.to_be_bytes());
+    digest_field(&mut digest, header.policy_schema_hash.as_bytes());
+    digest.update(header.source_count.to_be_bytes());
+    digest.update(header.removal_count.to_be_bytes());
+    digest.update(header.page_count.to_be_bytes());
+    digest_field(&mut digest, header.aggregate_sha256.as_bytes());
+    hex_digest(digest.finalize())
+}
+
 fn source_manifest_page_sha256(page: &SourceManifestPage) -> Result<String, ProtocolError> {
     let mut digest = Sha256::new();
     digest.update(b"ctx-pro-source-manifest-page-v1\0");
     digest.update(page.contract_version.to_be_bytes());
     digest_field(&mut digest, page.core_generation_id.as_bytes());
     digest_field(&mut digest, page.aggregate_sha256.as_bytes());
+    digest_field(&mut digest, page.previous_page_sha256.as_bytes());
     digest.update(page.page_index.to_be_bytes());
     digest.update(page.item_index.to_be_bytes());
     digest_json(&mut digest, &page.entries)?;
