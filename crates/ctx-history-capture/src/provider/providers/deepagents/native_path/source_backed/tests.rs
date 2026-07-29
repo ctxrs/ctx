@@ -55,9 +55,7 @@ fn source_backed_open_does_not_follow_leaf_swap_after_authorization() {
     });
     assert!(matches!(
         result,
-        Err(DeepAgentsSourceBackedErrorV0::Capture(
-            CaptureError::InvalidProviderTranscriptPath { .. },
-        )) | Err(DeepAgentsSourceBackedErrorV0::SqliteSource(
+        Err(DeepAgentsSourceBackedErrorV0::SqliteSource(
             SqliteSourceAccessError::SourceChanged,
         ))
     ));
