@@ -377,10 +377,7 @@ fn exact_resolver_hydrates_grouped_records_and_rejects_stale_locator() {
 fn lexical_body_prefers_full_payload_over_native_preview_and_hydrates_identically() {
     let temp = tempdir().unwrap();
     let path = temp.path().join("preview.jsonl");
-    let full = format!(
-        "custom-full-{}-custom-preview-tail",
-        "p".repeat(8_192)
-    );
+    let full = format!("custom-full-{}-custom-preview-tail", "p".repeat(8_192));
     let mut record = event(0, "event-full", "root", &full);
     record["preview"] = Value::String("native preview only".to_owned());
     write_records(

@@ -59,7 +59,6 @@ pub(in super::super) fn estimated_event_bytes(row: &ClineEventRow) -> usize {
         .saturating_add(encoded_option_str(row.body.as_deref()))
         .saturating_add(32)
         .saturating_add(1 + usize::from(row.source_record.is_some()) * (8 + 8 + 8 + 32))
-        .saturating_add(encoded_option_str(row.preview.as_deref()))
         .saturating_add(row.tool_call.as_ref().map_or(1, |call| {
             1_usize
                 .saturating_add(encoded_option_str(call.call_id.as_deref()))
@@ -71,7 +70,6 @@ pub(in super::super) fn estimated_event_bytes(row: &ClineEventRow) -> usize {
                 .saturating_add(encoded_option_i32(output.exit_code))
                 .saturating_add(encoded_option_u64(output.duration_ms))
                 .saturating_add(8)
-                .saturating_add(encoded_option_str(output.preview.as_deref()))
                 .saturating_add(encoded_option_str(output.call_id.as_deref()))
         }))
         .saturating_add(8)
@@ -125,61 +123,6 @@ pub(in super::super) fn estimated_rejection_bytes(rejection: &ClineItemRejection
         .saturating_add(1)
         .saturating_add(8)
         .saturating_add(encoded_str(&rejection.detail))
-}
-
-pub(in super::super) fn estimated_output_bytes(output: &ProOutputObservation) -> usize {
-    let coordinate = encoded_str(&output.coordinate.unit_key)
-        .saturating_add(8)
-        .saturating_add(encoded_option_str(
-            output.coordinate.native_record_id.as_deref(),
-        ))
-        .saturating_add(encoded_option_u64(output.coordinate.source_record_ordinal))
-        .saturating_add(encoded_option_u32(
-            output.coordinate.source_record_subrecord_index,
-        ))
-        .saturating_add(encoded_option_u64(output.coordinate.byte_start))
-        .saturating_add(encoded_option_u64(output.coordinate.byte_end_exclusive));
-    let associations = encoded_str(&output.associations.direct_session_id)
-        .saturating_add(encoded_str(&output.associations.root_session_id))
-        .saturating_add(encoded_option_str(
-            output.associations.parent_session_id.as_deref(),
-        ))
-        .saturating_add(encoded_option_str(
-            output.associations.provider_session_id.as_deref(),
-        ))
-        .saturating_add(encoded_option_str(output.associations.agent_id.as_deref()))
-        .saturating_add(
-            output
-                .associations
-                .repository
-                .as_ref()
-                .map_or(1, |repository| {
-                    1_usize
-                        .saturating_add(encoded_str(&repository.repository_id))
-                        .saturating_add(encoded_option_str(repository.checkout_id.as_deref()))
-                        .saturating_add(encoded_option_str(repository.worktree_id.as_deref()))
-                        .saturating_add(encoded_option_str(repository.object_format.as_deref()))
-                }),
-        );
-    let command = output.command.as_ref().map_or(1, |command| {
-        1_usize
-            .saturating_add(encoded_str(&command.tool_name))
-            .saturating_add(encoded_str(&command.command))
-            .saturating_add(encoded_option_str(command.working_directory.as_deref()))
-    });
-    1_usize
-        .saturating_add(coordinate)
-        .saturating_add(encoded_option_i64(output.occurred_at_unix_ms))
-        .saturating_add(associations)
-        .saturating_add(encoded_option_str(output.call_id.as_deref()))
-        .saturating_add(command)
-        .saturating_add(1)
-        .saturating_add(encoded_option_i32(output.outcome.exit_code))
-        .saturating_add(encoded_option_u64(output.outcome.duration_ms))
-        .saturating_add(4)
-        .saturating_add(encoded_str(&output.locator.kind))
-        .saturating_add(encoded_bytes(&output.locator.payload))
-        .saturating_add(encoded_bytes(&output.content))
 }
 
 pub(in super::super) fn estimated_observation_bytes(
@@ -254,10 +197,6 @@ fn encoded_option_str(value: Option<&str>) -> usize {
 }
 
 fn encoded_option_i32(value: Option<i32>) -> usize {
-    1 + usize::from(value.is_some()) * 4
-}
-
-fn encoded_option_u32(value: Option<u32>) -> usize {
     1 + usize::from(value.is_some()) * 4
 }
 

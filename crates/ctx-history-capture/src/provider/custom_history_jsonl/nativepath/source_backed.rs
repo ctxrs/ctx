@@ -28,11 +28,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use super::{
-    model::{ParsedCustomHistory, CUSTOM_ROUTE_SOURCE_FORMAT},
-    projection::ordered_sessions,
-    reader::parse_custom_history,
-};
+use super::reader::{parse_custom_history, ParsedCustomHistory};
+use crate::provider::custom_history_jsonl::push_provider_import_failure;
 use crate::{
     common::io::{open_provider_source_file, OpenedProviderSourceFile},
     provider::{
@@ -43,6 +40,7 @@ use crate::{
 };
 
 const CUSTOM_SOURCE_IDENTITY_VERSION: u32 = 1;
+const CUSTOM_ROUTE_SOURCE_FORMAT: &str = "ctx_history_jsonl_v1";
 const CUSTOM_SOURCE_SCHEMA_VARIANT: &str = "ctx-history-jsonl-v1-source-backed-v1";
 const CUSTOM_SOURCE_REVISION_KIND: &str = "custom-history-ordinary-file-observation-v1";
 const CUSTOM_SOURCE_BACKED_PARSER_REVISION: &str = "custom-history-jsonl-source-backed-v1";
@@ -679,6 +677,54 @@ fn parse_projection(bytes: &[u8]) -> CustomHistorySourceBackedResult<ParsedProje
     })
 }
 
+fn ordered_sessions(
+    sessions: &BTreeMap<(String, String), (usize, CtxHistoryJsonlSessionRecord)>,
+    summary: &mut ProviderImportSummary,
+) -> Vec<(String, String)> {
+    let mut remaining = sessions.keys().cloned().collect::<BTreeSet<_>>();
+    let mut emitted = BTreeSet::new();
+    let mut ordered = Vec::new();
+    loop {
+        let ready = remaining
+            .iter()
+            .filter(|key| {
+                let session = &sessions[*key].1;
+                [
+                    session.parent_session_id.as_ref(),
+                    session.root_session_id.as_ref(),
+                ]
+                .into_iter()
+                .flatten()
+                .all(|dependency| {
+                    dependency == &session.session_id
+                        || emitted.contains(&(session.source_id.clone(), dependency.clone()))
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if ready.is_empty() {
+            break;
+        }
+        for key in ready {
+            remaining.remove(&key);
+            emitted.insert(key.clone());
+            ordered.push(key);
+        }
+    }
+    for key in remaining {
+        let line = sessions[&key].0;
+        push_provider_import_failure(
+            summary,
+            line,
+            format!(
+                "session `{}` in source `{}` has a cyclic parent/root relationship",
+                key.1, key.0
+            ),
+        );
+    }
+    ordered
+}
+
 fn complete_prefix(bytes: &[u8]) -> (usize, bool) {
     if bytes.is_empty() || bytes.last() == Some(&b'\n') {
         return (bytes.len(), true);
@@ -1113,13 +1159,6 @@ fn lexical_body(event: &CtxHistoryJsonlEventRecord) -> String {
         .find_map(|key| event.payload.get(key).and_then(provider_value_text))
         .or_else(|| provider_value_text(&event.payload))
         .filter(|text| !text.trim().is_empty())
-        .or_else(|| {
-            event
-                .preview
-                .as_deref()
-                .filter(|text| !text.trim().is_empty())
-                .map(str::to_owned)
-        })
         .unwrap_or_default();
     let retained = provider_policy_event_text(event.event_type, &candidate, &event.payload);
     if retained.text.is_empty() {

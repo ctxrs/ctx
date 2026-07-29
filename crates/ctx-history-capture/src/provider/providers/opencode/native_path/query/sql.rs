@@ -1,67 +1,48 @@
-use super::*;
+use sha2::{Digest, Sha256};
 
-pub(super) fn event_source_sql(
-    schema: &OpenCodeNativeSchema,
-    profile: OpenCodeNativeProfile,
-) -> String {
-    event_source_sql_with_data(schema, profile, false)
-}
+use crate::{CaptureError, Result};
 
-pub(super) fn source_backed_event_source_sql(
-    schema: &OpenCodeNativeSchema,
-    profile: OpenCodeNativeProfile,
-) -> String {
-    event_source_sql_with_data(schema, profile, true)
-}
+use super::super::{
+    json::{
+        projection_sql, MISSING_MESSAGE_PROJECTION, MISSING_SESSION_PROJECTION,
+        RELATIONSHIP_MISMATCH_PROJECTION,
+    },
+    model::{OpenCodeNativeOrder, OpenCodeNativeSchemaFamily},
+    schema::OpenCodeNativeSchema,
+};
+use super::OpenCodeRetainedJson;
 
-fn event_source_sql_with_data(
-    schema: &OpenCodeNativeSchema,
-    profile: OpenCodeNativeProfile,
-    include_source_data: bool,
-) -> String {
+const JSON_HINT_BYTES: usize = 256;
+
+pub(super) fn source_backed_event_source_sql(schema: &OpenCodeNativeSchema) -> String {
     match schema.family {
-        OpenCodeNativeSchemaFamily::SessionMessageSeq => row_event_source_sql(
-            schema,
-            "session_message",
-            true,
-            profile,
-            include_source_data,
-        ),
-        OpenCodeNativeSchemaFamily::SessionMessageSynthesizedSeq => row_event_source_sql(
-            schema,
-            "session_message",
-            false,
-            profile,
-            include_source_data,
-        ),
+        OpenCodeNativeSchemaFamily::SessionMessageSeq => {
+            row_event_source_sql(schema, "session_message", true)
+        }
+        OpenCodeNativeSchemaFamily::SessionMessageSynthesizedSeq => {
+            row_event_source_sql(schema, "session_message", false)
+        }
         OpenCodeNativeSchemaFamily::SessionEntry => {
-            row_event_source_sql(schema, "session_entry", false, profile, include_source_data)
+            row_event_source_sql(schema, "session_entry", false)
         }
-        OpenCodeNativeSchemaFamily::LegacyMessage => {
-            row_event_source_sql(schema, "message", false, profile, include_source_data)
-        }
-        OpenCodeNativeSchemaFamily::MessagePart => {
-            part_event_source_sql(schema, profile, include_source_data)
-        }
+        OpenCodeNativeSchemaFamily::LegacyMessage => row_event_source_sql(schema, "message", false),
+        OpenCodeNativeSchemaFamily::MessagePart => part_event_source_sql(schema),
     }
 }
 
-pub(super) fn row_event_source_sql(
+fn row_event_source_sql(
     schema: &OpenCodeNativeSchema,
     table: &str,
     explicit_sequence: bool,
-    profile: OpenCodeNativeProfile,
-    include_source_data: bool,
 ) -> String {
     let type_column = type_expression(schema.event_has_type, "x");
-    let projection = projection_sql("x.data", &type_column, None, schema.family, "?1", profile);
+    let projection = projection_sql("x.data", &type_column, None, schema.family, "?1");
     let order_a = if explicit_sequence {
         "cast(x.seq as integer)"
     } else {
         "cast(x.time_created as integer)"
     };
     let order_tag = if explicit_sequence { 1 } else { 2 };
-    let source_data = if include_source_data { ", x.data" } else { "" };
     format!(
         "select cast(x.id as text), cast(x.id as text), cast(x.session_id as text),
                 {order_tag}, {order_a}, 0,
@@ -83,28 +64,16 @@ pub(super) fn row_event_source_sql(
                          and json_type(x.data, '$.time.created') is not null
                     then 1 else 0
                 end,
-                x.rowid{source_data}
+                x.rowid, x.data
          from {table} x
          left join session s on s.id = x.session_id",
         missing_session = hex_bytes(MISSING_SESSION_PROJECTION),
     )
 }
 
-pub(super) fn part_event_source_sql(
-    schema: &OpenCodeNativeSchema,
-    profile: OpenCodeNativeProfile,
-    include_source_data: bool,
-) -> String {
+fn part_event_source_sql(schema: &OpenCodeNativeSchema) -> String {
     let type_column = type_expression(schema.event_has_type, "p");
-    let projection = projection_sql(
-        "p.data",
-        &type_column,
-        Some("m.data"),
-        schema.family,
-        "?1",
-        profile,
-    );
-    let source_data = if include_source_data { ", p.data" } else { "" };
+    let projection = projection_sql("p.data", &type_column, Some("m.data"), schema.family, "?1");
     format!(
         "select cast(p.id as text), cast(p.message_id as text),
                 cast(p.session_id as text), 3,
@@ -122,7 +91,7 @@ pub(super) fn part_event_source_sql(
                     else {projection}
                 end,
                 0,
-                p.rowid{source_data}
+                p.rowid, p.data
          from part p
          left join message m on m.id = p.message_id
          left join session s on s.id = p.session_id",
@@ -132,7 +101,7 @@ pub(super) fn part_event_source_sql(
     )
 }
 
-pub(super) fn type_expression(has_type: bool, alias: &str) -> String {
+fn type_expression(has_type: bool, alias: &str) -> String {
     if has_type {
         format!(
             "case when typeof({alias}.type) = 'text'
@@ -171,7 +140,7 @@ pub(super) fn decode_order(
             part_id: native_identity.to_owned(),
         }),
         _ => Err(CaptureError::SystemInvariant(
-            "OpenCode snapshot index contains an unknown order tag",
+            "OpenCode source-backed index contains an unknown order tag",
         )),
     }
 }
@@ -203,14 +172,7 @@ pub(super) fn event_digest(
     Ok(super::super::schema::hex_digest(hasher.finalize().into()))
 }
 
-pub(super) fn native_order_digest(order: &OpenCodeNativeOrder) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(b"ctx-opencode-nativepath-order-v1\0");
-    hash_order(&mut hasher, order);
-    super::super::schema::hex_digest(hasher.finalize().into())
-}
-
-pub(super) fn hash_order(hasher: &mut Sha256, order: &OpenCodeNativeOrder) {
+fn hash_order(hasher: &mut Sha256, order: &OpenCodeNativeOrder) {
     match order {
         OpenCodeNativeOrder::ExplicitSequence {
             session_id,
@@ -249,7 +211,7 @@ pub(super) fn hash_order(hasher: &mut Sha256, order: &OpenCodeNativeOrder) {
     }
 }
 
-pub(super) fn hash_str(hasher: &mut Sha256, value: &str) {
+fn hash_str(hasher: &mut Sha256, value: &str) {
     hasher.update((value.len() as u64).to_le_bytes());
     hasher.update(value.as_bytes());
 }
@@ -266,199 +228,11 @@ pub(super) fn native_record_identity(
     }
 }
 
-pub(super) fn stable_native_event_index(
-    session_identity: &str,
-    native_record_identity: &str,
-) -> u64 {
-    let mut hasher = Sha256::new();
-    hasher.update(b"ctx-opencode-family-native-event-index-v1\0");
-    hash_str(&mut hasher, session_identity);
-    hash_str(&mut hasher, native_record_identity);
-    let digest: [u8; 32] = hasher.finalize().into();
-    u64::from_be_bytes(
-        digest[..8]
-            .try_into()
-            .expect("SHA-256 prefix has eight bytes"),
-    )
-}
-
-pub(super) fn ordered_source_rowid(rowid: i64) -> u64 {
-    (rowid as u64) ^ (1_u64 << 63)
-}
-
-pub(super) fn session_digest(values: [&str; 6], time_created: i64, time_updated: i64) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(b"ctx-opencode-nativepath-session-v1\0");
-    for value in values {
-        hash_str(&mut hasher, value);
+fn hex_bytes(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(output, "{byte:02x}");
     }
-    hasher.update(time_created.to_le_bytes());
-    hasher.update(time_updated.to_le_bytes());
-    super::super::schema::hex_digest(hasher.finalize().into())
-}
-
-pub(super) fn optional_session_text(
-    columns: &std::collections::BTreeSet<String>,
-    column: &str,
-) -> String {
-    if columns.contains(column) {
-        format!("case when typeof({column}) = 'text' then cast({column} as text) else '' end")
-    } else {
-        "''".to_owned()
-    }
-}
-
-pub(super) fn session_metadata_preflight_sql(
-    columns: &std::collections::BTreeSet<String>,
-) -> String {
-    let optional_lengths = ["parent_id", "title", "directory", "model", "agent"]
-        .into_iter()
-        .filter(|column| columns.contains(*column))
-        .map(|column| {
-            format!("case when typeof({column}) = 'text' then octet_length({column}) else 0 end")
-        })
-        .collect::<Vec<_>>();
-    let total = std::iter::once("octet_length(id)".to_owned())
-        .chain(optional_lengths)
-        .collect::<Vec<_>>()
-        .join(" + ");
-    format!(
-        "select exists(
-             select 1 from session
-             where typeof(id) <> 'text'
-                or octet_length(id) > ?1
-                or ({total}) + {SESSION_INDEX_FIXED_BYTES} > ?1
-             limit 1
-         )"
-    )
-}
-
-pub(super) fn session_metadata_bytes(
-    identity: &str,
-    parent: &str,
-    title: &str,
-    directory: &str,
-    model: &str,
-    agent: &str,
-) -> Result<i64> {
-    let bytes = identity
-        .len()
-        .checked_add(parent.len())
-        .and_then(|bytes| bytes.checked_add(title.len()))
-        .and_then(|bytes| bytes.checked_add(directory.len()))
-        .and_then(|bytes| bytes.checked_add(model.len()))
-        .and_then(|bytes| bytes.checked_add(agent.len()))
-        .and_then(|bytes| bytes.checked_add(SESSION_INDEX_FIXED_BYTES as usize))
-        .ok_or(CaptureError::SystemInvariant(
-            "OpenCode session metadata byte count overflowed",
-        ))?;
-    i64::try_from(bytes).map_err(|_| {
-        CaptureError::InvalidPayload(
-            "OpenCode session metadata bytes exceed SQLite integer".to_owned(),
-        )
-    })
-}
-
-pub(super) fn nonempty(value: String) -> Option<String> {
-    (!value.trim().is_empty()).then_some(value)
-}
-
-pub(super) fn table_count(conn: &Connection, table: &str) -> Result<u64> {
-    let sql = format!("select count(*) from {table}");
-    let count: i64 = conn.query_row(&sql, [], |row| row.get(0))?;
-    u64::try_from(count).map_err(|_| {
-        CaptureError::InvalidPayload(format!(
-            "OpenCode snapshot index table {table} has a negative row count"
-        ))
-    })
-}
-
-pub(super) fn i64_limit(limit: usize) -> Result<i64> {
-    i64::try_from(limit)
-        .map_err(|_| CaptureError::SystemInvariant("OpenCode page limit exceeds i64"))
-}
-
-pub(super) fn i64_from_u64(value: u64, label: &'static str) -> Result<i64> {
-    i64::try_from(value)
-        .map_err(|_| CaptureError::InvalidPayload(format!("{label} exceed SQLite integer")))
-}
-
-pub(super) fn native_shape_from_family(
-    family: OpenCodeNativeSchemaFamily,
-) -> OpenCodeCapturedShape {
-    match family {
-        OpenCodeNativeSchemaFamily::SessionMessageSeq
-        | OpenCodeNativeSchemaFamily::SessionMessageSynthesizedSeq => {
-            OpenCodeCapturedShape::SessionMessage
-        }
-        OpenCodeNativeSchemaFamily::SessionEntry => OpenCodeCapturedShape::SessionEntry,
-        OpenCodeNativeSchemaFamily::LegacyMessage => OpenCodeCapturedShape::Message,
-        OpenCodeNativeSchemaFamily::MessagePart => OpenCodeCapturedShape::MessagePart,
-    }
-}
-
-pub(super) fn native_locator(
-    shape: OpenCodeCapturedShape,
-    rowid: i64,
-) -> Result<OpenCodeNativeLocator> {
-    let locator = opencode_message_locator(shape, rowid)?;
-    Ok(OpenCodeNativeLocator {
-        version: 1,
-        kind: locator.kind().to_owned(),
-        payload: locator.value().to_vec(),
-    })
-}
-
-pub(super) fn output_unit_bytes(
-    native_identity: &str,
-    output: &OpenCodeOutputDraft,
-) -> Result<u64> {
-    let variable = [
-        native_identity.len(),
-        output.call_id.as_ref().map_or(0, String::len),
-        output.tool_name.as_ref().map_or(0, String::len),
-        output.command.as_ref().map_or(0, String::len),
-        output.working_directory.as_ref().map_or(0, String::len),
-        output.content.len(),
-    ]
-    .into_iter()
-    .try_fold(0_usize, usize::checked_add)
-    .ok_or(CaptureError::SystemInvariant(
-        "OpenCode output byte accounting overflowed",
-    ))?;
-    // Includes frontier, locator, source/session/message associations, option/length prefixes,
-    // fixed scalar fields, and the maximum validated native identity relationship envelope.
-    let bytes = variable
-        .checked_add(48 * 1024)
-        .ok_or(CaptureError::SystemInvariant(
-            "OpenCode output byte accounting overflowed",
-        ))?;
-    u64::try_from(bytes)
-        .map_err(|_| CaptureError::SystemInvariant("OpenCode output bytes exceed u64"))
-}
-
-pub(super) fn rejection_unit_bytes(native_identity: &str, reason: &str) -> Result<u64> {
-    let bytes = native_identity
-        .len()
-        .checked_add(reason.len())
-        .and_then(|bytes| bytes.checked_add(48 * 1024))
-        .ok_or(CaptureError::SystemInvariant(
-            "OpenCode rejection byte accounting overflowed",
-        ))?;
-    u64::try_from(bytes)
-        .map_err(|_| CaptureError::SystemInvariant("OpenCode rejection bytes exceed u64"))
-}
-
-pub(super) fn sqlite_nonnegative_u64(value: i64) -> rusqlite::Result<u64> {
-    u64::try_from(value).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(
-            0,
-            rusqlite::types::Type::Integer,
-            Box::new(error),
-        )
-    })
-}
-
-pub(super) fn hex_bytes(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    output
 }

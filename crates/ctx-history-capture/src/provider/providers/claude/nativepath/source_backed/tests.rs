@@ -66,10 +66,7 @@ fn source_backed_cold_and_noop_extract_stable_bounded_documents_and_frontiers() 
     let projects = projects_root(temp.path());
     let primary = session_path(&projects, "-project", "session-1");
     let subagent = projects.join("-project/session-1/subagents/agent-review.jsonl");
-    let full_body = format!(
-        "claude-full-{}-claude-tail-sentinel",
-        "c".repeat(8_192)
-    );
+    let full_body = format!("claude-full-{}-claude-tail-sentinel", "c".repeat(8_192));
     write_lines(
         &primary,
         &[

@@ -4,9 +4,7 @@ use super::*;
 pub(in super::super) struct ParsedItem {
     pub(in super::super) checkpoint: ClineItemCheckpoint,
     pub(in super::super) rows: Vec<ClineEventRow>,
-    pub(in super::super) outputs: Vec<ProOutputObservation>,
     pub(in super::super) rejection: Option<ClineItemRejection>,
-    pub(in super::super) transient_rejections: Vec<ClineItemRejection>,
     pub(in super::super) core_bytes: usize,
     pub(in super::super) source_record: Option<ClineSourceRecordEvidence>,
 }
@@ -371,10 +369,8 @@ fn retain_item_byte(bytes: &mut Vec<u8>, record_digest: Option<&mut Sha256>, byt
 #[allow(clippy::too_many_arguments)]
 pub(in super::super) fn parse_scanned_item(
     scanned: ClineScannedItem,
-    source: &ClineFileSourceIdentity,
     identity: &ClineTaskIdentity,
     component: ClineEventComponent,
-    profile: ClineNativeProfile,
     max_item_units: usize,
     native_id_occurrences: &mut BTreeMap<String, u64>,
     stats: &mut ClinePublicationStats,
@@ -428,10 +424,8 @@ pub(in super::super) fn parse_scanned_item(
     let mut item = parse_item(
         raw,
         ItemParseContext {
-            source,
             identity,
             component,
-            profile,
             max_item_units,
         },
         scanned.native_index,

@@ -10,7 +10,7 @@ pub(super) struct ParsedProjection<'a> {
 pub(super) fn parse_api_projection<'a>(
     raw_item: &'a RawValue,
     envelope: &RawEnvelope<'a>,
-    source: &ClineFileSourceIdentity,
+    component: ClineEventComponent,
     identity: &ClineTaskIdentity,
     native_key: &ClineNativeItemKey,
     native_index: u64,
@@ -29,10 +29,7 @@ pub(super) fn parse_api_projection<'a>(
     let role = role_from_discriminators(&discriminators);
     let context = ClineEventContext {
         task: identity,
-        component: match source.component {
-            ClineComponent::FallbackHistory => ClineEventComponent::FallbackHistory,
-            _ => ClineEventComponent::ApiHistory,
-        },
+        component,
         item: native_key,
         item_index: native_index,
         role,
@@ -270,7 +267,6 @@ pub(super) fn extract_file_touches(
 pub(super) fn parse_ui_projection<'a>(
     raw_item: &'a RawValue,
     envelope: &RawEnvelope<'a>,
-    _source: &ClineFileSourceIdentity,
     identity: &ClineTaskIdentity,
     native_key: &ClineNativeItemKey,
     native_index: u64,
@@ -378,201 +374,4 @@ pub(super) fn decode_retained_text(
                 format!("invalid retained Cline text: {error}"),
             )
         })
-}
-
-pub(super) fn decode_output_body(raw: Option<&RawValue>) -> Result<Vec<u8>, &'static str> {
-    let Some(raw) = raw else {
-        return Ok(Vec::new());
-    };
-    if raw.get().len() > MAX_OUTPUT_BODY_RAW_BYTES {
-        return Err("Cline output body exceeds the independent 4 MiB transient bound");
-    }
-    if raw.get().trim_start().starts_with('"') {
-        return serde_json::from_str::<String>(raw.get())
-            .map(String::into_bytes)
-            .map_err(|_| "Cline output body is not a valid JSON string");
-    }
-    if raw.get().trim() == "null" {
-        return Ok(Vec::new());
-    }
-    let value = serde_json::from_str::<serde_json::Value>(raw.get())
-        .map_err(|_| "Cline output body is not valid explicit JSON")?;
-    serde_json::to_vec(&value).map_err(|_| "Cline output body could not be encoded")
-}
-
-pub(super) fn decode_failure_preview(raw: Option<&RawValue>) -> Option<Box<str>> {
-    let raw = raw?;
-    if raw.get().trim_start().starts_with('"') {
-        decode_json_string_preview(raw.get()).map(String::into_boxed_str)
-    } else {
-        Some(failure_preview_from_bytes(raw.get().as_bytes()))
-    }
-}
-
-pub(super) fn decode_json_string_preview(raw: &str) -> Option<String> {
-    let bytes = raw.trim_start().as_bytes();
-    if bytes.first() != Some(&b'"') {
-        return None;
-    }
-    let mut output = String::new();
-    let mut index = 1_usize;
-    let mut chars = 0_usize;
-    while index < bytes.len() && chars < CLINE_NATIVE_MAX_FAILURE_PREVIEW_BYTES {
-        match bytes[index] {
-            b'"' => return Some(output),
-            b'\\' => {
-                index = index.checked_add(1)?;
-                let escaped = *bytes.get(index)?;
-                let decoded = match escaped {
-                    b'"' => '"',
-                    b'\\' => '\\',
-                    b'/' => '/',
-                    b'b' => '\u{0008}',
-                    b'f' => '\u{000c}',
-                    b'n' => '\n',
-                    b'r' => '\r',
-                    b't' => '\t',
-                    b'u' => {
-                        let first = decode_hex_quad(bytes.get(index + 1..index + 5)?)?;
-                        index = index.checked_add(4)?;
-                        let scalar = if (0xd800..=0xdbff).contains(&first) {
-                            if bytes.get(index + 1..index + 3) != Some(b"\\u") {
-                                return None;
-                            }
-                            let second = decode_hex_quad(bytes.get(index + 3..index + 7)?)?;
-                            if !(0xdc00..=0xdfff).contains(&second) {
-                                return None;
-                            }
-                            index = index.checked_add(6)?;
-                            0x1_0000
-                                + ((u32::from(first) - 0xd800) << 10)
-                                + (u32::from(second) - 0xdc00)
-                        } else {
-                            u32::from(first)
-                        };
-                        char::from_u32(scalar)?
-                    }
-                    _ => return None,
-                };
-                output.push(decoded);
-                chars = chars.saturating_add(1);
-                index = index.checked_add(1)?;
-            }
-            _ => {
-                let tail = std::str::from_utf8(bytes.get(index..)?).ok()?;
-                let decoded = tail.chars().next()?;
-                output.push(decoded);
-                chars = chars.saturating_add(1);
-                index = index.checked_add(decoded.len_utf8())?;
-            }
-        }
-    }
-    Some(output)
-}
-
-pub(super) fn decode_hex_quad(bytes: &[u8]) -> Option<u16> {
-    if bytes.len() != 4 {
-        return None;
-    }
-    bytes.iter().try_fold(0_u16, |value, byte| {
-        let digit = match byte {
-            b'0'..=b'9' => u16::from(*byte - b'0'),
-            b'a'..=b'f' => u16::from(*byte - b'a' + 10),
-            b'A'..=b'F' => u16::from(*byte - b'A' + 10),
-            _ => return None,
-        };
-        value.checked_mul(16)?.checked_add(digit)
-    })
-}
-
-pub(super) fn failure_preview_from_bytes(bytes: &[u8]) -> Box<str> {
-    String::from_utf8_lossy(bytes)
-        .chars()
-        .take(CLINE_NATIVE_MAX_FAILURE_PREVIEW_BYTES)
-        .collect::<String>()
-        .into_boxed_str()
-}
-
-pub(super) fn build_output_observation(
-    source: &ClineFileSourceIdentity,
-    identity: &ClineTaskIdentity,
-    native_key: &ClineNativeItemKey,
-    native_index: u64,
-    output: OutputCandidate<'_>,
-    content: Vec<u8>,
-) -> ProOutputObservation {
-    let component = match source.component {
-        ClineComponent::ApiHistory => "api",
-        ClineComponent::UiMessages => "ui",
-        ClineComponent::FallbackHistory => "fallback",
-        ClineComponent::TaskMetadata => "metadata",
-        ClineComponent::HistoryItem => "history_item",
-        ClineComponent::TaskIndex => "task_index",
-        ClineComponent::RootIndex => "root",
-    };
-    let mut identity_hash = Sha256::new();
-    identity_hash.update(b"ctx-task-json-output-item-v1\0");
-    identity_hash.update(source.provider.as_bytes());
-    identity_hash.update([source.component as u8]);
-    match native_key {
-        ClineNativeItemKey::NativeId {
-            native_id,
-            occurrence,
-        } => {
-            identity_hash.update(b"id\0");
-            identity_hash.update(native_id.as_bytes());
-            identity_hash.update(occurrence.to_le_bytes());
-        }
-        ClineNativeItemKey::ComponentOrdinal(ordinal) => {
-            identity_hash.update(b"ordinal\0");
-            identity_hash.update(ordinal.to_le_bytes());
-        }
-    }
-    identity_hash.update(output.sub_index.to_le_bytes());
-    let identity_hash = identity_hash.finalize();
-    let mut encoded_identity = String::with_capacity(identity_hash.len() * 2);
-    for byte in identity_hash {
-        use std::fmt::Write as _;
-        let _ = write!(encoded_identity, "{byte:02x}");
-    }
-    let unit_key = format!(
-        "{}/nativepath/{component}/{}",
-        source.provider, encoded_identity
-    );
-    let mut locator = Vec::with_capacity(29);
-    locator.push(source.component as u8);
-    locator.extend_from_slice(&native_index.to_be_bytes());
-    locator.extend_from_slice(&output.sub_index.to_be_bytes());
-    locator.extend_from_slice(&output.byte_start.to_be_bytes());
-    locator.extend_from_slice(&output.byte_end_exclusive.to_be_bytes());
-    ProOutputObservation {
-        kind: output.kind,
-        coordinate: OutputNativeCoordinate {
-            unit_key: unit_key.clone(),
-            native_sequence: native_index,
-            native_record_id: Some(unit_key),
-            source_record_ordinal: Some(native_index),
-            source_record_subrecord_index: Some(output.sub_index),
-            byte_start: Some(output.byte_start),
-            byte_end_exclusive: Some(output.byte_end_exclusive),
-        },
-        occurred_at_unix_ms: output.occurred_at_millis,
-        associations: OutputAssociations {
-            direct_session_id: identity.as_str().to_owned(),
-            root_session_id: identity.as_str().to_owned(),
-            parent_session_id: None,
-            provider_session_id: Some(identity.as_str().to_owned()),
-            agent_id: None,
-            repository: None,
-        },
-        call_id: output.call_id,
-        command: None,
-        outcome: output.outcome,
-        locator: OutputSourceLocator {
-            version: 1,
-            kind: "cline_native_component_range".to_owned(),
-            payload: locator,
-        },
-        content,
-    }
 }

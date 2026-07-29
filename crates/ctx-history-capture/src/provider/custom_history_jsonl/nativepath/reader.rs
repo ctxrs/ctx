@@ -1,92 +1,42 @@
-use super::*;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::{BufRead, Cursor, Read},
+    path::Path,
+};
 
-pub(crate) fn import_custom_history_nativepath(
-    path: &Path,
-    store: &mut Store,
-    options: CustomHistoryJsonlV1ImportOptions,
-) -> Result<ProviderImportSummary> {
-    let logical_path = options
-        .source_path
-        .clone()
-        .unwrap_or_else(|| path.to_path_buf());
-    let logical_locator = logical_locator(&logical_path);
-    let stream = custom_native_cursor_stream(&logical_locator);
-    let context = ProviderAdapterContext {
-        machine_id: options.machine_id.clone(),
-        source_path: Some(logical_path.clone()),
-        source_root: None,
-        imported_at: options.imported_at,
-    };
-    let stamp = match CustomFileStamp::observe(path) {
-        Ok(stamp) => stamp,
-        Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
-            return retire_missing_source(
-                store,
-                &context,
-                &options,
-                &logical_locator,
-                &stream,
-                ProviderSourceRouteRetirementReason::SourceMissing,
-            );
-        }
-        Err(error) => return Err(error),
-    };
-    let bytes = stamp.read_all()?;
-    let source_revision = source_revision(
-        &bytes,
-        Some(&stamp),
-        options.inventory_observation_token.as_deref(),
-    );
-    let parsed = parse_custom_history(Cursor::new(bytes), source_revision)?;
-    import_parsed(
-        store,
-        &context,
-        &options,
-        &logical_locator,
-        &stream,
-        parsed,
-        Some(&stamp),
-    )
-}
+use ctx_history_core::{
+    CtxHistoryJsonlEdgeRecord, CtxHistoryJsonlEventRecord, CtxHistoryJsonlFileTouchRecord,
+    CtxHistoryJsonlRecord, CtxHistoryJsonlSessionRecord, CtxHistoryJsonlSourceRecord,
+    CTX_HISTORY_JSONL_V1_SCHEMA_VERSION,
+};
 
-pub(crate) fn import_custom_history_nativepath_reader(
-    mut reader: impl BufRead,
-    store: &mut Store,
-    options: CustomHistoryJsonlV1ImportOptions,
-) -> Result<ProviderImportSummary> {
-    let mut bytes = Vec::new();
-    reader.read_to_end(&mut bytes)?;
-    let source_revision =
-        source_revision(&bytes, None, options.inventory_observation_token.as_deref());
-    let parsed = parse_custom_history(Cursor::new(bytes), source_revision)?;
-    let logical_locator = options
-        .source_path
-        .as_ref()
-        .map(|path| logical_locator(path))
-        .unwrap_or_else(|| logical_reader_locator(&parsed));
-    let stream = custom_native_cursor_stream(&logical_locator);
-    let context = ProviderAdapterContext {
-        machine_id: options.machine_id.clone(),
-        source_path: options.source_path.clone(),
-        source_root: None,
-        imported_at: options.imported_at,
-    };
-    import_parsed(
-        store,
-        &context,
-        &options,
-        &logical_locator,
-        &stream,
-        parsed,
-        None,
-    )
+use crate::{
+    common::io::{open_provider_source_file, read_provider_jsonl_record_or_skip_oversized},
+    ProviderImportSummary, Result,
+};
+
+use super::super::{
+    push_provider_import_failure, reject_invalid_custom_history_references,
+    retain_custom_history_content_sessions, validate_custom_history_identifier,
+    validate_custom_source_record,
+};
+
+#[derive(Debug)]
+pub(super) struct ParsedCustomHistory {
+    pub(super) summary: ProviderImportSummary,
+    pub(super) sources: BTreeMap<String, (usize, CtxHistoryJsonlSourceRecord)>,
+    pub(super) sessions: BTreeMap<(String, String), (usize, CtxHistoryJsonlSessionRecord)>,
+    pub(super) events: Vec<(usize, CtxHistoryJsonlEventRecord)>,
+    pub(super) file_touches: Vec<(usize, CtxHistoryJsonlFileTouchRecord)>,
+    pub(super) edges: Vec<(usize, CtxHistoryJsonlEdgeRecord)>,
+    pub(super) source_revision: String,
 }
 
 pub(crate) fn validate_custom_history_nativepath(path: &Path) -> Result<ProviderImportSummary> {
-    let stamp = CustomFileStamp::observe(path)?;
-    let bytes = stamp.read_all()?;
-    let revision = source_revision(&bytes, Some(&stamp), None);
-    Ok(parse_custom_history(Cursor::new(bytes), revision)?.summary)
+    let source = open_provider_source_file(path)?;
+    let bytes = source.read_all_bounded(usize::MAX)?;
+    source.revalidate()?;
+    Ok(parse_custom_history(Cursor::new(bytes), "validation-only".to_owned())?.summary)
 }
 
 pub(crate) fn validate_custom_history_nativepath_reader(
@@ -94,8 +44,7 @@ pub(crate) fn validate_custom_history_nativepath_reader(
 ) -> Result<ProviderImportSummary> {
     let mut bytes = Vec::new();
     reader.read_to_end(&mut bytes)?;
-    let revision = source_revision(&bytes, None, None);
-    Ok(parse_custom_history(Cursor::new(bytes), revision)?.summary)
+    Ok(parse_custom_history(Cursor::new(bytes), "validation-only".to_owned())?.summary)
 }
 
 pub(super) fn parse_custom_history(

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::{OutputOutcome, OutputOutcomeMetadata, ProOutputObservation};
+use crate::{OutputOutcome, OutputOutcomeMetadata};
 
 use super::source::{ClineComponent, ClineComponentObservation};
 
@@ -17,33 +17,10 @@ const PAGE_IDENTITY_DOMAIN: &[u8] = b"ctx-native-ingestion-page-v1\0";
 const SESSION_HASH_DOMAIN: &[u8] = b"ctx-cline-nativepath-session-v2\0";
 
 pub(crate) const CLINE_NATIVE_PAGE_MAX_UNITS: usize = 64;
-/// Locator reconciliation, capture-source upsert, route binding, and the
-/// component cursor are charged on every Core publication page.
 pub(crate) const CLINE_NATIVE_FIXED_PAGE_UNITS: usize = 4;
 pub(crate) const CLINE_NATIVE_SESSION_PAGE_UNITS: usize = 1;
-pub(crate) const CLINE_NATIVE_PAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
 pub(super) const CLINE_NATIVE_CORE_PAGE_MAX_BYTES: usize = 4 * 1024 * 1024;
-pub(super) const CLINE_NATIVE_TRANSIENT_PAGE_MAX_BYTES: usize = 4 * 1024 * 1024;
 pub(super) const CLINE_NATIVE_MAX_RETAINED_ITEM_BYTES: usize = 64 * 1024;
-pub(super) const CLINE_NATIVE_MAX_REJECTIONS: usize = 32;
-pub(super) const CLINE_NATIVE_MAX_FAILURE_PREVIEW_BYTES: usize = 4_000;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ClineNativeProfile {
-    CoreOnly,
-    CoreAndPro,
-    SourceBackedCoreOnly,
-}
-
-impl ClineNativeProfile {
-    pub(super) fn wants_outputs(self) -> bool {
-        self == Self::CoreAndPro
-    }
-
-    pub(super) fn wants_record_evidence(self) -> bool {
-        self == Self::SourceBackedCoreOnly
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct ClineTaskIdentity(pub(crate) Arc<str>);
@@ -136,7 +113,6 @@ pub(crate) struct ClineSparseOutputDiagnostic {
     pub(crate) exit_code: Option<i32>,
     pub(crate) duration_ms: Option<u64>,
     pub(crate) output_bytes: usize,
-    pub(crate) preview: Option<Box<str>>,
     pub(crate) call_id: Option<Box<str>>,
 }
 
@@ -166,7 +142,6 @@ pub(crate) struct ClineEventRow {
     pub(crate) occurred_at_millis: Option<i64>,
     pub(crate) body: Option<Box<str>>,
     pub(crate) content_hash: [u8; 32],
-    pub(crate) preview: Option<Box<str>>,
     pub(crate) tool_call: Option<ClineToolCall>,
     pub(crate) sparse_output: Option<ClineSparseOutputDiagnostic>,
     pub(crate) file_touches: Box<[ClineFileTouch]>,
@@ -180,10 +155,6 @@ impl ClineEventRow {
         kind: ClineEventKind,
         body: String,
     ) -> Self {
-        let preview = body
-            .chars()
-            .take(crate::PROVIDER_MAX_PREVIEW_CHARS)
-            .collect::<String>();
         let content_hash = event_hash(context, sub_index, kind, context.role, body.as_bytes());
         Self {
             identity: event_identity(context, sub_index),
@@ -193,7 +164,6 @@ impl ClineEventRow {
             occurred_at_millis: context.occurred_at_millis,
             body: Some(body.into_boxed_str()),
             content_hash,
-            preview: Some(preview.into_boxed_str()),
             tool_call: None,
             sparse_output: None,
             file_touches: Box::default(),
@@ -229,7 +199,6 @@ impl ClineEventRow {
                 &safe,
             ),
             body: None,
-            preview: None,
             tool_call: Some(ClineToolCall {
                 call_id: call_id.map(String::into_boxed_str),
                 name: name.map(String::into_boxed_str),
@@ -258,9 +227,6 @@ impl ClineEventRow {
         if let Some(call_id) = diagnostic.call_id.as_deref() {
             safe.extend_from_slice(call_id.as_bytes());
         }
-        if let Some(preview) = diagnostic.preview.as_deref() {
-            safe.extend_from_slice(preview.as_bytes());
-        }
         Self {
             identity: event_identity(context, sub_index),
             native_order: native_order(context, sub_index),
@@ -269,7 +235,6 @@ impl ClineEventRow {
             occurred_at_millis: context.occurred_at_millis,
             body: None,
             content_hash: event_hash(context, sub_index, kind, ClineEventRole::Unknown, &safe),
-            preview: None,
             tool_call: None,
             sparse_output: Some(diagnostic),
             file_touches: Box::default(),
@@ -355,7 +320,6 @@ fn event_hash(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ClineItemRejectionKind {
     OversizedRetainedItem,
-    OversizedTransientOutput,
     MalformedRecord,
     ConflictingDiscriminator,
     UnsupportedShape,
@@ -684,10 +648,8 @@ pub(crate) enum ClineTerminalEvidence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ClinePageAccounting {
     pub(crate) core_units: usize,
-    pub(crate) potential_output_units: usize,
     pub(crate) logical_units: usize,
     pub(crate) conservative_core_bytes: usize,
-    pub(crate) transient_output_bytes: usize,
     pub(crate) conservative_serialized_bytes: usize,
 }
 
@@ -699,12 +661,6 @@ pub(crate) struct ClineCorePayload {
     pub(crate) events: Box<[ClineEventRow]>,
     pub(crate) rejections: Box<[ClineItemRejection]>,
     pub(crate) terminal_metadata_checkpoint: Option<Box<ClineMetadataCheckpoint>>,
-}
-
-#[derive(Debug)]
-pub(crate) struct ClineTransientOutputPayload {
-    pub(crate) observations: Vec<ProOutputObservation>,
-    pub(crate) rejected_outputs: Box<[ClineItemRejection]>,
 }
 
 #[derive(Debug)]
@@ -720,7 +676,6 @@ pub(crate) struct ClineCertifiedPage {
     pub(crate) terminal_evidence: Option<ClineTerminalEvidence>,
     pub(crate) accounting: ClinePageAccounting,
     pub(crate) core: ClineCorePayload,
-    pub(crate) transient: Option<ClineTransientOutputPayload>,
     pub(crate) source_record: Option<ClineSourceRecordEvidence>,
 }
 
@@ -735,14 +690,6 @@ pub(crate) struct ClinePublicationStats {
     pub(crate) core_rows: usize,
     pub(crate) local_rejections: usize,
     pub(crate) output_outcomes_observed: usize,
-    pub(crate) output_bodies_hydrated: usize,
-    pub(crate) output_body_bytes_hydrated: usize,
-    pub(crate) success_unknown_core_rows: usize,
-    pub(crate) success_unknown_hashes: usize,
-    pub(crate) success_unknown_previews: usize,
-    pub(crate) success_unknown_touches: usize,
-    pub(crate) success_unknown_blobs: usize,
-    pub(crate) success_unknown_fts_documents: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

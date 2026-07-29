@@ -8,18 +8,16 @@ use sha2::{Digest, Sha256};
 use super::{
     normalize::{
         core_payload_fingerprint, estimated_frontier_bytes, estimated_metadata_checkpoint_bytes,
-        estimated_output_bytes, estimated_rejection_bytes, estimated_revision_bytes,
-        estimated_session_bytes, estimated_source_bytes, page_identity, ClineArrayCheckpoint,
-        ClineCatalogCompletion, ClineCatalogIndex, ClineCatalogRejection, ClineCertifiedPage,
-        ClineCertifiedRevision, ClineComponentFailure, ClineComponentFailureKind,
-        ClineComponentReadOutcome, ClineComponentTransition, ClineCorePayload, ClineEventComponent,
-        ClineEventKind, ClineFileSourceIdentity, ClineItemRejection, ClineItemRejectionKind,
-        ClineMetadataCheckpoint, ClineNativeProfile, ClinePageAccounting, ClinePageFrontier,
-        ClinePublicationStats, ClineSessionRow, ClineTaskCheckpoint, ClineTaskIdentity,
-        ClineTaskIdentityOrigin, ClineTerminalEvidence, ClineTransientOutputPayload,
-        CLINE_NATIVE_CORE_PAGE_MAX_BYTES, CLINE_NATIVE_FIXED_PAGE_UNITS,
-        CLINE_NATIVE_MAX_REJECTIONS, CLINE_NATIVE_PAGE_MAX_BYTES, CLINE_NATIVE_SESSION_PAGE_UNITS,
-        CLINE_NATIVE_TRANSIENT_PAGE_MAX_BYTES,
+        estimated_rejection_bytes, estimated_revision_bytes, estimated_session_bytes,
+        estimated_source_bytes, page_identity, ClineArrayCheckpoint, ClineCatalogCompletion,
+        ClineCatalogIndex, ClineCatalogRejection, ClineCertifiedPage, ClineCertifiedRevision,
+        ClineComponentFailure, ClineComponentFailureKind, ClineComponentReadOutcome,
+        ClineComponentTransition, ClineCorePayload, ClineEventComponent, ClineEventKind,
+        ClineFileSourceIdentity, ClineItemRejection, ClineItemRejectionKind,
+        ClineMetadataCheckpoint, ClinePageAccounting, ClinePageFrontier, ClinePublicationStats,
+        ClineSessionRow, ClineTaskCheckpoint, ClineTaskIdentity, ClineTaskIdentityOrigin,
+        ClineTerminalEvidence, CLINE_NATIVE_CORE_PAGE_MAX_BYTES, CLINE_NATIVE_FIXED_PAGE_UNITS,
+        CLINE_NATIVE_SESSION_PAGE_UNITS,
     },
     parse::{
         hydrate_component, parse_metadata, parse_root_index, parse_scanned_item,
@@ -39,7 +37,6 @@ type BeforeExposureHook = Box<dyn FnMut(&Path, ClineComponent)>;
 pub(crate) struct ClineNativeReader {
     discovery: ClineDiscovery,
     dialect: TaskJsonNativeDialect,
-    profile: ClineNativeProfile,
     previous_by_path: BTreeMap<PathBuf, ClineTaskCheckpoint>,
     route_index: usize,
     pending_page: Option<ClineCertifiedPage>,
@@ -341,33 +338,6 @@ fn local_authority_failure(
     }
 }
 
-fn output_pressure_rejection(
-    component: ClineComponent,
-    output: &crate::ProOutputObservation,
-) -> Option<ClineItemRejection> {
-    let event_component = event_component(component)?;
-    Some(ClineItemRejection {
-        component: event_component,
-        native_index: output.coordinate.native_sequence,
-        native_id: None,
-        kind: ClineItemRejectionKind::OversizedTransientOutput,
-        observed_bytes: u64::try_from(output.content.len()).unwrap_or(u64::MAX),
-        detail: "Cline transient output exceeded the independently bounded page lane".into(),
-    })
-}
-
-fn event_component(component: ClineComponent) -> Option<ClineEventComponent> {
-    match component {
-        ClineComponent::ApiHistory => Some(ClineEventComponent::ApiHistory),
-        ClineComponent::UiMessages => Some(ClineEventComponent::UiMessages),
-        ClineComponent::FallbackHistory => Some(ClineEventComponent::FallbackHistory),
-        ClineComponent::TaskMetadata
-        | ClineComponent::HistoryItem
-        | ClineComponent::TaskIndex
-        | ClineComponent::RootIndex => None,
-    }
-}
-
 fn estimated_page_envelope_bytes(
     source: &ClineFileSourceIdentity,
     revision: &ClineCertifiedRevision,
@@ -393,14 +363,9 @@ fn estimated_page_envelope_bytes(
         .saturating_add(1)
 }
 
-pub(super) fn owned_page_bounds_are_valid(
-    core_bytes: usize,
-    transient_bytes: usize,
-    logical_units: usize,
-) -> bool {
+pub(super) fn owned_page_bounds_are_valid(core_bytes: usize, logical_units: usize) -> bool {
     logical_units <= super::normalize::CLINE_NATIVE_PAGE_MAX_UNITS
         && core_bytes <= CLINE_NATIVE_CORE_PAGE_MAX_BYTES
-        && core_bytes.saturating_add(transient_bytes) <= CLINE_NATIVE_PAGE_MAX_BYTES
 }
 
 fn estimated_transition_bytes() -> usize {

@@ -18,21 +18,14 @@ impl ClineNativeReader {
     ) -> Result<ClineCertifiedPage, ClineComponentFailure> {
         let mut events = Vec::new();
         let mut rejections = Vec::new();
-        let mut outputs = Vec::new();
-        let mut transient_rejections = Vec::new();
         let mut core_bytes =
             estimated_page_envelope_bytes(&source, &revision, &expected, &next, evidence.as_ref());
-        let mut potential_output_units = 0_usize;
         let mut fingerprint_items = Vec::new();
         let source_record = item.as_ref().and_then(|item| item.source_record);
         if let Some(item) = item {
-            potential_output_units =
-                usize::try_from(item.checkpoint.output_outcomes).unwrap_or(usize::MAX);
             core_bytes = core_bytes.saturating_add(item.core_bytes);
             fingerprint_items.push(item.checkpoint);
             events = item.rows;
-            outputs = item.outputs;
-            transient_rejections = item.transient_rejections;
             if let Some(rejection) = item.rejection {
                 core_bytes = core_bytes.saturating_add(estimated_rejection_bytes(&rejection));
                 rejections.push(rejection);
@@ -58,41 +51,8 @@ impl ClineNativeReader {
             .saturating_add(
                 usize::from(session.is_some()).saturating_mul(CLINE_NATIVE_SESSION_PAGE_UNITS),
             );
-        let logical_units = core_units.saturating_add(potential_output_units);
-        let mut transient_bytes = usize::from(self.profile.wants_outputs()) * 16;
-        transient_bytes = outputs
-            .iter()
-            .map(estimated_output_bytes)
-            .chain(transient_rejections.iter().map(estimated_rejection_bytes))
-            .fold(transient_bytes, usize::saturating_add);
-        while transient_bytes > CLINE_NATIVE_TRANSIENT_PAGE_MAX_BYTES
-            || core_bytes.saturating_add(transient_bytes) > CLINE_NATIVE_PAGE_MAX_BYTES
-        {
-            if let Some(output) = outputs.pop() {
-                transient_bytes = transient_bytes.saturating_sub(estimated_output_bytes(&output));
-                if let Some(rejection) = output_pressure_rejection(source.component, &output) {
-                    let rejection_bytes = estimated_rejection_bytes(&rejection);
-                    if transient_bytes.saturating_add(rejection_bytes)
-                        <= CLINE_NATIVE_TRANSIENT_PAGE_MAX_BYTES
-                        && core_bytes
-                            .saturating_add(transient_bytes)
-                            .saturating_add(rejection_bytes)
-                            <= CLINE_NATIVE_PAGE_MAX_BYTES
-                        && transient_rejections.len() < CLINE_NATIVE_MAX_REJECTIONS
-                    {
-                        transient_bytes = transient_bytes.saturating_add(rejection_bytes);
-                        transient_rejections.push(rejection);
-                    }
-                }
-                continue;
-            }
-            let Some(rejection) = transient_rejections.pop() else {
-                break;
-            };
-            transient_bytes = transient_bytes.saturating_sub(estimated_rejection_bytes(&rejection));
-        }
-        let total = core_bytes.saturating_add(transient_bytes);
-        if !owned_page_bounds_are_valid(core_bytes, transient_bytes, logical_units) {
+        let logical_units = core_units;
+        if !owned_page_bounds_are_valid(core_bytes, logical_units) {
             return Err(ClineComponentFailure {
                 component: source.component,
                 path: source.canonical_path.clone(),
@@ -123,11 +83,9 @@ impl ClineNativeReader {
             terminal_evidence: evidence,
             accounting: ClinePageAccounting {
                 core_units,
-                potential_output_units,
                 logical_units,
                 conservative_core_bytes: core_bytes,
-                transient_output_bytes: transient_bytes,
-                conservative_serialized_bytes: total,
+                conservative_serialized_bytes: core_bytes,
             },
             core: ClineCorePayload {
                 #[cfg(test)]
@@ -137,13 +95,6 @@ impl ClineNativeReader {
                 rejections: rejections.into_boxed_slice(),
                 terminal_metadata_checkpoint: None,
             },
-            transient: self
-                .profile
-                .wants_outputs()
-                .then_some(ClineTransientOutputPayload {
-                    observations: outputs,
-                    rejected_outputs: transient_rejections.into_boxed_slice(),
-                }),
             source_record,
         })
     }
@@ -192,7 +143,7 @@ impl ClineNativeReader {
                 .saturating_add(estimated_session_bytes(&checkpoint.session));
         let core_units =
             CLINE_NATIVE_FIXED_PAGE_UNITS.saturating_add(CLINE_NATIVE_SESSION_PAGE_UNITS);
-        if !owned_page_bounds_are_valid(core_bytes, 0, core_units) {
+        if !owned_page_bounds_are_valid(core_bytes, core_units) {
             return Err(ClineNativePathError::Invariant {
                 message: "Cline metadata page exceeded the 4 MiB Core/8 MiB total page bounds"
                     .to_owned(),
@@ -210,10 +161,8 @@ impl ClineNativeReader {
             terminal_evidence: Some(evidence),
             accounting: ClinePageAccounting {
                 core_units,
-                potential_output_units: 0,
                 logical_units: core_units,
                 conservative_core_bytes: core_bytes,
-                transient_output_bytes: 0,
                 conservative_serialized_bytes: core_bytes,
             },
             core: ClineCorePayload {
@@ -224,13 +173,6 @@ impl ClineNativeReader {
                 rejections: Box::new([]),
                 terminal_metadata_checkpoint: Some(Box::new(checkpoint)),
             },
-            transient: self
-                .profile
-                .wants_outputs()
-                .then_some(ClineTransientOutputPayload {
-                    observations: Vec::new(),
-                    rejected_outputs: Box::new([]),
-                }),
             source_record: None,
         })
     }
@@ -261,7 +203,7 @@ impl ClineNativeReader {
         let evidence = ClineTerminalEvidence::Deleted;
         let core_bytes =
             estimated_page_envelope_bytes(&source, &revision, &expected, &next, Some(&evidence));
-        if !owned_page_bounds_are_valid(core_bytes, 0, CLINE_NATIVE_FIXED_PAGE_UNITS) {
+        if !owned_page_bounds_are_valid(core_bytes, CLINE_NATIVE_FIXED_PAGE_UNITS) {
             return Err(ClineNativePathError::Invariant {
                 message: "Cline deletion page exceeded the 4 MiB Core/8 MiB total page bounds"
                     .to_owned(),
@@ -279,10 +221,8 @@ impl ClineNativeReader {
             terminal_evidence: Some(evidence),
             accounting: ClinePageAccounting {
                 core_units: CLINE_NATIVE_FIXED_PAGE_UNITS,
-                potential_output_units: 0,
                 logical_units: CLINE_NATIVE_FIXED_PAGE_UNITS,
                 conservative_core_bytes: core_bytes,
-                transient_output_bytes: 0,
                 conservative_serialized_bytes: core_bytes,
             },
             core: ClineCorePayload {
@@ -293,13 +233,6 @@ impl ClineNativeReader {
                 rejections: Box::new([]),
                 terminal_metadata_checkpoint: None,
             },
-            transient: self
-                .profile
-                .wants_outputs()
-                .then_some(ClineTransientOutputPayload {
-                    observations: Vec::new(),
-                    rejected_outputs: Box::new([]),
-                }),
             source_record: None,
         })
     }

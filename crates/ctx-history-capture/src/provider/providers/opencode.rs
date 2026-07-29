@@ -129,11 +129,13 @@ pub(crate) fn decode_opencode_message_locator(
 }
 
 pub(crate) fn import_opencode_nativepath(
-    path: &Path,
-    store: &mut Store,
-    context: ProviderAdapterContext,
-    import_options: ProviderImportOptions,
-    dialect: &OpenCodeSqliteDialect,
+    _path: &Path,
+    _store: &mut Store,
+    _context: ProviderAdapterContext,
+    _import_options: ProviderImportOptions,
+    _dialect: &OpenCodeSqliteDialect,
 ) -> Result<ProviderImportSummary> {
-    native_path::vertical::import_opencode_nativepath(path, store, context, import_options, dialect)
+    Err(CaptureError::UnsupportedSchema(
+        "OpenCode-family Store ingestion was removed; use source-backed ingestion".to_owned(),
+    ))
 }

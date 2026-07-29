@@ -30,7 +30,7 @@ use super::{
         ClineComponent, ClineComponentObservation, ClineDiscovery, ClineLiveTaskObservation,
         ClineObservedFileState, TaskJsonNativeDialect,
     },
-    ClineNativePathError, ClineNativeProfile, ClineNativeReader,
+    ClineNativePathError, ClineNativeReader,
 };
 
 const SOURCE_ANCHOR_NAMESPACE: &str = "task-directory-id";
@@ -397,7 +397,7 @@ fn active_root(
         );
     }
     Ok(ActiveRoot {
-        reader: ClineNativeReader::new(discovery, &[], ClineNativeProfile::SourceBackedCoreOnly),
+        reader: ClineNativeReader::new(discovery, &[]),
         opening_inventory,
         inventory_sources,
         component_owners,
@@ -1170,12 +1170,6 @@ fn lexical_event_body(event: &ClineEventRow) -> String {
                 .tool_call
                 .as_ref()
                 .and_then(|call| call.name.as_deref().or(call.call_id.as_deref()))
-        })
-        .or_else(|| {
-            event
-                .sparse_output
-                .as_ref()
-                .and_then(|output| output.preview.as_deref())
         })
         .unwrap_or_else(|| event_kind(event.kind));
     candidate.to_owned()

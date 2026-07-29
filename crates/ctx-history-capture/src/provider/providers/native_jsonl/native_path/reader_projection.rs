@@ -125,7 +125,6 @@ impl DirectJsonlPageReader {
             0,
             line_number,
             occurred_at,
-            false,
             None,
             touches,
         )?;
@@ -240,7 +239,6 @@ impl DirectJsonlPageReader {
                     sub_ordinal,
                     line_number,
                     occurred_at,
-                    true,
                     Some(&subrecord),
                     retained_failure_touches.clone(),
                 )?;
@@ -250,23 +248,6 @@ impl DirectJsonlPageReader {
                     record_digest,
                 };
                 projected.events.push(event);
-            } else if self.collect_transient_outputs {
-                let Some(content) = subrecord.content else {
-                    continue;
-                };
-                projected.outputs.push(DirectJsonlOutput {
-                    raw_ordinal: ordinal,
-                    sub_ordinal,
-                    native_record_id: direct_jsonl_native_event_identity(self.provider, value),
-                    byte_start,
-                    byte_end_exclusive,
-                    call_id: subrecord.call_id.map(str::to_owned),
-                    tool_name: subrecord.tool_name.map(str::to_owned),
-                    outcome: subrecord.outcome.outcome,
-                    exit_code: subrecord.outcome.exit_code,
-                    duration_ms: subrecord.outcome.duration_ms,
-                    content: content.as_bytes().to_vec(),
-                });
             }
         }
         projected.recompute_serialized_bytes();
@@ -450,7 +431,6 @@ fn attach_direct_message_locator(
 #[derive(Default)]
 pub(super) struct ProjectedLine {
     pub(super) events: Vec<DirectJsonlEvent>,
-    pub(super) outputs: Vec<DirectJsonlOutput>,
     pub(super) rejections: Vec<DirectJsonlRejection>,
     pub(super) serialized_bytes: usize,
 }
@@ -479,7 +459,6 @@ impl ProjectedLine {
             .events
             .iter()
             .map(event_wire_bytes)
-            .chain(self.outputs.iter().map(output_wire_bytes))
             .chain(self.rejections.iter().map(rejection_wire_bytes))
             .fold(0_usize, usize::saturating_add);
     }
@@ -494,68 +473,18 @@ fn direct_event(
     sub_ordinal: u32,
     line_number: usize,
     occurred_at: DateTime<Utc>,
-    retained_failure: bool,
     result: Option<&super::result_content::NativeJsonlResultSubrecord<'_>>,
     touches: Vec<DirectJsonlTouch>,
 ) -> Result<DirectJsonlEvent> {
     let event_type = direct_jsonl_event_type(provider, value);
     let entry_type = native_jsonl_entry_type(provider, value);
     let role = direct_jsonl_role(provider, value);
-    let body_value = if provider == CaptureProvider::Windsurf {
-        super::windsurf::windsurf_event_body(value)
-    } else {
-        value.clone()
-    };
     let text = if event_type == EventType::ToolOutput {
         String::new()
     } else {
         direct_jsonl_event_text(provider, value, event_type, &entry_type)
     };
-    let retained_text = provider_policy_event_text(event_type, &text, &body_value);
     let lexical_text = direct_jsonl_lexical_text(event_type, &text, result);
-    let event_id = native_jsonl_event_id(provider, value, line_number);
-    let mut legacy_provider_event_hash = event_id.clone();
-    let mut cursor = event_id.clone();
-    let mut payload = json!({
-        "entry_type": entry_type,
-        "event_id": event_id,
-        "native_step_index": value.get("step_index").and_then(Value::as_u64),
-        "text": retained_text.text,
-        "text_retention": retained_text.retention.as_json(),
-        "result_evidence": provider_result_identifier_evidence(event_type, &text, &body_value),
-        "result_outcome": provider_result_outcome_evidence(event_type, &body_value),
-        "tool_calls": if provider == CaptureProvider::Antigravity {
-            value.get("tool_calls").map(|calls| {
-                provider_capped_json_value(
-                    &provider_policy_body(EventType::ToolCall, calls),
-                    PROVIDER_MAX_PREVIEW_CHARS,
-                )
-            })
-        } else {
-            None
-        },
-        "body": provider_capped_json(
-            &provider_policy_body(event_type, &body_value),
-            PROVIDER_MAX_PREVIEW_CHARS,
-        ),
-    });
-
-    if retained_failure {
-        let result = result.ok_or(CaptureError::SystemInvariant(
-            "retained direct JSONL failure has no result subrecord",
-        ))?;
-        let suffix = format!(":subrecord:{}", result.subrecord_index);
-        legacy_provider_event_hash.push_str(&suffix);
-        cursor.push_str(&suffix);
-        payload = json!({
-            "result_outcome": "failure",
-            "timed_out": result.outcome.outcome == OutputOutcome::Timeout,
-            "exit_code": result.outcome.exit_code,
-            "duration_ms": result.outcome.duration_ms,
-            "call_id": result.call_id,
-            "tool_name": result.tool_name,
-        });
-    }
 
     let positional_event_index = if sub_ordinal == 0 {
         raw_ordinal
@@ -569,34 +498,25 @@ fn direct_event(
             ))?
     };
     let native_record_id = direct_jsonl_native_event_identity(provider, value);
-    let provider_event_index = native_record_id
-        .as_deref()
-        .map(|event_identity| {
-            direct_jsonl_event_identity_index(provider, event_identity, sub_ordinal)
-        })
-        .unwrap_or(positional_event_index);
     let provider_event_sequence_index = positional_event_index;
     let provider_event_hash = crate::compute_payload_hash(&json!({
         "event_type": event_type.as_str(),
         "role": role.as_str(),
-        "payload": payload,
+        "native_record_id": native_record_id,
+        "sub_ordinal": sub_ordinal,
+        "lexical_text": lexical_text,
         "touches": touches,
     }))?;
     Ok(DirectJsonlEvent {
         raw_ordinal,
         sub_ordinal,
         native_record_id,
-        provider_event_index,
         provider_event_sequence_index,
         provider_event_hash,
-        legacy_provider_event_index: positional_event_index,
-        legacy_provider_event_hash,
-        cursor,
         event_type,
         role,
         occurred_at,
         lexical_text,
-        payload,
         metadata: json!({
             "source": source_format,
             "source_format": source_format,
@@ -607,7 +527,6 @@ fn direct_event(
             "tokens": native_jsonl_tokens(provider, value),
             "source_record_ordinal": raw_ordinal,
             "source_record_subrecord_index": sub_ordinal,
-            "legacy_provider_event_index": raw_ordinal,
         }),
         touches,
         source_record: DirectJsonlSourceRecord::default(),
@@ -681,7 +600,6 @@ pub(crate) fn direct_jsonl_complete_message_provider_event_hash(
         0,
         line_number,
         DateTime::<Utc>::UNIX_EPOCH,
-        false,
         None,
         touches,
     )
@@ -742,24 +660,6 @@ fn generic_native_event_identity(value: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|event_id| !event_id.trim().is_empty())
         .map(str::to_owned)
-}
-
-fn direct_jsonl_event_identity_index(
-    provider: CaptureProvider,
-    event_identity: &str,
-    sub_ordinal: u32,
-) -> u64 {
-    let mut digest = Sha256::new();
-    digest.update(b"ctx-direct-jsonl-provider-event-identity-v1\0");
-    digest.update(provider.as_str().as_bytes());
-    digest.update((event_identity.len() as u64).to_be_bytes());
-    digest.update(event_identity.as_bytes());
-    digest.update(sub_ordinal.to_be_bytes());
-    u64::from_be_bytes(
-        digest.finalize()[..8]
-            .try_into()
-            .expect("SHA-256 identity prefix is eight bytes"),
-    )
 }
 
 fn session_from_header(

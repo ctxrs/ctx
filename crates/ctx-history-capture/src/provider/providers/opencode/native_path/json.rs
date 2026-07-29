@@ -20,9 +20,7 @@ use serde_json::{Map, Number, Value};
 use crate::{CaptureError, Result};
 
 use super::super::{normalization::opencode_event_time, schema::OpenCodeSqliteDialect};
-use super::model::{
-    OpenCodeNativeProfile, OpenCodeNativeRejectionKind, OpenCodeNativeSchemaFamily,
-};
+use super::model::{OpenCodeNativeRejectionKind, OpenCodeNativeSchemaFamily};
 
 mod audit;
 mod output;
@@ -44,7 +42,6 @@ const TAG_RELATIONSHIP_MISMATCH: u8 = 9;
 const TAG_UNKNOWN_TYPE: u8 = 10;
 const TAG_OUTPUT: u8 = 11;
 const TAG_INVALID_TIMESTAMP: u8 = 12;
-const MAX_OUTPUT_SUBRECORDS_PER_NATIVE_ROW: usize = 4_096;
 
 pub(super) const OVERSIZED_PROJECTION: &[u8] = &[TAG_OVERSIZED];
 pub(super) const MISSING_SESSION_PROJECTION: &[u8] = &[TAG_MISSING_SESSION];
@@ -58,25 +55,9 @@ pub(super) struct OpenCodeRetainedJson {
     pub(super) body: Value,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) struct OpenCodeOutputDraft {
-    pub(super) subrecord_index: u32,
-    pub(super) kind: u8,
-    pub(super) call_id: Option<String>,
-    pub(super) tool_name: Option<String>,
-    pub(super) command: Option<String>,
-    pub(super) working_directory: Option<String>,
-    pub(super) outcome: u8,
-    pub(super) exit_code: Option<i32>,
-    pub(super) duration_ms: Option<u64>,
-    pub(super) content: String,
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct OpenCodeOutputJson {
     pub(super) diagnostic: Option<OpenCodeRetainedJson>,
-    pub(super) outputs: Vec<OpenCodeOutputDraft>,
-    pub(super) pro_rejection: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -114,13 +95,10 @@ struct RetainedWire {
 #[derive(Serialize, Deserialize)]
 struct OutputWire {
     diagnostic: Option<RetainedWire>,
-    outputs: Vec<OpenCodeOutputDraft>,
-    pro_rejection: Option<String>,
 }
 
 pub(super) fn register_projection_function(
     conn: &Connection,
-    profile: OpenCodeNativeProfile,
     dialect: &OpenCodeSqliteDialect,
 ) -> Result<Arc<OpenCodeJsonVisitorMetrics>> {
     let metrics = Arc::new(OpenCodeJsonVisitorMetrics::default());
@@ -133,12 +111,7 @@ pub(super) fn register_projection_function(
             | FunctionFlags::SQLITE_DETERMINISTIC
             | FunctionFlags::SQLITE_INNOCUOUS,
         move |context| {
-            project_json_function(
-                context,
-                &function_metrics,
-                profile,
-                projection_dialect.clone(),
-            )
+            project_json_function(context, &function_metrics, projection_dialect.clone())
         },
     )?;
     let timestamp_dialect = dialect.clone();
@@ -159,7 +132,6 @@ pub(super) fn projection_sql(
     parent_data: Option<&str>,
     family: OpenCodeNativeSchemaFamily,
     max_bytes_parameter: &str,
-    profile: OpenCodeNativeProfile,
 ) -> String {
     let parent_preflight = parent_data.map_or_else(String::new, |parent| {
         format!(
@@ -170,21 +142,17 @@ pub(super) fn projection_sql(
         )
     });
     let parent_argument = parent_data.unwrap_or("null");
-    let core_output_guard = if profile == OpenCodeNativeProfile::CoreOnly {
-        let output = output_predicate_sql(data, column_type, parent_data);
-        let failure = failure_predicate_sql(data, parent_data);
-        format!(
-            "when json_valid({data}) and {parent_valid}
-                   and ({output}) and not ({failure})
-             then X'{excluded}'",
-            parent_valid = parent_data
-                .map(|parent| format!("json_valid({parent})"))
-                .unwrap_or_else(|| "1".to_owned()),
-            excluded = hex_tag(TAG_EXCLUDED_OUTPUT),
-        )
-    } else {
-        String::new()
-    };
+    let output = output_predicate_sql(data, column_type, parent_data);
+    let failure = failure_predicate_sql(data, parent_data);
+    let core_output_guard = format!(
+        "when json_valid({data}) and {parent_valid}
+               and ({output}) and not ({failure})
+         then X'{excluded}'",
+        parent_valid = parent_data
+            .map(|parent| format!("json_valid({parent})"))
+            .unwrap_or_else(|| "1".to_owned()),
+        excluded = hex_tag(TAG_EXCLUDED_OUTPUT),
+    );
     let timestamp_rejection = if family != OpenCodeNativeSchemaFamily::MessagePart {
         format!(
             "when json_valid({data})
@@ -275,8 +243,6 @@ pub(super) fn decode_projection(bytes: &[u8]) -> Result<OpenCodeJsonProjection> 
                     role: diagnostic.role,
                     body: diagnostic.body,
                 }),
-                outputs: wire.outputs,
-                pro_rejection: wire.pro_rejection,
             }))
         }
         TAG_MALFORMED_JSON => Ok(OpenCodeJsonProjection::Rejected(
@@ -323,7 +289,6 @@ pub(super) fn decode_projection(bytes: &[u8]) -> Result<OpenCodeJsonProjection> 
 fn project_json_function(
     context: &Context<'_>,
     metrics: &OpenCodeJsonVisitorMetrics,
-    profile: OpenCodeNativeProfile,
     dialect: OpenCodeSqliteDialect,
 ) -> rusqlite::Result<Vec<u8>> {
     let data = context.get::<String>(0)?;
@@ -342,7 +307,6 @@ fn project_json_function(
         &column_type,
         parent_data.as_deref(),
         &family_label,
-        profile,
         dialect,
     ))
 }
@@ -352,7 +316,6 @@ fn project_json(
     column_type: &str,
     parent_data: Option<&str>,
     family_label: &str,
-    profile: OpenCodeNativeProfile,
     dialect: OpenCodeSqliteDialect,
 ) -> Vec<u8> {
     let family = family_from_label(family_label);
@@ -394,14 +357,9 @@ fn project_json(
         || parent.as_ref().is_some_and(|value| value.forbidden_output);
     if output {
         if body.duplicate_key || parent.as_ref().is_some_and(|value| value.duplicate_key) {
-            return encode_output(OutputWire {
-                diagnostic: None,
-                outputs: Vec::new(),
-                pro_rejection: (profile == OpenCodeNativeProfile::CoreAndPro)
-                    .then(|| "duplicate JSON key in an output-bearing native row".to_owned()),
-            });
+            return encode_output(OutputWire { diagnostic: None });
         }
-        return project_output(&body.value, &effective_type, profile);
+        return project_output(&body.value, &effective_type);
     }
     if body.duplicate_key || parent.as_ref().is_some_and(|value| value.duplicate_key) {
         return tag(TAG_MALFORMED_JSON);

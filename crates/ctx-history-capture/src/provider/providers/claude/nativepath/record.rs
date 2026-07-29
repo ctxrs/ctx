@@ -9,10 +9,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::{
-    privacy::{
-        is_result_label, is_result_shape_label, preflight_record, RawRecordPreflight,
-        RawResultClassification,
-    },
+    privacy::{preflight_record, RawRecordPreflight, RawResultClassification},
     rows::{
         ClaudeEventIdentity, ClaudeEventKind, ClaudeFileTouch, ClaudeNativeOrder,
         ClaudeOutputOutcome, ClaudePhysicalLocator, ClaudeRetainedRow,
@@ -20,13 +17,12 @@ use super::{
     },
 };
 use crate::{
-    provider::normalization::{provider_explicit_result_value_text, provider_policy_event_text},
-    OutputOutcome, OutputOutcomeMetadata,
+    provider::normalization::provider_policy_event_text, OutputOutcome, OutputOutcomeMetadata,
 };
 
 mod value_hydration;
 
-use value_hydration::{parsed_from_value, sparse_output_rows, value_output_descriptors};
+use value_hydration::sparse_output_rows;
 
 const CLAUDE_BODY_HASH_DOMAIN: &[u8] = b"ctx-claude-nativepath-body-v1\0";
 const MAX_CLASSIFICATION_METADATA_BYTES: usize = 4 * 1024;
@@ -625,24 +621,13 @@ pub(super) struct ParsedClaudeRecord {
     pub(super) version: Option<String>,
     pub(super) git_branch: Option<String>,
     pub(super) rows: Vec<ClaudeRetainedRow>,
-    pub(super) outputs: Vec<ParsedClaudeOutput>,
 }
 
 #[derive(Debug)]
-pub(super) struct ParsedClaudeOutput {
+pub(super) struct ClaudeOutputDescriptor {
     pub(super) subrecord_index: u32,
     pub(super) call_id: Option<String>,
     pub(super) outcome: OutputOutcomeMetadata,
-    /// Present only for the Pro profile. Empty output is represented by an
-    /// owned empty vector, while Core-only never owns this field.
-    pub(super) content: Option<Vec<u8>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ClaudeRecordMode {
-    CoreOnly,
-    CoreAndPro,
-    ProReplayOnly,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -678,55 +663,14 @@ pub(super) fn parse_native_record(
     bytes: &[u8],
     raw_ordinal: u64,
     locator: &ClaudePhysicalLocator,
-    mode: ClaudeRecordMode,
 ) -> Result<ParsedClaudeRecord, serde_json::Error> {
     let preflight = preflight_record(bytes)?;
     let result = ResultClassification::from(preflight.result);
     let record_outcome = preflight.outcome.clone();
-    if mode == ClaudeRecordMode::ProReplayOnly && !result.is_result() {
-        let metadata: MetadataOnlyRecord = serde_json::from_slice(bytes)?;
-        return Ok(ParsedClaudeRecord {
-            result,
-            preallocation_exclusion: false,
-            native_record_id: metadata
-                .uuid
-                .or_else(|| metadata.message.and_then(|message| message.id)),
-            session_id: metadata.session_id,
-            timestamp: metadata.timestamp,
-            cwd: metadata.cwd,
-            version: metadata.version,
-            git_branch: metadata.git_branch,
-            rows: Vec::new(),
-            outputs: Vec::new(),
-        });
-    }
-    if matches!(
-        mode,
-        ClaudeRecordMode::CoreAndPro | ClaudeRecordMode::ProReplayOnly
-    ) && result.is_result()
-    {
-        let core_outputs = if mode == ClaudeRecordMode::CoreAndPro {
-            preflight_output_descriptors(&preflight, bytes, &record_outcome)
-        } else {
-            Vec::new()
-        };
-        let value: Value = serde_json::from_slice(bytes)?;
-        let outputs = if preflight.output_descriptors().is_empty() {
-            value_output_descriptors(&value, result, &record_outcome)
-        } else {
-            hydrate_preflight_output_descriptors(&preflight, bytes, &record_outcome)?
-        };
-        let mut parsed =
-            parsed_from_value(&value, raw_ordinal, locator, result, &core_outputs, outputs);
-        if mode == ClaudeRecordMode::ProReplayOnly {
-            parsed.rows.clear();
-        }
-        return Ok(parsed);
-    }
 
     if result.is_result() {
         let metadata: MetadataOnlyRecord = serde_json::from_slice(bytes)?;
-        let mut outputs = preflight_output_descriptors(&preflight, bytes, &record_outcome);
+        let outputs = output_descriptors(&preflight, bytes, &record_outcome);
         let rows = sparse_output_rows(
             raw_ordinal,
             locator,
@@ -735,7 +679,6 @@ pub(super) fn parse_native_record(
             0,
             &outputs,
         );
-        debug_assert!(outputs.iter().all(|output| output.content.is_none()));
         return Ok(ParsedClaudeRecord {
             result,
             preallocation_exclusion: true,
@@ -748,7 +691,6 @@ pub(super) fn parse_native_record(
             version: metadata.version,
             git_branch: metadata.git_branch,
             rows,
-            outputs: std::mem::take(&mut outputs),
         });
     }
 
@@ -775,61 +717,30 @@ pub(super) fn parse_native_record(
         version,
         git_branch,
         rows,
-        outputs: Vec::new(),
     })
 }
 
-fn preflight_output_descriptors(
+fn output_descriptors(
     preflight: &RawRecordPreflight,
     bytes: &[u8],
     record_outcome: &OutputOutcomeMetadata,
-) -> Vec<ParsedClaudeOutput> {
+) -> Vec<ClaudeOutputDescriptor> {
     let mut outputs = preflight
         .output_descriptors()
         .iter()
         .enumerate()
-        .map(|(index, descriptor)| ParsedClaudeOutput {
+        .map(|(index, descriptor)| ClaudeOutputDescriptor {
             subrecord_index: u32::try_from(index).unwrap_or(u32::MAX),
             call_id: descriptor.decode_call_id(bytes),
             outcome: record_outcome.clone(),
-            content: None,
         })
         .collect::<Vec<_>>();
     if outputs.is_empty() {
-        outputs.push(ParsedClaudeOutput {
+        outputs.push(ClaudeOutputDescriptor {
             subrecord_index: 0,
             call_id: None,
             outcome: record_outcome.clone(),
-            content: None,
         });
     }
     outputs
-}
-
-fn hydrate_preflight_output_descriptors(
-    preflight: &RawRecordPreflight,
-    bytes: &[u8],
-    record_outcome: &OutputOutcomeMetadata,
-) -> Result<Vec<ParsedClaudeOutput>, serde_json::Error> {
-    preflight
-        .output_descriptors()
-        .iter()
-        .enumerate()
-        .map(|(index, descriptor)| {
-            let content = match descriptor.value(bytes) {
-                Some(raw) => {
-                    provider_explicit_result_value_text(&serde_json::from_slice::<Value>(raw)?)
-                        .unwrap_or_default()
-                        .into_bytes()
-                }
-                None => Vec::new(),
-            };
-            Ok(ParsedClaudeOutput {
-                subrecord_index: u32::try_from(index).unwrap_or(u32::MAX),
-                call_id: descriptor.decode_call_id(bytes),
-                outcome: record_outcome.clone(),
-                content: Some(content),
-            })
-        })
-        .collect()
 }

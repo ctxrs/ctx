@@ -161,11 +161,7 @@ impl ClineNativeReader {
                 Ok(Some(self.expose_component_page_after_metadata(page)?))
             }
             ClineObservedFileState::Present(_) => {
-                let scanner = match ClineArrayScanner::open(
-                    &observation,
-                    &mut self.stats,
-                    self.profile.wants_record_evidence(),
-                ) {
+                let scanner = match ClineArrayScanner::open(&observation, &mut self.stats, true) {
                     Ok(scanner) => scanner,
                     Err(ClineLocalReadError::Local(failure)) => {
                         task.component_failed = true;
@@ -300,10 +296,8 @@ impl ClineNativeReader {
                 let complete_bytes = scanned.complete_bytes;
                 let item = parse_scanned_item(
                     scanned,
-                    &active.source,
                     &active.metadata.session.identity,
                     active.component,
-                    self.profile,
                     super::super::normalize::CLINE_NATIVE_PAGE_MAX_UNITS
                         .saturating_sub(CLINE_NATIVE_FIXED_PAGE_UNITS)
                         .saturating_sub(
