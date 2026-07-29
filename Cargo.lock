@@ -738,7 +738,7 @@ dependencies = [
  "ctx-history-capture",
  "ctx-history-core",
  "ctx-history-index",
- "ctx-history-store",
+ "ctx-history-relational",
  "ctx-pro-host-protocol",
  "ed25519-dalek",
  "fastembed",
@@ -840,7 +840,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ctx-history-store"
+name = "ctx-history-relational"
 version = "0.26.0"
 dependencies = [
  "ctx-history-core",

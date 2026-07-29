@@ -7,7 +7,7 @@ use std::{
 use anyhow::Result;
 use clap::{Args, Subcommand};
 use ctx_history_core::EventType;
-use ctx_history_store::{
+use ctx_history_relational::{
     RawSqlOptions, RAW_SQL_DEFAULT_MAX_COLUMNS, RAW_SQL_DEFAULT_MAX_ROWS,
     RAW_SQL_DEFAULT_MAX_SQL_BYTES, RAW_SQL_DEFAULT_MAX_VALUE_BYTES, RAW_SQL_DEFAULT_TIMEOUT,
     RAW_SQL_MAX_COLUMNS_CAP, RAW_SQL_MAX_ROWS_CAP, RAW_SQL_MAX_SQL_BYTES_CAP, RAW_SQL_MAX_TIMEOUT,

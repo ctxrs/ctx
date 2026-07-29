@@ -37,7 +37,7 @@ _CTX_CLI_DEPS = [
     "//crates/ctx-history-capture:lib",
     "//crates/ctx-history-core:lib",
     "//crates/ctx-history-index:lib",
-    "//crates/ctx-history-store:lib",
+    "//crates/ctx-history-relational:lib",
     "//crates/ctx-pro-host-protocol:lib",
 ]
 

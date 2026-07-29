@@ -39,6 +39,7 @@
         "test:skill": "//crates/ctx-cli:skill_tests",
         "test:slash_command_e2e": "//crates/ctx-cli:slash_command_e2e_tests",
         "test:source_backed_content": "//crates/ctx-cli:source_backed_content_tests",
+        "test:status_store_cutover": "//crates/ctx-cli:status_store_cutover_tests",
         "test:upgrade": "//crates/ctx-cli:upgrade_tests",
         "test:upgrade_analytics": "//crates/ctx-cli:upgrade_analytics_tests",
         "custom-build:build-script-build": "//:cli_build_cfg_parity_check"
@@ -72,10 +73,10 @@
       },
       "native_unit": "//crates/ctx-history-index:unit_tests"
     },
-    "ctx-history-store": {
-      "manifest": "crates/ctx-history-store/Cargo.toml",
-      "targets": {"lib:ctx_history_store": "//crates/ctx-history-store:lib"},
-      "native_unit": "//crates/ctx-history-store:unit_tests"
+    "ctx-history-relational": {
+      "manifest": "crates/ctx-history-relational/Cargo.toml",
+      "targets": {"lib:ctx_history_relational": "//crates/ctx-history-relational:lib"},
+      "native_unit": "//crates/ctx-history-relational:unit_tests"
     },
     "ctx-pro-host-protocol": {
       "manifest": "crates/ctx-pro-host-protocol/Cargo.toml",

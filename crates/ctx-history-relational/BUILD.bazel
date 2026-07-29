@@ -20,25 +20,25 @@ PROD_SRCS = glob(
     exclude = RUST_PROD_SRC_EXCLUDES,
 )
 
-CTX_HISTORY_STORE_DEPS = [
+CTX_HISTORY_RELATIONAL_DEPS = [
     "//crates/ctx-history-core:lib",
 ]
 
 rust_library(
     name = "lib",
     srcs = PROD_SRCS,
-    crate_name = "ctx_history_store",
+    crate_name = "ctx_history_relational",
     crate_root = "src/lib.rs",
     edition = crate_edition(),
     aliases = aliases(),
-    deps = all_crate_deps(normal = True) + CTX_HISTORY_STORE_DEPS,
+    deps = all_crate_deps(normal = True) + CTX_HISTORY_RELATIONAL_DEPS,
     proc_macro_deps = all_crate_deps(proc_macro = True),
 )
 
 ctx_rust_test(
     name = "unit_tests",
     srcs = RUST_SRCS,
-    crate_name = "ctx_history_store",
+    crate_name = "ctx_history_relational",
     crate_root = "src/lib.rs",
     edition = crate_edition(),
     aliases = aliases(
@@ -48,7 +48,7 @@ ctx_rust_test(
     deps = all_crate_deps(
         normal = True,
         normal_dev = True,
-    ) + CTX_HISTORY_STORE_DEPS,
+    ) + CTX_HISTORY_RELATIONAL_DEPS,
     proc_macro_deps = all_crate_deps(
         proc_macro = True,
         proc_macro_dev = True,

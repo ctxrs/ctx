@@ -27,7 +27,7 @@ WORKSPACE_PACKAGES = (
     ("ctx", "crates/ctx-cli"),
     ("ctx-history-core", "crates/ctx-history-core"),
     ("ctx-history-index", "crates/ctx-history-index"),
-    ("ctx-history-store", "crates/ctx-history-store"),
+    ("ctx-history-relational", "crates/ctx-history-relational"),
 )
 EXTERNAL_PACKAGES = (
     ("fs4", "0.1.0"),
@@ -86,7 +86,7 @@ members = [
   "crates/ctx-cli",
   "crates/ctx-history-core",
   "crates/ctx-history-index",
-  "crates/ctx-history-store",
+  "crates/ctx-history-relational",
 ]
 
 [workspace.package]
@@ -146,7 +146,7 @@ repository = "https://example.invalid/{name}"
             "@@//crates/ctx-cli:ctx",
             "@@//crates/ctx-history-core:ctx_history_core",
             "@@//crates/ctx-history-index:ctx_history_index",
-            "@@//crates/ctx-history-store:ctx_history_store",
+            "@@//crates/ctx-history-relational:ctx_history_relational",
         ]
         inventory_labels.extend(
             f"@@rules_rust~~crate~crates__{name}-{version}//:{name}"
@@ -223,7 +223,7 @@ repository = "https://example.invalid/{name}"
                 (
                     "ctx-history-core",
                     "ctx-history-index",
-                    "ctx-history-store",
+                    "ctx-history-relational",
                 ),
             ),
             self.package("ctx-history-core", "0.26.0"),
@@ -232,7 +232,7 @@ repository = "https://example.invalid/{name}"
                 "0.26.0",
                 ("tantivy 0.26.1",),
             ),
-            self.package("ctx-history-store", "0.26.0"),
+            self.package("ctx-history-relational", "0.26.0"),
             self.package("fs4", "0.1.0", external=True),
             self.package("lz4_flex", "0.11.0", external=True),
             self.package("memmap2", "0.9.0", external=True),
