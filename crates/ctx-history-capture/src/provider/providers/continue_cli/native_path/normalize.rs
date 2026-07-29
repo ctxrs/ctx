@@ -6,13 +6,13 @@ use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::{ProOutputObservation, MAX_PROVIDER_JSONL_LINE_BYTES, PROVIDER_MAX_PREVIEW_CHARS};
+use crate::MAX_PROVIDER_JSONL_LINE_BYTES;
 
 use super::{
     parse::{
         ContinueOutputExclusionStats, ContinueSourceFailure, ContinueSourceFailureKind,
-        RawContinueContextItem, RawContinueDocument, RawContinueHistoryItem, RawContinueMessage,
-        RawContinueToolCallState, RawContinueUsage, RawTimestamp,
+        RawContinueDocument, RawContinueHistoryItem, RawContinueToolCallState, RawContinueUsage,
+        RawTimestamp,
     },
     source::{
         ContinueIndexMetadata, ContinueIndexObservation, ContinueIndexSnapshot,
@@ -20,7 +20,6 @@ use super::{
     },
 };
 
-const EVENT_HASH_DOMAIN: &[u8] = b"ctx-continue-nativepath-event-v3\0";
 const SESSION_METADATA_HASH_DOMAIN: &[u8] = b"ctx-continue-nativepath-session-metadata-v2\0";
 
 pub(crate) const CONTINUE_NATIVE_MAX_RETAINED_ITEM_BYTES: usize = MAX_PROVIDER_JSONL_LINE_BYTES;
@@ -28,25 +27,9 @@ pub(crate) const CONTINUE_NATIVE_MAX_RETAINED_ITEM_BYTES: usize = MAX_PROVIDER_J
 // Reserve four units for the page's source/session/route/cursor mechanics so
 // the family consumer can publish a page without exceeding either bound.
 pub(crate) const CONTINUE_NATIVE_MAX_PAGE_ROWS: usize = 60;
-// One event reconciliation and all of its file-touch upserts share the same
-// Store transaction. Keep the event itself inside the provider page bound.
 pub(crate) const CONTINUE_NATIVE_MAX_FILE_TOUCHES_PER_EVENT: usize =
     CONTINUE_NATIVE_MAX_PAGE_ROWS - 1;
 pub(crate) const CONTINUE_NATIVE_MAX_PAGE_BYTES: usize = 8 * 1024 * 1024;
-pub(crate) const CONTINUE_NATIVE_MAX_OUTPUT_PAGE_BYTES: usize = 4 * 1024 * 1024;
-pub(crate) const CONTINUE_NATIVE_MAX_OUTPUT_PAGE_UNITS: usize = 64;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ContinueNativeProfile {
-    CoreOnly,
-    CoreAndPro,
-}
-
-impl ContinueNativeProfile {
-    pub(super) fn wants_outputs(self) -> bool {
-        self == Self::CoreAndPro
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct ContinueSessionIdentity(pub(crate) String);
@@ -130,10 +113,7 @@ pub(crate) struct ContinueEventRow {
     pub(crate) kind: ContinueEventKind,
     pub(crate) role: ContinueEventRole,
     pub(crate) occurred_at: Option<DateTime<Utc>>,
-    pub(crate) body_json: String,
-    pub(crate) content_hash: String,
     pub(crate) search_text: String,
-    pub(crate) preview: String,
     pub(crate) calls: Box<[ContinueCallRelationship]>,
     pub(crate) file_touches: Box<[ContinueFileTouch]>,
 }
@@ -180,7 +160,6 @@ pub(crate) struct ContinuePreparedPage {
     pub(crate) terminal: bool,
     pub(crate) authority: Option<ContinueGenerationAuthority>,
     pub(crate) output_exclusion: Option<ContinueOutputExclusionStats>,
-    pub(crate) transient_output: Option<ContinueTransientOutputPayload>,
     pub(crate) row_count: usize,
     pub(crate) estimated_bytes: usize,
 }
@@ -190,53 +169,6 @@ impl ContinuePreparedPage {
         const FIXED_PAGE_BYTES: usize = 512;
         FIXED_PAGE_BYTES.saturating_add(session.0.len())
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ContinueProExtractionFailure {
-    pub(crate) history_ordinal: u64,
-    pub(crate) observed_outputs: usize,
-    pub(crate) observed_bytes: usize,
-    pub(crate) message: Box<str>,
-}
-
-#[derive(Debug)]
-pub(crate) struct ContinueTransientOutputPayload {
-    pub(crate) observations: Vec<ProOutputObservation>,
-    pub(crate) failure: Option<ContinueProExtractionFailure>,
-}
-
-pub(super) fn estimated_output_bytes(output: &ProOutputObservation) -> usize {
-    const FIXED_OUTPUT_BYTES: usize = 512;
-    FIXED_OUTPUT_BYTES
-        .saturating_add(output.coordinate.unit_key.len())
-        .saturating_add(
-            output
-                .coordinate
-                .native_record_id
-                .as_ref()
-                .map_or(0, String::len),
-        )
-        .saturating_add(output.associations.direct_session_id.len())
-        .saturating_add(output.associations.root_session_id.len())
-        .saturating_add(
-            output
-                .associations
-                .provider_session_id
-                .as_ref()
-                .map_or(0, String::len),
-        )
-        .saturating_add(output.call_id.as_ref().map_or(0, String::len))
-        .saturating_add(output.command.as_ref().map_or(0, |command| {
-            command
-                .tool_name
-                .len()
-                .saturating_add(command.command.len())
-                .saturating_add(command.working_directory.as_ref().map_or(0, String::len))
-        }))
-        .saturating_add(output.locator.kind.len())
-        .saturating_add(output.locator.payload.len())
-        .saturating_add(output.content.len())
 }
 
 pub(super) fn normalize_continue_document(
@@ -369,63 +301,9 @@ fn normalize_session(
     })
 }
 
-#[derive(Serialize)]
-struct SanitizedEventBody<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    message: Option<SanitizedMessage<'a>>,
-    #[serde(rename = "editorState", skip_serializing_if = "Option::is_none")]
-    editor_state: Option<&'a str>,
-    #[serde(rename = "contextItems", skip_serializing_if = "slice_is_empty")]
-    context_items: &'a [RawContinueContextItem],
-    #[serde(rename = "toolCallStates", skip_serializing_if = "Vec::is_empty")]
-    tool_call_states: Vec<SanitizedToolState<'a>>,
-    #[serde(
-        rename = "conversationSummary",
-        skip_serializing_if = "Option::is_none"
-    )]
-    conversation_summary: Option<&'a str>,
-}
-
-#[derive(Serialize)]
-struct SanitizedMessage<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    role: Option<&'a str>,
-    #[serde(skip_serializing_if = "slice_is_empty")]
-    content: &'a [String],
-    #[serde(rename = "toolCalls", skip_serializing_if = "Vec::is_empty")]
-    tool_calls: Vec<SanitizedToolCall<'a>>,
-}
-
-#[derive(Serialize)]
-struct SanitizedToolState<'a> {
-    #[serde(rename = "toolCallId", skip_serializing_if = "Option::is_none")]
-    tool_call_id: Option<&'a str>,
-    #[serde(rename = "toolCall", skip_serializing_if = "Option::is_none")]
-    tool_call: Option<SanitizedToolCall<'a>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    status: Option<&'a str>,
-    #[serde(rename = "exitCode", skip_serializing_if = "Option::is_none")]
-    exit_code: Option<i64>,
-    #[serde(rename = "durationMs", skip_serializing_if = "Option::is_none")]
-    duration_ms: Option<i64>,
-    #[serde(rename = "timedOut", skip_serializing_if = "Option::is_none")]
-    timed_out: Option<bool>,
-}
-
-#[derive(Serialize)]
-struct SanitizedToolCall<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    id: Option<&'a str>,
-    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
-    kind: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<&'a str>,
-}
-
 pub(super) enum NormalizeEventError {
     RetainedItemTooLarge { observed: usize },
     FileTouchLimitExceeded,
-    Serialization(String),
 }
 
 pub(super) fn normalize_event(
@@ -434,40 +312,13 @@ pub(super) fn normalize_event(
     item: &RawContinueHistoryItem,
     source_record_digest: [u8; 32],
 ) -> Result<ContinueEventRow, NormalizeEventError> {
-    let tool_states = item
-        .tool_call_states
-        .iter()
-        .map(sanitized_tool_state)
-        .collect::<Vec<_>>();
-    let body = SanitizedEventBody {
-        message: item.message.as_ref().map(sanitized_message),
-        editor_state: item.editor_text.as_deref(),
-        context_items: &item.context_items,
-        tool_call_states: tool_states,
-        conversation_summary: item.conversation_summary.as_deref(),
-    };
-    let body_bytes = serde_json::to_vec(&body).map_err(|error| {
-        NormalizeEventError::Serialization(format!(
-            "failed to serialize sanitized Continue event: {error}"
-        ))
-    })?;
-    if body_bytes.len() > CONTINUE_NATIVE_MAX_RETAINED_ITEM_BYTES {
+    let search_text = continue_retained_text(item);
+    if search_text.len() > CONTINUE_NATIVE_MAX_RETAINED_ITEM_BYTES {
         return Err(NormalizeEventError::RetainedItemTooLarge {
-            observed: body_bytes.len(),
+            observed: search_text.len(),
         });
     }
-    let search_text = continue_retained_text(item);
-    let preview = search_text
-        .chars()
-        .take(PROVIDER_MAX_PREVIEW_CHARS)
-        .collect::<String>();
     let file_touches = event_file_touches(item)?;
-    let content_hash = event_content_hash(&body_bytes, &file_touches)?;
-    let body_json = String::from_utf8(body_bytes).map_err(|error| {
-        NormalizeEventError::Serialization(format!(
-            "sanitized Continue event is not UTF-8: {error}"
-        ))
-    })?;
     Ok(ContinueEventRow {
         identity: ContinueEventIdentity {
             session: session.clone(),
@@ -500,10 +351,7 @@ pub(super) fn normalize_event(
                     .and_then(|message| message.timestamp.as_ref())
             })
             .and_then(parse_timestamp),
-        body_json,
-        content_hash,
         search_text,
-        preview,
         calls: event_call_relationships(item),
         file_touches,
     })
@@ -520,10 +368,7 @@ impl ContinueEventRow {
             FIXED_EVENT_BYTES
                 .saturating_add(self.identity.session.0.len())
                 .saturating_add(option_string_bytes(&self.native_item_id))
-                .saturating_add(self.body_json.len())
-                .saturating_add(self.content_hash.len())
-                .saturating_add(self.search_text.len())
-                .saturating_add(self.preview.len()),
+                .saturating_add(self.search_text.len()),
             |bytes, call| {
                 bytes
                     .saturating_add(64)
@@ -574,86 +419,6 @@ fn event_file_touches(
         touches.push(touch.clone());
     }
     Ok(touches.into_boxed_slice())
-}
-
-fn event_content_hash(
-    body_bytes: &[u8],
-    file_touches: &[ContinueFileTouch],
-) -> Result<String, NormalizeEventError> {
-    let mut hasher = Sha256::new();
-    hasher.update(EVENT_HASH_DOMAIN);
-    hash_bytes(&mut hasher, body_bytes);
-    hasher.update(
-        u64::try_from(file_touches.len())
-            .unwrap_or(u64::MAX)
-            .to_be_bytes(),
-    );
-    for touch in file_touches {
-        hash_bytes(&mut hasher, touch.path.as_bytes());
-        hash_optional_bytes(&mut hasher, touch.old_path.as_deref().map(str::as_bytes));
-        hash_optional_bytes(
-            &mut hasher,
-            touch.change_kind.map(|kind| kind.as_str().as_bytes()),
-        );
-        hash_bytes(&mut hasher, touch.confidence.as_str().as_bytes());
-        let metadata = serde_json::to_vec(&touch.metadata).map_err(|error| {
-            NormalizeEventError::Serialization(format!(
-                "failed to serialize normalized Continue file-touch metadata: {error}"
-            ))
-        })?;
-        hash_bytes(&mut hasher, &metadata);
-    }
-    Ok(hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
-}
-
-fn hash_optional_bytes(hasher: &mut Sha256, bytes: Option<&[u8]>) {
-    match bytes {
-        Some(bytes) => {
-            hasher.update([1]);
-            hash_bytes(hasher, bytes);
-        }
-        None => hasher.update([0]),
-    }
-}
-
-fn hash_bytes(hasher: &mut Sha256, bytes: &[u8]) {
-    hasher.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_be_bytes());
-    hasher.update(bytes);
-}
-
-fn sanitized_message(message: &RawContinueMessage) -> SanitizedMessage<'_> {
-    SanitizedMessage {
-        role: message.role.as_deref(),
-        content: &message.content,
-        tool_calls: message
-            .calls
-            .iter()
-            .map(|call| SanitizedToolCall {
-                id: call.id.as_deref(),
-                kind: call.kind.as_deref(),
-                name: call.name.as_deref(),
-            })
-            .collect(),
-    }
-}
-
-fn sanitized_tool_state(state: &RawContinueToolCallState) -> SanitizedToolState<'_> {
-    SanitizedToolState {
-        tool_call_id: state.tool_call_id.as_deref(),
-        tool_call: state.tool_call.as_ref().map(|call| SanitizedToolCall {
-            id: call.id.as_deref(),
-            kind: call.kind.as_deref(),
-            name: call.function_name.as_deref().or(call.name.as_deref()),
-        }),
-        status: state.status.as_deref(),
-        exit_code: state.exit_code,
-        duration_ms: state.duration_ms,
-        timed_out: state.timed_out,
-    }
 }
 
 fn call_relationship(ordinal: usize, state: &RawContinueToolCallState) -> ContinueCallRelationship {

@@ -1,7 +1,7 @@
 mod conversations;
 mod tasks;
 
-use conversations::{emit_sessions_and_hierarchy, load_task_hierarchy, scan_conversations};
+use conversations::{emit_sessions_and_hierarchy, scan_conversations};
 use tasks::scan_tasks;
 
 #[cfg(test)]
@@ -16,26 +16,21 @@ use sha2::{Digest, Sha256};
 use super::super::schema::{warp_quote_identifier, WarpSqliteSchema};
 use super::decode::{
     decode_warp_native_task, WarpDecodeCounters, WarpDecodedMessage, WarpDecodedMessagePayload,
-    WarpOutputLocalFailureKind, WarpProOutputPayload,
 };
-use super::publication::{
-    finish_core_hasher, hex_digest, new_core_hasher, WarpNativeCounters, WarpNativeDigestChain,
-    WarpNativeEvent, WarpNativeEventDraft, WarpNativeFrontier, WarpNativeFrontierPhase,
-    WarpNativeHierarchyEdge, WarpNativeMessageIdentity, WarpNativeOutputRejection,
-    WarpNativeOutputRejectionKind, WarpNativePageAccumulator, WarpNativeProPageAccumulator,
-    WarpNativeProfile, WarpNativeRejection, WarpNativeRejectionKind, WarpNativeSession,
-    WarpNativeSink, WarpNativeUnit, WARP_NATIVE_PAGE_MAX_BYTES, WARP_SOURCE_DIGEST_DOMAIN,
+use super::model::{
+    hex_digest, WarpNativeCounters, WarpNativeDigestChain, WarpNativeEvent, WarpNativeEventDraft,
+    WarpNativeHierarchyEdge, WarpNativeMessageIdentity, WarpNativePageAccumulator,
+    WarpNativeRejection, WarpNativeRejectionKind, WarpNativeSession, WarpNativeSink,
+    WarpNativeUnit, WARP_NATIVE_PAGE_MAX_BYTES, WARP_SOURCE_DIGEST_DOMAIN,
 };
 use crate::provider::sqlite::SqliteLengthPreflightGuard;
 use crate::{
-    complete_content::CompleteContentBodyDigest, CaptureError, OutputAssociations,
-    OutputNativeCoordinate, OutputObservationKind, OutputOutcome, OutputOutcomeMetadata,
-    OutputSourceLocator, ProOutputObservation, Result, MAX_PROVIDER_SQLITE_VALUE_BYTES,
+    complete_content::CompleteContentBodyDigest, CaptureError, OutputOutcome, Result,
+    MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
 
 const WARP_SESSION_METADATA_MAX_BYTES: usize = 64 * 1024;
 const WARP_ORDERING_KEY_MAX_BYTES: usize = 240 * 1024;
-const WARP_CONTENT_LOCATOR_KIND: &str = "warp-task-message-v1";
 const WARP_NATIVE_SQLITE_CONVERSATION_ROW_OVERHEAD_BYTES: u64 = 64 * 4;
 const WARP_NATIVE_SQLITE_ROW_OVERHEAD_BYTES: u64 = 64 * 5;
 
@@ -61,12 +56,10 @@ struct WarpHierarchyNode {
 enum WarpConversationEmission {
     Session {
         conversation_id: String,
-        rowid: i64,
         source_digest: [u8; 32],
     },
     Rejection {
         rejection: WarpNativeRejection,
-        rowid: i64,
         source_digest: [u8; 32],
     },
 }
@@ -100,46 +93,6 @@ struct WarpTaskCandidate {
 pub(super) struct WarpNativeQueryResult {
     pub(super) counters: WarpNativeCounters,
     pub(super) source_integrity_digest: String,
-    pub(super) core_generation_digest: String,
-    pub(super) eof: WarpNativeEof,
-    pub(super) pages_emitted: u64,
-    pub(super) pro_output_pages_emitted: u64,
-}
-
-/// Opaque proof that the pinned immutable snapshot query reached exact EOF.
-///
-/// The scanner constructs this only after both authoritative table traversals
-/// finish and every pending page is accepted. The outer transaction wrapper
-/// releases it only after the read transaction also closes cleanly.
-pub(super) struct WarpNativeEof {
-    frontier: WarpNativeFrontier,
-}
-
-impl WarpNativeEof {
-    pub(super) fn frontier(&self) -> &WarpNativeFrontier {
-        &self.frontier
-    }
-
-    pub(super) fn into_frontier(self) -> WarpNativeFrontier {
-        self.frontier
-    }
-}
-
-pub(super) fn scan_warp_native_snapshot(
-    conn: &Connection,
-    schema: &WarpSqliteSchema,
-    profile: WarpNativeProfile,
-    resume_frontier: Option<WarpNativeFrontier>,
-    sink: &mut dyn WarpNativeSink,
-) -> Result<WarpNativeQueryResult> {
-    conn.execute_batch("begin")?;
-    let result = scan_warp_native_snapshot_inner(conn, schema, profile, resume_frontier, sink);
-    let rollback = conn.execute_batch("rollback");
-    match (result, rollback) {
-        (Ok(result), Ok(())) => Ok(result),
-        (Err(error), Ok(())) => Err(error),
-        (_, Err(error)) => Err(CaptureError::from(error)),
-    }
 }
 
 /// Scans through a read transaction already pinned by the caller.
@@ -149,118 +102,50 @@ pub(super) fn scan_warp_native_snapshot(
 pub(super) fn scan_warp_native_pinned_snapshot(
     conn: &Connection,
     schema: &WarpSqliteSchema,
-    profile: WarpNativeProfile,
-    resume_frontier: Option<WarpNativeFrontier>,
     sink: &mut dyn WarpNativeSink,
 ) -> Result<WarpNativeQueryResult> {
-    scan_warp_native_snapshot_inner(conn, schema, profile, resume_frontier, sink)
-}
-
-fn scan_warp_native_snapshot_inner(
-    conn: &Connection,
-    schema: &WarpSqliteSchema,
-    profile: WarpNativeProfile,
-    resume_frontier: Option<WarpNativeFrontier>,
-    sink: &mut dyn WarpNativeSink,
-) -> Result<WarpNativeQueryResult> {
-    let resume_frontier = resume_frontier.unwrap_or_default();
-    let mut builder = WarpNativePageEmitter::new(sink, profile, resume_frontier.clone());
+    let mut builder = WarpNativePageEmitter::new(sink);
     let mut counters = WarpNativeCounters::default();
 
-    let hierarchy = if resume_frontier.phase == WarpNativeFrontierPhase::Tasks {
-        load_task_hierarchy(
-            conn,
-            schema,
-            &resume_frontier,
-            BTreeMap::new(),
-            &mut counters,
-        )?
-    } else {
-        let (hierarchy, conversation_emissions) =
-            scan_conversations(conn, &mut counters, &resume_frontier)?;
-        counters.hierarchy_nodes_retained = u64::try_from(hierarchy.len()).unwrap_or(u64::MAX);
-        counters.hierarchy_edges = hierarchy
-            .values()
-            .filter(|node| node.parent_conversation_id.is_some())
-            .count()
-            .try_into()
-            .unwrap_or(u64::MAX);
-        emit_sessions_and_hierarchy(
-            &hierarchy,
-            conversation_emissions,
-            &mut builder,
-            &mut counters,
-            &resume_frontier,
-        )?;
-        if resume_frontier.phase == WarpNativeFrontierPhase::Conversations {
-            load_task_hierarchy(conn, schema, &resume_frontier, hierarchy, &mut counters)?
-        } else {
-            hierarchy
-        }
-    };
-    scan_tasks(
-        conn,
-        schema,
+    let (hierarchy, conversation_emissions) = scan_conversations(conn, &mut counters)?;
+    counters.hierarchy_nodes_retained = u64::try_from(hierarchy.len()).unwrap_or(u64::MAX);
+    counters.hierarchy_edges = hierarchy
+        .values()
+        .filter(|node| node.parent_conversation_id.is_some())
+        .count()
+        .try_into()
+        .unwrap_or(u64::MAX);
+    emit_sessions_and_hierarchy(
         &hierarchy,
+        conversation_emissions,
         &mut builder,
         &mut counters,
-        profile,
-        &resume_frontier,
     )?;
-    let (
-        source_integrity_digest,
-        core_generation_digest,
-        final_frontier,
-        pages_emitted,
-        pro_output_pages_emitted,
-    ) = builder.finish()?;
+    scan_tasks(conn, schema, &hierarchy, &mut builder, &mut counters)?;
+    let source_integrity_digest = builder.finish()?;
     Ok(WarpNativeQueryResult {
         counters,
         source_integrity_digest,
-        core_generation_digest,
-        eof: WarpNativeEof {
-            frontier: final_frontier,
-        },
-        pages_emitted,
-        pro_output_pages_emitted,
     })
 }
 
 struct WarpNativePageEmitter<'a> {
     sink: &'a mut dyn WarpNativeSink,
     page: WarpNativePageAccumulator,
-    current_frontier: WarpNativeFrontier,
-    pro_page: Option<WarpNativeProPageAccumulator>,
-    pro_current_frontier: WarpNativeFrontier,
     source_hasher: WarpNativeDigestChain,
-    core_hasher: WarpNativeDigestChain,
-    pages_emitted: u64,
-    pro_output_pages_emitted: u64,
+    retained_events: u64,
+    legacy_indexed_events: u64,
 }
 
 impl<'a> WarpNativePageEmitter<'a> {
-    fn new(
-        sink: &'a mut dyn WarpNativeSink,
-        profile: WarpNativeProfile,
-        mut current_frontier: WarpNativeFrontier,
-    ) -> Self {
-        let source_hasher =
-            WarpNativeDigestChain::new(WARP_SOURCE_DIGEST_DOMAIN, current_frontier.source_digest);
-        let core_hasher = new_core_hasher(current_frontier.core_digest);
-        current_frontier.source_digest = source_hasher.state();
-        current_frontier.core_digest = core_hasher.state();
+    fn new(sink: &'a mut dyn WarpNativeSink) -> Self {
+        let source_hasher = WarpNativeDigestChain::new(WARP_SOURCE_DIGEST_DOMAIN);
         Self {
             sink,
-            page: WarpNativePageAccumulator::new(current_frontier.clone()),
-            current_frontier: current_frontier.clone(),
-            pro_page: profile
-                .wants_transient_outputs()
-                .then(|| WarpNativeProPageAccumulator::new(current_frontier.clone())),
-            pro_current_frontier: current_frontier,
+            page: WarpNativePageAccumulator::new(),
             source_hasher,
-            core_hasher,
-            pages_emitted: 0,
-            pro_output_pages_emitted: 0,
+            retained_events: 0,
+            legacy_indexed_events: 0,
         }
     }
 
@@ -268,14 +153,27 @@ impl<'a> WarpNativePageEmitter<'a> {
         self.source_hasher.push(label, digest)
     }
 
-    fn frontier(&self) -> &WarpNativeFrontier {
-        &self.current_frontier
+    fn retained_events(&self) -> u64 {
+        self.retained_events
+    }
+
+    fn legacy_indexed_events(&self) -> u64 {
+        self.legacy_indexed_events
+    }
+
+    fn advance_legacy_index(&mut self) -> Result<()> {
+        self.legacy_indexed_events =
+            self.legacy_indexed_events
+                .checked_add(1)
+                .ok_or(CaptureError::SystemInvariant(
+                    "Warp released event index overflowed",
+                ))?;
+        Ok(())
     }
 
     fn push(
         &mut self,
         mut unit: WarpNativeUnit,
-        next_frontier: WarpNativeFrontier,
         native_key: String,
         counters: &mut WarpNativeCounters,
     ) -> Result<()> {
@@ -287,86 +185,37 @@ impl<'a> WarpNativePageEmitter<'a> {
                 native_key,
             )?;
         }
-        let (core_unit, pro_unit) = unit.into_lanes();
+        let core_unit = unit.into_core();
         if !self.page.can_accept(&core_unit) {
             self.flush_core()?;
         }
-        let mut next_frontier = next_frontier;
-        next_frontier.source_digest = self.source_hasher.state();
-        let next_frontier = self
-            .page
-            .push(core_unit, next_frontier, &mut self.core_hasher)?;
-        self.current_frontier = next_frontier.clone();
+        let retained = u64::try_from(core_unit.retained_event_count())
+            .map_err(|_| CaptureError::SystemInvariant("Warp event count exceeds u64"))?;
+        self.page.push(core_unit)?;
+        self.retained_events =
+            self.retained_events
+                .checked_add(retained)
+                .ok_or(CaptureError::SystemInvariant(
+                    "Warp retained event count overflowed",
+                ))?;
         if self.page.is_full() {
             self.flush_core()?;
-        }
-
-        if let Some(page) = self.pro_page.as_ref() {
-            if !page.can_accept(&pro_unit) {
-                self.flush_pro()?;
-            }
-            let page = self.pro_page.as_mut().ok_or(CaptureError::SystemInvariant(
-                "Warp NativePath Pro page disappeared during fanout",
-            ))?;
-            page.push(pro_unit, next_frontier.clone())?;
-            self.pro_current_frontier = next_frontier;
-            if page.is_full() {
-                self.flush_pro()?;
-            }
         }
         Ok(())
     }
 
-    fn finish(mut self) -> Result<(String, String, WarpNativeFrontier, u64, u64)> {
+    fn finish(mut self) -> Result<String> {
         self.flush_core()?;
-        self.flush_pro()?;
-        Ok((
-            hex_digest(self.source_hasher.state()),
-            finish_core_hasher(&self.core_hasher),
-            self.current_frontier,
-            self.pages_emitted,
-            self.pro_output_pages_emitted,
-        ))
+        Ok(hex_digest(self.source_hasher.state()))
     }
 
     fn flush_core(&mut self) -> Result<()> {
-        let next = WarpNativePageAccumulator::new(self.current_frontier.clone());
+        let next = WarpNativePageAccumulator::new();
         let page = std::mem::replace(&mut self.page, next);
         let Some(page) = page.finish()? else {
             return Ok(());
         };
         self.sink.push_page(page)?;
-        self.pages_emitted =
-            self.pages_emitted
-                .checked_add(1)
-                .ok_or(CaptureError::SystemInvariant(
-                    "Warp NativePath page count overflowed",
-                ))?;
-        Ok(())
-    }
-
-    fn flush_pro(&mut self) -> Result<()> {
-        let Some(page) = self.pro_page.as_mut() else {
-            return Ok(());
-        };
-        let next = WarpNativeProPageAccumulator::new(self.pro_current_frontier.clone());
-        let page = std::mem::replace(page, next);
-        let Some(page) = page.finish()? else {
-            return Ok(());
-        };
-        let expected_receipt = page.receipt();
-        let receipt = self.sink.push_pro_output_page(page);
-        if receipt != expected_receipt {
-            return Err(CaptureError::SystemInvariant(
-                "Warp NativePath Pro page receipt did not match the emitted page",
-            ));
-        }
-        self.pro_output_pages_emitted =
-            self.pro_output_pages_emitted
-                .checked_add(1)
-                .ok_or(CaptureError::SystemInvariant(
-                    "Warp NativePath Pro page count overflowed",
-                ))?;
         Ok(())
     }
 }
@@ -375,9 +224,7 @@ fn record_retained_event_counters(counters: &mut WarpNativeCounters, event: &War
     counters.retained_events = counters.retained_events.saturating_add(1);
     counters.retained_body_bytes = counters
         .retained_body_bytes
-        .saturating_add(u64::try_from(event.body.len()).unwrap_or(u64::MAX));
-    counters.retained_content_hashes = counters.retained_content_hashes.saturating_add(1);
-    counters.retained_previews = counters.retained_previews.saturating_add(1);
+        .saturating_add(u64::try_from(event.lexical_body.len()).unwrap_or(u64::MAX));
 }
 
 fn hash_rejected_task_candidate(hasher: &mut Sha256, candidate: &WarpTaskCandidate) -> Result<()> {
@@ -500,15 +347,6 @@ fn merge_decode_counters(counters: &mut WarpNativeCounters, decoded: WarpDecodeC
     counters.malformed_output_records = counters
         .malformed_output_records
         .saturating_add(decoded.malformed_output_records);
-    counters.oversized_output_records = counters
-        .oversized_output_records
-        .saturating_add(decoded.oversized_output_records);
-    counters.result_body_bytes_decoded = counters
-        .result_body_bytes_decoded
-        .saturating_add(decoded.result_body_bytes_decoded);
-    counters.result_body_strings_allocated = counters
-        .result_body_strings_allocated
-        .saturating_add(decoded.result_body_strings_allocated);
 }
 
 fn required_text<'a>(value: ValueRef<'a>, field: &str) -> Result<&'a str> {

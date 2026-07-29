@@ -9,14 +9,11 @@ use serde_json::Value;
 use crate::common::io::{ensure_regular_provider_transcript_file, read_json_file_limited};
 use crate::provider::provider_safe_path_segment;
 use crate::provider::providers::task_json::{task_json_string_field, task_json_time_field};
-use crate::{
-    CaptureError, ProviderImportFailure, ProviderImportSummary, Result,
-    MAX_PROVIDER_JSONL_LINE_BYTES,
-};
+use crate::{CaptureError, Result, MAX_PROVIDER_JSONL_LINE_BYTES};
 
 use super::super::source::{CodeBuddyFrozenFile, CodeBuddyRevisionHasher};
 use super::super::{
-    CODEBUDDY_CAPTURE_REVISION, CODEBUDDY_MAX_CHECKPOINT_TEXT_BYTES, CODEBUDDY_POLICY_REVISION,
+    CODEBUDDY_CAPTURE_REVISION, CODEBUDDY_MAX_METADATA_TEXT_BYTES, CODEBUDDY_POLICY_REVISION,
 };
 
 #[derive(Debug)]
@@ -61,27 +58,34 @@ pub(super) struct CodeBuddyExtensionObservation {
     pub(super) source_revision: String,
 }
 
+#[derive(Debug)]
+pub(super) struct CodeBuddyExtensionRejection {
+    pub(super) line: usize,
+    pub(super) error: String,
+}
+
 impl CodeBuddyExtensionObservation {
     pub(super) fn read(
         metadata: &CodeBuddyExtensionMetadata,
         session_ordinal: usize,
-        summary: &mut ProviderImportSummary,
-    ) -> Result<Self> {
+    ) -> Result<(Self, Vec<CodeBuddyExtensionRejection>)> {
         let canonical_session_dir = fs::canonicalize(&metadata.session_dir)?;
-        let (source_revision, _) =
-            codebuddy_extension_source_revision(metadata, session_ordinal, Some(summary))?;
-        Ok(Self {
-            canonical_session_dir,
-            source_revision,
-        })
+        let (source_revision, _, rejections) =
+            codebuddy_extension_source_revision(metadata, session_ordinal)?;
+        Ok((
+            Self {
+                canonical_session_dir,
+                source_revision,
+            },
+            rejections,
+        ))
     }
 }
 
 pub(super) fn codebuddy_extension_metadata(
     session_dir: &Path,
     _session_ordinal: usize,
-) -> Result<(Option<CodeBuddyExtensionMetadata>, ProviderImportSummary)> {
-    let summary = ProviderImportSummary::default();
+) -> Result<CodeBuddyExtensionMetadata> {
     let session_index_path = session_dir.join("index.json");
     ensure_regular_provider_transcript_file(&session_index_path)?;
     let session_index = read_json_file_limited(
@@ -104,18 +108,15 @@ pub(super) fn codebuddy_extension_metadata(
         .to_owned();
     let (project_index, conversation) =
         codebuddy_project_index_and_conversation(&project_dir, &native_session_id)?;
-    Ok((
-        Some(CodeBuddyExtensionMetadata {
-            session_dir: session_dir.to_path_buf(),
-            project_dir,
-            native_session_id,
-            project_hash,
-            project_index,
-            conversation,
-            session_index,
-        }),
-        summary,
-    ))
+    Ok(CodeBuddyExtensionMetadata {
+        session_dir: session_dir.to_path_buf(),
+        project_dir,
+        native_session_id,
+        project_hash,
+        project_index,
+        conversation,
+        session_index,
+    })
 }
 
 pub(super) fn codebuddy_extension_metadata_from_admitted(
@@ -164,8 +165,7 @@ pub(super) fn codebuddy_extension_metadata_from_admitted(
 fn codebuddy_extension_source_revision(
     metadata: &CodeBuddyExtensionMetadata,
     session_ordinal: usize,
-    mut summary: Option<&mut ProviderImportSummary>,
-) -> Result<(String, u64)> {
+) -> Result<(String, u64, Vec<CodeBuddyExtensionRejection>)> {
     let mut revision = CodeBuddyRevisionHasher::new();
     revision.update(b"codebuddy-extension-source-v1");
     revision.update(&CODEBUDDY_CAPTURE_REVISION.to_be_bytes());
@@ -185,6 +185,7 @@ fn codebuddy_extension_source_revision(
     codebuddy_hash_path_state(&mut revision, &metadata.session_dir.join("messages"), false)?;
 
     let mut record_count = 0_u64;
+    let mut rejections = Vec::new();
     for (message_index, message_ref) in metadata.messages().iter().enumerate() {
         revision.update(&(message_index as u64).to_be_bytes());
         serde_json::to_writer(&mut revision, message_ref)?;
@@ -203,12 +204,10 @@ fn codebuddy_extension_source_revision(
                 let error = error.rejected()?;
                 revision.update(b"rejected-message");
                 revision.update(error.as_bytes());
-                if let Some(summary) = summary.as_deref_mut() {
-                    summary.record_failure(ProviderImportFailure {
-                        line: codebuddy_extension_line_number(session_ordinal, message_index),
-                        error,
-                    });
-                }
+                rejections.push(CodeBuddyExtensionRejection {
+                    line: codebuddy_extension_line_number(session_ordinal, message_index),
+                    error,
+                });
             }
         }
     }
@@ -218,6 +217,7 @@ fn codebuddy_extension_source_revision(
             revision.finish()
         ),
         record_count,
+        rejections,
     ))
 }
 
@@ -291,7 +291,7 @@ pub(super) fn codebuddy_extension_metadata_text(
         .conversation
         .as_ref()
         .and_then(|value| task_json_string_field(value, fields))
-        .filter(|value| value.len() <= CODEBUDDY_MAX_CHECKPOINT_TEXT_BYTES)
+        .filter(|value| value.len() <= CODEBUDDY_MAX_METADATA_TEXT_BYTES)
 }
 
 fn codebuddy_project_index_and_conversation(

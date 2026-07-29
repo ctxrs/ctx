@@ -1,7 +1,4 @@
-//! Provider-owned Zed NativePath parsing and Store publication.
-//!
-//! The provider-private scan feeds the Zed Store vertical directly. Exact temporary
-//! output evidence remains available for live Pro hydration.
+//! Source-backed Zed discovery, parsing, and exact hydration.
 
 use std::{
     ffi::OsString,
@@ -26,33 +23,16 @@ use crate::{
 
 mod decode;
 mod dto;
-mod output;
-mod publication;
+mod model;
 mod query;
 pub(crate) mod source_backed;
-mod staging;
-mod vertical;
 
 // Consumed by the provider registration seam once Zed is enabled there.
 #[allow(unused_imports)]
 pub(super) use source_backed::{
-    hydrate_zed_locator_v0, ingest_zed_source_backed_v0, ZedHydratedRecordV0, ZedLocatorResolverV0,
-    ZedSourceBackedCountersV0, ZedSourceBackedErrorV0, ZedSourceBackedIngestReceiptV0,
+    hydrate_zed_locator_v0, ZedHydratedRecordV0, ZedLocatorResolverV0, ZedSourceBackedErrorV0,
     ZedSourceBackedResultV0,
 };
-pub(super) use vertical::import_zed_nativepath;
-
-use dto::{
-    ZedNativeCounters, ZedNativeGenerationAuthority, ZedNativeIncomplete,
-    ZedNativeIncompleteReason, ZedNativeScanOutcome, ZedNativeSink, ZedNativeSourceAuthority,
-    ZedNativeSourceSelection,
-};
-#[cfg(test)]
-use dto::{
-    ZedNativeEvent, ZedNativeMessageIdentity, ZedNativePage, ZedNativeRejection,
-    ZedNativeRejectionKind, ZedNativeSession, ZED_NATIVE_PAGE_MAX_BYTES, ZED_NATIVE_PAGE_MAX_UNITS,
-};
-use query::scan_zed_native_snapshot;
 
 const ZED_SNAPSHOT_ACQUISITION_ATTEMPTS: usize = 3;
 const ZED_SOURCE_INVALID_REASON: &str = "Zed SQLite source must be a regular non-symlink file";
@@ -314,13 +294,6 @@ fn zed_hex_digest(digest: &[u8; 32]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-pub(super) fn scan_zed_nativepath(
-    selection: &ZedNativeSourceSelection,
-    sink: &mut dyn ZedNativeSink,
-) -> ZedNativeResult<ZedNativeScanOutcome> {
-    scan_zed_nativepath_with_finalizer(selection, sink, || Ok(()))
-}
-
 pub(super) fn decode_complete_message(
     row: &super::thread::ZedThreadRow,
     message_ordinal: u64,
@@ -342,7 +315,7 @@ struct ZedResolvedCompleteMessage {
 fn decode_complete_message_with_identity(
     row: &super::thread::ZedThreadRow,
     message_ordinal: u64,
-    record_digest: CompleteContentBodyDigest,
+    _record_digest: CompleteContentBodyDigest,
 ) -> ZedNativeResult<Option<ZedResolvedCompleteMessage>> {
     let updated_at = super::thread::zed_required_timestamp(&row.updated_at, "updated_at")?;
     let decoded =
@@ -358,38 +331,35 @@ fn decode_complete_message_with_identity(
             return Ok(());
         }
         let complete_text = draft.body.clone();
-        let event =
-            dto::ZedNativeEvent::from_draft(row.rowid, &row.id, draft, record_digest.clone())?;
-        let provider_event_index = event
-            .native_order
-            .message_ordinal
-            .checked_mul(2)
-            .and_then(|value| value.checked_add(u64::from(event.native_order.sub_ordinal)))
-            .ok_or(CaptureError::SystemInvariant(
-                "Zed provider event index overflowed",
-            ))?;
-        let cursor = event
-            .payload
-            .get("cursor")
-            .and_then(serde_json::Value::as_str)
-            .ok_or(CaptureError::SystemInvariant(
-                "Zed normalized payload has no cursor",
-            ))?
-            .to_owned();
-        let native_message_id = match &event.identity.message {
+        let provider_event_index =
+            draft
+                .message_ordinal
+                .checked_mul(2)
+                .ok_or(CaptureError::SystemInvariant(
+                    "Zed provider event index overflowed",
+                ))?;
+        let identity = model::event_identity(
+            &row.id,
+            draft.provider_message_id.as_deref(),
+            draft.message_ordinal,
+        );
+        let cursor = model::event_cursor(&identity);
+        let legacy_provider_event_hash = model::legacy_retained_event_hash(&identity, &draft.body);
+        let payload = model::legacy_event_payload(&row.id, provider_event_index, &cursor, &draft)?;
+        let native_message_id = match &identity.message {
             dto::ZedNativeMessageIdentity::ProviderId { value, .. } => Some(value.clone()),
             dto::ZedNativeMessageIdentity::MessageOrdinal(_) => None,
         };
         resolved = Some(ZedResolvedCompleteMessage {
             native_message_id,
-            native_message_ordinal: event.native_order.message_ordinal,
-            native_sub_ordinal: event.native_order.sub_ordinal,
+            native_message_ordinal: draft.message_ordinal,
+            native_sub_ordinal: 0,
             message: super::ZedNativePathCompleteMessage {
                 provider_event_index,
-                legacy_provider_event_hash: event.legacy_content_hash,
+                legacy_provider_event_hash,
                 cursor,
-                event_type: event.event_type,
-                payload: event.payload,
+                event_type: draft.event_type,
+                payload,
                 complete_text,
             },
         });
@@ -416,75 +386,6 @@ pub(super) fn into_capture_error(error: ZedNativePathError) -> CaptureError {
         },
         ZedNativePathError::UnsupportedSchema(reason) => CaptureError::UnsupportedSchema(reason),
     }
-}
-
-fn scan_zed_nativepath_with_finalizer(
-    selection: &ZedNativeSourceSelection,
-    sink: &mut dyn ZedNativeSink,
-    before_final_revalidation: impl FnOnce() -> ZedNativeResult<()>,
-) -> ZedNativeResult<ZedNativeScanOutcome> {
-    let path = selection.selected_path();
-    let mut snapshot = match acquire_immutable_snapshot(path)? {
-        ZedSnapshotAcquisition::Acquired(snapshot) => *snapshot,
-        ZedSnapshotAcquisition::Incomplete { physical_locator } => {
-            return Ok(ZedNativeScanOutcome::Incomplete(Box::new(
-                ZedNativeIncomplete {
-                    source_complete: false,
-                    reason: ZedNativeIncompleteReason::SnapshotAcquisitionRace,
-                    physical_locator,
-                    pages_emitted: 0,
-                    counters: ZedNativeCounters::default(),
-                },
-            )));
-        }
-    };
-
-    let result = scan_zed_native_snapshot(
-        snapshot.connection()?,
-        &snapshot.physical_locator,
-        &snapshot.snapshot_revision,
-        sink,
-    )?;
-    before_final_revalidation()?;
-    match snapshot.finish() {
-        Ok(()) => {}
-        Err(ZedNativePathError::Capture(CaptureError::SourceChangedDuringCapture)) => {
-            return Ok(ZedNativeScanOutcome::Incomplete(Box::new(
-                ZedNativeIncomplete {
-                    source_complete: false,
-                    reason: ZedNativeIncompleteReason::SourceChangedAfterScan,
-                    physical_locator: snapshot.physical_locator,
-                    pages_emitted: result.pages_emitted,
-                    counters: result.counters,
-                },
-            )));
-        }
-        Err(error) => return Err(error),
-    }
-
-    Ok(ZedNativeScanOutcome::Complete(Box::new(
-        ZedNativeGenerationAuthority {
-            source_complete: true,
-            zero_native_rows: result.counters.native_thread_rows == 0,
-            zero_retained_events: result.counters.retained_events == 0,
-            has_useful_content: result.counters.sessions_retained > 0
-                || result.counters.retained_events > 0,
-            source_authority: ZedNativeSourceAuthority::ExactDispatchedDatabase {
-                path: selection.selected_path().to_path_buf(),
-                inventory_observation_token: selection
-                    .inventory_observation_token()
-                    .map(str::to_owned),
-            },
-            physical_locator: snapshot.physical_locator,
-            snapshot_revision: snapshot.snapshot_revision,
-            capability_digest: result.capability_digest,
-            source_integrity_digest: result.source_integrity_digest,
-            core_generation_digest: result.core_generation_digest,
-            output_index: result.output_index,
-            pages_emitted: result.pages_emitted,
-            counters: result.counters,
-        },
-    )))
 }
 
 impl ZedAdmittedSqliteFamily {
@@ -690,20 +591,3 @@ pub(super) fn acquire_immutable_snapshot(path: &Path) -> ZedNativeResult<ZedSnap
         physical_locator: fallback_locator,
     })
 }
-
-pub(super) fn revalidate_zed_snapshot_revision(
-    path: &Path,
-    expected_revision: &str,
-) -> ZedNativeResult<bool> {
-    let mut snapshot = match acquire_immutable_snapshot(path)? {
-        ZedSnapshotAcquisition::Acquired(snapshot) => *snapshot,
-        ZedSnapshotAcquisition::Incomplete { .. } => return Ok(false),
-    };
-    let matches = snapshot.snapshot_revision == expected_revision;
-    snapshot.finish()?;
-    Ok(matches)
-}
-
-#[cfg(test)]
-#[path = "native_path/tests.rs"]
-mod tests;

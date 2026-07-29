@@ -5,7 +5,6 @@ use super::super::wire::{
     warp_message_arm, warp_tool_name, warp_tool_result_name, WarpMessageArm, WarpWireCursor,
     WarpWireValue,
 };
-use super::publication::{WarpNativeProfile, WARP_NATIVE_PRO_OUTPUT_MAX_BODY_BYTES};
 use crate::{CaptureError, OutputOutcome, Result};
 
 #[derive(Clone, Debug)]
@@ -28,7 +27,6 @@ pub(super) struct WarpDecodedMessage {
 pub(super) enum WarpDecodedMessagePayload {
     Retained(WarpRetainedMessage),
     Output(WarpDecodedOutput),
-    OutputLocalFailure { reason: String },
     Excluded,
 }
 
@@ -46,22 +44,6 @@ pub(super) struct WarpDecodedOutput {
     pub(super) call_id: Option<String>,
     pub(super) tool_name: &'static str,
     pub(super) outcome: OutputOutcome,
-    pub(super) pro_payload: Option<WarpProOutputPayload>,
-}
-
-#[derive(Clone, Debug)]
-pub(super) enum WarpProOutputPayload {
-    Content(Vec<u8>),
-    Rejected {
-        kind: WarpOutputLocalFailureKind,
-        reason: String,
-    },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum WarpOutputLocalFailureKind {
-    Malformed,
-    Oversized,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -76,9 +58,6 @@ pub(super) struct WarpDecodeCounters {
     pub(super) native_results_timeout: u64,
     pub(super) native_results_unknown: u64,
     pub(super) malformed_output_records: u64,
-    pub(super) oversized_output_records: u64,
-    pub(super) result_body_bytes_decoded: u64,
-    pub(super) result_body_strings_allocated: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -95,10 +74,7 @@ struct WarpToolResultClassification<'a> {
     body: WarpClassifiedBody<'a>,
 }
 
-pub(super) fn decode_warp_native_task(
-    data: &[u8],
-    profile: WarpNativeProfile,
-) -> Result<WarpDecodedTask> {
+pub(super) fn decode_warp_native_task(data: &[u8]) -> Result<WarpDecodedTask> {
     let mut cursor = WarpWireCursor::new(data);
     let mut task_id = None;
     let mut message_payloads = Vec::new();
@@ -120,7 +96,7 @@ pub(super) fn decode_warp_native_task(
         let message_ordinal = u32::try_from(ordinal).map_err(|_| {
             CaptureError::InvalidPayload("Warp task has too many protobuf messages".to_owned())
         })?;
-        let payload = decode_warp_native_message(message, message_ordinal, profile, &mut counters)?;
+        let payload = decode_warp_native_message(message, message_ordinal, &mut counters)?;
         messages.push(payload);
     }
     Ok(WarpDecodedTask { messages, counters })
@@ -129,7 +105,6 @@ pub(super) fn decode_warp_native_task(
 fn decode_warp_native_message(
     data: &[u8],
     message_ordinal: u32,
-    profile: WarpNativeProfile,
     counters: &mut WarpDecodeCounters,
 ) -> Result<WarpDecodedMessage> {
     let mut cursor = WarpWireCursor::new(data);
@@ -187,24 +162,17 @@ fn decode_warp_native_message(
         arm,
         WarpMessageArm::ToolResult | WarpMessageArm::DebugOutput
     ) {
-        let mut decoded_payload = decode_excluded_output(arm, payload, profile, counters)?;
+        let decoded_payload = decode_excluded_output(arm, payload, counters)?;
         let needs_metadata = matches!(
             &decoded_payload,
             WarpDecodedMessagePayload::Output(output)
-                if profile.wants_transient_outputs()
-                    || matches!(
-                        output.outcome,
-                        OutputOutcome::Failure | OutputOutcome::Timeout
-                    )
+                if matches!(
+                    output.outcome,
+                    OutputOutcome::Failure | OutputOutcome::Timeout
+                )
         );
         let (request_id, occurred_at) = if needs_metadata {
-            decode_output_metadata(
-                request_id,
-                timestamp,
-                profile,
-                &mut decoded_payload,
-                counters,
-            )
+            decode_output_metadata(request_id, timestamp, counters)
         } else {
             (None, None)
         };
@@ -301,8 +269,6 @@ fn decode_warp_native_message(
 fn decode_output_metadata(
     request_id: Option<&[u8]>,
     timestamp: Option<&[u8]>,
-    profile: WarpNativeProfile,
-    payload: &mut WarpDecodedMessagePayload,
     counters: &mut WarpDecodeCounters,
 ) -> (Option<String>, Option<DateTime<Utc>>) {
     let request_id = request_id
@@ -319,24 +285,8 @@ fn decode_output_metadata(
         .map(ToString::to_string)
         .or_else(|| occurred_at.as_ref().err().map(ToString::to_string));
     if let Some(error) = metadata_error {
-        let already_rejected = matches!(
-            payload,
-            WarpDecodedMessagePayload::Output(WarpDecodedOutput {
-                pro_payload: Some(WarpProOutputPayload::Rejected { .. }),
-                ..
-            })
-        );
-        if !already_rejected {
-            counters.malformed_output_records = counters.malformed_output_records.saturating_add(1);
-        }
-        if profile.wants_transient_outputs() {
-            if let WarpDecodedMessagePayload::Output(output) = payload {
-                output.pro_payload = Some(WarpProOutputPayload::Rejected {
-                    kind: WarpOutputLocalFailureKind::Malformed,
-                    reason: format!("Warp tool result message metadata is malformed: {error}"),
-                });
-            }
-        }
+        let _ = error;
+        counters.malformed_output_records = counters.malformed_output_records.saturating_add(1);
     }
     (request_id.unwrap_or(None), occurred_at.unwrap_or(None))
 }
@@ -344,7 +294,6 @@ fn decode_output_metadata(
 fn decode_excluded_output(
     arm: WarpMessageArm,
     payload: &[u8],
-    profile: WarpNativeProfile,
     counters: &mut WarpDecodeCounters,
 ) -> Result<WarpDecodedMessagePayload> {
     counters.native_result_records = counters.native_result_records.saturating_add(1);
@@ -357,13 +306,8 @@ fn decode_excluded_output(
             Err(error) => {
                 counters.malformed_output_records =
                     counters.malformed_output_records.saturating_add(1);
-                return Ok(if profile.wants_transient_outputs() {
-                    WarpDecodedMessagePayload::OutputLocalFailure {
-                        reason: format!("failed to classify Warp tool result: {error}"),
-                    }
-                } else {
-                    WarpDecodedMessagePayload::Excluded
-                });
+                let _ = error;
+                return Ok(WarpDecodedMessagePayload::Excluded);
             }
         },
         WarpMessageArm::DebugOutput => return Ok(WarpDecodedMessagePayload::Excluded),
@@ -396,11 +340,10 @@ fn decode_excluded_output(
             counters.native_results_unknown = counters.native_results_unknown.saturating_add(1);
         }
     }
-    let needs_call_id = profile.wants_transient_outputs()
-        || matches!(
-            classification.outcome,
-            OutputOutcome::Failure | OutputOutcome::Timeout
-        );
+    let needs_call_id = matches!(
+        classification.outcome,
+        OutputOutcome::Failure | OutputOutcome::Timeout
+    );
     let call_id = if needs_call_id {
         classification
             .call_id
@@ -410,20 +353,10 @@ fn decode_excluded_output(
     } else {
         Ok(None)
     };
-    let pro_payload = if profile.wants_transient_outputs() {
-        Some(decode_pro_output_payload(
-            &classification.body,
-            call_id.as_ref().err(),
-            counters,
-        ))
-    } else {
-        None
-    };
     Ok(WarpDecodedMessagePayload::Output(WarpDecodedOutput {
         call_id: call_id.unwrap_or(None),
         tool_name: classification.tool_name,
         outcome: classification.outcome,
-        pro_payload,
     }))
 }
 
@@ -545,52 +478,6 @@ fn classified_nested_text(data: &[u8], field: u32) -> WarpClassifiedBody<'_> {
         Ok(value) => WarpClassifiedBody::Bytes(value),
         Err(error) => WarpClassifiedBody::Malformed(error.to_string()),
     }
-}
-
-fn decode_pro_output_payload(
-    body: &WarpClassifiedBody<'_>,
-    call_id_error: Option<&CaptureError>,
-    counters: &mut WarpDecodeCounters,
-) -> WarpProOutputPayload {
-    if let Some(error) = call_id_error {
-        counters.malformed_output_records = counters.malformed_output_records.saturating_add(1);
-        return WarpProOutputPayload::Rejected {
-            kind: WarpOutputLocalFailureKind::Malformed,
-            reason: format!("Warp tool result call_id is malformed: {error}"),
-        };
-    }
-    let body = match body {
-        WarpClassifiedBody::Bytes(body) => body.unwrap_or_default(),
-        WarpClassifiedBody::Malformed(reason) => {
-            counters.malformed_output_records = counters.malformed_output_records.saturating_add(1);
-            return WarpProOutputPayload::Rejected {
-                kind: WarpOutputLocalFailureKind::Malformed,
-                reason: format!("Warp tool result body is malformed: {reason}"),
-            };
-        }
-    };
-    if body.len() > WARP_NATIVE_PRO_OUTPUT_MAX_BODY_BYTES {
-        counters.oversized_output_records = counters.oversized_output_records.saturating_add(1);
-        return WarpProOutputPayload::Rejected {
-            kind: WarpOutputLocalFailureKind::Oversized,
-            reason: format!(
-                "Warp output exceeds the {WARP_NATIVE_PRO_OUTPUT_MAX_BODY_BYTES}-byte \
-                 transient page-body limit ({} bytes)",
-                body.len()
-            ),
-        };
-    }
-    if let Err(error) = super::super::wire::warp_wire_text(body) {
-        counters.malformed_output_records = counters.malformed_output_records.saturating_add(1);
-        return WarpProOutputPayload::Rejected {
-            kind: WarpOutputLocalFailureKind::Malformed,
-            reason: format!("Warp tool result body is malformed: {error}"),
-        };
-    }
-    counters.result_body_bytes_decoded = counters
-        .result_body_bytes_decoded
-        .saturating_add(u64::try_from(body.len()).unwrap_or(u64::MAX));
-    WarpProOutputPayload::Content(body.to_vec())
 }
 
 fn decode_timestamp(data: &[u8]) -> Result<Option<DateTime<Utc>>> {

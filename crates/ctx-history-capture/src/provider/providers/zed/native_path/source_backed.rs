@@ -1,16 +1,14 @@
 use std::path::{Path, PathBuf};
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource,
-    ContentSourceResolver, EventHydrationRequest, EventIdentityInput, HydratedProviderRecord,
-    HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy, NativeItemKey,
-    NativeRecordCoordinate, NativeSessionKey, PositionStability, ProjectionContractError,
-    ScannedSourceCounts, SessionHydrationRequest, SessionIdentityInput, SourceAnchor,
-    SourceObservation, SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, AgentType, CaptureProvider, ContentSourceResolver,
+    EventHydrationRequest, EventIdentityInput, HydratedProviderRecord, HydrationFailure,
+    HydrationFailureKind, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
+    NativeSessionKey, PositionStability, ProjectionContractError, SessionHydrationRequest,
+    SessionIdentityInput, SourceAnchor, SourceObservation, SourceRecordLocator,
+    SourceResolverContractError, StableEntityId, TypedKey,
 };
-use ctx_history_index::{
-    CommitReceipt, GenerationWriter, IndexError, LexicalDocument, RevalidationTarget, WriterOptions,
-};
+use ctx_history_index::{GenerationWriter, IndexError, LexicalDocument};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -21,7 +19,7 @@ use super::{
         ZedNativeEvent, ZedNativeMessageIdentity, ZedNativePage, ZedNativeSession, ZedNativeSink,
     },
     query::{hydrate_zed_thread_row, ZedThreadLineage, ZedThreadLineageResolver},
-    revalidate_zed_snapshot_revision, ZedNativePathError, ZedNativeResult, ZedSnapshotAcquisition,
+    ZedNativePathError, ZedNativeResult, ZedSnapshotAcquisition,
 };
 use crate::{
     complete_content::CompleteContentBodyDigest, CaptureError, ZED_THREADS_SQLITE_SOURCE_FORMAT,
@@ -36,7 +34,6 @@ const ZED_LOGICAL_SESSION_KIND: &str = "zed-thread";
 const ZED_LOGICAL_EVENT_KIND: &str = "zed-thread-event";
 const ZED_SOURCE_SCHEMA_VARIANT: &str = "zed-nativepath-sqlite-v0";
 const ZED_SOURCE_REVISION_KIND: &str = "zed-provider-sqlite-snapshot-v0";
-const ZED_PARSER_REVISION: &str = "zed-nativepath-source-backed-v0";
 const ZED_SQLITE_RELATION: &str = "threads";
 
 #[derive(Debug, Error)]
@@ -53,10 +50,6 @@ pub(crate) enum ZedSourceBackedErrorV0 {
     Native(#[from] ZedNativePathError),
     #[error("Zed immutable SQLite snapshot could not be acquired")]
     SnapshotAcquisitionRace,
-    #[error("Zed provider source changed after the certified snapshot scan")]
-    SourceChangedAfterScan,
-    #[error("Zed source-backed scan counters do not reconcile")]
-    ScanCountMismatch,
     #[error("Zed source-backed count overflow")]
     CountOverflow,
     #[error("Zed event {0:?} was emitted without its bounded session context")]
@@ -82,22 +75,6 @@ pub(crate) enum ZedSourceBackedErrorV0 {
 }
 
 pub(crate) type ZedSourceBackedResultV0<T> = Result<T, ZedSourceBackedErrorV0>;
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct ZedSourceBackedCountersV0 {
-    pub(crate) pages: u64,
-    pub(crate) native_thread_rows: u64,
-    pub(crate) retained_sessions: u64,
-    pub(crate) retained_events: u64,
-    pub(crate) rejected_threads: u64,
-    pub(crate) certified_logical_bytes: u64,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct ZedSourceBackedIngestReceiptV0 {
-    pub(crate) commit: CommitReceipt,
-    pub(crate) counters: ZedSourceBackedCountersV0,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ZedHydratedRecordV0 {
@@ -218,93 +195,6 @@ pub(crate) fn hydrate_zed_locator_v0(
     locator: &SourceRecordLocator,
 ) -> ZedSourceBackedResultV0<ZedHydratedRecordV0> {
     ZedLocatorResolverV0::new(selected_database_path)?.hydrate(locator)
-}
-
-pub(crate) fn ingest_zed_source_backed_v0(
-    selected_database_path: impl AsRef<Path>,
-    global_index_root: impl AsRef<Path>,
-) -> ZedSourceBackedResultV0<ZedSourceBackedIngestReceiptV0> {
-    let selected_database_path = selected_database_path.as_ref();
-    let source = zed_source_key()?;
-    let mut snapshot = acquire_snapshot(selected_database_path)?;
-    let revision_digest = snapshot_revision_digest(&snapshot.snapshot_revision);
-    let selected_source_path = selected_database_path.to_string_lossy().into_owned();
-
-    let mut writer = GenerationWriter::open(global_index_root, WriterOptions::default())?;
-    writer.begin_source(source.clone())?;
-    let mut sink = ZedSourceBackedSinkV0::new(
-        &mut writer,
-        snapshot.connection()?,
-        source.clone(),
-        revision_digest,
-        selected_source_path,
-    )?;
-    let scan_result = scan_zed_native_snapshot(
-        snapshot.connection()?,
-        &snapshot.physical_locator,
-        &snapshot.snapshot_revision,
-        &mut sink,
-    );
-    if let Some(error) = sink.failure.take() {
-        return Err(error);
-    }
-    let staged_documents = sink.staged_documents;
-    drop(sink);
-    let scan = scan_result?;
-    snapshot.finish()?;
-    if staged_documents != scan.counters.retained_events {
-        return Err(ZedSourceBackedErrorV0::ScanCountMismatch);
-    }
-
-    let retained_records = scan.counters.retained_events;
-    let rejected_records = scan.counters.rejected_threads;
-    let complete_records = retained_records
-        .checked_add(rejected_records)
-        .ok_or(ZedSourceBackedErrorV0::CountOverflow)?;
-    let counts = ScannedSourceCounts {
-        complete_records,
-        retained_records,
-        rejected_records,
-        ignored_records: 0,
-        indexed_documents: staged_documents,
-        certified_bytes: scan.counters.certified_logical_bytes,
-    };
-    let observation = source_observation(&source, &snapshot.snapshot_revision)?;
-    let certificate = CertifiedSource::certify(
-        observation.clone(),
-        observation,
-        ZED_PARSER_REVISION,
-        decode_sha256_hex(&scan.source_integrity_digest)?,
-        counts,
-    )?;
-    writer.certify_source(certificate)?;
-    let selected_path = selected_database_path.to_path_buf();
-    let commit = writer.commit(|target| match target {
-        RevalidationTarget::Source(certificate) => {
-            let Ok(expected_revision) = std::str::from_utf8(certificate.observation().revision())
-            else {
-                return false;
-            };
-            certificate
-                .observation()
-                .source()
-                .exact_descriptor_eq(&source)
-                && revalidate_zed_snapshot_revision(&selected_path, expected_revision)
-                    .unwrap_or(false)
-        }
-        RevalidationTarget::Deletion(_) => false,
-    })?;
-    Ok(ZedSourceBackedIngestReceiptV0 {
-        commit,
-        counters: ZedSourceBackedCountersV0 {
-            pages: scan.pages_emitted,
-            native_thread_rows: scan.counters.native_thread_rows,
-            retained_sessions: scan.counters.sessions_retained,
-            retained_events: scan.counters.retained_events,
-            rejected_threads: scan.counters.rejected_threads,
-            certified_logical_bytes: scan.counters.certified_logical_bytes,
-        },
-    })
 }
 
 pub(crate) struct ZedSourceBackedSinkV0<'writer, 'connection> {
@@ -763,7 +653,6 @@ mod tests {
     use std::fs;
 
     use ctx_history_core::{CaptureProvider, EventRole, EventType, NativeRecordCoordinate};
-    use ctx_history_index::VerifiedIndex;
     use rusqlite::{params, Connection};
     use serde_json::json;
 
@@ -779,25 +668,9 @@ mod tests {
         let source = temp.path().join("source");
         fs::create_dir(&source).unwrap();
         let database = source.join("threads.db");
-        let index = temp.path().join("index");
         create_database(&database, "cold exact sentinel");
 
-        let cold = ingest_zed_source_backed_v0(&database, &index).unwrap();
-        assert_eq!(cold.commit.indexed_documents, 1);
-        assert_eq!(cold.counters.native_thread_rows, 1);
-        assert_eq!(cold.counters.retained_sessions, 1);
-        assert_eq!(cold.counters.retained_events, 1);
-        assert_eq!(cold.counters.rejected_threads, 0);
-        assert!(cold.counters.certified_logical_bytes > 0);
-
-        let verified = VerifiedIndex::open(&index).unwrap();
-        let event = verified
-            .search_event_candidates("cold exact sentinel", 10)
-            .unwrap()
-            .into_iter()
-            .next()
-            .unwrap()
-            .event;
+        let event = project_root_document(&database);
         let cold_event_id = event.event_id;
         let cold_session_id = event.session_id;
         assert_eq!(event.parent_session_id, None);
@@ -829,22 +702,10 @@ mod tests {
             ZedSourceBackedErrorV0::LocatorSourceRevisionMismatch
         ));
 
-        let replacement = ingest_zed_source_backed_v0(&database, &index).unwrap();
-        assert_eq!(replacement.commit.indexed_documents, 1);
-        let replaced = VerifiedIndex::open(&index).unwrap();
-        assert!(replaced
-            .search_event_candidates("cold exact sentinel", 10)
-            .unwrap()
-            .is_empty());
-        let replacement_event = replaced
-            .search_event_candidates("replacement exact sentinel", 10)
-            .unwrap()
-            .into_iter()
-            .next()
-            .unwrap()
-            .event;
+        let replacement_event = project_root_document(&database);
         assert_eq!(replacement_event.event_id, cold_event_id);
         assert_eq!(replacement_event.session_id, cold_session_id);
+        assert_eq!(replacement_event.body, "replacement exact sentinel");
         let hydrated = ZedLocatorResolverV0::new(&database)
             .unwrap()
             .hydrate(&replacement_event.locator);
@@ -879,7 +740,7 @@ mod tests {
         let event = ZedNativeEvent::from_draft(
             1,
             "thread-full-body",
-            super::super::publication::ZedDecodedCoreEvent {
+            super::super::model::ZedDecodedCoreEvent {
                 provider_message_id: Some("message-full-body".to_owned()),
                 thread_ordinal: 0,
                 message_ordinal: 0,
@@ -894,8 +755,6 @@ mod tests {
             CompleteContentBodyDigest::from_text(&full_body),
         )
         .unwrap();
-        assert_ne!(event.preview, full_body);
-
         let document =
             zed_lexical_document(&source, [0x5a; 32], "/tmp/threads.db", &context, event).unwrap();
         assert_eq!(document.body, full_body);
@@ -903,43 +762,19 @@ mod tests {
     }
 
     #[test]
-    fn source_backed_zed_indexes_native_thread_lineage_and_filters() {
+    fn source_backed_zed_resolves_native_thread_lineage() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source");
         fs::create_dir(&source).unwrap();
         let database = source.join("threads.db");
-        let index = temp.path().join("index");
         create_database(&database, "root lineage sentinel");
         insert_child_thread(&database, "child lineage sentinel");
 
-        let receipt = ingest_zed_source_backed_v0(&database, &index).unwrap();
-        assert_eq!(receipt.commit.indexed_documents, 2);
-        let verified = VerifiedIndex::open(index).unwrap();
-        let root = verified
-            .search_event_candidates("root lineage sentinel", 10)
-            .unwrap()
-            .into_iter()
-            .next()
-            .unwrap()
-            .event;
-        let child = verified
-            .search_event_candidates("child lineage sentinel", 10)
-            .unwrap()
-            .into_iter()
-            .next()
-            .unwrap()
-            .event;
-
-        assert_eq!(child.parent_session_id, Some(root.session_id));
-        assert_eq!(child.root_session_id, root.session_id);
-        assert_eq!(child.provider_session_id.as_deref(), Some("a-child"));
-        assert_eq!(child.branch, None);
-        assert_eq!(
-            child.source_path.as_deref(),
-            Some(database.to_string_lossy().as_ref())
-        );
-        assert_eq!(child.agent_type, "subagent");
-        assert!(!child.is_primary);
+        let snapshot = acquire_snapshot(&database).unwrap();
+        let mut lineage = ZedThreadLineageResolver::new(snapshot.connection().unwrap()).unwrap();
+        let child = lineage.resolve("a-child").unwrap().unwrap();
+        assert_eq!(child.parent_thread_id.as_deref(), Some("thread-1"));
+        assert_eq!(child.root_thread_id, "thread-1");
     }
 
     #[test]
@@ -961,20 +796,8 @@ mod tests {
         assert_eq!(report.sources.len(), 1);
         assert_eq!(report.sources[0].path, selected);
 
-        let index = temp.path().join("index");
-        ingest_zed_source_backed_v0(&report.sources[0].path, &index).unwrap();
-        let verified = VerifiedIndex::open(index).unwrap();
-        assert_eq!(
-            verified
-                .search_event_candidates("selected flatpak sentinel", 10)
-                .unwrap()
-                .len(),
-            1
-        );
-        assert!(verified
-            .search_event_candidates("suppressed xdg sentinel", 10)
-            .unwrap()
-            .is_empty());
+        let document = project_root_document(&report.sources[0].path);
+        assert_eq!(document.body, "selected flatpak sentinel");
     }
 
     #[test]
@@ -1009,6 +832,65 @@ mod tests {
                 local_data: Some(root.join("platform-local-data")),
             },
         )
+    }
+
+    #[derive(Default)]
+    struct CollectingSink {
+        pages: Vec<ZedNativePage>,
+    }
+
+    impl ZedNativeSink for CollectingSink {
+        fn push_page(&mut self, page: ZedNativePage) -> ZedNativeResult<()> {
+            self.pages.push(page);
+            Ok(())
+        }
+    }
+
+    fn project_root_document(path: &Path) -> LexicalDocument {
+        let mut snapshot = acquire_snapshot(path).unwrap();
+        let revision = snapshot.snapshot_revision.clone();
+        let physical_locator = snapshot.physical_locator.clone();
+        let mut sink = CollectingSink::default();
+        let scan = scan_zed_native_snapshot(
+            snapshot.connection().unwrap(),
+            &physical_locator,
+            &revision,
+            &mut sink,
+        )
+        .unwrap();
+        assert_eq!(scan.counters.native_thread_rows, 1);
+        assert_eq!(scan.counters.sessions_retained, 1);
+        assert_eq!(scan.counters.retained_events, 1);
+        assert_eq!(scan.counters.rejected_threads, 0);
+        assert!(scan.counters.certified_logical_bytes > 0);
+        snapshot.finish().unwrap();
+
+        let mut sessions = sink
+            .pages
+            .iter_mut()
+            .flat_map(|page| page.sessions.drain(..));
+        let session = sessions.next().unwrap();
+        assert!(sessions.next().is_none());
+        drop(sessions);
+        let source = zed_source_key().unwrap();
+        let session_id = zed_session_identity(&source, &session.thread_id).unwrap();
+        let context = ZedSessionProjectionContextV0 {
+            session,
+            session_id,
+            parent_session_id: None,
+            root_session_id: session_id,
+        };
+        let mut events = sink.pages.into_iter().flat_map(|page| page.events);
+        let event = events.next().unwrap();
+        assert!(events.next().is_none());
+        zed_lexical_document(
+            &source,
+            snapshot_revision_digest(&revision),
+            &path.to_string_lossy(),
+            &context,
+            event,
+        )
+        .unwrap()
     }
 
     fn create_database(path: &Path, text: &str) {

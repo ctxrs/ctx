@@ -1,12 +1,8 @@
-use std::path::Path;
-
 use ctx_history_core::EventType;
-use ctx_history_store::Store;
 
-use crate::{ProviderAdapterContext, ProviderImportOptions, ProviderImportSummary, Result};
+use crate::Result;
 
 mod nativepath;
-mod production;
 mod schema;
 mod source_backed;
 mod wire;
@@ -38,15 +34,6 @@ pub(crate) fn warp_message_content_at(
         fallback_task_id,
         message_index,
     )
-}
-
-pub(crate) fn import_warp_nativepath(
-    path: &Path,
-    store: &mut Store,
-    context: ProviderAdapterContext,
-    import_options: ProviderImportOptions,
-) -> Result<ProviderImportSummary> {
-    production::import_warp_nativepath(path, store, context, import_options)
 }
 
 #[cfg(test)]
