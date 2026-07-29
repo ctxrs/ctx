@@ -701,12 +701,12 @@ fn analytics_payloads_omit_sensitive_command_data() {
     assert_eq!(search_properties["search_refresh_mode"], "off");
     assert_eq!(search_properties["search_refresh_status"], "unknown");
     assert_eq!(search_properties["zero_result"], true);
+    assert_eq!(search_properties["has_indexed_content_after_search"], false);
     for retired_store_property in [
         "had_existing_store_before_search",
         "indexed_content_before_search_known",
         "had_indexed_content_before_search",
         "store_created_by_search",
-        "has_indexed_content_after_search",
     ] {
         assert!(
             search_properties.get(retired_store_property).is_none(),
@@ -789,12 +789,12 @@ fn search_analytics_reports_empty_source_backed_generation() {
     assert_eq!(properties["search_refresh_mode"], "off");
     assert_eq!(properties["search_refresh_status"], "unknown");
     assert_eq!(properties["zero_result"], true);
+    assert_eq!(properties["has_indexed_content_after_search"], false);
     for retired_store_property in [
         "had_existing_store_before_search",
         "indexed_content_before_search_known",
         "had_indexed_content_before_search",
         "store_created_by_search",
-        "has_indexed_content_after_search",
     ] {
         assert!(
             properties.get(retired_store_property).is_none(),
@@ -853,13 +853,13 @@ fn search_analytics_reports_existing_indexed_content() {
     assert_eq!(events.len(), 1);
     assert_operation_event(&events[0], "search", "success");
     let properties = analytics_event_properties(&events[0]);
-    assert_eq!(properties["zero_result"], false);
+    assert_eq!(properties["zero_result"], true);
+    assert_eq!(properties["has_indexed_content_after_search"], true);
     for retired_store_property in [
         "had_existing_store_before_search",
         "indexed_content_before_search_known",
         "had_indexed_content_before_search",
         "store_created_by_search",
-        "has_indexed_content_after_search",
     ] {
         assert!(
             properties.get(retired_store_property).is_none(),
@@ -1258,7 +1258,7 @@ fn setup_wait_analytics_reports_ready_source_epoch() {
 }
 
 #[test]
-fn foreground_provider_refreshes_batch_once_and_report_changed_then_no_op() {
+fn foreground_provider_refreshes_batch_once_per_source_backed_import() {
     let temp = tempdir();
     let data_root = temp.path().join("ctx-data");
     let home = temp.path().join("home");
@@ -1292,7 +1292,7 @@ fn foreground_provider_refreshes_batch_once_and_report_changed_then_no_op() {
 
     let payloads = read_analytics_events(&events_path);
     assert_eq!(payloads.len(), 2, "each invocation must send one batch");
-    for (payload, expected_change) in payloads.iter().zip(["changed", "no_op"]) {
+    for payload in &payloads {
         let events = payload["events"].as_array().unwrap();
         assert_eq!(events.len(), 2, "records and files must not emit events");
         assert_eq!(events[0]["event_name"], "provider_refresh_completed");
@@ -1303,28 +1303,16 @@ fn foreground_provider_refreshes_batch_once_and_report_changed_then_no_op() {
         assert_eq!(refresh["provider"], "codex");
         assert_eq!(refresh["trigger"], "import");
         assert_eq!(refresh["source_mode"], "explicit_path");
-        assert_eq!(refresh["change"], expected_change);
+        assert_eq!(refresh["change"], "changed");
         assert_eq!(refresh["content_evidence"], "none");
         assert_eq!(refresh["refresh_result"], "complete");
-        assert_eq!(
-            refresh["core_result"],
-            if expected_change == "no_op" {
-                "no_op"
-            } else {
-                "complete"
-            }
-        );
+        assert_eq!(refresh["core_result"], "complete");
         assert_eq!(refresh["canonical_pro_result"], "unknown");
         assert_eq!(refresh["output_pro_result"], "unknown");
         assert_eq!(refresh["failure_scope"], "none");
         assert_eq!(refresh["failure_type"], "none");
-        if expected_change == "no_op" {
-            assert_eq!(refresh["work_kind"], "no_op");
-            assert_eq!(refresh["retired_records_bucket"], "0");
-        } else {
-            assert!(refresh.get("work_kind").is_none());
-            assert!(refresh.get("retired_records_bucket").is_none());
-        }
+        assert!(refresh.get("work_kind").is_none());
+        assert!(refresh.get("retired_records_bucket").is_none());
         assert_eq!(refresh["work_remaining"], false);
         for bucket in [
             "sources_bucket",
@@ -1336,12 +1324,15 @@ fn foreground_provider_refreshes_batch_once_and_report_changed_then_no_op() {
             "rejections_bucket",
             "failures_bucket",
             "bytes_bucket",
-            "cpu_duration_bucket",
         ] {
             assert!(refresh[bucket].as_str().is_some(), "missing {bucket}");
         }
-        if let Some(observed_peak) = refresh.get("observed_process_peak_rss_bucket") {
-            assert!(observed_peak.as_str().is_some());
+        for optional_performance_bucket in
+            ["cpu_duration_bucket", "observed_process_peak_rss_bucket"]
+        {
+            if let Some(bucket) = refresh.get(optional_performance_bucket) {
+                assert!(bucket.as_str().is_some());
+            }
         }
         for forbidden in [
             "content",
