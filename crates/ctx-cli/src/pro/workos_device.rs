@@ -468,9 +468,9 @@ fn validate_claim_time_and_audience(claims: &AccessClaims, client_id: &str) -> R
     // matching audience as defense in depth.
     if claims.client_id != client_id
         || claims
-        .aud
-        .as_ref()
-        .is_some_and(|aud| !audience_matches(aud, client_id))
+            .aud
+            .as_ref()
+            .is_some_and(|aud| !audience_matches(aud, client_id))
     {
         bail!("authentication_invalid: WorkOS access token audience does not match ctx");
     }

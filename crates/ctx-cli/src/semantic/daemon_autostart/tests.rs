@@ -819,16 +819,7 @@ fn setup_handoff_wait_times_out_on_status_lock_identity_race_without_sleep() {
 
     let error = wait_for_daemon_handoff_with(
         3,
-        || {
-            daemon_handoff_observation_from(
-                Some(&status),
-                Some(44),
-                true,
-                Some(43),
-                None,
-                1236,
-            )
-        },
+        || daemon_handoff_observation_from(Some(&status), Some(44), true, Some(43), None, 1236),
         || Ok(None),
         || pauses.set(pauses.get() + 1),
     )

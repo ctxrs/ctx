@@ -53,9 +53,7 @@ fn invalid_or_oversized_plugin_manifests_remain_bounded_diagnostics() {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|source| {
-            source["kind"] == "history_source_plugin" && source["status"] == "invalid"
-        })
+        .filter(|source| source["kind"] == "history_source_plugin" && source["status"] == "invalid")
         .collect::<Vec<_>>();
     assert_eq!(failures.len(), 2);
     assert!(failures.iter().all(|source| source["importable"] == false));

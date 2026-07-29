@@ -235,10 +235,7 @@ fn every_generated_frame_round_trips_and_validates() {
 #[test]
 fn golden_frame_names_match_typed_message_kinds() {
     let value = inventory();
-    for (name, encoded) in value["golden_vectors"]["host_frames"]
-        .as_object()
-        .unwrap()
-    {
+    for (name, encoded) in value["golden_vectors"]["host_frames"].as_object().unwrap() {
         let envelope =
             read_frame::<_, HostEnvelope>(&mut Cursor::new(unhex(encoded.as_str().unwrap())))
                 .unwrap();

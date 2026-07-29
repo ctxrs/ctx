@@ -33,9 +33,7 @@ fn materialize_once(
     let config = crate::config::AppConfig::load(data_root)
         .context("source_unavailable: load daemon configuration for Pro materialization")?;
     if config.daemon.mode.runs_only_source_refresh() {
-        bail!(
-            "not_materialized: source-refresh-only daemon mode excludes Pro materialization"
-        );
+        bail!("not_materialized: source-refresh-only daemon mode excludes Pro materialization");
     }
     crate::semantic::autostart_daemon_and_wait(
         data_root,
@@ -64,9 +62,7 @@ fn materialize_once(
     };
     let status = helper_status(&mut client)?;
     if status.authority != ctx_pro_host_protocol::MaterializationAuthority::Source {
-        bail!(
-            "not_materialized: Pro helper did not activate v0.26 source-manifest authority"
-        );
+        bail!("not_materialized: Pro helper did not activate v0.26 source-manifest authority");
     }
     let receipt = status.source_receipt.ok_or_else(|| {
         anyhow!("not_materialized: Pro helper has no completed source-manifest receipt")

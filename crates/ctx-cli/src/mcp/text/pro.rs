@@ -320,5 +320,4 @@ mod tests {
         assert!(!rendered.contains("payload_type"));
         assert!(!rendered.contains("omitted"));
     }
-
 }

@@ -1,7 +1,4 @@
-use std::{
-    path::PathBuf,
-    time::Instant,
-};
+use std::{path::PathBuf, time::Instant};
 
 use anyhow::{Context, Result};
 use ctx_history_capture::ProviderImportSummary;

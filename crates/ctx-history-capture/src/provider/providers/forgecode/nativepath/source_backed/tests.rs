@@ -83,10 +83,7 @@ fn forgecode_source_backed_cold_scan_is_bounded_and_stable() {
 fn forgecode_source_backed_exact_resolver_uses_compound_row_coordinates() {
     let directory = crate::test_support_paths::tempdir().unwrap();
     let source_path = directory.path().join(".forge.db");
-    let complete = format!(
-        "{}-forgecode-tail-sentinel",
-        "x".repeat(8_192)
-    );
+    let complete = format!("{}-forgecode-tail-sentinel", "x".repeat(8_192));
     write_source(
         &source_path,
         "exact-conversation",

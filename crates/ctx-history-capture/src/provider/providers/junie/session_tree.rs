@@ -373,17 +373,16 @@ pub(super) fn bounded_junie_index_meta(meta: &JunieIndexMeta) -> JunieIndexMeta 
         .project_dir
         .as_deref()
         .map(|value| provider_local_preview(value, PROVIDER_MAX_PREVIEW_CHARS).0);
-    let raw = bounded_junie_metadata(&meta.raw)
-        .unwrap_or_else(|| {
-            json!({
-                "sessionId": &session_id,
-                "createdAt": meta.created_at,
-                "updatedAt": meta.updated_at,
-                "taskName": task_name.as_deref(),
-                "projectDir": project_dir.as_deref(),
-                "ctxTruncated": true,
-            })
-        });
+    let raw = bounded_junie_metadata(&meta.raw).unwrap_or_else(|| {
+        json!({
+            "sessionId": &session_id,
+            "createdAt": meta.created_at,
+            "updatedAt": meta.updated_at,
+            "taskName": task_name.as_deref(),
+            "projectDir": project_dir.as_deref(),
+            "ctxTruncated": true,
+        })
+    });
     JunieIndexMeta {
         session_id,
         created_at: meta.created_at,
