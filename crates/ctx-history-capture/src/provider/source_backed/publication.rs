@@ -64,7 +64,8 @@ impl SourceBackedRefreshExecutor {
 #[derive(Debug)]
 pub struct SourceBackedRefreshReceipt {
     pub commit: CommitReceipt,
-    /// The exact retained source set committed by `commit`.
+    /// The exact retained source set committed by `commit`, copied from its
+    /// immutable manifest rather than from a later [`VerifiedIndex`] reopen.
     pub sources: Vec<CertifiedSource>,
     /// Certified removals applied by this commit. These are projection
     /// handoff evidence, not provider content.
@@ -241,9 +242,8 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
     .map_err(SourceBackedCoordinatorError::Progress)?;
     let certified_source_count = commit.certified_sources;
     let certified_source_bytes = commit.certified_source_bytes;
-    let verified = VerifiedIndex::open(index_root.as_ref())?;
-    let sources = verified.manifest().sources.clone();
-    let removals = verified
+    let sources = commit.manifest().sources.clone();
+    let removals = commit
         .manifest()
         .removals
         .iter()

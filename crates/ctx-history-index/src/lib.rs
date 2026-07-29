@@ -841,13 +841,7 @@ impl GenerationWriter {
                     });
                 }
             }
-            return Ok(CommitReceipt {
-                generation_id: witness.base.generation_id()?,
-                opstamp: self.base_opstamp,
-                indexed_documents: witness.base.indexed_documents,
-                certified_sources: witness.base.sources.len(),
-                certified_source_bytes: witness.base.certified_source_bytes,
-            });
+            return CommitReceipt::from_manifest(self.base_opstamp, witness.base.clone());
         }
 
         for pending in self.pending.values() {
@@ -959,13 +953,7 @@ impl GenerationWriter {
             });
         }
 
-        Ok(CommitReceipt {
-            generation_id,
-            opstamp,
-            indexed_documents: manifest.indexed_documents,
-            certified_sources: manifest.sources.len(),
-            certified_source_bytes: manifest.certified_source_bytes,
-        })
+        CommitReceipt::from_manifest(opstamp, manifest)
     }
 
     fn next_manifest(&self) -> Result<GenerationManifest> {

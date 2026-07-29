@@ -16,6 +16,12 @@ fn commit_binds_manifest_and_searchable_documents() {
 
     let index = VerifiedIndex::open(temp.path()).unwrap();
     assert_eq!(index.generation_id(), receipt.generation_id);
+    assert_eq!(
+        receipt.manifest().generation_id().unwrap(),
+        receipt.generation_id
+    );
+    assert_eq!(receipt.manifest().sources, index.manifest().sources);
+    assert_eq!(receipt.manifest().removals, index.manifest().removals);
     assert_eq!(index.manifest().indexed_documents, 1);
     assert_eq!(index.count_term("atomic").unwrap(), 1);
 }
@@ -102,6 +108,18 @@ fn unchanged_commit_returns_the_verified_base_without_republication() {
     assert_eq!(unchanged.indexed_documents, 1);
     assert_eq!(unchanged.certified_sources, 1);
     assert_eq!(unchanged.certified_source_bytes, 10);
+    assert_eq!(
+        unchanged.manifest().generation_id().unwrap(),
+        unchanged.generation_id
+    );
+    assert_eq!(
+        unchanged.manifest().sources,
+        initial_receipt.manifest().sources
+    );
+    assert_eq!(
+        unchanged.manifest().removals,
+        initial_receipt.manifest().removals
+    );
     assert_eq!(fs::read(&meta_path).unwrap(), meta_before);
     assert_eq!(
         fs::metadata(&meta_path).unwrap().modified().unwrap(),
