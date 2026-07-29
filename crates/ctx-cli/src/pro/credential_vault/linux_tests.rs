@@ -471,7 +471,7 @@ fn secret_service_operation_does_not_run_until_selection_is_durable() -> anyhow:
     fs::create_dir(root.path().join("pro").join(BACKEND_MARKER_STAGE))?;
 
     assert!(backend.load_or_store(&record_id, &[4; 32]).is_err());
-    assert_eq!(adapter.counts(), (1, 0));
+    assert_eq!(adapter.counts(), (0, 0));
     assert!(!root.path().join("pro").join(BACKEND_MARKER).exists());
     Ok(())
 }
@@ -493,6 +493,57 @@ fn locked_denied_and_corrupt_adapter_fail_without_fallback() {
         assert!(!root.path().join("pro").join(BACKEND_MARKER).exists());
         assert!(!root.path().join("pro").join(FILE_VAULT_DIRECTORY).exists());
     }
+}
+
+#[test]
+fn preexisting_public_or_private_sensitive_state_blocks_unavailable_fallback() -> anyhow::Result<()>
+{
+    for state in [
+        FILE_VAULT_DIRECTORY,
+        BACKEND_MARKER_STAGE,
+        PRIVATE_GRAPH_STORE_DIRECTORY,
+        PRO_GRAPH_FILES[0],
+        PRO_GRAPH_FILES[1],
+        PRO_GRAPH_FILES[2],
+    ] {
+        let root = test_root();
+        let path = root.path().join("pro").join(state);
+        if matches!(state, FILE_VAULT_DIRECTORY | PRIVATE_GRAPH_STORE_DIRECTORY) {
+            fs::create_dir(&path)?;
+            fs::set_permissions(&path, fs::Permissions::from_mode(PRIVATE_DIRECTORY_MODE))?;
+        } else {
+            fs::write(&path, b"preexisting-sensitive-state")?;
+            fs::set_permissions(&path, fs::Permissions::from_mode(PRIVATE_FILE_MODE))?;
+        }
+        let adapter = FakeAdapter::new(AdapterMode::Unavailable);
+        let backend = LinuxBackend::new(root.path(), adapter.clone());
+        let record_id = ids(CredentialVaultNamespace::Production)
+            .get(CredentialRecordKind::InstallationSigningKey)
+            .to_owned();
+
+        let result = backend.store(&record_id, b"must-not-fallback");
+        if matches!(state, FILE_VAULT_DIRECTORY | BACKEND_MARKER_STAGE) {
+            assert!(matches!(result, Err(CredentialVaultError::Corrupt)));
+        } else {
+            assert!(matches!(
+                result,
+                Err(CredentialVaultError::Unavailable { .. })
+            ));
+        }
+        let expected_probes = usize::from(!matches!(
+            state,
+            FILE_VAULT_DIRECTORY | BACKEND_MARKER_STAGE
+        ));
+        assert_eq!(adapter.counts(), (expected_probes, 0));
+        assert!(!root.path().join("pro").join(BACKEND_MARKER).exists());
+        assert!(!root
+            .path()
+            .join("pro")
+            .join(FILE_VAULT_DIRECTORY)
+            .join(&record_id)
+            .exists());
+    }
+    Ok(())
 }
 
 #[test]

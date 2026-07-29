@@ -1,7 +1,12 @@
 #![allow(unsafe_code)]
 
-use std::ptr::{null, null_mut};
+use std::{
+    fs::File,
+    path::{Path, PathBuf},
+    ptr::{null, null_mut},
+};
 
+use fs2::FileExt as _;
 use sha2::{Digest, Sha256};
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_NOT_FOUND,
@@ -14,6 +19,7 @@ use windows_sys::Win32::Security::Credentials::{
 use windows_sys::Win32::System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject};
 use zeroize::Zeroize;
 
+use super::windows_file::{BackendSelection, VaultRoot};
 use super::{validate_record_id, CredentialVaultBackend, CredentialVaultError, SecretBytes};
 
 const TARGET_PREFIX: &str = "ctx-pro/credentials/v1/";
@@ -21,27 +27,264 @@ const MUTEX_PREFIX: &str = "Local\\ctx-pro-credentials-v1-";
 const USER_NAME: &str = "ctx-pro";
 const LOCK_WAIT_MILLIS: u32 = 30_000;
 const MAX_SECRET_BYTES: usize = CRED_MAX_CREDENTIAL_BLOB_SIZE as usize;
+const PROBE_TARGET: &str = "ctx-pro/credentials/v1/probe";
+const CREDENTIAL_MANAGER_SELECTION: &[u8] = b"ctx-pro-credential-backend-v1:credential-manager\n";
 
-pub(super) struct PlatformBackend<B = CredentialManagerBackend> {
+pub(super) struct PlatformBackend(WindowsBackend<CredentialManagerBackend>);
+
+impl PlatformBackend {
+    pub(super) fn production(data_root: &Path) -> Self {
+        Self(WindowsBackend::new(data_root, CredentialManagerBackend))
+    }
+
+    pub(super) fn cleanup_if_empty(&self) -> Result<(), CredentialVaultError> {
+        self.0.cleanup_if_empty()
+    }
+}
+
+impl CredentialVaultBackend for PlatformBackend {
+    fn load(&self, record_id: &str) -> Result<SecretBytes, CredentialVaultError> {
+        self.0.load(record_id)
+    }
+
+    fn load_or_store(
+        &self,
+        record_id: &str,
+        candidate: &[u8],
+    ) -> Result<SecretBytes, CredentialVaultError> {
+        self.0.load_or_store(record_id, candidate)
+    }
+
+    fn store(&self, record_id: &str, secret: &[u8]) -> Result<(), CredentialVaultError> {
+        self.0.store(record_id, secret)
+    }
+
+    fn delete(&self, record_id: &str) -> Result<(), CredentialVaultError> {
+        self.0.delete(record_id)
+    }
+}
+
+struct WindowsBackend<B> {
+    data_root: PathBuf,
+    native: NativeBackend<B>,
+}
+
+impl<B> WindowsBackend<B> {
+    fn new(data_root: &Path, backend: B) -> Self {
+        Self {
+            data_root: data_root.to_path_buf(),
+            native: NativeBackend::new(backend),
+        }
+    }
+}
+
+impl<B: CredentialBackend> WindowsBackend<B> {
+    fn inspect_unselected_native<T>(
+        &self,
+        operation: impl FnOnce(&NativeBackend<B>) -> Result<T, CredentialVaultError>,
+    ) -> Result<T, CredentialVaultError> {
+        match self.native.probe() {
+            Ok(()) => operation(&self.native),
+            Err(CredentialVaultError::Unavailable {
+                platform: "windows",
+            }) => Err(CredentialVaultError::NotFound),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn with_mutating_backend<T>(
+        &self,
+        operation: impl FnOnce(
+            BackendSelection,
+            &VaultRoot,
+            &NativeBackend<B>,
+        ) -> Result<T, CredentialVaultError>,
+    ) -> Result<T, CredentialVaultError> {
+        let root = VaultRoot::open(&self.data_root, CREDENTIAL_MANAGER_SELECTION)?;
+        let lock = root.open_lock()?;
+        lock.lock_exclusive()
+            .map_err(|_| CredentialVaultError::Backend)?;
+        let result = (|| {
+            let selection = match root.read_selection()? {
+                Some(selection) => selection,
+                None => {
+                    root.validate_unselected_file_state()?;
+                    match self.native.probe() {
+                        Ok(()) => {
+                            root.write_selection(BackendSelection::Native)?;
+                            BackendSelection::Native
+                        }
+                        Err(
+                            error @ CredentialVaultError::Unavailable {
+                                platform: "windows",
+                            },
+                        ) if root.preexisting_sensitive_state()? => return Err(error),
+                        Err(CredentialVaultError::Unavailable {
+                            platform: "windows",
+                        }) => {
+                            root.write_selection(BackendSelection::File)?;
+                            BackendSelection::File
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+            };
+            operation(selection, &root, &self.native)
+        })();
+        let unlock = file_unlock(&lock);
+        match (result, unlock) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
+    fn with_read_backend<T>(
+        &self,
+        operation: impl FnOnce(
+            Option<BackendSelection>,
+            &VaultRoot,
+            &NativeBackend<B>,
+        ) -> Result<T, CredentialVaultError>,
+    ) -> Result<T, CredentialVaultError> {
+        let root = VaultRoot::open(&self.data_root, CREDENTIAL_MANAGER_SELECTION)?;
+        let initial_selection = root.read_selection()?;
+        let Some(lock) = root.open_existing_lock()? else {
+            return if initial_selection.is_some() {
+                Err(CredentialVaultError::Corrupt)
+            } else {
+                root.validate_unselected_file_state()?;
+                operation(None, &root, &self.native)
+            };
+        };
+        lock.lock_exclusive()
+            .map_err(|_| CredentialVaultError::Backend)?;
+        let result = (|| {
+            let selection = root.read_selection()?;
+            if selection.is_none() {
+                root.validate_unselected_file_state()?;
+            }
+            operation(selection, &root, &self.native)
+        })();
+        let unlock = file_unlock(&lock);
+        match (result, unlock) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
+    fn cleanup_if_empty(&self) -> Result<(), CredentialVaultError> {
+        let root = match VaultRoot::open(&self.data_root, CREDENTIAL_MANAGER_SELECTION) {
+            Ok(root) => root,
+            Err(CredentialVaultError::NotFound) => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        let initial_selection = root.read_selection()?;
+        let Some(lock) = root.open_existing_lock()? else {
+            return if initial_selection.is_some() {
+                Err(CredentialVaultError::Corrupt)
+            } else {
+                Ok(())
+            };
+        };
+        lock.lock_exclusive()
+            .map_err(|_| CredentialVaultError::Backend)?;
+        let result = (|| {
+            let Some(selection) = root.read_selection()? else {
+                root.remove_marker_stage()?;
+                return Ok(());
+            };
+            match selection {
+                BackendSelection::File => root.remove_empty_file_vault()?,
+                BackendSelection::Native => self.native.probe()?,
+            }
+            root.remove_selection()
+        })();
+        let unlock = file_unlock(&lock);
+        match (result, unlock) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), _) | (Ok(()), Err(error)) => Err(error),
+        }
+    }
+}
+
+impl<B: CredentialBackend> CredentialVaultBackend for WindowsBackend<B> {
+    fn load(&self, record_id: &str) -> Result<SecretBytes, CredentialVaultError> {
+        validate_record_id(record_id)?;
+        self.with_read_backend(|selection, root, native| match selection {
+            Some(BackendSelection::File) => root.load_file_record(record_id),
+            Some(BackendSelection::Native) => native.load(record_id),
+            None => self.inspect_unselected_native(|native| native.load(record_id)),
+        })
+    }
+
+    fn load_or_store(
+        &self,
+        record_id: &str,
+        candidate: &[u8],
+    ) -> Result<SecretBytes, CredentialVaultError> {
+        validate_record_id(record_id)?;
+        drop(SecretBytes::new(candidate.to_vec())?);
+        self.with_mutating_backend(|selection, root, native| match selection {
+            BackendSelection::File => root.load_or_store_file_record(record_id, candidate),
+            BackendSelection::Native => native.load_or_store(record_id, candidate),
+        })
+    }
+
+    fn store(&self, record_id: &str, secret: &[u8]) -> Result<(), CredentialVaultError> {
+        validate_record_id(record_id)?;
+        drop(SecretBytes::new(secret.to_vec())?);
+        self.with_mutating_backend(|selection, root, native| match selection {
+            BackendSelection::File => root.store_file_record(record_id, secret),
+            BackendSelection::Native => native.store(record_id, secret),
+        })
+    }
+
+    fn delete(&self, record_id: &str) -> Result<(), CredentialVaultError> {
+        validate_record_id(record_id)?;
+        self.with_read_backend(|selection, root, native| match selection {
+            Some(BackendSelection::File) => root.delete_file_record(record_id),
+            Some(BackendSelection::Native) => native.delete(record_id),
+            None => self.inspect_unselected_native(|native| native.delete(record_id)),
+        })
+    }
+}
+
+fn file_unlock(file: &File) -> Result<(), CredentialVaultError> {
+    file.unlock().map_err(|_| CredentialVaultError::Backend)
+}
+
+struct NativeBackend<B = CredentialManagerBackend> {
     backend: B,
 }
 
-impl PlatformBackend<CredentialManagerBackend> {
-    pub(super) const fn production() -> Self {
+impl NativeBackend<CredentialManagerBackend> {
+    const fn production() -> Self {
         Self {
             backend: CredentialManagerBackend,
         }
     }
 }
 
-impl<B> PlatformBackend<B> {
-    #[cfg(test)]
+impl<B> NativeBackend<B> {
     const fn new(backend: B) -> Self {
         Self { backend }
     }
 }
 
-impl<B: CredentialBackend> CredentialVaultBackend for PlatformBackend<B> {
+impl<B: CredentialBackend> NativeBackend<B> {
+    fn probe(&self) -> Result<(), CredentialVaultError> {
+        match self.backend.load_secret(PROBE_TARGET) {
+            Ok(mut secret) => {
+                secret.zeroize();
+                Ok(())
+            }
+            Err(CredentialVaultError::NotFound) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+impl<B: CredentialBackend> CredentialVaultBackend for NativeBackend<B> {
     fn load(&self, record_id: &str) -> Result<SecretBytes, CredentialVaultError> {
         validate_record_id(record_id)?;
         let target = credential_target(record_id);
@@ -333,6 +576,7 @@ const fn map_operation_error(code: u32) -> CredentialVaultError {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
     use std::sync::{Arc, Barrier, Mutex};
     use std::thread;
 
@@ -341,9 +585,16 @@ mod tests {
     const TEST_RECORD_ID: &str =
         "cv2-0000000000000000000000000000000000000000000000000000000000000000";
 
+    #[derive(Debug, Clone, Copy)]
+    enum ForcedError {
+        Locked,
+        Unavailable,
+    }
+
     #[derive(Debug, Default)]
     struct MockState {
         secret: Option<Vec<u8>>,
+        error: Option<ForcedError>,
         writes: usize,
         locks: usize,
     }
@@ -360,6 +611,15 @@ mod tests {
                 .state
                 .lock()
                 .map_err(|_| CredentialVaultError::Backend)?;
+            match state.error {
+                Some(ForcedError::Locked) => return Err(CredentialVaultError::Locked),
+                Some(ForcedError::Unavailable) => {
+                    return Err(CredentialVaultError::Unavailable {
+                        platform: "windows",
+                    });
+                }
+                None => {}
+            }
             state.secret.clone().ok_or(CredentialVaultError::NotFound)
         }
 
@@ -368,6 +628,15 @@ mod tests {
                 .state
                 .lock()
                 .map_err(|_| CredentialVaultError::Backend)?;
+            match state.error {
+                Some(ForcedError::Locked) => return Err(CredentialVaultError::Locked),
+                Some(ForcedError::Unavailable) => {
+                    return Err(CredentialVaultError::Unavailable {
+                        platform: "windows",
+                    });
+                }
+                None => {}
+            }
             state.secret = Some(secret.to_vec());
             state.writes += 1;
             Ok(())
@@ -378,6 +647,15 @@ mod tests {
                 .state
                 .lock()
                 .map_err(|_| CredentialVaultError::Backend)?;
+            match state.error {
+                Some(ForcedError::Locked) => return Err(CredentialVaultError::Locked),
+                Some(ForcedError::Unavailable) => {
+                    return Err(CredentialVaultError::Unavailable {
+                        platform: "windows",
+                    });
+                }
+                None => {}
+            }
             let mut removed = state.secret.take().ok_or(CredentialVaultError::NotFound)?;
             removed.zeroize();
             state.writes += 1;
@@ -401,6 +679,37 @@ mod tests {
         }
     }
 
+    fn private_root() -> Result<tempfile::TempDir, Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        ctx_history_core::platform_security::restrict_private_directory(root.path())?;
+        let pro = root.path().join("pro");
+        std::fs::create_dir(&pro)?;
+        ctx_history_core::platform_security::restrict_private_directory(&pro)?;
+        Ok(root)
+    }
+
+    fn force_error(
+        backend: &MockBackend,
+        error: Option<ForcedError>,
+    ) -> Result<(), CredentialVaultError> {
+        backend
+            .state
+            .lock()
+            .map_err(|_| CredentialVaultError::Backend)?
+            .error = error;
+        Ok(())
+    }
+
+    fn selector_marker(root: &Path) -> PathBuf {
+        root.join("pro").join(".ctx-pro.credential-backend-v1")
+    }
+
+    fn fallback_record(root: &Path) -> PathBuf {
+        root.join("pro")
+            .join(".ctx-pro.credentials-v1")
+            .join(TEST_RECORD_ID)
+    }
+
     #[test]
     fn target_and_mutex_are_stable_bounded_and_opaque() {
         let id = "workos-session:alice@example.test";
@@ -416,7 +725,7 @@ mod tests {
 
     #[test]
     fn mock_round_trip_delete_and_write_lock() -> Result<(), CredentialVaultError> {
-        let vault = PlatformBackend::new(MockBackend::default());
+        let vault = NativeBackend::new(MockBackend::default());
         vault.store(TEST_RECORD_ID, b"private")?;
         assert_eq!(vault.load(TEST_RECORD_ID)?.as_slice(), b"private");
         vault.delete(TEST_RECORD_ID)?;
@@ -435,7 +744,7 @@ mod tests {
 
     #[test]
     fn oversize_secret_is_rejected_before_native_write() {
-        let vault = PlatformBackend::new(MockBackend::default());
+        let vault = NativeBackend::new(MockBackend::default());
         assert!(matches!(
             vault.store(TEST_RECORD_ID, &vec![7; MAX_SECRET_BYTES + 1]),
             Err(CredentialVaultError::SecretTooLarge { .. })
@@ -449,7 +758,7 @@ mod tests {
 
     #[test]
     fn concurrent_first_use_returns_one_winner() -> Result<(), CredentialVaultError> {
-        let vault = Arc::new(PlatformBackend::new(MockBackend::default()));
+        let vault = Arc::new(NativeBackend::new(MockBackend::default()));
         let barrier = Arc::new(Barrier::new(2));
         let mut workers = Vec::new();
         for candidate in [b"first".to_vec(), b"second".to_vec()] {
@@ -475,6 +784,232 @@ mod tests {
             .lock()
             .map_err(|_| CredentialVaultError::Backend)?;
         assert_eq!((state.writes, state.locks), (1, 2));
+        Ok(())
+    }
+
+    #[test]
+    fn pristine_read_only_unavailable_inspection_creates_nothing(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let root = private_root()?;
+        let backend = MockBackend::default();
+        force_error(&backend, Some(ForcedError::Unavailable))?;
+        let vault = WindowsBackend::new(root.path(), backend);
+
+        assert!(matches!(
+            vault.load(TEST_RECORD_ID),
+            Err(CredentialVaultError::NotFound)
+        ));
+        assert!(matches!(
+            vault.delete(TEST_RECORD_ID),
+            Err(CredentialVaultError::NotFound)
+        ));
+        assert!(!selector_marker(root.path()).exists());
+        assert!(!root
+            .path()
+            .join("pro/.ctx-pro.credentials-v1.lock")
+            .exists());
+        assert!(!root.path().join("pro/.ctx-pro.credentials-v1").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn unavailable_fresh_root_selects_sticky_file_backend_and_cleans_up(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let root = private_root()?;
+        let backend = MockBackend::default();
+        force_error(&backend, Some(ForcedError::Unavailable))?;
+        let first = WindowsBackend::new(root.path(), backend);
+        first.store(TEST_RECORD_ID, b"fallback-secret")?;
+        assert_eq!(
+            std::fs::read(selector_marker(root.path()))?,
+            super::super::windows_file::FILE_SELECTION
+        );
+        assert_eq!(first.load(TEST_RECORD_ID)?.as_slice(), b"fallback-secret");
+
+        let restarted = WindowsBackend::new(root.path(), MockBackend::default());
+        assert_eq!(
+            restarted.load(TEST_RECORD_ID)?.as_slice(),
+            b"fallback-secret"
+        );
+        restarted.delete(TEST_RECORD_ID)?;
+        assert!(matches!(
+            restarted.load(TEST_RECORD_ID),
+            Err(CredentialVaultError::NotFound)
+        ));
+        restarted.cleanup_if_empty()?;
+        assert!(!selector_marker(root.path()).exists());
+        assert!(!root.path().join("pro/.ctx-pro.credentials-v1").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn native_selection_is_sticky_and_never_downgrades() -> Result<(), Box<dyn std::error::Error>> {
+        let root = private_root()?;
+        let vault = WindowsBackend::new(root.path(), MockBackend::default());
+        vault.store(TEST_RECORD_ID, b"native")?;
+        assert_eq!(
+            std::fs::read(selector_marker(root.path()))?,
+            CREDENTIAL_MANAGER_SELECTION
+        );
+
+        force_error(&vault.native.backend, Some(ForcedError::Unavailable))?;
+        assert!(matches!(
+            vault.store(TEST_RECORD_ID, b"must-not-fallback"),
+            Err(CredentialVaultError::Unavailable {
+                platform: "windows"
+            })
+        ));
+        assert_eq!(
+            std::fs::read(selector_marker(root.path()))?,
+            CREDENTIAL_MANAGER_SELECTION
+        );
+        assert!(!root.path().join("pro/.ctx-pro.credentials-v1").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn locked_or_preexisting_sensitive_state_never_selects_fallback(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for preexisting in [false, true] {
+            let root = private_root()?;
+            if preexisting {
+                let graph_store = root.path().join("pro/.ctx-pro-key-store-v1");
+                std::fs::create_dir(&graph_store)?;
+                ctx_history_core::platform_security::restrict_private_directory(&graph_store)?;
+            }
+            let backend = MockBackend::default();
+            force_error(
+                &backend,
+                Some(if preexisting {
+                    ForcedError::Unavailable
+                } else {
+                    ForcedError::Locked
+                }),
+            )?;
+            let vault = WindowsBackend::new(root.path(), backend);
+            let result = vault.store(TEST_RECORD_ID, b"secret");
+            if preexisting {
+                assert!(matches!(
+                    result,
+                    Err(CredentialVaultError::Unavailable {
+                        platform: "windows"
+                    })
+                ));
+            } else {
+                assert!(matches!(result, Err(CredentialVaultError::Locked)));
+            }
+            assert!(!selector_marker(root.path()).exists());
+            assert!(!root.path().join("pro/.ctx-pro.credentials-v1").exists());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn markerless_file_vault_and_selector_temp_fail_closed_before_native_probe(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for orphan_vault in [true, false] {
+            let root = private_root()?;
+            let path = if orphan_vault {
+                root.path().join("pro/.ctx-pro.credentials-v1")
+            } else {
+                root.path().join("pro/.ctx-pro.credential-backend-v1.next")
+            };
+            if orphan_vault {
+                std::fs::create_dir(&path)?;
+                ctx_history_core::platform_security::restrict_private_directory(&path)?;
+            } else {
+                std::fs::write(&path, b"interrupted")?;
+                ctx_history_core::platform_security::restrict_private_file(&path)?;
+            }
+            let vault = WindowsBackend::new(root.path(), MockBackend::default());
+            assert!(matches!(
+                vault.store(TEST_RECORD_ID, b"secret"),
+                Err(CredentialVaultError::Corrupt)
+            ));
+            assert!(!selector_marker(root.path()).exists());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn fallback_rejects_acl_hardlink_and_junction_tampering(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let root = private_root()?;
+        let backend = MockBackend::default();
+        force_error(&backend, Some(ForcedError::Unavailable))?;
+        let vault = WindowsBackend::new(root.path(), backend);
+        vault.store(TEST_RECORD_ID, b"secret")?;
+
+        let record = fallback_record(root.path());
+        let hardlink = root.path().join("unexpected-record-link");
+        std::fs::hard_link(&record, &hardlink)?;
+        assert!(matches!(
+            vault.load(TEST_RECORD_ID),
+            Err(CredentialVaultError::Corrupt)
+        ));
+        std::fs::remove_file(hardlink)?;
+
+        let file_vault = root.path().join("pro/.ctx-pro.credentials-v1");
+        ctx_history_core::platform_security::restrict_private_directory(&file_vault)?;
+        assert!(matches!(
+            vault.load(TEST_RECORD_ID),
+            Err(CredentialVaultError::Corrupt)
+        ));
+
+        let clean_root = private_root()?;
+        let clean_backend = MockBackend::default();
+        force_error(&clean_backend, Some(ForcedError::Unavailable))?;
+        let clean_vault = WindowsBackend::new(clean_root.path(), clean_backend);
+        clean_vault.store(TEST_RECORD_ID, b"secret")?;
+        let records = clean_root.path().join("pro/.ctx-pro.credentials-v1");
+        let displaced = clean_root.path().join("displaced-records");
+        std::fs::rename(&records, &displaced)?;
+        let status = Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&records)
+            .arg(&displaced)
+            .status()?;
+        assert!(status.success(), "failed to create test junction");
+        assert!(matches!(
+            clean_vault.load(TEST_RECORD_ID),
+            Err(CredentialVaultError::Corrupt)
+        ));
+        std::fs::remove_dir(&records)?;
+        std::fs::rename(displaced, records)?;
+        Ok(())
+    }
+
+    #[test]
+    fn fallback_concurrent_first_use_returns_one_persisted_candidate(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        const WORKERS: usize = 8;
+
+        let root = private_root()?;
+        let backend = MockBackend::default();
+        force_error(&backend, Some(ForcedError::Unavailable))?;
+        let vault = Arc::new(WindowsBackend::new(root.path(), backend));
+        let barrier = Arc::new(Barrier::new(WORKERS));
+        let mut workers = Vec::with_capacity(WORKERS);
+        for candidate in 0..WORKERS as u8 {
+            let vault = Arc::clone(&vault);
+            let barrier = Arc::clone(&barrier);
+            workers.push(thread::spawn(move || {
+                barrier.wait();
+                vault
+                    .load_or_store(TEST_RECORD_ID, &[candidate; 32])
+                    .map(|secret| secret.as_slice().to_vec())
+            }));
+        }
+        let mut persisted = None;
+        for worker in workers {
+            let candidate = worker.join().map_err(|_| CredentialVaultError::Backend)??;
+            if let Some(expected) = &persisted {
+                assert_eq!(&candidate, expected);
+            } else {
+                persisted = Some(candidate);
+            }
+        }
+        assert!(persisted.is_some());
         Ok(())
     }
 

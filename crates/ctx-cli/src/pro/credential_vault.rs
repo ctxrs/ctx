@@ -16,16 +16,19 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use super::authorization::InstallationChallengeSigner;
 
 mod anonymous_trial;
-#[cfg(target_os = "macos")]
-#[rustfmt::skip]
-mod macos;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod secret_service;
+#[cfg(target_os = "macos")]
+#[path = "credential_vault/linux.rs"]
+mod unix_file;
 #[cfg(target_os = "windows")]
-#[rustfmt::skip]
 mod windows;
+#[cfg(target_os = "windows")]
+mod windows_file;
 
 #[cfg(target_os = "linux")]
 use linux::PlatformBackend;
@@ -377,12 +380,12 @@ pub(crate) struct PlatformCredentialVault {
     record_ids: CredentialRecordIds,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn production_backend(data_root: &Path) -> PlatformBackend {
     PlatformBackend::production(data_root)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn production_backend(_data_root: &Path) -> PlatformBackend {
     PlatformBackend::production()
 }
@@ -402,11 +405,11 @@ impl PlatformCredentialVault {
     }
 
     pub(crate) fn cleanup_backend_state(data_root: &Path) -> Result<(), CredentialVaultError> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         {
             PlatformBackend::production(data_root).cleanup_if_empty()
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
         {
             let _ = data_root;
             Ok(())

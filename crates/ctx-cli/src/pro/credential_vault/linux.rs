@@ -15,8 +15,16 @@ use std::{
 use fs2::FileExt as _;
 use zeroize::Zeroize as _;
 
+#[cfg(target_os = "macos")]
+use std::{
+    ffi::{c_int, c_void},
+    ptr::null_mut,
+};
+
+#[cfg(target_os = "linux")]
+use super::secret_service;
 use super::{
-    secret_service, validate_record_id, CredentialVaultBackend, CredentialVaultError, SecretBytes,
+    validate_record_id, CredentialVaultBackend, CredentialVaultError, SecretBytes,
     MAX_STORED_SECRET_BYTES,
 };
 
@@ -26,17 +34,21 @@ const FILE_VAULT_DIRECTORY: &str = ".ctx-pro.credentials-v1";
 const FILE_VAULT_LOCK: &str = ".ctx-pro.credentials-v1.lock";
 const FILE_RECORD_STAGE_SUFFIX: &str = ".next";
 const FILE_SELECTION: &[u8] = b"ctx-pro-credential-backend-v1:file\n";
+#[cfg(target_os = "linux")]
 const SECRET_SERVICE_SELECTION: &[u8] = b"ctx-pro-credential-backend-v1:secret-service\n";
 const MAX_BACKEND_MARKER_BYTES: usize = 64;
 const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
 const PRIVATE_FILE_MODE: u32 = 0o600;
+const PRIVATE_GRAPH_STORE_DIRECTORY: &str = ".ctx-pro-key-store-v1";
+const PRO_GRAPH_FILES: [&str; 3] = ["ctx-pro.db", "ctx-pro.db.next", "ctx-pro.db.previous"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BackendSelection {
+pub(super) enum BackendSelection {
     File,
-    SecretService,
+    Native,
 }
 
+#[cfg(target_os = "linux")]
 trait SecretServiceAdapter: Send + Sync {
     fn probe(&self) -> Result<(), CredentialVaultError>;
     fn load(&self, record_id: &str) -> Result<SecretBytes, CredentialVaultError>;
@@ -50,8 +62,10 @@ trait SecretServiceAdapter: Send + Sync {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg(target_os = "linux")]
 struct ProductionSecretService;
 
+#[cfg(target_os = "linux")]
 impl SecretServiceAdapter for ProductionSecretService {
     fn probe(&self) -> Result<(), CredentialVaultError> {
         secret_service::PlatformBackend::production().probe()
@@ -78,8 +92,10 @@ impl SecretServiceAdapter for ProductionSecretService {
     }
 }
 
+#[cfg(target_os = "linux")]
 pub(super) struct PlatformBackend(LinuxBackend<ProductionSecretService>);
 
+#[cfg(target_os = "linux")]
 impl PlatformBackend {
     pub(super) fn production(data_root: &Path) -> Self {
         Self(LinuxBackend::new(data_root, ProductionSecretService))
@@ -90,6 +106,7 @@ impl PlatformBackend {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl CredentialVaultBackend for PlatformBackend {
     fn load(&self, record_id: &str) -> Result<SecretBytes, CredentialVaultError> {
         self.0.load(record_id)
@@ -112,11 +129,13 @@ impl CredentialVaultBackend for PlatformBackend {
     }
 }
 
+#[cfg(target_os = "linux")]
 struct LinuxBackend<A> {
     data_root: PathBuf,
     secret_service: A,
 }
 
+#[cfg(target_os = "linux")]
 impl<A> LinuxBackend<A> {
     fn new(data_root: &Path, secret_service: A) -> Self {
         Self {
@@ -126,6 +145,7 @@ impl<A> LinuxBackend<A> {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl<A: SecretServiceAdapter> LinuxBackend<A> {
     fn inspect_unselected_secret_service<T>(
         secret_service: &A,
@@ -142,7 +162,7 @@ impl<A: SecretServiceAdapter> LinuxBackend<A> {
         &self,
         operation: impl FnOnce(BackendSelection, &VaultRoot, &A) -> Result<T, CredentialVaultError>,
     ) -> Result<T, CredentialVaultError> {
-        let root = VaultRoot::open(&self.data_root)?;
+        let root = VaultRoot::open(&self.data_root, SECRET_SERVICE_SELECTION)?;
         let lock = root.open_lock()?;
         lock.lock_exclusive()
             .map_err(|error| map_io_error(&error))?;
@@ -150,14 +170,20 @@ impl<A: SecretServiceAdapter> LinuxBackend<A> {
             if let Some(selection) = root.read_selection()? {
                 return operation(selection, &root, &self.secret_service);
             }
+            root.validate_unselected_file_state()?;
             match self.secret_service.probe() {
                 Ok(()) => {
-                    root.write_selection(BackendSelection::SecretService)?;
+                    root.write_selection(BackendSelection::Native)?;
                     // Any failure after the operation starts is indeterminate:
                     // Secret Service may have committed before a verification
                     // read failed. Keep the durable selection and fail closed
                     // rather than replaying the mutation into the file vault.
-                    operation(BackendSelection::SecretService, &root, &self.secret_service)
+                    operation(BackendSelection::Native, &root, &self.secret_service)
+                }
+                Err(error @ CredentialVaultError::Unavailable { .. })
+                    if root.preexisting_sensitive_state()? =>
+                {
+                    Err(error)
                 }
                 Err(CredentialVaultError::Unavailable { .. }) => {
                     root.write_selection(BackendSelection::File)?;
@@ -181,18 +207,25 @@ impl<A: SecretServiceAdapter> LinuxBackend<A> {
             &A,
         ) -> Result<T, CredentialVaultError>,
     ) -> Result<T, CredentialVaultError> {
-        let root = VaultRoot::open(&self.data_root)?;
+        let root = VaultRoot::open(&self.data_root, SECRET_SERVICE_SELECTION)?;
         let initial_selection = root.read_selection()?;
         let Some(lock) = root.open_existing_lock()? else {
             return if initial_selection.is_some() {
                 Err(CredentialVaultError::Corrupt)
             } else {
+                root.validate_unselected_file_state()?;
                 operation(None, &root, &self.secret_service)
             };
         };
         lock.lock_exclusive()
             .map_err(|error| map_io_error(&error))?;
-        let result = operation(root.read_selection()?, &root, &self.secret_service);
+        let result = (|| {
+            let selection = root.read_selection()?;
+            if selection.is_none() {
+                root.validate_unselected_file_state()?;
+            }
+            operation(selection, &root, &self.secret_service)
+        })();
         let unlock = fs2::FileExt::unlock(&lock).map_err(|error| map_io_error(&error));
         match (result, unlock) {
             (Ok(value), Ok(())) => Ok(value),
@@ -201,7 +234,7 @@ impl<A: SecretServiceAdapter> LinuxBackend<A> {
     }
 
     fn cleanup_if_empty(&self) -> Result<(), CredentialVaultError> {
-        let root = match VaultRoot::open(&self.data_root) {
+        let root = match VaultRoot::open(&self.data_root, SECRET_SERVICE_SELECTION) {
             Ok(root) => root,
             Err(CredentialVaultError::NotFound) => return Ok(()),
             Err(error) => return Err(error),
@@ -223,7 +256,7 @@ impl<A: SecretServiceAdapter> LinuxBackend<A> {
             };
             match selection {
                 BackendSelection::File => root.remove_empty_file_vault()?,
-                BackendSelection::SecretService => self.secret_service.probe()?,
+                BackendSelection::Native => self.secret_service.probe()?,
             }
             root.remove_selection()
         })();
@@ -235,12 +268,13 @@ impl<A: SecretServiceAdapter> LinuxBackend<A> {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl<A: SecretServiceAdapter> CredentialVaultBackend for LinuxBackend<A> {
     fn load(&self, record_id: &str) -> Result<SecretBytes, CredentialVaultError> {
         validate_record_id(record_id)?;
         self.with_read_backend(|selection, root, secret_service| match selection {
             Some(BackendSelection::File) => root.load_file_record(record_id),
-            Some(BackendSelection::SecretService) => secret_service.load(record_id),
+            Some(BackendSelection::Native) => secret_service.load(record_id),
             None => Self::inspect_unselected_secret_service(secret_service, |secret_service| {
                 secret_service.load(record_id)
             }),
@@ -256,7 +290,7 @@ impl<A: SecretServiceAdapter> CredentialVaultBackend for LinuxBackend<A> {
         drop(SecretBytes::new(candidate.to_vec())?);
         self.with_mutating_selected_backend(|selection, root, secret_service| match selection {
             BackendSelection::File => root.load_or_store_file_record(record_id, candidate),
-            BackendSelection::SecretService => secret_service.load_or_store(record_id, candidate),
+            BackendSelection::Native => secret_service.load_or_store(record_id, candidate),
         })
     }
 
@@ -265,7 +299,7 @@ impl<A: SecretServiceAdapter> CredentialVaultBackend for LinuxBackend<A> {
         drop(SecretBytes::new(value.to_vec())?);
         self.with_mutating_selected_backend(|selection, root, secret_service| match selection {
             BackendSelection::File => root.store_file_record(record_id, value),
-            BackendSelection::SecretService => secret_service.store(record_id, value),
+            BackendSelection::Native => secret_service.store(record_id, value),
         })
     }
 
@@ -273,7 +307,7 @@ impl<A: SecretServiceAdapter> CredentialVaultBackend for LinuxBackend<A> {
         validate_record_id(record_id)?;
         self.with_read_backend(|selection, root, secret_service| match selection {
             Some(BackendSelection::File) => root.delete_file_record(record_id),
-            Some(BackendSelection::SecretService) => secret_service.delete(record_id),
+            Some(BackendSelection::Native) => secret_service.delete(record_id),
             None => Self::inspect_unselected_secret_service(secret_service, |secret_service| {
                 secret_service.delete(record_id)
             }),
@@ -281,12 +315,16 @@ impl<A: SecretServiceAdapter> CredentialVaultBackend for LinuxBackend<A> {
     }
 }
 
-struct VaultRoot {
+pub(super) struct VaultRoot {
     pro: File,
+    native_selection: &'static [u8],
 }
 
 impl VaultRoot {
-    fn open(data_root: &Path) -> Result<Self, CredentialVaultError> {
+    pub(super) fn open(
+        data_root: &Path,
+        native_selection: &'static [u8],
+    ) -> Result<Self, CredentialVaultError> {
         let data = open_absolute_directory(data_root)?;
         verify_private_directory(&data).map_err(|_| CredentialVaultError::InvalidDataRoot)?;
         let pro = match open_directory_at(&data, OsStr::new("pro")) {
@@ -297,18 +335,21 @@ impl VaultRoot {
             Err(error) => return Err(map_path_error(&error)),
         };
         verify_private_directory(&pro).map_err(|_| CredentialVaultError::Corrupt)?;
-        Ok(Self { pro })
+        Ok(Self {
+            pro,
+            native_selection,
+        })
     }
 
-    fn open_lock(&self) -> Result<File, CredentialVaultError> {
+    pub(super) fn open_lock(&self) -> Result<File, CredentialVaultError> {
         open_or_create_private_file(&self.pro, OsStr::new(FILE_VAULT_LOCK), true)
     }
 
-    fn open_existing_lock(&self) -> Result<Option<File>, CredentialVaultError> {
+    pub(super) fn open_existing_lock(&self) -> Result<Option<File>, CredentialVaultError> {
         open_existing_private_file(&self.pro, OsStr::new(FILE_VAULT_LOCK), libc::O_RDWR)
     }
 
-    fn read_selection(&self) -> Result<Option<BackendSelection>, CredentialVaultError> {
+    pub(super) fn read_selection(&self) -> Result<Option<BackendSelection>, CredentialVaultError> {
         let Some(file) =
             open_existing_private_file(&self.pro, OsStr::new(BACKEND_MARKER), libc::O_RDONLY)?
         else {
@@ -317,15 +358,18 @@ impl VaultRoot {
         let bytes = read_bounded(file, MAX_BACKEND_MARKER_BYTES)?;
         match bytes.as_slice() {
             FILE_SELECTION => Ok(Some(BackendSelection::File)),
-            SECRET_SERVICE_SELECTION => Ok(Some(BackendSelection::SecretService)),
+            native if native == self.native_selection => Ok(Some(BackendSelection::Native)),
             _ => Err(CredentialVaultError::Corrupt),
         }
     }
 
-    fn write_selection(&self, selection: BackendSelection) -> Result<(), CredentialVaultError> {
+    pub(super) fn write_selection(
+        &self,
+        selection: BackendSelection,
+    ) -> Result<(), CredentialVaultError> {
         let bytes = match selection {
             BackendSelection::File => FILE_SELECTION,
-            BackendSelection::SecretService => SECRET_SERVICE_SELECTION,
+            BackendSelection::Native => self.native_selection,
         };
         atomic_write_private_file(
             &self.pro,
@@ -340,14 +384,44 @@ impl VaultRoot {
         }
     }
 
-    fn remove_marker_stage(&self) -> Result<(), CredentialVaultError> {
+    pub(super) fn preexisting_sensitive_state(&self) -> Result<bool, CredentialVaultError> {
+        for directory in [FILE_VAULT_DIRECTORY, PRIVATE_GRAPH_STORE_DIRECTORY] {
+            if sensitive_entry_exists(&self.pro, OsStr::new(directory), EntryKind::Directory)? {
+                return Ok(true);
+            }
+        }
+        for file in std::iter::once(BACKEND_MARKER_STAGE).chain(PRO_GRAPH_FILES) {
+            if sensitive_entry_exists(&self.pro, OsStr::new(file), EntryKind::File)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    pub(super) fn validate_unselected_file_state(&self) -> Result<(), CredentialVaultError> {
+        if sensitive_entry_exists(
+            &self.pro,
+            OsStr::new(FILE_VAULT_DIRECTORY),
+            EntryKind::Directory,
+        )? || sensitive_entry_exists(
+            &self.pro,
+            OsStr::new(BACKEND_MARKER_STAGE),
+            EntryKind::File,
+        )? {
+            Err(CredentialVaultError::Corrupt)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(super) fn remove_marker_stage(&self) -> Result<(), CredentialVaultError> {
         if remove_private_file(&self.pro, OsStr::new(BACKEND_MARKER_STAGE))? {
             self.pro.sync_all().map_err(|error| map_io_error(&error))?;
         }
         Ok(())
     }
 
-    fn remove_selection(&self) -> Result<(), CredentialVaultError> {
+    pub(super) fn remove_selection(&self) -> Result<(), CredentialVaultError> {
         let removed_stage = remove_private_file(&self.pro, OsStr::new(BACKEND_MARKER_STAGE))?;
         let removed_marker = remove_private_file(&self.pro, OsStr::new(BACKEND_MARKER))?;
         if removed_stage || removed_marker {
@@ -379,13 +453,16 @@ impl VaultRoot {
         }
     }
 
-    fn load_file_record(&self, record_id: &str) -> Result<SecretBytes, CredentialVaultError> {
+    pub(super) fn load_file_record(
+        &self,
+        record_id: &str,
+    ) -> Result<SecretBytes, CredentialVaultError> {
         self.file_vault(false)?
             .ok_or(CredentialVaultError::NotFound)?
             .load(record_id)
     }
 
-    fn load_or_store_file_record(
+    pub(super) fn load_or_store_file_record(
         &self,
         record_id: &str,
         candidate: &[u8],
@@ -403,19 +480,23 @@ impl VaultRoot {
         }
     }
 
-    fn store_file_record(&self, record_id: &str, value: &[u8]) -> Result<(), CredentialVaultError> {
+    pub(super) fn store_file_record(
+        &self,
+        record_id: &str,
+        value: &[u8],
+    ) -> Result<(), CredentialVaultError> {
         self.file_vault(true)?
             .ok_or(CredentialVaultError::Backend)?
             .store(record_id, value)
     }
 
-    fn delete_file_record(&self, record_id: &str) -> Result<(), CredentialVaultError> {
+    pub(super) fn delete_file_record(&self, record_id: &str) -> Result<(), CredentialVaultError> {
         self.file_vault(false)?
             .ok_or(CredentialVaultError::NotFound)?
             .delete(record_id)
     }
 
-    fn remove_empty_file_vault(&self) -> Result<(), CredentialVaultError> {
+    pub(super) fn remove_empty_file_vault(&self) -> Result<(), CredentialVaultError> {
         let Some(vault) = self.file_vault(false)? else {
             return Ok(());
         };
@@ -433,6 +514,51 @@ impl VaultRoot {
             Ok(_) => Err(CredentialVaultError::Backend),
             Err(error) => Err(map_path_error(&error)),
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum EntryKind {
+    Directory,
+    File,
+}
+
+fn sensitive_entry_exists(
+    parent: &File,
+    name: &OsStr,
+    expected: EntryKind,
+) -> Result<bool, CredentialVaultError> {
+    let name = path_component(name)?;
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: the parent descriptor and NUL-terminated component are valid;
+    // successful fstatat initializes the complete stat structure.
+    let result = unsafe {
+        libc::fstatat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            metadata.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result != 0 {
+        let error = io::Error::last_os_error();
+        return if error.kind() == io::ErrorKind::NotFound {
+            Ok(false)
+        } else {
+            Err(map_path_error(&error))
+        };
+    }
+    // SAFETY: the successful fstatat above initialized every field.
+    let metadata = unsafe { metadata.assume_init() };
+    let file_type = metadata.st_mode & libc::S_IFMT;
+    let expected_type = match expected {
+        EntryKind::Directory => libc::S_IFDIR,
+        EntryKind::File => libc::S_IFREG,
+    };
+    if file_type == expected_type {
+        Ok(true)
+    } else {
+        Err(CredentialVaultError::Corrupt)
     }
 }
 
@@ -638,7 +764,7 @@ fn verify_private_directory(directory: &File) -> io::Result<()> {
         && metadata.uid() == effective_uid()
         && metadata.mode() & 0o7777 == PRIVATE_DIRECTORY_MODE
     {
-        Ok(())
+        verify_no_macos_extended_acl(directory)
     } else {
         Err(private_path_error())
     }
@@ -651,9 +777,75 @@ fn verify_private_file(file: &File) -> Result<(), CredentialVaultError> {
         && metadata.mode() & 0o7777 == PRIVATE_FILE_MODE
         && metadata.nlink() == 1
     {
-        Ok(())
+        verify_no_macos_extended_acl(file).map_err(|_| CredentialVaultError::Corrupt)
     } else {
         Err(CredentialVaultError::Corrupt)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn verify_no_macos_extended_acl(_file: &File) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn verify_no_macos_extended_acl(file: &File) -> io::Result<()> {
+    const ACL_TYPE_EXTENDED: c_int = 0x0000_0100;
+    const ACL_FIRST_ENTRY: c_int = 0;
+    const DARWIN_ENOENT: c_int = 2;
+    const DARWIN_EINVAL: c_int = 22;
+
+    unsafe extern "C" {
+        fn __error() -> *mut c_int;
+        fn acl_get_fd_np(fd: c_int, acl_type: c_int) -> *mut c_void;
+        fn acl_get_entry(acl: *mut c_void, entry_id: c_int, entry: *mut *mut c_void) -> c_int;
+        fn acl_free(object: *mut c_void) -> c_int;
+    }
+
+    struct ExtendedAcl(*mut c_void);
+
+    impl Drop for ExtendedAcl {
+        fn drop(&mut self) {
+            // SAFETY: this guard owns the allocation returned by
+            // `acl_get_fd_np` and releases it exactly once.
+            unsafe {
+                acl_free(self.0);
+            }
+        }
+    }
+
+    // SAFETY: the descriptor is live and `ACL_TYPE_EXTENDED` is the stable
+    // Darwin ACL type for the non-POSIX access-control list.
+    unsafe {
+        *__error() = 0;
+    }
+    let acl = unsafe { acl_get_fd_np(file.as_raw_fd(), ACL_TYPE_EXTENDED) };
+    if acl.is_null() {
+        let error = io::Error::last_os_error();
+        return if error.raw_os_error() == Some(DARWIN_ENOENT) {
+            Ok(())
+        } else {
+            Err(error)
+        };
+    }
+    let acl = ExtendedAcl(acl);
+    let mut entry = null_mut();
+    // Darwin reports EINVAL when ACL_FIRST_ENTRY is requested from a valid
+    // empty ACL. Any actual entry could grant access beyond mode 0700/0600.
+    // SAFETY: `acl` is live and `entry` is a valid out pointer.
+    unsafe {
+        *__error() = 0;
+    }
+    let result = unsafe { acl_get_entry(acl.0, ACL_FIRST_ENTRY, &raw mut entry) };
+    if result == 0 {
+        Err(private_path_error())
+    } else {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(DARWIN_EINVAL) {
+            Ok(())
+        } else {
+            Err(error)
+        }
     }
 }
 
@@ -793,6 +985,6 @@ fn effective_uid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 #[path = "linux_tests.rs"]
 mod tests;

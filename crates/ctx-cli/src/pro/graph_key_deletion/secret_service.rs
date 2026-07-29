@@ -229,11 +229,12 @@ mod tests {
             .unwrap();
         assert_eq!(find_items(&service, &account).unwrap().len(), 1);
         assert_eq!(find_items(&service, &graph_id).unwrap().len(), 1);
-        super::super::delete(&graph_id).unwrap();
+        let data_root = tempdir().unwrap();
+        super::super::delete(data_root.path(), &graph_id).unwrap();
         assert!(find_items(&service, &account).unwrap().is_empty());
         assert_eq!(find_items(&service, &graph_id).unwrap().len(), 1);
         assert!(matches!(
-            super::super::delete(&graph_id),
+            super::super::delete(data_root.path(), &graph_id),
             Err(CredentialVaultError::NotFound)
         ));
         with_unique_item(&graph_id, |item| {
