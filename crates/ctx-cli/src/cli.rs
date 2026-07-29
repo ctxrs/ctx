@@ -65,7 +65,8 @@ pub(crate) enum CommandRoot {
     Search(SearchArgs),
     #[command(
         about = "Set up, resume, repair, manage, or remove local ctx Pro",
-        long_about = "Set up, resume, repair, manage, or remove local ctx Pro. Bare `ctx pro` runs the idempotent setup path; `ctx pro setup` is an explicit synonym. `ctx status` does not mutate canonical history or graph data; entitlement authorization may advance nonsecret anti-clock-rollback metadata."
+        long_about = "Set up, resume, repair, manage, or remove local ctx Pro. Bare `ctx pro` runs the idempotent setup path; `ctx pro setup` is an explicit synonym. `ctx status` does not mutate canonical history or graph data; entitlement authorization may advance nonsecret anti-clock-rollback metadata.",
+        after_help = format!("Price: {}", pro::PRO_MONTHLY_PRICE_DISPLAY)
     )]
     Pro(pro::ProArgs),
     #[command(

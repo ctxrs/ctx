@@ -5,6 +5,8 @@ use rusqlite::{Connection, TransactionBehavior};
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use crate::pro::PRO_MONTHLY_PRICE_DISPLAY;
+
 use super::store::{open_read_only, usage_path, usage_store_exists, verify_report_dates};
 use super::{
     estimate_usage, CoveredTokenEstimate, EstimateFacts, UsageEstimates, DEFINITION_VERSION,
@@ -1326,7 +1328,7 @@ pub(crate) fn pro_conversion_action(access_state: Option<&str>) -> Option<Value>
     match access_state {
         Some("trial") => Some(json!({
             "kind": "pro_monthly_conversion",
-            "price": "$20/month",
+            "price": PRO_MONTHLY_PRICE_DISPLAY,
             "command": "ctx pro manage",
             "reason": "trial_active",
         })),

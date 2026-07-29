@@ -7,6 +7,7 @@ use crate::analytics::{count_bucket, StatusTelemetry};
 use crate::config::{self, CONFIG_FILE};
 use crate::local_usage;
 use crate::output::print_json;
+use crate::pro::PRO_MONTHLY_PRICE_DISPLAY;
 use crate::semantic::source_epoch_status_report;
 use crate::{StatusArgs, UsageStatusMode};
 
@@ -194,7 +195,7 @@ pub(crate) fn run_status(
                         action
                             .get("price")
                             .and_then(Value::as_str)
-                            .unwrap_or("$20/month"),
+                            .unwrap_or(PRO_MONTHLY_PRICE_DISPLAY),
                         action
                             .get("command")
                             .and_then(Value::as_str)

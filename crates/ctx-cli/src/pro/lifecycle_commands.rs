@@ -49,7 +49,7 @@ use crate::{
         ProMaterializationTelemetryV1, ProReconcileOutcomeV1, ProUninstallDataDispositionV1,
     },
     output::JsonOutputFormat,
-    pro::stable_error_code,
+    pro::{stable_error_code, PRO_MONTHLY_PRICE_DISPLAY},
 };
 
 #[derive(Debug, Args)]
@@ -589,7 +589,9 @@ fn run_manage_with_opener(
             } else {
                 println!(
                     "Continue with ctx Pro for {}: {}",
-                    action["price"].as_str().unwrap_or("$20/month"),
+                    action["price"]
+                        .as_str()
+                        .unwrap_or(PRO_MONTHLY_PRICE_DISPLAY),
                     action["command"].as_str().unwrap_or("ctx pro manage")
                 );
             }

@@ -9,6 +9,14 @@ fn elapsed_since(clock: &Cell<i64>, start: i64) -> Duration {
 }
 
 #[test]
+fn paid_checkout_prompt_uses_the_fixed_monthly_price() {
+    assert_eq!(
+        render_paid_checkout_prompt("https://checkout.stripe.test/session"),
+        "Start ctx Pro for $20/month at:\n  https://checkout.stripe.test/session"
+    );
+}
+
+#[test]
 fn only_terminal_anonymous_trial_states_enter_paid_conversion() {
     for code in [
         "anonymous_trial_already_consumed",

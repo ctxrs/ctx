@@ -136,6 +136,20 @@ fn show_help_exposes_explicit_content_fidelity() {
 }
 
 #[test]
+fn pro_help_advertises_the_fixed_monthly_price() {
+    let temp = tempdir();
+    let output = ctx(&temp)
+        .args(["pro", "--help"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let help = String::from_utf8(output).unwrap();
+    assert!(help.contains("Price: $20/month"), "{help}");
+}
+
+#[test]
 fn pro_uninstall_help_uses_local_pro_data_terminology() {
     let temp = tempdir();
     let output = ctx(&temp)

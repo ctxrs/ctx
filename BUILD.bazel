@@ -1,4 +1,4 @@
-load("@rules_python//python:defs.bzl", "py_test")
+load("@rules_python//python:defs.bzl", "py_binary", "py_test")
 load("@rules_rust//rust:defs.bzl", "rustfmt_test")
 load("//tools/bazel:gates.bzl", "loc_check_inputs", "non_rust_gate", "real_harness_gate")
 load(
@@ -418,6 +418,25 @@ py_test(
     ],
     main = "scripts/tests/check-release-target-matrix-test.py",
     data = [":release_contracts"],
+    tags = ["release-gate"],
+)
+
+py_binary(
+    name = "pro_price_consistency_check",
+    srcs = ["scripts/check-pro-price-consistency.py"],
+    main = "scripts/check-pro-price-consistency.py",
+    tags = [
+        "manual",
+        "release-gate",
+        "release-tool",
+    ],
+)
+
+py_test(
+    name = "pro_price_consistency_tests",
+    srcs = ["scripts/tests/check-pro-price-consistency-test.py"],
+    data = ["scripts/check-pro-price-consistency.py"],
+    main = "scripts/tests/check-pro-price-consistency-test.py",
     tags = ["release-gate"],
 )
 
@@ -886,6 +905,7 @@ test_suite(
         ":public_cli_bazel_release_contract",
         ":public_cli_artifact_cleanup_tests",
         ":public_cli_release_targets_tests",
+        ":pro_price_consistency_tests",
         "//tools/bazel:release_route_analysis_tests",
         ":release_binary_compat_tests",
         ":release_binary_string_audit_tests",
