@@ -40,8 +40,6 @@ pub(crate) fn run_import(
             progress,
             json,
             print_human: !json,
-            allow_empty_sources: false,
-            include_history_source_plugins: true,
             operation: "import",
         },
     );

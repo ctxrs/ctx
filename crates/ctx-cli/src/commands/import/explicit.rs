@@ -18,9 +18,8 @@ use crate::{
 };
 
 use super::{
-    catalog::source_stats, explicit_source_for_import, upsert_explicit_source, CatalogTotals,
-    ImportReport, ImportRunOptions, ImportTotals, InventoryTotals, ProviderRefreshCollector,
-    ProviderRefreshRuntimeFacts,
+    catalog::source_stats, explicit_source_for_import, upsert_explicit_source, ImportReport,
+    ImportRunOptions, ImportTotals, ProviderRefreshCollector, ProviderRefreshRuntimeFacts,
 };
 
 pub(crate) struct ExplicitSourceCatalogImportContext<'a> {
@@ -109,14 +108,6 @@ pub(crate) fn run_explicit_source_catalog_import(
     Ok(ImportReport {
         resume: context.args.resume,
         totals,
-        inventory: InventoryTotals {
-            sources: 1,
-            source_files: stats.files,
-            source_bytes: stats.bytes,
-            ..InventoryTotals::default()
-        },
-        catalog: CatalogTotals::default(),
-        catalog_sources: Vec::new(),
         sources: vec![json!({
             "status": "published",
             "failure_scope": "none",
