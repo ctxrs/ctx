@@ -10,9 +10,6 @@ use ctx_history_index::LexicalDocument;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use super::{
-    publication::nanoclaw_logical_record_digest_bytes, NanoClawNativeScanner, NanoClawNativeUnit,
-};
 use crate::{
     complete_content::sqlite::{CompleteContentSqliteBoundError, CompleteContentSqliteQueryBudget},
     native_source::{NativeLocator, NativeSourceError},
@@ -22,7 +19,8 @@ use crate::{
             position::decode_nanoclaw_message_locator,
             project::NanoClawSourceBackedProject,
             projection::nanoclaw_core_event,
-            rows::nanoclaw_message_digest_values,
+            rows::{nanoclaw_logical_record_digest_bytes, nanoclaw_message_digest_values},
+            source::{NanoClawNativeScanner, NanoClawNativeUnit},
             NANOCLAW_MESSAGE_LOCATOR_KIND,
         },
         sqlite::sqlite_schema_fingerprint,

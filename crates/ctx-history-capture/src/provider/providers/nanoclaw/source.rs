@@ -191,12 +191,8 @@ pub(super) enum NanoClawNativeUnit {
 
 #[derive(Debug)]
 pub(super) struct NanoClawNativePage {
-    pub(super) expected_frontier: NanoClawFrontier,
-    pub(super) next_frontier: NanoClawFrontier,
     pub(super) terminal: bool,
     pub(super) units: Vec<NanoClawNativeUnit>,
-    pub(super) conservative_serialized_bytes: usize,
-    pub(super) prefix_digest: String,
 }
 
 pub(super) struct NanoClawNativeScanner<'connection, 'snapshot> {
@@ -227,10 +223,6 @@ impl<'connection, 'snapshot> NanoClawNativeScanner<'connection, 'snapshot> {
         })
     }
 
-    pub(super) fn prefix_digest(&self) -> String {
-        hex(&self.prefix_hasher.clone().finalize())
-    }
-
     pub(super) fn prefix_digest_bytes(&self) -> [u8; 32] {
         self.prefix_hasher.clone().finalize().into()
     }
@@ -248,27 +240,10 @@ impl<'connection, 'snapshot> NanoClawNativeScanner<'connection, 'snapshot> {
         }
     }
 
-    /// Replays only provider-owned rows to prove that a released NativePath
-    /// boundary still names the exact same semantic prefix.
-    pub(super) fn seek(
-        &mut self,
-        target: NanoClawFrontier,
-        expected_prefix_digest: &str,
-    ) -> Result<bool> {
-        let target = target.validate()?;
-        while self.frontier != target {
-            if self.next_unit()?.is_none() {
-                return Ok(false);
-            }
-        }
-        Ok(self.prefix_digest() == expected_prefix_digest)
-    }
-
     pub(super) fn next_page(&mut self) -> Result<NanoClawNativePage> {
         if !self.snapshot.revalidate()? {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
-        let expected_frontier = self.frontier;
         let mut units = Vec::new();
         let mut bytes = NANOCLAW_NATIVE_PAGE_RESERVE_BYTES;
         let mut terminal = false;
@@ -285,14 +260,7 @@ impl<'connection, 'snapshot> NanoClawNativeScanner<'connection, 'snapshot> {
         if !self.snapshot.revalidate()? {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
-        Ok(NanoClawNativePage {
-            expected_frontier,
-            next_frontier: self.frontier,
-            terminal,
-            units,
-            conservative_serialized_bytes: bytes,
-            prefix_digest: self.prefix_digest(),
-        })
+        Ok(NanoClawNativePage { terminal, units })
     }
 
     fn next_unit(&mut self) -> Result<Option<NanoClawNativeUnit>> {
@@ -662,14 +630,4 @@ fn nanoclaw_row_decode_error_is_local(error: &CaptureError) -> bool {
         ),
         _ => false,
     }
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
-    for byte in bytes {
-        encoded.push(char::from(DIGITS[usize::from(byte >> 4)]));
-        encoded.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
-    }
-    encoded
 }
