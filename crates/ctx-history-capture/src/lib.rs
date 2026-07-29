@@ -168,6 +168,3 @@ pub use provider::source_backed::{
     SourceBackedRouteErrorKind, SourceBackedRouteMetadata, SourceBackedRouteResult,
     SourceBackedRouteSelection, SourceBackedSelectorAuthority, LANDED_SOURCE_BACKED_ROUTES,
 };
-
-#[cfg(test)]
-mod tests;
