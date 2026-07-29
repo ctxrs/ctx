@@ -108,7 +108,6 @@ pub(crate) fn run_import_internal(
     run_automatic_source_refresh_import(AutomaticSourceRefreshImportContext {
         args,
         data_root,
-        telemetry,
         provider_refreshes,
         config,
         options,
