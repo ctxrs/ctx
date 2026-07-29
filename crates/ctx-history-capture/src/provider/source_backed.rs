@@ -738,6 +738,7 @@ pub enum SourceBackedCoordinatorError {
 pub struct SourceBackedGenerationSink<'writer> {
     writer: &'writer mut GenerationWriter,
     owners: &'writer mut HashMap<[u8; 32], SourceOwner>,
+    complete_inventories: &'writer mut Vec<CompleteInventoryOwner>,
     route_index: usize,
 }
 
@@ -745,6 +746,12 @@ pub struct SourceBackedGenerationSink<'writer> {
 struct SourceOwner {
     route_index: usize,
     source: SourceKey,
+}
+
+#[derive(Clone)]
+struct CompleteInventoryOwner {
+    route_index: usize,
+    inventory: CertifiedSourceInventory,
 }
 
 impl SourceBackedGenerationSink<'_> {
@@ -789,6 +796,18 @@ impl SourceBackedGenerationSink<'_> {
         append: CertifiedSourceAppend,
     ) -> SourceBackedCoordinatorResult<()> {
         self.writer.certify_source_append(append)?;
+        Ok(())
+    }
+
+    pub fn certify_complete_inventory(
+        &mut self,
+        inventory: CertifiedSourceInventory,
+    ) -> SourceBackedCoordinatorResult<()> {
+        self.writer.certify_complete_inventory(inventory.clone())?;
+        self.complete_inventories.push(CompleteInventoryOwner {
+            route_index: self.route_index,
+            inventory,
+        });
         Ok(())
     }
 
@@ -971,6 +990,8 @@ type ScanCallback = dyn for<'writer> Fn(&mut SourceBackedGenerationSink<'writer>
 type SourcePredicate = dyn Fn(&SourceKey) -> bool + Send + Sync;
 type RevalidationCallback =
     dyn for<'a> Fn(SourceBackedRevalidationTarget<'a>) -> bool + Send + Sync;
+type CompleteInventoryRevalidationCallback =
+    dyn Fn(&CertifiedSourceInventory) -> bool + Send + Sync;
 type HydrationCallback = dyn Fn(&EventHydrationRequest) -> Result<HydratedProviderRecord, HydrationFailure>
     + Send
     + Sync;
@@ -984,6 +1005,7 @@ pub struct SourceBackedRouteDriver {
     scan: Arc<ScanCallback>,
     owns_source: Arc<SourcePredicate>,
     revalidate: Arc<RevalidationCallback>,
+    revalidate_complete_inventory: Option<Arc<CompleteInventoryRevalidationCallback>>,
     hydrate: Arc<HydrationCallback>,
     hydrate_batch: Option<Arc<BatchHydrationCallback>>,
 }
@@ -1011,9 +1033,18 @@ impl SourceBackedRouteDriver {
             scan: Arc::new(scan),
             owns_source: Arc::new(owns_source),
             revalidate: Arc::new(revalidate),
+            revalidate_complete_inventory: None,
             hydrate: Arc::new(hydrate),
             hydrate_batch: None,
         }
+    }
+
+    pub fn with_complete_inventory_revalidation(
+        mut self,
+        revalidate: impl Fn(&CertifiedSourceInventory) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.revalidate_complete_inventory = Some(Arc::new(revalidate));
+        self
     }
 
     /// Installs a provider-native ordered batch reader without changing the
@@ -1915,6 +1946,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
     let scan_started = Instant::now();
     let mut writer = GenerationWriter::open(index_root.as_ref(), writer_options)?;
     let mut owners = HashMap::new();
+    let mut complete_inventory_owners = Vec::new();
     let mut completed_routes = 0;
     for (route_index, route) in registry.routes.iter().enumerate() {
         let Some(driver) = &route.driver else {
@@ -1934,6 +1966,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
         let mut sink = SourceBackedGenerationSink {
             writer: &mut writer,
             owners: &mut owners,
+            complete_inventories: &mut complete_inventory_owners,
             route_index,
         };
         (driver.scan)(&mut sink).map_err(|source| SourceBackedCoordinatorError::RouteScan {
@@ -1956,29 +1989,44 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
     .map_err(SourceBackedCoordinatorError::Progress)?;
     let scan_stage_duration = scan_started.elapsed();
     let commit_started = Instant::now();
-    let commit = writer.commit(|target| {
-        let source = match target {
-            RevalidationTarget::Source(source) => source.observation().source(),
-            RevalidationTarget::Deletion(deletion) => deletion.source(),
-        };
-        let Some(owner) = owners.get(&source.identity().digest()) else {
-            return false;
-        };
-        if !owner.source.exact_descriptor_eq(source) {
-            return false;
-        }
-        let Some(driver) = registry.routes[owner.route_index].driver.as_ref() else {
-            return false;
-        };
-        match target {
-            RevalidationTarget::Source(source) => {
-                (driver.revalidate)(SourceBackedRevalidationTarget::Source(source))
+    let commit = writer.commit_with_complete_inventory_revalidation(
+        |target| {
+            let source = match target {
+                RevalidationTarget::Source(source) => source.observation().source(),
+                RevalidationTarget::Deletion(deletion) => deletion.source(),
+            };
+            let Some(owner) = owners.get(&source.identity().digest()) else {
+                return false;
+            };
+            if !owner.source.exact_descriptor_eq(source) {
+                return false;
             }
-            RevalidationTarget::Deletion(deletion) => {
-                (driver.revalidate)(SourceBackedRevalidationTarget::Deletion(deletion))
+            let Some(driver) = registry.routes[owner.route_index].driver.as_ref() else {
+                return false;
+            };
+            match target {
+                RevalidationTarget::Source(source) => {
+                    (driver.revalidate)(SourceBackedRevalidationTarget::Source(source))
+                }
+                RevalidationTarget::Deletion(deletion) => {
+                    (driver.revalidate)(SourceBackedRevalidationTarget::Deletion(deletion))
+                }
             }
-        }
-    })?;
+        },
+        |inventory| {
+            let Some(owner) = complete_inventory_owners
+                .iter()
+                .find(|owner| owner.inventory == *inventory)
+            else {
+                return false;
+            };
+            registry.routes[owner.route_index]
+                .driver
+                .as_ref()
+                .and_then(|driver| driver.revalidate_complete_inventory.as_ref())
+                .is_some_and(|revalidate| revalidate(inventory))
+        },
+    )?;
     let commit_duration = commit_started.elapsed();
     report_progress(SourceBackedRefreshProgress {
         phase: "committed",
@@ -2156,10 +2204,13 @@ fn register_codex_session_tree_route(
     let root = source.path.clone();
     let capture_root = root.clone();
     let revalidation_root = root.clone();
+    let complete_inventory_revalidation_root = root.clone();
     let hydration_root = root;
     let driver = SourceBackedRouteDriver::new(
         move |sink| {
             let opening = discover_codex_root_inventory_v0(&capture_root).map_err(route_error)?;
+            sink.certify_complete_inventory(opening.certificate.clone())
+                .map_err(route_coordinator_error)?;
             let base_sources = codex_writer_base_sources(sink.writer);
             for (_, source_key, _) in &opening.sources {
                 sink.claim(source_key).map_err(route_coordinator_error)?;
@@ -2224,7 +2275,11 @@ fn register_codex_session_tree_route(
                 provider_bytes: codex_display_bytes(hydrated)?,
             })
         },
-    );
+    )
+    .with_complete_inventory_revalidation(move |expected| {
+        discover_codex_root_inventory_v0(&complete_inventory_revalidation_root)
+            .is_ok_and(|current| current.certificate == *expected)
+    });
     registry.register(executable_route(
         source,
         selection,
@@ -2244,6 +2299,7 @@ fn register_codex_explicit_session_route(
     let owned_source = input.source().clone();
     let scan_input = input.clone();
     let revalidation_input = input.clone();
+    let complete_inventory_revalidation_input = input.clone();
     let hydration_input = input.clone();
     let batch_hydration_input = input;
     let claimed_source = owned_source.clone();
@@ -2256,6 +2312,8 @@ fn register_codex_explicit_session_route(
                 let closing = observe_codex_explicit_session_source_backed_v0(&scan_input)
                     .map_err(route_error)?;
                 let inventory = opening.certify_against(&closing).map_err(route_error)?;
+                sink.certify_complete_inventory(inventory.clone())
+                    .map_err(route_coordinator_error)?;
                 if let Some(base) = base {
                     let deletion = CertifiedSourceDeletion::from_inventory(
                         base.observation().source().clone(),
@@ -2297,7 +2355,12 @@ fn register_codex_explicit_session_route(
                 &mut timings,
                 &mut counters,
             )
-            .map_err(route_error)
+            .map_err(route_error)?;
+            let closing = observe_codex_explicit_session_source_backed_v0(&scan_input)
+                .map_err(route_error)?;
+            let inventory = opening.certify_against(&closing).map_err(route_error)?;
+            sink.certify_complete_inventory(inventory)
+                .map_err(route_coordinator_error)
         },
         move |candidate| candidate.exact_descriptor_eq(&owned_source),
         move |target| match target {
@@ -2336,6 +2399,21 @@ fn register_codex_explicit_session_route(
         },
         move |request| hydrate_codex_explicit_event(&hydration_input, request),
     )
+    .with_complete_inventory_revalidation(move |expected| {
+        let Ok(opening) =
+            observe_codex_explicit_session_source_backed_v0(&complete_inventory_revalidation_input)
+        else {
+            return false;
+        };
+        let Ok(closing) =
+            observe_codex_explicit_session_source_backed_v0(&complete_inventory_revalidation_input)
+        else {
+            return false;
+        };
+        opening
+            .certify_against(&closing)
+            .is_ok_and(|current| current == *expected)
+    })
     .with_batch_hydration(move |request| {
         hydrate_codex_explicit_batch(&batch_hydration_input, request)
     });
@@ -3223,6 +3301,7 @@ where
 {
     let scan_inventory = Arc::clone(&inventory_source);
     let revalidation_inventory = Arc::clone(&inventory_source);
+    let complete_inventory_revalidation = Arc::clone(&inventory_source);
     let hydration_inventory = inventory_source;
     let driver = SourceBackedRouteDriver::new(
         move |sink| {
@@ -3336,6 +3415,8 @@ where
                 opening.source_keys(),
             )
             .map_err(route_error)?;
+            sink.certify_complete_inventory(certified_inventory.clone())
+                .map_err(route_coordinator_error)?;
             for base in base_sources.values() {
                 let base_source = base.observation().source();
                 if base_source.provider() == CaptureProvider::Crush.as_str()
@@ -3427,7 +3508,35 @@ where
                 provider_bytes,
             })
         },
-    );
+    )
+    .with_complete_inventory_revalidation(move |expected| {
+        let Ok(opening_observation) = complete_inventory_revalidation.observe() else {
+            return false;
+        };
+        let Ok(opening) = bind_crush_inventory(opening_observation.clone()) else {
+            return false;
+        };
+        let Ok(closing_observation) = complete_inventory_revalidation.observe() else {
+            return false;
+        };
+        if !opening
+            .matches(closing_observation.clone())
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        let Ok(closing) = bind_crush_inventory(closing_observation) else {
+            return false;
+        };
+        let source_keys = opening.source_keys();
+        CertifiedSourceInventory::certify(
+            opening.observation,
+            closing.observation,
+            CRUSH_DISCOVERY_REVISION,
+            source_keys,
+        )
+        .is_ok_and(|current| current == *expected)
+    });
     registry.register(executable_route(
         source,
         selection,
