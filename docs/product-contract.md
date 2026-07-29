@@ -70,6 +70,27 @@ research agent.
   corrupt credential inventory and persists an exact-root cleanup phase so
   retries remain verifiable after graph-key or credential records are already
   absent.
+- Local Pro credentials prefer the platform vault: Secret Service on Linux,
+  Keychain Services on macOS, and Credential Manager on Windows. A pristine
+  canonical root may durably select the supported owner-private file backend
+  only when the native adapter reports its platform's exact unavailable
+  condition. Locked, denied, corrupt, ambiguous, canceled, access-control, and
+  entitlement failures never select the file backend. A durable native
+  selection never downgrades after a later outage, and read-only inspection of
+  an unselected pristine root creates no selector, lock, directory, or record.
+  Markerless public file-vault or interrupted-selector state is corrupt and is
+  never reinterpreted as pristine. Public fallback selection also refuses a
+  root that already contains private graph-store or graph-database state; the
+  private graph selector remains independently owned and may be selected after
+  public activation during the ordered fresh-trial flow.
+  The public selector is `<data-root>/pro/.ctx-pro.credential-backend-v1` with
+  exactly one of
+  `ctx-pro-credential-backend-v1:{file,secret-service,keychain,credential-manager}\n`.
+  Its owner-private records remain in the separate
+  `<data-root>/pro/.ctx-pro.credentials-v1` namespace. Private graph-key
+  records retain their own selector, namespace, and deletion lifecycle.
+  Neither namespace permits an environment key, universal key, binary pepper,
+  plaintext database key, or legacy Store fallback.
 - `ctx pro --referral <codename>` is the sole referral-attribution input. The
   ordinary anonymous trial is 14 days; a code accepted with the first
   activation produces a 30-day referred trial. Attribution is immutable after

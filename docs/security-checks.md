@@ -119,3 +119,46 @@ repository mutation, or API keys.
 - Security docs do not promise default local sanitization.
 - Public docs do not make strict no-network claims except when describing
   local-only security mode.
+
+## No-Native-Store Combined-Candidate Gate
+
+The public and private release candidates must be qualified together at their
+reviewed commit SHAs. A mixed candidate is not evidence for this contract.
+Run the following sequence natively on every available Linux, macOS, and
+Windows release platform with the native credential adapter made genuinely
+unavailable:
+
+1. On a fresh canonical root, verify read-only credential and graph-key
+   inspection creates nothing; then start an anonymous trial and verify the
+   public credential and private graph-key namespaces independently select
+   their sticky owner-private file backends.
+2. Import canonical NativePath history, materialize Core plus Pro, restart the daemon,
+   and run `ctx blame`; verify Core Tantivy retrieval never depends on either
+   credential namespace and the SQLCipher graph remains derived-facts and
+   locator-only, source-rebuildable state.
+3. Upgrade the same root to the candidate pair, restart the daemon and helper,
+   and repeat materialization and blame. Verify neither namespace changes its
+   selected backend when a native vault later becomes available.
+4. Run verified `ctx pro uninstall --delete-data`, including an interrupted
+   deletion retry. Verify public records and public-owned empty backend state
+   are absent, and verify the selected private graph-key record and graph data
+   are absent without changing the private selector's existing sticky
+   lifecycle or crossing either namespace's ownership boundary.
+5. Repeat mutation attempts with native selections already durable while the
+   vault is locked, denied, corrupt, ambiguous, canceled, missing access or
+   entitlement, or unavailable. Every case must fail closed without creating a
+   file-backend selector or record. macOS fallback eligibility is limited to
+   `errSecNotAvailable` and no default keychain; Windows eligibility is limited
+   to `ERROR_NO_SUCH_LOGON_SESSION`.
+
+Linux additionally reruns the existing no-session-bus, process/thread race,
+owner-mode, symlink, hardlink, bounded-record, corruption, sticky-selection,
+and verified-deletion regression suite. macOS qualification checks owner-only
+mode, rejects extended ACLs, and checks file-and-directory sync behavior where
+supported. Windows qualification checks a protected current-user-only DACL,
+not POSIX mode, and rejects reparse points and unexpected links.
+
+Cross-compilation and hermetic mocked-adapter tests are required supporting
+evidence, but never replace a native platform pass. If a native runner is
+unavailable, the release record names the infrastructure blocker and leaves
+that platform gate open.

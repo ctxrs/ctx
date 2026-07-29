@@ -46,9 +46,10 @@ fn map_keychain_error(error: SecurityFrameworkError) -> CredentialVaultError {
         | ERR_SEC_NO_ACCESS_FOR_ITEM
         | ERR_SEC_MISSING_ENTITLEMENT
         | ERR_SEC_USER_CANCELED => CredentialVaultError::Locked,
-        ERR_SEC_NOT_AVAILABLE | ERR_SEC_NO_SUCH_KEYCHAIN | ERR_SEC_NO_DEFAULT_KEYCHAIN => {
+        ERR_SEC_NOT_AVAILABLE | ERR_SEC_NO_DEFAULT_KEYCHAIN => {
             CredentialVaultError::Unavailable { platform: "macos" }
         }
+        ERR_SEC_NO_SUCH_KEYCHAIN => CredentialVaultError::Backend,
         _ => CredentialVaultError::Backend,
     }
 }
