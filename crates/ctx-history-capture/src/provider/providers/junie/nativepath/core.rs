@@ -28,8 +28,7 @@ pub(super) fn import_core_source(
         context.imported_at,
         origin,
     )?;
-    if !plan.force_publication
-        && plan.cursor.terminal
+    if plan.cursor.terminal
         && plan.cursor.frontier.pending.is_none()
         && plan.cursor.source_revision == observation.source_revision()
         && plan.cursor.observed_length == observation.events_file.length
@@ -82,7 +81,6 @@ pub(super) fn import_core_source(
             && parsed.rows.is_empty()
             && plan.cursor.terminal
             && plan.cursor.source_revision == observation.source_revision()
-            && !plan.force_publication
         {
             break;
         }
@@ -178,7 +176,6 @@ pub(super) fn import_core_source(
                 );
             }
             plan.cursor = next_cursor;
-            plan.force_publication = false;
             plan.expected = store
                 .get_sync_cursor(None, &context.machine_id, &stream)?
                 .map(|cursor| cursor.cursor);

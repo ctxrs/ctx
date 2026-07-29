@@ -44,23 +44,16 @@ use crate::{
         },
         importer::{
             avoid_provider_source_event_seq_collision, compact_provider_result_payload,
-            provider_file_touch_import_id, provider_path_identity, provider_scoped_source_uuid,
+            provider_file_touch_import_id, provider_path_identity,
             provider_source_cursor_stream_for_path, provider_source_event_import_identity,
             provider_source_identity, provider_source_root, provider_source_session_uuid,
             provider_sync_metadata, timestamps,
         },
-        native_ingestion::{
-            process_pro_replay_only, NativePageAccounting, NativeProOutputPage,
-            NativeProReplayPage, NativeSafeFrontier,
-        },
         providers::native_jsonl::native_jsonl_missing_reason,
     },
-    stable_capture_uuid, CaptureError, CaptureWorkLimit, OutputAssociations,
-    OutputNativeCoordinate, OutputObservationKind, OutputOutcome, OutputOutcomeMetadata,
-    OutputSourceIdentity, OutputSourceLocator, ProOutputObservation, ProOutputSink,
-    ProOutputSourceDisposition, ProviderAdapterContext, ProviderImportFailure,
-    ProviderImportOptions, ProviderImportSummary, ProviderImportWorkResult, Result,
-    MAX_PROVIDER_JSONL_LINE_BYTES, MUX_SOURCE_FORMAT,
+    stable_capture_uuid, CaptureError, CaptureWorkLimit, ProviderAdapterContext,
+    ProviderImportFailure, ProviderImportOptions, ProviderImportSummary, ProviderImportWorkResult,
+    Result, MAX_PROVIDER_JSONL_LINE_BYTES, MUX_SOURCE_FORMAT,
 };
 
 use super::{
@@ -70,9 +63,8 @@ use super::{
     },
     normalization::{
         apply_mux_core_output_diagnostic, mux_core_event, mux_event_id, mux_event_text,
-        mux_event_type, mux_history_sequence, mux_message_model, mux_message_timestamp_opt,
-        mux_output_projection, mux_partial_event_index, mux_result_content, MuxCoreEvent,
-        MuxMessageRow, MuxOutputOutcome,
+        mux_event_type, mux_message_model, mux_message_timestamp_opt, mux_output_projection,
+        mux_partial_event_index, mux_result_content, MuxCoreEvent, MuxMessageRow, MuxOutputOutcome,
     },
     source::{visit_mux_session_sources, MuxFileObservation, MuxSessionSource},
     MUX_CAPTURE_REVISION, MUX_POLICY_REVISION,
@@ -81,7 +73,6 @@ use super::{
 mod core;
 mod lifecycle;
 mod model;
-mod output;
 mod parse;
 mod projection;
 mod publication;
@@ -92,7 +83,6 @@ mod source_backed;
 use core::*;
 use lifecycle::*;
 use model::*;
-use output::*;
 use parse::*;
 use projection::*;
 use publication::*;
@@ -115,6 +105,9 @@ pub(crate) fn import_mux_native_path(
     if context.source_path.is_none() {
         context.source_path = Some(path.to_path_buf());
     }
+    if options.import_profile.is_replay_only() {
+        return Ok(ProviderImportSummary::default());
+    }
     ensure_active_journal(store)?;
     let configured_root = context
         .source_path
@@ -133,12 +126,10 @@ pub(crate) fn import_mux_native_path(
     let bulk_guard = store.begin_event_search_bulk_mode()?;
     let operation = (|| {
         let mut summary = ProviderImportSummary::default();
-        let replay_only = options.import_profile.is_replay_only();
         let mut manifest_sources = Vec::new();
         let mut changed_groups = 0_usize;
 
         for session in sessions {
-            let legacy_bridge = mux_legacy_bridge(store, &context, &session)?;
             for (kind, source_path) in [
                 (MuxStreamKind::Chat, session.chat_path.clone()),
                 (MuxStreamKind::Partial, session.partial_path.clone()),
@@ -153,40 +144,21 @@ pub(crate) fn import_mux_native_path(
                     source_path,
                     kind,
                     &context,
-                    legacy_bridge.clone(),
                 )?;
                 manifest_sources.push(plan.manifest_source());
-                let core_output_ready = if replay_only {
-                    verify_terminal_core(store, &context.machine_id, &plan)?;
-                    true
-                } else {
-                    let source_summary = import_core_source(
-                        store,
-                        &bulk_guard,
-                        &configured_root,
-                        &context,
-                        &options,
-                        &plan,
-                    )?;
-                    let core_output_ready = !source_summary.work_remaining;
-                    if source_summary.work_result() == ProviderImportWorkResult::Changed {
-                        changed_groups = changed_groups.saturating_add(1);
-                    }
-                    summary.merge_from(source_summary);
-                    core_output_ready
-                };
-                if core_output_ready {
-                    if let Some(sink) = options.import_profile.sink() {
-                        if replay_source_outputs(&plan, &context, sink.as_ref())? {
-                            summary.record_failure(ProviderImportFailure {
-                                line: 0,
-                                error: "Mux Pro output replay is behind Core".to_owned(),
-                            });
-                        }
-                    }
+                let source_summary = import_core_source(
+                    store,
+                    &bulk_guard,
+                    &configured_root,
+                    &context,
+                    &options,
+                    &plan,
+                )?;
+                if source_summary.work_result() == ProviderImportWorkResult::Changed {
+                    changed_groups = changed_groups.saturating_add(1);
                 }
-                if !replay_only
-                    && options.capture_work_limit == CaptureWorkLimit::OneSafeGroup
+                summary.merge_from(source_summary);
+                if options.capture_work_limit == CaptureWorkLimit::OneSafeGroup
                     && changed_groups != 0
                 {
                     summary.work_remaining = true;
@@ -195,34 +167,32 @@ pub(crate) fn import_mux_native_path(
             }
         }
 
-        if !replay_only {
-            manifest_sources.sort_by(|left, right| {
-                left.path
-                    .cmp(&right.path)
-                    .then_with(|| stream_kind_rank(left.kind).cmp(&stream_kind_rank(right.kind)))
-            });
-            if let Some(prior) = prior_manifest.as_ref() {
-                retire_missing_sources(
-                    store,
-                    &bulk_guard,
-                    &context,
-                    prior,
-                    &manifest_sources,
-                    &mut summary,
-                )?;
-            }
-            let manifest = MuxRootManifest {
-                version: MUX_ROOT_MANIFEST_VERSION,
-                configured_root,
-                sources: manifest_sources,
-            };
-            summary.merge_from(publish_root_manifest(
+        manifest_sources.sort_by(|left, right| {
+            left.path
+                .cmp(&right.path)
+                .then_with(|| stream_kind_rank(left.kind).cmp(&stream_kind_rank(right.kind)))
+        });
+        if let Some(prior) = prior_manifest.as_ref() {
+            retire_missing_sources(
                 store,
                 &bulk_guard,
                 &context,
-                manifest,
-            )?);
+                prior,
+                &manifest_sources,
+                &mut summary,
+            )?;
         }
+        let manifest = MuxRootManifest {
+            version: MUX_ROOT_MANIFEST_VERSION,
+            configured_root,
+            sources: manifest_sources,
+        };
+        summary.merge_from(publish_root_manifest(
+            store,
+            &bulk_guard,
+            &context,
+            manifest,
+        )?);
         Ok(summary)
     })();
     let finish = store

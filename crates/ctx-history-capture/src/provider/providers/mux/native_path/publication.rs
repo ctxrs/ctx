@@ -58,14 +58,7 @@ pub(super) fn publish_core_page(
                 observed_at_ms: context.imported_at.timestamp_millis(),
             };
             let resolution = publication.reconcile_provider_source_locator(&locator)?;
-            let source_id = plan
-                .legacy_bridge
-                .as_ref()
-                .filter(|_| plan.is_legacy_primary_source())
-                .map_or_else(
-                    || mux_source_uuid(&resolution.canonical_source_identity),
-                    |bridge| bridge.primary_source_id,
-                );
+            let source_id = mux_source_uuid(&resolution.canonical_source_identity);
             publication.upsert_capture_source(&mux_capture_source(
                 source_id,
                 configured_root,
@@ -77,12 +70,11 @@ pub(super) fn publish_core_page(
             publication
                 .bind_capture_source_provider_route(source_id, &resolution.route_binding())?;
             let session = mux_session(
-                plan.session_source_id(source_id),
+                source_id,
                 configured_root,
                 context,
                 options.history_record_id,
                 session_metadata,
-                plan,
             )?;
             let session_was_present = mux_session_exists(store, session.id)?;
             publication.upsert_session(&session)?;
@@ -110,7 +102,7 @@ pub(super) fn publish_core_page(
                     .ok_or(CaptureError::SystemInvariant(
                         "Mux retained event has no provider hash",
                     ))?;
-                let event_identity_source_id = plan.event_identity_source_id(source_id);
+                let event_identity_source_id = source_id;
                 let identity = avoid_provider_source_event_seq_collision(
                     store,
                     provider_source_event_import_identity(
@@ -172,13 +164,10 @@ pub(super) fn publish_core_page(
             revalidate_source(plan)?;
             publication.publish_cursor_set()?;
             if page.expected.next_offset == 0 && plan.counts_session_projection() {
-                if plan.legacy_bridge.is_some() && session_was_present {
-                    summary.skipped_sessions = 1;
-                    summary.skipped = summary.skipped.saturating_add(1);
-                } else {
-                    summary.imported_sessions = 1;
-                    summary.imported = summary.imported.saturating_add(1);
-                }
+                summary.imported_sessions = usize::from(!session_was_present);
+                summary.skipped_sessions = usize::from(session_was_present);
+                summary.imported = summary.imported.saturating_add(summary.imported_sessions);
+                summary.skipped = summary.skipped.saturating_add(summary.skipped_sessions);
             }
             summary.set_work_result(ProviderImportWorkResult::Changed);
         }

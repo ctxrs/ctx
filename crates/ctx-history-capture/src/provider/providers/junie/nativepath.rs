@@ -4,9 +4,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[cfg(test)]
-use std::fs;
-
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
     AgentType, CaptureProvider, CaptureSource, CaptureSourceDescriptor, CaptureSourceKind,
@@ -37,11 +34,7 @@ use crate::{
             provider_import_session_uuid, provider_path_identity,
             provider_scoped_source_identity_key, provider_scoped_source_uuid,
             provider_source_cursor_stream_for_path, provider_source_identity,
-            provider_sync_metadata, timestamps, CertifiedProviderCursor,
-        },
-        native_ingestion::{
-            process_pro_replay_only, NativePageAccounting, NativeProOutputPage,
-            NativeProReplayPage, NativeSafeFrontier, NativeSourceIdentity,
+            provider_sync_metadata, timestamps,
         },
         normalization::{
             provider_capped_json_value, provider_local_preview, provider_policy_body,
@@ -49,12 +42,9 @@ use crate::{
             provider_result_outcome_evidence, provider_timestamp_millis,
         },
     },
-    CaptureError, CaptureWorkLimit, ImportProfile, OutputAssociations, OutputCommandContext,
-    OutputNativeCoordinate, OutputObservationKind, OutputOutcome, OutputOutcomeMetadata,
-    OutputSourceIdentity, OutputSourceLocator, ProOutputObservation, ProOutputProgress,
-    ProOutputSink, ProOutputSinkError, ProOutputSourceDisposition, ProviderAdapterContext,
-    ProviderImportFailure, ProviderImportOptions, ProviderImportSummary, ProviderImportWorkResult,
-    Result, JUNIE_SESSION_EVENTS_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS,
+    CaptureError, CaptureWorkLimit, ProviderAdapterContext, ProviderImportFailure,
+    ProviderImportOptions, ProviderImportSummary, ProviderImportWorkResult, Result,
+    JUNIE_SESSION_EVENTS_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS,
 };
 
 use super::{
@@ -70,30 +60,24 @@ use super::{
 };
 
 const CURSOR_VERSION: u32 = 1;
-const OUTPUT_FRONTIER_VERSION: u32 = 1;
-const OUTPUT_PARSER_REVISION: &str = "junie-nativepath-output-v1";
 const PUBLICATION_REVISION: &str = "junie-nativepath-v1";
 const RECORD_SET_KIND: &str = "junie-jsonl-record-set-v1";
 const MAX_RECORD_SET_ENTRIES: usize = 64;
 const RECORD_SET_DIGEST_DOMAIN: &[u8] = b"ctx-junie-jsonl-record-set-v1\0";
 const CORE_PAGE_MAX_ROWS: usize = 48;
 const CORE_PAGE_MAX_BYTES: usize = 4 * 1024 * 1024;
-const OUTPUT_PAGE_MAX_ROWS: usize = 32;
-const OUTPUT_PAGE_MAX_BYTES: usize = 4 * 1024 * 1024;
 const MAX_CURSOR_BYTES: usize = 192 * 1024;
 const GENERATION_EVENT_STRIDE: u64 = 1_000_000_000;
 
 mod core;
 mod cursor;
 mod lifecycle;
-mod output;
 mod projection;
 mod publication;
 mod source_backed;
 
 use core::*;
 use cursor::*;
-use output::*;
 use projection::*;
 use publication::*;
 

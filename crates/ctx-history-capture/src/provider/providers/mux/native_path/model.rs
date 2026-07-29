@@ -6,7 +6,6 @@ pub(super) const MUX_ROOT_MANIFEST_VERSION: u32 = 1;
 pub(super) const MUX_PAGE_MAX_RECORDS: usize = 8;
 pub(super) const MUX_PAGE_MAX_BYTES: usize = 4 * 1024 * 1024;
 pub(super) const MUX_MAX_FILE_TOUCHES_PER_EVENT: usize = 448;
-pub(super) const MUX_OUTPUT_PARSER_REVISION: &str = "mux-nativepath-output-v1";
 pub(super) const MUX_PUBLICATION_PREFIX: &str = "mux-nativepath-v1:";
 pub(super) const MUX_PARTIAL_NATIVE_ORDINAL: u64 = 1_u64 << 63;
 pub(super) const MUX_GENERATION_BITS: u32 = 16;
@@ -42,8 +41,6 @@ pub(super) struct MuxFrontier {
     pub(super) next_ordinal: u64,
     pub(super) prefix_sha256: [u8; 32],
     pub(super) file_identity: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) legacy_valid_rows: Option<u64>,
 }
 
 impl MuxFrontier {
@@ -54,7 +51,6 @@ impl MuxFrontier {
             next_ordinal: 0,
             prefix_sha256: Sha256::digest([]).into(),
             file_identity: None,
-            legacy_valid_rows: None,
         }
     }
 }
@@ -125,23 +121,6 @@ pub(super) enum MuxUnaddressableOutput {
     Missing,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum MuxLegacyPartialDisposition {
-    None,
-    Ignored,
-    Replace { chat_rank: u64 },
-    Insert { merged_index: u64 },
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct MuxLegacyBridge {
-    pub(super) primary_path: PathBuf,
-    pub(super) primary_source_id: Uuid,
-    pub(super) primary_source_identity: String,
-    pub(super) provider_session_id: String,
-    pub(super) partial_disposition: MuxLegacyPartialDisposition,
-}
-
 #[derive(Debug)]
 pub(super) struct MuxFileTouch {
     pub(super) provider_touch_index: u64,
@@ -172,7 +151,7 @@ pub(super) struct MuxPreparedPage {
 #[derive(Debug)]
 pub(super) struct MuxLoadedCursor {
     pub(super) stored: SyncCursor,
-    pub(super) wire: Option<MuxCursorWire>,
+    pub(super) wire: MuxCursorWire,
 }
 
 #[derive(Debug)]
@@ -192,7 +171,6 @@ pub(super) struct MuxSourcePlan {
     pub(super) accepted_events: u64,
     pub(super) rejected_records: u64,
     pub(super) first_failure: Option<MuxFailureWire>,
-    pub(super) legacy_bridge: Option<MuxLegacyBridge>,
 }
 
 impl MuxSourcePlan {
@@ -215,59 +193,8 @@ impl MuxSourcePlan {
             == Some(self.path.as_path())
     }
 
-    pub(super) fn is_legacy_primary_source(&self) -> bool {
-        self.legacy_bridge
-            .as_ref()
-            .is_some_and(|bridge| bridge.primary_path == self.path)
-    }
-
-    pub(super) fn event_identity_source_id(&self, capture_source_id: Uuid) -> Uuid {
-        self.legacy_bridge
-            .as_ref()
-            .map_or(capture_source_id, |bridge| bridge.primary_source_id)
-    }
-
-    pub(super) fn session_source_id(&self, capture_source_id: Uuid) -> Uuid {
-        self.event_identity_source_id(capture_source_id)
-    }
-
     pub(super) fn counts_session_projection(&self) -> bool {
-        self.legacy_bridge.is_none() || self.is_primary_source()
-    }
-
-    pub(super) fn legacy_event_index(&self, chat_rank: Option<u64>) -> Result<Option<u64>> {
-        let Some(bridge) = self.legacy_bridge.as_ref() else {
-            return Ok(None);
-        };
-        match self.kind {
-            MuxStreamKind::Chat => {
-                let rank = chat_rank.ok_or(CaptureError::SystemInvariant(
-                    "Mux legacy chat row lost its merged rank",
-                ))?;
-                match bridge.partial_disposition {
-                    MuxLegacyPartialDisposition::Replace { chat_rank } if chat_rank == rank => {
-                        Ok(None)
-                    }
-                    MuxLegacyPartialDisposition::Insert { merged_index }
-                        if rank >= merged_index =>
-                    {
-                        rank.checked_add(1)
-                            .map(Some)
-                            .ok_or(CaptureError::SystemInvariant(
-                                "Mux legacy merged event index overflowed",
-                            ))
-                    }
-                    _ => Ok(Some(rank)),
-                }
-            }
-            MuxStreamKind::Partial => match bridge.partial_disposition {
-                MuxLegacyPartialDisposition::Replace { chat_rank } => Ok(Some(chat_rank)),
-                MuxLegacyPartialDisposition::Insert { merged_index } => Ok(Some(merged_index)),
-                MuxLegacyPartialDisposition::None | MuxLegacyPartialDisposition::Ignored => {
-                    Ok(None)
-                }
-            },
-        }
+        self.is_primary_source()
     }
 }
 

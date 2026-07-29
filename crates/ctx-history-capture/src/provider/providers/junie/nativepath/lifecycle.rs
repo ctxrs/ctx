@@ -92,15 +92,6 @@ pub(crate) fn import_junie_nativepath(
         }
     }
 
-    if !summary.work_remaining {
-        replay_outputs(
-            store,
-            &inventory.sessions,
-            &configured_source_root,
-            &context,
-            &options.import_profile,
-        );
-    }
     Ok(summary)
 }
 
@@ -220,26 +211,11 @@ pub(super) fn known_routes(
         let Some(current_cursor) = store.get_sync_cursor(None, machine_id, &stream)? else {
             continue;
         };
-        let cursor = match decode_native_path_committed_cursor(&current_cursor.cursor) {
-            Ok(committed) => {
-                JunieStoreCursor::decode(committed.provider_cursor()).map_err(|_| {
-                    CaptureError::SystemInvariant(
-                        "Junie persisted NativePath route cursor is corrupt",
-                    )
-                })?
-            }
-            Err(_) if !looks_like_native_path_cursor(&current_cursor.cursor) => {
-                let legacy = CertifiedProviderCursor::decode_if_certified(&current_cursor.cursor)
-                    .map_err(|_| {
-                        CaptureError::SystemInvariant("Junie persisted released cursor is corrupt")
-                    })?
-                    .ok_or(CaptureError::SystemInvariant(
-                        "Junie persisted cursor has an unknown encoding",
-                    ))?;
-                released_cursor_for_retirement(canonical_source_identity, legacy)?
-            }
-            Err(error) => return Err(CaptureError::Store(error)),
-        };
+        let committed = decode_native_path_committed_cursor(&current_cursor.cursor)
+            .map_err(CaptureError::Store)?;
+        let cursor = JunieStoreCursor::decode(committed.provider_cursor()).map_err(|_| {
+            CaptureError::SystemInvariant("Junie persisted NativePath route cursor is corrupt")
+        })?;
         let route = KnownRoute {
             path,
             locator_identity: locator_identity.clone(),

@@ -46,7 +46,6 @@ pub(super) fn read_core_page(
     let mut physical_records = 0_usize;
     let mut offset = expected.next_offset;
     let mut ordinal = expected.next_ordinal;
-    let mut legacy_valid_rows = expected.legacy_valid_rows;
     let mut metadata_failure = if expected.next_offset == 0 {
         session.metadata_failure.take()
     } else {
@@ -154,27 +153,18 @@ pub(super) fn read_core_page(
                 continue;
             }
         };
-        if plan.legacy_bridge.is_none() {
-            if let Some(provider_session_id) = value
-                .get("workspaceId")
-                .and_then(Value::as_str)
-                .filter(|id| !id.trim().is_empty())
-            {
-                session.provider_session_id =
-                    bounded_mux_id(provider_session_id.to_owned(), &plan.path, "workspace id")?;
-            }
-        }
-        let legacy_chat_rank = legacy_valid_rows;
-        if let Some(rows) = legacy_valid_rows.as_mut() {
-            *rows = rows.checked_add(1).ok_or(CaptureError::SystemInvariant(
-                "Mux legacy merged row count overflowed",
-            ))?;
+        if let Some(provider_session_id) = value
+            .get("workspaceId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+        {
+            session.provider_session_id =
+                bounded_mux_id(provider_session_id.to_owned(), &plan.path, "workspace id")?;
         }
         let row = prepare_core_row(
             value,
             &record,
             ordinal,
-            legacy_chat_rank,
             line_number,
             session,
             plan,
@@ -203,7 +193,6 @@ pub(super) fn read_core_page(
         next_ordinal: ordinal,
         prefix_sha256: hasher.clone().finalize().into(),
         file_identity: Some(plan.observation.content_identity()),
-        legacy_valid_rows,
     };
     Ok(Some(MuxPreparedPage {
         rows,
@@ -353,7 +342,6 @@ pub(super) fn prepare_core_row(
     value: Value,
     record: &MuxRawRecord,
     ordinal: u64,
-    legacy_chat_rank: Option<u64>,
     line_number: usize,
     session: &MuxBoundedSessionMetadata,
     plan: &MuxSourcePlan,
@@ -398,10 +386,7 @@ pub(super) fn prepare_core_row(
             MuxOutputOutcome::Failure | MuxOutputOutcome::Timeout
         )
     });
-    let current_native_ordinal = mux_native_event_index(plan, record, ordinal)?;
-    let legacy_event_index = plan.legacy_event_index(legacy_chat_rank)?;
-    let publishes_merged_row = plan.legacy_bridge.is_none() || legacy_event_index.is_some();
-    let native_ordinal = legacy_event_index.unwrap_or(current_native_ordinal);
+    let native_ordinal = mux_native_event_index(plan, record, ordinal)?;
     let role = value
         .get("role")
         .and_then(Value::as_str)
@@ -432,7 +417,7 @@ pub(super) fn prepare_core_row(
         .model
         .clone()
         .or_else(|| mux_message_model(&row.value));
-    let event = if publishes_merged_row && (output_projection.is_none() || retain_core_output) {
+    let event = if output_projection.is_none() || retain_core_output {
         let mut event = mux_core_event(native_ordinal, &row, occurred_at, model.as_deref());
         if retain_core_output {
             if let Some(projection) = output_projection.as_ref() {
@@ -447,15 +432,13 @@ pub(super) fn prepare_core_row(
         .as_ref()
         .map(|event| event.provider_event_hash.clone());
     let mut file_touches = Vec::new();
-    if publishes_merged_row
-        && matches!(
-            event_type,
-            ctx_history_core::EventType::ToolCall
-                | ctx_history_core::EventType::ToolOutput
-                | ctx_history_core::EventType::CommandOutput
-                | ctx_history_core::EventType::FileTouched
-        )
-    {
+    if matches!(
+        event_type,
+        ctx_history_core::EventType::ToolCall
+            | ctx_history_core::EventType::ToolOutput
+            | ctx_history_core::EventType::CommandOutput
+            | ctx_history_core::EventType::FileTouched
+    ) {
         let raw_source_path = plan.path.display().to_string();
         let source_root = context
             .source_root
