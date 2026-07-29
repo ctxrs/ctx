@@ -78,11 +78,12 @@ pub(crate) fn write_python_helper(path: &Path, body: &str) {
 #[cfg(unix)]
 pub(crate) fn initialize_current_query_store(data_root: &Path) {
     initialize_pro_installation_identity(data_root);
-    let store = ctx_history_store::Store::open(data_root.join("work.sqlite")).unwrap();
-    let checkpoint = store
-        .activate_projection_journal(ctx_pro_host_protocol::PROTOCOL_FINGERPRINT)
-        .unwrap();
-    assert_eq!(checkpoint.position.sequence, 0);
+    let generation_id = super::initialize_generation_only_sql_projection(data_root);
+    assert!(!generation_id.is_empty());
+    assert!(
+        !data_root.join("work.sqlite").exists(),
+        "Pro query fixtures must use only the fresh source-backed epoch"
+    );
 }
 
 #[cfg(unix)]

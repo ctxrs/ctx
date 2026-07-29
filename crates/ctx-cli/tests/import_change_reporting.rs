@@ -1,8 +1,102 @@
 mod support;
 
-use ctx_history_core::compute_payload_hash;
-use ctx_history_store::Store;
+use std::{
+    io::Read,
+    process::{Child, Command as StdCommand, Stdio},
+};
+
 use support::*;
+
+struct SourceRefreshDaemon {
+    child: Option<Child>,
+}
+
+impl Drop for SourceRefreshDaemon {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn start_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
+    fs::write(
+        temp.path().join("config.toml"),
+        "[daemon]\nenabled = true\nmode = \"source-refresh-only\"\n\n[search]\nsemantic = false\n",
+    )
+    .unwrap();
+    let binary = copied_ctx_binary(temp);
+    let prepared = ctx_from_binary(temp, &binary);
+    let mut command = StdCommand::new(prepared.get_program());
+    for (name, value) in prepared.get_envs() {
+        match value {
+            Some(value) => {
+                command.env(name, value);
+            }
+            None => {
+                command.env_remove(name);
+            }
+        }
+    }
+    command
+        .args([
+            "daemon",
+            "run",
+            "--force",
+            "--idle-exit-seconds",
+            "600",
+            "--loop-interval-seconds",
+            "600",
+        ])
+        .env("CTX_DAEMON_MODE", "source-refresh-only")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let spawn_deadline = Instant::now() + Duration::from_secs(1);
+    let child = loop {
+        match command.spawn() {
+            Ok(child) => break child,
+            Err(error) if error.raw_os_error() == Some(26) && Instant::now() < spawn_deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("start isolated source-refresh daemon: {error}"),
+        }
+    };
+    let mut daemon = SourceRefreshDaemon { child: Some(child) };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(exit) = daemon.child.as_mut().unwrap().try_wait().unwrap() {
+            let mut stderr = String::new();
+            daemon
+                .child
+                .as_mut()
+                .unwrap()
+                .stderr
+                .as_mut()
+                .unwrap()
+                .read_to_string(&mut stderr)
+                .unwrap();
+            panic!("source-refresh daemon exited before becoming ready ({exit}): {stderr}");
+        }
+        let status = ctx(temp)
+            .args(["daemon", "status", "--format=json"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok());
+        if status.as_ref().is_some_and(|status| {
+            status["daemon"]["running"] == true
+                && status["daemon"]["source_refresh_endpoint"]["available"] == true
+        }) {
+            return daemon;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for source-refresh daemon readiness: {status:#?}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
 
 fn codex_source(message: &str) -> String {
     [
@@ -35,52 +129,12 @@ fn codex_source(message: &str) -> String {
     .collect()
 }
 
-fn codex_prompt_history_source(message: &str) -> String {
-    format!(
-        "{}\n",
-        json!({
-            "session_id": "prompt-history-routing",
-            "ts": 1_784_371_200,
-            "text": message,
-        })
-    )
-}
-
-fn append_codex_message(path: &Path, message: &str) {
-    let record = json!({
-        "timestamp": "2026-07-23T01:00:02Z",
-        "type": "response_item",
-        "payload": {
-            "type": "message",
-            "id": "message-two",
-            "role": "assistant",
-            "content": [{
-                "type": "output_text",
-                "text": message
-            }],
-            "phase": "final_answer"
-        }
-    });
-    let mut source = fs::OpenOptions::new().append(true).open(path).unwrap();
-    writeln!(source, "{}", serde_json::to_string(&record).unwrap()).unwrap();
-    source.sync_all().unwrap();
-}
-
-fn import_codex(temp: &TempDir, source: &Path) -> Value {
+fn import_codex(temp: &TempDir) -> Value {
     let events_path = temp.path().join("analytics.jsonl");
-    let data_root = temp.path().join("ctx-data");
-    let home = temp.path().join("home");
-    let state = temp.path().join("state");
     json_output(
         ctx(temp)
-            .arg("import")
-            .args(["--provider", "codex", "--path"])
-            .arg(source)
+            .args(["import", "--all"])
             .args(["--no-daemon", "--format=json", "--progress", "none"])
-            .env("CTX_DATA_ROOT", &data_root)
-            .env("HOME", &home)
-            .env("XDG_STATE_HOME", &state)
-            .env("LOCALAPPDATA", &state)
             .env_remove("CTX_ANALYTICS_ENABLED")
             .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
             .env("CTX_UPGRADE_AUTO", "off"),
@@ -93,263 +147,83 @@ fn assert_change(report: &Value, expected: &str) {
     assert_eq!(report["sources"][0]["change"], expected, "{report:#}");
 }
 
-fn rewrite_codex_event_as_legacy_fallback(data_root: &Path) -> (Value, String) {
-    let connection = Connection::open(data_root.join("work.sqlite")).unwrap();
-    connection
-        .create_scalar_function(
-            "ctx_projection_writer_authorized_v1",
-            0,
-            rusqlite::functions::FunctionFlags::SQLITE_UTF8
-                | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC
-                | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
-            |_| Ok(1_i64),
-        )
-        .unwrap();
-    let (payload_json, metadata_json, dedupe_key): (String, String, String) = connection
-        .query_row(
-            "SELECT payload_json, metadata_json, dedupe_key FROM events",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .unwrap();
-    let mut payload: Value = serde_json::from_str(&payload_json).unwrap();
-    let expected_body = payload["body"].clone();
-    let legacy_body = json!({"legacy_normalization": expected_body});
-    let legacy_hash = compute_payload_hash(&legacy_body).unwrap();
-    payload["body"] = legacy_body;
-    payload["provider_event_hash"] = Value::String(legacy_hash.clone());
+#[test]
+fn codex_reimport_ignores_legacy_store_and_rebuilds_from_provider_source() {
+    let temp = tempdir();
+    let _daemon = start_source_refresh_daemon(&temp);
+    let source_root = temp.path().join(".codex/sessions");
+    let source = source_root.join("2026/07/23/rollout-2026-07-23T01-00-00-source-authority.jsonl");
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    fs::write(&source, codex_source("provider authority before")).unwrap();
 
-    let mut metadata: Value = serde_json::from_str(&metadata_json).unwrap();
-    metadata
-        .as_object_mut()
+    let data_root = temp.path();
+    let legacy_path = data_root.join("work.sqlite");
+    let legacy_bytes = b"opaque v0.25 Store rollback sentinel\n";
+    fs::write(&legacy_path, legacy_bytes).unwrap();
+
+    let initial = import_codex(&temp);
+    assert_change(&initial, "changed");
+    assert_eq!(fs::read(&legacy_path).unwrap(), legacy_bytes);
+
+    let rewritten_source = fs::read_to_string(&source)
         .unwrap()
-        .remove("provider_event_hash_authority");
-    metadata["provider_event_hash"] = Value::String(legacy_hash.clone());
-    let legacy_dedupe_key =
-        Store::provider_event_dedupe_key_with_payload_hash(&dedupe_key, &legacy_hash).unwrap();
-
-    assert_eq!(
-        connection
-            .execute(
-                "UPDATE events
-                 SET payload_json = ?1, metadata_json = ?2, dedupe_key = ?3",
-                params![
-                    serde_json::to_string(&payload).unwrap(),
-                    serde_json::to_string(&metadata).unwrap(),
-                    legacy_dedupe_key,
-                ],
-            )
-            .unwrap(),
-        1
-    );
-    (payload["body"]["legacy_normalization"].clone(), dedupe_key)
-}
-
-#[test]
-fn import_reports_initial_noop_append_and_replacement_truthfully() {
-    let temp = tempdir();
-    fs::create_dir_all(temp.path().join("home")).unwrap();
-    let source = temp
-        .path()
-        .join(".codex/sessions/2026/07/23/import-change-reporting.jsonl");
-    fs::create_dir_all(source.parent().unwrap()).unwrap();
-    fs::write(&source, codex_source("replacement-before")).unwrap();
-
-    let initial = import_codex(&temp, &source);
-    assert_change(&initial, "changed");
-    assert_eq!(initial["totals"]["imported_events"], 1);
-
-    let no_op = import_codex(&temp, &source);
-    assert_change(&no_op, "no_op");
-    assert_eq!(no_op["totals"]["imported_events"], 0);
-    assert_eq!(no_op["totals"]["skipped_events"], 1);
-
-    append_codex_message(&source, "appended-message");
-    let append = import_codex(&temp, &source);
-    assert_change(&append, "changed");
-    assert_eq!(append["totals"]["imported_events"], 1);
-
-    let before_replacement = fs::read_to_string(&source).unwrap();
-    let after_replacement =
-        before_replacement.replacen("replacement-before", "replacement-after!", 1);
-    assert_ne!(before_replacement, after_replacement);
-    assert_eq!(before_replacement.len(), after_replacement.len());
-    fs::write(&source, after_replacement).unwrap();
-
-    let replacement = import_codex(&temp, &source);
-    assert_change(&replacement, "changed");
-    assert_eq!(replacement["totals"]["imported_events"], 0);
-    assert!(replacement["totals"]["skipped_events"].as_u64().unwrap() > 0);
-
-    let stored = json_output(
-        ctx(&temp)
-            .args([
-                "sql",
-                "SELECT SUM(payload_json LIKE '%replacement-before%') AS old_hits, \
-         SUM(payload_json LIKE '%replacement-after!%') AS new_hits FROM ctx_events",
-                "--format=json",
-            ])
-            .env("CTX_DATA_ROOT", temp.path().join("ctx-data")),
-    );
-    assert_eq!(stored["rows"], json!([[0, 1]]));
-
-    let analytics = read_analytics_events(&temp.path().join("analytics.jsonl"));
-    assert_eq!(analytics.len(), 4);
-    for (payload, expected) in analytics
-        .iter()
-        .zip(["changed", "no_op", "changed", "changed"])
-    {
-        assert_eq!(
-            payload["events"][0]["event_name"],
-            "provider_refresh_completed"
-        );
-        assert_eq!(payload["events"][0]["properties"]["change"], expected);
-        if expected == "no_op" {
-            assert_eq!(payload["events"][0]["properties"]["work_kind"], "no_op");
-        } else {
-            assert!(
-                payload["events"][0]["properties"]
-                    .get("work_kind")
-                    .is_none(),
-                "changed work must stay unclassified until NativePath returns an authoritative kind"
-            );
-        }
-        assert!(payload["events"][0]["properties"]["cpu_duration_bucket"].is_string());
-        assert!(payload["events"][0]["properties"]["observed_process_peak_rss_bucket"].is_string());
-        assert_no_json_string_contains(payload, &[source.to_str().unwrap(), "replacement-after!"]);
-    }
-
-    let human = ctx(&temp)
-        .arg("import")
-        .args(["--provider", "codex", "--path"])
-        .arg(&source)
-        .args(["--no-daemon", "--progress", "none"])
-        .env("CTX_DATA_ROOT", temp.path().join("ctx-data"))
-        .output()
-        .unwrap();
-    assert!(human.status.success());
-    let stdout = String::from_utf8(human.stdout).unwrap();
-    assert!(stdout.contains("change=no_op"), "{stdout}");
-    assert!(stdout.contains("change: no_op"), "{stdout}");
-}
-
-#[test]
-fn codex_reimport_reconciles_pre_authority_fallback_row() {
-    let temp = tempdir();
-    fs::create_dir_all(temp.path().join("home")).unwrap();
-    let source = temp
-        .path()
-        .join(".codex/sessions/2026/07/23/legacy-fallback.jsonl");
-    fs::create_dir_all(source.parent().unwrap()).unwrap();
-    fs::write(&source, codex_source("legacy fallback reconciliation")).unwrap();
-
-    let initial = import_codex(&temp, &source);
-    assert_change(&initial, "changed");
-
-    let data_root = temp.path().join("ctx-data");
-    let (expected_body, expected_dedupe_key) = rewrite_codex_event_as_legacy_fallback(&data_root);
-    let rewritten_source = fs::read_to_string(&source).unwrap().replace(
-        "\"originator\":\"codex-cli\"",
-        "\"originator\":\"codex-v1\"",
-    );
+        .replace("provider authority before", "provider authority after!");
     fs::write(&source, rewritten_source).unwrap();
 
-    let replay = import_codex(&temp, &source);
-    assert_eq!(replay["outcome"], "success", "{replay:#}");
+    let replay = import_codex(&temp);
+    assert_change(&replay, "changed");
     assert_eq!(replay["totals"]["rejected_records"], 0, "{replay:#}");
+    assert_eq!(fs::read(&legacy_path).unwrap(), legacy_bytes);
 
-    let connection = Connection::open(data_root.join("work.sqlite")).unwrap();
-    let (payload_json, metadata_json, dedupe_key): (String, String, String) = connection
-        .query_row(
-            "SELECT payload_json, metadata_json, dedupe_key FROM events",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .unwrap();
-    let payload: Value = serde_json::from_str(&payload_json).unwrap();
-    let metadata: Value = serde_json::from_str(&metadata_json).unwrap();
-    assert_eq!(payload["body"], expected_body);
-    assert_eq!(dedupe_key, expected_dedupe_key);
-    assert_eq!(
-        metadata["provider_event_hash_authority"],
-        "normalized_payload_fallback"
-    );
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "provider authority after",
+        "--provider",
+        "codex",
+        "--refresh",
+        "off",
+        "--format=json",
+    ]));
+    assert_eq!(search["retrieval"]["index"], "source_backed", "{search:#}");
+    let results = search["results"].as_array().unwrap();
+    assert_eq!(results.len(), 1, "{search:#}");
+    assert_eq!(results[0]["provider"], "codex");
+    assert!(results[0]["snippet"]
+        .as_str()
+        .is_some_and(|text| text.contains("provider authority after")));
+    let superseded = json_output(ctx(&temp).args([
+        "search",
+        "provider authority before",
+        "--provider",
+        "codex",
+        "--refresh",
+        "off",
+        "--format=json",
+    ]));
+    assert!(superseded["results"].as_array().unwrap().is_empty());
+    assert_eq!(fs::read(&legacy_path).unwrap(), legacy_bytes);
 }
 
 #[test]
-fn explicit_codex_dispatch_uses_admitted_schema_for_renames_and_trees() {
-    let prompt_temp = tempdir();
-    fs::create_dir_all(prompt_temp.path().join("home")).unwrap();
-    let prompt_named_rollout = prompt_temp.path().join("rollout-renamed.jsonl");
-    fs::write(
-        &prompt_named_rollout,
-        codex_prompt_history_source("renamed prompt-history dispatch"),
-    )
-    .unwrap();
-    let prompt = import_codex(&prompt_temp, &prompt_named_rollout);
-    assert_eq!(prompt["outcome"], "success", "{prompt:#}");
-    assert_eq!(prompt["sources"][0]["source_format"], "codex_history_jsonl");
-    assert_eq!(prompt["totals"]["imported_sessions"], 1);
-    assert_eq!(prompt["totals"]["imported_events"], 1);
-
-    let rollout_temp = tempdir();
-    fs::create_dir_all(rollout_temp.path().join("home")).unwrap();
-    let rollout_named_history = rollout_temp.path().join("history.jsonl");
-    fs::write(
-        &rollout_named_history,
-        codex_source("renamed rollout dispatch"),
-    )
-    .unwrap();
-    let direct = import_codex(&rollout_temp, &rollout_named_history);
-    assert_eq!(direct["outcome"], "success", "{direct:#}");
-    assert_eq!(direct["sources"][0]["source_format"], "codex_session_jsonl");
-    assert_eq!(direct["totals"]["imported_sessions"], 1);
-    assert_eq!(direct["totals"]["imported_events"], 1);
-
+fn discovered_codex_session_tree_reports_admitted_source_format() {
     let tree_temp = tempdir();
-    fs::create_dir_all(tree_temp.path().join("home")).unwrap();
-    let tree = tree_temp.path().join("renamed-session-tree");
+    let _daemon = start_source_refresh_daemon(&tree_temp);
+    let tree = tree_temp.path().join(".codex/sessions");
     fs::create_dir_all(tree.join("2026/07/23")).unwrap();
     fs::write(
-        tree.join("2026/07/23/rollout.jsonl"),
+        tree.join("2026/07/23/rollout-2026-07-23T01-00-00-tree-dispatch.jsonl"),
         codex_source("tree dispatch"),
     )
     .unwrap();
-    let tree_report = import_codex(&tree_temp, &tree);
+    let tree_report = import_codex(&tree_temp);
     assert_eq!(tree_report["outcome"], "success", "{tree_report:#}");
     assert_eq!(
         tree_report["sources"][0]["source_format"],
-        "codex_session_jsonl_tree"
+        "provider_authoritative_all"
     );
-    assert_eq!(
-        tree_report["totals"]["imported_sessions"],
-        direct["totals"]["imported_sessions"]
-    );
-    assert_eq!(
-        tree_report["totals"]["imported_events"],
-        direct["totals"]["imported_events"]
-    );
-}
-
-#[test]
-fn explicit_codex_dispatch_rejects_ambiguous_first_record() {
-    let temp = tempdir();
-    let source = temp.path().join("ambiguous.jsonl");
-    fs::write(
-        &source,
-        concat!(
-            r#"{"session_id":"both","ts":1784371200,"text":"both","timestamp":"2026-07-21T00:00:00Z","type":"session_meta","payload":{}}"#,
-            "\n"
-        ),
-    )
-    .unwrap();
-
-    ctx(&temp)
-        .arg("import")
-        .args(["--provider", "codex", "--path"])
-        .arg(&source)
-        .args(["--no-daemon", "--format=json", "--progress", "none"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("schema is ambiguous"));
+    assert_eq!(tree_report["sources"][0]["certified_source_count"], 1);
+    assert!(tree_report["sources"][0]["published_generation"].is_string());
+    assert_eq!(tree_report["totals"]["change"], "changed");
+    assert_eq!(tree_report["totals"]["imported_sessions"], 0);
+    assert_eq!(tree_report["totals"]["imported_events"], 1);
 }
