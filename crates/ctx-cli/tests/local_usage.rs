@@ -2,7 +2,6 @@ mod support;
 
 use std::fs;
 
-use predicates::prelude::*;
 use rusqlite::Connection;
 use support::*;
 
@@ -497,7 +496,7 @@ fn environment_disable_creates_no_sidecar() {
 }
 
 #[test]
-fn foreground_sql_uses_fresh_projection_and_is_recorded_once_as_not_applicable() {
+fn foreground_sql_uses_fresh_projection_and_is_recorded_once_as_result_bearing() {
     let temp = tempdir();
     let prior_epoch_path = temp.path().join("work.sqlite");
     let prior_epoch_bytes = b"not sqlite: opaque v0.25 prior-epoch sentinel";
@@ -527,9 +526,9 @@ fn foreground_sql_uses_fresh_projection_and_is_recorded_once_as_not_applicable()
     assert_eq!(usage["summary"]["calls"], 1);
     assert_eq!(usage["summary"]["successful_calls"], 1);
     assert_eq!(usage["summary"]["failed_calls"], 0);
-    assert_eq!(usage["summary"]["result_bearing_calls"], 0);
+    assert_eq!(usage["summary"]["result_bearing_calls"], 1);
     assert_eq!(usage["summary"]["empty_calls"], 0);
-    assert_eq!(usage["summary"]["not_applicable_calls"], 1);
+    assert_eq!(usage["summary"]["not_applicable_calls"], 0);
     assert_eq!(usage["details"]["by_operation"][0]["operation"], "sql");
     assert_eq!(usage["details"]["by_operation"][0]["successful_calls"], 1);
     assert_eq!(usage["details"]["by_operation"][0]["failed_calls"], 0);
