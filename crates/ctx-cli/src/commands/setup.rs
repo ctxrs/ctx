@@ -15,11 +15,6 @@ use crate::semantic::{
 use crate::upgrade::data_migration;
 use crate::{config, SetupArgs};
 
-pub(crate) use super::store_telemetry::{
-    analytics_preflight, indexed_history_item_count, insert_db_size_bucket,
-    insert_store_analytics_counts,
-};
-
 pub(crate) fn run_setup(
     args: SetupArgs,
     data_root: PathBuf,
@@ -278,8 +273,6 @@ fn print_setup_human(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn setup_source_has_no_legacy_store_runtime_dependency() {
         let source = include_str!("setup.rs");
