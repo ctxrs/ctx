@@ -49,10 +49,6 @@ pub(crate) use search_filters::{search_has_intent, SearchIntentInput, SourceIden
 pub(crate) use transcript::TranscriptMode;
 pub(crate) use value_parsers::parse_event_window_limit;
 
-const WAL_TRUNCATE_MIN_BYTES: u64 = 64 * 1024 * 1024;
-const LARGE_IMPORT_SOURCE_FILES_WARNING: usize = 10_000;
-const LARGE_IMPORT_SOURCE_BYTES_WARNING: u64 = 1024 * 1024 * 1024;
-const MAX_HISTORY_SOURCE_PLUGIN_JSONL_LINE_BYTES: usize = 16 * 1024 * 1024;
 const DEFAULT_VISIBLE_SOURCE_PROVIDERS: &[CaptureProvider] = &[
     CaptureProvider::Claude,
     CaptureProvider::Codex,
