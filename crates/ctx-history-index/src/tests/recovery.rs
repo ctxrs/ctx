@@ -59,7 +59,10 @@ fn deletion_requires_final_inventory_revalidation() {
     let mut accepted = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     let (deletion, inventory) = deletion_evidence(&source, 3);
     accepted.delete_source(deletion, inventory).unwrap();
-    accepted.commit(|_| true).unwrap();
+    let accepted_receipt = accepted.commit(|_| true).unwrap();
+    assert!(accepted_receipt.manifest().sources.is_empty());
+    assert_eq!(accepted_receipt.manifest().removals.len(), 1);
+    assert_eq!(accepted_receipt.manifest().removals[0].source(), &source);
     let current = VerifiedIndex::open(temp.path()).unwrap();
     assert_eq!(current.count_term("retained").unwrap(), 0);
     assert!(current.manifest().sources.is_empty());

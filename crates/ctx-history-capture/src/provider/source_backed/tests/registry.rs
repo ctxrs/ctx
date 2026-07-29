@@ -93,6 +93,168 @@ fn heterogeneous_routes_publish_once_and_hydrate_exact_locators() {
 }
 
 #[test]
+fn refresh_receipt_stays_bound_to_commit_when_current_generation_advances() {
+    let (g1_route, g1_certificate) = revisioned_receipt_route(1);
+    let (g2_route, g2_certificate) = revisioned_receipt_route(2);
+    let mut g1_registry = SourceBackedProviderRegistry::new();
+    g1_registry.register(g1_route);
+    let mut g2_registry = SourceBackedProviderRegistry::new();
+    g2_registry.register(g2_route);
+
+    let temp = tempdir().unwrap();
+    let root = temp.path().to_path_buf();
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let (g2_sender, g2_receiver) = std::sync::mpsc::sync_channel(1);
+    let (g1, g2) = std::thread::scope(|scope| {
+        let g2_barrier = Arc::clone(&barrier);
+        let g2_root = root.clone();
+        scope.spawn(move || {
+            g2_barrier.wait();
+            let receipt =
+                refresh_source_backed_generation(&g2_root, &g2_registry, WriterOptions::default())
+                    .unwrap();
+            g2_sender.send(receipt).unwrap();
+        });
+
+        let mut g2 = None;
+        let g1 = refresh_source_backed_generation_with_progress(
+            &root,
+            &g1_registry,
+            WriterOptions::default(),
+            |progress| {
+                if progress.phase == "committed" {
+                    barrier.wait();
+                    g2 = Some(
+                        g2_receiver
+                            .recv_timeout(Duration::from_secs(10))
+                            .expect("G2 did not publish while G1 was between commit and receipt"),
+                    );
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+        (g1, g2.expect("the committed progress barrier did not run"))
+    });
+
+    assert_ne!(g1.commit.generation_id, g2.commit.generation_id);
+    assert_eq!(g1.commit.indexed_documents, g2.commit.indexed_documents);
+    assert_eq!(g1.commit.certified_sources, g2.commit.certified_sources);
+    assert_eq!(
+        g1.commit.certified_source_bytes,
+        g2.commit.certified_source_bytes
+    );
+    assert_eq!(g1.sources, vec![g1_certificate]);
+    assert_eq!(g2.sources, vec![g2_certificate]);
+    assert_eq!(g1.sources, g1.commit.manifest().sources);
+    assert_eq!(g2.sources, g2.commit.manifest().sources);
+    assert_eq!(
+        g1.commit.manifest().generation_id().unwrap(),
+        g1.commit.generation_id
+    );
+    assert_eq!(
+        g2.commit.manifest().generation_id().unwrap(),
+        g2.commit.generation_id
+    );
+    assert!(g1.removals.is_empty());
+    assert!(g2.removals.is_empty());
+    assert_eq!(
+        VerifiedIndex::open(root).unwrap().generation_id(),
+        g2.commit.generation_id
+    );
+}
+
+fn revisioned_receipt_route(revision: u8) -> (SourceBackedRoute, CertifiedSource) {
+    let source = fixture_source(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 91);
+    let session_id = fixture_session_id(&source);
+    let event_id = derive_event_id(EventIdentityInput {
+        source: &source,
+        session_id,
+        logical_item_kind: "message",
+        native_item_key: &NativeItemKey::native_id("message", TypedKey::U64(1)).unwrap(),
+        subrecord_selector: None,
+    })
+    .unwrap();
+    let revision_digest = [revision; 32];
+    let locator = SourceRecordLocator::new(
+        source.clone(),
+        NativeRecordCoordinate::ProviderNative {
+            namespace: "receipt-race".to_owned(),
+            coordinate: TypedKey::U64(1),
+        },
+        LocatorRevisionPolicy::ExactSourceRevision,
+        Some(revision_digest),
+        [91; 32],
+    )
+    .unwrap();
+    let document = LexicalDocument {
+        event_id,
+        session_id,
+        parent_session_id: None,
+        root_session_id: session_id,
+        source: source.clone(),
+        locator,
+        provider_session_id: Some("receipt-race".to_owned()),
+        branch: None,
+        source_path: Some("/fixture/receipt-race".to_owned()),
+        agent_type: "primary".to_owned(),
+        is_primary: true,
+        event_sequence: 1,
+        occurred_at_unix_ms: Some(i64::from(revision)),
+        event_type: "message".to_owned(),
+        role: Some("user".to_owned()),
+        body: format!("receipt revision {revision}"),
+        workspace: None,
+        cwd: None,
+        touched_files: Vec::new(),
+    };
+    let observation =
+        SourceObservation::new(source.clone(), "fixture-revision", vec![revision]).unwrap();
+    let certificate = CertifiedSource::certify(
+        observation.clone(),
+        observation,
+        "coordinator-test-v1",
+        revision_digest,
+        ScannedSourceCounts {
+            complete_records: 1,
+            retained_records: 1,
+            indexed_documents: 1,
+            certified_bytes: 1,
+            ..ScannedSourceCounts::default()
+        },
+    )
+    .unwrap();
+    let scan_certificate = certificate.clone();
+    let revalidation_certificate = certificate.clone();
+    let scan_document = document.clone();
+    let owned_source = source.clone();
+    let driver = SourceBackedRouteDriver::new(
+        move |sink| {
+            sink.replace_source(scan_certificate.clone(), [scan_document.clone()])
+                .map_err(route_coordinator_error)
+        },
+        move |candidate| candidate.exact_descriptor_eq(&owned_source),
+        move |target| {
+            matches!(
+                target,
+                SourceBackedRevalidationTarget::Source(source)
+                    if source == &revalidation_certificate
+            )
+        },
+        move |request| {
+            Ok(HydratedProviderRecord {
+                event_id: request.event_id(),
+                provider_bytes: document.body.as_bytes().to_vec(),
+            })
+        },
+    );
+    (
+        fixture_executable_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, driver),
+        certificate,
+    )
+}
+
+#[test]
 fn ordered_batch_groups_by_route_and_exact_source_without_store() {
     let gemini_a = fixture_source(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 31);
     let gemini_b = fixture_source(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 32);
