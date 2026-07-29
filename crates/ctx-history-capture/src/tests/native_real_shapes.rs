@@ -2,8 +2,8 @@ use crate::tests::support::fixtures::jsonl::write_nanoclaw_smoke_project;
 use crate::tests::support::paths::tempdir;
 use crate::tests::support::provider_state::stored_provider_session_id;
 use crate::{
-    import_astrbot_sqlite, import_codebuddy_history, import_junie_history, import_nanoclaw_project,
-    provider_source_for_path, AstrBotSqliteImportOptions, CodeBuddyImportOptions,
+    import_codebuddy_history, import_junie_history, import_nanoclaw_project,
+    provider_source_for_path, CodeBuddyImportOptions,
     JunieImportOptions, NanoClawImportOptions, ProviderSourceStatus, CODEBUDDY_SOURCE_FORMAT,
     JUNIE_SESSION_EVENTS_SOURCE_FORMAT,
 };
@@ -13,131 +13,6 @@ use ctx_history_store::Store;
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::fs;
-
-#[test]
-fn native_astrbot_real_schema_casts_ids_metadata_and_datetime_millis() {
-    let temp = tempdir();
-    let fixture = temp.path().join("astrbot-real-schema.db");
-    let conn = Connection::open(&fixture).unwrap();
-    conn.execute_batch(
-        "CREATE TABLE conversations (
-            created_at DATETIME NOT NULL,
-            updated_at DATETIME NOT NULL,
-            inner_conversation_id INTEGER NOT NULL PRIMARY KEY,
-            conversation_id VARCHAR(36) NOT NULL UNIQUE,
-            platform_id VARCHAR NOT NULL,
-            user_id VARCHAR NOT NULL,
-            content JSON,
-            title VARCHAR(255),
-            persona_id VARCHAR,
-            token_usage INTEGER NOT NULL
-        );
-        CREATE TABLE platform_message_history (
-            created_at DATETIME NOT NULL,
-            updated_at DATETIME NOT NULL,
-            id INTEGER NOT NULL PRIMARY KEY,
-            platform_id VARCHAR NOT NULL,
-            user_id VARCHAR NOT NULL,
-            sender_id VARCHAR,
-            sender_name VARCHAR,
-            content JSON NOT NULL,
-            llm_checkpoint_id VARCHAR
-        );
-        CREATE TABLE preferences (scope TEXT, key TEXT, value);
-        ",
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO conversations VALUES (
-            '2026-07-10 03:18:34.491000',
-            '2026-07-10 03:19:51.992000',
-            7, 'conversation-real-shape', 'webchat', 'user-real-shape',
-            ?1, 'real schema', 'default', 42
-        )",
-        [json!([
-            {"role": "user", "content": "astrbot real schema oracle"},
-            {"type": "_checkpoint", "id": "checkpoint-real-shape"},
-            {"role": "assistant", "content": "astrbot real schema reply"}
-        ])
-        .to_string()],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO platform_message_history VALUES (
-            '2026-07-10 03:18:35.123000',
-            '2026-07-10 03:18:35.123000',
-            9, 'webchat', 'user-real-shape', 'user-real-shape', 'User',
-            ?1, 'checkpoint-real-shape'
-        )",
-        [json!({"text": "astrbot real platform oracle"}).to_string()],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO preferences VALUES ('umo', 'sel_conv_id', ?1)",
-        [json!({"val": "conversation-real-shape"}).to_string()],
-    )
-    .unwrap();
-    drop(conn);
-
-    let imported_at = DateTime::parse_from_rfc3339("2026-07-10T04:00:00Z")
-        .unwrap()
-        .with_timezone(&Utc);
-    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
-    let summary = import_astrbot_sqlite(
-        &fixture,
-        &mut store,
-        AstrBotSqliteImportOptions {
-            source_path: Some(fixture.clone()),
-            imported_at,
-            ..AstrBotSqliteImportOptions::default()
-        },
-    )
-    .unwrap();
-
-    assert_eq!(summary.failed, 0, "{:?}", summary.failures);
-    assert_eq!(summary.imported_sessions, 1);
-    assert_eq!(summary.imported_events, 3);
-    let session_id = stored_provider_session_id(&store, CaptureProvider::AstrBot, "7");
-    let session = store.get_session(session_id).unwrap();
-    assert_eq!(
-        session.started_at,
-        DateTime::parse_from_rfc3339("2026-07-10T03:18:34.491Z")
-            .unwrap()
-            .with_timezone(&Utc)
-    );
-    assert_eq!(
-        session.ended_at,
-        Some(
-            DateTime::parse_from_rfc3339("2026-07-10T03:19:51.992Z")
-                .unwrap()
-                .with_timezone(&Utc)
-        )
-    );
-    assert_eq!(session.external_agent_id.as_deref(), Some("webchat"));
-    assert_eq!(
-        session.sync.metadata["metadata"]["token_usage"].as_i64(),
-        Some(42)
-    );
-    assert_eq!(
-        session.sync.metadata["metadata"]["selected_conversation"].as_str(),
-        Some("conversation-real-shape")
-    );
-
-    let events = store.events_for_session(session_id).unwrap();
-    let platform = events
-        .iter()
-        .find(|event| {
-            event.sync.metadata["metadata"]["source"].as_str()
-                == Some("astrbot_platform_message_history")
-        })
-        .unwrap();
-    assert_eq!(
-        platform.occurred_at,
-        DateTime::parse_from_rfc3339("2026-07-10T03:18:35.123Z")
-            .unwrap()
-            .with_timezone(&Utc)
-    );
-}
 
 #[test]
 fn native_codebuddy_cli_jsonl_imports_searches_and_reimports() {

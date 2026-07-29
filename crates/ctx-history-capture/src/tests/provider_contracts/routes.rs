@@ -258,16 +258,6 @@ const PROVIDER_ROUTES: &[ProviderRouteContract] = &[
         )],
     },
     ProviderRouteContract {
-        semantic_id: "astrbot",
-        provider: CaptureProvider::AstrBot,
-        dispatch_variant: "AstrBot",
-        routes: &[binding!(
-            SQLITE_SOURCES,
-            "import_astrbot_sqlite",
-            "import_astrbot_nativepath"
-        )],
-    },
-    ProviderRouteContract {
         semantic_id: "shelley",
         provider: CaptureProvider::Shelley,
         dispatch_variant: "Shelley",

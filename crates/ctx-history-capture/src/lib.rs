@@ -103,7 +103,7 @@ pub use summaries::{
 
 mod options;
 pub use options::{
-    AntigravityCliImportOptions, AstrBotSqliteImportOptions, AuggieImportOptions,
+    AntigravityCliImportOptions, AuggieImportOptions,
     ClaudeProjectsImportOptions, ClineTaskJsonImportOptions, CodeBuddyImportOptions,
     CodexHistoryImportOptions, CodexSessionCatalogOptions, CodexSessionImportOptions,
     CodexSessionImportProgress, CodexSessionImportProgressCallback, ContinueCliImportOptions,
@@ -135,7 +135,7 @@ mod test_support_paths;
 pub(crate) mod provider;
 pub use provider::adapter::{CaptureWorkLimit, ProviderAdapterContext, ProviderImportOptions};
 pub use provider::api::{
-    import_antigravity_cli_history, import_astrbot_sqlite, import_auggie_history,
+    import_antigravity_cli_history, import_auggie_history,
     import_claude_projects_jsonl_tree, import_cline_task_json_history, import_codebuddy_history,
     import_continue_cli_sessions, import_copilot_cli_session_events, import_crush_sqlite,
     import_cursor_native_history, import_custom_history_jsonl_v1,
