@@ -1,12 +1,12 @@
 use std::fs;
 
 use ctx_history_core::{LocatorRevisionPolicy, NativeRecordCoordinate, TypedKey};
-use ctx_history_index::MAX_BODY_PREVIEW_CHARS;
 use rusqlite::{params, Connection};
 use serde_json::json;
 use tempfile::TempDir;
 
 use super::*;
+use crate::PROVIDER_MAX_TEXT_CHARS;
 
 fn create_database(path: &Path, rowid_offset: usize, user_text: &str, include_legacy: bool) {
     let connection = Connection::open(path).unwrap();
@@ -84,10 +84,14 @@ fn replace_database(path: &Path, replacement: &Path) {
 }
 
 #[test]
-fn cold_scan_bounds_projection_and_exactly_hydrates_the_conversation_row() {
+fn cold_scan_keeps_full_policy_body_and_exactly_hydrates_the_conversation_row() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("data.sqlite3");
-    let long_user_text = "kiro exact body ".repeat(MAX_BODY_PREVIEW_CHARS);
+    let long_user_text = format!(
+        "{}kiro-tail-term{}",
+        "x".repeat(3_000),
+        "y".repeat(PROVIDER_MAX_TEXT_CHARS)
+    );
     create_database(&path, 0, &long_user_text, true);
 
     let scan = scan_kiro_source_backed_v0(&path, KIRO_SQLITE_SOURCE_FORMAT).unwrap();
@@ -103,7 +107,8 @@ fn cold_scan_bounds_projection_and_exactly_hydrates_the_conversation_row() {
         .iter()
         .find(|document| document.role.as_deref() == Some("user"))
         .unwrap();
-    assert_eq!(user.body.chars().count(), MAX_BODY_PREVIEW_CHARS);
+    assert_eq!(user.body.chars().count(), PROVIDER_MAX_TEXT_CHARS);
+    assert!(user.body.contains("kiro-tail-term"));
     assert_eq!(user.parent_session_id, None);
     assert_eq!(user.root_session_id, user.session_id);
     assert_eq!(user.provider_session_id.as_deref(), Some("kiro-session"));
@@ -139,9 +144,7 @@ fn cold_scan_bounds_projection_and_exactly_hydrates_the_conversation_row() {
     assert!(resolver.source().exact_descriptor_eq(&scan.source));
     let hydrated = resolver.hydrate(&user.locator).unwrap();
     assert_eq!(hydrated.decoded_display_text, long_user_text);
-    assert!(String::from_utf8(hydrated.provider_bytes)
-        .unwrap()
-        .contains("assistant exact body"));
+    assert_eq!(hydrated.provider_bytes, long_user_text.as_bytes());
 }
 
 #[test]

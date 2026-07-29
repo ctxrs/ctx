@@ -678,15 +678,16 @@ fn drain_source_backed_plan(
 }
 
 #[test]
-fn firebender_source_backed_cold_and_exact_are_bounded_and_hydratable() {
+fn firebender_source_backed_cold_and_exact_keep_full_policy_body_and_hydrate() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = temp.path().join("project");
+    let complete_text = format!("firebender-head-{}-firebender-tail", "x".repeat(3_000));
     let messages = (0..61)
         .map(|index| {
             if index == 0 {
                 json!({
                     "role": "user",
-                    "content": "x".repeat(ctx_history_index::MAX_BODY_PREVIEW_CHARS + 100),
+                    "content": complete_text,
                 })
             } else {
                 json!({
@@ -712,13 +713,14 @@ fn firebender_source_backed_cold_and_exact_are_bounded_and_hydratable() {
     assert_eq!(certificate.counts().ignored_records, 0);
     assert!(certificate.counts().certified_bytes > 0);
     assert!(documents.iter().all(|document| {
-        document.body.chars().count() <= ctx_history_index::MAX_BODY_PREVIEW_CHARS
-            && &document.source == certificate.observation().source()
+        &document.source == certificate.observation().source()
             && document.event_id.source_digest()
                 == certificate.observation().source().identity().digest()
     }));
 
     let first = &documents[0];
+    assert_eq!(first.body, complete_text);
+    assert!(first.body.ends_with("firebender-tail"));
     assert_eq!(first.parent_session_id, None);
     assert_eq!(first.root_session_id, first.session_id);
     assert_eq!(first.provider_session_id.as_deref(), Some("stable-session"));
@@ -764,6 +766,12 @@ fn firebender_source_backed_cold_and_exact_are_bounded_and_hydratable() {
     assert_eq!(
         hydrated_messages.pointer("/0/role").and_then(Value::as_str),
         Some("user")
+    );
+    assert_eq!(
+        hydrated_messages
+            .pointer("/0/content")
+            .and_then(Value::as_str),
+        Some(complete_text.as_str())
     );
 
     let exact = prepare_firebender_source_backed(&root, Some(&certificate)).unwrap();

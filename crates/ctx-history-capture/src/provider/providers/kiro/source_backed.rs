@@ -14,7 +14,7 @@ use ctx_history_core::{
     SourceAnchor, SourceKey, SourceObservation, SourceRecordLocator, SourceResolverContractError,
     StableEntityId, TypedKey,
 };
-use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
+use ctx_history_index::LexicalDocument;
 use rusqlite::Connection;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -152,7 +152,7 @@ impl KiroLocatorResolverV0 {
             .ok_or(KiroSourceBackedErrorV0::MissingConversationEvent)?;
         let decoded_display_text = decoded.complete_text();
         Ok(KiroHydratedRecordV0 {
-            provider_bytes: row.value.into_bytes(),
+            provider_bytes: decoded_display_text.as_bytes().to_vec(),
             decoded_display_text,
         })
     }
@@ -398,7 +398,6 @@ impl KiroLogicalScan {
                     &self.indexed_source_path,
                     entry,
                     native.event,
-                    native.complete_text,
                     record_digest,
                 )?;
                 self.documents.push(document);
@@ -479,7 +478,6 @@ fn kiro_lexical_document(
     source_path: &str,
     entry: &Value,
     event: super::super::event::KiroNativeEvent,
-    complete_text: String,
     record_digest: [u8; 32],
 ) -> KiroSourceBackedResultV0<LexicalDocument> {
     let native_item_key = NativeItemKey::native_id(
@@ -509,10 +507,12 @@ fn kiro_lexical_document(
         record_digest,
     )?;
     let touched_files = projected_touched_files(event.event_type, entry)?;
-    let body = complete_text
-        .chars()
-        .take(MAX_BODY_PREVIEW_CHARS)
-        .collect::<String>();
+    let body = event
+        .payload
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
     if body.is_empty() {
         return Err(KiroSourceBackedErrorV0::UncertifiableRow {
             relation: row.table,

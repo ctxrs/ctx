@@ -8,7 +8,7 @@ use ctx_history_core::{
     SourceAnchor, SourceKey, SourceObservation, SourceRecordLocator, SourceResolverContractError,
     StableEntityId, TypedKey,
 };
-use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
+use ctx_history_index::LexicalDocument;
 use ctx_history_store::NATIVE_PATH_MAX_RETAINED_PAGE_BYTES;
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
@@ -23,7 +23,7 @@ use super::{
 use crate::{
     native_source::NativeSqliteValue,
     provider::{
-        normalization::{provider_local_preview, provider_timestamp_millis},
+        normalization::provider_timestamp_millis,
         sqlite::{sqlite_schema_fingerprint, sqlite_table_columns, SqliteLengthPreflightGuard},
     },
     CaptureError, Result as CaptureResult, FIREBENDER_SQLITE_SOURCE_FORMAT,
@@ -412,17 +412,21 @@ fn firebender_document(
         }
         sparse_output_body(&evidence)
     } else {
-        super::firebender_message_text(message).unwrap_or_else(|| {
-            format!(
-                "Firebender {}",
-                message
-                    .get("role")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("message")
-            )
-        })
+        native
+            .payload
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                format!(
+                    "Firebender {}",
+                    message
+                        .get("role")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("message")
+                )
+            })
     };
-    let (body, _) = provider_local_preview(&body, MAX_BODY_PREVIEW_CHARS);
     let body = if body.is_empty() {
         format!("Firebender {}", native.event_type.as_str())
     } else {

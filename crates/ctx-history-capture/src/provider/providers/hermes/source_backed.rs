@@ -17,13 +17,12 @@ use ctx_history_core::{
     SourceAnchor, SourceKey, SourceObservation, SourceRecordLocator, SourceResolverContractError,
     StableEntityId, TypedKey,
 };
-use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
+use ctx_history_index::LexicalDocument;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
     common::io::ProviderSourceRoot,
-    native_source::NativeSqliteValue,
     provider::{
         native_ingestion::{NATIVE_INGESTION_PAGE_MAX_BYTES, NATIVE_INGESTION_PAGE_MAX_UNITS},
         normalization::provider_required_timestamp_seconds,
@@ -703,7 +702,7 @@ fn project_message(
         occurred_at_unix_ms: Some(native.occurred_at.timestamp_millis()),
         event_type: native.event_type.as_str().to_owned(),
         role: native.role.map(|role| role.as_str().to_owned()),
-        body: bounded_text(body, MAX_BODY_PREVIEW_CHARS),
+        body: body.to_owned(),
         workspace: session.workspace,
         cwd: session.cwd,
         touched_files: Vec::new(),
@@ -1061,7 +1060,7 @@ pub(crate) fn hydrate_hermes_source_backed_message(
             return Err(HermesSourceBackedError::StaleRecordEvidence);
         }
         Ok(HermesHydratedMessage {
-            provider_bytes: encode_native_values(&values),
+            provider_bytes: text.as_bytes().to_vec(),
             text,
             provider_session_id: actual_session_id,
             provider_event_hash,
@@ -1102,35 +1101,6 @@ fn decode_message_coordinate(
         return Err(HermesSourceBackedError::InvalidLocator);
     }
     Ok((provider_session_id.clone(), *message_id, *rowid))
-}
-
-fn encode_native_values(values: &[NativeSqliteValue]) -> Vec<u8> {
-    let mut encoded = Vec::new();
-    encoded.extend_from_slice(&(values.len() as u64).to_be_bytes());
-    for value in values {
-        match value {
-            NativeSqliteValue::Null => encoded.push(0),
-            NativeSqliteValue::Integer(value) => {
-                encoded.push(1);
-                encoded.extend_from_slice(&value.to_be_bytes());
-            }
-            NativeSqliteValue::RealBits(value) => {
-                encoded.push(2);
-                encoded.extend_from_slice(&value.to_be_bytes());
-            }
-            NativeSqliteValue::Text(value) => {
-                encoded.push(3);
-                encoded.extend_from_slice(&(value.len() as u64).to_be_bytes());
-                encoded.extend_from_slice(value.as_bytes());
-            }
-            NativeSqliteValue::Blob(value) => {
-                encoded.push(4);
-                encoded.extend_from_slice(&(value.len() as u64).to_be_bytes());
-                encoded.extend_from_slice(value);
-            }
-        }
-    }
-    encoded
 }
 
 #[cfg(test)]

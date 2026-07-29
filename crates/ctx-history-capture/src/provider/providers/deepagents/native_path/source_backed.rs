@@ -18,7 +18,7 @@ use ctx_history_core::{
     SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation, SourceRecordLocator,
     SourceResolverContractError, StableEntityId, SubrecordSelector, TypedKey,
 };
-use ctx_history_index::{LexicalDocument, MAX_BODY_PREVIEW_CHARS};
+use ctx_history_index::LexicalDocument;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -37,13 +37,13 @@ use super::super::{
 use super::core_eligible;
 use crate::{
     common::io::ProviderSourceRoot,
-    provider::{normalization::capped_text, sqlite::sqlite_schema_fingerprint},
+    provider::{normalization::provider_local_preview, sqlite::sqlite_schema_fingerprint},
     provider_sources::{
         open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
         SqliteSourceAccessError, SqliteSourceEvidence, SqliteSourceReadSnapshot,
     },
     CaptureError, ProviderAdapterContext, DEEPAGENTS_SQLITE_SOURCE_FORMAT,
-    MAX_PROVIDER_SQLITE_VALUE_BYTES,
+    MAX_PROVIDER_SQLITE_VALUE_BYTES, PROVIDER_MAX_TEXT_CHARS,
 };
 
 const DEEPAGENTS_SOURCE_ANCHOR_NAMESPACE: &str = "deepagents.sessions";
@@ -752,7 +752,7 @@ fn deepagents_lexical_document(
         Some(source_revision_digest),
         record_digest,
     )?;
-    let (body, _) = capped_text(&message.text, MAX_BODY_PREVIEW_CHARS);
+    let body = provider_local_preview(&message.text, PROVIDER_MAX_TEXT_CHARS).0;
     let event_type = if message.role == ctx_history_core::EventRole::Tool {
         ctx_history_core::EventType::ToolOutput
     } else {
