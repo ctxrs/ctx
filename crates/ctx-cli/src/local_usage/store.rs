@@ -30,7 +30,8 @@ use file_family::{
 
 pub(crate) const USAGE_FILE: &str = "usage.sqlite";
 const APPLICATION_ID: i64 = 0x4354_5855;
-const SCHEMA_VERSION: i64 = 1;
+const LEGACY_SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const BUSY_TIMEOUT: Duration = Duration::from_millis(25);
 const PAGE_SIZE_BYTES: i64 = 4 * 1024;
 const MAX_DATABASE_BYTES: i64 = 6 * 1024 * 1024;
@@ -40,7 +41,7 @@ const JOURNAL_SIZE_LIMIT_BYTES: i64 = 1024 * 1024;
 const STALE_INIT_AGE: Duration = Duration::from_secs(60 * 60);
 const INIT_SLOT_COUNT: usize = 8;
 
-const DAILY_USAGE_SCHEMA: &str = r#"
+const DAILY_USAGE_SCHEMA_V1: &str = r#"
 CREATE TABLE daily_usage (
     day_utc TEXT NOT NULL
         CHECK (
@@ -173,6 +174,262 @@ CREATE TABLE daily_usage (
 ) WITHOUT ROWID, STRICT;
 "#;
 
+const DAILY_USAGE_SCHEMA: &str = r#"
+CREATE TABLE daily_usage (
+    day_utc TEXT NOT NULL
+        CHECK (
+            length(day_utc) = 10
+            AND day_utc GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+            AND date(day_utc) IS NOT NULL
+            AND date(day_utc) = day_utc
+        ),
+    definition_version INTEGER NOT NULL CHECK (definition_version = 2),
+    ctx_version TEXT NOT NULL
+        CHECK (
+            length(ctx_version) BETWEEN 1 AND 64
+            AND ctx_version NOT GLOB '*[^0-9A-Za-z.+-]*'
+        ),
+    surface TEXT NOT NULL CHECK (surface IN ('cli', 'mcp')),
+    operation TEXT NOT NULL CHECK (
+        (
+            surface = 'cli'
+            AND operation IN (
+                'setup', 'index', 'sources', 'import', 'show',
+                'locate', 'search', 'pro_setup', 'pro_manage', 'pro_uninstall',
+                'blame', 'sql', 'docs', 'integrations', 'daemon_status',
+                'daemon_enable', 'daemon_disable', 'upgrade', 'doctor'
+            )
+        )
+        OR
+        (
+            surface = 'mcp'
+            AND operation IN (
+                'status', 'sources', 'search', 'sql', 'show_session',
+                'show_event', 'pro_status', 'blame'
+            )
+        )
+    ),
+    outcome TEXT NOT NULL CHECK (outcome IN ('success', 'failure')),
+    value_class TEXT NOT NULL
+        CHECK (value_class IN ('result_bearing', 'empty', 'not_applicable')),
+    duration_bucket TEXT NOT NULL
+        CHECK (duration_bucket IN (
+            'under_10_ms', '10_to_49_ms', '50_to_249_ms', '250_to_999_ms',
+            '1_to_4_s', '5_to_29_s', '30_s_or_more'
+        )),
+    target_type TEXT NOT NULL
+        CHECK (target_type IN ('file', 'commit', 'pull_request', 'not_applicable')),
+    pro_outcome TEXT NOT NULL
+        CHECK (
+            (
+                operation = 'blame'
+                AND (
+                    (outcome = 'failure' AND pro_outcome = 'error')
+                    OR
+                    (
+                        outcome = 'success'
+                        AND pro_outcome IN ('produced', 'possible', 'none')
+                    )
+                )
+            )
+            OR (operation != 'blame' AND pro_outcome = 'not_applicable')
+        ),
+    result_action TEXT NOT NULL CHECK (
+        result_action IN (
+            'search', 'open_session', 'open_event', 'locate',
+            'sources', 'sql', 'blame', 'not_applicable'
+        )
+    ),
+    calls INTEGER NOT NULL CHECK (calls > 0),
+    result_count INTEGER NOT NULL CHECK (result_count >= 0),
+    citation_count INTEGER NOT NULL CHECK (citation_count >= 0),
+    latency_ms INTEGER NOT NULL CHECK (latency_ms >= 0),
+    latency_samples INTEGER NOT NULL
+        CHECK (latency_samples BETWEEN 0 AND calls),
+    response_bytes INTEGER NOT NULL CHECK (response_bytes >= 0),
+    response_byte_samples INTEGER NOT NULL
+        CHECK (response_byte_samples BETWEEN 0 AND calls),
+    output_bytes INTEGER NOT NULL CHECK (output_bytes >= 0),
+    output_byte_samples INTEGER NOT NULL
+        CHECK (output_byte_samples BETWEEN 0 AND calls),
+    context_bytes INTEGER NOT NULL CHECK (context_bytes >= 0),
+    context_byte_samples INTEGER NOT NULL
+        CHECK (context_byte_samples BETWEEN 0 AND calls),
+    search_result_bytes INTEGER NOT NULL CHECK (search_result_bytes >= 0),
+    search_result_byte_samples INTEGER NOT NULL
+        CHECK (search_result_byte_samples BETWEEN 0 AND calls),
+    context_searches INTEGER NOT NULL CHECK (context_searches >= 0),
+    context_found INTEGER NOT NULL CHECK (context_found >= 0),
+    context_opened INTEGER NOT NULL CHECK (context_opened >= 0),
+    context_cited INTEGER NOT NULL CHECK (context_cited >= 0),
+    validated_discoveries INTEGER NOT NULL CHECK (validated_discoveries >= 0),
+    CHECK (
+        (
+            outcome = 'failure'
+            AND value_class = 'not_applicable'
+            AND result_action = 'not_applicable'
+            AND result_count = 0
+            AND citation_count = 0
+            AND context_bytes = 0
+            AND context_byte_samples = 0
+            AND search_result_bytes = 0
+            AND search_result_byte_samples = 0
+            AND context_searches = 0
+            AND context_found = 0
+            AND context_opened = 0
+            AND context_cited = 0
+            AND validated_discoveries = 0
+        )
+        OR outcome = 'success'
+    ),
+    CHECK (
+        (value_class = 'result_bearing' AND result_count >= calls)
+        OR (
+            value_class IN ('empty', 'not_applicable')
+            AND result_count = 0
+            AND citation_count = 0
+        )
+    ),
+    CHECK (
+        (latency_samples = 0 AND latency_ms = 0)
+        OR latency_samples > 0
+    ),
+    CHECK (
+        (context_byte_samples = 0 AND context_bytes = 0)
+        OR context_byte_samples > 0
+    ),
+    CHECK (
+        (
+            surface = 'mcp'
+            AND response_byte_samples = calls
+            AND response_bytes > 0
+            AND output_byte_samples = 0
+            AND output_bytes = 0
+        )
+        OR (
+            surface = 'cli'
+            AND response_byte_samples = 0
+            AND response_bytes = 0
+            AND (
+                (output_byte_samples = 0 AND output_bytes = 0)
+                OR output_byte_samples > 0
+            )
+        )
+    ),
+    CHECK (
+        (
+            search_result_byte_samples = 0
+            AND search_result_bytes = 0
+        )
+        OR search_result_byte_samples > 0
+    ),
+    CHECK (
+        (
+            operation = 'search'
+            AND outcome = 'success'
+            AND value_class = 'result_bearing'
+            AND search_result_bytes <= context_bytes
+            AND search_result_byte_samples <= context_byte_samples
+        )
+        OR (
+            search_result_bytes = 0
+            AND search_result_byte_samples = 0
+        )
+    ),
+    CHECK (
+        (
+            outcome = 'success'
+            AND result_action = 'search'
+            AND context_searches BETWEEN 0 AND calls
+            AND context_found BETWEEN 0 AND result_count
+            AND (context_found = 0 OR context_searches > 0)
+            AND context_opened = 0
+            AND context_cited = 0
+            AND validated_discoveries = 0
+        )
+        OR (
+            outcome = 'success'
+            AND result_action IN ('open_session', 'open_event')
+            AND context_searches = 0
+            AND context_found = 0
+            AND context_opened BETWEEN 0 AND calls
+            AND context_cited = 0
+            AND validated_discoveries BETWEEN 0 AND calls
+            AND validated_discoveries <= context_opened + context_cited
+        )
+        OR (
+            context_searches = 0
+            AND context_found = 0
+            AND context_opened = 0
+            AND context_cited = 0
+            AND validated_discoveries = 0
+        )
+    ),
+    CHECK (
+        operation = 'blame'
+        OR (
+            target_type = 'not_applicable'
+            AND pro_outcome = 'not_applicable'
+        )
+    ),
+    CHECK (
+        operation != 'blame'
+        OR (
+            target_type IN ('file', 'commit', 'pull_request')
+            OR (outcome = 'failure' AND target_type = 'not_applicable')
+        )
+    ),
+    CHECK (
+        result_action = 'not_applicable'
+        OR (result_action = 'search' AND operation = 'search')
+        OR (
+            result_action = 'open_session'
+            AND (
+                (surface = 'cli' AND operation = 'show')
+                OR (surface = 'mcp' AND operation = 'show_session')
+            )
+        )
+        OR (
+            result_action = 'open_event'
+            AND (
+                (surface = 'cli' AND operation = 'show')
+                OR (surface = 'mcp' AND operation = 'show_event')
+            )
+        )
+        OR (result_action = 'locate' AND surface = 'cli' AND operation = 'locate')
+        OR (result_action = 'sources' AND operation = 'sources')
+        OR (result_action = 'sql' AND operation = 'sql')
+        OR (result_action = 'blame' AND operation = 'blame')
+    ),
+    CHECK (
+        value_class = 'not_applicable'
+        OR result_action != 'not_applicable'
+    ),
+    CHECK (
+        outcome = 'failure'
+        OR surface = 'cli'
+        OR (
+            surface = 'mcp'
+            AND operation IN (
+                'sources', 'search', 'sql', 'show_session', 'show_event', 'blame'
+            )
+            AND value_class IN ('result_bearing', 'empty')
+            AND result_action != 'not_applicable'
+        )
+        OR (
+            surface = 'mcp'
+            AND operation IN ('status', 'pro_status')
+            AND value_class = 'not_applicable'
+            AND result_action = 'not_applicable'
+        )
+    ),
+    PRIMARY KEY (
+        day_utc, definition_version, ctx_version, surface, operation, outcome,
+        value_class, duration_bucket, target_type, pro_outcome, result_action
+    )
+) WITHOUT ROWID, STRICT;
+"#;
+
 const MAINTENANCE_SCHEMA: &str = r#"
 CREATE TABLE maintenance (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -186,6 +443,38 @@ CREATE TABLE maintenance (
 "#;
 
 const EXPECTED_DAILY_COLUMNS: &[&str] = &[
+    "day_utc",
+    "definition_version",
+    "ctx_version",
+    "surface",
+    "operation",
+    "outcome",
+    "value_class",
+    "duration_bucket",
+    "target_type",
+    "pro_outcome",
+    "result_action",
+    "calls",
+    "result_count",
+    "citation_count",
+    "latency_ms",
+    "latency_samples",
+    "response_bytes",
+    "response_byte_samples",
+    "output_bytes",
+    "output_byte_samples",
+    "context_bytes",
+    "context_byte_samples",
+    "search_result_bytes",
+    "search_result_byte_samples",
+    "context_searches",
+    "context_found",
+    "context_opened",
+    "context_cited",
+    "validated_discoveries",
+];
+
+const EXPECTED_DAILY_COLUMNS_V1: &[&str] = &[
     "day_utc",
     "definition_version",
     "ctx_version",
@@ -212,7 +501,7 @@ pub(crate) enum UsageStoreError {
     ApplicationId,
     #[error("usage store has unsupported schema version {0}")]
     SchemaVersion(i64),
-    #[error("usage store schema does not match version 1")]
+    #[error("usage store schema does not match its declared version")]
     SchemaIdentity,
     #[error("usage store exceeds its size limit")]
     GrowthLimit,
@@ -305,17 +594,41 @@ fn record_at_with_ctx_version(
         r#"
         INSERT INTO daily_usage (
             day_utc, definition_version, ctx_version, surface, operation, outcome,
-            value_class, duration_bucket, target_type, pro_outcome, calls,
-            result_count, citation_count, response_bytes
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, ?12, ?13)
+            value_class, duration_bucket, target_type, pro_outcome, result_action,
+            calls, result_count, citation_count, latency_ms, latency_samples,
+            response_bytes, response_byte_samples, output_bytes, output_byte_samples,
+            context_bytes, context_byte_samples, search_result_bytes,
+            search_result_byte_samples, context_searches, context_found,
+            context_opened, context_cited, validated_discoveries
+        ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+            1, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
+            ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28
+        )
         ON CONFLICT (
             day_utc, definition_version, ctx_version, surface, operation, outcome,
-            value_class, duration_bucket, target_type, pro_outcome
+            value_class, duration_bucket, target_type, pro_outcome, result_action
         ) DO UPDATE SET
             calls = calls + 1,
             result_count = result_count + excluded.result_count,
             citation_count = citation_count + excluded.citation_count,
-            response_bytes = response_bytes + excluded.response_bytes
+            latency_ms = latency_ms + excluded.latency_ms,
+            latency_samples = latency_samples + excluded.latency_samples,
+            response_bytes = response_bytes + excluded.response_bytes,
+            response_byte_samples = response_byte_samples + excluded.response_byte_samples,
+            output_bytes = output_bytes + excluded.output_bytes,
+            output_byte_samples = output_byte_samples + excluded.output_byte_samples,
+            context_bytes = context_bytes + excluded.context_bytes,
+            context_byte_samples = context_byte_samples + excluded.context_byte_samples,
+            search_result_bytes = search_result_bytes + excluded.search_result_bytes,
+            search_result_byte_samples =
+                search_result_byte_samples + excluded.search_result_byte_samples,
+            context_searches = context_searches + excluded.context_searches,
+            context_found = context_found + excluded.context_found,
+            context_opened = context_opened + excluded.context_opened,
+            context_cited = context_cited + excluded.context_cited,
+            validated_discoveries =
+                validated_discoveries + excluded.validated_discoveries
         "#,
         params![
             day,
@@ -328,9 +641,26 @@ fn record_at_with_ctx_version(
             operation.duration.as_str(),
             operation.target_type.as_str(),
             operation.pro_outcome.as_str(),
+            operation
+                .result_action
+                .map_or("not_applicable", super::ResultObservationAction::as_str),
             operation.result_count,
             operation.citation_count,
+            operation.latency_ms,
+            operation.latency_samples,
             operation.response_bytes,
+            operation.response_byte_samples,
+            operation.output_bytes,
+            operation.output_byte_samples,
+            operation.context_bytes,
+            operation.context_byte_samples,
+            operation.search_result_bytes,
+            operation.search_result_byte_samples,
+            operation.context.context_searches,
+            operation.context.context_found,
+            operation.context.context_opened,
+            operation.context.context_cited,
+            operation.context.validated_discoveries,
         ],
     )?;
     let last_retention_day = transaction
@@ -397,11 +727,16 @@ pub(super) fn fill_to_capacity_for_test(data_root: &Path) -> Result<String, Usag
         INSERT INTO daily_usage (
             day_utc, definition_version, ctx_version, surface, operation,
             outcome, value_class, duration_bucket, target_type, pro_outcome,
-            calls, result_count, citation_count, response_bytes
+            result_action, calls, result_count, citation_count, latency_ms,
+            latency_samples, response_bytes, response_byte_samples, output_bytes,
+            output_byte_samples, context_bytes, context_byte_samples,
+            search_result_bytes, search_result_byte_samples, context_searches,
+            context_found, context_opened, context_cited, validated_discoveries
         ) VALUES (
-            ?1, 1, ?2, 'cli', 'doctor', 'success',
+            ?1, 2, ?2, 'cli', 'doctor', 'success',
             'not_applicable', 'under_10_ms', 'not_applicable',
-            'not_applicable', 1, 0, 0, 0
+            'not_applicable', 'not_applicable', 1, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
         )
     "#;
     let mut next = 0_u64;
@@ -456,6 +791,155 @@ pub(super) fn record_with_ctx_version_for_test(
     )
 }
 
+#[cfg(test)]
+pub(super) fn create_mixed_v1_fixture_for_test(data_root: &Path) -> Result<(), UsageStoreError> {
+    create_private_directory_all(data_root)?;
+    verify_private_directory_and_owner(data_root)?;
+    let path = usage_path(data_root);
+    if path.exists() {
+        return Err(UsageStoreError::SchemaIdentity);
+    }
+    let mut conn = Connection::open_with_flags(
+        &path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_CREATE
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    conn.pragma_update(None, "page_size", PAGE_SIZE_BYTES)?;
+    let day = utc_day(SystemTime::now());
+    let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute_batch(DAILY_USAGE_SCHEMA_V1)?;
+    transaction.execute_batch(MAINTENANCE_SCHEMA)?;
+    let insert = r#"
+        INSERT INTO daily_usage (
+            day_utc, definition_version, ctx_version, surface, operation,
+            outcome, value_class, duration_bucket, target_type, pro_outcome,
+            calls, result_count, citation_count, response_bytes
+        ) VALUES (
+            ?1, 1, '0.25.0-legacy', ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+            ?9, ?10, ?11, ?12
+        )
+    "#;
+    for row in [
+        (
+            "cli",
+            "doctor",
+            "success",
+            "not_applicable",
+            "under_10_ms",
+            "not_applicable",
+            "not_applicable",
+            2_i64,
+            0_i64,
+            0_i64,
+            0_i64,
+        ),
+        (
+            "mcp",
+            "search",
+            "success",
+            "result_bearing",
+            "50_to_249_ms",
+            "not_applicable",
+            "not_applicable",
+            3,
+            6,
+            0,
+            900,
+        ),
+        (
+            "mcp",
+            "show_session",
+            "success",
+            "result_bearing",
+            "10_to_49_ms",
+            "not_applicable",
+            "not_applicable",
+            1,
+            2,
+            0,
+            300,
+        ),
+        (
+            "cli",
+            "blame",
+            "success",
+            "result_bearing",
+            "250_to_999_ms",
+            "commit",
+            "produced",
+            1,
+            1,
+            1,
+            0,
+        ),
+        (
+            "mcp",
+            "blame",
+            "success",
+            "empty",
+            "250_to_999_ms",
+            "file",
+            "possible",
+            1,
+            0,
+            0,
+            200,
+        ),
+        (
+            "mcp",
+            "search",
+            "failure",
+            "not_applicable",
+            "10_to_49_ms",
+            "not_applicable",
+            "not_applicable",
+            1,
+            0,
+            0,
+            100,
+        ),
+    ] {
+        transaction.execute(
+            insert,
+            params![
+                day, row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10
+            ],
+        )?;
+    }
+    transaction.execute(
+        "INSERT INTO maintenance(singleton, last_retention_day) VALUES (1, ?1)",
+        [day],
+    )?;
+    transaction.pragma_update(None, "application_id", APPLICATION_ID)?;
+    transaction.pragma_update(None, "user_version", LEGACY_SCHEMA_VERSION)?;
+    transaction.commit()?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    let _ = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    });
+    drop(conn);
+    protect_sqlite_files(&path)?;
+    Ok(())
+}
+
+#[cfg(test)]
+pub(super) fn fail_v1_migration_before_commit_for_test(
+    data_root: &Path,
+) -> Result<(), UsageStoreError> {
+    let path = usage_path(data_root);
+    let mut conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    configure_transient(&conn, BUSY_TIMEOUT)?;
+    migrate_to_current(&mut conn, || Err::<(), _>(UsageStoreError::Integrity))
+}
+
 pub(crate) struct ReadOnlyStore {
     conn: Connection,
     family_guard: FamilyGuard,
@@ -478,7 +962,8 @@ pub(crate) fn open_read_only(path: &Path) -> Result<ReadOnlyStore, UsageStoreErr
         return Err(UsageStoreError::UnsafeReadState);
     }
     let image = capture_checkpointed_image(path, &guard, || {})?;
-    let conn = deserialize_read_only(image)?;
+    let mut conn = deserialize_read_only(image)?;
+    migrate_to_current(&mut conn, || Ok(()))?;
     configure_report_connection(&conn)?;
     guard.recheck_unchanged(path)?;
     Ok(ReadOnlyStore {
@@ -570,7 +1055,8 @@ fn open_writable(
         }
         let image = capture_checkpointed_image(path, &guard, || {})?;
         let detached = deserialize_read_only(image)?;
-        super::report::validate_rows(&detached)?;
+        let schema_version = verify_supported_schema(&detached)?;
+        super::report::validate_rows_for_schema(&detached, schema_version)?;
         drop(detached);
         guard.recheck_unchanged(path)?;
         cleanup_stale_initializer_slots(path, SystemTime::now())?;
@@ -580,12 +1066,35 @@ fn open_writable(
     if newly_created {
         flags |= OpenFlags::SQLITE_OPEN_CREATE;
     }
-    let conn = Connection::open_with_flags(path, flags)?;
+    let mut conn = Connection::open_with_flags(path, flags)?;
     verify_same_file(path, guard.main_file())?;
     verify_single_link(guard.main_file())?;
-    verify_schema(&conn)?;
-    super::report::validate_rows(&conn)?;
+    let schema_version = verify_supported_schema(&conn)?;
+    super::report::validate_rows_for_schema(&conn, schema_version)?;
     configure_transient(&conn, busy_timeout)?;
+    if schema_version == LEGACY_SCHEMA_VERSION {
+        // A quiescent v1 store can have a WAL-mode main header without
+        // auxiliaries. Opening it natively creates fresh WAL/SHM files, which
+        // cannot be part of the pre-open family guard. Return to rollback
+        // journal mode before migration so the guarded family is main-only
+        // again; v2 persistent configuration restores WAL after commit.
+        let journal_mode: String =
+            conn.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+        if journal_mode != "wal" {
+            return Err(UsageStoreError::SchemaIdentity);
+        }
+        conn.pragma_update(None, "journal_mode", "DELETE")?;
+        let journal_mode: String =
+            conn.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+        if journal_mode != "delete" {
+            return Err(UsageStoreError::UnsafeReadState);
+        }
+        guard.recheck(&path)?;
+    }
+    migrate_to_current(&mut conn, || {
+        guard.recheck(path)?;
+        preflight_existing_family(path, true)
+    })?;
     configure_persistent(&conn)?;
     verify_schema(&conn)?;
     super::report::validate_rows(&conn)?;
@@ -810,7 +1319,86 @@ fn initialize_schema(conn: &mut Connection) -> Result<(), UsageStoreError> {
     Ok(())
 }
 
-fn verify_schema(conn: &Connection) -> Result<(), UsageStoreError> {
+fn migrate_to_current<T>(
+    conn: &mut Connection,
+    before_commit: impl FnOnce() -> Result<T, UsageStoreError>,
+) -> Result<(), UsageStoreError> {
+    match verify_supported_schema(conn)? {
+        SCHEMA_VERSION => return Ok(()),
+        LEGACY_SCHEMA_VERSION => {}
+        version => return Err(UsageStoreError::SchemaVersion(version)),
+    }
+    super::report::validate_rows_for_schema(conn, LEGACY_SCHEMA_VERSION)?;
+    let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute_batch("ALTER TABLE daily_usage RENAME TO daily_usage_v1;")?;
+    transaction.execute_batch(DAILY_USAGE_SCHEMA)?;
+    transaction.execute_batch(
+        r#"
+        INSERT INTO daily_usage (
+            day_utc, definition_version, ctx_version, surface, operation, outcome,
+            value_class, duration_bucket, target_type, pro_outcome, result_action,
+            calls, result_count, citation_count, latency_ms, latency_samples,
+            response_bytes, response_byte_samples, output_bytes, output_byte_samples,
+            context_bytes, context_byte_samples, search_result_bytes,
+            search_result_byte_samples, context_searches, context_found,
+            context_opened, context_cited, validated_discoveries
+        )
+        SELECT
+            day_utc,
+            2,
+            ctx_version,
+            surface,
+            operation,
+            outcome,
+            value_class,
+            duration_bucket,
+            target_type,
+            pro_outcome,
+            CASE
+                WHEN outcome != 'success' OR value_class = 'not_applicable'
+                    THEN 'not_applicable'
+                WHEN operation = 'search' THEN 'search'
+                WHEN surface = 'mcp' AND operation = 'show_session' THEN 'open_session'
+                WHEN surface = 'mcp' AND operation = 'show_event' THEN 'open_event'
+                WHEN operation = 'sources' THEN 'sources'
+                WHEN operation = 'sql' THEN 'sql'
+                WHEN operation = 'blame' THEN 'blame'
+                ELSE 'not_applicable'
+            END,
+            calls,
+            result_count,
+            citation_count,
+            0,
+            0,
+            response_bytes,
+            CASE WHEN surface = 'mcp' THEN calls ELSE 0 END,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+        FROM daily_usage_v1;
+        DROP TABLE daily_usage_v1;
+        "#,
+    )?;
+    transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    verify_schema(&transaction)?;
+    super::report::validate_rows(&transaction)?;
+    let commit_guard = before_commit()?;
+    transaction.commit()?;
+    drop(commit_guard);
+    verify_schema(conn)?;
+    super::report::validate_rows(conn)?;
+    Ok(())
+}
+
+pub(super) fn verify_supported_schema(conn: &Connection) -> Result<i64, UsageStoreError> {
     let page_size: i64 = conn.pragma_query_value(None, "page_size", |row| row.get(0))?;
     if page_size != PAGE_SIZE_BYTES {
         return Err(UsageStoreError::SchemaIdentity);
@@ -824,10 +1412,31 @@ fn verify_schema(conn: &Connection) -> Result<(), UsageStoreError> {
         return Err(UsageStoreError::ApplicationId);
     }
     let user_version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if user_version != SCHEMA_VERSION {
-        return Err(UsageStoreError::SchemaVersion(user_version));
-    }
     verify_schema_object_allowlist(conn)?;
+    match user_version {
+        LEGACY_SCHEMA_VERSION => {
+            verify_daily_schema(conn, DAILY_USAGE_SCHEMA_V1, EXPECTED_DAILY_COLUMNS_V1)?
+        }
+        SCHEMA_VERSION => verify_daily_schema(conn, DAILY_USAGE_SCHEMA, EXPECTED_DAILY_COLUMNS)?,
+        _ => return Err(UsageStoreError::SchemaVersion(user_version)),
+    }
+    verify_table_schema(conn, "maintenance", MAINTENANCE_SCHEMA)?;
+    Ok(user_version)
+}
+
+pub(super) fn verify_schema(conn: &Connection) -> Result<(), UsageStoreError> {
+    let version = verify_supported_schema(conn)?;
+    if version != SCHEMA_VERSION {
+        return Err(UsageStoreError::SchemaVersion(version));
+    }
+    Ok(())
+}
+
+fn verify_daily_schema(
+    conn: &Connection,
+    expected_schema: &str,
+    expected_columns: &[&str],
+) -> Result<(), UsageStoreError> {
     let mut statement = conn.prepare("PRAGMA table_info(daily_usage)")?;
     let columns = statement
         .query_map([], |row| row.get::<_, String>(1))?
@@ -835,12 +1444,11 @@ fn verify_schema(conn: &Connection) -> Result<(), UsageStoreError> {
     if columns
         .iter()
         .map(String::as_str)
-        .ne(EXPECTED_DAILY_COLUMNS.iter().copied())
+        .ne(expected_columns.iter().copied())
     {
         return Err(UsageStoreError::SchemaIdentity);
     }
-    verify_table_schema(conn, "daily_usage", DAILY_USAGE_SCHEMA)?;
-    verify_table_schema(conn, "maintenance", MAINTENANCE_SCHEMA)?;
+    verify_table_schema(conn, "daily_usage", expected_schema)?;
     Ok(())
 }
 

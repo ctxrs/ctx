@@ -1,5 +1,13 @@
 use super::*;
 
+fn assert_constraint_rejected(conn: &Connection, sql: &str) {
+    conn.execute_batch("SAVEPOINT invalid_row").unwrap();
+    let result = conn.execute(sql, []);
+    conn.execute_batch("ROLLBACK TO invalid_row; RELEASE invalid_row")
+        .unwrap();
+    assert!(result.is_err(), "{sql}");
+}
+
 #[test]
 fn daily_upsert_uses_closed_content_free_dimensions() {
     let root = private_tempdir();
@@ -105,31 +113,25 @@ fn value_classes_reconcile_successes_and_failures() {
 fn sqlite_rejects_unknown_and_cross_surface_operations() {
     let root = private_tempdir();
     store::record(root.path(), operation("doctor")).unwrap();
+    store::record(
+        root.path(),
+        mcp_operation("status", true, ValueClass::NotApplicable, 0),
+    )
+    .unwrap();
     let conn = Connection::open(usage_path(root.path())).unwrap();
-    for (surface, operation) in [
-        ("cli", "query=private-content"),
-        ("cli", "status"),
-        ("mcp", "unknown"),
-        ("cli", "show_session"),
-        ("mcp", "pro_manage"),
+    for sql in [
+        "UPDATE daily_usage SET operation = 'query=private-content' \
+         WHERE surface = 'cli' AND operation = 'doctor'",
+        "UPDATE daily_usage SET operation = 'status' \
+         WHERE surface = 'cli' AND operation = 'doctor'",
+        "UPDATE daily_usage SET operation = 'unknown' \
+         WHERE surface = 'mcp' AND operation = 'status'",
+        "UPDATE daily_usage SET operation = 'show_session' \
+         WHERE surface = 'cli' AND operation = 'doctor'",
+        "UPDATE daily_usage SET operation = 'pro_manage' \
+         WHERE surface = 'mcp' AND operation = 'status'",
     ] {
-        let result = conn.execute(
-            r#"
-            INSERT INTO daily_usage (
-                day_utc, definition_version, ctx_version, surface, operation,
-                outcome, value_class, duration_bucket, target_type, pro_outcome,
-                calls, result_count, citation_count, response_bytes
-            ) VALUES (
-                '2026-07-25', 1, ?1, ?2, ?3, 'success', 'not_applicable',
-                'under_10_ms', 'not_applicable', 'not_applicable', 1, 0, 0, 0
-            )
-            "#,
-            params![CTX_VERSION, surface, operation],
-        );
-        assert!(
-            result.is_err(),
-            "{surface}/{operation} unexpectedly persisted"
-        );
+        assert_constraint_rejected(&conn, sql);
     }
 }
 
@@ -137,47 +139,93 @@ fn sqlite_rejects_unknown_and_cross_surface_operations() {
 fn sqlite_enforces_counter_and_dimension_applicability_invariants() {
     let root = private_tempdir();
     store::record(root.path(), operation("doctor")).unwrap();
+    store::record(
+        root.path(),
+        mcp_operation("search", true, ValueClass::ResultBearing, 1),
+    )
+    .unwrap();
+    store::record(
+        root.path(),
+        mcp_operation("status", true, ValueClass::NotApplicable, 0),
+    )
+    .unwrap();
+    let mut open = mcp_operation("show_session", true, ValueClass::ResultBearing, 1);
+    open.context.context_opened = 1;
+    open.context.validated_discoveries = 1;
+    store::record(root.path(), open).unwrap();
     let conn = Connection::open(usage_path(root.path())).unwrap();
-    let invalid_rows = [
+    let invalid_updates = [
         // Failures are N/A and cannot retain result or citation counts.
-        "('2026-07-25',1,'0.26.0','mcp','search','failure','result_bearing','under_10_ms','not_applicable','not_applicable',1,1,0,20)",
+        "UPDATE daily_usage SET outcome = 'failure' \
+         WHERE surface = 'mcp' AND operation = 'search'",
         // Empty/N/A classes carry no exact result or citation totals.
-        "('2026-07-25',1,'0.26.0','mcp','search','success','empty','under_10_ms','not_applicable','not_applicable',1,1,0,20)",
-        // CLI result classification is defined only for blame.
-        "('2026-07-25',1,'0.26.0','cli','search','success','result_bearing','under_10_ms','not_applicable','not_applicable',1,1,0,0)",
+        "UPDATE daily_usage SET value_class = 'empty' \
+         WHERE surface = 'mcp' AND operation = 'search'",
+        // Result actions cannot be assigned to an unrelated operation.
+        "UPDATE daily_usage SET result_action = 'open_event' \
+         WHERE surface = 'mcp' AND operation = 'search'",
         // Successful result-capable operations must classify nonempty vs empty.
-        "('2026-07-25',1,'0.26.0','mcp','search','success','not_applicable','under_10_ms','not_applicable','not_applicable',1,0,0,20)",
-        "('2026-07-25',1,'0.26.0','cli','blame','success','not_applicable','under_10_ms','commit','none',1,0,0,0)",
+        "UPDATE daily_usage SET value_class = 'not_applicable', result_count = 0, \
+         context_bytes = 0, context_byte_samples = 0, search_result_bytes = 0, \
+         search_result_byte_samples = 0 \
+         WHERE surface = 'mcp' AND operation = 'search'",
         // Status operations have no result classification.
-        "('2026-07-25',1,'0.26.0','mcp','status','success','empty','under_10_ms','not_applicable','not_applicable',1,0,0,20)",
+        "UPDATE daily_usage SET value_class = 'empty', result_action = 'sources' \
+         WHERE surface = 'mcp' AND operation = 'status'",
         // Non-blame rows cannot carry target or Pro dimensions.
-        "('2026-07-25',1,'0.26.0','mcp','status','success','not_applicable','under_10_ms','file','not_applicable',1,0,0,20)",
+        "UPDATE daily_usage SET target_type = 'file' \
+         WHERE surface = 'mcp' AND operation = 'status'",
         // Successful MCP blame cannot use the pre-target N/A target.
-        "('2026-07-25',1,'0.26.0','mcp','blame','success','empty','under_10_ms','not_applicable','none',1,0,0,20)",
+        "UPDATE daily_usage SET operation = 'blame', value_class = 'empty', \
+         result_action = 'blame', pro_outcome = 'none' \
+         WHERE surface = 'mcp' AND operation = 'status'",
         // Transport bytes apply only to delivered MCP responses.
-        "('2026-07-25',1,'0.26.0','cli','doctor','success','not_applicable','under_10_ms','not_applicable','not_applicable',1,0,0,1)",
-        "('2026-07-25',1,'0.26.0','mcp','status','success','not_applicable','under_10_ms','not_applicable','not_applicable',1,0,0,0)",
+        "UPDATE daily_usage SET response_bytes = 1, response_byte_samples = 1 \
+         WHERE surface = 'cli' AND operation = 'doctor'",
+        "UPDATE daily_usage SET response_bytes = 0 \
+         WHERE surface = 'mcp' AND operation = 'status'",
+        // Search-result bytes are a strict subset of one-copy semantic bytes.
+        "UPDATE daily_usage SET search_result_bytes = context_bytes + 1 \
+         WHERE surface = 'mcp' AND operation = 'search'",
+        // Search correlation is bounded by calls and factual result counts.
+        "UPDATE daily_usage SET context_searches = calls + 1 \
+         WHERE surface = 'mcp' AND operation = 'search'",
+        "UPDATE daily_usage SET context_searches = 1, context_found = result_count + 1 \
+         WHERE surface = 'mcp' AND operation = 'search'",
+        "UPDATE daily_usage SET context_searches = 0, context_found = 1 \
+         WHERE surface = 'mcp' AND operation = 'search'",
+        // Open correlation is bounded, validation needs an open, and cite is
+        // closed until a real result action supports it.
+        "UPDATE daily_usage SET context_opened = calls + 1 \
+         WHERE surface = 'mcp' AND operation = 'show_session'",
+        "UPDATE daily_usage SET context_opened = 0, validated_discoveries = 1 \
+         WHERE surface = 'mcp' AND operation = 'show_session'",
+        "UPDATE daily_usage SET context_cited = 1 \
+         WHERE surface = 'mcp' AND operation = 'show_session'",
+        "UPDATE daily_usage SET context_found = 1 \
+         WHERE surface = 'mcp' AND operation = 'show_session'",
+        // Unrelated rows cannot carry correlation proxies.
+        "UPDATE daily_usage SET context_searches = 1 \
+         WHERE surface = 'mcp' AND operation = 'status'",
     ];
-    for values in invalid_rows {
-        let sql = format!(
-            "INSERT INTO daily_usage (
-                day_utc, definition_version, ctx_version, surface, operation,
-                outcome, value_class, duration_bucket, target_type, pro_outcome,
-                calls, result_count, citation_count, response_bytes
-             ) VALUES {values}"
-        );
-        assert!(conn.execute(&sql, []).is_err(), "{values}");
+    for sql in invalid_updates {
+        assert_constraint_rejected(&conn, sql);
     }
     conn.execute(
         r#"
         INSERT INTO daily_usage (
             day_utc, definition_version, ctx_version, surface, operation,
             outcome, value_class, duration_bucket, target_type, pro_outcome,
-            calls, result_count, citation_count, response_bytes
+            result_action, calls, result_count, citation_count, latency_ms,
+            latency_samples, response_bytes, response_byte_samples, output_bytes,
+            output_byte_samples, context_bytes, context_byte_samples,
+            search_result_bytes, search_result_byte_samples, context_searches,
+            context_found, context_opened, context_cited, validated_discoveries
         ) VALUES (
-            '2026-07-25', 1, '0.26.0', 'cli', 'blame', 'failure',
+            '2026-07-25', 2, '0.26.0', 'cli', 'blame', 'failure',
             'not_applicable', 'under_10_ms', 'not_applicable', 'error',
-            1, 0, 0, 0
+            'not_applicable', 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0
         )
         "#,
         [],
@@ -211,7 +259,7 @@ fn sqlite_identity_permissions_and_journal_policy_are_explicit() {
     assert_eq!(
         conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
             .unwrap(),
-        1
+        2
     );
     assert_eq!(
         conn.pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))

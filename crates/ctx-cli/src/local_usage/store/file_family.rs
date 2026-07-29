@@ -15,7 +15,7 @@ use rusqlite::{serialize::OwnedData, Connection, DatabaseName, OpenFlags};
 
 #[cfg(test)]
 use super::usage_path;
-use super::{verify_schema, UsageStoreError, MAX_DATABASE_BYTES, PAGE_SIZE_BYTES};
+use super::{verify_supported_schema, UsageStoreError, MAX_DATABASE_BYTES, PAGE_SIZE_BYTES};
 
 const MAX_FAMILY_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -267,8 +267,11 @@ pub(super) fn deserialize_read_only(image: Vec<u8>) -> Result<Connection, UsageS
             | OpenFlags::SQLITE_OPEN_CREATE
             | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )?;
-    conn.deserialize(DatabaseName::Main, data, true)?;
-    verify_schema(&conn)?;
+    // The detached image must be privately writable long enough to apply
+    // in-memory schema migrations. The source family is never opened by this
+    // connection, and the report path enables query_only before exposure.
+    conn.deserialize(DatabaseName::Main, data, false)?;
+    verify_supported_schema(&conn)?;
     Ok(conn)
 }
 

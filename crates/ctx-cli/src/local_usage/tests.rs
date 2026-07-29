@@ -13,13 +13,15 @@ use ctx_pro_host_protocol::{
     BlameMatch, BlameResult, BlameTarget, CommitBlameMatch, CommitFactType, CommitPredicate,
     FactConfidence, FactState, ResolvedBlameTarget, ResourceKind, ResourceRef,
 };
-use rusqlite::{params, Connection, ErrorCode};
+use rusqlite::{Connection, ErrorCode};
 use serde_json::json;
 
 use super::store::usage_path;
 use super::{
-    read_report, reset, store, CliUsage, CompletedOperation, McpInvocation, ProOutcome, Surface,
-    TargetType, ValueClass, CTX_VERSION, DEFINITION_VERSION,
+    estimate_usage, read_report, reset, store, CliUsage, CompletedOperation,
+    EphemeralContextCorrelation, EstimateCoverage, EstimateFacts, McpInvocation, McpUsageRecorder,
+    ProOutcome, ResultObservationAction, Surface, TargetType, ValueClass,
+    CONTEXT_CORRELATION_MAX_RECORDS, CTX_VERSION, DEFINITION_VERSION, ESTIMATE_MODEL,
 };
 
 mod schema_tests;
@@ -160,8 +162,204 @@ fn mcp_operation(
         pro_outcome: ProOutcome::NotApplicable,
         result_count,
         citation_count: 0,
+        result_action: success
+            .then(|| super::result_observation_action(name))
+            .flatten(),
+        latency_ms: 1,
+        latency_samples: 1,
         response_bytes: 100,
+        response_byte_samples: 1,
+        output_bytes: 0,
+        output_byte_samples: 0,
+        context_bytes: if success && value_class != ValueClass::NotApplicable {
+            100
+        } else {
+            0
+        },
+        context_byte_samples: u64::from(success && value_class != ValueClass::NotApplicable),
+        search_result_bytes: if name == "search" && success && result_count > 0 {
+            100
+        } else {
+            0
+        },
+        search_result_byte_samples: u64::from(name == "search" && success && result_count > 0),
+        context: super::ContextUsage::default(),
     }
+}
+
+#[test]
+fn cli_result_observation_is_content_free_and_search_scoped() {
+    let mut search = CliUsage::excluded();
+    search.operation = Some("search");
+    search.set_result_observation(ResultObservationAction::Search, 3, 1, 640);
+    search.set_semantic_context_bytes(640);
+    search.set_measured_output_bytes(701);
+    search.add_context_usage(super::ContextUsage {
+        context_searches: 1,
+        context_found: 3,
+        ..super::ContextUsage::default()
+    });
+    let completed = search.completed(true, Duration::from_millis(17)).unwrap();
+    assert_eq!(
+        completed.result_metadata_for_test(),
+        (ValueClass::ResultBearing, 3, 1)
+    );
+    assert_eq!(completed.response_bytes, 0);
+    assert_eq!(completed.output_bytes, 701);
+    assert_eq!(completed.context_bytes, 640);
+    assert_eq!(completed.context_byte_samples, 1);
+    assert_eq!(completed.search_result_bytes, 640);
+    assert_eq!(completed.search_result_byte_samples, 1);
+    assert_eq!(completed.context.context_searches, 1);
+    assert_eq!(completed.context.context_found, 3);
+
+    let mut show = CliUsage::excluded();
+    show.operation = Some("show");
+    show.set_result_observation(ResultObservationAction::OpenSession, 1, 0, 320);
+    let completed = show.completed(true, Duration::from_millis(5)).unwrap();
+    assert_eq!(completed.response_bytes, 0);
+    assert_eq!(completed.output_bytes, 0);
+    assert_eq!(completed.context_bytes, 320);
+    assert_eq!(completed.context_byte_samples, 1);
+    assert_eq!(
+        completed.search_result_bytes, 0,
+        "a mismatched observation cannot apply the search estimate input"
+    );
+
+    assert!(CliUsage::excluded()
+        .completed(true, Duration::ZERO)
+        .is_none());
+}
+
+#[test]
+fn ephemeral_context_correlation_deduplicates_without_resetting_state() {
+    let mut correlation = EphemeralContextCorrelation::default();
+    correlation.record_search();
+    correlation.record_found("known");
+    correlation.record_opened(&"known");
+    correlation.record_cited(&"known");
+    correlation.record_found("known");
+    correlation.record_opened(&"known");
+    correlation.record_cited(&"known");
+    correlation.record_opened(&"unknown");
+    correlation.record_cited(&"unknown");
+
+    let usage = correlation.finish();
+    assert_eq!(usage.context_searches, 1);
+    assert_eq!(usage.context_found, 1);
+    assert_eq!(usage.context_opened, 1);
+    assert_eq!(usage.context_cited, 1);
+    assert_eq!(usage.validated_discoveries, 1);
+}
+
+#[test]
+fn cite_only_validation_has_no_open_time_estimate() {
+    let mut correlation = EphemeralContextCorrelation::default();
+    correlation.record_found("cited-only");
+    correlation.record_cited(&"cited-only");
+    let usage = correlation.finish();
+    assert_eq!(usage.context_opened, 0);
+    assert_eq!(usage.context_cited, 1);
+    assert_eq!(usage.validated_discoveries, 1);
+
+    let estimates = estimate_usage(EstimateFacts {
+        discovered_record_opens: usage.context_opened,
+        ..EstimateFacts::default()
+    });
+    assert_eq!(estimates.estimated_time_saved_seconds, 0);
+}
+
+#[test]
+fn estimate_model_uses_approved_coefficients_and_one_copy_bytes() {
+    let estimates = estimate_usage(EstimateFacts {
+        result_bearing_searches: 2,
+        semantic_context_eligible_samples: 4,
+        semantic_context_bytes: 40,
+        semantic_context_byte_samples: 4,
+        semantic_search_result_bytes: 8,
+        semantic_search_result_byte_samples: 2,
+        discovered_record_opens: 2,
+        produced_blame_requests: 1,
+        possible_blame_requests: 1,
+    });
+
+    assert_eq!(ESTIMATE_MODEL.approximate_bytes_per_token, 4);
+    assert_eq!(ESTIMATE_MODEL.avoided_search_token_multiplier, 49);
+    assert_eq!(
+        estimates.approximate_context_tokens.approximate_tokens,
+        Some(10)
+    );
+    assert_eq!(
+        estimates
+            .approximate_avoided_context_tokens
+            .approximate_tokens,
+        Some(98)
+    );
+    assert_eq!(
+        estimates.estimated_time_saved_seconds,
+        2 * 60 + 2 * 15 + 300 + 120
+    );
+}
+
+#[test]
+fn legacy_missing_semantic_measurements_are_named_and_not_fabricated_zero() {
+    let estimates = estimate_usage(EstimateFacts {
+        result_bearing_searches: 3,
+        semantic_context_eligible_samples: 4,
+        ..EstimateFacts::default()
+    });
+
+    assert_eq!(
+        estimates.approximate_context_tokens.coverage,
+        EstimateCoverage::UnavailableLegacy
+    );
+    assert_eq!(
+        estimates.approximate_context_tokens.approximate_tokens,
+        None
+    );
+    assert_eq!(
+        estimates.approximate_avoided_context_tokens.coverage,
+        EstimateCoverage::UnavailableLegacy
+    );
+    assert_eq!(
+        estimates
+            .approximate_avoided_context_tokens
+            .approximate_tokens,
+        None
+    );
+    assert_eq!(estimates.estimated_time_saved_seconds, 3 * 60);
+    assert_eq!(
+        serde_json::to_value(estimates).unwrap()["approximate_context_tokens"]["coverage"],
+        "unavailable_legacy"
+    );
+
+    let no_eligible_actions = estimate_usage(EstimateFacts::default());
+    assert_eq!(
+        no_eligible_actions.approximate_context_tokens.coverage,
+        EstimateCoverage::Complete
+    );
+    assert_eq!(
+        no_eligible_actions
+            .approximate_context_tokens
+            .approximate_tokens,
+        Some(0)
+    );
+}
+
+#[test]
+fn ephemeral_context_correlation_drops_new_keys_at_its_fixed_cap() {
+    let mut correlation = EphemeralContextCorrelation::default();
+    for key in 0..CONTEXT_CORRELATION_MAX_RECORDS + 8 {
+        correlation.record_found(key);
+    }
+    correlation.record_opened(&0);
+    correlation.record_cited(&(CONTEXT_CORRELATION_MAX_RECORDS + 1));
+
+    let usage = correlation.finish();
+    assert_eq!(usage.context_found, CONTEXT_CORRELATION_MAX_RECORDS as u64);
+    assert_eq!(usage.context_opened, 1);
+    assert_eq!(usage.context_cited, 0);
+    assert_eq!(usage.validated_discoveries, 1);
 }
 
 #[cfg(unix)]
@@ -223,11 +421,16 @@ fn reporting_never_changes_checkpointed_or_active_sqlite_families() {
         INSERT INTO daily_usage (
             day_utc, definition_version, ctx_version, surface, operation,
             outcome, value_class, duration_bucket, target_type, pro_outcome,
-            calls, result_count, citation_count, response_bytes
+            result_action, calls, result_count, citation_count, latency_ms,
+            latency_samples, response_bytes, response_byte_samples, output_bytes,
+            output_byte_samples, context_bytes, context_byte_samples,
+            search_result_bytes, search_result_byte_samples, context_searches,
+            context_found, context_opened, context_cited, validated_discoveries
         ) VALUES (
-            date('now'), 1, '0.26.0-active-wal', 'cli', 'doctor',
+            date('now'), 2, '0.26.0-active-wal', 'cli', 'doctor',
             'success', 'not_applicable', '10_to_49_ms', 'not_applicable',
-            'not_applicable', 1, 0, 0, 0
+            'not_applicable', 'not_applicable', 1, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
         )
         "#,
         [],
@@ -241,6 +444,309 @@ fn reporting_never_changes_checkpointed_or_active_sqlite_families() {
     assert_eq!(report.error.unwrap().code, "usage_store_unavailable");
     assert_eq!(directory_bytes(root.path()), active_before);
     drop(conn);
+}
+
+#[test]
+fn v1_detached_read_migration_preserves_the_entire_source_family() {
+    let root = private_tempdir();
+    store::create_mixed_v1_fixture_for_test(root.path()).unwrap();
+    let path = usage_path(root.path());
+    let before = sqlite_family_snapshot(&path);
+
+    let report = read_report(root.path(), true, true);
+    assert_eq!(report.state, "ready", "{:?}", report.error);
+    let summary = report.summary.unwrap();
+    assert_eq!(summary.calls, 9);
+    assert_eq!(summary.result_count, 9);
+    assert_eq!(summary.citation_count, 1);
+    assert_eq!(summary.pro_blame.citation_count, 1);
+    assert_eq!(summary.mcp_response_bytes, 1_500);
+    assert_eq!(summary.mcp_response_byte_samples, 6);
+    assert_eq!(summary.cli_output_bytes, 0);
+    assert_eq!(summary.cli_output_byte_samples, 0);
+    assert_eq!(summary.measured_latency_samples, 0);
+    assert_eq!(summary.semantic_context_bytes, 0);
+    assert_eq!(summary.semantic_context_byte_samples, 0);
+    assert_eq!(summary.semantic_search_result_bytes, 0);
+    assert_eq!(summary.semantic_search_result_byte_samples, 0);
+    assert_eq!(summary.result_actions.searches, 3);
+    assert_eq!(summary.result_actions.result_bearing_searches, 3);
+    assert_eq!(summary.result_actions.sessions_opened, 1);
+    assert_eq!(summary.result_actions.blame_requests, 2);
+    assert_eq!(summary.context.context_found, 0);
+    assert_eq!(summary.context.context_opened, 0);
+    let estimates = report.estimates.unwrap();
+    assert_eq!(
+        estimates.approximate_context_tokens.coverage,
+        EstimateCoverage::UnavailableLegacy
+    );
+    assert_eq!(
+        estimates.approximate_context_tokens.approximate_tokens,
+        None
+    );
+    assert_eq!(
+        estimates.approximate_avoided_context_tokens.coverage,
+        EstimateCoverage::UnavailableLegacy
+    );
+    assert_eq!(
+        estimates
+            .approximate_avoided_context_tokens
+            .approximate_tokens,
+        None
+    );
+    assert_eq!(estimates.estimated_time_saved_seconds, 600);
+    assert_eq!(sqlite_family_snapshot(&path), before);
+
+    let conn = Connection::open(path).unwrap();
+    assert_eq!(
+        conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn v1_writable_migration_preserves_facts_and_leaves_new_measurements_unknown() {
+    let root = private_tempdir();
+    store::create_mixed_v1_fixture_for_test(root.path()).unwrap();
+    store::growth_policy_for_test(root.path()).unwrap();
+    let path = usage_path(root.path());
+    let conn = Connection::open(&path).unwrap();
+    assert_eq!(
+        conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    let migrated = conn
+        .query_row(
+            r#"
+            SELECT
+                SUM(calls), SUM(result_count), SUM(citation_count),
+                SUM(response_bytes), SUM(response_byte_samples),
+                SUM(latency_ms), SUM(latency_samples),
+                SUM(output_bytes), SUM(output_byte_samples),
+                SUM(context_bytes), SUM(context_byte_samples),
+                SUM(search_result_bytes), SUM(search_result_byte_samples),
+                SUM(context_searches), SUM(context_found), SUM(context_opened),
+                SUM(context_cited), SUM(validated_discoveries),
+                MIN(definition_version), MAX(definition_version)
+            FROM daily_usage
+            "#,
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, i64>(9)?,
+                    row.get::<_, i64>(10)?,
+                    row.get::<_, i64>(11)?,
+                    row.get::<_, i64>(12)?,
+                    row.get::<_, i64>(13)?,
+                    row.get::<_, i64>(14)?,
+                    row.get::<_, i64>(15)?,
+                    row.get::<_, i64>(16)?,
+                    row.get::<_, i64>(17)?,
+                    row.get::<_, i64>(18)?,
+                    row.get::<_, i64>(19)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(migrated.0, 9);
+    assert_eq!(migrated.1, 9);
+    assert_eq!(migrated.2, 1);
+    assert_eq!(migrated.3, 1_500);
+    assert_eq!(migrated.4, 6);
+    assert_eq!(
+        [
+            migrated.5,
+            migrated.6,
+            migrated.7,
+            migrated.8,
+            migrated.9,
+            migrated.10,
+            migrated.11,
+            migrated.12,
+            migrated.13,
+            migrated.14,
+            migrated.15,
+            migrated.16,
+            migrated.17,
+        ],
+        [0; 13]
+    );
+    assert_eq!((migrated.18, migrated.19), (2, 2));
+    drop(conn);
+
+    store::growth_policy_for_test(root.path()).unwrap();
+    let report = read_report(root.path(), true, false);
+    assert_eq!(report.summary.unwrap().calls, 9);
+    assert_eq!(
+        report
+            .estimates
+            .unwrap()
+            .approximate_avoided_context_tokens
+            .coverage,
+        EstimateCoverage::UnavailableLegacy
+    );
+
+    store::record(
+        root.path(),
+        mcp_operation("search", true, ValueClass::ResultBearing, 1),
+    )
+    .unwrap();
+    let report = read_report(root.path(), true, false);
+    assert_eq!(
+        report
+            .estimates
+            .unwrap()
+            .approximate_avoided_context_tokens
+            .coverage,
+        EstimateCoverage::Partial
+    );
+}
+
+#[test]
+fn v1_migration_rolls_back_before_commit_and_unknown_versions_fail_closed() {
+    let rollback = private_tempdir();
+    store::create_mixed_v1_fixture_for_test(rollback.path()).unwrap();
+    let rollback_path = usage_path(rollback.path());
+    let before = sqlite_family_snapshot(&rollback_path);
+    assert!(matches!(
+        store::fail_v1_migration_before_commit_for_test(rollback.path()),
+        Err(store::UsageStoreError::Integrity)
+    ));
+    assert_eq!(sqlite_family_snapshot(&rollback_path), before);
+    let conn = Connection::open(&rollback_path).unwrap();
+    assert_eq!(
+        conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE name = 'daily_usage_v1'",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    drop(conn);
+
+    let unknown = private_tempdir();
+    store::create_mixed_v1_fixture_for_test(unknown.path()).unwrap();
+    let unknown_path = usage_path(unknown.path());
+    let conn = Connection::open(&unknown_path).unwrap();
+    conn.pragma_update(None, "user_version", 99).unwrap();
+    drop(conn);
+    let before = sqlite_family_snapshot(&unknown_path);
+    assert_eq!(read_report(unknown.path(), true, false).state, "error");
+    assert!(matches!(
+        store::growth_policy_for_test(unknown.path()),
+        Err(store::UsageStoreError::SchemaVersion(99))
+    ));
+    assert_eq!(sqlite_family_snapshot(&unknown_path), before);
+}
+
+#[test]
+fn report_rejects_semantic_sample_coverage_above_eligible_actions() {
+    let root = private_tempdir();
+    store::record(
+        root.path(),
+        mcp_operation("status", true, ValueClass::NotApplicable, 0),
+    )
+    .unwrap();
+    let path = usage_path(root.path());
+    let conn = Connection::open(&path).unwrap();
+    conn.pragma_update(None, "ignore_check_constraints", true)
+        .unwrap();
+    conn.execute(
+        "UPDATE daily_usage SET context_bytes = 20, context_byte_samples = 1",
+        [],
+    )
+    .unwrap();
+    conn.pragma_update(None, "ignore_check_constraints", false)
+        .unwrap();
+    drop(conn);
+    assert_eq!(read_report(root.path(), true, false).state, "error");
+}
+
+#[test]
+fn blame_citations_are_separate_from_global_delivery_citations() {
+    let root = private_tempdir();
+    let mut search = mcp_operation("search", true, ValueClass::ResultBearing, 1);
+    search.citation_count = 3;
+    store::record(root.path(), search).unwrap();
+
+    let mut blame = mcp_operation("blame", true, ValueClass::ResultBearing, 1);
+    blame.target_type = TargetType::Commit;
+    blame.pro_outcome = ProOutcome::Produced;
+    blame.citation_count = 2;
+    store::record(root.path(), blame).unwrap();
+
+    let report = read_report(root.path(), true, false);
+    assert_eq!(report.state, "ready", "{:?}", report.error);
+    let summary = report.summary.unwrap();
+    assert_eq!(summary.citation_count, 5);
+    assert_eq!(summary.pro_blame.citation_count, 2);
+}
+
+#[test]
+fn report_rejects_aggregate_correlation_counts_that_exceed_found_results() {
+    let root = private_tempdir();
+    let mut search = mcp_operation("search", true, ValueClass::ResultBearing, 1);
+    search.context.context_searches = 1;
+    search.context.context_found = 1;
+    store::record(root.path(), search).unwrap();
+
+    for operation in ["show_session", "show_event"] {
+        let mut opened = mcp_operation(operation, true, ValueClass::ResultBearing, 1);
+        opened.context.context_opened = 1;
+        opened.context.validated_discoveries = 1;
+        store::record(root.path(), opened).unwrap();
+    }
+
+    assert_eq!(read_report(root.path(), true, false).state, "error");
+}
+
+#[test]
+fn reset_migrates_v1_then_logically_deletes_every_aggregate() {
+    let root = private_tempdir();
+    store::create_mixed_v1_fixture_for_test(root.path()).unwrap();
+    assert!(reset(root.path()).unwrap());
+    let report = read_report(root.path(), true, true);
+    assert_eq!(report.state, "empty");
+    assert_eq!(report.summary.unwrap().calls, 0);
+    let conn = Connection::open(usage_path(root.path())).unwrap();
+    assert_eq!(
+        conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+}
+
+#[test]
+fn warm_report_read_latency_has_a_small_sanity_ceiling() {
+    let root = private_tempdir();
+    for _ in 0..8 {
+        store::record(root.path(), operation("search")).unwrap();
+    }
+    let started = Instant::now();
+    for _ in 0..25 {
+        assert_eq!(read_report(root.path(), true, true).state, "ready");
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "25 local usage reads exceeded the sanity ceiling"
+    );
 }
 
 #[test]
@@ -1000,6 +1506,185 @@ fn recognized_mcp_calls_are_classified_from_the_flushed_response_shape() {
 }
 
 #[test]
+fn mcp_search_keeps_wire_and_single_structured_result_bytes_separate() {
+    let results = json!([
+        {"ctx_event_id": "one", "content": "first semantic result"},
+        {"ctx_event_id": "two", "content": "second semantic result"}
+    ]);
+    let semantic_bytes = serde_json::to_vec(&results).unwrap().len() as u64;
+    let response = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+            "content": [{
+                "type": "text",
+                "text": "first semantic result\nsecond semantic result"
+            }],
+            "structuredContent": {"results": results.clone()}
+        }
+    });
+    let wire_bytes = 4_096;
+    let context_bytes = serde_json::to_vec(&json!({"results": results}))
+        .unwrap()
+        .len() as u64;
+    let completed = McpInvocation::recognized("search").unwrap().completed(
+        &response,
+        Duration::from_millis(8),
+        wire_bytes,
+    );
+    assert_eq!(completed.response_bytes, wire_bytes as u64);
+    assert_eq!(completed.response_byte_samples, 1);
+    assert_eq!(completed.context_bytes, context_bytes);
+    assert_eq!(completed.context_byte_samples, 1);
+    assert_eq!(completed.search_result_bytes, semantic_bytes);
+    assert_eq!(completed.search_result_byte_samples, 1);
+    assert!(completed.search_result_bytes <= completed.context_bytes);
+    assert_ne!(completed.search_result_bytes, completed.response_bytes);
+    assert_eq!(
+        completed.result_action,
+        Some(ResultObservationAction::Search)
+    );
+
+    let estimates = estimate_usage(EstimateFacts {
+        result_bearing_searches: 1,
+        semantic_context_eligible_samples: 1,
+        semantic_context_bytes: completed.context_bytes,
+        semantic_context_byte_samples: completed.context_byte_samples,
+        semantic_search_result_bytes: completed.search_result_bytes,
+        semantic_search_result_byte_samples: completed.search_result_byte_samples,
+        ..EstimateFacts::default()
+    });
+    assert_eq!(
+        estimates.approximate_context_tokens.approximate_tokens,
+        Some((context_bytes + 3) / 4)
+    );
+    assert_eq!(
+        estimates
+            .approximate_avoided_context_tokens
+            .approximate_tokens,
+        Some(((semantic_bytes + 3) / 4) * 49)
+    );
+}
+
+#[test]
+fn mcp_status_payloads_measure_transport_but_not_semantic_context() {
+    for operation in ["status", "pro_status"] {
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [{"type": "text", "text": "healthy"}],
+                "structuredContent": {"health": "healthy"}
+            }
+        });
+        let completed = McpInvocation::recognized(operation).unwrap().completed(
+            &response,
+            Duration::from_millis(2),
+            512,
+        );
+        assert_eq!(completed.response_bytes, 512);
+        assert_eq!(completed.response_byte_samples, 1);
+        assert_eq!(completed.context_bytes, 0);
+        assert_eq!(completed.context_byte_samples, 0);
+        assert_eq!(completed.search_result_bytes, 0);
+        assert_eq!(completed.search_result_byte_samples, 0);
+    }
+}
+
+#[test]
+fn mcp_correlation_uses_one_scope_key_and_never_validates_more_than_found() {
+    let root = private_tempdir();
+    let mut recorder = McpUsageRecorder::start(root.path().to_path_buf());
+    let search_response = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+            "structuredContent": {
+                "results": [{
+                    "result_scope": "session",
+                    "result_type": "session_result",
+                    "ctx_session_id": "session-1",
+                    "ctx_event_id": "event-1"
+                }]
+            }
+        }
+    });
+    let search = McpInvocation::recognized("search").unwrap();
+    let mut search_operation = search.completed(&search_response, Duration::ZERO, 200);
+    recorder.correlate_delivered(search, &search_response, &mut search_operation);
+    assert_eq!(search_operation.context.context_found, 1);
+
+    let show_response = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": {"structuredContent": {"events": [{}]}}
+    });
+    let mut show_session = McpInvocation::recognized("show_session").unwrap();
+    show_session.bind_context_target("session-1".to_owned());
+    let mut session_operation = show_session.completed(&show_response, Duration::ZERO, 100);
+    recorder.correlate_delivered(show_session, &show_response, &mut session_operation);
+    assert_eq!(session_operation.context.validated_discoveries, 1);
+
+    let mut show_event = McpInvocation::recognized("show_event").unwrap();
+    show_event.bind_context_target("event-1".to_owned());
+    let mut event_operation = show_event.completed(&show_response, Duration::ZERO, 100);
+    recorder.correlate_delivered(show_event.clone(), &show_response, &mut event_operation);
+    assert_eq!(event_operation.context.validated_discoveries, 0);
+    let mut duplicate_event_operation = show_event.completed(&show_response, Duration::ZERO, 100);
+    recorder.correlate_delivered(show_event, &show_response, &mut duplicate_event_operation);
+    assert_eq!(duplicate_event_operation.context.validated_discoveries, 0);
+
+    let repeated_search = McpInvocation::recognized("search").unwrap();
+    let mut repeated_operation = repeated_search.completed(&search_response, Duration::ZERO, 200);
+    recorder.correlate_delivered(
+        repeated_search.clone(),
+        &search_response,
+        &mut repeated_operation,
+    );
+    assert_eq!(repeated_operation.context.context_found, 0);
+
+    let event_search_response = json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "result": {
+            "structuredContent": {
+                "results": [{
+                    "result_scope": "event",
+                    "result_type": "event",
+                    "ctx_session_id": "session-1",
+                    "ctx_event_id": "event-1"
+                }]
+            }
+        }
+    });
+    let mut event_search_operation =
+        repeated_search.completed(&event_search_response, Duration::ZERO, 200);
+    recorder.correlate_delivered(
+        repeated_search,
+        &event_search_response,
+        &mut event_search_operation,
+    );
+    assert_eq!(event_search_operation.context.context_found, 1);
+
+    let mut show_event = McpInvocation::recognized("show_event").unwrap();
+    show_event.bind_context_target("event-1".to_owned());
+    let mut event_operation = show_event.completed(&show_response, Duration::ZERO, 100);
+    recorder.correlate_delivered(show_event, &show_response, &mut event_operation);
+    assert_eq!(event_operation.context.validated_discoveries, 1);
+
+    let found = search_operation
+        .context
+        .context_found
+        .saturating_add(repeated_operation.context.context_found)
+        .saturating_add(event_search_operation.context.context_found);
+    let validated = session_operation
+        .context
+        .validated_discoveries
+        .saturating_add(event_operation.context.validated_discoveries);
+    assert!(validated <= found, "validated={validated} found={found}");
+}
+
+#[test]
 fn mcp_blame_classification_reads_only_typed_match_fields() {
     let response = json!({
         "jsonrpc": "2.0",
@@ -1191,7 +1876,7 @@ fn mcp_recorder_observes_same_size_and_mtime_persistent_disable() {
     let response = json!({"jsonrpc": "2.0", "id": 1, "result": {
         "structuredContent": {"schema_version": 1}
     }});
-    recorder.record_delivered(invocation, &response, Duration::ZERO, 40);
+    recorder.record_delivered(invocation.clone(), &response, Duration::ZERO, 40);
     fs::write(&config_path, "[local_usage]\nenabled = false\n").unwrap();
     assert_eq!(config_path.metadata().unwrap().len(), original_len);
     fs::File::options()
@@ -1218,9 +1903,9 @@ fn mcp_recorder_retains_last_known_control_only_on_unrelated_config_failure() {
     let response = json!({"jsonrpc": "2.0", "id": 1, "result": {
         "structuredContent": {"schema_version": 1}
     }});
-    recorder.record_delivered(invocation, &response, Duration::ZERO, 40);
+    recorder.record_delivered(invocation.clone(), &response, Duration::ZERO, 40);
     fs::write(&config_path, "unrelated malformed line\n").unwrap();
-    recorder.record_delivered(invocation, &response, Duration::ZERO, 40);
+    recorder.record_delivered(invocation.clone(), &response, Duration::ZERO, 40);
     assert_eq!(
         read_report(root.path(), true, false).summary.unwrap().calls,
         2
@@ -1272,9 +1957,9 @@ fn malformed_local_control_disables_mcp_refresh_and_startup() {
         let config_path = root.path().join("config.toml");
         fs::write(&config_path, "[local_usage]\nenabled = true\n").unwrap();
         let mut recorder = super::McpUsageRecorder::start(root.path().to_path_buf());
-        recorder.record_delivered(invocation, &response, Duration::ZERO, 40);
+        recorder.record_delivered(invocation.clone(), &response, Duration::ZERO, 40);
         fs::write(&config_path, malformed).unwrap();
-        recorder.record_delivered(invocation, &response, Duration::ZERO, 40);
+        recorder.record_delivered(invocation.clone(), &response, Duration::ZERO, 40);
         assert_eq!(
             read_report(root.path(), true, false).summary.unwrap().calls,
             1,
@@ -1284,7 +1969,7 @@ fn malformed_local_control_disables_mcp_refresh_and_startup() {
         let startup = private_tempdir();
         fs::write(startup.path().join("config.toml"), malformed).unwrap();
         let mut recorder = super::McpUsageRecorder::start(startup.path().to_path_buf());
-        recorder.record_delivered(invocation, &response, Duration::ZERO, 40);
+        recorder.record_delivered(invocation.clone(), &response, Duration::ZERO, 40);
         assert!(!usage_path(startup.path()).exists(), "{name}");
     }
 }
@@ -1377,7 +2062,7 @@ fn recording_hot_path_benchmark_smoke() {
         "local usage warm upsert exceeded its release p99 contract: \
          p50={p50:?} p90={p90:?} p95={p95:?} p99={p99:?} max={maximum:?}"
     );
-    assert_eq!(DEFINITION_VERSION, 1);
+    assert_eq!(DEFINITION_VERSION, 2);
 }
 
 #[test]
