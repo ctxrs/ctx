@@ -1,6 +1,6 @@
 use std::{
     collections::HashSet,
-    io::{BufReader, Read},
+    io::{BufReader, Read, Write},
     path::{Component, Path, PathBuf},
 };
 
@@ -10,7 +10,6 @@ use crate::common::io::{
     open_provider_source_path, read_provider_jsonl_line_or_skip_oversized,
     OpenedProviderSourceFile, OpenedProviderSourcePath, ProviderJsonlLineRead, ProviderSourceRoot,
 };
-use crate::provider::importer::BoundedParserCheckpoint;
 use crate::provider::normalization::provider_local_preview;
 use crate::provider::provider_safe_path_segment;
 use crate::{CaptureError, ProviderImportFailure, Result, PROVIDER_MAX_PREVIEW_CHARS};
@@ -374,10 +373,7 @@ pub(super) fn bounded_junie_index_meta(meta: &JunieIndexMeta) -> JunieIndexMeta 
         .project_dir
         .as_deref()
         .map(|value| provider_local_preview(value, PROVIDER_MAX_PREVIEW_CHARS).0);
-    let raw = BoundedParserCheckpoint::from_serializable(&meta.raw)
-        .ok()
-        .filter(|checkpoint| checkpoint.as_bytes().len() <= MAX_JUNIE_INDEX_METADATA_BYTES)
-        .and_then(|checkpoint| checkpoint.deserialize::<Value>().ok())
+    let raw = bounded_junie_metadata(&meta.raw)
         .unwrap_or_else(|| {
             json!({
                 "sessionId": &session_id,
@@ -395,6 +391,41 @@ pub(super) fn bounded_junie_index_meta(meta: &JunieIndexMeta) -> JunieIndexMeta 
         task_name,
         project_dir,
         raw,
+    }
+}
+
+fn bounded_junie_metadata(value: &Value) -> Option<Value> {
+    let mut writer = BoundedJsonWriter {
+        bytes: Vec::new(),
+        maximum: MAX_JUNIE_INDEX_METADATA_BYTES,
+    };
+    serde_json::to_writer(&mut writer, value).ok()?;
+    serde_json::from_slice(&writer.bytes).ok()
+}
+
+struct BoundedJsonWriter {
+    bytes: Vec<u8>,
+    maximum: usize,
+}
+
+impl Write for BoundedJsonWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let next = self
+            .bytes
+            .len()
+            .checked_add(buffer.len())
+            .ok_or_else(|| std::io::Error::other("Junie metadata length overflow"))?;
+        if next > self.maximum {
+            return Err(std::io::Error::other(
+                "Junie metadata exceeds its byte bound",
+            ));
+        }
+        self.bytes.extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 

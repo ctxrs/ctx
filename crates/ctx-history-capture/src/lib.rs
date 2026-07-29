@@ -77,7 +77,6 @@ pub mod complete_content;
 
 pub(crate) mod native_source;
 mod pro_output;
-pub(crate) mod released_jsonl_cursor;
 pub use pro_output::{
     ImportProfile, OutputAssociations, OutputCommandContext, OutputNativeCoordinate,
     OutputNativeCursor, OutputObservationKind, OutputOutcome, OutputOutcomeMetadata,

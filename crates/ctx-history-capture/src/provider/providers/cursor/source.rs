@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     provider::{
-        importer::provider_path_identity,
+        provider_path_identity,
         native_ingestion::{
             process_pro_replay_only, NativePageAccounting, NativeProOutputPage,
             NativeProReplayPage, NativeSafeFrontier, NativeSourceIdentity,

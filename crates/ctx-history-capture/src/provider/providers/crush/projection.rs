@@ -3,7 +3,7 @@ use ctx_history_core::{Confidence, EventRole, EventType, FileChangeKind};
 use serde_json::{json, Value};
 
 use crate::native_source::NativeSqliteValue;
-use crate::provider::importer::compact_provider_result_payload;
+use crate::provider::normalization::compact_provider_result_payload;
 use crate::provider::normalization::{
     provider_capped_json, provider_line_from_index, provider_normalized_result_value,
     provider_policy_body, provider_policy_event_text, provider_role, provider_timestamp_millis,

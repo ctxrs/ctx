@@ -16,7 +16,7 @@ use crate::{
         open_provider_source_file, open_provider_source_path, OpenedProviderSourceFile,
         OpenedProviderSourcePath, ProviderSourceDirectory, ProviderSourceRoot,
     },
-    provider::importer::provider_path_identity,
+    provider::provider_path_identity,
     CaptureError,
 };
 

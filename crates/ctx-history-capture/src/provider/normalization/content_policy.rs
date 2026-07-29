@@ -1,4 +1,4 @@
-use ctx_history_core::EventType;
+use ctx_history_core::{compact_result_payload, EventType};
 use serde_json::{json, Value};
 
 use super::value::provider_local_preview;
@@ -100,6 +100,14 @@ pub(crate) fn provider_policy_event_text(
             omission_policy: policy.omission_policy,
             omission_applied: false,
         },
+    }
+}
+
+pub(crate) fn compact_provider_result_payload(event_type: EventType, payload: &Value) -> Value {
+    if matches!(event_type, EventType::ToolOutput | EventType::CommandOutput) {
+        compact_result_payload(payload)
+    } else {
+        payload.clone()
     }
 }
 

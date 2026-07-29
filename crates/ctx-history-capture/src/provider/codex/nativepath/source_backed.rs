@@ -1276,7 +1276,7 @@ fn codex_inventory_observation_v0(
     root_revision: &[u8; 32],
     sources: &[(CodexCatalogSource, SourceKey, String)],
 ) -> CodexSourceBackedResultV0<SourceInventoryObservation> {
-    let root_identity = crate::provider::importer::provider_path_identity(session_root)
+    let root_identity = crate::provider::provider_path_identity(session_root)
         .map_err(CodexSourceBackedErrorV0::Capture)?;
     let authority_key: [u8; 32] = Sha256::digest(root_identity.as_bytes()).into();
     let mut ordered = sources.iter().collect::<Vec<_>>();
@@ -1291,7 +1291,7 @@ fn codex_inventory_observation_v0(
         revision.update(source_key.identity().digest());
         revision.update(source_key.exact_descriptor_digest());
         hash_inventory_field(&mut revision, source.source_root.as_bytes());
-        let path_identity = crate::provider::importer::provider_path_identity(&source.source_path)?;
+        let path_identity = crate::provider::provider_path_identity(&source.source_path)?;
         hash_inventory_field(&mut revision, path_identity.as_bytes());
         hash_inventory_field(&mut revision, native_session_id.as_bytes());
         hash_inventory_field(
@@ -1314,7 +1314,7 @@ fn hash_inventory_field(hasher: &mut Sha256, value: &[u8]) {
 }
 
 fn codex_root_revision_v0(session_root: &Path) -> CodexSourceBackedResultV0<[u8; 32]> {
-    let root_identity = crate::provider::importer::provider_path_identity(session_root)?;
+    let root_identity = crate::provider::provider_path_identity(session_root)?;
     let mut revision = Sha256::new();
     revision.update(b"ctx.codex-session-root-revision-v0\0");
     hash_inventory_field(&mut revision, root_identity.as_bytes());

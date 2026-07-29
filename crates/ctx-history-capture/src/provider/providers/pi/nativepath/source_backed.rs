@@ -36,7 +36,7 @@ use super::{
 use crate::{
     common::io::OpenedProviderSourceFile,
     provider::{
-        importer::provider_path_identity,
+        provider_path_identity,
         providers::pi::{pi_entry_text, PI_SOURCE_FORMAT},
     },
     CaptureError, ProviderAdapterContext, MAX_PROVIDER_JSONL_LINE_BYTES,

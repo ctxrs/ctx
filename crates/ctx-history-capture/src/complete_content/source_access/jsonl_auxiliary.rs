@@ -18,7 +18,7 @@ use crate::{
         jsonl::ExactJsonlSourceBinding, CompleteContentError, CompleteContentErrorKind,
     },
     provider::{
-        importer::provider_path_identity,
+        provider_path_identity,
         providers::{codebuddy, cursor, kimi, mistral_vibe, openclaw},
     },
     CODEBUDDY_SOURCE_FORMAT, CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT, KIMI_CODE_CLI_SOURCE_FORMAT,
