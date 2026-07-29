@@ -120,10 +120,12 @@ pub(crate) fn run_setup(
             mode,
             &source.report,
             &refresh_request,
-            daemon_autostart_requested,
-            daemon_autostart_reason,
-            daemon_handoff.as_ref(),
-            &supervisor,
+            DaemonAutostartHuman {
+                requested: daemon_autostart_requested,
+                reason: daemon_autostart_reason,
+                handoff: daemon_handoff.as_ref(),
+                supervisor: &supervisor,
+            },
         );
     }
     Ok(())
@@ -234,15 +236,19 @@ fn supervisor_persistently_verified(supervisor: &Value) -> bool {
             == Some(true)
 }
 
+struct DaemonAutostartHuman<'a> {
+    requested: bool,
+    reason: Option<&'a str>,
+    handoff: Option<&'a DaemonHandoff>,
+    supervisor: &'a Value,
+}
+
 fn print_setup_human(
     data_root: &std::path::Path,
     mode: &str,
     source: &Value,
     refresh_request: &Value,
-    daemon_autostart_requested: bool,
-    daemon_autostart_reason: Option<&str>,
-    daemon_handoff: Option<&DaemonHandoff>,
-    supervisor: &Value,
+    daemon: DaemonAutostartHuman<'_>,
 ) {
     println!("ctx source-backed history epoch: {mode}");
     if let Some(generation) = source["lexical"]["generation_id"].as_str() {
@@ -258,8 +264,8 @@ fn print_setup_human(
         "Source refresh: {}",
         refresh_request["status"].as_str().unwrap_or("unavailable")
     );
-    match daemon_handoff {
-        Some(handoff) if supervisor_persistently_verified(supervisor) => {
+    match daemon.handoff {
+        Some(handoff) if supervisor_persistently_verified(daemon.supervisor) => {
             println!(
                 "Daemon is persistently supervised and running (PID {}).",
                 handoff.pid
@@ -268,18 +274,19 @@ fn print_setup_human(
         Some(handoff) => println!(
             "Daemon is running (PID {}) with degraded persistence: {}.",
             handoff.pid,
-            supervisor
+            daemon
+                .supervisor
                 .get("limitation")
                 .and_then(Value::as_str)
                 .unwrap_or("native per-user supervisor unavailable")
         ),
-        None if daemon_autostart_requested => {
+        None if daemon.requested => {
             println!("Daemon handoff was not verified; run `ctx daemon status`.")
         }
-        None if daemon_autostart_reason == Some("explicit_opt_out") => {
+        None if daemon.reason == Some("explicit_opt_out") => {
             println!("Daemon refresh was skipped because --no-daemon was used.")
         }
-        None if daemon_autostart_reason == Some("daemon_disabled") => {
+        None if daemon.reason == Some("daemon_disabled") => {
             println!("Daemon refresh is unavailable because daemon maintenance is disabled.")
         }
         None => {}

@@ -125,16 +125,66 @@ fn optional_json_text_line_bytes(value: &Value, key: &str) -> usize {
         .unwrap_or_default()
 }
 
-pub(super) fn search_json(
-    request: &SourceSearchRequest,
-    index: &VerifiedIndex,
-    collection: &SearchCollection,
-    filters: &EventSearchFilters,
-    snippets: &HashMap<Uuid, String>,
-    refresh_status: &str,
+struct SearchJsonInput<'a> {
+    request: &'a SourceSearchRequest,
+    index: &'a VerifiedIndex,
+    collection: &'a SearchCollection,
+    filters: &'a EventSearchFilters,
+    snippets: &'a HashMap<Uuid, String>,
+    metrics: SearchRenderMetrics<'a>,
+}
+
+struct SearchRenderMetrics<'a> {
+    refresh_status: &'a str,
     refresh_source_count: usize,
     query_duration: Duration,
-) -> Result<Value> {
+}
+
+// Keep the orchestration call shape stable while rendering consumes one typed input.
+type SearchJsonCompatibilityFn = fn(
+    &SourceSearchRequest,
+    &VerifiedIndex,
+    &SearchCollection,
+    &EventSearchFilters,
+    &HashMap<Uuid, String>,
+    &str,
+    usize,
+    Duration,
+) -> Result<Value>;
+
+pub(super) const SEARCH_JSON: SearchJsonCompatibilityFn =
+    |request,
+     index,
+     collection,
+     filters,
+     snippets,
+     refresh_status,
+     refresh_source_count,
+     query_duration| {
+        render_search_json(SearchJsonInput {
+            request,
+            index,
+            collection,
+            filters,
+            snippets,
+            metrics: SearchRenderMetrics {
+                refresh_status,
+                refresh_source_count,
+                query_duration,
+            },
+        })
+    };
+pub(super) use self::SEARCH_JSON as search_json;
+
+fn render_search_json(input: SearchJsonInput<'_>) -> Result<Value> {
+    let SearchJsonInput {
+        request,
+        index,
+        collection,
+        filters,
+        snippets,
+        metrics,
+    } = input;
     let normalized_query = NormalizedSearchQuery::from_request(request);
     let result_scope = if request.events { "event" } else { "session" };
     let results = collection
@@ -159,7 +209,7 @@ pub(super) fn search_json(
             ))
         })
         .collect::<Result<Vec<_>>>()?;
-    let phase_attribution = phase_attribution(query_duration);
+    let phase_attribution = phase_attribution(metrics.query_duration);
     Ok(compact_json(json!({
         "schema_version": 1,
         "payload_type": "search_results",
@@ -181,8 +231,8 @@ pub(super) fn search_json(
         },
         "freshness": {
             "mode": request.refresh.as_str(),
-            "status": refresh_status,
-            "source_count": refresh_source_count,
+            "status": metrics.refresh_status,
+            "source_count": metrics.refresh_source_count,
         },
         "retrieval": {
             "requested_mode": collection.requested_backend.as_str(),
