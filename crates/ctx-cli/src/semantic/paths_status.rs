@@ -396,22 +396,77 @@ pub(super) fn write_private_json_file(path: &Path, value: &Value) -> Result<()> 
     if let Some(parent) = path.parent() {
         create_private_dir_all(parent)?;
     }
-    let tmp_path = path.with_extension(format!("json.{}.tmp", process::id()));
-    if tmp_path.exists() {
-        let _ = fs::remove_file(&tmp_path);
-    }
-    let mut file = private_create_new_file(&tmp_path)?;
-    file.write_all(&serde_json::to_vec_pretty(value)?)
-        .with_context(|| format!("write private status file {}", tmp_path.display()))?;
-    file.write_all(b"\n")
-        .with_context(|| format!("write private status file {}", tmp_path.display()))?;
-    file.sync_all()
-        .with_context(|| format!("sync private status file {}", tmp_path.display()))?;
+    let (tmp_path, mut file) = (0..PRIVATE_JSON_TEMP_ATTEMPTS)
+        .find_map(|_| {
+            let sequence = PRIVATE_JSON_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let tmp_path = path.with_extension(format!("json.{}.{}.tmp", process::id(), sequence));
+            match private_create_new_file(&tmp_path) {
+                Ok(file) => Some(Ok((tmp_path, file))),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+                Err(error) => Some(Err(error)),
+            }
+        })
+        .transpose()?
+        .with_context(|| format!("allocate private status file beside {}", path.display()))?;
+    let write_result = (|| -> Result<()> {
+        file.write_all(&serde_json::to_vec_pretty(value)?)
+            .with_context(|| format!("write private status file {}", tmp_path.display()))?;
+        file.write_all(b"\n")
+            .with_context(|| format!("write private status file {}", tmp_path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("sync private status file {}", tmp_path.display()))?;
+        Ok(())
+    })();
     drop(file);
-    fs::rename(&tmp_path, path)
-        .with_context(|| format!("replace private status file {}", path.display()))?;
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(error);
+    }
+    if let Err(error) = replace_private_file(&tmp_path, path)
+        .with_context(|| format!("replace private status file {}", path.display()))
+    {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(error);
+    }
     secure_private_file_permissions(path)?;
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace_private_file(source: &Path, target: &Path) -> std::io::Result<()> {
+    fs::rename(source, target)
+}
+
+#[cfg(windows)]
+fn replace_private_file(source: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let target = target
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: both buffers are NUL-terminated and remain live for the call.
+    let moved = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            target.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 pub(super) fn write_daemon_status(data_root: &Path, value: &Value) -> Result<()> {
@@ -735,6 +790,7 @@ use std::{
     io::{Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process,
+    sync::atomic::{AtomicU64, Ordering},
     time::SystemTime,
 };
 
@@ -761,9 +817,13 @@ use super::{
 #[cfg(unix)]
 use super::runtime_limits::DAEMON_QUERY_SOCKET_FILE;
 
+const PRIVATE_JSON_TEMP_ATTEMPTS: usize = 16;
+static PRIVATE_JSON_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
 
     #[test]
     fn durable_state_path_is_purpose_based() {
@@ -771,5 +831,42 @@ mod tests {
             daemon_source_backed_refresh_job_path(Path::new("ctx-data")),
             Path::new("ctx-data/daemon/jobs/core-refresh.json")
         );
+    }
+
+    #[test]
+    fn concurrent_status_writers_use_distinct_atomic_staging_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = Arc::new(temp.path().join("daemon/jobs/core-refresh.json"));
+        let barrier = Arc::new(Barrier::new(16));
+        let writers = (0..16)
+            .map(|writer| {
+                let path = Arc::clone(&path);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    for iteration in 0..32 {
+                        write_private_json_file(
+                            path.as_ref(),
+                            &json!({"writer": writer, "iteration": iteration}),
+                        )
+                        .unwrap();
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+
+        let published: Value = serde_json::from_slice(&fs::read(path.as_ref()).unwrap()).unwrap();
+        assert!(published["writer"].as_u64().is_some());
+        assert!(published["iteration"].as_u64().is_some());
+        assert!(fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")));
     }
 }
