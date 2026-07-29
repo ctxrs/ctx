@@ -10,10 +10,10 @@ fn exercise_complete_session_budget(
     let events = (0..event_count).collect::<Vec<_>>();
     let mut budget = SourceHydrationOperationBudget::new(limit_bytes);
     for (batch_index, _) in events.chunks(SOURCE_HYDRATION_BATCH_MAX_ITEMS).enumerate() {
-        let _remaining = budget.remaining_response_bytes(Some(event_id))?;
+        let _remaining = budget.remaining_response_bytes()?;
         *daemon_calls += 1;
         let text = response_texts.get(batch_index).cloned().unwrap_or_default();
-        budget.retain_batch(&[(event_id, text)], Some(event_id))?;
+        budget.retain_batch(&[(event_id, text)])?;
     }
     Ok(())
 }
@@ -42,7 +42,6 @@ fn hydration_client_preserves_budget_code_and_accepts_content_too_large_kind() {
         source_hydration_failure_kind("content_too_large").unwrap(),
         "aggregate request budget was exceeded",
         false,
-        None,
     );
 
     assert_eq!(unavailable.code(), "hydration_budget_exceeded");
@@ -82,7 +81,6 @@ fn complete_session_129th_event_makes_no_daemon_call_after_exact_exhaustion() {
     assert_eq!(unavailable.code(), "hydration_budget_exceeded");
     assert_eq!(unavailable.failure_kind, "content_too_large");
     assert!(!unavailable.retryable_after_refresh());
-    assert!(unavailable.complete_content_error().is_some());
 }
 
 #[test]
@@ -107,10 +105,7 @@ fn complete_session_multi_chunk_overage_is_typed_and_stops_before_third_call() {
 
 #[test]
 fn transport_overage_maps_without_parsing_error_detail() {
-    let error = map_source_hydration_request_error(
-        DaemonQueryResponseTooLarge::new(1024).into(),
-        Some(Uuid::nil()),
-    );
+    let error = map_source_hydration_request_error(DaemonQueryResponseTooLarge::new(1024).into());
 
     let unavailable = error
         .downcast_ref::<SourceHydrationUnavailable>()

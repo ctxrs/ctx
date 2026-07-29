@@ -23,10 +23,6 @@ pub(crate) struct UsageReport {
     pub(crate) retention_days: i64,
     #[serde(skip)]
     pub(crate) definition_version: i64,
-    #[serde(skip)]
-    pub(crate) summary: Option<UsageSummary>,
-    #[serde(skip)]
-    pub(crate) details: Option<UsageDetails>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) definitions: Option<Vec<UsageDefinition>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -113,12 +109,6 @@ pub(crate) struct DurationSummary {
     pub(crate) calls: u64,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct UsageDetails {
-    pub(crate) by_operation: Vec<OperationSummary>,
-    pub(crate) duration_buckets: Vec<DurationSummary>,
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct UsageReportError {
     pub(crate) code: &'static str,
@@ -174,17 +164,6 @@ fn base_report(
     estimates: Option<UsageEstimates>,
     error: Option<UsageReportError>,
 ) -> UsageReport {
-    let compatibility_definition = definitions.as_ref().and_then(|definitions| {
-        definitions
-            .iter()
-            .find(|definition| definition.definition_version == DEFINITION_VERSION)
-            .or_else(|| definitions.last())
-    });
-    let summary = compatibility_definition.map(|definition| definition.summary.clone());
-    let details = compatibility_definition.map(|definition| UsageDetails {
-        by_operation: definition.by_operation.clone(),
-        duration_buckets: definition.duration_buckets.clone(),
-    });
     UsageReport {
         schema_version: 2,
         local_only: true,
@@ -193,8 +172,6 @@ fn base_report(
         state,
         retention_days: RETENTION_DAYS,
         definition_version: DEFINITION_VERSION,
-        summary,
-        details,
         definitions,
         estimates,
         error,

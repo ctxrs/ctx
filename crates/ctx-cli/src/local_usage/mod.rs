@@ -469,15 +469,6 @@ pub(crate) fn record_best_effort(data_root: &Path, enabled: bool, operation: Com
     }
 }
 
-#[cfg(test)]
-fn record_best_effort_with_ctx_version_for_test(
-    data_root: &Path,
-    operation: CompletedOperation,
-    ctx_version: &str,
-) {
-    let _ = store::record_with_ctx_version_for_test(data_root, operation, ctx_version);
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum McpContextTarget {
     Session(String),

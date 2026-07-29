@@ -111,26 +111,6 @@ fn smoke_helper_at_path_with_authorization_observing_status(
     Ok(smoke)
 }
 
-#[cfg(all(test, unix))]
-pub(super) fn smoke_helper_at_path_with_authorization_and_status(
-    data_root: &Path,
-    path: &Path,
-    authorization: Option<&dyn AuthorizationProvider>,
-) -> Result<(HelperSmoke, StatusResult)> {
-    let mut observed_status = None;
-    let smoke = smoke_helper_at_path_with_authorization_observing_status(
-        data_root,
-        path,
-        None,
-        authorization,
-        |status| observed_status = Some(status),
-    )?;
-    Ok((
-        smoke,
-        observed_status.expect("successful helper smoke must observe status"),
-    ))
-}
-
 pub(crate) fn status(data_root: &Path) -> ProStatus {
     status_with_helper_resolver(data_root, support::helper_path)
 }
