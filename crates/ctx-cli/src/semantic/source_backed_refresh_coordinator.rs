@@ -6,7 +6,7 @@ use std::{
     time::Duration as StdDuration,
 };
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use ctx_history_capture::{
     build_automatic_source_backed_registry, DiscoveryContext, ProviderSourceStatus,
     SourceBackedAutomaticRegistryIssue, SourceBackedAutomaticUnavailableReason,
@@ -24,6 +24,10 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
+    commands::import::{
+        load_explicit_source_catalog_authority, register_explicit_source_catalog_routes,
+        ExplicitSourceCatalogAuthority,
+    },
     compact_json,
     config::{AppConfig, DaemonMode},
     identity,
@@ -60,6 +64,14 @@ impl SourceBackedRefreshMode {
             Self::Background => "background",
             Self::Wait => "wait",
         }
+    }
+
+    pub(crate) fn coordinate_explicit_source_catalog(
+        self,
+        data_root: &Path,
+        authority: &ExplicitSourceCatalogAuthority,
+    ) -> Result<SourceBackedRefreshObservation> {
+        coordinate_source_backed_refresh_with_catalog(data_root, self, Some(authority))
     }
 }
 
@@ -250,6 +262,8 @@ struct SourceBackedRefreshAttempt {
     finished_at_ms: Option<i64>,
     previous_generation: Option<String>,
     published_generation: Option<String>,
+    requested_explicit_source_catalog: Option<ExplicitSourceCatalogAuthority>,
+    published_explicit_source_catalog: Option<ExplicitSourceCatalogAuthority>,
     coalesced_requests: u64,
     progress: SourceBackedRefreshProgress,
     scanned_routes: Option<usize>,
@@ -276,6 +290,12 @@ impl SourceBackedRefreshAttempt {
             "finished_at_ms": self.finished_at_ms,
             "previous_generation": self.previous_generation,
             "published_generation": self.published_generation,
+            "requested_explicit_source_catalog": self.requested_explicit_source_catalog
+                .as_ref()
+                .map(ExplicitSourceCatalogAuthority::to_json),
+            "published_explicit_source_catalog": self.published_explicit_source_catalog
+                .as_ref()
+                .map(ExplicitSourceCatalogAuthority::to_json),
             "generation_changed": self.previous_generation != self.published_generation,
             "coalesced_requests": self.coalesced_requests,
             "progress": self.progress.to_json(),
@@ -308,6 +328,12 @@ impl SourceBackedRefreshAttempt {
             "last_run_at_ms": self.started_at_ms.unwrap_or(self.requested_at_ms),
             "previous_generation": self.previous_generation,
             "published_generation": self.published_generation,
+            "requested_explicit_source_catalog": self.requested_explicit_source_catalog
+                .as_ref()
+                .map(ExplicitSourceCatalogAuthority::to_json),
+            "published_explicit_source_catalog": self.published_explicit_source_catalog
+                .as_ref()
+                .map(ExplicitSourceCatalogAuthority::to_json),
             "generation_changed": self.previous_generation != self.published_generation,
             "coalesced_requests": self.coalesced_requests,
             "progress": self.progress.to_json(),
@@ -498,11 +524,21 @@ impl SourceBackedRefreshCoordinator {
                 if !matches!(mode, "background" | "wait") {
                     return Err(anyhow!("invalid daemon source refresh mode `{mode}`"));
                 }
+                let requested_catalog = request
+                    .get("explicit_source_catalog")
+                    .map(ExplicitSourceCatalogAuthority::from_json)
+                    .transpose()?;
                 let previous_generation = published_generation_id(data_root)?;
-                let response = self.enqueue_with_metadata(
+                let metadata = if requested_catalog.is_some() {
+                    source_catalog_refresh_runtime_metadata(data_root)
+                } else {
+                    source_refresh_runtime_metadata(data_root)
+                };
+                let response = self.enqueue_with_catalog_metadata(
                     previous_generation,
-                    source_refresh_runtime_metadata(data_root),
-                );
+                    metadata,
+                    requested_catalog,
+                )?;
                 let request_id = response
                     .get("request_id")
                     .and_then(Value::as_str)
@@ -535,7 +571,26 @@ impl SourceBackedRefreshCoordinator {
         self.run_next_with(
             |request_id, coordinator| {
                 prepare_source_rebuild_if_needed(data_root)?;
-                execute_source_backed_refresh(executor.as_ref(), data_root, request_id, coordinator)
+                let requested_catalog =
+                    coordinator.requested_explicit_source_catalog(request_id);
+                let publication = execute_source_backed_refresh(
+                    executor.as_ref(),
+                    data_root,
+                    request_id,
+                    coordinator,
+                )?;
+                if let Some(expected) = requested_catalog {
+                    let published = load_explicit_source_catalog_authority(data_root)
+                        .context("verify published explicit source catalog authority")?;
+                    if published != expected {
+                        bail!(
+                            "source-backed refresh published for explicit source catalog {:?}, not the requested authority {:?}",
+                            published,
+                            expected
+                        );
+                    }
+                }
+                Ok(publication)
             },
             || published_generation_id(data_root),
             |generation_id| complete_pending_source_rebuild(data_root, generation_id),
@@ -545,10 +600,12 @@ impl SourceBackedRefreshCoordinator {
 
     pub(in crate::semantic) fn enqueue_periodic(&self, data_root: &Path) -> Result<Value> {
         let observed_generation = published_generation_id(data_root)?;
-        Ok(self.enqueue_with_metadata(
+        let catalog = load_explicit_source_catalog_authority(data_root)?;
+        self.enqueue_with_catalog_metadata(
             observed_generation,
             SourceRefreshRuntimeMetadata::periodic(),
-        ))
+            Some(catalog),
+        )
     }
 
     #[cfg(test)]
@@ -569,12 +626,40 @@ impl SourceBackedRefreshCoordinator {
         observed_generation: Option<String>,
         metadata: SourceRefreshRuntimeMetadata,
     ) -> Value {
+        self.enqueue_with_catalog_metadata(observed_generation, metadata, None)
+            .expect("requests without catalog authority always coalesce")
+    }
+
+    fn enqueue_with_catalog_metadata(
+        &self,
+        observed_generation: Option<String>,
+        metadata: SourceRefreshRuntimeMetadata,
+        requested_catalog: Option<ExplicitSourceCatalogAuthority>,
+    ) -> Result<Value> {
         let mut state = self.lock_state();
         if let Some(active_request_id) = state.active_request_id.clone() {
             if let Some(active) = find_attempt_mut(&mut state, &active_request_id) {
                 if active.state.is_active() {
+                    if let Some(requested_catalog) = requested_catalog {
+                        if active.requested_explicit_source_catalog.is_none()
+                            && active.state == SourceBackedRefreshState::Queued
+                        {
+                            active.requested_explicit_source_catalog = Some(requested_catalog);
+                        } else if active.requested_explicit_source_catalog.as_ref()
+                            != Some(&requested_catalog)
+                        {
+                            bail!(
+                                "daemon source refresh request {} is already active for a different explicit source catalog authority; retry after it publishes",
+                                active.request_id
+                            );
+                        }
+                        if metadata.trigger == "import" {
+                            active.trigger = metadata.trigger;
+                            active.trigger_provenance = metadata.trigger_provenance;
+                        }
+                    }
                     active.coalesced_requests = active.coalesced_requests.saturating_add(1);
-                    return active.to_json();
+                    return Ok(active.to_json());
                 }
             }
         }
@@ -587,6 +672,8 @@ impl SourceBackedRefreshCoordinator {
             finished_at_ms: None,
             previous_generation: observed_generation.clone(),
             published_generation: observed_generation,
+            requested_explicit_source_catalog: requested_catalog,
+            published_explicit_source_catalog: None,
             coalesced_requests: 0,
             progress: SourceBackedRefreshProgress::default(),
             scanned_routes: None,
@@ -603,12 +690,21 @@ impl SourceBackedRefreshCoordinator {
         state.active_request_id = Some(attempt.request_id.clone());
         state.attempts.push_back(attempt);
         trim_attempt_history(&mut state);
-        response
+        Ok(response)
     }
 
     fn status(&self, request_id: &str) -> Option<Value> {
         let state = self.lock_state();
         find_attempt(&state, request_id).map(SourceBackedRefreshAttempt::to_json)
+    }
+
+    fn requested_explicit_source_catalog(
+        &self,
+        request_id: &str,
+    ) -> Option<ExplicitSourceCatalogAuthority> {
+        let state = self.lock_state();
+        find_attempt(&state, request_id)
+            .and_then(|attempt| attempt.requested_explicit_source_catalog.clone())
     }
 
     fn job_status(&self, request_id: &str) -> Option<Value> {
@@ -653,7 +749,7 @@ impl SourceBackedRefreshCoordinator {
         Published: FnOnce(&str) -> Result<()>,
         Failed: FnOnce(&str) -> Result<()>,
     {
-        let (request_id, previous_generation) = {
+        let (request_id, previous_generation, requested_catalog) = {
             let mut state = self.lock_state();
             let request_id = state.active_request_id.clone()?;
             let attempt = find_attempt_mut(&mut state, &request_id)?;
@@ -663,7 +759,11 @@ impl SourceBackedRefreshCoordinator {
             attempt.state = SourceBackedRefreshState::Running;
             attempt.started_at_ms = Some(utc_now().timestamp_millis());
             attempt.progress.phase = "starting".to_owned();
-            (request_id, attempt.previous_generation.clone())
+            (
+                request_id,
+                attempt.previous_generation.clone(),
+                attempt.requested_explicit_source_catalog.clone(),
+            )
         };
 
         let execution = execute(&request_id, self);
@@ -747,6 +847,7 @@ impl SourceBackedRefreshCoordinator {
                     attempt.certified_source_bytes = Some(publication.certified_source_bytes);
                     attempt.timings = Some(publication.timings);
                     let source_manifest = publication.source_manifest;
+                    attempt.published_explicit_source_catalog = requested_catalog.clone();
                     installed_resolver = publication.resolver.map(|resolver| {
                         Arc::new(GenerationBoundSourceBackedResolver {
                             generation_id: observed,
@@ -840,6 +941,14 @@ fn source_refresh_runtime_metadata(data_root: &Path) -> SourceRefreshRuntimeMeta
         daemon_mode,
         trigger: "search",
         trigger_provenance,
+    }
+}
+
+fn source_catalog_refresh_runtime_metadata(data_root: &Path) -> SourceRefreshRuntimeMetadata {
+    SourceRefreshRuntimeMetadata {
+        trigger: "import",
+        trigger_provenance: "explicit_source_catalog",
+        ..source_refresh_runtime_metadata(data_root)
     }
 }
 
@@ -983,6 +1092,7 @@ where
     Refresh: FnOnce(
         &DiscoveryContext,
         &Path,
+        &Path,
         &mut dyn FnMut(CaptureSourceBackedRefreshProgress) -> SourceBackedRouteResult<()>,
     ) -> Result<SourceBackedRefreshPublication>,
 {
@@ -1002,17 +1112,24 @@ where
                 )
             })
     };
-    refresh_all(discovery, execution.index_root, &mut report_progress)
+    refresh_all(
+        discovery,
+        execution.data_root,
+        execution.index_root,
+        &mut report_progress,
+    )
 }
 
 fn refresh_all_provider_sources(
     discovery: &DiscoveryContext,
+    data_root: &Path,
     index_root: &Path,
     report_progress: &mut dyn FnMut(
         CaptureSourceBackedRefreshProgress,
     ) -> SourceBackedRouteResult<()>,
 ) -> Result<SourceBackedRefreshPublication> {
-    let build = build_automatic_source_backed_registry(discovery);
+    let mut build = build_automatic_source_backed_registry(discovery);
+    register_explicit_source_catalog_routes(data_root, index_root, &mut build)?;
     let (executor, issues) = build.into_refresh_executor(WriterOptions::default());
     reject_blocking_automatic_registry_issues(&issues)?;
     let resolver = Arc::new(executor.registry().resolver_registry());
@@ -1194,7 +1311,18 @@ pub(crate) fn coordinate_source_backed_refresh(
     data_root: &Path,
     mode: SourceBackedRefreshMode,
 ) -> Result<SourceBackedRefreshObservation> {
+    coordinate_source_backed_refresh_with_catalog(data_root, mode, None)
+}
+
+fn coordinate_source_backed_refresh_with_catalog(
+    data_root: &Path,
+    mode: SourceBackedRefreshMode,
+    explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
+) -> Result<SourceBackedRefreshObservation> {
     if mode == SourceBackedRefreshMode::Off {
+        if explicit_source_catalog.is_some() {
+            bail!("explicit source catalog imports require daemon refresh mode `wait`");
+        }
         let pin = pin_published_generation(data_root)?.ok_or_else(|| {
             anyhow!("the source-backed index does not exist; retry with daemon refresh enabled")
         })?;
@@ -1212,6 +1340,8 @@ pub(crate) fn coordinate_source_backed_refresh(
         "schema_version": 1,
         "op": SOURCE_REFRESH_REQUEST_OP,
         "mode": mode.as_str(),
+        "explicit_source_catalog": explicit_source_catalog
+            .map(ExplicitSourceCatalogAuthority::to_json),
     }));
     let response = match daemon_source_refresh_request(
         data_root,
@@ -1258,13 +1388,14 @@ pub(crate) fn coordinate_source_backed_refresh(
         });
     }
 
-    wait_for_published_generation(data_root, request_id, mode)
+    wait_for_published_generation(data_root, request_id, mode, explicit_source_catalog)
 }
 
 fn wait_for_published_generation(
     data_root: &Path,
     request_id: String,
     mode: SourceBackedRefreshMode,
+    expected_catalog: Option<&ExplicitSourceCatalogAuthority>,
 ) -> Result<SourceBackedRefreshObservation> {
     loop {
         let response = match daemon_source_refresh_request(
@@ -1300,6 +1431,23 @@ fn wait_for_published_generation(
         validate_daemon_refresh_response(&response)?;
         match response.get("request_state").and_then(Value::as_str) {
             Some("published") => {
+                if let Some(expected_catalog) = expected_catalog {
+                    let published_catalog = response
+                        .get("published_explicit_source_catalog")
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "published daemon source refresh has no explicit source catalog authority"
+                            )
+                        })
+                        .and_then(ExplicitSourceCatalogAuthority::from_json)?;
+                    if &published_catalog != expected_catalog {
+                        bail!(
+                            "daemon published an unexpected explicit source catalog authority: expected {:?}, published {:?}",
+                            expected_catalog,
+                            published_catalog
+                        );
+                    }
+                }
                 let expected = response
                     .get("published_generation")
                     .and_then(Value::as_str)
@@ -1311,6 +1459,12 @@ fn wait_for_published_generation(
                         "daemon published source-backed generation {expected}, but no verified generation can be opened"
                     )
                 })?;
+                if pin.generation_id() != expected {
+                    bail!(
+                        "daemon reported source-backed generation {expected}, but the verified published generation is {}",
+                        pin.generation_id()
+                    );
+                }
                 return Ok(SourceBackedRefreshObservation {
                     mode,
                     status: "published".to_owned(),
@@ -1482,6 +1636,59 @@ mod tests {
     }
 
     #[test]
+    fn explicit_catalog_request_retains_daemon_metadata_and_authority() {
+        let temp = tempfile::tempdir().unwrap();
+        let authority = load_explicit_source_catalog_authority(temp.path()).unwrap();
+        let coordinator = SourceBackedRefreshCoordinator::new();
+        let periodic = coordinator.enqueue_periodic(temp.path()).unwrap();
+        let response = coordinator
+            .handle_ipc_request(
+                temp.path(),
+                &json!({
+                    "schema_version": 1,
+                    "op": SOURCE_REFRESH_REQUEST_OP,
+                    "mode": "wait",
+                    "explicit_source_catalog": authority.to_json(),
+                }),
+            )
+            .unwrap()
+            .expect("source refresh response");
+
+        assert_eq!(request_id(&response), request_id(&periodic));
+        assert_eq!(response["coalesced_requests"], 1);
+        assert_eq!(response["owner"], "daemon");
+        assert_eq!(response["trigger"], "import");
+        assert_eq!(response["trigger_provenance"], "explicit_source_catalog");
+        assert_eq!(
+            ExplicitSourceCatalogAuthority::from_json(
+                &response["requested_explicit_source_catalog"]
+            )
+            .unwrap(),
+            authority
+        );
+
+        let request_id = request_id(&response);
+        let run = coordinator
+            .run_next_with(
+                |_, _| Ok(test_publication("catalog-generation")),
+                || Ok(Some("catalog-generation".to_owned())),
+                |_| Ok(()),
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert!(!run.failed);
+        let published = coordinator.status(&request_id).unwrap();
+        assert_eq!(published["request_state"], "published");
+        assert_eq!(
+            ExplicitSourceCatalogAuthority::from_json(
+                &published["published_explicit_source_catalog"]
+            )
+            .unwrap(),
+            authority
+        );
+    }
+
+    #[test]
     fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
         let coordinator = SourceBackedRefreshCoordinator::new();
         assert_eq!(
@@ -1519,9 +1726,10 @@ mod tests {
         let publication = execute_capture_owned_refresh_with(
             execution,
             &discovery,
-            |observed_discovery, observed_index_root, progress| {
+            |observed_discovery, observed_data_root, observed_index_root, progress| {
                 provider_wide_calls += 1;
                 assert_eq!(observed_discovery, &discovery);
+                assert_eq!(observed_data_root, data_root);
                 assert_eq!(observed_index_root, index_root);
                 progress(CaptureSourceBackedRefreshProgress {
                     phase: "discovering",
