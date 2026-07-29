@@ -805,12 +805,22 @@ pub(super) fn run_daemon_inner(
             &mut config_reload,
         ) == DaemonConfigReloadOutcome::StopDisabled;
         if config_reload.status == "activation_failed" {
+            let activation_error = config_reload
+                .last_error
+                .clone()
+                .unwrap_or_else(|| "query service activation failed".to_owned());
+            write_daemon_lifecycle_status_with_runtime(
+                data_root,
+                &args,
+                "failed",
+                started_at_ms,
+                Some(utc_now().timestamp_millis()),
+                Some(activation_error.clone()),
+                false,
+                &config_reload.to_json(),
+            )?;
             return Err(anyhow!(
-                "activate daemon control service: {}",
-                config_reload
-                    .last_error
-                    .as_deref()
-                    .unwrap_or("query service activation failed")
+                "activate daemon control service: {activation_error}"
             ));
         }
         #[cfg(test)]

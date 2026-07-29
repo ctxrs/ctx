@@ -46,8 +46,8 @@ mod installation;
 mod recovery;
 
 pub(crate) use autostart::{
-    autostart_daemon_and_wait, daemon_autostart_suppression_reason, maybe_autostart_daemon,
-    maybe_autostart_daemon_for_search,
+    autostart_daemon_and_wait, daemon_autostart_can_reuse_existing,
+    daemon_autostart_suppression_reason, maybe_autostart_daemon, maybe_autostart_daemon_for_search,
 };
 use autostart::{
     configured_daemon_autostart_command, daemon_autostart_allowed, daemon_autostart_command,
