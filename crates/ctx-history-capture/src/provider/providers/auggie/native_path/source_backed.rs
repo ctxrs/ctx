@@ -679,9 +679,16 @@ pub(crate) mod registration {
         let capture_context = context.clone();
         let hydration_root = root;
         let driver = captured_route_driver(
+            &source,
             move |sink| {
                 let inventory =
                     discover_auggie_source_backed(&capture_root).map_err(route_error)?;
+                if !inventory.is_complete() {
+                    return Err(crate::provider::source_backed::SourceBackedRouteError::new(
+                        crate::provider::source_backed::SourceBackedRouteErrorKind::Unavailable,
+                        "Auggie selected route inventory is temporarily unavailable",
+                    ));
+                }
                 for projected in
                     project_auggie_source_backed_inventory(&inventory, &capture_context)
                         .map_err(route_error)?

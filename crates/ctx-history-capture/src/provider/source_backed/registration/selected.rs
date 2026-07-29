@@ -134,6 +134,7 @@ pub(super) fn register_pi_route(
     let hydration_root = root;
     let hydration_context = context;
     let driver = captured_route_driver(
+        &source,
         move |sink| {
             let mut begun = HashSet::new();
             let mut sink_failure = None;
@@ -360,6 +361,7 @@ pub fn register_nanoclaw_source_backed_route(
     let owned_source = nanoclaw_source_key(catalog_lineage)
         .map_err(|error| invalid_route(source.provider, error.to_string()))?;
     let driver = captured_route_driver(
+        &source,
         move |sink| {
             sink.begin(owned_source.clone())?;
             let receipt =
@@ -410,6 +412,7 @@ pub fn register_warp_source_backed_route(
     let capture_selection = selected.clone();
     let hydration_selection = selected;
     let driver = captured_route_driver(
+        &source,
         move |sink| {
             let snapshot =
                 project_warp_source_backed_v0(capture_selection.clone()).map_err(route_error)?;
@@ -464,6 +467,7 @@ pub fn register_goose_source_backed_route(
     let capture_selection = selected.clone();
     let hydration_selection = selected;
     let driver = captured_route_driver(
+        &source,
         move |sink| {
             let adapter =
                 GooseSourceBackedAdapterV0::open(capture_selection.clone()).map_err(route_error)?;
@@ -559,6 +563,7 @@ pub(in crate::provider::source_backed) fn register_lingma_inventory_source(
     let hydration_inventory = Arc::clone(&inventory_source);
     let batch_hydration_inventory = inventory_source;
     let driver = captured_route_driver(
+        &source,
         move |sink| {
             let opening = capture_inventory.observe().map_err(route_error)?;
             let closing_inventory = Arc::clone(&capture_inventory);

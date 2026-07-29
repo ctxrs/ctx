@@ -751,6 +751,7 @@ pub(crate) mod registration {
         let capture_path = path.clone();
         let hydration_path = path;
         let driver = captured_route_driver(
+            &source,
             move |sink| {
                 let scan = scan_kiro_source_backed_v0(&capture_path, source_format)
                     .map_err(route_error)?;

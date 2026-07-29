@@ -32,6 +32,7 @@ pub(super) fn register_hermes_candidate(
     let capture_candidate = candidate.clone();
     let hydration_path = candidate.path().to_path_buf();
     let driver = captured_route_driver(
+        &source,
         move |sink| {
             sink.begin(capture_candidate.source().clone())?;
             let mut sink_failure = None;
@@ -88,6 +89,7 @@ pub(super) fn register_rovodev_route(
     let hydration_root = root;
     let hydration_context = context;
     let driver = captured_route_driver(
+        &source,
         move |sink| {
             let inventory = discover_rovodev_source_backed(&capture_root, capture_context.clone())
                 .map_err(route_error)?;
@@ -110,8 +112,8 @@ pub(super) fn register_rovodev_route(
                 }
                 sink.certify(scan.source)?;
             }
-            inventory.certify().map_err(route_error)?;
-            Ok(())
+            let inventory = inventory.certify().map_err(route_error)?;
+            sink.certify_complete_inventory(inventory)
         },
         provider_format_scope(CaptureProvider::RovoDev, "rovodev_session_json_tree"),
         move |request| {
@@ -149,6 +151,7 @@ pub(super) fn register_trae_route(
     let capture_path = path.clone();
     let hydration_path = path;
     let driver = captured_route_driver(
+        &source,
         move |sink| {
             let mut began = false;
             let mut sink_failure = None;
@@ -213,22 +216,50 @@ pub(super) fn register_openclaw_route(
     let capture_root = root.clone();
     let hydration_root = root;
     let driver = captured_route_driver(
+        &source,
         move |sink| {
             let adapter = openclaw_source_backed_adapter_v0();
             for selected in adapter
                 .discover_selected(&capture_root)
                 .map_err(route_error)?
             {
+                let base = sink.base_source(selected.source_key());
                 sink.begin(selected.source_key().clone())?;
                 let mut reader = adapter
-                    .open_source(&selected, DateTime::<Utc>::UNIX_EPOCH, None)
+                    .open_source(&selected, DateTime::<Utc>::UNIX_EPOCH, base.as_ref())
                     .map_err(route_error)?;
                 while let Some(page) = reader.next_page().map_err(route_error)? {
                     for document in page.documents {
                         sink.document(document)?;
                     }
                 }
-                sink.certify(reader.finish().map_err(route_error)?.certified_source)?;
+                let scan = reader.finish().map_err(route_error)?;
+                if scan.disposition
+                    == crate::provider::providers::openclaw::OpenClawSourceBackedDispositionV0::Append
+                {
+                    let base = base.as_ref().ok_or_else(|| {
+                        SourceBackedRouteError::new(
+                            SourceBackedRouteErrorKind::Internal,
+                            "OpenClaw append scan did not receive a base certificate",
+                        )
+                    })?;
+                    let prefix = scan.verified_base_prefix.ok_or_else(|| {
+                        SourceBackedRouteError::new(
+                            SourceBackedRouteErrorKind::Internal,
+                            "OpenClaw append scan did not return verified prefix evidence",
+                        )
+                    })?;
+                    let append = CertifiedSourceAppend::certify(
+                        base,
+                        scan.certified_source,
+                        prefix.bytes,
+                        prefix.digest,
+                    )
+                    .map_err(route_error)?;
+                    sink.certify_append(append)?;
+                } else {
+                    sink.certify(scan.certified_source)?;
+                }
             }
             Ok(())
         },
@@ -281,6 +312,7 @@ pub(super) fn register_continue_route(
     let capture_root = root.clone();
     let hydration_root = root;
     let driver = captured_route_driver(
+        &source,
         move |sink| {
             let discovery = discover_continue_root(&capture_root).map_err(route_error)?;
             let mut reader = ContinueSourceBackedReader::new(&discovery).map_err(route_error)?;
@@ -350,13 +382,15 @@ pub(super) fn register_mux_route(
     let hydration_root = root.clone();
     let batch_hydration_root = root;
     let driver = captured_route_driver(
+        &source,
         move |sink| {
             for candidate in
                 discover_mux_source_backed_sources(&capture_root, DateTime::<Utc>::UNIX_EPOCH)
                     .map_err(route_error)?
             {
+                let base = sink.base_source(candidate.source_key());
                 sink.begin(candidate.source_key().clone())?;
-                let receipt = scan_mux_source_backed(&candidate, None, |page| {
+                let receipt = scan_mux_source_backed(&candidate, base.as_ref(), |page| {
                     for record in page.records {
                         sink.document(record.document).map_err(|error| {
                             crate::provider::providers::mux::native_path::MuxSourceBackedError::Capture(
@@ -367,13 +401,16 @@ pub(super) fn register_mux_route(
                     Ok(())
                 })
                 .map_err(route_error)?;
-                if !matches!(receipt.disposition, MuxSourceBackedDisposition::Cold) {
-                    return Err(SourceBackedRouteError::new(
-                        SourceBackedRouteErrorKind::Internal,
-                        "cold Mux coordinator scan returned a non-cold disposition",
-                    ));
+                match receipt.disposition {
+                    MuxSourceBackedDisposition::Append { proof } => {
+                        sink.certify_append(proof)?;
+                    }
+                    MuxSourceBackedDisposition::Cold
+                    | MuxSourceBackedDisposition::Unchanged
+                    | MuxSourceBackedDisposition::Replacement { .. } => {
+                        sink.certify(receipt.certificate)?;
+                    }
                 }
-                sink.certify(receipt.certificate)?;
             }
             Ok(())
         },

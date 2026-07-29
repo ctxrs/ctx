@@ -16,6 +16,7 @@ pub(super) fn register_forgecode_route(
     let capture_selection = make_selection.clone();
     let hydration_selection = make_selection;
     let driver = captured_route_driver(
+        &source,
         move |sink| {
             let ForgeCodeSourceBackedDiscoveryV0::Live(mut scan) =
                 open_forgecode_source_backed_v0(capture_selection(capture_path.clone()))
@@ -76,6 +77,7 @@ pub(super) fn register_junie_route(
     let hydration_root = root.clone();
     let batch_hydration_root = root;
     let driver = captured_route_driver(
+        &source,
         move |sink| {
             let mut scanner =
                 JunieSourceBackedScannerV0::discover(&capture_root, DateTime::<Utc>::UNIX_EPOCH)
@@ -123,6 +125,7 @@ pub(super) fn register_kimi_route(
     let capture_root = root.clone();
     let hydration_root = root;
     let driver = captured_route_driver(
+        &source,
         move |sink| {
             let catalog = KimiSourceBackedCatalog::discover(&capture_root).map_err(route_error)?;
             let sources = catalog.source_keys().cloned().collect::<Vec<_>>();
@@ -173,6 +176,7 @@ pub(super) fn register_firebender_route(
     let capture_path = path.clone();
     let hydration_path = path;
     let driver = captured_route_driver(
+        &source,
         move |sink| {
             let FirebenderSourceBackedPlan::Replacement(mut scanner) =
                 prepare_firebender_source_backed(&capture_path, None).map_err(route_error)?
@@ -226,6 +230,7 @@ pub(super) fn register_deepagents_route(
     let capture_database = database.clone();
     let hydration_database = database;
     let driver = captured_route_driver(
+        &source,
         move |sink| {
             let mut scanner = DeepAgentsSourceBackedScannerV0::open(
                 DeepAgentsDatabaseSelectionV0::explicit(capture_database.clone()),
@@ -271,6 +276,7 @@ pub(super) fn register_mistral_route(
     let capture_root = root.clone();
     let hydration_root = root;
     let driver = captured_route_driver(
+        &source,
         move |sink| {
             let scan = scan_mistral_vibe_source_backed(&capture_root, DateTime::<Utc>::UNIX_EPOCH)
                 .map_err(route_error)?;
@@ -319,6 +325,7 @@ pub(super) fn register_opencode_family_route(
     let provider = source.provider;
     let source_format = source.source_format;
     let driver = captured_route_driver(
+        &source,
         move |sink| {
             let mut began = false;
             let mut sink_failure = None;
@@ -379,6 +386,7 @@ pub(super) fn register_openhands_route(
     let capture_root = root.clone();
     let hydration_root = root;
     let driver = captured_route_driver(
+        &source,
         move |sink| {
             let adapter =
                 OpenHandsSourceBackedAdapterV1::discover(&capture_root).map_err(route_error)?;
@@ -425,6 +433,7 @@ pub(super) fn register_task_json_route(
     let provider = source.provider;
     let source_format = source.source_format;
     let driver = captured_route_driver(
+        &source,
         move |sink| {
             let mut adapter = match provider {
                 CaptureProvider::Cline => cline_task_json_source_backed_adapter(&capture_selected),

@@ -271,6 +271,7 @@ pub fn register_astrbot_source_backed_route(
     let hydration_discovery = discovery.clone();
     let batch_hydration_discovery = discovery;
     let driver = captured_route_driver(
+        &source,
         move |sink| {
             let opening = AstrBotSourceBackedInventoryV0::discover(&capture_discovery)
                 .map_err(route_error)?;
@@ -289,8 +290,8 @@ pub fn register_astrbot_source_backed_route(
             }
             let closing = AstrBotSourceBackedInventoryV0::discover(&capture_discovery)
                 .map_err(route_error)?;
-            opening.certify(&closing).map_err(route_error)?;
-            Ok(())
+            let inventory = opening.certify(&closing).map_err(route_error)?;
+            sink.certify_complete_inventory(inventory)
         },
         provider_format_scope(CaptureProvider::AstrBot, "astrbot_data_v4_sqlite"),
         move |request| {
@@ -354,6 +355,7 @@ fn register_shelley_adapter(
     let capture_adapter = adapter.clone();
     let hydration_adapter = adapter;
     let driver = captured_route_driver(
+        &source,
         move |sink| {
             sink.begin(capture_adapter.source().clone())?;
             let mut scan = capture_adapter.start_scan().map_err(route_error)?;

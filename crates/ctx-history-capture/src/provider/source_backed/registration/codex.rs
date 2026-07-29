@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Mutex;
 
 pub(super) fn register_codex_session_tree_route(
     registry: &mut SourceBackedProviderRegistry,
@@ -334,100 +335,218 @@ pub fn register_codex_prompt_history_source_backed_route(
         .map_err(|error| invalid_route(source.provider, error.to_string()))?;
     let owned_source = retained.source().clone();
     let capture_source = retained.clone();
-    let revalidation_source = retained.clone();
+    let terminal_source = retained.clone();
     let hydration_resolver = Arc::new(
         CodexPromptHistorySourceBackedResolverV0::new([retained])
             .map_err(|error| invalid_route(source.provider, error.to_string()))?,
     );
-    let scan_owned_source = owned_source.clone();
     let claimed_source = owned_source.clone();
+    let capture_route = source.clone();
+    let terminal_route = source.clone();
+    let terminal_evidence = Arc::new(Mutex::new(
+        None::<Result<(CertifiedSource, CertifiedSourceInventory), SourceBackedRouteError>>,
+    ));
+    let scan_terminal_evidence = Arc::clone(&terminal_evidence);
+    let source_terminal_evidence = Arc::clone(&terminal_evidence);
+    let inventory_terminal_evidence = terminal_evidence;
+    let terminal_capture: Arc<CodexPromptTerminalCapture> = Arc::new(move || {
+        let scan =
+            scan_codex_prompt_history_source_backed_v0(terminal_source.clone(), None, |_| Ok(()))
+                .map_err(route_error)?;
+        let inventory =
+            certify_captured_route_inventory(&terminal_route, &[scan.certificate.clone()])?;
+        Ok((scan.certificate, inventory))
+    });
+    let source_terminal_capture = Arc::clone(&terminal_capture);
+    let inventory_terminal_capture = terminal_capture;
     let driver = SourceBackedRouteDriver::new(
         move |sink| {
-            sink.begin_source(claimed_source.clone())
-                .map_err(route_coordinator_error)?;
-            let mut emitted_documents = 0_u64;
-            let mut retained_page_bytes = 0_u64;
-            // v0.26 starts a fresh history epoch. Do not seed this scan from
-            // legacy Store/NativePath rows, cursors, or complete bodies.
-            let scan =
-                scan_codex_prompt_history_source_backed_v0(capture_source.clone(), None, |page| {
-                    if !page.source.exact_descriptor_eq(&claimed_source) {
-                        return Err(CaptureError::InvalidPayload(
-                            "Codex prompt-history page changed its source descriptor".to_owned(),
-                        )
-                        .into());
-                    }
-                    emitted_documents = emitted_documents
-                        .checked_add(u64::try_from(page.documents.len()).map_err(|_| {
-                            CaptureError::InvalidPayload(
-                                "Codex prompt-history page count exceeds platform limits"
+            *scan_terminal_evidence.lock().map_err(|_| {
+                SourceBackedRouteError::new(
+                    SourceBackedRouteErrorKind::Internal,
+                    "Codex prompt-history terminal evidence lock was poisoned",
+                )
+            })? = None;
+            let base = sink.base_source(&claimed_source).cloned();
+            let Some(base) = base else {
+                sink.begin_source(claimed_source.clone())
+                    .map_err(route_coordinator_error)?;
+                let scan = scan_codex_prompt_history_source_backed_v0(
+                    capture_source.clone(),
+                    None,
+                    |page| {
+                        if !page.source.exact_descriptor_eq(&claimed_source) {
+                            return Err(CaptureError::InvalidPayload(
+                                "Codex prompt-history page changed its source descriptor"
                                     .to_owned(),
                             )
-                        })?)
-                        .ok_or_else(|| {
-                            CaptureError::InvalidPayload(
-                                "Codex prompt-history document count overflowed".to_owned(),
-                            )
-                        })?;
-                    retained_page_bytes = retained_page_bytes
-                        .checked_add(u64::try_from(page.retained_bytes).map_err(|_| {
-                            CaptureError::InvalidPayload(
-                                "Codex prompt-history page bytes exceed platform limits".to_owned(),
-                            )
-                        })?)
-                        .ok_or_else(|| {
-                            CaptureError::InvalidPayload(
-                                "Codex prompt-history retained page bytes overflowed".to_owned(),
-                            )
-                        })?;
-                    for document in page.documents {
-                        sink.add_document(document)
-                            .map_err(capture_coordinator_error)?;
-                    }
-                    Ok(())
-                })
+                            .into());
+                        }
+                        let _retained_page_bytes = page.retained_bytes;
+                        for document in page.documents {
+                            sink.add_document(document)
+                                .map_err(capture_coordinator_error)?;
+                        }
+                        Ok(())
+                    },
+                )
                 .map_err(route_error)?;
-            if !matches!(
-                scan.disposition,
-                CodexPromptHistorySourceBackedDispositionV0::Cold
-            ) || !scan.source.source().exact_descriptor_eq(&claimed_source)
-                || scan.emitted_documents != emitted_documents
-                || scan.certificate.counts().indexed_documents != emitted_documents
-                || (emitted_documents != 0 && retained_page_bytes == 0)
-            {
+                if !matches!(
+                    scan.disposition,
+                    CodexPromptHistorySourceBackedDispositionV0::Cold
+                ) || !scan.source.source().exact_descriptor_eq(&claimed_source)
+                    || scan.certificate.counts().indexed_documents != scan.emitted_documents
+                {
+                    return Err(SourceBackedRouteError::new(
+                        SourceBackedRouteErrorKind::Internal,
+                        "Codex prompt-history cold scan did not reconcile",
+                    ));
+                }
+                sink.certify_source(scan.certificate.clone())
+                    .map_err(route_coordinator_error)?;
+                let inventory =
+                    certify_captured_route_inventory(&capture_route, &[scan.certificate])?;
+                sink.certify_complete_inventory(inventory)
+                    .map_err(route_coordinator_error)?;
+                return Ok(());
+            };
+
+            let planned = scan_codex_prompt_history_source_backed_v0(
+                capture_source.clone(),
+                Some(&base),
+                |_| Ok(()),
+            )
+            .map_err(route_error)?;
+            if !planned.source.source().exact_descriptor_eq(&claimed_source) {
                 return Err(SourceBackedRouteError::new(
-                    SourceBackedRouteErrorKind::Internal,
-                    "Codex prompt-history scan counts or source authority did not reconcile",
+                    SourceBackedRouteErrorKind::SourceChanged,
+                    "Codex prompt-history replay changed its source descriptor",
                 ));
             }
-            sink.certify_source(scan.certificate)
+            let certificate = match planned.disposition {
+                CodexPromptHistorySourceBackedDispositionV0::Unchanged => {
+                    if planned.certificate != base || planned.emitted_documents != 0 {
+                        return Err(SourceBackedRouteError::new(
+                            SourceBackedRouteErrorKind::SourceChanged,
+                            "Codex prompt-history unchanged evidence did not match its base",
+                        ));
+                    }
+                    let frontier = base.frontier().ok_or_else(|| {
+                        SourceBackedRouteError::new(
+                            SourceBackedRouteErrorKind::Internal,
+                            "Codex prompt-history replay base has no append frontier",
+                        )
+                    })?;
+                    sink.begin_source_append(claimed_source.clone())
+                        .map_err(route_coordinator_error)?;
+                    let append = CertifiedSourceAppend::certify(
+                        &base,
+                        planned.certificate.clone(),
+                        frontier.certified_prefix_bytes(),
+                        *frontier.certified_prefix_digest(),
+                    )
+                    .map_err(route_error)?;
+                    sink.certify_source_append(append)
+                        .map_err(route_coordinator_error)?;
+                    planned.certificate
+                }
+                CodexPromptHistorySourceBackedDispositionV0::Append
+                | CodexPromptHistorySourceBackedDispositionV0::Replacement => {
+                    let is_append = matches!(
+                        planned.disposition,
+                        CodexPromptHistorySourceBackedDispositionV0::Append
+                    );
+                    if is_append {
+                        sink.begin_source_append(claimed_source.clone())
+                            .map_err(route_coordinator_error)?;
+                    } else {
+                        sink.begin_source(claimed_source.clone())
+                            .map_err(route_coordinator_error)?;
+                    }
+                    let scan = scan_codex_prompt_history_source_backed_v0(
+                        capture_source.clone(),
+                        Some(&base),
+                        |page| {
+                            if !page.source.exact_descriptor_eq(&claimed_source) {
+                                return Err(CaptureError::InvalidPayload(
+                                    "Codex prompt-history page changed its source descriptor"
+                                        .to_owned(),
+                                )
+                                .into());
+                            }
+                            let _retained_page_bytes = page.retained_bytes;
+                            for document in page.documents {
+                                sink.add_document(document)
+                                    .map_err(capture_coordinator_error)?;
+                            }
+                            Ok(())
+                        },
+                    )
+                    .map_err(route_error)?;
+                    if scan.certificate != planned.certificate
+                        || std::mem::discriminant(&scan.disposition)
+                            != std::mem::discriminant(&planned.disposition)
+                    {
+                        return Err(SourceBackedRouteError::new(
+                            SourceBackedRouteErrorKind::SourceChanged,
+                            "Codex prompt-history changed between planning and staging",
+                        ));
+                    }
+                    if is_append {
+                        let frontier = base.frontier().ok_or_else(|| {
+                            SourceBackedRouteError::new(
+                                SourceBackedRouteErrorKind::Internal,
+                                "Codex prompt-history append base has no frontier",
+                            )
+                        })?;
+                        let append = CertifiedSourceAppend::certify(
+                            &base,
+                            scan.certificate.clone(),
+                            frontier.certified_prefix_bytes(),
+                            *frontier.certified_prefix_digest(),
+                        )
+                        .map_err(route_error)?;
+                        sink.certify_source_append(append)
+                            .map_err(route_coordinator_error)?;
+                    } else {
+                        sink.certify_source(scan.certificate.clone())
+                            .map_err(route_coordinator_error)?;
+                    }
+                    scan.certificate
+                }
+                CodexPromptHistorySourceBackedDispositionV0::Cold => {
+                    return Err(SourceBackedRouteError::new(
+                        SourceBackedRouteErrorKind::Internal,
+                        "Codex prompt-history replay unexpectedly returned a cold disposition",
+                    ));
+                }
+            };
+            let inventory = certify_captured_route_inventory(&capture_route, &[certificate])?;
+            sink.certify_complete_inventory(inventory)
                 .map_err(route_coordinator_error)
         },
         move |candidate| candidate.exact_descriptor_eq(&owned_source),
         move |target| match target {
-            SourceBackedRevalidationTarget::Source(expected)
-                if expected
-                    .observation()
-                    .source()
-                    .exact_descriptor_eq(&scan_owned_source) =>
-            {
-                scan_codex_prompt_history_source_backed_v0(
-                    revalidation_source.clone(),
-                    Some(expected),
-                    |_| Ok(()),
-                )
-                .is_ok_and(|scan| {
-                    matches!(
-                        scan.disposition,
-                        CodexPromptHistorySourceBackedDispositionV0::Unchanged
-                    ) && scan.certificate == *expected
-                })
-            }
-            SourceBackedRevalidationTarget::Source(_)
-            | SourceBackedRevalidationTarget::Deletion(_) => false,
+            SourceBackedRevalidationTarget::Source(expected) => cached_codex_prompt_evidence(
+                &source_terminal_evidence,
+                source_terminal_capture.as_ref(),
+            )
+            .is_some_and(|(current, _)| current == *expected),
+            SourceBackedRevalidationTarget::Deletion(deletion) => cached_codex_prompt_evidence(
+                &source_terminal_evidence,
+                source_terminal_capture.as_ref(),
+            )
+            .is_some_and(|(_, inventory)| deletion.verifies(&inventory)),
         },
         move |request| hydration_resolver.hydrate_event(request),
-    );
+    )
+    .with_complete_inventory_revalidation(move |expected| {
+        cached_codex_prompt_evidence(
+            &inventory_terminal_evidence,
+            inventory_terminal_capture.as_ref(),
+        )
+        .is_some_and(|(_, current)| current == *expected)
+    });
     registry.register(executable_route(
         source,
         selection,
@@ -435,4 +554,21 @@ pub fn register_codex_prompt_history_source_backed_route(
         driver,
     )?);
     Ok(())
+}
+
+type CodexPromptTerminalCapture = dyn Fn() -> Result<(CertifiedSource, CertifiedSourceInventory), SourceBackedRouteError>
+    + Send
+    + Sync;
+
+fn cached_codex_prompt_evidence(
+    cached: &Mutex<
+        Option<Result<(CertifiedSource, CertifiedSourceInventory), SourceBackedRouteError>>,
+    >,
+    capture: &CodexPromptTerminalCapture,
+) -> Option<(CertifiedSource, CertifiedSourceInventory)> {
+    let mut cached = cached.lock().ok()?;
+    if cached.is_none() {
+        *cached = Some(capture());
+    }
+    cached.as_ref()?.as_ref().ok().cloned()
 }
