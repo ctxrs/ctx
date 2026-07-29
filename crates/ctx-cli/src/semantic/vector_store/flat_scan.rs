@@ -25,7 +25,9 @@ mod validation;
 use scoring::exact_dot_product_f32_avx;
 #[cfg(test)]
 use scoring::exact_dot_product_f32_scalar;
-use scoring::{validate_and_dot_le_bytes, ExactDotProductKernel};
+#[cfg(test)]
+use scoring::validate_and_dot_le_bytes;
+use scoring::ExactDotProductKernel;
 use validation::{validate_config, validate_normalized_f32};
 
 pub(in crate::semantic) const DEFAULT_NORMALIZATION_TOLERANCE: f64 = 1.0e-3;
@@ -47,6 +49,7 @@ impl FlatScanConfig {
         }
     }
 
+    #[cfg(test)]
     pub(in crate::semantic) const fn with_normalization_tolerance(
         mut self,
         tolerance: f64,
@@ -74,6 +77,7 @@ pub(in crate::semantic) struct ActiveChunk {
 }
 
 impl ActiveChunk {
+    #[cfg(test)]
     pub(in crate::semantic) const fn new(event_id: Uuid, chunk_ordinal: u32) -> Self {
         Self {
             event_id,
@@ -98,7 +102,9 @@ impl ActiveChunk {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::semantic) enum FlatScanSkipReason {
     Filtered,
+    #[cfg(test)]
     Tombstoned,
+    #[cfg(test)]
     Superseded,
 }
 
@@ -191,6 +197,7 @@ pub(in crate::semantic) enum FlatScanError {
         actual: usize,
         chunk_ordinal: Option<u32>,
     },
+    #[cfg(test)]
     ByteLengthMismatch {
         input: FlatScanInput,
         expected: usize,
@@ -241,6 +248,7 @@ impl fmt::Display for FlatScanError {
                 input.label(),
                 chunk_suffix(*chunk_ordinal)
             ),
+            #[cfg(test)]
             Self::ByteLengthMismatch {
                 input,
                 expected,
@@ -369,6 +377,7 @@ impl<'query> ExactFlatF32Scan<'query> {
     ///
     /// The iterator may span segments, but all chunks for an event must be
     /// contiguous and already resolved against newer records and tombstones.
+    #[cfg(test)]
     pub(in crate::semantic) fn scan_f32<'vector, I>(
         &mut self,
         chunks: I,
@@ -413,6 +422,7 @@ impl<'query> ExactFlatF32Scan<'query> {
     ///
     /// This path decodes directly from an mmap-compatible byte slice without a
     /// per-vector allocation.
+    #[cfg(test)]
     pub(in crate::semantic) fn scan_le_bytes<'vector, I>(
         &mut self,
         chunks: I,
@@ -448,9 +458,11 @@ impl<'query> ExactFlatF32Scan<'query> {
             FlatScanSkipReason::Filtered => {
                 self.counters.filtered_events = self.counters.filtered_events.saturating_add(1);
             }
+            #[cfg(test)]
             FlatScanSkipReason::Tombstoned => {
                 self.counters.tombstoned_events = self.counters.tombstoned_events.saturating_add(1);
             }
+            #[cfg(test)]
             FlatScanSkipReason::Superseded => {
                 self.counters.superseded_events = self.counters.superseded_events.saturating_add(1);
             }
@@ -458,6 +470,7 @@ impl<'query> ExactFlatF32Scan<'query> {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(in crate::semantic) const fn counters(&self) -> &FlatScanCounters {
         &self.counters
     }
@@ -477,6 +490,7 @@ impl<'query> ExactFlatF32Scan<'query> {
         })
     }
 
+    #[cfg(test)]
     fn scan_one_f32(&mut self, metadata: ActiveChunk, vector: &[f32]) -> Result<(), FlatScanError> {
         self.observe_chunk(metadata);
         if vector.len() != self.config.dimensions {
@@ -535,6 +549,7 @@ impl<'query> ExactFlatF32Scan<'query> {
         Ok(())
     }
 
+    #[cfg(test)]
     fn scan_one_le_bytes(
         &mut self,
         metadata: ActiveChunk,
@@ -638,6 +653,7 @@ impl<'query> ExactFlatF32Scan<'query> {
     }
 }
 
+#[cfg(test)]
 impl ExactFlatF32Scan<'static> {
     /// Decode a little-endian F32 query once, then scan without query-sized
     /// allocation growth.

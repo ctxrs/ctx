@@ -27,7 +27,6 @@ use super::{
         SemanticVectorSearchStats, SemanticVectorStore,
     },
     vector_store_search::scan_exact_generation,
-    SemanticEventDocument,
 };
 #[cfg(test)]
 use super::{
@@ -35,6 +34,7 @@ use super::{
     vector_store::{
         SemanticChunkDocument, SourceBackedSemanticEmbedder, SourceBackedSemanticResolver,
     },
+    SemanticEventDocument,
 };
 
 mod transport;
@@ -115,6 +115,7 @@ impl SourceHydrationUnavailable {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn code(&self) -> &str {
         &self.code
     }
