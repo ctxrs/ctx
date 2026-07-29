@@ -1028,8 +1028,8 @@ fn complete_content_error(error: CompleteContentError) -> CaptureError {
         | CompleteContentErrorKind::ContentVerificationFailed => {
             CaptureError::SourceChangedDuringCapture
         }
-        CompleteContentErrorKind::HydrationUnsupported => CaptureError::InvalidPayload(
-            "Cursor source-backed complete-message hydration is unsupported".to_owned(),
+        CompleteContentErrorKind::HydrationUnsupported => CaptureError::SystemInvariant(
+            "Cursor exact JSONL hydration became unsupported after route admission",
         ),
         CompleteContentErrorKind::ContentTooLarge => CaptureError::InvalidPayload(
             "Cursor source-backed complete message exceeds the hydration bound".to_owned(),
