@@ -146,12 +146,12 @@ pub(crate) fn hydrate_codebuddy_source_backed_record(
             },
         )?;
         let source_key = codebuddy_source_key(source, &state.session)?;
-        if source_key.exact_descriptor_eq(locator.source()) {
-            if matched.replace((source, state)).is_some() {
-                return Err(invalid_source_backed(
-                    "locator source identity matched multiple installed CodeBuddy stores",
-                ));
-            }
+        if source_key.exact_descriptor_eq(locator.source())
+            && matched.replace((source, state)).is_some()
+        {
+            return Err(invalid_source_backed(
+                "locator source identity matched multiple installed CodeBuddy stores",
+            ));
         }
     }
     let (source, state) = matched.ok_or_else(|| {

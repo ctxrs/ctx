@@ -283,8 +283,8 @@ pub(crate) fn scan_hermes_source_backed(
     let sqlite_user_version = conn
         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
         .map_err(CaptureError::from)?;
-    let schema_fingerprint = sqlite_schema_fingerprint(&conn)?;
-    let schema = HermesSchema::detect(&conn)?;
+    let schema_fingerprint = sqlite_schema_fingerprint(conn)?;
+    let schema = HermesSchema::detect(conn)?;
     let revision =
         hermes_source_revision(&opening_evidence, sqlite_user_version, &schema_fingerprint);
     let revision_digest: [u8; 32] = Sha256::digest(&revision).into();
@@ -326,7 +326,7 @@ pub(crate) fn scan_hermes_source_backed(
             let rowid = native.locator.rowid;
             let ordinal = native.ordinal;
             let record = project_native_row(
-                &conn,
+                conn,
                 &schema,
                 &candidate.source,
                 &source_path,
@@ -1040,15 +1040,15 @@ pub(crate) fn hydrate_hermes_source_backed_message(
         let sqlite_user_version = conn
             .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
             .map_err(CaptureError::from)?;
-        let schema_fingerprint = sqlite_schema_fingerprint(&conn)?;
-        HermesSchema::detect(&conn)?;
+        let schema_fingerprint = sqlite_schema_fingerprint(conn)?;
+        HermesSchema::detect(conn)?;
         let revision =
             hermes_source_revision(&opening_evidence, sqlite_user_version, &schema_fingerprint);
         let revision_digest: [u8; 32] = Sha256::digest(&revision).into();
         if locator.certified_source_revision_digest() != Some(&revision_digest) {
             return Err(HermesSourceBackedError::StaleSourceEvidence);
         }
-        let values = match load_hermes_message_values(&conn, rowid) {
+        let values = match load_hermes_message_values(conn, rowid) {
             Ok(values) => values,
             Err(CaptureError::Sqlite(rusqlite::Error::QueryReturnedNoRows)) => {
                 return Err(HermesSourceBackedError::MissingRecord);
@@ -1056,7 +1056,7 @@ pub(crate) fn hydrate_hermes_source_backed_message(
             Err(error) => return Err(error.into()),
         };
         let (actual_session_id, provider_event_hash, normalized_payload_hash, text) =
-            hermes_complete_message_with_normalized_hash(&conn, &values)?;
+            hermes_complete_message_with_normalized_hash(conn, &values)?;
         if actual_session_id != provider_session_id
             || provider_event_hash != format!("message:{message_id}")
         {

@@ -567,7 +567,7 @@ pub(super) fn next_extension_page(
         };
         let classification = extension_core_row(
             context,
-            &metadata,
+            metadata,
             &mut next.session,
             &mut session_title,
             ordinal,

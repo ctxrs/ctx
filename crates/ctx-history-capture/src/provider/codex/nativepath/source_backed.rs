@@ -1540,11 +1540,10 @@ fn open_codex_hydration_source(
 
 fn normalize_codex_hydration_capture_error(error: CaptureError) -> CaptureError {
     match error {
-        CaptureError::InvalidProviderTranscriptPath { reason, .. }
-            if reason == "provider source changed while its authority handle was retained" =>
-        {
-            CaptureError::SourceChangedDuringCapture
-        }
+        CaptureError::InvalidProviderTranscriptPath {
+            reason: "provider source changed while its authority handle was retained",
+            ..
+        } => CaptureError::SourceChangedDuringCapture,
         other => other,
     }
 }
@@ -1561,7 +1560,7 @@ fn hydrate_codex_source_record(
     let opened = open_codex_hydration_source(source)?;
     if byte_offset != 0 {
         let boundary = opened.read_exact_range(byte_offset.saturating_sub(1), 1, 1)?;
-        if boundary != [b'\n'] {
+        if boundary != *b"\n" {
             return Err(CodexSourceBackedErrorV0::LocatorRecordBoundaryMismatch);
         }
     }

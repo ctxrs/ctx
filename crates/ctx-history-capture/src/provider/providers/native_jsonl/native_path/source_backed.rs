@@ -308,7 +308,7 @@ impl DirectJsonlSourceAdapter {
         }
 
         let canonical_root = root.to_path_buf();
-        paths.sort_by(|left, right| path_key(&left.0).cmp(&path_key(&right.0)));
+        paths.sort_by_key(|left| path_key(&left.0));
         let leaves = paths
             .into_iter()
             .map(

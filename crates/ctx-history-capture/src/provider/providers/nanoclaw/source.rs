@@ -55,13 +55,13 @@ impl<'snapshot> NanoClawDatabaseSource<'snapshot> {
         }
         let conn = read.connection()?;
         let table = source.table();
-        if !sqlite_table_exists(&conn, table)? {
+        if !sqlite_table_exists(conn, table)? {
             return Err(CaptureError::InvalidPayload(format!(
                 "NanoClaw {} is missing required {table} table",
                 snapshot.path().display()
             )));
         }
-        let columns = sqlite_table_columns(&conn, table)?;
+        let columns = sqlite_table_columns(conn, table)?;
         ensure_sqlite_table_columns(
             &columns,
             match source {

@@ -119,6 +119,8 @@ pub(crate) enum AstrBotSourceBackedErrorV0 {
 
 pub(crate) type AstrBotSourceBackedResultV0<T> = std::result::Result<T, AstrBotSourceBackedErrorV0>;
 
+type PlatformUnitProjection = (Option<CoreUnit>, Option<String>, [u8; 32], Option<String>);
+
 fn conversation_items(raw: &str) -> (Vec<Value>, bool) {
     match provider_json_text(raw) {
         Value::Array(items) => (items, true),
@@ -379,7 +381,7 @@ pub(crate) fn scan_astrbot_source_backed_v0(
 
     loop {
         let Some(candidate) = fetch_candidate(
-            &conn,
+            conn,
             &sql.conversation_candidate_initial,
             &sql.conversation_candidate_after,
             conversation_after,
@@ -408,7 +410,7 @@ pub(crate) fn scan_astrbot_source_backed_v0(
         }
 
         let row =
-            hydrate_conversation(&conn, &sql.conversation_hydration, candidate.physical_rowid)?;
+            hydrate_conversation(conn, &sql.conversation_hydration, candidate.physical_rowid)?;
         let row_digest =
             logical_values_digest(&super::super::model::conversation_values(row.clone()));
         content_chain = chain_hash(content_chain, row_digest);
@@ -471,7 +473,7 @@ pub(crate) fn scan_astrbot_source_backed_v0(
     ) {
         let mut platform_after = None;
         loop {
-            let Some(candidate) = fetch_candidate(&conn, initial, after, platform_after)? else {
+            let Some(candidate) = fetch_candidate(conn, initial, after, platform_after)? else {
                 break;
             };
             platform_after = Some(candidate.physical_rowid);
@@ -557,7 +559,7 @@ fn source_backed_platform_unit(
     candidate: RowCandidate,
     native_ordinal: u64,
     checkpoint_links: &BTreeMap<String, PlatformMessageLink>,
-) -> AstrBotSourceBackedResultV0<(Option<CoreUnit>, Option<String>, [u8; 32], Option<String>)> {
+) -> AstrBotSourceBackedResultV0<PlatformUnitProjection> {
     let hydration =
         sql.platform_message_hydration
             .as_deref()
@@ -711,7 +713,9 @@ impl AstrBotSourceBackedResolverV0 {
                         row_digest,
                         content_kind,
                     } => {
-                        if !conversations.contains_key(&physical_rowid) {
+                        if let std::collections::btree_map::Entry::Vacant(entry) =
+                            conversations.entry(physical_rowid)
+                        {
                             let row = hydrate_conversation(
                                 conn,
                                 &sql.conversation_hydration,
@@ -719,7 +723,7 @@ impl AstrBotSourceBackedResolverV0 {
                             )
                             .map_err(map_capture_hydration)?;
                             let values = super::super::model::conversation_values(row);
-                            conversations.insert(physical_rowid, values);
+                            entry.insert(values);
                         }
                         let values = conversations.get(&physical_rowid).ok_or_else(|| {
                             hydration_failure(
@@ -1127,17 +1131,14 @@ fn load_checkpoint_links(
 ) -> std::result::Result<BTreeMap<String, PlatformMessageLink>, HydrationFailure> {
     let mut links = BTreeMap::new();
     let mut after = None;
-    loop {
-        let Some(candidate) = fetch_candidate(
-            conn,
-            &sql.conversation_candidate_initial,
-            &sql.conversation_candidate_after,
-            after,
-        )
-        .map_err(map_capture_hydration)?
-        else {
-            break;
-        };
+    while let Some(candidate) = fetch_candidate(
+        conn,
+        &sql.conversation_candidate_initial,
+        &sql.conversation_candidate_after,
+        after,
+    )
+    .map_err(map_capture_hydration)?
+    {
         after = Some(candidate.physical_rowid);
         if candidate.observed_bytes().map_err(map_capture_hydration)?
             > u64::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES).unwrap_or(u64::MAX)

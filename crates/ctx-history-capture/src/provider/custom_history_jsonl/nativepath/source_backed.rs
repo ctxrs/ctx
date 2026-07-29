@@ -414,26 +414,25 @@ pub(crate) fn scan_custom_history_source_backed_explicit(
     if let Some(prior) = prior {
         if prior.parser_revision() == CUSTOM_SOURCE_BACKED_PARSER_REVISION
             && prior.observation() == &opening_observation
+            && decode_checkpoint(prior).is_ok()
         {
-            if decode_checkpoint(prior).is_ok() {
-                let closing = observe_custom_history_source_backed_explicit(input)?;
-                opening_inventory.certify_against(&closing)?;
-                return Ok(CustomHistorySourceBackedOutcome::Present(
-                    CustomHistorySourceBackedReceipt {
-                        route: route(
-                            input,
-                            source,
-                            Arc::clone(
-                                opening_inventory
-                                    .opened()
-                                    .ok_or(CustomHistorySourceBackedError::InventoryChanged)?,
-                            ),
+            let closing = observe_custom_history_source_backed_explicit(input)?;
+            opening_inventory.certify_against(&closing)?;
+            return Ok(CustomHistorySourceBackedOutcome::Present(
+                CustomHistorySourceBackedReceipt {
+                    route: route(
+                        input,
+                        source,
+                        Arc::clone(
+                            opening_inventory
+                                .opened()
+                                .ok_or(CustomHistorySourceBackedError::InventoryChanged)?,
                         ),
-                        certificate: prior.clone(),
-                        disposition: CustomHistorySourceBackedDisposition::Unchanged,
-                    },
-                ));
-            }
+                    ),
+                    certificate: prior.clone(),
+                    disposition: CustomHistorySourceBackedDisposition::Unchanged,
+                },
+            ));
         }
     }
 
@@ -1256,7 +1255,7 @@ fn hydrate_from_file(
     }
     if byte_offset != 0 {
         let boundary = file.read_exact_range(byte_offset.saturating_sub(1), 1, 1)?;
-        if boundary != [b'\n'] {
+        if boundary != *b"\n" {
             return Err(CustomHistorySourceBackedError::InvalidLocator);
         }
     }

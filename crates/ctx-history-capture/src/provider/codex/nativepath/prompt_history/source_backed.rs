@@ -854,7 +854,7 @@ fn hydrate_from_source(
         let boundary = source
             .opened
             .read_exact_range(byte_offset.saturating_sub(1), 1, 1)?;
-        if boundary != [b'\n'] {
+        if boundary != *b"\n" {
             return Err(CodexPromptHistorySourceBackedErrorV0::InvalidLocator);
         }
     }

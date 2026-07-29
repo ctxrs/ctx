@@ -53,7 +53,7 @@ fn event(index: u64, id: &str, session_id: &str, text: &str) -> Value {
         "event_index": index,
         "event_id": id,
         "event_type": "message",
-        "role": if index % 2 == 0 { "user" } else { "assistant" },
+        "role": if index.is_multiple_of(2) { "user" } else { "assistant" },
         "occurred_at": format!("2026-07-28T12:00:{:02}Z", index.min(59)),
         "payload": {"text": text},
     })

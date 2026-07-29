@@ -1248,7 +1248,9 @@ impl LingmaSourceBackedResolverV0 {
             let mut values_by_row = BTreeMap::new();
             let mut hydrated = Vec::with_capacity(requests.len());
             for (request, coordinate) in requests.iter().zip(coordinates) {
-                if !values_by_row.contains_key(&coordinate.rowid) {
+                if let std::collections::btree_map::Entry::Vacant(entry) =
+                    values_by_row.entry(coordinate.rowid)
+                {
                     let raw = load_raw_row(connection, coordinate.rowid)
                         .map_err(map_capture_hydration)?;
                     let row = super::decode_raw_row(raw, encoding).map_err(|_| {
@@ -1258,7 +1260,7 @@ impl LingmaSourceBackedResolverV0 {
                         )
                     })?;
                     let values = native_values(&row);
-                    values_by_row.insert(coordinate.rowid, values);
+                    entry.insert(values);
                 }
                 let values = values_by_row.get(&coordinate.rowid).ok_or_else(|| {
                     hydration_failure(

@@ -127,9 +127,9 @@ fn insert_outbound(path: &Path, id: &str, seq: i64, timestamp: i64, content: &st
         .unwrap();
 }
 
-fn sqlite_persistent_disk_state(
-    databases: &[&Path],
-) -> Vec<(PathBuf, Option<(Vec<u8>, u64, std::time::SystemTime)>)> {
+type PersistentDiskState = Vec<(PathBuf, Option<(Vec<u8>, u64, std::time::SystemTime)>)>;
+
+fn sqlite_persistent_disk_state(databases: &[&Path]) -> PersistentDiskState {
     let mut state = Vec::new();
     for database in databases {
         // Stock WAL readers may update volatile SHM reader marks.
