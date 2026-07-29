@@ -114,10 +114,13 @@ plaintext transcript chunks.
 
 `--backend hybrid` blends lexical and semantic evidence with reciprocal-rank
 fusion. `--semantic-weight` controls the semantic contribution and defaults to
-`0.35`. Hybrid uses semantic evidence only when the semantic generation is
-bound to the active lexical generation, coverage is complete, and pending
-dirty work is drained; otherwise it returns lexical results with a structured
-fallback reason.
+`0.35`. A zero semantic weight is exactly lexical retrieval: ctx does not
+contact the semantic query service, initialize a model, open or scan a vector
+generation, or perform any other vector work. Hybrid uses semantic evidence
+only when the semantic generation is bound to the active lexical generation,
+coverage is complete, and pending dirty work is drained. When semantic is
+disabled or otherwise unavailable, hybrid may return lexical results with a
+structured fallback reason.
 
 The production embedding model is
 `intfloat/multilingual-e5-small` with 384-dimensional vectors. Queries use the
@@ -127,29 +130,32 @@ generation identity, so incompatible derived data is rebuilt rather than
 silently reused.
 
 Search does not download models, initialize semantic storage, or perform
-foreground semantic catch-up. Explicit semantic search reports a local error
-when its cached runtime/model or compatible generation is unavailable. Hybrid
+foreground semantic catch-up. Explicit semantic search reports a typed local
+error when its cached runtime/model or compatible generation is unavailable; it
+never silently changes a semantic-only request into lexical retrieval. Hybrid
 remains lexical-safe in those cases.
 
 ## Refresh and freshness
 
-`--refresh background` is the default. With daemon maintenance enabled, search
-serves the published generation while the daemon owns bounded provider
-discovery, source refresh, immutable candidate-generation construction,
-publication, relational catch-up, and semantic catch-up. The daemon retains
-the catalog and exact resolver bound to the published generation; query-time
-rendering does not rediscover providers.
+`--refresh background` is the default. Search health-checks and, when needed,
+wakes or recovers the default-enabled persistent daemon, then serves the latest
+committed generation without waiting for every independent projection. The
+daemon owns bounded provider discovery, source refresh, immutable
+candidate-generation construction, publication, relational catch-up, opted-in
+semantic catch-up, and Pro catch-up. The query process never becomes a
+foreground history writer.
 
-On a fresh root, search may perform a bounded foreground lexical bootstrap. If
-daemon maintenance is disabled, background mode uses the bounded foreground
-source-refresh path for supported discovered providers. History-source plugins
-are not executed by search refresh in 1.0; explicitly import one before
-searching its published source-backed generation.
+On a fresh root, background mode asks the daemon to publish the first lexical
+generation. If daemon maintenance is disabled, search performs no hidden
+bootstrap or fallback import and can query only an already committed
+generation. Enabled auto-refresh history-source plugins run through the same
+daemon-owned, bounded source-backed route; explicit-only sources still require
+an explicit import.
 
-`--refresh wait` performs foreground source refresh and fails if source-level
-or system-level work cannot complete. Isolated malformed records are reported
-and skipped while valid records can still be published. It does not wait for
-complete semantic coverage.
+`--refresh wait` wakes the daemon and waits for the requested source frontier
+and lexical-generation receipt. It fails with a typed source, lag, or system
+error when that receipt cannot publish; it does not fall back to a foreground
+importer or wait for complete semantic or Pro coverage.
 
 `--refresh off` queries the currently published generations without provider
 discovery, plugin execution, refresh scheduling, semantic catch-up, or model

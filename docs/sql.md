@@ -5,9 +5,10 @@ projection. Use it when normal `ctx search` does not express the question:
 counts, audits, joins, file/session metadata lookups, or scripts that need
 structured output.
 
-`ctx sql` does not refresh provider history, import files, initialize storage, or
-rebuild projections. Run a writable command such as `ctx setup` or `ctx import`
-first if the local metadata projection needs to be created or rebuilt.
+`ctx sql` does not refresh provider history, import files, initialize storage,
+hydrate bodies, or rebuild projections. Run `ctx setup` or `ctx import` to
+request daemon-owned maintenance first if the local metadata projection needs
+to be created or rebuilt.
 
 ## Examples
 
@@ -21,9 +22,10 @@ ctx sql - --format raw < query.sql
 ```
 
 Use normal `ctx search` for transcript text search. The relational projection
-does not store or expose event payloads, and `ctx sql` does not hydrate provider
-source files. Use `ctx show` or `ctx locate` when you need source-backed event
-content or its provider location.
+contains only metadata and typed locators; it does not store or expose event
+bodies, previews, command/result payloads, or transcript text, and `ctx sql`
+does not hydrate provider source files. Use `ctx show` or `ctx locate` when you
+need source-backed event content or its provider location.
 
 ## Stable Views
 
