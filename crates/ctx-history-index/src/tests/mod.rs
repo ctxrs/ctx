@@ -111,10 +111,8 @@ fn complete_inventory(
         vec![revision],
     )
     .unwrap();
-    let inventory =
-        CertifiedSourceInventory::certify(inventory.clone(), inventory, "discovery-v1", sources)
-            .unwrap();
-    inventory
+    CertifiedSourceInventory::certify(inventory.clone(), inventory, "discovery-v1", sources)
+        .unwrap()
 }
 
 fn stage_exact_replay(writer: &mut GenerationWriter, source: &SourceKey) -> CertifiedSource {
