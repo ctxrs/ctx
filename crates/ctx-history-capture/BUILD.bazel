@@ -133,7 +133,6 @@ ctx_rust_test(
         "//:provider_support_matrix",
         "//:public_test_fixtures",
         "//crates/ctx-cli:native_dispatch_source",
-        "//crates/ctx-history-store:canonical_observation_projection_source",
     ],
     edition = crate_edition(),
     aliases = aliases(
