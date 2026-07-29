@@ -38,8 +38,8 @@ pub(crate) mod registration {
         HydrationFailure, HydrationFailureKind,
     };
 
-    use super::super::{discover_gemini_transcripts, hydrate_gemini_source_backed_record};
-    use super::GeminiSourceBackedLeafReader;
+    use super::super::discover_gemini_transcripts;
+    use super::{hydrate_gemini_source_backed_record, GeminiSourceBackedLeafReader};
     use crate::provider::source_backed::{
         executable_route, hydration_failure, route_capture_error, route_coordinator_error,
         route_error, SourceBackedCoordinatorResult, SourceBackedGenerationSink,

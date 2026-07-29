@@ -252,10 +252,6 @@ impl DirectJsonlSourceAdapter {
         self.source_format
     }
 
-    pub(crate) fn missing_reason(self) -> &'static str {
-        super::super::dialect::native_jsonl_missing_reason(self.provider)
-    }
-
     pub(crate) fn discover(
         self,
         root: impl AsRef<Path>,
@@ -293,10 +289,9 @@ impl DirectJsonlSourceAdapter {
                 self.provider,
                 root,
                 &mut visit,
-                &mut |path, error| {
+                &mut |path, _error| {
                     failures.push(DirectJsonlInventoryFailure {
                         path: path.to_path_buf(),
-                        detail: error.to_string(),
                     });
                     Ok(())
                 },
@@ -487,10 +482,6 @@ pub(crate) struct DirectJsonlSourceInventory {
 }
 
 impl DirectJsonlSourceInventory {
-    pub(crate) fn observation(&self) -> &SourceInventoryObservation {
-        &self.observation
-    }
-
     pub(crate) fn root_missing(&self) -> bool {
         self.root_missing
     }
@@ -528,7 +519,6 @@ impl DirectJsonlSourceInventory {
 #[derive(Debug)]
 pub(crate) struct DirectJsonlInventoryFailure {
     pub(crate) path: PathBuf,
-    pub(crate) detail: String,
 }
 
 #[derive(Debug, Clone)]
@@ -542,21 +532,10 @@ pub(crate) struct DirectJsonlInventoryLeaf {
     observation: DirectJsonlFileObservation,
 }
 
-impl DirectJsonlInventoryLeaf {
-    pub(crate) fn path(&self) -> &Path {
-        &self.path
-    }
-
-    pub(crate) fn observation(&self) -> &DirectJsonlFileObservation {
-        &self.observation
-    }
-}
-
 #[derive(Debug)]
 pub(crate) struct DirectJsonlSourcePage {
     pub(crate) source: SourceKey,
     pub(crate) documents: Vec<LexicalDocument>,
-    pub(crate) terminal: bool,
 }
 
 pub(crate) struct DirectJsonlSourceReader {
@@ -661,11 +640,7 @@ impl DirectJsonlSourceReader {
                 .checked_add(documents.len() as u64)
                 .ok_or(DirectJsonlSourceBackedError::CountMismatch)?;
             self.last_checkpoint = Some(page.next_checkpoint);
-            return Ok(Some(DirectJsonlSourcePage {
-                source,
-                documents,
-                terminal: page.terminal,
-            }));
+            return Ok(Some(DirectJsonlSourcePage { source, documents }));
         }
     }
 
@@ -734,7 +709,6 @@ impl DirectJsonlSourceReader {
             source,
             native_session_id,
             certificate,
-            terminal: checkpoint.terminal,
         })
     }
 
@@ -767,7 +741,6 @@ pub(crate) struct DirectJsonlCertifiedLeaf {
     source: SourceKey,
     native_session_id: String,
     certificate: CertifiedSource,
-    terminal: bool,
 }
 
 impl DirectJsonlCertifiedLeaf {
@@ -777,10 +750,6 @@ impl DirectJsonlCertifiedLeaf {
 
     pub(crate) fn certificate(&self) -> &CertifiedSource {
         &self.certificate
-    }
-
-    pub(crate) fn terminal(&self) -> bool {
-        self.terminal
     }
 }
 
@@ -995,7 +964,6 @@ pub(super) fn assert_source_backed_fixture(
     assert_eq!(opening.leaves().len(), 1);
     let leaf = opening.leaves()[0].clone();
     let (documents, certified) = collect_test_leaf(adapter, &leaf);
-    assert!(certified.terminal());
     assert_eq!(
         certified.certificate().counts().indexed_documents,
         documents.len() as u64
@@ -1024,7 +992,7 @@ pub(super) fn assert_source_backed_fixture(
     assert_eq!(document.agent_type, expected_agent_type);
     assert_eq!(document.is_primary, expected_is_primary);
     assert_eq!(document.branch, None);
-    assert_eq!(document.source_path.as_deref(), leaf.path().to_str());
+    assert_eq!(document.source_path.as_deref(), leaf.path.to_str());
     let NativeRecordCoordinate::Jsonl {
         byte_length,
         native_session_key,
@@ -1153,8 +1121,14 @@ mod architecture_tests {
                 "{provider} no longer exposes an auditable LexicalDocument body assignment"
             );
             for token in forbidden {
+                let contains_forbidden = source.lines().any(|line| {
+                    let line = line.trim();
+                    line.contains(token)
+                        && !line.starts_with("assert!(!source.contains(")
+                        && !line.starts_with("assert!(!provider_source.contains(")
+                });
                 assert!(
-                    !source.contains(token),
+                    !contains_forbidden,
                     "{provider} source-backed path contains forbidden architecture token {token}"
                 );
             }

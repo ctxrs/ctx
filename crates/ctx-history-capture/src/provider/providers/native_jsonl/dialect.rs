@@ -7,33 +7,6 @@ use crate::{CaptureError, Result};
 
 use super::normalization::native_jsonl_header_session_id;
 
-pub(crate) fn native_jsonl_missing_reason(provider: CaptureProvider) -> &'static str {
-    match provider {
-        CaptureProvider::Pi => "no Pi session JSONL files found",
-        CaptureProvider::Claude => "no Claude project session JSONL files found",
-        CaptureProvider::Antigravity => {
-            "no Antigravity transcript JSONL files found under brain/*/.system_generated/logs"
-        }
-        CaptureProvider::Gemini => "no Gemini CLI chat JSONL transcripts found under chats",
-        CaptureProvider::Tabnine => "no Tabnine CLI chat JSONL transcripts found under chats",
-        CaptureProvider::Windsurf => {
-            "no Windsurf Cascade hook transcript JSONL files found under ~/.windsurf/transcripts"
-        }
-        CaptureProvider::Qoder => {
-            "no Qoder transcript JSONL files found under ~/.qoder/projects/*/transcript"
-        }
-        CaptureProvider::CopilotCli => "no Copilot CLI session events.jsonl transcripts found",
-        CaptureProvider::FactoryAiDroid => "no Factory AI Droid session JSONL transcripts found",
-        CaptureProvider::QwenCode => "no Qwen Code chat JSONL transcripts found under chats",
-        CaptureProvider::KimiCodeCli => "no Kimi Code CLI wire.jsonl transcripts found",
-        CaptureProvider::MistralVibe => {
-            "no Mistral Vibe meta.json/messages.jsonl session directories found"
-        }
-        CaptureProvider::Mux => "no Mux chat.jsonl or partial.json session files found",
-        _ => "no native provider JSONL transcripts found",
-    }
-}
-
 fn provider_jsonl_path_is_native(provider: CaptureProvider, path: &Path) -> bool {
     match provider {
         CaptureProvider::Antigravity => {

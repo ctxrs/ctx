@@ -105,14 +105,6 @@ impl ClaudeSourceBackedLeaf {
     pub(crate) fn source_key(&self) -> &SourceKey {
         &self.source_key
     }
-
-    pub(crate) fn session_id(&self) -> StableEntityId {
-        self.session_id
-    }
-
-    pub(crate) fn provider_session_id(&self) -> String {
-        self.source.key.provider_session_id()
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -282,7 +274,7 @@ fn claude_session_identity(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ClaudeSourceBackedDisposition {
+enum ClaudeSourceBackedDisposition {
     Full,
     Append,
     Unchanged,
@@ -291,13 +283,10 @@ pub(crate) enum ClaudeSourceBackedDisposition {
 #[derive(Debug)]
 pub(crate) struct ClaudeSourceBackedPage {
     pub(crate) documents: Vec<LexicalDocument>,
-    pub(crate) next_frontier: SourceFrontier,
-    pub(crate) terminal: bool,
 }
 
 #[derive(Debug)]
 pub(crate) struct ClaudeSourceBackedScan {
-    pub(crate) disposition: ClaudeSourceBackedDisposition,
     pub(crate) source: CertifiedSource,
 }
 
@@ -333,10 +322,6 @@ impl ClaudeSourceBackedScanner {
         let Some(page) = self.inner.next_page()? else {
             return Ok(None);
         };
-        let checkpoint = self
-            .inner
-            .checkpoint_at(&page.next_safe_frontier, page.terminal);
-        let next_frontier = source_frontier(&checkpoint)?;
         let session = page.session.clone();
         let mut documents = Vec::with_capacity(page.rows.len());
         for row in page.rows {
@@ -353,11 +338,7 @@ impl ClaudeSourceBackedScanner {
                 .checked_add(1)
                 .ok_or(ClaudeSourceBackedError::CountMismatch)?;
         }
-        Ok(Some(ClaudeSourceBackedPage {
-            documents,
-            next_frontier,
-            terminal: page.terminal,
-        }))
+        Ok(Some(ClaudeSourceBackedPage { documents }))
     }
 
     pub(crate) fn finish(self) -> ClaudeSourceBackedResult<ClaudeSourceBackedScan> {
@@ -407,10 +388,7 @@ impl ClaudeSourceBackedScanner {
             counts,
             Some(frontier),
         )?;
-        Ok(ClaudeSourceBackedScan {
-            disposition,
-            source,
-        })
+        Ok(ClaudeSourceBackedScan { source })
     }
 }
 

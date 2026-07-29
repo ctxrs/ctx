@@ -125,20 +125,6 @@ pub(super) fn initial_frontier() -> ClaudeNativeFrontier {
     }
 }
 
-pub(super) fn lifecycle_from_change(change: ChangeSignal) -> ClaudeSourceLifecycle {
-    match change {
-        ChangeSignal::Fresh => ClaudeSourceLifecycle::New,
-        ChangeSignal::Unchanged => ClaudeSourceLifecycle::Replay,
-        ChangeSignal::Append => ClaudeSourceLifecycle::Append,
-        ChangeSignal::Rewrite | ChangeSignal::Reparse => ClaudeSourceLifecycle::Rewrite,
-        ChangeSignal::Truncation => ClaudeSourceLifecycle::Rewind,
-        ChangeSignal::Replacement => ClaudeSourceLifecycle::Replacement,
-        ChangeSignal::Relocation => ClaudeSourceLifecycle::Move,
-        ChangeSignal::LiveCopy => ClaudeSourceLifecycle::Copy,
-        ChangeSignal::ConflictingLiveCopy => ClaudeSourceLifecycle::Ambiguous,
-    }
-}
-
 pub(super) fn refine_change_signal(
     signal: ChangeSignal,
     previous: Option<&ParseCheckpoint>,

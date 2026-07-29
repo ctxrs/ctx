@@ -15,13 +15,13 @@ use super::{
     },
     record::{parse_native_record, ParsedClaudeRecord},
     rows::{
-        ClaudePhysicalLocator, ClaudeRetainedRow, ClaudeRowPage, ClaudeSessionMetadata, ParseStats,
+        ClaudePhysicalLocator, ClaudeRetainedRow, ClaudeSessionMetadata, ParseStats,
         RecordRejection, RejectionKind, RejectionSummary, CLAUDE_MAX_PAGE_BYTES,
         CLAUDE_MAX_PAGE_ROWS,
     },
     source::{
         open_discovered_file, revalidate_open_file, ClaudeFileFingerprint, ClaudeNativePathError,
-        ClaudePhysicalFileId, ClaudeSourceLifecycle, DiscoveredClaudeSession,
+        ClaudePhysicalFileId, DiscoveredClaudeSession,
     },
 };
 
@@ -31,18 +31,15 @@ mod page_queue;
 mod raw_io;
 mod read_plan;
 
-pub(crate) use page::{
-    ClaudeNativePage, ClaudeNativePageIdentity, ClaudePageCertificate, IncompleteTail, ParseOutput,
-};
+pub(crate) use page::{ClaudeNativePage, ClaudePageCertificate, ParseOutput};
 pub(super) use page_identity::exact_json_encoded_bytes;
 use page_identity::*;
 use raw_io::*;
-use read_plan::{empty_parsed_record, lifecycle_from_change, plan_read, refine_change_signal};
+use read_plan::{empty_parsed_record, plan_read, refine_change_signal};
 
 const CLAUDE_RECORD_CHAIN_DOMAIN: &[u8] = b"ctx-claude-nativepath-record-chain-v1\0";
 const CLAUDE_BOUNDARY_PROOF_DOMAIN: &[u8] = b"ctx-claude-nativepath-boundary-proof-v1\0";
 const CLAUDE_IDENTITY_HASH_DOMAIN: &[u8] = b"ctx-claude-nativepath-native-identity-v1\0";
-const CLAUDE_CORE_PAGE_IDENTITY_DOMAIN: &[u8] = b"ctx/claude-nativepath/core-page/v1\0";
 const CLAUDE_BOUNDARY_PROOF_BYTES: usize = 64 * 1024;
 const CLAUDE_PAGE_ENCODING_ALLOWANCE: usize = 4 * 1024;
 
@@ -87,7 +84,6 @@ pub(crate) struct ClaudeNativeScanner {
     before: ClaudeFileFingerprint,
     reader: BufReader<File>,
     change: ChangeSignal,
-    lifecycle: ClaudeSourceLifecycle,
     previous: Option<ParseCheckpoint>,
     offset: u64,
     raw_ordinal: u64,
@@ -98,7 +94,7 @@ pub(crate) struct ClaudeNativeScanner {
     last_complete_terminated: bool,
     session: ClaudeSessionMetadata,
     rejections: RejectionSummary,
-    incomplete_tail: Option<IncompleteTail>,
+    has_incomplete_tail: bool,
     stats: ParseStats,
     core_page: CorePageBuilder,
     ready_core: Option<ClaudeNativePage>,
@@ -126,18 +122,13 @@ impl ClaudeNativeScanner {
         }
         let initial = plan.frontier.clone();
         let replay = !plan.parse;
-        let replay_incomplete = (replay && previous.is_some_and(|checkpoint| !checkpoint.terminal))
-            .then(|| IncompleteTail {
-                byte_start: initial.complete_offset,
-                observed_bytes: before.len.saturating_sub(initial.complete_offset),
-            });
+        let has_incomplete_tail = replay && previous.is_some_and(|checkpoint| !checkpoint.terminal);
         Ok(Self {
             session: ClaudeSessionMetadata::new(source.key.clone()),
             source,
             before,
             reader: BufReader::new(file),
             change: plan.change,
-            lifecycle: lifecycle_from_change(plan.change),
             previous: previous.cloned(),
             offset: initial.complete_offset,
             raw_ordinal: initial.next_raw_ordinal,
@@ -147,7 +138,7 @@ impl ClaudeNativeScanner {
             native_identity_records: initial.native_identity_records,
             last_complete_terminated: initial.appendable_boundary,
             rejections: RejectionSummary::default(),
-            incomplete_tail: replay_incomplete,
+            has_incomplete_tail,
             stats,
             core_page: CorePageBuilder::new(initial),
             ready_core: None,
@@ -207,10 +198,7 @@ impl ClaudeNativeScanner {
             };
 
             if !raw_line.terminated {
-                self.incomplete_tail = Some(IncompleteTail {
-                    byte_start,
-                    observed_bytes: raw_line.observed_bytes,
-                });
+                self.has_incomplete_tail = true;
                 self.exhausted = true;
                 self.queue_end_pages(false)?;
                 return self.take_ready();
@@ -317,14 +305,6 @@ impl ClaudeNativeScanner {
         }
     }
 
-    pub(crate) fn checkpoint_at(
-        &self,
-        frontier: &ClaudeNativeFrontier,
-        terminal: bool,
-    ) -> ParseCheckpoint {
-        self.build_checkpoint(frontier, terminal)
-    }
-
     pub(crate) fn finish(mut self) -> Result<ParseOutput, ClaudeNativePathError> {
         if !self.exhausted
             || self.pending.is_some()
@@ -338,22 +318,17 @@ impl ClaudeNativeScanner {
         }
         revalidate_open_file(&self.source, self.reader.get_ref(), &self.before)?;
         let frontier = self.frontier();
-        let terminal = self.incomplete_tail.is_none();
+        let terminal = !self.has_incomplete_tail;
         let checkpoint = self.build_checkpoint(&frontier, terminal);
         self.change = refine_change_signal(self.change, self.previous.as_ref(), &checkpoint);
-        self.lifecycle = lifecycle_from_change(self.change);
         if self.replay {
             self.stats.metadata_only_noop = true;
         }
         Ok(ParseOutput {
             change: self.change,
-            lifecycle: self.lifecycle,
             rejections: self.rejections,
-            session: self.session,
             checkpoint,
-            incomplete_tail: self.incomplete_tail,
             stats: self.stats,
-            source_certified: true,
         })
     }
 
@@ -548,25 +523,6 @@ impl ClaudeNativeScanner {
             appendable_boundary: frontier.appendable_boundary,
         }
     }
-}
-
-#[allow(dead_code)]
-pub(crate) fn parse_session<F>(
-    source: &DiscoveredClaudeSession,
-    previous: Option<&ParseCheckpoint>,
-    mut emit_page: F,
-) -> Result<ParseOutput, ClaudeNativePathError>
-where
-    F: FnMut(ClaudeRowPage) -> Result<(), ClaudeNativePathError>,
-{
-    let mut scanner = ClaudeNativeScanner::new(source.clone(), previous)?;
-    while let Some(page) = scanner.next_page()? {
-        emit_page(ClaudeRowPage {
-            estimated_bytes: page.serialized_bytes,
-            rows: page.rows,
-        })?;
-    }
-    scanner.finish()
 }
 
 struct ReadPlan {

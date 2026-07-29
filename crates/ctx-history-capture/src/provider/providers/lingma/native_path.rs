@@ -14,9 +14,8 @@ mod source_backed;
 use records::{hash_optional_bytes, hash_optional_i64, hash_optional_u64};
 pub(super) use records::{lingma_complete_user_message, lingma_complete_values};
 pub(crate) use source_backed::{
-    scan_lingma_source_backed_v0, LingmaDatabaseScanV0, LingmaDatabaseSourceV0,
-    LingmaSourceBackedErrorV0, LingmaSourceBackedRecordV0, LingmaSourceBackedResolverV0,
-    LingmaSourceBackedResultV0, LingmaSourceBackedScanV0, LingmaSourceInventoryV0,
+    scan_lingma_source_backed_v0, LingmaDatabaseSourceV0, LingmaSourceBackedErrorV0,
+    LingmaSourceBackedResolverV0, LingmaSourceBackedResultV0, LingmaSourceInventoryV0,
 };
 
 const CORE_PAGE_LOOKAHEAD_ROWS: usize = 65;

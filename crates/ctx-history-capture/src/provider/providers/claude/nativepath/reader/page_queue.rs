@@ -60,7 +60,6 @@ impl ClaudeNativeScanner {
                 reason: "Claude Core page escaped its certified bounds".to_owned(),
             });
         }
-        let identity = core_page_identity(&self.session, &page, terminal, &certificate)?;
         self.stats.emitted_pages = self.stats.emitted_pages.saturating_add(1);
         self.stats.emitted_rows = self
             .stats
@@ -69,17 +68,8 @@ impl ClaudeNativeScanner {
         self.stats.peak_page_rows = self.stats.peak_page_rows.max(page.rows.len());
         self.stats.peak_page_bytes = self.stats.peak_page_bytes.max(serialized_bytes);
         Ok(ClaudeNativePage {
-            identity,
             session: self.session.clone(),
-            expected_frontier: page.expected_frontier,
-            next_safe_frontier: page.next_safe_frontier,
             rows: page.rows,
-            rejections: page.rejections,
-            rejected_records: page.rejected_records,
-            logical_units: page.logical_units,
-            serialized_bytes,
-            terminal,
-            certificate,
         })
     }
 

@@ -10,38 +10,14 @@ mod source_backed;
 #[cfg(test)]
 mod source_backed_tests;
 
-pub(super) use normalize::{
-    ClineArrayCheckpoint, ClineCatalogCompletion, ClineCatalogIndex, ClineCertifiedPage,
-    ClineEventComponent, ClineEventKind, ClineEventRole, ClineEventRow, ClineFileSourceIdentity,
-    ClineMetadataCheckpoint, ClineNativeItemKey, ClinePageFrontier, ClineSessionRow,
-    ClineTaskCheckpoint, ClineTaskIdentity, ClineTaskIdentityOrigin,
-};
-#[cfg(test)]
-pub(super) use normalize::{
-    ClineComponentFailureKind, ClineComponentReadOutcome, ClineComponentTransition,
-    ClineItemRejectionKind, ClinePublicationStats, ClineTerminalEvidence,
-    CLINE_NATIVE_PAGE_MAX_UNITS,
-};
 pub(super) use reader::ClineNativeReader;
-#[cfg(test)]
-pub(crate) use source::{
-    clear_cline_io_failure, inject_cline_io_failure, ClineInjectedIoOperation,
-};
-pub(super) use source::{
-    discover_cline_root, discover_roo_root, revalidate_cline_component_source, ClineComponent,
-    ClineComponentObservation, ClineDiscovery, ClineFileStamp, ClineLiveTaskObservation,
-    ClineObservedFileState, TaskJsonNativeDialect,
-};
+pub(super) use source::{discover_cline_root, discover_roo_root};
 pub(crate) use source_backed::{
     cline_task_json_source_backed_adapter, cline_task_json_source_backed_resolver,
     roo_task_json_source_backed_adapter, roo_task_json_source_backed_resolver,
-    TaskJsonSourceBackedCompletion, TaskJsonSourceBackedPage, TaskJsonSourceBackedResolver,
 };
 
-use std::{
-    io,
-    path::PathBuf,
-};
+use std::{io, path::PathBuf};
 
 use thiserror::Error;
 

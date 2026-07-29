@@ -167,10 +167,6 @@ impl LingmaDatabaseSourceV0 {
         Ok(source)
     }
 
-    pub(crate) fn path(&self) -> &Path {
-        &self.path
-    }
-
     pub(crate) fn source_key(&self) -> LingmaSourceBackedResultV0<SourceKey> {
         let anchor =
             SourceAnchor::provider_native(SOURCE_ANCHOR_NAMESPACE, self.catalog_lineage.clone())?;
@@ -234,10 +230,6 @@ impl LingmaSourceInventoryV0 {
         })
     }
 
-    pub(crate) fn databases(&self) -> &[LingmaDatabaseSourceV0] {
-        &self.databases
-    }
-
     fn source_keys(&self) -> LingmaSourceBackedResultV0<Vec<SourceKey>> {
         self.databases
             .iter()
@@ -275,16 +267,11 @@ impl LingmaSourceBackedRecordV0 {
 
 #[derive(Debug, Clone)]
 pub(crate) struct LingmaDatabaseScanV0 {
-    path: PathBuf,
     certificate: CertifiedSource,
     records: Vec<LingmaSourceBackedRecordV0>,
 }
 
 impl LingmaDatabaseScanV0 {
-    pub(crate) fn path(&self) -> &Path {
-        &self.path
-    }
-
     pub(crate) fn certificate(&self) -> &CertifiedSource {
         &self.certificate
     }
@@ -296,7 +283,6 @@ impl LingmaDatabaseScanV0 {
 
 #[derive(Debug, Clone)]
 pub(crate) struct LingmaSourceBackedScanV0 {
-    inventory: CertifiedSourceInventory,
     databases: Vec<LingmaDatabaseScanV0>,
 }
 
@@ -326,10 +312,6 @@ fn before_database_certification() {
 fn before_database_certification() {}
 
 impl LingmaSourceBackedScanV0 {
-    pub(crate) fn inventory(&self) -> &CertifiedSourceInventory {
-        &self.inventory
-    }
-
     pub(crate) fn databases(&self) -> &[LingmaDatabaseScanV0] {
         &self.databases
     }
@@ -353,16 +335,13 @@ where
         return Err(LingmaSourceBackedErrorV0::InventoryChangedDuringScan);
     }
     let source_keys = opening_inventory.source_keys()?;
-    let inventory = CertifiedSourceInventory::certify(
+    CertifiedSourceInventory::certify(
         opening_inventory.observation,
         closing_inventory.observation,
         INVENTORY_DISCOVERY_REVISION,
         source_keys,
     )?;
-    Ok(LingmaSourceBackedScanV0 {
-        inventory,
-        databases,
-    })
+    Ok(LingmaSourceBackedScanV0 { databases })
 }
 
 fn reject_duplicate_paths(inventory: &LingmaSourceInventoryV0) -> LingmaSourceBackedResultV0<()> {
@@ -448,7 +427,6 @@ fn scan_database(
         },
     )?;
     Ok(LingmaDatabaseScanV0 {
-        path: database.path.clone(),
         certificate,
         records: parsed.records,
     })
@@ -1550,7 +1528,6 @@ mod tests {
         ]);
         let closing = opening.clone();
         let scan = scan_lingma_source_backed_v0(opening, || Ok(closing.clone())).unwrap();
-        assert_eq!(scan.inventory.observed_sources(), 2);
         assert_eq!(scan.databases.len(), 2);
         assert_eq!(all_records(&scan).len(), 4);
         let long_user = all_records(&scan)

@@ -45,19 +45,13 @@ fn message(session: &str, uuid: &str, text: &str) -> Value {
 fn scan(
     leaf: ClaudeSourceBackedLeaf,
     previous: Option<&CertifiedSource>,
-) -> (
-    ClaudeSourceBackedScan,
-    Vec<LexicalDocument>,
-    Vec<SourceFrontier>,
-) {
+) -> (ClaudeSourceBackedScan, Vec<LexicalDocument>) {
     let mut scanner = ClaudeSourceBackedScanner::new(leaf, previous).unwrap();
     let mut documents = Vec::new();
-    let mut frontiers = Vec::new();
     while let Some(page) = scanner.next_page().unwrap() {
         documents.extend(page.documents);
-        frontiers.push(page.next_frontier);
     }
-    (scanner.finish().unwrap(), documents, frontiers)
+    (scanner.finish().unwrap(), documents)
 }
 
 #[test]
@@ -100,17 +94,16 @@ fn source_backed_cold_and_noop_extract_stable_bounded_documents_and_frontiers() 
     let leaf = inventory
         .leaves()
         .iter()
-        .find(|leaf| leaf.provider_session_id() == "session-1")
+        .find(|leaf| leaf.source.key.provider_session_id() == "session-1")
         .unwrap()
         .clone();
-    let (cold, cold_documents, cold_frontiers) = scan(leaf.clone(), None);
-    assert_eq!(cold.disposition, ClaudeSourceBackedDisposition::Full);
+    let (cold, cold_documents) = scan(leaf.clone(), None);
     assert_eq!(cold_documents.len(), 2);
     assert_eq!(cold_documents[0].body, full_body);
     assert!(cold_documents[0].body.ends_with("claude-tail-sentinel"));
-    assert_eq!(cold_documents[0].session_id, leaf.session_id());
+    assert_eq!(cold_documents[0].session_id, leaf.session_id);
     assert_eq!(cold_documents[0].parent_session_id, None);
-    assert_eq!(cold_documents[0].root_session_id, leaf.session_id());
+    assert_eq!(cold_documents[0].root_session_id, leaf.session_id);
     assert_eq!(&cold_documents[0].source, leaf.source_key());
     assert_eq!(
         cold_documents[0].provider_session_id.as_deref(),
@@ -128,29 +121,33 @@ fn source_backed_cold_and_noop_extract_stable_bounded_documents_and_frontiers() 
         unsupported,
         ClaudeSourceBackedError::ExactDisplayUnavailable
     ));
-    assert!(cold_frontiers
-        .last()
+    assert!(cold
+        .source
+        .frontier()
         .is_some_and(|frontier| frontier.certified_prefix_bytes() > 0));
 
-    let (noop, noop_documents, noop_frontiers) = scan(leaf.clone(), Some(&cold.source));
-    assert_eq!(noop.disposition, ClaudeSourceBackedDisposition::Unchanged);
+    let (noop, noop_documents) = scan(leaf.clone(), Some(&cold.source));
     assert!(noop_documents.is_empty());
     assert_eq!(noop.source, cold.source);
-    assert!(noop_frontiers.is_empty());
 
     let subagent_leaf = inventory
         .leaves()
         .iter()
-        .find(|leaf| leaf.provider_session_id().contains("/subagents/"))
+        .find(|leaf| {
+            leaf.source
+                .key
+                .provider_session_id()
+                .contains("/subagents/")
+        })
         .unwrap()
         .clone();
-    let (_, subagent_documents, _) = scan(subagent_leaf, None);
+    let (_, subagent_documents) = scan(subagent_leaf, None);
     assert_eq!(subagent_documents.len(), 1);
     assert_eq!(
         subagent_documents[0].parent_session_id,
-        Some(leaf.session_id())
+        Some(leaf.session_id)
     );
-    assert_eq!(subagent_documents[0].root_session_id, leaf.session_id());
+    assert_eq!(subagent_documents[0].root_session_id, leaf.session_id);
     assert_eq!(subagent_documents[0].agent_type, "subagent");
     assert!(!subagent_documents[0].is_primary);
 }
@@ -165,7 +162,7 @@ fn exact_jsonl_locator_reopens_full_message_and_fails_closed_after_rewrite() {
 
     let inventory = discover_claude_source_backed(&projects).unwrap();
     let leaf = inventory.leaves()[0].clone();
-    let (_, documents, _) = scan(leaf, None);
+    let (_, documents) = scan(leaf, None);
     assert_eq!(documents.len(), 1);
     assert_eq!(documents[0].body, full_text);
     assert!(documents[0].body.ends_with("claude-exact-tail"));
