@@ -77,4 +77,21 @@ grep -Fq -- '--force-rerun disables test-result reuse' \
   <("${repo_root}/scripts/check.sh" --help) \
   || fail 'help does not document force-rerun cache behavior'
 
+expected_modes="$(printf '%s\n' fast presubmit smoke ci nightly release)"
+[[ "$("${repo_root}/scripts/check.sh" --list-modes)" == "${expected_modes}" ]] \
+  || fail 'mode inventory does not include the explicit nightly/release tiers'
+
+for mode in nightly release; do
+  : >"${CTX_FAKE_BAZEL_LOG}"
+  "${repo_root}/scripts/check.sh" --mode "${mode}" \
+    >"${test_root}/${mode}.out" 2>"${test_root}/${mode}.err"
+  grep -Fqx "arg=//:${mode}" "${CTX_FAKE_BAZEL_LOG}" \
+    || fail "${mode} mode did not execute its owning suite"
+done
+
+if grep -Eq '^test:ci --test_env=(BUILDKITE|BUILDKITE_BUILD_ID|CI|GITHUB_ACTIONS)$' \
+  "${source_root}/.bazelrc"; then
+  fail 'volatile CI identity is inherited by every test action'
+fi
+
 printf 'check force-rerun tests passed\n'

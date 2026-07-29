@@ -35,10 +35,6 @@ build:ci --stamp=false
 build:ci --color=yes
 build:ci --curses=no
 test:ci --build_tests_only
-test:ci --test_env=BUILDKITE
-test:ci --test_env=BUILDKITE_BUILD_ID
-test:ci --test_env=CI
-test:ci --test_env=GITHUB_ACTIONS
 test:ci --test_output=errors
 test:ci --test_summary=detailed
 test:ci --test_timeout=300,900,1800,3600
