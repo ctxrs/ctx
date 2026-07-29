@@ -266,6 +266,7 @@ pub(super) struct CodexRecordProbe<'a> {
 pub(super) struct CodexStructuralOutput {
     pub(super) outcome: OutputOutcomeMetadata,
     pub(super) output_bytes: Option<usize>,
+    pub(super) has_exact_display_field: bool,
 }
 
 pub(super) fn classify_codex_record(line: &[u8]) -> serde_json::Result<CodexRecordProbe<'_>> {

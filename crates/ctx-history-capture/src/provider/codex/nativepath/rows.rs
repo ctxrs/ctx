@@ -8,7 +8,10 @@ use ctx_history_core::{
 use serde::{ser::SerializeStruct, Deserialize, Serialize, Serializer};
 use serde_json::{json, Value};
 
-use super::record::{CodexDecodedRecord, CodexResultKind, CodexRetainedKind};
+use super::record::{
+    CodexDecodedRecord, CodexRecordClass, CodexRecordProbe, CodexResultKind, CodexRetainedKind,
+    CodexStructuralOutput,
+};
 use crate::complete_content::{
     attach_verified_content_locator, jsonl::JSONL_COMPLETE_CONTENT_LOCATOR_KIND,
     verified_content_profile, CompleteContentBodyDigest, CompleteContentSourceFamily,
@@ -16,12 +19,12 @@ use crate::complete_content::{
 };
 use crate::provider::codex::events::{
     codex_command_preview, codex_content_text, codex_local_preview, codex_message_body,
-    codex_provider_event, codex_sparse_tool_output_event, codex_tool_arguments_preview,
-    codex_tool_name, CodexNativeEvent, CodexToolCallContext,
+    codex_provider_event, codex_result_content, codex_sparse_tool_output_event,
+    codex_tool_arguments_preview, codex_tool_name, CodexNativeEvent, CodexToolCallContext,
 };
 use crate::{
-    CaptureError, OutputOutcomeMetadata, Result as CaptureResult, CODEX_SESSION_SOURCE_FORMAT,
-    PROVIDER_MAX_PREVIEW_CHARS, PROVIDER_MAX_TEXT_CHARS,
+    CaptureError, OutputOutcome, OutputOutcomeMetadata, Result as CaptureResult,
+    CODEX_SESSION_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS, PROVIDER_MAX_TEXT_CHARS,
 };
 
 #[cfg(test)]
@@ -493,6 +496,43 @@ enum SourceBackedSemanticProjection {
     Malformed(&'static str),
 }
 
+/// The shared admission rule for Codex documents whose exact display text
+/// remains in the provider source.
+///
+/// `Eligible` means Core may publish a locator and exact hydration must decode
+/// display text from that same record. Known bookkeeping, encrypted/code-only,
+/// and non-diagnostic result records are intentionally non-display and never
+/// enter source-page enumeration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CodexSourceBackedDocumentEligibility {
+    Eligible,
+    IntentionallyNonDisplay,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum CodexSourceBackedDisplayText {
+    Exact(String),
+    IntentionallyNonDisplay,
+    ParserRevisionGap,
+}
+
+pub(super) fn source_backed_output_eligibility(
+    result_kind: CodexResultKind,
+    structural: &CodexStructuralOutput,
+) -> CodexSourceBackedDocumentEligibility {
+    if result_kind.is_eligible_output()
+        && matches!(
+            structural.outcome.outcome,
+            OutputOutcome::Failure | OutputOutcome::Timeout
+        )
+        && structural.has_exact_display_field
+    {
+        CodexSourceBackedDocumentEligibility::Eligible
+    } else {
+        CodexSourceBackedDocumentEligibility::IntentionallyNonDisplay
+    }
+}
+
 fn source_backed_semantic_projection(
     kind: CodexRetainedKind,
     payload: &Value,
@@ -506,53 +546,47 @@ fn source_backed_semantic_projection(
 }
 
 pub(super) fn source_backed_display_text(
-    record_type: Option<&str>,
+    probe: &CodexRecordProbe<'_>,
     payload: &Value,
-) -> Option<String> {
-    let item_type = payload.get("type").and_then(Value::as_str);
-    let (event_type, role, text) = match (record_type, item_type) {
-        (Some("response_item"), Some("message")) => {
-            let role = match payload.get("role").and_then(Value::as_str)? {
-                "user" => EventRole::User,
-                "assistant" => EventRole::Assistant,
-                "developer" | "system" => EventRole::System,
-                _ => return None,
-            };
-            (
-                EventType::Message,
-                Some(role),
-                payload.get("content").and_then(codex_content_text)?,
-            )
+) -> CodexSourceBackedDisplayText {
+    match probe.class {
+        CodexRecordClass::Retained(kind) => {
+            match source_backed_semantic_projection(kind, payload) {
+                SourceBackedSemanticProjection::Materialized(semantic) => {
+                    CodexSourceBackedDisplayText::Exact(semantic.lexical_body)
+                }
+                SourceBackedSemanticProjection::ValidUnmaterializable => {
+                    CodexSourceBackedDisplayText::IntentionallyNonDisplay
+                }
+                SourceBackedSemanticProjection::Malformed(_) => {
+                    CodexSourceBackedDisplayText::ParserRevisionGap
+                }
+            }
         }
-        (Some("response_item"), Some("reasoning")) => (
-            EventType::Summary,
-            Some(EventRole::Assistant),
-            payload
-                .get("summary")
-                .and_then(codex_content_text)
-                .or_else(|| {
-                    payload
-                        .get("summary_text")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                })?,
-        ),
-        (
-            Some("response_item"),
-            Some("function_call" | "custom_tool_call" | "web_search_call" | "tool_search_call"),
-        ) => (
-            EventType::ToolCall,
-            Some(EventRole::Assistant),
-            source_backed_tool_call_text(payload)?.0,
-        ),
-        (Some("compacted"), _) => (
-            EventType::Summary,
-            Some(EventRole::System),
-            codex_content_text(payload)?,
-        ),
-        _ => return None,
-    };
-    Some(source_backed_lexical_body(event_type, role, &text))
+        CodexRecordClass::ExcludedResult(result_kind) => {
+            let Some(structural) = probe.output.as_ref() else {
+                return if result_kind.is_eligible_output() {
+                    CodexSourceBackedDisplayText::ParserRevisionGap
+                } else {
+                    CodexSourceBackedDisplayText::IntentionallyNonDisplay
+                };
+            };
+            match source_backed_output_eligibility(result_kind, structural) {
+                CodexSourceBackedDocumentEligibility::Eligible => {
+                    match codex_result_content(payload) {
+                        Some(content) => CodexSourceBackedDisplayText::Exact(content.into_owned()),
+                        None => CodexSourceBackedDisplayText::ParserRevisionGap,
+                    }
+                }
+                CodexSourceBackedDocumentEligibility::IntentionallyNonDisplay => {
+                    CodexSourceBackedDisplayText::IntentionallyNonDisplay
+                }
+            }
+        }
+        CodexRecordClass::SessionMeta | CodexRecordClass::Ignored => {
+            CodexSourceBackedDisplayText::IntentionallyNonDisplay
+        }
+    }
 }
 
 fn source_backed_message(payload: &Value) -> SourceBackedSemanticProjection {

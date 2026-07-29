@@ -29,6 +29,7 @@ fn structural_output_visitor_matches_decoded_payload_and_ignores_envelope_distra
         let probe = super::record::classify_codex_record(line.as_bytes()).unwrap();
         let structural = probe.output.unwrap();
         assert_eq!(structural.outcome, expected, "{line}");
+        assert!(structural.has_exact_display_field, "{line}");
     }
 
     let escaped_output = super::record::classify_codex_record(lines[3].as_bytes())
@@ -41,6 +42,44 @@ fn structural_output_visitor_matches_decoded_payload_and_ignores_envelope_distra
         .output
         .unwrap();
     assert_eq!(duplicate_output.output_bytes, Some("last".len()));
+}
+
+#[test]
+fn structural_output_marks_metadata_only_failures_as_non_display() {
+    let line = r#"{"timestamp":"2026-01-01T00:00:03Z","type":"response_item","payload":{"type":"function_call_output","call_id":"metadata-only","status":"failed"}}"#;
+    let structural = super::record::classify_codex_record(line.as_bytes())
+        .unwrap()
+        .output
+        .unwrap();
+    assert_eq!(structural.outcome.outcome, crate::OutputOutcome::Failure);
+    assert!(!structural.has_exact_display_field);
+}
+
+#[test]
+fn source_backed_display_contract_distinguishes_non_display_from_revision_gaps() {
+    use super::rows::CodexSourceBackedDisplayText;
+
+    for line in [
+        r#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"metadata-only","status":"failed"}}"#,
+        r#"{"type":"response_item","payload":{"type":"reasoning","encrypted_content":"opaque","summary":[]}}"#,
+    ] {
+        assert_eq!(
+            source_backed_display_disposition(line),
+            CodexSourceBackedDisplayText::IntentionallyNonDisplay
+        );
+    }
+    assert_eq!(
+        source_backed_display_disposition(
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant"}}"#,
+        ),
+        CodexSourceBackedDisplayText::ParserRevisionGap
+    );
+}
+
+fn source_backed_display_disposition(line: &str) -> super::rows::CodexSourceBackedDisplayText {
+    let probe = super::record::classify_codex_record(line.as_bytes()).unwrap();
+    let envelope = serde_json::from_str::<Value>(line).unwrap();
+    super::rows::source_backed_display_text(&probe, &envelope["payload"])
 }
 
 #[test]

@@ -180,6 +180,7 @@ struct JsonNodeSummary {
     signals: StructuralOutputSignals,
     scalar: JsonScalarSummary,
     direct_output_bytes: Option<usize>,
+    direct_output_present: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -349,6 +350,7 @@ impl StructuralObjectFields {
                 ..JsonScalarSummary::default()
             },
             direct_output_bytes,
+            direct_output_present: selected_output.is_some(),
         }
     }
 }
@@ -631,6 +633,7 @@ impl StructuralStringVisitor {
                 ..JsonScalarSummary::default()
             },
             direct_output_bytes: None,
+            direct_output_present: false,
         }
     }
 }

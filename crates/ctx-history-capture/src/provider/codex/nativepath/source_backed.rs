@@ -30,7 +30,8 @@ use thiserror::Error;
 
 use super::{
     reader::{CodexParseDisposition, CodexScanCounters},
-    rows::{source_backed_display_text, CodexSourceBackedRowV0},
+    record::classify_codex_record,
+    rows::{source_backed_display_text, CodexSourceBackedDisplayText, CodexSourceBackedRowV0},
     source::{CodexCatalogSource, CodexFileObservation, CodexSourceIdentity},
     CodexAppendProof, CodexCheckpointGeneration, CodexNativeCheckpoint, CodexNativeOwnedPage,
     CodexNativeScanner, CodexSessionRow,
@@ -56,7 +57,7 @@ const CODEX_LOGICAL_EVENT_KIND: &str = "codex-event";
 const CODEX_SOURCE_SCHEMA_VARIANT: &str = "codex-nativepath-jsonl-v0";
 const CODEX_SOURCE_REVISION_KIND: &str = "codex-ordinary-file-observation-v0";
 const CODEX_FRONTIER_KIND: &str = "codex-nativepath-checkpoint-v4";
-const CODEX_PARSER_REVISION: &str = "codex-nativepath-source-backed-v0";
+const CODEX_PARSER_REVISION: &str = "codex-nativepath-source-backed-v1";
 const CODEX_INVENTORY_AUTHORITY_NAMESPACE: &str = "codex.sessions-root";
 const CODEX_INVENTORY_REVISION_KIND: &str = "codex-session-tree-inventory-v0";
 const CODEX_DISCOVERY_REVISION: &str = "codex-session-catalog-v0";
@@ -1629,12 +1630,16 @@ fn decode_exact_display_text(
 ) -> CodexSourceBackedResultV0<Option<String>> {
     let record = provider_bytes.strip_suffix(b"\n").unwrap_or(provider_bytes);
     let record = record.strip_suffix(b"\r").unwrap_or(record);
+    let probe = classify_codex_record(record)?;
     let envelope: Value = serde_json::from_slice(record)?;
-    let record_type = envelope.get("type").and_then(Value::as_str);
     let Some(payload) = envelope.get("payload") else {
         return Ok(None);
     };
-    Ok(source_backed_display_text(record_type, payload))
+    Ok(match source_backed_display_text(&probe, payload) {
+        CodexSourceBackedDisplayText::Exact(text) => Some(text),
+        CodexSourceBackedDisplayText::IntentionallyNonDisplay
+        | CodexSourceBackedDisplayText::ParserRevisionGap => None,
+    })
 }
 
 #[cfg(test)]
@@ -2008,6 +2013,132 @@ mod tests {
             hydrated.decoded_display_text.as_deref(),
             Some("append sentinel")
         );
+    }
+
+    #[test]
+    fn source_backed_timeout_result_is_exactly_hydratable_on_cold_and_replay() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        let index = temp.path().join("global-index");
+        fs::create_dir_all(&sessions).unwrap();
+        let native_session_id = "019fa000-0000-7000-8000-000000000071";
+        let exact_output = r#"{"message":"Wait timed out.","timed_out":true}"#;
+        let timeout_result = serde_json::json!({
+            "timestamp": "2026-07-19T03:38:53Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call-timeout-result",
+                "output": exact_output,
+                "internal_chat_message_metadata_passthrough": {
+                    "turn_id": "turn-timeout-result"
+                }
+            }
+        })
+        .to_string();
+        let metadata_only = serde_json::json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {"total_token_usage": {"input_tokens": 42}}
+            }
+        })
+        .to_string();
+        let metadata_only_failure = serde_json::json!({
+            "timestamp": "2026-07-19T03:38:54Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call-metadata-only",
+                "status": "failed"
+            }
+        })
+        .to_string();
+        let encrypted_reasoning = serde_json::json!({
+            "timestamp": "2026-07-19T03:38:55Z",
+            "type": "response_item",
+            "payload": {
+                "type": "reasoning",
+                "encrypted_content": "opaque-code-only-record",
+                "summary": []
+            }
+        })
+        .to_string();
+        write_session(
+            &sessions,
+            native_session_id,
+            &[
+                timeout_result,
+                metadata_only,
+                metadata_only_failure,
+                encrypted_reasoning,
+            ],
+        );
+
+        let cold = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+        assert_eq!(cold.commit.indexed_documents, 1);
+        let cold_index = VerifiedIndex::open(&index).unwrap();
+        let source = codex_source_key(native_session_id).unwrap();
+        let cold_page = cold_index.source_event_page(&source, None, 64).unwrap();
+        assert!(cold_page.terminal);
+        assert_eq!(cold_page.items.len(), 1);
+        assert_eq!(cold_page.items[0].event_sequence, 1);
+        assert_eq!(cold_page.items[0].event_type, "tool_output");
+        let cold_event_id = cold_page.items[0].event_id;
+        let cold_text = hydrate_codex_locator(&sessions, &cold_page.items[0].locator)
+            .unwrap()
+            .decoded_display_text
+            .expect("every published Codex document must have exact display text");
+        assert_eq!(cold_text, exact_output);
+        let cold_counts = cold_index.manifest().sources[0].counts();
+        assert_eq!(cold_counts.complete_records, 5);
+        assert_eq!(cold_counts.retained_records, 1);
+        assert_eq!(cold_counts.ignored_records, 4);
+        assert_eq!(cold_counts.indexed_documents, 1);
+
+        let replay = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+        assert_eq!(replay.counters.replayed_sources, 1);
+        assert_eq!(replay.counters.staged_documents, 0);
+        assert_eq!(replay.commit.generation_id, cold.commit.generation_id);
+        let replayed_index = VerifiedIndex::open(&index).unwrap();
+        let replayed_page = replayed_index.source_event_page(&source, None, 64).unwrap();
+        assert!(replayed_page.terminal);
+        assert_eq!(replayed_page.items.len(), 1);
+        assert_eq!(replayed_page.items[0].event_id, cold_event_id);
+        let replayed_text = hydrate_codex_locator(&sessions, &replayed_page.items[0].locator)
+            .unwrap()
+            .decoded_display_text
+            .expect("replayed Codex document must remain exactly hydratable");
+        assert_eq!(replayed_text, cold_text);
+        assert_eq!(replayed_index.manifest().sources[0].counts(), cold_counts);
+    }
+
+    /// Read-only production oracle. The provider corpus is only observed and
+    /// hydrated; both Core generations are written below a fresh tempdir.
+    #[test]
+    #[ignore = "set CTX_CODEX_PRO_HYDRATION_ORACLE_ROOT to a production Codex sessions root"]
+    fn production_corpus_cold_and_replay_source_pages_have_exact_id_content_parity() {
+        let sessions = std::env::var_os("CTX_CODEX_PRO_HYDRATION_ORACLE_ROOT")
+            .map(PathBuf::from)
+            .expect("CTX_CODEX_PRO_HYDRATION_ORACLE_ROOT must be set");
+        let before = discover_codex_root_inventory_v0(&sessions).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let index = temp.path().join("global-index");
+
+        let cold = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+        let cold_index = VerifiedIndex::open(&index).unwrap();
+        let cold_oracle = exact_source_page_oracle(&sessions, &cold_index);
+        assert_eq!(cold_oracle.0, cold.commit.indexed_documents);
+
+        let replay = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+        assert_eq!(replay.counters.staged_documents, 0);
+        assert_eq!(replay.commit.generation_id, cold.commit.generation_id);
+        let replayed_index = VerifiedIndex::open(&index).unwrap();
+        let replayed_oracle = exact_source_page_oracle(&sessions, &replayed_index);
+        assert_eq!(replayed_oracle, cold_oracle);
+
+        let after = discover_codex_root_inventory_v0(&sessions).unwrap();
+        assert_eq!(after.certificate, before.certificate);
     }
 
     #[test]
@@ -2515,6 +2646,51 @@ mod tests {
             .into_iter()
             .map(|candidate| candidate.event.event_id)
             .collect()
+    }
+
+    fn exact_source_page_oracle(sessions: &Path, index: &VerifiedIndex) -> (u64, [u8; 32]) {
+        const ORACLE_PAGE_ITEMS: usize = 256;
+
+        let resolver = CodexLocatorResolverV0::discover([sessions]).unwrap();
+        let mut sources = index
+            .manifest()
+            .sources
+            .iter()
+            .map(|source| source.observation().source().clone())
+            .collect::<Vec<_>>();
+        sources.sort_by_key(SourceKey::exact_descriptor_digest);
+        let mut count = 0_u64;
+        let mut digest = Sha256::new();
+        for source in sources {
+            let mut cursor = None;
+            loop {
+                let page = index
+                    .source_event_page(&source, cursor.as_ref(), ORACLE_PAGE_ITEMS)
+                    .unwrap();
+                for event in &page.items {
+                    let hydrated = resolver.hydrate(&event.locator).unwrap();
+                    let text = hydrated.decoded_display_text.as_deref().unwrap_or_else(|| {
+                        panic!(
+                            "Core-published Codex event {} has no exact display text",
+                            event.event_id
+                        )
+                    });
+                    digest.update(source.exact_descriptor_digest());
+                    digest.update(event.event_id.digest());
+                    digest.update((text.len() as u64).to_be_bytes());
+                    digest.update(text.as_bytes());
+                    count = count.checked_add(1).unwrap();
+                }
+                if page.terminal {
+                    break;
+                }
+                cursor = Some(
+                    page.next_cursor
+                        .expect("non-terminal source page must carry a cursor"),
+                );
+            }
+        }
+        (count, digest.finalize().into())
     }
 
     fn session_path(sessions: &Path, native_session_id: &str) -> PathBuf {
