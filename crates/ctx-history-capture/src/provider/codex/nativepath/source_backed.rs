@@ -480,7 +480,7 @@ fn ingest_codex_source_backed_inner_v0(
         if managed_codex_session_source(source) && !opening_certificate.contains(source) {
             let deletion =
                 CertifiedSourceDeletion::from_inventory(source.clone(), &opening_certificate)?;
-            writer.delete_source(deletion)?;
+            writer.delete_source(deletion, opening_certificate.clone())?;
             counters.deleted_sources = counters.deleted_sources.saturating_add(1);
         }
     }
