@@ -1,5 +1,5 @@
 use super::*;
-use std::io::Write as _;
+use std::{io::Write as _, sync::Arc};
 use tantivy::directory::TerminatingWrite as _;
 
 #[test]
@@ -155,6 +155,92 @@ fn unchanged_commit_returns_the_verified_base_without_republication() {
 
     let verified = VerifiedIndex::open(temp.path()).unwrap();
     assert_eq!(verified.generation_id(), unchanged.generation_id);
+    assert_eq!(verified.document_count(), 1);
+    assert_eq!(verified.count_term("stable").unwrap(), 1);
+}
+
+#[test]
+fn logically_identical_one_pass_replacement_is_discarded_without_publication() {
+    let temp = tempdir().unwrap();
+    let source = source("logical-snapshot.sqlite");
+    let certificate = certificate(&source, 1, 1);
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    initial.begin_source(source.clone()).unwrap();
+    initial
+        .add_document(document(&source, 1, "stable logical row"))
+        .unwrap();
+    initial.certify_source(certificate.clone()).unwrap();
+    let initial_receipt = initial.commit(|_| true).unwrap();
+
+    let meta_path = temp.path().join("meta.json");
+    let meta_before = fs::read(&meta_path).unwrap();
+    let meta_metadata_before = fs::metadata(&meta_path).unwrap();
+    let manifests_before = fs::read_dir(temp.path().join(MANIFEST_DIRECTORY))
+        .unwrap()
+        .count();
+
+    let mut staged = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let constructions = Arc::clone(&staged.index_writer_constructions);
+    staged.begin_source(source.clone()).unwrap();
+    staged
+        .add_document(document(&source, 1, "stable logical row"))
+        .unwrap();
+    staged.certify_source(certificate.clone()).unwrap();
+    let inventory = complete_inventory(&source, 1, vec![source.clone()]);
+    staged
+        .certify_complete_inventory(inventory.clone())
+        .unwrap();
+    assert_eq!(
+        constructions.load(Ordering::SeqCst),
+        1,
+        "one-pass replacement staging should construct one disposable writer"
+    );
+
+    let mut source_revalidations = 0;
+    let mut inventory_revalidations = 0;
+    let receipt = staged
+        .commit_with_complete_inventory_revalidation(
+            |target| {
+                source_revalidations += 1;
+                matches!(
+                    target,
+                    RevalidationTarget::Source(current) if current == &certificate
+                )
+            },
+            |current| {
+                inventory_revalidations += 1;
+                current == &inventory
+            },
+        )
+        .unwrap();
+
+    assert_eq!(source_revalidations, 1);
+    assert_eq!(inventory_revalidations, 1);
+    assert_eq!(receipt.generation_id, initial_receipt.generation_id);
+    assert_eq!(receipt.opstamp, initial_receipt.opstamp);
+    assert_eq!(fs::read(&meta_path).unwrap(), meta_before);
+    assert_eq!(
+        fs::metadata(&meta_path).unwrap().modified().unwrap(),
+        meta_metadata_before.modified().unwrap()
+    );
+    assert_eq!(
+        fs::read_dir(temp.path().join(MANIFEST_DIRECTORY))
+            .unwrap()
+            .count(),
+        manifests_before
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+
+        assert_eq!(
+            fs::metadata(&meta_path).unwrap().ino(),
+            meta_metadata_before.ino()
+        );
+    }
+
+    let verified = VerifiedIndex::open(temp.path()).unwrap();
+    assert_eq!(verified.generation_id(), initial_receipt.generation_id);
     assert_eq!(verified.document_count(), 1);
     assert_eq!(verified.count_term("stable").unwrap(), 1);
 }
