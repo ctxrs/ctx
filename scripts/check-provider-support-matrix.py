@@ -45,9 +45,12 @@ PUBLIC_DOCS_WITH_SELF_CONTAINED_CLAIMS = (
     REPO_ROOT / "docs/security-checks.md",
 )
 PUBLIC_PRIVATE_BOUNDARY_SCAN_PATHS = PUBLIC_DOCS_WITH_SELF_CONTAINED_CLAIMS + (
-    REPO_ROOT / "crates/ctx-history-search/src/tests/perf.rs",
+    REPO_ROOT / "scripts/public-ctx/perf-smoke/runner.sh",
 )
-CODEX_PUBLIC_CLAIM_TEST_SUITE = REPO_ROOT / "crates/ctx-history-capture/src/tests/codex"
+CODEX_PUBLIC_CLAIM_TEST_SUITE = (
+    REPO_ROOT
+    / "crates/ctx-history-capture/src/provider/codex/nativepath/source_backed/tests"
+)
 FORBIDDEN_PUBLIC_CLAIM_RE = re.compile(
     r"ctx-" + r"private|private\s+conformance|conformance\s+evidence|"
     r"proof\s+packet|fixture-backed|source-backed|schema\s+confidence|Full\s+GA",
@@ -77,6 +80,7 @@ PUBLIC_COVERAGE_PATHS = {
     "crates/ctx-cli/tests/search_refresh.rs",
     "crates/ctx-cli/tests/support/search_refresh/core_behaviors.rs",
     "crates/ctx-cli/tests/support/search_refresh/generation_lifecycle.rs",
+    "crates/ctx-cli/tests/support/native_providers/workspace_sources.rs",
     "crates/ctx-cli/tests/search_show_locate_sql.rs",
     "crates/ctx-cli/tests/setup_sources_import.rs",
     "crates/ctx-history-capture/src/lib.rs",
