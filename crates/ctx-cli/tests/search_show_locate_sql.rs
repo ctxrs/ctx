@@ -1,6 +1,142 @@
 mod support;
 
+use std::{
+    io::Read,
+    process::{Child, Command as StdCommand, Stdio},
+};
+
 use support::*;
+
+struct SourceRefreshDaemon {
+    child: Option<Child>,
+}
+
+impl Drop for SourceRefreshDaemon {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn start_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
+    fs::write(
+        temp.path().join("config.toml"),
+        "[daemon]\nenabled = true\nmode = \"full\"\n\n[search]\nsemantic = false\n",
+    )
+    .unwrap();
+    let binary = copied_ctx_binary(temp);
+    let prepared = ctx_from_binary(temp, &binary);
+    let mut command = StdCommand::new(prepared.get_program());
+    for (name, value) in prepared.get_envs() {
+        match value {
+            Some(value) => {
+                command.env(name, value);
+            }
+            None => {
+                command.env_remove(name);
+            }
+        }
+    }
+    command
+        .args([
+            "daemon",
+            "run",
+            "--force",
+            "--idle-exit-seconds",
+            "600",
+            "--loop-interval-seconds",
+            "600",
+        ])
+        .env("CTX_DAEMON_MODE", "full")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let spawn_deadline = Instant::now() + Duration::from_secs(1);
+    let child = loop {
+        match command.spawn() {
+            Ok(child) => break child,
+            Err(error) if error.raw_os_error() == Some(26) && Instant::now() < spawn_deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("start isolated source-refresh daemon: {error}"),
+        }
+    };
+    let mut daemon = SourceRefreshDaemon { child: Some(child) };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(exit) = daemon.child.as_mut().unwrap().try_wait().unwrap() {
+            let mut stderr = String::new();
+            daemon
+                .child
+                .as_mut()
+                .unwrap()
+                .stderr
+                .as_mut()
+                .unwrap()
+                .read_to_string(&mut stderr)
+                .unwrap();
+            panic!("source-refresh daemon exited before becoming ready ({exit}): {stderr}");
+        }
+        let status = ctx(temp)
+            .args(["daemon", "status", "--format=json"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok());
+        if status.as_ref().is_some_and(|status| {
+            status["daemon"]["running"] == true
+                && status["daemon"]["source_refresh_endpoint"]["available"] == true
+        }) {
+            return daemon;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for source-refresh daemon readiness: {status:#?}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn source_backed_count(temp: &TempDir, sql: &str) -> i64 {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let packet = loop {
+        let output = ctx(temp)
+            .args(["sql", sql, "--format=json"])
+            .output()
+            .unwrap();
+        if output.status.success() {
+            break serde_json::from_slice::<Value>(&output.stdout).unwrap();
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("source-backed SQL projection") && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+            continue;
+        }
+        panic!("source-backed SQL failed: {stderr}");
+    };
+    packet["rows"][0][0]
+        .as_i64()
+        .unwrap_or_else(|| panic!("expected integer SQL scalar in {packet:#}"))
+}
+
+fn assert_source_backed_search(search: &Value, provider: &str, query: &str) {
+    assert_eq!(search["schema_version"], 1, "{search:#}");
+    assert_eq!(search["query"], query, "{search:#}");
+    assert_eq!(search["filters"]["provider"], provider, "{search:#}");
+    assert_eq!(search["retrieval"]["index"], "source_backed", "{search:#}");
+    let results = search["results"].as_array().unwrap();
+    assert_eq!(results.len(), 1, "{search:#}");
+    assert_eq!(results[0]["provider"], provider, "{search:#}");
+    assert!(results[0]["ctx_event_id"].is_string(), "{search:#}");
+    assert!(results[0]["ctx_session_id"].is_string(), "{search:#}");
+    assert!(
+        results[0]["snippet"]
+            .as_str()
+            .is_some_and(|snippet| snippet.contains(query)),
+        "{search:#}"
+    );
+}
 
 #[path = "support/search_show_locate_sql/import_paths.rs"]
 mod import_paths;
@@ -770,84 +906,101 @@ fn codex_cli_default_import_uses_catalog_state_for_incremental_catch_up() {
 #[test]
 fn codex_cli_provider_oracle_covers_retrieval_and_claimed_fidelity() {
     let temp = tempdir();
-    let basic_fixture = provider_history_fixture("codex-sessions");
-    let rich_fixture = provider_history_fixture("codex-rich-sessions");
+    let _daemon = start_source_refresh_daemon(&temp);
+    let fixture = temp.path().join("combined-codex-sessions");
+    copy_dir_all(
+        Path::new(&provider_history_fixture("codex-sessions")),
+        &fixture,
+    );
+    copy_dir_all(
+        Path::new(&provider_history_fixture("codex-rich-sessions")),
+        &fixture,
+    );
 
-    let basic = json_output(ctx(&temp).args([
+    let imported = json_output(ctx(&temp).args([
         "import",
         "--provider",
         "codex",
         "--path",
-        &basic_fixture,
+        fixture.to_str().unwrap(),
+        "--no-daemon",
         "--format=json",
     ]));
-    assert_eq!(basic["totals"]["imported_sessions"], 2);
-    assert_eq!(basic["totals"]["imported_events"], 7);
-    assert_eq!(basic["totals"]["imported_edges"], 1);
-
-    let rich = json_output(ctx(&temp).args([
-        "import",
-        "--provider",
-        "codex",
-        "--path",
-        &rich_fixture,
-        "--format=json",
-    ]));
-    assert_eq!(rich["totals"]["imported_sessions"], 1);
-    assert_eq!(rich["totals"]["imported_events"], 5);
+    assert_eq!(imported["schema_version"], 2, "{imported:#}");
+    assert_eq!(
+        imported["sources"][0]["status"], "published",
+        "{imported:#}"
+    );
+    assert_eq!(imported["sources"][0]["provider"], "codex", "{imported:#}");
+    assert_eq!(
+        imported["sources"][0]["source_format"], "codex_session_jsonl_tree",
+        "{imported:#}"
+    );
+    assert!(
+        imported["sources"][0]["published_generation"].is_string(),
+        "{imported:#}"
+    );
+    assert_eq!(imported["totals"]["imported_sessions"], 0, "{imported:#}");
+    assert_eq!(imported["totals"]["imported_events"], 0, "{imported:#}");
 
     let query = "setup flow";
-    let search =
-        json_output(ctx(&temp).args(["search", query, "--provider", "codex", "--format=json"]));
-    assert_search_provider_oracle(&search, "codex", query, 1, "message");
+    let search = json_output(ctx(&temp).args([
+        "search",
+        query,
+        "--provider",
+        "codex",
+        "--refresh",
+        "off",
+        "--format=json",
+    ]));
+    assert_source_backed_search(&search, "codex", query);
 
-    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
     assert_eq!(
-        sqlite_count(
-            &conn,
-            "SELECT COUNT(*) FROM sessions WHERE provider = 'codex' AND fidelity = 'imported'"
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'codex' AND fidelity = 'imported'"
         ),
         3
     );
     assert_eq!(
-        sqlite_count(
-            &conn,
-            "SELECT COUNT(*) FROM events e JOIN sessions s ON e.session_id = s.id WHERE s.provider = 'codex' AND e.fidelity = 'imported'"
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'codex' AND fidelity = 'imported'"
         ),
         12
     );
     assert_eq!(
-        sqlite_count(
-            &conn,
-            "SELECT COUNT(*) FROM events e JOIN sessions s ON e.session_id = s.id WHERE s.provider = 'codex' AND e.event_type = 'message' AND e.role = 'user'"
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'codex' AND event_type = 'message' AND role = 'user'"
         ),
         3
     );
     assert_eq!(
-        sqlite_count(
-            &conn,
-            "SELECT COUNT(*) FROM events e JOIN sessions s ON e.session_id = s.id WHERE s.provider = 'codex' AND e.event_type = 'message' AND e.role = 'assistant'"
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'codex' AND event_type = 'message' AND role = 'assistant'"
         ),
         2
     );
     assert_eq!(
-        sqlite_count(
-            &conn,
-            "SELECT COUNT(*) FROM events e JOIN sessions s ON e.session_id = s.id WHERE s.provider = 'codex' AND e.event_type = 'tool_call'"
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'codex' AND event_type = 'tool_call'"
         ),
         4
     );
     assert_eq!(
-        sqlite_count(
-            &conn,
-            "SELECT COUNT(*) FROM events e JOIN sessions s ON e.session_id = s.id WHERE s.provider = 'codex' AND e.event_type = 'tool_output'"
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'codex' AND event_type = 'tool_output'"
         ),
         0
     );
     assert_eq!(
-        sqlite_count(
-            &conn,
-            "SELECT COUNT(*) FROM events e JOIN sessions s ON e.session_id = s.id WHERE s.provider = 'codex' AND e.event_type = 'command_output'"
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'codex' AND event_type = 'command_output'"
         ),
         0
     );
@@ -857,11 +1010,11 @@ fn codex_cli_provider_oracle_covers_retrieval_and_claimed_fidelity() {
         "Success. Updated files:",
     ] {
         assert_eq!(
-            sqlite_count(
-                &conn,
+            source_backed_count(
+                &temp,
                 &format!(
-                    "SELECT COUNT(*) FROM events e JOIN sessions s ON e.session_id = s.id \
-                     WHERE s.provider = 'codex' AND e.payload_json LIKE '%{forbidden_output}%'"
+                    "SELECT COUNT(*) FROM ctx_events \
+                     WHERE provider = 'codex' AND payload_json LIKE '%{forbidden_output}%'"
                 ),
             ),
             0,
@@ -869,27 +1022,33 @@ fn codex_cli_provider_oracle_covers_retrieval_and_claimed_fidelity() {
         );
     }
     assert_eq!(
-        sqlite_count(
-            &conn,
-            "SELECT COUNT(*) FROM sessions WHERE provider = 'codex' AND metadata_json LIKE '%model_provider%'"
-        ),
-        3
-    );
-    assert_eq!(
-        sqlite_count(
-            &conn,
-            "SELECT COUNT(*) FROM events e JOIN sessions s ON e.session_id = s.id WHERE s.provider = 'codex' AND e.payload_json LIKE '%token_usage%'"
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'codex' AND payload_json LIKE '%token_usage%'"
         ),
         0
     );
-    assert_eq!(sqlite_count(&conn, "SELECT COUNT(*) FROM session_edges"), 1);
-    assert_eq!(sqlite_count(&conn, "SELECT COUNT(*) FROM artifacts"), 0);
-    assert_eq!(sqlite_count(&conn, "SELECT COUNT(*) FROM files_touched"), 1);
+    assert_eq!(
+        source_backed_count(&temp, "SELECT COUNT(*) FROM ctx_files_touched"),
+        1
+    );
+    assert_eq!(
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_projection_metadata WHERE status = 'ready'"
+        ),
+        1
+    );
+    assert!(
+        !temp.path().join("work.sqlite").exists(),
+        "Codex acceptance must use the source-backed generation and relational projection"
+    );
 }
 
 #[test]
 fn pi_cli_import_search_flow() {
     let temp = tempdir();
+    let _daemon = start_source_refresh_daemon(&temp);
     let fixture = provider_history_fixture("pi-session.jsonl");
 
     let imported = json_output(ctx(&temp).args([
@@ -898,22 +1057,32 @@ fn pi_cli_import_search_flow() {
         "pi",
         "--path",
         &fixture,
+        "--no-daemon",
         "--format=json",
     ]));
     assert_eq!(imported["schema_version"], 2);
+    assert_eq!(
+        imported["sources"][0]["status"], "published",
+        "{imported:#}"
+    );
     assert_eq!(imported["sources"][0]["provider"], "pi");
     assert_eq!(imported["sources"][0]["source_format"], "pi_session_jsonl");
-    assert_eq!(imported["totals"]["imported_sessions"], 1);
-    assert_eq!(imported["totals"]["imported_events"], 4);
+    assert_eq!(imported["totals"]["imported_sessions"], 0);
+    assert_eq!(imported["totals"]["imported_events"], 0);
+    let first_generation = imported["sources"][0]["published_generation"]
+        .as_str()
+        .expect("Pi explicit import must publish a source-backed generation");
 
     let search = json_output(ctx(&temp).args([
         "search",
         "provider metadata",
         "--provider",
         "pi",
+        "--refresh",
+        "off",
         "--format=json",
     ]));
-    assert_search_provider_oracle(&search, "pi", "provider metadata", 1, "message");
+    assert_source_backed_search(&search, "pi", "provider metadata");
 
     let second = json_output(ctx(&temp).args([
         "import",
@@ -922,6 +1091,7 @@ fn pi_cli_import_search_flow() {
         "--path",
         &fixture,
         "--resume",
+        "--no-daemon",
         "--format=json",
     ]));
     assert_eq!(second["resume"], true);
@@ -929,51 +1099,47 @@ fn pi_cli_import_search_flow() {
     assert_eq!(second["totals"]["imported_sessions"], 0);
     assert_eq!(second["totals"]["imported_events"], 0);
     assert_eq!(second["totals"]["skipped"], 0);
-    assert_eq!(second["totals"]["change"], "no_op");
-
-    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
+    assert_eq!(second["sources"][0]["catalog_changed"], false, "{second:#}");
     assert_eq!(
-        sqlite_count(
-            &conn,
-            "SELECT COUNT(*) FROM sessions WHERE provider = 'pi' AND fidelity = 'imported'"
+        second["sources"][0]["published_generation"], first_generation,
+        "{second:#}"
+    );
+
+    assert_eq!(
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'pi' AND fidelity = 'imported'"
         ),
         1
     );
     assert_eq!(
-        sqlite_count(
-            &conn,
-            "SELECT COUNT(*) FROM events e JOIN sessions s ON e.session_id = s.id WHERE s.provider = 'pi' AND e.fidelity = 'imported'"
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'pi' AND fidelity = 'imported'"
         ),
         4
     );
     assert_eq!(
-        sqlite_count(
-            &conn,
-            "SELECT COUNT(*) FROM events e JOIN sessions s ON e.session_id = s.id WHERE s.provider = 'pi' AND e.event_type = 'message' AND e.role = 'user'"
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'pi' AND event_type = 'message' AND role = 'user'"
         ),
         1
     );
     assert_eq!(
-        sqlite_count(
-            &conn,
-            "SELECT COUNT(*) FROM events e JOIN sessions s ON e.session_id = s.id WHERE s.provider = 'pi' AND e.event_type = 'message' AND e.role = 'assistant'"
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'pi' AND event_type = 'message' AND role = 'assistant'"
         ),
         1
-    );
-    assert_eq!(
-        sqlite_count(
-            &conn,
-            "SELECT COUNT(*) FROM events e JOIN sessions s ON e.session_id = s.id WHERE s.provider = 'pi' AND json_type(e.metadata_json, '$.metadata.model') = 'text'"
-        ),
-        2
     );
     for event_type in ["tool_output", "command_output"] {
         assert_eq!(
-            sqlite_count(
-                &conn,
+            source_backed_count(
+                &temp,
                 &format!(
-                    "SELECT COUNT(*) FROM events e JOIN sessions s ON e.session_id = s.id \
-                     WHERE s.provider = 'pi' AND e.event_type = '{event_type}'"
+                    "SELECT COUNT(*) FROM ctx_events \
+                     WHERE provider = 'pi' AND event_type = '{event_type}'"
                 ),
             ),
             0,
@@ -982,18 +1148,28 @@ fn pi_cli_import_search_flow() {
     }
     for forbidden_output in ["tests passed", "ok token=fixture-secret"] {
         assert_eq!(
-            sqlite_count(
-                &conn,
+            source_backed_count(
+                &temp,
                 &format!(
-                    "SELECT COUNT(*) FROM events e JOIN sessions s ON e.session_id = s.id \
-                     WHERE s.provider = 'pi' AND e.payload_json LIKE '%{forbidden_output}%'"
+                    "SELECT COUNT(*) FROM ctx_events \
+                     WHERE provider = 'pi' AND payload_json LIKE '%{forbidden_output}%'"
                 ),
             ),
             0,
             "successful Pi output body leaked into Core rows: {forbidden_output}"
         );
     }
-    assert_eq!(sqlite_count(&conn, "SELECT COUNT(*) FROM session_edges"), 0);
+    assert_eq!(
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_projection_metadata WHERE status = 'ready'"
+        ),
+        1
+    );
+    assert!(
+        !temp.path().join("work.sqlite").exists(),
+        "Pi acceptance must use the source-backed generation and relational projection"
+    );
 }
 
 #[test]

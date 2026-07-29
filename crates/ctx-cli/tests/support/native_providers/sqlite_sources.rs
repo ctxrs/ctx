@@ -218,6 +218,7 @@ fn deepagents_cli_sources_import_search_and_reimport_with_aliases() {
         &default_db,
     )
     .unwrap();
+    let _daemon = start_source_refresh_daemon(&temp);
 
     let sources = json_output(ctx(&temp).args(["sources", "--format=json"]));
     let source = sources["sources"]
@@ -235,6 +236,7 @@ fn deepagents_cli_sources_import_search_and_reimport_with_aliases() {
         "import",
         "--provider",
         "deep-agents",
+        "--no-daemon",
         "--format=json",
         "--progress",
         "none",
@@ -257,13 +259,7 @@ fn deepagents_cli_sources_import_search_and_reimport_with_aliases() {
         "off",
         "--format=json",
     ]));
-    assert_search_provider_oracle(
-        &search,
-        "deepagents",
-        "deepagents fixture oracle",
-        1,
-        "message",
-    );
+    assert_source_backed_search(&search, "deepagents", "deepagents fixture oracle");
 
     let second = json_output(ctx(&temp).args([
         "import",
@@ -271,15 +267,15 @@ fn deepagents_cli_sources_import_search_and_reimport_with_aliases() {
         "deepagents",
         "--path",
         default_db.to_str().unwrap(),
+        "--no-daemon",
         "--format=json",
     ]));
     assert_eq!(second["totals"]["rejected_records"], 0);
     assert_eq!(second["totals"]["imported_events"], 0);
-    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
     assert_eq!(
-        sqlite_count(
-            &conn,
-            "SELECT COUNT(*) FROM events e JOIN sessions s ON e.session_id = s.id WHERE s.provider = 'deepagents'"
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'deepagents'"
         ),
         2
     );
@@ -335,29 +331,50 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
         ),
     ] {
         let temp = tempdir();
-        let fixture = provider_history_fixture(fixture);
+        let fixture = PathBuf::from(provider_history_fixture(fixture));
+        let explicit = if stored_provider == "crush" {
+            let default = temp.path().join(".local/share/crush/crush.db");
+            fs::create_dir_all(default.parent().unwrap()).unwrap();
+            fs::copy(&fixture, &default).unwrap();
+            None
+        } else {
+            Some(fixture.as_path())
+        };
+        let _daemon = start_source_refresh_daemon(&temp);
 
-        let imported = json_output(ctx(&temp).args([
-            "import",
-            "--provider",
-            cli_provider,
-            "--path",
-            &fixture,
-            "--format=json",
-            "--progress",
-            "none",
-        ]));
+        let mut first_command = ctx(&temp);
+        first_command.args(["import", "--provider", cli_provider]);
+        if let Some(explicit) = explicit {
+            first_command.args(["--path", explicit.to_str().unwrap()]);
+        }
+        first_command.args(["--no-daemon", "--format=json", "--progress", "none"]);
+        let imported = json_output(&mut first_command);
         assert_eq!(imported["schema_version"], 2);
         assert_eq!(imported["sources"][0]["provider"], stored_provider);
         assert_eq!(imported["sources"][0]["source_format"], source_format);
         assert_eq!(imported["totals"]["rejected_records"], 0);
-        assert_eq!(imported["totals"]["imported_sessions"], sessions);
-        assert_eq!(imported["totals"]["imported_events"], events);
+        assert!(
+            imported["sources"][0]["published_generation"].is_string(),
+            "{imported:#}"
+        );
+        assert_eq!(
+            source_backed_count(
+                &temp,
+                &format!("SELECT COUNT(*) FROM ctx_sessions WHERE provider = '{stored_provider}'")
+            ),
+            sessions
+        );
+        assert_eq!(
+            source_backed_count(
+                &temp,
+                &format!("SELECT COUNT(*) FROM ctx_events WHERE provider = '{stored_provider}'")
+            ),
+            events
+        );
         if stored_provider == "crush" {
-            let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
             assert_eq!(
-                sqlite_count(
-                    &conn,
+                source_backed_count(
+                    &temp,
                     "SELECT COUNT(*) FROM ctx_sessions \
                      WHERE provider = 'crush' AND provider_session_id = 'crush-child'",
                 ),
@@ -365,8 +382,8 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
                 "NativePath must preserve the structurally valid child without conversation messages"
             );
             assert_eq!(
-                sqlite_count(
-                    &conn,
+                source_backed_count(
+                    &temp,
                     "SELECT COUNT(*) FROM ctx_events \
                      WHERE provider = 'crush' AND provider_session_id = 'crush-child' \
                      AND event_type = 'command_output'",
@@ -375,8 +392,8 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
                 "the successful child-only shell command output must remain absent from Core"
             );
             assert_eq!(
-                sqlite_count(
-                    &conn,
+                source_backed_count(
+                    &temp,
                     "SELECT COUNT(*) FROM ctx_events \
                      WHERE provider = 'crush' AND provider_session_id = 'crush-root'",
                 ),
@@ -394,7 +411,7 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
             "off",
             "--format=json",
         ]));
-        assert_search_provider_oracle(&search, stored_provider, query, 1, "message");
+        assert_source_backed_search(&search, stored_provider, query);
 
         let result = &search["results"].as_array().unwrap()[0];
         let ctx_event_id = result["ctx_event_id"].as_str().unwrap();
@@ -406,16 +423,13 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
             .as_str()
             .is_some_and(|path| path.ends_with(".db") || path.ends_with(".sqlite3")));
 
-        let second = json_output(ctx(&temp).args([
-            "import",
-            "--provider",
-            cli_provider,
-            "--path",
-            &fixture,
-            "--format=json",
-            "--progress",
-            "none",
-        ]));
+        let mut second_command = ctx(&temp);
+        second_command.args(["import", "--provider", cli_provider]);
+        if let Some(explicit) = explicit {
+            second_command.args(["--path", explicit.to_str().unwrap()]);
+        }
+        second_command.args(["--no-daemon", "--format=json", "--progress", "none"]);
+        let second = json_output(&mut second_command);
         assert_eq!(second["totals"]["rejected_records"], 0);
         assert_eq!(second["totals"]["imported_sessions"], 0);
         assert_eq!(second["totals"]["imported_events"], 0);

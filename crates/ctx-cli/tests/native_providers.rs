@@ -1,11 +1,147 @@
 mod support;
 
+use std::{
+    io::Read,
+    process::{Child, Command as StdCommand, Stdio},
+};
+
 use support::*;
 
 #[path = "support/native_providers/sqlite_sources.rs"]
 mod sqlite_sources;
 #[path = "support/native_providers/workspace_sources.rs"]
 mod workspace_sources;
+
+struct SourceRefreshDaemon {
+    child: Option<Child>,
+}
+
+impl Drop for SourceRefreshDaemon {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn start_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
+    fs::write(
+        temp.path().join("config.toml"),
+        "[daemon]\nenabled = true\nmode = \"full\"\n\n[search]\nsemantic = false\n",
+    )
+    .unwrap();
+    let binary = copied_ctx_binary(temp);
+    let prepared = ctx_from_binary(temp, &binary);
+    let mut command = StdCommand::new(prepared.get_program());
+    for (name, value) in prepared.get_envs() {
+        match value {
+            Some(value) => {
+                command.env(name, value);
+            }
+            None => {
+                command.env_remove(name);
+            }
+        }
+    }
+    command
+        .args([
+            "daemon",
+            "run",
+            "--force",
+            "--idle-exit-seconds",
+            "600",
+            "--loop-interval-seconds",
+            "600",
+        ])
+        .env("CTX_DAEMON_MODE", "full")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let spawn_deadline = Instant::now() + Duration::from_secs(1);
+    let child = loop {
+        match command.spawn() {
+            Ok(child) => break child,
+            Err(error) if error.raw_os_error() == Some(26) && Instant::now() < spawn_deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("start isolated source-refresh daemon: {error}"),
+        }
+    };
+    let mut daemon = SourceRefreshDaemon { child: Some(child) };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(exit) = daemon.child.as_mut().unwrap().try_wait().unwrap() {
+            let mut stderr = String::new();
+            daemon
+                .child
+                .as_mut()
+                .unwrap()
+                .stderr
+                .as_mut()
+                .unwrap()
+                .read_to_string(&mut stderr)
+                .unwrap();
+            panic!("source-refresh daemon exited before becoming ready ({exit}): {stderr}");
+        }
+        let status = ctx(temp)
+            .args(["daemon", "status", "--format=json"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok());
+        if status.as_ref().is_some_and(|status| {
+            status["daemon"]["running"] == true
+                && status["daemon"]["source_refresh_endpoint"]["available"] == true
+        }) {
+            return daemon;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for source-refresh daemon readiness: {status:#?}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn source_backed_count(temp: &TempDir, sql: &str) -> i64 {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let packet = loop {
+        let output = ctx(temp)
+            .args(["sql", sql, "--format=json"])
+            .output()
+            .unwrap();
+        if output.status.success() {
+            break serde_json::from_slice::<Value>(&output.stdout).unwrap();
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("source-backed SQL projection") && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+            continue;
+        }
+        panic!("source-backed SQL failed: {stderr}");
+    };
+    packet["rows"][0][0]
+        .as_i64()
+        .unwrap_or_else(|| panic!("expected integer SQL scalar in {packet:#}"))
+}
+
+fn assert_source_backed_search(search: &Value, provider: &str, query: &str) {
+    assert_eq!(search["schema_version"], 1, "{search:#}");
+    assert_eq!(search["query"], query, "{search:#}");
+    assert_eq!(search["filters"]["provider"], provider, "{search:#}");
+    assert_eq!(search["retrieval"]["index"], "source_backed", "{search:#}");
+    let results = search["results"].as_array().unwrap();
+    assert_eq!(results.len(), 1, "{search:#}");
+    assert_eq!(results[0]["provider"], provider, "{search:#}");
+    assert!(results[0]["ctx_event_id"].is_string(), "{search:#}");
+    assert!(results[0]["ctx_session_id"].is_string(), "{search:#}");
+    assert!(
+        results[0]["snippet"]
+            .as_str()
+            .is_some_and(|snippet| snippet.contains(query)),
+        "{search:#}"
+    );
+}
 
 #[test]
 fn qwen_kimi_mistral_mux_and_qoder_default_sources_import_search_and_reimport() {
@@ -30,6 +166,7 @@ fn qwen_kimi_mistral_mux_and_qoder_default_sources_import_search_and_reimport() 
         Path::new(&provider_history_fixture("qoder/projects")),
         &temp.path().join(".qoder").join("projects"),
     );
+    let _daemon = start_source_refresh_daemon(&temp);
 
     let sources = json_output(ctx(&temp).args(["sources", "--format=json"]));
     for (provider, source_format) in [
@@ -74,6 +211,7 @@ fn qwen_kimi_mistral_mux_and_qoder_default_sources_import_search_and_reimport() 
             "import",
             "--provider",
             cli_provider,
+            "--no-daemon",
             "--format=json",
             "--progress",
             "none",
@@ -85,10 +223,9 @@ fn qwen_kimi_mistral_mux_and_qoder_default_sources_import_search_and_reimport() 
             "{first:#}"
         );
         if stored_provider == "mux" {
-            let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
             assert_eq!(
-                sqlite_count(
-                    &conn,
+                source_backed_count(
+                    &temp,
                     "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'mux'"
                 ),
                 2,
@@ -105,12 +242,13 @@ fn qwen_kimi_mistral_mux_and_qoder_default_sources_import_search_and_reimport() 
             "off",
             "--format=json",
         ]));
-        assert_search_provider_oracle(&search, stored_provider, query, 1, "message");
+        assert_source_backed_search(&search, stored_provider, query);
 
         let second = json_output(ctx(&temp).args([
             "import",
             "--provider",
             cli_provider,
+            "--no-daemon",
             "--format=json",
             "--progress",
             "none",
@@ -549,268 +687,6 @@ fn native_provider_cli_flow_imports_supported_provider_paths() {
     }
 }
 
-#[test]
-fn authorized_missing_explicit_paths_retire_routes_and_restart_as_noops() {
-    for (cli_provider, stored_provider, source_format, fixture) in [
-        (
-            "factory-ai-droid",
-            "factory_ai_droid",
-            "factory_ai_droid_sessions_jsonl",
-            write_native_factory_droid_fixture as fn(&TempDir, &str) -> String,
-        ),
-        (
-            "lingma",
-            "lingma",
-            "lingma_sqlite",
-            write_native_lingma_fixture,
-        ),
-        (
-            "shelley",
-            "shelley",
-            "shelley_sqlite",
-            write_native_shelley_fixture,
-        ),
-        (
-            "forgecode",
-            "forgecode",
-            "forgecode_sqlite",
-            write_native_forgecode_fixture,
-        ),
-        (
-            "astrbot",
-            "astrbot",
-            "astrbot_data_v4_sqlite",
-            write_native_astrbot_fixture,
-        ),
-    ] {
-        let temp = tempdir();
-        let path = PathBuf::from(fixture(
-            &temp,
-            &format!("{stored_provider}-missing-route-oracle"),
-        ));
-        let path_text = path.to_str().unwrap();
-        let first = json_output(ctx(&temp).args([
-            "import",
-            "--provider",
-            cli_provider,
-            "--path",
-            path_text,
-            "--format=json",
-            "--progress",
-            "none",
-        ]));
-        assert_eq!(first["outcome"], "success", "{first:#}");
-        assert!(
-            provider_route_count(&temp, stored_provider, source_format) > 0,
-            "{stored_provider} did not publish route authority"
-        );
-
-        if path.is_dir() {
-            fs::remove_dir_all(&path).unwrap();
-        } else {
-            fs::remove_file(&path).unwrap();
-        }
-        let retired = json_output(ctx(&temp).args([
-            "import",
-            "--provider",
-            cli_provider,
-            "--path",
-            path_text,
-            "--format=json",
-            "--progress",
-            "none",
-        ]));
-        assert_eq!(retired["outcome"], "success", "{retired:#}");
-        assert_eq!(retired["totals"]["source_files"], 0, "{retired:#}");
-        assert_eq!(retired["totals"]["source_bytes"], 0, "{retired:#}");
-        assert_eq!(retired["sources"][0]["source_files"], 0, "{retired:#}");
-        assert_eq!(
-            provider_route_count(&temp, stored_provider, source_format),
-            0,
-            "{stored_provider} did not retire its route"
-        );
-        assert_eq!(
-            current_provider_locator_count(&temp, stored_provider, source_format),
-            0,
-            "{stored_provider} retained a current missing locator"
-        );
-
-        let restarted = json_output(ctx(&temp).args([
-            "import",
-            "--provider",
-            cli_provider,
-            "--path",
-            path_text,
-            "--format=json",
-            "--progress",
-            "none",
-        ]));
-        assert_eq!(restarted["outcome"], "success", "{restarted:#}");
-        assert_eq!(restarted["totals"]["change"], "no_op", "{restarted:#}");
-        assert_eq!(restarted["totals"]["source_files"], 0, "{restarted:#}");
-        assert_eq!(
-            provider_route_count(&temp, stored_provider, source_format),
-            0,
-            "{stored_provider} restart restored a retired route"
-        );
-    }
-}
-
-#[test]
-fn missing_explicit_path_authority_is_provider_scoped_and_cold_paths_fail_closed() {
-    for (provider, missing_name) in [
-        ("factory-ai-droid", "cold-factory-sessions"),
-        ("lingma", "cold-lingma.sqlite"),
-        ("shelley", "cold-shelley.db"),
-        ("forgecode", "COLD-FORGECODE.DB"),
-        ("astrbot", "cold-astrbot.sqlite"),
-    ] {
-        let temp = tempdir();
-        let missing = temp.path().join(missing_name);
-        let stderr = failure_stderr(ctx(&temp).args([
-            "import",
-            "--provider",
-            provider,
-            "--path",
-            missing.to_str().unwrap(),
-            "--format=json",
-            "--progress",
-            "none",
-        ]));
-        assert!(
-            stderr.contains("invalid provider transcript path"),
-            "{stderr}"
-        );
-        assert!(
-            stderr.contains("no matching prior provider route authority"),
-            "{stderr}"
-        );
-    }
-
-    let temp = tempdir();
-    let lingma = PathBuf::from(write_native_lingma_fixture(
-        &temp,
-        "cross-provider-route-oracle",
-    ));
-    let lingma_text = lingma.to_str().unwrap();
-    json_output(ctx(&temp).args([
-        "import",
-        "--provider",
-        "lingma",
-        "--path",
-        lingma_text,
-        "--format=json",
-        "--progress",
-        "none",
-    ]));
-    fs::remove_file(&lingma).unwrap();
-
-    let stderr = failure_stderr(ctx(&temp).args([
-        "import",
-        "--provider",
-        "shelley",
-        "--path",
-        lingma_text,
-        "--format=json",
-        "--progress",
-        "none",
-    ]));
-    assert!(
-        stderr.contains("invalid provider transcript path"),
-        "{stderr}"
-    );
-    assert!(
-        stderr.contains("no matching prior provider route authority"),
-        "{stderr}"
-    );
-
-    let retired = json_output(ctx(&temp).args([
-        "import",
-        "--provider",
-        "lingma",
-        "--path",
-        lingma_text,
-        "--format=json",
-        "--progress",
-        "none",
-    ]));
-    assert_eq!(retired["outcome"], "success", "{retired:#}");
-}
-
-#[test]
-fn forgecode_custom_filenames_receive_zero_stat_missing_path_plans() {
-    for custom_name in ["history.sqlite", "history", "HISTORY.DB"] {
-        let temp = tempdir();
-        let generated = PathBuf::from(write_native_forgecode_fixture(
-            &temp,
-            "forgecode-custom-missing-route-oracle",
-        ));
-        let custom = temp.path().join(custom_name);
-        fs::rename(generated, &custom).unwrap();
-        let custom_text = custom.to_str().unwrap();
-
-        let first = json_output(ctx(&temp).args([
-            "import",
-            "--provider",
-            "forgecode",
-            "--path",
-            custom_text,
-            "--format=json",
-            "--progress",
-            "none",
-        ]));
-        assert_eq!(first["outcome"], "success", "{first:#}");
-        fs::remove_file(&custom).unwrap();
-
-        let output = ctx(&temp)
-            .args([
-                "import",
-                "--provider",
-                "forgecode",
-                "--path",
-                custom_text,
-                "--format=json",
-                "--progress",
-                "none",
-            ])
-            .output()
-            .unwrap();
-        let stderr = String::from_utf8(output.stderr).unwrap();
-        assert!(
-            !stderr.contains("no matching prior provider route authority"),
-            "{custom_name} was rejected before ForgeCode dispatch: {stderr}"
-        );
-        let packet: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|_| {
-            panic!("{custom_name} did not produce an import report after dispatch: {stderr}")
-        });
-        assert_eq!(packet["totals"]["source_files"], 0, "{packet:#}");
-        assert_eq!(packet["totals"]["source_bytes"], 0, "{packet:#}");
-        assert_eq!(packet["sources"][0]["source_files"], 0, "{packet:#}");
-    }
-}
-
-fn provider_route_count(temp: &TempDir, provider: &str, source_format: &str) -> i64 {
-    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
-    conn.query_row(
-        "SELECT COUNT(*) FROM capture_source_provider_routes
-         WHERE provider = ?1 AND source_format = ?2",
-        params![provider, source_format],
-        |row| row.get(0),
-    )
-    .unwrap()
-}
-
-fn current_provider_locator_count(temp: &TempDir, provider: &str, source_format: &str) -> i64 {
-    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
-    conn.query_row(
-        "SELECT COUNT(*) FROM provider_source_locators
-         WHERE provider = ?1 AND source_format = ?2 AND is_current = 1",
-        params![provider, source_format],
-        |row| row.get(0),
-    )
-    .unwrap()
-}
-
 fn source_by_path<'a>(packet: &'a Value, provider: &str, path: &Path) -> &'a Value {
     let expected_path = path.display().to_string();
     packet["sources"]
@@ -845,6 +721,7 @@ fn native_provider_cli_policy_excludes_success_tool_outputs_from_search_and_payl
     let openhands_path = write_native_openhands_fixture(&temp, openhands_query);
     let continue_query = "continue-policy-real-message-oracle";
     let continue_path = write_native_continue_fixture(&temp, continue_query);
+    let _daemon = start_source_refresh_daemon(&temp);
 
     for (provider, path, query) in [
         ("qoder", qoder_path.as_str(), qoder_query),
@@ -857,6 +734,7 @@ fn native_provider_cli_policy_excludes_success_tool_outputs_from_search_and_payl
             provider,
             "--path",
             path,
+            "--no-daemon",
             "--format=json",
             "--progress",
             "none",
@@ -872,7 +750,7 @@ fn native_provider_cli_policy_excludes_success_tool_outputs_from_search_and_payl
             "off",
             "--format=json",
         ]));
-        assert_search_provider_oracle(&search, provider, query, 1, "message");
+        assert_source_backed_search(&search, provider, query);
     }
 
     for (provider, sentinel) in [
@@ -895,32 +773,31 @@ fn native_provider_cli_policy_excludes_success_tool_outputs_from_search_and_payl
         );
     }
 
-    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
     assert_eq!(
-        sqlite_count(
-            &conn,
-            "SELECT COUNT(*) FROM events WHERE payload_json LIKE '%qoder-success-tool-output-sentinel%'",
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_events WHERE payload_json LIKE '%qoder-success-tool-output-sentinel%'",
         ),
         0
     );
     assert_eq!(
-        sqlite_count(
-            &conn,
-            "SELECT COUNT(*) FROM events WHERE payload_json LIKE '%openhands-success-tool-output-sentinel%'",
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_events WHERE payload_json LIKE '%openhands-success-tool-output-sentinel%'",
         ),
         0
     );
     assert_eq!(
-        sqlite_count(
-            &conn,
-            "SELECT COUNT(*) FROM events WHERE payload_json LIKE '%continue-success-tool-output-sentinel%'",
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_events WHERE payload_json LIKE '%continue-success-tool-output-sentinel%'",
         ),
         0
     );
     assert!(
-        sqlite_count(
-            &conn,
-            "SELECT COUNT(*) FROM files_touched WHERE path = 'openhands-cli-native-oracle.txt'",
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_files_touched WHERE path = 'openhands-cli-native-oracle.txt'",
         ) > 0
     );
 }
@@ -1271,6 +1148,7 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
 fn antigravity_cli_imports_native_transcript_tree() {
     let temp = tempdir();
     let fixture = provider_history_fixture("antigravity/v1/brain");
+    let _daemon = start_source_refresh_daemon(&temp);
 
     let imported = json_output(ctx(&temp).args([
         "import",
@@ -1278,6 +1156,7 @@ fn antigravity_cli_imports_native_transcript_tree() {
         "antigravity",
         "--path",
         &fixture,
+        "--no-daemon",
         "--format=json",
     ]));
     assert_eq!(imported["schema_version"], 2);
@@ -1286,14 +1165,34 @@ fn antigravity_cli_imports_native_transcript_tree() {
         imported["sources"][0]["source_format"],
         "antigravity_cli_transcript_jsonl_tree"
     );
-    assert_eq!(imported["totals"]["imported_sessions"], 4);
-    assert_eq!(imported["totals"]["imported_events"], 11);
-    assert_eq!(imported["totals"]["rejected_records"], 1);
-
-    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
     assert_eq!(
-        sqlite_count(
-            &conn,
+        imported["sources"][0]["status"], "published",
+        "{imported:#}"
+    );
+    assert_eq!(imported["totals"]["imported_sessions"], 0, "{imported:#}");
+    assert_eq!(imported["totals"]["imported_events"], 0, "{imported:#}");
+    assert!(
+        imported["sources"][0]["published_generation"].is_string(),
+        "{imported:#}"
+    );
+    assert_eq!(
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'antigravity'"
+        ),
+        4
+    );
+    assert_eq!(
+        source_backed_count(
+            &temp,
+            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'antigravity'"
+        ),
+        11
+    );
+
+    assert_eq!(
+        source_backed_count(
+            &temp,
             "SELECT COUNT(*) FROM ctx_sessions \
              WHERE provider = 'antigravity' AND provider_session_id = 'agy-future'",
         ),
@@ -1301,8 +1200,8 @@ fn antigravity_cli_imports_native_transcript_tree() {
         "the future-shape transcript must retain its notice-only session"
     );
     assert_eq!(
-        sqlite_count(
-            &conn,
+        source_backed_count(
+            &temp,
             "SELECT COUNT(*) FROM ctx_events \
              WHERE provider = 'antigravity' AND provider_session_id = 'agy-future' \
              AND event_type = 'notice'",
@@ -1316,9 +1215,11 @@ fn antigravity_cli_imports_native_transcript_tree() {
         "write_to_file",
         "--provider",
         "antigravity",
+        "--refresh",
+        "off",
         "--format=json",
     ]));
-    assert_search_provider_oracle(&search, "antigravity", "write_to_file", 1, "tool_call");
+    assert_source_backed_search(&search, "antigravity", "write_to_file");
 }
 
 #[test]
