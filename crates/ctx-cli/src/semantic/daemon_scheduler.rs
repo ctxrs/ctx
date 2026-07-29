@@ -100,7 +100,43 @@ fn run_full_source_backed_refresh(
             false,
         );
     };
-    finish_full_source_backed_refresh(data_root, runtime, run.job, run.did_work)
+    let mut job = run.job;
+    let mut did_work = run.did_work;
+    if !run.failed && daemon_mode_runs_source_backed_pro_catch_up(runtime.config.daemon.mode) {
+        if let Some(core_generation_id) = job
+            .get("published_generation")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        {
+            let authority = source_refresh
+                .and_then(SourceBackedRefreshCoordinator::retained_published_generation);
+            match run_after_core_publication(data_root, &core_generation_id, authority.as_deref()) {
+                Ok(pro_run) => {
+                    did_work |= pro_run.did_work;
+                    job["pro_projection"] = pro_run.status;
+                }
+                Err(error) => {
+                    job["pro_projection"] = compact_json(json!({
+                        "schema_version": 1,
+                        "owner": "daemon",
+                        "kind": "source_backed_pro_catch_up",
+                        "status": "error",
+                        "pending": true,
+                        "retryable": true,
+                        "core_generation_id": core_generation_id,
+                        "receipt_core_generation_id": null,
+                        "error_code": "source_pro_status_unavailable",
+                        "last_error": format!("{error:#}"),
+                    }));
+                }
+            }
+        }
+    }
+    finish_full_source_backed_refresh(data_root, runtime, job, did_work)
+}
+
+fn daemon_mode_runs_source_backed_pro_catch_up(mode: crate::config::DaemonMode) -> bool {
+    !mode.runs_only_source_refresh()
 }
 
 fn finish_full_source_backed_refresh(
@@ -314,5 +350,95 @@ use super::{
     query_service::DaemonQueryActivity,
     reports::SemanticWorkerReport,
     runtime_limits::DAEMON_MIN_REMAINING_FOR_JOB_SECS,
+    source_backed_pro_catch_up::run_after_core_publication,
     source_backed_refresh_coordinator::SourceBackedRefreshCoordinator,
 };
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use crate::{
+        config::{AppConfig, DaemonMode},
+        output::JsonOutputFormat,
+        DaemonRunArgs,
+    };
+
+    use super::{
+        daemon_job_should_backoff, daemon_mode_runs_source_backed_pro_catch_up,
+        record_daemon_job_retry, run_daemon_once_with_activity, DaemonRetryBackoff, DaemonRuntime,
+    };
+
+    #[test]
+    fn source_refresh_only_mode_excludes_source_backed_pro_catch_up() {
+        assert!(daemon_mode_runs_source_backed_pro_catch_up(
+            DaemonMode::Full
+        ));
+        assert!(!daemon_mode_runs_source_backed_pro_catch_up(
+            DaemonMode::SourceRefreshOnly
+        ));
+    }
+
+    #[test]
+    fn source_refresh_only_tick_creates_no_pro_catch_up_status() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = AppConfig::default();
+        config.daemon.mode = DaemonMode::SourceRefreshOnly;
+        let mut runtime = DaemonRuntime {
+            config,
+            ..DaemonRuntime::default()
+        };
+        let args = DaemonRunArgs {
+            foreground: false,
+            once: true,
+            idle_exit_seconds: None,
+            loop_interval_seconds: None,
+            max_chunks: None,
+            max_seconds: None,
+            force: false,
+            start_mode: None,
+            trigger_command: None,
+            format: JsonOutputFormat::Json,
+        };
+
+        let iteration = run_daemon_once_with_activity(
+            &args,
+            temp.path(),
+            &mut runtime,
+            None,
+            false,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(!iteration.did_work);
+        assert!(!iteration.failed);
+        assert!(!temp
+            .path()
+            .join("daemon/jobs/source-backed-pro-catch-up.json")
+            .exists());
+    }
+
+    #[test]
+    fn pro_projection_error_never_puts_core_refresh_into_backoff() {
+        let core_job = json!({
+            "status": "completed",
+            "published_generation": "a".repeat(64),
+            "pro_projection": {
+                "status": "error",
+                "pending": true,
+                "retryable": true,
+                "error_code": "pro_not_installed",
+            },
+        });
+        let mut backoff = DaemonRetryBackoff::default();
+
+        assert!(!daemon_job_should_backoff(&core_job));
+        let recorded = record_daemon_job_retry(&mut backoff, core_job);
+
+        assert_eq!(recorded["status"], "completed");
+        assert_eq!(recorded["pro_projection"]["status"], "error");
+        assert_eq!(backoff.consecutive_failures, 0);
+    }
+}
