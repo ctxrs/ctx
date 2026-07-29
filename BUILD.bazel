@@ -363,6 +363,7 @@ sh_test(
         "scripts/bazelw",
         "scripts/ci-common.sh",
         "scripts/tests/fixtures/fake-bazel.sh",
+        "scripts/tests/fixtures/fake-df.sh",
     ],
 )
 

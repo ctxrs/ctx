@@ -8,6 +8,7 @@ else
 fi
 wrapper="${repo_root}/scripts/bazelw"
 fake_bazel="${repo_root}/scripts/tests/fixtures/fake-bazel.sh"
+fake_df="${repo_root}/scripts/tests/fixtures/fake-df.sh"
 test_root="$(mktemp -d "${TEST_TMPDIR:-${TMPDIR:-/tmp}}/ctx-bazelw-test.XXXXXXXX")"
 trap 'rm -rf -- "${test_root}"' EXIT
 
@@ -94,6 +95,12 @@ grep -Fq 'Bazel version mismatch: expected 7.4.1, got 8.0.0' \
   || fail 'Bazel version mismatch diagnostic was not emitted'
 
 unset CTX_BAZEL_CACHE_ROOT
+mkdir -p "${test_root}/bin"
+cp "${fake_df}" "${test_root}/bin/df"
+chmod 0755 "${test_root}/bin/df"
+export PATH="${test_root}/bin:${PATH}"
+export CTX_FAKE_DF_FREE_KIB=9000000
+export CTX_FAKE_DF_FREE_INODES=400000
 export CTX_BAZEL_SPACIOUS_ROOT="${test_root}/spacious"
 mkdir -p "${CTX_BAZEL_SPACIOUS_ROOT}"
 : >"${CTX_FAKE_BAZEL_LOG}"
@@ -112,21 +119,7 @@ grep -Fq "cache=${XDG_CACHE_HOME}/ctx/bazel/bazel-7.4.1" "${test_root}/xdg-confi
 # exhausted. Exercise the capacity decision directly with deterministic df
 # output instead of requiring a dedicated filesystem in the test sandbox.
 source "${repo_root}/scripts/ci-common.sh"
-df() {
-  case "$1" in
-    -Pk)
-      printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
-      printf 'fixture 10000000 1 9000000 1%% %s\n' "$2"
-      ;;
-    -Pi)
-      printf 'Filesystem Inodes IUsed IFree IUse%% Mounted on\n'
-      printf 'fixture 500000 499999 1 100%% %s\n' "$2"
-      ;;
-    *)
-      return 2
-      ;;
-  esac
-}
+export CTX_FAKE_DF_FREE_INODES=1
 export CTX_BAZEL_SPACIOUS_ROOT="${test_root}/spacious"
 export XDG_CACHE_HOME="${test_root}/xdg-low-inode"
 selected_cache="$(ctx_bazel_cache_root)"
