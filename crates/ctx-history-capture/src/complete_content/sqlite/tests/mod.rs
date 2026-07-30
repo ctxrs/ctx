@@ -9,16 +9,15 @@ use ctx_history_core::{
 };
 use ctx_history_index::LexicalDocument;
 use rusqlite::{params, Connection};
-use serde_json::{json, Value};
+use serde_json::json;
 
 use crate::{
-    provider::providers::{astrbot, firebender, kiro, lingma, opencode, trae},
+    provider::providers::{astrbot, kiro, lingma, opencode, trae},
     DiscoveryContext, DiscoveryPlatform, DiscoveryPlatformDirs, KIRO_SQLITE_SOURCE_FORMAT,
     PROVIDER_MAX_TEXT_CHARS,
 };
 
 mod compound;
-mod firebender_warp;
 mod ordinary;
 mod row_contained;
 mod security;
@@ -259,15 +258,4 @@ fn replace_trae_value(path: &Path, body: &str) {
             ],
         )
         .unwrap();
-}
-
-fn firebender_message_from_hydrated_row(
-    hydrated: &firebender::native_path::FirebenderHydratedSourceRow,
-) -> String {
-    let messages: Value = serde_json::from_slice(hydrated.messages_json()).unwrap();
-    let message = messages
-        .as_array()
-        .and_then(|messages| messages.get(hydrated.message_index() as usize))
-        .unwrap();
-    firebender::firebender_message_text(message).unwrap()
 }

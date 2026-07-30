@@ -69,7 +69,6 @@ use super::providers::{
     deepagents::native_path::source_backed::{
         DeepAgentsDatabaseSelectionV0, DeepAgentsLocatorResolverV0, DeepAgentsSourceBackedScannerV0,
     },
-    firebender::firebender_message_text,
     forgecode::nativepath::source_backed::{
         open_forgecode_source_backed_v0, ForgeCodeSourceBackedDiscoveryV0,
         ForgeCodeSourceBackedResolverV0, ForgeCodeSourceSelectionV0,
