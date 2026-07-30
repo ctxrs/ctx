@@ -13,9 +13,7 @@ fn setup_skips_empty_codex_session_tree() {
     );
     assert!(setup["catalog"]["source_files"].is_null(), "{setup:#}");
     assert_eq!(
-        setup["daemon"]["jobs"]["source_backed_refresh"]["receipt"]["current"]
-            ["current_source_count"],
-        0,
+        setup["refresh_request"]["receipt"]["current"]["current_source_count"], 0,
         "{setup:#}",
     );
 
@@ -345,6 +343,13 @@ fn explicit_native_sources_are_listed_but_not_auto_imported() {
     assert_eq!(nanoclaw["native_import"], false);
     assert_eq!(nanoclaw["importable"], true);
     assert!(nanoclaw["unsupported_reason"].is_null());
+
+    let empty_generation =
+        json_output(ctx(&temp).args(["setup", "--wait", "--format=json", "--progress", "none"]));
+    assert_eq!(
+        empty_generation["refresh_request"]["receipt"]["current"]["current_source_count"], 0,
+        "{empty_generation:#}"
+    );
 
     let mut search_command = ctx(&temp);
     search_command.current_dir(&project);

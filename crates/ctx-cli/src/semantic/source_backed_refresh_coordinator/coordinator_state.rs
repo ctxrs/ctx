@@ -16,7 +16,7 @@ pub(crate) struct SourceBackedRefreshReceipt {
 }
 
 impl SourceBackedRefreshReceipt {
-    fn to_json(&self) -> Value {
+    pub(crate) fn to_json(&self) -> Value {
         compact_json(json!({
             "previous_generation": self.previous_generation,
             "published_generation": self.published_generation,

@@ -163,15 +163,22 @@ fn request_source_refresh(
         SourceBackedRefreshMode::Background
     };
     match coordinate_source_backed_refresh(data_root, mode) {
-        Ok(observation) => json!({
-            "status": observation.status,
-            "reason": Value::Null,
-            "mode": if wait { "wait" } else { "background" },
-            "request_id": observation.request_id,
-            "daemon_available": observation.daemon_available,
-            "source_count": observation.source_count,
-            "published_generation": observation.pin.generation_id(),
-        }),
+        Ok(observation) => {
+            let receipt = observation
+                .receipt
+                .as_ref()
+                .map(|receipt| receipt.to_json());
+            json!({
+                "status": observation.status,
+                "reason": Value::Null,
+                "mode": if wait { "wait" } else { "background" },
+                "request_id": observation.request_id,
+                "daemon_available": observation.daemon_available,
+                "source_count": observation.source_count,
+                "published_generation": observation.pin.generation_id(),
+                "receipt": receipt,
+            })
+        }
         Err(error) => {
             let daemon_unavailable = error
                 .downcast_ref::<crate::semantic::SourceBackedRefreshDaemonUnavailable>()
