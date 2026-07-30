@@ -12,6 +12,31 @@ use super::{
     terminate_and_reap_test_child,
 };
 
+pub(crate) fn assert_mcp_typed_error(
+    result: &Value,
+    error_code: &str,
+    retryable: bool,
+    detail_fragment: &str,
+) {
+    assert_eq!(result["isError"], true, "{result:#}");
+    let structured = &result["structuredContent"];
+    assert_eq!(structured["error_code"], error_code, "{result:#}");
+    assert_eq!(structured["retryable"], retryable, "{result:#}");
+    assert!(structured["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains(detail_fragment)));
+}
+
+pub(crate) fn assert_status_facts_stay_machine_only(result: &Value) {
+    let text = mcp_content_text(result);
+    for machine_only in ["local_usage", "pro_status", "automatic_upgrades"] {
+        assert!(
+            !text.contains(machine_only),
+            "MCP status machine fact {machine_only:?} leaked into text content:\n{text}"
+        );
+    }
+}
+
 pub(crate) struct McpSourceRefreshDaemon {
     child: Option<Child>,
 }

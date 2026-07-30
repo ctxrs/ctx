@@ -79,6 +79,28 @@ impl SourceBackedSemanticNotReady {
     pub(crate) fn detail(&self) -> &str {
         &self.detail
     }
+
+    pub(crate) fn retryable(&self) -> bool {
+        matches!(
+            self.code,
+            "semantic_store_unavailable"
+                | "semantic_store_missing"
+                | "semantic_generation_unreadable"
+                | "semantic_generation_not_acknowledged"
+                | "semantic_query_service_unavailable"
+                | "semantic_projection_event_mismatch"
+                | "semantic_generation_receipt_mismatch"
+        )
+    }
+
+    pub(crate) fn structured(&self) -> Value {
+        json!({
+            "error": self.to_string(),
+            "error_code": self.code,
+            "detail": self.detail,
+            "retryable": self.retryable(),
+        })
+    }
 }
 
 pub(crate) struct SourceBackedSemanticQueryPin {

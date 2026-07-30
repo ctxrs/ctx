@@ -1020,13 +1020,21 @@ fn search_backend_defaults_and_supported_semantic_config_are_reported() {
         .assert()
         .failure()
         .get_output()
-        .stderr
         .clone();
-    let disabled_strict_semantic = String::from_utf8(disabled_strict_semantic).unwrap();
     assert!(
-        disabled_strict_semantic.contains("semantic search is disabled"),
-        "{disabled_strict_semantic}"
+        disabled_strict_semantic.stdout.is_empty(),
+        "{disabled_strict_semantic:#?}"
     );
+    let disabled_strict_semantic: Value =
+        serde_json::from_slice(&disabled_strict_semantic.stderr).unwrap();
+    assert_eq!(
+        disabled_strict_semantic["error_code"], "semantic_disabled",
+        "{disabled_strict_semantic:#}"
+    );
+    assert_eq!(disabled_strict_semantic["retryable"], false);
+    assert!(disabled_strict_semantic["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("semantic search is disabled")));
 
     fs::write(
         data_root(&temp).join("config.toml"),
@@ -1063,13 +1071,21 @@ fn search_backend_defaults_and_supported_semantic_config_are_reported() {
         .assert()
         .failure()
         .get_output()
-        .stderr
         .clone();
-    let missing_index_strict_semantic = String::from_utf8(missing_index_strict_semantic).unwrap();
     assert!(
-        missing_index_strict_semantic.contains("semantic_store_missing"),
-        "{missing_index_strict_semantic}"
+        missing_index_strict_semantic.stdout.is_empty(),
+        "{missing_index_strict_semantic:#?}"
     );
+    let missing_index_strict_semantic: Value =
+        serde_json::from_slice(&missing_index_strict_semantic.stderr).unwrap();
+    assert_eq!(
+        missing_index_strict_semantic["error_code"], "semantic_store_missing",
+        "{missing_index_strict_semantic:#}"
+    );
+    assert_eq!(missing_index_strict_semantic["retryable"], true);
+    assert!(missing_index_strict_semantic["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("flat-F32")));
 
     let explicit_lexical = json_output(ctx(&temp).args([
         "search",

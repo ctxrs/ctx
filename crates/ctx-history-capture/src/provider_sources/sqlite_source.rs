@@ -112,6 +112,7 @@ pub(crate) type SqliteSourceAccessResult<T> = Result<T, SqliteSourceAccessError>
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SqliteSourceSnapshotStrategy {
+    #[cfg(target_os = "linux")]
     ImmutableMain,
     CopiedFamily,
 }

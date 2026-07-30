@@ -352,6 +352,11 @@ pub(crate) fn run_cli() -> Result<()> {
             } else if let Some(error) = source_hydration_error_contract(error) {
                 eprintln!("{}", serde_json::to_string(&error.structured())?);
                 Some(RenderedJsonError.into())
+            } else if let Some(error) =
+                error.downcast_ref::<semantic::SourceBackedSemanticNotReady>()
+            {
+                eprintln!("{}", serde_json::to_string(&error.structured())?);
+                Some(RenderedJsonError.into())
             } else {
                 eprintln!("Error: {error:?}");
                 Some(RenderedCliError.into())
