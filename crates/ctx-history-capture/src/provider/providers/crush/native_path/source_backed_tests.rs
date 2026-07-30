@@ -61,7 +61,7 @@ impl CrushProjectInventorySourceV0 for TestInventory {
 }
 
 #[test]
-fn inventory_route_reuses_logical_leaves_and_deletes_without_projection() {
+fn inventory_route_projects_each_logical_leaf_and_deletes_safely() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let first = temp.path().join("route-first.db");
     let second = temp.path().join("route-second.db");
@@ -115,7 +115,16 @@ fn inventory_route_reuses_logical_leaves_and_deletes_without_projection() {
         refresh_source_backed_generation(&index_root, &registry, options.clone()).unwrap();
     assert_eq!(unchanged.commit.generation_id, cold.commit.generation_id);
     assert_eq!(unchanged.commit.opstamp, cold.commit.opstamp);
-    assert_eq!(route_inventory.work().0, 2);
+    assert_eq!(unchanged.sources, cold.sources);
+    let (projection_passes, snapshots) = route_inventory.work();
+    assert_eq!(projection_passes, 4);
+    assert_eq!(snapshots.len(), 4);
+    assert!(snapshots
+        .iter()
+        .all(|work| work.immutable_snapshot_opens == 1
+            && work.copied_snapshot_opens == 0
+            && work.source_bytes_copied == 0
+            && work.max_active_snapshots == 1));
 
     Connection::open(&first)
         .unwrap()
@@ -125,7 +134,7 @@ fn inventory_route_reuses_logical_leaves_and_deletes_without_projection() {
         )
         .unwrap();
     refresh_source_backed_generation(&index_root, &registry, options.clone()).unwrap();
-    assert_eq!(route_inventory.work().0, 3);
+    assert_eq!(route_inventory.work().0, 6);
 
     route_inventory.replace(inventory(
         b"route-inventory-2",
@@ -133,7 +142,7 @@ fn inventory_route_reuses_logical_leaves_and_deletes_without_projection() {
     ));
     let deleted = refresh_source_backed_generation(&index_root, &registry, options).unwrap();
     assert_eq!(deleted.sources.len(), 1);
-    assert_eq!(route_inventory.work().0, 3);
+    assert_eq!(route_inventory.work().0, 7);
 
     let source = crush_source_key(TypedKey::utf8("route-project-a").unwrap()).unwrap();
     let events = VerifiedIndex::open(&index_root)
