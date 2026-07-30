@@ -1,6 +1,37 @@
 use super::*;
 use std::sync::Mutex;
 
+#[cfg(test)]
+type ExplicitCodexStageHook = Box<dyn FnOnce(CodexSourceBackedCountersV0)>;
+
+#[cfg(test)]
+std::thread_local! {
+    static AFTER_EXPLICIT_CODEX_STAGE_HOOK:
+        std::cell::RefCell<Option<ExplicitCodexStageHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_after_explicit_codex_stage_hook(
+    hook: impl FnOnce(CodexSourceBackedCountersV0) + 'static,
+) {
+    AFTER_EXPLICIT_CODEX_STAGE_HOOK.with(|slot| {
+        assert!(
+            slot.borrow().is_none(),
+            "explicit Codex stage hook is already installed"
+        );
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(test)]
+fn run_after_explicit_codex_stage_hook(counters: CodexSourceBackedCountersV0) {
+    let hook = AFTER_EXPLICIT_CODEX_STAGE_HOOK.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook(counters);
+    }
+}
+
 #[derive(Clone)]
 struct CodexSessionTreeTerminalEvidence {
     inventory: CertifiedSourceInventory,
@@ -154,13 +185,22 @@ pub(super) fn register_codex_explicit_session_route(
         .map_err(|error| invalid_route(source.provider, error.to_string()))?;
     let owned_source = input.source().clone();
     let scan_input = input.clone();
-    let revalidation_input = input.clone();
     let complete_inventory_revalidation_input = input.clone();
     let hydration_input = input.clone();
     let batch_hydration_input = input;
     let claimed_source = owned_source.clone();
+    let terminal_evidence = Arc::new(Mutex::new(None::<CodexSessionTreeTerminalEvidence>));
+    let capture_terminal_evidence = Arc::clone(&terminal_evidence);
+    let source_terminal_evidence = Arc::clone(&terminal_evidence);
+    let inventory_terminal_evidence = terminal_evidence;
     let driver = SourceBackedRouteDriver::new(
         move |sink| {
+            *capture_terminal_evidence.lock().map_err(|_| {
+                SourceBackedRouteError::new(
+                    SourceBackedRouteErrorKind::Internal,
+                    "explicit Codex terminal evidence lock was poisoned",
+                )
+            })? = None;
             let opening = observe_codex_explicit_session_source_backed_v0(&scan_input)
                 .map_err(route_error)?;
             let base = sink.base_source(&claimed_source).cloned();
@@ -176,9 +216,18 @@ pub(super) fn register_codex_explicit_session_route(
                         &inventory,
                     )
                     .map_err(route_error)?;
-                    sink.delete_source(deletion, inventory)
+                    sink.delete_source(deletion, inventory.clone())
                         .map_err(route_coordinator_error)?;
                 }
+                *capture_terminal_evidence.lock().map_err(|_| {
+                    SourceBackedRouteError::new(
+                        SourceBackedRouteErrorKind::Internal,
+                        "explicit Codex terminal evidence lock was poisoned",
+                    )
+                })? = Some(CodexSessionTreeTerminalEvidence {
+                    inventory,
+                    sources: HashMap::new(),
+                });
                 return Ok(());
             }
 
@@ -212,50 +261,63 @@ pub(super) fn register_codex_explicit_session_route(
                 &mut counters,
             )
             .map_err(route_error)?;
+            #[cfg(test)]
+            run_after_explicit_codex_stage_hook(counters);
             let closing = observe_codex_explicit_session_source_backed_v0(&scan_input)
                 .map_err(route_error)?;
             let inventory = opening.certify_against(&closing).map_err(route_error)?;
-            sink.certify_complete_inventory(inventory)
-                .map_err(route_coordinator_error)
+            sink.certify_complete_inventory(inventory.clone())
+                .map_err(route_coordinator_error)?;
+            *capture_terminal_evidence.lock().map_err(|_| {
+                SourceBackedRouteError::new(
+                    SourceBackedRouteErrorKind::Internal,
+                    "explicit Codex terminal evidence lock was poisoned",
+                )
+            })? = Some(CodexSessionTreeTerminalEvidence {
+                inventory,
+                sources: revalidation,
+            });
+            Ok(())
         },
         move |candidate| candidate.exact_descriptor_eq(&owned_source),
-        move |target| match target {
-            SourceBackedRevalidationTarget::Source(expected) => {
-                let Ok(inventory) =
-                    observe_codex_explicit_session_source_backed_v0(&revalidation_input)
-                else {
-                    return false;
-                };
-                inventory
-                    .source_plan()
-                    .filter(|(_, source_key, _)| {
-                        source_key.exact_descriptor_eq(expected.observation().source())
-                    })
-                    .and_then(|(catalog_source, source_key, _)| {
-                        codex_source_observation(&source_key, &catalog_source.catalog_observation)
-                            .ok()
-                    })
-                    .is_some_and(|observation| observation == *expected.observation())
-            }
-            SourceBackedRevalidationTarget::Deletion(deletion) => {
-                let Ok(opening) =
-                    observe_codex_explicit_session_source_backed_v0(&revalidation_input)
-                else {
-                    return false;
-                };
-                let Ok(closing) =
-                    observe_codex_explicit_session_source_backed_v0(&revalidation_input)
-                else {
-                    return false;
-                };
-                opening
-                    .certify_against(&closing)
-                    .is_ok_and(|inventory| deletion.verifies(&inventory))
+        move |target| {
+            let Ok(evidence) = source_terminal_evidence.lock() else {
+                return false;
+            };
+            let Some(evidence) = evidence.as_ref() else {
+                return false;
+            };
+            match target {
+                SourceBackedRevalidationTarget::Source(expected) => evidence
+                    .sources
+                    .get(expected.observation().source())
+                    .is_some_and(|source_evidence| {
+                        codex_source_observation(
+                            expected.observation().source(),
+                            &source_evidence.observation,
+                        )
+                        .is_ok_and(|observation| observation == *expected.observation())
+                            && source_evidence.revalidate()
+                    }),
+                SourceBackedRevalidationTarget::Deletion(deletion) => {
+                    deletion.verifies(&evidence.inventory)
+                        && !evidence.sources.contains_key(deletion.source())
+                }
             }
         },
         move |request| hydrate_codex_explicit_event(&hydration_input, request),
     )
     .with_complete_inventory_revalidation(move |expected| {
+        let terminal = inventory_terminal_evidence
+            .lock()
+            .ok()
+            .and_then(|evidence| evidence.clone());
+        let Some(terminal) = terminal else {
+            return false;
+        };
+        if terminal.inventory != *expected {
+            return false;
+        }
         let Ok(opening) =
             observe_codex_explicit_session_source_backed_v0(&complete_inventory_revalidation_input)
         else {
@@ -269,6 +331,14 @@ pub(super) fn register_codex_explicit_session_route(
         opening
             .certify_against(&closing)
             .is_ok_and(|current| current == *expected)
+            && closing.source_plan().is_none_or(|(source, source_key, _)| {
+                terminal.sources.get(&source_key).is_some_and(|evidence| {
+                    evidence
+                        .observation
+                        .admits_append_only_growth(&source.catalog_observation)
+                        && evidence.revalidate()
+                })
+            })
     })
     .with_batch_hydration(move |request| {
         hydrate_codex_explicit_batch(&batch_hydration_input, request)
@@ -458,12 +528,9 @@ pub fn register_codex_prompt_history_source_backed_route(
                 return Ok(());
             };
 
-            let planned = scan_codex_prompt_history_source_backed_v0(
-                capture_source.clone(),
-                Some(&base),
-                |_| Ok(()),
-            )
-            .map_err(route_error)?;
+            let planned =
+                plan_codex_prompt_history_source_backed_v0(capture_source.clone(), Some(&base))
+                    .map_err(route_error)?;
             if !planned.source.source().exact_descriptor_eq(&claimed_source) {
                 return Err(SourceBackedRouteError::new(
                     SourceBackedRouteErrorKind::SourceChanged,
@@ -510,9 +577,10 @@ pub fn register_codex_prompt_history_source_backed_route(
                         sink.begin_source(claimed_source.clone())
                             .map_err(route_coordinator_error)?;
                     }
-                    let scan = scan_codex_prompt_history_source_backed_v0(
+                    let scan = stage_planned_codex_prompt_history_source_backed_v0(
                         capture_source.clone(),
                         Some(&base),
+                        &planned,
                         |page| {
                             if !page.source.exact_descriptor_eq(&claimed_source) {
                                 return Err(CaptureError::InvalidPayload(

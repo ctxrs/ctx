@@ -183,52 +183,60 @@ impl CodexLocatorResolverV0 {
         }
         reads.sort_by_key(|read| (read.byte_offset, read.physical_ordinal, read.caller_index));
 
-        let opened = open_codex_hydration_source(source)?;
-        let opening_observation =
-            opened_codex_file_observation(&source.source_path, opened.file())?;
-        opened
-            .revalidate_same_object()
-            .map_err(normalize_codex_hydration_capture_error)?;
-        if !source
-            .catalog_observation
-            .admits_append_only_growth(&opening_observation)
-        {
+        for attempt in 0..2 {
+            let (opened, opening_observation) = open_verified_codex_hydration_source(source)?;
+            #[cfg(test)]
+            run_codex_hydration_after_source_open_hook();
+            let mut reader = opened.file().try_clone()?;
+            let mut ordered = vec![None; request.len()];
+            #[cfg(test)]
+            CODEX_BATCH_READ_OFFSETS.with(|offsets| offsets.borrow_mut().clear());
+            for read in &reads {
+                #[cfg(test)]
+                CODEX_BATCH_READ_OFFSETS
+                    .with(|offsets| offsets.borrow_mut().push(read.byte_offset));
+                let hydrated = hydrate_codex_source_record_from_batch_reader(
+                    &mut reader,
+                    opened.len(),
+                    read.event.locator(),
+                    read.byte_offset,
+                    read.byte_length,
+                    read.physical_ordinal,
+                )?;
+                let provider_bytes = hydrated
+                    .decoded_display_text
+                    .ok_or(CodexSourceBackedErrorV0::LocatorRecordNotDisplayable)?
+                    .into_bytes();
+                ordered[read.caller_index] = Some(HydratedProviderRecord {
+                    event_id: read.event.event_id(),
+                    provider_bytes,
+                });
+            }
+            let closing_observation =
+                opened_codex_file_observation(&source.source_path, opened.file())?;
+            opened
+                .revalidate_same_object()
+                .map_err(normalize_codex_hydration_capture_error)?;
+            if closing_observation == opening_observation {
+                let records = ordered
+                    .into_iter()
+                    .map(|record| record.ok_or(CodexSourceBackedErrorV0::LocatorEventMismatch))
+                    .collect::<CodexSourceBackedResultV0<Vec<_>>>()?;
+                return Ok(BatchHydrationResult::new(records)?);
+            }
+            if attempt == 0
+                && opening_observation.admits_append_only_growth(&closing_observation)
+                && closing_observation.len > opening_observation.len
+            {
+                continue;
+            }
             return Err(CodexSourceBackedErrorV0::Capture(
                 CaptureError::SourceChangedDuringCapture,
             ));
         }
-        let mut reader = opened.file().try_clone()?;
-        let mut ordered = vec![None; request.len()];
-        #[cfg(test)]
-        CODEX_BATCH_READ_OFFSETS.with(|offsets| offsets.borrow_mut().clear());
-        for read in reads {
-            #[cfg(test)]
-            CODEX_BATCH_READ_OFFSETS.with(|offsets| offsets.borrow_mut().push(read.byte_offset));
-            let hydrated = hydrate_codex_source_record_from_batch_reader(
-                &mut reader,
-                opened.len(),
-                read.event.locator(),
-                read.byte_offset,
-                read.byte_length,
-                read.physical_ordinal,
-            )?;
-            let provider_bytes = hydrated
-                .decoded_display_text
-                .ok_or(CodexSourceBackedErrorV0::LocatorRecordNotDisplayable)?
-                .into_bytes();
-            ordered[read.caller_index] = Some(HydratedProviderRecord {
-                event_id: read.event.event_id(),
-                provider_bytes,
-            });
-        }
-        opened
-            .revalidate_same_object()
-            .map_err(normalize_codex_hydration_capture_error)?;
-        let records = ordered
-            .into_iter()
-            .map(|record| record.ok_or(CodexSourceBackedErrorV0::LocatorEventMismatch))
-            .collect::<CodexSourceBackedResultV0<Vec<_>>>()?;
-        Ok(BatchHydrationResult::new(records)?)
+        Err(CodexSourceBackedErrorV0::Capture(
+            CaptureError::SourceChangedDuringCapture,
+        ))
     }
 }
 
@@ -258,6 +266,29 @@ fn open_codex_hydration_source(
         .map_err(Into::into)
 }
 
+fn open_verified_codex_hydration_source(
+    source: &CodexCatalogSource,
+) -> CodexSourceBackedResultV0<(Arc<OpenedProviderSourceFile>, CodexFileObservation)> {
+    let opened = open_codex_hydration_source(source)?;
+    let before = opened_codex_file_observation(&source.source_path, opened.file())?;
+    let catalog = catalog_codex_explicit_session_opened(&source.source_path, &opened)
+        .map_err(normalize_codex_hydration_capture_error)?;
+    let after = opened_codex_file_observation(&source.source_path, opened.file())?;
+    opened
+        .revalidate_same_object()
+        .map_err(normalize_codex_hydration_capture_error)?;
+    if before != after
+        || !source.catalog_observation.admits_append_only_growth(&after)
+        || catalog.external_session_id != source.catalog_native_session_id
+        || catalog.parent_external_session_id != source.catalog_parent_native_session_id
+    {
+        return Err(CodexSourceBackedErrorV0::Capture(
+            CaptureError::SourceChangedDuringCapture,
+        ));
+    }
+    Ok((opened, after))
+}
+
 fn normalize_codex_hydration_capture_error(error: CaptureError) -> CaptureError {
     match error {
         CaptureError::InvalidProviderTranscriptPath {
@@ -277,40 +308,59 @@ fn hydrate_codex_source_record(
 ) -> CodexSourceBackedResultV0<CodexHydratedRecordV0> {
     let byte_length =
         usize::try_from(byte_length).map_err(|_| CodexSourceBackedErrorV0::LocatorRangeTooLarge)?;
-    let opened = open_codex_hydration_source(source)?;
-    #[cfg(test)]
-    run_codex_hydration_after_source_open_hook();
-    if byte_offset != 0 {
-        let boundary = opened.read_exact_range_allow_append(byte_offset.saturating_sub(1), 1, 1)?;
-        if boundary != *b"\n" {
+    for attempt in 0..2 {
+        let (opened, opening_observation) = open_verified_codex_hydration_source(source)?;
+        #[cfg(test)]
+        run_codex_hydration_after_source_open_hook();
+        if byte_offset != 0 {
+            let boundary =
+                opened.read_exact_range_allow_append(byte_offset.saturating_sub(1), 1, 1)?;
+            if boundary != *b"\n" {
+                return Err(CodexSourceBackedErrorV0::LocatorRecordBoundaryMismatch);
+            }
+        }
+        let provider_bytes = opened
+            .read_exact_range_allow_append(
+                byte_offset,
+                byte_length,
+                MAX_HYDRATED_CODEX_RECORD_BYTES as usize,
+            )
+            .map_err(|error| match error {
+                CaptureError::InvalidPayload(_) => CodexSourceBackedErrorV0::LocatorRangeMissing,
+                other => CodexSourceBackedErrorV0::Capture(other),
+            })?;
+        if !provider_bytes.ends_with(b"\n") {
             return Err(CodexSourceBackedErrorV0::LocatorRecordBoundaryMismatch);
         }
+        let actual_digest: [u8; 32] = Sha256::digest(&provider_bytes).into();
+        if &actual_digest != locator.record_digest() {
+            return Err(CodexSourceBackedErrorV0::LocatorDigestMismatch);
+        }
+        let decoded_display_text = decode_exact_display_text(&provider_bytes, physical_ordinal)?;
+        let closing_observation =
+            opened_codex_file_observation(&source.source_path, opened.file())?;
+        opened
+            .revalidate_same_object()
+            .map_err(normalize_codex_hydration_capture_error)?;
+        if closing_observation == opening_observation {
+            return Ok(CodexHydratedRecordV0 {
+                provider_bytes,
+                decoded_display_text,
+            });
+        }
+        if attempt == 0
+            && opening_observation.admits_append_only_growth(&closing_observation)
+            && closing_observation.len > opening_observation.len
+        {
+            continue;
+        }
+        return Err(CodexSourceBackedErrorV0::Capture(
+            CaptureError::SourceChangedDuringCapture,
+        ));
     }
-    let provider_bytes = opened
-        .read_exact_range_allow_append(
-            byte_offset,
-            byte_length,
-            MAX_HYDRATED_CODEX_RECORD_BYTES as usize,
-        )
-        .map_err(|error| match error {
-            CaptureError::InvalidPayload(_) => CodexSourceBackedErrorV0::LocatorRangeMissing,
-            other => CodexSourceBackedErrorV0::Capture(other),
-        })?;
-    if !provider_bytes.ends_with(b"\n") {
-        return Err(CodexSourceBackedErrorV0::LocatorRecordBoundaryMismatch);
-    }
-    let actual_digest: [u8; 32] = Sha256::digest(&provider_bytes).into();
-    if &actual_digest != locator.record_digest() {
-        return Err(CodexSourceBackedErrorV0::LocatorDigestMismatch);
-    }
-    let decoded_display_text = decode_exact_display_text(&provider_bytes, physical_ordinal)?;
-    opened
-        .revalidate_same_object()
-        .map_err(normalize_codex_hydration_capture_error)?;
-    Ok(CodexHydratedRecordV0 {
-        provider_bytes,
-        decoded_display_text,
-    })
+    Err(CodexSourceBackedErrorV0::Capture(
+        CaptureError::SourceChangedDuringCapture,
+    ))
 }
 
 fn hydrate_codex_source_record_from_batch_reader(

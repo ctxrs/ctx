@@ -289,20 +289,21 @@ impl JsonlFamilyLeaf {
         FAMILY_LEAF_OPENS.with(|count| count.set(count.get().saturating_add(1)));
         let opened = self.authority.open_file(&self.authority_path)?;
         let current = observe_opened_file(&self.source_path, &opened)?;
-        if current != self.observation
-            && (self.whole_record || !self.observation.admits_frozen_prefix_in(&current))
-        {
-            return Err(CaptureError::SourceChangedDuringCapture);
+        if current != self.observation {
+            if self.whole_record || !self.observation.is_same_file_growth_to(&current) {
+                return Err(CaptureError::SourceChangedDuringCapture);
+            }
+            if let Some(probe) = &self.identity_probe {
+                revalidate_frozen_prefix(
+                    &self.source_path,
+                    &opened,
+                    &probe.observation,
+                    probe.complete_prefix_end,
+                    super::prefix_digest(&probe.prefix_hasher),
+                )?;
+            }
         }
         Ok((Arc::new(opened), current))
-    }
-
-    fn accepts_hydration_closing(
-        &self,
-        opening: &JsonlFileObservation,
-        closing: &JsonlFileObservation,
-    ) -> bool {
-        opening == closing || (!self.whole_record && opening.admits_frozen_prefix_in(closing))
     }
 
     fn open_for_scan(&self) -> Result<(Self, Arc<OpenedProviderSourceFile>)> {

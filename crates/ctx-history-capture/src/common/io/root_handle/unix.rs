@@ -388,7 +388,10 @@ fn filesystem_identity(file: &File) -> Result<FilesystemIdentity, AuthorityOpenE
         })?
         .to_ascii_lowercase();
     #[cfg(target_os = "macos")]
-    let qualified = matches!(name.as_str(), "apfs" | "hfs");
+    // HFS exposes only coarse change timestamps on supported macOS releases.
+    // That cannot safely distinguish an in-place same-size rewrite during a
+    // metadata-only no-op check, so source authority is limited to APFS.
+    let qualified = name == "apfs";
     #[cfg(target_os = "freebsd")]
     let qualified = name == "ufs";
     if !qualified {

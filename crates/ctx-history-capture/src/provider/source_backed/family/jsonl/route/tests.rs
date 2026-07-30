@@ -5,6 +5,7 @@ use ctx_history_core::{
     NativeRecordCoordinate, NativeSessionKey, SessionIdentityInput, SourceAnchor,
     SourceRecordLocator,
 };
+use sha2::{Digest, Sha256};
 
 use super::*;
 
@@ -13,13 +14,42 @@ const TEST_SCHEMA: &str = "terminal-witness-v1";
 
 struct TestAdapter;
 
-struct TestHydrator;
+const TEST_RECORD: &[u8] = b"{\"message\":\"before\"}\n";
+
+struct TestHydrator {
+    source_file: Arc<OpenedProviderSourceFile>,
+}
 
 impl JsonlFamilyHydrator for TestHydrator {
     fn hydrate(
         &mut self,
         request: &EventHydrationRequest,
     ) -> std::result::Result<HydratedProviderRecord, HydrationFailure> {
+        let NativeRecordCoordinate::Jsonl {
+            byte_offset,
+            byte_length,
+            ..
+        } = request.locator().coordinate()
+        else {
+            return Err(hydration_error(
+                HydrationFailureKind::InvalidLocator,
+                "terminal witness locator is not JSONL",
+            ));
+        };
+        let bytes = self
+            .source_file
+            .read_exact_range_allow_append(
+                *byte_offset,
+                usize::try_from(*byte_length).unwrap(),
+                TEST_RECORD.len(),
+            )
+            .map_err(|error| hydration_error(HydrationFailureKind::StaleRecordEvidence, error))?;
+        if &<[u8; 32]>::from(Sha256::digest(&bytes)) != request.locator().record_digest() {
+            return Err(hydration_error(
+                HydrationFailureKind::StaleRecordEvidence,
+                "terminal witness record digest changed",
+            ));
+        }
         Ok(HydratedProviderRecord {
             event_id: request.event_id(),
             provider_bytes: b"frozen exact body".to_vec(),
@@ -94,9 +124,9 @@ impl JsonlFamilyAdapter for TestAdapter {
     fn hydrator(
         &self,
         _leaf: &JsonlFamilyLeaf,
-        _source_file: Arc<OpenedProviderSourceFile>,
+        source_file: Arc<OpenedProviderSourceFile>,
     ) -> std::result::Result<Box<dyn JsonlFamilyHydrator>, HydrationFailure> {
-        Ok(Box::new(TestHydrator))
+        Ok(Box::new(TestHydrator { source_file }))
     }
 }
 
@@ -123,14 +153,14 @@ fn hydration_request(source: SourceKey) -> EventHydrationRequest {
         source,
         NativeRecordCoordinate::Jsonl {
             byte_offset: 0,
-            byte_length: 21,
+            byte_length: TEST_RECORD.len() as u64,
             physical_ordinal: 0,
             native_session_key: Some(TypedKey::U64(1)),
             native_event_key: Some(TypedKey::U64(1)),
         },
         LocatorRevisionPolicy::StableRecordEvidence,
         None,
-        [1; 32],
+        Sha256::digest(TEST_RECORD).into(),
     )
     .unwrap();
     EventHydrationRequest::new(event_id, locator).unwrap()
@@ -246,7 +276,7 @@ fn active_source_family_contract_jsonl_terminal_inventory_accepts_proven_append(
     let root = temp.path().join("sessions");
     fs::create_dir_all(&root).unwrap();
     let first = root.join("first.jsonl");
-    fs::write(&first, b"{\"message\":\"frozen\"}\n").unwrap();
+    fs::write(&first, TEST_RECORD).unwrap();
     let adapter = TestAdapter;
     let (resident, inventory) = expected_state(&adapter, &root);
     let source = expected_source(&resident);
@@ -286,6 +316,32 @@ fn active_source_family_contract_jsonl_terminal_inventory_accepts_proven_append(
     let hydrated = hydrate_single(&adapter, &root, &hydration_resident, &request)
         .expect("append-safe hydrate");
     assert_eq!(hydrated.provider_bytes, b"frozen exact body");
+}
+
+#[test]
+fn active_source_family_contract_jsonl_hydration_rejects_same_length_rewrite() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("first.jsonl");
+    fs::write(&source_path, b"{\"message\":\"before\"}\n").unwrap();
+    let adapter = TestAdapter;
+    let source = adapter
+        .discover(&root)
+        .unwrap()
+        .leaves()
+        .first()
+        .unwrap()
+        .source()
+        .clone();
+    let request = hydration_request(source);
+    let rewrite_path = source_path.clone();
+    set_after_jsonl_group_open_hook(move || {
+        fs::write(rewrite_path, b"{\"message\":\"after!\"}\n").unwrap();
+    });
+    let resident = Mutex::new(FamilyResident::default());
+    let error = hydrate_single(&adapter, &root, &resident, &request).unwrap_err();
+    assert_eq!(error.kind, HydrationFailureKind::StaleRecordEvidence);
 }
 
 #[test]

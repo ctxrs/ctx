@@ -2,6 +2,40 @@ use std::collections::HashMap;
 
 use super::*;
 
+#[cfg(test)]
+std::thread_local! {
+    static AFTER_PROMPT_HYDRATION_OBSERVATION_HOOK:
+        std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn install_after_prompt_hydration_observation_hook(hook: impl FnOnce() + 'static) {
+    AFTER_PROMPT_HYDRATION_OBSERVATION_HOOK.with(|slot| {
+        assert!(
+            slot.borrow().is_none(),
+            "prompt-history hydration hook is already installed"
+        );
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(test)]
+fn run_after_prompt_hydration_observation_hook() {
+    let hook = AFTER_PROMPT_HYDRATION_OBSERVATION_HOOK.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PromptHydrationObservation {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    readonly: bool,
+    ordinary_file_token: [u8; 32],
+}
+
 /// Invocation-local resolver for exact prompt-history JSONL ranges.
 #[derive(Debug)]
 pub(crate) struct CodexPromptHistorySourceBackedResolverV0 {
@@ -103,66 +137,91 @@ fn hydrate_from_source(
     let locator = request.locator();
     let (byte_offset, byte_length, physical_ordinal, native_session_id) =
         validate_locator(locator)?;
-    let range_end = byte_offset
-        .checked_add(byte_length)
-        .ok_or(CodexPromptHistorySourceBackedErrorV0::LocatorRangeTooLarge)?;
-    if range_end > source.opened.file().metadata()?.len() {
-        return Err(CodexPromptHistorySourceBackedErrorV0::LocatorRangeMissing);
-    }
-    if byte_offset != 0 {
-        let boundary =
-            source
-                .opened
-                .read_exact_range_allow_append(byte_offset.saturating_sub(1), 1, 1)?;
-        if boundary != *b"\n" {
+    for attempt in 0..2 {
+        let opening = prompt_hydration_observation(&source.opened)?;
+        #[cfg(test)]
+        run_after_prompt_hydration_observation_hook();
+        let range_end = byte_offset
+            .checked_add(byte_length)
+            .ok_or(CodexPromptHistorySourceBackedErrorV0::LocatorRangeTooLarge)?;
+        if range_end > opening.len {
+            return Err(CodexPromptHistorySourceBackedErrorV0::LocatorRangeMissing);
+        }
+        if byte_offset != 0 {
+            let boundary =
+                source
+                    .opened
+                    .read_exact_range_allow_append(byte_offset.saturating_sub(1), 1, 1)?;
+            if boundary != *b"\n" {
+                return Err(CodexPromptHistorySourceBackedErrorV0::InvalidLocator);
+            }
+        }
+        let length = usize::try_from(byte_length)
+            .map_err(|_| CodexPromptHistorySourceBackedErrorV0::LocatorRangeTooLarge)?;
+        let provider_bytes = source.opened.read_exact_range_allow_append(
+            byte_offset,
+            length,
+            usize::try_from(MAX_HYDRATED_RECORD_BYTES)
+                .map_err(|_| CodexPromptHistorySourceBackedErrorV0::LocatorRangeTooLarge)?,
+        )?;
+        if !provider_bytes.ends_with(b"\n") {
             return Err(CodexPromptHistorySourceBackedErrorV0::InvalidLocator);
         }
+        if &Sha256::digest(&provider_bytes)[..] != locator.record_digest() {
+            return Err(CodexPromptHistorySourceBackedErrorV0::LocatorDigestMismatch);
+        }
+        let body = provider_bytes
+            .strip_suffix(b"\n")
+            .unwrap_or(&provider_bytes);
+        let body = body.strip_suffix(b"\r").unwrap_or(body);
+        let line: PromptLine = serde_json::from_slice(body)
+            .map_err(|_| CodexPromptHistorySourceBackedErrorV0::LocatorRecordMismatch)?;
+        if line.session_id != native_session_id
+            || line.session_id.trim().is_empty()
+            || chrono::DateTime::from_timestamp(line.ts, 0).is_none()
+        {
+            return Err(CodexPromptHistorySourceBackedErrorV0::LocatorRecordMismatch);
+        }
+        let session_id = stable_session_id(locator.source(), &line.session_id)?;
+        let native_item_key = NativeItemKey::certified_position(
+            EVENT_POSITION_KIND,
+            TypedKey::U64(physical_ordinal),
+            PositionStability::AppendStable,
+        )?;
+        let event_id = derive_event_id(EventIdentityInput {
+            source: locator.source(),
+            session_id,
+            logical_item_kind: LOGICAL_EVENT_KIND,
+            native_item_key: &native_item_key,
+            subrecord_selector: None,
+        })?;
+        if event_id != request.event_id() {
+            return Err(CodexPromptHistorySourceBackedErrorV0::LocatorRecordMismatch);
+        }
+        let closing = prompt_hydration_observation(&source.opened)?;
+        if closing == opening {
+            return Ok(HydratedProviderRecord {
+                event_id,
+                provider_bytes: prompt_lexical_body(&line.text).into_bytes(),
+            });
+        }
+        if attempt == 0 && closing.len > opening.len {
+            continue;
+        }
+        return Err(CodexPromptHistorySourceBackedErrorV0::SourceChanged);
     }
-    let length = usize::try_from(byte_length)
-        .map_err(|_| CodexPromptHistorySourceBackedErrorV0::LocatorRangeTooLarge)?;
-    let provider_bytes = source.opened.read_exact_range_allow_append(
-        byte_offset,
-        length,
-        usize::try_from(MAX_HYDRATED_RECORD_BYTES)
-            .map_err(|_| CodexPromptHistorySourceBackedErrorV0::LocatorRangeTooLarge)?,
-    )?;
-    if !provider_bytes.ends_with(b"\n") {
-        return Err(CodexPromptHistorySourceBackedErrorV0::InvalidLocator);
-    }
-    if &Sha256::digest(&provider_bytes)[..] != locator.record_digest() {
-        return Err(CodexPromptHistorySourceBackedErrorV0::LocatorDigestMismatch);
-    }
-    let body = provider_bytes
-        .strip_suffix(b"\n")
-        .unwrap_or(&provider_bytes);
-    let body = body.strip_suffix(b"\r").unwrap_or(body);
-    let line: PromptLine = serde_json::from_slice(body)
-        .map_err(|_| CodexPromptHistorySourceBackedErrorV0::LocatorRecordMismatch)?;
-    if line.session_id != native_session_id
-        || line.session_id.trim().is_empty()
-        || chrono::DateTime::from_timestamp(line.ts, 0).is_none()
-    {
-        return Err(CodexPromptHistorySourceBackedErrorV0::LocatorRecordMismatch);
-    }
-    let session_id = stable_session_id(locator.source(), &line.session_id)?;
-    let native_item_key = NativeItemKey::certified_position(
-        EVENT_POSITION_KIND,
-        TypedKey::U64(physical_ordinal),
-        PositionStability::AppendStable,
-    )?;
-    let event_id = derive_event_id(EventIdentityInput {
-        source: locator.source(),
-        session_id,
-        logical_item_kind: LOGICAL_EVENT_KIND,
-        native_item_key: &native_item_key,
-        subrecord_selector: None,
-    })?;
-    if event_id != request.event_id() {
-        return Err(CodexPromptHistorySourceBackedErrorV0::LocatorRecordMismatch);
-    }
-    Ok(HydratedProviderRecord {
-        event_id,
-        provider_bytes: prompt_lexical_body(&line.text).into_bytes(),
+    Err(CodexPromptHistorySourceBackedErrorV0::SourceChanged)
+}
+
+fn prompt_hydration_observation(
+    source: &OpenedProviderSourceFile,
+) -> CodexPromptHistorySourceBackedResultV0<PromptHydrationObservation> {
+    let (metadata, ordinary_file_token) = stable_current_ordinary_file_observation(source)?;
+    Ok(PromptHydrationObservation {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+        readonly: metadata.permissions().readonly(),
+        ordinary_file_token,
     })
 }
 

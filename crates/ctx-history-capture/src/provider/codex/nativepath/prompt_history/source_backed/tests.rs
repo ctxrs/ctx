@@ -139,7 +139,33 @@ fn cold_noop_append_and_exact_hydration_keep_stable_bounded_identity() {
     let appended = prompt_line("session-a", 1_785_139_270, "appended prompt");
     append(&path, &appended);
     lines.push(appended);
-    let (appended_scan, appended_documents, _) = collect(&input, Some(&noop.certificate));
+    reset_prompt_history_work_counters();
+    let planned = plan_codex_prompt_history_source_backed_v0(
+        observe_codex_prompt_history_source_backed_explicit_v0(&input).unwrap(),
+        Some(&noop.certificate),
+    )
+    .unwrap();
+    let mut appended_documents = Vec::new();
+    let appended_scan = stage_planned_codex_prompt_history_source_backed_v0(
+        observe_codex_prompt_history_source_backed_explicit_v0(&input).unwrap(),
+        Some(&noop.certificate),
+        &planned,
+        |page| {
+            appended_documents.extend(page.documents);
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(planned.certificate, appended_scan.certificate);
+    let current_len = fs::metadata(&path).unwrap().len();
+    assert!(
+        prompt_history_full_scan_bytes() <= current_len.saturating_mul(3),
+        "plan plus staging must perform at most one planning scan and two staging scans"
+    );
+    assert!(
+        prompt_history_prefix_hash_bytes() <= current_len.saturating_mul(6),
+        "plan plus staging must keep stable prefix confirmation bounded"
+    );
     assert!(matches!(
         appended_scan.disposition,
         CodexPromptHistorySourceBackedDispositionV0::Append
@@ -207,6 +233,93 @@ fn active_source_family_contract_prompt_history_freezes_eof_and_defers_append() 
     ));
     assert_eq!(catch_up_documents.len(), 1);
     assert_eq!(catch_up_documents[0].body, "second prompt");
+}
+
+#[test]
+fn active_source_family_contract_prompt_history_plan_and_stage_share_frozen_eof() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("history.jsonl");
+    let first = prompt_line("active-session", 1_785_139_200, "first prompt");
+    let planned_append = prompt_line("active-session", 1_785_139_201, "planned append");
+    let deferred_append = prompt_line("active-session", 1_785_139_202, "deferred append");
+    fs::write(&path, &first).unwrap();
+    let input = CodexPromptHistorySourceBackedInputV0::explicit(&path, [49; 32]);
+    let (cold, _, _) = collect(&input, None);
+    append(&path, &planned_append);
+
+    let source = observe_codex_prompt_history_source_backed_explicit_v0(&input).unwrap();
+    let planned =
+        plan_codex_prompt_history_source_backed_v0(source.clone(), Some(&cold.certificate))
+            .unwrap();
+    append(&path, &deferred_append);
+
+    let mut staged_documents = Vec::new();
+    let staged = stage_planned_codex_prompt_history_source_backed_v0(
+        source,
+        Some(&cold.certificate),
+        &planned,
+        |page| {
+            staged_documents.extend(page.documents);
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(staged.certificate, planned.certificate);
+    assert!(matches!(
+        staged.disposition,
+        CodexPromptHistorySourceBackedDispositionV0::Append
+    ));
+    assert_eq!(staged_documents.len(), 1);
+    assert_eq!(staged_documents[0].body, "planned append");
+    revalidate_codex_prompt_history_source_backed_v0(&staged.source, &staged.certificate).unwrap();
+
+    let (catch_up, catch_up_documents, _) = collect(&input, Some(&staged.certificate));
+    assert!(matches!(
+        catch_up.disposition,
+        CodexPromptHistorySourceBackedDispositionV0::Append
+    ));
+    assert_eq!(catch_up_documents.len(), 1);
+    assert_eq!(catch_up_documents[0].body, "deferred append");
+}
+
+#[test]
+fn active_source_family_contract_prompt_history_hydration_retries_append_and_rejects_rewrite() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("history.jsonl");
+    let first = prompt_line("active-session", 1_785_139_200, "stable prompt");
+    fs::write(&path, &first).unwrap();
+    let input = CodexPromptHistorySourceBackedInputV0::explicit(&path, [50; 32]);
+    let (scan, documents, _) = collect(&input, None);
+    let resolver = CodexPromptHistorySourceBackedResolverV0::new([scan.source.clone()]).unwrap();
+    let request =
+        EventHydrationRequest::new(documents[0].event_id, documents[0].locator.clone()).unwrap();
+
+    let append_path = path.clone();
+    super::hydration::install_after_prompt_hydration_observation_hook(move || {
+        append(
+            &append_path,
+            &prompt_line("active-session", 1_785_139_201, "later prompt"),
+        );
+    });
+    assert_eq!(
+        resolver.hydrate_event(&request).unwrap().provider_bytes,
+        b"stable prompt"
+    );
+
+    let rewrite_path = path.clone();
+    super::hydration::install_after_prompt_hydration_observation_hook(move || {
+        let mut bytes = fs::read(&rewrite_path).unwrap();
+        let offset = bytes
+            .windows(b"stable prompt".len())
+            .position(|window| window == b"stable prompt")
+            .unwrap();
+        bytes[offset] = b'S';
+        fs::write(&rewrite_path, bytes).unwrap();
+    });
+    assert_eq!(
+        resolver.hydrate_event(&request).unwrap_err().kind,
+        HydrationFailureKind::StaleRecordEvidence
+    );
 }
 
 #[test]

@@ -252,6 +252,95 @@ fn active_source_family_contract_codex_hydration_accepts_append_after_source_ope
 }
 
 #[test]
+fn active_source_family_contract_codex_hydration_rejects_owner_rewrite_with_append() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    fs::create_dir_all(&sessions).unwrap();
+    let native_session_id = "019fa000-0000-7000-8000-000000000089";
+    let replacement_id = "019fa000-0000-7000-8000-000000000099";
+    write_session(
+        &sessions,
+        native_session_id,
+        &[message("user", "ownerrewriteexactcontent")],
+    );
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    let event = VerifiedIndex::open(&index)
+        .unwrap()
+        .source_event_page(&codex_source_key(native_session_id).unwrap(), None, 8)
+        .unwrap()
+        .items
+        .into_iter()
+        .next()
+        .unwrap();
+    let request = EventHydrationRequest::new(event.event_id, event.locator).unwrap();
+    let resolver = CodexLocatorResolverV0::discover([&sessions]).unwrap();
+    let source_path = session_path(&sessions, native_session_id);
+
+    super::super::hydration::install_codex_hydration_after_source_open_hook({
+        let source_path = source_path.clone();
+        move || {
+            let mut bytes = fs::read(&source_path).unwrap();
+            let offset = bytes
+                .windows(native_session_id.len())
+                .position(|window| window == native_session_id.as_bytes())
+                .unwrap();
+            bytes[offset..offset + native_session_id.len()]
+                .copy_from_slice(replacement_id.as_bytes());
+            bytes.extend_from_slice(
+                format!("{}\n", message("assistant", "appendedafterownerrewrite")).as_bytes(),
+            );
+            fs::write(source_path, bytes).unwrap();
+        }
+    });
+
+    let error = resolver.hydrate_event_request(&request).unwrap_err();
+    assert!(matches!(
+        error,
+        CodexSourceBackedErrorV0::Capture(CaptureError::SourceChangedDuringCapture)
+    ));
+}
+
+#[test]
+fn active_source_family_contract_codex_batch_hydration_retries_append() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    fs::create_dir_all(&sessions).unwrap();
+    let native_session_id = "019fa000-0000-7000-8000-000000000090";
+    write_session(
+        &sessions,
+        native_session_id,
+        &[message("user", "batchexactcontent")],
+    );
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    let event = VerifiedIndex::open(&index)
+        .unwrap()
+        .source_event_page(&codex_source_key(native_session_id).unwrap(), None, 8)
+        .unwrap()
+        .items
+        .into_iter()
+        .next()
+        .unwrap();
+    let request = EventHydrationRequest::new(event.event_id, event.locator).unwrap();
+    let batch = BatchHydrationRequest::new(vec![request.clone()]).unwrap();
+    let resolver = CodexLocatorResolverV0::discover([&sessions]).unwrap();
+    let source_path = session_path(&sessions, native_session_id);
+    super::super::hydration::install_codex_hydration_after_source_open_hook(move || {
+        OpenOptions::new()
+            .append(true)
+            .open(source_path)
+            .unwrap()
+            .write_all(format!("{}\n", message("assistant", "batchappend")).as_bytes())
+            .unwrap();
+    });
+
+    let hydrated = resolver.hydrate_batch_request(&batch).unwrap();
+    assert_eq!(hydrated.records()[0].event_id, request.event_id());
+    assert_eq!(hydrated.records()[0].provider_bytes, b"batchexactcontent");
+}
+
+#[test]
 fn codex_exact_hydration_post_open_rewrite_and_replacement_fail_closed() {
     let temp = tempfile::tempdir().unwrap();
     let sessions = temp.path().join("sessions");

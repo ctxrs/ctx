@@ -35,14 +35,18 @@ use crate::{
 
 mod hydration;
 mod path;
+mod projection;
 pub(crate) use hydration::CodexPromptHistorySourceBackedResolverV0;
 use path::absolute_lexical_path;
+use projection::{
+    lexical_document, prompt_lexical_body, retained_document_bytes, stable_session_id,
+};
 
 const SOURCE_FORMAT: &str = "codex_history_jsonl";
 const SOURCE_SCHEMA_VARIANT: &str = "codex-prompt-history-jsonl-v1";
 const SOURCE_IDENTITY_VERSION: u32 = 1;
 const SOURCE_REVISION_KIND: &str = "codex-prompt-history-ordinary-file-v2";
-const PARSER_REVISION: &str = "codex-prompt-history-source-backed-v4";
+const PARSER_REVISION: &str = "codex-prompt-history-source-backed-v2";
 const FRONTIER_KIND: &str = "codex-prompt-history-jsonl-frontier-v1";
 const SESSION_KEY_NAMESPACE: &str = "codex.prompt-history.session";
 const EVENT_POSITION_KIND: &str = "codex.prompt-history.raw-ordinal";
@@ -207,8 +211,15 @@ pub(crate) struct CodexPromptHistorySourceBackedScanV0 {
     pub(crate) certificate: CertifiedSource,
     pub(crate) disposition: CodexPromptHistorySourceBackedDispositionV0,
     pub(crate) emitted_documents: u64,
+    frozen: CodexPromptHistoryFrozenSnapshotV0,
     #[cfg(test)]
     pub(crate) terminal: bool,
+}
+
+#[derive(Debug, Clone)]
+struct CodexPromptHistoryFrozenSnapshotV0 {
+    metadata: Metadata,
+    ordinary_file_token: [u8; 32],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -236,6 +247,7 @@ struct ScanAnalysis {
     counts: ScannedSourceCounts,
     content_digest: [u8; 32],
     whole_source_digest: [u8; 32],
+    prior_prefix_digest: Option<[u8; 32]>,
     terminal: bool,
 }
 
@@ -339,6 +351,58 @@ pub(crate) fn scan_codex_prompt_history_source_backed_v0(
     prior: Option<&CertifiedSource>,
     emit: impl FnMut(CodexPromptHistorySourceBackedPageV0) -> CodexPromptHistorySourceBackedResultV0<()>,
 ) -> CodexPromptHistorySourceBackedResultV0<CodexPromptHistorySourceBackedScanV0> {
+    let (metadata, ordinary_file_token) = stable_current_ordinary_file_observation(&source.opened)?;
+    scan_codex_prompt_history_source_backed_inner_v0(
+        source,
+        prior,
+        true,
+        CodexPromptHistoryFrozenSnapshotV0 {
+            metadata,
+            ordinary_file_token,
+        },
+        emit,
+    )
+}
+
+pub(crate) fn plan_codex_prompt_history_source_backed_v0(
+    source: CodexPromptHistorySourceBackedSourceV0,
+    prior: Option<&CertifiedSource>,
+) -> CodexPromptHistorySourceBackedResultV0<CodexPromptHistorySourceBackedScanV0> {
+    let (metadata, ordinary_file_token) = stable_current_ordinary_file_observation(&source.opened)?;
+    scan_codex_prompt_history_source_backed_inner_v0(
+        source,
+        prior,
+        false,
+        CodexPromptHistoryFrozenSnapshotV0 {
+            metadata,
+            ordinary_file_token,
+        },
+        |_| Ok(()),
+    )
+}
+
+pub(crate) fn stage_planned_codex_prompt_history_source_backed_v0(
+    source: CodexPromptHistorySourceBackedSourceV0,
+    prior: Option<&CertifiedSource>,
+    planned: &CodexPromptHistorySourceBackedScanV0,
+    emit: impl FnMut(CodexPromptHistorySourceBackedPageV0) -> CodexPromptHistorySourceBackedResultV0<()>,
+) -> CodexPromptHistorySourceBackedResultV0<CodexPromptHistorySourceBackedScanV0> {
+    scan_codex_prompt_history_source_backed_inner_v0(
+        source,
+        prior,
+        true,
+        planned.frozen.clone(),
+        emit,
+    )
+}
+
+fn scan_codex_prompt_history_source_backed_inner_v0(
+    source: CodexPromptHistorySourceBackedSourceV0,
+    prior: Option<&CertifiedSource>,
+    project_documents: bool,
+    frozen: CodexPromptHistoryFrozenSnapshotV0,
+    emit: impl FnMut(CodexPromptHistorySourceBackedPageV0) -> CodexPromptHistorySourceBackedResultV0<()>,
+) -> CodexPromptHistorySourceBackedResultV0<CodexPromptHistorySourceBackedScanV0> {
     if let Some(prior) = prior {
         prior.validate_contract()?;
         if !source
@@ -349,16 +413,21 @@ pub(crate) fn scan_codex_prompt_history_source_backed_v0(
         }
     }
 
-    let (opening_metadata, opening_token) =
-        stable_current_ordinary_file_observation(&source.opened)?;
+    source.opened.revalidate_same_object()?;
+    if source.opened.file().metadata()?.len() < frozen.metadata.len() {
+        return Err(CodexPromptHistorySourceBackedErrorV0::SourceChanged);
+    }
+    let opening_metadata = &frozen.metadata;
+    let opening_token = frozen.ordinary_file_token;
     if let Some(prior) = prior {
-        if exact_ordinary_file_observation_matches(&opening_metadata, opening_token, prior)? {
+        if exact_ordinary_file_observation_matches(opening_metadata, opening_token, prior)? {
             let _checkpoint = decode_checkpoint(prior)?;
             return Ok(CodexPromptHistorySourceBackedScanV0 {
                 source,
                 certificate: prior.clone(),
                 disposition: CodexPromptHistorySourceBackedDispositionV0::Unchanged,
                 emitted_documents: 0,
+                frozen,
                 #[cfg(test)]
                 terminal: _checkpoint.terminal,
             });
@@ -366,11 +435,19 @@ pub(crate) fn scan_codex_prompt_history_source_backed_v0(
     }
 
     let frozen_len = opening_metadata.len();
-    let analysis = walk_complete_records(&source.opened, frozen_len, |_| Ok(()))?;
-    verify_frozen_prefix(&source.opened, frozen_len, analysis.whole_source_digest)?;
+    let prior_prefix_boundary = prior
+        .filter(|prior| prior.parser_revision() == PARSER_REVISION)
+        .and_then(|prior| decode_checkpoint(prior).ok())
+        .map(|checkpoint| checkpoint.certified_prefix_bytes);
+    let analysis = walk_complete_records(
+        &source.opened,
+        frozen_len,
+        prior_prefix_boundary,
+        |_| Ok(()),
+    )?;
 
     let observation_wire = observation_wire(
-        &opening_metadata,
+        opening_metadata,
         opening_token,
         analysis.whole_source_digest,
     )?;
@@ -400,21 +477,28 @@ pub(crate) fn scan_codex_prompt_history_source_backed_v0(
         Some(frontier),
     )?;
 
-    let (disposition, emit_from_byte) = classify_disposition(&source, prior, &certificate)?;
-    let emitted_documents = if matches!(
-        disposition,
-        CodexPromptHistorySourceBackedDispositionV0::Unchanged
-    ) {
+    let (disposition, emit_from_byte) =
+        classify_disposition(prior, &certificate, analysis.prior_prefix_digest)?;
+    let emitted_documents = if !project_documents
+        || matches!(
+            disposition,
+            CodexPromptHistorySourceBackedDispositionV0::Unchanged
+        ) {
         0
     } else {
         let mut pages = PageEmitter::new(&source, emit);
-        let projection_analysis = walk_complete_records(&source.opened, frozen_len, |record| {
-            if record.byte_offset >= emit_from_byte {
-                pages.push(lexical_document(&source, record)?)
-            } else {
-                Ok(())
-            }
-        })?;
+        let projection_analysis = walk_complete_records(
+            &source.opened,
+            frozen_len,
+            prior_prefix_boundary,
+            |record| {
+                if record.byte_offset >= emit_from_byte {
+                    pages.push(lexical_document(&source, record)?)
+                } else {
+                    Ok(())
+                }
+            },
+        )?;
         if projection_analysis != analysis {
             return Err(CodexPromptHistorySourceBackedErrorV0::SourceChanged);
         }
@@ -427,15 +511,16 @@ pub(crate) fn scan_codex_prompt_history_source_backed_v0(
         certificate,
         disposition,
         emitted_documents,
+        frozen,
         #[cfg(test)]
         terminal: analysis.terminal,
     })
 }
 
 fn classify_disposition(
-    source: &CodexPromptHistorySourceBackedSourceV0,
     prior: Option<&CertifiedSource>,
     current: &CertifiedSource,
+    prior_prefix_digest: Option<[u8; 32]>,
 ) -> CodexPromptHistorySourceBackedResultV0<(CodexPromptHistorySourceBackedDispositionV0, u64)> {
     let Some(prior) = prior else {
         return Ok((CodexPromptHistorySourceBackedDispositionV0::Cold, 0));
@@ -450,9 +535,7 @@ fn classify_disposition(
     if prior.parser_revision() == PARSER_REVISION {
         if let Ok(checkpoint) = decode_checkpoint(prior) {
             if current.counts().certified_bytes >= checkpoint.certified_prefix_bytes {
-                if let Some(prefix_digest) =
-                    hash_opened_prefix(&source.opened, checkpoint.certified_prefix_bytes)?
-                {
+                if let Some(prefix_digest) = prior_prefix_digest {
                     if CertifiedSourceAppend::certify(
                         prior,
                         current.clone(),
@@ -476,6 +559,7 @@ fn classify_disposition(
 fn walk_complete_records(
     source: &OpenedProviderSourceFile,
     frozen_len: u64,
+    prefix_boundary: Option<u64>,
     mut retained: impl FnMut(&RetainedPromptRecord) -> CodexPromptHistorySourceBackedResultV0<()>,
 ) -> CodexPromptHistorySourceBackedResultV0<ScanAnalysis> {
     let mut reader = BufReader::new(opened_file_from_start(source)?.take(frozen_len));
@@ -487,6 +571,10 @@ fn walk_complete_records(
     let mut rejected_records = 0_u64;
     let mut ignored_records = 0_u64;
     let mut certified_bytes = 0_u64;
+    let mut prior_prefix_digest = prefix_boundary.filter(|boundary| *boundary == 0).map(|_| {
+        let digest: [u8; 32] = Sha256::new().finalize().into();
+        digest
+    });
     let mut terminal = true;
 
     loop {
@@ -595,6 +683,9 @@ fn walk_complete_records(
             .checked_add(1)
             .ok_or(CodexPromptHistorySourceBackedErrorV0::CountMismatch)?;
         certified_bytes = offset;
+        if prefix_boundary == Some(certified_bytes) {
+            prior_prefix_digest = Some(complete.clone().finalize().into());
+        }
     }
 
     if offset != frozen_len {
@@ -613,6 +704,7 @@ fn walk_complete_records(
         counts,
         content_digest: complete.finalize().into(),
         whole_source_digest: whole.finalize().into(),
+        prior_prefix_digest,
         terminal,
     })
 }
@@ -822,83 +914,6 @@ pub(crate) fn revalidate_codex_prompt_history_source_backed_v0(
     )
 }
 
-fn lexical_document(
-    source: &CodexPromptHistorySourceBackedSourceV0,
-    record: &RetainedPromptRecord,
-) -> CodexPromptHistorySourceBackedResultV0<LexicalDocument> {
-    let session_id = stable_session_id(&source.source, &record.line.session_id)?;
-    let native_item_key = NativeItemKey::certified_position(
-        EVENT_POSITION_KIND,
-        TypedKey::U64(record.physical_ordinal),
-        PositionStability::AppendStable,
-    )?;
-    let event_id = derive_event_id(EventIdentityInput {
-        source: &source.source,
-        session_id,
-        logical_item_kind: LOGICAL_EVENT_KIND,
-        native_item_key: &native_item_key,
-        subrecord_selector: None,
-    })?;
-    let locator = SourceRecordLocator::new(
-        source.source.clone(),
-        NativeRecordCoordinate::Jsonl {
-            byte_offset: record.byte_offset,
-            byte_length: record.byte_length,
-            physical_ordinal: record.physical_ordinal,
-            native_session_key: Some(TypedKey::utf8(&record.line.session_id)?),
-            native_event_key: Some(TypedKey::U64(record.physical_ordinal)),
-        },
-        LocatorRevisionPolicy::StableRecordEvidence,
-        None,
-        record.record_digest,
-    )?;
-    let body = prompt_lexical_body(&record.line.text);
-    let occurred_at_unix_ms =
-        chrono::DateTime::from_timestamp(record.line.ts, 0).map(|value| value.timestamp_millis());
-    Ok(LexicalDocument {
-        event_id,
-        session_id,
-        parent_session_id: None,
-        root_session_id: session_id,
-        source: source.source.clone(),
-        locator,
-        provider_session_id: bounded_metadata(&record.line.session_id),
-        branch: None,
-        source_path: source.path().to_str().and_then(bounded_metadata),
-        agent_type: AgentType::Primary.as_str().to_owned(),
-        is_primary: true,
-        event_sequence: record.physical_ordinal,
-        occurred_at_unix_ms,
-        event_type: "message".to_owned(),
-        role: Some("user".to_owned()),
-        body,
-        workspace: None,
-        cwd: None,
-        touched_files: Vec::new(),
-    })
-}
-
-fn prompt_lexical_body(text: &str) -> String {
-    if text.is_empty() {
-        "message".to_owned()
-    } else {
-        text.to_owned()
-    }
-}
-
-fn stable_session_id(
-    source: &SourceKey,
-    native_session_id: &str,
-) -> CodexPromptHistorySourceBackedResultV0<StableEntityId> {
-    let native_session_key =
-        NativeSessionKey::native_id(SESSION_KEY_NAMESPACE, TypedKey::utf8(native_session_id)?)?;
-    Ok(derive_session_id(SessionIdentityInput {
-        source,
-        logical_session_kind: LOGICAL_SESSION_KIND,
-        native_session_key: &native_session_key,
-    })?)
-}
-
 fn decode_checkpoint(
     certificate: &CertifiedSource,
 ) -> CodexPromptHistorySourceBackedResultV0<CheckpointV0> {
@@ -925,19 +940,6 @@ fn decode_checkpoint(
         return Err(CodexPromptHistorySourceBackedErrorV0::InvalidCheckpoint);
     }
     Ok(checkpoint)
-}
-
-fn retained_document_bytes(document: &LexicalDocument) -> usize {
-    document
-        .body
-        .len()
-        .saturating_add(document.provider_session_id.as_ref().map_or(0, String::len))
-        .saturating_add(document.source_path.as_ref().map_or(0, String::len))
-        .saturating_add(512)
-}
-
-fn bounded_metadata(value: &str) -> Option<String> {
-    (!value.is_empty() && value.len() <= DOCUMENT_METADATA_MAX_BYTES).then(|| value.to_owned())
 }
 
 #[cfg(test)]

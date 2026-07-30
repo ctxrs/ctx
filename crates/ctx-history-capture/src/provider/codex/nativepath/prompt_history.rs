@@ -11,7 +11,9 @@ mod source_backed;
 
 pub(crate) use source_backed::{
     observe_codex_prompt_history_source_backed_explicit_v0,
-    revalidate_codex_prompt_history_source_backed_v0, scan_codex_prompt_history_source_backed_v0,
+    plan_codex_prompt_history_source_backed_v0, revalidate_codex_prompt_history_source_backed_v0,
+    scan_codex_prompt_history_source_backed_v0,
+    stage_planned_codex_prompt_history_source_backed_v0,
     CodexPromptHistorySourceBackedDispositionV0, CodexPromptHistorySourceBackedInputV0,
     CodexPromptHistorySourceBackedResolverV0,
 };

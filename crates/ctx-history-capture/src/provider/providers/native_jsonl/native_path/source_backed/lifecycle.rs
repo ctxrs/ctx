@@ -1,4 +1,8 @@
-use std::{collections::HashMap, path::Path, sync::Mutex};
+use std::{
+    collections::{BTreeSet, HashMap},
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 
 use ctx_history_core::{
     derive_event_id, CertifiedSource, CertifiedSourceAppend, CertifiedSourceDeletion,
@@ -31,19 +35,21 @@ impl DirectJsonlSourceAdapter {
         terminal_evidence: &DirectJsonlTerminalEvidenceSet,
         expected: &CertifiedSource,
     ) -> DirectJsonlSourceBackedResult<bool> {
-        let checkpoint = match decode_certificate(self, expected) {
-            Ok(checkpoint) => checkpoint,
-            Err(_) => return Ok(false),
-        };
-        let Some(evidence) = terminal_evidence.get(expected.observation().source())? else {
+        Ok(self
+            .terminal_certificate_evidence(terminal_evidence, expected)?
+            .is_some())
+    }
+
+    fn revalidate_certificate_filesystem(
+        self,
+        terminal_evidence: &DirectJsonlTerminalEvidenceSet,
+        expected: &CertifiedSource,
+    ) -> DirectJsonlSourceBackedResult<bool> {
+        let Some((evidence, checkpoint)) =
+            self.terminal_certificate_evidence(terminal_evidence, expected)?
+        else {
             return Ok(false);
         };
-        if evidence.certificate != *expected
-            || evidence.leaf.path != *checkpoint.physical.identity().source_path()
-            || !evidence.leaf.observation.supports_exact_revalidation()
-        {
-            return Ok(false);
-        }
         let (_, source_file) = evidence.leaf.open_for_scan()?;
         revalidate_frozen_prefix(
             &evidence.leaf.path,
@@ -53,6 +59,28 @@ impl DirectJsonlSourceAdapter {
             *checkpoint.physical.complete_prefix_sha256(),
         )?;
         Ok(true)
+    }
+
+    fn terminal_certificate_evidence(
+        self,
+        terminal_evidence: &DirectJsonlTerminalEvidenceSet,
+        expected: &CertifiedSource,
+    ) -> DirectJsonlSourceBackedResult<Option<(DirectJsonlTerminalEvidence, DirectJsonlCheckpoint)>>
+    {
+        let checkpoint = match decode_certificate(self, expected) {
+            Ok(checkpoint) => checkpoint,
+            Err(_) => return Ok(None),
+        };
+        let Some(evidence) = terminal_evidence.get(expected.observation().source())? else {
+            return Ok(None);
+        };
+        if evidence.certificate != *expected
+            || evidence.leaf.path != *checkpoint.physical.identity().source_path()
+            || !evidence.leaf.observation.supports_exact_revalidation()
+        {
+            return Ok(None);
+        }
+        Ok(Some((evidence, checkpoint)))
     }
 
     #[cfg(test)]
@@ -85,9 +113,11 @@ impl DirectJsonlSourceAdapter {
         }
         let current = self.discover(root)?;
         let evidence = terminal_evidence.all()?;
+        let rejected_paths = terminal_evidence.rejected_paths()?;
         if !current.is_exact_complete()
             || &current.observation != expected.observation()
             || evidence.len() != expected.observed_sources()
+            || evidence.len().saturating_add(rejected_paths.len()) != current.leaves().len()
             || evidence
                 .iter()
                 .any(|source| !expected.contains(source.certificate.observation().source()))
@@ -95,7 +125,18 @@ impl DirectJsonlSourceAdapter {
             return Ok(false);
         }
         for source in evidence {
-            if !self.revalidate_certificate(terminal_evidence, &source.certificate)? {
+            if !self.revalidate_certificate_filesystem(terminal_evidence, &source.certificate)? {
+                return Ok(false);
+            }
+        }
+        for path in rejected_paths {
+            let Some(leaf) = current.leaves().iter().find(|leaf| leaf.path == path) else {
+                return Ok(false);
+            };
+            if !matches!(
+                self.select_leaf(leaf, chrono::DateTime::<chrono::Utc>::UNIX_EPOCH),
+                Err(DirectJsonlSourceBackedError::RejectedSource { .. })
+            ) {
                 return Ok(false);
             }
         }
@@ -451,6 +492,7 @@ pub(super) struct DirectJsonlTerminalEvidence {
 #[derive(Default)]
 pub(super) struct DirectJsonlTerminalEvidenceSet {
     sources: Mutex<HashMap<[u8; 32], DirectJsonlTerminalEvidence>>,
+    rejected_paths: Mutex<BTreeSet<PathBuf>>,
 }
 
 impl DirectJsonlTerminalEvidenceSet {
@@ -460,6 +502,14 @@ impl DirectJsonlTerminalEvidenceSet {
             .map_err(|_| {
                 DirectJsonlSourceBackedError::Publication(
                     "terminal evidence lock was poisoned".to_owned(),
+                )
+            })?
+            .clear();
+        self.rejected_paths
+            .lock()
+            .map_err(|_| {
+                DirectJsonlSourceBackedError::Publication(
+                    "rejected terminal evidence lock was poisoned".to_owned(),
                 )
             })?
             .clear();
@@ -485,6 +535,22 @@ impl DirectJsonlTerminalEvidenceSet {
             })?
             .insert(digest, evidence);
         if replaced.is_some() {
+            return Err(DirectJsonlSourceBackedError::CountMismatch);
+        }
+        Ok(())
+    }
+
+    pub(super) fn record_rejected_path(&self, path: PathBuf) -> DirectJsonlSourceBackedResult<()> {
+        if !self
+            .rejected_paths
+            .lock()
+            .map_err(|_| {
+                DirectJsonlSourceBackedError::Publication(
+                    "rejected terminal evidence lock was poisoned".to_owned(),
+                )
+            })?
+            .insert(path)
+        {
             return Err(DirectJsonlSourceBackedError::CountMismatch);
         }
         Ok(())
@@ -516,6 +582,20 @@ impl DirectJsonlTerminalEvidenceSet {
                 )
             })?
             .values()
+            .cloned()
+            .collect())
+    }
+
+    fn rejected_paths(&self) -> DirectJsonlSourceBackedResult<Vec<PathBuf>> {
+        Ok(self
+            .rejected_paths
+            .lock()
+            .map_err(|_| {
+                DirectJsonlSourceBackedError::Publication(
+                    "rejected terminal evidence lock was poisoned".to_owned(),
+                )
+            })?
+            .iter()
             .cloned()
             .collect())
     }

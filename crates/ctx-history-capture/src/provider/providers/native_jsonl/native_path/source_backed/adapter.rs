@@ -17,8 +17,8 @@ use super::{
     DirectJsonlSession, DirectJsonlSourceBackedError, DirectJsonlSourceBackedResult,
     DirectJsonlSourceReader, ProjectedLine, DIRECT_JSONL_DISCOVERY_REVISION,
     DIRECT_JSONL_INVENTORY_AUTHORITY_NAMESPACE, DIRECT_JSONL_INVENTORY_REVISION_KIND,
-    DIRECT_JSONL_NATIVEPATH_PARSER_REVISION, DIRECT_JSONL_NATIVEPATH_POLICY_REVISION,
-    DIRECT_JSONL_SOURCE_IDENTITY_VERSION,
+    DIRECT_JSONL_LEGACY_DISCOVERY_REVISION, DIRECT_JSONL_NATIVEPATH_PARSER_REVISION,
+    DIRECT_JSONL_NATIVEPATH_POLICY_REVISION, DIRECT_JSONL_SOURCE_IDENTITY_VERSION,
 };
 use crate::{
     common::io::{
@@ -399,6 +399,65 @@ impl DirectJsonlSourceAdapter {
         })
     }
 
+    pub(super) fn open_leaf_for_hydration(
+        self,
+        leaf: &DirectJsonlInventoryLeaf,
+        expected_source: &SourceKey,
+        expected_native_session_id: &str,
+    ) -> DirectJsonlSourceBackedResult<(DirectJsonlInventoryLeaf, Arc<OpenedProviderSourceFile>)>
+    {
+        let mut selected = self.select_leaf(leaf, DateTime::<Utc>::UNIX_EPOCH)?;
+        if !selected.source.exact_descriptor_eq(expected_source)
+            || selected.session.native_session_id != expected_native_session_id
+        {
+            return Err(DirectJsonlSourceBackedError::NativeSessionChanged);
+        }
+        let source_file = selected
+            .source_file
+            .take()
+            .ok_or(DirectJsonlSourceBackedError::CountMismatch)?;
+        Ok((selected.leaf, source_file))
+    }
+
+    pub(super) fn revalidate_opened_hydration_identity(
+        self,
+        leaf: &DirectJsonlInventoryLeaf,
+        source_file: &Arc<OpenedProviderSourceFile>,
+        expected_source: &SourceKey,
+        expected_native_session_id: &str,
+    ) -> DirectJsonlSourceBackedResult<()> {
+        let mut projector = DirectJsonlProjector::new(
+            self.provider,
+            self.source_format,
+            &leaf.path,
+            Some(leaf.source_root.clone()),
+            DateTime::<Utc>::UNIX_EPOCH,
+            None,
+        )?;
+        let (projected, _) = probe_first_record(&leaf.path, source_file, |record| {
+            let projected = projector.project_record(record)?;
+            if !projected.rejections.is_empty() {
+                return Err(DirectJsonlSourceBackedError::RejectedSource {
+                    path: leaf.path.clone(),
+                    rejections: projected.rejections,
+                });
+            }
+            Ok(projected)
+        })?;
+        let _ = projected;
+        let session = projector
+            .session()
+            .ok_or_else(|| DirectJsonlSourceBackedError::MissingNativeSession(leaf.path.clone()))?;
+        let (source, _) = direct_jsonl_session_identity(self, &session.native_session_id)?;
+        if !source.exact_descriptor_eq(expected_source)
+            || session.native_session_id != expected_native_session_id
+        {
+            return Err(DirectJsonlSourceBackedError::NativeSessionChanged);
+        }
+        source_file.revalidate_same_object()?;
+        Ok(())
+    }
+
     pub(crate) fn open_selected(
         self,
         mut selected: DirectJsonlSelectedLeaf,
@@ -600,7 +659,10 @@ impl DirectJsonlSourceAdapter {
     ) -> bool {
         deletion.validate_contract().is_ok()
             && self.owns(deletion.source())
-            && deletion.discovery_revision() == DIRECT_JSONL_DISCOVERY_REVISION
+            && matches!(
+                deletion.discovery_revision(),
+                DIRECT_JSONL_DISCOVERY_REVISION | DIRECT_JSONL_LEGACY_DISCOVERY_REVISION
+            )
             && deletion.inventory().provider() == self.provider.as_str()
             && deletion.inventory().authority_namespace()
                 == DIRECT_JSONL_INVENTORY_AUTHORITY_NAMESPACE
@@ -757,19 +819,6 @@ impl DirectJsonlInventoryLeaf {
         let mut leaf = self.clone();
         leaf.observation = current;
         Ok((leaf, Arc::new(opened)))
-    }
-
-    pub(super) fn open_for_hydration(
-        &self,
-    ) -> DirectJsonlSourceBackedResult<Arc<OpenedProviderSourceFile>> {
-        self.authority.revalidate()?;
-        let opened = self.authority.root.open_file(&self.authority_path)?;
-        let current = observe_opened_file(&self.path, &opened)?;
-        if current != self.observation && !self.observation.is_same_file_growth_to(&current) {
-            return Err(CaptureError::SourceChangedDuringCapture.into());
-        }
-        self.authority.revalidate()?;
-        Ok(Arc::new(opened))
     }
 }
 
