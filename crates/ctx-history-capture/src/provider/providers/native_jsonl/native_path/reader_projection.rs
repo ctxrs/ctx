@@ -505,17 +505,7 @@ fn direct_event(
     };
     let lexical_text = direct_jsonl_lexical_text(event_type, &text, result);
 
-    let positional_event_index = if sub_ordinal == 0 {
-        raw_ordinal
-    } else {
-        raw_ordinal
-            .checked_mul(u64::from(u16::MAX) + 1)
-            .and_then(|index| index.checked_add(u64::from(sub_ordinal)))
-            .map(|index| index | (1_u64 << 63))
-            .ok_or(CaptureError::SystemInvariant(
-                "direct JSONL provider event identity index overflowed",
-            ))?
-    };
+    let positional_event_index = direct_jsonl_event_sequence(raw_ordinal, sub_ordinal)?;
     let native_record_id = direct_jsonl_native_event_identity(provider, value);
     let provider_event_sequence_index = positional_event_index;
     let provider_event_hash = crate::compute_payload_hash(&json!({
@@ -550,6 +540,33 @@ fn direct_event(
         touches,
         source_record: DirectJsonlSourceRecord::default(),
     })
+}
+
+fn direct_jsonl_event_sequence(raw_ordinal: u64, sub_ordinal: u32) -> Result<u64> {
+    const SUBRECORD_STRIDE: u64 = 65_536;
+    const SUBRECORD_SEQUENCE_BASE: u64 = 1_u64 << 62;
+
+    if sub_ordinal == 0 {
+        return i64::try_from(raw_ordinal)
+            .map(|_| raw_ordinal)
+            .map_err(|_| {
+                CaptureError::SystemInvariant("direct JSONL provider event sequence overflowed")
+            });
+    }
+    let sub_ordinal = u64::from(sub_ordinal);
+    if sub_ordinal >= SUBRECORD_STRIDE {
+        return Err(CaptureError::SystemInvariant(
+            "direct JSONL provider event has too many subrecords",
+        ));
+    }
+    raw_ordinal
+        .checked_mul(SUBRECORD_STRIDE)
+        .and_then(|index| index.checked_add(sub_ordinal))
+        .filter(|index| *index < SUBRECORD_SEQUENCE_BASE)
+        .map(|index| index | SUBRECORD_SEQUENCE_BASE)
+        .ok_or(CaptureError::SystemInvariant(
+            "direct JSONL provider event sequence overflowed",
+        ))
 }
 
 enum DirectJsonlTouchProjection {
@@ -734,5 +751,32 @@ fn session_from_header(
         ended_at: None,
         cwd,
         metadata,
+    }
+}
+
+#[cfg(test)]
+mod event_sequence_tests {
+    use super::direct_jsonl_event_sequence;
+
+    #[test]
+    fn direct_jsonl_event_sequence_preserves_record_and_subrecord_order_in_sqlite_range() {
+        let first = direct_jsonl_event_sequence(1, 0).unwrap();
+        let first_result = direct_jsonl_event_sequence(1, 1).unwrap();
+        let last_first_result = direct_jsonl_event_sequence(1, u16::MAX.into()).unwrap();
+        let second = direct_jsonl_event_sequence(2, 0).unwrap();
+        let second_result = direct_jsonl_event_sequence(2, 1).unwrap();
+
+        assert!(first < second);
+        assert!(second < first_result);
+        assert!(first_result < last_first_result);
+        assert!(last_first_result < second_result);
+        assert!(second_result <= i64::MAX as u64);
+    }
+
+    #[test]
+    fn direct_jsonl_event_sequence_rejects_unrepresentable_coordinates() {
+        assert!(direct_jsonl_event_sequence(1, u32::from(u16::MAX) + 1).is_err());
+        assert!(direct_jsonl_event_sequence(i64::MAX as u64 + 1, 0).is_err());
+        assert!(direct_jsonl_event_sequence((1_u64 << 46) + 1, 1).is_err());
     }
 }
