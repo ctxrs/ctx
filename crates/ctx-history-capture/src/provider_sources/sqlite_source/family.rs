@@ -20,6 +20,14 @@ pub(super) struct SqliteSourceFamily {
 }
 
 impl SqliteSourceFamily {
+    pub(super) fn approved_parent_path(&self) -> &Path {
+        &self.authority.path
+    }
+
+    pub(super) fn database_name(&self) -> &OsStr {
+        &self.database.name
+    }
+
     pub(super) fn open(
         authority: &SqliteSourceDirectoryAuthority,
         database_name: &OsStr,

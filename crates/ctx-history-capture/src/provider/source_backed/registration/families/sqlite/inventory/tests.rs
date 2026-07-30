@@ -24,6 +24,7 @@ use super::{
     shared::{
         sqlite_inventory_leaf_execution_policy, SqliteInventoryCatalog, SqliteInventoryCatalogLeaf,
         SqliteInventoryDocumentAdapter, SqliteInventoryProvider, SqliteInventorySnapshotCounters,
+        SQLITE_INVENTORY_MAX_LEAF_WORKERS,
     },
     *,
 };
@@ -277,7 +278,7 @@ impl SqliteInventoryProvider for TestProvider {
 
     fn test_leaf_execution_policy(&self) -> Option<DocumentLeafExecutionPolicy> {
         self.test_leaf_workers
-            .map(DocumentLeafExecutionPolicy::IndependentWithWorkers)
+            .map(DocumentLeafExecutionPolicy::IndependentCapped)
     }
 }
 
@@ -290,7 +291,7 @@ fn finite_sqlite_inventory_parallelism_is_explicit_and_default_safe() {
     ] {
         assert_eq!(
             sqlite_inventory_leaf_execution_policy(provider),
-            DocumentLeafExecutionPolicy::Independent
+            DocumentLeafExecutionPolicy::IndependentCapped(SQLITE_INVENTORY_MAX_LEAF_WORKERS)
         );
     }
     for provider in [

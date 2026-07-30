@@ -405,7 +405,11 @@ impl GenerationWriter {
                 .is_some_and(|pending| {
                     matches!(
                         (&pending.mode, &pending.certificate),
-                        (PendingSourceMode::Append { base }, Some(current))
+                        (
+                            PendingSourceMode::Append { base }
+                                | PendingSourceMode::Retain { base },
+                            Some(current),
+                        )
                             if pending.staged_documents == 0
                                 && base == base_source
                                 && current == base_source
@@ -546,7 +550,9 @@ impl GenerationWriter {
             .ok_or(IndexError::DocumentSourceNotActive)?;
         match &pending.mode {
             PendingSourceMode::Append { base } => Ok(base),
-            PendingSourceMode::Replace => Err(IndexError::DocumentSourceNotActive),
+            PendingSourceMode::Replace | PendingSourceMode::Retain { .. } => {
+                Err(IndexError::DocumentSourceNotActive)
+            }
         }
     }
 
@@ -607,6 +613,9 @@ impl GenerationWriter {
             ));
         }
         let is_append = matches!(&pending_source.mode, PendingSourceMode::Append { .. });
+        if matches!(&pending_source.mode, PendingSourceMode::Retain { .. }) {
+            return Err(IndexError::DocumentSourceNotActive);
+        }
         let index_fields = pending_source.index_fields.clone();
         if let Some(base_searcher) = &self.base_searcher {
             validate_event_identity_against_base(

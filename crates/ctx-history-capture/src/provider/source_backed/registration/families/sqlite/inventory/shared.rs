@@ -7,6 +7,8 @@ use std::{
 
 use sha2::Digest;
 
+#[cfg(test)]
+use crate::provider_sources::SqliteSourceSnapshotCounters;
 use crate::{
     common::io::ProviderSourceRoot,
     provider::source_backed::family::document::{
@@ -25,6 +27,8 @@ use crate::{
 
 use super::*;
 
+pub(super) const SQLITE_INVENTORY_MAX_LEAF_WORKERS: usize = 4;
+
 /// Central admission policy for independently certifiable SQLite inventories.
 ///
 /// These providers discover a bounded set of distinct databases, derive each
@@ -36,7 +40,10 @@ pub(super) fn sqlite_inventory_leaf_execution_policy(
 ) -> DocumentLeafExecutionPolicy {
     match provider {
         CaptureProvider::AstrBot | CaptureProvider::Lingma | CaptureProvider::Crush => {
-            DocumentLeafExecutionPolicy::Independent
+            // Each active-WAL snapshot carries source-family, ctx-owned copy,
+            // spool, and Tantivy descriptors. Four scanners plus the eight
+            // index workers remain below the process-wide release FD budget.
+            DocumentLeafExecutionPolicy::IndependentCapped(SQLITE_INVENTORY_MAX_LEAF_WORKERS)
         }
         _ => DocumentLeafExecutionPolicy::Serial,
     }
@@ -177,13 +184,13 @@ where
         let mut observed = Vec::with_capacity(catalog.leaves.len());
         for (index, leaf) in catalog.leaves.into_iter().enumerate() {
             let catalog_leaf = sqlite_catalog_leaf_fingerprint(&leaf.source, &leaf.path);
+            // Discovery validates one path at a time but retains no provider
+            // descriptors. Active scan workers reacquire the same no-follow
+            // authority, bounding descriptors by worker count.
             let retained = RetainedSqliteInventoryLeaf::retain(&self.data_root, &leaf.path)?;
+            drop(retained);
             let base_certificate =
                 exact_base_certificate(base_sources, &leaf.source, self.parser_revision()).cloned();
-            let snapshot = retained.open()?;
-            let revalidate = snapshot.terminal_revalidator();
-            let terminal_revalidate: Box<dyn Fn() -> bool + Send + Sync> =
-                Box::new(move || revalidate().is_ok());
             catalog_leaves.push(catalog_leaf);
             fingerprints.push(catalog_leaf);
             observed.push(ObservedDocumentLeaf::with_durable_replay(
@@ -195,9 +202,9 @@ where
                     catalog_fingerprint: catalog_leaf,
                     base_certificate,
                     provider_leaf: leaf.provider_leaf,
-                    _retained: retained,
-                    snapshot: Mutex::new(Some(snapshot)),
-                    terminal_revalidate,
+                    terminal_revalidate: Mutex::new(None),
+                    #[cfg(test)]
+                    snapshot_counters: Mutex::new(None),
                 },
                 false,
             ));
@@ -222,9 +229,9 @@ pub(super) struct SqliteInventoryDocumentLeaf<L> {
     catalog_fingerprint: [u8; 32],
     base_certificate: Option<CertifiedSource>,
     provider_leaf: L,
-    _retained: RetainedSqliteInventoryLeaf,
-    snapshot: Mutex<Option<SqliteSourceReadSnapshot>>,
-    terminal_revalidate: Box<dyn Fn() -> bool + Send + Sync>,
+    terminal_revalidate: Mutex<Option<Box<dyn Fn() -> bool + Send + Sync>>>,
+    #[cfg(test)]
+    snapshot_counters: Mutex<Option<Box<dyn Fn() -> SqliteSourceSnapshotCounters + Send + Sync>>>,
 }
 
 #[derive(Debug)]
@@ -334,12 +341,11 @@ where
         sink: &mut ChangedDocumentSink<'_, '_>,
     ) -> SourceBackedRouteResult<DocumentSourceTerminal> {
         validate_catalog_slot(authority, leaf)?;
-        let snapshot = leaf
-            .snapshot
-            .lock()
-            .map_err(|_| sqlite_inventory_internal("SQLite snapshot lock was poisoned"))?
-            .take()
-            .ok_or_else(|| sqlite_inventory_internal("SQLite snapshot was already consumed"))?;
+        let retained = RetainedSqliteInventoryLeaf::retain(&self.data_root, &leaf.path)?;
+        let snapshot = retained.open()?;
+        let revalidate = snapshot.terminal_revalidator();
+        #[cfg(test)]
+        let counter_authority = retained.authority.clone();
         sink.begin_source(leaf.source.clone())?;
         let certificate = self
             .provider_adapter
@@ -355,7 +361,7 @@ where
                 "logical scan returned an unexpected source certificate",
             ));
         }
-        leaf._retained
+        retained
             .authority
             .record_logical_projection(
                 certificate.counts().complete_records,
@@ -365,6 +371,24 @@ where
                     .is_some_and(|base| base == &certificate),
             )
             .map_err(route_error)?;
+        {
+            let mut terminal = leaf.terminal_revalidate.lock().map_err(|_| {
+                sqlite_inventory_internal("SQLite terminal witness lock was poisoned")
+            })?;
+            if terminal.is_some() {
+                return Err(sqlite_inventory_internal(
+                    "SQLite inventory leaf was scanned more than once",
+                ));
+            }
+            *terminal = Some(Box::new(move || revalidate().is_ok()));
+        }
+        #[cfg(test)]
+        {
+            let mut counters = leaf.snapshot_counters.lock().map_err(|_| {
+                sqlite_inventory_internal("SQLite snapshot counter lock was poisoned")
+            })?;
+            *counters = Some(Box::new(move || counter_authority.snapshot_counters()));
+        }
         let observation = certificate.observation().clone();
         Ok(DocumentSourceTerminal {
             source: observation.source().clone(),
@@ -395,32 +419,32 @@ where
         }
         let mut fingerprints = Vec::with_capacity(tree.leaves.len());
         for observed in &tree.leaves {
-            let leaf = &observed.provider_leaf;
-            if let Some(snapshot) = leaf
-                .snapshot
-                .lock()
-                .map_err(|_| sqlite_inventory_internal("SQLite snapshot lock was poisoned"))?
-                .take()
-            {
-                snapshot.finish().map_err(route_error)?;
-            }
-            fingerprints.push(leaf.catalog_fingerprint);
+            fingerprints.push(observed.provider_leaf.catalog_fingerprint);
         }
         #[cfg(test)]
         self.provider_adapter.after_snapshots_sealed();
         for observed in &tree.leaves {
-            if !(observed.provider_leaf.terminal_revalidate)() {
+            let leaf = &observed.provider_leaf;
+            let terminal = leaf.terminal_revalidate.lock().map_err(|_| {
+                sqlite_inventory_internal("SQLite terminal witness lock was poisoned")
+            })?;
+            if !terminal.as_ref().is_some_and(|revalidate| revalidate()) {
                 return Err(sqlite_inventory_changed(
-                    "retained SQLite terminal fence no longer matches its source family",
+                    "SQLite terminal witness no longer matches its source family",
                 ));
             }
             #[cfg(test)]
             {
-                let counters = observed
-                    .provider_leaf
-                    ._retained
-                    .authority
-                    .snapshot_counters();
+                let counters = leaf
+                    .snapshot_counters
+                    .lock()
+                    .map_err(|_| {
+                        sqlite_inventory_internal("SQLite snapshot counter lock was poisoned")
+                    })?
+                    .as_ref()
+                    .ok_or_else(|| {
+                        sqlite_inventory_internal("SQLite snapshot counters were not installed")
+                    })?();
                 self.provider_adapter
                     .observe_snapshot_counters(SqliteInventorySnapshotCounters {
                         immutable_snapshot_opens: counters.immutable_snapshot_opens(),
