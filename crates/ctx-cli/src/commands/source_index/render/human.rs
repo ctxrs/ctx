@@ -1,5 +1,6 @@
 use crate::ui::{is_copyable_atom, Document, Line, RenderContext, Span, Token};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation as _;
+use unicode_width::UnicodeWidthStr;
 
 const FIELD_GAP: usize = 2;
 
@@ -224,15 +225,15 @@ fn wrap_safe(text: &str, width: Option<usize>) -> Vec<String> {
         let mut last_space_end = None;
         let mut overflow_at = None;
 
-        for (index, character) in remaining.char_indices() {
-            let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
-            if used.saturating_add(character_width) > width && index > 0 {
+        for (index, grapheme) in remaining.grapheme_indices(true) {
+            let grapheme_width = UnicodeWidthStr::width(grapheme);
+            if used.saturating_add(grapheme_width) > width && index > 0 {
                 overflow_at = Some(index);
                 break;
             }
-            used = used.saturating_add(character_width);
-            if character == ' ' {
-                last_space_end = Some(index + character.len_utf8());
+            used = used.saturating_add(grapheme_width);
+            if grapheme == " " {
+                last_space_end = Some(index + grapheme.len());
             }
         }
 
@@ -282,4 +283,42 @@ fn protected_escape_range(text: &str, split_at: usize) -> Option<std::ops::Range
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wrap_safe;
+
+    #[test]
+    fn specialized_wrapping_preserves_extended_grapheme_clusters() {
+        let family = "👨‍👩‍👧‍👦";
+        let input = format!("{family}{family}");
+        assert_eq!(
+            wrap_safe(&input, Some(2)),
+            vec![family.to_owned(), family.to_owned()]
+        );
+
+        let accented = "e\u{301}";
+        let input = accented.repeat(3);
+        assert_eq!(
+            wrap_safe(&input, Some(1)),
+            vec![
+                accented.to_owned(),
+                accented.to_owned(),
+                accented.to_owned()
+            ]
+        );
+
+        let input = family.repeat(80);
+        for width in [32, 48, 80, 120] {
+            let wrapped = wrap_safe(&input, Some(width));
+            assert!(
+                wrapped
+                    .iter()
+                    .all(|segment| segment.replace(family, "").is_empty()),
+                "width {width} split an extended grapheme cluster: {wrapped:?}"
+            );
+            assert_eq!(wrapped.concat(), input);
+        }
+    }
 }

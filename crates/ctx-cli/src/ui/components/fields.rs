@@ -1,4 +1,4 @@
-use super::layout::{display_width, pad_after, wrap_text};
+use super::layout::{display_width, is_copyable_atom, pad_after, wrap_text};
 use crate::ui::{Document, Line, RenderContext, Span, Token};
 
 const FIELD_GAP: usize = 2;
@@ -25,9 +25,19 @@ pub(crate) fn fields(context: &RenderContext, values: &[Field<'_>]) -> Document 
         .map(|field| display_width(field.label))
         .max()
         .unwrap_or(0);
-    let stacked = context
-        .content_width()
-        .is_some_and(|width| width <= label_width.saturating_add(FIELD_GAP).saturating_add(12));
+    let stacked = context.content_width().is_some_and(|width| {
+        let aligned_value_width = width
+            .saturating_sub(label_width)
+            .saturating_sub(FIELD_GAP)
+            .max(1);
+        width <= label_width.saturating_add(FIELD_GAP).saturating_add(12)
+            || values.iter().any(|field| {
+                field
+                    .value
+                    .split_whitespace()
+                    .any(|word| is_copyable_atom(word) && display_width(word) > aligned_value_width)
+            })
+    });
 
     if stacked {
         stacked_fields(context, values)
@@ -80,4 +90,43 @@ fn stacked_fields(context: &RenderContext, values: &[Field<'_>]) -> Document {
         }
     }
     document
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::{ColorMode, StreamKind, TestContext};
+
+    fn context(width: usize) -> RenderContext {
+        RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(ColorMode::Never))
+    }
+
+    #[test]
+    fn oversized_copyable_values_receive_their_own_child_line() {
+        let url = "https://connect.stripe.com/setup/s/test";
+        for width in [32, 48] {
+            let rendered = fields(
+                &context(width),
+                &[
+                    Field::new("State", "pending"),
+                    Field::new("Setup link", url),
+                ],
+            )
+            .render_plain();
+            assert!(rendered.contains("Setup link\n  https://"), "{rendered}");
+            assert!(!rendered.contains("Setup link  https://"), "{rendered}");
+            assert_eq!(rendered.matches(url).count(), 1, "{rendered}");
+        }
+
+        let rendered = fields(
+            &context(80),
+            &[
+                Field::new("State", "pending"),
+                Field::new("Setup link", url),
+            ],
+        )
+        .render_plain();
+        assert!(rendered.contains("Setup link  https://"), "{rendered}");
+        assert_eq!(rendered.matches(url).count(), 1, "{rendered}");
+    }
 }

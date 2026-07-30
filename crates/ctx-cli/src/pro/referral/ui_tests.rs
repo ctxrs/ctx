@@ -276,6 +276,40 @@ fn payout_no_open_and_json_are_browser_free_and_json_uses_cached_auth() {
 }
 
 #[test]
+fn payout_setup_url_moves_below_its_label_at_narrow_widths() {
+    let result = payout_result();
+    for width in [32, 48] {
+        let rendered = render::payout(
+            &RenderContext::for_test(
+                TestContext::tty(StreamKind::Stdout, width).color(ColorMode::Never),
+            ),
+            &result,
+            false,
+        )
+        .render_plain();
+        assert!(
+            rendered.contains("Setup link\n  https://connect.stripe.com/setup/s/test\n"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("Setup link  https://connect.stripe.com"),
+            "{rendered}"
+        );
+    }
+
+    let rendered = render::payout(
+        &RenderContext::for_test(TestContext::tty(StreamKind::Stdout, 80).color(ColorMode::Never)),
+        &result,
+        false,
+    )
+    .render_plain();
+    assert!(
+        rendered.contains("Setup link  https://connect.stripe.com/setup/s/test\n"),
+        "{rendered}"
+    );
+}
+
+#[test]
 fn every_json_command_uses_cached_auth_and_bypasses_ui() {
     let cases = [
         (
