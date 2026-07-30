@@ -177,7 +177,7 @@ fn interrupted_publication_journal_exposes_minimal_v2_transaction_contract() {
     assert_eq!(journal["schema_version"], 2);
     assert!(journal["attempt_id"].as_str().is_some());
     assert!(journal.get("attempt_generation").is_none());
-    assert_eq!(journal["data_root"], temp.path().display().to_string());
+    assert_eq!(journal["data_root"], data_root(&temp).display().to_string());
     assert!(journal.get("ownership_token").is_none());
     assert!(journal.get("scheduler").is_none());
     assert!(journal.get("telemetry").is_none());

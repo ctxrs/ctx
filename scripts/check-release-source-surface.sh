@@ -36,7 +36,8 @@ source_paths=(
   crates/ctx-history-search/src
 )
 
-removed_surface_pattern='ctx (dashboard|shim|publish|evidence|link-pr|context|update|uninstall|watch)([^[:alnum:]_-]|$)'
+removed_surface_pattern='ctx (dashboard|shim|publish|evidence|link-pr|context|uninstall|watch)([^[:alnum:]_-]|$)'
+removed_surface_pattern+='|ctx update([[:space:]]+--|[^[:alnum:]_ -]|[[:space:]]*$)'
 removed_surface_pattern+='|ctx pr([^[:alnum:]_-]|$)|publish pr-comment|dashboard export|gh CLI|GhCli|upsert_github|wrapper scripts'
 removed_surface_pattern+='|write-shim-command|write_shim_command|capture_shim_command|shim_command_envelope'
 removed_surface_pattern+='|(^|[^[:alnum:]_])ShimCommandOptions([^[:alnum:]_]|$)'

@@ -427,7 +427,7 @@ fn upgrade_status_accepts_current_legacy_metadata_without_sidecar_fields() {
     ));
 
     assert_eq!(outcome["status"], "up_to_date");
-    assert!(!temp.path().join("runtime").exists());
+    assert!(!data_root(&temp).join("runtime").exists());
 }
 
 #[cfg(unix)]
@@ -445,7 +445,7 @@ fn upgrade_refuses_newer_legacy_metadata_without_sidecar_fields() {
         stderr.contains("has no complete ONNX Runtime sidecar metadata"),
         "{stderr}"
     );
-    assert!(!temp.path().join("runtime").exists());
+    assert!(!data_root(&temp).join("runtime").exists());
 }
 
 #[cfg(unix)]
