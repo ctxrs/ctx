@@ -3,44 +3,39 @@ use std::{
     env, fs,
     io::Read,
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 
-mod runtime;
 mod source_backed;
 
-pub(crate) use source_backed::prepare_source_backed_history_source;
+pub(crate) use source_backed::{
+    prepare_source_backed_history_source, COMMAND_ONLY_UNSUPPORTED_REASON,
+};
 
 const PLUGIN_MANIFEST_FILE: &str = "ctx-history-plugin.json";
 const MAX_PLUGIN_MANIFEST_BYTES: usize = 1024 * 1024;
-const DEFAULT_PLUGIN_TIMEOUT_SECONDS: u64 = 300;
 
 /// Discovery and execution metadata for a manifest-backed history source.
 ///
-/// Commands emit the existing `ctx-history-jsonl-v1` interchange format. The
-/// plugin-local source bridge persists that provider export as the exact-content
-/// authority and registers it with the sole source-backed generation path.
+/// Durable provider-owned paths use the existing `ctx-history-jsonl-v1`
+/// interchange format and are registered with the sole source-backed
+/// generation path. Command-only exports remain visible but unsupported.
 #[derive(Debug, Clone)]
 pub struct HistorySourcePluginSource {
     pub plugin_name: String,
     pub plugin_display_name: Option<String>,
     pub plugin_version: Option<String>,
     pub manifest_path: PathBuf,
-    pub manifest_dir: PathBuf,
     pub id: String,
     pub display_name: Option<String>,
     pub provider_key: String,
     pub source_id: String,
     pub source_format: String,
-    pub command: Vec<String>,
-    pub working_dir: Option<PathBuf>,
-    pub env: BTreeMap<String, String>,
+    pub source_path: Option<PathBuf>,
     pub enabled: bool,
     pub refresh: HistorySourcePluginRefresh,
-    pub timeout: Duration,
 }
 
 impl HistorySourcePluginSource {
@@ -50,14 +45,6 @@ impl HistorySourcePluginSource {
 
     pub fn history_source(&self) -> String {
         format!("{}/{}", self.provider_key, self.source_id)
-    }
-
-    pub fn cursor_stream(&self) -> String {
-        ctx_history_capture::custom_history_jsonl_v1_cursor_stream(
-            &self.provider_key,
-            &self.source_id,
-            &self.source_format,
-        )
     }
 
     pub fn matches_selector(&self, selector: &str) -> bool {
@@ -107,6 +94,9 @@ struct HistorySourcePluginSourceManifest {
     #[serde(default)]
     source_id: Option<String>,
     source_format: String,
+    #[serde(default, rename = "path")]
+    source_path: Option<PathBuf>,
+    #[serde(default)]
     command: Vec<String>,
     #[serde(default)]
     working_dir: Option<PathBuf>,
@@ -256,9 +246,34 @@ fn read_plugin_manifest(path: &Path) -> Result<Vec<HistorySourcePluginSource>> {
                 source.id
             )
         })?;
-        if source.command.is_empty() || source.command.iter().any(|part| part.trim().is_empty()) {
+        if source.command.iter().any(|part| part.trim().is_empty()) {
             return Err(anyhow!(
-                "history source plugin manifest {} source {} has empty command",
+                "history source plugin manifest {} source {} has an empty command argument",
+                path.display(),
+                source.id
+            ));
+        }
+        if source.source_path.is_some() && !source.command.is_empty() {
+            return Err(anyhow!(
+                "history source plugin manifest {} source {} must declare either a durable path or a command, not both",
+                path.display(),
+                source.id
+            ));
+        }
+        if source.source_path.is_none() && source.command.is_empty() {
+            return Err(anyhow!(
+                "history source plugin manifest {} source {} must declare a durable path or a command",
+                path.display(),
+                source.id
+            ));
+        }
+        if source.source_path.is_some()
+            && (source.working_dir.is_some()
+                || !source.env.is_empty()
+                || source.timeout_seconds.is_some())
+        {
+            return Err(anyhow!(
+                "history source plugin manifest {} source {} durable path cannot declare command runtime options",
                 path.display(),
                 source.id
             ));
@@ -272,28 +287,26 @@ fn read_plugin_manifest(path: &Path) -> Result<Vec<HistorySourcePluginSource>> {
                 )
             })?;
         }
+        let source_path = source.source_path.map(|source_path| {
+            if source_path.is_absolute() {
+                source_path
+            } else {
+                manifest_dir.join(source_path)
+            }
+        });
         sources.push(HistorySourcePluginSource {
             plugin_name: manifest.name.clone(),
             plugin_display_name: manifest.display_name.clone(),
             plugin_version: manifest.version.clone(),
             manifest_path: path.to_path_buf(),
-            manifest_dir: manifest_dir.clone(),
             id: source.id,
             display_name: source.display_name,
             provider_key,
             source_id,
             source_format: source.source_format,
-            command: source.command,
-            working_dir: source.working_dir,
-            env: source.env,
+            source_path,
             enabled: source.enabled,
             refresh: source.refresh,
-            timeout: Duration::from_secs(
-                source
-                    .timeout_seconds
-                    .unwrap_or(DEFAULT_PLUGIN_TIMEOUT_SECONDS)
-                    .max(1),
-            ),
         });
     }
     Ok(sources)
@@ -452,7 +465,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn manifest_preserves_validated_runtime_metadata() {
+    fn command_only_manifest_remains_discoverable_as_unsupported() {
         let temp = tempfile::tempdir().unwrap();
         let manifest = temp.path().join(PLUGIN_MANIFEST_FILE);
         fs::write(
@@ -471,6 +484,6 @@ mod tests {
         let sources = read_plugin_manifest(&manifest).unwrap();
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].label(), "example/default");
-        assert_eq!(sources[0].command, ["example-export"]);
+        assert!(sources[0].source_path.is_none());
     }
 }

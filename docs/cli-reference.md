@@ -300,7 +300,6 @@ ctx import --provider pi --path ~/.pi/agent/sessions
 ctx import --input-format ctx-history-jsonl-v1 --path ./history.jsonl
 ctx import --history-source example-agent/default
 ctx import --history-source-manifest ./ctx-history-plugin.json
-ctx import --history-source example-agent/default --reset-cursor
 ctx import --resume
 ctx import --no-daemon
 ctx import --format json
@@ -318,11 +317,11 @@ as `relational.sqlite`; semantic catch-up is daemon-owned. It does not write
 `config.toml` for implicit defaults.
 
 History-source plugin import is explicit and single-source in 1.0. A selected
-manifest command emits `ctx-history-jsonl-v1`; the importer validates and
-merges that delta into a private managed provider export, registers the custom
-route, and waits for daemon-owned source-backed publication before committing
-its cursor. Plugin commands are not executed by `import --all`, setup, or
-search refresh.
+manifest declares a durable provider-owned `ctx-history-jsonl-v1` path; the
+importer validates its schema and source identity, registers that same path as
+the custom route, and waits for daemon-owned source-backed publication.
+Command-only manifests are reported as unsupported and are never copied into
+ctx storage. Plugins are not imported by `import --all` or setup.
 
 Imports always commit valid records and report rejected records. An unreadable
 or structurally incompatible input fails that source, while ctx-owned storage

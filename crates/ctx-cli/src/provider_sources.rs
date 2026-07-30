@@ -12,7 +12,7 @@ use ctx_history_core::CaptureProvider;
 
 use crate::history_source_plugins::{
     discover_history_source_plugins_with_diagnostics, HistorySourcePluginManifestFailure,
-    HistorySourcePluginRefresh, HistorySourcePluginSource,
+    HistorySourcePluginRefresh, HistorySourcePluginSource, COMMAND_ONLY_UNSUPPORTED_REASON,
 };
 use crate::identity;
 use crate::provider_args::{cli_supported_provider, ProviderArg};
@@ -138,6 +138,19 @@ pub(crate) fn plugin_sources_json(sources: &[HistorySourcePluginSource]) -> Vec<
     sources
         .iter()
         .map(|source| {
+            let durable_path = source.source_path.as_ref();
+            let durable_exists = durable_path.is_some_and(|path| path.is_file());
+            let command_only = durable_path.is_none();
+            let (status, unsupported_reason) = if command_only {
+                ("unsupported", Some(COMMAND_ONLY_UNSUPPORTED_REASON))
+            } else if durable_exists {
+                ("available", None)
+            } else {
+                (
+                    "missing",
+                    Some("the declared provider-owned durable source path is not a regular file"),
+                )
+            };
             json!({
                 "provider": CaptureProvider::Custom.as_str(),
                 "kind": "history_source_plugin",
@@ -151,16 +164,17 @@ pub(crate) fn plugin_sources_json(sources: &[HistorySourcePluginSource]) -> Vec<
                 "provider_key": source.provider_key,
                 "source_id": source.source_id,
                 "source_format": source.source_format,
+                "path": durable_path,
                 "manifest_path": source.manifest_path,
                 "enabled": source.enabled,
                 "refresh": history_source_plugin_refresh_json(source.refresh),
-                "status": "available",
+                "status": status,
                 "import_support": "history_source_plugin",
                 "native_import": false,
-                "importable": true,
-                "import_mode": "explicit_source_backed",
-                "provider_source_authority": true,
-                "unsupported_reason": null,
+                "importable": durable_exists,
+                "import_mode": durable_exists.then_some("explicit_source_backed"),
+                "provider_source_authority": durable_exists,
+                "unsupported_reason": unsupported_reason,
             })
         })
         .collect()
