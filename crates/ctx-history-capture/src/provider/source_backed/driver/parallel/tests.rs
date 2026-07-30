@@ -1,8 +1,8 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc, Arc, Barrier,
+        mpsc, Arc, Barrier, Mutex,
     },
 };
 
@@ -205,9 +205,16 @@ fn a_barrier_proves_all_forced_workers_scan_concurrently() {
         .collect();
     let barrier = Arc::new(Barrier::new(4));
     let scan_barrier = Arc::clone(&barrier);
+    let observed_workers = Arc::new(Mutex::new(HashSet::new()));
+    let scan_workers = Arc::clone(&observed_workers);
 
     let results = harness
         .run(jobs, 4, move |job, emitter| {
+            let thread = std::thread::current();
+            scan_workers
+                .lock()
+                .unwrap()
+                .insert((thread.id(), thread.name().unwrap_or_default().to_owned()));
             scan_barrier.wait();
             emitter.complete(ParallelLeafScanComplete::Skipped {
                 result: *job.leaf(),
@@ -217,6 +224,35 @@ fn a_barrier_proves_all_forced_workers_scan_concurrently() {
         .unwrap();
 
     assert_eq!(results, (0_u8..8).collect::<Vec<_>>());
+    let observed_workers = Arc::try_unwrap(observed_workers)
+        .unwrap()
+        .into_inner()
+        .unwrap();
+    assert_eq!(observed_workers.len(), 4);
+    assert_eq!(
+        observed_workers
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect::<HashSet<_>>(),
+        (0..4).map(source_worker_thread_name).collect()
+    );
+}
+
+#[test]
+fn source_worker_names_and_spawn_count_are_deterministically_bounded() {
+    let names = (0..MAX_PARALLEL_LEAF_WORKERS)
+        .map(source_worker_thread_name)
+        .collect::<HashSet<_>>();
+
+    assert_eq!(names.len(), MAX_PARALLEL_LEAF_WORKERS);
+    assert!(names.iter().all(|name| name.len() <= 15));
+    assert!(names.contains("ctx-src-scan00"));
+    assert!(names.contains("ctx-src-scan15"));
+    assert_eq!(
+        bounded_leaf_worker_count(usize::MAX, usize::MAX),
+        MAX_PARALLEL_LEAF_WORKERS
+    );
+    assert_eq!(bounded_leaf_worker_count(3, usize::MAX), 3);
 }
 
 #[test]
