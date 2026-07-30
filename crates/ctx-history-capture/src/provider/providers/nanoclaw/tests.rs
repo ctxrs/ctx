@@ -284,7 +284,7 @@ fn document_family_cold_scan_and_grouped_hydration_are_exact() {
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     assert_eq!(receipt.sources.len(), 1);
     let certificate = &receipt.sources[0];
-    assert_eq!(certificate.parser_revision(), "nanoclaw-source-backed-v1");
+    assert_eq!(certificate.parser_revision(), "nanoclaw-source-backed-v2");
     assert_eq!(certificate.counts().complete_records, 3);
     assert_eq!(certificate.counts().retained_records, 2);
     assert_eq!(certificate.counts().indexed_documents, 2);
@@ -305,7 +305,7 @@ fn document_family_cold_scan_and_grouped_hydration_are_exact() {
         assert_eq!(event.root_session_id, event.session_id);
         assert_eq!(event.provider_session_id.as_deref(), Some("thread-0000"));
         assert_eq!(event.source_path.as_deref(), Some(canonical_root.as_str()));
-        assert_eq!(event.agent_type, "codex");
+        assert_eq!(event.agent_type, "primary");
         assert!(event.is_primary);
         assert_eq!(
             event.locator.revision_policy(),

@@ -91,6 +91,7 @@ fn cold_noop_append_and_exact_hydration_keep_stable_bounded_identity() {
         cold_documents[0].session_id
     );
     assert_eq!(cold_documents[0].event_sequence, 0);
+    assert_eq!(cold_documents[0].agent_type, "primary");
     let NativeRecordCoordinate::Jsonl {
         physical_ordinal,
         native_session_key: Some(TypedKey::Utf8(session)),

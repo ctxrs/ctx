@@ -92,6 +92,7 @@ fn goose_active_wal_noop_replace_delete_and_batch_hydration() {
         .source()
         .clone();
     let events = verified.source_event_page(&source, None, 10).unwrap().items;
+    assert!(events.iter().all(|event| event.agent_type == "primary"));
     let requests = events
         .iter()
         .map(|event| EventHydrationRequest::new(event.event_id, event.locator.clone()).unwrap())

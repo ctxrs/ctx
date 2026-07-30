@@ -4,7 +4,7 @@ use std::{
 };
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, BatchHydrationRequest, BatchHydrationResult,
+    derive_event_id, derive_session_id, AgentType, BatchHydrationRequest, BatchHydrationResult,
     CaptureProvider, EventIdentityInput, HydratedProviderRecord, HydrationFailure,
     HydrationFailureKind, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
     NativeSessionKey, ProjectionContractError, ScannedSourceCounts, SessionIdentityInput,
@@ -43,7 +43,7 @@ use crate::{
 
 const NANOCLAW_SOURCE_SCHEMA_VARIANT: &str = "nanoclaw-compound-project-v1";
 const NANOCLAW_SOURCE_REVISION_KIND: &str = "nanoclaw-compound-project-snapshot-v1";
-const NANOCLAW_SOURCE_BACKED_PARSER_REVISION: &str = "nanoclaw-source-backed-v1";
+const NANOCLAW_SOURCE_BACKED_PARSER_REVISION: &str = "nanoclaw-source-backed-v2";
 const NANOCLAW_LOGICAL_SESSION_KIND: &str = "nanoclaw-session";
 const NANOCLAW_NATIVE_SESSION_NAMESPACE: &str = "nanoclaw.project-session";
 const NANOCLAW_LOGICAL_EVENT_KIND: &str = "nanoclaw-message";
@@ -559,11 +559,6 @@ fn nanoclaw_lexical_document(
         .clone()
         .filter(|thread| !thread.is_empty())
         .unwrap_or_else(|| session.id.clone());
-    let agent_type = session
-        .agent_provider
-        .clone()
-        .filter(|agent| !agent.is_empty())
-        .unwrap_or_else(|| CaptureProvider::NanoClaw.as_str().to_owned());
     Ok(LexicalDocument {
         event_id,
         session_id,
@@ -574,7 +569,7 @@ fn nanoclaw_lexical_document(
         provider_session_id: Some(provider_session_id),
         branch: None,
         source_path: Some(source_path.to_owned()),
-        agent_type,
+        agent_type: AgentType::Primary.as_str().to_owned(),
         is_primary: true,
         event_sequence: ordinal,
         occurred_at_unix_ms: Some(event.occurred_at.timestamp_millis()),

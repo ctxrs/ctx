@@ -12,7 +12,7 @@ use std::sync::{
 };
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, BatchHydrationRequest, BatchHydrationResult,
+    derive_event_id, derive_session_id, AgentType, BatchHydrationRequest, BatchHydrationResult,
     CaptureProvider, ContentSourceResolver, EventHydrationRequest, EventIdentityInput,
     HydratedProviderRecord, HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy,
     NativeItemKey, NativeRecordCoordinate, NativeSessionKey, ProjectionContractError,
@@ -54,7 +54,7 @@ use support::*;
 const SOURCE_ANCHOR_NAMESPACE: &str = "task-directory-id";
 const SOURCE_SCHEMA_VARIANT: &str = "task-directory-v1";
 const SOURCE_REVISION_KIND: &str = "task-directory-compound-v1";
-const PARSER_REVISION: &str = "task-json-source-backed-v1";
+const PARSER_REVISION: &str = "task-json-source-backed-v2";
 const LOGICAL_SESSION_KIND: &str = "task-json-thread";
 const LOGICAL_EVENT_KIND: &str = "task-json-event";
 const NATIVE_SESSION_NAMESPACE: &str = "task-json-task-id";
@@ -786,12 +786,7 @@ fn project_event(
         provider_session_id: Some(provider_session_id.to_owned()),
         branch: None,
         source_path: Some(relative_file.to_owned()),
-        agent_type: match dialect.provider {
-            CaptureProvider::Cline => "cline",
-            CaptureProvider::RooCode => "roo-code",
-            _ => unreachable!(),
-        }
-        .to_owned(),
+        agent_type: AgentType::Primary.as_str().to_owned(),
         is_primary: true,
         event_sequence: event_sequence(dialect, &event)?,
         occurred_at_unix_ms: event.occurred_at_millis,
